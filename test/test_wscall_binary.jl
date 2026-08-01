@@ -13,12 +13,11 @@ const RE = KaimonSlate.ReportEngine
 const NS = KaimonSlate.NotebookServer
 
 @testset "slateCall / slate_emit binary transport" begin
-
     @testset "uplink frame round-trips encode_binary_frame ↔ _decode_uplink_frame" begin
         # A browser→server buffer frame reuses `encode_binary_frame`'s layout: channel = correlating call
         # id, meta = {i,n} index/count, payload = raw UInt8 bytes. The hub decodes it back to those parts.
         bytes = UInt8[10, 20, 30, 40]
-        frame = SEB.encode_binary_frame("c7", SEB.SlateBinary(bytes; i = 0, n = 2))
+        frame = SEB.encode_binary_frame("c7", SEB.SlateBinary(bytes; i=0, n=2))
         ch, i, n, payload = NS._decode_uplink_frame(frame)
         @test ch == "c7"
         @test i == 0
@@ -28,7 +27,9 @@ const NS = KaimonSlate.NotebookServer
 
         # A different index/count + a longer payload survives intact.
         big = rand(UInt8, 1024)
-        ch2, i2, n2, p2 = NS._decode_uplink_frame(SEB.encode_binary_frame("c42", SEB.SlateBinary(big; i = 3, n = 4)))
+        ch2, i2, n2, p2 = NS._decode_uplink_frame(
+            SEB.encode_binary_frame("c42", SEB.SlateBinary(big; i=3, n=4))
+        )
         @test (ch2, i2, n2) == ("c42", 3, 4)
         @test p2 == big
 
@@ -46,7 +47,9 @@ const NS = KaimonSlate.NotebookServer
 
         # Delivered as the reserved `__slate_buffers` arg (a Vector of byte vectors), each buffer stays a
         # compact Vector{UInt8}; only the small outer container is generic.
-        args = RE._slate_args(Dict("ch" => "x", "__slate_buffers" => Vector{UInt8}[UInt8[9, 8, 7], UInt8[1]]))
+        args = RE._slate_args(
+            Dict("ch" => "x", "__slate_buffers" => Vector{UInt8}[UInt8[9, 8, 7], UInt8[1]])
+        )
         @test args.ch == "x"
         @test length(args.__slate_buffers) == 2
         @test all(x -> x isa Vector{UInt8}, args.__slate_buffers)
@@ -63,7 +66,7 @@ const NS = KaimonSlate.NotebookServer
         RE.register_bin_emit!(r.id, frame -> push!(binframes, frame))
         RE.register_emit!(r.id, (ch, v) -> push!(plainpushes, (String(ch), v)))
         try
-            emit("buf", SEB.SlateBinary(UInt8[1, 2, 3]; k = 1))   # → binary frame path
+            emit("buf", SEB.SlateBinary(UInt8[1, 2, 3]; k=1))   # → binary frame path
             emit("txt", Dict("hello" => "world"))                  # → JSON emit path
         finally
             RE.unregister_bin_emit!(r.id)
@@ -80,7 +83,6 @@ const NS = KaimonSlate.NotebookServer
         @test length(plainpushes) == 1
         @test plainpushes[1][1] == "txt"
     end
-
 end
 
 @testset "@onclick/@onchange handlers can stream" begin
@@ -89,13 +91,23 @@ end
     # with no context and `@async` doesn't inherit task-locals, so without this the stream is a silent no-op.
     import SlateExtensionsBase as SEB2
     got = Ref{Any}(nothing)
-    ctx = (; region = nothing, notebook = "", side = "", emit = (ch, v) -> (got[] = (String(ch), v)),
-             regions = Symbol[], effect = (k; kw...) -> nothing, on = (c, f) -> nothing)
+    ctx = (;
+        region=nothing,
+        notebook="",
+        side="",
+        emit=(ch, v) -> (got[] = (String(ch), v)),
+        regions=Symbol[],
+        effect=(k; kw...) -> nothing,
+        on=(c, f) -> nothing,
+    )
     tokens = Dict{Symbol,Base.RefValue{Bool}}()
     handler = _ -> SEB2.slate_emit("chan", 42)
 
     RE.__on_fire!(tokens, :btn, handler, nothing, ctx)                 # WITH ctx → the emit lands
-    for _ in 1:200; got[] === nothing || break; sleep(0.01); end
+    for _ in 1:200
+        got[] === nothing || break
+        sleep(0.01)
+    end
     @test got[] == ("chan", 42)
 
     got[] = nothing                                                    # WITHOUT ctx → silent no-op (the old bug)

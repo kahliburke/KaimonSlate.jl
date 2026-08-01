@@ -18,9 +18,10 @@
 # `_ssh_capture` (remote.jl) runs a command and captures stdout; this variant also FEEDS stdin — how we
 # hand a host public key material to append to a file without ever putting it on the command line.
 function _ssh_feed(host, argv::Cmd, input::AbstractString)
-    out = IOBuffer(); err = IOBuffer()
+    out = IOBuffer()
+    err = IOBuffer()
     ok = try
-        run(pipeline(_ssh(host, argv); stdin = IOBuffer(String(input)), stdout = out, stderr = err))
+        run(pipeline(_ssh(host, argv); stdin=IOBuffer(String(input)), stdout=out, stderr=err))
         true
     catch
         false
@@ -46,7 +47,7 @@ _shq(s) = "'" * replace(String(s), "'" => "'\\''") * "'"
 const _MESH_HOST_LOCKS = Dict{String,ReentrantLock}()
 const _MESH_LOCKS_LOCK = ReentrantLock()
 _mesh_host_lock(host) = lock(_MESH_LOCKS_LOCK) do
-    get!(() -> ReentrantLock(), _MESH_HOST_LOCKS, String(host))
+    return get!(() -> ReentrantLock(), _MESH_HOST_LOCKS, String(host))
 end
 
 # ── Identity material ──────────────────────────────────────────────────────────────────────────────
@@ -58,13 +59,14 @@ function _extract_ssh_key(out)
         m = match(r"(ssh-[A-Za-z0-9-]+)\s+([A-Za-z0-9+/=]+)", ln)
         m === nothing || return "$(m.captures[1]) $(m.captures[2])"
     end
-    error("mesh: no ssh key found in output: $(first(strip(String(out)), 120))")
+    return error("mesh: no ssh key found in output: $(first(strip(String(out)), 120))")
 end
 
 # A region's OWN ed25519 keypair on its host — generated in place, private half never leaves. Returns
 # the PUBLIC key as "<type> <base64>" (comment dropped; we re-tag when we install it). Idempotent.
 function _mesh_ensure_key!(region)
-    r = region_get(region); r === nothing && error("mesh: unknown region '$region'")
+    r = region_get(region)
+    r === nothing && error("mesh: unknown region '$region'")
     base = _mesh_basename(r.name)   # safe basename (folded name + hex): no shell metacharacters
     script = """
     umask 077; mkdir -p ~/.ssh
@@ -80,15 +82,19 @@ end
 # A host's SSH host public key, read over the ALREADY-TRUSTED hub↔host channel (no ssh-keyscan, no TOFU).
 # Returned as "<type> <base64>" to seed a puller's slate_known_hosts. Cached (an ssh round-trip).
 const _MESH_HOSTKEY_CACHE = Dict{String,String}()
-const _MESH_HOSTKEY_LOCK  = ReentrantLock()
+const _MESH_HOSTKEY_LOCK = ReentrantLock()
 function _mesh_host_key(host)
     h = String(host)
-    hit = lock(_MESH_HOSTKEY_LOCK) do; get(_MESH_HOSTKEY_CACHE, h, ""); end
+    hit = lock(_MESH_HOSTKEY_LOCK) do ;
+        return get(_MESH_HOSTKEY_CACHE, h, "")
+    end
     isempty(hit) || return hit
     ok, out = _ssh_capture(h, `cat /etc/ssh/ssh_host_ed25519_key.pub`)
     ok || error("mesh: could not read host key on $h")
     key = _extract_ssh_key(out)
-    lock(_MESH_HOSTKEY_LOCK) do; _MESH_HOSTKEY_CACHE[h] = key; end
+    lock(_MESH_HOSTKEY_LOCK) do ;
+        return _MESH_HOSTKEY_CACHE[h] = key
+    end
     return key
 end
 
@@ -97,7 +103,7 @@ end
 # `tag` absent ⇒ pure append. `line` empty ⇒ pure delete (drop matching lines). The `{ … ; cat; }` group
 # writes kept-lines-minus-tag then appends stdin; a grep that matches nothing still emits its kept lines,
 # so an emptied file is fine. Runs under the per-host hub lock.
-function _mesh_file_put!(host, file, tag::AbstractString, line::AbstractString; mode = "600")
+function _mesh_file_put!(host, file, tag::AbstractString, line::AbstractString; mode="600")
     lock(_mesh_host_lock(host)) do
         # kept-lines-minus-tag, then the new line via printf (both non-secret; embedded in the script, not
         # on argv). grep matching nothing still emits its kept lines, so an emptied file is fine.
@@ -109,7 +115,7 @@ function _mesh_file_put!(host, file, tag::AbstractString, line::AbstractString; 
         mv "\$t" "\$f"; chmod $mode "\$f"
         """
         ok, _ = _ssh_script(host, script)
-        ok || error("mesh: edit of ~/.ssh/$file on $host failed")
+        return ok || error("mesh: edit of ~/.ssh/$file on $host failed")
     end
     return nothing
 end
@@ -121,7 +127,7 @@ function _mesh_file_drop!(host, file, tag::AbstractString)
         t=\$(mktemp "\$HOME/.ssh/.slmesh.XXXXXX") || exit 1
         { grep -vF $(_shq(tag)) "\$f" || true; } > "\$t"; mv "\$t" "\$f"
         """
-        _ssh_script(host, script)
+        return _ssh_script(host, script)
     end
     return nothing
 end
@@ -140,8 +146,10 @@ const _MESH_GRANT_LOCK = ReentrantLock()
 # `_mesh_install_grant!` (arm) and reconciled from live on-host state by `_mesh_host_state`; cleared on
 # teardown. Cold after a hub restart until a state read repopulates it — the persisted route verdict (disk,
 # TTL'd) covers that window for a pair that already resolved :ssh, so the cold gap never regresses a live one.
-_mesh_grant_armed(source, puller) = lock(_MESH_GRANT_LOCK) do
-    haskey(_MESH_GRANT_PORT, (String(source), String(puller)))
+function _mesh_grant_armed(source, puller)
+    lock(_MESH_GRANT_LOCK) do
+        return haskey(_MESH_GRANT_PORT, (String(source), String(puller)))
+    end
 end
 
 # Cheap in-place permitopen rewrite: on the source's EXISTING grant line only, swap `permitopen`'s port to
@@ -152,9 +160,11 @@ end
 # whether it rewrote (⇒ the port cache is refreshed). The tag is a unique per-grant marker with no regex
 # metacharacters (region names are [A-Za-z0-9_], the uuid is hex), so it's safe as a sed address.
 function _mesh_rewrite_permitopen!(source, puller, port::Integer)
-    src = region_get(source); pul = region_get(puller)
+    src = region_get(source)
+    pul = region_get(puller)
     (src === nothing || pul === nothing || src.host == pul.host) && return false
-    p = Int(port); p > 0 || return false
+    p = Int(port)
+    p > 0 || return false
     tag = "$(_mesh_basename(pul.name)) from $(_mesh_basename(src.name))"
     ok = false
     lock(_mesh_host_lock(src.host)) do
@@ -166,9 +176,11 @@ function _mesh_rewrite_permitopen!(source, puller, port::Integer)
         mv "\$t" "\$f"; chmod 600 "\$f"
         """
         okk, _ = _ssh_script(src.host, script)
-        ok = okk
+        return ok = okk
     end
-    ok && lock(_MESH_GRANT_LOCK) do; _MESH_GRANT_PORT[(src.name, pul.name)] = p; end
+    ok && lock(_MESH_GRANT_LOCK) do ;
+        return _MESH_GRANT_PORT[(src.name, pul.name)] = p
+    end
     return ok
 end
 
@@ -179,9 +191,12 @@ end
 # A cold cache (`cur === nothing`, e.g. post-restart) still rewrites: the grep guard keeps an un-introduced
 # pair a no-op, so this self-heals a stale/placeholder on-host port instead of silently leaving it wrong.
 function _mesh_finalize_port!(source, puller, port::Integer)
-    p = Int(port); p > 1 || return nothing
+    p = Int(port)
+    p > 1 || return nothing
     key = (String(source), String(puller))
-    cur = lock(_MESH_GRANT_LOCK) do; get(_MESH_GRANT_PORT, key, nothing); end
+    cur = lock(_MESH_GRANT_LOCK) do ;
+        return get(_MESH_GRANT_PORT, key, nothing)
+    end
     cur == p && return nothing
     _mesh_rewrite_permitopen!(source, puller, p)
     return nothing
@@ -208,11 +223,13 @@ end
 # inert placeholder `127.0.0.1:1` — a visible, reconcilable grant that can forward NOWHERE useful until a
 # real port is finalized (the tunnel-source case; §2).
 function _mesh_install_grant!(source, puller; port::Integer)
-    src = region_get(source); pul = region_get(puller)
+    src = region_get(source)
+    pul = region_get(puller)
     (src === nothing || pul === nothing) && error("mesh: unknown region in grant $puller←$source")
     src.host == pul.host && return nothing            # same host ⇒ loopback direct, no ssh mesh needed
     ppub = _mesh_ensure_key!(pul.name)                # puller's outgoing pubkey (on puller's host)
-    ptag = _mesh_basename(pul.name); stag = _mesh_basename(src.name)
+    ptag = _mesh_basename(pul.name)
+    stag = _mesh_basename(src.name)
     p = port > 0 ? Int(port) : 1
     # `restrict` alone still lets the key RUN COMMANDS (it only kills pty/agent/x11/forwarding, seen live:
     # `true` executed under it) — so also force `command="false"` to deny any session. The bridge dials
@@ -226,18 +243,23 @@ function _mesh_install_grant!(source, puller; port::Integer)
     # must cover both; known_hosts takes comma-separated hostnames on one line). Tagged by source.
     hk = _mesh_host_key(src.host)
     hostnames = join(unique(filter(!isempty, [_peer_host_ip(src.host), src.peer])), ",")
-    _mesh_file_put!(pul.host, "slate_known_hosts", "slate-mesh-pin $stag", "$hostnames $hk slate-mesh-pin $stag")
-    lock(_MESH_GRANT_LOCK) do; _MESH_GRANT_PORT[(src.name, pul.name)] = p; end   # remember the live permitopen port
+    _mesh_file_put!(
+        pul.host, "slate_known_hosts", "slate-mesh-pin $stag", "$hostnames $hk slate-mesh-pin $stag"
+    )
+    lock(_MESH_GRANT_LOCK) do ;
+        return _MESH_GRANT_PORT[(src.name, pul.name)] = p
+    end   # remember the live permitopen port
     _rlog("mesh: grant $(pul.name)←$(src.name) installed (permitopen 127.0.0.1:$p on $(src.host))")
-    return (; source = src.name, puller = pul.name, port = p, placeholder = (p == 1))
+    return (; source=src.name, puller=pul.name, port=p, placeholder=(p == 1))
 end
 
 # The source's blob port for a permitopen, when statically knowable: a :direct region pins it at
 # base_port+2. A :tunnel region assigns it per-worker at spawn ⇒ unknown here ⇒ 0 (caller uses the
 # placeholder and finalizes the real port just-in-time at transfer).
 function _region_blob_port(name)
-    r = region_get(name); r === nothing && return 0
-    (r.transport === :direct && r.base_port > 0) ? r.base_port + 2 : 0
+    r = region_get(name)
+    r === nothing && return 0
+    return (r.transport === :direct && r.base_port > 0) ? r.base_port + 2 : 0
 end
 
 # Every CROSS-HOST ordered pair among `names` — (a, b) distinct, both regions defined and on DIFFERENT
@@ -247,7 +269,8 @@ function _cross_host_pairs(names)
     out = Tuple[]
     for a in names, b in names
         a == b && continue
-        ra = region_get(a); rb = region_get(b)
+        ra = region_get(a)
+        rb = region_get(b)
         (ra === nothing || rb === nothing || ra.host == rb.host) && continue
         push!(out, (a, b, ra, rb))
     end
@@ -260,7 +283,7 @@ end
 # pull over loopback, no mesh). Idempotent. Returns the list of installed grants. NOTE (Phase 1): this
 # installs for all cross-host pairs unconditionally; the consent flow (§5.1, later) restricts it to pairs
 # a reachability probe says actually need the bridge.
-function introduce_group!(names::AbstractVector; on_progress = nothing)
+function introduce_group!(names::AbstractVector; on_progress=nothing)
     for n in names
         region_get(n) === nothing && error("mesh: unknown region '$n'")
     end
@@ -274,15 +297,21 @@ function introduce_group!(names::AbstractVector; on_progress = nothing)
     n = length(todo)
     installed = Any[]
     for (i, (a, b)) in enumerate(todo)
-        on_progress === nothing || (try; on_progress(i, n, String(a), String(b)); catch; end)
-        g = _mesh_install_grant!(a, b; port = _region_blob_port(a))   # a = source, b = puller
+        on_progress === nothing || (
+            try
+                on_progress(i, n, String(a), String(b))
+            catch
+            end
+        )
+        g = _mesh_install_grant!(a, b; port=_region_blob_port(a))   # a = source, b = puller
         g === nothing || push!(installed, g)
     end
     # Arming changes the topology: a pair that previously resolved :relay (bridge not armed → grant-aware
     # routing declined :ssh) can now go over the bridge. Drop those cached verdicts so the NEXT transfer
     # re-probes and picks up the fresh grant, rather than waiting out the route TTL on the relay.
     for g in installed
-        s = region_get(g.source); p = region_get(g.puller)
+        s = region_get(g.source)
+        p = region_get(g.puller)
         (s === nothing || p === nothing) || _peer_route_forget_pair!(s.host, p.host)
     end
     return installed
@@ -299,12 +328,20 @@ function teardown_region_mesh!(region)
     r === nothing && return nothing
     _mesh_grant_forget_region!(r.name)   # its on-host grants are about to go — drop the port cache too
     _peer_route_forget!(r.host)          # and the cached route verdicts touching its host — the next transfer
-                                         # re-probes (grant-aware routing now resolves :relay, no armed bridge)
+    # re-probes (grant-aware routing now resolves :relay, no armed bridge)
     tag = _mesh_basename(r.name)
     hosts = unique(String[r.host; [x.host for x in regions()]...])
     for h in hosts
-        try; _mesh_file_drop!(h, "authorized_keys", tag); catch e; _rlog("mesh teardown: authkeys on $h — $(first(sprint(showerror, e), 120))"); end
-        try; _mesh_file_drop!(h, "slate_known_hosts", tag); catch e; _rlog("mesh teardown: known_hosts on $h — $(first(sprint(showerror, e), 120))"); end
+        try
+            _mesh_file_drop!(h, "authorized_keys", tag)
+        catch e
+            _rlog("mesh teardown: authkeys on $h — $(first(sprint(showerror, e), 120))")
+        end
+        try
+            _mesh_file_drop!(h, "slate_known_hosts", tag)
+        catch e
+            _rlog("mesh teardown: known_hosts on $h — $(first(sprint(showerror, e), 120))")
+        end
     end
     try
         _ssh_script(r.host, "rm -f \"\$HOME/.ssh/$tag\" \"\$HOME/.ssh/$tag.pub\"\n")
@@ -334,54 +371,95 @@ function _mesh_host_state(host)
     # A single ssh failure here means "unreachable" to the caller (which then can't tell connected from not),
     # but a burst of mesh ops (teardown + worker spawn + probe) transiently starves ssh — so retry a couple
     # times with a short backoff before concluding a host is actually down.
-    ok = false; out = ""
+    ok = false
+    out = ""
     for attempt in 1:3
         ok, out = _ssh_script(host, script)
         ok && break
         attempt < 3 && sleep(0.6)
     end
-    keys = String[]; grants = Any[]; pins = Any[]; section = ""
+    keys = String[]
+    grants = Any[]
+    pins = Any[]
+    section = ""
     for ln in split(out, '\n')
-        s = strip(ln); isempty(s) && continue
-        if s in ("@keys", "@ak", "@kh"); section = s; continue; end
+        s = strip(ln)
+        isempty(s) && continue
+        if s in ("@keys", "@ak", "@kh")
+            section = s
+            continue
+        end
         if section == "@keys"
             startswith(s, "slate-") && push!(keys, s)
         elseif section == "@ak"
-            m = match(r"permitopen=\"127\.0\.0\.1:(\d+)\".*slate-([A-Za-z0-9_]+)-[0-9a-f]{8} from slate-([A-Za-z0-9_]+)-[0-9a-f]{8}", s)
-            m === nothing || push!(grants, Dict("puller" => m.captures[2], "source" => m.captures[3],
-                "port" => parse(Int, m.captures[1]), "placeholder" => m.captures[1] == "1"))
+            m = match(
+                r"permitopen=\"127\.0\.0\.1:(\d+)\".*slate-([A-Za-z0-9_]+)-[0-9a-f]{8} from slate-([A-Za-z0-9_]+)-[0-9a-f]{8}",
+                s,
+            )
+            m === nothing || push!(
+                grants,
+                Dict(
+                    "puller" => m.captures[2],
+                    "source" => m.captures[3],
+                    "port" => parse(Int, m.captures[1]),
+                    "placeholder" => m.captures[1] == "1",
+                ),
+            )
         elseif section == "@kh"
             m = match(r"^(\S+)\s.*slate-mesh-pin slate-([A-Za-z0-9_]+)-[0-9a-f]{8}", s)
-            m === nothing || push!(pins, Dict("source" => m.captures[2], "addrs" => String.(split(m.captures[1], ","))))
+            m === nothing || push!(
+                pins,
+                Dict("source" => m.captures[2], "addrs" => String.(split(m.captures[1], ","))),
+            )
         end
     end
     # Reconcile the hub-side grant cache from ground truth: any grant present on-host is armed, so the route
     # resolver may pick :ssh for it. Only ADDS what we actually saw — an unreachable host reads as no grants,
     # and we must NOT infer teardown from a failed read (a bridge-pull failure self-heals a truly-stale entry).
     ok && for g in grants
-        lock(_MESH_GRANT_LOCK) do; _MESH_GRANT_PORT[(String(g["source"]), String(g["puller"]))] = Int(g["port"]); end
+        lock(_MESH_GRANT_LOCK) do ;
+            return _MESH_GRANT_PORT[(String(g["source"]), String(g["puller"]))] = Int(g["port"])
+        end
     end
-    return Dict("host" => String(host), "reachable" => ok, "keys" => keys, "grants" => grants, "pins" => pins)
+    return Dict(
+        "host" => String(host),
+        "reachable" => ok,
+        "keys" => keys,
+        "grants" => grants,
+        "pins" => pins,
+    )
 end
 
 # The peer mesh for `names` as STRUCTURED data (for the DAG UI): the cached route verdict per cross-host
 # pair, and the parsed mesh state per host. `refresh` first forgets the cached verdicts (recalculate).
-function peer_plan_data(names::AbstractVector; refresh::Bool = false)
+function peer_plan_data(names::AbstractVector; refresh::Bool=false)
     hosts = unique(String[region_get(n) === nothing ? "" : region_get(n).host for n in names])
     filter!(!isempty, hosts)
-    refresh && for h in hosts; _peer_route_forget!(h); end
+    refresh && for h in hosts
+        _peer_route_forget!(h)
+    end
     routes = Any[]
     for (a, b, ra, rb) in _cross_host_pairs(names)
         v = _peer_route_load(ra.host, rb.host)      # b pulls from a ⇒ keyed (a.host, b.host)
         bw = _peer_bw_get(ra.host, rb.host)         # measured peer rate (bytes/s) for this direction, 0 = unmeasured
-        push!(routes, Dict("src" => String(a), "dst" => String(b),
-            "kind" => v === nothing ? "unresolved" : String(v[1]),
-            "addr" => v === nothing ? "" : v[2],
-            "age_s" => v === nothing ? -1 : round(Int, time() - v[3]),
-            "mbps" => bw > 0 ? round(bw / 1e6; digits = 1) : 0.0))
+        push!(
+            routes,
+            Dict(
+                "src" => String(a),
+                "dst" => String(b),
+                "kind" => v === nothing ? "unresolved" : String(v[1]),
+                "addr" => v === nothing ? "" : v[2],
+                "age_s" => v === nothing ? -1 : round(Int, time() - v[3]),
+                "mbps" => bw > 0 ? round(bw / 1e6; digits=1) : 0.0,
+            ),
+        )
     end
-    return Dict("regions" => String.(collect(names)), "refreshed" => refresh,
-                "routes" => routes, "hosts" => [_mesh_host_state(h) for h in hosts])
+    return Dict(
+        "regions" => String.(collect(names)),
+        "refreshed" => refresh,
+        "routes" => routes,
+        "hosts" => [_mesh_host_state(h) for h in hosts],
+    )
 end
 
 # ── Consent-gated introduction (§5.1): what a popup must cover ─────────────────────────────────────────
@@ -394,11 +472,14 @@ end
 function mesh_consent_status(names::AbstractVector)
     defined = String[String(n) for n in names if region_get(n) !== nothing]
     hosts = unique(String[region_get(n).host for n in defined])
-    installed = Set{Tuple{String,String}}(); unreachable = String[]
+    installed = Set{Tuple{String,String}}()
+    unreachable = String[]
     for h in hosts
         st = _mesh_host_state(h)          # one ssh (with retry) per host — run me off the request path (async)
         st["reachable"] || push!(unreachable, h)
-        for g in st["grants"]; push!(installed, (String(g["source"]), String(g["puller"]))); end
+        for g in st["grants"]
+            push!(installed, (String(g["source"]), String(g["puller"])))
+        end
     end
     pairs = Any[]
     for (a, b, ra, rb) in _cross_host_pairs(defined)
@@ -407,11 +488,25 @@ function mesh_consent_status(names::AbstractVector)
         # needing connection (with the `unreachable` warning) rather than silently skipping it: a false
         # "connect?" is a harmless idempotent re-arm, but a silently-missed mesh leaves transfers on the relay.
         p = _region_blob_port(a)
-        push!(pairs, Dict("source" => a, "puller" => b, "source_host" => ra.host,
-                          "puller_host" => rb.host, "port" => p > 0 ? p : 1, "placeholder" => p <= 0))
+        push!(
+            pairs,
+            Dict(
+                "source" => a,
+                "puller" => b,
+                "source_host" => ra.host,
+                "puller_host" => rb.host,
+                "port" => p > 0 ? p : 1,
+                "placeholder" => p <= 0,
+            ),
+        )
     end
-    return Dict("connected" => isempty(pairs), "pairs" => pairs, "hosts" => sort(collect(hosts)),
-                "unreachable" => unreachable, "regions" => defined)
+    return Dict(
+        "connected" => isempty(pairs),
+        "pairs" => pairs,
+        "hosts" => sort(collect(hosts)),
+        "unreachable" => unreachable,
+        "regions" => defined,
+    )
 end
 
 # ── Dry-run diagnostic / audit (§6.2) ────────────────────────────────────────────────────────────────
@@ -420,18 +515,29 @@ end
 # and the exact `ssh -N -L` line `_pull_ssh!` would run. Doubles as the ownership-reconciliation view.
 # `refresh=true` first FORGETS the cached verdicts for these hosts, so the next transfer re-probes (the DAG
 # "recalculate" action) — the fresh verdict lands on that transfer, not here (probing needs live workers).
-function peer_plan(names::AbstractVector; refresh::Bool = false)
+function peer_plan(names::AbstractVector; refresh::Bool=false)
     io = IOBuffer()
     hosts = unique(String[region_get(n) === nothing ? "?" : region_get(n).host for n in names])
     if refresh
-        for h in hosts; h == "?" || _peer_route_forget!(h); end
-        println(io, "(route cache cleared for $(join(filter(!=("?"), hosts), ", ")) — next transfer re-probes)")
+        for h in hosts
+            h == "?" || _peer_route_forget!(h)
+        end
+        println(
+            io,
+            "(route cache cleared for $(join(filter(!=("?"), hosts), ", ")) — next transfer re-probes)",
+        )
     end
     println(io, "── cached route verdicts (src → dst : kind @ addr, age) ──")
     for (a, b, ra, rb) in _cross_host_pairs(names)
         v = _peer_route_load(ra.host, rb.host)      # b pulls from a ⇒ keyed (a.host, b.host)
-        println(io, v === nothing ? "  $b ← $a : (not yet resolved)" :
-            "  $b ← $a : $(v[1]) @ $(v[2])  ($(round(Int, time() - v[3]))s ago)")
+        println(
+            io,
+            if v === nothing
+                "  $b ← $a : (not yet resolved)"
+            else
+                "  $b ← $a : $(v[1]) @ $(v[2])  ($(round(Int, time() - v[3]))s ago)"
+            end,
+        )
     end
     println(io, "── mesh artifacts on hosts ──")
     for h in hosts
@@ -442,16 +548,26 @@ function peer_plan(names::AbstractVector; refresh::Bool = false)
         echo 'slate_known_hosts:'; cat "\$HOME/.ssh/slate_known_hosts" 2>/dev/null | sed 's/^/  /'
         """
         ok, out = _ssh_script(h, script)
-        println(io, "▸ $h"); println(io, ok ? rstrip(out) : "  (ssh failed)")
+        println(io, "▸ $h")
+        println(io, ok ? rstrip(out) : "  (ssh failed)")
     end
     println(io, "── peer pull commands (per cross-host pair) ──")
     for (a, b, ra, rb) in _cross_host_pairs(names)
-        port = _region_blob_port(a); port = port > 0 ? port : 1
-        aip = _region_peer_addr(a, ra.host); au = _ssh_user(ra.host)
+        port = _region_blob_port(a)
+        port = port > 0 ? port : 1
+        aip = _region_peer_addr(a, ra.host)
+        au = _ssh_user(ra.host)
         tgt = isempty(au) ? aip : "$au@$aip"
-        note = _region_blob_port(a) > 0 ? "" : "  (placeholder port — tunnel source, finalized at transfer)"
+        note = if _region_blob_port(a) > 0
+            ""
+        else
+            "  (placeholder port — tunnel source, finalized at transfer)"
+        end
         println(io, "$b ← $a$note")
-        println(io, "  ssh -i $(_mesh_key_path(b)) -o IdentitiesOnly=yes -o UserKnownHostsFile=$(_mesh_known_hosts()) \\")
+        println(
+            io,
+            "  ssh -i $(_mesh_key_path(b)) -o IdentitiesOnly=yes -o UserKnownHostsFile=$(_mesh_known_hosts()) \\",
+        )
         println(io, "      -o StrictHostKeyChecking=yes -N -L <lport>:127.0.0.1:$port $tgt")
     end
     return String(take!(io))

@@ -29,9 +29,12 @@ end
 function _close_listeners(nb::LiveNotebook)
     lock(nb.llock) do
         for ch in nb.listeners
-            try; close(ch); catch; end
+            try
+                close(ch)
+            catch
+            end
         end
-        empty!(nb.listeners)
+        return empty!(nb.listeners)
     end
 end
 
@@ -63,10 +66,13 @@ function _schedule_live_rerender!(nb::LiveNotebook)
         get!(_LIVE_RERENDER_KICK, nb.id) do
             c = Channel{Nothing}(256)
             _run_live_rerender_loop!(nb, c)
-            c
+            return c
         end
     end
-    try; put!(ch, nothing); catch; end   # buffered → effectively non-blocking; closed → notebook gone
+    try
+        put!(ch, nothing)
+    catch
+    end   # buffered → effectively non-blocking; closed → notebook gone
     return nothing
 end
 
@@ -80,13 +86,20 @@ function _run_live_rerender_loop!(nb::LiveNotebook, ch::Channel{Nothing})
         try
             take!(ch)                              # wait for a connect
             sleep(_LIVE_RERENDER_DEBOUNCE)         # let a reload burst settle to the final page
-            while isready(ch); take!(ch); end      # coalesce the rest of the burst into this one pass
+            while isready(ch)
+                take!(ch)
+            end      # coalesce the rest of the burst into this one pass
             for (cid, wire) in ReportEngine.rerender_live(nb.kernel, nb.report)
-                try; server_celldone(nb, "reconnect", cid, wire); catch; end
+                try
+                    server_celldone(nb, "reconnect", cid, wire)
+                catch
+                end
             end
         catch e
             e isa InvalidStateException && break    # mailbox closed → notebook closing → end the task
-            @warn "Kaimon Slate: live re-render loop error" id = nb.id exception = (e, catch_backtrace())
+            @warn "Kaimon Slate: live re-render loop error" id = nb.id exception = (
+                e, catch_backtrace()
+            )
             sleep(0.5)                              # avoid a hot error loop
         end
     end
@@ -98,9 +111,12 @@ function _stop_live_rerender!(nb::LiveNotebook)
     ch = lock(_LIVE_RERENDER_LOCK) do
         c = get(_LIVE_RERENDER_KICK, nb.id, nothing)
         delete!(_LIVE_RERENDER_KICK, nb.id)
-        c
+        return c
     end
-    ch === nothing || try; close(ch); catch; end
+    ch === nothing || try
+        close(ch)
+    catch
+    end
     return nothing
 end
 
@@ -109,7 +125,10 @@ function _sse(stream::HTTP.Stream, nb::LiveNotebook)
     HTTP.setheader(stream, "Cache-Control" => "no-cache")
     HTTP.startwrite(stream)
     ch = Channel{String}(256)   # headroom so the slow-client resync tokens (see _broadcast) don't block
-    n = lock(nb.llock) do; push!(nb.listeners, ch); length(nb.listeners); end
+    n = lock(nb.llock) do ;
+        push!(nb.listeners, ch)
+        return length(nb.listeners)
+    end
     @info "Kaimon Slate: browser connected" id = nb.id clients = n
     # A freshly-connected browser page needs any LIVE (session-bound) outputs — WGLMakie figures, whose
     # scene + interaction live in the worker session, not the replayed HTML — re-rendered for IT, the way a
@@ -123,7 +142,10 @@ function _sse(stream::HTTP.Stream, nb::LiveNotebook)
         end
     catch
     finally
-        left = lock(nb.llock) do; filter!(c -> c !== ch, nb.listeners); length(nb.listeners); end
+        left = lock(nb.llock) do ;
+            filter!(c -> c !== ch, nb.listeners)
+            return length(nb.listeners)
+        end
         close(ch)
         @info "Kaimon Slate: browser disconnected" id = nb.id clients = left
     end
@@ -160,10 +182,18 @@ end
 # export, or a foreign HTML file).
 function _html_bundle_source(path::AbstractString)
     isfile(path) || return nothing
-    txt = try; read(path, String); catch; return nothing; end
+    txt = try
+        read(path, String)
+    catch
+        return nothing
+    end
     m = match(r"var _bb64=\"([A-Za-z0-9+/=]+)\"", txt)
     m === nothing && return nothing
-    src = try; String(Base64.base64decode(m.captures[1])); catch; return nothing; end
+    src = try
+        String(Base64.base64decode(m.captures[1]))
+    catch
+        return nothing
+    end
     occursin(_BUNDLE_OPEN, src) || return nothing   # sanity: a real self-contained bundle
     return src
 end
@@ -237,27 +267,48 @@ function _sse_import(stream::HTTP.Stream, h)
     function emit(ev::AbstractString, data::AbstractString)
         io = IOBuffer()
         println(io, "event: ", ev)
-        for ln in split(data, '\n'); println(io, "data: ", ln); end   # SSE: one data: per line
+        for ln in split(data, '\n')
+            println(io, "data: ", ln)
+        end   # SSE: one data: per line
         println(io)
-        try; write(stream, String(take!(io))); return true; catch; return false; end
+        try
+            write(stream, String(take!(io)))
+            return true
+        catch
+            return false
+        end
     end
     # Stream `Pkg.instantiate()` for `projdir`; returns :ok / :aborted / :failed.
     function instantiate!(projdir)
         emit("status", "Resolving & instantiating packages — this can take a while…")
         jl = Base.julia_cmd()[1]
         out = Pipe()
-        proc = run(pipeline(`$jl --project=$projdir --color=no --startup-file=no -e 'using Pkg; Pkg.instantiate()'`;
-                            stdout = out, stderr = out); wait = false)
+        proc = run(
+            pipeline(
+                `$jl --project=$projdir --color=no --startup-file=no -e 'using Pkg; Pkg.instantiate()'`;
+                stdout=out,
+                stderr=out,
+            );
+            wait=false,
+        )
         close(out.in)                       # parent's write end; lets eachline see EOF on exit
         for line in eachline(out)
-            emit("log", line) || (try; kill(proc); catch; end; return :aborted)
+            emit("log", line) || (
+                try
+                    kill(proc)
+                catch
+                end;
+                return :aborted
+            )
         end
         wait(proc)
         return proc.exitcode == 0 ? :ok : :failed
     end
     q = HTTP.queryparams(HTTP.URI(stream.message.target))
     path = expanduser(strip(get(q, "path", "")))
-    target = let t = strip(get(q, "target", "")); isempty(t) ? "" : expanduser(t); end
+    target = let t = strip(get(q, "target", ""))
+        isempty(t) ? "" : expanduser(t)
+    end
     runon = strip(get(q, "runon", ""))              # run-location chosen in the import dialog ("" = local/global)
     try
         (isfile(path) && _has_bundle_footer(path)) ||
@@ -265,17 +316,19 @@ function _sse_import(stream::HTTP.Stream, h)
         (!isempty(target) && isdir(target) && !isempty(readdir(target))) &&
             return emit("failed", "Target directory already exists and isn't empty:\n$target")
         emit("status", "Expanding bundle…")
-        tdir = expand(path; target = target)
+        tdir = expand(path; target=target)
         co = _read_coords(tdir)                       # (root, envdir, parent, notebook)
         openpath = co.notebook
         isempty(openpath) && return emit("failed", "Expanded, but found no notebook .jl in $tdir")
         emit("log", "Expanded to $tdir" * (co.envdir == tdir ? "" : " (env: $(co.envdir))"))
         r = instantiate!(co.envdir)
-        r === :aborted && return            # client gone
-        r === :failed && return emit("failed",
-            "Package instantiation failed.\nThe project is at $tdir — open it and retry there.")
+        r === :aborted && return nothing            # client gone
+        r === :failed && return emit(
+            "failed",
+            "Package instantiation failed.\nThe project is at $tdir — open it and retry there.",
+        )
         emit("status", "Opening notebook…")
-        id = open_notebook!(h, openpath; runon = String(runon))
+        id = open_notebook!(h, openpath; runon=String(runon))
         emit("done", JSON.json(Dict("id" => id, "url" => "/n/$id", "target" => tdir)))
     catch e
         emit("failed", sprint(showerror, e))
@@ -292,20 +345,44 @@ function _sse_preflight(stream::HTTP.Stream, h)
     HTTP.setheader(stream, "Cache-Control" => "no-cache")
     HTTP.startwrite(stream)
     function emit(ev::AbstractString, data::AbstractString)
-        io = IOBuffer(); println(io, "event: ", ev)
-        for ln in split(data, '\n'); println(io, "data: ", ln); end
+        io = IOBuffer()
+        println(io, "event: ", ev)
+        for ln in split(data, '\n')
+            println(io, "data: ", ln)
+        end
         println(io)
-        try; write(stream, String(take!(io))); return true; catch; return false; end
+        try
+            write(stream, String(take!(io)))
+            return true
+        catch
+            return false
+        end
     end
     q = HTTP.queryparams(HTTP.URI(stream.message.target))
     host = strip(get(q, "host", ""))
-    tr = Symbol(strip(get(q, "transport", "tunnel"))); tr in (:tunnel, :direct) || (tr = :tunnel)
+    tr = Symbol(strip(get(q, "transport", "tunnel")))
+    tr in (:tunnel, :direct) || (tr = :tunnel)
     isempty(host) && (emit("failed", "no host given"); return nothing)
     try
-        r = ReportEngine.preflight_remote(host; transport = tr, on_step = step ->
-            emit("step", JSON.json(Dict("name" => step.name, "status" => step.status,
-                                        "detail" => step.detail, "ms" => step.ms))))
-        emit("done", JSON.json(Dict("ok" => r["ok"], "host" => r["host"], "transport" => r["transport"])))
+        r = ReportEngine.preflight_remote(
+            host;
+            transport=tr,
+            on_step=step -> emit(
+                "step",
+                JSON.json(
+                    Dict(
+                        "name" => step.name,
+                        "status" => step.status,
+                        "detail" => step.detail,
+                        "ms" => step.ms,
+                    ),
+                ),
+            ),
+        )
+        emit(
+            "done",
+            JSON.json(Dict("ok" => r["ok"], "host" => r["host"], "transport" => r["transport"])),
+        )
     catch e
         emit("failed", sprint(showerror, e))
     end
@@ -330,7 +407,12 @@ end
 # hash it would bump the file's ATIME, which `watch_file` reports as a change (NOTE_ATTRIB) — and
 # since the recompute itself reads the asset via `@asset`, a hash-based watcher would wake itself in
 # a tight loop. `stat`/mtime touches nothing, so an atime-only event leaves the signal unchanged.
-_asset_mtime(f) = try; mtime(f); catch; 0.0; end
+_asset_mtime(f) =
+    try
+        mtime(f)
+    catch
+        0.0
+    end
 
 # Watch the file for external edits (VS Code / agent) → sync → push instantly.
 # `watch_file` returns on change (instant) or after a 2s safety timeout (covers
@@ -367,21 +449,28 @@ function _start_watcher!(nb::LiveNotebook)
         try
             files = _asset_files(nb)
             if isempty(files)
-                sleep(2); continue                    # no @asset deps yet — cheap periodic recheck
+                sleep(2)
+                continue                    # no @asset deps yet — cheap periodic recheck
             end
             prev = Dict(f => _asset_mtime(f) for f in files)
             ch = Channel{Nothing}(length(files) + 1)  # buffer ≥ putters → none blocks, no leaked tasks
             for f in files
                 @async begin
-                    try; FileWatching.watch_file(f, 2.0); catch; end
-                    try; put!(ch, nothing); catch; end
+                    try
+                        FileWatching.watch_file(f, 2.0)
+                    catch
+                    end
+                    try
+                        put!(ch, nothing)
+                    catch
+                    end
                 end
             end
             take!(ch)                                 # wake on the first event (or the 2 s ceiling)
             changed = String[f for f in files if _asset_mtime(f) != get(prev, f, 0.0)]
             isempty(changed) || server_asset_changed(nb, changed)
             sleep(0.2)                                # floor: bound any event storm (e.g. an editor's
-                                                      # multi-write save) to ≤5 Hz regardless of wakes
+            # multi-write save) to ≤5 Hz regardless of wakes
         catch
             sleep(0.5)
         end
@@ -395,7 +484,9 @@ function _start_watcher!(nb::LiveNotebook)
     # op-level checkpoints (and guarantees the "at least every minute" capture).
     @async while true
         sleep(60)
-        try; _history!(nb; source = "auto", kind = "draft"); catch; end
+        try
+            _history!(nb; source="auto", kind="draft")
+        catch
+        end
     end
 end
-

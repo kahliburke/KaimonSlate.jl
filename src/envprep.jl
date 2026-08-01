@@ -10,7 +10,7 @@
 #     whose SDK is a `[sources]` path dep),
 #   • FINGERPRINT the parent so a later parent change (a dep added, a re-resolve) is detected as
 #     stale and the fork rebuilt — the robustness the remote path already had and the local didn't.
-import Pkg   # Pkg.TOML only
+using Pkg: Pkg   # Pkg.TOML only
 
 # `[sources]` with every relative `path` rewritten absolute (anchored on `base`), so a parent's
 # dev/path dep still resolves once its env is copied into a scratch fork dir.
@@ -19,8 +19,10 @@ function _abs_sources(sources, base::AbstractString)
     for (nm, s) in sources
         if s isa AbstractDict && haskey(s, "path")
             p = String(s["path"])
-            s = merge(Dict{String,Any}(String(k) => v for (k, v) in s),
-                      Dict{String,Any}("path" => isabspath(p) ? p : abspath(joinpath(base, p))))
+            s = merge(
+                Dict{String,Any}(String(k) => v for (k, v) in s),
+                Dict{String,Any}("path" => isabspath(p) ? p : abspath(joinpath(base, p))),
+            )
         end
         out[String(nm)] = s
     end
@@ -32,7 +34,11 @@ end
 # scratch fork dir. (Manifest v2: `deps` maps a name to a vector of entry tables.)
 function _abspath_manifest_deps!(manifest::AbstractString, base::AbstractString)
     isfile(manifest) || return nothing
-    m = try; Pkg.TOML.parsefile(manifest); catch; return nothing; end
+    m = try
+        Pkg.TOML.parsefile(manifest)
+    catch
+        return nothing
+    end
     deps = get(m, "deps", nothing)
     deps isa AbstractDict || return nothing
     changed = false
@@ -40,11 +46,13 @@ function _abspath_manifest_deps!(manifest::AbstractString, base::AbstractString)
         for e in (entries isa AbstractVector ? entries : (entries,))
             if e isa AbstractDict && haskey(e, "path")
                 p = String(e["path"])
-                isabspath(p) || (e["path"] = abspath(joinpath(base, p)); changed = true)
+                isabspath(p) || (e["path"]=abspath(joinpath(base, p)); changed=true)
             end
         end
     end
-    changed && open(manifest, "w") do io; Pkg.TOML.print(io, m); end
+    changed && open(manifest, "w") do io
+        return Pkg.TOML.print(io, m)
+    end
     return nothing
 end
 
@@ -68,10 +76,12 @@ function seed_env_project!(envdir::AbstractString, parent::AbstractString)
     haskey(pt, "deps") && (seed["deps"] = pt["deps"])
     haskey(pt, "compat") && (seed["compat"] = pt["compat"])
     haskey(pt, "sources") && (seed["sources"] = _abs_sources(pt["sources"], parent))
-    open(joinpath(envdir, "Project.toml"), "w") do io; Pkg.TOML.print(io, seed); end
+    open(joinpath(envdir, "Project.toml"), "w") do io
+        return Pkg.TOML.print(io, seed)
+    end
     pmf = joinpath(parent, "Manifest.toml")
     if isfile(pmf)
-        cp(pmf, joinpath(envdir, "Manifest.toml"); force = true)
+        cp(pmf, joinpath(envdir, "Manifest.toml"); force=true)
         _abspath_manifest_deps!(joinpath(envdir, "Manifest.toml"), parent)
     end
     return (haskey(pt, "name") && haskey(pt, "uuid")) ? String(pt["name"]) : ""
@@ -86,14 +96,17 @@ function env_parent_fingerprint(parent::AbstractString)
         p = joinpath(parent, f)
         isfile(p) && write(io, read(p))
     end
-    return string(hash(take!(io)); base = 16)
+    return string(hash(take!(io)); base=16)
 end
 
 _env_stamp_file(envdir::AbstractString) = joinpath(envdir, ".slate-parent")
 
 "Record the parent fingerprint `envdir` was seeded from (for later [`env_stale`](@ref) checks)."
 function stamp_env!(envdir::AbstractString, parent::AbstractString)
-    try; write(_env_stamp_file(envdir), env_parent_fingerprint(parent)); catch; end
+    try
+        write(_env_stamp_file(envdir), env_parent_fingerprint(parent))
+    catch
+    end
     return nothing
 end
 

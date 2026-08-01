@@ -5,20 +5,21 @@
 # (so dynamic args work), and the control is reported back through eval — not parsed.
 using ReTest
 
-include(joinpath(@__DIR__, "..", "src", "engine.jl")); using .ReportEngine
+include(joinpath(@__DIR__, "..", "src", "engine.jl"));
+using .ReportEngine
 const RE = ReportEngine
 findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
 
 @testset "ReportEngine bind" begin
-
     @testset "widget constructors build specs" begin
         s = RE.Slider(0:10)
         @test s.kind == "slider" && s.params["min"] == 0 && s.params["max"] == 10 && s.default == 0
         @test RE.Checkbox(true).default === true
         sel = RE.Select(["a", "b"])
         # Options normalize to `[{value,label}]` specs (the labeled-options form), not bare values.
-        @test sel.kind == "select" && sel.default == "a" &&
-              [o["value"] for o in sel.params["options"]] == ["a", "b"]
+        @test sel.kind == "select" &&
+            sel.default == "a" &&
+            [o["value"] for o in sel.params["options"]] == ["a", "b"]
         @test RE.Toggle(true).kind == "toggle"
         @test RE.TextArea("hi").kind == "textarea"
         @test RE.ColorPicker("#ff8800").default == "#ff8800"
@@ -28,9 +29,12 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test RE.MultiSelect(["x", "y"]).default == Any[]
         @test RE.Button("Go").params["label"] == "Go" && RE.Button("Go").default == 0
         nf = RE.NumberField(0, 10, 3)
-        @test nf.kind == "number" && nf.default == 3 && nf.params["min"] == 0 && nf.params["max"] == 10
+        @test nf.kind == "number" &&
+            nf.default == 3 &&
+            nf.params["min"] == 0 &&
+            nf.params["max"] == 10
         # kwargs (the natural Pluto-ish syntax) are real now, not a parser special case
-        sk = RE.Slider(0.0:0.01:1.0; default = 0.5, label = "frac")
+        sk = RE.Slider(0.0:0.01:1.0; default=0.5, label="frac")
         @test sk.default == 0.5 && sk.params["label"] == "frac"
     end
 
@@ -45,7 +49,7 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
     end
 
     @testset "custom_widget: third-party kind passes through the value contract" begin
-        w = RE.custom_widget("mathfield"; label = "answer")
+        w = RE.custom_widget("mathfield"; label="answer")
         @test w.kind == "mathfield" && w.default == "" && w.params["label"] == "answer"
         @test RE.custom_widget("mathfield", "\\frac{1}{2}").default == "\\frac{1}{2}"   # positional default carries
         # coerce is TYPE-DRIVEN from the default even for an unregistered kind: a String-valued field
@@ -58,21 +62,21 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
     end
 
     @testset "TableSelect binds the clicked row as a NamedTuple" begin
-        ts = RE.TableSelect([(sym = "AAPL", px = 42.0), (sym = "MSFT", px = 13.5)])
+        ts = RE.TableSelect([(sym="AAPL", px=42.0), (sym="MSFT", px=13.5)])
         @test ts.kind == "tableselect"
         @test [c["name"] for c in ts.params["columns"]] == ["sym", "px"]   # object-form columns
         @test ts.default == 0                                   # nothing selected initially
         # No selection → nothing; a valid 1-based index → the row as a NamedTuple (field per column)
         @test RE.wrap_value(ts, 0) === nothing
         row = RE.wrap_value(ts, 1)
-        @test row === (sym = "AAPL", px = 42.0)
+        @test row === (sym="AAPL", px=42.0)
         @test row.px == 42.0 && row.sym == "AAPL"               # struct-like field access
         # coerce clamps the browser's row index to the known rows (out of range → 0 = none)
         @test RE.coerce_bind(ts, 2.0) === 2
         @test RE.coerce_bind(ts, 99) === 0 && RE.coerce_bind(ts, 0) === 0
         # reconcile keeps the selected index across a re-run while it stays in range
         @test RE.reconcile_bind(ts, 2, ts) == 2
-        ts1 = RE.TableSelect([(sym = "AAPL", px = 42.0)])       # a re-run that now has only 1 row
+        ts1 = RE.TableSelect([(sym="AAPL", px=42.0)])       # a re-run that now has only 1 row
         @test RE.reconcile_bind(ts, 2, ts1) == 0               # index 2 no longer valid → default
     end
 
@@ -83,15 +87,18 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test RE.reconcile_bind(RE.Select(["a", "b"]), "b", RE.Select(["a", "b", "c"])) == "b"
         @test RE.reconcile_bind(RE.Select(["a", "b"]), "b", RE.Select(["a", "c"])) == "a"  # gone → default
         # multiselect drops now-invalid options
-        @test RE.reconcile_bind(RE.MultiSelect(["x", "y", "z"]), ["x", "z"],
-                                 RE.MultiSelect(["x", "y"])) == ["x"]
+        @test RE.reconcile_bind(
+            RE.MultiSelect(["x", "y", "z"]), ["x", "z"], RE.MultiSelect(["x", "y"])
+        ) == ["x"]
         # `_do_bind` handles the "?" placeholder (browser set a value before this bind cell's first
         # run this session): it isn't a real type change, so the pending value survives, coerced
         # against the real widget, instead of being discarded to the default.
         lk = ReentrantLock()
         regp = Dict{Symbol,Tuple{RE.Widget,Any}}(:k => (RE.Widget("?", Dict{String,Any}(), 7), 7))
         @test RE._do_bind(regp, lk, :k, RE.Slider(0:10)) == 7
-        regp2 = Dict{Symbol,Tuple{RE.Widget,Any}}(:k => (RE.Widget("?", Dict{String,Any}(), 7.0), 7.0))
+        regp2 = Dict{Symbol,Tuple{RE.Widget,Any}}(
+            :k => (RE.Widget("?", Dict{String,Any}(), 7.0), 7.0)
+        )
         @test RE._do_bind(regp2, lk, :k, RE.Slider(0:10)) == 7   # coerced like a normal Int slider set
     end
 
@@ -104,12 +111,14 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         eval_stale!(r)
         @test !isempty(findcell(r, "ctl").binds)           # control reported by eval
         @test findcell(r, "ctl").binds[1].widget == "slider"
-        @test Base.invokelatest(getproperty, r.mod, :n) == 1 && Base.invokelatest(getproperty, r.mod, :m) == 2
+        @test Base.invokelatest(getproperty, r.mod, :n) == 1 &&
+            Base.invokelatest(getproperty, r.mod, :m) == 2
 
         set_bind_value!(r, findcell(r, "ctl"), 5)          # "move the slider"
         findcell(r, "use").state = STALE                   # (server marks dependents)
         eval_stale!(r)
-        @test Base.invokelatest(getproperty, r.mod, :n) == 5 && Base.invokelatest(getproperty, r.mod, :m) == 10
+        @test Base.invokelatest(getproperty, r.mod, :n) == 5 &&
+            Base.invokelatest(getproperty, r.mod, :m) == 10
         @test findcell(r, "ctl").binds[1].value == 5       # host-side spec mirrors it
     end
 
@@ -119,7 +128,8 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test :w in findcell(r, "mix").writes && :q in findcell(r, "mix").writes
         eval_stale!(r)
         @test findcell(r, "mix").state == FRESH
-        @test Base.invokelatest(getproperty, r.mod, :w) == 2 && Base.invokelatest(getproperty, r.mod, :q) == 3
+        @test Base.invokelatest(getproperty, r.mod, :w) == 2 &&
+            Base.invokelatest(getproperty, r.mod, :q) == 3
         @test !isempty(findcell(r, "mix").binds)           # control reported even though mixed
     end
 
@@ -128,7 +138,11 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         c = RE.Choice(8, "8 heads", 4)
         @test convert(Int, c) === 8                        # typed field / local / collection element
         @test Int(c) === 8                                 # explicit numeric construction
-        @test (let x::Int = c; x end) === 8                # typed local assignment
+        @test (
+            let x::Int = c
+                x
+            end
+        ) === 8                # typed local assignment
         @test Int[c, c] == [8, 8]                          # typed collection element
         @test [10, 20, 30, 40, 50, 60, 70, 80][c] == 80    # indexing (to_index)
         @test c == 8 && c.value === 8 && c.label == "8 heads"
@@ -138,7 +152,8 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
 
     @testset "a mixed @bind cell is memoizable, keyed on the control value" begin
         r = parse_report("#%% code id=up\nd = 3\n#%% code id=mix\n@bind k Slider(1:5)\ny = d * k")
-        build_dependencies!(r); eval_stale!(r)
+        build_dependencies!(r)
+        eval_stale!(r)
         mix = findcell(r, "mix")
         @test !isempty(mix.binds)
         @test RE._memoizable(mix)                          # bind cells now cacheable (scaffold-replay on restore)
@@ -168,7 +183,8 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
 
     @testset "value persists across a bind-cell re-run (registry reconcile)" begin
         r = parse_report("#%% code id=ctl\n@bind n Slider(1:10)")
-        build_dependencies!(r); eval_stale!(r)
+        build_dependencies!(r)
+        eval_stale!(r)
         set_bind_value!(r, findcell(r, "ctl"), 7)
         @test Base.invokelatest(getproperty, r.mod, :n) == 7
         findcell(r, "ctl").state = STALE                   # re-run the bind cell
@@ -178,20 +194,25 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
     end
 
     @testset "group cell: multiple @bind; per-name value set" begin
-        r = parse_report("#%% code id=ctl\n@bind a Slider(1:10)\n@bind b Slider(0:0.5:5)\n" *
-                         "#%% code id=use\nm = a + b")
+        r = parse_report(
+            "#%% code id=ctl\n@bind a Slider(1:10)\n@bind b Slider(0:0.5:5)\n" *
+            "#%% code id=use\nm = a + b",
+        )
         build_dependencies!(r)
         ctl = findcell(r, "ctl")
         @test :a in ctl.writes && :b in ctl.writes
         @test "ctl" in findcell(r, "use").deps
         eval_stale!(r)
         @test length(ctl.binds) == 2
-        @test Base.invokelatest(getproperty, r.mod, :a) == 1 && Base.invokelatest(getproperty, r.mod, :b) == 0 && Base.invokelatest(getproperty, r.mod, :m) == 1
+        @test Base.invokelatest(getproperty, r.mod, :a) == 1 &&
+            Base.invokelatest(getproperty, r.mod, :b) == 0 &&
+            Base.invokelatest(getproperty, r.mod, :m) == 1
 
         set_bind_value!(r, ctl, :b, 2.5)                   # set one of the two
         findcell(r, "use").state = STALE
         eval_stale!(r)
-        @test Base.invokelatest(getproperty, r.mod, :b) == 2.5 && Base.invokelatest(getproperty, r.mod, :m) == 3.5
+        @test Base.invokelatest(getproperty, r.mod, :b) == 2.5 &&
+            Base.invokelatest(getproperty, r.mod, :m) == 3.5
         @test ctl.binds[findfirst(s -> s.name == :a, ctl.binds)].value == 1   # other unchanged
     end
 
@@ -239,9 +260,12 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
     end
 
     @testset "@bind Button: a valueless click increments the global AND fires @onclick" begin
-        r = parse_report("#%% code id=ctl\n@bind go Button(\"Run\")\n@onclick go (fires[] += 1)\n" *
-                         "#%% code id=use\nseen = go")
-        build_dependencies!(r); eval_stale!(r)
+        r = parse_report(
+            "#%% code id=ctl\n@bind go Button(\"Run\")\n@onclick go (fires[] += 1)\n" *
+            "#%% code id=use\nseen = go",
+        )
+        build_dependencies!(r)
+        eval_stale!(r)
         # inject the counter the handler bumps AFTER eval (the module exists now); the @onclick
         # closure only resolves `fires` when it fires, so registering it earlier is fine.
         Core.eval(r.mod, :(const fires = $(Ref(0))))
@@ -249,7 +273,8 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test Base.invokelatest(getproperty, r.mod, :go) == 0
 
         set_bind_value!(r, findcell(r, "ctl"), :go, nothing)    # click — no value passed
-        findcell(r, "use").state = STALE; eval_stale!(r)
+        findcell(r, "use").state = STALE
+        eval_stale!(r)
         @test Base.invokelatest(getproperty, r.mod, :go) == 1   # count advanced server-side
         @test Base.invokelatest(getproperty, r.mod, :seen) == 1 # a reader reacted
 
@@ -259,8 +284,10 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
 
         # @onclick dispatch is async (__on_fire! spawns a task) — wait for both fires to land
         fires = Base.invokelatest(getproperty, r.mod, :fires)
-        for _ in 1:200; fires[] == 2 && break; sleep(0.01); end
+        for _ in 1:200
+            fires[] == 2 && break
+            sleep(0.01)
+        end
         @test fires[] == 2                                       # the handler fired on each click
     end
-
 end

@@ -12,17 +12,22 @@
 # `slate.diag` can report the console state without a headless browser. One payload per tab.
 const _DIAG = Dict{String,Any}()                               # nbid → last pushed payload
 const _DIAG_LOCK = ReentrantLock()
-set_diag!(nbid, payload) = lock(_DIAG_LOCK) do; _DIAG[String(nbid)] = payload; end
-get_diag(nbid) = lock(_DIAG_LOCK) do; get(_DIAG, String(nbid), nothing); end
+set_diag!(nbid, payload) = lock(_DIAG_LOCK) do ;
+    return _DIAG[String(nbid)] = payload
+end
+get_diag(nbid) = lock(_DIAG_LOCK) do ;
+    return get(_DIAG, String(nbid), nothing)
+end
 
 # Human-readable diagnostics for the `slate.diag` MCP tool.
 function diag_report(nb::LiveNotebook)
     d = get_diag(nb.id)
     d === nothing && return "No browser has reported diagnostics for '$(nb.id)' yet. Open the " *
-        "notebook in a browser (it pushes on load) and retry."
+           "notebook in a browser (it pushes on load) and retry."
     entries = get(d, "entries", Any[])
     io = IOBuffer()
-    url = string(get(d, "url", "")); ts = string(get(d, "ts", ""))
+    url = string(get(d, "url", ""))
+    ts = string(get(d, "ts", ""))
     println(io, "Browser diagnostics for '", nb.id, "'", isempty(url) ? "" : "  ($url)")
     println(io, "session ", get(d, "session", "?"), isempty(ts) ? "" : "  @ $ts")
     if isempty(entries)
@@ -54,16 +59,17 @@ function _pkg_names()
         end
     catch
     end
-    _PKG_NAMES[] = sort!(unique!(names))
+    return _PKG_NAMES[] = sort!(unique!(names))
 end
 # Rank: exact match first, then prefix matches, then substring; case-insensitive; capped.
-function _pkg_complete(q::AbstractString, limit::Int = 50)
-    q = lowercase(strip(q)); isempty(q) && return String[]
+function _pkg_complete(q::AbstractString, limit::Int=50)
+    q = lowercase(strip(q))
+    isempty(q) && return String[]
     names = _pkg_names()
     exact = filter(n -> lowercase(n) == q, names)
     pre = filter(n -> lowercase(n) != q && startswith(lowercase(n), q), names)
     sub = filter(n -> !startswith(lowercase(n), q) && occursin(q, lowercase(n)), names)
-    first(vcat(exact, pre, sub), limit)
+    return first(vcat(exact, pre, sub), limit)
 end
 
 const _SNAPSHOTS = Dict{String,Dict{String,Vector{UInt8}}}()          # nbid → cellid → latest PNG
@@ -77,23 +83,39 @@ function set_snapshot!(nbid::AbstractString, cell::AbstractString, png::Vector{U
     lock(_SNAP_LOCK) do
         get!(_SNAPSHOTS, String(nbid), Dict{String,Vector{UInt8}}())[String(cell)] = png
         cells = get(_SNAP_SVG, String(nbid), nothing)     # a fresh raster ⇒ any cached export SVGs are stale
-        cells === nothing || delete!(cells, String(cell))
+        return cells === nothing || delete!(cells, String(cell))
     end
     return nothing
 end
-_snapshot(nbid, cell) = lock(_SNAP_LOCK) do
-    get(get(_SNAPSHOTS, String(nbid), Dict{String,Vector{UInt8}}()), String(cell), nothing)
+function _snapshot(nbid, cell)
+    lock(_SNAP_LOCK) do
+        return get(
+            get(_SNAPSHOTS, String(nbid), Dict{String,Vector{UInt8}}()), String(cell), nothing
+        )
+    end
 end
 # Vector (SVG) snapshot of a client-rendered chart in export `theme`, or `nothing` if not cached.
-_snapshot_svg(nbid, cell, theme::AbstractString) = lock(_SNAP_LOCK) do
-    get(get(get(_SNAP_SVG, String(nbid), Dict{String,Dict{String,String}}()), String(cell), Dict{String,String}()), String(theme), nothing)
+function _snapshot_svg(nbid, cell, theme::AbstractString)
+    lock(_SNAP_LOCK) do
+        return get(
+            get(
+                get(_SNAP_SVG, String(nbid), Dict{String,Dict{String,String}}()),
+                String(cell),
+                Dict{String,String}(),
+            ),
+            String(theme),
+            nothing,
+        )
+    end
 end
 # Cache an on-demand SVG rendered at export time (`_figure_for_export`'s live round-trip), keyed by
 # the export theme it was rendered in — no PNG required (the round-trip may run before any PNG existed).
-function set_snapshot_svg!(nbid::AbstractString, cell::AbstractString, theme::AbstractString, svg::AbstractString)
+function set_snapshot_svg!(
+    nbid::AbstractString, cell::AbstractString, theme::AbstractString, svg::AbstractString
+)
     lock(_SNAP_LOCK) do
         cells = get!(_SNAP_SVG, String(nbid), Dict{String,Dict{String,String}}())
-        get!(cells, String(cell), Dict{String,String}())[String(theme)] = String(svg)
+        return get!(cells, String(cell), Dict{String,String}())[String(theme)] = String(svg)
     end
     return nothing
 end
@@ -106,13 +128,36 @@ const _SNAP_FIG = Dict{String,Dict{String,Dict{String,Tuple{Vector{UInt8},String
 # The PDF and HTML exports want different formats from the SAME re-render (vector pdf vs. an
 # HTML-embeddable raster/svg), so the format preference is part of the key.
 _fig_key(theme::AbstractString, raster::Bool) = string(theme, raster ? "|r" : "|v")
-_snapshot_fig(nbid, cell, theme::AbstractString; raster::Bool = false) = lock(_SNAP_LOCK) do
-    get(get(get(_SNAP_FIG, String(nbid), Dict{String,Dict{String,Tuple{Vector{UInt8},String}}}()), String(cell), Dict{String,Tuple{Vector{UInt8},String}}()), _fig_key(theme, raster), nothing)
-end
-function set_snapshot_fig!(nbid::AbstractString, cell::AbstractString, theme::AbstractString, raster::Bool, bytes::Vector{UInt8}, ext::AbstractString)
+function _snapshot_fig(nbid, cell, theme::AbstractString; raster::Bool=false)
     lock(_SNAP_LOCK) do
-        cells = get!(_SNAP_FIG, String(nbid), Dict{String,Dict{String,Tuple{Vector{UInt8},String}}}())
-        get!(cells, String(cell), Dict{String,Tuple{Vector{UInt8},String}}())[_fig_key(theme, raster)] = (copy(bytes), String(ext))
+        return get(
+            get(
+                get(
+                    _SNAP_FIG, String(nbid), Dict{String,Dict{String,Tuple{Vector{UInt8},String}}}()
+                ),
+                String(cell),
+                Dict{String,Tuple{Vector{UInt8},String}}(),
+            ),
+            _fig_key(theme, raster),
+            nothing,
+        )
+    end
+end
+function set_snapshot_fig!(
+    nbid::AbstractString,
+    cell::AbstractString,
+    theme::AbstractString,
+    raster::Bool,
+    bytes::Vector{UInt8},
+    ext::AbstractString,
+)
+    lock(_SNAP_LOCK) do
+        cells = get!(
+            _SNAP_FIG, String(nbid), Dict{String,Dict{String,Tuple{Vector{UInt8},String}}}()
+        )
+        return get!(cells, String(cell), Dict{String,Tuple{Vector{UInt8},String}}())[_fig_key(theme, raster)] = (
+            copy(bytes), String(ext)
+        )
     end
     return nothing
 end
@@ -172,47 +217,64 @@ end
 const _LIVE_PENDING = Dict{String,Channel{Any}}()
 const _LIVE_LOCK = ReentrantLock()
 const _LIVE_SEQ = Threads.Atomic{Int}(0)
-_live_reqid() = string(Threads.atomic_add!(_LIVE_SEQ, 1); base = 16)
+_live_reqid() = string(Threads.atomic_add!(_LIVE_SEQ, 1); base=16)
 
 # The POST handler hands the browser's reply to the waiting request. Returns whether a waiter existed.
 function deliver_live!(reqid::AbstractString, payload)
-    ch = lock(_LIVE_LOCK) do; get(_LIVE_PENDING, String(reqid), nothing); end
+    ch = lock(_LIVE_LOCK) do ;
+        return get(_LIVE_PENDING, String(reqid), nothing)
+    end
     ch === nothing && return false
-    try; put!(ch, payload); catch; end
+    try
+        put!(ch, payload)
+    catch
+    end
     return true
 end
 
 # Broadcast `event:<json>` (reqid + `fields`) to the open tab and block until it POSTs a reply, or
 # `timeout`. Returns the reply payload (a Dict) or `nothing` (no live tab / no answer in time). Always
 # deregisters. NOTE: call OUTSIDE `nb.lock` — it blocks up to `timeout` and must not stall other ops.
-function request_live(nb::LiveNotebook, event::AbstractString, fields::AbstractDict; timeout::Real = 4.0)
-    any_listener = lock(nb.llock) do; !isempty(nb.listeners); end
+function request_live(
+    nb::LiveNotebook, event::AbstractString, fields::AbstractDict; timeout::Real=4.0
+)
+    any_listener = lock(nb.llock) do ;
+        return !isempty(nb.listeners)
+    end
     any_listener || return nothing
     reqid = _live_reqid()
     ch = Channel{Any}(1)
-    lock(_LIVE_LOCK) do; _LIVE_PENDING[reqid] = ch; end
+    lock(_LIVE_LOCK) do ;
+        return _LIVE_PENDING[reqid] = ch
+    end
     # Wake the take! when the browser is silent — but DON'T close if a reply is already buffered
     # (`isready`), or a reply landing right at the deadline would be discarded → caller sees nothing.
     timer = Timer(_ -> (isopen(ch) && !isready(ch) && close(ch)), timeout)
     try
-        _broadcast(nb, string(event, ":", JSON.json(merge(Dict{String,Any}("reqid" => reqid), fields))))
+        _broadcast(
+            nb, string(event, ":", JSON.json(merge(Dict{String,Any}("reqid" => reqid), fields)))
+        )
         return take!(ch)                 # the browser reply; throws once the timer closes the channel
     catch
         return nothing                   # timeout (channel closed) or any error → caller degrades
     finally
         close(timer)
-        lock(_LIVE_LOCK) do; delete!(_LIVE_PENDING, reqid); end
+        lock(_LIVE_LOCK) do ;
+            return delete!(_LIVE_PENDING, reqid)
+        end
         isopen(ch) && close(ch)
     end
 end
 
-request_live_inspect(nb::LiveNotebook, cellid::AbstractString; timeout::Real = 4.0) =
-    request_live(nb, "inspect", Dict{String,Any}("cell" => String(cellid)); timeout = timeout)
+function request_live_inspect(nb::LiveNotebook, cellid::AbstractString; timeout::Real=4.0)
+    return request_live(nb, "inspect", Dict{String,Any}("cell" => String(cellid)); timeout=timeout)
+end
 
 # Run `code` in the open tab (global scope — `nbState`, `charts`, `exportPdf`, … are reachable) and
 # return the browser's reply Dict `{ok, result, error}`, or `nothing` if no tab answered in time.
-request_live_eval(nb::LiveNotebook, code::AbstractString; timeout::Real = 8.0) =
-    request_live(nb, "js", Dict{String,Any}("code" => String(code)); timeout = timeout)
+function request_live_eval(nb::LiveNotebook, code::AbstractString; timeout::Real=8.0)
+    return request_live(nb, "js", Dict{String,Any}("code" => String(code)); timeout=timeout)
+end
 
 # Render a browser capture into the inspect text: cleaned DOM + this tab's console entries. The
 # raster (if any) is routed to the snapshot store by the POST handler, so it shows via `slate.view`.
@@ -220,15 +282,18 @@ function _format_live_capture(cap)
     cap isa AbstractDict || return ""
     io = IOBuffer()
     html = strip(string(get(cap, "html", "")))
-    isempty(html) || (println(io, "\n--- live DOM (rendered in the open browser) ---"); println(io, html))
+    isempty(html) ||
+        (println(io, "\n--- live DOM (rendered in the open browser) ---"); println(io, html))
     cons = get(cap, "console", nothing)
     if cons isa AbstractVector && !isempty(cons)
         println(io, "\n--- console (this tab) ---")
         for e in cons
-            e isa AbstractDict ? println(io, "  [", get(e, "kind", "?"), "] ", get(e, "text", "")) :
-                                 println(io, "  ", e)
+            if e isa AbstractDict
+                println(io, "  [", get(e, "kind", "?"), "] ", get(e, "text", ""))
+            else
+                println(io, "  ", e)
+            end
         end
     end
     return String(take!(io))
 end
-

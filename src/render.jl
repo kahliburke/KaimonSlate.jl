@@ -15,7 +15,7 @@ module ReportRender
 
 using OteraEngine, CommonMark
 using ..ReportEngine
-import Base64
+using Base64: Base64
 
 export render_html, render_report_file, output_html, markdown_html
 
@@ -46,7 +46,8 @@ function output_html(cell::Cell)
     isempty(o.stdout) || print(io, "<div class=\"out\"><pre>", _esc(o.stdout), "</pre></div>")
     # Captured stderr / `@warn` output — a distinct warnings block (not an error: the cell may
     # still have succeeded). VS Code source links in any `@ file:line` notices are made clickable.
-    isempty(o.stderr) || print(io, "<div class=\"warn\"><pre>", _linkify_trace(o.stderr), "</pre></div>")
+    isempty(o.stderr) ||
+        print(io, "<div class=\"warn\"><pre>", _linkify_trace(o.stderr), "</pre></div>")
     if isempty(o.display) && !isempty(o.value_repr)
         print(io, "<div class=\"val\"><pre>", _esc(o.value_repr), "</pre></div>")
     end
@@ -62,10 +63,19 @@ function output_html(cell::Cell)
             print(io, _render_exc_html(o.exception))
         else
             cid, ln = org
-            print(io, "<span class=\"err-msg errjump\"",
-                  (isempty(cid) ? "" : " data-cid=\"" * cid * "\""), " data-line=\"", ln,
-                  "\" title=\"jump to the error origin (line ", ln, isempty(cid) ? "" : " in cell " * cid, ")\">",
-                  _render_exc_html(o.exception), "</span>")
+            print(
+                io,
+                "<span class=\"err-msg errjump\"",
+                (isempty(cid) ? "" : " data-cid=\"" * cid * "\""),
+                " data-line=\"",
+                ln,
+                "\" title=\"jump to the error origin (line ",
+                ln,
+                isempty(cid) ? "" : " in cell " * cid,
+                ")\">",
+                _render_exc_html(o.exception),
+                "</span>",
+            )
         end
         (o.backtrace === nothing || isempty(o.backtrace)) ||
             print(io, "<span class=\"err-bt\">\n", _linkify_trace(o.backtrace), "</span>")
@@ -76,8 +86,11 @@ end
 
 # Colour an already-escaped line's `` `backticked` `` names (identifiers/types Julia quotes in its
 # error text) — the backticks drop, the content gets the `err-id` accent.
-_color_ticks(s::AbstractString) =
-    replace(s, r"`[^`]*`" => m -> "<span class=\"err-id\">" * chop(m; head = 1, tail = 1) * "</span>")
+function _color_ticks(s::AbstractString)
+    return replace(
+        s, r"`[^`]*`" => m -> "<span class=\"err-id\">" * chop(m; head=1, tail=1) * "</span>"
+    )
+end
 
 # Render an exception message as coloured HTML: the leading error TYPE (`UndefVarError`, `MethodError`,
 # …) is set apart, `Suggestion:` lines are dimmed, and quoted names are accented. Everything is escaped.
@@ -89,7 +102,13 @@ function _render_exc_html(exc::AbstractString)
         if startswith(lstrip(raw), "Suggestion:")
             print(io, "<span class=\"err-suggest\">", _color_ticks(_esc(raw)), "</span>")
         elseif m !== nothing
-            print(io, "<span class=\"err-type\">", _esc(m.captures[1]), "</span>", _color_ticks(_esc(m.captures[2])))
+            print(
+                io,
+                "<span class=\"err-type\">",
+                _esc(m.captures[1]),
+                "</span>",
+                _color_ticks(_esc(m.captures[2])),
+            )
         else
             print(io, _color_ticks(_esc(raw)))
         end
@@ -102,7 +121,7 @@ end
 # cell (`cellid`); if the error is purely inside another cell's code the call site here still names
 # this cell. Falls back to any `cell:…:N` / legacy `string:N` when `cellid` is unknown. `nothing`
 # when the error has no in-cell location (surfaced deep inside a package).
-function _cell_error_line(o::CellOutput, cellid::AbstractString = "")
+function _cell_error_line(o::CellOutput, cellid::AbstractString="")
     for s in (o.backtrace, o.exception)
         s === nothing && continue
         for m in eachmatch(r"\bcell:([\w\-]+):(\d+)", s)
@@ -134,26 +153,56 @@ end
 # (our cell eval `filename`) → jump to that line IN THIS CELL (errors.js wires `.cellref`).
 function _linkify_trace(bt::AbstractString)
     home = homedir()
-    s = replace(_esc(bt), r"((?:~|/)[\w./ \-]*\.jl):(\d+)" => function (m)
-        p = match(r"^(.*\.jl):(\d+)$", m)
-        p === nothing && return m
-        path, line = String(p.captures[1]), String(p.captures[2])
-        ap = startswith(path, "~") ? home * path[2:end] : path
-        isabspath(ap) && isfile(ap) || return m   # skip Base's relative ./foo.jl etc. — only real files
-        "<a class=\"srcref\" href=\"vscode://file" * ap * ":" * line * "\" title=\"open in VS Code\">" * m * "</a>"
-    end)
+    s = replace(
+        _esc(bt),
+        r"((?:~|/)[\w./ \-]*\.jl):(\d+)" => function (m)
+            p = match(r"^(.*\.jl):(\d+)$", m)
+            p === nothing && return m
+            path, line = String(p.captures[1]), String(p.captures[2])
+            ap = startswith(path, "~") ? home * path[2:end] : path
+            isabspath(ap) && isfile(ap) || return m   # skip Base's relative ./foo.jl etc. — only real files
+            return "<a class=\"srcref\" href=\"vscode://file" *
+                   ap *
+                   ":" *
+                   line *
+                   "\" title=\"open in VS Code\">" *
+                   m *
+                   "</a>"
+        end,
+    )
     # `cell:<id>:N` → jump to line N IN CELL <id> (cross-cell: the frame names its own source cell).
-    s = replace(s, r"\bcell:([\w\-]+):(\d+)\b" => function (m)
-        p = match(r"\bcell:([\w\-]+):(\d+)\b", m)
-        cid, ln = String(p.captures[1]), String(p.captures[2])
-        "<a class=\"cellref\" data-cid=\"" * cid * "\" data-line=\"" * ln *
-            "\" title=\"jump to line " * ln * " in cell " * cid * "\">" * m * "</a>"
-    end)
+    s = replace(
+        s,
+        r"\bcell:([\w\-]+):(\d+)\b" => function (m)
+            p = match(r"\bcell:([\w\-]+):(\d+)\b", m)
+            cid, ln = String(p.captures[1]), String(p.captures[2])
+            return "<a class=\"cellref\" data-cid=\"" *
+                   cid *
+                   "\" data-line=\"" *
+                   ln *
+                   "\" title=\"jump to line " *
+                   ln *
+                   " in cell " *
+                   cid *
+                   "\">" *
+                   m *
+                   "</a>"
+        end,
+    )
     # Legacy / interpolation `string:N` → jump to that line in THIS cell (no cell id in the frame).
-    return replace(s, r"\bstring:(\d+)\b" => function (m)
-        ln = String(match(r"\d+", m).match)
-        "<a class=\"cellref\" data-line=\"" * ln * "\" title=\"jump to line " * ln * " in this cell\">" * m * "</a>"
-    end)
+    return replace(
+        s,
+        r"\bstring:(\d+)\b" => function (m)
+            ln = String(match(r"\d+", m).match)
+            return "<a class=\"cellref\" data-line=\"" *
+                   ln *
+                   "\" title=\"jump to line " *
+                   ln *
+                   " in this cell\">" *
+                   m *
+                   "</a>"
+        end,
+    )
 end
 
 # Markdown → HTML with the table extension (GFM tables) and LaTeX math.
@@ -169,7 +218,7 @@ const _MATH_DISPLAY = r"\$\$(.+?)\$\$"s
 # amounts ("it cost $5 and $10") don't get swallowed as a math span (the candidate "5 and "
 # would have to end right before the second $, but it ends in a space — rejected).
 const _MATH_INLINE = r"\$(?!\s)([^\$\n]+?)(?<!\s)\$"
-_math_token(i::Int) = "xslatemathx" * string(i; pad = 5) * "x"
+_math_token(i::Int) = "xslatemathx" * string(i; pad=5) * "x"
 
 # A string value's text/plain repr is quoted (`"c"`), but inside `{{ }}` interpolation — a
 # presentation context, like Julia's `$(…)` — we want the bare content (`c`). Strip one layer of
@@ -178,16 +227,20 @@ _math_token(i::Int) = "xslatemathx" * string(i; pad = 5) * "x"
 function _interp_scalar(s::AbstractString)
     (ncodeunits(s) >= 2 && startswith(s, '"') && endswith(s, '"')) || return s
     inner = s[nextind(s, firstindex(s)):prevind(s, lastindex(s))]
-    return replace(inner, "\\\"" => "\"", "\\\$" => "\$", "\\\\" => "\\", "\\n" => "\n", "\\t" => "\t")
+    return replace(
+        inner, "\\\"" => "\"", "\\\$" => "\$", "\\\\" => "\\", "\\n" => "\n", "\\t" => "\t"
+    )
 end
 
 # Render markdown, splicing each `{{ expr }}` capture in. Self-contained outputs
 # (image / HTML / LaTeX / scalar) embed directly; echarts & interactive tables
 # emit a host placeholder (`.ichart`/`.itable` keyed by index) that the SPA
 # hydrates from the cell's collected `echarts`/`tables` — same order as here.
-function _md_html(src::AbstractString, interps = CellOutput[])
+function _md_html(src::AbstractString, interps=CellOutput[])
     tmpl, exprs = ReportEngine._md_template(src)
-    frags = String[]; ec = 0; tc = 0
+    frags = String[]
+    ec = 0
+    tc = 0
     for i in 1:length(exprs)
         o = i <= length(interps) ? interps[i] : nothing
         if o === nothing
@@ -197,9 +250,11 @@ function _md_html(src::AbstractString, interps = CellOutput[])
         elseif !isempty(o.display)
             push!(frags, _render_chunks(o.display))
         elseif !isempty(o.echarts)
-            push!(frags, "<div class=\"ichart\" data-i=\"$ec\"></div>"); ec += 1
+            push!(frags, "<div class=\"ichart\" data-i=\"$ec\"></div>")
+            ec += 1
         elseif !isempty(o.tables)
-            push!(frags, "<div class=\"itable\" data-i=\"$tc\"></div>"); tc += 1
+            push!(frags, "<div class=\"itable\" data-i=\"$tc\"></div>")
+            tc += 1
         elseif !isempty(o.value_repr)
             push!(frags, "<span class=\"ival\">" * _esc(_interp_scalar(o.value_repr)) * "</span>")
         else
@@ -218,7 +273,9 @@ function _md_html(src::AbstractString, interps = CellOutput[])
         tex = m
         for j in 1:length(exprs)                                    # interpolations inside math → raw TeX
             tok = ReportEngine._interp_token(j)
-            occursin(tok, tex) && (tex = replace(tex, tok => _math_value(j <= length(interps) ? interps[j] : nothing)))
+            occursin(tok, tex) && (
+                tex = replace(tex, tok => _math_value(j <= length(interps) ? interps[j] : nothing))
+            )
         end
         html = replace(html, _math_token(i) => _esc(tex))           # raw TeX, escaped; KaTeX reads the text node
     end
@@ -238,8 +295,8 @@ function _math_value(o::Union{CellOutput,Nothing})
     for ch in o.display
         if ch.mime == "text/latex"
             t = strip(String(copy(ch.data)))
-            startswith(t, "\$\$") && endswith(t, "\$\$") && length(t) >= 4 && return t[3:end-2]
-            startswith(t, "\$") && endswith(t, "\$") && length(t) >= 2 && return t[2:end-1]
+            startswith(t, "\$\$") && endswith(t, "\$\$") && length(t) >= 4 && return t[3:(end - 2)]
+            startswith(t, "\$") && endswith(t, "\$") && length(t) >= 2 && return t[2:(end - 1)]
             return t
         end
     end
@@ -264,21 +321,35 @@ function _render_chunks(chunks)
             # `$$…$$` sizing. Bare TeX (no delimiters) is wrapped so it still renders.
             # HTML-escape so the browser hands KaTeX the raw text node verbatim.
             tex = String(copy(ch.data))
-            wrapped = (occursin('$', tex) || occursin("\\(", tex) || occursin("\\[", tex)) ?
-                      tex : "\\[" * tex * "\\]"
+            wrapped = if (occursin('$', tex) || occursin("\\(", tex) || occursin("\\[", tex))
+                tex
+            else
+                "\\[" * tex * "\\]"
+            end
             print(io, "<div class=\"disp latex\">", _esc(wrapped), "</div>")
         elseif startswith(ch.mime, "image/")
             b64 = Base64.base64encode(ch.data)
-            print(io, "<div class=\"disp img\"><img alt=\"output\" src=\"data:",
-                  ch.mime, ";base64,", b64, "\"/></div>")
+            print(
+                io,
+                "<div class=\"disp img\"><img alt=\"output\" src=\"data:",
+                ch.mime,
+                ";base64,",
+                b64,
+                "\"/></div>",
+            )
         elseif ch.mime == "application/vnd.kaimonslate.component+json"
             # A Slate component descriptor {v, component, props} (SlateExtensionsBase `slate_render`):
             # emit a mount placeholder carrying the raw descriptor in a sibling JSON script; the SPA looks
             # up the registered component and mounts it (props + a display ctx exposing call/stream, no
             # bind value). `<\/` keeps the JSON from closing the <script> early.
             desc = replace(String(copy(ch.data)), "</" => "<\\/")
-            print(io, "<div class=\"disp slatecomp\"><span class=\"slatecomponent\"></span>",
-                  "<script type=\"application/json\" class=\"slatecomponent-desc\">", desc, "</script></div>")
+            print(
+                io,
+                "<div class=\"disp slatecomp\"><span class=\"slatecomponent\"></span>",
+                "<script type=\"application/json\" class=\"slatecomponent-desc\">",
+                desc,
+                "</script></div>",
+            )
         elseif ch.mime == "application/vnd.kaimonslate.html+html"
             # A self-contained HTML fragment (the `slate_render` escape hatch) — trusted, injected as-is.
             print(io, "<div class=\"disp html\">", String(copy(ch.data)), "</div>")
@@ -292,20 +363,30 @@ end
 # template autoescapes; rich output → trusted HTML via `display`.
 function _cell_view(cell::Cell)
     if cell.kind == MARKDOWN
-        return (kind = "md", state = "", source = "", stdout = "", value = "",
-                error = "", display = "", html = _md_html(cell.source, cell.interp))
+        return (
+            kind="md",
+            state="",
+            source="",
+            stdout="",
+            value="",
+            error="",
+            display="",
+            html=_md_html(cell.source, cell.interp),
+        )
     end
     o = cell.output
     chunks = o === nothing ? MimeChunk[] : o.display
-    return (kind    = "code",
-            state   = lowercase(string(cell.state)),
-            source  = cell.source,
-            stdout  = o === nothing ? "" : o.stdout,
-            # suppress the text/plain value repr when richer output is present
-            value   = (o === nothing || !isempty(chunks)) ? "" : o.value_repr,
-            error   = (o === nothing || o.exception === nothing) ? "" : o.exception,
-            display = _render_chunks(chunks),
-            html    = "")
+    return (
+        kind="code",
+        state=lowercase(string(cell.state)),
+        source=cell.source,
+        stdout=o === nothing ? "" : o.stdout,
+        # suppress the text/plain value repr when richer output is present
+        value=(o === nothing || !isempty(chunks)) ? "" : o.value_repr,
+        error=(o === nothing || o.exception === nothing) ? "" : o.exception,
+        display=_render_chunks(chunks),
+        html="",
+    )
 end
 
 """
@@ -314,10 +395,10 @@ end
 Render an (already-evaluated) `Report` to a self-contained HTML string.
 """
 function render_html(report::Report)
-    tmpl = Template(_TEMPLATE; config = Dict("autoescape" => true))
+    tmpl = Template(_TEMPLATE; config=Dict("autoescape" => true))
     cells = [_cell_view(c) for c in report.cells]
     title = isempty(report.title) ? report.id : report.title
-    return tmpl(init = Dict(:title => title, :cells => cells))
+    return tmpl(; init=Dict(:title => title, :cells => cells))
 end
 
 """
@@ -326,14 +407,16 @@ end
 End-to-end convenience: read a hybrid `.jl`, parse → evaluate → render → write
 HTML. Returns the output path.
 """
-function render_report_file(path::AbstractString;
-                            out::AbstractString = replace(path, r"\.jl$" => "") * ".html",
-                            title::AbstractString = "",
-                            reset::Bool = false)
+function render_report_file(
+    path::AbstractString;
+    out::AbstractString=replace(path, r"\.jl$" => "") * ".html",
+    title::AbstractString="",
+    reset::Bool=false,
+)
     src = read(path, String)
     id = replace(splitext(basename(path))[1], r"[^A-Za-z0-9]" => "_")
-    report = parse_report(src; id = id, title = title)
-    eval_report!(report; reset = reset)
+    report = parse_report(src; id=id, title=title)
+    eval_report!(report; reset=reset)
     write(out, render_html(report))
     return out
 end

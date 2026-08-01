@@ -1,7 +1,7 @@
 # Standalone tests for the report engine model + parser (no project deps).
 # Run:  julia --startup-file=no test/report/test_engine.jl
 using ReTest
-import Logging
+using Logging: Logging
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl"))
 using .ReportEngine
@@ -20,9 +20,8 @@ mean(data)
 """
 
 @testset "ReportEngine" begin
-
     @testset "parse: kinds, ids, sources" begin
-        r = parse_report(SAMPLE; title = "My Report")
+        r = parse_report(SAMPLE; title="My Report")
         @test length(r.cells) == 3
 
         @test r.cells[1].kind == MARKDOWN
@@ -86,7 +85,8 @@ mean(data)
         r = parse_report(src)
         @test length(r.cells) == 2
         @test all(c -> c.kind == CODE, r.cells)
-        @test r.cells[1].source == "# incorporate one observation\nfunction push!(rs, x)\n    rs.n += 1\nend"
+        @test r.cells[1].source ==
+            "# incorporate one observation\nfunction push!(rs, x)\n    rs.n += 1\nend"
         @test r.cells[2].source == "# sample variance\nvariance(rs) = rs.m2 / (rs.n - 1)"
     end
 
@@ -188,10 +188,12 @@ mean(data)
 
         # absent by default; header token order is flexible
         @test isempty(parse_report("#%% code id=a\nx = 1").cells[1].controls)
-        @test parse_report("#%% code controls=[a,b],c id=z\nf()").cells[1].controls == [["a", "b"], ["c"]]
+        @test parse_report("#%% code controls=[a,b],c id=z\nf()").cells[1].controls ==
+            [["a", "b"], ["c"]]
 
         # empty entries dropped (stray/trailing commas, empty groups)
-        @test parse_report("#%% code id=a controls=x,,[y,],\nf()").cells[1].controls == [["x"], ["y"]]
+        @test parse_report("#%% code id=a controls=x,,[y,],\nf()").cells[1].controls ==
+            [["x"], ["y"]]
 
         # serialize emits the grammar (bare singles, [..] groups) and round-trips
         s = serialize_report(rg)
@@ -247,8 +249,9 @@ mean(data)
 
     @testset "progress-logging bridge → cell meter" begin
         rec = NamedTuple[]   # (id, frac, msg, done)
-        lg = ReportEngine._ProgressLogger(Logging.NullLogger(),
-                                          (i, f, m, d) -> push!(rec, (id = i, frac = f, msg = m, done = d)))
+        lg = ReportEngine._ProgressLogger(
+            Logging.NullLogger(), (i, f, m, d) -> push!(rec, (id=i, frac=f, msg=m, done=d))
+        )
         Logging.with_logger(lg) do
             Logging.@logmsg Logging.LogLevel(-1) "train" progress = 0.5 _id = :bar1
             Logging.@logmsg Logging.LogLevel(-1) "inner" progress = 0.25 _id = :bar2   # a SECOND scope id
@@ -256,16 +259,15 @@ mean(data)
             @info "ordinary log — not progress"        # must NOT reach the sink
         end
         @test length(rec) == 3
-        @test rec[1] == (id = "bar1", frac = 0.5, msg = "train", done = false)
-        @test rec[2] == (id = "bar2", frac = 0.25, msg = "inner", done = false)   # distinct bar id
-        @test rec[3] == (id = "bar1", frac = 1.0, msg = "train", done = true)      # "done" → remove bar
+        @test rec[1] == (id="bar1", frac=0.5, msg="train", done=false)
+        @test rec[2] == (id="bar2", frac=0.25, msg="inner", done=false)   # distinct bar id
+        @test rec[3] == (id="bar1", frac=1.0, msg="train", done=true)      # "done" → remove bar
         # fraction coercion helper
         @test ReportEngine._progress_frac("done") == 1.0
         @test ReportEngine._progress_frac(nothing) == 0.0
         @test ReportEngine._progress_frac(2.0) == 1.0          # clamped
         @test ReportEngine._progress_sink(Module(:Bare))("", 0.5, "x", false) === nothing   # no slate_progress → no-op
     end
-
 end
 
 @testset "runnable-notebook format (preamble + @md skin)" begin
@@ -310,7 +312,7 @@ end
 
 @testset "standalone! injects the runnable contract" begin
     m = Module(:StandaloneContract)
-    standalone!(m; dir = "/tmp")
+    standalone!(m; dir="/tmp")
     Core.eval(m, Meta.parse("v = 6 * 7"))
     Core.eval(m, Meta.parse("@bind n Slider(1:100; default=42)"))     # real bind path → widget default
     Core.eval(m, Meta.parse("@bind flag Checkbox()"))
@@ -327,12 +329,13 @@ end
     @test Core.eval(m, :__slate_standalone) == true
 
     # idempotent: a second call (or the engine re-populating the same module) is a no-op
-    @test (standalone!(m; dir = "/tmp"); Core.eval(m, :n)) == 42
+    @test (standalone!(m; dir="/tmp"); Core.eval(m, :n)) == 42
 end
 
 @testset "memo status classifier (cache badge)" begin
-    src = "#%% code id=cheap\nx = 1 + 1\n#%% code id=nc nocache\ny = 2\n#%% code id=vol volatile\nz = 3\n" *
-          "#%% code id=downvol\nw = z + 1\n#%% code id=uses\nusing Statistics\n#%% md id=note\ntext"
+    src =
+        "#%% code id=cheap\nx = 1 + 1\n#%% code id=nc nocache\ny = 2\n#%% code id=vol volatile\nz = 3\n" *
+        "#%% code id=downvol\nw = z + 1\n#%% code id=uses\nusing Statistics\n#%% md id=note\ntext"
     r = parse_report(src)
     build_dependencies!(r)
     S = id -> ReportEngine._memo_status(r, r.cells[findfirst(c -> c.id == id, r.cells)])
@@ -359,7 +362,8 @@ end
     @test findfirst(c -> c.id == "a", r2.cells) !== nothing
 
     # parallel=false also round-trips (not dropped)
-    rf = parse_report("#%% code id=a\nx = 1"); rf.meta["parallel"] = false
+    rf = parse_report("#%% code id=a\nx = 1")
+    rf.meta["parallel"] = false
     @test parse_report(serialize_report(rf)).meta["parallel"] === false
 
     # no settings → no config footer
@@ -395,7 +399,7 @@ end
     @test fp("a") != fp(:a)
     @test fp('a') != fp("a")
     # nested structures compose; multiple args ≡ tuple
-    @test fp((a = 1, b = [Dict("x" => nothing)])) == fp((a = 1, b = [Dict("x" => nothing)]))
+    @test fp((a=1, b=[Dict("x" => nothing)])) == fp((a=1, b=[Dict("x" => nothing)]))
     @test fp(1, "two") == fp((1, "two"))
     # BigInt beyond Int64 range round-trips deterministically
     @test fp(big(2)^200) == fp(big(2)^100 * big(2)^100)

@@ -12,7 +12,7 @@ include(joinpath(HERE, "..", "src", "trace.jl"))
 # Mirror the namespace injection: the per-notebook sink + `@tr` == the notebook's `@trace`.
 __slate_trace_sink = Ref{Any}(nothing)
 macro tr(blk)
-    esc(_trace_transform(blk))
+    return esc(_trace_transform(blk))
 end
 
 # Rows recorded by the most recent `@tr` block, as (name, value-repr) pairs.
@@ -40,11 +40,16 @@ nv() = [(n, v) for (_, n, v) in rows()]
             s
         end
         @test v == 14
-        @test nv() == [("s", "0"),
-            ("c", "1"), ("s", "1"),
-            ("c", "4"), ("s", "5"),
-            ("c", "9"), ("s", "14"),
-            ("result", "14")]
+        @test nv() == [
+            ("s", "0"),
+            ("c", "1"),
+            ("s", "1"),
+            ("c", "4"),
+            ("s", "5"),
+            ("c", "9"),
+            ("s", "14"),
+            ("result", "14"),
+        ]
     end
 
     @testset "while loop" begin

@@ -33,7 +33,7 @@ st                                                                        # → 
 module SlateAFM
 
 using SlateExtensionsBase
-import JSON   # parse the `meta.json` an introspected PyPI widget writes (defaults/css) — see pypi.jl
+using JSON: JSON   # parse the `meta.json` an introspected PyPI widget writes (defaults/css) — see pypi.jl
 
 # `ext_asset_url` (from SlateExtensionsBase) is the mechanism for pointing `afm` at a module served from a
 # package's `provide_assets!` scope — re-exported so a notebook builds those URLs without a bespoke helper.
@@ -60,24 +60,34 @@ struct AFM
     traits::Dict{String,Any}
 end
 # `css` = stylesheet URL(s) the host injects before render (many anywidgets assume their CSS is host-loaded).
-afm(src::AbstractString; id::AbstractString = "", css = String[], traits...) =
-    AFM(String(src), String(id), css isa AbstractString ? [String(css)] : String[String(c) for c in css],
-        Dict{String,Any}(String(k) => v for (k, v) in traits))
+function afm(src::AbstractString; id::AbstractString="", css=String[], traits...)
+    return AFM(
+        String(src),
+        String(id),
+        css isa AbstractString ? [String(css)] : String[String(c) for c in css],
+        Dict{String,Any}(String(k) => v for (k, v) in traits),
+    )
+end
 
 # Reflect an AFM handle into its wire `Widget`: the bound value is the trait dict; the module URL (and an
 # optional message `id` / `css`) ride as params. (No hand-typed kind — it's this package's constant.)
 function SlateExtensionsBase.to_widget(a::AFM)
     p = Dict{Symbol,Any}(:src => a.src)
-    isempty(a.id)  || (p[:id]  = a.id)
+    isempty(a.id) || (p[:id] = a.id)
     isempty(a.css) || (p[:css] = a.css)
-    Widget(KIND, a.traits; p...)
+    return Widget(KIND, a.traits; p...)
 end
 
 # ── Custom messages: the AFM `model.send` / `on("msg:custom")` half, over Slate's slate_on/slate_emit ──
 const _MSG = Dict{String,Any}()   # "SlateAFM.msg:<id>" -> Julia handler(content)
 
-_afmfield(a, k) = a isa AbstractDict ? get(a, String(k), get(a, k, nothing)) :
-                  (hasproperty(a, Symbol(k)) ? getproperty(a, Symbol(k)) : nothing)
+function _afmfield(a, k)
+    return if a isa AbstractDict
+        get(a, String(k), get(a, k, nothing))
+    else
+        (hasproperty(a, Symbol(k)) ? getproperty(a, Symbol(k)) : nothing)
+    end
+end
 
 """
     afm_on_msg(f, id)
@@ -87,7 +97,7 @@ is called `f(content, buffers)` — `buffers::Vector{Vector{UInt8}}` are the wid
 when none) — or, for convenience, `f(content)` if it takes a single argument. `id` is the widget's message
 id — bind it with `afm(src; id = "…")`.
 """
-afm_on_msg(f, id::AbstractString) = (_MSG["SlateAFM.msg:" * String(id)] = f; nothing)
+afm_on_msg(f, id::AbstractString) = (_MSG["SlateAFM.msg:" * String(id)]=f; nothing)
 
 # Coerce an emit buffer to raw bytes: a byte vector rides as-is; anything else is `Vector{UInt8}`-converted.
 _as_bytes(b::Vector{UInt8}) = b
@@ -103,19 +113,19 @@ Send `content` TO a widget — received by its `model.on("msg:custom", (content,
 is an iterable of byte buffers (each `Vector{UInt8}`), delivered to the widget as `ArrayBuffer`s. Call from
 a cell (or from an [`afm_on_msg`](@ref) handler, to reply). No buffers ⇒ a single plain content frame.
 """
-function afm_emit(id::AbstractString, content; buffers = ())
+function afm_emit(id::AbstractString, content; buffers=())
     ch = "SlateAFM.msg:" * String(id)
     bufs = Vector{UInt8}[_as_bytes(b) for b in buffers]
     n = length(bufs)
     if n == 0
-        slate_emit(ch, (content = content,))   # fast path: no buffers, no message id
+        slate_emit(ch, (content=content,))   # fast path: no buffers, no message id
         return nothing
     end
     # A buffered message rides N+1 frames on one channel, correlated by a message id: a JSON `content` frame
     # (carrying the buffer count) followed by one binary frame per buffer (a UInt8 `SlateBinary` whose meta
     # tags it with the message id + index). The host shim reassembles them in its `slateOnStream` handler.
     mid = (_MID[] += 1)
-    slate_emit(ch, (content = content, mid = mid, nbuf = n))
+    slate_emit(ch, (content=content, mid=mid, nbuf=n))
     for (i, b) in enumerate(bufs)
         slate_emit(ch, SlateBinary(b, Dict{String,Any}("mid" => mid, "bi" => i - 1, "nbuf" => n)))
     end
@@ -149,7 +159,7 @@ Base.iterate(h::AFMHandle, s...) = iterate(getfield(h, :traits), s...)
 function Base.getproperty(h::AFMHandle, s::Symbol)
     (s === :id || s === :traits || s === :props) && return getfield(h, s)
     p = getfield(h, :props)
-    haskey(p, s) ? p[s] : throw(KeyError(s))
+    return haskey(p, s) ? p[s] : throw(KeyError(s))
 end
 Base.propertynames(h::AFMHandle) = (:id, :traits, :props, keys(getfield(h, :props))...)
 
@@ -162,10 +172,11 @@ _briefpairs(io, d) = join(io, (string(k, "=", _briefval(v)) for (k, v) in d), ",
 
 Base.show(io::IO, h::AFMHandle) = print(io, "AFMHandle(", repr(getfield(h, :id)), ")")
 function Base.show(io::IO, ::MIME"text/plain", h::AFMHandle)
-    t = getfield(h, :traits); p = getfield(h, :props)
+    t = getfield(h, :traits)
+    p = getfield(h, :props)
     print(io, "AFMHandle ", repr(getfield(h, :id)))
     isempty(t) || (print(io, "\n  traits: "); _briefpairs(io, t))
-    isempty(p) || (print(io, "\n  props:  "); _briefpairs(io, p))
+    return isempty(p) || (print(io, "\n  props:  "); _briefpairs(io, p))
 end
 
 """
@@ -174,7 +185,7 @@ end
 Send to the widget the handle refers to — the handle carries its own message `id`, so a driver never
 re-types the id string.
 """
-afm_emit(h::AFMHandle, content; buffers = ()) = afm_emit(h.id, content; buffers = buffers)
+afm_emit(h::AFMHandle, content; buffers=()) = afm_emit(h.id, content; buffers=buffers)
 
 # ── Viewer verbs ──────────────────────────────────────────────────────────────────────────────────────
 """
@@ -184,15 +195,18 @@ Send a `structure` (e.g. a PDB string) to a viewer widget and stash it — plus 
 `n_atoms = …`) — on the handle for later querying. The widget receives `{op, <key>: structure}` on its
 `msg:custom` channel.
 """
-function load!(h::AFMHandle, structure; op = "load", key = "pdb", props...)
+function load!(h::AFMHandle, structure; op="load", key="pdb", props...)
     afm_emit(h, Dict("op" => op, key => structure))
-    p = getfield(h, :props); p[Symbol(key)] = structure
-    for (k, v) in props; p[k] = v; end
+    p = getfield(h, :props)
+    p[Symbol(key)] = structure
+    for (k, v) in props
+        p[k] = v
+    end
     return h
 end
 
 """    spin!(h::AFMHandle, on = true) — toggle a viewer's auto-rotation."""
-spin!(h::AFMHandle, on::Bool = true) = (afm_emit(h, Dict("op" => "spin", "on" => on)); h)
+spin!(h::AFMHandle, on::Bool=true) = (afm_emit(h, Dict("op" => "spin", "on" => on)); h)
 
 """
     stream!(h::AFMHandle, frames; dt = 0.05, op = "load", key = "pdb", meta = nothing)
@@ -201,7 +215,7 @@ Stream a SEQUENCE of structures into a viewer over time — a growing / morphing
 iterable (each element a structure); `dt` is the pause between frames; `meta(i)` (optional) returns the
 props to stash for frame `i`. Runs on the caller, so an `@onclick` handler streams the frames as it goes.
 """
-function stream!(h::AFMHandle, frames; dt::Real = 0.05, op = "load", key = "pdb", meta = nothing)
+function stream!(h::AFMHandle, frames; dt::Real=0.05, op="load", key="pdb", meta=nothing)
     p = getfield(h, :props)
     for (i, f) in enumerate(frames)
         afm_emit(h, Dict("op" => op, key => f))
@@ -220,9 +234,15 @@ A live PDBe Mol* viewer widget (the `molstar_live.js` module). Bind it — `@bin
 not a string. `id` names its message channel (needed so a driver can reach it after a re-run).
 """
 const _MOLSTAR_CSS = "https://cdn.jsdelivr.net/npm/pdbe-molstar@3.3.2/build/pdbe-molstar.css"
-molstar(; id::AbstractString = "mol", height = 440, css = _MOLSTAR_CSS, traits...) =
-    afm(ext_asset_url(@__MODULE__, "examples/molstar_live.js");
-        id = id, css = css, height = height, traits...)
+function molstar(; id::AbstractString="mol", height=440, css=_MOLSTAR_CSS, traits...)
+    return afm(
+        ext_asset_url(@__MODULE__, "examples/molstar_live.js");
+        id=id,
+        css=css,
+        height=height,
+        traits...,
+    )
+end
 
 # Persistence policy when a bind cell RE-RUNS with the same kind. The default reconciler keeps the whole
 # old value — wrong for AFM, whose trait dict is BOTH config (`height`, `min`) set in the `@bind` source
@@ -253,29 +273,37 @@ function __slate_frontend(slate_on)
     # Make `@bind name afm(...)` bind `name` to a rich AFMHandle (id + dict-like traits + props bag)
     # instead of a bare trait dict — the wire/memo side still sees the bare dict (this only lifts the
     # user-facing value). Idempotent: re-registering just replaces the kind's hooks.
-    register_kind!(KIND; wrap = (w, v) -> AFMHandle(get(w.params, "id", ""), v),
-                   reconcile = _afm_reconcile)
+    register_kind!(
+        KIND; wrap=(w, v) -> AFMHandle(get(w.params, "id", ""), v), reconcile=_afm_reconcile
+    )
     # PyPI-provisioned widgets are kept STRICTLY SEPARATE: a distinct served root (the deploy dir) under a
     # distinct key (`_PYPI_KEY`), so fetched third-party modules never mingle with the package's own assets.
     provide_assets!(_PYPI_KEY, (mkpath(_served_root()); _served_root()))
     # JS→Julia custom messages (a widget's `model.send`): route by channel to a registered handler.
     # NB: `slate_on` is `(channel, f)` — pass the handler as the 2nd argument, NOT via `do` (a do-block
     # would bind the closure as the FIRST arg, registering under the closure's name instead of the channel).
-    slate_on("SlateAFM.msg", function (a)
-        ch = _afmfield(a, :ch)
-        ch === nothing && return nothing
-        h = get(_MSG, String(ch), nothing)
-        h === nothing && return nothing
-        content = _afmfield(a, :content)
-        # `model.send` buffers arrive as native binary WS frames, decoded by Slate into
-        # `args.__slate_buffers::Vector{Vector{UInt8}}` — real bytes, no base64.
-        raw = _afmfield(a, :__slate_buffers)
-        buffers = raw === nothing ? Vector{UInt8}[] : Vector{UInt8}[Vector{UInt8}(b) for b in raw]
-        # Prefer a 2-arg handler `(content, buffers)`; fall back to a 1-arg `(content)` handler.
-        applicable(h, content, buffers) ? Base.invokelatest(h, content, buffers) :
-                                          Base.invokelatest(h, content)
-        return nothing
-    end)
+    slate_on(
+        "SlateAFM.msg",
+        function (a)
+            ch = _afmfield(a, :ch)
+            ch === nothing && return nothing
+            h = get(_MSG, String(ch), nothing)
+            h === nothing && return nothing
+            content = _afmfield(a, :content)
+            # `model.send` buffers arrive as native binary WS frames, decoded by Slate into
+            # `args.__slate_buffers::Vector{Vector{UInt8}}` — real bytes, no base64.
+            raw = _afmfield(a, :__slate_buffers)
+            buffers =
+                raw === nothing ? Vector{UInt8}[] : Vector{UInt8}[Vector{UInt8}(b) for b in raw]
+            # Prefer a 2-arg handler `(content, buffers)`; fall back to a 1-arg `(content)` handler.
+            if applicable(h, content, buffers)
+                Base.invokelatest(h, content, buffers)
+            else
+                Base.invokelatest(h, content)
+            end
+            return nothing
+        end,
+    )
     return nothing
 end
 

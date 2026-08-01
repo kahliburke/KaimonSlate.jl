@@ -11,14 +11,25 @@ const _DOCS_MODEL = "qwen3-embedding:0.6b"
 
 # Call a Kaimon MCP tool, RAW value (service endpoint uses Serialization, so
 # vectors/dicts come back native; tolerate a JSON-string handler too).
-_kt(tool::Symbol, args::Dict) = getfield(Main, :Kaimon).KaimonGate.call_tool(tool, Dict{String,Any}(args))
+function _kt(tool::Symbol, args::Dict)
+    return getfield(Main, :Kaimon).KaimonGate.call_tool(tool, Dict{String,Any}(args))
+end
 _kt_json(v) = v isa AbstractString ? JSON.parse(v) : v
 # Tolerant field access — results may be Dicts (string or symbol keys) or NamedTuples.
-_field(x, k) = x isa AbstractDict ? get(x, k, get(x, Symbol(k), nothing)) :
-               (hasproperty(x, Symbol(k)) ? getproperty(x, Symbol(k)) : nothing)
+function _field(x, k)
+    return if x isa AbstractDict
+        get(x, k, get(x, Symbol(k), nothing))
+    else
+        (hasproperty(x, Symbol(k)) ? getproperty(x, Symbol(k)) : nothing)
+    end
+end
 
-_embed(text::AbstractString) = Float64[Float64(x) for x in
-    _kt_json(_kt(:ollama_embed, Dict("text" => String(text), "model" => _DOCS_MODEL)))]
+function _embed(text::AbstractString)
+    return Float64[
+        Float64(x) for
+        x in _kt_json(_kt(:ollama_embed, Dict("text" => String(text), "model" => _DOCS_MODEL)))
+    ]
+end
 
 # Ensure the docs collection exists. Returns `true` when the collection is ready to
 # index into, `false` when Qdrant is unreachable (so callers skip quietly).
@@ -31,13 +42,15 @@ function _ensure_docs_collection()::Bool
     ex = _kt(:qdrant_collection_exists, Dict("collection" => _DOCS_COLLECTION))
     (ex === true || ex == "true") && return true       # already exists
     (ex === false || ex == "false") || return false    # non-boolean ⇒ Qdrant down ⇒ skip
-    _kt(:qdrant_create_collection, Dict("collection" => _DOCS_COLLECTION,
-                                        "vector_size" => _DOCS_DIM, "distance" => "Cosine"))
+    _kt(
+        :qdrant_create_collection,
+        Dict("collection" => _DOCS_COLLECTION, "vector_size" => _DOCS_DIM, "distance" => "Cosine"),
+    )
     return true
 end
 
 # Stable positive id for a doc record (first 60 bits of its SHA-256 → fits Int).
-_doc_id(s) = parse(Int, SlateHistory._sha(s)[1:15]; base = 16)
+_doc_id(s) = parse(Int, SlateHistory._sha(s)[1:15]; base=16)
 
 "Embed + upsert harvested doc records into the search index. Returns the count indexed."
 function index_docs!(records)
@@ -46,18 +59,36 @@ function index_docs!(records)
     _ensure_docs_collection()
     n = 0
     for r in records
-        modname = string(get(r, "module", "")); name = string(get(r, "name", ""))
-        doc = string(get(r, "doc", "")); text = "$modname.$name\n$doc"
-        vec = try; _embed(text); catch; continue; end
-        pt = Dict("id" => _doc_id(text), "vector" => vec,
-                  # `text` (= "Module.name\ndoc") lets Kaimon's FTS index this point — trigram
-                  # substring then matches a bare name/module fragment the embedding buries.
-                  # `metadata.module` is what BOTH engines filter on for module scoping: Qdrant
-                  # keys filters as `metadata.$field`; the FTS side reads json_extract(metadata,
-                  # '$.module') — and backfill_fts! mirrors this `metadata` dict from the payload.
-                  "payload" => Dict("module" => modname, "name" => name, "doc" => doc, "text" => text,
-                                    "metadata" => Dict("module" => modname)))
-        try; _kt(:qdrant_upsert_points, Dict("collection" => _DOCS_COLLECTION, "points" => [pt])); n += 1; catch; end
+        modname = string(get(r, "module", ""))
+        name = string(get(r, "name", ""))
+        doc = string(get(r, "doc", ""))
+        text = "$modname.$name\n$doc"
+        vec = try
+            _embed(text)
+        catch
+            continue
+        end
+        pt = Dict(
+            "id" => _doc_id(text),
+            "vector" => vec,
+            # `text` (= "Module.name\ndoc") lets Kaimon's FTS index this point — trigram
+            # substring then matches a bare name/module fragment the embedding buries.
+            # `metadata.module` is what BOTH engines filter on for module scoping: Qdrant
+            # keys filters as `metadata.$field`; the FTS side reads json_extract(metadata,
+            # '$.module') — and backfill_fts! mirrors this `metadata` dict from the payload.
+            "payload" => Dict(
+                "module" => modname,
+                "name" => name,
+                "doc" => doc,
+                "text" => text,
+                "metadata" => Dict("module" => modname),
+            ),
+        )
+        try
+            _kt(:qdrant_upsert_points, Dict("collection" => _DOCS_COLLECTION, "points" => [pt]))
+            n += 1
+        catch
+        end
     end
     return n
 end
@@ -65,7 +96,15 @@ end
 "Mirror the docs collection's `text` + `metadata` payloads into Kaimon's FTS index (the plain
 upsert path doesn't), so lexical name/substring search AND module filters work. Idempotent;
 best-effort if FTS is unavailable. The auto-index path calls this; the manual `index_docs` tool too."
-ensure_docs_fts!() = (try; _kt(:qdrant_ensure_fts_coverage, Dict("collection" => _DOCS_COLLECTION)); catch; end; nothing)
+function ensure_docs_fts!()
+    return (
+        try
+            _kt(:qdrant_ensure_fts_coverage, Dict("collection" => _DOCS_COLLECTION))
+        catch
+        end;
+        nothing
+    )
+end
 
 # Map one `search_code` structured hit → {module,name,doc,score}. The indexed `text` payload is
 # "Module.name\ndoc" (see index_docs!), so module/name/doc are recovered from it (the hit's own
@@ -75,12 +114,16 @@ function _doc_record(h)
     text = string(something(_field(h, "text"), ""))
     nl = findfirst('\n', text)
     head = nl === nothing ? text : String(SubString(text, 1, prevind(text, nl)))
-    doc  = nl === nothing ? "" : String(SubString(text, nextind(text, nl)))
+    doc = nl === nothing ? "" : String(SubString(text, nextind(text, nl)))
     i = findlast('.', head)
     modname = i === nothing ? "" : String(SubString(head, 1, prevind(head, i)))
     isempty(name) && i !== nothing && (name = String(SubString(head, nextind(head, i))))
-    return Dict{String,Any}("module" => modname, "name" => name, "doc" => doc,
-                            "score" => something(_field(h, "score"), 0.0))
+    return Dict{String,Any}(
+        "module" => modname,
+        "name" => name,
+        "doc" => doc,
+        "score" => something(_field(h, "score"), 0.0),
+    )
 end
 
 "Hybrid docs search over the `slate_docs` index. ONE `search_code` call now does the query embed,
@@ -91,11 +134,18 @@ pass the notebook's in-scope set (`_inscope_modules`) so a query can't surface a
 packages from the shared index. Notes: `collection` is required (the service endpoint has no
 workspace binding); `embedding_model` must match `index_docs!` (qwen3-embedding:0.6b) or the
 semantic arm degrades to lexical-only — which still returns name/substring hits."
-function search_docs(query::AbstractString; limit::Int = 8, modules::AbstractVector = String[])
+function search_docs(query::AbstractString; limit::Int=8, modules::AbstractVector=String[])
     _agent_available() || return Dict{String,Any}[]
-    q = strip(String(query)); isempty(q) && return Dict{String,Any}[]
-    args = Dict{String,Any}("collection" => _DOCS_COLLECTION, "query" => q, "mode" => "hybrid",
-                            "format" => "structured", "embedding_model" => _DOCS_MODEL, "limit" => limit)
+    q = strip(String(query))
+    isempty(q) && return Dict{String,Any}[]
+    args = Dict{String,Any}(
+        "collection" => _DOCS_COLLECTION,
+        "query" => q,
+        "mode" => "hybrid",
+        "format" => "structured",
+        "embedding_model" => _DOCS_MODEL,
+        "limit" => limit,
+    )
     isempty(modules) || (args["filters"] = Dict("module" => String[string(m) for m in modules]))
     hits = try
         _kt_json(_kt(:search_code, args))
@@ -108,7 +158,13 @@ end
 
 # A docstring (markdown) → safe HTML for the help viewer. Empty in → empty out.
 _doc_esc(s) = replace(String(s), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;")
-_doc_html(doc) = (s = strip(String(doc)); isempty(s) ? "" : (try; markdown_html(s); catch; "<pre>" * _doc_esc(s) * "</pre>"; end))
+_doc_html(doc) = (s=strip(String(doc)); isempty(s) ? "" : (
+    try
+        markdown_html(s)
+    catch
+        "<pre>" * _doc_esc(s) * "</pre>"
+    end
+))
 
 # Live help lookup for `name` (a binding or module), resolved where cells eval. Returns the
 # module_help record + a rendered `docHtml`. Powers the docs palette's ?Module drill-down +
@@ -120,19 +176,37 @@ function help_lookup(nb::LiveNotebook, name::AbstractString)
     e = slate_api_entry(name)
     if e !== nothing
         doc = _entry_markdown(e)
-        return Dict{String,Any}("name" => e.name, "module" => "Slate", "kind" => "slate",
-                                "doc" => doc, "exports" => Dict{String,Any}[], "docHtml" => _doc_html(doc))
+        return Dict{String,Any}(
+            "name" => e.name,
+            "module" => "Slate",
+            "kind" => "slate",
+            "doc" => doc,
+            "exports" => Dict{String,Any}[],
+            "docHtml" => _doc_html(doc),
+        )
     end
     # An ECharts option path (e.g. `yAxis.type`) — resolve from the curated registry, not a live binding.
     ec = echarts_doc_entry(name)
     if ec !== nothing
-        return Dict{String,Any}("name" => ec.path, "module" => "ECharts", "kind" => "echarts",
-                                "doc" => ec.doc, "exports" => Dict{String,Any}[], "docHtml" => _doc_html(ec.doc))
+        return Dict{String,Any}(
+            "name" => ec.path,
+            "module" => "ECharts",
+            "kind" => "echarts",
+            "doc" => ec.doc,
+            "exports" => Dict{String,Any}[],
+            "docHtml" => _doc_html(ec.doc),
+        )
     end
     rec = try
         ReportEngine.module_help(nb.kernel, nb.report, String(name))
     catch
-        Dict{String,Any}("name" => String(name), "module" => "", "doc" => "", "kind" => "unknown", "exports" => Dict{String,Any}[])
+        Dict{String,Any}(
+            "name" => String(name),
+            "module" => "",
+            "doc" => "",
+            "kind" => "unknown",
+            "exports" => Dict{String,Any}[],
+        )
     end
     rec["docHtml"] = _doc_html(get(rec, "doc", ""))
     return rec
@@ -150,15 +224,18 @@ const _DOC_CACHE_LOCK = ReentrantLock()
 # pile up, each re-parsing the same docstrings, pegging every thread. Single-flight per key fixes that.
 const _INDEXING = Set{String}()
 const _DOC_SCHEMA = "3"   # bump when the indexed payload shape changes → forces a one-time re-harvest
-                          # (schema 2 added the `text` payload that Kaimon's FTS index needs;
-                          #  schema 3 added the `metadata.module` payload that module-scoped filters read)
-_doc_cache_file() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
-                             "kaimonslate", "docindex.json")
+# (schema 2 added the `text` payload that Kaimon's FTS index needs;
+#  schema 3 added the `metadata.module` payload that module-scoped filters read)
+function _doc_cache_file()
+    return joinpath(
+        get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "docindex.json"
+    )
+end
 function _doc_cache_load()
     lock(_DOC_CACHE_LOCK) do
-        isempty(_DOC_CACHE) || return
+        isempty(_DOC_CACHE) || return nothing
         f = _doc_cache_file()
-        isfile(f) || return
+        isfile(f) || return nothing
         try
             loaded = Dict(String(k) => string(v) for (k, v) in JSON.parsefile(f))
             # A stale schema → leave the cache empty so every package re-harvests + re-indexes
@@ -173,7 +250,13 @@ function _doc_cache_put!(name, version)
         _DOC_CACHE[String(name)] = String(version)
         _DOC_CACHE["__schema__"] = _DOC_SCHEMA           # not a package — never in the harvest set
         f = _doc_cache_file()
-        try; mkpath(dirname(f)); open(f, "w") do io; JSON.print(io, _DOC_CACHE); end; catch; end
+        try
+            mkpath(dirname(f))
+            open(f, "w") do io
+                return JSON.print(io, _DOC_CACHE)
+            end
+        catch
+        end
     end
 end
 
@@ -182,7 +265,11 @@ function _used_packages(report::Report)
     pkgs = String[]
     for c in report.cells
         c.kind == CODE || continue
-        top = try; Meta.parseall(c.source); catch; continue; end
+        top = try
+            Meta.parseall(c.source)
+        catch
+            continue
+        end
         for s in (top isa Expr && top.head === :toplevel ? top.args : Any[top])
             (s isa Expr && (s.head === :using || s.head === :import)) || continue
             for a in s.args
@@ -206,10 +293,19 @@ plus the universal Base/Core. Drives module-scoped doc search so the SHARED inde
 THIS notebook's packages, not another notebook's. Error-tolerant — a failure yields the universals."
 function _inscope_modules(nb::LiveNotebook)
     mods = Set{String}(_UNIVERSAL_MODULES)
-    for d in (try; ReportEngine.project_deps(nb.kernel, nb.report); catch; Dict{String,Any}[]; end)
-        n = string(get(d, "name", "")); isempty(n) || push!(mods, n)
+    for d in (
+        try
+            ReportEngine.project_deps(nb.kernel, nb.report)
+        catch
+            Dict{String,Any}[]
+        end
+    )
+        n = string(get(d, "name", ""))
+        isempty(n) || push!(mods, n)
     end
-    for u in _used_packages(nb.report); push!(mods, u); end
+    for u in _used_packages(nb.report)
+        push!(mods, u)
+    end
     return collect(mods)
 end
 
@@ -227,19 +323,31 @@ function _autoindex!(nb::LiveNotebook)
             _doc_cache_load()
             # What needs (re)indexing: Slate helpers + ECharts DSL (version-cached on content hash),
             # plus the notebook's project deps and any package a cell `using`s.
-            want = Dict{String,String}("Slate" => slate_api_version(), "ECharts" => echarts_docs_version())
-            for d in (try; ReportEngine.project_deps(nb.kernel, nb.report); catch; Dict{String,Any}[]; end)
-                n = string(get(d, "name", "")); isempty(n) || (want[n] = string(get(d, "version", "")))
+            want = Dict{String,String}(
+                "Slate" => slate_api_version(), "ECharts" => echarts_docs_version()
+            )
+            for d in (
+                try
+                    ReportEngine.project_deps(nb.kernel, nb.report)
+                catch
+                    Dict{String,Any}[]
+                end
+            )
+                n = string(get(d, "name", ""))
+                isempty(n) || (want[n] = string(get(d, "version", "")))
             end
-            for u in _used_packages(nb.report); haskey(want, u) || (want[u] = ""); end
+            for u in _used_packages(nb.report)
+                haskey(want, u) || (want[u] = "")
+            end
             # CLAIM only the stale keys that no concurrent harvest already owns (single-flight) — so a
             # re-trigger during a slow harvest can't spawn a second pass over the same docstrings.
             lock(_DOC_CACHE_LOCK) do
                 for (k, v) in want
-                    (get(_DOC_CACHE, k, nothing) != v && !(k in _INDEXING)) && (push!(claimed, k); push!(_INDEXING, k))
+                    (get(_DOC_CACHE, k, nothing) != v && !(k in _INDEXING)) &&
+                        (push!(claimed, k); push!(_INDEXING, k))
                 end
             end
-            isempty(claimed) && return
+            isempty(claimed) && return nothing
             if "Slate" in claimed
                 ns = index_docs!(slate_api_records())
                 ns == 0 || (ensure_docs_fts!(); _doc_cache_put!("Slate", slate_api_version()))
@@ -253,15 +361,20 @@ function _autoindex!(nb::LiveNotebook)
                 recs = ReportEngine.harvest_docs(nb.kernel, nb.report, pkgs)
                 index_docs!(recs)
                 ensure_docs_fts!()   # mirror the new text+metadata payloads into the FTS index
-                for n in pkgs; _doc_cache_put!(n, get(want, n, "")); end
-                @info "slate: auto-indexed docs" notebook = nb.id packages = pkgs symbols = length(recs)
+                for n in pkgs
+                    _doc_cache_put!(n, get(want, n, ""))
+                end
+                @info "slate: auto-indexed docs" notebook = nb.id packages = pkgs symbols = length(
+                    recs
+                )
             end
         catch e
             @warn "slate: auto-index failed" exception = (e, catch_backtrace()) maxlog = 5
         finally
-            isempty(claimed) || lock(_DOC_CACHE_LOCK) do; setdiff!(_INDEXING, claimed); end
+            isempty(claimed) || lock(_DOC_CACHE_LOCK) do ;
+                setdiff!(_INDEXING, claimed)
+            end
         end
     end
     return nothing
 end
-

@@ -37,15 +37,23 @@ const _THEME_SET_RE = r"\b(?:set_theme!|update_theme!|use_slate_theme!)\s*\("
 _sets_global_theme(src::AbstractString) = occursin(_THEME_SET_RE, src)
 
 # The leaf name of a call's callee: `set_theme!` → :set_theme!, `CairoMakie.set_theme!` → :set_theme!.
-_call_leaf(f) = f isa Symbol ? f :
-                (f isa Expr && f.head === :. && length(f.args) == 2 && f.args[2] isa QuoteNode) ?
-                    f.args[2].value : nothing
+function _call_leaf(f)
+    if f isa Symbol
+        f
+    elseif (f isa Expr && f.head === :. && length(f.args) == 2 && f.args[2] isa QuoteNode)
+        f.args[2].value
+    else
+        nothing
+    end
+end
 
 # Collect every theme-setter CALL expression anywhere in `ex` — they're typically nested inside a plot
 # cell's `let … end`, so a top-level scan misses them.
 function _collect_theme_calls!(acc::Vector{Any}, ex)
     ex isa Expr || return acc
     (ex.head === :call && _call_leaf(ex.args[1]) in _THEME_CALL_NAMES) && push!(acc, ex)
-    for a in ex.args; _collect_theme_calls!(acc, a); end
+    for a in ex.args
+        _collect_theme_calls!(acc, a)
+    end
     return acc
 end

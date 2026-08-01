@@ -16,8 +16,10 @@ _fmt_field(d::AbstractDict, k::Symbol) = haskey(d, String(k)) ? d[String(k)] : g
 # Coerce a reduced cell value to a Float64, or `nothing` if it isn't a formattable number. `Bool` is
 # NOT a number here (a bool column with a numeric format falls through to its raw text).
 _as_number(x::Bool) = nothing
-_as_number(x::Real) = (f = Float64(x); isfinite(f) ? f : nothing)
-_as_number(x::AbstractString) = (n = tryparse(Float64, x); (n !== nothing && isfinite(n)) ? n : nothing)
+_as_number(x::Real) = (f=Float64(x); isfinite(f) ? f : nothing)
+function _as_number(x::AbstractString)
+    return (n=tryparse(Float64, x); (n !== nothing && isfinite(n)) ? n : nothing)
+end
 _as_number(::Any) = nothing
 
 # Round |x| to `d` decimals half-away-from-zero and return `(negative, integer-units::BigInt)` where
@@ -33,18 +35,20 @@ function _round_dec(x::Float64, d::Int)
     s = string(u)
     if d > 0
         s = lpad(s, d + 1, '0')               # guarantee an integer digit before the point
-        s = s[1:end-d] * "." * s[end-d+1:end]
+        s = s[1:(end - d)] * "." * s[(end - d + 1):end]
     end
     return (neg && u != 0) ? "-" * s : s
 end
 
 # Group the integer part of a decimal string in threes (keeps sign + fractional part).
 function _group3(dec::AbstractString)
-    neg = startswith(dec, "-"); body = neg ? SubString(dec, 2) : SubString(dec, 1)
+    neg = startswith(dec, "-")
+    body = neg ? SubString(dec, 2) : SubString(dec, 1)
     dot = findfirst('.', body)
     ip = dot === nothing ? body : SubString(body, 1, dot - 1)
     rest = dot === nothing ? "" : SubString(body, dot)
-    n = length(ip); io = IOBuffer()
+    n = length(ip)
+    io = IOBuffer()
     for (i, ch) in enumerate(ip)
         (i > 1 && (n - i + 1) % 3 == 0) && print(io, ',')
         print(io, ch)
@@ -56,7 +60,8 @@ _maybe_group(dec::AbstractString, sep::Bool) = sep ? _group3(dec) : String(dec)
 # Scientific: mantissa at `sig` significant figures, integer exponent — `1.23e4`, `1.20e-3`.
 function _sci(x::Float64, sig::Int)
     x == 0 && return "0e0"
-    neg = x < 0; ax = abs(x)
+    neg = x < 0
+    ax = abs(x)
     e = floor(Int, log10(ax))
     m = ax / (10.0^e)
     ms = _round_dec(m, max(sig - 1, 0))
@@ -70,8 +75,13 @@ end
 # 1024-base humanized size; `B` shows no decimals.
 const _BYTE_UNITS = ("B", "KB", "MB", "GB", "TB", "PB")
 function _bytes(x::Float64, d::Int)
-    neg = x < 0; ax = abs(x); i = 1
-    while ax >= 1024 && i < length(_BYTE_UNITS); ax /= 1024; i += 1; end
+    neg = x < 0
+    ax = abs(x)
+    i = 1
+    while ax >= 1024 && i < length(_BYTE_UNITS)
+        ax /= 1024
+        i += 1
+    end
     body = _round_dec(ax, i == 1 ? 0 : d)
     return (neg ? "-" : "") * body * " " * _BYTE_UNITS[i]
 end
@@ -81,7 +91,7 @@ end
 function _strip_trailing_zeros(s::AbstractString)
     occursin('.', s) || return s
     s = rstrip(s, '0')
-    return endswith(s, '.') ? s[1:end-1] : s
+    return endswith(s, '.') ? s[1:(end - 1)] : s
 end
 
 """
@@ -124,13 +134,19 @@ function _format_cell(value, fmt)
     sep = _fmt_field(fmt, :sep) === true
     prefix = something(_fmt_field(fmt, :prefix), "")
     suffix = something(_fmt_field(fmt, :suffix), "")
-    body =
-        kind === :integer    ? _maybe_group(_round_dec(n, 0), sep) :
-        kind === :percent     ? _round_dec(n * 100, digits === nothing ? 1 : digits) * "%" :
-        kind === :currency    ? _maybe_group(_round_dec(n, digits === nothing ? 2 : digits), sep) :
-        kind === :scientific  ? _sci(n, digits === nothing ? 3 : digits) :
-        kind === :bytes       ? _bytes(n, digits === nothing ? 1 : digits) :
-        _maybe_group(_round_dec(n, digits === nothing ? 2 : digits), sep)   # :fixed (+ fallback)
+    body = if kind === :integer
+        _maybe_group(_round_dec(n, 0), sep)
+    elseif kind === :percent
+        _round_dec(n * 100, digits === nothing ? 1 : digits) * "%"
+    elseif kind === :currency
+        _maybe_group(_round_dec(n, digits === nothing ? 2 : digits), sep)
+    elseif kind === :scientific
+        _sci(n, digits === nothing ? 3 : digits)
+    elseif kind === :bytes
+        _bytes(n, digits === nothing ? 1 : digits)
+    else
+        _maybe_group(_round_dec(n, digits === nothing ? 2 : digits), sep)
+    end   # :fixed (+ fallback)
     neg = startswith(body, "-")                    # sign sits OUTSIDE the prefix: -$1,234.50
     core = neg ? SubString(body, 2) : body
     return string(neg ? "-" : "", prefix, core, suffix)

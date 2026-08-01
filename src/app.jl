@@ -18,15 +18,43 @@
 # First run offers to register Slate as a Kaimon extension — the CONSENTED
 # replacement for the old silent `__init__` auto-register (see `__init__`).
 
-import HTTP
+using HTTP: HTTP
 using Match: @match
-using Tachikoma: Model, Terminal, Frame, Rect, Buffer, KeyEvent, MouseEvent, Block, Style, Span,
-                 StatusBar, DataTable, DataColumn, col_right,
-                 ResizableLayout, Vertical, Fixed, Fill, split_layout,
-                 handle_key!, handle_mouse!, handle_resize!, render_resize_handles!,
-                 render, set_string!, set_char!, tstyle, theme, center, bottom, right,
-                 BOX_HEAVY, SPINNER_BRAILLE
-import Tachikoma
+using Tachikoma:
+    Model,
+    Terminal,
+    Frame,
+    Rect,
+    Buffer,
+    KeyEvent,
+    MouseEvent,
+    Block,
+    Style,
+    Span,
+    StatusBar,
+    DataTable,
+    DataColumn,
+    col_right,
+    ResizableLayout,
+    Vertical,
+    Fixed,
+    Fill,
+    split_layout,
+    handle_key!,
+    handle_mouse!,
+    handle_resize!,
+    render_resize_handles!,
+    render,
+    set_string!,
+    set_char!,
+    tstyle,
+    theme,
+    center,
+    bottom,
+    right,
+    BOX_HEAVY,
+    SPINNER_BRAILLE
+using Tachikoma: Tachikoma
 
 # ── First-run onboarding (plain terminal, before the alt-screen TUI) ──────────
 
@@ -40,16 +68,16 @@ import Tachikoma
 # dynamically, so no restart is needed: the caller falls through to the waiting TUI,
 # which attaches the moment Kaimon brings the extension's hub up. `input`/`output`
 # are injectable for tests.
-function _maybe_onboard!(; input::IO = stdin, output::IO = stdout)::Bool
+function _maybe_onboard!(; input::IO=stdin, output::IO=stdout)::Bool
     isdir(_kaimon_dir()) || return false
     _slate_registered() && return false
     ext_prompt_choice() == "dismissed" && return false
     input === stdin && !(stdin isa Base.TTY) && return false
     _onboard_banner(output)
-    printstyled(output, "  Register Slate as a Kaimon extension now?  "; bold = true)
-    printstyled(output, "[Y]es"; color = :green, bold = true)
+    printstyled(output, "  Register Slate as a Kaimon extension now?  "; bold=true)
+    printstyled(output, "[Y]es"; color=:green, bold=true)
     print(output, " · [n]o · [d]on't ask again ")
-    printstyled(output, "› "; color = :cyan)
+    printstyled(output, "› "; color=:cyan)
     ans = _read_choice(input)
     println(output, ans in ('\r', '\n') ? "" : string(ans))   # echo — raw mode doesn't
     if ans in ('y', '\r', '\n', ' ')
@@ -58,7 +86,7 @@ function _maybe_onboard!(; input::IO = stdin, output::IO = stdout)::Bool
     elseif ans == 'd'
         set_ext_prompt_choice!("dismissed")
         println(output)
-        printstyled(output, "  Okay — won't ask again."; color = :yellow)
+        printstyled(output, "  Okay — won't ask again."; color=:yellow)
         println(output, "  (`KaimonSlate.register_extension()` registers manually.)")
     end                          # 'n'/anything else → not persisted, ask again next run
     return false
@@ -73,7 +101,11 @@ end
 function _read_choice(input::IO)::Char
     if input === stdin && stdin isa Base.TTY
         @static if Sys.iswindows()
-            ln = try; readline(stdin); catch; ""; end
+            ln = try
+                readline(stdin)
+            catch
+                ""
+            end
             return lowercase(isempty(ln) ? '\n' : first(ln))
         else
             raw = ccall(:jl_tty_set_mode, Int32, (Ptr{Cvoid}, Int32), stdin.handle, 1) == 0
@@ -90,20 +122,20 @@ end
 # The pre-prompt banner: what registering does, in two lines. Plain terminal output
 # (this runs before the alt-screen TUI); printstyled drops the colors on non-tty IO.
 function _onboard_banner(io::IO)
-    hr() = printstyled(io, "  ", "─"^58, "\n"; color = :cyan)
+    hr() = printstyled(io, "  ", "─"^58, "\n"; color=:cyan)
     println(io)
     hr()
-    printstyled(io, "  ◆ Kaimon detected\n"; color = :cyan, bold = true)
+    printstyled(io, "  ◆ Kaimon detected\n"; color=:cyan, bold=true)
     hr()
     println(io, "  Slate can register itself as a Kaimon extension:")
     println(io)
-    printstyled(io, "    • "; color = :cyan)
+    printstyled(io, "    • "; color=:cyan)
     println(io, "your agents get the slate.* notebook tools")
-    printstyled(io, "    • "; color = :cyan)
+    printstyled(io, "    • "; color=:cyan)
     println(io, "the in-browser Agent chat panel lights up (Kaimon's agent service)")
-    printstyled(io, "    • "; color = :cyan)
+    printstyled(io, "    • "; color=:cyan)
     println(io, "Kaimon serves your notebooks from its hub — no extra process")
-    println(io)
+    return println(io)
 end
 
 # ── Hub probe / attach ─────────────────────────────────────────────────────────
@@ -113,7 +145,7 @@ end
 # distinguishes a real hub from some unrelated service squatting the port.
 function _hub_running()
     r = try
-        HTTP.get(_base() * "/api/notebooks"; retry = false, status_exception = false)
+        HTTP.get(_base() * "/api/notebooks"; retry=false, status_exception=false)
     catch
         return false
     end
@@ -126,7 +158,11 @@ end
 function _ext_autostarts()
     file = joinpath(_kaimon_dir(), "extensions.json")
     isfile(file) || return false
-    data = try; JSON.parsefile(file); catch; return false; end
+    data = try
+        JSON.parsefile(file)
+    catch
+        return false
+    end
     exts = get(data, "extensions", nothing)
     exts isa AbstractVector || return false
     for e in exts
@@ -140,7 +176,13 @@ end
 # Startup-mode decision (pure — unit-tested): a live hub always wins (attach);
 # otherwise defer to a registered auto-start extension unless --own forces it.
 _startup_mode(hub_up::Bool, ext_autostart::Bool, own::Bool) =
-    hub_up ? :viewer : (own || !ext_autostart) ? :owner : :waiting
+    if hub_up
+        :viewer
+    elseif (own || !ext_autostart)
+        :owner
+    else
+        :waiting
+    end
 
 # Owner-mode boot: persisted settings BEFORE any worker spawns, reap leftovers from a
 # crashed instance, shutdown backstop, bind the hub. Throws if the port can't be bound.
@@ -159,7 +201,7 @@ _fetch_notebooks(mode::Symbol) =
         h = _HUB[]
         h === nothing ? Any[] : NotebookServer._notebooks_json(h)
     else
-        r = HTTP.get(_base() * "/api/notebooks"; retry = false)
+        r = HTTP.get(_base() * "/api/notebooks"; retry=false)
         JSON.parse(String(r.body))
     end
 
@@ -170,8 +212,12 @@ function _open_notebook_url(mode::Symbol, path::AbstractString)
     if mode == :owner
         return "$(_base())/n/$(open_notebook!(_hub(), path))"
     end
-    r = HTTP.post(_base() * "/api/open", ["Content-Type" => "application/json"],
-                  JSON.json(Dict("path" => path)); retry = false)
+    r = HTTP.post(
+        _base() * "/api/open",
+        ["Content-Type" => "application/json"],
+        JSON.json(Dict("path" => path));
+        retry=false,
+    )
     return _base() * String(get(JSON.parse(String(r.body)), "url", "/"))
 end
 
@@ -179,7 +225,7 @@ end
 
 mutable struct SlateModel <: Model
     mode::Symbol                 # :owner (we bind the port) | :viewer (attached over HTTP) |
-                                 # :waiting (deferring to the Kaimon extension's hub)
+    # :waiting (deferring to the Kaimon extension's hub)
     base::String
     quit::Bool
     tick::Int
@@ -192,7 +238,7 @@ mutable struct SlateModel <: Model
     pending::Union{Nothing,String}  # notebook to open once a hub exists (waiting mode)
     layout::ResizableLayout      # header / table / status bar — divider mouse-draggable
     table::Union{DataTable,Nothing}  # persistent across frames: owns selection, scroll,
-                                     # column widths/drag, and the [d] detail modal
+    # column widths/drag, and the [d] detail modal
     rows::Vector{Any}            # the raw notebook dicts, aligned with the table rows
     _table_hash::UInt            # rebuild the table only when its data changes
     detail::Bool                 # the [d] notebook-detail modal is open
@@ -201,11 +247,30 @@ mutable struct SlateModel <: Model
     close_arm_until::Float64
     refresher::Union{Task,Nothing}
 end
-SlateModel(mode::Symbol; pending = nothing) =
-    SlateModel(mode, _base(), false, 0, "", 0.0,
-               ReentrantLock(), Any[], false, false, pending,
-               ResizableLayout(Vertical, [Fixed(5), Fill(1), Fixed(1)]),
-               nothing, Any[], UInt(0), false, nothing, "", 0.0, nothing)
+function SlateModel(mode::Symbol; pending=nothing)
+    return SlateModel(
+        mode,
+        _base(),
+        false,
+        0,
+        "",
+        0.0,
+        ReentrantLock(),
+        Any[],
+        false,
+        false,
+        pending,
+        ResizableLayout(Vertical, [Fixed(5), Fill(1), Fixed(1)]),
+        nothing,
+        Any[],
+        UInt(0),
+        false,
+        nothing,
+        "",
+        0.0,
+        nothing,
+    )
+end
 
 # Open the notebook that was queued while we waited for a hub (then browser it).
 function _open_pending!(m::SlateModel)
@@ -222,26 +287,33 @@ function _open_pending!(m::SlateModel)
     return nothing
 end
 
-_flash!(m::SlateModel, s::AbstractString) = (m.msg = String(s); m.msg_until = time() + 4.0; nothing)
+_flash!(m::SlateModel, s::AbstractString) = (m.msg=String(s); m.msg_until=time() + 4.0; nothing)
 
 # Commit the [p] port prompt: validate, persist durably (`set_configured_port!`), point the model at
 # the new base, and tell the user how to apply it. A running hub keeps its current port until it's
 # restarted — [r] rebinds an owner hub on the new port; an extension hub restarts from Kaimon.
 function _commit_port!(m::SlateModel)
-    buf = something(m.port_edit, ""); m.port_edit = nothing
+    buf = something(m.port_edit, "")
+    m.port_edit = nothing
     p = tryparse(Int, strip(buf))
     (p === nothing || !(1 <= p <= 65535)) && return _flash!(m, "invalid port — keeping $(_PORT[])")
     set_configured_port!(p)
     _PORT[] = p
     m.base = _base()
-    _flash!(m, m.mode == :owner ? "port saved: $p — press [r] to restart the hub and apply" :
-                                  "port saved: $p — restart Slate to apply")
+    _flash!(
+        m,
+        if m.mode == :owner
+            "port saved: $p — press [r] to restart the hub and apply"
+        else
+            "port saved: $p — restart Slate to apply"
+        end,
+    )
     return nothing
 end
 
 # Snapshot the shared status under the lock (the refresher task writes it).
 _status(m::SlateModel) = lock(m.lock) do
-    (copy(m.notebooks), m.ok, m.registered)
+    return (copy(m.notebooks), m.ok, m.registered)
 end
 
 # Pull fresh status into the model (called from the background refresher).
@@ -254,9 +326,15 @@ function _refresh!(m::SlateModel)
             _open_pending!(m)
             _flash!(m, "Kaimon's slate hub is up — attached")
         else
-            reg = try; _slate_registered(); catch; false; end
+            reg = try
+                _slate_registered()
+            catch
+                false
+            end
             lock(m.lock) do
-                m.notebooks = Any[]; m.ok = false; m.registered = reg
+                m.notebooks = Any[]
+                m.ok = false
+                return m.registered = reg
             end
             return nothing
         end
@@ -267,9 +345,15 @@ function _refresh!(m::SlateModel)
         (Any[], false)
     end
     m.mode == :owner && _HUB[] === nothing && (ok = false)
-    reg = try; _slate_registered(); catch; false; end
+    reg = try
+        _slate_registered()
+    catch
+        false
+    end
     lock(m.lock) do
-        m.notebooks = nbs; m.ok = ok; m.registered = reg
+        m.notebooks = nbs
+        m.ok = ok
+        return m.registered = reg
     end
     return nothing
 end
@@ -302,13 +386,18 @@ function _restart_hub!(m::SlateModel)
                     paths = lock(h.lock) do
                         [abspath(nb.path) for nb in values(h.notebooks)]
                     end
-                    try; stop_hub(h); catch; end
+                    try
+                        stop_hub(h)
+                    catch
+                    end
                     _HUB[] = nothing
                 end
             end
             h2 = _hub()
             for p in paths
-                try; open_notebook!(h2, p); catch e
+                try
+                    open_notebook!(h2, p)
+                catch e
                     @warn "slate: reopen after restart failed" path = p exception = e
                 end
             end
@@ -329,11 +418,14 @@ function _close_selected!(m::SlateModel)
     sel = m.table === nothing ? 0 : m.table.selected
     (1 <= sel <= length(m.rows)) || return nothing
     nb = m.rows[sel]
-    id = String(get(nb, "id", "")); path = String(get(nb, "path", ""))
+    id = String(get(nb, "id", ""))
+    path = String(get(nb, "path", ""))
     if m.close_arm_id != id || time() > m.close_arm_until
         m.close_arm_id = id
         m.close_arm_until = time() + 4.0
-        return _flash!(m, "close '$id'? press c again — open tabs get a notice, unsaved edits are backed up")
+        return _flash!(
+            m, "close '$id'? press c again — open tabs get a notice, unsaved edits are backed up"
+        )
     end
     m.close_arm_id = ""
     @async begin
@@ -342,8 +434,12 @@ function _close_selected!(m::SlateModel)
                 h = _HUB[]
                 h === nothing || close_notebook!(h, id)
             else
-                HTTP.post(_base() * "/api/close", ["Content-Type" => "application/json"],
-                          JSON.json(Dict("path" => path)); retry = false)
+                HTTP.post(
+                    _base() * "/api/close",
+                    ["Content-Type" => "application/json"],
+                    JSON.json(Dict("path" => path));
+                    retry=false,
+                )
             end
             _refresh!(m)
             _flash!(m, "closed $id")
@@ -366,7 +462,10 @@ end
 
 function Tachikoma.init!(m::SlateModel, ::Terminal)
     m.refresher = @async while !m.quit
-        try; _refresh!(m); catch; end
+        try
+            _refresh!(m)
+        catch
+        end
         sleep(1.0)
     end
     return nothing
@@ -384,9 +483,9 @@ function Tachikoma.update!(m::SlateModel, evt::KeyEvent)
     if m.port_edit !== nothing         # the [p] port-input prompt owns the keys
         @match (evt.key, evt.char) begin
             (:escape, _) => (m.port_edit = nothing)
-            (:enter, _)  => _commit_port!(m)
+            (:enter, _) => _commit_port!(m)
             (:backspace, _) => (m.port_edit = String(chop(m.port_edit)))
-            (:char, c)   => (isdigit(c) && length(m.port_edit) < 5 && (m.port_edit *= c))
+            (:char, c) => (isdigit(c) && length(m.port_edit) < 5 && (m.port_edit *= c))
             (:ctrl_c, _) => (m.quit = true)
             _ => nothing
         end
@@ -406,7 +505,7 @@ function Tachikoma.update!(m::SlateModel, evt::KeyEvent)
     dt !== nothing && !isempty(m.rows) && handle_key!(dt, evt) && return nothing
     @match (evt.key, evt.char) begin
         (:ctrl_c, _) || (:ctrl, 'c') || (:char, 'q') => (m.quit = true)
-        (:enter, _)  => _open_selected!(m)
+        (:enter, _) => _open_selected!(m)
         (:char, 'd') => begin
             sel = dt === nothing ? 0 : dt.selected
             (1 <= sel <= length(m.rows)) && (m.detail = true)
@@ -438,10 +537,10 @@ function Tachikoma.view(m::SlateModel, f::Frame)
     m.tick += 1
     nbs, ok, registered = _status(m)
     panes = split_layout(m.layout, f.area)
-    length(panes) == 3 || return
+    length(panes) == 3 || return nothing
     _view_header(m, panes[1], f.buffer, ok, registered)
     _sync_table!(m, nbs)
-    m.table === nothing || (m.table.tick = m.tick; render(m.table, panes[2], f.buffer))
+    m.table === nothing || (m.table.tick=m.tick; render(m.table, panes[2], f.buffer))
     _view_statusbar(m, panes[3], f.buffer, ok)
     render_resize_handles!(f.buffer, m.layout)
     m.detail && _view_detail(m, f)   # on top of everything
@@ -462,13 +561,18 @@ function _view_detail(m::SlateModel, f::Frame)
     val_w = maximum(textwidth(last(p)) for p in fields)
     w = clamp(label_w + val_w + 4, 40, max(20, f.area.width - 4))
     h = min(f.area.height - 2, length(fields) + 3)   # borders + hint row
-    inner = render(Block(title = " $(String(get(m.rows[sel], "id", "?"))) ",
-                         border_style = tstyle(:accent, bold = true),
-                         title_style = tstyle(:accent, bold = true),
-                         box = BOX_HEAVY),
-                   center(f.area, w, h), buf)
+    inner = render(
+        Block(;
+            title=" $(String(get(m.rows[sel], "id", "?"))) ",
+            border_style=tstyle(:accent; bold=true),
+            title_style=tstyle(:accent; bold=true),
+            box=BOX_HEAVY,
+        ),
+        center(f.area, w, h),
+        buf,
+    )
     for y in inner.y:bottom(inner), x in inner.x:right(inner)   # blank the interior
-        set_char!(buf, x, y, ' ', Style(bg = theme().bg))
+        set_char!(buf, x, y, ' ', Style(; bg=theme().bg))
     end
     y = inner.y
     for (lab, val) in fields
@@ -482,11 +586,16 @@ function _view_detail(m::SlateModel, f::Frame)
 end
 
 function _view_header(m::SlateModel, area::Rect, buf::Buffer, ok::Bool, registered::Bool)
-    inner = render(Block(title = " slate — KaimonSlate ",
-                         border_style = tstyle(:accent),
-                         title_style = tstyle(:accent, bold = true)),
-                   area, buf)
-    inner.width < 24 && return
+    inner = render(
+        Block(;
+            title=" slate — KaimonSlate ",
+            border_style=tstyle(:accent),
+            title_style=tstyle(:accent; bold=true),
+        ),
+        area,
+        buf,
+    )
+    inner.width < 24 && return nothing
     x = inner.x + 1
     lbl(row, s) = set_string!(buf, x, inner.y + row, rpad(s, 8), tstyle(:text_dim), inner)
 
@@ -494,23 +603,43 @@ function _view_header(m::SlateModel, area::Rect, buf::Buffer, ok::Bool, register
     if m.mode == :waiting
         dots = "."^mod1(m.tick ÷ 8, 3)
         set_string!(buf, x + 8, inner.y, "◌ ", tstyle(:warning), inner)
-        set_string!(buf, x + 10, inner.y,
+        set_string!(
+            buf,
+            x + 10,
+            inner.y,
             "waiting for Kaimon's slate extension$dots  ([s] starts a local hub instead)",
-            tstyle(:warning), inner)
+            tstyle(:warning),
+            inner,
+        )
     else
-        set_string!(buf, x + 8, inner.y, ok ? "● " : "○ ", ok ? tstyle(:success) : tstyle(:error), inner)
-        set_string!(buf, x + 10, inner.y,
-            !ok ? (m.mode == :owner ? "starting…" : "hub not answering") :
-            m.mode == :owner ? "up — this process owns the hub" :
-                               "attached — external hub (Kaimon extension)",
-            tstyle(:text), inner)
+        set_string!(
+            buf, x + 8, inner.y, ok ? "● " : "○ ", ok ? tstyle(:success) : tstyle(:error), inner
+        )
+        set_string!(
+            buf,
+            x + 10,
+            inner.y,
+            if !ok
+                (m.mode == :owner ? "starting…" : "hub not answering")
+            elseif m.mode == :owner
+                "up — this process owns the hub"
+            else
+                "attached — external hub (Kaimon extension)"
+            end,
+            tstyle(:text),
+            inner,
+        )
     end
     lbl(1, "URL")
     set_string!(buf, x + 8, inner.y + 1, m.base, tstyle(:accent), inner)
     lbl(2, "Kaimon")
-    ktxt, kst = !isdir(_kaimon_dir()) ? ("not installed", tstyle(:text_dim)) :
-                registered            ? ("extension registered", tstyle(:success)) :
-                                        ("installed — extension not registered", tstyle(:warning))
+    ktxt, kst = if !isdir(_kaimon_dir())
+        ("not installed", tstyle(:text_dim))
+    elseif registered
+        ("extension registered", tstyle(:success))
+    else
+        ("installed — extension not registered", tstyle(:warning))
+    end
     set_string!(buf, x + 8, inner.y + 2, ktxt, kst, inner)
     return nothing
 end
@@ -525,25 +654,27 @@ function _rel_ago(unix::Int)
     return "$(d ÷ 86400)d"
 end
 
-_geti(nb, k) = (v = get(nb, k, 0); v isa Number ? Int(v) : 0)
+_geti(nb, k) = (v=get(nb, k, 0); v isa Number ? Int(v) : 0)
 
 # The [d] detail modal: everything the status payload knows about one notebook.
 function _nb_detail(rows::Vector{Any}, row::Int)
     (1 <= row <= length(rows)) || return Pair{String,String}[]
     nb = rows[row]
     id = String(get(nb, "id", "?"))
-    ms = (v = get(nb, "compute_ms", 0.0); v isa Number ? Float64(v) : 0.0)
+    ms = (v=get(nb, "compute_ms", 0.0); v isa Number ? Float64(v) : 0.0)
     port = get(nb, "port", nothing)
-    ["Title"   => String(get(nb, "title", "")),
-     "Id"      => id,
-     "Path"    => String(get(nb, "path", "")),
-     "URL"     => "$(_base())/n/$id",
-     "Cells"   => "$(_geti(nb, "cells")) ($(_geti(nb, "code")) code · $(_geti(nb, "md")) md)",
-     "State"   => "$(_geti(nb, "running")) running · $(_geti(nb, "stale")) stale · $(_geti(nb, "errors")) err",
-     "Binds"   => string(_geti(nb, "binds")),
-     "Compute" => ms >= 1000 ? "$(round(ms / 1000; digits = 1))s" : "$(round(Int, ms))ms",
-     "Edited"  => _rel_ago(_geti(nb, "mtime")) * " ago",
-     "Worker"  => port isa Number ? ":$(Int(port))" : "in-process"]
+    return [
+        "Title" => String(get(nb, "title", "")),
+        "Id" => id,
+        "Path" => String(get(nb, "path", "")),
+        "URL" => "$(_base())/n/$id",
+        "Cells" => "$(_geti(nb, "cells")) ($(_geti(nb, "code")) code · $(_geti(nb, "md")) md)",
+        "State" => "$(_geti(nb, "running")) running · $(_geti(nb, "stale")) stale · $(_geti(nb, "errors")) err",
+        "Binds" => string(_geti(nb, "binds")),
+        "Compute" => ms >= 1000 ? "$(round(ms / 1000; digits = 1))s" : "$(round(Int, ms))ms",
+        "Edited" => _rel_ago(_geti(nb, "mtime")) * " ago",
+        "Worker" => port isa Number ? ":$(Int(port))" : "in-process",
+    ]
 end
 
 # Build/rebuild the notebooks DataTable — only when the data (or the spinner/age
@@ -553,27 +684,60 @@ function _sync_table!(m::SlateModel, nbs::Vector{Any})
     rows = Any[nb for nb in nbs if nb isa AbstractDict]
     n = length(rows)
     anim = any(nb -> _geti(nb, "running") > 0, rows)
-    h = hash(([(get(nb, "id", ""), _geti(nb, "cells"), _geti(nb, "running"), _geti(nb, "stale"),
-                _geti(nb, "errors"), get(nb, "port", 0), _geti(nb, "mtime")) for nb in rows],
-              anim ? m.tick ÷ 2 : 0,   # spinner frame
-              m.tick ÷ 30))            # "edited Xs ago" refresh (~2 s at 15 fps)
+    h = hash((
+        [
+            (
+                get(nb, "id", ""),
+                _geti(nb, "cells"),
+                _geti(nb, "running"),
+                _geti(nb, "stale"),
+                _geti(nb, "errors"),
+                get(nb, "port", 0),
+                _geti(nb, "mtime"),
+            ) for nb in rows
+        ],
+        anim ? m.tick ÷ 2 : 0,   # spinner frame
+        m.tick ÷ 30,
+    ))            # "edited Xs ago" refresh (~2 s at 15 fps)
     old = m.table
-    old !== nothing && m._table_hash == h && return
-    col_name = Any[]; col_cells = Any[]; col_run = Any[]; col_stale = Any[]
-    col_err = Any[]; col_edited = Any[]; col_worker = Any[]; col_url = Any[]
+    old !== nothing && m._table_hash == h && return nothing
+    col_name = Any[]
+    col_cells = Any[]
+    col_run = Any[]
+    col_stale = Any[]
+    col_err = Any[]
+    col_edited = Any[]
+    col_worker = Any[]
+    col_url = Any[]
     row_styles = Style[]
-    tot_cells = 0; tot_run = 0; tot_stale = 0; tot_err = 0
+    tot_cells = 0
+    tot_run = 0
+    tot_stale = 0
+    tot_err = 0
     for nb in rows
         errs, running, stale = _geti(nb, "errors"), _geti(nb, "running"), _geti(nb, "stale")
         cells = _geti(nb, "cells")
-        tot_cells += cells; tot_run += running; tot_stale += stale; tot_err += errs
-        st = errs > 0    ? tstyle(:error) :
-             running > 0 ? tstyle(:accent) :
-             stale > 0   ? tstyle(:warning) : tstyle(:success)
-        icon = running > 0 ?
-            string(SPINNER_BRAILLE[mod1(m.tick ÷ 2 + 1, length(SPINNER_BRAILLE))]) : "●"
+        tot_cells += cells
+        tot_run += running
+        tot_stale += stale
+        tot_err += errs
+        st = if errs > 0
+            tstyle(:error)
+        elseif running > 0
+            tstyle(:accent)
+        elseif stale > 0
+            tstyle(:warning)
+        else
+            tstyle(:success)
+        end
+        icon = if running > 0
+            string(SPINNER_BRAILLE[mod1(m.tick ÷ 2 + 1, length(SPINNER_BRAILLE))])
+        else
+            "●"
+        end
         id = String(get(nb, "id", "?"))
-        title = String(get(nb, "title", "")); isempty(title) && (title = id)
+        title = String(get(nb, "title", ""))
+        isempty(title) && (title = id)
         port = get(nb, "port", nothing)
         push!(col_name, Span("$icon $title", st))
         push!(col_cells, string(cells))
@@ -592,27 +756,39 @@ function _sync_table!(m::SlateModel, nbs::Vector{Any})
         end
         push!(row_styles, tstyle(:text_dim))
     end
-    agg = n == 0 ? "" :
-        " — $tot_cells cells" * (tot_run > 0 ? " · $tot_run running" : "") *
-        (tot_stale > 0 ? " · $tot_stale stale" : "") * (tot_err > 0 ? " · $tot_err err" : "")
+    agg = if n == 0
+        ""
+    else
+        " — $tot_cells cells" *
+        (tot_run > 0 ? " · $tot_run running" : "") *
+        (tot_stale > 0 ? " · $tot_stale stale" : "") *
+        (tot_err > 0 ? " · $tot_err err" : "")
+    end
     dt = DataTable(
         [
             DataColumn("Notebook", col_name),
-            DataColumn("Cells", col_cells; width = 6, align = col_right),
-            DataColumn("Run", col_run; width = 5, align = col_right),
-            DataColumn("Stale", col_stale; width = 6, align = col_right),
-            DataColumn("Err", col_err; width = 5, align = col_right),
-            DataColumn("Edited", col_edited; width = 7, align = col_right),
-            DataColumn("Worker", col_worker; width = 8),
+            DataColumn("Cells", col_cells; width=6, align=col_right),
+            DataColumn("Run", col_run; width=5, align=col_right),
+            DataColumn("Stale", col_stale; width=6, align=col_right),
+            DataColumn("Err", col_err; width=5, align=col_right),
+            DataColumn("Edited", col_edited; width=7, align=col_right),
+            DataColumn("Worker", col_worker; width=8),
             DataColumn("URL", col_url),
         ];
-        selected = n == 0 ? 0 :
-                   old === nothing ? 1 : clamp(max(old.selected, 1), 1, n),
-        block = Block(title = "Notebooks ($n)$agg — [d] details",
-                      border_style = tstyle(:border),
-                      title_style = tstyle(:text, bold = true)),
-        tick = m.tick,
-        row_styles = row_styles,
+        selected=if n == 0
+            0
+        elseif old === nothing
+            1
+        else
+            clamp(max(old.selected, 1), 1, n)
+        end,
+        block=Block(;
+            title="Notebooks ($n)$agg — [d] details",
+            border_style=tstyle(:border),
+            title_style=tstyle(:text; bold=true),
+        ),
+        tick=m.tick,
+        row_styles=row_styles,
     )
     if old !== nothing   # carry the interaction state across the rebuild
         dt.offset = old.offset
@@ -633,30 +809,40 @@ end
 
 function _view_statusbar(m::SlateModel, area::Rect, buf::Buffer, ok::Bool)
     left = if m.port_edit !== nothing
-        [Span(" set hub port: ", tstyle(:accent, bold = true)),
-         Span(isempty(m.port_edit) ? "▏" : "$(m.port_edit)▏", tstyle(:text, bold = true)),
-         Span("  [enter] save · [esc] cancel ", tstyle(:text_dim))]
+        [
+            Span(" set hub port: ", tstyle(:accent; bold=true)),
+            Span(isempty(m.port_edit) ? "▏" : "$(m.port_edit)▏", tstyle(:text; bold=true)),
+            Span("  [enter] save · [esc] cancel ", tstyle(:text_dim)),
+        ]
     elseif time() < m.msg_until && !isempty(m.msg)
-        [Span(" $(m.msg) ", tstyle(:warning, bold = true))]
+        [Span(" $(m.msg) ", tstyle(:warning; bold=true))]
     elseif m.mode == :waiting
-        [Span(" [q]uit ", tstyle(:text_dim)),
-         Span(" [p]ort ", tstyle(:text_dim)),
-         Span(" [s]tart local hub ", tstyle(:warning))]
+        [
+            Span(" [q]uit ", tstyle(:text_dim)),
+            Span(" [p]ort ", tstyle(:text_dim)),
+            Span(" [s]tart local hub ", tstyle(:warning)),
+        ]
     else
-        [Span(" [q]uit ", tstyle(:text_dim)),
-         Span(" [↑↓/enter] open notebook ", tstyle(:text_dim)),
-         Span(" [d]etails ", tstyle(:text_dim)),
-         Span(" [c]lose notebook ", tstyle(:text_dim)),
-         Span(" [o]pen index ", tstyle(:text_dim)),
-         Span(" [p]ort ", tstyle(:text_dim)),
-         Span(" [r]estart hub ", tstyle(:text_dim))]
+        [
+            Span(" [q]uit ", tstyle(:text_dim)),
+            Span(" [↑↓/enter] open notebook ", tstyle(:text_dim)),
+            Span(" [d]etails ", tstyle(:text_dim)),
+            Span(" [c]lose notebook ", tstyle(:text_dim)),
+            Span(" [o]pen index ", tstyle(:text_dim)),
+            Span(" [p]ort ", tstyle(:text_dim)),
+            Span(" [r]estart hub ", tstyle(:text_dim)),
+        ]
     end
-    mode_span = m.mode == :waiting ?
-        Span(" waiting ", tstyle(:warning, bold = true)) :
-        Span(m.mode == :owner ? " owner " : " viewer ",
-             ok ? tstyle(:success, bold = true) : tstyle(:error, bold = true))
+    mode_span = if m.mode == :waiting
+        Span(" waiting ", tstyle(:warning; bold=true))
+    else
+        Span(
+            m.mode == :owner ? " owner " : " viewer ",
+            ok ? tstyle(:success; bold=true) : tstyle(:error; bold=true),
+        )
+    end
     right = [mode_span, Span(" $(m.base) ", tstyle(:accent))]
-    render(StatusBar(left = left, right = right), area, buf)
+    render(StatusBar(; left=left, right=right), area, buf)
     return nothing
 end
 
@@ -684,26 +870,34 @@ Environment:
 # `--status`: one-shot, script-friendly status print (no TUI). 0 = hub up, 1 = not.
 function _print_status()::Int
     if !_hub_running()
-        printstyled("  ○ no hub on $(_base())\n"; color = :red)
-        println(_ext_autostarts() ?
-            "  Slate is registered as a Kaimon extension — start Kaimon to bring it up (or `slate --own`)." :
-            "  Run `slate` to start one.")
+        printstyled("  ○ no hub on $(_base())\n"; color=:red)
+        println(
+            if _ext_autostarts()
+                "  Slate is registered as a Kaimon extension — start Kaimon to bring it up (or `slate --own`)."
+            else
+                "  Run `slate` to start one."
+            end,
+        )
         return 1
     end
-    nbs = try; _fetch_notebooks(:viewer); catch; Any[]; end
-    printstyled("  ● hub up at $(_base())"; color = :green, bold = true)
+    nbs = try
+        _fetch_notebooks(:viewer)
+    catch
+        Any[]
+    end
+    printstyled("  ● hub up at $(_base())"; color=:green, bold=true)
     println(" — $(length(nbs)) notebook$(length(nbs) == 1 ? "" : "s") open")
     for nb in nbs
         nb isa AbstractDict || continue
-        geti(k) = (v = get(nb, k, 0); v isa Number ? Int(v) : 0)
+        geti(k) = (v=get(nb, k, 0); v isa Number ? Int(v) : 0)
         id = String(get(nb, "id", "?"))
         parts = ["$(geti("cells")) cells"]
         geti("running") > 0 && push!(parts, "$(geti("running")) running")
         geti("stale") > 0 && push!(parts, "$(geti("stale")) stale")
         geti("errors") > 0 && push!(parts, "$(geti("errors")) err")
-        printstyled("    • "; color = :cyan)
+        printstyled("    • "; color=:cyan)
         print(rpad(id, 22), join(parts, " · "), "  ")
-        printstyled("$(_base())/n/$id\n"; color = :light_black)
+        printstyled("$(_base())/n/$id\n"; color=:light_black)
     end
     return 0
 end
@@ -716,7 +910,8 @@ function _app_main(args::Vector{String})::Int
     want_port = false
     for a in args
         if want_port
-            want_port = false; port_arg = a
+            want_port = false
+            port_arg = a
         elseif a in ("-h", "--help")
             print(_APP_HELP)
             return 0
@@ -727,7 +922,7 @@ function _app_main(args::Vector{String})::Int
         elseif a == "--port"
             want_port = true                       # value is the next argument
         elseif startswith(a, "--port=")
-            port_arg = a[length("--port=")+1:end]
+            port_arg = a[(length("--port=") + 1):end]
         elseif startswith(a, "-")
             println(stderr, "slate: unknown option '$a'\n")
             print(stderr, _APP_HELP)
@@ -756,7 +951,11 @@ function _app_main(args::Vector{String})::Int
         # without a restart. Don't exit — fall through to `:waiting`, where the TUI polls for
         # Kaimon's hub and attaches the moment it answers (or press [s] to own a local hub).
         println()
-        printstyled("  ✓ Registered as a Kaimon extension — attaching to its hub…\n"; color = :green, bold = true)
+        printstyled(
+            "  ✓ Registered as a Kaimon extension — attaching to its hub…\n";
+            color=:green,
+            bold=true,
+        )
         println()
     end
     mode = _startup_mode(_hub_running(), _ext_autostarts(), own)
@@ -764,7 +963,9 @@ function _app_main(args::Vector{String})::Int
         try
             _own_hub!()
         catch e
-            println(stderr, "slate: could not start the hub on port $(_PORT[]): ", sprint(showerror, e))
+            println(
+                stderr, "slate: could not start the hub on port $(_PORT[]): ", sprint(showerror, e)
+            )
             println(stderr, "Is another service using the port? Set KAIMONSLATE_PORT to move it.")
             return 1
         end
@@ -786,7 +987,7 @@ function _app_main(args::Vector{String})::Int
     end
     m = SlateModel(mode; pending)
     _refresh!(m)                     # first frame renders with data
-    Tachikoma.app(m; fps = 15)
+    Tachikoma.app(m; fps=15)
     return 0
 end
 

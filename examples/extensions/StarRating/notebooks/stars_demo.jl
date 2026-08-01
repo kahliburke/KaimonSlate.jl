@@ -1,4 +1,11 @@
-try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+try
+    using KaimonSlate: KaimonSlate
+catch
+    error(
+        "This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate.",
+    )
+end;
+KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
 
 #%% md id=8e6c70
 @md"""
@@ -15,7 +22,7 @@ This notebook uses the **StarRating** extension package, which depends only on
 using StarRating
 
 #%% code id=bind
-@bind rating Stars(; max = 5, label = "How good is Slate's extension SDK?", default=0)
+@bind rating Stars(; max=5, label="How good is Slate's extension SDK?", default=0)
 
 #%% md id=readout
 @md"""

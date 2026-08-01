@@ -1,4 +1,11 @@
-try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+try
+    using KaimonSlate: KaimonSlate
+catch
+    error(
+        "This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate.",
+    )
+end;
+KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
 
 #%% md id=f191df
 @md"""
@@ -27,9 +34,9 @@ CairoMakie.activate!()
 use_slate_theme!()
 
 let
-    fig = Figure(size = (560, 320))
-    ax = Axis(fig[1, 1]; title = "CairoMakie baseline (static)", xlabel = "x", ylabel = "sin x")
-    lines!(ax, 0:0.05:4π, sin; color = :dodgerblue)
+    fig = Figure(; size=(560, 320))
+    ax = Axis(fig[1, 1]; title="CairoMakie baseline (static)", xlabel="x", ylabel="sin x")
+    lines!(ax, 0:0.05:4π, sin; color=:dodgerblue)
     fig
 end
 
@@ -44,16 +51,21 @@ BonitoSlate.enable!()
 
 #%% code id=wgl_3d controls=[n,pts] nocache
 let
-    xs = range(-3, 3; length = 100)
-    ys = range(-3, 3; length = 100)
+    xs = range(-3, 3; length=100)
+    ys = range(-3, 3; length=100)
     zs = [exp(-(x^2 + y^2) / 3) * sin(2x) * cos(n*y) for x in xs, y in ys]
-    fig = Figure(size = (820, 860))
+    fig = Figure(; size=(820, 860))
     # Axis label/tick colours come from `use_slate_theme!()` (see baseline_cairo). Note: WGLMakie does not
     # currently render the Axis3 box (panels/grids/spines) that CairoMakie/GLMakie draw, so the live figure
     # shows the surface + labels without an enclosing frame; a static/PDF export renders the full box.
-    ax = Axis3(fig[1, 1]; title = "WGLMakie 3D surface — live over Slate (drag to rotate)",
-               xlabel = "x", ylabel = "y", zlabel = "z")
-    surface!(ax, xs, ys, zs; colormap = :viridis)
+    ax = Axis3(
+        fig[1, 1];
+        title="WGLMakie 3D surface — live over Slate (drag to rotate)",
+        xlabel="x",
+        ylabel="y",
+        zlabel="z",
+    )
+    surface!(ax, xs, ys, zs; colormap=:viridis)
     fig
 end
 

@@ -6,12 +6,25 @@ using KaimonSlate
 const NS = KaimonSlate.NotebookServer
 const RE = KaimonSlate.ReportEngine
 
-_mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
-    RE.InProcessKernel(), 1, String[], String[], ReentrantLock(), Channel{String}[],
-    ReentrantLock(), "", false, Dict{String,String}())
+function _mknb(src)
+    return NS.LiveNotebook(
+        "deck",
+        "/tmp/slidetest.jl",
+        RE.parse_report(src),
+        RE.InProcessKernel(),
+        1,
+        String[],
+        String[],
+        ReentrantLock(),
+        Channel{String}[],
+        ReentrantLock(),
+        "",
+        false,
+        Dict{String,String}(),
+    )
+end
 
 @testset "slideshow mode" begin
-
     @testset "heading depth + rule splitting" begin
         @test NS._first_heading_depth("intro\n## Slide\nbody") == 2
         @test NS._first_heading_depth("# Title") == 1
@@ -45,7 +58,7 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
         y = 2
         """
         cells = RE.parse_report(src).cells
-        segs = NS._slide_segments(cells; level = 2)
+        segs = NS._slide_segments(cells; level=2)
         ids(s) = [f[1].id for f in s.frags]
         @test length(segs) == 4
         @test ids(segs[1]) == ["title"]                 # pre-heading → title slide
@@ -58,13 +71,13 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
     @testset "level controls the boundary" begin
         src = "#%% md id=a\n## two\n\n#%% md id=b\n### three\n"
         cells = RE.parse_report(src).cells
-        @test length(NS._slide_segments(cells; level = 2)) == 1   # ### does not break at level 2
-        @test length(NS._slide_segments(cells; level = 3)) == 2   # ### breaks at level 3
+        @test length(NS._slide_segments(cells; level=2)) == 1   # ### does not break at level 2
+        @test length(NS._slide_segments(cells; level=3)) == 2   # ### breaks at level 3
     end
 
     @testset "--- splits a markdown cell mid-cell" begin
         src = "#%% md id=s\n## Topic\n\npart one\n\n---\n\npart two\n"
-        segs = NS._slide_segments(RE.parse_report(src).cells; level = 2)
+        segs = NS._slide_segments(RE.parse_report(src).cells; level=2)
         @test length(segs) == 2
         @test occursin("part one", segs[1].frags[1][2])
         @test occursin("part two", segs[2].frags[1][2])
@@ -93,7 +106,8 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
 
     @testset "cell_json exposes slide/notes flags" begin
         r = RE.parse_report("#%% code id=a slide\nx=1\n\n#%% md id=b notes\nhi\n")
-        j1 = NS.cell_json(r.cells[1]); j2 = NS.cell_json(r.cells[2])
+        j1 = NS.cell_json(r.cells[1])
+        j2 = NS.cell_json(r.cells[2])
         @test get(j1, "slide", false) == true
         @test get(j2, "notes", false) == true
         @test "slide" in j1["tags"] && "notes" in j2["tags"]
@@ -104,7 +118,7 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
         # Typst fetches registry packages on first compile; guard on network/availability so the
         # suite stays green offline — but assert real bytes whenever it does run.
         pdf = try
-            NS.export_pdf(nb; layout = "slides", theme = "dark")
+            NS.export_pdf(nb; layout="slides", theme="dark")
         catch err
             @info "slide PDF compile skipped" err
             nothing
@@ -119,7 +133,7 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
         # deck compiling first (typst/packages/network available), so offline skips both but a
         # citation-specific failure can never hide behind the skip.
         plain = try
-            NS.export_pdf(_mknb("#%% md id=s\n## One\n\nplain\n"); layout = "slides")
+            NS.export_pdf(_mknb("#%% md id=s\n## One\n\nplain\n"); layout="slides")
         catch
             nothing
         end
@@ -127,10 +141,12 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
             @info "cited slide PDF compile skipped (typst unavailable)"
             @test true
         else
-            nb = _mknb("#%% md id=s\n## Cited slide\n\nSee [@knuth1984, p. 3].\n\n" *
-                       "#%% md id=refs bibliography\n@book{knuth1984,\n  author = {Knuth, D.},\n" *
-                       "  title = {The TeXbook},\n  publisher = {Addison-Wesley},\n  year = {1984}\n}\n")
-            pdf = NS.export_pdf(nb; layout = "slides")   # a throw here IS the regression
+            nb = _mknb(
+                "#%% md id=s\n## Cited slide\n\nSee [@knuth1984, p. 3].\n\n" *
+                "#%% md id=refs bibliography\n@book{knuth1984,\n  author = {Knuth, D.},\n" *
+                "  title = {The TeXbook},\n  publisher = {Addison-Wesley},\n  year = {1984}\n}\n",
+            )
+            pdf = NS.export_pdf(nb; layout="slides")   # a throw here IS the regression
             @test length(pdf) > 1000
         end
     end

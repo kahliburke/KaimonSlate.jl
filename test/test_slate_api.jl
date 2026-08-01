@@ -16,30 +16,30 @@ const RE = KaimonSlate.ReportEngine
 # documented spelling differs. Anything else MUST have a registry entry — add the entry, or add the
 # name here with a reason.
 const UNDOCUMENTED_BY_DESIGN = Dict(
-    "EChart"      => "the type `echart(…)` returns; users call the constructor function, not this",
-    "SlateTable"  => "ditto for `slate_table(…)`",
-    "Widget"      => "abstract supertype of the widget constructors",
-    "Choice"      => "wrapper for a labeled Select/Radio value; reached via the bound variable",
-    "Selection"   => "ditto for multi-selects",
-    "indices"     => "helper on a Selection value, documented with the widgets that produce it",
-    "Reactive"    => "the type `reactive(…)` returns",
-    "slate_off"   => "documented inside the `slate_on` entry (its symmetric counterpart)",
-    "slate_call"  => "documented inside the `slate_on` entry (the in-process invoke)",
+    "EChart" => "the type `echart(…)` returns; users call the constructor function, not this",
+    "SlateTable" => "ditto for `slate_table(…)`",
+    "Widget" => "abstract supertype of the widget constructors",
+    "Choice" => "wrapper for a labeled Select/Radio value; reached via the bound variable",
+    "Selection" => "ditto for multi-selects",
+    "indices" => "helper on a Selection value, documented with the widgets that produce it",
+    "Reactive" => "the type `reactive(…)` returns",
+    "slate_off" => "documented inside the `slate_on` entry (its symmetric counterpart)",
+    "slate_call" => "documented inside the `slate_on` entry (the in-process invoke)",
     "slate_everywhere" => "documented inside the `slate_effect` entry",
     "use_slate_theme!" => "has its own entry",           # kept explicit: both theme names are documented
-    "html_str"    => "the `html\"…\"` section macro of a web cell — documented in the `web cell` entry",
-    "css_str"     => "ditto",
-    "js_str"      => "ditto",
-    "web"         => "the `@web` skin — documented as `web cell`",
-    "md"          => "the `@md` skin — documented as `markdown`",
-    "sfile"       => "documented inside the `datadir` entry",
-    "bind"        => "documented as `@bind`",
-    "trace"       => "documented as `@trace`",
-    "asset"       => "documented as `@asset`",
-    "use"         => "documented as `@use`",
-    "reactive"    => "documented as `reactive` (the macro shares the entry with the function)",
-    "onclick"     => "documented as `@onclick`",
-    "onchange"    => "documented as `@onchange`",
+    "html_str" => "the `html\"…\"` section macro of a web cell — documented in the `web cell` entry",
+    "css_str" => "ditto",
+    "js_str" => "ditto",
+    "web" => "the `@web` skin — documented as `web cell`",
+    "md" => "the `@md` skin — documented as `markdown`",
+    "sfile" => "documented inside the `datadir` entry",
+    "bind" => "documented as `@bind`",
+    "trace" => "documented as `@trace`",
+    "asset" => "documented as `@asset`",
+    "use" => "documented as `@use`",
+    "reactive" => "documented as `reactive` (the macro shares the entry with the function)",
+    "onclick" => "documented as `@onclick`",
+    "onchange" => "documented as `@onchange`",
 )
 
 # Every name a cell can see, from the ONE place they are injected — a fresh standalone namespace is
@@ -52,10 +52,12 @@ const UNDOCUMENTED_BY_DESIGN = Dict(
 # passes on nothing. The `length(inj)` floor below is the backstop if this ever regresses again.
 function injected_names()
     m = Module(:DriftProbe)
-    RE.standalone!(m; dir = mktempdir())
+    RE.standalone!(m; dir=mktempdir())
     skip = (:eval, :include, :__slate_standalone, nameof(m))
-    return String[String(n) for n in Base.invokelatest(names, m; all = true)
-                  if !startswith(String(n), "__") && !(n in skip) && !startswith(String(n), "#")]
+    return String[
+        String(n) for n in Base.invokelatest(names, m; all=true) if
+        !startswith(String(n), "__") && !(n in skip) && !startswith(String(n), "#")
+    ]
 end
 
 # Stands in for `KaimonGate.GateTool` so `create_tools` can be built without Kaimon loaded. The
@@ -76,29 +78,39 @@ end
         # reporting what it injects), the drift check would PASS vacuously — which is the one failure
         # mode a coverage test must not have. Pin a floor and a few known-injected helpers.
         @test length(inj) > 40
-        @test all(n -> any(x -> lstrip(x, '@') == n, inj), ["echart", "bind", "slate_table", "web", "save_asset"])
+        @test all(
+            n -> any(x -> lstrip(x, '@') == n, inj),
+            ["echart", "bind", "slate_table", "web", "save_asset"],
+        )
 
         documented = Set(lowercase(lstrip(e.name, '@')) for e in NS.SLATE_API)
         allowed = Set(lowercase(lstrip(k, '@')) for k in keys(UNDOCUMENTED_BY_DESIGN))
-        missing_docs = [n for n in inj
-                        if !(lowercase(lstrip(n, '@')) in documented) &&
-                           !(lowercase(lstrip(n, '@')) in allowed)]
+        missing_docs = [
+            n for n in inj if
+            !(lowercase(lstrip(n, '@')) in documented) && !(lowercase(lstrip(n, '@')) in allowed)
+        ]
         # One assertion carrying the whole list, so a failure names every gap at once rather than
         # stopping at the first.
-        @test isempty(missing_docs) ||
-              error("cell helpers injected but NOT in SLATE_API (document them in src/slate_api.jl, " *
-                    "or add them to UNDOCUMENTED_BY_DESIGN with a reason): " * join(sort(missing_docs), ", "))
+        @test isempty(missing_docs) || error(
+            "cell helpers injected but NOT in SLATE_API (document them in src/slate_api.jl, " *
+            "or add them to UNDOCUMENTED_BY_DESIGN with a reason): " *
+            join(sort(missing_docs), ", "),
+        )
     end
 
     @testset "every entry is complete" begin
-        bad_summary = [e.name for e in NS.SLATE_API if isempty(strip(e.summary)) || length(e.summary) > 110]
-        @test isempty(bad_summary) ||
-              error("entries need a ONE-LINE summary (non-empty, ≤110 chars): " * join(bad_summary, ", "))
+        bad_summary = [
+            e.name for e in NS.SLATE_API if isempty(strip(e.summary)) || length(e.summary) > 110
+        ]
+        @test isempty(bad_summary) || error(
+            "entries need a ONE-LINE summary (non-empty, ≤110 chars): " * join(bad_summary, ", ")
+        )
         # A `docbinding` that no longer resolves renders an EMPTY entry — the failure mode of pointing
         # at a renamed/moved function. Catch it here rather than in an agent's context.
         empty_doc = [e.name for e in NS.SLATE_API if isempty(strip(NS._entry_markdown(e)))]
-        @test isempty(empty_doc) ||
-              error("entries render no documentation (a stale docbinding?): " * join(empty_doc, ", "))
+        @test isempty(empty_doc) || error(
+            "entries render no documentation (a stale docbinding?): " * join(empty_doc, ", ")
+        )
         @test allunique(lowercase(e.name) for e in NS.SLATE_API)
     end
 
@@ -119,19 +131,24 @@ end
         @test occursin("Express", one) && !occursin("### @bind", one)
         # BATCHED: three helpers, one call — the thing that makes a cheap index workable.
         many = NS.slate_api_reference("echart @bind slate_table")
-        @test occursin("### echart", many) && occursin("### @bind", many) && occursin("### slate_table", many)
+        @test occursin("### echart", many) &&
+            occursin("### @bind", many) &&
+            occursin("### slate_table", many)
         @test NS.slate_api_reference("echart, @bind") == NS.slate_api_reference("echart @bind")
         # PARTIAL batch: a named helper is still served, and the token that resolved to nothing says
         # so — never a bare "no match" that silently drops what the caller correctly named.
         part = NS.slate_api_reference("echart binding")
-        @test occursin("### echart", part) && occursin("No entry named `binding`", part) &&
-              occursin("@bind", part)
+        @test occursin("### echart", part) &&
+            occursin("No entry named `binding`", part) &&
+            occursin("@bind", part)
         # …but a token that merely FILTERS an entry keeps working as a phrase query, not a partial batch.
         filt = NS.slate_api_reference("slate_table format")
         @test occursin("### slate_table", filt) && !occursin("No entry named", filt)
         # A category returns its members and nothing else.
         wid = NS.slate_api_reference("Widgets")
-        @test occursin("### Slider", wid) && occursin("### TableSelect", wid) && !occursin("### echart", wid)
+        @test occursin("### Slider", wid) &&
+            occursin("### TableSelect", wid) &&
+            !occursin("### echart", wid)
         @test occursin("### web cell", NS.slate_api_reference("web cells"))
         # An exact helper name beats a category of the same spelling.
         @test occursin("### display", NS.slate_api_reference("display"))
@@ -193,13 +210,15 @@ end
             arities = unique(Int(m.nargs) for m in methods(t.handler))
             length(arities) > 1 && push!(optional_positional, t.name)
         end
-        @test isempty(optional_positional) ||
-              error("slate tools with an OPTIONAL POSITIONAL arg — it can only be omitted from " *
-                    "the END, so make it a keyword arg: " * join(sort(optional_positional), ", "))
+        @test isempty(optional_positional) || error(
+            "slate tools with an OPTIONAL POSITIONAL arg — it can only be omitted from " *
+            "the END, so make it a keyword arg: " *
+            join(sort(optional_positional), ", "),
+        )
 
         # …and the end-to-end behaviour that shape protects: a topic must reach the registry.
         api = only(t for t in tools if t.name == "api").handler
-        @test occursin("### echart", api(topic = "echart"))
+        @test occursin("### echart", api(topic="echart"))
         @test occursin("— index", api())
     end
 

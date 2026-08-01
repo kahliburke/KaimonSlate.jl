@@ -22,8 +22,11 @@ struct WebPage
     js::String
     obscure::Bool
 end
-WebPage(; html::AbstractString = "", css::AbstractString = "", js::AbstractString = "", obscure::Bool = false) =
-    WebPage(String(html), String(css), String(js), obscure)
+function WebPage(;
+    html::AbstractString="", css::AbstractString="", js::AbstractString="", obscure::Bool=false
+)
+    return WebPage(String(html), String(css), String(js), obscure)
+end
 
 function Base.show(io::IO, ::MIME"text/html", w::WebPage)
     isempty(w.css) || print(io, "<style>", replace(w.css, "</style>" => "<\\/style>"), "</style>")
@@ -33,8 +36,12 @@ function Base.show(io::IO, ::MIME"text/html", w::WebPage)
             # Decode the base64'd UTF-8 (atob → latin-1 bytes; TextDecoder reassembles multi-byte
             # chars) and run it. A plain `<script>` — revived live by the front end, native in a
             # static export.
-            print(io, "<script>Function(new TextDecoder().decode(Uint8Array.from(atob('",
-                  Base64.base64encode(w.js), "'),c=>c.charCodeAt(0))))()</script>")
+            print(
+                io,
+                "<script>Function(new TextDecoder().decode(Uint8Array.from(atob('",
+                Base64.base64encode(w.js),
+                "'),c=>c.charCodeAt(0))))()</script>",
+            )
         else
             print(io, "<script>", replace(w.js, "</script>" => "<\\/script>"), "</script>")
         end
@@ -54,4 +61,4 @@ the renderer. Put it in a cell above any `@bind` of that kind. This replaces the
 register_widget_js("mathfield", read(joinpath(pkgdir(@__MODULE__), "assets", "mathfield.js"), String))
 ```
 """
-register_widget_js(kind::AbstractString, js::AbstractString) = WebPage(js = String(js))
+register_widget_js(kind::AbstractString, js::AbstractString) = WebPage(; js=String(js))

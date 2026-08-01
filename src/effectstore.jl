@@ -12,11 +12,12 @@ cell's declared effects are inspectable on disk, mirroring MemoStore's manifests
 """
 module EffectStore
 
-import TOML
+using TOML: TOML
 
 # One TOML file per cell src-digest under `root/`. The key is sanitised to a safe filename stem.
-_path(root::AbstractString, key::AbstractString) =
-    joinpath(root, replace(String(key), r"[^A-Za-z0-9]" => "_") * ".toml")
+function _path(root::AbstractString, key::AbstractString)
+    return joinpath(root, replace(String(key), r"[^A-Za-z0-9]" => "_") * ".toml")
+end
 
 """
     store!(root, key, records) -> nothing
@@ -28,15 +29,28 @@ and leaves the prior state, never throws into the caller.
 function store!(root::AbstractString, key::AbstractString, records)
     p = _path(root, key)
     if isempty(records)
-        isfile(p) && (try; rm(p); catch; end)
+        isfile(p) && (
+            try
+                rm(p)
+            catch
+            end
+        )
         return nothing
     end
     try
         mkpath(root)
-        data = Dict("effect" => [Dict("kind"     => String(string(r.kind)),
-                                      "names"    => String[string(n) for n in r.names],
-                                      "stmt_src" => String(r.stmt_src)) for r in records])
-        open(p, "w") do io; TOML.print(io, data); end
+        data = Dict(
+            "effect" => [
+                Dict(
+                    "kind" => String(string(r.kind)),
+                    "names" => String[string(n) for n in r.names],
+                    "stmt_src" => String(r.stmt_src),
+                ) for r in records
+            ],
+        )
+        open(p, "w") do io
+            return TOML.print(io, data)
+        end
     catch e
         @warn "EffectStore: could not persist effects" key = key exception = e
     end
@@ -54,10 +68,13 @@ function load(root::AbstractString, key::AbstractString)
     try
         d = TOML.parsefile(p)
         haskey(d, "effect") || return nothing
-        return [(; kind     = Symbol(e["kind"]),
-                   names    = Symbol[Symbol(n) for n in get(e, "names", String[])],
-                   stmt_src = String(get(e, "stmt_src", "")))
-                for e in d["effect"]]
+        return [
+            (;
+                kind=Symbol(e["kind"]),
+                names=Symbol[Symbol(n) for n in get(e, "names", String[])],
+                stmt_src=String(get(e, "stmt_src", "")),
+            ) for e in d["effect"]
+        ]
     catch e
         @warn "EffectStore: could not read effects" key = key exception = e
         return nothing

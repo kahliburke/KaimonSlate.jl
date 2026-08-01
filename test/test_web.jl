@@ -3,22 +3,24 @@
 # (interpolating-markdown semantics, but always needs one eval).
 using ReTest
 
-include(joinpath(@__DIR__, "..", "src", "engine.jl")); using .ReportEngine
+include(joinpath(@__DIR__, "..", "src", "engine.jl"));
+using .ReportEngine
 const RE = ReportEngine
 
 findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
 
 # Evaluate a `@web(...)` skin (built from panes) in a fresh standalone namespace with the given
 # variable bindings, returning the resulting WebPage.
-function eval_web(vars::NamedTuple; html = "", css = "", js = "")
+function eval_web(vars::NamedTuple; html="", css="", js="")
     m = Module(:WebEvalT)
-    RE.standalone!(m; dir = ".")
-    for (k, v) in pairs(vars); Core.eval(m, :(const $(k) = $(v))); end
-    return Core.eval(m, Base.Meta.parse(RE._web_skin(; html = html, css = css, js = js)))
+    RE.standalone!(m; dir=".")
+    for (k, v) in pairs(vars)
+        Core.eval(m, :(const $(k) = $(v)))
+    end
+    return Core.eval(m, Base.Meta.parse(RE._web_skin(; html=html, css=css, js=js)))
 end
 
 @testset "Web cells" begin
-
     @testset "parse: #%% web kind + verbatim source" begin
         src = """
         #%% web id=hero
@@ -36,7 +38,9 @@ end
     end
 
     @testset "serialize round-trips source + kind" begin
-        r = parse_report("#%% web id=w\n" * RE._web_skin(html = "<b>{{ x }}</b>", js = "const n = {{ x }};"))
+        r = parse_report(
+            "#%% web id=w\n" * RE._web_skin(html="<b>{{ x }}</b>", js="const n = {{ x }};")
+        )
         c = r.cells[1]
         r2 = parse_report(serialize_report(r))
         @test r2.cells[1].kind == WEB
@@ -52,7 +56,7 @@ end
         @test RE._slate_json(NaN) == "null"           # NaN/Inf aren't valid JSON
         @test RE._slate_json("hi") == "\"hi\""
         @test RE._slate_json([1, 2, 3]) == "[1,2,3]"
-        @test RE._slate_json((a = 1, b = "x")) == "{\"a\":1,\"b\":\"x\"}"
+        @test RE._slate_json((a=1, b="x")) == "{\"a\":1,\"b\":\"x\"}"
         @test RE._slate_json(Dict("k" => false)) == "{\"k\":false}"
         # `<`/`>` are unicode-escaped so a value can never spell `</script>` and break out of a <script>.
         j = RE._slate_json("</script>")
@@ -68,10 +72,12 @@ end
     end
 
     @testset "@web interpolation, escaped per section" begin
-        wp = eval_web((title = "Fish & <chips>", accent = "tomato", xs = [1, 2, 3]);
-                      html = "<h1>{{ title }}</h1>",
-                      css  = "#hero { color: {{ accent }}; }",
-                      js   = "const pts = {{ xs }};")
+        wp = eval_web(
+            (title="Fish & <chips>", accent="tomato", xs=[1, 2, 3]);
+            html="<h1>{{ title }}</h1>",
+            css="#hero { color: {{ accent }}; }",
+            js="const pts = {{ xs }};",
+        )
         @test wp isa RE.WebPage
         @test occursin("<h1>Fish &amp; &lt;chips&gt;</h1>", wp.html)   # HTML entity-escaped
         @test occursin("color: tomato;", wp.css)                      # CSS token
@@ -79,35 +85,35 @@ end
     end
 
     @testset "JS \$ and \${} stay literal; only {{ }} interpolates" begin
-        wp = eval_web((n = 7,); js = raw"const el = $('#x'); const s = `${v}`; const n = {{ n }};")
+        wp = eval_web((n=7,); js=raw"const el = $('#x'); const s = `${v}`; const n = {{ n }};")
         @test occursin(raw"$('#x')", wp.js)      # jQuery $ untouched
         @test occursin(raw"`${v}`", wp.js)       # template literal untouched
         @test occursin("const n = 7;", wp.js)    # {{ }} did interpolate
     end
 
     @testset "JS-section injection is contained" begin
-        wp = eval_web((evil = "</script><img src=x onerror=alert(1)>",); js = "const t = {{ evil }};")
+        wp = eval_web((evil="</script><img src=x onerror=alert(1)>",); js="const t = {{ evil }};")
         @test !occursin("</script>", wp.js)      # escaped — can't break out of the <script>
     end
 
     @testset "JS handed to Slate.runFragment(root, echo)" begin
-        wp = eval_web((n = 1,); js = "root.textContent = {{ n }};")
+        wp = eval_web((n=1,); js="root.textContent = {{ n }};")
         @test occursin("Slate.runFragment(", wp.js)               # the frontend runtime (root/echo/error live in core.js)
         @test occursin("document.currentScript", wp.js)           # captures the cell's output element
         @test occursin("async function(root, echo)", wp.js)       # fragment gets `root` + the `echo` printer
     end
 
     @testset "_web_sections / _web_interp_exprs" begin
-        src = RE._web_skin(html = "<h1>{{ headline }}</h1>", js = "const n = {{ count }};")
+        src = RE._web_skin(html="<h1>{{ headline }}</h1>", js="const n = {{ count }};")
         s = RE._web_sections(src)
         @test s.html == "<h1>{{ headline }}</h1>"      # exact (no dedent, one leading/trailing \n stripped)
         @test s.js == "const n = {{ count }};"
         @test isempty(s.css)
         # Panes must reassemble to the EXACT stored source — else the editor reads as spuriously "edited".
-        @test RE._web_skin(html = s.html, css = s.css, js = s.js) == src
+        @test RE._web_skin(html=s.html, css=s.css, js=s.js) == src
         @test Set(RE._web_interp_exprs(src)) == Set(["headline", "count"])
         # A multi-line section with interior indentation survives verbatim (no dedent drift).
-        multi = RE._web_skin(html = "<div>\n  <b>{{ x }}</b>\n</div>", js = "let a = {{ y }};")
+        multi = RE._web_skin(html="<div>\n  <b>{{ x }}</b>\n</div>", js="let a = {{ y }};")
         @test RE._web_skin(; RE._web_sections(multi)...) == multi
     end
 
@@ -115,16 +121,18 @@ end
         # code→web stores the code plain; the browser reassembles it into a single-section skin on the
         # way back to code. Unwrapping that skin must return the ORIGINAL code, not a `@web(...)` wrapper.
         code = "x = 5\ny = x + 1"
-        @test RE._web_unwrap(RE._web_skin(html = code)) == code
+        @test RE._web_unwrap(RE._web_skin(html=code)) == code
         @test RE._web_unwrap(code) == code                       # already-plain source passes through
         # A genuine MULTI-pane web cell has no clean plain form → keep the runnable `@web(...)` intact.
-        multi = RE._web_skin(html = "<b>hi</b>", js = "a = 1")
+        multi = RE._web_skin(html="<b>hi</b>", js="a = 1")
         @test RE._web_unwrap(multi) == multi
     end
 
     @testset "reactive deps + staleness (interpolating-md semantics, always evals)" begin
-        r = parse_report("#%% code id=src\ncount = 5\n\n#%% web id=w\n" *
-                         RE._web_skin(js = "const n = {{ count }};"))
+        r = parse_report(
+            "#%% code id=src\ncount = 5\n\n#%% web id=w\n" *
+            RE._web_skin(js="const n = {{ count }};"),
+        )
         build_dependencies!(r)
         w = findcell(r, "w")
         @test w.kind == WEB
@@ -134,9 +142,8 @@ end
         @test w.state == STALE           # never auto-FRESH: must evaluate @web to render
 
         # A web cell with NO interpolation still must run (unlike static markdown, which goes FRESH).
-        r2 = parse_report("#%% web id=static\n" * RE._web_skin(html = "<p>hello</p>"))
+        r2 = parse_report("#%% web id=static\n" * RE._web_skin(html="<p>hello</p>"))
         build_dependencies!(r2)
         @test findcell(r2, "static").state == STALE
     end
-
 end

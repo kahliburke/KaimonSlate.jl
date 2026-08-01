@@ -11,21 +11,21 @@ let public_assets = joinpath(@__DIR__, "src", "public", "assets")
     src_dir = joinpath(@__DIR__, "src", "assets")
     if isdir(src_dir) && !haskey(ENV, "KAIMONSLATE_ASSET_BASE")
         mkpath(public_assets)
-        for f in readdir(src_dir; join = false)
+        for f in readdir(src_dir; join=false)
             src = joinpath(src_dir, f)
             isfile(src) || continue
             endswith(f, ".tach") && continue
-            cp(src, joinpath(public_assets, f); force = true)
+            cp(src, joinpath(public_assets, f); force=true)
         end
     end
 end
 
 # Clean stale build directory to avoid ENOTEMPTY errors from Documenter.
 let build_dir = joinpath(@__DIR__, "build")
-    for attempt = 1:3
+    for attempt in 1:3
         isdir(build_dir) || break
         try
-            rm(build_dir; recursive = true, force = true)
+            rm(build_dir; recursive=true, force=true)
         catch
             attempt == 3 && rethrow()
             sleep(0.5)
@@ -35,22 +35,22 @@ end
 
 # Step 1: Generate markdown only — skip VitePress so we can patch config first.
 makedocs(;
-    sitename = "KaimonSlate.jl",
-    modules = [
+    sitename="KaimonSlate.jl",
+    modules=[
         KaimonSlate,
         KaimonSlate.NotebookServer,
         KaimonSlate.NotebookServer.SlateHistory,
         KaimonSlate.ReportEngine,
         KaimonSlate.ReportRender,
     ],
-    remotes = nothing,
-    format = DocumenterVitepress.MarkdownVitepress(;
-        repo = "https://github.com/kahliburke/KaimonSlate.jl",
-        devurl = "dev",
-        deploy_url = "kahliburke.github.io/KaimonSlate.jl",
-        build_vitepress = false,
+    remotes=nothing,
+    format=DocumenterVitepress.MarkdownVitepress(;
+        repo="https://github.com/kahliburke/KaimonSlate.jl",
+        devurl="dev",
+        deploy_url="kahliburke.github.io/KaimonSlate.jl",
+        build_vitepress=false,
     ),
-    pages = [
+    pages=[
         "Home" => "index.md",
         "Installation" => "installation.md",
         "Getting Started" => "getting-started.md",
@@ -81,7 +81,7 @@ makedocs(;
         ],
         "API Reference" => "api.md",
     ],
-    warnonly = [:missing_docs, :docs_block, :cross_references],
+    warnonly=[:missing_docs, :docs_block, :cross_references],
 )
 
 # Step 2: Fix &amp; in markdown headings before VitePress sees them.
@@ -99,15 +99,14 @@ end
 
 # Step 3: Patch the VitePress config.mts base path for the deploy subfolder
 # (e.g. /KaimonSlate.jl/dev/ or /KaimonSlate.jl/previews/PR42/).
-let config_path =
-    joinpath(@__DIR__, "build", ".documenter", ".vitepress", "config.mts")
+let config_path = joinpath(@__DIR__, "build", ".documenter", ".vitepress", "config.mts")
     if isfile(config_path)
         deploy_decision = Documenter.deploy_folder(
             Documenter.auto_detect_deploy_system();
-            repo = "github.com/kahliburke/KaimonSlate.jl",
-            devbranch = "main",
-            devurl = "dev",
-            push_preview = true,
+            repo="github.com/kahliburke/KaimonSlate.jl",
+            devbranch="main",
+            devurl="dev",
+            push_preview=true,
         )
         folder = deploy_decision.subfolder
         base = "/KaimonSlate.jl/$(folder)$(isempty(folder) ? "" : "/")"
@@ -121,8 +120,8 @@ end
 DocumenterVitepress.build_docs(joinpath(@__DIR__, "build"))
 
 deploydocs(;
-    repo = "github.com/kahliburke/KaimonSlate.jl",
-    target = "build/.documenter/.vitepress/dist",
-    devbranch = "main",
-    push_preview = true,
+    repo="github.com/kahliburke/KaimonSlate.jl",
+    target="build/.documenter/.vitepress/dist",
+    devbranch="main",
+    push_preview=true,
 )

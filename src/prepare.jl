@@ -29,7 +29,7 @@ mutable struct PrepareTracker
     err::Bool
     t0::Float64              # start wall time (for elapsed)
 end
-PrepareTracker(t0::Float64 = time()) = PrepareTracker("", "", -1, 0, "", String[], 0, "", false, t0)
+PrepareTracker(t0::Float64=time()) = PrepareTracker("", "", -1, 0, "", String[], 0, "", false, t0)
 
 # A completion line, color OFF (non-TTY), is `<12-char timing>  ✓ Name` (✓ ok, ✗ failed,
 # ? not-precompilable). ✗ pads with spaces instead of a timing token — the optional timing
@@ -49,7 +49,7 @@ function prepare_feed!(tr::PrepareTracker, raw::AbstractString)
         rest = strip(s[nextind(s, 1, length("@@SLATE_PREP")):end])
         if startswith(rest, "total=")
             n = tryparse(Int, strip(rest[nextind(rest, 1, length("total=")):end]))
-            n === nothing || (tr.total = n; tr.phase = tr.phase == "" ? "precompile" : tr.phase)
+            n === nothing || (tr.total=n; tr.phase=tr.phase == "" ? "precompile" : tr.phase)
         elseif startswith(rest, "stage=")
             # Coarse bring-up step (payload sync, env build, worker spawn, connect) — the banner headline.
             # Orthogonal to `phase`: the precompile k/N bar (phase) rides UNDER it while packages compile.
@@ -59,8 +59,10 @@ function prepare_feed!(tr::PrepareTracker, raw::AbstractString)
         elseif startswith(rest, "done")
             tr.phase = "done"
         elseif startswith(rest, "error")
-            tr.phase = "error"; tr.err = true
-            m = findfirst(' ', rest); m === nothing || (tr.note = strip(rest[nextind(rest, m):end]))
+            tr.phase = "error"
+            tr.err = true
+            m = findfirst(' ', rest)
+            m === nothing || (tr.note = strip(rest[nextind(rest, m):end]))
         end
         return true
     end
@@ -68,11 +70,13 @@ function prepare_feed!(tr::PrepareTracker, raw::AbstractString)
     # ── per-package precompile completion ────────────────────────────────────────────────────
     m = match(_PREP_DONE_RE, s)
     if m !== nothing
-        mark = m.captures[1]; name = String(m.captures[2])
+        mark = m.captures[1]
+        name = String(m.captures[2])
         tr.phase = "precompile"
         tr.done += 1
         tr.pkg = name
-        pushfirst!(tr.recent, name); length(tr.recent) > 4 && pop!(tr.recent)
+        pushfirst!(tr.recent, name)
+        length(tr.recent) > 4 && pop!(tr.recent)
         mark == "✗" && (tr.err = true)
         tr.total >= 0 && tr.done > tr.total && (tr.total = tr.done)   # extensions can overshoot the estimate
         return true
@@ -97,8 +101,12 @@ function prepare_feed!(tr::PrepareTracker, raw::AbstractString)
         tr.phase = "install"
         return true
     end
-    if startswith(s, "Updating") || startswith(s, "Resolving") || startswith(s, "Installed") ||
-       startswith(s, "Downloaded") || startswith(s, "Cloning") || startswith(s, "Fetching")
+    if startswith(s, "Updating") ||
+        startswith(s, "Resolving") ||
+        startswith(s, "Installed") ||
+        startswith(s, "Downloaded") ||
+        startswith(s, "Cloning") ||
+        startswith(s, "Fetching")
         tr.phase == "precompile" && return false
         tr.phase = tr.phase in ("", "resolve") ? "resolve" : tr.phase
         return true
@@ -108,18 +116,39 @@ function prepare_feed!(tr::PrepareTracker, raw::AbstractString)
 end
 
 # Is there anything worth showing? (No point flashing a banner for a fully-warm env.)
-prepare_active(tr::PrepareTracker) =
-    !isempty(tr.stage) || tr.phase in ("resolve", "install", "precompile", "error") ||
-    tr.total > 0 || tr.done > 0
+function prepare_active(tr::PrepareTracker)
+    return !isempty(tr.stage) ||
+           tr.phase in ("resolve", "install", "precompile", "error") ||
+           tr.total > 0 ||
+           tr.done > 0
+end
 
 # Minimal JSON (hand-built; the worker has no JSON dep). Phase/counts/current pkg/elapsed/note.
 function prepare_json(tr::PrepareTracker)
     esc(x) = replace(String(x), '\\' => "\\\\", '"' => "\\\"", '\n' => " ", '\r' => " ")
     recent = "[" * join(("\"" * esc(r) * "\"" for r in tr.recent), ",") * "]"
     secs = round(Int, time() - tr.t0)
-    string("{\"phase\":\"", esc(tr.phase), "\",\"stage\":\"", esc(tr.stage),
-           "\",\"k\":", tr.done, ",\"n\":", tr.total,
-           ",\"pkg\":\"", esc(tr.pkg), "\",\"installed\":", tr.installed,
-           ",\"recent\":", recent, ",\"secs\":", secs,
-           ",\"err\":", tr.err ? "true" : "false", ",\"note\":\"", esc(tr.note), "\"}")
+    return string(
+        "{\"phase\":\"",
+        esc(tr.phase),
+        "\",\"stage\":\"",
+        esc(tr.stage),
+        "\",\"k\":",
+        tr.done,
+        ",\"n\":",
+        tr.total,
+        ",\"pkg\":\"",
+        esc(tr.pkg),
+        "\",\"installed\":",
+        tr.installed,
+        ",\"recent\":",
+        recent,
+        ",\"secs\":",
+        secs,
+        ",\"err\":",
+        tr.err ? "true" : "false",
+        ",\"note\":\"",
+        esc(tr.note),
+        "\"}",
+    )
 end

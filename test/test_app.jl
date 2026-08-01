@@ -12,10 +12,16 @@ const KS = KaimonSlate
 # on Windows resolves off APPDATA instead (it never consults XDG_CONFIG_HOME there — see
 # `_kaimon_dir`), so both vars are sandboxed here; the one this platform doesn't use is inert.
 # KAIMONSLATE_HOME / KAIMONSLATE_CONFIG_HOME are cleared so XDG_CONFIG_HOME is what SlateHome uses.
-_with_isolated_config(f) = mktempdir() do tmp
-    withenv("XDG_CONFIG_HOME" => tmp, "APPDATA" => tmp, "KAIMONSLATE_HOME" => nothing,
-            "KAIMONSLATE_CONFIG_HOME" => nothing) do
-        f(tmp)
+function _with_isolated_config(f)
+    mktempdir() do tmp
+        withenv(
+            "XDG_CONFIG_HOME" => tmp,
+            "APPDATA" => tmp,
+            "KAIMONSLATE_HOME" => nothing,
+            "KAIMONSLATE_CONFIG_HOME" => nothing,
+        ) do
+            return f(tmp)
+        end
     end
 end
 
@@ -28,7 +34,7 @@ end
 # Drive the onboarding prompt; returns (just_registered::Bool, printed_output::String).
 _onboard(input::String) = begin
     out = IOBuffer()
-    ret = KS._maybe_onboard!(input = IOBuffer(input), output = out)
+    ret = KS._maybe_onboard!(; input=IOBuffer(input), output=out)
     (ret, String(take!(out)))
 end
 
@@ -37,7 +43,10 @@ end
     # decides and XDG_CONFIG_HOME is NOT consulted — even if set (e.g. by Git Bash/MSYS2/Cygwin),
     # it must not redirect KaimonSlate away from the real %APPDATA%\Kaimon that Kaimon itself uses.
     if Sys.iswindows()
-        withenv("APPDATA" => "C:\\tmp\\appdata-kaimon-test", "XDG_CONFIG_HOME" => "C:\\tmp\\xdg-kaimon-test") do
+        withenv(
+            "APPDATA" => "C:\\tmp\\appdata-kaimon-test",
+            "XDG_CONFIG_HOME" => "C:\\tmp\\xdg-kaimon-test",
+        ) do
             @test KS._kaimon_dir() == joinpath("C:\\tmp\\appdata-kaimon-test", "Kaimon")
         end
         withenv("APPDATA" => nothing, "XDG_CONFIG_HOME" => nothing) do
@@ -127,12 +136,12 @@ end
 
 @testset "slateapp startup mode" begin
     # hub answering always wins; a registered auto-start extension defers unless --own
-    @test KS._startup_mode(true,  true,  false) == :viewer
-    @test KS._startup_mode(true,  false, true)  == :viewer
-    @test KS._startup_mode(false, true,  false) == :waiting
-    @test KS._startup_mode(false, true,  true)  == :owner
+    @test KS._startup_mode(true, true, false) == :viewer
+    @test KS._startup_mode(true, false, true) == :viewer
+    @test KS._startup_mode(false, true, false) == :waiting
+    @test KS._startup_mode(false, true, true) == :owner
     @test KS._startup_mode(false, false, false) == :owner
-    @test KS._startup_mode(false, false, true)  == :owner
+    @test KS._startup_mode(false, false, true) == :owner
 
     _with_isolated_config() do tmp
         @test !KS._ext_autostarts()                              # nothing registered
@@ -168,10 +177,15 @@ end
 @testset "slateapp registered check" begin
     _with_isolated_config() do tmp
         @test !KS._slate_registered()                            # no kaimon dir
-        kdir = joinpath(tmp, "kaimon"); mkpath(kdir)
+        kdir = joinpath(tmp, "kaimon")
+        mkpath(kdir)
         @test !KS._slate_registered()                            # no file
-        write(joinpath(kdir, "extensions.json"),
-              JSON.json(Dict("extensions" => [Dict("project_path" => "/nonexistent", "enabled" => true)])))
+        write(
+            joinpath(kdir, "extensions.json"),
+            JSON.json(
+                Dict("extensions" => [Dict("project_path" => "/nonexistent", "enabled" => true)])
+            ),
+        )
         @test !KS._slate_registered()                            # entry isn't a Slate checkout
         KS.register_extension()
         @test KS._slate_registered()
@@ -196,7 +210,7 @@ end
     # waiting mode: no hub to restart — points at [s]
     @test occursin("[s]", KS._restart_hub!(KS.SlateModel(:waiting)))
     # a queued file survives construction (opened on the waiting→viewer flip)
-    @test KS.SlateModel(:waiting; pending = "nb.jl").pending == "nb.jl"
+    @test KS.SlateModel(:waiting; pending="nb.jl").pending == "nb.jl"
     # quit keys flip the flag
     KS.Tachikoma.update!(m, KS.Tachikoma.KeyEvent(:char, 'q'))
     @test KS.Tachikoma.should_quit(m)

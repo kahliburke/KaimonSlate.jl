@@ -7,11 +7,21 @@
 # sync, the periodic draft net). Per-cell digests let the UI attribute + recover
 # individual cells. Never throws into the caller.
 _cells_of(report) = [(c.id, c.kind == MARKDOWN ? "md" : "code", c.source) for c in report.cells]
-function _history!(nb::LiveNotebook; source::AbstractString = "browser", kind::AbstractString = "checkpoint",
-                   label::AbstractString = "")
+function _history!(
+    nb::LiveNotebook;
+    source::AbstractString="browser",
+    kind::AbstractString="checkpoint",
+    label::AbstractString="",
+)
     try
-        SlateHistory.record!(nb.path, serialize_report(nb.report);
-                             source_label = source, kind = kind, cells = _cells_of(nb.report), label = label)
+        SlateHistory.record!(
+            nb.path,
+            serialize_report(nb.report);
+            source_label=source,
+            kind=kind,
+            cells=_cells_of(nb.report),
+            label=label,
+        )
     catch e
         @warn "KaimonSlate: history capture failed" exception = (e, catch_backtrace())
     end
@@ -28,15 +38,19 @@ const _SWRITES_LOCK = ReentrantLock()
 function _note_server_write!(report_id::AbstractString, h::UInt64)
     lock(_SWRITES_LOCK) do
         v = get!(_SERVER_WRITES, String(report_id), UInt64[])
-        push!(v, h); length(v) > 64 && popfirst!(v)
+        push!(v, h)
+        return length(v) > 64 && popfirst!(v)
     end
 end
-_is_server_write(report_id, h::UInt64) =
-    lock(_SWRITES_LOCK) do; h in get(_SERVER_WRITES, String(report_id), UInt64[]); end
+function _is_server_write(report_id, h::UInt64)
+    lock(_SWRITES_LOCK) do ;
+        return h in get(_SERVER_WRITES, String(report_id), UInt64[])
+    end
+end
 
 # Persist the notebook to its `.jl` AND record a durable checkpoint. The single
 # write+capture chokepoint for in-app mutations (replaces bare `write(...)`).
-function _persist!(nb::LiveNotebook; source::AbstractString = "browser", label::AbstractString = "")
+function _persist!(nb::LiveNotebook; source::AbstractString="browser", label::AbstractString="")
     s = serialize_report(nb.report)
     # Preserve a self-contained `.jl`'s env artifacts. `serialize_report` writes only the lightweight
     # env/config footers, so without this the FIRST edit-save silently strips the `Slate.bundle` (and
@@ -49,18 +63,22 @@ function _persist!(nb::LiveNotebook; source::AbstractString = "browser", label::
             isempty(carry) || (s = rstrip(s, '\n') * "\n\n" * carry * "\n")
         end
     catch e
-        @warn "KaimonSlate: could not preserve bundle footer on save" exception = (e, catch_backtrace())
+        @warn "KaimonSlate: could not preserve bundle footer on save" exception = (
+            e, catch_backtrace()
+        )
     end
     _note_server_write!(nb.report.id, hash(s))   # register BEFORE writing: a watcher tick fired by
     write(nb.path, s)                             # this write must recognize it as OURS, not external
     nb.version += 1                               # every in-app commit advances the version (CAS basis)
-    _history!(nb; source = source, label = label)
+    _history!(nb; source=source, label=label)
     return nb
 end
 
 # Infra packages the remote provisioner adds INTO the worker's env (the single-env fix) — filtered out
 # of the notebook's package view + footer so they don't masquerade as the user's own deps.
-const _WORKER_INFRA_PKGS = Set(["KaimonGate", "Revise", "ExpressionExplorer", "SlateExtensionsBase"])
+const _WORKER_INFRA_PKGS = Set([
+    "KaimonGate", "Revise", "ExpressionExplorer", "SlateExtensionsBase"
+])
 
 # The notebook's OWN packages (the delta beyond the parent project) as sorted
 # `{name, version, uuid}` — the set difference active − parent − parent-package. Shared by
@@ -71,7 +89,13 @@ function _notebook_adds(nb::LiveNotebook)
     catch
         # `ok = false` distinguishes a FAILED env probe from a genuinely detached notebook (both
         # `detached = true`) — so a transient failure can't be read as "no packages" and wipe the footer.
-        return (adds = Dict{String,Any}[], parent = Dict{String,Any}[], parentpath = "", detached = true, ok = false)
+        return (
+            adds=Dict{String,Any}[],
+            parent=Dict{String,Any}[],
+            parentpath="",
+            detached=true,
+            ok=false,
+        )
     end
     pdeps = info.parent === nothing ? Dict{String,Any}[] : info.parent.deps
     pnames = Set(string(get(d, "name", "")) for d in pdeps)
@@ -79,11 +103,17 @@ function _notebook_adds(nb::LiveNotebook)
     # Worker infra injected into a REMOTE worker's env (one-env fix) — not the user's notebook deps, so
     # hide them from the package viewer + the reproducibility footer (the remote provisioner adds them).
     union!(pnames, _WORKER_INFRA_PKGS)
-    adds = sort([d for d in info.notebook.deps if !(string(get(d, "name", "")) in pnames)];
-                by = d -> string(get(d, "name", "")))
-    return (adds = adds, parent = pdeps,
-            parentpath = info.parent === nothing ? "" : info.parent.path,
-            detached = info.parent === nothing, ok = true)
+    adds = sort(
+        [d for d in info.notebook.deps if !(string(get(d, "name", "")) in pnames)];
+        by=d -> string(get(d, "name", "")),
+    )
+    return (
+        adds=adds,
+        parent=pdeps,
+        parentpath=info.parent === nothing ? "" : info.parent.path,
+        detached=info.parent === nothing,
+        ok=true,
+    )
 end
 
 # Sync the `.jl` reproducibility footer (`report.meta["env"]`) to the notebook's current
@@ -93,10 +123,13 @@ function _refresh_env_meta!(nb::LiveNotebook)
     # nb.lock (protocol), then apply the change + persist under the lock. Sole caller: `notebook_pkg_op!`.
     info = _notebook_adds(nb)
     info.ok || return nb   # env probe failed transiently — leave the footer as-is rather than wiping it
-    env = Dict{String,Any}[Dict{String,Any}("name" => string(get(d, "name", "")),
-                                             "version" => string(get(d, "version", "")),
-                                             "uuid" => string(get(d, "uuid", "")))
-                           for d in info.adds]
+    env = Dict{String,Any}[
+        Dict{String,Any}(
+            "name" => string(get(d, "name", "")),
+            "version" => string(get(d, "version", "")),
+            "uuid" => string(get(d, "uuid", "")),
+        ) for d in info.adds
+    ]
     @report_op nb report begin
         cur = get(report.meta, "env", Dict{String,Any}[])
         changed = if isempty(env)
@@ -104,9 +137,10 @@ function _refresh_env_meta!(nb::LiveNotebook)
         elseif env == cur
             false
         else
-            report.meta["env"] = env; true
+            report.meta["env"] = env
+            true
         end
-        changed && _persist!(nb; source = "packages")   # local file write, no round-trip → lock-safe
+        changed && _persist!(nb; source="packages")   # local file write, no round-trip → lock-safe
     end
     return nb
 end
@@ -115,22 +149,26 @@ end
 # code cells so a `using` lights up, sync the `.jl` Slate.env footer, and refresh docs/agent view.
 # The single source of truth for the browser package panel (`POST /api/{id}/package`) AND the
 # `slate.pkg` agent tool — so both paths behave identically. `op` is "add" or "rm".
-function notebook_pkg_op!(nb::LiveNotebook, op::AbstractString, name::AbstractString;
-                          target::AbstractString = "notebook")
+function notebook_pkg_op!(
+    nb::LiveNotebook, op::AbstractString, name::AbstractString; target::AbstractString="notebook"
+)
     (op in ("add", "rm")) || return Dict{String,Any}("ok" => false, "message" => "bad op '$op'")
     # `pkg_op` is a long worker round-trip (resolve + precompile — minutes on a fresh env) — run it OFF
     # nb.lock (protocol), serialized vs eval on the notebook's gate mutex. Holding nb.lock across it was a
     # teardown-deadlock hazard: a concurrent close/restart needing nb.lock would wedge behind the install.
     r = lock(_eval_mutex(nb)) do
-        ReportEngine.pkg_op(nb.kernel, nb.report, op, name; target = target)
+        return ReportEngine.pkg_op(nb.kernel, nb.report, op, name; target=target)
     end
     if get(r, "ok", false) === true                  # env changed → re-run so `using` cells pick it up
         @report_op nb report begin
-            for c in report.cells; c.kind == CODE && (c.state = STALE); end
+            for c in report.cells
+                c.kind == CODE && (c.state = STALE)
+            end
         end
         _eval!(nb)                                   # non-blocking; the runner drains the restaled cells
         _refresh_env_meta!(nb)                       # sync the .jl footer (itself round-trips off-lock)
-        _autoindex!(nb); _agent_push!(nb)
+        _autoindex!(nb)
+        _agent_push!(nb)
     end
     return r
 end
@@ -143,28 +181,116 @@ end
 # *permission* is deliberately NOT here — it must never travel in a file (a `bypass` preset riding a
 # shared notebook is a privilege-escalation footgun); the client remembers it locally per notebook.
 const _CONFIG_UI = (
-    (key = "agentmodel", group = "Agent", label = "Agent model", type = :string, default = "",
-     choices = String[], global_default = nothing, restart = false),
-    (key = "threads", group = "Execution", label = "Worker threads", type = :string, default = "",
-     choices = String[], global_default = () -> ReportEngine.WORKER_THREADS[], restart = true),
-    (key = "juliaflags", group = "Execution", label = "Extra Julia flags", type = :string, default = "",
-     choices = String[], global_default = () -> ReportEngine.WORKER_EXTRA_FLAGS[], restart = true),
-    (key = "parallel", group = "Execution", label = "Parallel cells", type = :bool, default = true,
-     choices = String[], global_default = () -> PARALLEL_DEFAULT[], restart = false),
-    (key = "hotreload", group = "Execution", label = "Hot-reload /src edits", type = :bool, default = true,
-     choices = String[], global_default = nothing, restart = false),
-    (key = "macroexpand", group = "Execution", label = "Macro-aware deps", type = :bool, default = true,
-     choices = String[], global_default = nothing, restart = false),
-    (key = "slidelevel", group = "Slides", label = "Slide heading level", type = :int, default = 2,
-     choices = String[], global_default = nothing, restart = false),
-    (key = "slidetransition", group = "Slides", label = "Slide transition", type = :enum, default = "fade",
-     choices = ["none", "fade", "slide"], global_default = nothing, restart = false),
-    (key = "slideratio", group = "Slides", label = "PDF slide ratio", type = :enum, default = "16:9",
-     choices = ["16:9", "4:3"], global_default = nothing, restart = false),
-    (key = "bibstyle", group = "Slides", label = "Bibliography style", type = :string, default = "ieee",
-     choices = String[], global_default = nothing, restart = false),
-    (key = "series", group = "Publishing", label = "Series", type = :string, default = "",
-     choices = String[], global_default = nothing, restart = false),
+    (
+        key="agentmodel",
+        group="Agent",
+        label="Agent model",
+        type=:string,
+        default="",
+        choices=String[],
+        global_default=nothing,
+        restart=false,
+    ),
+    (
+        key="threads",
+        group="Execution",
+        label="Worker threads",
+        type=:string,
+        default="",
+        choices=String[],
+        global_default=() -> ReportEngine.WORKER_THREADS[],
+        restart=true,
+    ),
+    (
+        key="juliaflags",
+        group="Execution",
+        label="Extra Julia flags",
+        type=:string,
+        default="",
+        choices=String[],
+        global_default=() -> ReportEngine.WORKER_EXTRA_FLAGS[],
+        restart=true,
+    ),
+    (
+        key="parallel",
+        group="Execution",
+        label="Parallel cells",
+        type=:bool,
+        default=true,
+        choices=String[],
+        global_default=() -> PARALLEL_DEFAULT[],
+        restart=false,
+    ),
+    (
+        key="hotreload",
+        group="Execution",
+        label="Hot-reload /src edits",
+        type=:bool,
+        default=true,
+        choices=String[],
+        global_default=nothing,
+        restart=false,
+    ),
+    (
+        key="macroexpand",
+        group="Execution",
+        label="Macro-aware deps",
+        type=:bool,
+        default=true,
+        choices=String[],
+        global_default=nothing,
+        restart=false,
+    ),
+    (
+        key="slidelevel",
+        group="Slides",
+        label="Slide heading level",
+        type=:int,
+        default=2,
+        choices=String[],
+        global_default=nothing,
+        restart=false,
+    ),
+    (
+        key="slidetransition",
+        group="Slides",
+        label="Slide transition",
+        type=:enum,
+        default="fade",
+        choices=["none", "fade", "slide"],
+        global_default=nothing,
+        restart=false,
+    ),
+    (
+        key="slideratio",
+        group="Slides",
+        label="PDF slide ratio",
+        type=:enum,
+        default="16:9",
+        choices=["16:9", "4:3"],
+        global_default=nothing,
+        restart=false,
+    ),
+    (
+        key="bibstyle",
+        group="Slides",
+        label="Bibliography style",
+        type=:string,
+        default="ieee",
+        choices=String[],
+        global_default=nothing,
+        restart=false,
+    ),
+    (
+        key="series",
+        group="Publishing",
+        label="Series",
+        type=:string,
+        default="",
+        choices=String[],
+        global_default=nothing,
+        restart=false,
+    ),
     # `@replay` export resolution as `<mark id>:<stride>` pairs — normally set from the export dialog's
     # replay step, not typed here. Registered because this registry is also the persistence whitelist,
     # and it earns its place in the panel anyway: it is the one view of what a document has decided to
@@ -172,11 +298,22 @@ const _CONFIG_UI = (
     # READ-ONLY here: it is decided in the export dialog's replay step, against measured sizes, which is
     # the only place the choice can be made meaningfully. Shown so a notebook's state is legible and can
     # be cleared, not so it can be typed into.
-    (key = "replaystrides", group = "Publishing", label = "Replay resolution", type = :string, default = "",
-     choices = String[], global_default = nothing, restart = false, readonly = true),
+    (
+        key="replaystrides",
+        group="Publishing",
+        label="Replay resolution",
+        type=:string,
+        default="",
+        choices=String[],
+        global_default=nothing,
+        restart=false,
+        readonly=true,
+    ),
 )
 
-_config_item(key) = (i = findfirst(x -> x.key == key, _CONFIG_UI); i === nothing ? nothing : _CONFIG_UI[i])
+function _config_item(key)
+    return (i=findfirst(x -> x.key == key, _CONFIG_UI); i === nothing ? nothing : _CONFIG_UI[i])
+end
 
 # The config panel's view: each setting with its effective value, whether the notebook overrides it,
 # and the global/built-in it would fall back to. The client layers its own browser-global (agent
@@ -186,33 +323,46 @@ function notebook_config_payload(nb::LiveNotebook)
     items = map(_CONFIG_UI) do it
         gd = it.global_default === nothing ? nothing : it.global_default()
         overridden = haskey(meta, it.key)
-        Dict{String,Any}("key" => it.key, "group" => it.group, "label" => it.label,
-                         "type" => String(it.type), "choices" => it.choices,
-                         # Machine-managed settings render as readable text, not an input: their real
-                         # editor is elsewhere (see the `replaystrides` entry). Absent ⇒ editable.
-                         "readonly" => get(it, :readonly, false),
-                         "overridden" => overridden,
-                         "value" => overridden ? meta[it.key] : (gd === nothing ? it.default : gd),
-                         "default" => it.default, "global" => gd)
+        return Dict{String,Any}(
+            "key" => it.key,
+            "group" => it.group,
+            "label" => it.label,
+            "type" => String(it.type),
+            "choices" => it.choices,
+            # Machine-managed settings render as readable text, not an input: their real
+            # editor is elsewhere (see the `replaystrides` entry). Absent ⇒ editable.
+            "readonly" => get(it, :readonly, false),
+            "overridden" => overridden,
+            "value" => overridden ? meta[it.key] : (gd === nothing ? it.default : gd),
+            "default" => it.default,
+            "global" => gd,
+        )
     end
     return Dict{String,Any}("items" => collect(items))
 end
 
 # Set (or clear) one per-notebook config override, persist the footer, and run its side effect.
 # `clear=true` or an empty string value removes the override so the setting follows the global/default.
-function set_notebook_config!(nb::LiveNotebook, key::AbstractString, value; clear::Bool = false)
+function set_notebook_config!(nb::LiveNotebook, key::AbstractString, value; clear::Bool=false)
     it = _config_item(String(key))
-    it === nothing && return Dict{String,Any}("ok" => false, "message" => "unknown config key '$key'")
+    it === nothing &&
+        return Dict{String,Any}("ok" => false, "message" => "unknown config key '$key'")
     if clear || (value isa AbstractString && isempty(strip(String(value))))
         delete!(nb.report.meta, it.key)
     else
-        nb.report.meta[it.key] = it.type === :bool ? (value === true || value == "true") :
-                                 it.type === :int  ? something(tryparse(Int, string(value)), it.default) :
-                                 String(string(value))
+        nb.report.meta[it.key] = if it.type === :bool
+            (value === true || value == "true")
+        elseif it.type === :int
+            something(tryparse(Int, string(value)), it.default)
+        else
+            String(string(value))
+        end
     end
-    it.key == "threads" && nb.kernel isa ReportEngine.GateKernel &&
+    it.key == "threads" &&
+        nb.kernel isa ReportEngine.GateKernel &&
         (nb.kernel.threads = get(nb.report.meta, "threads", ""))
-    it.key == "juliaflags" && nb.kernel isa ReportEngine.GateKernel &&
+    it.key == "juliaflags" &&
+        nb.kernel isa ReportEngine.GateKernel &&
         (nb.kernel.extra_flags = get(nb.report.meta, "juliaflags", ""))
     _persist!(nb)
     it.restart && restart_kernel!(nb)
@@ -229,7 +379,7 @@ function restore_history!(nb::LiveNotebook, hash::AbstractString)
     lock(nb.lock) do
         _snapshot!(nb)
         _restore!(nb, src)            # applies, runs, persists as source="restore"
-        nb.version += 1
+        return nb.version += 1
     end
     _broadcast(nb, string(nb.version))
     return true
@@ -242,7 +392,7 @@ function sync_from_file!(nb::LiveNotebook)
     isfile(nb.path) || return false
     disk = read(nb.path, String)
     norm = try
-        serialize_report(parse_report(disk; id = nb.report.id))
+        serialize_report(parse_report(disk; id=nb.report.id))
     catch
         return false                     # mid-save / unparseable — skip this tick
     end
@@ -254,7 +404,7 @@ function sync_from_file!(nb::LiveNotebook)
     _eval!(nb)
     nb.version += 1
     # External write (agent mid-turn → "agent", else a human in another editor).
-    _history!(nb; source = nb.agent_busy ? "agent" : "external")
+    _history!(nb; source=nb.agent_busy ? "agent" : "external")
     return true
 end
 
@@ -270,31 +420,45 @@ _json_finite(x::NamedTuple) = NamedTuple{keys(x)}(map(_json_finite, values(x)))
 _json_finite(x::Union{AbstractVector,Tuple}) = Any[_json_finite(v) for v in x]
 _json_finite(x::Pair) = _json_finite(x.first) => _json_finite(x.second)
 
-_echarts_specs(c::Cell) = c.output === nothing ? Any[] : Any[_json_finite(e) for e in c.output.echarts]
+function _echarts_specs(c::Cell)
+    return c.output === nothing ? Any[] : Any[_json_finite(e) for e in c.output.echarts]
+end
 _table_specs(c::Cell) = c.output === nothing ? Any[] : c.output.tables
 
 # Read a field from an animation payload whether it crossed as a NamedTuple (in-process) or a Dict
 # (after the gate wire). Bytes are coerced to a real `Vector{UInt8}`.
-_aget(a, k::Symbol) = a isa AbstractDict ? get(a, String(k), get(a, k, nothing)) :
-                      (hasproperty(a, k) ? getproperty(a, k) : nothing)
+function _aget(a, k::Symbol)
+    return if a isa AbstractDict
+        get(a, String(k), get(a, k, nothing))
+    else
+        (hasproperty(a, k) ? getproperty(a, k) : nothing)
+    end
+end
 _abytes(x) = x === nothing ? UInt8[] : (x isa Vector{UInt8} ? x : Vector{UInt8}(x))
 
 # Animation specs for a cell: register the (gzipped) frame stack + LUT in the durable blob store and
 # return manifests carrying `/blob/<hash>` URLs — so the heavy buffers never ride in the cell JSON.
-function _animation_specs(c::Cell, nbid::AbstractString = "")
+function _animation_specs(c::Cell, nbid::AbstractString="")
     (c.output === nothing || isempty(c.output.animations) || isempty(nbid)) && return Any[]
     specs = Any[]
     for a in c.output.animations
-        manifest = _aget(a, :manifest); manifest === nothing && continue
-        frames = _abytes(_aget(a, :frames)); lut = _abytes(_aget(a, :lut))
+        manifest = _aget(a, :manifest)
+        manifest === nothing && continue
+        frames = _abytes(_aget(a, :frames))
+        lut = _abytes(_aget(a, :lut))
         (isempty(frames) || isempty(lut)) && continue
-        fh = string(hash(frames); base = 16); lh = string(hash(lut); base = 16)
-        _blob_put_durable!(string(nbid, "/", fh), "application/octet-stream",
-                           transcode(GzipCompressor, frames); encoding = "gzip")
+        fh = string(hash(frames); base=16)
+        lh = string(hash(lut); base=16)
+        _blob_put_durable!(
+            string(nbid, "/", fh),
+            "application/octet-stream",
+            transcode(GzipCompressor, frames);
+            encoding="gzip",
+        )
         _blob_put_durable!(string(nbid, "/", lh), "application/octet-stream", lut)
         m = Dict{String,Any}(string(k) => v for (k, v) in pairs(manifest))
         m["framesUrl"] = string("/api/", nbid, "/blob/", fh)
-        m["lutUrl"]    = string("/api/", nbid, "/blob/", lh)
+        m["lutUrl"] = string("/api/", nbid, "/blob/", lh)
         push!(specs, m)
     end
     return specs
@@ -302,13 +466,26 @@ end
 # A generated-asset record → its bytes. A byte/string/array asset carries `bytes`; a JSON-value asset
 # carries `value` and is encoded HERE (the worker has no JSON dep — mirrors echarts/tables). Shared by
 # state-serving and the static export so both agree on the exact bytes + their content hash.
-_asset_bytes(a) = hasproperty(a, :bytes) ? Vector{UInt8}(getfield(a, :bytes)) :
-                  Vector{UInt8}(codeunits(JSON.json(getfield(a, :value))))
+function _asset_bytes(a)
+    return if hasproperty(a, :bytes)
+        Vector{UInt8}(getfield(a, :bytes))
+    else
+        Vector{UInt8}(codeunits(JSON.json(getfield(a, :value))))
+    end
+end
 # Typed-array metadata for a packed numeric asset (`{dtype, shape, order}`), empty otherwise — rides in
 # the spec so the client hands back an ndarray-lite instead of a raw ArrayBuffer.
-_asset_meta(a) = hasproperty(a, :dtype) ?
-    Dict{String,Any}("dtype" => getfield(a, :dtype), "shape" => collect(getfield(a, :shape)), "order" => getfield(a, :order)) :
-    Dict{String,Any}()
+function _asset_meta(a)
+    return if hasproperty(a, :dtype)
+        Dict{String,Any}(
+            "dtype" => getfield(a, :dtype),
+            "shape" => collect(getfield(a, :shape)),
+            "order" => getfield(a, :order),
+        )
+    else
+        Dict{String,Any}()
+    end
+end
 
 # Shared metadata for a generated asset — everything but the transport (`url`/`data`, set by each caller):
 # path, mime, original name, byte size, content sha, PRODUCING CELL, creation time, and typed-array
@@ -316,9 +493,14 @@ _asset_meta(a) = hasproperty(a, :dtype) ?
 # widget's `Slate.assetInfo(path)` reports the same facts everywhere. `sha` is the content hash (also the
 # blob key + a stable id).
 function _asset_common(a, bytes::Vector{UInt8}, cellid::AbstractString)
-    d = Dict{String,Any}("path" => String(getfield(a, :path)), "mime" => String(getfield(a, :mime)),
-                         "name" => String(getfield(a, :name)), "bytes" => length(bytes),
-                         "sha" => string(hash(bytes); base = 16), "cell" => String(cellid))
+    d = Dict{String,Any}(
+        "path" => String(getfield(a, :path)),
+        "mime" => String(getfield(a, :mime)),
+        "name" => String(getfield(a, :name)),
+        "bytes" => length(bytes),
+        "sha" => string(hash(bytes); base=16),
+        "cell" => String(cellid),
+    )
     hasproperty(a, :created) && (d["created"] = getfield(a, :created))
     merge!(d, _asset_meta(a))
     return d
@@ -327,11 +509,12 @@ end
 # Generated assets (`save_asset`) a cell produced → wire specs (see `_asset_common`) + the served blob
 # `url`. The bytes go into the content-addressed store (served at `/api/<id>/blob/<sha>`); the client
 # builds a `path → asset` registry from these so `Slate.asset(path)` resolves live. Mirrors `_animation_specs`.
-function _asset_specs(c::Cell, nbid::AbstractString = "")
+function _asset_specs(c::Cell, nbid::AbstractString="")
     (c.output === nothing || isempty(c.output.assets) || isempty(nbid)) && return Any[]
     specs = Any[]
     for a in c.output.assets
-        bytes = _asset_bytes(a); d = _asset_common(a, bytes, c.id)
+        bytes = _asset_bytes(a)
+        d = _asset_common(a, bytes, c.id)
         _blob_put_durable!(string(nbid, "/", d["sha"]), d["mime"], bytes)
         d["url"] = string("/api/", nbid, "/blob/", d["sha"])
         push!(specs, d)
@@ -340,23 +523,47 @@ function _asset_specs(c::Cell, nbid::AbstractString = "")
 end
 # Specs from a markdown cell's `{{ }}` interpolations, in document order (matches
 # the `.ichart`/`.itable` placeholder indices the renderer emits).
-_md_interp_echarts(c::Cell) = (e = Any[]; for o in c.interp, s in o.echarts; push!(e, _json_finite(s)); end; e)
-_md_interp_tables(c::Cell) = (t = Any[]; for o in c.interp; append!(t, o.tables); end; t)
+_md_interp_echarts(c::Cell) = (
+    e=Any[];
+    for o in c.interp, s in o.echarts
+        push!(e, _json_finite(s))
+    end;
+    e
+)
+_md_interp_tables(c::Cell) = (
+    t=Any[];
+    for o in c.interp
+        append!(t, o.tables)
+    end;
+    t
+)
 
 # A bound control resolved for the frontend: enough to render the widget *and*
 # POST value changes to `/api/bind/<id>` (the *defining* cell's id) keyed by
 # variable name, regardless of which cell surfaces it.
-_control_spec(cell::Cell, spec::BindSpec) =
-    Dict{String,Any}("id" => cell.id, "name" => String(spec.name),
-                     "widget" => spec.widget, "params" => spec.params, "value" => spec.value)
+function _control_spec(cell::Cell, spec::BindSpec)
+    return Dict{String,Any}(
+        "id" => cell.id,
+        "name" => String(spec.name),
+        "widget" => spec.widget,
+        "params" => spec.params,
+        "value" => spec.value,
+    )
+end
 
 # `hosts` is the list of cell ids whose control strip surfaces this bind (usually one,
 # possibly several, possibly the bind's OWN cell). `hosted` stays a simple bool for the
 # common path; `hostedby` lets the frontend say *where* (jump link) and tell self-host apart.
-_bind_json(spec::BindSpec, hosts::Vector{String}) =
-    Dict{String,Any}("name" => String(spec.name), "widget" => spec.widget,
-                     "params" => spec.params, "value" => spec.value,
-                     "hosted" => !isempty(hosts), "hostedby" => hosts)
+function _bind_json(spec::BindSpec, hosts::Vector{String})
+    return Dict{String,Any}(
+        "name" => String(spec.name),
+        "widget" => spec.widget,
+        "params" => spec.params,
+        "value" => spec.value,
+        "hosted" => !isempty(hosts),
+        "hostedby" => hosts,
+    )
+end
 
 # ── Content-addressed blob store for output images ───────────────────────────────
 # Plot rasters (CairoMakie `image/png`) are otherwise inlined into every cell's output HTML as
@@ -373,10 +580,12 @@ const _IMG_RE = r"<img([^>]*?)src=\"data:(image/[A-Za-z0-9.+-]+);base64,([A-Za-z
 function _blob_put!(key::AbstractString, mime::AbstractString, bytes::Vector{UInt8})
     lock(_BLOB_LOCK) do
         length(_BLOBS) > 800 && empty!(_BLOBS)   # crude cap; content-addressed keys re-populate on next render
-        _BLOBS[String(key)] = (String(mime), bytes)
+        return _BLOBS[String(key)] = (String(mime), bytes)
     end
 end
-blob_get(key::AbstractString) = lock(_BLOB_LOCK) do; get(_BLOBS, String(key), nothing); end
+blob_get(key::AbstractString) = lock(_BLOB_LOCK) do ;
+    return get(_BLOBS, String(key), nothing)
+end
 
 # Extension-served byte assets (see SlateExtensionsBase.provide_served_asset!) — a large shared runtime a
 # page loads ONCE (e.g. the Bonito JS bundle), fetched lazily from the worker by content hash the first
@@ -384,15 +593,20 @@ blob_get(key::AbstractString) = lock(_BLOB_LOCK) do; get(_BLOBS, String(key), no
 # NO eviction cap: a served module must stay resident for the life of any page that imported it.
 const _SERVED_MODULES = Dict{String,Tuple{String,Vector{UInt8}}}()   # "id/hash" → (mime, bytes)
 const _SERVED_LOCK = ReentrantLock()
-_served_module_put!(key::AbstractString, mime::AbstractString, bytes::Vector{UInt8}) =
-    lock(_SERVED_LOCK) do; _SERVED_MODULES[String(key)] = (String(mime), bytes); end
-served_module_get(key::AbstractString) = lock(_SERVED_LOCK) do; get(_SERVED_MODULES, String(key), nothing); end
+function _served_module_put!(key::AbstractString, mime::AbstractString, bytes::Vector{UInt8})
+    lock(_SERVED_LOCK) do ;
+        return _SERVED_MODULES[String(key)] = (String(mime), bytes)
+    end
+end
+served_module_get(key::AbstractString) = lock(_SERVED_LOCK) do ;
+    return get(_SERVED_MODULES, String(key), nothing)
+end
 # Intrinsic (w, h) of a PNG from its IHDR header, else nothing — lets the <img> reserve its box.
 function _png_dims(b::Vector{UInt8})
     (length(b) >= 24 && b[1] == 0x89 && b[2] == 0x50) || return nothing
     w = (Int(b[17]) << 24) | (Int(b[18]) << 16) | (Int(b[19]) << 8) | Int(b[20])
     h = (Int(b[21]) << 24) | (Int(b[22]) << 16) | (Int(b[23]) << 8) | Int(b[24])
-    (w > 0 && h > 0) ? (w, h) : nothing
+    return (w > 0 && h > 0) ? (w, h) : nothing
 end
 # Preview-asset size caps (shared by the durable-blob tier, the interim-render sidecar, and the
 # export-embedded preview). A single rendered asset over `_PREVIEW_MAX_ASSET` isn't persisted for
@@ -406,21 +620,32 @@ const _PREVIEW_MAX_TOTAL = 50 * 1024 * 1024
 # width/height so the layout reserves space before the (async, cached) image loads.
 function _externalize_blobs(nbid::AbstractString, html::AbstractString)
     (isempty(nbid) || !occursin("data:image", html)) && return html
-    replace(html, _IMG_RE => function (s)
-        m = match(_IMG_RE, s)
-        pre, mime, b64, post = m.captures
-        bytes = try; Base64.base64decode(b64); catch; return s; end
-        h = string(hash(bytes); base = 16)
-        key = string(nbid, "/", h)
-        _blob_put!(key, mime, bytes)
-        # Also persist to the durable tier (under the per-asset cap), so the interim-render preview
-        # survives a server restart AND has a real byte source to re-inline into a travelling export.
-        # Content-addressed → write-once; an oversized asset stays memory-only and recomputes on reopen.
-        length(bytes) <= _PREVIEW_MAX_ASSET && _blob_put_durable!(key, mime, bytes)
-        dim = _png_dims(bytes)
-        sz = dim === nothing ? "" : string(" width=\"", dim[1], "\" height=\"", dim[2], "\"")
-        string("<img", pre, "src=\"/api/", nbid, "/blob/", h, "\"", sz, post, ">")
-    end)
+    replace(
+        html,
+        _IMG_RE => function (s)
+            m = match(_IMG_RE, s)
+            pre, mime, b64, post = m.captures
+            bytes = try
+                Base64.base64decode(b64)
+            catch
+                return s
+            end
+            h = string(hash(bytes); base=16)
+            key = string(nbid, "/", h)
+            _blob_put!(key, mime, bytes)
+            # Also persist to the durable tier (under the per-asset cap), so the interim-render preview
+            # survives a server restart AND has a real byte source to re-inline into a travelling export.
+            # Content-addressed → write-once; an oversized asset stays memory-only and recomputes on reopen.
+            length(bytes) <= _PREVIEW_MAX_ASSET && _blob_put_durable!(key, mime, bytes)
+            dim = _png_dims(bytes)
+            sz = if dim === nothing
+                ""
+            else
+                string(" width=\"", dim[1], "\" height=\"", dim[2], "\"")
+            end
+            return string("<img", pre, "src=\"/api/", nbid, "/blob/", h, "\"", sz, post, ">")
+        end,
+    )
 end
 
 # ── Durable blob tier (content-addressed, on disk) ────────────────────────────────────────────
@@ -432,20 +657,34 @@ end
 const _DBLOB_DIR = Ref{String}("")
 function _dblob_dir()
     if _DBLOB_DIR[] == ""
-        d = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(get(ENV, "HOME", tempdir()), ".cache")), "kaimonslate", "blobs")
-        try; mkpath(d); catch; d = joinpath(tempdir(), "kaimonslate-blobs"); mkpath(d); end
+        d = joinpath(
+            get(ENV, "XDG_CACHE_HOME", joinpath(get(ENV, "HOME", tempdir()), ".cache")),
+            "kaimonslate",
+            "blobs",
+        )
+        try
+            mkpath(d)
+        catch
+            d = joinpath(tempdir(), "kaimonslate-blobs")
+            mkpath(d)
+        end
         _DBLOB_DIR[] = d
     end
     return _DBLOB_DIR[]
 end
-_dblob_file(key::AbstractString) = joinpath(_dblob_dir(), replace(String(key), "/" => "__", r"[^A-Za-z0-9_.]" => "_"))
+function _dblob_file(key::AbstractString)
+    return joinpath(_dblob_dir(), replace(String(key), "/" => "__", r"[^A-Za-z0-9_.]" => "_"))
+end
 
-function _blob_put_durable!(key::AbstractString, mime::AbstractString, bytes::Vector{UInt8}; encoding::AbstractString = "")
+function _blob_put_durable!(
+    key::AbstractString, mime::AbstractString, bytes::Vector{UInt8}; encoding::AbstractString=""
+)
     f = _dblob_file(key)
     try
         if !isfile(f)                                   # content-addressed: write once, atomically
-            tmp = f * ".tmp" * string(hash(bytes); base = 16)
-            write(tmp, bytes); mv(tmp, f; force = true)
+            tmp = f * ".tmp" * string(hash(bytes); base=16)
+            write(tmp, bytes)
+            mv(tmp, f; force=true)
             write(f * ".meta", string(mime, "\n", encoding))
         end
     catch
@@ -455,11 +694,17 @@ end
 
 # Route lookup: memory (`_BLOBS`) first, then the durable disk tier. Returns (mime, bytes, encoding).
 function blob_lookup(key::AbstractString)
-    m = lock(_BLOB_LOCK) do; get(_BLOBS, String(key), nothing); end
+    m = lock(_BLOB_LOCK) do ;
+        return get(_BLOBS, String(key), nothing)
+    end
     m !== nothing && return (m[1], m[2], "")
     f = _dblob_file(key)
     isfile(f) || return nothing
-    meta = isfile(f * ".meta") ? split(read(f * ".meta", String), "\n") : ["application/octet-stream", ""]
+    meta = if isfile(f * ".meta")
+        split(read(f * ".meta", String), "\n")
+    else
+        ["application/octet-stream", ""]
+    end
     return (String(meta[1]), read(f), length(meta) >= 2 ? String(meta[2]) : "")
 end
 
@@ -467,9 +712,18 @@ end
 # The document's cells as JSON (`state_json`'s `cells`), factored out so the interim-render snapshot
 # (below) and the export-embedded preview build the SAME shape from the SAME code path. Recomputes
 # the render context (bind index, citations, figure numbering) when not supplied by the caller.
-function _render_cells(nb::LiveNotebook; bindref = nothing, hostednames = nothing,
-                       md = nothing, nbdir = nothing, cited = nothing, bibctx = :unset,
-                       figidx = :unset, br = nothing, live_placeholder::Bool = false)
+function _render_cells(
+    nb::LiveNotebook;
+    bindref=nothing,
+    hostednames=nothing,
+    md=nothing,
+    nbdir=nothing,
+    cited=nothing,
+    bibctx=:unset,
+    figidx=:unset,
+    br=nothing,
+    live_placeholder::Bool=false,
+)
     if bindref === nothing || hostednames === nothing
         bindref, hostednames = _bind_index(nb.report)
     end
@@ -479,10 +733,22 @@ function _render_cells(nb::LiveNotebook; bindref = nothing, hostednames = nothin
     cited === nothing && (cited = cited_citation_keys(nb.report))
     bibctx === :unset && (bibctx = _bib_link_ctx(nb))
     figidx === :unset && (figidx = figure_index(nb.report))
-    return [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
-        cited = cited, bibctx = bibctx, figidx = figidx, backref = br, report = nb.report,
-        live_placeholder = live_placeholder)
-            for c in nb.report.cells]
+    return [
+        cell_json(
+            c,
+            bindref,
+            hostednames;
+            multidef=md,
+            nbid=nb.id,
+            nbdir=nbdir,
+            cited=cited,
+            bibctx=bibctx,
+            figidx=figidx,
+            backref=br,
+            report=nb.report,
+            live_placeholder=live_placeholder,
+        ) for c in nb.report.cells
+    ]
 end
 
 # ── Interim-render preview sidecar ──────────────────────────────────────────────────────────────
@@ -493,8 +759,14 @@ end
 # manifest is small (blob URLs, not inline rasters). Cache-tier and fully disposable: a missing or
 # corrupt sidecar just means no interim preview, never a correctness issue. Live cells supersede it
 # cell-by-cell as each `celldone:` lands (the browser reconciles by id + content hash).
-_preview_file(path) = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
-    "kaimonslate", "preview", SlateHistory._sha(abspath(String(path)))[1:16] * ".json")
+function _preview_file(path)
+    return joinpath(
+        get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
+        "kaimonslate",
+        "preview",
+        SlateHistory._sha(abspath(String(path)))[1:16] * ".json",
+    )
+end
 
 const _PREVIEW_SAVE_AT = Dict{String,Float64}()   # nbid → last flush time (debounce)
 const _PREVIEW_SAVE_LOCK = ReentrantLock()
@@ -507,8 +779,12 @@ function _has_rich_display(nb::LiveNotebook)
     for c in nb.report.cells
         o = c.output
         o === nothing && continue
-        (isempty(o.display) && isempty(_echarts_specs(c)) && isempty(_table_specs(c)) &&
-         isempty(_animation_specs(c, nb.id))) || return true
+        (
+            isempty(o.display) &&
+            isempty(_echarts_specs(c)) &&
+            isempty(_table_specs(c)) &&
+            isempty(_animation_specs(c, nb.id))
+        ) || return true
     end
     return false
 end
@@ -522,9 +798,12 @@ function _live_blob_hashes(cells)
     for e in cells
         e isa AbstractDict || continue
         for k in ("output", "animations", "echarts", "tables", "assets")
-            v = get(e, k, nothing); v === nothing && continue
+            v = get(e, k, nothing)
+            v === nothing && continue
             s = v isa AbstractString ? v : JSON.json(v)
-            for m in eachmatch(_BLOBHASH_RE, s); push!(live, String(m.captures[1])); end
+            for m in eachmatch(_BLOBHASH_RE, s)
+                push!(live, String(m.captures[1]))
+            end
         end
     end
     return live
@@ -543,8 +822,8 @@ function _prune_preview_blobs!(nbid::AbstractString, live::AbstractSet)
             (startswith(fn, base) && !endswith(fn, ".meta")) || continue
             h = fn[nextind(fn, lastindex(base)):end]
             h in live && continue
-            rm(joinpath(dir, fn); force = true)
-            rm(joinpath(dir, fn * ".meta"); force = true)
+            rm(joinpath(dir, fn); force=true)
+            rm(joinpath(dir, fn * ".meta"); force=true)
         end
     catch e
         @debug "KaimonSlate: preview blob prune failed" exception = (e, catch_backtrace())
@@ -562,23 +841,29 @@ end
 # ("no slate_on handler registered for channel …", plus its handshake calls failing against the still-
 # booting worker) and hangs on a spinner until a second reload. The placeholder replays the LAYOUT
 # without booting anything; the fresh figure arrives via `celldone` once the worker is up.
-function _save_preview!(nb::LiveNotebook; force::Bool = false)
+function _save_preview!(nb::LiveNotebook; force::Bool=false)
     do_save = lock(_PREVIEW_SAVE_LOCK) do
         now = time()
         last = get(_PREVIEW_SAVE_AT, nb.id, 0.0)
-        (force || now - last > _PREVIEW_DEBOUNCE_S) ? (_PREVIEW_SAVE_AT[nb.id] = now; true) : false
+        return if (force || now - last > _PREVIEW_DEBOUNCE_S)
+            (_PREVIEW_SAVE_AT[nb.id]=now; true)
+        else
+            false
+        end
     end
     do_save || return nothing
     try
         cells = lock(nb.lock) do
-            _has_rich_display(nb) ? _render_cells(nb; live_placeholder = true) : nothing
+            return _has_rich_display(nb) ? _render_cells(nb; live_placeholder=true) : nothing
         end
         cells === nothing && return nothing   # nothing rich to preview — leave any stale sidecar for now
         f = _preview_file(nb.path)
         mkpath(dirname(f))
         tmp = f * ".tmp"
-        open(tmp, "w") do io; JSON.print(io, cells); end
-        mv(tmp, f; force = true)
+        open(tmp, "w") do io
+            return JSON.print(io, cells)
+        end
+        mv(tmp, f; force=true)
         _prune_preview_blobs!(nb.id, _live_blob_hashes(cells))   # evict superseded figure rasters
     catch e
         @debug "KaimonSlate: preview snapshot failed" exception = (e, catch_backtrace())
@@ -593,7 +878,11 @@ end
 function _load_preview_marked(path::AbstractString, report)
     f = _preview_file(path)
     isfile(f) || return nothing
-    cells = try; JSON.parse(read(f, String)); catch; nothing; end
+    cells = try
+        JSON.parse(read(f, String))
+    catch
+        nothing
+    end
     (cells isa AbstractVector && !isempty(cells)) || return nothing
     live = Dict{String,String}()
     for c in report.cells
@@ -602,7 +891,8 @@ function _load_preview_marked(path::AbstractString, report)
     for e in cells
         e isa AbstractDict || continue
         e["preview"] = true
-        id = String(get(e, "id", "")); h = String(get(e, "hash", ""))
+        id = String(get(e, "id", ""))
+        h = String(get(e, "hash", ""))
         e["previewStale"] = !(haskey(live, id) && live[id] == h)
     end
     return cells
@@ -615,29 +905,58 @@ end
 const _OUTFILES = Dict{String,String}()   # "id/<hashfile>" → absolute path
 _outfile_put!(nbid, name, path) = lock(_BLOB_LOCK) do
     length(_OUTFILES) > 4000 && empty!(_OUTFILES)
-    _OUTFILES[string(nbid, "/", name)] = String(path)
+    return _OUTFILES[string(nbid, "/", name)] = String(path)
 end
-outfile_get(key) = lock(_BLOB_LOCK) do; get(_OUTFILES, String(key), nothing); end
-_ovget(e, k, default = nothing) = e isa AbstractDict ? get(e, String(k), get(e, k, default)) :
-                                  (hasproperty(e, k) ? getproperty(e, k) : default)
+outfile_get(key) = lock(_BLOB_LOCK) do ;
+    return get(_OUTFILES, String(key), nothing)
+end
+function _ovget(e, k, default=nothing)
+    return if e isa AbstractDict
+        get(e, String(k), get(e, k, default))
+    else
+        (hasproperty(e, k) ? getproperty(e, k) : default)
+    end
+end
 function _overflow_bar(nbid::AbstractString, entries)
     isempty(nbid) && return ""
     items = String[]
     for e in entries
-        path = String(_ovget(e, :path, "")); isfile(path) || continue
-        name = basename(path); _outfile_put!(nbid, name, path)
+        path = String(_ovget(e, :path, ""))
+        isfile(path) || continue
+        name = basename(path)
+        _outfile_put!(nbid, name, path)
         url = string("/api/", nbid, "/output/", name)
         kind = String(_ovget(e, :kind, "output"))
         kb = round(Int, Int(_ovget(e, :bytes, 0)) / 1024)
         clipped = _ovget(e, :clipped, false) === true
         ext = endswith(path, ".html") ? "html" : "txt"
-        push!(items, string(
-            "<span class=\"ovitem\">⚠ full ", kind, " (", kb, " KB", clipped ? ", clipped at cap" : "", "): ",
-            "<a href=\"", url, "\" target=\"_blank\" rel=\"noopener\">open ↗</a> · ",
-            "<a href=\"vscode://file", path, "\">editor</a> · ",
-            "<a href=\"", url, "\" download=\"", kind, "-", name, "\">download</a></span>"))
+        push!(
+            items,
+            string(
+                "<span class=\"ovitem\">⚠ full ",
+                kind,
+                " (",
+                kb,
+                " KB",
+                clipped ? ", clipped at cap" : "",
+                "): ",
+                "<a href=\"",
+                url,
+                "\" target=\"_blank\" rel=\"noopener\">open ↗</a> · ",
+                "<a href=\"vscode://file",
+                path,
+                "\">editor</a> · ",
+                "<a href=\"",
+                url,
+                "\" download=\"",
+                kind,
+                "-",
+                name,
+                "\">download</a></span>",
+            ),
+        )
     end
-    isempty(items) ? "" : string("<div class=\"ovbar\">", join(items, ""), "</div>")
+    return isempty(items) ? "" : string("<div class=\"ovbar\">", join(items, ""), "</div>")
 end
 
 # `bindref`: var-name → (defining cell, its BindSpec). `hostednames`: variable name →
@@ -648,40 +967,90 @@ end
 # a large library shows the count and lists ONLY the cited entries (so a 2000-entry Zotero file
 # doesn't flood the cell). External files get a "view" link (the /bibfile route).
 const _BIB_CARD_LIMIT = 10
-function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::AbstractString, cited,
-                        numbers::Dict{String,Int} = Dict{String,Int}())
+function _bib_card_html(
+    file::AbstractString,
+    count::Integer,
+    entries,
+    nbid::AbstractString,
+    cited,
+    numbers::Dict{String,Int}=Dict{String,Int}(),
+)
     esc = _esc   # shared HTML-escape (server_hub) — same &<>" mapping
     ncited = Base.count(e -> e.key in cited, entries)
     meta(e) = strip(join(filter(!isempty, [String(e.author), String(e.title)]), " · "))
     # Cited entries get their [N] (matching the in-text numbers); uncited get a hollow marker.
-    mark(e) = haskey(numbers, e.key) ? "<span class=\"bibcard-num\">[$(numbers[e.key])]</span>" :
-              (e.key in cited ? "<span class=\"bibcard-tick\">●</span>" : "<span class=\"bibcard-tick\">○</span>")
-    item(e) = string("<li class=\"", e.key in cited ? "cited" : "uncited", "\">", mark(e),
-        "<code>", esc(e.key), "</code>",
-        isempty(meta(e)) ? "" : "<span class=\"bibcard-meta\">" * esc(meta(e)) * "</span></li>")
+    mark(e) =
+        if haskey(numbers, e.key)
+            "<span class=\"bibcard-num\">[$(numbers[e.key])]</span>"
+        else
+            (
+                if e.key in cited
+                    "<span class=\"bibcard-tick\">●</span>"
+                else
+                    "<span class=\"bibcard-tick\">○</span>"
+                end
+            )
+        end
+    item(e) = string(
+        "<li class=\"",
+        e.key in cited ? "cited" : "uncited",
+        "\">",
+        mark(e),
+        "<code>",
+        esc(e.key),
+        "</code>",
+        isempty(meta(e)) ? "" : "<span class=\"bibcard-meta\">" * esc(meta(e)) * "</span></li>",
+    )
     io = IOBuffer()
-    print(io, "<div class=\"bibcard\"><div class=\"bibcard-hd\">📚 <strong>References</strong>",
-          "<span class=\"bibcard-n\">", count, count == 1 ? " entry" : " entries",
-          ncited > 0 ? " · $(ncited) cited" : "", "</span></div>")
+    print(
+        io,
+        "<div class=\"bibcard\"><div class=\"bibcard-hd\">📚 <strong>References</strong>",
+        "<span class=\"bibcard-n\">",
+        count,
+        count == 1 ? " entry" : " entries",
+        ncited > 0 ? " · $(ncited) cited" : "",
+        "</span></div>",
+    )
     if !isempty(file)
         link = "/api/" * esc(nbid) * "/bibfile?name=" * esc(file)
-        print(io, "<div class=\"bibcard-file\">External file: <a href=\"", link,
-              "\" target=\"_blank\" rel=\"noopener\"><code>", esc(file), "</code></a></div>")
+        print(
+            io,
+            "<div class=\"bibcard-file\">External file: <a href=\"",
+            link,
+            "\" target=\"_blank\" rel=\"noopener\"><code>",
+            esc(file),
+            "</code></a></div>",
+        )
     end
     if count == 0
-        print(io, "<div class=\"bibcard-empty\">No entries found", isempty(file) ? "." : " in this file.", "</div>")
+        print(
+            io,
+            "<div class=\"bibcard-empty\">No entries found",
+            isempty(file) ? "." : " in this file.",
+            "</div>",
+        )
     elseif count < _BIB_CARD_LIMIT
         # Small library: list all, highlighting cited vs uncited.
         print(io, "<ul class=\"bibcard-keys\">")
-        for e in entries; print(io, item(e)); end
+        for e in entries
+            print(io, item(e))
+        end
         print(io, "</ul>")
     elseif ncited == 0
-        print(io, "<div class=\"bibcard-empty\">No entries cited yet — cite with <code>[@key]</code>.</div>")
+        print(
+            io,
+            "<div class=\"bibcard-empty\">No entries cited yet — cite with <code>[@key]</code>.</div>",
+        )
     else
         # Large library: show only the cited entries.
-        print(io, "<div class=\"bibcard-note\">Showing the $(ncited) cited of $(count) entries.</div>",
-              "<ul class=\"bibcard-keys\">")
-        for e in entries; e.key in cited && print(io, item(e)); end
+        print(
+            io,
+            "<div class=\"bibcard-note\">Showing the $(ncited) cited of $(count) entries.</div>",
+            "<ul class=\"bibcard-keys\">",
+        )
+        for e in entries
+            e.key in cited && print(io, item(e))
+        end
         print(io, "</ul>")
     end
     print(io, "<div class=\"bibcard-hint\">Cite with <code>[@key]</code> in markdown.</div></div>")
@@ -691,11 +1060,20 @@ end
 # HTML link for a live citation, formatted to TRACK the notebook's bibstyle: `[1]` for numeric
 # styles, `(Knuth, 1984)` for author-date. Jumps to the bibliography cell; the tooltip is the entry.
 # A live `[@fig:label]` cross-reference → an HTML link that scrolls to the figure and shows "Figure N".
-_fig_link_emit(num, anchor) =
-    string("<a class=\"figref\" href=\"#cell-", replace(String(anchor), "\"" => ""), "\">Figure ", num, "</a>")
+function _fig_link_emit(num, anchor)
+    return string(
+        "<a class=\"figref\" href=\"#cell-",
+        replace(String(anchor), "\"" => ""),
+        "\">Figure ",
+        num,
+        "</a>",
+    )
+end
 # Fallback bracket-cite emit for the live view when the notebook has NO bibliography: reconstruct the
 # original `[@key]` literally so a stray citation isn't turned into a Typst sentinel (§c§…) on screen.
-_cite_literal(key, sup, _form) = isempty(strip(sup)) ? string("[@", key, "]") : string("[@", key, ", ", strip(sup), "]")
+function _cite_literal(key, sup, _form)
+    return isempty(strip(sup)) ? string("[@", key, "]") : string("[@", key, ", ", strip(sup), "]")
+end
 
 function _cite_link_emit(ctx)
     esc = _esc   # shared HTML-escape (server_hub) — same &<>" mapping
@@ -704,8 +1082,15 @@ function _cite_link_emit(ctx)
         inner = isempty(strip(sup)) ? core : string(core, ", ", strip(sup))
         text = ctx.numeric ? string("[", inner, "]") : string("(", inner, ")")
         href = isempty(ctx.anchor) ? "" : " href=\"#cell-$(esc(ctx.anchor))\""
-        string("<a class=\"cite\"", href, " title=\"", esc(get(ctx.tips, String(key), String(key))),
-               "\">", esc(text), "</a>")
+        string(
+            "<a class=\"cite\"",
+            href,
+            " title=\"",
+            esc(get(ctx.tips, String(key), String(key))),
+            "\">",
+            esc(text),
+            "</a>",
+        )
     end
 end
 # Live-citation context from the notebook's :bibliography cells — the anchor cell, per-key tooltips,
@@ -716,14 +1101,21 @@ function _bib_link_ctx(nb)
     isempty(bi) && return nothing
     idx = findfirst(c -> :bibliography in c.flags, nb.report.cells)
     anchor = idx === nothing ? "" : nb.report.cells[idx].id
-    tips = Dict{String,String}(e.key => strip(join(filter(!isempty, [e.author, e.title]), " · ")) for e in bi)
+    tips = Dict{String,String}(
+        e.key => strip(join(filter(!isempty, [e.author, e.title]), " · ")) for e in bi
+    )
     numeric = _is_numeric_style(get(nb.report.meta, "bibstyle", "ieee"))
     numbers = numeric ? citation_numbers(nb.report, Set(e.key for e in bi)) : Dict{String,Int}()
-    labels = numeric ? Dict{String,String}(k => string(v) for (k, v) in numbers) :
-                       Dict{String,String}(e.key => _author_year_label(e.author, e.year) for e in bi)
-    return (anchor = anchor, tips = tips, labels = labels, numeric = numeric, numbers = numbers)
+    labels = if numeric
+        Dict{String,String}(k => string(v) for (k, v) in numbers)
+    else
+        Dict{String,String}(e.key => _author_year_label(e.author, e.year) for e in bi)
+    end
+    return (anchor=anchor, tips=tips, labels=labels, numeric=numeric, numbers=numbers)
 end
-_bib_keys_meta(ctx) = ctx === nothing ? nothing : [Dict("key" => k, "label" => v) for (k, v) in ctx.tips]
+function _bib_keys_meta(ctx)
+    return ctx === nothing ? nothing : [Dict("key" => k, "label" => v) for (k, v) in ctx.tips]
+end
 
 # A SESSION-BOUND (live) output — one whose HTML is a view onto state that lives in the WORKER, e.g. a
 # WGLMakie scene wired to its own socket — must NOT boot from the STORED output on a page (re)load: it was
@@ -736,52 +1128,87 @@ _bib_keys_meta(ctx) = ctx === nothing ? nothing : [Dict("key" => k, "label" => v
 # one extension's markup and silently misses every other live renderer. It is `CellOutput.live`, set at
 # capture from the value's `SlateExtensionsBase.slate_live_render` opt-in (see capture.jl `_LIVE_OUTPUTS`).
 _is_live(c::Cell) = c.output !== nothing && c.output.live
-_live_output_placeholder() =
-    string("<div class=\"slate-live-placeholder\" ",
+function _live_output_placeholder()
+    return string(
+        "<div class=\"slate-live-placeholder\" ",
         "style=\"min-width:280px;min-height:180px;display:flex;align-items:center;justify-content:center\">",
         "<span style=\"color:#8891a5;font-size:0.9em\">⟳ interactive output — connecting…</span>",
-        "</div>")
+        "</div>",
+    )
+end
 
-function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
-                   hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
-                   multidef::Set{String} = Set{String}(), nbid::AbstractString = "",
-                   nbdir::AbstractString = "", cited::Set{String} = Set{String}(),
-                   bibctx = nothing, figidx = nothing, report = nothing,
-                   backref::Dict{String,Vector{String}} = Dict{String,Vector{String}}(),
-                   live_placeholder::Bool = false)
+function cell_json(
+    c::Cell,
+    bindref::Dict{String,Tuple{Cell,BindSpec}}=Dict{String,Tuple{Cell,BindSpec}}(),
+    hostednames::Dict{String,Vector{String}}=Dict{String,Vector{String}}();
+    multidef::Set{String}=Set{String}(),
+    nbid::AbstractString="",
+    nbdir::AbstractString="",
+    cited::Set{String}=Set{String}(),
+    bibctx=nothing,
+    figidx=nothing,
+    report=nothing,
+    backref::Dict{String,Vector{String}}=Dict{String,Vector{String}}(),
+    live_placeholder::Bool=false,
+)
     fignums = figidx === nothing ? Dict{String,Int}() : figidx.numbers
     figrefs = figidx === nothing ? Dict{String,Tuple{Int,String}}() : figidx.labels
     # Markdown citations → links to the bibliography cell (per bibstyle), and `[@fig:label]` → a live
     # "Figure N" link that jumps to the figure. Skips bibliography/caption cells' own bodies.
-    _mdsrc = (c.kind == MARKDOWN && !(:bibliography in c.flags) && (bibctx !== nothing || !isempty(figrefs))) ?
-        _rewrite_citations(c.source, bibctx === nothing ? Set{String}() : Set(keys(bibctx.tips));
-                           emit = bibctx === nothing ? _cite_literal : _cite_link_emit(bibctx),
-                           figrefs = figrefs, figemit = _fig_link_emit) : c.source
+    _mdsrc =
+        if (
+            c.kind == MARKDOWN &&
+            !(:bibliography in c.flags) &&
+            (bibctx !== nothing || !isempty(figrefs))
+        )
+            _rewrite_citations(
+                c.source,
+                bibctx === nothing ? Set{String}() : Set(keys(bibctx.tips));
+                emit=bibctx === nothing ? _cite_literal : _cite_link_emit(bibctx),
+                figrefs=figrefs,
+                figemit=_fig_link_emit,
+            )
+        else
+            c.source
+        end
     d = Dict{String,Any}(
-        "id"      => c.id,
-        "kind"    => c.kind == MARKDOWN ? "md" : c.kind == WEB ? "web" : "code",
-        "source"  => c.source,
+        "id" => c.id,
+        "kind" => if c.kind == MARKDOWN
+            "md"
+        elseif c.kind == WEB
+            "web"
+        else
+            "code"
+        end,
+        "source" => c.source,
         # Canonical per-cell content hash (the SAME SHA the history uses) — a version token the browser
         # keys reconcile off, instead of a fuzzy string comparison that can drift.
-        "hash"    => SlateHistory._sha(c.source),
-        "state"   => lowercase(string(c.state)),
-        "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(_mdsrc, c.interp) :
-                        (live_placeholder && _is_live(c) ? _live_output_placeholder() : output_html(c))),
+        "hash" => SlateHistory._sha(c.source),
+        "state" => lowercase(string(c.state)),
+        "output" => _externalize_blobs(
+            nbid,
+            if c.kind == MARKDOWN
+                markdown_html(_mdsrc, c.interp)
+            else
+                (live_placeholder && _is_live(c) ? _live_output_placeholder() : output_html(c))
+            end,
+        ),
         # How the browser should treat this output's session-boundness (see `_live_output_placeholder`):
         # "render" = the real, live-for-THIS-session thing; "placeholder" = a stand-in awaiting the connect
         # hook's re-render; "" = an ordinary self-contained output. The front end needs the distinction
         # because a full-state payload (which every mutating API call returns) carries the placeholder,
         # and it must not overwrite a live output the page has already booted.
-        "live"    => c.kind == MARKDOWN || !_is_live(c) ? "" : (live_placeholder ? "placeholder" : "render"),
+        "live" =>
+            c.kind == MARKDOWN || !_is_live(c) ? "" : (live_placeholder ? "placeholder" : "render"),
         "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
         "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
         "animations" => c.kind == MARKDOWN ? Any[] : _animation_specs(c, nbid),
         "assets" => c.kind == MARKDOWN ? Any[] : _asset_specs(c, nbid),
-        "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
-        "deps"    => collect(c.deps),
+        "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits=1),
+        "deps" => collect(c.deps),
         # Top-level names this cell defines — drives ⌘-click go-to-definition in the editor. A name the
         # cell only MUTATES (`prog[] = …`) isn't defined here, so it's excluded (go-to-def lands on the definer).
-        "defs"    => c.kind == CODE ? sort!(String[string(w) for w in cell_definitions(c)]) : String[],
+        "defs" => c.kind == CODE ? sort!(String[string(w) for w in cell_definitions(c)]) : String[],
     )
     # A web cell ships its three panes (split from the `@web(...)` source) so the editor can mount a
     # per-language HTML/CSS/JS editor instead of showing the raw skin.
@@ -796,13 +1223,20 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # structurally-uncacheable cell (nocache/volatile/`using` barrier/impure upstream) still explains
     # itself. "cacheable"/"" ⇒ no badge. Drives the cell cache badge + the run-status restore counter
     # (a fast restore burst otherwise reads as a glitch), mirroring the DAG's cache indicator.
-    memostate = ""; memowhy = ""    # computed once, shared by the cell badge (here) AND the DAG stats card (below)
+    memostate = ""
+    memowhy = ""    # computed once, shared by the cell badge (here) AND the DAG stats card (below)
     if c.kind == CODE
         o = c.output
         rt = o === nothing ? "" : o.memo
-        memostate, memowhy = rt in ("restored", "stored", "handle", "uncacheable") ? (rt, o.memo_why) :
-                             report !== nothing ? ReportEngine._memo_status(report, c) : ("", "")
-        (memostate == "handle" && isempty(memowhy)) && (memowhy = "produces a live handle (DB/socket/file) — tag `resource`")
+        memostate, memowhy = if rt in ("restored", "stored", "handle", "uncacheable")
+            (rt, o.memo_why)
+        elseif report !== nothing
+            ReportEngine._memo_status(report, c)
+        else
+            ("", "")
+        end
+        (memostate == "handle" && isempty(memowhy)) &&
+            (memowhy = "produces a live handle (DB/socket/file) — tag `resource`")
         memostate in ("restored", "stored", "handle", "uncacheable") || (memostate = "")   # "cacheable"/"" ⇒ no badge
         if !isempty(memostate)
             d["memo"] = memostate
@@ -811,7 +1245,9 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     end
     if !isempty(c.controls)
         # resolve each column's names to (defining cell, spec); drop unknown names + empty columns
-        cols = [[_control_spec(bindref[n]...) for n in col if haskey(bindref, n)] for col in c.controls]
+        cols = [
+            [_control_spec(bindref[n]...) for n in col if haskey(bindref, n)] for col in c.controls
+        ]
         cols = filter(!isempty, cols)
         isempty(cols) || (d["controls"] = cols)
     end
@@ -829,7 +1265,11 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         d["roleCaption"] = true
         if haskey(fignums, c.id)
             d["figNum"] = fignums[c.id]
-            d["output"] = "<span class=\"figlabel\">Figure " * string(fignums[c.id]) * ".</span> " * d["output"]
+            d["output"] =
+                "<span class=\"figlabel\">Figure " *
+                string(fignums[c.id]) *
+                ".</span> " *
+                d["output"]
         end
     end
     if :bibliography in c.flags                          # bibliography / references
@@ -852,12 +1292,21 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # cell-metadata popup — what the cell announced it did to Slate (e.g. a everywhere op registration),
     # which names it registered, and the statement that did it (deparse line-markers stripped for display).
     if c.output !== nothing && !isempty(c.output.effects)
-        d["effects"] = [Dict{String,Any}(
-            "kind"  => (hasproperty(e, :kind) ? String(string(e.kind)) : ""),
-            "names" => String[string(n) for n in (hasproperty(e, :names) ? e.names : Symbol[])],
-            "stmt"  => first(strip(replace(String(hasproperty(e, :stmt_src) ? e.stmt_src : ""),
-                                           r"#=.*?=#" => "")), 200))
-            for e in c.output.effects]
+        d["effects"] = [
+            Dict{String,Any}(
+                "kind" => (hasproperty(e, :kind) ? String(string(e.kind)) : ""),
+                "names" => String[string(n) for n in (hasproperty(e, :names) ? e.names : Symbol[])],
+                "stmt" => first(
+                    strip(
+                        replace(
+                            String(hasproperty(e, :stmt_src) ? e.stmt_src : ""),
+                            r"#=.*?=#" => "",
+                        ),
+                    ),
+                    200,
+                ),
+            ) for e in c.output.effects
+        ]
     end
     # Live run statistics (session-scoped, keyed by notebook id) — the DAG heat map + stats card.
     # Only present once the cell has completed at least one run this session.
@@ -883,7 +1332,13 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # excluding any it defines itself.
     if c.kind == CODE && !isempty(c.reads)
         own = Set(String(b.name) for b in c.binds)
-        uses = sort!(unique!(String[String(s) for s in c.reads if haskey(bindref, String(s)) && !(String(s) in own)]))
+        uses = sort!(
+            unique!(
+                String[
+                    String(s) for s in c.reads if haskey(bindref, String(s)) && !(String(s) in own)
+                ],
+            ),
+        )
         isempty(uses) || (d["binduses"] = uses)
     end
     # Names this cell defines that are ALSO defined by another cell — a silent footgun in a shared
@@ -932,11 +1387,15 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
         bk = nb.kernel
         if !isempty(side)
             bk = _side_kernel!(nb, side)
-            try; ReportEngine.prepare!(bk, nb.report); catch e
-                ReportEngine._rlog("bind: region kernel prepare failed: " * first(sprint(showerror, e), 120))
+            try
+                ReportEngine.prepare!(bk, nb.report)
+            catch e
+                ReportEngine._rlog(
+                    "bind: region kernel prepare failed: " * first(sprint(showerror, e), 120)
+                )
             end
         end
-        ReportEngine.assign_bind!(bk, nb.report, nsym, value)   # coerce on the worker + update its registry/global
+        return ReportEngine.assign_bind!(bk, nb.report, nsym, value)   # coerce on the worker + update its registry/global
     end
     # Mirror the coerced value into the host BindSpec + restale readers under nb.lock (host mutation only).
     @report_op nb report begin
@@ -978,17 +1437,31 @@ function _bind_index(report::Report)
 end
 
 # Worker/kernel status for the topbar dot.
-_kernel_status(k::GateKernel) = Dict{String,Any}("kind" => "gate", "port" => k.port, "connected" => (k.conn !== nothing))
+function _kernel_status(k::GateKernel)
+    return Dict{String,Any}("kind" => "gate", "port" => k.port, "connected" => (k.conn !== nothing))
+end
 _kernel_status(::Kernel) = Dict{String,Any}("kind" => "inproc", "port" => 0, "connected" => true)
 
 # One worker entry (side/host/status + latest telemetry) for the topbar pills. `side==""` is the main
 # kernel; a region side is its own worker. `host` is the remote host or "" (local/in-process).
 function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
     st = _kernel_status(k)
-    host = try; (k isa ReportEngine.GateKernel && k.target isa ReportEngine.RemoteTarget) ?
-                String(k.target.ssh_host) : ""; catch; ""; end
-    d = Dict{String,Any}("side" => String(side), "host" => host,
-                         "kind" => st["kind"], "port" => st["port"], "connected" => st["connected"])
+    host = try
+        if (k isa ReportEngine.GateKernel && k.target isa ReportEngine.RemoteTarget)
+            String(k.target.ssh_host)
+        else
+            ""
+        end
+    catch
+        ""
+    end
+    d = Dict{String,Any}(
+        "side" => String(side),
+        "host" => host,
+        "kind" => st["kind"],
+        "port" => st["port"],
+        "connected" => st["connected"],
+    )
     # Latest telemetry (cpu/rss/host cpu/mem) → a JSON string the pill popup parses. Fully guarded: a
     # telemetry hiccup must NEVER throw here, or it takes the whole `state_json` (the notebook) down.
     if k isa ReportEngine.GateKernel
@@ -1007,12 +1480,15 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
         since = remote ? get(_KERNEL_UNRESPONSIVE_SINCE, k, nothing) : nothing   # liveness clock is remote-only
         if k.conn === nothing
             d["status"] = k.redial_hold ? "disconnected" : "connecting"
-            d["note"]   = k.redial_hold ?
-                "worker stopped responding — press ▶ or re-run to reconnect" : "starting up…"
+            d["note"] = if k.redial_hold
+                "worker stopped responding — press ▶ or re-run to reconnect"
+            else
+                "starting up…"
+            end
         elseif since !== nothing
             el = round(Int, time() - something(since, time()))
             d["status"] = "degraded"
-            d["note"]   = "no liveness reply for $(el)s — auto-drops & reconnects at $(round(Int, _DEAD_WIRE_GRACE))s"
+            d["note"] = "no liveness reply for $(el)s — auto-drops & reconnects at $(round(Int, _DEAD_WIRE_GRACE))s"
         else
             d["status"] = "ok"
         end
@@ -1026,25 +1502,35 @@ end
 function _workers_json(nb::LiveNotebook)
     out = Any[_worker_entry(nb, "", nb.kernel)]
     regs = lock(_REGION_LOCK) do
-        [(String(side), k) for ((id, side), k) in _REGION_KERNELS if id == nb.id]
+        return [(String(side), k) for ((id, side), k) in _REGION_KERNELS if id == nb.id]
     end
-    for (side, k) in sort(regs; by = first)
+    for (side, k) in sort(regs; by=first)
         push!(out, _worker_entry(nb, side, k))
     end
     return out
 end
 
 # The active region kernel for `side` WITHOUT spawning one (unlike `_side_kernel!`); `nothing` if none.
-_region_kernel_if_active(nb::LiveNotebook, side::AbstractString) =
-    lock(_REGION_LOCK) do; get(_REGION_KERNELS, (nb.id, String(side)), nothing); end
+function _region_kernel_if_active(nb::LiveNotebook, side::AbstractString)
+    lock(_REGION_LOCK) do ;
+        return get(_REGION_KERNELS, (nb.id, String(side)), nothing)
+    end
+end
 
 # The tail of a worker's log (+ latest telemetry) for the worker/region status popup. `side==""` = main.
 function _worker_log(nb::LiveNotebook, side::AbstractString, lines::Int)
     k = isempty(side) ? nb.kernel : _region_kernel_if_active(nb, side)
-    k === nothing && return Dict{String,Any}("side" => side, "log" => "", "connected" => false,
-                                             "note" => "no active worker for this region")
-    log = try; ReportEngine.worker_log_tail(k; lines = lines)
-          catch e; "log unavailable: " * first(sprint(showerror, e), 160); end
+    k === nothing && return Dict{String,Any}(
+        "side" => side,
+        "log" => "",
+        "connected" => false,
+        "note" => "no active worker for this region",
+    )
+    log = try
+        ReportEngine.worker_log_tail(k; lines=lines)
+    catch e
+        "log unavailable: " * first(sprint(showerror, e), 160)
+    end
     return merge(_worker_entry(nb, side, k), Dict{String,Any}("log" => log))
 end
 
@@ -1058,10 +1544,20 @@ end
 
 function state_json(nb::LiveNotebook)
     meta = Dict{String,Any}(
-        "id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
-        "version" => nb.version, "worker" => _kernel_status(nb.kernel),
+        "id" => nb.id,
+        "title" => nb.report.title,
+        "path" => abspath(nb.path),
+        "version" => nb.version,
+        "worker" => _kernel_status(nb.kernel),
         # On-disk mtime (unix seconds) — lets the reconcile modal say when the saved version was written.
-        "savedAt" => (try; round(Int, mtime(abspath(nb.path))); catch; 0; end))
+        "savedAt" => (
+            try
+                round(Int, mtime(abspath(nb.path)))
+            catch
+                0
+            end
+        ),
+    )
     # The project ROOT (dir holding the nearest Project.toml above the notebook) — so "open
     # project in VS Code" opens the project, not the notebooks/ subdir. Omitted when detached.
     let proj = Base.current_project(dirname(abspath(nb.path)))
@@ -1070,8 +1566,11 @@ function state_json(nb::LiveNotebook)
     meta["hotreload"] = get(nb.report.meta, "hotreload", true)   # /src auto-reload toggle (default on)
     meta["parallel"] = get(nb.report.meta, "parallel", PARALLEL_DEFAULT[])   # effective state (default + per-nb override)
     meta["threads"] = get(nb.report.meta, "threads", "")                     # per-notebook worker thread override ("" = global)
-    meta["threadsEffective"] = nb.kernel isa ReportEngine.GateKernel ?       # what the live worker spawns with
-        ReportEngine.effective_worker_threads(nb.kernel.threads) : ""
+    meta["threadsEffective"] = if nb.kernel isa ReportEngine.GateKernel       # what the live worker spawns with
+        ReportEngine.effective_worker_threads(nb.kernel.threads)
+    else
+        ""
+    end
     # Slide-deck presentation prefs (per-notebook, persisted in the Slate.config footer).
     meta["slideLevel"] = get(nb.report.meta, "slidelevel", 2)               # heading depth that starts a slide
     meta["slideTransition"] = get(nb.report.meta, "slidetransition", "fade") # none | fade | slide
@@ -1108,9 +1607,12 @@ function state_json(nb::LiveNotebook)
         # We can't cheaply know WHICH will precompile ahead of instantiation (a fresh download has no env
         # on disk yet), so this is the environment's package set, not a predicted stale-precompile subset.
         let env = get(nb.report.meta, "env", nothing)
-            env isa AbstractVector &&
-                (meta["launchDeps"] = String[String(get(e, "name", "")) for e in env
-                                             if e isa AbstractDict && !isempty(String(get(e, "name", "")))])
+            env isa AbstractVector && (
+                meta["launchDeps"] = String[
+                    String(get(e, "name", "")) for
+                    e in env if e isa AbstractDict && !isempty(String(get(e, "name", "")))
+                ]
+            )
         end
         return meta
     end
@@ -1122,9 +1624,11 @@ function state_json(nb::LiveNotebook)
         # "env" = reconstructing a self-contained bundle's environment (shows a frozen preview);
         # "run" = a normal open whose initial full run is happening in the background;
         # "remote" = bringing up a remote worker (provision + connect) before any cell can run.
-        meta["hydratingKind"] = get(nb.report.meta, "hydratingKind",
-                                    haskey(nb.report.meta, "preview") ? "env" : "run")
-        haskey(nb.report.meta, "hydratingHost") && (meta["hydratingHost"] = nb.report.meta["hydratingHost"])
+        meta["hydratingKind"] = get(
+            nb.report.meta, "hydratingKind", haskey(nb.report.meta, "preview") ? "env" : "run"
+        )
+        haskey(nb.report.meta, "hydratingHost") &&
+            (meta["hydratingHost"] = nb.report.meta["hydratingHost"])
         return meta
     end
     bindref, hostednames = _bind_index(nb.report)
@@ -1142,26 +1646,48 @@ function state_json(nb::LiveNotebook)
     # the payload's per-cell `live` marker tells the front end which of the two it is (see
     # `_live_output_placeholder`, `_swapOutput`) — so the run/edit/bind replies that also return full state
     # don't blank a working live output.
-    meta["cells"] = _render_cells(nb; bindref = bindref, hostednames = hostednames, md = md,
-        nbdir = nbdir, cited = cited, bibctx = bibctx, figidx = figidx, br = br, live_placeholder = true)
+    meta["cells"] = _render_cells(
+        nb;
+        bindref=bindref,
+        hostednames=hostednames,
+        md=md,
+        nbdir=nbdir,
+        cited=cited,
+        bibctx=bibctx,
+        figidx=figidx,
+        br=br,
+        live_placeholder=true,
+    )
     # Which worker generation this page is booting against — lets the browser ignore a `workerreset:` for a
     # worker it never had state in (see `_WORKER_GEN`).
     meta["workerGen"] = worker_generation(nb)
     # In-memory scratchpad cells (slate.eval) — a separate panel, never part of the document flow.
     isempty(nb.scratch) || (meta["scratch"] = [cell_json(c) for c in nb.scratch])
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
-    let bk = _bib_keys_meta(bibctx); bk === nothing || (meta["bibKeys"] = bk); end
-    haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])
+    let bk = _bib_keys_meta(bibctx)
+        bk === nothing || (meta["bibKeys"] = bk)
+    end
+    haskey(nb.report.meta, "hydrate_error") &&
+        (meta["hydrateError"] = nb.report.meta["hydrate_error"])
     # Package-declared front-end scripts (SlateExtensionsBase manifest → `_refresh_extensions!`). The
     # browser injects each `<script>` once (deduped by id) so a package's widget renderer / editor
     # extension registers with no boot cell (see `_frontend_scripts`, view.js `injectFrontendScripts`).
-    let fe = _frontend_scripts_json(nb); isempty(fe) || (meta["frontendScripts"] = fe); end
+    let fe = _frontend_scripts_json(nb)
+        isempty(fe) || (meta["frontendScripts"] = fe)
+    end
     return meta
 end
 
 # Edit a cell's source → reconcile (mark it + dependents stale) → run stale →
 # persist back to the `.jl`.
-function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString; announce::Bool = false, force::Bool = false, run::Bool = true)
+function edit_cell!(
+    nb::LiveNotebook,
+    id::AbstractString,
+    source::AbstractString;
+    announce::Bool=false,
+    force::Bool=false,
+    run::Bool=true,
+)
     # MUST hold nb.lock around the report mutation + persist: with async eval the runner / set_bind!
     # (playhead) hold the lock intermittently, so an unlocked update_source!+_persist! here races them
     # and can lose the edit (it temporarily reverts the source mid-serialize). Reentrant-safe — the
@@ -1169,7 +1695,7 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
     lock(nb.lock) do
         cells = nb.report.cells
         idx = findfirst(c -> c.id == id, cells)
-        idx === nothing && return
+        idx === nothing && return nothing
         if cells[idx].source != String(source)
             _snapshot!(nb)
             _preempt_superseded!(nb, (cells[idx],))   # a RUNNING old-source eval is now worthless
@@ -1197,7 +1723,7 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
                     c = nb.report.cells[j]
                     # A locked dependent stays frozen against this cascade too — only its OWN
                     # ▶ (did == id) may re-run it, so the played cell itself bypasses the guard.
-                    ok = did == id ? (c.state = STALE; true) : ReportEngine.restale!(c)
+                    ok = did == id ? (c.state=STALE; true) : ReportEngine.restale!(c)
                     ok || continue
                     # ▶ means "actually re-evaluate" — for the WHOLE cascade, not just this cell.
                     # The memo key digests upstream SOURCES, so if the played cell is impure (a data
@@ -1212,9 +1738,8 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
         # run=false → commit the edit and leave the cell (and its restaled dependents) sitting STALE.
         # The kick must be skipped here, not just the caller's wait: it is what starts the cascade.
         run && _eval!(nb)                # non-blocking kick (safe inside the lock)
-        _persist!(nb)
+        return _persist!(nb)
     end
     _autoindex!(nb)                      # a new `using` in this cell → pick up its docs (outside lock)
     return nb
 end
-

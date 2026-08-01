@@ -58,39 +58,65 @@ _replay_of(x) = (x isa AbstractArray && nameof(typeof(x)) === :ReplayArray) ? x 
 function _mark_replay!(opt, arr, comp)
     r = _replay_of(arr)
     r === nothing && return opt
-    opt["__replay"] = Dict{String,Any}("id" => String(r.id), "control" => String(r.control),
-                                       "index" => r.index - 1, "comp" => comp, "rank" => ndims(r))
+    opt["__replay"] = Dict{String,Any}(
+        "id" => String(r.id),
+        "control" => String(r.control),
+        "index" => r.index - 1,
+        "comp" => comp,
+        "rank" => ndims(r),
+    )
     return opt
 end
 
 # Pair x and y into ECharts `[x,y]` points, with a clear error on a length mismatch instead of a
 # deep `eachindex(x,y)` DimensionMismatch from inside the DSL.
 function _xy(kind, x, y)
-    length(x) == length(y) ||
-        throw(ArgumentError("echart(:$kind, x, y): x and y must be equal length, got $(length(x)) and $(length(y))"))
+    length(x) == length(y) || throw(
+        ArgumentError(
+            "echart(:$kind, x, y): x and y must be equal length, got $(length(x)) and $(length(y))",
+        ),
+    )
     return [[x[i], y[i]] for i in eachindex(x, y)]
 end
 
 # Type-7 (linear-interpolation) five-number summary for a boxplot category — Base only.
 function _q5(v)
-    s = sort!(collect(Float64, v)); n = length(s)
+    s = sort!(collect(Float64, v))
+    n = length(s)
     n == 0 && throw(ArgumentError("echart(:boxplot, …): a category has no samples (empty vector)"))
-    q(p) = (h = (n - 1) * p + 1; lo = floor(Int, h); hi = min(ceil(Int, h), n); s[lo] + (h - lo) * (s[hi] - s[lo]))
-    [s[1], q(0.25), q(0.5), q(0.75), s[n]]
+    q(p) = (
+        h=(n - 1) * p + 1;
+        lo=floor(Int, h);
+        hi=min(ceil(Int, h), n);
+        s[lo] + (h - lo) * (s[hi] - s[lo])
+    )
+    return [s[1], q(0.25), q(0.5), q(0.75), s[n]]
 end
 
 # z::Matrix (rows = y, cols = x) → ECharts `[xIndex, yIndex, value]` triples + category axes +
 # a calculable visualMap spanning the data. `series(:heatmap, z)` or `series(:heatmap, xs, ys, z)`.
 # A horizontal, bottom-centred, calculable `visualMap` over [lo, hi] — shared by the heatmap and
 # calendar-heatmap layouts.
-_visualmap(lo, hi) = Dict{String,Any}("min" => lo, "max" => hi, "calculable" => true,
-                                      "orient" => "horizontal", "left" => "center", "bottom" => 0)
+function _visualmap(lo, hi)
+    return Dict{String,Any}(
+        "min" => lo,
+        "max" => hi,
+        "calculable" => true,
+        "orient" => "horizontal",
+        "left" => "center",
+        "bottom" => 0,
+    )
+end
 
 function _heatmap!(opt, layout, args)
     if length(args) == 1 && args[1] isa AbstractMatrix
-        z = args[1]; xs = string.(1:size(z, 2)); ys = string.(1:size(z, 1))
+        z = args[1]
+        xs = string.(1:size(z, 2))
+        ys = string.(1:size(z, 1))
     elseif length(args) == 3 && args[3] isa AbstractMatrix
-        z = args[3]; xs = string.(collect(args[1])); ys = string.(collect(args[2]))
+        z = args[3]
+        xs = string.(collect(args[1]))
+        ys = string.(collect(args[2]))
     else
         throw(ArgumentError("echart(:heatmap, …) expects a Matrix or (xlabels, ylabels, Matrix)"))
     end
@@ -103,48 +129,75 @@ function _heatmap!(opt, layout, args)
     lo, hi = extrema(z)
     layout["xAxis"] = _cataxis(xs)
     layout["yAxis"] = _cataxis(ys)
-    layout["visualMap"] = _visualmap(lo, hi)
+    return layout["visualMap"] = _visualmap(lo, hi)
 end
 
 # indicators: `name => max` pairs (or raw dicts/NamedTuples); vals: one value vector, or
 # `name => vector` pairs for several rings. `series(:radar, indicators, vals)`.
 function _radar!(opt, layout, indicators, vals)
-    layout["radar"] = Dict{String,Any}("indicator" =>
-        Any[i isa Pair ? Dict{String,Any}("name" => string(i.first), "max" => i.second) : _ec(i) for i in indicators])
-    opt["data"] = (vals isa AbstractVector && !isempty(vals) && first(vals) isa Pair) ?
-        Any[Dict{String,Any}("name" => string(p.first), "value" => collect(p.second)) for p in vals] :
+    layout["radar"] = Dict{String,Any}(
+        "indicator" => Any[
+            if i isa Pair
+                Dict{String,Any}("name" => string(i.first), "max" => i.second)
+            else
+                _ec(i)
+            end for i in indicators
+        ],
+    )
+    return opt["data"] = if (vals isa AbstractVector && !isempty(vals) && first(vals) isa Pair)
+        Any[Dict{String,Any}("name" => string(p.first), "value" => collect(p.second)) for p in vals]
+    else
         Any[Dict{String,Any}("value" => collect(vals))]
+    end
 end
 
 # ── Relational / hierarchical / geo-flow / calendar data shaping ──────────────────────────────
 # (source, target, value) from a 3-tuple/3-vector, or the pair sugar `src => (tgt => val)`.
 function _flow3(e)
-    (e isa Union{Tuple,AbstractVector} && length(e) == 3) && return (string(e[1]), string(e[2]), e[3])
-    (e isa Pair && e.second isa Pair) && return (string(e.first), string(e.second.first), e.second.second)
-    throw(ArgumentError("echart(:sankey, …): a link must be (source, target, value) or `src => tgt => val` — got $(repr(e))"))
+    (e isa Union{Tuple,AbstractVector} && length(e) == 3) &&
+        return (string(e[1]), string(e[2]), e[3])
+    (e isa Pair && e.second isa Pair) &&
+        return (string(e.first), string(e.second.first), e.second.second)
+    return throw(
+        ArgumentError(
+            "echart(:sankey, …): a link must be (source, target, value) or `src => tgt => val` — got $(repr(e))",
+        ),
+    )
 end
 # (source, target) from a 2-tuple/2-vector or the pair `src => tgt`.
 function _edge2(e)
     e isa Pair && return (string(e.first), string(e.second))
     (e isa Union{Tuple,AbstractVector} && length(e) == 2) && return (string(e[1]), string(e[2]))
-    throw(ArgumentError("echart(:graph, …): an edge must be (source, target) or `src => tgt` — got $(repr(e))"))
+    return throw(
+        ArgumentError(
+            "echart(:graph, …): an edge must be (source, target) or `src => tgt` — got $(repr(e))"
+        ),
+    )
 end
-_uniqnodes(pairs) = unique!(reduce(vcat, [[a, b] for (a, b) in pairs]; init = String[]))
+_uniqnodes(pairs) = unique!(reduce(vcat, [[a, b] for (a, b) in pairs]; init=String[]))
 
 # sankey: `links` (auto-derive nodes) or `(nodes, links)`; each link → {source,target,value}.
 function _sankey!(opt, args)
-    (length(args) in (1, 2)) || throw(ArgumentError("echart(:sankey, …) expects `links` or `(nodes, links)`"))
+    (length(args) in (1, 2)) ||
+        throw(ArgumentError("echart(:sankey, …) expects `links` or `(nodes, links)`"))
     flows = [_flow3(e) for e in args[end]]
-    names = length(args) == 2 ? [string(n) for n in args[1]] : _uniqnodes([(f[1], f[2]) for f in flows])
+    names =
+        length(args) == 2 ? [string(n) for n in args[1]] : _uniqnodes([(f[1], f[2]) for f in flows])
     opt["data"] = Any[Dict{String,Any}("name" => n) for n in names]
-    opt["links"] = Any[Dict{String,Any}("source" => s, "target" => t, "value" => v) for (s, t, v) in flows]
+    return opt["links"] = Any[
+        Dict{String,Any}("source" => s, "target" => t, "value" => v) for (s, t, v) in flows
+    ]
 end
 # graph (network): `edges` (auto-derive nodes) or `(nodes, edges)`; force layout + roam by default.
 function _graph!(opt, args)
-    (length(args) in (1, 2)) || throw(ArgumentError("echart(:graph, …) expects `edges` or `(nodes, edges)`"))
+    (length(args) in (1, 2)) ||
+        throw(ArgumentError("echart(:graph, …) expects `edges` or `(nodes, edges)`"))
     es = [_edge2(e) for e in args[end]]
     if length(args) == 2
-        opt["data"] = Any[(n isa Union{AbstractString,Symbol}) ? Dict{String,Any}("name" => string(n)) : _ec(n) for n in args[1]]
+        opt["data"] = Any[
+            (n isa Union{AbstractString,Symbol}) ? Dict{String,Any}("name" => string(n)) : _ec(n)
+            for n in args[1]
+        ]
     else
         opt["data"] = Any[Dict{String,Any}("name" => n) for n in _uniqnodes(es)]
     end
@@ -152,15 +205,28 @@ function _graph!(opt, args)
     get!(opt, "layout", "force")
     get!(opt, "roam", true)
     haskey(opt, "label") || (opt["label"] = Dict{String,Any}("show" => true))
-    haskey(opt, "force") || (opt["force"] = Dict{String,Any}("repulsion" => 140, "edgeLength" => 70))
+    return haskey(opt, "force") ||
+           (opt["force"] = Dict{String,Any}("repulsion" => 140, "edgeLength" => 70))
 end
 # treemap/sunburst: a hierarchy. `name => value` is a leaf; `name => [children…]` a branch; a
 # NamedTuple/Dict node passes through (its `children` recurse). Accepts one root or a vector of roots.
-_treenode(p::Pair) = p.second isa AbstractVector ?
-    Dict{String,Any}("name" => string(p.first), "children" => Any[_treenode(c) for c in p.second]) :
-    Dict{String,Any}("name" => string(p.first), "value" => p.second)
+function _treenode(p::Pair)
+    return if p.second isa AbstractVector
+        Dict{String,Any}(
+            "name" => string(p.first), "children" => Any[_treenode(c) for c in p.second]
+        )
+    else
+        Dict{String,Any}("name" => string(p.first), "value" => p.second)
+    end
+end
 _treenode(x) = _ec(x)
-_hier(data) = data isa Union{Pair,NamedTuple,AbstractDict} ? Any[_treenode(data)] : Any[_treenode(x) for x in data]
+function _hier(data)
+    return if data isa Union{Pair,NamedTuple,AbstractDict}
+        Any[_treenode(data)]
+    else
+        Any[_treenode(x) for x in data]
+    end
+end
 
 """
     series(kind, args...; name=nothing, kwargs...) -> EChartSeries
@@ -192,7 +258,7 @@ splices into the series option verbatim.
            series(:line, x, b; name="fit", smooth=true, yAxisIndex=1); legend=true,
            yAxis=[(name="obs",), (name="fit", type=:log)])
 """
-function series(kind::Symbol, args...; name = nothing, kwargs...)
+function series(kind::Symbol, args...; name=nothing, kwargs...)
     k = String(kind)
     isarea = k == "area"
     isarea && (k = "line")
@@ -203,7 +269,8 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
     if k in ("line", "bar") && length(args) == 2
         x, y = args
         if _iscat(x)
-            layout["xAxis"] = _cataxis(x); opt["data"] = collect(y)
+            layout["xAxis"] = _cataxis(x)
+            opt["data"] = collect(y)
             _mark_replay!(opt, y, nothing)          # data IS the series — replaced wholesale
         else
             opt["data"] = _xy(k, x, y)
@@ -217,9 +284,15 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
         _replay_of(y) === nothing ? _mark_replay!(opt, x, 0) : _mark_replay!(opt, y, 1)
     elseif k == "pie" && length(args) == 2
         labels, vals = args
-        length(labels) == length(vals) ||
-            throw(ArgumentError("echart(:pie, labels, values): equal length required, got $(length(labels)) and $(length(vals))"))
-        opt["data"] = [Dict{String,Any}("name" => string(labels[i]), "value" => vals[i]) for i in eachindex(labels, vals)]
+        length(labels) == length(vals) || throw(
+            ArgumentError(
+                "echart(:pie, labels, values): equal length required, got $(length(labels)) and $(length(vals))",
+            ),
+        )
+        opt["data"] = [
+            Dict{String,Any}("name" => string(labels[i]), "value" => vals[i]) for
+            i in eachindex(labels, vals)
+        ]
     elseif k == "heatmap"
         _heatmap!(opt, layout, args)
     elseif k == "candlestick" && length(args) == 2
@@ -239,41 +312,65 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
     elseif k == "graph"
         _graph!(opt, args)
     elseif k in ("treemap", "sunburst")
-        length(args) == 1 || throw(ArgumentError("echart(:$k, tree) expects one hierarchical data arg"))
+        length(args) == 1 ||
+            throw(ArgumentError("echart(:$k, tree) expects one hierarchical data arg"))
         opt["data"] = _hier(args[1])
     elseif k == "lines"
         # Geo flows (trajectories): each datum is a `{coords: [[lon,lat],[lon,lat]]}` segment. Defaults
         # to the geo coordinate system (pass `geo=(map="world",…)`); override coordinateSystem for cartesian.
         if length(args) == 2
             from, to = args
-            length(from) == length(to) ||
-                throw(ArgumentError("echart(:lines, from, to): equal length required, got $(length(from)) and $(length(to))"))
-            opt["data"] = Any[Dict{String,Any}("coords" => Any[collect(from[i]), collect(to[i])]) for i in eachindex(from, to)]
+            length(from) == length(to) || throw(
+                ArgumentError(
+                    "echart(:lines, from, to): equal length required, got $(length(from)) and $(length(to))",
+                ),
+            )
+            opt["data"] = Any[
+                Dict{String,Any}("coords" => Any[collect(from[i]), collect(to[i])]) for
+                i in eachindex(from, to)
+            ]
         elseif length(args) == 1
-            opt["data"] = Any[Dict{String,Any}("coords" => Any[collect(a), collect(b)]) for (a, b) in args[1]]
+            opt["data"] = Any[
+                Dict{String,Any}("coords" => Any[collect(a), collect(b)]) for (a, b) in args[1]
+            ]
         else
-            throw(ArgumentError("echart(:lines, …) expects `(from, to)` coord vectors or a list of `(ptA, ptB)` flows"))
+            throw(
+                ArgumentError(
+                    "echart(:lines, …) expects `(from, to)` coord vectors or a list of `(ptA, ptB)` flows",
+                ),
+            )
         end
         get!(opt, "coordinateSystem", "geo")
     elseif k == "calendar"
         # Calendar heatmap: a heatmap series bound to a `calendar` coordinate system; each datum is
         # `[date, value]`. Brings the calendar component (range auto-spanned from the dates) + a visualMap.
-        length(args) == 2 || throw(ArgumentError("echart(:calendar, dates, values) expects two args"))
+        length(args) == 2 ||
+            throw(ArgumentError("echart(:calendar, dates, values) expects two args"))
         dates, vals = args
-        length(dates) == length(vals) ||
-            throw(ArgumentError("echart(:calendar, dates, values): equal length required, got $(length(dates)) and $(length(vals))"))
+        length(dates) == length(vals) || throw(
+            ArgumentError(
+                "echart(:calendar, dates, values): equal length required, got $(length(dates)) and $(length(vals))",
+            ),
+        )
         ds = [string(d) for d in dates]                    # Date shows as ISO "yyyy-mm-dd" — no Dates dep needed
-        opt["type"] = "heatmap"; opt["coordinateSystem"] = "calendar"
+        opt["type"] = "heatmap"
+        opt["coordinateSystem"] = "calendar"
         opt["data"] = Any[Any[ds[i], vals[i]] for i in eachindex(ds, vals)]
         lo, hi = extrema(vals)
         y1, y2 = minimum(ds)[1:4], maximum(ds)[1:4]
-        layout["calendar"] = Dict{String,Any}("range" => (y1 == y2 ? y1 : [y1, y2]), "cellSize" => Any["auto", 16])
+        layout["calendar"] = Dict{String,Any}(
+            "range" => (y1 == y2 ? y1 : [y1, y2]), "cellSize" => Any["auto", 16]
+        )
         layout["visualMap"] = _visualmap(lo, hi)
         k = "heatmap"                                       # the actual ECharts series type (calendar is the coord system)
     elseif k in ("line", "bar", "scatter", "pie", "candlestick", "radar", "boxplot")
         # A known ergonomic kind matched on `k` above but not on arg count — don't silently fall
         # through to the generic branches below (which would misinterpret the args as raw data).
-        throw(ArgumentError("echart(:$k, …) expects 2 positional args (see `series` docstring for the shape), got $(length(args))"))
+        throw(
+            ArgumentError(
+                "echart(:$k, …) expects 2 positional args (see `series` docstring for the shape), got $(length(args))",
+            ),
+        )
     elseif length(args) == 1
         opt["data"] = _ec(only(args))
     elseif length(args) >= 2 && args[1] isa AbstractVector && args[2] isa AbstractVector
@@ -286,7 +383,9 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
 end
 
 # Series kinds that carry no cartesian x/y axis (they bring their own coordinate system).
-const _EC_NOAXIS = Set(["pie", "radar", "gauge", "funnel", "sunburst", "tree", "treemap", "sankey", "graph", "map"])
+const _EC_NOAXIS = Set([
+    "pie", "radar", "gauge", "funnel", "sunburst", "tree", "treemap", "sankey", "graph", "map"
+])
 
 # Cartesian kinds whose datum stands ALONE rather than being one sample of a series along x — so the
 # tooltip should report the point under the cursor, not everything sharing its x. (Scatter is left on
@@ -297,7 +396,7 @@ const _EC_ITEMTIP = Set(["heatmap"])
 # Assemble the full option from series + layout. Each series' implied components are merged
 # first (first wins per key), then cartesian kinds get default value axes if none was implied;
 # unknown kwargs (grid/dataZoom/toolbox/color/animation/…) pass through raw and override.
-function _echart_build(slist; title = nothing, legend = nothing, tooltip = true, theme = true, kwargs...)
+function _echart_build(slist; title=nothing, legend=nothing, tooltip=true, theme=true, kwargs...)
     opt = Dict{String,Any}("series" => [s.opt for s in slist])
     theme === false || (opt["backgroundColor"] = "transparent")
     # Reactive charts re-`setOption` on every update; ECharts' ~1s default UPDATE animation lags
@@ -305,7 +404,11 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
     # tracks typical reactive cadences; override via a kwarg (e.g. `animation = false` to snap).
     opt["animationDurationUpdate"] = 300
     if title !== nothing
-        opt["title"] = (title isa AbstractString || title isa Symbol) ? Dict{String,Any}("text" => String(title)) : _ec(title)
+        opt["title"] = if (title isa AbstractString || title isa Symbol)
+            Dict{String,Any}("text" => String(title))
+        else
+            _ec(title)
+        end
     end
     for s in slist, (k, v) in s.layout
         haskey(opt, k) || (opt[k] = v)
@@ -313,8 +416,9 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
     # A series wants no cartesian axes if its KIND brings its own coordinate system (pie/sankey/graph/
     # treemap/…) OR it's bound to a non-cartesian coordinateSystem (geo/calendar/polar/…) — so geo `lines`
     # and calendar heatmaps don't get empty value axes drawn over their map/calendar.
-    _nocart(s) = s.kind in _EC_NOAXIS ||
-                 get(s.opt, "coordinateSystem", "") in ("geo", "calendar", "polar", "singleAxis", "parallel")
+    _nocart(s) =
+        s.kind in _EC_NOAXIS ||
+        get(s.opt, "coordinateSystem", "") in ("geo", "calendar", "polar", "singleAxis", "parallel")
     noaxis = !isempty(slist) && all(_nocart, slist)
     if !noaxis
         haskey(opt, "xAxis") || (opt["xAxis"] = Dict{String,Any}("type" => "value"))
@@ -344,7 +448,8 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
         leg = Dict{String,Any}()
         if haskey(opt, "title")
             leg["top"] = 30
-            (noaxis || haskey(opt, "grid")) || (opt["grid"] = Dict{String,Any}("top" => 72, "containLabel" => true))
+            (noaxis || haskey(opt, "grid")) ||
+                (opt["grid"] = Dict{String,Any}("top" => 72, "containLabel" => true))
         end
         opt["legend"] = leg
     end
@@ -459,26 +564,64 @@ into a live value) — see the `slate.api` reference.
 # spliced into the SERIES, so `echart(:line, x, y; yAxis=(type=:log,))` would set a bogus series field
 # and quietly do nothing. These keys are lifted onto the OPTION instead, so axis/grid/zoom config
 # "just works" on a one-series chart (e.g. a log axis, a category x-axis, a slider zoom).
-const _EC_TOPLEVEL = Set{String}(["xAxis", "yAxis", "grid", "dataZoom", "visualMap", "polar",
-    "angleAxis", "radiusAxis", "radar", "geo", "toolbox", "dataset", "brush", "calendar", "timeline",
-    "singleAxis", "parallel", "parallelAxis", "graphic", "axisPointer", "textStyle", "color",
+const _EC_TOPLEVEL = Set{String}([
+    "xAxis",
+    "yAxis",
+    "grid",
+    "dataZoom",
+    "visualMap",
+    "polar",
+    "angleAxis",
+    "radiusAxis",
+    "radar",
+    "geo",
+    "toolbox",
+    "dataset",
+    "brush",
+    "calendar",
+    "timeline",
+    "singleAxis",
+    "parallel",
+    "parallelAxis",
+    "graphic",
+    "axisPointer",
+    "textStyle",
+    "color",
     # Slate extensions (not ECharts keys): `registerMap=(name="world", url="/assets/maps/world.json")`
     # declares a geo map to fetch + `echarts.registerMap` before render (vector for several); the
     # front-end registers each map once per page and strips the key. `height`/`width` size the chart's
     # DIV (px number or any CSS length) — split into `__size` by `_slate_normalize!`.
-    "registerMap", "height", "width"])
+    "registerMap",
+    "height",
+    "width",
+])
 
 # Express: a single series + simple layout. Kwargs naming a top-level component (xAxis/yAxis/grid/…)
 # go on the OPTION (so `yAxis=(type=:log,)` makes a log axis); everything else styles the series.
-function echart(kind::Symbol, args...; title = nothing, legend = nothing, tooltip = true, theme = true, kwargs...)
-    serieskw = Pair{Symbol,Any}[]; topkw = Pair{Symbol,Any}[]
+function echart(
+    kind::Symbol, args...; title=nothing, legend=nothing, tooltip=true, theme=true, kwargs...
+)
+    serieskw = Pair{Symbol,Any}[]
+    topkw = Pair{Symbol,Any}[]
     for (k, v) in kwargs
         push!(String(k) in _EC_TOPLEVEL ? topkw : serieskw, k => v)
     end
-    EChart(_echart_build([series(kind, args...; serieskw...)];
-                         title = title, legend = legend, tooltip = tooltip, theme = theme, topkw...))
+    return EChart(
+        _echart_build(
+            [series(kind, args...; serieskw...)];
+            title=title,
+            legend=legend,
+            tooltip=tooltip,
+            theme=theme,
+            topkw...,
+        ),
+    )
 end
 # Composable: one or more `series(...)`, plus raw layout/components (grid/dataZoom/visualMap/…).
-echart(s::EChartSeries, more::EChartSeries...; kwargs...) = EChart(_echart_build([s, more...]; kwargs...))
+function echart(s::EChartSeries, more::EChartSeries...; kwargs...)
+    return EChart(_echart_build([s, more...]; kwargs...))
+end
 # Raw NamedTuple/keyword options — the full ECharts surface, Symbol/NamedTuple-friendly.
-echart(; kwargs...) = EChart(_slate_normalize!(Dict{String,Any}(String(k) => _ec(v) for (k, v) in kwargs)))
+function echart(; kwargs...)
+    return EChart(_slate_normalize!(Dict{String,Any}(String(k) => _ec(v) for (k, v) in kwargs)))
+end

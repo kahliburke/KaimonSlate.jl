@@ -15,8 +15,9 @@ it through the kernel (`assign_bind!` coerces against the widget, updates the
 per-notebook registry, and assigns the global), then mirror the coerced value into
 the host-side `BindSpec`. No-op if the cell has no such bind.
 """
-function set_bind_value!(report::Report, cell::Cell, name::Symbol, value,
-                         kernel::Kernel = InProcessKernel())
+function set_bind_value!(
+    report::Report, cell::Cell, name::Symbol, value, kernel::Kernel=InProcessKernel()
+)
     i = findfirst(b -> b.name == name, cell.binds)
     i === nothing && return cell
     spec = cell.binds[i]
@@ -26,7 +27,7 @@ function set_bind_value!(report::Report, cell::Cell, name::Symbol, value,
 end
 
 "Convenience: set the sole bind of a single-control cell (no-op unless exactly one)."
-function set_bind_value!(report::Report, cell::Cell, value, kernel::Kernel = InProcessKernel())
+function set_bind_value!(report::Report, cell::Cell, value, kernel::Kernel=InProcessKernel())
     length(cell.binds) == 1 || return cell
     return set_bind_value!(report, cell, cell.binds[1].name, value, kernel)
 end

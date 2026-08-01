@@ -32,8 +32,12 @@ const _NS = "kaimonslate"
 # ── Resolver ──────────────────────────────────────────────────────────────────────────────────────
 # One helper drives all three homes; `home_sub` is the subdir under `KAIMONSLATE_HOME`, `xdg_var`/
 # `xdg_default` the standard XDG base and its default relative to `homedir()`.
-function _resolve(home_override::AbstractString, home_sub::AbstractString,
-                  xdg_var::AbstractString, xdg_default::AbstractString)
+function _resolve(
+    home_override::AbstractString,
+    home_sub::AbstractString,
+    xdg_var::AbstractString,
+    xdg_default::AbstractString,
+)
     v = get(ENV, home_override, "")
     isempty(v) || return abspath(expanduser(v))
     h = get(ENV, "KAIMONSLATE_HOME", "")
@@ -46,7 +50,9 @@ end
 config_home() = _resolve("KAIMONSLATE_CONFIG_HOME", "config", "XDG_CONFIG_HOME", ".config")
 
 "KaimonSlate's data home — the durable ledger working checkout (NOT a cache; never GC'd)."
-data_home() = _resolve("KAIMONSLATE_DATA_HOME", "data", "XDG_DATA_HOME", joinpath(".local", "share"))
+function data_home()
+    return _resolve("KAIMONSLATE_DATA_HOME", "data", "XDG_DATA_HOME", joinpath(".local", "share"))
+end
 
 "KaimonSlate's cache home — regenerable local site builds; safe to delete."
 cache_home() = _resolve("KAIMONSLATE_CACHE_HOME", "cache", "XDG_CACHE_HOME", ".cache")
@@ -73,9 +79,13 @@ effects_dir() = joinpath(cache_home(), "effects")
 "`mkpath` each home that will be written to; returns the three paths."
 function ensure_homes!()
     for d in (config_home(), data_home(), cache_home())
-        try; mkpath(d); catch e; @warn "SlateHome: could not create home dir" dir = d exception = e; end
+        try
+            mkpath(d)
+        catch e
+            @warn "SlateHome: could not create home dir" dir = d exception = e
+        end
     end
-    return (; config = config_home(), data = data_home(), cache = cache_home())
+    return (; config=config_home(), data=data_home(), cache=cache_home())
 end
 
 end # module SlateHome

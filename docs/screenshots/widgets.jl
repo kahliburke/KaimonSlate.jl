@@ -1,4 +1,11 @@
-try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+try
+    using KaimonSlate: KaimonSlate
+catch
+    error(
+        "This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate.",
+    )
+end;
+KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
 
 #%% md id=intro
 @md"""
@@ -9,43 +16,43 @@ Declare a control in a cell; the bound name holds its live value, and any cell t
 """
 
 #%% code id=slider
-@bind n Slider(0:100; default = 42, label = "samples")
+@bind n Slider(0:100; default=42, label="samples")
 
 #%% code id=numberfield
-@bind count NumberField(0, 100, 12; label = "count")
+@bind count NumberField(0, 100, 12; label="count")
 
 #%% code id=checkbox
-@bind agree Checkbox(true; label = "I agree")
+@bind agree Checkbox(true; label="I agree")
 
 #%% code id=toggle
-@bind live Toggle(true; label = "stream", on = "Live", off = "Paused")
+@bind live Toggle(true; label="stream", on="Live", off="Paused")
 
 #%% code id=textfield
-@bind who TextField("Ada"; label = "name")
+@bind who TextField("Ada"; label="name")
 
 #%% code id=textarea
-@bind notes TextArea("multi\nline\nnotes"; label = "notes")
+@bind notes TextArea("multi\nline\nnotes"; label="notes")
 
 #%% code id=select
-@bind color Select(["red", "green", "blue"], "green"; label = "color")
+@bind color Select(["red", "green", "blue"], "green"; label="color")
 
 #%% code id=radio
-@bind size Radio(["S", "M", "L"], "M"; label = "size")
+@bind size Radio(["S", "M", "L"], "M"; label="size")
 
 #%% code id=multiselect
-@bind tags MultiSelect(["x", "y", "z"], ["x", "z"]; label = "tags")
+@bind tags MultiSelect(["x", "y", "z"], ["x", "z"]; label="tags")
 
 #%% code id=multicheckbox
-@bind flags MultiCheckBox(["a", "b", "c"], ["b"]; label = "flags")
+@bind flags MultiCheckBox(["a", "b", "c"], ["b"]; label="flags")
 
 #%% code id=colorpicker
-@bind tint ColorPicker("#56d364"; label = "tint")
+@bind tint ColorPicker("#56d364"; label="tint")
 
 #%% code id=datefield
-@bind day DateField("2026-06-05"; label = "date")
+@bind day DateField("2026-06-05"; label="date")
 
 #%% code id=timefield
-@bind at TimeField("09:30"; label = "time")
+@bind at TimeField("09:30"; label="time")
 
 #%% code id=button
 @bind go Button("Run")

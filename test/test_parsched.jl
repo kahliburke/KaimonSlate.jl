@@ -3,12 +3,13 @@ using ReTest
 using Random
 include(joinpath(@__DIR__, "..", "src", "parsched.jl"))
 
-pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
-    ParCell(id, Set(deps), Set(reads), Set(writes), opaque)
+function pc(id; deps=String[], reads=Symbol[], writes=Symbol[], opaque=false)
+    return ParCell(id, Set(deps), Set(reads), Set(writes), opaque)
+end
 
 @testset "parsched" begin
     @testset "independent cells don't block each other" begin
-        cells = [pc("a"; writes = [:x]), pc("b"; writes = [:y]), pc("c"; writes = [:z])]
+        cells = [pc("a"; writes=[:x]), pc("b"; writes=[:y]), pc("c"; writes=[:z])]
         bl = par_blockers(cells)
         @test bl["a"] == Set{String}()
         @test bl["b"] == Set{String}()
@@ -17,9 +18,11 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
     end
 
     @testset "data dependency serializes a chain" begin
-        cells = [pc("a"; writes = [:x]),
-                 pc("b"; deps = ["a"], reads = [:x], writes = [:y]),
-                 pc("c"; deps = ["b"], reads = [:y], writes = [:z])]
+        cells = [
+            pc("a"; writes=[:x]),
+            pc("b"; deps=["a"], reads=[:x], writes=[:y]),
+            pc("c"; deps=["b"], reads=[:y], writes=[:z]),
+        ]
         bl = par_blockers(cells)
         @test bl["b"] == Set(["a"])
         @test bl["c"] == Set(["b"])
@@ -27,21 +30,23 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
     end
 
     @testset "reads-what-it-writes is a dependency even without explicit deps" begin
-        cells = [pc("a"; writes = [:data]), pc("b"; reads = [:data], writes = [:out])]
+        cells = [pc("a"; writes=[:data]), pc("b"; reads=[:data], writes=[:out])]
         bl = par_blockers(cells)
         @test bl["b"] == Set(["a"])
     end
 
     @testset "write-write conflict serializes by document order" begin
-        cells = [pc("a"; writes = [:x]), pc("b"; writes = [:x])]   # both define x
+        cells = [pc("a"; writes=[:x]), pc("b"; writes=[:x])]   # both define x
         bl = par_blockers(cells)
         @test bl["b"] == Set(["a"])                                # later waits for earlier
     end
 
     @testset "an opaque cell is a two-way barrier" begin
-        cells = [pc("a"; writes = [:x]),
-                 pc("u"; opaque = true),                            # e.g. `using Foo`
-                 pc("b"; writes = [:y])]
+        cells = [
+            pc("a"; writes=[:x]),
+            pc("u"; opaque=true),                            # e.g. `using Foo`
+            pc("b"; writes=[:y]),
+        ]
         bl = par_blockers(cells)
         @test bl["u"] == Set(["a"])                                # waits for everything before
         @test bl["b"] == Set(["u"])                                # waits for the barrier (which already waits for a)
@@ -49,12 +54,19 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
     end
 
     @testset "run_scheduled: order recorded, every cell evaluated" begin
-        cells = [pc("a"; writes = [:x]),
-                 pc("b"; deps = ["a"], reads = [:x], writes = [:y]),
-                 pc("c"; deps = ["b"], reads = [:y], writes = [:z])]
+        cells = [
+            pc("a"; writes=[:x]),
+            pc("b"; deps=["a"], reads=[:x], writes=[:y]),
+            pc("c"; deps=["b"], reads=[:y], writes=[:z]),
+        ]
         order = String[]
         lk = ReentrantLock()
-        res = run_scheduled(cells, 4, id -> (lock(lk) do; push!(order, id); end; "ran:$id"))
+        res = run_scheduled(cells, 4, id -> (
+            lock(lk) do ;
+                push!(order, id)
+            end;
+            "ran:$id"
+        ))
         @test res == Dict("a" => "ran:a", "b" => "ran:b", "c" => "ran:c")
         @test order == ["a", "b", "c"]                    # a strict chain runs in order
     end
@@ -62,7 +74,7 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
     @testset "run_scheduled: independent cells actually overlap" begin
         # Three independent cells, pool of 3: they must run CONCURRENTLY (peak ≥ 2),
         # not one-at-a-time. Each holds its slot briefly so overlap is observable.
-        cells = [pc("a"; writes = [:x]), pc("b"; writes = [:y]), pc("c"; writes = [:z])]
+        cells = [pc("a"; writes=[:x]), pc("b"; writes=[:y]), pc("c"; writes=[:z])]
         active = Threads.Atomic{Int}(0)
         peak = Threads.Atomic{Int}(0)
         evalfn = function (_id)
@@ -77,9 +89,11 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
 
     @testset "run_scheduled: a chain never overlaps" begin
         # a → b → c by data dependency: at no point may two run together, whatever the pool size.
-        cells = [pc("a"; writes = [:x]),
-                 pc("b"; deps = ["a"], reads = [:x], writes = [:y]),
-                 pc("c"; deps = ["b"], reads = [:y], writes = [:z])]
+        cells = [
+            pc("a"; writes=[:x]),
+            pc("b"; deps=["a"], reads=[:x], writes=[:y]),
+            pc("c"; deps=["b"], reads=[:y], writes=[:z]),
+        ]
         active = Threads.Atomic{Int}(0)
         peak = Threads.Atomic{Int}(0)
         evalfn = function (_id)
@@ -93,17 +107,19 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
     end
 
     @testset "run_scheduled: a thrown cell is captured, batch still drains" begin
-        cells = [pc("a"; writes = [:x]), pc("b"; writes = [:y])]
+        cells = [pc("a"; writes=[:x]), pc("b"; writes=[:y])]
         res = run_scheduled(cells, 2, id -> id == "a" ? error("boom") : "ok")
         @test res["a"] isa Exception                      # the throw became this cell's result
         @test res["b"] == "ok"                            # the other cell still completed
     end
 
     @testset "run_scheduled: ondone fires once per cell with its result" begin
-        cells = [pc("a"; writes = [:x]), pc("b"; deps = ["a"], reads = [:x])]
+        cells = [pc("a"; writes=[:x]), pc("b"; deps=["a"], reads=[:x])]
         seen = Tuple{String,Any}[]
         lk = ReentrantLock()
-        run_scheduled(cells, 2, id -> "v:$id", (id, r) -> (lock(lk) do; push!(seen, (id, r)); end))
+        run_scheduled(cells, 2, id -> "v:$id", (id, r) -> (lock(lk) do ;
+            push!(seen, (id, r))
+        end))
         @test Set(seen) == Set([("a", "v:a"), ("b", "v:b")])
     end
 
@@ -112,7 +128,7 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
         # superseded cell's eval can be interrupted (__slate_cancel_cells). The throw is captured
         # as that cell's result and the rest of the batch still drains — an InterruptException in
         # one evaluator must never kill the scheduler.
-        cells = [pc("slow"; writes = [:a]), pc("quick"; writes = [:b])]
+        cells = [pc("slow"; writes=[:a]), pc("quick"; writes=[:b])]
         tasks = Dict{String,Task}()
         lk = ReentrantLock()
         started = Channel{Bool}(1)
@@ -123,21 +139,27 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
             end
             return "done:$id"
         end
-        runner = Threads.@spawn run_scheduled(cells, 2, evalfn;
-                                              onspawn = (id, t) -> (lock(lk) do; tasks[id] = t; end))
+        runner = Threads.@spawn run_scheduled(
+            cells, 2, evalfn; onspawn=(id, t) -> (lock(lk) do ;
+                tasks[id] = t
+            end)
+        )
         take!(started)                        # the slow cell is definitely in flight
-        schedule(tasks["slow"], InterruptException(); error = true)
+        schedule(tasks["slow"], InterruptException(); error=true)
         res = fetch(runner)
         @test res["slow"] isa InterruptException   # captured as the cell's result, not rethrown
         @test res["quick"] == "done:quick"         # siblings unaffected; batch drained
     end
 
     @testset "run_scheduled: onspawn hands back a Task per cell (cancellation hook)" begin
-        cells = [pc("a"; writes = [:x]), pc("b"; writes = [:y])]
+        cells = [pc("a"; writes=[:x]), pc("b"; writes=[:y])]
         spawned = Dict{String,Task}()
         lk = ReentrantLock()
-        run_scheduled(cells, 2, id -> id, (_id, _r) -> nothing;
-                      onspawn = (id, t) -> (lock(lk) do; spawned[id] = t; end))
+        run_scheduled(
+            cells, 2, id -> id, (_id, _r) -> nothing; onspawn=(id, t) -> (lock(lk) do ;
+                spawned[id] = t
+            end)
+        )
         @test Set(keys(spawned)) == Set(["a", "b"])     # every launched cell exposed its task
         @test all(t -> t isa Task, values(spawned))
     end
@@ -153,7 +175,7 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
         # Two INDEPENDENT graphics cells (no shared user global) still serialise via the sentinel write,
         # while a pure cell stays co-runnable with a graphics cell.
         g = _GRAPHICS_SENTINEL
-        cells = [pc("p1"; writes = [:a, g]), pc("p2"; writes = [:b, g]), pc("calc"; writes = [:c])]
+        cells = [pc("p1"; writes=[:a, g]), pc("p2"; writes=[:b, g]), pc("calc"; writes=[:c])]
         bl = par_blockers(cells)
         @test bl["p2"] == Set(["p1"])                              # graphics ↔ graphics serialised
         @test !co_runnable(["p1", "p2"], bl)
@@ -171,9 +193,11 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
                 b = Set{String}()
                 for j in 1:(i - 1)
                     e = cells[j]
-                    if e.opaque || c.opaque || (e.id in c.deps) ||
-                       !isdisjoint(c.writes, e.writes) ||
-                       !isdisjoint(c.reads, e.writes)
+                    if e.opaque ||
+                        c.opaque ||
+                        (e.id in c.deps) ||
+                        !isdisjoint(c.writes, e.writes) ||
+                        !isdisjoint(c.reads, e.writes)
                         push!(b, e.id)
                     end
                 end
@@ -189,13 +213,18 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
             ids = ["c$k" for k in 1:n]
             cells = ParCell[]
             for i in 1:n
-                deps = i == 1 ? String[] : unique(rand(rng, ids[1:i-1], rand(rng, 0:2)))
+                deps = i == 1 ? String[] : unique(rand(rng, ids[1:(i - 1)], rand(rng, 0:2)))
                 rand(rng) < 0.15 && push!(deps, "notinbatch")   # deps may point outside the batch
-                push!(cells, pc(ids[i];
-                                deps = deps,
-                                reads = unique(rand(rng, pool, rand(rng, 0:3))),
-                                writes = unique(rand(rng, pool, rand(rng, 0:2))),
-                                opaque = rand(rng) < 0.12))
+                push!(
+                    cells,
+                    pc(
+                        ids[i];
+                        deps=deps,
+                        reads=unique(rand(rng, pool, rand(rng, 0:3))),
+                        writes=unique(rand(rng, pool, rand(rng, 0:2))),
+                        opaque=rand(rng) < 0.12,
+                    ),
+                )
             end
             ok &= par_blockers(cells) == reference_blockers(cells)
         end
@@ -204,10 +233,12 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
 
     @testset "mixed: independent pair after a shared dependency" begin
         # base → (left, right) independent → join
-        cells = [pc("base"; writes = [:v]),
-                 pc("left"; deps = ["base"], reads = [:v], writes = [:l]),
-                 pc("right"; deps = ["base"], reads = [:v], writes = [:r]),
-                 pc("join"; deps = ["left", "right"], reads = [:l, :r], writes = [:j])]
+        cells = [
+            pc("base"; writes=[:v]),
+            pc("left"; deps=["base"], reads=[:v], writes=[:l]),
+            pc("right"; deps=["base"], reads=[:v], writes=[:r]),
+            pc("join"; deps=["left", "right"], reads=[:l, :r], writes=[:j]),
+        ]
         bl = par_blockers(cells)
         @test bl["left"] == Set(["base"]) && bl["right"] == Set(["base"])
         @test co_runnable(["left", "right"], bl)                   # the fork runs in parallel

@@ -1,4 +1,11 @@
-try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+try
+    using KaimonSlate: KaimonSlate
+catch
+    error(
+        "This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate.",
+    )
+end;
+KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
 
 #%% md id=intro
 @md"""
@@ -37,7 +44,7 @@ The trick below is a **control vs. frozen** pair. Each holds a random token mint
 drift_n = 2
 
 #%% code id=drift_frozen frozenat=acc772e6f98aa444 locked lockedkey=b4db5fa1ec64d8f3
-drift_frozen = "n=$(drift_n) · " * string(rand(UInt64); base = 16, pad = 16)
+drift_frozen = "n=$(drift_n) · " * string(rand(UInt64); base=16, pad=16)
 
 #%% code id=control
 # NOT locked — a fresh random token every run. This is the control: if THIS value is identical
@@ -45,12 +52,12 @@ drift_frozen = "n=$(drift_n) · " * string(rand(UInt64); base = 16, pad = 16)
 for i in 1:5
     x = i+653
 end
-control_token = string(rand(UInt64); base = 16, pad = 16)
+control_token = string(rand(UInt64); base=16, pad=16)
 
 #%% code id=frozen frozenat=30d4aabad45c85a8 locked lockedkey=e58922d0a099976c
 # Tagged `locked`. Once frozen in a live session, this exact token must be restored — not re-minted —
 # on every subsequent open, including standalone upload and the download-and-run one-liner.
-frozen_token = string(rand(UInt64); base = 16, pad = 16)
+frozen_token = string(rand(UInt64); base=16, pad=16)
 
 #%% code id=derived
 # A downstream cell that consumes the frozen value, to confirm the cascade sees the FROZEN token

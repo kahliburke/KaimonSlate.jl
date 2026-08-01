@@ -21,7 +21,7 @@
 "pid $(getpid()) · peak RSS $(round(Sys.maxrss() / 1024^3; digits = 2)) GB · threads $(Threads.nthreads())"
 
 #%% code id=stall_ctl
-@bind stall_secs Slider(0, 300, 0; step = 10, label = "cooperative stall (s)")
+@bind stall_secs Slider(0, 300, 0; step=10, label="cooperative stall (s)")
 
 #%% code id=stall nocache
 # Cancellable — the watchdog should see a live heartbeat and NOT flag it; cancel_eval stops it;
@@ -30,16 +30,19 @@ stall_secs > 0 && sleep(stall_secs)
 "slept $(stall_secs)s"
 
 #%% code id=hang_ctl
-@bind hang Toggle(false; label = "UNCANCELLABLE tight-loop hang")
+@bind hang Toggle(false; label="UNCANCELLABLE tight-loop hang")
 
 #%% code id=hang nocache
 # ⚠ No yield point → InterruptException can't land. The ONLY recovery is ⟲ Restart worker, after
 # which the supervisor resets this cell (left RUNNING with no kernel evaluating it) back to stale.
-hang && (while true; end)
+hang && (
+    while true
+    end
+)
 "not hanging"
 
 #%% code id=alloc_ctl
-@bind alloc_gb Slider(0, 16, 0; step = 1, label = "memory runaway (GB)")
+@bind alloc_gb Slider(0, 16, 0; step=1, label="memory runaway (GB)")
 
 #%% code id=runaway nocache
 # Allocate + HOLD `alloc_gb` GB (kept in a binding so GC can't reclaim it) → the worker's RSS
@@ -48,14 +51,14 @@ hog = alloc_gb > 0 ? fill(0x01, alloc_gb * 1024^3) : UInt8[]
 "holding $(round(length(hog) / 1024^3; digits = 2)) GB"
 
 #%% code id=boom_ctl
-@bind boom Toggle(false; label = "throw an exception")
+@bind boom Toggle(false; label="throw an exception")
 
 #%% code id=boom nocache
 boom && error("intentional boom — testing error surfacing")
 "no error"
 
 #%% code id=crash_ctl
-@bind crash Toggle(false; label = "KILL the worker process")
+@bind crash Toggle(false; label="KILL the worker process")
 
 #%% code id=crash nocache
 # Hard process exit → the worker dies under the hub. Tests reconnect/respawn + reconciliation of

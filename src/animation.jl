@@ -21,23 +21,80 @@ end
 # ── Built-in colormaps (anchor RGB 0–255, linearly interpolated to 256) ───────────────────────────
 # Accurate enough to read correctly; pass `colormap = cgrad(:magma)` for an exact Makie match.
 const _CMAP_ANCHORS = Dict{Symbol,Vector{NTuple{3,Int}}}(
-    :viridis => [(68,1,84),(72,40,120),(62,74,137),(49,104,142),(38,130,142),
-                 (31,158,137),(53,183,121),(110,206,88),(181,222,43),(253,231,37)],
-    :magma   => [(0,0,4),(28,16,68),(79,18,123),(129,37,129),(181,54,122),
-                 (229,80,100),(251,135,97),(254,194,135),(252,253,191)],
-    :inferno => [(0,0,4),(31,12,72),(85,15,109),(136,34,106),(186,54,85),
-                 (227,89,51),(249,140,10),(249,201,50),(252,255,164)],
-    :plasma  => [(13,8,135),(84,2,163),(139,10,165),(185,50,137),(219,92,104),
-                 (244,136,73),(254,188,43),(240,249,33)],
-    :gray    => [(0,0,0),(255,255,255)],
-    :grays   => [(0,0,0),(255,255,255)],
+    :viridis => [
+        (68, 1, 84),
+        (72, 40, 120),
+        (62, 74, 137),
+        (49, 104, 142),
+        (38, 130, 142),
+        (31, 158, 137),
+        (53, 183, 121),
+        (110, 206, 88),
+        (181, 222, 43),
+        (253, 231, 37),
+    ],
+    :magma => [
+        (0, 0, 4),
+        (28, 16, 68),
+        (79, 18, 123),
+        (129, 37, 129),
+        (181, 54, 122),
+        (229, 80, 100),
+        (251, 135, 97),
+        (254, 194, 135),
+        (252, 253, 191),
+    ],
+    :inferno => [
+        (0, 0, 4),
+        (31, 12, 72),
+        (85, 15, 109),
+        (136, 34, 106),
+        (186, 54, 85),
+        (227, 89, 51),
+        (249, 140, 10),
+        (249, 201, 50),
+        (252, 255, 164),
+    ],
+    :plasma => [
+        (13, 8, 135),
+        (84, 2, 163),
+        (139, 10, 165),
+        (185, 50, 137),
+        (219, 92, 104),
+        (244, 136, 73),
+        (254, 188, 43),
+        (240, 249, 33),
+    ],
+    :gray => [(0, 0, 0), (255, 255, 255)],
+    :grays => [(0, 0, 0), (255, 255, 255)],
     # Diverging (blue → white → red) for signed fields; default when clim = :symmetric.
-    :coolwarm => [(59,76,192),(122,150,235),(192,212,245),(241,241,241),
-                  (245,200,170),(222,120,98),(180,4,38)],
-    :balance  => [(59,76,192),(122,150,235),(192,212,245),(241,241,241),
-                  (245,200,170),(222,120,98),(180,4,38)],
-    :rdbu     => [(178,24,43),(214,96,77),(244,165,130),(247,247,247),
-                  (146,197,222),(67,147,195),(33,102,172)],
+    :coolwarm => [
+        (59, 76, 192),
+        (122, 150, 235),
+        (192, 212, 245),
+        (241, 241, 241),
+        (245, 200, 170),
+        (222, 120, 98),
+        (180, 4, 38),
+    ],
+    :balance => [
+        (59, 76, 192),
+        (122, 150, 235),
+        (192, 212, 245),
+        (241, 241, 241),
+        (245, 200, 170),
+        (222, 120, 98),
+        (180, 4, 38),
+    ],
+    :rdbu => [
+        (178, 24, 43),
+        (214, 96, 77),
+        (244, 165, 130),
+        (247, 247, 247),
+        (146, 197, 222),
+        (67, 147, 195),
+        (33, 102, 172),
+    ],
 )
 
 const _DIVERGING_CMAPS = Set([:coolwarm, :balance, :rdbu])
@@ -48,8 +105,11 @@ function _lut_from_anchors(anchors::AbstractVector{<:NTuple{3,<:Real}})
     lut = Vector{UInt8}(undef, 256 * 4)
     @inbounds for i in 0:255
         t = n == 1 ? 0.0 : (i / 255) * (n - 1)
-        lo = clamp(floor(Int, t), 0, n - 1); hi = min(lo + 1, n - 1); f = t - lo
-        a = anchors[lo + 1]; b = anchors[hi + 1]
+        lo = clamp(floor(Int, t), 0, n - 1)
+        hi = min(lo + 1, n - 1)
+        f = t - lo
+        a = anchors[lo + 1]
+        b = anchors[hi + 1]
         lut[4i + 1] = round(UInt8, clamp(a[1] + (b[1] - a[1]) * f, 0, 255))
         lut[4i + 2] = round(UInt8, clamp(a[2] + (b[2] - a[2]) * f, 0, 255))
         lut[4i + 3] = round(UInt8, clamp(a[3] + (b[3] - a[3]) * f, 0, 255))
@@ -62,17 +122,21 @@ end
 # colorants (`.r/.g/.b` in 0–1), RGB/RGBA tuples, and `(r,g,b)` in either 0–1 or 0–255.
 function _rgb_of(c)
     if hasproperty(c, :r) && hasproperty(c, :g) && hasproperty(c, :b)
-        return (round(Int, clamp(float(c.r), 0, 1) * 255),
-                round(Int, clamp(float(c.g), 0, 1) * 255),
-                round(Int, clamp(float(c.b), 0, 1) * 255))
+        return (
+            round(Int, clamp(float(c.r), 0, 1) * 255),
+            round(Int, clamp(float(c.g), 0, 1) * 255),
+            round(Int, clamp(float(c.b), 0, 1) * 255),
+        )
     elseif c isa Union{Tuple,AbstractVector} && length(c) >= 3
         v = float.(collect(c)[1:3])
         scale = maximum(v) <= 1.0 ? 255 : 1
-        return (round(Int, clamp(v[1] * scale, 0, 255)),
-                round(Int, clamp(v[2] * scale, 0, 255)),
-                round(Int, clamp(v[3] * scale, 0, 255)))
+        return (
+            round(Int, clamp(v[1] * scale, 0, 255)),
+            round(Int, clamp(v[2] * scale, 0, 255)),
+            round(Int, clamp(v[3] * scale, 0, 255)),
+        )
     end
-    throw(ArgumentError("animate: don't know how to read a color from $(typeof(c))"))
+    return throw(ArgumentError("animate: don't know how to read a color from $(typeof(c))"))
 end
 
 # Resolve `colormap` → a 256 × RGBA LUT. Symbol → built-in; otherwise an iterable of colors
@@ -84,7 +148,8 @@ function _resolve_lut(colormap, signed::Bool)
         key = lowercase(string(colormap))
         sym = Symbol(key)
         anchors = get(_CMAP_ANCHORS, sym, nothing)
-        anchors === nothing && (anchors = signed ? _CMAP_ANCHORS[:coolwarm] : _CMAP_ANCHORS[:viridis])
+        anchors === nothing &&
+            (anchors = signed ? _CMAP_ANCHORS[:coolwarm] : _CMAP_ANCHORS[:viridis])
         return _lut_from_anchors(anchors), sym in _DIVERGING_CMAPS
     end
     cols = collect(colormap)
@@ -117,11 +182,14 @@ function _resolve_clim(frames, clim, transform)
     glo, ghi = Inf, -Inf
     for fr in frames
         lo, hi = _extrema_valid(fr, transform)
-        glo = min(glo, lo); ghi = max(ghi, hi)
+        glo = min(glo, lo)
+        ghi = max(ghi, hi)
     end
-    isfinite(glo) || (glo = 0.0); isfinite(ghi) || (ghi = 1.0)
+    isfinite(glo) || (glo = 0.0)
+    isfinite(ghi) || (ghi = 1.0)
     if sym
-        m = max(abs(glo), abs(ghi)); m = m == 0 ? 1.0 : m
+        m = max(abs(glo), abs(ghi))
+        m = m == 0 ? 1.0 : m
         return ("symmetric", -m, m, Tuple{Float64,Float64}[])
     end
     glo == ghi && (ghi = glo + 1.0)            # flat field → avoid a zero-width range
@@ -134,9 +202,10 @@ function _extrema_valid(fr, transform)
     @inbounds for v in fr
         x = _apply(transform, float(v))
         isfinite(x) || continue
-        x < lo && (lo = x); x > hi && (hi = x)
+        x < lo && (lo = x)
+        x > hi && (hi = x)
     end
-    (isfinite(lo) && isfinite(hi)) ? (lo, hi) : (0.0, 1.0)
+    return (isfinite(lo) && isfinite(hi)) ? (lo, hi) : (0.0, 1.0)
 end
 
 # Quantize one frame's value to a UInt8 (0–255). NaN/Inf → 0.
@@ -158,7 +227,8 @@ function _quantize8(frames, mode, lo, hi, ranges, transform)
     @inbounds for (fi, fr) in enumerate(frames)
         flo, fhi = mode == "perframe" ? ranges[fi] : (lo, hi)
         for r in 1:H, c in 1:W
-            buf[k] = _q8(fr[r, c], flo, fhi, transform); k += 1
+            buf[k] = _q8(fr[r, c], flo, fhi, transform)
+            k += 1
         end
     end
     return buf, H, W, nf
@@ -179,7 +249,10 @@ function _quantize_rgba(frames)
     @inbounds for fr in frames
         for r in 1:H, c in 1:W
             rr, gg, bb = _image_px(fr, r, c)
-            buf[k] = UInt8(rr); buf[k+1] = UInt8(gg); buf[k+2] = UInt8(bb); buf[k+3] = 0xff
+            buf[k] = UInt8(rr)
+            buf[k + 1] = UInt8(gg)
+            buf[k + 2] = UInt8(bb)
+            buf[k + 3] = 0xff
             k += 4
         end
     end
@@ -192,11 +265,20 @@ end
 # across frames — e.g. a track identity. Rendered client-side, independent of the frame texture.
 function _overlay_json(overlay, nf)
     overlay === nothing && return nothing
-    length(overlay) == nf ||
-        throw(ArgumentError("animate: `overlay` must have one entry per frame ($(length(overlay)) given, $nf frames)"))
+    length(overlay) == nf || throw(
+        ArgumentError(
+            "animate: `overlay` must have one entry per frame ($(length(overlay)) given, $nf frames)",
+        ),
+    )
     return [[_overlay_point(p) for p in pts] for pts in overlay]
 end
-_overlay_point(p) = length(p) >= 3 ? [Float64(p[1]), Float64(p[2]), Int(p[3])] : [Float64(p[1]), Float64(p[2]), 0]
+function _overlay_point(p)
+    return if length(p) >= 3
+        [Float64(p[1]), Float64(p[2]), Int(p[3])]
+    else
+        [Float64(p[1]), Float64(p[2]), 0]
+    end
+end
 
 # ── Public API ──────────────────────────────────────────────────────────────────────────────────
 """
@@ -225,42 +307,66 @@ frames, e.g. a tracked object's identity. Pair with `playhead` to react to the c
     tracks = [[(x1,y1,1), (x2,y2,2)] for _ in 1:n] # per-frame (x,y,id) detections
     animate(vidframes; kind=:image, overlay=tracks, fps=25, title="tracked beetles")
 """
-function animate(frames::AbstractVector;
-                 kind::Symbol = :heatmap, fps::Real = 30, times = nothing,
-                 colormap = :auto, clim = :global, transform = nothing,
-                 dither::Bool = true, bits::Integer = 8,
-                 x = nothing, y = nothing, title::AbstractString = "",
-                 colorbar::Bool = true, loop::Bool = true, autoplay::Bool = false,
-                 overlay = nothing, maxbytes::Integer = 128_000_000)
-    kind === :heatmap || kind === :image ||
+function animate(
+    frames::AbstractVector;
+    kind::Symbol=:heatmap,
+    fps::Real=30,
+    times=nothing,
+    colormap=:auto,
+    clim=:global,
+    transform=nothing,
+    dither::Bool=true,
+    bits::Integer=8,
+    x=nothing,
+    y=nothing,
+    title::AbstractString="",
+    colorbar::Bool=true,
+    loop::Bool=true,
+    autoplay::Bool=false,
+    overlay=nothing,
+    maxbytes::Integer=128_000_000,
+)
+    kind === :heatmap ||
+        kind === :image ||
         throw(ArgumentError("animate: kind must be :heatmap or :image (got $kind)"))
     isempty(frames) && throw(ArgumentError("animate: `frames` is empty"))
-    bits == 8 || throw(ArgumentError("animate: only bits=8 is supported (bits=16 is schema-reserved)"))
+    bits == 8 ||
+        throw(ArgumentError("animate: only bits=8 is supported (bits=16 is schema-reserved)"))
 
     if kind === :image
-        all(f -> f isa AbstractMatrix || (f isa AbstractArray && ndims(f) == 3), frames) ||
-            throw(ArgumentError("animate(kind=:image) needs a vector of H×W color matrices or H×W×3 arrays"))
+        all(f -> f isa AbstractMatrix || (f isa AbstractArray && ndims(f) == 3), frames) || throw(
+            ArgumentError(
+                "animate(kind=:image) needs a vector of H×W color matrices or H×W×3 arrays"
+            ),
+        )
         sz = _image_hw(first(frames))
-        all(f -> _image_hw(f) == sz, frames) || throw(ArgumentError("animate: all frames must share the same size"))
+        all(f -> _image_hw(f) == sz, frames) ||
+            throw(ArgumentError("animate: all frames must share the same size"))
         nbytes = length(frames) * sz[1] * sz[2] * 4
-        nbytes > maxbytes && throw(ArgumentError(
-            "animate: stack is $(round(nbytes/1e6; digits=1)) MB raw (> maxbytes $(round(maxbytes/1e6; digits=1)) MB). " *
-            "Use fewer frames, a smaller frame, or raise maxbytes="))
+        nbytes > maxbytes && throw(
+            ArgumentError(
+                "animate: stack is $(round(nbytes/1e6; digits=1)) MB raw (> maxbytes $(round(maxbytes/1e6; digits=1)) MB). " *
+                "Use fewer frames, a smaller frame, or raise maxbytes=",
+            ),
+        )
         buf, H, W, nf = _quantize_rgba(frames)
         # A LUT isn't used in image mode, but the blob-store contract (server_history.jl) requires a
         # non-empty one alongside the frame stack, so ship a trivial one.
         lut = _lut_from_anchors(_CMAP_ANCHORS[:gray])
         manifest = Dict{String,Any}(
-            "kind"   => "image",
-            "animId" => string(hash(buf); base = 16),
-            "shape"  => [nf, H, W],
+            "kind" => "image",
+            "animId" => string(hash(buf); base=16),
+            "shape" => [nf, H, W],
             "channels" => 4,
-            "bits"   => 8,
-            "fps"    => Float64(fps),
-            "times"  => times === nothing ? nothing : Float64.(collect(times)),
-            "axes"   => Dict("x" => x === nothing ? nothing : Float64.(collect(x)),
-                             "y" => y === nothing ? nothing : Float64.(collect(y)),
-                             "title" => String(title), "colorbar" => false),
+            "bits" => 8,
+            "fps" => Float64(fps),
+            "times" => times === nothing ? nothing : Float64.(collect(times)),
+            "axes" => Dict(
+                "x" => x === nothing ? nothing : Float64.(collect(x)),
+                "y" => y === nothing ? nothing : Float64.(collect(y)),
+                "title" => String(title),
+                "colorbar" => false,
+            ),
             "controls" => Dict("loop" => loop, "autoplay" => autoplay),
             "overlay" => _overlay_json(overlay, nf),
         )
@@ -270,39 +376,48 @@ function animate(frames::AbstractVector;
     all(f -> f isa AbstractMatrix, frames) ||
         throw(ArgumentError("animate(kind=:heatmap) needs a vector of matrices"))
     sz = size(first(frames))
-    all(f -> size(f) == sz, frames) || throw(ArgumentError("animate: all frames must share the same size"))
+    all(f -> size(f) == sz, frames) ||
+        throw(ArgumentError("animate: all frames must share the same size"))
 
     signed = clim === :symmetric
-    xform  = signed ? nothing : transform          # never sqrt() signed data
+    xform = signed ? nothing : transform          # never sqrt() signed data
     mode, lo, hi, ranges = _resolve_clim(frames, clim, xform)
     signed |= (mode == "symmetric")
 
     nbytes = length(frames) * prod(sz)
-    nbytes > maxbytes && throw(ArgumentError(
-        "animate: stack is $(round(nbytes/1e6; digits=1)) MB raw (> maxbytes $(round(maxbytes/1e6; digits=1)) MB). " *
-        "Use fewer frames, a smaller field, or raise maxbytes="))
+    nbytes > maxbytes && throw(
+        ArgumentError(
+            "animate: stack is $(round(nbytes/1e6; digits=1)) MB raw (> maxbytes $(round(maxbytes/1e6; digits=1)) MB). " *
+            "Use fewer frames, a smaller field, or raise maxbytes=",
+        ),
+    )
 
     buf, H, W, nf = _quantize8(frames, mode, lo, hi, ranges, xform)
     lut, diverging = _resolve_lut(colormap, signed)
 
-    clim_json = mode == "perframe" ?
-        Dict("mode" => "perframe", "ranges" => [[r[1], r[2]] for r in ranges]) :
+    clim_json = if mode == "perframe"
+        Dict("mode" => "perframe", "ranges" => [[r[1], r[2]] for r in ranges])
+    else
         Dict("mode" => mode, "range" => [lo, hi])
+    end
 
     manifest = Dict{String,Any}(
-        "kind"   => "heatmap",
+        "kind" => "heatmap",
         # Stable per-content id linking this animation to a `playhead(anim)` bind in another cell.
-        "animId" => string(hash(buf); base = 16),
-        "shape"  => [nf, H, W],
-        "bits"   => 8,
-        "fps"    => Float64(fps),
-        "times"  => times === nothing ? nothing : Float64.(collect(times)),
-        "clim"   => clim_json,
+        "animId" => string(hash(buf); base=16),
+        "shape" => [nf, H, W],
+        "bits" => 8,
+        "fps" => Float64(fps),
+        "times" => times === nothing ? nothing : Float64.(collect(times)),
+        "clim" => clim_json,
         "diverging" => diverging,
         "dither" => dither,
-        "axes"   => Dict("x" => x === nothing ? nothing : Float64.(collect(x)),
-                         "y" => y === nothing ? nothing : Float64.(collect(y)),
-                         "title" => String(title), "colorbar" => colorbar),
+        "axes" => Dict(
+            "x" => x === nothing ? nothing : Float64.(collect(x)),
+            "y" => y === nothing ? nothing : Float64.(collect(y)),
+            "title" => String(title),
+            "colorbar" => colorbar,
+        ),
         "controls" => Dict("loop" => loop, "autoplay" => autoplay),
         "overlay" => _overlay_json(overlay, nf),
     )

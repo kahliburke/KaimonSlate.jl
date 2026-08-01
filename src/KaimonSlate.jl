@@ -24,7 +24,7 @@ As a Kaimon extension, `create_tools` exposes `slate.open` / `slate.list` /
 """
 module KaimonSlate
 
-import JSON
+using JSON: JSON
 
 include("engine.jl")    # module ReportEngine (+ eval / deps / bind / echarts)
 include("render.jl")    # module ReportRender
@@ -35,13 +35,41 @@ include("server.jl")    # module NotebookServer (uses ..ReportEngine, ..ReportRe
 
 using .ReportEngine
 using .ReportRender
-using .NotebookServer: serve_notebook, start_server, LiveNotebook,
-                      Hub, start_hub, open_notebook!, close_notebook!, stop_hub, set_run_on!,
-                      find_live, notebook_digest,
-                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_delete_cells!, agent_rename_cell!, agent_scratch_eval!, agent_scratch_eval_bg!, scratch_check, agent_surface_controls!,
-                      acquire_floor!, release_floor!, floor_status,
-                      index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
-                      request_live_eval, export_standalone, export_pdf, expand
+using .NotebookServer:
+    serve_notebook,
+    start_server,
+    LiveNotebook,
+    Hub,
+    start_hub,
+    open_notebook!,
+    close_notebook!,
+    stop_hub,
+    set_run_on!,
+    find_live,
+    notebook_digest,
+    agent_add_cell!,
+    agent_edit_cell!,
+    agent_run!,
+    agent_delete_cell!,
+    agent_delete_cells!,
+    agent_rename_cell!,
+    agent_scratch_eval!,
+    agent_scratch_eval_bg!,
+    scratch_check,
+    agent_surface_controls!,
+    acquire_floor!,
+    release_floor!,
+    floor_status,
+    index_docs!,
+    search_docs,
+    cell_image,
+    cell_image_fresh,
+    cell_inspect,
+    diag_report,
+    request_live_eval,
+    export_standalone,
+    export_pdf,
+    expand
 
 export serve_notebook, LiveNotebook, expand, standalone!, register_extension
 
@@ -83,8 +111,9 @@ entry is added. Registration is consented: the `slate` app prompts on first run 
 loads only self-register when spawned AS the extension (see `__init__`). Call it explicitly to
 (re)register a specific `project_path` or to flip `auto_start`.
 """
-function register_extension(; auto_start::Bool = true, enabled::Bool = true, force::Bool = false,
-                            project_path = pkgdir(@__MODULE__))
+function register_extension(;
+    auto_start::Bool=true, enabled::Bool=true, force::Bool=false, project_path=pkgdir(@__MODULE__)
+)
     kdir = _kaimon_dir()
     isdir(kdir) || return false                              # Kaimon not installed / no config dir here
     project_path === nothing && return false                 # can't locate ourselves (unusual)
@@ -97,7 +126,9 @@ function register_extension(; auto_start::Bool = true, enabled::Bool = true, for
         try
             JSON.parsefile(file)
         catch e
-            @warn "KaimonSlate: extensions.json won't parse — aborting registration (fix or remove the file, then re-run register_extension)" file exception = (e, catch_backtrace())
+            @warn "KaimonSlate: extensions.json won't parse — aborting registration (fix or remove the file, then re-run register_extension)" file exception = (
+                e, catch_backtrace()
+            )
             return false
         end
     else
@@ -109,7 +140,9 @@ function register_extension(; auto_start::Bool = true, enabled::Bool = true, for
     # git worktree, or the packaged install), don't add another — multiple entries spawn multiple
     # hubs that fight over ports. Just working in a worktree must not pollute the config. `force=true`
     # re-points to a specific checkout (drops other KaimonSlate entries first).
-    slate_idx = findall(e -> e isa AbstractDict && _is_slate_project(String(get(e, "project_path", ""))), exts)
+    slate_idx = findall(
+        e -> e isa AbstractDict && _is_slate_project(String(get(e, "project_path", ""))), exts
+    )
     if !isempty(slate_idx)
         force || return false                                # already have one — leave it be
         deleteat!(exts, slate_idx)                           # force: replace whatever was there
@@ -150,10 +183,16 @@ end
 function _slate_registered()
     file = joinpath(_kaimon_dir(), "extensions.json")
     isfile(file) || return false
-    data = try; JSON.parsefile(file); catch; return false; end
+    data = try
+        JSON.parsefile(file)
+    catch
+        return false
+    end
     exts = get(data, "extensions", nothing)
     exts isa AbstractVector || return false
-    return any(e -> e isa AbstractDict && _is_slate_project(String(get(e, "project_path", ""))), exts)
+    return any(
+        e -> e isa AbstractDict && _is_slate_project(String(get(e, "project_path", ""))), exts
+    )
 end
 
 # ── Single-server hub ─────────────────────────────────────────────────────────
@@ -173,12 +212,18 @@ _base() = "http://127.0.0.1:$(_PORT[])"
 # The running hub (started lazily on first open).
 function _hub()
     lock(_LOCK) do
-        _HUB[] === nothing && (_HUB[] = start_hub(; port = _PORT[]))
+        _HUB[] === nothing && (_HUB[] = start_hub(; port=_PORT[]))
         # (Re)register the remote bring-up → browser-banner sink HERE too, not only in `start_hub`: this
         # runs on every hub access, so a Revise reload of the server picks it up WITHOUT a full restart
         # (start_hub only runs once, at boot). The closure reads `_HUB[]` at call time → always the live hub.
-        try; ReportEngine._BRINGUP_SINK[] = line -> NotebookServer._bringup_broadcast(_HUB[], line); catch; end
-        try; NotebookServer._install_worker_push!(_HUB[]); catch; end   # re-wire telemetry/log WS push on reload
+        try
+            ReportEngine._BRINGUP_SINK[] = line -> NotebookServer._bringup_broadcast(_HUB[], line)
+        catch
+        end
+        try
+            NotebookServer._install_worker_push!(_HUB[])
+        catch
+        end   # re-wire telemetry/log WS push on reload
         return _HUB[]::Hub
     end
 end
@@ -191,7 +236,8 @@ function _pids_matching(needle::AbstractString)::Vector{Int}
     pids = Int[]
     try
         toks = if Sys.iswindows()
-            q = "Get-CimInstance Win32_Process -Filter \"Name LIKE 'julia%' AND CommandLine LIKE '%$needle%'\" | " *
+            q =
+                "Get-CimInstance Win32_Process -Filter \"Name LIKE 'julia%' AND CommandLine LIKE '%$needle%'\" | " *
                 "ForEach-Object { \$_.ProcessId }"
             split(readchomp(`powershell -NoProfile -NonInteractive -Command $q`))
         else
@@ -211,9 +257,9 @@ end
 function _kill_pid(pid::Integer)
     try
         if Sys.iswindows()
-            run(pipeline(`taskkill /F /PID $pid`; stdout = devnull, stderr = devnull); wait = false)
+            run(pipeline(`taskkill /F /PID $pid`; stdout=devnull, stderr=devnull); wait=false)
         else
-            run(pipeline(`kill -9 $pid`; stderr = devnull); wait = false)
+            run(pipeline(`kill -9 $pid`; stderr=devnull); wait=false)
         end
     catch
     end
@@ -238,14 +284,22 @@ end
 # ReportEngine.WORKER_THREADS[] (which `_spawn_worker!` consumes), and editable live from the panel.
 _slate_config_path() = SlateHome.config_file()   # our OWN XDG config home (off Kaimon's dir; see SlateHome)
 
-_slate_config() = (f = _slate_config_path(); isfile(f) ?
-    (try; JSON.parsefile(f); catch; Dict{String,Any}(); end) : Dict{String,Any}())
+function _slate_config()
+    return (f=_slate_config_path(); isfile(f) ? (
+        try
+            JSON.parsefile(f)
+        catch
+            Dict{String,Any}()
+        end
+    ) : Dict{String,Any}())
+end
 
 # Persist the in-memory slate config `cfg` to disk (best-effort). Shared by every setter below — they
 # all write the one config file, so a failure is the same regardless of which knob changed.
 function _persist_slate_config!(cfg)
     try
-        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
+        mkpath(SlateHome.config_home())
+        write(_slate_config_path(), JSON.json(cfg, 2))
     catch e
         @warn "slate: could not persist config" exception = e
     end
@@ -255,10 +309,16 @@ end
 # Respawn every running notebook's worker so a just-changed spawn setting (threads/flags/memo cap)
 # takes effect immediately. No-op when the hub isn't up.
 function _respawn_running_workers!()
-    _HUB[] === nothing && return
-    nbs = lock(_HUB[].lock) do; collect(values(_HUB[].notebooks)); end
+    _HUB[] === nothing && return nothing
+    nbs = lock(_HUB[].lock) do ;
+        return collect(values(_HUB[].notebooks))
+    end
     for nb in nbs
-        try; NotebookServer.restart_kernel!(nb); catch e; @warn "slate: worker respawn failed" notebook = nb.id exception = e; end
+        try
+            NotebookServer.restart_kernel!(nb)
+        catch e
+            @warn "slate: worker respawn failed" notebook = nb.id exception = e
+        end
     end
     return nothing
 end
@@ -273,10 +333,11 @@ Persist the worker Julia-thread spec (e.g. `"4,1"` or `"auto"`), apply it to fut
 and — by default — respawn every running notebook's worker so it takes effect immediately. Returns
 the stored spec. Called by the Kaimon TUI panel via `ctx.eval`.
 """
-function set_worker_threads!(spec::AbstractString; respawn::Bool = true)
+function set_worker_threads!(spec::AbstractString; respawn::Bool=true)
     s = strip(String(spec))
     ReportEngine.WORKER_THREADS[] = s
-    cfg = _slate_config(); cfg["worker_threads"] = s
+    cfg = _slate_config()
+    cfg["worker_threads"] = s
     _persist_slate_config!(cfg)
     respawn && _respawn_running_workers!()
     @info "slate: worker threads set" spec = s respawned = respawn
@@ -294,10 +355,11 @@ Persist extra Julia command-line flags appended to every spawned worker (e.g.
 respawn every running notebook's worker so it takes effect immediately. Returns the stored spec.
 Called by the Kaimon TUI panel via `ctx.eval`, same pattern as `set_worker_threads!`.
 """
-function set_worker_extra_flags!(spec::AbstractString; respawn::Bool = true)
+function set_worker_extra_flags!(spec::AbstractString; respawn::Bool=true)
     s = strip(String(spec))
     ReportEngine.WORKER_EXTRA_FLAGS[] = s
-    cfg = _slate_config(); cfg["worker_extra_flags"] = s
+    cfg = _slate_config()
+    cfg["worker_extra_flags"] = s
     _persist_slate_config!(cfg)
     respawn && _respawn_running_workers!()
     @info "slate: worker extra flags set" spec = s respawned = respawn
@@ -311,7 +373,7 @@ configured_port()::Int = something(tryparse(Int, string(get(_slate_config(), "po
 # else the persisted config value when set (>0), else the 8765 default.
 function _resolve_boot_port(envval::AbstractString, cfgport::Integer)
     env = tryparse(Int, envval)
-    env !== nothing ? env : (cfgport > 0 ? Int(cfgport) : 8765)
+    return env !== nothing ? env : (cfgport > 0 ? Int(cfgport) : 8765)
 end
 
 """
@@ -327,7 +389,8 @@ function set_configured_port!(port::Integer)
     cfg = _slate_config()
     p > 0 ? (cfg["port"] = p) : delete!(cfg, "port")
     try
-        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
+        mkpath(SlateHome.config_home())
+        write(_slate_config_path(), JSON.json(cfg, 2))
     catch e
         @warn "slate: could not persist port setting" exception = e
     end
@@ -335,7 +398,8 @@ function set_configured_port!(port::Integer)
 end
 
 "Configured durable memo-store cap in GB; 0.0 means unset (worker env / adaptive default applies)."
-memo_cap_gb()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "memo_cap_gb", ""))), 0.0)
+memo_cap_gb()::Float64 =
+    something(tryparse(Float64, string(get(_slate_config(), "memo_cap_gb", ""))), 0.0)
 
 """
     set_memo_cap_gb!(gb; respawn=true) -> Float64
@@ -344,10 +408,11 @@ Persist the durable memo-store ceiling (GB) and apply it to future worker spawns
 recycles running workers so it takes effect immediately. `0` clears the override back to the
 adaptive default (a quarter of free disk, clamped 2–20 GB). Called by the Kaimon TUI panel.
 """
-function set_memo_cap_gb!(gb::Real; respawn::Bool = true)
+function set_memo_cap_gb!(gb::Real; respawn::Bool=true)
     v = max(0.0, Float64(gb))
     ReportEngine.MEMO_CAP_GB[] = v
-    cfg = _slate_config(); v > 0 ? (cfg["memo_cap_gb"] = v) : delete!(cfg, "memo_cap_gb")
+    cfg = _slate_config()
+    v > 0 ? (cfg["memo_cap_gb"] = v) : delete!(cfg, "memo_cap_gb")
     _persist_slate_config!(cfg)
     respawn && _respawn_running_workers!()
     @info "slate: memo cap set" gb = v respawned = respawn
@@ -355,7 +420,8 @@ function set_memo_cap_gb!(gb::Real; respawn::Bool = true)
 end
 
 "Configured data-channel chunk size in MB; 0.0 = unset (env / 8 MiB default applies)."
-blob_chunk_mb()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "blob_chunk_mb", ""))), 0.0)
+blob_chunk_mb()::Float64 =
+    something(tryparse(Float64, string(get(_slate_config(), "blob_chunk_mb", ""))), 0.0)
 
 """
     set_blob_chunk_mb!(mb) -> Float64
@@ -367,16 +433,19 @@ bigger ones amortize the RTT. `0` clears back to the env / 8 MiB default. Settin
 function set_blob_chunk_mb!(mb::Real)
     v = max(0.0, Float64(mb))
     ReportEngine.BLOB_CHUNK_MB[] = v
-    cfg = _slate_config(); v > 0 ? (cfg["blob_chunk_mb"] = v) : delete!(cfg, "blob_chunk_mb")
+    cfg = _slate_config()
+    v > 0 ? (cfg["blob_chunk_mb"] = v) : delete!(cfg, "blob_chunk_mb")
     _persist_slate_config!(cfg)
     return v
 end
 
 "Configured boot-carry per-entry ceiling in seconds; 0.0 = unset (env / 30s default applies)."
-carry_max_s()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "carry_max_s", ""))), 0.0)
+carry_max_s()::Float64 =
+    something(tryparse(Float64, string(get(_slate_config(), "carry_max_s", ""))), 0.0)
 
 "Configured transfer-preview threshold (s); -1 = unset (env / 60s default), 0 = previews off."
-xfer_confirm_s()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "xfer_confirm_s", ""))), -1.0)
+xfer_confirm_s()::Float64 =
+    something(tryparse(Float64, string(get(_slate_config(), "xfer_confirm_s", ""))), -1.0)
 
 """
     remote_config() -> Dict{String,Any}
@@ -386,14 +455,17 @@ timing (dial deadlines, ssh ConnectTimeout, tunnel keepalive, blob timeouts, …
 installed into the engine at init. See the `_ssh_*`/`_dial_*`/… helpers in remote.jl for every key,
 its `KAIMONSLATE_*` env equivalent, and its default. Empty ⇒ every timing keeps its built-in default.
 """
-remote_config()::Dict{String,Any} =
-    (r = get(_slate_config(), "remote", nothing); r isa AbstractDict ? Dict{String,Any}(r) : Dict{String,Any}())
+remote_config()::Dict{String,Any} = (
+    r=get(_slate_config(), "remote", nothing);
+    r isa AbstractDict ? Dict{String,Any}(r) : Dict{String,Any}()
+)
 
 "Persist the transfer-preview threshold and apply it live. -1 clears to default; 0 disables."
 function set_xfer_confirm_s!(s::Real)
     v = Float64(s) < 0 ? -1.0 : Float64(s)
     ReportEngine.XFER_CONFIRM_S[] = v
-    cfg = _slate_config(); v >= 0 ? (cfg["xfer_confirm_s"] = v) : delete!(cfg, "xfer_confirm_s")
+    cfg = _slate_config()
+    v >= 0 ? (cfg["xfer_confirm_s"] = v) : delete!(cfg, "xfer_confirm_s")
     _persist_slate_config!(cfg)
     return v
 end
@@ -408,7 +480,8 @@ clears back to the env / 30s default. Settings panel knob.
 function set_carry_max_s!(s::Real)
     v = max(0.0, Float64(s))
     ReportEngine.CARRY_MAX_S[] = v
-    cfg = _slate_config(); v > 0 ? (cfg["carry_max_s"] = v) : delete!(cfg, "carry_max_s")
+    cfg = _slate_config()
+    v > 0 ? (cfg["carry_max_s"] = v) : delete!(cfg, "carry_max_s")
     _persist_slate_config!(cfg)
     return v
 end
@@ -418,7 +491,8 @@ ext_prompt_choice()::String = String(get(_slate_config(), "ext_prompt", ""))
 
 "Persist the onboarding answer (see `ext_prompt_choice`). Returns the stored choice."
 function set_ext_prompt_choice!(choice::AbstractString)
-    cfg = _slate_config(); cfg["ext_prompt"] = String(choice)
+    cfg = _slate_config()
+    cfg["ext_prompt"] = String(choice)
     _persist_slate_config!(cfg)
     return String(choice)
 end
@@ -434,7 +508,8 @@ per-notebook Settings toggle still overrides for a specific notebook.
 """
 function set_parallel_default!(on::Bool)
     NotebookServer.PARALLEL_DEFAULT[] = on
-    cfg = _slate_config(); cfg["parallel"] = on
+    cfg = _slate_config()
+    cfg["parallel"] = on
     _persist_slate_config!(cfg)
     return on
 end
@@ -466,12 +541,15 @@ function _load_slate_config!()
     # Persist hook for the browser Settings panel's transfer knobs (route in server_complete.jl —
     # NotebookServer has no JSON-config ownership, same pattern as _RUNON_PERSIST).
     NotebookServer._XFER_PERSIST[] = function (chunk_mb, carry_s, confirm_s)
-        set_blob_chunk_mb!(chunk_mb); set_carry_max_s!(carry_s); set_xfer_confirm_s!(confirm_s)
+        set_blob_chunk_mb!(chunk_mb)
+        set_carry_max_s!(carry_s)
+        set_xfer_confirm_s!(confirm_s)
         return nothing
     end
     # Install the persist hook so set_runon_default! (from the browser route / gate tool) writes slate.json.
     NotebookServer._RUNON_PERSIST[] = function (spec)
-        cfg = _slate_config(); cfg["run_location"] = String(spec)
+        cfg = _slate_config()
+        cfg["run_location"] = String(spec)
         _persist_slate_config!(cfg)
         return nothing
     end
@@ -490,29 +568,50 @@ reflected into MCP JSON Schema by Kaimon.
 function create_tools(GateTool::Type)
     # The invoking agent's identity (its MCP session id), or "" for a sessionless/self call.
     # Keys the build-floor implicitly, so the model never threads a token (and can't self-lock).
-    _caller() = (c = parentmodule(GateTool).current_caller(); c === nothing ? "" : String(c))
+    _caller() = (c=parentmodule(GateTool).current_caller(); c === nothing ? "" : String(c))
 
     # The owning Kaimon agent's id for this call ("" for an external MCP client), via the
     # X-Kaimon-Agent-Id correlation Kaimon sets on a spawned agent's session. Companion to
     # `_caller()`: `_caller()` is the raw session id; this is which agent (if any) owns it.
-    _agent_id() = (a = parentmodule(GateTool).current_agent_id(); a === nothing ? "" : String(a))
+    _agent_id() = (a=parentmodule(GateTool).current_agent_id(); a === nothing ? "" : String(a))
 
     # Run a mutating tool, then surface it in the chat panel IF an outside driver made the
     # call (crew calls already stream in over the agent bus). Returns the tool's result so a
     # wrapper can `return _surfaced(...)`. A ⛔-prefixed result (e.g. a rejected floor commit)
     # renders as a failed row.
-    _surfaced(nb, tool, args, res) =
-        (NotebookServer.note_external_tool!(nb, _agent_id(), tool, args, res;
-            ok = !startswith(lstrip(res), "⛔")); res)
+    _surfaced(nb, tool, args, res) = (
+        NotebookServer.note_external_tool!(
+            nb, _agent_id(), tool, args, res; ok=(!startswith(lstrip(res), "⛔"))
+        );
+        res
+    )
 
     # ── Progress + cooperative cancellation for slow tools ────────────────────────────────────────
     # A site deploy is minutes of network work; without these it's a silent block that can also hit the
     # request timeout (`progress` defers it). All three key off the gate's task-local request id, so
     # they're no-ops outside a live tool call (tests, direct calls). Reached via `parentmodule(GateTool)`
     # — the same indirection `_agent_id` uses, so KaimonSlate still declares no KaimonGate dependency.
-    _say(msg) = (try; parentmodule(GateTool).progress(String(msg)); catch; end; nothing)
-    _cancelled() = (try; parentmodule(GateTool).is_cancelled() === true; catch; false; end)
-    _keep(key, val) = (try; parentmodule(GateTool).stash(String(key), val); catch; end; nothing)
+    _say(msg) = (
+        try
+            parentmodule(GateTool).progress(String(msg))
+        catch
+        end;
+        nothing
+    )
+    _cancelled() = (
+        try
+            parentmodule(GateTool).is_cancelled() === true
+        catch
+            false
+        end
+    )
+    _keep(key, val) = (
+        try
+            parentmodule(GateTool).stash(String(key), val)
+        catch
+        end;
+        nothing
+    )
 
     """
         open(path::String; threads::String="", autorun::Bool=true) -> String
@@ -529,11 +628,11 @@ function create_tools(GateTool::Type)
     so you (or the user) can inspect/edit first (e.g. tag a cell `locked`) before
     anything, possibly expensive, runs. Only applies on a fresh open.
     """
-    function nb_open(path::String; threads::String = "", autorun::Bool = true)::String
+    function nb_open(path::String; threads::String="", autorun::Bool=true)::String
         path = expanduser(path)
         isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
         h = _hub()
-        id = open_notebook!(h, path; threads = threads, autorun = autorun)
+        id = open_notebook!(h, path; threads=threads, autorun=autorun)
         return "Serving $(abspath(path)) at $(_base())/n/$id"
     end
 
@@ -546,7 +645,7 @@ function create_tools(GateTool::Type)
         h = _HUB[]
         (h === nothing || isempty(h.notebooks)) && return "No notebooks open."
         lines = lock(h.lock) do
-            ["$(_base())/n/$(nb.id)  ←  $(abspath(nb.path))" for nb in values(h.notebooks)]
+            return ["$(_base())/n/$(nb.id)  ←  $(abspath(nb.path))" for nb in values(h.notebooks)]
         end
         return join(["Index: $(_base())"; lines], "\n")
     end
@@ -603,11 +702,14 @@ function create_tools(GateTool::Type)
     # `scope` MUST be a keyword arg: the gate silently strips optional POSITIONALS
     # (see _reflect_tool/_dispatch_tool_call notes) — as a positional this defaulted to
     # "session" no matter what the caller passed. Same fix on check_remote/publish_history.
-    function run_on(notebook::String, host::String; scope::String = "session")::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        sc = Symbol(strip(scope)); sc in (:session, :notebook, :clear) || (sc = :session)
-        set_run_on!(nb, host; scope = sc)
-        sc === :clear && return "✅ $(basename(nb.path)) → run-location cleared (follows global default / local)."
+    function run_on(notebook::String, host::String; scope::String="session")::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
+        sc = Symbol(strip(scope))
+        sc in (:session, :notebook, :clear) || (sc = :session)
+        set_run_on!(nb, host; scope=sc)
+        sc === :clear &&
+            return "✅ $(basename(nb.path)) → run-location cleared (follows global default / local)."
         isempty(strip(host)) && return "✅ $(basename(nb.path)) → LOCAL worker ($(sc))."
         return "✅ $(basename(nb.path)) → provisioning + spawning on '$host' ($(sc)); watch `slate.diag` or the worker log for progress."
     end
@@ -625,7 +727,8 @@ function create_tools(GateTool::Type)
     and duckdb/pyarrow-readable.
     """
     function sync_memo(notebook::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         k = nb.kernel
         (k isa ReportEngine.GateKernel && k.target isa ReportEngine.RemoteTarget) ||
             return "Notebook isn't on a remote worker — nothing to sync."
@@ -643,23 +746,48 @@ function create_tools(GateTool::Type)
     Returns a step-by-step checklist. Slow on a cold host (first-time provisioning). Run this before
     `run_on` to catch setup problems early; it also primes the host so the first real run is fast.
     """
-    function check_remote(host::String; transport::String = "tunnel")::String
-        h = strip(host); isempty(h) && return "Give an ssh host (a `Host` in ~/.ssh/config)."
-        tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
+    function check_remote(host::String; transport::String="tunnel")::String
+        h = strip(host)
+        isempty(h) && return "Give an ssh host (a `Host` in ~/.ssh/config)."
+        tr = Symbol(strip(transport))
+        tr in (:tunnel, :direct) || (tr = :tunnel)
         # Stream each step to the caller — a cold provision (juliaup install + first env build) is
         # minutes, so without this the tool call is a silent "evaluating…". `on_step` fires at each
         # step's START ("run") and completion; mirror that to KaimonGate.progress.
         on_step = function (s)
-            mark = s.status == "run" ? "▸" : s.status == "ok" ? "✓" : s.status == "skip" ? "–" : "✗"
+            mark = if s.status == "run"
+                "▸"
+            elseif s.status == "ok"
+                "✓"
+            elseif s.status == "skip"
+                "–"
+            else
+                "✗"
+            end
             detail = isempty(s.detail) ? "" : " — " * first(s.detail, 100)
-            ReportEngine._gate_progress("$mark $(s.name)$detail")
+            return ReportEngine._gate_progress("$mark $(s.name)$detail")
         end
-        r = ReportEngine.preflight_remote(h; transport = tr, on_step = on_step)
+        r = ReportEngine.preflight_remote(h; transport=tr, on_step=on_step)
         io = IOBuffer()
-        println(io, (r["ok"] ? "✅" : "❌"), " preflight '$h' ($(r["transport"])) — ", r["ok"] ? "ALL OK" : "FAILED")
+        println(
+            io,
+            (r["ok"] ? "✅" : "❌"),
+            " preflight '$h' ($(r["transport"])) — ",
+            r["ok"] ? "ALL OK" : "FAILED",
+        )
         for s in r["steps"]
-            mark = s["status"] == "ok" ? "✓" : s["status"] == "skip" ? "–" : "✗"
-            println(io, "  $mark $(s["name"])  ($(s["ms"])ms)", isempty(s["detail"]) ? "" : "\n      $(s["detail"])")
+            mark = if s["status"] == "ok"
+                "✓"
+            elseif s["status"] == "skip"
+                "–"
+            else
+                "✗"
+            end
+            println(
+                io,
+                "  $mark $(s["name"])  ($(s["ms"])ms)",
+                isempty(s["detail"]) ? "" : "\n      $(s["detail"])",
+            )
         end
         return String(take!(io))
     end
@@ -672,29 +800,52 @@ function create_tools(GateTool::Type)
     specific one with `reap_worker`. Never kills anything.
     """
     function remote_workers(host::String)::String
-        h = strip(host); isempty(h) && return "Give an ssh host."
+        h = strip(host)
+        isempty(h) && return "Give an ssh host."
         ws = ReportEngine.list_remote_workers(h)
         isempty(ws) && return "No Slate workers found on '$h' (or host unreachable)."
-        io = IOBuffer(); println(io, "Workers on '$h':")
+        io = IOBuffer()
+        println(io, "Workers on '$h':")
         for w in ws
             mf = w["manifest"]
             reg = ReportEngine._manifest_get(mf, "region")
-            nbk = ReportEngine._manifest_get(mf, "notebook"); nbk = isempty(nbk) ? (isempty(reg) ? "?" : "warm·$reg") : nbk
+            nbk = ReportEngine._manifest_get(mf, "notebook")
+            nbk = isempty(nbk) ? (isempty(reg) ? "?" : "warm·$reg") : nbk
             spawned = ReportEngine._manifest_get(mf, "spawned")
-            la = w["lastActivity"]; age = la == 0 ? "never" : string(round(Int, (time() - la) / 60), "m ago")
+            la = w["lastActivity"]
+            age = la == 0 ? "never" : string(round(Int, (time() - la) / 60), "m ago")
             # lifecycle sidecar: attached (a hub is using it) / idle (detached, warm, adoptable)
             st = get(w, "state", "")
-            badge = !w["alive"] ? "⚪ stopped" :
-                    st == "idle" ? (isempty(reg) ? "🟡 idle (warm)" : "🔵 warm·$reg (adoptable)") :
-                    st == "attached" ? "🟢 attached" : "🟢 running"
-            println(io, "  • port $(w["port"])  $badge  notebook=$(nbk)  last activity: $age", isempty(spawned) ? "" : "  (spawned $spawned)")
+            badge = if !w["alive"]
+                "⚪ stopped"
+            elseif st == "idle"
+                (isempty(reg) ? "🟡 idle (warm)" : "🔵 warm·$reg (adoptable)")
+            elseif st == "attached"
+                "🟢 attached"
+            else
+                "🟢 running"
+            end
+            println(
+                io,
+                "  • port $(w["port"])  $badge  notebook=$(nbk)  last activity: $age",
+                isempty(spawned) ? "" : "  (spawned $spawned)",
+            )
             # latest telemetry sample (2s sampler → .stats sidecar); numbers are unquoted JSON
             stj = get(w, "stats", "")
             if !isempty(stj)
-                g(key) = (m = match(Regex("\"" * key * "\":(-?[0-9.]+)"), stj); m === nothing ? nothing : m.captures[1])
-                mb(v) = string(round(parse(Float64, v) / 2^20; digits = 1), "MB")
-                hb(v) = (x = parse(Float64, v); x >= 2^30 ? string(round(x / 2^30; digits = 1), "GB") : mb(string(x)))
-                cpu = g("cpu"); rss = g("rss"); memo = g("memo_bytes"); ev = g("evals")
+                g(key) = (
+                    m=match(Regex("\"" * key * "\":(-?[0-9.]+)"), stj);
+                    m === nothing ? nothing : m.captures[1]
+                )
+                mb(v) = string(round(parse(Float64, v) / 2^20; digits=1), "MB")
+                hb(v) = (
+                    x=parse(Float64, v);
+                    x >= 2^30 ? string(round(x / 2^30; digits=1), "GB") : mb(string(x))
+                )
+                cpu = g("cpu")
+                rss = g("rss")
+                memo = g("memo_bytes")
+                ev = g("evals")
                 parts = String[]
                 (cpu !== nothing && cpu != "-1.0") && push!(parts, "cpu $(cpu)%")
                 rss === nothing || push!(parts, "rss $(mb(rss))")
@@ -702,11 +853,16 @@ function create_tools(GateTool::Type)
                 ev === nothing || push!(parts, "$(ev) running")
                 # System-wide (the whole HOST, not just this worker) — added for remote regions so the
                 # box's overall load/memory is visible next to the process figures.
-                scpu = g("sys_cpu"); load1 = g("load1"); smt = g("sys_mem_total"); smf = g("sys_mem_free")
+                scpu = g("sys_cpu")
+                load1 = g("load1")
+                smt = g("sys_mem_total")
+                smf = g("sys_mem_free")
                 (scpu !== nothing && scpu != "-1.0") && push!(parts, "host-cpu $(scpu)%")
                 (load1 !== nothing && load1 != "-1.0") && push!(parts, "load $(load1)")
-                (smt !== nothing && smf !== nothing && smt != "0") &&
-                    push!(parts, "host-mem $(hb(string(parse(Float64, smt) - parse(Float64, smf))))/$(hb(smt))")
+                (smt !== nothing && smf !== nothing && smt != "0") && push!(
+                    parts,
+                    "host-mem $(hb(string(parse(Float64, smt) - parse(Float64, smf))))/$(hb(smt))",
+                )
                 isempty(parts) || println(io, "      stats: ", join(parts, " · "))
             end
         end
@@ -721,8 +877,12 @@ function create_tools(GateTool::Type)
     so a worker holding useful results is safe until you choose to remove it. Use `remote_workers` first.
     """
     function reap_worker(host::String, port::Int)::String
-        h = strip(host); isempty(h) && return "Give an ssh host."
-        try; NotebookServer._drop_kernels_for_worker!(_HUB[], h, port); catch; end   # wake any eval bound to this worker before it dies
+        h = strip(host)
+        isempty(h) && return "Give an ssh host."
+        try
+            NotebookServer._drop_kernels_for_worker!(_HUB[], h, port)
+        catch
+        end   # wake any eval bound to this worker before it dies
         ReportEngine.reap_remote_worker(h, port)
         return "✅ reaped worker-$port on '$h' (process killed, files removed)."
     end
@@ -744,24 +904,50 @@ function create_tools(GateTool::Type)
     Pass `delete=true` to REMOVE the named region from the registry (all other args ignored): its warm
     workers are reaped, but any worker currently attached to a notebook keeps running.
     """
-    function region(name::String; host::String = "", transport::String = "tunnel", base_port::Int = 0,
-                    preload::String = "", data_root::String = "", cache_root::String = "", warm::Int = 0,
-                    threads::String = "", sysimage::Bool = false, curve::Bool = true, peer::String = "",
-                    delete::Bool = false)::String
-        nm = strip(name); isempty(nm) && return "Give a region name."
+    function region(
+        name::String;
+        host::String="",
+        transport::String="tunnel",
+        base_port::Int=0,
+        preload::String="",
+        data_root::String="",
+        cache_root::String="",
+        warm::Int=0,
+        threads::String="",
+        sysimage::Bool=false,
+        curve::Bool=true,
+        peer::String="",
+        delete::Bool=false,
+    )::String
+        nm = strip(name)
+        isempty(nm) && return "Give a region name."
         if delete
             ReportEngine.region_get(nm) === nothing && return "No region '$nm' to delete."
             ReportEngine.region_remove!(nm)   # reaps this region's warm workers, then drops the record
             return "🗑️ region '$nm' deleted (warm workers reaped; attached workers keep running)."
         end
-        tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
-        pl = strip(preload); (isempty(pl) || isdir(expanduser(pl))) || return "preload project dir not found: $pl"
-        r = ReportEngine.region_set!(nm; host = String(strip(host)), transport = tr, base_port = base_port,
-                                     preload = isempty(pl) ? "" : abspath(expanduser(pl)),
-                                     data_root = String(strip(data_root)), cache_root = String(strip(cache_root)),
-                                     warm = max(0, warm), threads = String(strip(threads)), sysimage = sysimage,
-                                     curve = curve, peer = String(strip(peer)))
-        r.warm > 0 && Threads.@spawn try; ReportEngine.region_reconcile!(r.name); catch; end
+        tr = Symbol(strip(transport))
+        tr in (:tunnel, :direct) || (tr = :tunnel)
+        pl = strip(preload)
+        (isempty(pl) || isdir(expanduser(pl))) || return "preload project dir not found: $pl"
+        r = ReportEngine.region_set!(
+            nm;
+            host=String(strip(host)),
+            transport=tr,
+            base_port=base_port,
+            preload=isempty(pl) ? "" : abspath(expanduser(pl)),
+            data_root=String(strip(data_root)),
+            cache_root=String(strip(cache_root)),
+            warm=max(0, warm),
+            threads=String(strip(threads)),
+            sysimage=sysimage,
+            curve=curve,
+            peer=String(strip(peer)),
+        )
+        r.warm > 0 && Threads.@spawn try
+            ReportEngine.region_reconcile!(r.name)
+        catch
+        end
         return "✅ region '$(r.name)' → $(isempty(r.host) ? "(no host)" : r.host) ($(r.transport))" *
                (r.warm > 0 ? ", warm=$(r.warm) (reconciling)" : "") *
                (r.sysimage ? ", sysimage=on" : "") *
@@ -784,13 +970,23 @@ function create_tools(GateTool::Type)
     function peer_introduce(regions::String)::String
         names = String[strip(s) for s in split(regions, ',') if !isempty(strip(s))]
         length(names) < 2 && return "Give ≥2 region names (comma-separated)."
-        for n in names; ReportEngine.region_get(n) === nothing && return "No region '$n'."; end
-        installed = try; ReportEngine.introduce_group!(names)
-        catch e; return "❌ introduce failed: " * first(sprint(showerror, e), 200); end
+        for n in names
+            ReportEngine.region_get(n) === nothing && return "No region '$n'."
+        end
+        installed = try
+            ReportEngine.introduce_group!(names)
+        catch e
+            return "❌ introduce failed: " * first(sprint(showerror, e), 200)
+        end
         isempty(installed) && return "No cross-host pairs to mesh among: $(join(names, ", "))."
         return "✅ mesh armed ($(length(installed)) grant(s)):\n" * join(
-            ["  $(g.puller)←$(g.source)  permitopen 127.0.0.1:$(g.port)" *
-             (g.placeholder ? " (placeholder — finalized at first transfer)" : "") for g in installed], "\n")
+            [
+                "  $(g.puller)←$(g.source)  permitopen 127.0.0.1:$(g.port)" *
+                (g.placeholder ? " (placeholder — finalized at first transfer)" : "") for
+                g in installed
+            ],
+            "\n",
+        )
     end
 
     """
@@ -802,8 +998,11 @@ function create_tools(GateTool::Type)
     """
     function peer_teardown(region::String)::String
         ReportEngine.region_get(region) === nothing && return "No region '$region'."
-        try; ReportEngine.teardown_region_mesh!(region)
-        catch e; return "❌ teardown failed: " * first(sprint(showerror, e), 200); end
+        try
+            ReportEngine.teardown_region_mesh!(region)
+        catch e
+            return "❌ teardown failed: " * first(sprint(showerror, e), 200)
+        end
         return "🧹 mesh artifacts for '$region' removed."
     end
 
@@ -815,12 +1014,15 @@ function create_tools(GateTool::Type)
     run. The mesh audit / ownership-reconciliation view (PEER_TUNNEL_PLAN §6.2). `refresh="1"` first clears
     the cached route verdicts so the next transfer re-probes (the DAG "recalculate" action).
     """
-    function peer_plan_tool(regions::String; refresh::String = "0")::String
+    function peer_plan_tool(regions::String; refresh::String="0")::String
         names = String[strip(s) for s in split(regions, ',') if !isempty(strip(s))]
         isempty(names) && return "Give region names (comma-separated)."
         ref = lowercase(strip(refresh)) in ("1", "true", "yes", "on")
-        try; return ReportEngine.peer_plan(names; refresh = ref)
-        catch e; return "❌ peer_plan failed: " * first(sprint(showerror, e), 200); end
+        try
+            return ReportEngine.peer_plan(names; refresh=ref)
+        catch e
+            return "❌ peer_plan failed: " * first(sprint(showerror, e), 200)
+        end
     end
 
     """
@@ -834,17 +1036,36 @@ function create_tools(GateTool::Type)
     function transfers()::String
         vs = ReportEngine.xfer_views()
         isempty(vs) && return "No transfers active or recent."
-        hum(b) = b < 0 ? "?" : b < 1024 ? "$(b) B" : b < 2^20 ? "$(round(b / 1024; digits = 1)) KB" :
-                 b < 2^30 ? "$(round(b / 2^20; digits = 1)) MB" : "$(round(b / 2^30; digits = 2)) GB"
+        hum(b) =
+            if b < 0
+                "?"
+            elseif b < 1024
+                "$(b) B"
+            elseif b < 2^20
+                "$(round(b / 1024; digits = 1)) KB"
+            elseif b < 2^30
+                "$(round(b / 2^20; digits = 1)) MB"
+            else
+                "$(round(b / 2^30; digits = 2)) GB"
+            end
         io = IOBuffer()
         for v in vs
             el = (v.finished > 0 ? v.finished : time()) - v.started
             rate = (el > 0 && v.done > 0) ? v.done / el : 0.0
-            state = !isempty(v.err) ? "❌ " * first(v.err, 60) : v.finished > 0 ? "✓ done" : "▶ running"
+            state = if !isempty(v.err)
+                "❌ " * first(v.err, 60)
+            elseif v.finished > 0
+                "✓ done"
+            else
+                "▶ running"
+            end
             pct = v.total > 0 ? " ($(round(Int, 100 * v.done / v.total))%)" : ""
             println(io, "$(v.dst) ← $(v.src)  ·  $(v.name)  [$(v.via)]")
-            println(io, "   $(hum(v.done))$(v.total > 0 ? " / " * hum(v.total) : "")$(pct)  ·  " *
-                        "$(rate > 0 ? hum(round(Int, rate)) * "/s" : "—")  ·  $(round(el; digits = 1))s  ·  $(state)")
+            println(
+                io,
+                "   $(hum(v.done))$(v.total > 0 ? " / " * hum(v.total) : "")$(pct)  ·  " *
+                "$(rate > 0 ? hum(round(Int, rate)) * "/s" : "—")  ·  $(round(el; digits = 1))s  ·  $(state)",
+            )
         end
         return String(take!(io))
     end
@@ -860,12 +1081,14 @@ function create_tools(GateTool::Type)
     clears. Pure `using` cells run on every side; keep `@bind` cells on the main kernel.
     """
     function region_on(notebook::String, regions::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         names = NotebookServer.set_notebook_regions!(nb, regions)   # teardown old region kernels + persist the footer
         isempty(names) && return "✅ regions cleared — all cells run on the main kernel again."
         unknown = [nm for nm in names if ReportEngine.region_get(nm) === nothing]
         n = count(c -> !isempty(NotebookServer._cell_region(c)), nb.report.cells)
-        return "✅ $(basename(nb.path)) uses region(s): " * join(names, ", ") *
+        return "✅ $(basename(nb.path)) uses region(s): " *
+               join(names, ", ") *
                (isempty(unknown) ? "" : "  ⚠ not defined in the registry: " * join(unknown, ", ")) *
                ". Tag cells with `region=<name>` ($n tagged now)."
     end
@@ -880,18 +1103,25 @@ function create_tools(GateTool::Type)
     reason on a recompute (no manifest / blob missing / decode failed / below threshold / …).
     `cell=""` returns every recorded cell. Reads the LIVE worker — run a cell first.
     """
-    function memo_trace(notebook::String; cell::String = "")::String
-        nb, err = _nb(notebook); nb === nothing && return err
+    function memo_trace(notebook::String; cell::String="")::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         k = nb.kernel
-        k isa ReportEngine.GateKernel || return "In-process kernel — no durable memo layer to trace."
+        k isa ReportEngine.GateKernel ||
+            return "In-process kernel — no durable memo layer to trace."
         t = try
             ReportEngine.memo_trace(k, strip(cell))
         catch e
             return "memo_trace failed: $(first(sprint(showerror, e), 200))"
         end
         t === nothing && return "Worker not connected — run a cell first."
-        fmt(d) = join(sort!(["  $k2: $(v2 isa AbstractVector ? join((string(x) for x in v2), "; ") : v2)"
-                             for (k2, v2) in d]), "\n")
+        fmt(d) = join(
+            sort!([
+                "  $k2: $(v2 isa AbstractVector ? join((string(x) for x in v2), "; ") : v2)" for
+                (k2, v2) in d
+            ]),
+            "\n",
+        )
         if !isempty(strip(cell))
             return "memo trace — cell '$cell':\n" * fmt(t)
         end
@@ -915,20 +1145,28 @@ function create_tools(GateTool::Type)
     function regions()::String
         rs = ReportEngine.regions()
         parked = ReportEngine.parked_wires()
-        isempty(rs) && isempty(parked) &&
+        isempty(rs) &&
+            isempty(parked) &&
             return "No regions configured and no parked wires. Define one with region(name; host, warm, …)."
         io = IOBuffer()
         if !isempty(rs)
             println(io, "Regions (desired state; live roster → remote_workers(host)):")
             for r in rs
-                ports = (r.transport === :direct && r.base_port > 0 && r.warm > 0) ?
-                        "  ports=$(r.base_port)–$(r.base_port + 3r.warm - 1)" : ""
-                println(io, "  • $(r.name)  → $(isempty(r.host) ? "(no host)" : r.host)  warm=$(r.warm)  ",
-                        "transport=$(r.transport)$ports  preload=",
-                        isempty(r.preload) ? "(none)" : r.preload,
-                        isempty(r.data_root) ? "" : "  data_root=$(r.data_root)")
+                ports = if (r.transport === :direct && r.base_port > 0 && r.warm > 0)
+                    "  ports=$(r.base_port)–$(r.base_port + 3r.warm - 1)"
+                else
+                    ""
+                end
+                println(
+                    io,
+                    "  • $(r.name)  → $(isempty(r.host) ? "(no host)" : r.host)  warm=$(r.warm)  ",
+                    "transport=$(r.transport)$ports  preload=",
+                    isempty(r.preload) ? "(none)" : r.preload,
+                    isempty(r.data_root) ? "" : "  data_root=$(r.data_root)",
+                )
                 st = ReportEngine.region_status(r.name)
-                st === nothing || println(io, "      last: ", st.ok ? "ok" : "FAILED", " — ", st.msg)
+                st === nothing ||
+                    println(io, "      last: ", st.ok ? "ok" : "FAILED", " — ", st.msg)
             end
         end
         if !isempty(parked)
@@ -950,38 +1188,72 @@ function create_tools(GateTool::Type)
     for a host's full roster.
     """
     function whereis(notebook::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         k = nb.kernel
-        k isa ReportEngine.GateKernel || return "'$notebook' runs IN-PROCESS (no worker — standalone/fallback kernel $(typeof(k)))."
+        k isa ReportEngine.GateKernel ||
+            return "'$notebook' runs IN-PROCESS (no worker — standalone/fallback kernel $(typeof(k)))."
         io = IOBuffer()
         t = k.target
         if t isa ReportEngine.RemoteTarget
             println(io, "'$notebook' runs REMOTELY on '$(t.ssh_host)' (transport=$(t.transport))")
-            println(io, "  ports: main $(k.port) · stream $(k.stream_port) · data $(k.port + 2)  (remote env: $(t.project))")
-            println(io, "  connection: ", k.conn === nothing ? "not connected (connects on next run)" :
-                        "live" * (k.tunnel === nothing ? " (direct CURVE)" : " (ssh tunnel)"))
+            println(
+                io,
+                "  ports: main $(k.port) · stream $(k.stream_port) · data $(k.port + 2)  (remote env: $(t.project))",
+            )
+            println(
+                io,
+                "  connection: ",
+                if k.conn === nothing
+                    "not connected (connects on next run)"
+                else
+                    "live" * (k.tunnel === nothing ? " (direct CURVE)" : " (ssh tunnel)")
+                end,
+            )
             # one ssh probe for the worker's own view: lifecycle state, pool provenance, telemetry
             w = nothing
             try
                 for x in ReportEngine.list_remote_workers(t.ssh_host)
-                    x["port"] == k.port && (w = x; break)
+                    x["port"] == k.port && (w=x; break)
                 end
             catch
             end
             if w !== nothing
                 mf = w["manifest"]
-                prov = ReportEngine._manifest_get(mf, "adopted") == "1" ? "adopted from the warm pool" :
-                       ReportEngine._manifest_get(mf, "pool") == "1" ? "warm-pool member (unadopted)" : "spawned for this notebook"
-                println(io, "  worker: ", w["alive"] === true ? "alive" : "NOT RUNNING", " · state=$(get(w, "state", "?")) · $prov")
+                prov = if ReportEngine._manifest_get(mf, "adopted") == "1"
+                    "adopted from the warm pool"
+                elseif ReportEngine._manifest_get(mf, "pool") == "1"
+                    "warm-pool member (unadopted)"
+                else
+                    "spawned for this notebook"
+                end
+                println(
+                    io,
+                    "  worker: ",
+                    w["alive"] === true ? "alive" : "NOT RUNNING",
+                    " · state=$(get(w, "state", "?")) · $prov",
+                )
                 stj = get(w, "stats", "")
                 isempty(stj) || println(io, "  stats: ", stj)
             end
         elseif k.remote
-            println(io, "'$notebook' is ATTACHED to a pre-running worker at 127.0.0.1:$(k.port) (stream $(k.stream_port)) — not managed by this hub.")
+            println(
+                io,
+                "'$notebook' is ATTACHED to a pre-running worker at 127.0.0.1:$(k.port) (stream $(k.stream_port)) — not managed by this hub.",
+            )
         else
-            alive = k.proc !== nothing && (try; Base.process_running(k.proc); catch; false; end)
-            println(io, "'$notebook' runs LOCALLY: worker port $(k.port) (stream $(k.stream_port)), ",
-                    alive ? "pid $(getpid(k.proc))" : "no live process (spawns on next run)")
+            alive = k.proc !== nothing && (
+                try
+                    Base.process_running(k.proc)
+                catch
+                    false
+                end
+            )
+            println(
+                io,
+                "'$notebook' runs LOCALLY: worker port $(k.port) (stream $(k.stream_port)), ",
+                alive ? "pid $(getpid(k.proc))" : "no live process (spawns on next run)",
+            )
             println(io, "  env: $(k.project)")
         end
         return String(take!(io))
@@ -997,9 +1269,10 @@ function create_tools(GateTool::Type)
     - `delta_since="<token>"`: only the cells added/edited/removed since that token.
     Every read ends with a STATE TOKEN ("state=…") — pass it back as `delta_since` to catch up.
     """
-    function read_cells(notebook::String; cells::String = "", delta_since::String = "")::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        return notebook_digest(nb; cells = cells, delta_since = delta_since)
+    function read_cells(notebook::String; cells::String="", delta_since::String="")::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
+        return notebook_digest(nb; cells=cells, delta_since=delta_since)
     end
 
     """
@@ -1024,7 +1297,7 @@ function create_tools(GateTool::Type)
     # pass just the later one. (It was an optional POSITIONAL, which the gate's dispatcher then
     # dropped silently — every call returned the index. Fixed in KaimonGate's `_dispatch_tool_call`,
     # but the convention stands on its own.)
-    api(; topic::String = "")::String = NotebookServer.slate_api_reference(topic)   # SSOT (also feeds the prompt)
+    api(; topic::String="")::String = NotebookServer.slate_api_reference(topic)   # SSOT (also feeds the prompt)
 
     """
         add_cell(notebook, source, after, kind) -> String
@@ -1046,11 +1319,33 @@ function create_tools(GateTool::Type)
     `slate.api` for the reference before plotting or adding interactivity; their names are not in
     package docs.
     """
-    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "", tags::String = "", run::Bool = true)::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_add_cell!(nb, source; after = after, kind = kind, id = id, tags = tags, run = run, caller = _caller())
-        return _surfaced(nb, "add_cell",
-            Dict{String,Any}("source" => source, "after" => after, "kind" => kind, "id" => id, "tags" => tags, "run" => run), res)
+    function add_cell(
+        notebook::String,
+        source::String;
+        after::String="",
+        kind::String="code",
+        id::String="",
+        tags::String="",
+        run::Bool=true,
+    )::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
+        res = agent_add_cell!(
+            nb, source; after=after, kind=kind, id=id, tags=tags, run=run, caller=_caller()
+        )
+        return _surfaced(
+            nb,
+            "add_cell",
+            Dict{String,Any}(
+                "source" => source,
+                "after" => after,
+                "kind" => kind,
+                "id" => id,
+                "tags" => tags,
+                "run" => run,
+            ),
+            res,
+        )
     end
 
     """
@@ -1061,8 +1356,9 @@ function create_tools(GateTool::Type)
     Dependencies are preserved. Use to give cells meaningful ids (e.g. "ground_state", "viz_conv").
     """
     function rename_cell(notebook::String, cell::String, newid::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_rename_cell!(nb, cell, newid; caller = _caller())
+        nb, err = _nb(notebook)
+        nb === nothing && return err
+        res = agent_rename_cell!(nb, cell, newid; caller=_caller())
         return _surfaced(nb, "rename_cell", Dict{String,Any}("cell" => cell, "newid" => newid), res)
     end
 
@@ -1080,11 +1376,18 @@ function create_tools(GateTool::Type)
     the edits with `run=false`, then reconcile ONCE with `run(notebook, "")`. It is also the safe way
     to edit a notebook whose cells are mid-computation.
     """
-    function edit_cell(notebook::String, cell::String, source::String; tags::String = "", run::Bool = true)::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_edit_cell!(nb, cell, source; tags = tags, run = run, caller = _caller())
-        return _surfaced(nb, "edit_cell",
-            Dict{String,Any}("cell" => cell, "source" => source, "tags" => tags, "run" => run), res)
+    function edit_cell(
+        notebook::String, cell::String, source::String; tags::String="", run::Bool=true
+    )::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
+        res = agent_edit_cell!(nb, cell, source; tags=tags, run=run, caller=_caller())
+        return _surfaced(
+            nb,
+            "edit_cell",
+            Dict{String,Any}("cell" => cell, "source" => source, "tags" => tags, "run" => run),
+            res,
+        )
     end
 
     """
@@ -1093,8 +1396,9 @@ function create_tools(GateTool::Type)
     Run cell `cell` and return its result; `cell` = "" recomputes all stale cells.
     """
     function run_cell(notebook::String, cell::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_run!(nb, cell; caller = _caller())
+        nb, err = _nb(notebook)
+        nb === nothing && return err
+        res = agent_run!(nb, cell; caller=_caller())
         return _surfaced(nb, "run", Dict{String,Any}("cell" => cell), res)
     end
 
@@ -1106,14 +1410,15 @@ function create_tools(GateTool::Type)
     cell. Ids that don't exist are reported, and the rest still delete.
     """
     function delete_cell(notebook::String, cell::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        ids = String.(split(strip(cell), r"[\s,]+"; keepempty = false))   # ids are [A-Za-z0-9_] → safe to split
+        nb, err = _nb(notebook)
+        nb === nothing && return err
+        ids = String.(split(strip(cell), r"[\s,]+"; keepempty=false))   # ids are [A-Za-z0-9_] → safe to split
         isempty(ids) && return "(no cell id given)"
         if length(ids) == 1
-            res = agent_delete_cell!(nb, ids[1]; caller = _caller())
+            res = agent_delete_cell!(nb, ids[1]; caller=_caller())
             return _surfaced(nb, "delete_cell", Dict{String,Any}("cell" => ids[1]), res)
         end
-        res = agent_delete_cells!(nb, ids; caller = _caller())
+        res = agent_delete_cells!(nb, ids; caller=_caller())
         return _surfaced(nb, "delete_cell", Dict{String,Any}("cells" => join(ids, ", ")), res)
     end
 
@@ -1136,9 +1441,12 @@ function create_tools(GateTool::Type)
     somewhere in the notebook (a typo is rejected with the list of available controls).
     """
     function surface_controls(notebook::String, cell::String, controls::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_surface_controls!(nb, cell, controls; caller = _caller())
-        return _surfaced(nb, "surface", Dict{String,Any}("cell" => cell, "controls" => controls), res)
+        nb, err = _nb(notebook)
+        nb === nothing && return err
+        res = agent_surface_controls!(nb, cell, controls; caller=_caller())
+        return _surfaced(
+            nb, "surface", Dict{String,Any}("cell" => cell, "controls" => controls), res
+        )
     end
 
     # ── Multi-agent write safety (MULTIAGENT.md §3) ───────────────────────────
@@ -1154,7 +1462,8 @@ function create_tools(GateTool::Type)
     auto-expires after a few minutes idle. If another agent holds it, you get told who.
     """
     function acquire_floor(notebook::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         ok, why = acquire_floor!(nb, _caller())
         ok || return "⛔ build-floor $why. Try again shortly, or coordinate via the team."
         return "🔓 build-floor acquired — you hold it; other agents are locked out until slate.release_floor (auto-expires after $(Int(NotebookServer.FLOOR_TTL))s idle). Your edits carry your session automatically."
@@ -1166,8 +1475,13 @@ function create_tools(GateTool::Type)
     Release the build-floor you hold so other agents can commit.
     """
     function release_floor(notebook::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        return release_floor!(nb, _caller()) ? "✅ build-floor released." : "(you don't hold the build-floor — nothing to release)"
+        nb, err = _nb(notebook)
+        nb === nothing && return err
+        return if release_floor!(nb, _caller())
+            "✅ build-floor released."
+        else
+            "(you don't hold the build-floor — nothing to release)"
+        end
     end
 
     """
@@ -1178,15 +1492,19 @@ function create_tools(GateTool::Type)
     loaded in the notebook first (a cell with `using Foo`).
     """
     function index_docs(notebook::String, modules::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         mods = String[strip(m) for m in split(modules, r"[,\s]+") if !isempty(strip(m))]
-        isempty(mods) && return "Name the packages/modules to index (comma-separated); they must be `using`'d in the notebook."
+        isempty(mods) &&
+            return "Name the packages/modules to index (comma-separated); they must be `using`'d in the notebook."
         recs = ReportEngine.harvest_docs(nb.kernel, nb.report, mods)
         n = index_docs!(recs)
         n == 0 || NotebookServer.ensure_docs_fts!()   # light up lexical search + module filters for these
-        return n == 0 ?
-            "Indexed nothing — are the modules loaded (run `using …`) and the docs service (Ollama/Qdrant) up?" :
+        return if n == 0
+            "Indexed nothing — are the modules loaded (run `using …`) and the docs service (Ollama/Qdrant) up?"
+        else
             "Indexed $n documented symbols from $(join(mods, ", ")). Search them with slate.search_docs."
+        end
     end
 
     """
@@ -1199,11 +1517,17 @@ function create_tools(GateTool::Type)
     function search_docs_tool(notebook::String, query::String)::String
         nb, _ = _nb(notebook)   # scope to this notebook's packages when resolvable; unfiltered otherwise
         mods = nb === nothing ? String[] : NotebookServer._inscope_modules(nb)
-        res = search_docs(query; modules = mods)
-        isempty(res) && return "No matches — build the index first with slate.index_docs, or rephrase."
+        res = search_docs(query; modules=mods)
+        isempty(res) &&
+            return "No matches — build the index first with slate.index_docs, or rephrase."
         io = IOBuffer()
         for r in res
-            println(io, "● $(r["module"]).$(r["name"])  (", round(Float64(get(r, "score", 0.0)); digits = 3), ")")
+            println(
+                io,
+                "● $(r["module"]).$(r["name"])  (",
+                round(Float64(get(r, "score", 0.0)); digits=3),
+                ")",
+            )
             snip = join(first(split(rstrip(string(r["doc"])), "\n"), 4), "\n")
             isempty(strip(snip)) || println(io, snip)
             println(io)
@@ -1220,13 +1544,18 @@ function create_tools(GateTool::Type)
     those with `read`; text output also comes back via `read`.
     """
     function view_cell(notebook::String, cell::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         findfirst(c -> c.id == cell, nb.report.cells) === nothing &&
             return "No cell '$cell' in '$notebook' (use slate.read to list cells)."
         png = cell_image_fresh(nb, cell)   # CairoMakie/ECharts raster, or a fresh on-demand capture (md/table/value)
-        png === nothing && return "Cell '$cell' has no figure to view yet — run a plotting cell (CairoMakie or an ECharts chart); text/data → use slate.read."
-        isdefined(Main, :Kaimon) || return "Image view needs the Kaimon host (unavailable in standalone mode)."
-        return getfield(Main, :Kaimon).KaimonGate.image_result(png; text = "Cell '$cell' — rendered figure")
+        png === nothing &&
+            return "Cell '$cell' has no figure to view yet — run a plotting cell (CairoMakie or an ECharts chart); text/data → use slate.read."
+        isdefined(Main, :Kaimon) ||
+            return "Image view needs the Kaimon host (unavailable in standalone mode)."
+        return getfield(Main, :Kaimon).KaimonGate.image_result(
+            png; text="Cell '$cell' — rendered figure"
+        )
     end
 
     """
@@ -1238,7 +1567,8 @@ function create_tools(GateTool::Type)
     whole notebook → slate.read.)
     """
     function inspect_cell(notebook::String, cell::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         return cell_inspect(nb, cell)
     end
 
@@ -1255,22 +1585,31 @@ function create_tools(GateTool::Type)
     For a Button, OMIT `value` — a valueless set is a CLICK: the server increments the click count
     and fires the handler, so you never need to read (or race) the current count.
     """
-    function set_bind_tool(notebook::String, name::String; value::String = "")::String
-        nb, err = _nb(notebook); nb === nothing && return err
+    function set_bind_tool(notebook::String, name::String; value::String="")::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         bindref, _ = NotebookServer._bind_index(nb.report)
         entry = get(bindref, name, nothing)
         if entry === nothing
             names = sort(collect(keys(bindref)))
-            return isempty(names) ? "⛔ '$(basename(nb.path))' has no @bind controls." :
-                   "⛔ no @bind named '$name' (available: $(join(names, ", ")))."
+            return if isempty(names)
+                "⛔ '$(basename(nb.path))' has no @bind controls."
+            else
+                "⛔ no @bind named '$name' (available: $(join(names, ", ")))."
+            end
         end
         cell, spec = entry
         isbtn = spec.widget == "button"
         v = if isempty(strip(value))
-            isbtn || return "⛔ '$name' is a $(spec.widget) — pass value= (JSON), e.g. value=\"5\". Only a button fires with no value (a click)."
+            isbtn ||
+                return "⛔ '$name' is a $(spec.widget) — pass value= (JSON), e.g. value=\"5\". Only a button fires with no value (a click)."
             nothing                                   # valueless → server-side click increment
         else
-            try; JSON.parse(value); catch; String(value); end
+            try
+                JSON.parse(value)
+            catch
+                String(value)
+            end
         end
         NotebookServer.set_bind!(nb, cell.id, name, v)
         newv = let (br, _) = NotebookServer._bind_index(nb.report)
@@ -1289,7 +1628,8 @@ function create_tools(GateTool::Type)
     needed). Reports "✓ clean" when nothing was captured.
     """
     function notebook_diag(notebook::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         return diag_report(nb)
     end
 
@@ -1312,13 +1652,25 @@ function create_tools(GateTool::Type)
     the worker; poll for its result with `check_eval(notebook, job)`. So use `eval` freely for slow
     computations; you'll just get a job id to poll instead of blocking.
     """
-    function scratch_eval(notebook::String, source::String; ephemeral::String = "0",
-                          memo_key::String = "", memo_threshold::String = "0")::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        r = agent_scratch_eval_bg!(nb, source;
-            ephemeral = lowercase(ephemeral) in ("1", "true", "yes", "on"),
-            memo_key = memo_key, memo_threshold = something(tryparse(Float64, memo_threshold), 0.0))
-        return _surfaced(nb, "eval", Dict{String,Any}("source" => source, "ephemeral" => ephemeral), r.text)
+    function scratch_eval(
+        notebook::String,
+        source::String;
+        ephemeral::String="0",
+        memo_key::String="",
+        memo_threshold::String="0",
+    )::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
+        r = agent_scratch_eval_bg!(
+            nb,
+            source;
+            ephemeral=lowercase(ephemeral) in ("1", "true", "yes", "on"),
+            memo_key=memo_key,
+            memo_threshold=something(tryparse(Float64, memo_threshold), 0.0),
+        )
+        return _surfaced(
+            nb, "eval", Dict{String,Any}("source" => source, "ephemeral" => ephemeral), r.text
+        )
     end
     """
         check_eval(notebook, job) -> String
@@ -1329,7 +1681,8 @@ function create_tools(GateTool::Type)
     `notebook` just routes/validates the caller.
     """
     function check_scratch_eval(notebook::String, job::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         return scratch_check(job)
     end
 
@@ -1347,9 +1700,11 @@ function create_tools(GateTool::Type)
     `exportPdf()`); to inspect generated artifacts use the server-side tool (`slate.export_pdf`).
     """
     function eval_js(notebook::String, code::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         res = request_live_eval(nb, code)
-        res === nothing && return "No open browser tab answered. Open/reload the notebook in a browser, then retry — eval_js runs in the live page."
+        res === nothing &&
+            return "No open browser tab answered. Open/reload the notebook in a browser, then retry — eval_js runs in the live page."
         res isa AbstractDict || return string(res)
         get(res, "ok", false) === true && return String(get(res, "result", "null"))
         return "JS error: " * String(get(res, "error", "(unknown)"))
@@ -1378,31 +1733,60 @@ function create_tools(GateTool::Type)
     mode). On a deck, code is hidden by default (set `source="1"`/`code` to show it) and
     `notes="1"` appends a speaker-notes section.
     """
-    function export_pdf_tool(notebook::String; theme::String = "light", charttheme::String = "",
-                             override::String = "0", params::String = "0",
-                             source::String = "1", style::String = "article", columns::String = "1",
-                             code::String = "normal", body::String = "", path::String = "",
-                             layout::String = "article", notes::String = "0")::String
-        nb, err = _nb(notebook); nb === nothing && return err
+    function export_pdf_tool(
+        notebook::String;
+        theme::String="light",
+        charttheme::String="",
+        override::String="0",
+        params::String="0",
+        source::String="1",
+        style::String="article",
+        columns::String="1",
+        code::String="normal",
+        body::String="",
+        path::String="",
+        layout::String="article",
+        notes::String="0",
+    )::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         # Deck defaults: code hidden unless the caller explicitly opts in.
         slides = layout == "slides"
         slide_source = slides ? (source == "1") : (source != "0")
         pdf = try
-            export_pdf(nb; include_source = slide_source, style = style,
-                       columns = something(tryparse(Int, columns), 1), theme = theme,
-                       charttheme = charttheme, override = override == "1",
-                       code = code, body = body, include_params = params == "1",
-                       layout = layout, notes = notes == "1",
-                       level = get(nb.report.meta, "slidelevel", 2))
+            export_pdf(
+                nb;
+                include_source=slide_source,
+                style=style,
+                columns=something(tryparse(Int, columns), 1),
+                theme=theme,
+                charttheme=charttheme,
+                override=override == "1",
+                code=code,
+                body=body,
+                include_params=params == "1",
+                layout=layout,
+                notes=notes == "1",
+                level=get(nb.report.meta, "slidelevel", 2),
+            )
         catch e
             return "PDF export failed: " * sprint(showerror, e)
         end
-        out = isempty(path) ? joinpath(tempdir(), "slate-export",
-                  replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".pdf") : String(path)
+        out = if isempty(path)
+            joinpath(
+                tempdir(),
+                "slate-export",
+                replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".pdf",
+            )
+        else
+            String(path)
+        end
         try
-            mkpath(dirname(out)); write(out, pdf)
+            mkpath(dirname(out))
+            write(out, pdf)
         catch e
-            return "PDF rendered ($(length(pdf)) bytes) but writing to $out failed: " * sprint(showerror, e)
+            return "PDF rendered ($(length(pdf)) bytes) but writing to $out failed: " *
+                   sprint(showerror, e)
         end
         return "Wrote $(length(pdf)) bytes → $out\n(open it with Read to view the pages)"
     end
@@ -1429,27 +1813,48 @@ function create_tools(GateTool::Type)
 
     Adding may precompile (can take a while). The parent project's deps are never touched.
     """
-    function pkg(notebook::String; op::String = "list", name::String = "")::String
-        nb, err = _nb(notebook); nb === nothing && return err
+    function pkg(notebook::String; op::String="list", name::String="")::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         if op == "list"
             e = NotebookServer._notebook_adds(nb)
-            _prov(p) = get(p, "source", "registry") == "path" ? "  [dev: $(get(p, "origin", ""))]" :
-                       get(p, "source", "registry") == "git" ? "  [git: $(get(p, "origin", ""))]" : ""
-            adds = isempty(e.adds) ? "  (none yet)" :
-                   join(["  $(get(p, "name", "")) $(get(p, "version", ""))$(_prov(p))" for p in e.adds], "\n")
-            parent = isempty(e.parent) ? "" :
-                     "\nInherited from parent ($(basename(e.parentpath))) — read-only:\n  " *
-                     join([string(get(p, "name", "")) for p in e.parent], ", ")
-            head = e.detached ? "Notebook packages (detached — this env is everything):" :
-                                "Notebook packages (its own adds):"
+            _prov(p) =
+                if get(p, "source", "registry") == "path"
+                    "  [dev: $(get(p, "origin", ""))]"
+                elseif get(p, "source", "registry") == "git"
+                    "  [git: $(get(p, "origin", ""))]"
+                else
+                    ""
+                end
+            adds = if isempty(e.adds)
+                "  (none yet)"
+            else
+                join(
+                    ["  $(get(p, "name", "")) $(get(p, "version", ""))$(_prov(p))" for p in e.adds],
+                    "\n",
+                )
+            end
+            parent = if isempty(e.parent)
+                ""
+            else
+                "\nInherited from parent ($(basename(e.parentpath))) — read-only:\n  " *
+                join([string(get(p, "name", "")) for p in e.parent], ", ")
+            end
+            head = if e.detached
+                "Notebook packages (detached — this env is everything):"
+            else
+                "Notebook packages (its own adds):"
+            end
             return "$head\n$adds$parent"
         end
         (op in ("add", "rm")) || return "bad op '$op' — use op=list|add|rm."
         isempty(strip(name)) && return "op=$op needs name=<package>."
         res = NotebookServer.notebook_pkg_op!(nb, op, name)
-        get(res, "ok", false) === true ?
-            "✅ $(op == "add" ? "added" : "removed") $name — notebook env updated & Slate.env footer synced." :
+        return if get(res, "ok", false) === true
+            "✅ $(op == "add" ? "added" : "removed") $name — notebook env updated & Slate.env footer synced."
+        else
             "❌ $op $name failed: $(get(res, "message", "?"))"
+        end
     end
 
     # ── Site membership: the model publishing actually runs on ────────────────────────────────────
@@ -1457,22 +1862,29 @@ function create_tools(GateTool::Type)
     # That membership lives in the site build's manifest (`publish_sites_info`), NOT in the doc-level
     # `assignedTargets` list — which is only the standalone escape hatch. Resolving publishing off
     # `assignedTargets` is what made a fully-configured site member look like it had no destinations.
-    _member_sites(nb) = [s for s in get(NotebookServer.publish_sites_info(nb), "sites", Any[])
-                         if get(s, "member", false) === true]
+    _member_sites(nb) = [
+        s for s in get(NotebookServer.publish_sites_info(nb), "sites", Any[]) if
+        get(s, "member", false) === true
+    ]
 
     _site_targets(s) = String[String(t) for t in get(s, "targets", String[])]
     _site_dests(s) = isempty(_site_targets(s)) ? "(local-only)" : join(_site_targets(s), ", ")
-    _site_line(s, mark = "") =
-        "  " * mark * String(get(s, "name", "?")) *
+    _site_line(s, mark="") =
+        "  " *
+        mark *
+        String(get(s, "name", "?")) *
         (get(s, "isHome", false) === true ? "  ★ front page" : "") *
-        "  → " * _site_dests(s) *
+        "  → " *
+        _site_dests(s) *
         (isempty(String(get(s, "url", ""))) ? "" : "  " * String(get(s, "url", "")))
 
     # Per-target result rows shared by the site publish/sync paths.
-    _result_lines(res) = ["$(r["ok"] ? "✅" : "❌") $(r["target"]) — $(r["status"])" *
-                          (isempty(String(get(r, "url", ""))) ? "" : " → " * String(r["url"])) *
-                          (isempty(String(get(r, "doi", ""))) ? "" : " (DOI $(r["doi"]))")
-                          for r in get(res, "results", Any[])]
+    _result_lines(res) = [
+        "$(r["ok"] ? "✅" : "❌") $(r["target"]) — $(r["status"])" *
+        (isempty(String(get(r, "url", ""))) ? "" : " → " * String(r["url"])) *
+        (isempty(String(get(r, "doi", ""))) ? "" : " (DOI $(r["doi"]))") for
+        r in get(res, "results", Any[])
+    ]
 
     """
         publish(notebook; site="", targets="") -> String
@@ -1492,8 +1904,9 @@ function create_tools(GateTool::Type)
     never a source repo. ARCHIVES (Zenodo DOIs) are a different verb — permanent and immutable,
     never part of a site push; mint one deliberately with `slate.archive`.
     """
-    function publish_tool(notebook::String; site::String = "", targets::String = "")::String
-        nb, err = _nb(notebook); nb === nothing && return err
+    function publish_tool(notebook::String; site::String="", targets::String="")::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         names = String[String(strip(t)) for t in split(targets, ',') if !isempty(strip(t))]
         sname = String(strip(site))
         # ── Site-first path (explicit `targets` opts out) ─────────────────────────────────────────
@@ -1505,8 +1918,9 @@ function create_tools(GateTool::Type)
             end
             if isempty(sname)
                 length(sites) == 1 && (sname = String(get(sites[1], "name", "")))
-                length(sites) > 1 && return "This notebook belongs to several sites — pass site=\"name\":\n" *
-                                            join([_site_line(s) for s in sites], "\n")
+                length(sites) > 1 &&
+                    return "This notebook belongs to several sites — pass site=\"name\":\n" *
+                           join([_site_line(s) for s in sites], "\n")
             elseif !any(s -> String(get(s, "name", "")) == sname, sites)
                 # Naming a site it isn't in is a membership change, not a publish — never implicit.
                 return "⛔ This notebook is not a member of site '$sname'. Add it first:\n" *
@@ -1515,18 +1929,27 @@ function create_tools(GateTool::Type)
         end
         if !isempty(sname)
             res = try
-                NotebookServer.publish_to_site!(nb, sname; hub = _hub())
+                NotebookServer.publish_to_site!(nb, sname; hub=_hub())
             catch e
-                return _surfaced(nb, "publish", Dict{String,Any}("site" => sname),
-                                 "⛔ Publish failed: " * sprint(showerror, e))
+                return _surfaced(
+                    nb,
+                    "publish",
+                    Dict{String,Any}("site" => sname),
+                    "⛔ Publish failed: " * sprint(showerror, e),
+                )
             end
             msg = if get(res, "localOnly", false) === true
                 "✅ Staged into site '$sname' — it has no configured destinations, so nothing deployed.\n" *
                 "   Preview: $(get(res, "url", ""))  ·  add destinations with " *
                 "slate.sites(op=\"set\", name=\"$sname\", targets=\"…\")"
             else
-                (get(res, "ok", false) === true ? "Published into site '$sname'" :
-                 "Site '$sname' published with errors") * ":\n" * join(_result_lines(res), "\n")
+                (
+                    if get(res, "ok", false) === true
+                        "Published into site '$sname'"
+                    else
+                        "Site '$sname' published with errors"
+                    end
+                ) * ":\n" * join(_result_lines(res), "\n")
             end
             return _surfaced(nb, "publish", Dict{String,Any}("site" => sname), msg)
         end
@@ -1537,28 +1960,44 @@ function create_tools(GateTool::Type)
             names = String[String(t) for t in get(info, "assignedTargets", String[])]
             # An archive assigned to the doc (a past deposit) must not be re-minted as a side
             # effect of an implicit "publish everywhere" — archives are always explicit.
-            archives = try; Set(NotebookServer.archive_target_names()); catch; Set{String}(); end
+            archives = try
+                Set(NotebookServer.archive_target_names())
+            catch
+                Set{String}()
+            end
             skipped = [n for n in names if n in archives]
             if !isempty(skipped)
                 filter!(n -> !(n in archives), names)
                 note = "\n(skipped archive target$(length(skipped) == 1 ? "" : "s") $(join(skipped, ", ")) — a DOI deposit is deliberate; use slate.archive)"
             end
         end
-        isempty(names) && return "Nothing to publish to: this notebook isn't a member of any site, and its " *
-            "document has no targets assigned.\n" *
-            "  • Site (the normal route): slate.site_membership(notebook) to see the sites, then " *
-            "…(notebook, site=\"…\", member=\"true\") and publish again.\n" *
-            "  • Standalone page: slate.publish(notebook, targets=\"name1,name2\")." * note
+        isempty(names) &&
+            return "Nothing to publish to: this notebook isn't a member of any site, and its " *
+                   "document has no targets assigned.\n" *
+                   "  • Site (the normal route): slate.site_membership(notebook) to see the sites, then " *
+                   "…(notebook, site=\"…\", member=\"true\") and publish again.\n" *
+                   "  • Standalone page: slate.publish(notebook, targets=\"name1,name2\")." *
+                   note
         res = try
             NotebookServer.run_publish(nb, names)
         catch e
-            return _surfaced(nb, "publish", Dict{String,Any}("targets" => join(names, ",")),
-                             "⛔ Publish failed: " * sprint(showerror, e))
+            return _surfaced(
+                nb,
+                "publish",
+                Dict{String,Any}("targets" => join(names, ",")),
+                "⛔ Publish failed: " * sprint(showerror, e),
+            )
         end
-        lines = ["$(r["ok"] ? "✅" : "❌") $(r["target"]) — $(r["status"])" *
-                 (isempty(r["url"]) ? "" : " → " * r["url"]) *
-                 (isempty(r["doi"]) ? "" : " (DOI $(r["doi"]))") for r in res["results"]]
-        msg = (res["ok"] ? "Published" : "Publish completed with errors") * ":\n" * join(lines, "\n") * note
+        lines = [
+            "$(r["ok"] ? "✅" : "❌") $(r["target"]) — $(r["status"])" *
+            (isempty(r["url"]) ? "" : " → " * r["url"]) *
+            (isempty(r["doi"]) ? "" : " (DOI $(r["doi"]))") for r in res["results"]
+        ]
+        msg =
+            (res["ok"] ? "Published" : "Publish completed with errors") *
+            ":\n" *
+            join(lines, "\n") *
+            note
         return _surfaced(nb, "publish", Dict{String,Any}("targets" => join(names, ",")), msg)
     end
 
@@ -1572,32 +2011,41 @@ function create_tools(GateTool::Type)
     name from the Publishing manager; empty is accepted only when exactly one archive target is
     configured. Live-site publishing is `slate.publish`.
     """
-    function archive_tool(notebook::String; target::String = "")::String
-        nb, err = _nb(notebook); nb === nothing && return err
+    function archive_tool(notebook::String; target::String="")::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         archives = try
             NotebookServer.archive_target_names()
         catch e
             return "⛔ Could not read the publish ledger: " * sprint(showerror, e)
         end
-        isempty(archives) && return "No archive target configured. Add one in the Publishing manager (kind=zenodo, with the API token in Secrets), then retry."
+        isempty(archives) &&
+            return "No archive target configured. Add one in the Publishing manager (kind=zenodo, with the API token in Secrets), then retry."
         name = String(strip(target))
         if isempty(name)
-            length(archives) == 1 || return "Several archive targets configured ($(join(archives, ", "))) — pass target=\"name\"."
+            length(archives) == 1 ||
+                return "Several archive targets configured ($(join(archives, ", "))) — pass target=\"name\"."
             name = archives[1]
         elseif !(name in archives)
             return "⛔ '$name' is not an archive target (archives: $(join(archives, ", "))). Live sites go through slate.publish."
         end
         res = try
-            NotebookServer.run_publish(nb, [name]; archive = true)
+            NotebookServer.run_publish(nb, [name]; archive=true)
         catch e
-            return _surfaced(nb, "archive", Dict{String,Any}("target" => name),
-                             "⛔ Archive failed: " * sprint(showerror, e))
+            return _surfaced(
+                nb,
+                "archive",
+                Dict{String,Any}("target" => name),
+                "⛔ Archive failed: " * sprint(showerror, e),
+            )
         end
         r = res["results"][1]
-        msg = r["ok"] ?
+        msg = if r["ok"]
             "✅ Archived — DOI $(r["doi"]) (permanent, citable; this version can never be changed)" *
-            (isempty(r["url"]) ? "" : " → " * r["url"]) :
+            (isempty(r["url"]) ? "" : " → " * r["url"])
+        else
             "❌ Archive failed: $(r["status"])\n$(r["log"])"
+        end
         return _surfaced(nb, "archive", Dict{String,Any}("target" => name), msg)
     end
 
@@ -1608,23 +2056,41 @@ function create_tools(GateTool::Type)
     just that document's history (timestamped events with live URLs / DOIs / commit SHAs); leave it
     empty for a summary across all documents and the configured targets.
     """
-    function publish_history_tool(; notebook::String = "")::String
+    function publish_history_tool(; notebook::String="")::String
         if !isempty(strip(notebook))
-            nb, err = _nb(notebook); nb === nothing && return err
+            nb, err = _nb(notebook)
+            nb === nothing && return err
             info = NotebookServer.publish_doc_info(nb)
             evs = get(info, "events", Any[])
-            isempty(evs) && return string("No publish history for '", get(info, "slug", ""), "' yet.")
-            lines = ["  $(e["ts"])  $(e["target"])  $(e["status"])" *
-                     (isempty(e["url"]) ? "" : "  " * e["url"]) *
-                     (isempty(e["doi"]) ? "" : "  DOI " * e["doi"]) for e in evs]
-            return "History for $(get(info, "title", "")) [$(get(info, "docId", ""))]:\n" * join(lines, "\n")
+            isempty(evs) &&
+                return string("No publish history for '", get(info, "slug", ""), "' yet.")
+            lines = [
+                "  $(e["ts"])  $(e["target"])  $(e["status"])" *
+                (isempty(e["url"]) ? "" : "  " * e["url"]) *
+                (isempty(e["doi"]) ? "" : "  DOI " * e["doi"]) for e in evs
+            ]
+            return "History for $(get(info, "title", "")) [$(get(info, "docId", ""))]:\n" *
+                   join(lines, "\n")
         end
         view = NotebookServer.publish_ledger_view()
-        docs = get(view, "documents", Any[]); tgts = get(view, "targets", Any[])
-        dl = isempty(docs) ? "  (nothing published yet)" :
-             join(["  $(d["title"]) [$(length(d["events"])) events] → $(join(d["targets"], ", "))" for d in docs], "\n")
-        tl = isempty(tgts) ? "  (no targets configured)" :
-             join(["  $(t["name"]) ($(t["kind"]))" for t in tgts], "\n")
+        docs = get(view, "documents", Any[])
+        tgts = get(view, "targets", Any[])
+        dl = if isempty(docs)
+            "  (nothing published yet)"
+        else
+            join(
+                [
+                    "  $(d["title"]) [$(length(d["events"])) events] → $(join(d["targets"], ", "))"
+                    for d in docs
+                ],
+                "\n",
+            )
+        end
+        tl = if isempty(tgts)
+            "  (no targets configured)"
+        else
+            join(["  $(t["name"]) ($(t["kind"]))" for t in tgts], "\n")
+        end
         return "Publish ledger (backend: $(get(view, "backend", "?"))):\nDocuments:\n$dl\nTargets:\n$tl"
     end
 
@@ -1645,12 +2111,17 @@ function create_tools(GateTool::Type)
     content stays live). `op="rm", purge="true"` ALSO tears down the deployed side where feasible —
     rsync-serve stops its remote server and deletes the served dir; static hosts are a no-op.
     """
-    function publish_targets_tool(; op::String = "list", name::String = "", kind::String = "",
-                                  config::String = "", purge::String = "")::String
+    function publish_targets_tool(;
+        op::String="list", name::String="", kind::String="", config::String="", purge::String=""
+    )::String
         if op == "list"
             tgts = get(NotebookServer.publish_ledger_view(), "targets", Any[])
-            isempty(tgts) && return "No publish targets configured. Add one, e.g.\n  slate.publish_targets(op=add, name=site, kind=github-pages, config={\"repo\":\"me/site\"})."
-            rows = [string("  ", t["name"], "  (", t["kind"], ")  ", JSON.json(t["config"])) for t in tgts]
+            isempty(tgts) &&
+                return "No publish targets configured. Add one, e.g.\n  slate.publish_targets(op=add, name=site, kind=github-pages, config={\"repo\":\"me/site\"})."
+            rows = [
+                string("  ", t["name"], "  (", t["kind"], ")  ", JSON.json(t["config"])) for
+                t in tgts
+            ]
             return "Publish targets:\n" * join(rows, "\n")
         elseif op == "add"
             (isempty(strip(name)) || isempty(strip(kind))) && return "op=add needs name= and kind=."
@@ -1663,10 +2134,16 @@ function create_tools(GateTool::Type)
             return string("✅ target '", name, "' (", kind, ") saved.")
         elseif op == "rm"
             isempty(strip(name)) && return "op=rm needs name=."
-            view = NotebookServer.publish_target_delete!(String(name); purge = lowercase(purge) == "true")
+            view = NotebookServer.publish_target_delete!(
+                String(name); purge=lowercase(purge) == "true"
+            )
             plog = get(view, "purgeLog", String[])
-            return string("✅ target '", name, "' removed (references detached).",
-                          isempty(plog) ? "" : "\n" * join(plog, "\n"))
+            return string(
+                "✅ target '",
+                name,
+                "' removed (references detached).",
+                isempty(plog) ? "" : "\n" * join(plog, "\n"),
+            )
         else
             return string("bad op '", op, "' — use list|add|rm.")
         end
@@ -1687,31 +2164,74 @@ function create_tools(GateTool::Type)
     tear down deployed content where feasible — rsync-serve is stopped and wiped; static hosts stay
     live) or `purge="false"` (leave everything deployed as-is). Ask the user which they want.
     """
-    function sites_tool(; op::String = "list", name::String = "", targets::String = "",
-                        home::String = "", title::String = "", paths::String = "", purge::String = "")::String
+    function sites_tool(;
+        op::String="list",
+        name::String="",
+        targets::String="",
+        home::String="",
+        title::String="",
+        paths::String="",
+        purge::String="",
+    )::String
         if op == "list"
             sites = get(NotebookServer.publish_ledger_view(), "sites", Any[])
-            isempty(sites) && return "No sites yet. Create one: slate.sites(op=\"set\", name=\"…\", targets=\"t1,t2\")."
-            return "Sites:\n" * join(["  $(s["name"])" *
-                (isempty(String(get(s, "title", ""))) ? "" : "  “$(s["title"])”") *
-                "  → " * (isempty(s["targets"]) ? "(local-only)" :
-                    join([let p = String(get(get(s, "paths", Dict()), t, "")); isempty(p) ? t : "$t/$p"; end for t in s["targets"]], ", ")) *
-                "  · $(length(get(s, "docs", []))) doc(s)" for s in sites], "\n")
+            isempty(sites) &&
+                return "No sites yet. Create one: slate.sites(op=\"set\", name=\"…\", targets=\"t1,t2\")."
+            return "Sites:\n" * join(
+                [
+                    "  $(s["name"])" *
+                    (isempty(String(get(s, "title", ""))) ? "" : "  “$(s["title"])”") *
+                    "  → " *
+                    (
+                        if isempty(s["targets"])
+                            "(local-only)"
+                        else
+                            join(
+                                [
+                                    let p = String(get(get(s, "paths", Dict()), t, ""))
+                                        isempty(p) ? t : "$t/$p"
+                                    end for t in s["targets"]
+                                ],
+                                ", ",
+                            )
+                        end
+                    ) *
+                    "  · $(length(get(s, "docs", []))) doc(s)" for s in sites
+                ],
+                "\n",
+            )
         elseif op in ("set", "create")
             isempty(strip(name)) && return "op=set needs name=."
             ts = String[String(strip(t)) for t in split(targets, ',') if !isempty(strip(t))]
             pmap = Dict{String,String}()
             for pair in split(paths, ',')
-                kv = split(pair, '='; limit = 2)
-                length(kv) == 2 && !isempty(strip(kv[1])) && (pmap[String(strip(kv[1]))] = String(strip(kv[2])))
+                kv = split(pair, '='; limit=2)
+                length(kv) == 2 &&
+                    !isempty(strip(kv[1])) &&
+                    (pmap[String(strip(kv[1]))] = String(strip(kv[2])))
             end
             try
-                NotebookServer.publish_site_set!(String(name), ts, String(home), String(title); paths = pmap)
+                NotebookServer.publish_site_set!(
+                    String(name), ts, String(home), String(title); paths=pmap
+                )
             catch e
                 return "⛔ " * sprint(showerror, e)
             end
-            return string("✅ site '", name, "' saved (targets: ", isempty(ts) ? "none — local staging" :
-                join([let p = get(pmap, t, ""); isempty(p) ? t : "$t/$p"; end for t in ts], ", "), ").")
+            return string(
+                "✅ site '",
+                name,
+                "' saved (targets: ",
+                if isempty(ts)
+                    "none — local staging"
+                else
+                    join([
+                        let p = get(pmap, t, "")
+                            isempty(p) ? t : "$t/$p"
+                        end for t in ts
+                    ], ", ")
+                end,
+                ").",
+            )
         elseif op == "delete"
             isempty(strip(name)) && return "op=delete needs name=."
             site = let v = NotebookServer.publish_ledger_view()
@@ -1725,10 +2245,16 @@ function create_tools(GateTool::Type)
                        "(ask the user): re-invoke with purge=\"true\" to also tear it down where feasible, " *
                        "or purge=\"false\" to remove only the local definition + build."
             end
-            view = NotebookServer.publish_site_delete!(String(name); purge = lowercase(purge) == "true")
+            view = NotebookServer.publish_site_delete!(
+                String(name); purge=lowercase(purge) == "true"
+            )
             plog = get(view, "purgeLog", String[])
-            return string("✅ site '", name, "' removed (definition + local build).",
-                          isempty(plog) ? "" : "\n" * join(plog, "\n"))
+            return string(
+                "✅ site '",
+                name,
+                "' removed (definition + local build).",
+                isempty(plog) ? "" : "\n" * join(plog, "\n"),
+            )
         else
             return string("bad op '", op, "' — use list|set|delete.")
         end
@@ -1746,19 +2272,29 @@ function create_tools(GateTool::Type)
     setting it here REPLACES the current front page. Both are LOCAL: nothing deploys until you
     `slate.publish` the notebook or `slate.site_publish` the site.
     """
-    function site_membership_tool(notebook::String; site::String = "", member::String = "",
-                                  home::String = "")::String
-        nb, err = _nb(notebook); nb === nothing && return err
+    function site_membership_tool(
+        notebook::String; site::String="", member::String="", home::String=""
+    )::String
+        nb, err = _nb(notebook)
+        nb === nothing && return err
         render(info) = begin
             sites = get(info, "sites", Any[])
-            isempty(sites) ? "No sites defined yet — create one with slate.sites(op=\"set\", name=\"…\", targets=\"…\")." :
-                "Sites for '$(get(info, "title", ""))':\n" *
-                join([_site_line(s, get(s, "member", false) === true ? "✓ " : "· ") for s in sites], "\n")
+            if isempty(sites)
+                "No sites defined yet — create one with slate.sites(op=\"set\", name=\"…\", targets=\"…\")."
+            else
+                "Sites for '$(get(info, "title", ""))':\n" * join(
+                    [_site_line(s, get(s, "member", false) === true ? "✓ " : "· ") for s in sites],
+                    "\n",
+                )
+            end
         end
         sname = String(strip(site))
         mem, hm = lowercase(strip(member)), lowercase(strip(home))
-        isempty(sname) && return (isempty(mem) && isempty(hm)) ? render(NotebookServer.publish_sites_info(nb)) :
+        isempty(sname) && return if (isempty(mem) && isempty(hm))
+            render(NotebookServer.publish_sites_info(nb))
+        else
             "member=/home= need site=\"name\" — call with no arguments to see the sites."
+        end
         info = try
             NotebookServer.publish_sites_info(nb)
         catch e
@@ -1773,17 +2309,29 @@ function create_tools(GateTool::Type)
         try
             # Membership first: setting the front page also rebuilds into the site, so joining and
             # starring in one call lands in the right order.
-            isempty(mem) || (info = NotebookServer.publish_set_membership!(nb, sname, mem == "true");
-                             push!(acts, mem == "true" ? "added to '$sname'" : "removed from '$sname'"))
-            isempty(hm) || (info = NotebookServer.publish_set_home!(nb, sname, hm == "true");
-                            push!(acts, hm == "true" ? "set as '$sname' front page" : "cleared as front page"))
+            isempty(mem) || (
+                info=NotebookServer.publish_set_membership!(nb, sname, mem == "true");
+                push!(acts, mem == "true" ? "added to '$sname'" : "removed from '$sname'")
+            )
+            isempty(hm) || (
+                info=NotebookServer.publish_set_home!(nb, sname, hm == "true");
+                push!(acts, hm == "true" ? "set as '$sname' front page" : "cleared as front page")
+            )
         catch e
-            return _surfaced(nb, "site_membership", Dict{String,Any}("site" => sname),
-                             "⛔ " * sprint(showerror, e))
+            return _surfaced(
+                nb,
+                "site_membership",
+                Dict{String,Any}("site" => sname),
+                "⛔ " * sprint(showerror, e),
+            )
         end
         msg = "✅ " * join(acts, " · ") * " (local — publish to deploy).\n" * render(info)
-        return _surfaced(nb, "site_membership",
-                         Dict{String,Any}("site" => sname, "member" => member, "home" => home), msg)
+        return _surfaced(
+            nb,
+            "site_membership",
+            Dict{String,Any}("site" => sname, "member" => member, "home" => home),
+            msg,
+        )
     end
 
     """
@@ -1807,7 +2355,7 @@ function create_tools(GateTool::Type)
     staging leaves the live site untouched; once the destinations are being written concurrently it
     runs to completion, since a half-deployed site is worse than a finished one.
     """
-    function site_publish_tool(site::String; dry_run::String = "true", stage::String = "true")::String
+    function site_publish_tool(site::String; dry_run::String="true", stage::String="true")::String
         name = String(strip(site))
         isempty(name) && return "site= is required — slate.sites(op=\"list\") shows them."
         h = _hub()
@@ -1823,21 +2371,39 @@ function create_tools(GateTool::Type)
         # Whether a member's notebook is OPEN matters more than it looks: with stage="true" an open
         # member is RE-EXPORTED from its live state, so a notebook opened but never run would ship a
         # blank page over a good one. Surface it per row rather than leaving it in the plan data.
-        rows = ["  " * (get(m, "home", false) === true ? "★ " : "· ") * String(get(m, "title", "?")) *
-                "  [" * String(get(m, "action", "?")) * (get(m, "stale", false) === true ? " · STALE" : "") *
-                (get(m, "open", false) === true ? " · will re-export (open)" : "") * "]\n" *
-                "      " * String(get(m, "reason", "")) for m in members]
+        rows = [
+            "  " *
+            (get(m, "home", false) === true ? "★ " : "· ") *
+            String(get(m, "title", "?")) *
+            "  [" *
+            String(get(m, "action", "?")) *
+            (get(m, "stale", false) === true ? " · STALE" : "") *
+            (get(m, "open", false) === true ? " · will re-export (open)" : "") *
+            "]\n" *
+            "      " *
+            String(get(m, "reason", "")) for m in members
+        ]
         openct = count(m -> get(m, "open", false) === true, members)
-        head = "Site '$name' → " * (isempty(tgts) ? "(no configured destinations)" : join(tgts, ", ")) * "\n" *
-               (isempty(rows) ? "  (no members)" : join(rows, "\n"))
-        lowercase(strip(dry_run)) == "false" ||
-            return head * "\n\nDRY RUN — nothing deployed." *
-                   (openct == 0 ? "" : "\n⚠ $openct member$(openct == 1 ? " is" : "s are") OPEN and will be " *
-                    "RE-EXPORTED from live state when you stage — make sure each has actually been RUN, or a " *
-                    "blank render ships over a good page. Use stage=\"false\" to deploy the staged copy as-is.") *
-                   "\nConfirm with the user, then re-invoke with dry_run=\"false\" to stage and deploy."
-        isempty(tgts) && return head * "\n\n⛔ Nothing to deploy to — add destinations with " *
-                                "slate.sites(op=\"set\", name=\"$name\", targets=\"…\")."
+        head =
+            "Site '$name' → " *
+            (isempty(tgts) ? "(no configured destinations)" : join(tgts, ", ")) *
+            "\n" *
+            (isempty(rows) ? "  (no members)" : join(rows, "\n"))
+        lowercase(strip(dry_run)) == "false" || return head *
+               "\n\nDRY RUN — nothing deployed." *
+               (
+                   if openct == 0
+                       ""
+                   else
+                       "\n⚠ $openct member$(openct == 1 ? " is" : "s are") OPEN and will be " *
+                       "RE-EXPORTED from live state when you stage — make sure each has actually been RUN, or a " *
+                       "blank render ships over a good page. Use stage=\"false\" to deploy the staged copy as-is."
+                   end
+               ) *
+               "\nConfirm with the user, then re-invoke with dry_run=\"false\" to stage and deploy."
+        isempty(tgts) && return head *
+               "\n\n⛔ Nothing to deploy to — add destinations with " *
+               "slate.sites(op=\"set\", name=\"$name\", targets=\"…\")."
         # Cancellation is only honoured at the two points where it's SAFE and meaningful: before
         # staging, and after staging but before the first byte ships. Once `sync_site!` fans out to the
         # destinations concurrently, aborting would leave some live and some not — worse than finishing.
@@ -1846,16 +2412,22 @@ function create_tools(GateTool::Type)
         if lowercase(strip(stage)) != "false"
             _say("Staging '$name' — re-exporting open members…")
             try
-                NotebookServer.stage_site!(name; hub = h,
-                    on_event = (_i, phase, payload) -> (phase === :status || phase === :log) && _say(string(payload)))
+                NotebookServer.stage_site!(
+                    name;
+                    hub=h,
+                    on_event=(_i, phase, payload) ->
+                        (phase === :status || phase === :log) && _say(string(payload)),
+                )
                 staged = "Staged — open members re-exported.\n"
             catch e
                 return "⛔ Stage failed: " * sprint(showerror, e)
             end
         end
         _cancelled() && return "⛔ Cancelled after staging — the local build is updated, but " *
-                               "NOTHING was deployed. The live site is untouched."
-        _say("Deploying to $(length(tgts)) destination$(length(tgts) == 1 ? "" : "s"): $(join(tgts, ", "))…")
+               "NOTHING was deployed. The live site is untouched."
+        _say(
+            "Deploying to $(length(tgts)) destination$(length(tgts) == 1 ? "" : "s"): $(join(tgts, ", "))…",
+        )
         # `sync_site!` fans each destination into its own `@async` task, and task-local storage is NOT
         # inherited by a child task — so the gate request id that `progress`/`stash` key off is absent
         # there and every per-target line silently vanishes (the main-task lines still appear, which is
@@ -1865,25 +2437,48 @@ function create_tools(GateTool::Type)
         bind_gate!() = (rid === nothing || task_local_storage(:gate_request_id, rid); nothing)
         done_ct = Threads.Atomic{Int}(0)
         res = try
-            NotebookServer.sync_site!(name; hub = h, on_event = (i, phase, payload) -> begin
-                bind_gate!()
-                tn = (1 <= i <= length(tgts)) ? tgts[i] : "target $i"
-                phase === :start && _say("Starting $tn …")
-                if phase === :done
-                    ok = try; payload.ok === true; catch; false; end
-                    st = try; String(payload.status); catch; ""; end
-                    _keep(tn, (; ok = ok, status = st))   # per-target outcome, visible via check_eval
-                    n = Threads.atomic_add!(done_ct, 1) + 1
-                    _say("$(ok ? "✓" : "✗") $tn $(ok ? "complete" : "FAILED")" *
-                         (isempty(st) || st == "ok" ? "" : " — $st") * "  ($n/$(length(tgts)))")
-                end
-            end)
+            NotebookServer.sync_site!(
+                name;
+                hub=h,
+                on_event=(i, phase, payload) -> begin
+                    bind_gate!()
+                    tn = (1 <= i <= length(tgts)) ? tgts[i] : "target $i"
+                    phase === :start && _say("Starting $tn …")
+                    if phase === :done
+                        ok = try
+                            payload.ok === true
+                        catch
+                            false
+                        end
+                        st = try
+                            String(payload.status)
+                        catch
+                            ""
+                        end
+                        _keep(tn, (; ok=ok, status=st))   # per-target outcome, visible via check_eval
+                        n = Threads.atomic_add!(done_ct, 1) + 1
+                        _say(
+                            "$(ok ? "✓" : "✗") $tn $(ok ? "complete" : "FAILED")" *
+                            (isempty(st) || st == "ok" ? "" : " — $st") *
+                            "  ($n/$(length(tgts)))",
+                        )
+                    end
+                end,
+            )
         catch e
             return "⛔ Sync failed: " * sprint(showerror, e)
         end
         _say("Done — $name deployed to $(join(tgts, ", ")).")
-        return staged * (get(res, "ok", false) === true ? "Synced site '$name'" :
-                         "Site '$name' synced with errors") * ":\n" * join(_result_lines(res), "\n")
+        return staged *
+               (
+                   if get(res, "ok", false) === true
+                       "Synced site '$name'"
+                   else
+                       "Site '$name' synced with errors"
+                   end
+               ) *
+               ":\n" *
+               join(_result_lines(res), "\n")
     end
 
     # Auto-start the hub at extension init so the server is always up on its port
@@ -1978,7 +2573,13 @@ Stop every running notebook server before the extension subprocess exits.
 """
 function on_shutdown()
     lock(_LOCK) do
-        _HUB[] === nothing || (try; stop_hub(_HUB[]); catch; end; _HUB[] = nothing)
+        return _HUB[] === nothing || (
+            try
+                stop_hub(_HUB[])
+            catch
+            end;
+            _HUB[]=nothing
+        )
     end
     @info "KaimonSlate shut down"
 end

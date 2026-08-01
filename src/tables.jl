@@ -41,15 +41,19 @@ struct ColumnDef
     domain::Union{Nothing,Tuple{Float64,Float64}}   # (min,max) for scaling bar/heat; nothing = non-numeric / no data
 end
 # Back-compat convenience: the 6-arg form (pre-viz call sites) defaults viz/domain.
-ColumnDef(name, type, align, format, sortable, filterable) =
-    ColumnDef(name, type, align, format, sortable, filterable, :none, nothing)
+function ColumnDef(name, type, align, format, sortable, filterable)
+    return ColumnDef(name, type, align, format, sortable, filterable, :none, nothing)
+end
 
 # (min, max) of a column's finite numeric RAW values, or nothing (used to scale :bar/:heat).
 function _col_domain(col)
-    lo = Inf; hi = -Inf
+    lo = Inf
+    hi = -Inf
     for v in col
         (v isa Real && !(v isa Bool) && isfinite(v)) || continue
-        f = Float64(v); f < lo && (lo = f); f > hi && (hi = f)
+        f = Float64(v)
+        f < lo && (lo = f)
+        f > hi && (hi = f)
     end
     return isfinite(lo) ? (lo, hi) : nothing
 end
@@ -63,19 +67,23 @@ _default_align(t::Symbol) = (t === :int || t === :float) ? :right : (t === :bool
 # dependency-free). Empty / all-missing ⇒ `:string`.
 _is_datelike(v) = nameof(typeof(v)) in (:Date, :DateTime, :Time)
 function _infer_type(col)::Symbol
-    seen = false; allbool = true; allint = true; allreal = true; alldate = true
+    seen = false
+    allbool = true
+    allint = true
+    allreal = true
+    alldate = true
     for v in col
         (v === nothing || v === missing) && continue
         seen = true
         b = v isa Bool
         allbool &= b
-        allint  &= (v isa Integer && !b)
+        allint &= (v isa Integer && !b)
         allreal &= (v isa Real && !b)
         alldate &= _is_datelike(v)
     end
     seen || return :string
     allbool && return :bool
-    allint  && return :int
+    allint && return :int
     allreal && return :float
     alldate && return :date
     return :string
@@ -111,13 +119,14 @@ const _MAX_TABLE_ROWS = 5000
 # a display string. Non-finite floats and out-of-range integers stringify (JSON has
 # no NaN/Inf, and JS numbers lose precision past 2^53), which keeps the whole
 # `/state` payload valid JSON.
-_safe_string(x) =
+function _safe_string(x)
     try
-        s = Base.invokelatest(sprint, show, MIME("text/plain"), x; context = :limit => true)
+        s = Base.invokelatest(sprint, show, MIME("text/plain"), x; context=:limit => true)
         length(s) > 200 ? first(s, 199) * "…" : s
     catch
         "?"
     end
+end
 
 function _cellval(x)
     (x === nothing || x === missing) && return nothing
@@ -129,7 +138,11 @@ function _cellval(x)
         return isfinite(x) ? Float64(x) : string(x)
     end
     if x isa Real
-        f = try Float64(x) catch; nothing end
+        f = try
+            Float64(x)
+        catch
+            nothing
+        end
         return (f !== nothing && isfinite(f)) ? f : _safe_string(x)
     end
     x isa AbstractString && return String(x)
@@ -178,7 +191,12 @@ function _table_from_tables(x)
         # Bounds-safe like `_from_columns` below: a Tables.jl source isn't guaranteed to have
         # equal-length columns (DataFrames does, but the interface itself doesn't), so a ragged
         # column would otherwise throw a BoundsError here instead of degrading to a padded cell.
-        rows = Vector{Any}[Any[_cellval(i <= length(coldata[j]) ? coldata[j][i] : nothing) for j in eachindex(coldata)] for i in 1:n]
+        rows = Vector{Any}[
+            Any[
+                _cellval(i <= length(coldata[j]) ? coldata[j][i] : nothing) for
+                j in eachindex(coldata)
+            ] for i in 1:n
+        ]
         return _finish(_infer_columns(snames, coldata), rows)   # `coldata` are RAW columns
     catch
         return nothing
@@ -188,7 +206,9 @@ end
 # No-dependency shapes (used when Tables.jl isn't loaded, or for plain containers).
 function _table_manual(x)
     if x isa AbstractVector
-        isempty(x) && return SlateTable(ColumnDef[], Vector{Any}[], Dict{String,Any}("nrows" => 0, "ncols" => 0))
+        isempty(x) && return SlateTable(
+            ColumnDef[], Vector{Any}[], Dict{String,Any}("nrows" => 0, "ncols" => 0)
+        )
         if all(r -> r isa NamedTuple, x)
             names = String[string(k) for k in keys(first(x))]
             syms = Symbol.(names)
@@ -214,13 +234,25 @@ _as_slate_table(x) = x isa SlateTable ? x : _table_from_tables(x)
 
 # Default `ColumnFormat` for a preset kind — the params a bare `:preset` expands to before overrides.
 function _format_preset(kind::Symbol)::ColumnFormat
-    kind === :currency   ? ColumnFormat(:currency, 2, true, "\$", "") :
-    kind === :percent    ? ColumnFormat(:percent, 1, false, "", "") :
-    kind === :integer    ? ColumnFormat(:integer, nothing, true, "", "") :
-    kind === :fixed      ? ColumnFormat(:fixed, 2, false, "", "") :
-    kind === :scientific ? ColumnFormat(:scientific, 3, false, "", "") :
-    kind === :bytes      ? ColumnFormat(:bytes, 1, false, "", "") :
-    throw(ArgumentError("unknown format preset :$kind (expected one of :currency :percent :integer :fixed :scientific :bytes)"))
+    if kind === :currency
+        ColumnFormat(:currency, 2, true, "\$", "")
+    elseif kind === :percent
+        ColumnFormat(:percent, 1, false, "", "")
+    elseif kind === :integer
+        ColumnFormat(:integer, nothing, true, "", "")
+    elseif kind === :fixed
+        ColumnFormat(:fixed, 2, false, "", "")
+    elseif kind === :scientific
+        ColumnFormat(:scientific, 3, false, "", "")
+    elseif kind === :bytes
+        ColumnFormat(:bytes, 1, false, "", "")
+    else
+        throw(
+            ArgumentError(
+                "unknown format preset :$kind (expected one of :currency :percent :integer :fixed :scientific :bytes)",
+            ),
+        )
+    end
 end
 
 _fmt_get(d::NamedTuple, k, default) = haskey(d, k) ? getfield(d, k) : default
@@ -233,40 +265,69 @@ function _parse_col_format(spec)::ColumnFormat
     if spec isa NamedTuple || spec isa AbstractDict
         kind = Symbol(_fmt_get(spec, :kind, :fixed))
         base = _format_preset(kind)
-        return ColumnFormat(kind,
+        return ColumnFormat(
+            kind,
             _fmt_get(spec, :digits, base.digits),
             Bool(_fmt_get(spec, :sep, base.sep)),
             String(_fmt_get(spec, :prefix, base.prefix)),
-            String(_fmt_get(spec, :suffix, base.suffix)))
+            String(_fmt_get(spec, :suffix, base.suffix)),
+        )
     end
-    throw(ArgumentError("format spec must be a preset Symbol (e.g. :currency) or a NamedTuple " *
-                        "(e.g. (kind=:currency, digits=2)); got $(typeof(spec))"))
+    return throw(
+        ArgumentError(
+            "format spec must be a preset Symbol (e.g. :currency) or a NamedTuple " *
+            "(e.g. (kind=:currency, digits=2)); got $(typeof(spec))",
+        ),
+    )
 end
 
 # Overlay user `format=`/`align=`/`coltype=` (each a column-name-keyed NamedTuple/Dict) onto the
 # inferred `ColumnDef`s IN PLACE (immutable structs → replace by index). An unknown column name is a
 # build-time authoring typo → hard error listing the available names.
-function _apply_col_opts!(cols::Vector{ColumnDef}; format = NamedTuple(), align = NamedTuple(),
-                         coltype = NamedTuple(), viz = NamedTuple(), default_format = nothing)
+function _apply_col_opts!(
+    cols::Vector{ColumnDef};
+    format=NamedTuple(),
+    align=NamedTuple(),
+    coltype=NamedTuple(),
+    viz=NamedTuple(),
+    default_format=nothing,
+)
     # The inevitable Julia trap: `viz = (x = :heat)` is an ASSIGNMENT in parens, not a NamedTuple —
     # the option arrives as a bare Symbol and `pairs` would throw an opaque MethodError. Say it
     # in human instead.
     for (opt, v) in (("format", format), ("align", align), ("coltype", coltype), ("viz", viz))
-        v isa Union{NamedTuple,AbstractDict} ||
-            throw(ArgumentError("slate_table: `$opt` must be a column-keyed NamedTuple/Dict — got " *
-                                "`$(repr(v))`. A ONE-entry NamedTuple needs its trailing comma: " *
-                                "`$opt = (colname = $(repr(v)),)` (or `(; colname = $(repr(v)))`)"))
+        v isa Union{NamedTuple,AbstractDict} || throw(
+            ArgumentError(
+                "slate_table: `$opt` must be a column-keyed NamedTuple/Dict — got " *
+                "`$(repr(v))`. A ONE-entry NamedTuple needs its trailing comma: " *
+                "`$opt = (colname = $(repr(v)),)` (or `(; colname = $(repr(v)))`)",
+            ),
+        )
     end
     idx = Dict(c.name => i for (i, c) in enumerate(cols))
-    _at(nm) = (i = get(idx, String(nm), nothing); i === nothing &&
-        throw(ArgumentError("slate_table: no column \"$nm\" (have: $(join((c.name for c in cols), ", ")))")); i)
+    _at(nm) = (
+        i=get(idx, String(nm), nothing);
+        i === nothing && throw(
+            ArgumentError(
+                "slate_table: no column \"$nm\" (have: $(join((c.name for c in cols), ", ")))",
+            ),
+        );
+        i
+    )
     for (nm, v) in pairs(coltype)
-        i = _at(nm); c = cols[i]; t = Symbol(v)
-        cols[i] = ColumnDef(c.name, t, _default_align(t), c.format, c.sortable, c.filterable, c.viz, c.domain)
+        i = _at(nm)
+        c = cols[i]
+        t = Symbol(v)
+        cols[i] = ColumnDef(
+            c.name, t, _default_align(t), c.format, c.sortable, c.filterable, c.viz, c.domain
+        )
     end
     for (nm, v) in pairs(align)
-        i = _at(nm); c = cols[i]
-        cols[i] = ColumnDef(c.name, c.type, Symbol(v), c.format, c.sortable, c.filterable, c.viz, c.domain)
+        i = _at(nm)
+        c = cols[i]
+        cols[i] = ColumnDef(
+            c.name, c.type, Symbol(v), c.format, c.sortable, c.filterable, c.viz, c.domain
+        )
     end
     # Blanket format for every numeric column, applied BEFORE the per-column overlay below so an
     # explicit `format=(col=...,)` entry always wins over `default_format`.
@@ -274,16 +335,24 @@ function _apply_col_opts!(cols::Vector{ColumnDef}; format = NamedTuple(), align 
         parsed = _parse_col_format(default_format)
         for (i, c) in enumerate(cols)
             (c.type === :int || c.type === :float) || continue
-            cols[i] = ColumnDef(c.name, c.type, c.align, parsed, c.sortable, c.filterable, c.viz, c.domain)
+            cols[i] = ColumnDef(
+                c.name, c.type, c.align, parsed, c.sortable, c.filterable, c.viz, c.domain
+            )
         end
     end
     for (nm, v) in pairs(format)
-        i = _at(nm); c = cols[i]
-        cols[i] = ColumnDef(c.name, c.type, c.align, _parse_col_format(v), c.sortable, c.filterable, c.viz, c.domain)
+        i = _at(nm)
+        c = cols[i]
+        cols[i] = ColumnDef(
+            c.name, c.type, c.align, _parse_col_format(v), c.sortable, c.filterable, c.viz, c.domain
+        )
     end
     for (nm, v) in pairs(viz)
-        i = _at(nm); c = cols[i]
-        cols[i] = ColumnDef(c.name, c.type, c.align, c.format, c.sortable, c.filterable, Symbol(v), c.domain)
+        i = _at(nm)
+        c = cols[i]
+        cols[i] = ColumnDef(
+            c.name, c.type, c.align, c.format, c.sortable, c.filterable, Symbol(v), c.domain
+        )
     end
     return cols
 end
@@ -329,38 +398,61 @@ large data — `slate_query(conn, sql)` does the same for a SQL source). `export
 rows shown in FIXED exports (PDF / markdown / static HTML) to the first `n` (with a "showing n of N"
 note); the live table stays fully paginated.
 """
-function slate_table(x; paged::Bool = false, page_size::Int = 50, export_rows = nothing,
-                     format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple(), viz = NamedTuple(),
-                     default_format = nothing)
+function slate_table(
+    x;
+    paged::Bool=false,
+    page_size::Int=50,
+    export_rows=nothing,
+    format=NamedTuple(),
+    align=NamedTuple(),
+    coltype=NamedTuple(),
+    viz=NamedTuple(),
+    default_format=nothing,
+)
     # `paged=true` → a server-paged provider (paged.jl), one page fetched at a time; otherwise the
     # eager form below materializes all rows (capped). `page_size` sets the paged page length.
     if paged
         prov = _inmemory_provider(x)
-        prov === nothing && throw(ArgumentError(
-            "slate_table(…; paged=true): cannot tabulate $(typeof(x)) — pass a DataFrame/Tables.jl " *
-            "source, a Vector of NamedTuples, or a Dict/NamedTuple of column vectors."))
-        pt = _make_paged(prov; page_size = page_size)
+        prov === nothing && throw(
+            ArgumentError(
+                "slate_table(…; paged=true): cannot tabulate $(typeof(x)) — pass a DataFrame/Tables.jl " *
+                "source, a Vector of NamedTuples, or a Dict/NamedTuple of column vectors.",
+            ),
+        )
+        pt = _make_paged(prov; page_size=page_size)
         _apply_col_opts!(pt.columns; format, align, coltype, viz, default_format)
         return pt   # paged tables are already page-limited in fixed exports (only page 1 ships)
     end
     t = _as_slate_table(x)
     t === nothing && (t = _table_manual(x))
-    t === nothing && throw(ArgumentError(
-        "slate_table: cannot tabulate $(typeof(x)) — pass a DataFrame/Tables.jl source, " *
-        "a Vector of NamedTuples, a Dict/NamedTuple of column vectors, or `columns, rows`."))
+    t === nothing && throw(
+        ArgumentError(
+            "slate_table: cannot tabulate $(typeof(x)) — pass a DataFrame/Tables.jl source, " *
+            "a Vector of NamedTuples, a Dict/NamedTuple of column vectors, or `columns, rows`.",
+        ),
+    )
     _apply_col_opts!(t.columns; format, align, coltype, viz, default_format)
     export_rows === nothing || (t.opts["export_rows"] = Int(export_rows))   # cap rows in fixed exports (PDF/md/HTML)
     return t
 end
 
-function slate_table(columns, rows; export_rows = nothing,
-                     format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple(), viz = NamedTuple(),
-                     default_format = nothing)
+function slate_table(
+    columns,
+    rows;
+    export_rows=nothing,
+    format=NamedTuple(),
+    align=NamedTuple(),
+    coltype=NamedTuple(),
+    viz=NamedTuple(),
+    default_format=nothing,
+)
     names = String[string(c) for c in columns]
     ncol = length(names)
-    rawrows = rows isa AbstractMatrix ?
-        [Any[rows[i, j] for j in 1:size(rows, 2)] for i in 1:size(rows, 1)] :
+    rawrows = if rows isa AbstractMatrix
+        [Any[rows[i, j] for j in 1:size(rows, 2)] for i in 1:size(rows, 1)]
+    else
         [collect(Any, r) for r in rows]
+    end
     rws = Vector{Any}[Any[_cellval(v) for v in r] for r in rawrows]
     rawcols = Any[Any[(j <= length(r) ? r[j] : nothing) for r in rawrows] for j in 1:ncol]
     cols = _infer_columns(names, rawcols)
@@ -373,11 +465,24 @@ end
 # Serialize a column (+ its optional format) to the wire — the SINGLE column shape shared by eager
 # and paged (`paged.jl`) tables, so every consumer reads one `{name,type,align,format,…}` object.
 _format_wire(::Nothing) = nothing
-_format_wire(f::ColumnFormat) = Dict{String,Any}(
-    "kind" => String(f.kind), "digits" => f.digits, "sep" => f.sep, "prefix" => f.prefix, "suffix" => f.suffix)
+function _format_wire(f::ColumnFormat)
+    return Dict{String,Any}(
+        "kind" => String(f.kind),
+        "digits" => f.digits,
+        "sep" => f.sep,
+        "prefix" => f.prefix,
+        "suffix" => f.suffix,
+    )
+end
 function _col_wire(c::ColumnDef)
-    d = Dict{String,Any}("name" => c.name, "type" => String(c.type), "align" => String(c.align),
-        "format" => _format_wire(c.format), "sortable" => c.sortable, "filterable" => c.filterable)
+    d = Dict{String,Any}(
+        "name" => c.name,
+        "type" => String(c.type),
+        "align" => String(c.align),
+        "format" => _format_wire(c.format),
+        "sortable" => c.sortable,
+        "filterable" => c.filterable,
+    )
     if c.viz !== :none                                   # in-cell bar/heat + its numeric domain (min,max)
         d["viz"] = String(c.viz)
         c.domain === nothing || (d["domain"] = Any[c.domain[1], c.domain[2]])
@@ -387,5 +492,8 @@ end
 
 # The wire representation carried in `run_capture`'s `tables` field (raw Dict;
 # serializes over the gate and JSON-encodes server-side, like an echarts option).
-_table_wire(t::SlateTable) = Dict{String,Any}(
-    "columns" => Any[_col_wire(c) for c in t.columns], "rows" => t.rows, "opts" => t.opts)
+function _table_wire(t::SlateTable)
+    return Dict{String,Any}(
+        "columns" => Any[_col_wire(c) for c in t.columns], "rows" => t.rows, "opts" => t.opts
+    )
+end

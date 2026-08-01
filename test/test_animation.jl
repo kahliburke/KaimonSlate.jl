@@ -8,13 +8,13 @@ include(joinpath(HERE_ANIM, "..", "src", "animation.jl"))
 # Pull the quantized value of frame f (1-based), row r, col c out of a flat buffer.
 function qat(a::Animation, f, r, c)
     nf, H, W = a.manifest["shape"]
-    return a.frames[(f-1)*H*W + (r-1)*W + c]
+    return a.frames[(f - 1) * H * W + (r - 1) * W + c]
 end
 
 @testset "animation core" begin
     @testset "quantize :global maps endpoints to 0 / 255" begin
         frames = [Float64[0 1; 2 3], Float64[1 1; 1 1]]   # global range 0..3
-        a = animate(frames; x = [10.0, 20.0], y = [1.0, 2.0])
+        a = animate(frames; x=[10.0, 20.0], y=[1.0, 2.0])
         @test a.manifest["shape"] == [2, 2, 2]
         @test qat(a, 1, 1, 1) == 0x00              # value 0 → 0
         @test qat(a, 1, 2, 2) == 0xff              # value 3 (global max) → 255
@@ -35,7 +35,7 @@ end
 
     @testset ":symmetric clim centers at zero, diverging map, skips transform" begin
         frames = [Float64[-2 0; 1 2]]              # symmetric range -2..2
-        a = animate(frames; clim = :symmetric, transform = sqrt)   # sqrt must be ignored (no NaN)
+        a = animate(frames; clim=:symmetric, transform=sqrt)   # sqrt must be ignored (no NaN)
         @test a.manifest["clim"]["mode"] == "symmetric"
         @test a.manifest["clim"]["range"] == [-2.0, 2.0]
         @test a.manifest["diverging"] == true
@@ -46,7 +46,7 @@ end
     end
 
     @testset ":perframe clim normalizes each frame independently" begin
-        a = animate([Float64[0 1], Float64[0 10]]; clim = :perframe)
+        a = animate([Float64[0 1], Float64[0 10]]; clim=:perframe)
         @test a.manifest["clim"]["mode"] == "perframe"
         @test a.manifest["clim"]["ranges"] == [[0.0, 1.0], [0.0, 10.0]]
         @test qat(a, 1, 1, 2) == 0xff              # 1 is frame-1 max
@@ -54,7 +54,7 @@ end
     end
 
     @testset "transform applied before quantization (unsigned)" begin
-        a = animate([Float64[0 1; 4 9]]; transform = sqrt)        # sqrt → 0,1,2,3 ; range 0..3
+        a = animate([Float64[0 1; 4 9]]; transform=sqrt)        # sqrt → 0,1,2,3 ; range 0..3
         @test qat(a, 1, 1, 1) == 0x00
         @test qat(a, 1, 2, 2) == 0xff
         @test qat(a, 1, 1, 2) == round(UInt8, 1/3*255)            # sqrt(1)=1
@@ -67,7 +67,7 @@ end
     end
 
     @testset "LUT is 256×RGBA, opaque, monotone-ish endpoints" begin
-        a = animate([Float64[0 1]]; colormap = :viridis)
+        a = animate([Float64[0 1]]; colormap=:viridis)
         @test length(a.lut) == 256 * 4
         @test all(a.lut[4i] == 0xff for i in 1:256)              # alpha channel
         @test (a.lut[1], a.lut[2], a.lut[3]) == (0x44, 0x01, 0x54)   # viridis dark end
@@ -75,17 +75,23 @@ end
 
     @testset "user-supplied colormap (duck-typed colors)" begin
         # mimic Colors.jl colorants and 0–1 tuples without importing Colors
-        nt(r, g, b) = (r = r, g = g, b = b)
-        a = animate([Float64[0 1]]; colormap = [nt(0.0,0.0,0.0), nt(1.0,1.0,1.0)])
+        nt(r, g, b) = (r=r, g=g, b=b)
+        a = animate([Float64[0 1]]; colormap=[nt(0.0, 0.0, 0.0), nt(1.0, 1.0, 1.0)])
         @test (a.lut[1], a.lut[2], a.lut[3]) == (0x00, 0x00, 0x00)
-        @test (a.lut[end-3], a.lut[end-2], a.lut[end-1]) == (0xff, 0xff, 0xff)
-        b = animate([Float64[0 1]]; colormap = [(0,0,0), (255,255,255)])   # 0–255 tuples
+        @test (a.lut[end - 3], a.lut[end - 2], a.lut[end - 1]) == (0xff, 0xff, 0xff)
+        b = animate([Float64[0 1]]; colormap=[(0, 0, 0), (255, 255, 255)])   # 0–255 tuples
         @test (b.lut[1], b.lut[2], b.lut[3]) == (0x00, 0x00, 0x00)
     end
 
     @testset "manifest carries fps / times / controls / dither" begin
-        a = animate([Float64[0 1], Float64[1 2]]; fps = 24, times = [0.0, 0.5],
-                    loop = false, autoplay = true, dither = false)
+        a = animate(
+            [Float64[0 1], Float64[1 2]];
+            fps=24,
+            times=[0.0, 0.5],
+            loop=false,
+            autoplay=true,
+            dither=false,
+        )
         @test a.manifest["fps"] == 24.0
         @test a.manifest["times"] == [0.0, 0.5]
         @test a.manifest["controls"] == Dict("loop" => false, "autoplay" => true)
@@ -100,10 +106,10 @@ end
     end
 
     @testset "kind=:image packs RGBA8 frames, no colormap" begin
-        nt(r, g, b) = (r = r, g = g, b = b)                     # duck-typed colorant, 0–1 channels
-        red   = fill(nt(1.0, 0.0, 0.0), 2, 2)
+        nt(r, g, b) = (r=r, g=g, b=b)                     # duck-typed colorant, 0–1 channels
+        red = fill(nt(1.0, 0.0, 0.0), 2, 2)
         green = fill(nt(0.0, 1.0, 0.0), 2, 2)
-        a = animate([red, green]; kind = :image, fps = 10)
+        a = animate([red, green]; kind=:image, fps=10)
         @test a.manifest["kind"] == "image"
         @test a.manifest["shape"] == [2, 2, 2]
         @test a.manifest["channels"] == 4
@@ -114,26 +120,27 @@ end
     end
 
     @testset "kind=:image accepts raw H×W×3 arrays" begin
-        f1 = zeros(UInt8, 2, 2, 3); f1[1, 1, :] = [10, 20, 30]
-        a = animate([f1, f1]; kind = :image)
+        f1 = zeros(UInt8, 2, 2, 3)
+        f1[1, 1, :] = [10, 20, 30]
+        a = animate([f1, f1]; kind=:image)
         @test (a.frames[1], a.frames[2], a.frames[3]) == (0x0a, 0x14, 0x1e)
     end
 
     @testset "overlay: one entry per frame, points carry (x,y,id)" begin
-        a = animate([Float64[0 1], Float64[1 0]]; overlay = [[(1.0, 2.0, 5)], [(3.0, 4.0)]])
+        a = animate([Float64[0 1], Float64[1 0]]; overlay=[[(1.0, 2.0, 5)], [(3.0, 4.0)]])
         @test a.manifest["overlay"] == [[[1.0, 2.0, 5]], [[3.0, 4.0, 0]]]   # missing id defaults to 0
     end
 
     @testset "overlay length mismatch errors" begin
-        @test_throws ArgumentError animate([Float64[0 1], Float64[1 0]]; overlay = [[(1.0, 2.0)]])
+        @test_throws ArgumentError animate([Float64[0 1], Float64[1 0]]; overlay=[[(1.0, 2.0)]])
     end
 
     @testset "argument errors" begin
         @test_throws ArgumentError animate(Matrix{Float64}[])                 # empty
-        @test_throws ArgumentError animate([Float64[0 1]]; kind = :line)      # v1 heatmap only
-        @test_throws ArgumentError animate([Float64[0 1]]; bits = 16)         # 8-bit only in v1
+        @test_throws ArgumentError animate([Float64[0 1]]; kind=:line)      # v1 heatmap only
+        @test_throws ArgumentError animate([Float64[0 1]]; bits=16)         # 8-bit only in v1
         @test_throws ArgumentError animate([[1.0, 2.0]])                      # not matrices
         @test_throws ArgumentError animate([Float64[0 1], Float64[0 1 2]])    # mismatched sizes
-        @test_throws ArgumentError animate([rand(100, 100) for _ in 1:50]; maxbytes = 1000)  # cap
+        @test_throws ArgumentError animate([rand(100, 100) for _ in 1:50]; maxbytes=1000)  # cap
     end
 end

@@ -18,7 +18,7 @@ end
 # Write interface — delegate to the resolved per-task sink. Covers what print/show/log emit.
 Base.unsafe_write(d::DemuxIO, p::Ptr{UInt8}, n::UInt) = unsafe_write(_demux_sink(d), p, n)
 Base.write(d::DemuxIO, b::UInt8) = write(_demux_sink(d), b)
-Base.flush(d::DemuxIO) = (s = _demux_sink(d); applicable(flush, s) && flush(s); nothing)
+Base.flush(d::DemuxIO) = (s=_demux_sink(d); applicable(flush, s) && flush(s); nothing)
 Base.isopen(::DemuxIO) = true
 Base.iswritable(::DemuxIO) = true
 Base.isreadable(::DemuxIO) = false
@@ -47,12 +47,15 @@ end
 # parallel evaluators never share them. Restores the prior capture keys on exit (nested-safe).
 function with_captured_output(f)
     tls = task_local_storage()
-    out = IOBuffer(); err = IOBuffer()
-    prev_out = get(tls, :slate_out, nothing); prev_err = get(tls, :slate_err, nothing)
-    tls[:slate_out] = out; tls[:slate_err] = err
+    out = IOBuffer()
+    err = IOBuffer()
+    prev_out = get(tls, :slate_out, nothing)
+    prev_err = get(tls, :slate_err, nothing)
+    tls[:slate_out] = out
+    tls[:slate_err] = err
     try
         value = f()
-        return (value = value, stdout = String(take!(out)), stderr = String(take!(err)))
+        return (value=value, stdout=String(take!(out)), stderr=String(take!(err)))
     finally
         prev_out === nothing ? delete!(tls, :slate_out) : (tls[:slate_out] = prev_out)
         prev_err === nothing ? delete!(tls, :slate_err) : (tls[:slate_err] = prev_err)

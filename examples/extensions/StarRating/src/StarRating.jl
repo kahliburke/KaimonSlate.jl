@@ -40,8 +40,9 @@ struct Stars
     label::Union{Nothing,String}
     default::Int
 end
-Stars(; max::Int = 5, label = nothing, default::Int = 0) =
-    Stars(max, label === nothing ? nothing : String(label), clamp(default, 0, max))
+function Stars(; max::Int=5, label=nothing, default::Int=0)
+    return Stars(max, label === nothing ? nothing : String(label), clamp(default, 0, max))
+end
 
 # The `to_widget` seam: reflect the struct into its wire `Widget`. `auto_widget` uses `default` as the
 # value and the other fields (`max`, and `label` when set) as params, under the type-derived, namespaced
@@ -67,9 +68,9 @@ front-end helper `window._starRatingInsert` (shipped in `assets/star_tools.js`) 
 Authored the same way as a widget: a typed struct + a `to_cell_action` overload.
 """
 Base.@kwdef struct InsertStarsButton
-    icon::String    = "★"
-    title::String   = "insert a Stars() rating control"
-    show::String    = "cell.kind === 'code'"          # code cells only
+    icon::String = "★"
+    title::String = "insert a Stars() rating control"
+    show::String = "cell.kind === 'code'"          # code cells only
     onclick::String = "window._starRatingInsert(cellId)"
 end
 SlateExtensionsBase.to_cell_action(b::InsertStarsButton) = auto_cell_action(b)
@@ -79,7 +80,7 @@ SlateExtensionsBase.to_cell_action(b::InsertStarsButton) = auto_cell_action(b)
 # and `register_cell_action!` by the action's id, so Slate can re-run it every drain safely.
 function __slate_frontend(slate_on)
     # A page-global editor extension + the toolbar-action helper (one classic script).
-    provide_frontend!(@pkg_asset("assets/star_tools.js"); id = "StarRating.tools")
+    provide_frontend!(@pkg_asset("assets/star_tools.js"); id="StarRating.tools")
     # A ★ button on every code cell's header toolbar.
     register_cell_action!(InsertStarsButton())
     return nothing

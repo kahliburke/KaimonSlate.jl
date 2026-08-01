@@ -7,20 +7,20 @@ const NS = KaimonSlate.NotebookServer
 
 @testset "files-tab" begin
     @testset "_file_kind classification" begin
-        @test NS._file_kind("worker.jl")      == "text"
-        @test NS._file_kind("style.css")      == "text"
-        @test NS._file_kind("synth.js")       == "text"
-        @test NS._file_kind("page.html")      == "text"
-        @test NS._file_kind("data.json")      == "text"
-        @test NS._file_kind("README.md")      == "text"
-        @test NS._file_kind("plot.PNG")       == "image"     # case-insensitive
-        @test NS._file_kind("photo.jpeg")     == "image"
-        @test NS._file_kind("icon.svg")       == "image"     # svg previews as image (still text-editable via ?as=text)
-        @test NS._file_kind("clip.mp3")       == "audio"
-        @test NS._file_kind("intro.mp4")      == "video"
-        @test NS._file_kind("blob.bin")       == "binary"
-        @test NS._file_kind("archive.zip")    == "binary"
-        @test NS._file_kind("noext")          == "binary"
+        @test NS._file_kind("worker.jl") == "text"
+        @test NS._file_kind("style.css") == "text"
+        @test NS._file_kind("synth.js") == "text"
+        @test NS._file_kind("page.html") == "text"
+        @test NS._file_kind("data.json") == "text"
+        @test NS._file_kind("README.md") == "text"
+        @test NS._file_kind("plot.PNG") == "image"     # case-insensitive
+        @test NS._file_kind("photo.jpeg") == "image"
+        @test NS._file_kind("icon.svg") == "image"     # svg previews as image (still text-editable via ?as=text)
+        @test NS._file_kind("clip.mp3") == "audio"
+        @test NS._file_kind("intro.mp4") == "video"
+        @test NS._file_kind("blob.bin") == "binary"
+        @test NS._file_kind("archive.zip") == "binary"
+        @test NS._file_kind("noext") == "binary"
     end
 
     @testset "_safe_proj_path confinement" begin
@@ -62,9 +62,11 @@ const NS = KaimonSlate.NotebookServer
         # dirs before files; each file carries a kind + bytes
         assets = only(n for n in tree if n["name"] == "assets")
         @test assets["dir"] === true
-        kinds = Dict(n["name"] => n["kind"] for n in assets["children"] if get(n, "dir", false) === false)
+        kinds = Dict(
+            n["name"] => n["kind"] for n in assets["children"] if get(n, "dir", false) === false
+        )
         @test kinds["logo.png"] == "image"
-        @test kinds["app.js"]   == "text"
+        @test kinds["app.js"] == "text"
         for n in assets["children"]
             get(n, "dir", false) === false && (@test haskey(n, "bytes"))
         end
@@ -89,7 +91,8 @@ const NS = KaimonSlate.NotebookServer
         @test g2 !== nothing && String(g2[1]) == "Hello World"
 
         # asset-route URL resolves against the asset base, with the traversal guard
-        root = mktempdir(); mkpath(joinpath(root, "assets"))
+        root = mktempdir()
+        mkpath(joinpath(root, "assets"))
         write(joinpath(root, "assets", "logo.png"), UInt8[1, 2, 3])
         ga = NS._embedded_media(root, "/n/abc123/asset/assets/logo.png")
         @test ga !== nothing && ga[1] == UInt8[1, 2, 3] && ga[2] == "image/png"
@@ -100,29 +103,31 @@ const NS = KaimonSlate.NotebookServer
     end
 
     @testset "_export_embed_html rewrite (inline vs published)" begin
-        root = mktempdir(); mkpath(joinpath(root, "assets"))
+        root = mktempdir()
+        mkpath(joinpath(root, "assets"))
         write(joinpath(root, "assets", "pic.png"), UInt8[0x89, 0x50, 0x4e, 0x47, 9, 9])
         html = "<p><img src=\"/n/xyz/asset/assets/pic.png\" alt=\"p\"></p>"
 
-        inlined = NS._export_embed_html(html, root; inline = true)      # standalone → data: URI
+        inlined = NS._export_embed_html(html, root; inline=true)      # standalone → data: URI
         @test occursin("src=\"data:image/png;base64,", inlined)
         @test !occursin("/asset/", inlined)
 
-        published = NS._export_embed_html(html, root; inline = false)   # site → page-relative
+        published = NS._export_embed_html(html, root; inline=false)   # site → page-relative
         @test occursin("src=\"assets/pic.png\"", published)
         @test !occursin("/n/xyz/asset/", published)
 
         # an already-inline data: src is left untouched in both modes
         d = "<img src=\"data:image/gif;base64,AAAA\">"
-        @test NS._export_embed_html(d, root; inline = true) == d
-        @test NS._export_embed_html(d, root; inline = false) == d
+        @test NS._export_embed_html(d, root; inline=true) == d
+        @test NS._export_embed_html(d, root; inline=false) == d
         # an unreadable asset ref is left as-is rather than corrupting the doc
         miss = "<img src=\"/n/x/asset/assets/gone.png\">"
-        @test NS._export_embed_html(miss, root; inline = true) == miss
+        @test NS._export_embed_html(miss, root; inline=true) == miss
     end
 
     @testset "_stage_typst_md_media stages images, drops non-images" begin
-        root = mktempdir(); mkpath(joinpath(root, "assets"))
+        root = mktempdir()
+        mkpath(joinpath(root, "assets"))
         write(joinpath(root, "assets", "fig.png"), UInt8[0x89, 0x50, 0x4e, 0x47])
         dir = mktempdir()
 
@@ -167,7 +172,11 @@ const NS = KaimonSlate.NotebookServer
 
         cells = [
             RE.Cell("m1", RE.MARKDOWN, "text ![a](/n/x/asset/assets/a.png) more"),
-            RE.Cell("m2", RE.MARKDOWN, "raw <img src=\"/n/x/asset/media/b.png\"> and nested ![c](/n/x/asset/images/sub/c.png)"),
+            RE.Cell(
+                "m2",
+                RE.MARKDOWN,
+                "raw <img src=\"/n/x/asset/media/b.png\"> and nested ![c](/n/x/asset/images/sub/c.png)",
+            ),
             RE.Cell("m3", RE.MARKDOWN, "data ![d](data:image/png;base64,AAAA) — no file"),
         ]
         files = NS._embedded_asset_files(cells, root)
@@ -184,7 +193,11 @@ const NS = KaimonSlate.NotebookServer
             @test true
         else
             io = IOBuffer()
-            ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", "embed_snippet.mjs"))`; stdout = io, stderr = io))
+            ok = success(
+                pipeline(
+                    `$node $(joinpath(@__DIR__, "js", "embed_snippet.mjs"))`; stdout=io, stderr=io
+                ),
+            )
             ok || print(String(take!(io)))
             @test ok
         end

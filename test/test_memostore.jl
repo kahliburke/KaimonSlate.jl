@@ -2,18 +2,24 @@
 # dedup, fmt gating, and gc (refcounted blobs, LRU manifest roots, grace window, legacy sweep).
 # Everything runs against a fresh mktempdir; grace/cap are injected, so no mtime manipulation.
 using ReTest
-import Serialization
+using Serialization: Serialization
 include(joinpath(@__DIR__, "..", "src", "memostore.jl"))
 include(joinpath(@__DIR__, "..", "src", "memocodecs.jl"))
 
 # A manifest shaped the way the worker writes it (bindings + wire referencing stored blobs).
-mkmanifest(binds::Vector{<:Pair}, wire_h::String) = Dict{String,Any}(
-    "created" => 0, "julia" => string(VERSION),
-    "bindings" => [Dict{String,Any}("name" => n, "codec" => "jls", "blob" => h, "bytes" => 1)
-                   for (n, h) in binds],
-    "wire" => Dict{String,Any}("codec" => "jls", "blob" => wire_h, "bytes" => 1))
+function mkmanifest(binds::Vector{<:Pair}, wire_h::String)
+    return Dict{String,Any}(
+        "created" => 0,
+        "julia" => string(VERSION),
+        "bindings" => [
+            Dict{String,Any}("name" => n, "codec" => "jls", "blob" => h, "bytes" => 1) for
+            (n, h) in binds
+        ],
+        "wire" => Dict{String,Any}("codec" => "jls", "blob" => wire_h, "bytes" => 1),
+    )
+end
 
-blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs")); init = 0)
+blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs")); init=0)
 
 @testset "memostore" begin
     @testset "blobs: content addressing, dedup, round-trip" begin
@@ -60,7 +66,9 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
             # wrong fmt (an old/foreign manifest) reads as a miss, not an error
             write(MemoStore.manifest_path(root, "oldfmt00"), "fmt = 2\n")
             @test MemoStore.read_manifest(root, "oldfmt00") === nothing
-            @test_throws ArgumentError MemoStore.write_manifest(root, "../evil", mkmanifest(Pair{String,String}[], hA))
+            @test_throws ArgumentError MemoStore.write_manifest(
+                root, "../evil", mkmanifest(Pair{String,String}[], hA)
+            )
             @test_throws ArgumentError MemoStore.read_manifest(root, "a/b")
             MemoStore.touch_manifest(root, "abc123")                     # no-throw; still readable
             @test MemoStore.read_manifest(root, "abc123") !== nothing
@@ -81,9 +89,10 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
             write(joinpath(root, "deadbeef01"), "fmt2 relic")
             hA, _ = MemoStore.put_blob(io -> write(io, "keep"), root)
             MemoStore.write_manifest(root, "live0001", mkmanifest(["x" => hA], hA))
-            MemoStore.gc(root; cap = typemax(Int))
+            MemoStore.gc(root; cap=typemax(Int))
             @test !isfile(joinpath(root, "deadbeef01"))
-            @test MemoStore.read_manifest(root, "live0001") !== nothing && MemoStore.has_blob(root, hA)
+            @test MemoStore.read_manifest(root, "live0001") !== nothing &&
+                MemoStore.has_blob(root, hA)
         end
     end
 
@@ -96,7 +105,7 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
             sleep(0.05)                                                  # m2 strictly newer (LRU order)
             MemoStore.write_manifest(root, "m2", mkmanifest(["a" => hA, "c" => hC], hA))
             st = MemoStore.stats(root)
-            MemoStore.gc(root; cap = st.bytes - 1, grace = -1.0)         # force ≥1 eviction; grace off
+            MemoStore.gc(root; cap=st.bytes - 1, grace=-1.0)         # force ≥1 eviction; grace off
             @test MemoStore.read_manifest(root, "m1") === nothing        # oldest root evicted
             @test MemoStore.read_manifest(root, "m2") !== nothing
             @test !MemoStore.has_blob(root, hB)                          # only m1 referenced it
@@ -113,7 +122,7 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
             MemoStore.write_manifest(root, "pinned", mkmanifest(["b" => hB], hB))
             MemoStore.set_pin!(root, "pinned", true)
             @test MemoStore.is_pinned(root, "pinned") && !MemoStore.is_pinned(root, "old")
-            MemoStore.gc(root; cap = 0, grace = -1.0)             # cap=0 → evict everything it can
+            MemoStore.gc(root; cap=0, grace=-1.0)             # cap=0 → evict everything it can
             @test MemoStore.read_manifest(root, "old") === nothing   # unpinned, oldest → gone
             @test MemoStore.read_manifest(root, "pinned") !== nothing   # pinned → survives despite cap=0
             @test MemoStore.has_blob(root, hB)                    # its blob survives too (refcounted)
@@ -121,7 +130,7 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
             # Unpin → ordinary LRU eviction applies again.
             MemoStore.set_pin!(root, "pinned", false)
             @test !MemoStore.is_pinned(root, "pinned")
-            MemoStore.gc(root; cap = 0, grace = -1.0)
+            MemoStore.gc(root; cap=0, grace=-1.0)
             @test MemoStore.read_manifest(root, "pinned") === nothing
         end
     end
@@ -129,16 +138,16 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
     @testset "gc: grace window protects fresh unreferenced blobs" begin
         mktempdir() do root
             hO, _ = MemoStore.put_blob(io -> write(io, "orphan"), root)  # no manifest yet (mid-store)
-            MemoStore.gc(root; cap = 0, grace = 1e6)                     # young → survives
+            MemoStore.gc(root; cap=0, grace=1e6)                     # young → survives
             @test MemoStore.has_blob(root, hO)
-            MemoStore.gc(root; cap = 0, grace = -1.0)                    # grace off → swept
+            MemoStore.gc(root; cap=0, grace=-1.0)                    # grace off → swept
             @test !MemoStore.has_blob(root, hO)
         end
     end
 
     @testset "stats counts both layers" begin
         mktempdir() do root
-            @test MemoStore.stats(root) == (manifests = 0, blobs = 0, bytes = 0)
+            @test MemoStore.stats(root) == (manifests=0, blobs=0, bytes=0)
             hA, _ = MemoStore.put_blob(io -> write(io, "12345678"), root)
             MemoStore.write_manifest(root, "s1", mkmanifest(["x" => hA], hA))
             st = MemoStore.stats(root)
@@ -164,7 +173,9 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
                 @test MemoStore.unpack(dst, packed) >= 3
                 @test MemoStore.read_manifest(dst, "keyA") !== nothing
                 @test MemoStore.read_manifest(dst, "keyB") === nothing          # not selected → absent
-                @test MemoStore.has_blob(dst, hA) && MemoStore.has_blob(dst, hs) && MemoStore.has_blob(dst, wh)
+                @test MemoStore.has_blob(dst, hA) &&
+                    MemoStore.has_blob(dst, hs) &&
+                    MemoStore.has_blob(dst, wh)
                 @test !MemoStore.has_blob(dst, hB)
                 blobs_before = blobcount(dst)
                 MemoStore.unpack(dst, packed)                                    # idempotent: blobs already present
@@ -175,13 +186,16 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
             packed2 = MemoStore.pack(src, ["keyA", "keyB"])
             mktempdir() do dst2
                 MemoStore.unpack(dst2, packed2)
-                @test MemoStore.has_blob(dst2, hA) && MemoStore.has_blob(dst2, hB) && MemoStore.has_blob(dst2, hs)
+                @test MemoStore.has_blob(dst2, hA) &&
+                    MemoStore.has_blob(dst2, hB) &&
+                    MemoStore.has_blob(dst2, hs)
             end
 
             # A hand-forged entry escaping the store (path traversal / unknown subtree) is ignored.
             io = IOBuffer()
             for rel in ("../escape.txt", "secrets/x")
-                rb = Vector{UInt8}(rel); db = Vector{UInt8}("x")
+                rb = Vector{UInt8}(rel)
+                db = Vector{UInt8}("x")
                 write(io, hton(UInt32(length(rb))), rb, hton(UInt64(length(db))), db)
             end
             mktempdir() do dst3

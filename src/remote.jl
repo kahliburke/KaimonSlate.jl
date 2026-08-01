@@ -26,10 +26,10 @@
 # hub already uses (`connect_tcp!(…; server_key=…)` does the client-side CURVE itself).
 # ═══════════════════════════════════════════════════════════════════════════════
 
-import Sockets
-import FileWatching
-import Dates
-import Mmap
+using Sockets: Sockets
+using FileWatching: FileWatching
+using Dates: Dates
+using Mmap: Mmap
 import SHA as _SHA
 
 # ── Durable orchestration log ─────────────────────────────────────────────────────
@@ -41,7 +41,9 @@ import SHA as _SHA
 # Slate's LOCAL cache root — respects XDG_CACHE_HOME (append "kaimonslate" under it rather than
 # using it verbatim; same rationale as Kaimon's cache_dir). The REMOTE layout stays literal
 # ".cache/kaimonslate" ($HOME-relative over ssh) — the remote's XDG env isn't cheaply knowable.
-_slate_cache_dir() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate")
+function _slate_cache_dir()
+    return joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate")
+end
 
 const _REMOTE_LOG = joinpath(_slate_cache_dir(), "remote.log")
 # Resolved at write time so a test (or a sandboxed run) can redirect the durable log to a throwaway path
@@ -55,7 +57,7 @@ function _rlog(msg::AbstractString)
         open(path, "a") do io
             # ms resolution: the reattach path is timed in tens of ms now — whole-second
             # timestamps couldn't distinguish "instant" from "1.9s" (both printed as :01→:02).
-            println(io, "[", Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS.sss"), "] ", msg)
+            return println(io, "[", Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS.sss"), "] ", msg)
         end
     catch
     end
@@ -64,7 +66,7 @@ function _rlog(msg::AbstractString)
 end
 
 "Tail the durable remote-orchestration log (last `maxbytes`)."
-function remote_log(; maxbytes::Int = 60_000)
+function remote_log(; maxbytes::Int=60_000)
     isfile(_REMOTE_LOG) || return "(no remote activity logged yet — $_REMOTE_LOG)"
     s = read(_REMOTE_LOG, String)
     return ncodeunits(s) > maxbytes ? "…(truncated)…\n" * String(last(s, maxbytes)) : s
@@ -77,7 +79,7 @@ Tail the SSH host's own `worker-<port>.log` (the remote Julia process's stdout/s
 load, serve() banner, eval output, crashes). This is the factorio-side record — fetched over the
 same authenticated SSH channel we spawned it on, so it's visible locally in the browser worker-log.
 """
-function fetch_remote_worker_log(k; maxbytes::Int = 30_000)
+function fetch_remote_worker_log(k; maxbytes::Int=30_000)
     t = k.target
     t isa RemoteTarget || return "(not a remote kernel)"
     k.port == 0 && return "(remote worker not spawned yet)"
@@ -115,29 +117,49 @@ struct RemoteTarget <: RunTarget
     sysimage::Bool               # opt-in: bake + boot a PackageCompiler worker sysimage for this env (default false)
     curve::Bool                  # CURVE-encrypt this region's data channel (default true; false = plaintext, for the §7 bench)
 end
-RemoteTarget(ssh_host::AbstractString; transport::Symbol = :tunnel,
-             project::AbstractString = "~/.cache/kaimonslate/remote",
-             port::Int = 0, stream_port::Int = 0, origin_env::AbstractString = "",
-             datadir::AbstractString = "", cache_root::AbstractString = "", region::AbstractString = "",
-             sysimage::Bool = false, curve::Bool = true) =
-    RemoteTarget(String(ssh_host), transport, String(project), port, stream_port,
-                 String(origin_env), String(datadir), String(cache_root), String(region), sysimage, curve)
+function RemoteTarget(
+    ssh_host::AbstractString;
+    transport::Symbol=:tunnel,
+    project::AbstractString="~/.cache/kaimonslate/remote",
+    port::Int=0,
+    stream_port::Int=0,
+    origin_env::AbstractString="",
+    datadir::AbstractString="",
+    cache_root::AbstractString="",
+    region::AbstractString="",
+    sysimage::Bool=false,
+    curve::Bool=true,
+)
+    return RemoteTarget(
+        String(ssh_host),
+        transport,
+        String(project),
+        port,
+        stream_port,
+        String(origin_env),
+        String(datadir),
+        String(cache_root),
+        String(region),
+        sysimage,
+        curve,
+    )
+end
 
 is_remote(::LocalTarget) = false
 is_remote(::RemoteTarget) = true
 
 # Remote layout under the host's $HOME (all $HOME-relative → scp/ssh log in at $HOME).
-const _REMOTE_ROOT      = ".cache/kaimonslate"
-const _REMOTE_WORKER    = "$_REMOTE_ROOT/worker"      # Slate's worker payload (src/*.jl)
+const _REMOTE_ROOT = ".cache/kaimonslate"
+const _REMOTE_WORKER = "$_REMOTE_ROOT/worker"      # Slate's worker payload (src/*.jl)
 const _REMOTE_KGATE_ENV = "$_REMOTE_ROOT/kgate-env"   # a project with KaimonGate (+ Revise) instantiated
-const _REMOTE_SYSIMG    = "$_REMOTE_ROOT/sysimg"      # baked worker sysimages, keyed by payload+env hash
+const _REMOTE_SYSIMG = "$_REMOTE_ROOT/sysimg"      # baked worker sysimages, keyed by payload+env hash
 const _REMOTE_SYSIMG_BUILDER = "$_REMOTE_ROOT/sysimg-builder"  # env holding PackageCompiler (kept OFF the worker env)
-const _REMOTE_KEY_PATH  = "~/.cache/kaimon/curve/server.key"
+const _REMOTE_KEY_PATH = "~/.cache/kaimon/curve/server.key"
 # The extension SDK (Widget/Choice/WebPage/slate_context) is path-dev'd from the monorepo and NOT yet
 # registered, so a registry `Pkg.add` can't find it on a remote host. Ship its source and `Pkg.develop`
 # it into the worker env — the remote counterpart of the local `src/worker_infra` LOAD_PATH stack.
 const _REMOTE_SEB = "$_REMOTE_ROOT/devsrc/SlateExtensionsBase"
-const _LOCAL_SEB  = normpath(joinpath(@__DIR__, "..", "lib", "SlateExtensionsBase"))
+const _LOCAL_SEB = normpath(joinpath(@__DIR__, "..", "lib", "SlateExtensionsBase"))
 const _SEB_DEVELOP = "try; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\")); preserve=Pkg.PRESERVE_ALL); catch; try; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\"))); catch; end; end"
 
 # ── Remote timing knobs ───────────────────────────────────────────────────────────────────────
@@ -159,21 +181,33 @@ const _SEB_DEVELOP = "try; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), 
 #   blob_xfer_timeout       KAIMONSLATE_BLOB_XFER_TIMEOUT       600   whole-binding / direct-blob move gate timeout
 #   sysimage_lock_stale     KAIMONSLATE_SYSIMAGE_LOCK_STALE     1800  concurrent sysimage-build lock staleness window
 #   peer_bw_mbps            KAIMONSLATE_PEER_BW_MBPS            30    assumed rate (MB/s) for an unmeasured peer link
-_ssh_connect_timeout()    = round(Int, _rcfg("ssh_connect_timeout",    "KAIMONSLATE_SSH_CONNECT_TIMEOUT",    15))
-_ssh_control_persist()    = round(Int, _rcfg("ssh_control_persist",    "KAIMONSLATE_SSH_CONTROL_PERSIST",    600))
-_tunnel_alive_interval()  = round(Int, _rcfg("tunnel_alive_interval",  "KAIMONSLATE_TUNNEL_ALIVE_INTERVAL",  5))
-_tunnel_alive_count()     = round(Int, _rcfg("tunnel_alive_count",     "KAIMONSLATE_TUNNEL_ALIVE_COUNT",     3))
-_tunnel_respawn_backoff() = _rcfg("tunnel_respawn_backoff", "KAIMONSLATE_TUNNEL_RESPAWN_BACKOFF", 1.0)
-_fwd_ready_wait()         = _rcfg("fwd_ready_wait",         "KAIMONSLATE_FWD_READY_WAIT",         8.0)   # bounded wait for an async ssh -L local port to accept before the first connect
-_probe_timeout()          = _rcfg("probe_timeout",          "KAIMONSLATE_PROBE_TIMEOUT",          4.0)
-_firewall_giveup()        = _rcfg("firewall_giveup",        "KAIMONSLATE_FIREWALL_GIVEUP",        10.0)
-_dial_deadline_cold()     = _rcfg("dial_deadline_cold",     "KAIMONSLATE_DIAL_DEADLINE_COLD",     120.0)
-_dial_deadline_probe()    = _rcfg("dial_deadline_probe",    "KAIMONSLATE_DIAL_DEADLINE_PROBE",    15.0)
-_dial_deadline_record()   = _rcfg("dial_deadline_record",   "KAIMONSLATE_DIAL_DEADLINE_RECORD",   5.0)
-_blob_chunk_timeout_ms()  = round(Int, _rcfg("blob_chunk_timeout", "KAIMONSLATE_BLOB_CHUNK_TIMEOUT", 20.0) * 1000)
-_blob_xfer_timeout()      = _rcfg("blob_xfer_timeout",      "KAIMONSLATE_BLOB_XFER_TIMEOUT",      600.0)
-_sysimage_lock_stale()    = round(Int, _rcfg("sysimage_lock_stale", "KAIMONSLATE_SYSIMAGE_LOCK_STALE", 1800))
-_peer_bw_default()        = _rcfg("peer_bw_mbps",          "KAIMONSLATE_PEER_BW_MBPS",           30.0) * 1.0e6
+function _ssh_connect_timeout()
+    return round(Int, _rcfg("ssh_connect_timeout", "KAIMONSLATE_SSH_CONNECT_TIMEOUT", 15))
+end
+function _ssh_control_persist()
+    return round(Int, _rcfg("ssh_control_persist", "KAIMONSLATE_SSH_CONTROL_PERSIST", 600))
+end
+function _tunnel_alive_interval()
+    return round(Int, _rcfg("tunnel_alive_interval", "KAIMONSLATE_TUNNEL_ALIVE_INTERVAL", 5))
+end
+_tunnel_alive_count() = round(Int, _rcfg("tunnel_alive_count", "KAIMONSLATE_TUNNEL_ALIVE_COUNT", 3))
+function _tunnel_respawn_backoff()
+    return _rcfg("tunnel_respawn_backoff", "KAIMONSLATE_TUNNEL_RESPAWN_BACKOFF", 1.0)
+end
+_fwd_ready_wait() = _rcfg("fwd_ready_wait", "KAIMONSLATE_FWD_READY_WAIT", 8.0)   # bounded wait for an async ssh -L local port to accept before the first connect
+_probe_timeout() = _rcfg("probe_timeout", "KAIMONSLATE_PROBE_TIMEOUT", 4.0)
+_firewall_giveup() = _rcfg("firewall_giveup", "KAIMONSLATE_FIREWALL_GIVEUP", 10.0)
+_dial_deadline_cold() = _rcfg("dial_deadline_cold", "KAIMONSLATE_DIAL_DEADLINE_COLD", 120.0)
+_dial_deadline_probe() = _rcfg("dial_deadline_probe", "KAIMONSLATE_DIAL_DEADLINE_PROBE", 15.0)
+_dial_deadline_record() = _rcfg("dial_deadline_record", "KAIMONSLATE_DIAL_DEADLINE_RECORD", 5.0)
+function _blob_chunk_timeout_ms()
+    return round(Int, _rcfg("blob_chunk_timeout", "KAIMONSLATE_BLOB_CHUNK_TIMEOUT", 20.0) * 1000)
+end
+_blob_xfer_timeout() = _rcfg("blob_xfer_timeout", "KAIMONSLATE_BLOB_XFER_TIMEOUT", 600.0)
+function _sysimage_lock_stale()
+    return round(Int, _rcfg("sysimage_lock_stale", "KAIMONSLATE_SYSIMAGE_LOCK_STALE", 1800))
+end
+_peer_bw_default() = _rcfg("peer_bw_mbps", "KAIMONSLATE_PEER_BW_MBPS", 30.0) * 1.0e6
 
 # ── Supervised SSH tunnel (lifted from TachiRei/tunnel.jl; migrate to KaimonGate later) ──
 "An OS-assigned free local TCP port (bind :0, read it, release — small race window)."
@@ -189,11 +223,13 @@ end
 # within `timeout` — a closed/firewalled port that DROPS the SYN, the case that would otherwise block
 # connect() for the full ~75 s OS TCP timeout and stall the whole run). Non-blocking: a probe that times
 # out abandons its connect task (it errors out on its own); we never sit on the OS timeout.
-function _probe_tcp(host::AbstractString, port::Integer; timeout::Float64 = 4.0)
+function _probe_tcp(host::AbstractString, port::Integer; timeout::Float64=4.0)
     result = Threads.Atomic{Int}(0)     # 0 pending · 1 open · 2 refused · 3 unreachable
     Threads.@spawn begin
         r = try
-            s = Sockets.connect(String(host), Int(port)); close(s); 1
+            s = Sockets.connect(String(host), Int(port))
+            close(s)
+            1
         catch e
             occursin("refused", lowercase(sprint(showerror, e))) ? 2 : 3
         end
@@ -204,7 +240,13 @@ function _probe_tcp(host::AbstractString, port::Integer; timeout::Float64 = 4.0)
         sleep(0.05)
     end
     v = result[]
-    return v == 1 ? :open : v == 2 ? :refused : :unreachable
+    return if v == 1
+        :open
+    elseif v == 2
+        :refused
+    else
+        :unreachable
+    end
 end
 
 """
@@ -232,11 +274,21 @@ function _run_tunnel!(t::Tunnel)
         # connection with its own ServerAlive (prior behaviour). stdin=devnull so background `ssh -N` doesn't
         # exit on inherited-stdin EOF.
         mux = _ssh_mux_opts()
-        alive = isempty(mux) ? ["-o", "ServerAliveInterval=$(_tunnel_alive_interval())",
-                                "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"] : String[]
+        alive = if isempty(mux)
+            [
+                "-o",
+                "ServerAliveInterval=$(_tunnel_alive_interval())",
+                "-o",
+                "ServerAliveCountMax=$(_tunnel_alive_count())",
+            ]
+        else
+            String[]
+        end
         cmd = `ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes $mux $alive $lflags $(t.host)`
         try
-            t.proc = Base.run(pipeline(cmd; stdin = devnull, stdout = devnull, stderr = devnull); wait = false)
+            t.proc = Base.run(
+                pipeline(cmd; stdin=devnull, stdout=devnull, stderr=devnull); wait=false
+            )
             wait(t.proc)
         catch
         end
@@ -256,7 +308,12 @@ end
 function close_tunnel(t::Tunnel)
     t.running = false
     p = t.proc
-    p === nothing || (try; kill(p); catch; end)
+    p === nothing || (
+        try
+            kill(p)
+        catch
+        end
+    )
     return nothing
 end
 
@@ -267,7 +324,10 @@ end
 # orphan. Best-effort (needs `pkill`; a leftover forward is harmless, just untidy).
 function _reap_orphan_ssh!()
     d = joinpath(_slate_cache_dir(), "mux")
-    try; run(pipeline(`pkill -9 -f $("ControlPath=" * d)`; stdout = devnull, stderr = devnull)); catch; end
+    try
+        run(pipeline(`pkill -9 -f $("ControlPath=" * d)`; stdout=devnull, stderr=devnull))
+    catch
+    end
     return nothing
 end
 
@@ -288,9 +348,23 @@ end
 function _ssh_mux_opts()
     get(ENV, "KAIMONSLATE_NO_SSH_MUX", "") == "1" && return String[]
     d = joinpath(_slate_cache_dir(), "mux")
-    try; mkpath(d); catch; return String[]; end
-    return ["-o", "ControlMaster=auto", "-o", "ControlPath=$d/%C", "-o", "ControlPersist=$(_ssh_control_persist())",
-            "-o", "ServerAliveInterval=$(_tunnel_alive_interval())", "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"]
+    try
+        mkpath(d)
+    catch
+        return String[]
+    end
+    return [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=$d/%C",
+        "-o",
+        "ControlPersist=$(_ssh_control_persist())",
+        "-o",
+        "ServerAliveInterval=$(_tunnel_alive_interval())",
+        "-o",
+        "ServerAliveCountMax=$(_tunnel_alive_count())",
+    ]
 end
 
 # rsync's `-e` value is whitespace-tokenized by rsync itself, so a mux path containing a space
@@ -301,12 +375,19 @@ function _rsync_ssh_opt()
     return ["-e", "ssh -o BatchMode=yes " * join(opts, " ")]
 end
 
-_ssh(host, argv::Cmd) = `ssh -o BatchMode=yes -o ConnectTimeout=$(_ssh_connect_timeout()) $(_ssh_mux_opts()) $host $argv`
+function _ssh(host, argv::Cmd)
+    return `ssh -o BatchMode=yes -o ConnectTimeout=$(_ssh_connect_timeout()) $(_ssh_mux_opts()) $host $argv`
+end
 
 # Run `cmd`, merging stdout+stderr; on failure, @warn the command + captured output. Returns (ok, output).
 function _run_logged(cmd::Cmd, what::AbstractString)
     buf = IOBuffer()
-    ok = try; run(pipeline(cmd; stdout = buf, stderr = buf)); true; catch; false; end
+    ok = try
+        run(pipeline(cmd; stdout=buf, stderr=buf))
+        true
+    catch
+        false
+    end
     s = String(take!(buf))
     ok || _rlog("FAILED: $what\n    cmd: $(string(cmd))\n    out: $(first(strip(s), 1200))")
     return (ok, s)
@@ -316,17 +397,25 @@ end
 # arrives, tagged with `what`, so a long remote step (env instantiate / precompile — minutes, otherwise
 # silent) is visible live via `tail -f ~/.cache/kaimonslate/remote.log`. Each line is also handed to
 # `online` (a callback the caller can point at the UI bring-up banner). Returns (ok, full output).
-function _run_streamed(cmd::Cmd, what::AbstractString; online = nothing)
+function _run_streamed(cmd::Cmd, what::AbstractString; online=nothing)
     out = Pipe()
-    proc = try; run(pipeline(cmd; stdout = out, stderr = out); wait = false)
-            catch e; _rlog("FAILED: $what (could not start: $(sprint(showerror, e)))"); return (false, ""); end
+    proc = try
+        run(pipeline(cmd; stdout=out, stderr=out); wait=false)
+    catch e
+        _rlog("FAILED: $what (could not start: $(sprint(showerror, e)))")
+        return (false, "")
+    end
     close(out.in)
     lines = String[]
     for line in eachline(out)                     # blocks per line until the remote closes the pipe (process exit)
         push!(lines, line)
-        s = strip(line); isempty(s) && continue
+        s = strip(line)
+        isempty(s) && continue
         _rlog("  ⟨$what⟩ $s")                     # live progress — the remote step narrates itself into the log
-        online === nothing || try; online(String(s)); catch; end
+        online === nothing || try
+            online(String(s))
+        catch
+        end
     end
     wait(proc)
     ok = success(proc)
@@ -338,7 +427,14 @@ end
 # banner), so a remote provision narrates itself in the UI, not only in `remote.log`. Best-effort and
 # global — unset (the default) makes `_bringup_note` a no-op, so the log streaming stands on its own.
 const _BRINGUP_SINK = Ref{Any}(nothing)
-_bringup_note(line::AbstractString) = (f = _BRINGUP_SINK[]; f === nothing || (try; f(String(line)); catch; end); nothing)
+function _bringup_note(line::AbstractString)
+    return (f=_BRINGUP_SINK[]; f === nothing || (
+        try
+            f(String(line))
+        catch
+        end
+    ); nothing)
+end
 
 # Emit a coarse bring-up STAGE label to the browser banner (through the same sink) — the structured
 # headline for a boot step: payload sync, worker-runtime build, env build, worker spawn, connect. The
@@ -350,14 +446,27 @@ _prep_stage(label::AbstractString) = _bringup_note("@@SLATE_PREP stage=" * Strin
 # KaimonGate.progress, keyed to the current request) — so a slow tool like `check_remote` (a cold
 # provision is minutes) isn't a silent "evaluating…". No-op if the gate/progress isn't available.
 # Distinct from `_bringup_note` (browser bring-up banner) and `_rlog` (durable disk log).
-_gate_progress(msg::AbstractString) = (try; getfield(_kaimon(), :KaimonGate).progress(String(msg)); catch; end; nothing)
+function _gate_progress(msg::AbstractString)
+    return (
+        try
+            getfield(_kaimon(), :KaimonGate).progress(String(msg))
+        catch
+        end;
+        nothing
+    )
+end
 
 _ssh_ok(host, argv::Cmd) = first(_run_logged(_ssh(host, argv), "ssh $host"))
 
 # Existence/predicate check over ssh — a nonzero exit is a normal FALSE (e.g. `test -f` on a missing
 # file), NOT a failure, so it is deliberately NOT logged (unlike _ssh_ok, which treats nonzero as an error).
 _ssh_test(host, argv::Cmd) =
-    try; run(pipeline(_ssh(host, argv); stdout = devnull, stderr = devnull)); true; catch; false; end
+    try
+        run(pipeline(_ssh(host, argv); stdout=devnull, stderr=devnull))
+        true
+    catch
+        false
+    end
 
 # Run Julia CODE on the remote by shipping it as a FILE — NEVER `julia -e "…"` over ssh. ssh flattens its
 # argv and the remote shell re-splits + glob-expands the result, so `;`, `[...]`, `(...)` and any newline
@@ -365,19 +474,33 @@ _ssh_test(host, argv::Cmd) =
 # and zsh globbed `Pkg.activate(ARGS[1])` → "no matches found"). A script path is a single clean token, so
 # it survives. The script self-activates via `homedir()` (a `--project=~/…` wouldn't expand under ssh).
 # Returns ok::Bool; the remote script is removed after.
-function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::Bool = false, online = nothing)
+function _ssh_julia!(
+    host, code::AbstractString, what::AbstractString; stream::Bool=false, online=nothing
+)
     _ssh_ok(host, `mkdir -p $_REMOTE_ROOT`) || return (false, "")
     tmp = tempname()
     write(tmp, code)
     remote = "$_REMOTE_ROOT/$(basename(tmp)).jl"
     scp_ok = try
-        run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote))`; stdout = devnull, stderr = devnull)); true
-    catch; false; end
-    rm(tmp; force = true)
+        run(
+            pipeline(
+                `scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote))`;
+                stdout=devnull,
+                stderr=devnull,
+            ),
+        )
+        true
+    catch
+        false
+    end
+    rm(tmp; force=true)
     scp_ok || (_rlog("FAILED: scp provisioning script → $host ($what)"); return (false, ""))
     jcmd = _ssh(host, `$(_julia_sh("julia --startup-file=no $remote"))`)
-    ok, out = stream ? _run_streamed(jcmd, what; online = online) : _run_logged(jcmd, what)
-    try; run(pipeline(_ssh(host, `rm -f $remote`); stdout = devnull, stderr = devnull)); catch; end
+    ok, out = stream ? _run_streamed(jcmd, what; online=online) : _run_logged(jcmd, what)
+    try
+        run(pipeline(_ssh(host, `rm -f $remote`); stdout=devnull, stderr=devnull))
+    catch
+    end
     return (ok, out)
 end
 
@@ -399,21 +522,38 @@ function _ensure_julia!(host)
         # Present already — flag a version skew (non-fatal): Serialization (the jls codec across the
         # gate) and Manifest resolution can differ across Julia versions. `juliaup add $ver` fixes it.
         m = match(r"(\d+\.\d+\.\d+)", out)
-        m !== nothing && m.captures[1] != ver &&
-            _rlog("provision: $host runs Julia $(m.captures[1]) but the hub runs $ver — version skew (Serialization/Manifest may differ); run `juliaup add $ver && juliaup default $ver` on $host to match")
+        m !== nothing &&
+            m.captures[1] != ver &&
+            _rlog(
+                "provision: $host runs Julia $(m.captures[1]) but the hub runs $ver — version skew (Serialization/Manifest may differ); run `juliaup add $ver && juliaup default $ver` on $host to match",
+            )
         return true
     end
     uok, uname = _ssh_capture(host, `uname -s`)
-    (uok && !isempty(strip(uname))) ||
-        (_rlog("provision: no `julia` on $host and it isn't a Unix host — install Julia manually (juliaup)"); return false)
+    (uok && !isempty(strip(uname))) || (
+        _rlog(
+            "provision: no `julia` on $host and it isn't a Unix host — install Julia manually (juliaup)",
+        );
+        return false
+    )
     # Pin the install to the HUB's version (`--default-channel $ver`) — not "latest" — so hub↔worker
     # Serialization + Manifest stay compatible. NB: `sh -s` reads the installer SCRIPT from stdin (the
     # curl pipe), so do NOT redirect stdin (a `< /dev/null` starves it → curl broken pipe). `--yes` is unattended.
-    _rlog("provision: `julia` missing on $host ($(strip(uname))) — installing juliaup + Julia $ver unattended (a couple of minutes)…")
-    _run_streamed(_ssh(host, `$("curl -fsSL https://install.julialang.org | sh -s -- --yes --default-channel $ver")`),
-                  "install juliaup ($ver) on $host"; online = _bringup_note)
+    _rlog(
+        "provision: `julia` missing on $host ($(strip(uname))) — installing juliaup + Julia $ver unattended (a couple of minutes)…",
+    )
+    _run_streamed(
+        _ssh(
+            host,
+            `$("curl -fsSL https://install.julialang.org | sh -s -- --yes --default-channel $ver")`,
+        ),
+        "install juliaup ($ver) on $host";
+        online=_bringup_note,
+    )
     ok, _ = _ssh_capture(host, `$(_julia_sh("command -v julia"))`)
-    ok || _rlog("provision: juliaup install on $host did not yield a working `julia` (see remote.log)")
+    ok || _rlog(
+        "provision: juliaup install on $host did not yield a working `julia` (see remote.log)"
+    )
     return ok
 end
 
@@ -439,20 +579,35 @@ end
 
 # Value-fetch over ssh (curve key, SSH_CONNECTION): keep stdout CLEAN (stderr separate) but log it on failure.
 function _ssh_capture(host, argv::Cmd)
-    out = IOBuffer(); err = IOBuffer()
-    ok = try; run(pipeline(_ssh(host, argv); stdout = out, stderr = err)); true; catch; false; end
-    ok || @warn "slate remote: ssh $host FAILED" cmd = string(argv) stderr = first(strip(String(take!(err))), 800)
+    out = IOBuffer()
+    err = IOBuffer()
+    ok = try
+        run(pipeline(_ssh(host, argv); stdout=out, stderr=err))
+        true
+    catch
+        false
+    end
+    ok || @warn "slate remote: ssh $host FAILED" cmd = string(argv) stderr = first(
+        strip(String(take!(err))), 800
+    )
     return (ok, String(take!(out)))
 end
 
 # rsync a local dir → the host, over ssh. Trailing slash on src copies CONTENTS.
-function _rsync!(host, localdir::AbstractString, remotedir::AbstractString; delete::Bool = false,
-                 excludes::Vector{String} = String[])
+function _rsync!(
+    host,
+    localdir::AbstractString,
+    remotedir::AbstractString;
+    delete::Bool=false,
+    excludes::Vector{String}=String[],
+)
     _ssh_ok(host, `mkdir -p $remotedir`)   # openrsync (macOS) has no --mkpath; ensure the dest exists
     args = String["-az"]
     append!(args, _rsync_ssh_opt())
     delete && push!(args, "--delete")
-    for e in excludes; push!(args, "--exclude", e); end
+    for e in excludes
+        push!(args, "--exclude", e)
+    end
     push!(args, string(rstrip(localdir, '/'), "/"), string(host, ":", remotedir))
     return first(_run_logged(`rsync $args`, "rsync → $host:$remotedir"))
 end
@@ -473,10 +628,19 @@ end
 const _PAYLOAD_SHA_CACHE = Ref{Tuple{Float64,String}}((-1.0, ""))
 function _payload_sha()
     srcdir = @__DIR__
-    files = sort!(String[joinpath(srcdir, f) for f in readdir(srcdir)
-                         if endswith(f, ".jl") && isfile(joinpath(srcdir, f))])
-    mt = try; maximum(mtime, files; init = 0.0); catch; 0.0; end
-    (_PAYLOAD_SHA_CACHE[][1] == mt && !isempty(_PAYLOAD_SHA_CACHE[][2])) && return _PAYLOAD_SHA_CACHE[][2]
+    files = sort!(
+        String[
+            joinpath(srcdir, f) for
+            f in readdir(srcdir) if endswith(f, ".jl") && isfile(joinpath(srcdir, f))
+        ],
+    )
+    mt = try
+        maximum(mtime, files; init=0.0)
+    catch
+        0.0
+    end
+    (_PAYLOAD_SHA_CACHE[][1] == mt && !isempty(_PAYLOAD_SHA_CACHE[][2])) &&
+        return _PAYLOAD_SHA_CACHE[][2]
     ctx = _SHA.SHA1_CTX()
     for f in files
         _SHA.update!(ctx, codeunits(basename(f)))
@@ -497,39 +661,50 @@ reruns (rsync only ships deltas; the env instantiate is skipped once `.ready` ex
 """
 function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     host = t.ssh_host
-    _rlog("provision START host=$host transport=$(t.transport) project=$(t.project) parent=$parent_project")
+    _rlog(
+        "provision START host=$host transport=$(t.transport) project=$(t.project) parent=$parent_project",
+    )
     # Reachability precheck FIRST — a clear message beats a cryptic "rsync … failed" ten steps in when the
     # host is a typo or your ssh config/key isn't set up.
-    _ssh_test(host, `true`) ||
-        error("Cannot reach '$host' over SSH — check the hostname and your ~/.ssh/config (key-based auth is required; try `ssh $host` in a terminal).")
+    _ssh_test(host, `true`) || error(
+        "Cannot reach '$host' over SSH — check the hostname and your ~/.ssh/config (key-based auth is required; try `ssh $host` in a terminal).",
+    )
     # 0. Julia — a fresh box may have none; install juliaup unattended (Linux/macOS). Everything below
     #    needs `julia`, so this gates the rest.
-    _ensure_julia!(host) ||
-        error("provision: no usable `julia` on '$host' (auto-install skipped/failed — Windows, or juliaup install error). Install Julia (juliaup) manually and retry.")
+    _ensure_julia!(host) || error(
+        "provision: no usable `julia` on '$host' (auto-install skipped/failed — Windows, or juliaup install error). Install Julia (juliaup) manually and retry.",
+    )
     # 1. worker payload
     srcdir = @__DIR__
     tmp = mktempdir()
     try
         for f in readdir(srcdir)
-            (endswith(f, ".jl") && isfile(joinpath(srcdir, f))) && cp(joinpath(srcdir, f), joinpath(tmp, f))
+            (endswith(f, ".jl") && isfile(joinpath(srcdir, f))) &&
+                cp(joinpath(srcdir, f), joinpath(tmp, f))
         end
         _rlog("provision [1/3] rsync worker payload → $host:$_REMOTE_WORKER")
         _prep_stage("Syncing worker files → $host")
-        _rsync!(host, tmp, _REMOTE_WORKER) || error("provision: rsync worker payload → $host failed")
+        _rsync!(host, tmp, _REMOTE_WORKER) ||
+            error("provision: rsync worker payload → $host failed")
     finally
-        rm(tmp; recursive = true, force = true)
+        rm(tmp; recursive=true, force=true)
     end
     # 1b. Ship the unregistered extension SDK's source (a registry add can't find it); the env build
     #     below `Pkg.develop`s it into the worker env so `worker.jl`'s `using SlateExtensionsBase` resolves.
     if isdir(_LOCAL_SEB)
-        _rsync!(host, _LOCAL_SEB, _REMOTE_SEB; excludes = [".git", "*.cov"]) ||
-            _rlog("provision: rsync SlateExtensionsBase → $host failed (worker will miss the extension SDK)")
+        _rsync!(host, _LOCAL_SEB, _REMOTE_SEB; excludes=[".git", "*.cov"]) || _rlog(
+            "provision: rsync SlateExtensionsBase → $host failed (worker will miss the extension SDK)",
+        )
     else
-        _rlog("provision: local SlateExtensionsBase source not found at $_LOCAL_SEB — remote worker may miss it")
+        _rlog(
+            "provision: local SlateExtensionsBase source not found at $_LOCAL_SEB — remote worker may miss it",
+        )
     end
     # 2. KaimonGate worker env (from the registry) — instantiate once
     if !_ssh_test(host, `test -f $_REMOTE_KGATE_ENV/.ready`)
-        _rlog("provision [2/3] building KaimonGate env on $host (first run — adds KaimonGate+Revise; can take minutes)")
+        _rlog(
+            "provision [2/3] building KaimonGate env on $host (first run — adds KaimonGate+Revise; can take minutes)",
+        )
         _prep_stage("Building worker runtime on $host")
         code = """
         import Pkg
@@ -537,8 +712,9 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
         Pkg.add(["KaimonGate", "Revise"])
         Pkg.instantiate()
         """
-        first(_ssh_julia!(host, code, "build KaimonGate env on $host")) ||
-            error("provision: could not build the remote KaimonGate env on $host (is `julia` on its PATH?)")
+        first(_ssh_julia!(host, code, "build KaimonGate env on $host")) || error(
+            "provision: could not build the remote KaimonGate env on $host (is `julia` on its PATH?)",
+        )
         _ssh_ok(host, `touch $_REMOTE_KGATE_ENV/.ready`)
     else
         _rlog("provision [2/3] KaimonGate env already built on $host (skip)")
@@ -554,16 +730,19 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     # no stacked-env skew). SlateExtensionsBase (the extension SDK) rides worker_infra locally too; on a
     # remote host it needs to reach the worker's env as well (registry add or shipped source — see below).
     rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
-    infra = _local_has_revise() ?
-        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"Revise\")]" :
+    infra = if _local_has_revise()
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"Revise\")]"
+    else
         "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\")]"
+    end
     build_env! = function ()
         if !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml"))
             _replicate_env!(t)                                # notebook env + worker infra
         elseif !isempty(parent_project) && isdir(parent_project)
-            _rlog("provision [3/3] rsync parent project → $host:$(t.project) + instantiate (no resolved origin env)")
-            _rsync!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"]) ||
-                error("provision: rsync parent project → $host failed")
+            _rlog(
+                "provision [3/3] rsync parent project → $host:$(t.project) + instantiate (no resolved origin env)",
+            )
+            _rsync!(host, parent_project, t.project; excludes=["Manifest.toml", ".git", "*.cov"]) || error("provision: rsync parent project → $host failed")
             # Replicate the parent's dev'd path deps (e.g. a `[sources]` local package) into devsrc/ and
             # rewrite Project.toml's `[sources]` paths to point there — else the resolve below dangles on a
             # `path="../dep"` that doesn't exist on the host. The Manifest is intentionally NOT shipped here
@@ -573,15 +752,33 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
             # Streamed so the (fresh-resolve) instantiate narrates into the bring-up banner. No Manifest is
             # shipped here → no reliable pre-count, so the precompile bar is indeterminate ("k done"), but it
             # still shows live progress + the current package instead of going dark.
-            build = _rewrite_devpaths_script(rel, rewrites) *
-                "\nimport Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _SEB_DEVELOP * "; Pkg.instantiate()\n" *
-                _PREP_DONE_SNIPPET * "\n"
-            first(_ssh_julia!(host, build, "instantiate parent project on $host";
-                              stream = true, online = _bringup_note)) || error("provision: parent env build → $host failed")
+            build =
+                _rewrite_devpaths_script(rel, rewrites) *
+                "\nimport Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " *
+                _SEB_DEVELOP *
+                "; Pkg.instantiate()\n" *
+                _PREP_DONE_SNIPPET *
+                "\n"
+            first(
+                _ssh_julia!(
+                    host,
+                    build,
+                    "instantiate parent project on $host";
+                    stream=true,
+                    online=_bringup_note,
+                ),
+            ) || error("provision: parent env build → $host failed")
         else
             _rlog("provision [3/3] bare notebook — worker env = worker infra only")
-            first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _SEB_DEVELOP * "; Pkg.instantiate()",
-                              "bare worker env on $host")) || error("provision: could not build the worker env on $host")
+            first(
+                _ssh_julia!(
+                    host,
+                    "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " *
+                    _SEB_DEVELOP *
+                    "; Pkg.instantiate()",
+                    "bare worker env on $host",
+                ),
+            ) || error("provision: could not build the worker env on $host")
         end
     end
     _prep_stage("Building package environment on $host")
@@ -593,7 +790,10 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
         # Project + Manifest and rebuild ONCE from the authoritative local source, so one bad provision
         # self-heals instead of wedging every future spawn on this env. (The isolation keying means this
         # only ever touches THIS project's env.) A second failure is a real problem — let it surface.
-        _rlog("provision [3/3] env build failed on $host — resetting env + one retry: " * first(sprint(showerror, e), 140))
+        _rlog(
+            "provision [3/3] env build failed on $host — resetting env + one retry: " *
+            first(sprint(showerror, e), 140),
+        )
         _ssh_ok(host, `rm -f $rel/Project.toml $rel/Manifest.toml`)
         build_env!()
     end
@@ -631,7 +831,9 @@ end
 _sysimage_enabled() = get(ENV, "KAIMONSLATE_SYSIMAGE", "1") != "0"
 # Minimum free RAM (GB) on the host before a sysimage build is allowed — a link peaks at several GB, so on a
 # small/busy box the build defers instead of OOM-thrashing. Tunable; default sized for a ~300MB image.
-_sysimage_minfree_gb() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_SYSIMAGE_MINFREE_GB", "")), 5.0)
+function _sysimage_minfree_gb()
+    return something(tryparse(Float64, get(ENV, "KAIMONSLATE_SYSIMAGE_MINFREE_GB", "")), 5.0)
+end
 
 # Per-env sysimage subdir (host-$HOME-relative), keyed by a hash of the worker's `--project` dir. Computed
 # hub-side from the SAME `t.project` string at both the build and the boot site so they always agree.
@@ -641,7 +843,8 @@ _sysimage_dir(project::AbstractString) = "$_REMOTE_SYSIMG/$(_sysimage_envkey(pro
 # The precompile execution file (run with the worker env active): include the payload and drive the
 # eval/capture path so its hot specializations bake in. Best-effort throughout — a trace error just means
 # fewer baked methods, never a failed build.
-_sysimage_exec_contents() = """
+function _sysimage_exec_contents()
+    return """
 # Auto-generated by KaimonSlate — trace-compile the worker payload's eval/capture path into the sysimage.
 try
     include(joinpath(homedir(), raw"$_REMOTE_WORKER", "worker.jl"))
@@ -651,11 +854,14 @@ try
 catch
 end
 """
+end
 
 # The remote build program: recompute the key, skip if already current, else (invalidating a drifted
 # pointer first) bake `sysimg/<key>.so` via PackageCompiler from a dedicated builder env, then publish
 # `sysimg/current` atomically and prune older images. Self-guarded against concurrent builds by a lockfile.
-function _sysimage_build_script(projrel::AbstractString, sysreldir::AbstractString, minfree_gb::Real)
+function _sysimage_build_script(
+    projrel::AbstractString, sysreldir::AbstractString, minfree_gb::Real
+)
     io = IOBuffer()
     P(s) = println(io, s)
     P("import Pkg, TOML, SHA")   # all stdlib — always available on the remote's default Julia
@@ -670,7 +876,9 @@ function _sysimage_build_script(projrel::AbstractString, sysreldir::AbstractStri
     # Hash the payload SOURCE only — exclude the transient per-port boot scripts (`worker-<port>.jl`) that
     # `_launch_worker!` writes into this same dir, or the key would drift on every single spawn (new port →
     # new boot script) and rebuild endlessly. The rsync'd src payload (worker.jl + its includes) is stable.
-    P("files = sort!(filter(f -> endswith(f, \".jl\") && !occursin(r\"^worker-\\d+\\.jl\$\", basename(f)), readdir(payload; join = true)))")
+    P(
+        "files = sort!(filter(f -> endswith(f, \".jl\") && !occursin(r\"^worker-\\d+\\.jl\$\", basename(f)), readdir(payload; join = true)))",
+    )
     P("ctx = SHA.SHA1_CTX()")
     P("for f in files; SHA.update!(ctx, codeunits(basename(f))); SHA.update!(ctx, read(f)); end")
     P("mf = joinpath(proj, \"Manifest.toml\")")
@@ -681,7 +889,9 @@ function _sysimage_build_script(projrel::AbstractString, sysreldir::AbstractStri
     P("  for name in sort!(collect(keys(mdeps)))")
     P("    for e in mdeps[name]")
     P("      e isa AbstractDict || continue")
-    P("      SHA.update!(ctx, codeunits(string(name, \";\", get(e, \"uuid\", \"\"), \";\", get(e, \"version\", \"\"), \";\", get(e, \"git-tree-sha1\", get(e, \"path\", \"\")), \"|\")))")
+    P(
+        "      SHA.update!(ctx, codeunits(string(name, \";\", get(e, \"uuid\", \"\"), \";\", get(e, \"version\", \"\"), \";\", get(e, \"git-tree-sha1\", get(e, \"path\", \"\")), \"|\")))",
+    )
     P("    end")
     P("  end")
     P("end")
@@ -689,7 +899,9 @@ function _sysimage_build_script(projrel::AbstractString, sysreldir::AbstractStri
     P("target = joinpath(sysdir, key * \".so\"); curf = joinpath(sysdir, \"current\")")
     P("println(\"[sysimg] key=\$key\"); flush(stdout)")
     # already current → nothing to do (checked BEFORE the memory guard: skipping needs no headroom)
-    P("if isfile(curf) && strip(read(curf, String)) == key && isfile(target); println(\"[sysimg] already current — nothing to do\"); exit(0); end")
+    P(
+        "if isfile(curf) && strip(read(curf, String)) == key && isfile(target); println(\"[sysimg] already current — nothing to do\"); exit(0); end",
+    )
     # Free-RAM guard: a sysimage link peaks at several GB; on a tight box DEFER rather than OOM-thrash. We keep
     # any existing `current` bootable (a slightly-stale image still loads — Revise reloads /src on top), so
     # deferring is safe; a later provision on a quieter box builds it. Tunable via KAIMONSLATE_SYSIMAGE_MINFREE_GB.
@@ -697,23 +909,35 @@ function _sysimage_build_script(projrel::AbstractString, sysreldir::AbstractStri
     # pages), anything else unbounded (Inf ⇒ guard off) rather than assuming a Linux-only /proc.
     P("avail = try")
     P("  if Sys.islinux()")
-    P("    parse(Float64, match(r\"MemAvailable:\\s+(\\d+)\", read(\"/proc/meminfo\", String)).captures[1]) / 1048576")
+    P(
+        "    parse(Float64, match(r\"MemAvailable:\\s+(\\d+)\", read(\"/proc/meminfo\", String)).captures[1]) / 1048576",
+    )
     P("  elseif Sys.isapple()")
-    P("    vs = read(`vm_stat`, String); pg = (m = match(r\"page size of (\\d+)\", vs)) === nothing ? 4096 : parse(Int, m.captures[1])")
+    P(
+        "    vs = read(`vm_stat`, String); pg = (m = match(r\"page size of (\\d+)\", vs)) === nothing ? 4096 : parse(Int, m.captures[1])",
+    )
     P("    fp(re) = ((m = match(re, vs)) === nothing ? 0 : parse(Int, m.captures[1]))")
     P("    (fp(r\"Pages free:\\s+(\\d+)\") + fp(r\"Pages inactive:\\s+(\\d+)\")) * pg / 2^30")
     P("  else; Inf; end")
     P("catch; Inf; end")
-    P("if avail < $minfree_gb; println(\"[sysimg] only \$(round(avail; digits = 1))GB free (< $(minfree_gb)GB) — deferring build (lower KAIMONSLATE_SYSIMAGE_MINFREE_GB to force)\"); exit(0); end")
+    P(
+        "if avail < $minfree_gb; println(\"[sysimg] only \$(round(avail; digits = 1))GB free (< $(minfree_gb)GB) — deferring build (lower KAIMONSLATE_SYSIMAGE_MINFREE_GB to force)\"); exit(0); end",
+    )
     # drift → clear the stale pointer so workers fall back to a plain boot while we rebuild
-    P("if isfile(curf); prev = strip(read(curf, String)); rm(curf; force = true); println(\"[sysimg] payload/env drift (\$prev → \$key) — invalidated; rebuilding\"); end")
+    P(
+        "if isfile(curf); prev = strip(read(curf, String)); rm(curf; force = true); println(\"[sysimg] payload/env drift (\$prev → \$key) — invalidated; rebuilding\"); end",
+    )
     # concurrent-build lock (stale after 30 min)
     P("lk = joinpath(sysdir, \".building\")")
-    P("if isfile(lk) && (time() - mtime(lk)) < $(_sysimage_lock_stale()); println(\"[sysimg] another build in progress — skip\"); exit(0); end")
+    P(
+        "if isfile(lk) && (time() - mtime(lk)) < $(_sysimage_lock_stale()); println(\"[sysimg] another build in progress — skip\"); exit(0); end",
+    )
     P("write(lk, key)")
     P("try")
     P("  builder = joinpath(home, raw\"$_REMOTE_SYSIMG_BUILDER\"); Pkg.activate(builder)")
-    P("  if !isfile(joinpath(builder, \"Project.toml\")) || !occursin(\"PackageCompiler\", read(joinpath(builder, \"Project.toml\"), String))")
+    P(
+        "  if !isfile(joinpath(builder, \"Project.toml\")) || !occursin(\"PackageCompiler\", read(joinpath(builder, \"Project.toml\"), String))",
+    )
     P("    Pkg.add(\"PackageCompiler\")")
     P("  end")
     P("  Pkg.instantiate()")
@@ -721,16 +945,24 @@ function _sysimage_build_script(projrel::AbstractString, sysreldir::AbstractStri
     P("  open(exec, \"w\") do eio; write(eio, $(repr(_sysimage_exec_contents()))); end")
     P("  pdata = TOML.parsefile(joinpath(proj, \"Project.toml\"))")
     P("  pkgs = sort!(collect(keys(get(pdata, \"deps\", Dict{String,Any}()))))")   # env's direct deps → baked as packages
-    P("  println(\"[sysimg] baking \$(length(pkgs)) package(s) + payload trace → \$target\"); flush(stdout)")
+    P(
+        "  println(\"[sysimg] baking \$(length(pkgs)) package(s) + payload trace → \$target\"); flush(stdout)",
+    )
     P("  @eval import PackageCompiler")   # added at runtime above → @eval + invokelatest to dodge world-age
-    P("  Base.invokelatest(PackageCompiler.create_sysimage, pkgs; sysimage_path = target, project = proj, precompile_execution_file = exec)")
+    P(
+        "  Base.invokelatest(PackageCompiler.create_sysimage, pkgs; sysimage_path = target, project = proj, precompile_execution_file = exec)",
+    )
     P("  tmpc = curf * \".tmp\"; write(tmpc, key); mv(tmpc, curf; force = true)")   # publish the pointer atomically
-    P("  for f in readdir(sysdir; join = true); (endswith(f, \".so\") && f != target) && rm(f; force = true); end")   # prune old images
+    P(
+        "  for f in readdir(sysdir; join = true); (endswith(f, \".so\") && f != target) && rm(f; force = true); end",
+    )   # prune old images
     # Prime the pkgimage cache against the NEW base image: the very first boot with a fresh custom sysimage
     # otherwise recompiles the env's pkgimages (~a minute on a slow CPU), which would land under the first
     # real worker. Pay it HERE, detached and idle, by running the exec (include worker.jl + evals = the real
     # boot's load path) once under the new image, so every subsequent worker boot hits the warm cache.
-    P("  try; println(\"[sysimg] priming pkgimage cache against new image…\"); flush(stdout); run(pipeline(`\$(Base.julia_cmd()[1]) --sysimage=\$target --project=\$proj --startup-file=no \$exec`; stdout = devnull, stderr = devnull)); catch e; println(\"[sysimg] prime skipped (\$(first(sprint(showerror, e), 80)))\"); end")
+    P(
+        "  try; println(\"[sysimg] priming pkgimage cache against new image…\"); flush(stdout); run(pipeline(`\$(Base.julia_cmd()[1]) --sysimage=\$target --project=\$proj --startup-file=no \$exec`; stdout = devnull, stderr = devnull)); catch e; println(\"[sysimg] prime skipped (\$(first(sprint(showerror, e), 80)))\"); end",
+    )
     P("  println(\"[sysimg] DONE — current=\$key\")")
     P("finally")
     P("  rm(lk; force = true)")
@@ -740,7 +972,7 @@ end
 
 # Ship the build program to the host and launch it DETACHED (survives the ssh channel closing), stdout →
 # the build log. Fire-and-forget: workers boot without the image until it lands, then pick it up via `-J`.
-function _kickoff_sysimage_build!(t::RemoteTarget, projrel::AbstractString; force::Bool = false)
+function _kickoff_sysimage_build!(t::RemoteTarget, projrel::AbstractString; force::Bool=false)
     (t.sysimage || force) || return nothing  # OPT-IN per region (Region.sysimage); `force` = an explicit UI/API build
     _sysimage_enabled() || return nothing     # global kill-switch (KAIMONSLATE_SYSIMAGE=0) overrides even an opted-in region
     host = t.ssh_host
@@ -748,7 +980,9 @@ function _kickoff_sysimage_build!(t::RemoteTarget, projrel::AbstractString; forc
     # if the host has none — the worker just keeps booting the plain way, and we avoid a scary linker-error
     # stacktrace in the build log on a minimal box (e.g. a fresh cloud image with no build tools).
     if !_ssh_test(host, `sh -c $("command -v cc || command -v gcc || command -v clang")`)
-        _rlog("sysimg: no C compiler (cc/gcc/clang) on $host — skipping sysimage build (install build tools, e.g. `apt install build-essential`, to enable)")
+        _rlog(
+            "sysimg: no C compiler (cc/gcc/clang) on $host — skipping sysimage build (install build tools, e.g. `apt install build-essential`, to enable)",
+        )
         return nothing
     end
     sysreldir = _sysimage_dir(t.project)            # sysimg/<envkey> — per-env, matches the boot-line resolver
@@ -758,13 +992,23 @@ function _kickoff_sysimage_build!(t::RemoteTarget, projrel::AbstractString; forc
     tmp = tempname()
     write(tmp, _sysimage_build_script(projrel, sysreldir, _sysimage_minfree_gb()))
     ok = try
-        run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote))`; stdout = devnull, stderr = devnull)); true
-    catch; false; end
-    rm(tmp; force = true)
+        run(
+            pipeline(
+                `scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote))`;
+                stdout=devnull,
+                stderr=devnull,
+            ),
+        )
+        true
+    catch
+        false
+    end
+    rm(tmp; force=true)
     ok || (_rlog("sysimg: scp build script → $host failed (skip)"); return nothing)
     launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && if command -v setsid >/dev/null 2>&1; then setsid nohup julia --startup-file=no $remote > $logf 2>&1 & else nohup julia --startup-file=no $remote > $logf 2>&1 & fi"
     _rlog("sysimg: launching detached build on $host  (log: $host:$logf)")
-    _ssh_ok(host, `$launch`) || _rlog("sysimg: build launch returned nonzero on $host (it may still be starting)")
+    _ssh_ok(host, `$launch`) ||
+        _rlog("sysimg: build launch returned nonzero on $host (it may still be starting)")
     return nothing
 end
 
@@ -774,9 +1018,19 @@ end
 function sysimage_status(t::RemoteTarget)
     host = t.ssh_host
     d = _sysimage_dir(t.project)
-    res = Dict{String,Any}("host" => host, "envkey" => _sysimage_envkey(t.project), "opt_in" => t.sysimage,
-                           "reachable" => false, "building" => false, "current" => "", "bytes" => 0,
-                           "built" => 0, "stale" => false, "compiler" => true, "log" => "")
+    res = Dict{String,Any}(
+        "host" => host,
+        "envkey" => _sysimage_envkey(t.project),
+        "opt_in" => t.sysimage,
+        "reachable" => false,
+        "building" => false,
+        "current" => "",
+        "bytes" => 0,
+        "built" => 0,
+        "stale" => false,
+        "compiler" => true,
+        "log" => "",
+    )
     isempty(host) && return res
     pr = startswith(t.project, "~/") ? t.project[3:end] : t.project   # env dir → Manifest for the staleness check
     # Pass the WHOLE script as the single remote-command arg (like `_launch_worker!`'s launch line): ssh
@@ -785,25 +1039,31 @@ function sysimage_status(t::RemoteTarget)
     # Staleness is an mtime heuristic (cheap, no content hash): a payload `.jl` (EXCLUDING the transient
     # per-port `worker-<port>.jl` boot scripts, which the build key also ignores) or the env Manifest newer
     # than the `.so` ⇒ the image predates a code/dep change and should be rebuilt.
-    sh = "D=\$HOME/$d; CUR=\$(cat \$D/current 2>/dev/null); echo \"current=\$CUR\"; " *
-         "if [ -n \"\$CUR\" ] && [ -f \"\$D/\$CUR.so\" ]; then SO=\$D/\$CUR.so; echo \"bytes=\$(stat -c %s \$SO 2>/dev/null || stat -f %z \$SO 2>/dev/null)\"; echo \"built=\$(stat -c %Y \$SO 2>/dev/null || stat -f %m \$SO 2>/dev/null)\"; " *
-         "N=\$(find \$HOME/$_REMOTE_WORKER -maxdepth 1 -name '*.jl' ! -name 'worker-*.jl' -newer \$SO -print -quit 2>/dev/null); " *
-         "MF=\$HOME/$pr/Manifest.toml; if [ -z \"\$N\" ] && [ -f \"\$MF\" ] && [ \"\$MF\" -nt \"\$SO\" ]; then N=\$MF; fi; " *
-         "[ -n \"\$N\" ] && echo stale=1; fi; " *
-         "if [ -f \$D/.building ]; then echo building=1; fi; " *
-         "if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then echo nocompiler=1; fi; " *
-         # Marker must NOT start with `=` — zsh (a common login shell) would try equals-expansion on `===LOG===`
-         # (`=cmd` → path of cmd), fail with a nonzero exit, and make the whole ssh command look like it failed.
-         # `|| true` so a MISSING build.log (a host that hasn't built yet) doesn't make `tail` — the last
-         # command — exit nonzero, which _ssh_capture would read as an unreachable host (false "status
-         # unavailable"). A genuine ssh/connection failure still returns nonzero via ssh itself.
-         "echo __SLATELOG__; tail -n 14 \$D/build.log 2>/dev/null || true"
-    ok, out = try; _ssh_capture(host, `$sh`); catch; (false, ""); end
+    sh =
+        "D=\$HOME/$d; CUR=\$(cat \$D/current 2>/dev/null); echo \"current=\$CUR\"; " *
+        "if [ -n \"\$CUR\" ] && [ -f \"\$D/\$CUR.so\" ]; then SO=\$D/\$CUR.so; echo \"bytes=\$(stat -c %s \$SO 2>/dev/null || stat -f %z \$SO 2>/dev/null)\"; echo \"built=\$(stat -c %Y \$SO 2>/dev/null || stat -f %m \$SO 2>/dev/null)\"; " *
+        "N=\$(find \$HOME/$_REMOTE_WORKER -maxdepth 1 -name '*.jl' ! -name 'worker-*.jl' -newer \$SO -print -quit 2>/dev/null); " *
+        "MF=\$HOME/$pr/Manifest.toml; if [ -z \"\$N\" ] && [ -f \"\$MF\" ] && [ \"\$MF\" -nt \"\$SO\" ]; then N=\$MF; fi; " *
+        "[ -n \"\$N\" ] && echo stale=1; fi; " *
+        "if [ -f \$D/.building ]; then echo building=1; fi; " *
+        "if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then echo nocompiler=1; fi; " *
+        # Marker must NOT start with `=` — zsh (a common login shell) would try equals-expansion on `===LOG===`
+        # (`=cmd` → path of cmd), fail with a nonzero exit, and make the whole ssh command look like it failed.
+        # `|| true` so a MISSING build.log (a host that hasn't built yet) doesn't make `tail` — the last
+        # command — exit nonzero, which _ssh_capture would read as an unreachable host (false "status
+        # unavailable"). A genuine ssh/connection failure still returns nonzero via ssh itself.
+        "echo __SLATELOG__; tail -n 14 \$D/build.log 2>/dev/null || true"
+    ok, out = try
+        _ssh_capture(host, `$sh`)
+    catch
+        (false, "")
+    end
     ok || return res
     res["reachable"] = true
     parts = split(out, "__SLATELOG__")
     for line in split(strip(parts[1]), '\n')
-        kv = split(line, '='; limit = 2); length(kv) == 2 || continue
+        kv = split(line, '='; limit=2)
+        length(kv) == 2 || continue
         k, v = strip(kv[1]), strip(kv[2])
         k == "current" && (res["current"] = String(v))
         k == "bytes" && (res["bytes"] = something(tryparse(Int, v), 0))
@@ -823,22 +1083,28 @@ end
 # it (conn.name == "slate-<host>-<port>"). Empty when the hub has no live connection (only attached workers
 # stream telemetry in; an idle / other-hub worker surfaces just its point-in-time `.stats` sidecar). Each
 # sample is the flat telemetry NamedTuple (cpu, rss, memo, sys_cpu, load1, …, rcv = hub arrival time).
-worker_stats_history(host::AbstractString, port::Integer) =
-    (st = kernel_stats("slate-$host-$port"); st === nothing ? Any[] : st.history)
+function worker_stats_history(host::AbstractString, port::Integer)
+    return (st=kernel_stats("slate-$host-$port"); st === nothing ? Any[] : st.history)
+end
 
-sysimage_status_for_region(name) = (r = region_get(name); r === nothing ? nothing : sysimage_status(_region_target(r)))
+function sysimage_status_for_region(name)
+    return (r=region_get(name); r === nothing ? nothing : sysimage_status(_region_target(r)))
+end
 function sysimage_build_for_region!(name)
-    r = region_get(name); r === nothing && return (; ok = false, error = "no region '$name'")
-    isempty(r.host) && return (; ok = false, error = "region '$(r.name)' has no host")
+    r = region_get(name)
+    r === nothing && return (; ok=false, error="no region '$name'")
+    isempty(r.host) && return (; ok=false, error="region '$(r.name)' has no host")
     t = _region_target(r)
     rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
     Threads.@spawn try
         provision_remote!(t, r.preload)               # idempotent — ensures the env exists before the build reads its Manifest
-        _kickoff_sysimage_build!(t, rel; force = true)
+        _kickoff_sysimage_build!(t, rel; force=true)
     catch e
-        _rlog("sysimg: manual build for region '$(r.name)' failed to start — $(sprint(showerror, e))")
+        _rlog(
+            "sysimg: manual build for region '$(r.name)' failed to start — $(sprint(showerror, e))"
+        )
     end
-    return (; ok = true, host = t.ssh_host, envkey = _sysimage_envkey(t.project))
+    return (; ok=true, host=t.ssh_host, envkey=_sysimage_envkey(t.project))
 end
 
 # Dev'd dependencies in a Manifest = entries carrying a `path` (a local checkout, `Pkg.develop`). Returns
@@ -851,7 +1117,10 @@ function _dev_deps(manifest::AbstractString, envdir::AbstractString)
     curname = ""
     for line in eachline(manifest)
         m = match(r"^\[\[deps\.(.+?)\]\]\s*$", line)
-        if m !== nothing; curname = String(m.captures[1]); continue; end
+        if m !== nothing
+            curname = String(m.captures[1])
+            continue
+        end
         startswith(strip(line), "[") && (curname = "")           # entered some other table → out of a deps block
         isempty(curname) && continue
         pm = match(r"^\s*path\s*=\s*\"(.*)\"\s*$", line)
@@ -880,15 +1149,19 @@ function _rsync_dev_deps!(t::RemoteTarget, local_env::AbstractString)
         # Normalize + strip the trailing slash the `path="."` form leaves (abspath("x/.") → "x/") so the
         # project-itself entry compares equal to the env dir and is left as the active project.
         if rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(local_env)), '/')
-            _rlog("env: dev dep '$name' is the project itself — left as the active project (not redirected to devsrc)")
+            _rlog(
+                "env: dev dep '$name' is the project itself — left as the active project (not redirected to devsrc)",
+            )
             continue
         end
         if !isdir(lpath)
-            _rlog("env: dev dep '$name' source missing locally ($lpath) — skipping (its path will dangle)")
+            _rlog(
+                "env: dev dep '$name' source missing locally ($lpath) — skipping (its path will dangle)",
+            )
             continue
         end
         rp = "$_REMOTE_DEVSRC/$name"
-        _rsync!(host, lpath, rp; excludes = [".git", "*.cov"]) ||
+        _rsync!(host, lpath, rp; excludes=[".git", "*.cov"]) ||
             (_rlog("env: rsync dev dep '$name' → $host failed"); continue)
         push!(rewrites, (name, rp))
         _rlog("env: dev dep '$name' → $host:$rp")
@@ -911,7 +1184,10 @@ function _rewrite_devpaths_script(projrel::AbstractString, rewrites::Vector{Tupl
     println(io, "  deps = get(data, \"deps\", Dict{String,Any}())")
     for (name, rp) in rewrites
         println(io, "  if haskey(deps, raw\"$name\")")
-        println(io, "    for e in deps[raw\"$name\"]; e isa AbstractDict && (e[\"path\"] = joinpath(homedir(), raw\"$rp\")); end")
+        println(
+            io,
+            "    for e in deps[raw\"$name\"]; e isa AbstractDict && (e[\"path\"] = joinpath(homedir(), raw\"$rp\")); end",
+        )
         println(io, "  end")
     end
     println(io, "  open(mf, \"w\") do _io; TOML.print(_io, data); end")
@@ -922,7 +1198,10 @@ function _rewrite_devpaths_script(projrel::AbstractString, rewrites::Vector{Tupl
     println(io, "  src = get(pdata, \"sources\", nothing)")
     println(io, "  if src isa AbstractDict")
     for (name, rp) in rewrites
-        println(io, "    if get(src, raw\"$name\", nothing) isa AbstractDict && haskey(src[raw\"$name\"], \"path\")")
+        println(
+            io,
+            "    if get(src, raw\"$name\", nothing) isa AbstractDict && haskey(src[raw\"$name\"], \"path\")",
+        )
         println(io, "      src[raw\"$name\"][\"path\"] = joinpath(homedir(), raw\"$rp\")")
         println(io, "    end")
     end
@@ -946,7 +1225,7 @@ function _replicate_env!(t::RemoteTarget)
     origin = t.origin_env
     _rlog("env: replicating origin env → $host:$(t.project)  (from $origin)")
     # 1. the origin project WHOLESALE, INCLUDING the Manifest (exact versions) + its own /src.
-    _rsync!(host, origin, t.project; excludes = [".git", "*.cov", ".ready"]) ||
+    _rsync!(host, origin, t.project; excludes=[".git", "*.cov", ".ready"]) ||
         error("env: rsync origin project → $host failed")
     # 2. dev'd deps: rsync each local source into devsrc/<name>; collect (name → $HOME-relative remote path).
     rewrites = _rsync_dev_deps!(t, origin)
@@ -954,8 +1233,13 @@ function _replicate_env!(t::RemoteTarget)
     projrel = startswith(t.project, "~/") ? t.project[3:end] : t.project
     # STREAM the instantiate/precompile — the long, otherwise-silent step — into the remote log live, so a
     # multi-minute bring-up narrates its progress (resolve, install, Precompiling …) instead of going dark.
-    ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites, _local_has_revise()),
-                          "instantiate on $host"; stream = true, online = _bringup_note)
+    ok, out = _ssh_julia!(
+        host,
+        _env_instantiate_script(projrel, rewrites, _local_has_revise()),
+        "instantiate on $host";
+        stream=true,
+        online=_bringup_note,
+    )
     ok || error("env: instantiate failed on $host — $(first(strip(out), 500))")
     return nothing
 end
@@ -963,7 +1247,12 @@ end
 # Does the USER use Revise locally (it's in their global default env)? If so we mirror it onto the remote
 # worker so hot-reload matches their setup; if they don't use Revise, we don't force it into the worker env.
 function _local_has_revise()
-    mf = joinpath(first(Base.DEPOT_PATH), "environments", "v$(VERSION.major).$(VERSION.minor)", "Manifest.toml")
+    mf = joinpath(
+        first(Base.DEPOT_PATH),
+        "environments",
+        "v$(VERSION.major).$(VERSION.minor)",
+        "Manifest.toml",
+    )
     isfile(mf) || return false
     try
         for line in eachline(mf)
@@ -996,10 +1285,14 @@ const _PREP_DONE_SNIPPET = "try; println(stderr, \"@@SLATE_PREP done\"); flush(s
 
 # The remote script: rewrite each dev dep's Manifest `path` to its rsync'd remote source, then instantiate
 # the project. Uses the TOML stdlib on the remote (always available); homedir() resolves the absolute paths.
-function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}}, add_revise::Bool)
-    infra = add_revise ?
-        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"Revise\")]" :
+function _env_instantiate_script(
+    projrel::AbstractString, rewrites::Vector{Tuple{String,String}}, add_revise::Bool
+)
+    infra = if add_revise
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"Revise\")]"
+    else
         "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\")]"
+    end
     io = IOBuffer()
     # Redirect dev deps' Manifest + [sources] paths to their rsync'd devsrc locations (no-op when empty).
     rw = _rewrite_devpaths_script(projrel, rewrites)
@@ -1037,14 +1330,23 @@ const _SYNCERS = Dict{String,SyncWatcher}()   # keyed by "host:remote_project"
 const _SYNC_LOCK = ReentrantLock()
 
 function start_sync!(t::RemoteTarget, parent_project::AbstractString)
-    (isempty(parent_project) && !isdir(parent_project)) && return
+    (isempty(parent_project) && !isdir(parent_project)) && return nothing
     base = string(t.ssh_host, ":", t.project)
     lock(_SYNC_LOCK) do
         # 1. the notebook's parent project /src → t.project (project code hot-reload). NEVER the env
         #    files, or we'd clobber the replicated Project/Manifest (the exact env provisioning set up).
-        _start_syncer!(base, t.ssh_host, parent_project,
-                       isdir(joinpath(parent_project, "src")) ? joinpath(parent_project, "src") : parent_project,
-                       t.project, ["Manifest.toml", "Project.toml", ".git", "*.cov"])
+        _start_syncer!(
+            base,
+            t.ssh_host,
+            parent_project,
+            if isdir(joinpath(parent_project, "src"))
+                joinpath(parent_project, "src")
+            else
+                parent_project
+            end,
+            t.project,
+            ["Manifest.toml", "Project.toml", ".git", "*.cov"],
+        )
         # 2. each dev'd path dep → devsrc/<name>, so a local package the notebook develops stays fresh on
         #    the remote and Revise hot-reloads its edits there — the "kept up to date" half of dev-dep
         #    provisioning. Read the SAME env whose Manifest provisioning replicated (origin_env, else the
@@ -1053,40 +1355,67 @@ function start_sync!(t::RemoteTarget, parent_project::AbstractString)
         for (name, lpath) in _dev_deps(joinpath(env, "Manifest.toml"), env)
             rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
             isdir(lpath) || continue
-            _start_syncer!("$base:dev:$name", t.ssh_host, lpath,
-                           isdir(joinpath(lpath, "src")) ? joinpath(lpath, "src") : lpath,
-                           "$_REMOTE_DEVSRC/$name", [".git", "*.cov"])
+            _start_syncer!(
+                "$base:dev:$name",
+                t.ssh_host,
+                lpath,
+                isdir(joinpath(lpath, "src")) ? joinpath(lpath, "src") : lpath,
+                "$_REMOTE_DEVSRC/$name",
+                [".git", "*.cov"],
+            )
         end
     end
     return nothing
 end
 
 # Start one keyed filesystem→remote syncer if not already running (call with _SYNC_LOCK held).
-function _start_syncer!(key::AbstractString, host::AbstractString, localdir::AbstractString,
-                        watchdir::AbstractString, remotedir::AbstractString, excludes::Vector{String})
+function _start_syncer!(
+    key::AbstractString,
+    host::AbstractString,
+    localdir::AbstractString,
+    watchdir::AbstractString,
+    remotedir::AbstractString,
+    excludes::Vector{String},
+)
     k = String(key)
-    (haskey(_SYNCERS, k) && _SYNCERS[k].running) && return
-    _SYNCERS[k] = SyncWatcher(Threads.@spawn(_sync_task(String(host), String(localdir), String(watchdir),
-                                                        String(remotedir), excludes, k)), true)
+    (haskey(_SYNCERS, k) && _SYNCERS[k].running) && return nothing
+    _SYNCERS[k] = SyncWatcher(
+        Threads.@spawn(
+            _sync_task(
+                String(host), String(localdir), String(watchdir), String(remotedir), excludes, k
+            )
+        ),
+        true,
+    )
     return nothing
 end
 
 # One sync task: watch `watchdir`, and on any change rsync `localdir` → `remotedir` (delta-only),
 # coalescing bursts. Generic over what's synced so BOTH the parent project (/src hot-reload) and each
 # dev'd path dep (devsrc/<name>, so a local package's edits Revise-reload on the remote) share it.
-function _sync_task(host::AbstractString, localdir::AbstractString, watchdir::AbstractString,
-                    remotedir::AbstractString, excludes::Vector{String}, key::String)
+function _sync_task(
+    host::AbstractString,
+    localdir::AbstractString,
+    watchdir::AbstractString,
+    remotedir::AbstractString,
+    excludes::Vector{String},
+    key::String,
+)
     while get(_SYNCERS, key, nothing) !== nothing && _SYNCERS[key].running
         try
             FileWatching.watch_folder(watchdir, 2.0)          # block until a change (or 2s tick)
             sleep(0.15)                                        # coalesce a burst of saves
-            _rsync!(host, localdir, remotedir; excludes = excludes)
+            _rsync!(host, localdir, remotedir; excludes=excludes)
         catch e
-            @warn "slate remote: sync loop error" host = host dir = localdir exception = (e,) maxlog = 3
+            @warn "slate remote: sync loop error" host = host dir = localdir exception = (e,) maxlog =
+                3
             sleep(1.0)
         end
     end
-    try; FileWatching.unwatch_folder(watchdir); catch; end
+    try
+        FileWatching.unwatch_folder(watchdir)
+    catch
+    end
     return nothing
 end
 
@@ -1109,8 +1438,14 @@ end
 # `-e` + nested-ssh quoting silently mangles the program). Resolves the provisioned KaimonGate env
 # + worker payload via `homedir()` on the remote, includes the payload, and serves. For :direct it
 # serves CURVE and allow-lists ONLY the hub's client pubkey (mutual auth: hub pins the server key).
-function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, parent::String,
-                               client_pub::String; warm_deps::Bool = false)
+function _remote_worker_script(
+    t::RemoteTarget,
+    port::Int,
+    stream_port::Int,
+    parent::String,
+    client_pub::String;
+    warm_deps::Bool=false,
+)
     bind = t.transport === :direct ? "0.0.0.0" : "127.0.0.1"
     curve = t.transport === :direct                       # tunnel = SSH-encrypted, CURVE redundant
     allow = curve ? "String[raw\"$client_pub\"]" : "String[]"
@@ -1123,12 +1458,20 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     # scratch disk, a shared mount that already holds the data. Set it BEFORE the worker starts so
     # `datadir()` resolves it from t=0 (a cold-spawned region worker is correct from birth; an
     # ADOPTED pool worker gets the same via `__slate_adopt`). Empty ⇒ the worker's own <project>/data.
-    dd = isempty(t.datadir) ? "" : "ENV[\"KAIMONSLATE_DATADIR\"] = expanduser(raw\"$(t.datadir)\")\n    "
+    dd = if isempty(t.datadir)
+        ""
+    else
+        "ENV[\"KAIMONSLATE_DATADIR\"] = expanduser(raw\"$(t.datadir)\")\n    "
+    end
     # Likewise a region can PIN this worker's CACHE home (its content-addressed store) so co-located
     # region workers get SEPARATE CAS instead of sharing `~/.cache/kaimonslate/memo` — the store split
     # that makes a cross-region blob actually move over the peer channel instead of dedup'ing to 0.
     # Set before start so `_memo_dir()` resolves it from t=0. Empty ⇒ the shared default.
-    cr = isempty(t.cache_root) ? "" : "ENV[\"KAIMONSLATE_CACHE_HOME\"] = expanduser(raw\"$(t.cache_root)\")\n    "
+    cr = if isempty(t.cache_root)
+        ""
+    else
+        "ENV[\"KAIMONSLATE_CACHE_HOME\"] = expanduser(raw\"$(t.cache_root)\")\n    "
+    end
     return """
     _t0 = time(); _bt(m) = try; println("[slate-boot] +" * string(round(time() - _t0; digits = 1)) * "s " * m); flush(stdout); catch; end
     $(dd)$(cr)_wk = joinpath(homedir(), raw"$_REMOTE_WORKER", "worker.jl")
@@ -1168,13 +1511,21 @@ end
 # actually came up. Shared by the notebook spawn path and `warm_pool!` — a pool worker is just
 # a launch with no notebook (`label=""`, `pool=true`, state starts at `idle`, and `warm_deps`
 # pays the preload env's package loads while nobody is attached).
-function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
-                         label::AbstractString, parent::AbstractString,
-                         threads::AbstractString = "", extra_flags::AbstractString = "",
-                         warm::Bool = false, region::AbstractString = "", warm_deps::Bool = false)
+function _launch_worker!(
+    t::RemoteTarget,
+    port::Int,
+    stream_port::Int;
+    label::AbstractString,
+    parent::AbstractString,
+    threads::AbstractString="",
+    extra_flags::AbstractString="",
+    warm::Bool=false,
+    region::AbstractString="",
+    warm_deps::Bool=false,
+)
     host = t.ssh_host
     hubkey = _hub_client_pubkey()
-    script = _remote_worker_script(t, port, stream_port, t.project, hubkey; warm_deps = warm_deps)
+    script = _remote_worker_script(t, port, stream_port, t.project, hubkey; warm_deps=warm_deps)
 
     # Ship the worker script as a FILE (verified: `-e` + nested-ssh quoting mangles it) and launch it
     # detached so it outlives the ssh exec. `setsid` gives a clean new session but is Linux-only
@@ -1185,9 +1536,15 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     tmp = tempname()
     write(tmp, script)
     try
-        run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote_script))`; stdout = devnull, stderr = devnull))
+        run(
+            pipeline(
+                `scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote_script))`;
+                stdout=devnull,
+                stderr=devnull,
+            ),
+        )
     finally
-        rm(tmp; force = true)
+        rm(tmp; force=true)
     end
     nthreads = effective_worker_threads(threads)
     proj = startswith(t.project, "~/") ? "\$HOME/" * t.project[3:end] : t.project   # --project=~ won't expand
@@ -1205,23 +1562,34 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     # ("-J /path") and Julia would read the value as " /path" (leading space → treated as relative → homedir
     # prepended → load failure). The `=`-joined long form has no space to split on, so it's shell-agnostic.
     sysreldir = _sysimage_dir(t.project)
-    siresolve = t.sysimage ?
-        "SI=\$(cat $sysreldir/current 2>/dev/null); JOPT=''; if [ -n \"\$SI\" ] && [ -f \"\$HOME/$sysreldir/\$SI.so\" ]; then JOPT=\"--sysimage=\$HOME/$sysreldir/\$SI.so\"; fi" :
+    siresolve = if t.sysimage
+        "SI=\$(cat $sysreldir/current 2>/dev/null); JOPT=''; if [ -n \"\$SI\" ] && [ -f \"\$HOME/$sysreldir/\$SI.so\" ]; then JOPT=\"--sysimage=\$HOME/$sysreldir/\$SI.so\"; fi"
+    else
         "JOPT=''"   # region didn't opt into a sysimage → always a plain boot
+    end   # region didn't opt into a sysimage → always a plain boot
     xflags = effective_worker_extra_flags(extra_flags)
     jl = "julia \$JOPT --project=$proj --startup-file=no --threads=$nthreads $xflags $remote_script '$tag'"
     launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && $siresolve && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
-    _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
+    _rlog(
+        "spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf",
+    )
     # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
     # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
     _ssh_ok(host, `$launch`) ||
         _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
     # Record who/what this worker serves so it's self-describing (list/reconnect/reap/adopt all read
     # this). `project` (the worker's --project env dir) is what pool adoption matches on.
-    fields = ["notebook" => String(label), "parent" => String(parent), "hub" => gethostname(),
-              "transport" => string(t.transport), "project" => t.project,
-              "port" => string(port), "stream_port" => string(stream_port),
-              "client_pubkey" => hubkey, "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS")]
+    fields = [
+        "notebook" => String(label),
+        "parent" => String(parent),
+        "hub" => gethostname(),
+        "transport" => string(t.transport),
+        "project" => t.project,
+        "port" => string(port),
+        "stream_port" => string(stream_port),
+        "client_pubkey" => hubkey,
+        "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"),
+    ]
     isempty(region) || push!(fields, "region" => String(region))   # the named region this worker serves (adoption key)
     _write_worker_manifest!(host, port, fields)
     _write_worker_state!(host, port, warm ? "idle" : "attached")
@@ -1237,30 +1605,45 @@ end
 # log popup. Drop it from what we SHOW; the raw `worker-<port>.log` file still keeps it for debugging.
 _is_worker_log_noise(line::AbstractString) = occursin("trying to print a failed Task notice", line)
 
-function worker_log_tail(k::GateKernel; lines::Int = 300)
+function worker_log_tail(k::GateKernel; lines::Int=300)
     lines = clamp(lines, 1, 5000)
     if k.target isa RemoteTarget
         host = k.target.ssh_host
         rlog = "$_REMOTE_WORKER/worker-$(k.port).log"
-        ok, out = try; _ssh_capture(host, `tail -n $lines $rlog`); catch; (false, ""); end
+        ok, out = try
+            _ssh_capture(host, `tail -n $lines $rlog`)
+        catch
+            (false, "")
+        end
         return ok ? join(Iterators.filter(!_is_worker_log_noise, eachsplit(out, '\n')), "\n") : ""
     end
-    p = try; k.logpath; catch; ""; end
+    p = try
+        k.logpath
+    catch
+        ""
+    end
     (isempty(p) || !isfile(p)) && return ""
     return try
         ls = filter(!_is_worker_log_noise, readlines(p))
         join(@view(ls[max(1, length(ls) - lines + 1):end]), "\n")
-    catch; ""; end
+    catch
+        ""
+    end
 end
-worker_log_tail(::Kernel; lines::Int = 300) = ""   # in-process kernel has no worker log
+worker_log_tail(::Kernel; lines::Int=300) = ""   # in-process kernel has no worker log
 
 # Read a field off an `__slate_env_info` result — a Dict{String,Any} locally, a JSON3.Object (Symbol
 # props) once it has ridden back over the gate. Returns `dv` on any miss.
-_infofield(o, k::String, dv) = try
-    o isa AbstractDict ? (haskey(o, k) ? o[k] : get(o, Symbol(k), dv)) :
-    (hasproperty(o, Symbol(k)) ? getproperty(o, Symbol(k)) : dv)
-catch
-    dv
+function _infofield(o, k::String, dv)
+    try
+        if o isa AbstractDict
+            (haskey(o, k) ? o[k] : get(o, Symbol(k), dv))
+        else
+            (hasproperty(o, Symbol(k)) ? getproperty(o, Symbol(k)) : dv)
+        end
+    catch
+        dv
+    end
 end
 
 # Is the live worker `k` running the CURRENT worker payload? Compares its boot-baked stamp
@@ -1275,13 +1658,19 @@ function _payload_current(k)::Bool
     get(ENV, "KAIMONSLATE_SKIP_PAYLOAD_CHECK", "") == "1" && return true
     want = _payload_sha()
     got = try
-        String(_infofield(_tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 6.0), "payload_sha", ""))
+        String(
+            _infofield(
+                _tool(k, "__slate_env_info", Dict{String,Any}(); timeout=6.0), "payload_sha", ""
+            ),
+        )
     catch
         return true
     end
     got == want && return true
-    _rlog("payload: worker-$(k.port) for '$(k.label)' is stale " *
-          "(sha $(isempty(got) ? "none" : first(got, 12)) ≠ current $(first(want, 12))) — reprovisioning")
+    _rlog(
+        "payload: worker-$(k.port) for '$(k.label)' is stale " *
+        "(sha $(isempty(got) ? "none" : first(got, 12)) ≠ current $(first(want, 12))) — reprovisioning",
+    )
     return false
 end
 
@@ -1305,7 +1694,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     # it sat directly on the reattach path, where try #1 usually races the tunnel coming up).
     # On failure the just-opened tunnel is CLOSED — its supervisor would otherwise respawn the
     # forward forever (a leak the old single-path flow had on its error exit).
-    function dial(port, stream_port; deadline::Float64, server_key::String = "", remote_ip::String = "")
+    function dial(port, stream_port; deadline::Float64, server_key::String="", remote_ip::String="")
         if t.transport === :direct
             # CURVE key + routable IP: use the caller's cached values (the attachment record) when
             # given — each is otherwise an ssh exec, and both were learned at the original spawn.
@@ -1314,7 +1703,10 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             if isempty(server_key)
                 server_key = _fetch_and_pin_curve!(t, ip, port)
             else
-                try; getfield(_kaimon(), :KaimonGate).pin_server!(ip, port, server_key); catch; end
+                try
+                    getfield(_kaimon(), :KaimonGate).pin_server!(ip, port, server_key)
+                catch
+                end
             end
             connect_host, connect_port, connect_stream = ip, port, stream_port
             tunnel = nothing
@@ -1324,7 +1716,9 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             tunnel = open_tunnel(host, [(lport, port), (lstream, stream_port)])
             connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
         end
-        _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
+        _rlog(
+            "connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)",
+        )
         _prep_stage("Connecting to worker on $host — remote Julia boot + handshake…")
         # A FORWARDED transport (:tunnel) sets up its `ssh -L` ASYNC (open_tunnel spawns it), so the local
         # port isn't listening the instant we dial — a bare connect_tcp! then burns its full ~1.5s
@@ -1335,11 +1729,14 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         if tunnel !== nothing
             fw0 = time()
             while time() - fw0 < min(deadline, _fwd_ready_wait()) &&
-                  _probe_tcp(connect_host, connect_port; timeout = 0.5) !== :open
+                  _probe_tcp(connect_host, connect_port; timeout=0.5) !== :open
                 sleep(0.05)
             end
         end
-        t0 = time(); last = ""; conn = nothing; tries = 0
+        t0 = time()
+        last = ""
+        conn = nothing
+        tries = 0
         firewall_since = 0.0   # :direct — first time the port looked firewalled (SYN dropped) with no refuse/open since
         while time() - t0 < deadline
             tries += 1
@@ -1350,25 +1747,37 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             # message instead of waiting out the whole deadline.
             if t.transport === :direct
                 _pt = time()
-                pr = _probe_tcp(connect_host, connect_port; timeout = _probe_timeout())
-                _rlog("  dial try $tries: probe=$pr in $(round(time() - _pt; digits = 2))s (elapsed $(round(time() - t0; digits = 1))s)")
+                pr = _probe_tcp(connect_host, connect_port; timeout=_probe_timeout())
+                _rlog(
+                    "  dial try $tries: probe=$pr in $(round(time() - _pt; digits = 2))s (elapsed $(round(time() - t0; digits = 1))s)",
+                )
                 if pr === :unreachable
                     firewall_since == 0.0 && (firewall_since = time())
                     last = "port $connect_port on $host is not reachable — open $(connect_port)-$(connect_port + 2) in the host's firewall, or use transport=:tunnel"
                     (time() - firewall_since > _firewall_giveup()) && break   # sustained DROP ⇒ firewall, not a slow boot — stop early
-                    sleep(0.5); continue
+                    sleep(0.5)
+                    continue
                 end
                 firewall_since = 0.0                                  # refused/open ⇒ host reachable; normal boot/ready path
                 if pr === :refused
                     last = "worker not listening on $connect_port yet (booting)"
-                    sleep(0.5); continue
+                    sleep(0.5)
+                    continue
                 end
             end
             try
-                conn = K.connect_tcp!(_manager(), connect_host, connect_port;
-                                      name = "slate-$(host)-$(port)", stream_port = connect_stream,
-                                      server_key = server_key, label = k.label)
-                _rlog("connect: TCP+CURVE up after $tries tries, $(round(time() - t0; digits = 1))s of dialing (post-connect setup follows before 'connect OK')")
+                conn = K.connect_tcp!(
+                    _manager(),
+                    connect_host,
+                    connect_port;
+                    name="slate-$(host)-$(port)",
+                    stream_port=connect_stream,
+                    server_key=server_key,
+                    label=k.label,
+                )
+                _rlog(
+                    "connect: TCP+CURVE up after $tries tries, $(round(time() - t0; digits = 1))s of dialing (post-connect setup follows before 'connect OK')",
+                )
                 break
             catch e
                 last = sprint(showerror, e)
@@ -1381,11 +1790,18 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             end
         end
         if conn === nothing
-            _rlog("connect FAILED: could not reach worker on $host:$port after $tries tries ($last)")
-            tunnel === nothing || (try; close_tunnel(tunnel); catch; end)
+            _rlog(
+                "connect FAILED: could not reach worker on $host:$port after $tries tries ($last)"
+            )
+            tunnel === nothing || (
+                try
+                    close_tunnel(tunnel)
+                catch
+                end
+            )
         end
         # resolved key/ip ride back so a successful caller can stamp them into the attachment record
-        return (conn = conn, tunnel = tunnel, err = last, server_key = server_key, remote_ip = ip)
+        return (conn=conn, tunnel=tunnel, err=last, server_key=server_key, remote_ip=ip)
     end
 
     t0 = time()
@@ -1401,42 +1817,102 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         start_sync!(t, parent_project)
         # Remote ports (loopback for :tunnel, 0.0.0.0 for :direct). Pinned when the target names them
         # (needed for :direct behind a firewall); else auto from _next_ports (9100+), floored above the roster.
-        port, stream_port =
-            (t.transport === :direct && t.port != 0) ?
-                # :direct region: t.port is the base_port HINT — take a FREE slot in its stride (roster-aware)
-                # so we land in the firewall-opened range, never colliding with warm workers / another notebook.
-                (let sl = _direct_port_slots(t.port, 1; roster = (try; list_remote_workers(host); catch; Any[]; end), label = "region cold-spawn on $host")
-                     isempty(sl) ? _next_ports(floor = try; _port_floor(host); catch; 0; end, reserve = 3) : sl[1]   # :direct pins blob at gate+2
-                 end) :
-            t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) :
-                          _next_ports(floor = try; _port_floor(host); catch; 0; end,
-                                      reserve = t.transport === :direct ? 3 : 2)   # :tunnel blob = worker-chosen free port
-        k.port = port; k.stream_port = stream_port
+        port, stream_port = if (t.transport === :direct && t.port != 0)
+            # :direct region: t.port is the base_port HINT — take a FREE slot in its stride (roster-aware)
+            # so we land in the firewall-opened range, never colliding with warm workers / another notebook.
+            (
+                let sl = _direct_port_slots(
+                        t.port,
+                        1;
+                        roster=(
+                            try
+                                list_remote_workers(host)
+                            catch
+                                Any[]
+                            end
+                        ),
+                        label="region cold-spawn on $host",
+                    )
+                    isempty(sl) ? _next_ports(; floor=try
+                        _port_floor(host)
+                    catch
+                        0
+                    end, reserve=3) : sl[1]   # :direct pins blob at gate+2
+                end
+            )
+        elseif t.port != 0
+            (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1)
+        else
+            _next_ports(; floor=try
+                _port_floor(host)
+            catch
+                0
+            end, reserve=t.transport === :direct ? 3 : 2)
+        end   # :tunnel blob = worker-chosen free port
+        k.port = port
+        k.stream_port = stream_port
         _prep_stage("Starting worker process on $host")
-        _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, extra_flags = k.extra_flags, region = t.region)
-        r = dial(port, stream_port; deadline = _dial_deadline_cold())   # covers remote Julia boot + KaimonGate load (~90s)
-        r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
+        _launch_worker!(
+            t,
+            port,
+            stream_port;
+            label=k.label,
+            parent=k.parent,
+            threads=k.threads,
+            extra_flags=k.extra_flags,
+            region=t.region,
+        )
+        r = dial(port, stream_port; deadline=_dial_deadline_cold())   # covers remote Julia boot + KaimonGate load (~90s)
+        r.conn === nothing &&
+            error("slate remote: could not reach worker on $host:$port ($(r.err))")
         k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
-        _attach_record!(host, k.label; port = port, stream_port = stream_port,
-                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
+        _attach_record!(
+            host,
+            k.label;
+            port=port,
+            stream_port=stream_port,
+            transport=t.transport,
+            server_key=r.server_key,
+            remote_ip=r.remote_ip,
+        )
         _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host")
         return (r.conn, r.tunnel)
     end
 
     function attached!(r, via::String)
-        k.conn = r.conn; k.tunnel = r.tunnel        # so the payload probe can gate-call this worker
+        k.conn = r.conn
+        k.tunnel = r.tunnel        # so the payload probe can gate-call this worker
         # A reused worker (park/record/probe/adopt) may be running an OLDER payload than the hub — a
         # live worker never re-includes its code, and `tools()` is fixed at boot, so a newly added
         # gate tool can't appear on it. If its boot stamp is behind, reap it and cold-spawn fresh.
         if !_payload_current(k)
-            try; reap_remote_worker(host, k.port); catch; end
-            try; K.disconnect!(r.conn); catch; end
-            r.tunnel === nothing || (try; close_tunnel(r.tunnel); catch; end)
-            k.conn = nothing; k.tunnel = nothing
+            try
+                reap_remote_worker(host, k.port)
+            catch
+            end
+            try
+                K.disconnect!(r.conn)
+            catch
+            end
+            r.tunnel === nothing || (
+                try
+                    close_tunnel(r.tunnel)
+                catch
+                end
+            )
+            k.conn = nothing
+            k.tunnel = nothing
             return fresh_spawn()
         end
-        _attach_record!(host, k.label; port = k.port, stream_port = k.stream_port,
-                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
+        _attach_record!(
+            host,
+            k.label;
+            port=k.port,
+            stream_port=k.stream_port,
+            transport=t.transport,
+            server_key=r.server_key,
+            remote_ip=r.remote_ip,
+        )
         start_sync!(t, parent_project)          # non-blocking watcher; heals /src drift from the detached period
         Threads.@spawn begin
             try
@@ -1446,7 +1922,9 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
                 _rlog("background catch-up (post-reattach) failed: $(sprint(showerror, e))")
             end
         end
-        _rlog("connect OK: reattached via $via to worker-$(k.port) on $host in $(round(Int, (time() - t0) * 1000))ms → notebook now runs on $host")
+        _rlog(
+            "connect OK: reattached via $via to worker-$(k.port) on $host in $(round(Int, (time() - t0) * 1000))ms → notebook now runs on $host",
+        )
         return (r.conn, r.tunnel)
     end
 
@@ -1456,14 +1934,19 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     #    fresh dial is ~5 RTTs ≈ 370ms on a WAN link, measured). Dead → close, demote to record.
     parked = unpark_remote!(host, k.label)
     if parked !== nothing
-        k.port = parked.port; k.stream_port = parked.stream_port
-        k.conn = parked.conn; k.tunnel = parked.tunnel
+        k.port = parked.port
+        k.stream_port = parked.stream_port
+        k.conn = parked.conn
+        k.tunnel = parked.tunnel
         alive = try
-            _tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 5.0)
+            _tool(k, "__slate_env_info", Dict{String,Any}(); timeout=5.0)
             true
         catch e
-            _rlog("park: parked wire for '$(k.label)' on $host is dead ($(first(sprint(showerror, e), 120))) — demoting to record")
-            k.conn = nothing; k.tunnel = nothing
+            _rlog(
+                "park: parked wire for '$(k.label)' on $host is dead ($(first(sprint(showerror, e), 120))) — demoting to record",
+            )
+            k.conn = nothing
+            k.tunnel = nothing
             _close_parked!(parked)
             false
         end
@@ -1471,9 +1954,13 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             # keep the record's CURVE key/ip (learned at spawn) — attached! rewrites the record,
             # and blanking them would put ssh back on the NEXT cold reattach's path.
             old = _attach_lookup(host, k.label)
-            r = (conn = parked.conn, tunnel = parked.tunnel, err = "",
-                 server_key = old === nothing ? "" : String(old.server_key),
-                 remote_ip = old === nothing ? "" : String(old.remote_ip))
+            r = (
+                conn=parked.conn,
+                tunnel=parked.tunnel,
+                err="",
+                server_key=old === nothing ? "" : String(old.server_key),
+                remote_ip=old === nothing ? "" : String(old.remote_ip),
+            )
             return attached!(r, "park")
         end
     end
@@ -1483,9 +1970,15 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     #    a live worker answers in well under a second; anything else is stale → demote.
     rec = _attach_lookup(host, k.label)
     if rec !== nothing
-        k.port = rec.port; k.stream_port = rec.stream_port
-        r = dial(rec.port, rec.stream_port; deadline = _dial_deadline_record(),
-                 server_key = String(rec.server_key), remote_ip = String(rec.remote_ip))
+        k.port = rec.port
+        k.stream_port = rec.stream_port
+        r = dial(
+            rec.port,
+            rec.stream_port;
+            deadline=_dial_deadline_record(),
+            server_key=String(rec.server_key),
+            remote_ip=String(rec.remote_ip),
+        )
         r.conn !== nothing && return attached!(r, "record")
         _attach_clear!(host, k.label)
         _rlog("reconnect: attachment record for worker-$(rec.port) was stale — demoting to probe")
@@ -1498,11 +1991,17 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     #    dial and falls through to a fresh spawn on new ports (the stale one stays visible in
     #    the roster for manual reap).
     reattach = nothing
-    try; reattach = _find_live_worker(host, k.label, k.parent); catch; end
+    try
+        reattach = _find_live_worker(host, k.label, k.parent)
+    catch
+    end
     if reattach !== nothing
-        k.port = reattach.port; k.stream_port = reattach.stream_port
-        _rlog("reconnect: probe found live worker-$(k.port) on $host (notebook=$(k.label)) — skipping spawn + provision")
-        r = dial(k.port, k.stream_port; deadline = _dial_deadline_probe())
+        k.port = reattach.port
+        k.stream_port = reattach.stream_port
+        _rlog(
+            "reconnect: probe found live worker-$(k.port) on $host (notebook=$(k.label)) — skipping spawn + provision",
+        )
+        r = dial(k.port, k.stream_port; deadline=_dial_deadline_probe())
         r.conn !== nothing && return attached!(r, "probe")
         # It answered the probe but not a 15s dial: wedged/half-dead (a merely-busy worker answers on its
         # interactive thread). We're about to redo its work on a fresh worker, so REAP the superseded one
@@ -1510,9 +2009,16 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         # repeat it, and a lingering ghost only eats the host's memory (and could resurface to fight its
         # replacement). Synchronous + best-effort so no port/file race with the fresh spawn that follows;
         # the kill lands at once if reachable, else when the process thaws.
-        _rlog("reconnect: live worker-$(k.port) didn't answer the 15s dial — reaping the superseded worker and cold-spawning fresh")
-        try; reap_remote_worker(host, k.port)
-        catch e; _rlog("reconnect: reap of superseded worker-$(k.port) failed: $(first(sprint(showerror, e), 100))"); end
+        _rlog(
+            "reconnect: live worker-$(k.port) didn't answer the 15s dial — reaping the superseded worker and cold-spawning fresh",
+        )
+        try
+            reap_remote_worker(host, k.port)
+        catch e
+            _rlog(
+                "reconnect: reap of superseded worker-$(k.port) failed: $(first(sprint(showerror, e), 100))",
+            )
+        end
     end
 
     # 2.5 Adoption: no worker of OURS is serving this notebook — but a warm POOL worker with the
@@ -1521,41 +2027,78 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     #     its manifest to this notebook. Any failure falls through to a fresh spawn. The claim
     #     set stops two notebooks opening concurrently from adopting the same worker.
     pool = nothing
-    try; pool = _claim_region_worker!(t.region, host; project = t.project, transport = string(t.transport)); catch e; _rlog("adopt: region scan failed ($(sprint(showerror, e)))"); end
+    try
+        pool = _claim_region_worker!(
+            t.region, host; project=t.project, transport=string(t.transport)
+        )
+    catch e
+        _rlog("adopt: region scan failed ($(sprint(showerror, e)))")
+    end
     if pool !== nothing
-        k.port = pool.port; k.stream_port = pool.stream_port
-        _rlog("adopt: warm worker-$(pool.port) on $host for region '$(t.region)' — adopting for '$(k.label)'")
-        r = dial(pool.port, pool.stream_port; deadline = _dial_deadline_probe())
+        k.port = pool.port
+        k.stream_port = pool.stream_port
+        _rlog(
+            "adopt: warm worker-$(pool.port) on $host for region '$(t.region)' — adopting for '$(k.label)'",
+        )
+        r = dial(pool.port, pool.stream_port; deadline=_dial_deadline_probe())
         adopted = false
         if r.conn !== nothing
             adopted = try
                 k.conn = r.conn                     # _tool needs the conn on the kernel
                 # Stamp the region's data root as we tie this generic pool worker to us — same handoff
                 # that re-points PARENT_PROJECT. Empty datadir clears any prior region's root (set-or-clear).
-                _tool(k, "__slate_adopt", Dict{String,Any}("parent" => t.project, "datadir" => t.datadir); timeout = 15.0)
+                _tool(
+                    k,
+                    "__slate_adopt",
+                    Dict{String,Any}("parent" => t.project, "datadir" => t.datadir);
+                    timeout=15.0,
+                )
                 k.ns_gen += 1   # adopt swaps in a fresh namespace ⇒ region dedups must re-establish it
                 true
             catch e
-                _rlog("adopt: worker-$(pool.port) refused adoption ($(sprint(showerror, e))) — falling back to fresh spawn")
+                _rlog(
+                    "adopt: worker-$(pool.port) refused adoption ($(sprint(showerror, e))) — falling back to fresh spawn",
+                )
                 k.conn = nothing
-                try; _kaimon().disconnect!(r.conn); catch; end
-                r.tunnel === nothing || (try; close_tunnel(r.tunnel); catch; end)
+                try
+                    _kaimon().disconnect!(r.conn)
+                catch
+                end
+                r.tunnel === nothing || (
+                    try
+                        close_tunnel(r.tunnel)
+                    catch
+                    end
+                )
                 false
             end
         else
-            _rlog("adopt: pool worker-$(pool.port) didn't answer the 15s dial — falling back to fresh spawn")
+            _rlog(
+                "adopt: pool worker-$(pool.port) didn't answer the 15s dial — falling back to fresh spawn",
+            )
         end
         if adopted
-            port = k.port; sp = k.stream_port
+            port = k.port
+            sp = k.stream_port
             Threads.@spawn begin   # identity rewrite + replenish — neither belongs on the hot path
                 try
-                    _write_worker_manifest!(host, port, [
-                        "notebook" => k.label, "parent" => k.parent, "hub" => gethostname(),
-                        "transport" => string(t.transport), "project" => t.project,
-                        "port" => string(port), "stream_port" => string(sp),
-                        "client_pubkey" => _hub_client_pubkey(), "region" => t.region,
-                        "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"), "adopted" => "1",
-                    ])
+                    _write_worker_manifest!(
+                        host,
+                        port,
+                        [
+                            "notebook" => k.label,
+                            "parent" => k.parent,
+                            "hub" => gethostname(),
+                            "transport" => string(t.transport),
+                            "project" => t.project,
+                            "port" => string(port),
+                            "stream_port" => string(sp),
+                            "client_pubkey" => _hub_client_pubkey(),
+                            "region" => t.region,
+                            "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"),
+                            "adopted" => "1",
+                        ],
+                    )
                     _write_worker_state!(host, port, "attached")   # no longer warm — exclude from the region's warm count
                 catch e
                     _rlog("adopt: manifest rewrite failed ($(sprint(showerror, e)))")
@@ -1563,7 +2106,11 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
                 # claim held until the worker is marked attached — else a concurrent open could rescan
                 # the roster mid-rewrite and adopt this worker a second time
                 _release_region_claim!(host, port)
-                try; region_reconcile!(t.region); catch e; _rlog("region: replenish after adopt failed ($(sprint(showerror, e)))"); end
+                try
+                    region_reconcile!(t.region)
+                catch e
+                    _rlog("region: replenish after adopt failed ($(sprint(showerror, e)))")
+                end
             end
             return attached!(r, "adopt")
         end
@@ -1621,28 +2168,59 @@ end
 # undo. Kill (an explicit restart, the preflight probe, `reap_remote_worker`) is the full
 # cleanup: pkill + drop the script/manifest/state so nothing lingers in the registry (the .log
 # is kept for post-mortem). Called from `_kill_worker!`.
-function teardown_remote!(k; kill::Bool = false)
+function teardown_remote!(k; kill::Bool=false)
     if k.tunnel !== nothing
-        try; close_tunnel(k.tunnel); catch; end
+        try
+            close_tunnel(k.tunnel)
+        catch
+        end
         k.tunnel = nothing
     end
     t = k.target
     if t isa RemoteTarget
-        try; stop_sync!(t); catch; end
+        try
+            stop_sync!(t)
+        catch
+        end
         if k.port == 0                # nothing was spawned — only local resources to release
             _rlog("teardown: closing tunnel + sync on $(t.ssh_host) (no worker was spawned)")
         elseif kill
             # Only kill a worker we actually spawned (port assigned). pkill exits nonzero when nothing
             # matches — a normal outcome, not a failure — so route it through the quiet predicate, not _ssh_ok.
-            _rlog("teardown: closing tunnel + sync, killing remote worker-$(k.port).jl on $(t.ssh_host)")
-            try; _ssh_test(t.ssh_host, `pkill -f $("worker-" * string(k.port) * ".jl")`); catch; end
-            try; _ssh_test(t.ssh_host, `rm -f $("$_REMOTE_WORKER/worker-$(k.port).jl") $("$_REMOTE_WORKER/worker-$(k.port).json") $("$_REMOTE_WORKER/worker-$(k.port).state") $("$_REMOTE_WORKER/worker-$(k.port).stats")`); catch; end
-            try; _attach_clear!(t.ssh_host, k.label); catch; end   # a killed worker must not be re-dialed from the record
-            try; _evict_parked!(t.ssh_host; label = k.label, port = k.port); catch; end   # …nor via a parked wire
-            try; _evict_data_tunnels!(t.ssh_host; port = _blob_data_port_cached(t.ssh_host, k.port)); catch; end   # real port (relocated tunnel workers)
-            try; _blob_dport_forget!(t.ssh_host, k.port); catch; end
+            _rlog(
+                "teardown: closing tunnel + sync, killing remote worker-$(k.port).jl on $(t.ssh_host)",
+            )
+            try
+                _ssh_test(t.ssh_host, `pkill -f $("worker-" * string(k.port) * ".jl")`)
+            catch
+            end
+            try
+                _ssh_test(
+                    t.ssh_host,
+                    `rm -f $("$_REMOTE_WORKER/worker-$(k.port).jl") $("$_REMOTE_WORKER/worker-$(k.port).json") $("$_REMOTE_WORKER/worker-$(k.port).state") $("$_REMOTE_WORKER/worker-$(k.port).stats")`,
+                )
+            catch
+            end
+            try
+                _attach_clear!(t.ssh_host, k.label)
+            catch
+            end   # a killed worker must not be re-dialed from the record
+            try
+                _evict_parked!(t.ssh_host; label=k.label, port=k.port)
+            catch
+            end   # …nor via a parked wire
+            try
+                _evict_data_tunnels!(t.ssh_host; port=_blob_data_port_cached(t.ssh_host, k.port))
+            catch
+            end   # real port (relocated tunnel workers)
+            try
+                _blob_dport_forget!(t.ssh_host, k.port)
+            catch
+            end
         else
-            _rlog("teardown: detaching from worker-$(k.port) on $(t.ssh_host) — worker stays warm (state=idle)")
+            _rlog(
+                "teardown: detaching from worker-$(k.port) on $(t.ssh_host) — worker stays warm (state=idle)",
+            )
             _write_worker_state!(t.ssh_host, k.port, "idle")
         end
     end
@@ -1660,23 +2238,34 @@ struct PreflightStep
     detail::String
     ms::Int
 end
-_pfdict(s::PreflightStep) = Dict{String,Any}("name" => s.name, "status" => s.status, "detail" => s.detail, "ms" => s.ms)
+function _pfdict(s::PreflightStep)
+    return Dict{String,Any}(
+        "name" => s.name, "status" => s.status, "detail" => s.detail, "ms" => s.ms
+    )
+end
 
 # Run one step: time it, catch throws as failures, log + collect, and (if given) stream it via `on_step`
 # the moment it completes — so a caller can report progress live instead of waiting for the whole run.
 # `f` is first so the `do`-block call form `_pfstep!(steps, name, on_step) do … end` binds it correctly.
-function _pfstep!(f, steps::Vector{PreflightStep}, name::AbstractString, on_step = nothing)
+function _pfstep!(f, steps::Vector{PreflightStep}, name::AbstractString, on_step=nothing)
     on_step === nothing || on_step(PreflightStep(String(name), "run", "", 0))   # announce "in progress"
     t0 = time()
-    status = "fail"; detail = ""
+    status = "fail"
+    detail = ""
     try
         (status, detail) = f()
     catch e
-        status = "fail"; detail = sprint(showerror, e)
+        status = "fail"
+        detail = sprint(showerror, e)
     end
-    step = PreflightStep(String(name), String(status), String(detail), round(Int, (time() - t0) * 1000))
+    step = PreflightStep(
+        String(name), String(status), String(detail), round(Int, (time() - t0) * 1000)
+    )
     push!(steps, step)
-    _rlog("preflight [$(step.status)] $(step.name) ($(step.ms)ms)" * (isempty(step.detail) ? "" : " — " * first(step.detail, 300)))
+    _rlog(
+        "preflight [$(step.status)] $(step.name) ($(step.ms)ms)" *
+        (isempty(step.detail) ? "" : " — " * first(step.detail, 300)),
+    )
     on_step === nothing || on_step(step)
     return step
 end
@@ -1684,8 +2273,12 @@ end
 function _pfresult(host, transport, steps::Vector{PreflightStep})
     ok = all(s -> s.status != "fail", steps)
     _rlog("preflight DONE $host → $(ok ? "ALL OK" : "FAILED")")
-    return Dict{String,Any}("host" => String(host), "transport" => String(transport),
-                            "ok" => ok, "steps" => [_pfdict(s) for s in steps])
+    return Dict{String,Any}(
+        "host" => String(host),
+        "transport" => String(transport),
+        "ok" => ok,
+        "steps" => [_pfdict(s) for s in steps],
+    )
 end
 
 """
@@ -1698,67 +2291,107 @@ leaves the primed env behind (so the first real run is fast) but no worker or tu
 `on_step(::PreflightStep)`, if given, is called as each step STARTS (status "run") and COMPLETES — so
 the SSE endpoint can stream progress live instead of blocking for the whole (minutes-long) run.
 """
-function preflight_remote(host::AbstractString; transport::Symbol = :tunnel, on_step = nothing)
+function preflight_remote(host::AbstractString; transport::Symbol=:tunnel, on_step=nothing)
     host = String(host)
-    t = RemoteTarget(host; transport = transport, project = "~/.cache/kaimonslate/remote/__preflight__")
+    t = RemoteTarget(host; transport=transport, project="~/.cache/kaimonslate/remote/__preflight__")
     steps = PreflightStep[]
     _rlog("═══ PREFLIGHT: $host (transport=$transport) ═══")
 
     s = _pfstep!(steps, "SSH reachable", on_step) do
-        _ssh_test(host, `true`) ? ("ok", "key-based ssh to '$host' works") :
-            ("fail", "cannot ssh to '$host' in BatchMode — check ~/.ssh/config Host + key auth (try `ssh $host` in a terminal)")
+        return if _ssh_test(host, `true`)
+            ("ok", "key-based ssh to '$host' works")
+        else
+            (
+                "fail",
+                "cannot ssh to '$host' in BatchMode — check ~/.ssh/config Host + key auth (try `ssh $host` in a terminal)",
+            )
+        end
     end
     s.status == "ok" || return _pfresult(host, transport, steps)
 
     s = _pfstep!(steps, "Julia present", on_step) do
-        _ensure_julia!(host) ||
-            return ("fail", "no usable `julia` on '$host' and auto-install skipped/failed (Windows, or juliaup error) — install Julia (juliaup) manually")
+        _ensure_julia!(host) || return (
+            "fail",
+            "no usable `julia` on '$host' and auto-install skipped/failed (Windows, or juliaup error) — install Julia (juliaup) manually",
+        )
         okj, out = _ssh_capture(host, `$(_julia_sh("julia --version"))`)
-        okj ? ("ok", strip(out)) : ("fail", "`julia` resolved but `julia --version` failed on '$host'")
+        return if okj
+            ("ok", strip(out))
+        else
+            ("fail", "`julia` resolved but `julia --version` failed on '$host'")
+        end
     end
     s.status == "ok" || return _pfresult(host, transport, steps)
 
     s = _pfstep!(steps, "Provision env", on_step) do
         provision_remote!(t, "")   # detached: ships worker payload + builds/primes the KaimonGate env
-        ("ok", "worker payload + KaimonGate env ready under ~/.cache/kaimonslate")
+        return ("ok", "worker payload + KaimonGate env ready under ~/.cache/kaimonslate")
     end
     s.status == "ok" || return _pfresult(host, transport, steps)
 
     _pfstep!(steps, "KaimonGate loads", on_step) do
-        okk, out = _ssh_julia!(host, """
-        insert!(LOAD_PATH, 1, joinpath(homedir(), raw"$_REMOTE_KGATE_ENV"))
-        import KaimonGate
-        print("KaimonGate v", pkgversion(KaimonGate))
-        """, "probe KaimonGate on $host")
-        okk ? ("ok", strip(out)) : ("fail", "KaimonGate failed to load in the remote env (see remote.log)")
+        okk, out = _ssh_julia!(
+            host,
+            """
+insert!(LOAD_PATH, 1, joinpath(homedir(), raw"$_REMOTE_KGATE_ENV"))
+import KaimonGate
+print("KaimonGate v", pkgversion(KaimonGate))
+""",
+            "probe KaimonGate on $host",
+        )
+        return if okk
+            ("ok", strip(out))
+        else
+            ("fail", "KaimonGate failed to load in the remote env (see remote.log)")
+        end
     end
 
     if transport === :direct
         _pfstep!(steps, "CURVE server key", on_step) do
             okc, out = _ssh_capture(host, `head -n1 $_REMOTE_KEY_PATH`)
-            (okc && !isempty(strip(out))) ? ("ok", "server pubkey present ($(first(strip(out), 12))…)") :
-                ("fail", "no CURVE server key at $_REMOTE_KEY_PATH — run a KaimonGate serve once on '$host' to generate it, or use transport=tunnel")
+            return if (okc && !isempty(strip(out)))
+                ("ok", "server pubkey present ($(first(strip(out), 12))…)")
+            else
+                (
+                    "fail",
+                    "no CURVE server key at $_REMOTE_KEY_PATH — run a KaimonGate serve once on '$host' to generate it, or use transport=tunnel",
+                )
+            end
         end
     else
         _pfstep!(steps, "CURVE server key", on_step) do
-            ("skip", "n/a for :tunnel — SSH provides the encryption")
+            return ("skip", "n/a for :tunnel — SSH provides the encryption")
         end
     end
 
     # Capstone — a real spawn → connect (tunnel/CURVE) → round-trip eval → teardown. Proves the whole
     # transport + connection + eval loop end-to-end, then leaves nothing running.
     _pfstep!(steps, "Spawn + connect + eval", on_step) do
-        k = GateKernel("~/.cache/kaimonslate/remote/__preflight__";
-                       parent = "", threads = "", target = t, label = "preflight")
-        rep = parse_report("# preflight"; id = "__preflight__", title = "preflight")
+        k = GateKernel(
+            "~/.cache/kaimonslate/remote/__preflight__";
+            parent="",
+            threads="",
+            target=t,
+            label="preflight",
+        )
+        rep = parse_report("# preflight"; id="__preflight__", title="preflight")
         try
-            out = eval_capture(k, rep,
+            out = eval_capture(
+                k,
+                rep,
                 "string(gethostname(), \" · \", Sys.KERNEL, \" · julia \", VERSION, \" · pid \", getpid())",
-                "preflight")
-            out.exception !== nothing ? ("fail", "remote eval errored: " * out.exception) :
+                "preflight",
+            )
+            if out.exception !== nothing
+                ("fail", "remote eval errored: " * out.exception)
+            else
                 ("ok", "round-trip OK → " * strip(replace(out.value_repr, "\"" => "")))
+            end
         finally
-            try; shutdown!(k; kill_remote = true); catch; end   # probe worker is disposable — kill, don't idle
+            try
+                shutdown!(k; kill_remote=true)
+            catch
+            end   # probe worker is disposable — kill, don't idle
         end
     end
 
@@ -1786,7 +2419,14 @@ function _write_worker_manifest!(host, port::Int, fields)
     body = _flat_json(fields)
     path = "$_REMOTE_WORKER/worker-$port.json"
     try
-        run(pipeline(_ssh(host, `$("cat > " * path)`); stdin = IOBuffer(body), stdout = devnull, stderr = devnull))
+        run(
+            pipeline(
+                _ssh(host, `$("cat > " * path)`);
+                stdin=IOBuffer(body),
+                stdout=devnull,
+                stderr=devnull,
+            ),
+        )
     catch e
         _rlog("manifest: could not write $host:$path ($(sprint(showerror, e)))")
     end
@@ -1801,7 +2441,14 @@ function _write_worker_state!(host, port::Int, state::AbstractString)
     body = string(state, " ", round(Int, time()))
     path = "$_REMOTE_WORKER/worker-$port.state"
     try
-        run(pipeline(_ssh(host, `$("cat > " * path)`); stdin = IOBuffer(body), stdout = devnull, stderr = devnull))
+        run(
+            pipeline(
+                _ssh(host, `$("cat > " * path)`);
+                stdin=IOBuffer(body),
+                stdout=devnull,
+                stderr=devnull,
+            ),
+        )
     catch e
         _rlog("state: could not write $host:$path ($(sprint(showerror, e)))")
     end
@@ -1830,31 +2477,57 @@ end
 # ones bound per-chunk exposure on thin ones. Panel setting (the Ref, persisted to
 # slate.json) wins; KAIMONSLATE_BLOB_CHUNK_MB env next; default 8 MiB; min 64 KB.
 const BLOB_CHUNK_MB = Ref{Float64}(0.0)   # 0 = unset (env / default applies)
-_blob_chunk() = max(65_536, round(Int, 2^20 *
-    (BLOB_CHUNK_MB[] > 0 ? BLOB_CHUNK_MB[] :
-     something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_CHUNK_MB", "")), 8.0))))
+function _blob_chunk()
+    return max(
+        65_536,
+        round(
+            Int,
+            2^20 * (
+                if BLOB_CHUNK_MB[] > 0
+                    BLOB_CHUNK_MB[]
+                else
+                    something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_CHUNK_MB", "")), 8.0)
+                end
+            ),
+        ),
+    )
+end
 
 # Hard per-entry ceiling (seconds) for the BOOT-window memo carry — the "never stall a notebook
 # open" bound the cost gate enforces regardless of how expensive an entry claims to be to
 # recompute. Same precedence: panel Ref → KAIMONSLATE_CARRY_MAX_S env → 30s default.
 const CARRY_MAX_S = Ref{Float64}(0.0)     # 0 = unset (env / default applies)
-_carry_ceiling_s() = CARRY_MAX_S[] > 0 ? CARRY_MAX_S[] :
-    something(tryparse(Float64, get(ENV, "KAIMONSLATE_CARRY_MAX_S", "")), 30.0)
+function _carry_ceiling_s()
+    return if CARRY_MAX_S[] > 0
+        CARRY_MAX_S[]
+    else
+        something(tryparse(Float64, get(ENV, "KAIMONSLATE_CARRY_MAX_S", "")), 30.0)
+    end
+end
 
 # Region-boundary transfer preview threshold (seconds): a cell whose pending boundary transfer
 # is estimated to take longer than this ERRORS with the preview (what/size/ETA) on its first
 # run; running the cell again proceeds — approve-by-rerun. 60s default; 0 disables previews.
 # Same precedence tiers as the other transfer knobs.
 const XFER_CONFIRM_S = Ref{Float64}(-1.0)  # <0 = unset (env / default applies); 0 = disabled
-_xfer_confirm_s() = XFER_CONFIRM_S[] >= 0 ? XFER_CONFIRM_S[] :
-    something(tryparse(Float64, get(ENV, "KAIMONSLATE_XFER_CONFIRM_S", "")), 60.0)
+function _xfer_confirm_s()
+    return if XFER_CONFIRM_S[] >= 0
+        XFER_CONFIRM_S[]
+    else
+        something(tryparse(Float64, get(ENV, "KAIMONSLATE_XFER_CONFIRM_S", "")), 60.0)
+    end
+end
 
 # ── Per-host upstream-bandwidth memory (the transfer-vs-recompute input) ─────────────────────
 # Every push measures its own rate over 8 MiB chunks and stamps it here (EMA so one anomalous
 # push doesn't own the estimate). Host-level, not per-worker — the link is the physics. The
 # carry's cost gate reads it; unknown hosts assume a conservative 1 MB/s (biases the FIRST
 # carry toward recompute — a boot window must never stall on an unmeasured link).
-_bw_path(host_ip) = joinpath(_slate_cache_dir(), "bw", replace(String(host_ip), r"[^A-Za-z0-9._-]" => "_") * ".json")
+function _bw_path(host_ip)
+    return joinpath(
+        _slate_cache_dir(), "bw", replace(String(host_ip), r"[^A-Za-z0-9._-]" => "_") * ".json"
+    )
+end
 # The get/note EMA pair shared by the hub-uplink and per-peer bandwidth memories: read the recorded rate
 # from `path_fn(key...)`'s JSON under `json_key` (0 ⇒ unmeasured/unreadable), and stamp a new sample as a
 # 0.7·old + 0.3·new EMA (one anomalous transfer can't own the estimate). Only the path helper + the JSON
@@ -1862,14 +2535,22 @@ _bw_path(host_ip) = joinpath(_slate_cache_dir(), "bw", replace(String(host_ip), 
 function _bw_get_at(path_fn, json_key, key...)
     p = path_fn(key...)
     isfile(p) || return 0.0
-    something(tryparse(Float64, _manifest_get(try; read(p, String); catch; return 0.0; end, json_key)), 0.0)
+    something(tryparse(Float64, _manifest_get(
+        try
+            read(p, String)
+        catch
+            return 0.0
+        end,
+        json_key,
+    )), 0.0)
 end
 function _bw_note_at!(path_fn, json_key, bps::Float64, key...)
     bps > 0 || return nothing
     old = _bw_get_at(path_fn, json_key, key...)
     ema = old > 0 ? 0.7 * old + 0.3 * bps : bps
     try
-        p = path_fn(key...); mkpath(dirname(p))
+        p = path_fn(key...)
+        mkpath(dirname(p))
         write(p, "{\"$(json_key)\":\"$(round(ema; digits = 1))\",\"ts\":\"$(round(Int, time()))\"}")
     catch
     end
@@ -1885,8 +2566,11 @@ _bw_note!(host_ip, bps::Float64) = _bw_note_at!(_bw_path, "up_bps", bps, host_ip
 # peers share the same host (loopback rate). Unmeasured ⇒ a FAST default: direct is fast, so bias
 # AWAY from a needless confirm (the opposite of the uplink's conservative 1 MB/s recompute-bias).
 # The unmeasured default is `_peer_bw_default()` (slate.json `peer_bw_mbps` / KAIMONSLATE_PEER_BW_MBPS; 30 MB/s).
-_peer_bw_path(a, b) = joinpath(_slate_cache_dir(), "bw", "peer",
-    replace("$(a)__$(b)", r"[^A-Za-z0-9._-]" => "_") * ".json")
+function _peer_bw_path(a, b)
+    return joinpath(
+        _slate_cache_dir(), "bw", "peer", replace("$(a)__$(b)", r"[^A-Za-z0-9._-]" => "_") * ".json"
+    )
+end
 _peer_bw_get(a, b) = _bw_get_at(_peer_bw_path, "bps", a, b)
 _peer_bw_note!(a, b, bps::Float64) = _bw_note_at!(_peer_bw_path, "bps", bps, a, b)
 
@@ -1899,8 +2583,11 @@ function _plan_rate(src_k, dst_k, mode::Symbol)
         pb = _peer_bw_get(src_k.target.ssh_host, dst_k.target.ssh_host)
         return pb > 0 ? pb : _peer_bw_default()
     end
-    host = dst_k.target isa RemoteTarget ? dst_k.target.ssh_host :
-           (src_k.target isa RemoteTarget ? src_k.target.ssh_host : "")
+    host = if dst_k.target isa RemoteTarget
+        dst_k.target.ssh_host
+    else
+        (src_k.target isa RemoteTarget ? src_k.target.ssh_host : "")
+    end
     return _bw_get(host)                        # 0 ⇒ the gate applies its own conservative floor
 end
 
@@ -1908,9 +2595,12 @@ end
 # dead channel would hang a caller forever), CURVE client auth when a `server_key` is pinned (:direct;
 # tunnel passes "" — SSH already encrypts), dialled to the worker's blob port. The CALLER owns the socket
 # and closes it (its own try/finally).
-function _open_data_req(kg, Z, host_ip, data_port; server_key::AbstractString = "", timeout_ms::Integer)
+function _open_data_req(
+    kg, Z, host_ip, data_port; server_key::AbstractString="", timeout_ms::Integer
+)
     sock = Z.Socket(Z.REQ)
-    sock.rcvtimeo = timeout_ms; sock.sndtimeo = timeout_ms
+    sock.rcvtimeo = timeout_ms
+    sock.sndtimeo = timeout_ms
     if !isempty(server_key)
         cpub, csec = kg._load_or_create_client_keypair()   # the key the worker allow-lists
         kg.make_curve_client!(sock, String(server_key), cpub, csec)
@@ -1919,9 +2609,15 @@ function _open_data_req(kg, Z, host_ip, data_port; server_key::AbstractString = 
     return sock
 end
 
-function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vector{String};
-                          timeout_ms::Int = _blob_chunk_timeout_ms(), server_key::AbstractString = "",
-                          max_transfer_s::Float64 = 0.0, bw_key::AbstractString = host_ip)
+function push_memo_blobs!(
+    host_ip::AbstractString,
+    data_port::Int,
+    srckeys::Vector{String};
+    timeout_ms::Int=_blob_chunk_timeout_ms(),
+    server_key::AbstractString="",
+    max_transfer_s::Float64=0.0,
+    bw_key::AbstractString=host_ip,
+)
     kg = getfield(_kaimon(), :KaimonGate)
     Z = kg.ZMQ
     root = joinpath(_slate_cache_dir(), "memo")   # mirrors worker.jl _memo_dir
@@ -1929,9 +2625,13 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
     isdir(mdir) || return "no local memo store"
     keyset = Set(srckeys)
     picked = Tuple{String,String}[]                    # (fullkey, manifest toml)
-    for f in readdir(mdir; join = true)
+    for f in readdir(mdir; join=true)
         endswith(f, ".toml") || continue
-        s = try; read(f, String); catch; continue; end
+        s = try
+            read(f, String)
+        catch
+            continue
+        end
         m = match(r"srckey\s*=\s*\"([0-9a-f]+)\"", s)
         (m !== nothing && String(m.captures[1]) in keyset) || continue
         push!(picked, (replace(basename(f), ".toml" => ""), s))
@@ -1949,17 +2649,25 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
         bw = max(_bw_get(bw_key), 1.0e6)
         keep = Tuple{String,String}[]
         for (k, s) in picked
-            bytes = sum(parse(Int, m.captures[1]) for m in eachmatch(r"bytes\s*=\s*(\d+)", s); init = 0)
+            bytes = sum(
+                parse(Int, m.captures[1]) for m in eachmatch(r"bytes\s*=\s*(\d+)", s); init=0
+            )
             msm = match(r"(?m)^ms\s*=\s*([0-9.]+)", s)
             ms = msm === nothing ? 0.0 : something(tryparse(Float64, msm.captures[1]), 0.0)
             if !_carry_should_ship(bytes, ms, bw, max_transfer_s)
-                push!(skipped, "$(first(k, 8))… ($(round(Int, bytes / 2^20))MB ≈ $(round(bytes / bw; digits = 1))s transfer vs $(round(ms; digits = 0))ms recompute)")
+                push!(
+                    skipped,
+                    "$(first(k, 8))… ($(round(Int, bytes / 2^20))MB ≈ $(round(bytes / bw; digits = 1))s transfer vs $(round(ms; digits = 0))ms recompute)",
+                )
                 continue
             end
             push!(keep, (k, s))
         end
         picked = keep
-        isempty(skipped) || _rlog("memo push: cost gate skipped $(length(skipped)) entr$(length(skipped) == 1 ? "y" : "ies") — recompute is cheaper (bw $(round(bw / 1e6; digits = 1)) MB/s): " * join(skipped, "; "))
+        isempty(skipped) || _rlog(
+            "memo push: cost gate skipped $(length(skipped)) entr$(length(skipped) == 1 ? "y" : "ies") — recompute is cheaper (bw $(round(bw / 1e6; digits = 1)) MB/s): " *
+            join(skipped, "; "),
+        )
         isempty(picked) && return "all $(length(skipped)) entries cheaper to recompute (skipped)"
     end
     hashes = String[]
@@ -1970,7 +2678,7 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
     # Bounded I/O: this also runs on the notebook-boot path (memo carry), where an unbound
     # REQ recv against a dead blob channel would hang the open forever. On expiry recv
     # throws (EAGAIN) → the caller's catch downgrades to "cells recompute instead".
-    sock = _open_data_req(kg, Z, host_ip, data_port; server_key = server_key, timeout_ms = timeout_ms)
+    sock = _open_data_req(kg, Z, host_ip, data_port; server_key=server_key, timeout_ms=timeout_ms)
     try
         req(frame) = (Z.send(sock, frame); String(copy(Z.recv(sock))))
         # Framing probe: v2 servers answer "2" and take multipart zero-copy 'p'; a v1 server
@@ -1980,7 +2688,8 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
         v2 = req(UInt8['V']) == "2"
         t0 = time()
         want = want_hashes(req, hashes)
-        sent = 0; nbytes = 0
+        sent = 0
+        nbytes = 0
         for h in want
             p = joinpath(root, "blobs", "sha256", h[1:2], String(h))
             isfile(p) || (_rlog("memo push: missing local blob $h — skipped"); continue)
@@ -1993,30 +2702,43 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
         end
         deduped = length(hashes) - length(want)
         elapsed = time() - t0
-        rate = (nbytes > 0 && elapsed > 0) ? " @ $(round(nbytes / elapsed / 2^20; digits = 1)) MB/s" : ""
+        rate = if (nbytes > 0 && elapsed > 0)
+            " @ $(round(nbytes / elapsed / 2^20; digits = 1)) MB/s"
+        else
+            ""
+        end
         # Feed the cost gate: remember this host's measured upstream rate (only from pushes big
         # enough that chunk round-trips, not RTT, dominated the clock).
         nbytes > 4 << 20 && elapsed > 0 && _bw_note!(bw_key, nbytes / elapsed)
-        msg = "pushed $(sent) blobs ($(nbytes) bytes in $(round(elapsed; digits = 1))s$rate, $(v2 ? "v2 zero-copy" : "v1 copy")) + $(length(picked)) manifests, $(deduped) blobs deduped" *
-              (isempty(skipped) ? "" : "; $(length(skipped)) skipped (recompute cheaper)")
-        _rlog("memo push → $host_ip:$data_port ($(isempty(server_key) ? "plaintext" : "CURVE")) — $msg")
+        msg =
+            "pushed $(sent) blobs ($(nbytes) bytes in $(round(elapsed; digits = 1))s$rate, $(v2 ? "v2 zero-copy" : "v1 copy")) + $(length(picked)) manifests, $(deduped) blobs deduped" *
+            (isempty(skipped) ? "" : "; $(length(skipped)) skipped (recompute cheaper)")
+        _rlog(
+            "memo push → $host_ip:$data_port ($(isempty(server_key) ? "plaintext" : "CURVE")) — $msg",
+        )
         return msg
     finally
-        try; Z.close(sock); catch; end
+        try
+            Z.close(sock)
+        catch
+        end
     end
 end
 
 # The dedup query, extracted so the put loop reads clean: ask the server which of `hashes`
 # it lacks. (Empty reply string → nothing to send.)
-want_hashes(req, hashes) =
-    split(req(vcat(UInt8['H'], Vector{UInt8}(codeunits(join(hashes, ","))))), ","; keepempty = false)
+function want_hashes(req, hashes)
+    return split(
+        req(vcat(UInt8['H'], Vector{UInt8}(codeunits(join(hashes, ","))))), ","; keepempty=false
+    )
+end
 
 # Ship ONE blob file over an already-connected data-channel REQ socket — v2 = multipart 'p'
 # with a zero-copy payload frame over an mmap (libzmq sends straight out of the page cache;
 # the Message's origin keeps the mmap alive until the frame is out — REQ/REP: by the reply);
 # v1 = single-frame copy-chunk 'P'. Returns the bytes sent. Shared by the memo push and the
 # region runner's single-binding transfers.
-function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool; on_progress = nothing)
+function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool; on_progress=nothing)
     sz = filesize(path)
     nbytes = 0
     tick() = on_progress === nothing || on_progress(nbytes, sz)
@@ -2028,11 +2750,12 @@ function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool; on
             n = min(chunk, sz - off)
             last = off + n >= sz
             hdr = vcat(UInt8['p'], Vector{UInt8}(codeunits(h)), UInt8[last ? 0x01 : 0x00])
-            Z.send(sock, hdr; more = true)
+            Z.send(sock, hdr; more=true)
             Z.send(sock, Z.Message(mm, pointer(mm) + off, n))
             r = String(copy(Z.recv(sock)))
             startswith(r, "err") && error("blob push $h: $r")
-            nbytes += n; off += n
+            nbytes += n
+            off += n
             tick()
         end
     else
@@ -2040,7 +2763,9 @@ function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool; on
             while true
                 chunk = read(io, 1 << 20)
                 last = eof(io)
-                r = req(vcat(UInt8['P'], Vector{UInt8}(codeunits(h)), UInt8[last ? 0x01 : 0x00], chunk))
+                r = req(
+                    vcat(UInt8['P'], Vector{UInt8}(codeunits(h)), UInt8[last ? 0x01 : 0x00], chunk)
+                )
                 startswith(r, "err") && error("blob push $h: $r")
                 nbytes += length(chunk)
                 tick()
@@ -2058,15 +2783,22 @@ Ship ONE blob from the LOCAL CAS to a worker's store over its data channel (dedu
 'H' query makes an already-present blob cost one round-trip). The region runner's local→remote
 half; `pull_blob!` is the reverse. Returns bytes actually sent (0 = deduped).
 """
-function push_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractString;
-                    server_key::AbstractString = "", timeout_ms::Int = _blob_chunk_timeout_ms(),
-                    on_plan = nothing, meta = nothing, on_progress = nothing)
+function push_blob!(
+    host_ip::AbstractString,
+    data_port::Int,
+    hash::AbstractString;
+    server_key::AbstractString="",
+    timeout_ms::Int=_blob_chunk_timeout_ms(),
+    on_plan=nothing,
+    meta=nothing,
+    on_progress=nothing,
+)
     root = joinpath(_slate_cache_dir(), "memo")
     p = joinpath(root, "blobs", "sha256", hash[1:2], String(hash))
     isfile(p) || error("push_blob!: no local blob $hash")
     kg = getfield(_kaimon(), :KaimonGate)
     Z = kg.ZMQ
-    sock = _open_data_req(kg, Z, host_ip, data_port; server_key = server_key, timeout_ms = timeout_ms)
+    sock = _open_data_req(kg, Z, host_ip, data_port; server_key=server_key, timeout_ms=timeout_ms)
     try
         req(frame) = (Z.send(sock, frame); String(copy(Z.recv(sock))))
         v2 = req(UInt8['V']) == "2"
@@ -2076,9 +2808,12 @@ function push_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractStrin
             return 0
         end
         on_plan === nothing || on_plan(Int(filesize(p)), meta)   # exact bytes; may throw (preview gate)
-        return _send_blob!(Z, sock, req, p, String(hash), v2; on_progress = on_progress)
+        return _send_blob!(Z, sock, req, p, String(hash), v2; on_progress=on_progress)
     finally
-        try; Z.close(sock); catch; end
+        try
+            Z.close(sock)
+        catch
+        end
     end
 end
 
@@ -2091,19 +2826,26 @@ runner: a remote cell's writes that local cells read). Streams into a tmp file, 
 against the address, atomic-renames — a truncated/corrupt transfer never lands. Dedup first:
 an already-present blob costs nothing. Returns bytes moved over the network (0 = deduped).
 """
-function pull_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractString;
-                    server_key::AbstractString = "", timeout_ms::Int = _blob_chunk_timeout_ms(), on_progress = nothing)
+function pull_blob!(
+    host_ip::AbstractString,
+    data_port::Int,
+    hash::AbstractString;
+    server_key::AbstractString="",
+    timeout_ms::Int=_blob_chunk_timeout_ms(),
+    on_progress=nothing,
+)
     root = joinpath(_slate_cache_dir(), "memo")
     dest = joinpath(root, "blobs", "sha256", hash[1:2], String(hash))
     isfile(dest) && return 0                              # dedup: already here — nothing moved
     kg = getfield(_kaimon(), :KaimonGate)
     Z = kg.ZMQ
-    sock = _open_data_req(kg, Z, host_ip, data_port; server_key = server_key, timeout_ms = timeout_ms)
+    sock = _open_data_req(kg, Z, host_ip, data_port; server_key=server_key, timeout_ms=timeout_ms)
     try
         chunk = _blob_chunk()
         mkpath(dirname(dest))
         tmp = tempname(dirname(dest))
-        total = -1; off = 0
+        total = -1
+        off = 0
         open(tmp, "w") do io
             while total < 0 || off < total
                 Z.send(sock, "G$(hash):$(off):$(chunk)")
@@ -2116,15 +2858,20 @@ function pull_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractStrin
                 GC.@preserve payload unsafe_write(io, pointer(payload), length(payload))
                 off += length(payload)
                 on_progress === nothing || on_progress(off, total)
-                length(payload) == 0 && off < total && error("pull $hash: empty chunk at $off/$total")
+                length(payload) == 0 &&
+                    off < total &&
+                    error("pull $hash: empty chunk at $off/$total")
             end
         end
         got = bytes2hex(open(_SHA.sha256, tmp))
-        got == String(hash) || (rm(tmp; force = true); error("pull $hash: hash mismatch (got $got)"))
-        mv(tmp, dest; force = true)
+        got == String(hash) || (rm(tmp; force=true); error("pull $hash: hash mismatch (got $got)"))
+        mv(tmp, dest; force=true)
         return total
     finally
-        try; Z.close(sock); catch; end
+        try
+            Z.close(sock)
+        catch
+        end
     end
 end
 
@@ -2132,36 +2879,54 @@ end
 # One REQ/REP round-trip to a worker's blob channel carrying a NON-data control verb (`X` transfer request
 # / `S` status) — reuses the exact CURVE+REQ setup as pull_blob!, so it rides the same reachability + auth
 # the relay already has (no new port/socket). Returns the reply string.
-function _xfer_ctl_call(host_ip::AbstractString, data_port::Int, msg::AbstractString;
-                        server_key::AbstractString = "", timeout_ms::Int = 15_000)
-    kg = getfield(_kaimon(), :KaimonGate); Z = kg.ZMQ
-    sock = _open_data_req(kg, Z, host_ip, data_port; server_key = server_key, timeout_ms = timeout_ms)
+function _xfer_ctl_call(
+    host_ip::AbstractString,
+    data_port::Int,
+    msg::AbstractString;
+    server_key::AbstractString="",
+    timeout_ms::Int=15_000,
+)
+    kg = getfield(_kaimon(), :KaimonGate)
+    Z = kg.ZMQ
+    sock = _open_data_req(kg, Z, host_ip, data_port; server_key=server_key, timeout_ms=timeout_ms)
     try
         Z.send(sock, String(msg))
         return String(Z.recv(sock))
     finally
-        try; Z.close(sock); catch; end
+        try
+            Z.close(sock)
+        catch
+        end
     end
 end
 
 # Hub-side view of the transfers it's orchestrating (Mode A), for the `transfers` introspection tool: a
 # live row per pull with dst←src, size, bytes-so-far, throughput, route. Finished rows linger briefly.
 mutable struct XferView
-    dst::String; src::String; name::String; via::String
-    done::Int; total::Int; started::Float64; finished::Float64; err::String
+    dst::String
+    src::String
+    name::String
+    via::String
+    done::Int
+    total::Int
+    started::Float64
+    finished::Float64
+    err::String
 end
 const _XFER_VIEWS = Dict{Int,XferView}()
 const _XFER_VIEW_LOCK = ReentrantLock()
-const _XFER_VIEW_SEQ  = Threads.Atomic{Int}(0)
-_xfer_view_prune!() = lock(_XFER_VIEW_LOCK) do
-    for (k, v) in collect(_XFER_VIEWS)
-        (v.finished > 0 && time() - v.finished > 60) && delete!(_XFER_VIEWS, k)
+const _XFER_VIEW_SEQ = Threads.Atomic{Int}(0)
+function _xfer_view_prune!()
+    lock(_XFER_VIEW_LOCK) do
+        for (k, v) in collect(_XFER_VIEWS)
+            (v.finished > 0 && time() - v.finished > 60) && delete!(_XFER_VIEWS, k)
+        end
     end
 end
 # Every transfer the hub is running or recently ran (active first, then recent), for the tool.
 function xfer_views()
     lock(_XFER_VIEW_LOCK) do
-        sort(collect(values(_XFER_VIEWS)); by = v -> (v.finished > 0, -v.started))
+        return sort(collect(values(_XFER_VIEWS)); by=v -> (v.finished > 0, -v.started))
     end
 end
 
@@ -2169,8 +2934,14 @@ end
 # bytes) series sampled at each control poll (~5 Hz), from which instantaneous throughput is derived. Kept
 # in a capped ring (NOT the 60 s-pruned live view) so the dashboard's timelines/distributions have history.
 struct XferTrace
-    src::String; dst::String; name::String; via::String
-    started::Float64; finished::Float64; total::Int; err::String
+    src::String
+    dst::String
+    name::String
+    via::String
+    started::Float64
+    finished::Float64
+    total::Int
+    err::String
     ts::Vector{Float64}     # sample wall-times
     bs::Vector{Int}         # cumulative bytes at each ts
 end
@@ -2178,70 +2949,120 @@ const _XFER_TRACES = XferTrace[]
 # Ring depth — GLOBAL across every notebook's transfers (the dashboard filters to its own regions), so a
 # busy notebook shouldn't evict another's history. Env-tunable for long observation runs; loops on pop so
 # a lowered cap trims immediately.
-_xfer_trace_cap() = max(1, something(tryparse(Int, get(ENV, "KAIMONSLATE_XFER_TRACE_CAP", "")), 4000))
+function _xfer_trace_cap()
+    return max(1, something(tryparse(Int, get(ENV, "KAIMONSLATE_XFER_TRACE_CAP", "")), 4000))
+end
 const _XFER_TRACE_LOCK = ReentrantLock()
 function _xfer_trace_push!(meta, started, total, ts, bs, err)
-    meta === nothing && return
+    meta === nothing && return nothing
     lock(_XFER_TRACE_LOCK) do
-        push!(_XFER_TRACES, XferTrace(String(meta.src), String(meta.dst), String(meta.name), String(meta.via),
-                                      started, time(), total, String(err), copy(ts), copy(bs)))
+        push!(
+            _XFER_TRACES,
+            XferTrace(
+                String(meta.src),
+                String(meta.dst),
+                String(meta.name),
+                String(meta.via),
+                started,
+                time(),
+                total,
+                String(err),
+                copy(ts),
+                copy(bs),
+            ),
+        )
         cap = _xfer_trace_cap()
-        while length(_XFER_TRACES) > cap; popfirst!(_XFER_TRACES); end
+        while length(_XFER_TRACES) > cap
+            popfirst!(_XFER_TRACES)
+        end
     end
 end
-xfer_traces() = lock(_XFER_TRACE_LOCK) do; copy(_XFER_TRACES); end
+xfer_traces() = lock(_XFER_TRACE_LOCK) do ;
+    return copy(_XFER_TRACES)
+end
 
 # Drive a peer pull on `dst_k` OVER ITS BLOB CHANNEL (not the gate): send the `X` request to the dst's
 # blob endpoint (hub-vantage — reuses the relay reach), then poll `S` to completion. The actual pull runs
 # on the dst's dedicated executor task, so the gate loop never blocks. `spec` is the newline-framed body
 # after the verb (see `_xfer_control`); `meta` (dst/src/name/via) drives the `transfers` view. Returns
 # (bytes, via). THROWS on failure (caller decides fallback).
-function _xfer_ctl_pull(dst_k, spec::AbstractString; timeout::Float64 = _blob_xfer_timeout(), meta = nothing)
+function _xfer_ctl_pull(
+    dst_k, spec::AbstractString; timeout::Float64=_blob_xfer_timeout(), meta=nothing
+)
     vid = Threads.atomic_add!(_XFER_VIEW_SEQ, 1)
     t0 = time()
-    trT = Float64[]; trB = Int[]; total = -1; traced = false   # per-poll progress series → dashboard trace
-    fin = err -> (traced || (traced = true; _xfer_trace_push!(meta, t0, total, trT, trB, err)))
+    trT = Float64[]
+    trB = Int[]
+    total = -1
+    traced = false   # per-poll progress series → dashboard trace
+    fin = err -> (traced || (traced=true; _xfer_trace_push!(meta, t0, total, trT, trB, err)))
     if meta !== nothing
         _xfer_view_prune!()
         lock(_XFER_VIEW_LOCK) do
-            _XFER_VIEWS[vid] = XferView(String(meta.dst), String(meta.src), String(meta.name),
-                                        String(meta.via), 0, -1, t0, 0.0, "")
+            return _XFER_VIEWS[vid] = XferView(
+                String(meta.dst),
+                String(meta.src),
+                String(meta.name),
+                String(meta.via),
+                0,
+                -1,
+                t0,
+                0.0,
+                "",
+            )
         end
     end
-    _upd!(f) = meta === nothing || lock(_XFER_VIEW_LOCK) do; v = get(_XFER_VIEWS, vid, nothing); v === nothing || f(v); end
+    _upd!(f) = meta === nothing || lock(_XFER_VIEW_LOCK) do ;
+        v = get(_XFER_VIEWS, vid, nothing)
+        return v === nothing || f(v)
+    end
     try
         ep = _data_endpoint!(dst_k.target, dst_k)          # the DST's blob channel, reachable from the hub
-        jid = _xfer_ctl_call(ep.ip, ep.port, "X" * spec; server_key = ep.server_key)
+        jid = _xfer_ctl_call(ep.ip, ep.port, "X" * spec; server_key=ep.server_key)
         (isempty(jid) || startswith(jid, "err")) && error("xfer request rejected: $jid")
-        deadline = time() + timeout; polls = 0
+        deadline = time() + timeout
+        polls = 0
         while time() < deadline
-            st = _xfer_ctl_call(ep.ip, ep.port, "S" * jid; server_key = ep.server_key)
+            st = _xfer_ctl_call(ep.ip, ep.port, "S" * jid; server_key=ep.server_key)
             if startswith(st, "running")
                 p = split(st)
                 if length(p) >= 3
-                    d = something(tryparse(Int, p[2]), 0); total = something(tryparse(Int, p[3]), total)
-                    _upd!(v -> (v.done = d; v.total = total))
-                    push!(trT, time()); push!(trB, d)      # granular sample for the throughput trace
+                    d = something(tryparse(Int, p[2]), 0)
+                    total = something(tryparse(Int, p[3]), total)
+                    _upd!(v -> (v.done=d; v.total=total))
+                    push!(trT, time())
+                    push!(trB, d)      # granular sample for the throughput trace
                 end
             elseif startswith(st, "done ")
-                p = split(st); b = something(tryparse(Int, p[2]), 0); total = b
-                push!(trT, time()); push!(trB, b)
-                _upd!(v -> (v.done = b; v.total = b; v.finished = time()))
+                p = split(st)
+                b = something(tryparse(Int, p[2]), 0)
+                total = b
+                push!(trT, time())
+                push!(trB, b)
+                _upd!(v -> (v.done=b; v.total=b; v.finished=time()))
                 fin("")
                 return (b, length(p) >= 3 ? String(p[3]) : "direct")
             elseif startswith(st, "err")
-                _upd!(v -> (v.finished = time(); v.err = String(st)))
+                _upd!(v -> (v.finished=time(); v.err=String(st)))
                 fin(String(st))
                 error("xfer $jid: $st")
             end
             polls += 1                                      # adaptive: quick early polls catch small/fast
-            sleep(polls < 8 ? 0.025 : polls < 20 ? 0.08 : 0.2)   # transfers; back off for long ones
+            sleep(
+                if polls < 8
+                    0.025
+                elseif polls < 20
+                    0.08
+                else
+                    0.2
+                end,
+            )   # transfers; back off for long ones
         end
-        _upd!(v -> (v.finished = time(); v.err = "timeout"))
+        _upd!(v -> (v.finished=time(); v.err="timeout"))
         fin("timeout")
         error("xfer $jid: timed out after $(round(Int, timeout))s")
     catch e
-        _upd!(v -> v.finished == 0.0 && (v.finished = time(); v.err = first(sprint(showerror, e), 100)))
+        _upd!(v -> v.finished == 0.0 && (v.finished=time(); v.err=first(sprint(showerror, e), 100)))
         fin(first(sprint(showerror, e), 100))
         rethrow()
     end
@@ -2252,8 +3073,9 @@ end
 # recorded compute cost (0.5s floor — trivial entries always ship, so a warm reattach isn't
 # nickel-and-dimed) and the hard per-entry ceiling (a notebook open must never stall on one
 # giant entry, however expensive its recompute claims to be — `sync_memo` covers that case).
-_carry_should_ship(bytes::Integer, ms::Real, bw_bps::Real, cap_s::Real) =
-    (est = bytes / max(bw_bps, 1.0); est <= max(2 * ms / 1000, 0.5) && est <= cap_s)
+function _carry_should_ship(bytes::Integer, ms::Real, bw_bps::Real, cap_s::Real)
+    return (est=bytes / max(bw_bps, 1.0); est <= max(2 * ms / 1000, 0.5) && est <= cap_s)
+end
 
 # ── Data-channel endpoint (transport-aware) ─────────────────────────────────────────────────
 # Where the hub dials a worker's blob channel (gate port + 2). :direct → the routable IP + the
@@ -2288,22 +3110,28 @@ const _BLOB_SERVER_KEY_LOCK = ReentrantLock()
 function _blob_server_key!(t::RemoteTarget, k, dport::Int)
     ck = (t.ssh_host, dport)
     hit = lock(_BLOB_SERVER_KEY_LOCK) do
-        get(_BLOB_SERVER_KEY, ck, nothing)
+        return get(_BLOB_SERVER_KEY, ck, nothing)
     end
     hit === nothing || return hit
     key = try
-        r = _tool(k, "__slate_server_key", Dict{String,Any}(); timeout = 30.0)
-        e = try; getproperty(r, :error); catch; nothing; end
+        r = _tool(k, "__slate_server_key", Dict{String,Any}(); timeout=30.0)
+        e = try
+            getproperty(r, :error)
+        catch
+            nothing
+        end
         e === nothing ? String(r.key) : ""
     catch
         ""
     end
     if isempty(key)
-        _rlog("data channel: no CURVE server key from $(t.ssh_host) worker (data port $dport) — the worker " *
-              "may predate the always-CURVE blob channel; cold-respawn it (plaintext connect will fail).")
+        _rlog(
+            "data channel: no CURVE server key from $(t.ssh_host) worker (data port $dport) — the worker " *
+            "may predate the always-CURVE blob channel; cold-respawn it (plaintext connect will fail).",
+        )
     else
         lock(_BLOB_SERVER_KEY_LOCK) do
-            _BLOB_SERVER_KEY[ck] = key
+            return _BLOB_SERVER_KEY[ck] = key
         end
     end
     return key
@@ -2318,40 +3146,62 @@ end
 # reached, not a stale `gate+2`. Falls back to `gate+2` — WITHOUT caching — when the worker predates the
 # tool or hasn't bound yet (returns 0); a later call re-queries once the blob server is up.
 const _BLOB_DPORT_CACHE = Dict{Tuple{String,Int},Int}()   # (host, gate port) → real blob data port
-const _BLOB_DPORT_LOCK  = ReentrantLock()
+const _BLOB_DPORT_LOCK = ReentrantLock()
 function _blob_data_port!(t::RemoteTarget, k)
     default = k.port + 2
     t.transport === :tunnel || return default          # :direct is firewall-pinned at gate+2
     ck = (String(t.ssh_host), Int(k.port))
-    hit = lock(_BLOB_DPORT_LOCK) do; get(_BLOB_DPORT_CACHE, ck, 0); end
+    hit = lock(_BLOB_DPORT_LOCK) do ;
+        return get(_BLOB_DPORT_CACHE, ck, 0)
+    end
     hit > 0 && return hit
     p = try
-        r = _tool(k, "__slate_ports", Dict{String,Any}(); timeout = 15.0)
-        e = try; getproperty(r, :error); catch; nothing; end
+        r = _tool(k, "__slate_ports", Dict{String,Any}(); timeout=15.0)
+        e = try
+            getproperty(r, :error)
+        catch
+            nothing
+        end
         e === nothing ? Int(r.blob) : 0
     catch
         0
     end
     p > 0 || return default                             # not bound yet / pre-tool worker → gate+2, re-query next call
-    lock(_BLOB_DPORT_LOCK) do; _BLOB_DPORT_CACHE[ck] = p; end
-    p == default || _rlog("data channel: $(t.ssh_host) worker-$(k.port) blob bound free port $p (not gate+2=$default)")
+    lock(_BLOB_DPORT_LOCK) do ;
+        return _BLOB_DPORT_CACHE[ck] = p
+    end
+    p == default || _rlog(
+        "data channel: $(t.ssh_host) worker-$(k.port) blob bound free port $p (not gate+2=$default)",
+    )
     return p
 end
 # Cached-only lookup for teardown/reap, where the worker may already be dead (no gate call). `gate+2` when
 # unknown — harmless, since a worker that never bound / never transferred opened no data tunnel to evict.
-_blob_data_port_cached(host, gate_port) = lock(_BLOB_DPORT_LOCK) do
-    get(_BLOB_DPORT_CACHE, (String(host), Int(gate_port)), Int(gate_port) + 2)
+function _blob_data_port_cached(host, gate_port)
+    lock(_BLOB_DPORT_LOCK) do
+        return get(_BLOB_DPORT_CACHE, (String(host), Int(gate_port)), Int(gate_port) + 2)
+    end
 end
-_blob_dport_forget!(host, gate_port) =
-    (lock(_BLOB_DPORT_LOCK) do; delete!(_BLOB_DPORT_CACHE, (String(host), Int(gate_port))); end; nothing)
+function _blob_dport_forget!(host, gate_port)
+    (
+        lock(_BLOB_DPORT_LOCK) do ;
+            return delete!(_BLOB_DPORT_CACHE, (String(host), Int(gate_port)))
+        end;
+        nothing
+    )
+end
 
 function _data_endpoint!(t::RemoteTarget, k)
     dport = _blob_data_port!(t, k)
     if t.transport === :direct
         rec = _attach_lookup(t.ssh_host, k.label)   # ip + CURVE key were learned at spawn — no ssh here
-        ip = rec !== nothing && !isempty(rec.remote_ip) ? String(rec.remote_ip) : _remote_ip(t.ssh_host)
+        ip = if rec !== nothing && !isempty(rec.remote_ip)
+            String(rec.remote_ip)
+        else
+            _remote_ip(t.ssh_host)
+        end
         key = (_blob_curve(t) && rec !== nothing) ? String(rec.server_key) : ""   # "" when this region runs plaintext (bench)
-        return (ip = ip, port = dport, server_key = key)
+        return (ip=ip, port=dport, server_key=key)
     end
     # :tunnel — the blob channel is CURVE (encryption-only) behind the SSH forward, so pin the
     # worker's server key. Fetch it OUTSIDE the tunnel lock so a control RPC never blocks other
@@ -2363,20 +3213,25 @@ function _data_endpoint!(t::RemoteTarget, k)
         lp = _free_local_port()
         tun = open_tunnel(t.ssh_host, [(lp, dport)])
         _DATA_TUNNELS[(t.ssh_host, dport)] = (tun, lp)
-        _rlog("data channel: opened dedicated tunnel $(t.ssh_host):$dport ← 127.0.0.1:$lp (own ssh proc, CURVE)")
+        _rlog(
+            "data channel: opened dedicated tunnel $(t.ssh_host):$dport ← 127.0.0.1:$lp (own ssh proc, CURVE)",
+        )
         return lp
     end
-    return (ip = "127.0.0.1", port = lport, server_key = key)
+    return (ip="127.0.0.1", port=lport, server_key=key)
 end
 
 # Close the cached data forward for `host` (a specific worker's data port, or all when port=0).
-function _evict_data_tunnels!(host; port::Int = 0)
+function _evict_data_tunnels!(host; port::Int=0)
     lock(_DATA_TUNNEL_LOCK) do
         for key in collect(keys(_DATA_TUNNELS))
             key[1] == String(host) || continue
             (port == 0 || key[2] == port) || continue
             tun, _ = pop!(_DATA_TUNNELS, key)
-            try; close_tunnel(tun); catch; end
+            try
+                close_tunnel(tun)
+            catch
+            end
         end
     end
     lock(_BLOB_SERVER_KEY_LOCK) do
@@ -2393,7 +3248,7 @@ end
 # the shared engine of the boot-window carry and the mid-session `sync_memo` tool. `boot=true`
 # arms the cost gate (per-entry transfer-vs-recompute + a hard per-entry ceiling, so a big
 # store on a slow link can't stall the notebook open); the explicit tool pushes everything.
-function push_notebook_memo!(k, report; boot::Bool = false)
+function push_notebook_memo!(k, report; boot::Bool=false)
     t = k.target
     t isa RemoteTarget || return "not on a remote worker"
     k.port == 0 && return "remote worker not up yet"
@@ -2401,9 +3256,14 @@ function push_notebook_memo!(k, report; boot::Bool = false)
     filter!(!isempty, keys)
     isempty(keys) && return "no memoizable cells"
     ep = _data_endpoint!(t, k)
-    return push_memo_blobs!(ep.ip, ep.port, keys; server_key = ep.server_key,
-                            max_transfer_s = boot ? _carry_ceiling_s() : 0.0,
-                            bw_key = t.ssh_host)   # bandwidth is per HOST — a tunnel dials 127.0.0.1
+    return push_memo_blobs!(
+        ep.ip,
+        ep.port,
+        keys;
+        server_key=ep.server_key,
+        max_transfer_s=boot ? _carry_ceiling_s() : 0.0,
+        bw_key=t.ssh_host,
+    )   # bandwidth is per HOST — a tunnel dials 127.0.0.1
 end
 
 # ── Cross-kernel value transport (the region runner's boundary) ─────────────────────────────
@@ -2449,53 +3309,84 @@ end
 # (relay→direct once a firewall opens). And self-healing DOWNWARD in real time: a cached direct/ssh pull
 # that FAILS (topology changed under us) invalidates its entry (`_peer_route_forget_pair!`) and relays now.
 const _PEER_ROUTE_CACHE = Dict{Tuple{String,String},Tuple{Symbol,String,Float64}}()   # → (kind, A-addr, ts)
-const _PEER_ROUTE_LOCK  = ReentrantLock()
+const _PEER_ROUTE_LOCK = ReentrantLock()
 const PEER_ROUTE_TTL = Ref{Float64}(-1.0)   # <0 = unset (env / default applies)
-_peer_route_ttl() = PEER_ROUTE_TTL[] >= 0 ? PEER_ROUTE_TTL[] :
-    something(tryparse(Float64, get(ENV, "KAIMONSLATE_PEER_ROUTE_TTL", "")), 600.0)   # 10 min default
+function _peer_route_ttl()
+    return if PEER_ROUTE_TTL[] >= 0
+        PEER_ROUTE_TTL[]
+    else
+        something(tryparse(Float64, get(ENV, "KAIMONSLATE_PEER_ROUTE_TTL", "")), 600.0)   # 10 min default
+    end   # 10 min default
+end   # 10 min default
 
 _route_sanitize(x) = replace(String(x), r"[^A-Za-z0-9._-]" => "_")
-_route_cache_path(sh, dh) = joinpath(_slate_cache_dir(), "route", "$(_route_sanitize(sh))__$(_route_sanitize(dh)).json")
+function _route_cache_path(sh, dh)
+    return joinpath(
+        _slate_cache_dir(), "route", "$(_route_sanitize(sh))__$(_route_sanitize(dh)).json"
+    )
+end
 function _peer_route_load(sh, dh)
-    p = _route_cache_path(sh, dh); isfile(p) || return nothing
-    s = try; read(p, String); catch; return nothing; end
-    k = _manifest_get(s, "kind"); ip = _manifest_get(s, "ip"); ts = tryparse(Float64, _manifest_get(s, "ts"))
+    p = _route_cache_path(sh, dh)
+    isfile(p) || return nothing
+    s = try
+        read(p, String)
+    catch
+        return nothing
+    end
+    k = _manifest_get(s, "kind")
+    ip = _manifest_get(s, "ip")
+    ts = tryparse(Float64, _manifest_get(s, "ts"))
     (isempty(k) || ts === nothing) && return nothing
     return (Symbol(k), String(ip), ts)
 end
 function _peer_route_save(sh, dh, kind, ip, ts)
     try
         mkpath(dirname(_route_cache_path(sh, dh)))
-        write(_route_cache_path(sh, dh), "{\"kind\":\"$(kind)\",\"ip\":\"$(ip)\",\"ts\":\"$(round(Int, ts))\"}")
+        write(
+            _route_cache_path(sh, dh),
+            "{\"kind\":\"$(kind)\",\"ip\":\"$(ip)\",\"ts\":\"$(round(Int, ts))\"}",
+        )
     catch
     end
     return nothing
 end
 # Fresh (kind, ip) for a pair, or nothing if absent/expired (→ caller re-probes). Load-through from disk.
 function _peer_route_lookup(sh, dh)
-    hit = lock(_PEER_ROUTE_LOCK) do; get(_PEER_ROUTE_CACHE, (sh, dh), nothing); end
+    hit = lock(_PEER_ROUTE_LOCK) do ;
+        return get(_PEER_ROUTE_CACHE, (sh, dh), nothing)
+    end
     if hit === nothing
         hit = _peer_route_load(sh, dh)
-        hit !== nothing && lock(_PEER_ROUTE_LOCK) do; _PEER_ROUTE_CACHE[(sh, dh)] = hit; end
+        hit !== nothing && lock(_PEER_ROUTE_LOCK) do ;
+            return _PEER_ROUTE_CACHE[(sh, dh)] = hit
+        end
     end
     (hit === nothing || (time() - hit[3]) > _peer_route_ttl()) && return nothing
     return (hit[1], hit[2])
 end
 function _peer_route_store!(sh, dh, kind, ip)
     t = time()
-    lock(_PEER_ROUTE_LOCK) do; _PEER_ROUTE_CACHE[(sh, dh)] = (kind, ip, t); end
+    lock(_PEER_ROUTE_LOCK) do ;
+        return _PEER_ROUTE_CACHE[(sh, dh)] = (kind, ip, t)
+    end
     _peer_route_save(sh, dh, kind, ip, t)
     return nothing
 end
 # Drop one pair's verdict (in-memory + disk) — the real-time downgrade on a failed direct/ssh pull.
 function _peer_route_forget_pair!(sh, dh)
-    lock(_PEER_ROUTE_LOCK) do; delete!(_PEER_ROUTE_CACHE, (String(sh), String(dh))); end
-    try; rm(_route_cache_path(sh, dh); force = true); catch; end
+    lock(_PEER_ROUTE_LOCK) do ;
+        return delete!(_PEER_ROUTE_CACHE, (String(sh), String(dh)))
+    end
+    try
+        rm(_route_cache_path(sh, dh); force=true)
+    catch
+    end
     return nothing
 end
 # Drop every verdict touching `host` (in-memory + disk) — topology changed (reap).
 function _peer_route_forget!(host)
-    h = String(host); hs = _route_sanitize(h)
+    h = String(host)
+    hs = _route_sanitize(h)
     lock(_PEER_ROUTE_LOCK) do
         for k in collect(keys(_PEER_ROUTE_CACHE))
             (k[1] == h || k[2] == h) && delete!(_PEER_ROUTE_CACHE, k)
@@ -2505,7 +3396,10 @@ function _peer_route_forget!(host)
     isdir(d) && for f in readdir(d)
         endswith(f, ".json") || continue
         parts = split(chopsuffix(f, ".json"), "__")
-        (length(parts) == 2 && hs in parts) && try; rm(joinpath(d, f); force = true); catch; end
+        (length(parts) == 2 && hs in parts) && try
+            rm(joinpath(d, f); force=true)
+        catch
+        end
     end
     return nothing
 end
@@ -2529,13 +3423,21 @@ end
 # (cross-network NAT — a hub reaching a box by a public IP that NATs to a private one) will need an
 # explicit region `peer` override; not required for the same-subnet case.
 const _HOST_IP_CACHE = Dict{String,String}()
-const _HOST_IP_LOCK  = ReentrantLock()
+const _HOST_IP_LOCK = ReentrantLock()
 function _peer_host_ip(host)
     h = String(host)
-    hit = lock(_HOST_IP_LOCK) do; get(_HOST_IP_CACHE, h, ""); end
+    hit = lock(_HOST_IP_LOCK) do ;
+        return get(_HOST_IP_CACHE, h, "")
+    end
     isempty(hit) || return hit
-    ip = try; _remote_ip(h); catch; h; end
-    lock(_HOST_IP_LOCK) do; _HOST_IP_CACHE[h] = ip; end
+    ip = try
+        _remote_ip(h)
+    catch
+        h
+    end
+    lock(_HOST_IP_LOCK) do ;
+        return _HOST_IP_CACHE[h] = ip
+    end
     return ip
 end
 
@@ -2577,17 +3479,34 @@ function _resolve_peer_route(src_k, dst_k)
     # hub-facing interface IP first (the fast path when B shares A's network — e.g. a private subnet the hub
     # is also on), then A's explicit `peer` advertise addr (its PUBLIC IP, for a cross-network B). A region
     # with neither reachable (localhost/NAT source) yields no working candidate ⇒ relay.
-    adv = (r = region_get(src_k.target.region); r === nothing ? "" : String(r.peer))
+    adv = (r=region_get(src_k.target.region); r === nothing ? "" : String(r.peer))
     cands = colocated ? ["127.0.0.1"] : unique(filter(!isempty, [_peer_host_ip(sh), adv]))
     # B probes A (only B can test its own B→A reachability).
-    _probe(pip, pport) = (r = try; _tool(dst_k, "__slate_probe_peer",
-            Dict{String,Any}("ip" => pip, "port" => pport); timeout = 15.0); catch; nothing; end;
-        r !== nothing && (try; r.reachable === true; catch; false; end))
+    _probe(pip, pport) = (
+        r=try
+            _tool(
+                dst_k,
+                "__slate_probe_peer",
+                Dict{String,Any}("ip" => pip, "port" => pport);
+                timeout=15.0,
+            )
+        catch
+            nothing
+        end;
+        r !== nothing && (
+            try
+                r.reachable === true
+            catch
+                false
+            end
+        )
+    )
     cached = _peer_route_lookup(sh, dh)              # in-memory → disk → nothing if absent/expired (TTL)
     if cached === nothing
-        kind = :relay; ip = isempty(cands) ? "" : cands[1]
+        kind = :relay
+        ip = isempty(cands) ? "" : cands[1]
         for c in cands                               # prefer a DIRECT blob dial on any candidate
-            _probe(c, port) && (kind = :direct; ip = c; break)
+            _probe(c, port) && (kind=:direct; ip=c; break)
         end
         # A responding :22 means sshd is up — NOT that our least-privilege forward key is authorized. So the
         # SSH bridge is a candidate ONLY when a mesh grant is actually armed for this pull (dst pulls from
@@ -2598,16 +3517,23 @@ function _resolve_peer_route(src_k, dst_k)
         armed = _mesh_grant_armed(src_k.target.region, dst_k.target.region)
         if kind === :relay && armed                  # else the SSH bridge over any candidate reachable on :22
             for c in cands
-                _probe(c, 22) && (kind = :ssh; ip = c; break)
+                _probe(c, 22) && (kind=:ssh; ip=c; break)
             end
         end
         cached = (kind, ip)
         _peer_route_store!(sh, dh, kind, ip)         # persist (survives restart; a topology map + TTL'd)
         candstr = join(cands, "/")
-        _rlog(kind === :direct ? "peer route $sh→$dh: blob $ip:$port reachable ⇒ direct" :
-              kind === :ssh    ? "peer route $sh→$dh: blob firewalled; ssh $ip:22 reachable ⇒ ssh-bridge (§4)" :
-              armed            ? "peer route $sh→$dh: no candidate $candstr reachable on blob/:22 ⇒ relay" :
-                                 "peer route $sh→$dh: blob unreachable + no mesh grant armed ⇒ relay (arm the mesh to bridge)")
+        _rlog(
+            if kind === :direct
+                "peer route $sh→$dh: blob $ip:$port reachable ⇒ direct"
+            elseif kind === :ssh
+                "peer route $sh→$dh: blob firewalled; ssh $ip:22 reachable ⇒ ssh-bridge (§4)"
+            elseif armed
+                "peer route $sh→$dh: no candidate $candstr reachable on blob/:22 ⇒ relay"
+            else
+                "peer route $sh→$dh: blob unreachable + no mesh grant armed ⇒ relay (arm the mesh to bridge)"
+            end,
+        )
     end
     return PeerRoute(cached[1], cached[2], port, skey)
 end
@@ -2624,14 +3550,26 @@ const _AUTHED_LOCK = ReentrantLock()
 _authed_key(src_k, bpub) = (objectid(src_k), String(bpub))
 function _ensure_authed!(src_k, bpub)
     key = _authed_key(src_k, bpub)
-    lock(_AUTHED_LOCK) do; key in _AUTHED; end && return nothing
-    ak = _tool(src_k, "__slate_authorize_client", Dict{String,Any}("pubkey" => String(bpub)); timeout = 60.0)
-    akerr = try; getproperty(ak, :error); catch; nothing; end
+    lock(_AUTHED_LOCK) do ;
+        return key in _AUTHED
+    end && return nothing
+    ak = _tool(
+        src_k, "__slate_authorize_client", Dict{String,Any}("pubkey" => String(bpub)); timeout=60.0
+    )
+    akerr = try
+        getproperty(ak, :error)
+    catch
+        nothing
+    end
     akerr === nothing || error("authorise on source failed: $akerr")
-    lock(_AUTHED_LOCK) do; push!(_AUTHED, key); end
+    lock(_AUTHED_LOCK) do ;
+        return push!(_AUTHED, key)
+    end
     return nothing
 end
-_forget_authed!(src_k, bpub) = lock(_AUTHED_LOCK) do; delete!(_AUTHED, _authed_key(src_k, bpub)); end
+_forget_authed!(src_k, bpub) = lock(_AUTHED_LOCK) do ;
+    return delete!(_AUTHED, _authed_key(src_k, bpub))
+end
 
 # A dest's blob CLIENT pubkey is stable for the worker's lifetime — the keypair is persisted to disk, so
 # it survives even a respawn — yet `_pull_*!` fetched it over the gate on EVERY pull. Cache it per dest
@@ -2641,16 +3579,26 @@ const _DEST_CKEY = Dict{UInt,String}()
 const _DEST_CKEY_LOCK = ReentrantLock()
 function _dest_client_key(dst_k)
     oid = objectid(dst_k)
-    hit = lock(_DEST_CKEY_LOCK) do; get(_DEST_CKEY, oid, nothing); end
+    hit = lock(_DEST_CKEY_LOCK) do ;
+        return get(_DEST_CKEY, oid, nothing)
+    end
     hit === nothing || return hit
-    bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout = 60.0)
-    bkerr = try; getproperty(bk, :error); catch; nothing; end
+    bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout=60.0)
+    bkerr = try
+        getproperty(bk, :error)
+    catch
+        nothing
+    end
     bkerr === nothing || error("dest client key unavailable: $bkerr")
     bpub = String(bk.key)
-    lock(_DEST_CKEY_LOCK) do; _DEST_CKEY[oid] = bpub; end
+    lock(_DEST_CKEY_LOCK) do ;
+        return _DEST_CKEY[oid] = bpub
+    end
     return bpub
 end
-_forget_dest_client_key!(dst_k) = lock(_DEST_CKEY_LOCK) do; delete!(_DEST_CKEY, objectid(dst_k)); end
+_forget_dest_client_key!(dst_k) = lock(_DEST_CKEY_LOCK) do ;
+    return delete!(_DEST_CKEY, objectid(dst_k))
+end
 
 # Broker one direct B←A pull over the RESOLVED route (`route.{ip,port,server_key}` = A's blob endpoint in
 # B's OWN vantage — co-located loopback already applied by `_resolve_peer_route`): ensure B's client key is
@@ -2663,8 +3611,16 @@ function _pull_direct!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
     try
         # Drive the pull over the DST's BLOB CHANNEL (transfer-control plane), NOT a gate :tool_call — so it
         # runs on the dst's executor task and never starves gate liveness (TRANSFER_CONTROL_PLAN Mode A).
-        bytes, _ = _xfer_ctl_pull(dst_k, "$(h)\ndirect\n$(route.ip)\n$(route.port)\n$(route.server_key)";
-            meta = (dst = String(dst_k.target.region), src = String(src_k.target.region), name = String(name), via = "direct"))
+        bytes, _ = _xfer_ctl_pull(
+            dst_k,
+            "$(h)\ndirect\n$(route.ip)\n$(route.port)\n$(route.server_key)";
+            meta=(
+                dst=String(dst_k.target.region),
+                src=String(src_k.target.region),
+                name=String(name),
+                via="direct",
+            ),
+        )
         return bytes
     catch
         authed && _forget_authed!(src_k, bpub)             # failure → drop the caches so a retry re-authorizes
@@ -2676,16 +3632,22 @@ end
 # A host's SSH user, resolved from the hub's OWN ssh config (`ssh -G` prints the resolved config without
 # connecting) so B ssh's in as the right user. Cached. Empty ⇒ let ssh pick its default.
 const _SSH_USER_CACHE = Dict{String,String}()
-const _SSH_USER_LOCK  = ReentrantLock()
+const _SSH_USER_LOCK = ReentrantLock()
 function _ssh_user(host)
     h = String(host)
-    hit = lock(_SSH_USER_LOCK) do; get(_SSH_USER_CACHE, h, nothing); end
+    hit = lock(_SSH_USER_LOCK) do ;
+        return get(_SSH_USER_CACHE, h, nothing)
+    end
     hit === nothing || return hit
     u = try
         m = match(r"(?m)^user (.+)$", read(`ssh -G $h`, String))
         m === nothing ? "" : String(strip(m.captures[1]))
-    catch; ""; end
-    lock(_SSH_USER_LOCK) do; _SSH_USER_CACHE[h] = u; end
+    catch
+        ""
+    end
+    lock(_SSH_USER_LOCK) do ;
+        return _SSH_USER_CACHE[h] = u
+    end
     return u
 end
 
@@ -2697,10 +3659,10 @@ end
 function _mesh_basename(region)
     r = region_get(region)
     r === nothing && return "slate-$(_fold_region(region))-unknown"
-    "slate-$(r.name)-$(first(region_uuid(r.name), 8))"
+    return "slate-$(r.name)-$(first(region_uuid(r.name), 8))"
 end
 _mesh_key_path(region) = "~/.ssh/" * _mesh_basename(region)   # a region's OWN private key (it ssh's OUT with this)
-_mesh_known_hosts()    = "~/.ssh/slate_known_hosts"           # slate-OWNED known_hosts (never the user's)
+_mesh_known_hosts() = "~/.ssh/slate_known_hosts"           # slate-OWNED known_hosts (never the user's)
 
 # Broker one SSH-BRIDGED B←A pull (§4): authorise B on A's blob channel, have B open a worker-local
 # `ssh -N -L` forward to A (using B's own mesh key) and CURVE-pull through it, then revoke. `route.ip` is
@@ -2710,8 +3672,12 @@ function _pull_ssh!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
     # A tunnel source's grant was installed with an inert placeholder permitopen; rewrite it to the LIVE
     # blob port (route.port) before dialing, so the forward isn't administratively refused (§2). No-op for
     # a :direct source (already the real port) or an un-introduced pair (nothing to touch).
-    try; _mesh_finalize_port!(String(src_k.target.region), String(dst_k.target.region), route.port); catch e
-        _rlog("mesh: permitopen finalize $(dst_k.target.region)←$(src_k.target.region) failed — $(first(sprint(showerror, e), 120))")
+    try
+        _mesh_finalize_port!(String(src_k.target.region), String(dst_k.target.region), route.port)
+    catch e
+        _rlog(
+            "mesh: permitopen finalize $(dst_k.target.region)←$(src_k.target.region) failed — $(first(sprint(showerror, e), 120))",
+        )
     end
     bpub = _dest_client_key(dst_k)                         # cached per dest kernel — no gate round-trip on reuse
     authed = !isempty(route.server_key)
@@ -2721,10 +3687,19 @@ function _pull_ssh!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
     try
         # Over the DST's blob channel (transfer-control plane), off the gate — the ssh forward + CURVE pull
         # run on the dst's executor task (TRANSFER_CONTROL_PLAN Mode A).
-        spec = "$(h)\nssh\n$(ssh_target)\n$(_mesh_key_path(String(dst_k.target.region)))\n" *
-               "$(_mesh_known_hosts())\n$(route.port)\n$(route.server_key)"
-        bytes, _ = _xfer_ctl_pull(dst_k, spec;
-            meta = (dst = String(dst_k.target.region), src = String(src_k.target.region), name = String(name), via = "ssh"))
+        spec =
+            "$(h)\nssh\n$(ssh_target)\n$(_mesh_key_path(String(dst_k.target.region)))\n" *
+            "$(_mesh_known_hosts())\n$(route.port)\n$(route.server_key)"
+        bytes, _ = _xfer_ctl_pull(
+            dst_k,
+            spec;
+            meta=(
+                dst=String(dst_k.target.region),
+                src=String(src_k.target.region),
+                name=String(name),
+                via="ssh",
+            ),
+        )
         return bytes
     catch
         authed && _forget_authed!(src_k, bpub)             # failure → drop the caches so a retry re-authorizes
@@ -2739,38 +3714,72 @@ end
 # is never a memo value), pull it to the dest over the SAME peer path a real transfer uses (feeding the
 # peer-rate memory + the live `transfers` view), then drop the blob on BOTH ends. Returns
 # (; kind, bytes, seconds, mbps); kind = :direct | :ssh | :relay | :local.
-_probe_bytes() = round(Int, 1e6 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_PROBE_MB", "")), 8.0))
-function probe_transfer!(src_k, dst_k; bytes::Int = _probe_bytes())
+function _probe_bytes()
+    return round(Int, 1e6 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_PROBE_MB", "")), 8.0))
+end
+function probe_transfer!(src_k, dst_k; bytes::Int=_probe_bytes())
     (src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget && src_k !== dst_k) ||
-        return (; kind = :local, bytes = 0, seconds = 0.0, mbps = 0.0)
+        return (; kind=:local, bytes=0, seconds=0.0, mbps=0.0)
     route = _resolve_peer_route(src_k, dst_k)               # probe B→A + cache the verdict
-    route.kind in (:direct, :ssh) || return (; kind = route.kind, bytes = 0, seconds = 0.0, mbps = 0.0)
-    mk = _tool(src_k, "__slate_make_probe_blob", Dict{String,Any}("bytes" => bytes); timeout = 60.0)
-    mkerr = try; getproperty(mk, :error); catch; nothing; end
+    route.kind in (:direct, :ssh) || return (; kind=route.kind, bytes=0, seconds=0.0, mbps=0.0)
+    mk = _tool(src_k, "__slate_make_probe_blob", Dict{String,Any}("bytes" => bytes); timeout=60.0)
+    mkerr = try
+        getproperty(mk, :error)
+    catch
+        nothing
+    end
     mkerr === nothing || error("probe: source blob failed: $mkerr")
     h = String(mk.hash)
     try
         t0 = time()
-        moved = route.kind === :direct ? _pull_direct!(src_k, dst_k, "·probe", h, mk, route) :
-                                         _pull_ssh!(src_k, dst_k, "·probe", h, mk, route)
+        moved = if route.kind === :direct
+            _pull_direct!(src_k, dst_k, "·probe", h, mk, route)
+        else
+            _pull_ssh!(src_k, dst_k, "·probe", h, mk, route)
+        end
         el = time() - t0
-        (moved > 0 && el > 0) && _peer_bw_note!(String(src_k.target.ssh_host), String(dst_k.target.ssh_host), moved / el)
-        return (; kind = route.kind, bytes = moved, seconds = el, mbps = el > 0 ? moved / el / 1e6 : 0.0)
+        (moved > 0 && el > 0) &&
+            _peer_bw_note!(String(src_k.target.ssh_host), String(dst_k.target.ssh_host), moved / el)
+        return (; kind=route.kind, bytes=moved, seconds=el, mbps=el > 0 ? moved / el / 1e6 : 0.0)
     finally
-        try; _tool(src_k, "__slate_drop_blob", Dict{String,Any}("hash" => h); timeout = 20.0); catch; end
-        try; _tool(dst_k, "__slate_drop_blob", Dict{String,Any}("hash" => h); timeout = 20.0); catch; end
+        try
+            _tool(src_k, "__slate_drop_blob", Dict{String,Any}("hash" => h); timeout=20.0)
+        catch
+        end
+        try
+            _tool(dst_k, "__slate_drop_blob", Dict{String,Any}("hash" => h); timeout=20.0)
+        catch
+        end
     end
 end
 
-function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false, mode::Symbol = :relay,
-                           on_plan = nothing, on_progress = nothing, cellkey::AbstractString = "")
+function transfer_binding!(
+    src_k,
+    dst_k,
+    name::AbstractString;
+    zc::Bool=false,
+    mode::Symbol=:relay,
+    on_plan=nothing,
+    on_progress=nothing,
+    cellkey::AbstractString="",
+)
     # `cellkey` (the producing cell's memo key) lets the source memo-RESTORE the value if its live global
     # is gone (a swapped worker) instead of failing "no global named" — the source persists the memo store
     # across the swap even though its namespace was reset. Empty ⇒ no fallback (caller can't name the cell).
-    meta = _tool(src_k, "__slate_blob_of", Dict{String,Any}("name" => String(name), "cellkey" => String(cellkey)); timeout = _blob_xfer_timeout())
-    err = try; getproperty(meta, :error); catch; nothing; end
+    meta = _tool(
+        src_k,
+        "__slate_blob_of",
+        Dict{String,Any}("name" => String(name), "cellkey" => String(cellkey));
+        timeout=_blob_xfer_timeout(),
+    )
+    err = try
+        getproperty(meta, :error)
+    catch
+        nothing
+    end
     err === nothing || error("transfer '$name': $err")
-    h = String(meta.hash); codec = String(meta.codec)
+    h = String(meta.hash)
+    codec = String(meta.codec)
 
     # Transfer-preview / confirmation gate: it's about the transfer SIZE, not the path taken, so fire it
     # ONCE, up front. A big-transfer "confirm by rerun" then PROPAGATES to the cell (approve-by-rerun)
@@ -2790,8 +3799,11 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
         if route.kind === :direct || route.kind === :ssh
             try
                 _t0 = time()
-                moved = route.kind === :direct ? _pull_direct!(src_k, dst_k, name, h, meta, route) :
-                                                 _pull_ssh!(src_k, dst_k, name, h, meta, route)
+                moved = if route.kind === :direct
+                    _pull_direct!(src_k, dst_k, name, h, meta, route)
+                else
+                    _pull_ssh!(src_k, dst_k, name, h, meta, route)
+                end
                 used = route.kind
                 _el = time() - _t0                          # feed the peer-rate memory (skip dedup/tiny moves)
                 (moved > (4 << 20) && _el > 0) &&
@@ -2801,13 +3813,19 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
                 # Real-time DOWNGRADE: the cached path broke (topology likely changed under us) — forget this
                 # pair's verdict so the next transfer re-probes, and relay right now.
                 fellback = true
-                _peer_route_forget_pair!(String(src_k.target.ssh_host), String(dst_k.target.ssh_host))
-                _rlog("region transfer '$name': $(route.kind) failed, forgetting route + falling back to relay — " *
-                      first(sprint(showerror, e), 160))
+                _peer_route_forget_pair!(
+                    String(src_k.target.ssh_host), String(dst_k.target.ssh_host)
+                )
+                _rlog(
+                    "region transfer '$name': $(route.kind) failed, forgetting route + falling back to relay — " *
+                    first(sprint(showerror, e), 160),
+                )
             end
         elseif mode === :direct
-            error("transfer '$name': direct not viable — peer route resolved to :relay (source and dest " *
-                  "must be reachable peers, directly or via the SSH bridge)")
+            error(
+                "transfer '$name': direct not viable — peer route resolved to :relay (source and dest " *
+                "must be reachable peers, directly or via the SSH bridge)",
+            )
         end
     end
 
@@ -2816,12 +3834,21 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
         root = joinpath(_slate_cache_dir(), "memo")
         if src_k.target isa RemoteTarget                   # remote source → land the blob locally
             ep = _data_endpoint!(src_k.target, src_k)
-            moved += pull_blob!(ep.ip, ep.port, h; server_key = ep.server_key, on_progress = on_progress)
+            moved += pull_blob!(
+                ep.ip, ep.port, h; server_key=ep.server_key, on_progress=on_progress
+            )
         end
         if dst_k.target isa RemoteTarget                   # remote destination → ship it there
             ep = _data_endpoint!(dst_k.target, dst_k)
-            moved += push_blob!(ep.ip, ep.port, h; server_key = ep.server_key,
-                                on_plan = nothing, meta = meta, on_progress = on_progress)
+            moved += push_blob!(
+                ep.ip,
+                ep.port,
+                h;
+                server_key=ep.server_key,
+                on_plan=nothing,
+                meta=meta,
+                on_progress=on_progress,
+            )
         end
         # When this relay RESCUED a failed peer attempt, post a ✓ relay row: otherwise the only trace left in
         # the transfers view is the ❌ direct/ssh try, which reads as a dead transfer though the value arrived.
@@ -2829,17 +3856,34 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
         if fellback && (src_k.target isa RemoteTarget || dst_k.target isa RemoteTarget)
             lock(_XFER_VIEW_LOCK) do
                 vid = Threads.atomic_add!(_XFER_VIEW_SEQ, 1)
-                _XFER_VIEWS[vid] = XferView(String(dst_k.target.region), String(src_k.target.region),
-                                            String(name), "relay", moved, moved, relay_t0, time(), "")
+                return _XFER_VIEWS[vid] = XferView(
+                    String(dst_k.target.region),
+                    String(src_k.target.region),
+                    String(name),
+                    "relay",
+                    moved,
+                    moved,
+                    relay_t0,
+                    time(),
+                    "",
+                )
             end
         end
     end
 
-    r = _tool(dst_k, "__slate_bind_blob", Dict{String,Any}(
-        "name" => String(name), "hash" => h, "codec" => codec, "zc" => zc); timeout = _blob_xfer_timeout())
-    rerr = try; getproperty(r, :error); catch; nothing; end
+    r = _tool(
+        dst_k,
+        "__slate_bind_blob",
+        Dict{String,Any}("name" => String(name), "hash" => h, "codec" => codec, "zc" => zc);
+        timeout=_blob_xfer_timeout(),
+    )
+    rerr = try
+        getproperty(r, :error)
+    catch
+        nothing
+    end
     rerr === nothing || error("transfer '$name' (bind): $rerr")
-    return (; bytes = moved, codec = codec, mode = used)
+    return (; bytes=moved, codec=codec, mode=used)
 end
 
 # Boot-window memo carry — "your session follows you", automatically. Called from `prepare!`
@@ -2851,10 +3895,12 @@ end
 function _sync_memo_boot!(k, report)
     k.target isa RemoteTarget || return nothing
     try
-        r = push_notebook_memo!(k, report; boot = true)
+        r = push_notebook_memo!(k, report; boot=true)
         _rlog("memo carry (boot window) → $(k.target.ssh_host):$(k.port + 2) — $r")
     catch e
-        _rlog("memo carry failed — cells recompute remotely instead ($(first(sprint(showerror, e), 200)))")
+        _rlog(
+            "memo carry failed — cells recompute remotely instead ($(first(sprint(showerror, e), 200)))",
+        )
     end
     return nothing
 end
@@ -2870,20 +3916,36 @@ end
 # ReportEngine deliberately has no JSON dep), keyed by hash(host, label).
 const _ATTACH_DIR = joinpath(_slate_cache_dir(), "attach")
 
-_attach_path(host, label) =
-    joinpath(_ATTACH_DIR, string(hash((String(host), String(label))); base = 16) * ".json")
+function _attach_path(host, label)
+    return joinpath(_ATTACH_DIR, string(hash((String(host), String(label))); base=16) * ".json")
+end
 
-function _attach_record!(host, label; port::Int, stream_port::Int, transport::Symbol,
-                         server_key::AbstractString = "", remote_ip::AbstractString = "")
-    fields = ["host" => String(host), "label" => String(label), "port" => string(port),
-              "stream_port" => string(stream_port), "transport" => string(transport),
-              "server_key" => String(server_key), "remote_ip" => String(remote_ip),
-              "ts" => string(round(Int, time()))]
+function _attach_record!(
+    host,
+    label;
+    port::Int,
+    stream_port::Int,
+    transport::Symbol,
+    server_key::AbstractString="",
+    remote_ip::AbstractString="",
+)
+    fields = [
+        "host" => String(host),
+        "label" => String(label),
+        "port" => string(port),
+        "stream_port" => string(stream_port),
+        "transport" => string(transport),
+        "server_key" => String(server_key),
+        "remote_ip" => String(remote_ip),
+        "ts" => string(round(Int, time())),
+    ]
     body = _flat_json(fields)
     try
         mkpath(_ATTACH_DIR)
-        p = _attach_path(host, label); tmp = p * ".tmp"
-        write(tmp, body); mv(tmp, p; force = true)
+        p = _attach_path(host, label)
+        tmp = p * ".tmp"
+        write(tmp, body)
+        mv(tmp, p; force=true)
     catch e
         _rlog("attach-record: could not write for $host/$label ($(sprint(showerror, e)))")
     end
@@ -2893,16 +3955,32 @@ end
 function _attach_lookup(host, label)
     p = _attach_path(host, label)
     isfile(p) || return nothing
-    s = try; read(p, String); catch; return nothing; end
+    s = try
+        read(p, String)
+    catch
+        return nothing
+    end
     g(k) = _manifest_get(s, k)
-    port = tryparse(Int, g("port")); sp = tryparse(Int, g("stream_port"))
+    port = tryparse(Int, g("port"))
+    sp = tryparse(Int, g("stream_port"))
     (port === nothing || sp === nothing || port == 0) && return nothing
     tr = g("transport")
-    return (port = port, stream_port = sp, transport = Symbol(isempty(tr) ? "tunnel" : tr),
-            server_key = g("server_key"), remote_ip = g("remote_ip"))
+    return (
+        port=port,
+        stream_port=sp,
+        transport=Symbol(isempty(tr) ? "tunnel" : tr),
+        server_key=g("server_key"),
+        remote_ip=g("remote_ip"),
+    )
 end
 
-_attach_clear!(host, label) = (try; rm(_attach_path(host, label); force = true); catch; end; nothing)
+_attach_clear!(host, label) = (
+    try
+        rm(_attach_path(host, label); force=true)
+    catch
+    end;
+    nothing
+)
 
 # Drop any attach record pointing at (host, port) — the manual reap path only knows the port, and records
 # are keyed by hash(host,label) with no port index, so scan. Without this, reaping a worker leaves its
@@ -2915,9 +3993,17 @@ function _attach_clear_port!(host, port::Int)
     for f in readdir(_ATTACH_DIR)
         endswith(f, ".json") || continue
         p = joinpath(_ATTACH_DIR, f)
-        s = try; read(p, String); catch; continue; end
-        (_manifest_get(s, "host") == h && tryparse(Int, _manifest_get(s, "port")) == port) &&
-            (try; rm(p; force = true); catch; end)
+        s = try
+            read(p, String)
+        catch
+            continue
+        end
+        (_manifest_get(s, "host") == h && tryparse(Int, _manifest_get(s, "port")) == port) && (
+            try
+                rm(p; force=true)
+            catch
+            end
+        )
     end
     return nothing
 end
@@ -2940,9 +4026,11 @@ end
 # Config-home resolution mirrors SlateHome.config_file(); ReportEngine loads before SlateHome so it can't
 # call it directly (same reason `_slate_cache_dir` is inlined here). KEEP IN SYNC with slate_home.jl.
 function _slate_config_dir()
-    h = get(ENV, "KAIMONSLATE_CONFIG_HOME", "");  isempty(h) || return h
-    kh = get(ENV, "KAIMONSLATE_HOME", "");        isempty(kh) || return joinpath(kh, "config")
-    joinpath(get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config")), "kaimonslate")
+    h = get(ENV, "KAIMONSLATE_CONFIG_HOME", "")
+    isempty(h) || return h
+    kh = get(ENV, "KAIMONSLATE_HOME", "")
+    isempty(kh) || return joinpath(kh, "config")
+    return joinpath(get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config")), "kaimonslate")
 end
 _regions_path() = joinpath(_slate_config_dir(), "regions.json")
 
@@ -2963,23 +4051,61 @@ struct Region
 end
 
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
-_asint(x) = x isa Integer ? Int(x) : x isa AbstractFloat ? round(Int, x) : something(tryparse(Int, String(x)), 0)
-_asbool(x) = x === true || x == 1 || (x isa AbstractString && lowercase(strip(x)) in ("1", "true", "yes", "on"))
+_asint(x) =
+    if x isa Integer
+        Int(x)
+    elseif x isa AbstractFloat
+        round(Int, x)
+    else
+        something(tryparse(Int, String(x)), 0)
+    end
+function _asbool(x)
+    return x === true ||
+           x == 1 ||
+           (x isa AbstractString && lowercase(strip(x)) in ("1", "true", "yes", "on"))
+end
 # Fold a region name to a tag-safe identifier — a cell's `region=<name>` tag folds non-word chars to
 # `_`, so region_set!/region_get/region_delete! MUST fold identically or a stored region can never be
 # looked up again ("slate-remote" stored as "slate_remote"; a get on "slate-remote" would miss).
 _fold_region(name) = replace(strip(String(name)), r"[^A-Za-z0-9_]+" => "_")
-_region_from_dict(d::AbstractDict) = Region(
-    String(get(d, "name", "")), String(get(d, "host", "")),
-    Symbol(let t = String(get(d, "transport", "tunnel")); isempty(t) ? "tunnel" : t end),
-    _asint(get(d, "base_port", 0)), String(get(d, "preload", "")), String(get(d, "data_root", "")),
-    String(get(d, "cache_root", "")), _asint(get(d, "warm", 0)), String(get(d, "threads", "")),
-    _asbool(get(d, "sysimage", false)), _asbool(get(d, "curve", true)), String(get(d, "uuid", "")),
-    String(get(d, "peer", "")))
-_region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
-    "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
-    "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
-    "curve" => r.curve, "uuid" => r.uuid, "peer" => r.peer)
+function _region_from_dict(d::AbstractDict)
+    return Region(
+        String(get(d, "name", "")),
+        String(get(d, "host", "")),
+        Symbol(
+            let t = String(get(d, "transport", "tunnel"))
+                isempty(t) ? "tunnel" : t
+            end,
+        ),
+        _asint(get(d, "base_port", 0)),
+        String(get(d, "preload", "")),
+        String(get(d, "data_root", "")),
+        String(get(d, "cache_root", "")),
+        _asint(get(d, "warm", 0)),
+        String(get(d, "threads", "")),
+        _asbool(get(d, "sysimage", false)),
+        _asbool(get(d, "curve", true)),
+        String(get(d, "uuid", "")),
+        String(get(d, "peer", "")),
+    )
+end
+function _region_to_dict(r::Region)
+    return Dict(
+        "name" => r.name,
+        "host" => r.host,
+        "transport" => String(r.transport),
+        "base_port" => r.base_port,
+        "preload" => r.preload,
+        "data_root" => r.data_root,
+        "cache_root" => r.cache_root,
+        "warm" => r.warm,
+        "threads" => r.threads,
+        "sysimage" => r.sysimage,
+        "curve" => r.curve,
+        "uuid" => r.uuid,
+        "peer" => r.peer,
+    )
+end
 
 # ── Per-region UUID (mesh-artifact naming; PEER_TUNNEL_PLAN §5.5) ──────────────────────────────
 # A stable 128-bit id minted once at region setup and persisted in the region record. Every
@@ -2993,44 +4119,81 @@ region_artifact_name(r::Region) = "slate-$(r.name)-$(region_uuid8(r))"
 # Every configured region (sorted by name). Lock-free: a concurrent writer swaps the file atomically, so a
 # reader sees either the old or the new complete file, never a torn one.
 function regions()
-    p = _regions_path(); isfile(p) || return Region[]
-    data = try; JSON.parse(read(p, String)); catch; return Region[]; end
+    p = _regions_path()
+    isfile(p) || return Region[]
+    data = try
+        JSON.parse(read(p, String))
+    catch
+        return Region[]
+    end
     data isa AbstractVector || return Region[]
     out = Region[]
     for d in data
         d isa AbstractDict || continue
-        r = _region_from_dict(d); isempty(r.name) && continue
+        r = _region_from_dict(d)
+        isempty(r.name) && continue
         push!(out, r)
     end
-    sort!(out; by = r -> r.name)
+    sort!(out; by=r -> r.name)
     return out
 end
-region_get(name) = (n = _fold_region(name); for r in regions(); r.name == n && return r; end; nothing)
+region_get(name) = (
+    n=_fold_region(name);
+    for r in regions()
+        r.name == n && return r
+    end;
+    nothing
+)
 
 # The region's stable UUID, self-healing an older record that predates the field by minting +
 # persisting one on first request (a no-op once set). Returns "" for an unknown region. Peer-mesh
 # code calls this — never `region_get(...).uuid` directly — so a pre-UUID region can't slip through
 # with a blank id.
 function region_uuid(name)
-    r = region_get(name); r === nothing && return ""
+    r = region_get(name)
+    r === nothing && return ""
     isempty(r.uuid) || return r.uuid
-    region_set!(r.name; host = r.host, transport = r.transport, base_port = r.base_port,
-                preload = r.preload, data_root = r.data_root, cache_root = r.cache_root,
-                warm = r.warm, threads = r.threads, sysimage = r.sysimage, curve = r.curve,
-                peer = r.peer).uuid
+    return region_set!(
+        r.name;
+        host=r.host,
+        transport=r.transport,
+        base_port=r.base_port,
+        preload=r.preload,
+        data_root=r.data_root,
+        cache_root=r.cache_root,
+        warm=r.warm,
+        threads=r.threads,
+        sysimage=r.sysimage,
+        curve=r.curve,
+        peer=r.peer,
+    ).uuid
 end
 
 function _write_regions!(list::AbstractVector{Region})
     mkpath(_slate_config_dir())
-    p = _regions_path(); tmp = p * ".tmp"
-    write(tmp, JSON.json([_region_to_dict(r) for r in list], 2)); mv(tmp, p; force = true)
+    p = _regions_path()
+    tmp = p * ".tmp"
+    write(tmp, JSON.json([_region_to_dict(r) for r in list], 2))
+    mv(tmp, p; force=true)
     return nothing
 end
 
 # Create or update a region by name (upsert). Returns the stored Region.
-function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "",
-                     data_root = "", cache_root = "", warm = 0, threads = "", sysimage = false,
-                     curve = true, uuid = "", peer = "")
+function region_set!(
+    name;
+    host,
+    transport=:tunnel,
+    base_port=0,
+    preload="",
+    data_root="",
+    cache_root="",
+    warm=0,
+    threads="",
+    sysimage=false,
+    curve=true,
+    uuid="",
+    peer="",
+)
     n = _fold_region(name)   # tag-safe id — MUST match region_get/region_delete! + a cell's `region=` tag
     isempty(n) && error("region name required")
     return lock(_REGIONS_LOCK) do
@@ -3039,24 +4202,41 @@ function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "
         # The UUID is STABLE across upserts: an explicit arg wins, else keep the existing region's,
         # else mint one. Editing a region (warm count, ports, …) must never rotate it — every mesh
         # artifact keyed on `slate-<region>-<uuid8>` would orphan (PEER_TUNNEL_PLAN §5.5).
-        u = !isempty(String(uuid)) ? String(uuid) :
-            (i === nothing || isempty(list[i].uuid)) ? _mint_region_uuid() : list[i].uuid
+        u = if !isempty(String(uuid))
+            String(uuid)
+        elseif (i === nothing || isempty(list[i].uuid))
+            _mint_region_uuid()
+        else
+            list[i].uuid
+        end
         # `peer` (§5.6 advertise addr) is likewise sticky across upserts: explicit arg wins, else keep
         # the existing value, else "" (derive from the hub-facing IP).
         pe = !isempty(String(peer)) ? String(peer) : (i === nothing ? "" : list[i].peer)
-        r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
-                   String(data_root), String(cache_root), Int(warm), String(threads),
-                   _asbool(sysimage), _asbool(curve), u, pe)
+        r = Region(
+            String(n),
+            String(host),
+            Symbol(transport),
+            Int(base_port),
+            String(preload),
+            String(data_root),
+            String(cache_root),
+            Int(warm),
+            String(threads),
+            _asbool(sysimage),
+            _asbool(curve),
+            u,
+            pe,
+        )
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)
-        r
+        return r
     end
 end
 
 function region_delete!(name)
     n = _fold_region(name)
     lock(_REGIONS_LOCK) do
-        _write_regions!(filter(x -> x.name != n, regions()))
+        return _write_regions!(filter(x -> x.name != n, regions()))
     end
     return nothing
 end
@@ -3076,8 +4256,12 @@ function region_remove!(name)
     end
     # Remove this region's peer-mesh artifacts (keypair, authorized_keys grants, host-key pins) BEFORE the
     # record is dropped — teardown needs the host + uuid to enumerate them by tag (§5.5). Best-effort.
-    try; teardown_region_mesh!(name); catch e
-        _rlog("region[$(_fold_region(name))]: mesh teardown failed ($(first(sprint(showerror, e), 120)))")
+    try
+        teardown_region_mesh!(name)
+    catch e
+        _rlog(
+            "region[$(_fold_region(name))]: mesh teardown failed ($(first(sprint(showerror, e), 120)))",
+        )
     end
     region_delete!(name)
     delete!(_REGION_STATUS, _fold_region(name))   # status is keyed by the folded region name
@@ -3089,8 +4273,10 @@ end
 # Snapshot of the parked wires (host, label, port, idle seconds) — for the query surface.
 function parked_wires()
     lock(_PARK_LOCK) do
-        [(host = k[1], label = k[2], port = p.port, idle_s = round(Int, time() - p.since))
-         for (k, p) in _PARKED]
+        return [
+            (host=k[1], label=k[2], port=p.port, idle_s=round(Int, time() - p.since)) for
+            (k, p) in _PARKED
+        ]
     end
 end
 
@@ -3099,22 +4285,25 @@ end
 # when the open range is too narrow. Shared by the warm reconcile AND a region kernel's own cold spawn
 # so both land inside the base range you opened in the firewall — never the monotonic auto counter,
 # which marches past the range and never rewinds.
-function _direct_port_slots(base_port::Int, n::Int; roster, label::AbstractString = "")
+function _direct_port_slots(base_port::Int, n::Int; roster, label::AbstractString="")
     occupied = Set{Int}()
     for w in roster
         w["alive"] === true || continue
-        p = w["port"]; push!(occupied, p, p + 1, p + 2)
+        p = w["port"]
+        push!(occupied, p, p + 1, p + 2)
     end
     ports = Tuple{Int,Int}[]
     k = 0
     while length(ports) < n && k < 256
-        p = base_port + 3k; k += 1
+        p = base_port + 3k
+        k += 1
         (p + 2) <= 65535 || break
         (p in occupied || (p + 1) in occupied || (p + 2) in occupied) && continue
         push!(ports, (p, p + 1))
     end
-    length(ports) < n &&
-        _rlog("$(isempty(label) ? "" : label * ": ")only $(length(ports)) free :direct slot(s) from base $base_port — open a wider range for $n worker(s)")
+    length(ports) < n && _rlog(
+        "$(isempty(label) ? "" : label * ": ")only $(length(ports)) free :direct slot(s) from base $base_port — open a wider range for $n worker(s)",
+    )
     return ports
 end
 
@@ -3125,9 +4314,12 @@ end
 # collision/pollution goes away. Empty path ⇒ the infra-only shared "detached" — nothing is replicated
 # there, so there's nothing to pollute.
 function _proj_key(p)
-    s = String(p); isempty(s) && return "detached"
+    s = String(p)
+    isempty(s) && return "detached"
     ap = abspath(expanduser(s))
-    replace(basename(rstrip(ap, '/')), r"[^A-Za-z0-9._-]" => "_") * "-" * bytes2hex(_SHA.sha1(codeunits(ap)))[1:8]
+    return replace(basename(rstrip(ap, '/')), r"[^A-Za-z0-9._-]" => "_") *
+           "-" *
+           bytes2hex(_SHA.sha1(codeunits(ap)))[1:8]
 end
 # A notebook's remote env dir: keyed by the content it REPLICATES (origin_env) when it has one, else its
 # parent project — never the shared mutable dir when there's content to isolate.
@@ -3143,54 +4335,76 @@ _remote_env_key(origin_env, parent) = _proj_key(isempty(String(origin_env)) ? pa
 # region reclaims it on adoption. For a :direct region, `port` carries base_port as the range HINT —
 # fresh_spawn allocates a free slot from it (see _direct_port_slots) so the kernel lands in the
 # firewall-opened range, not the growing auto counter.
-_region_target(r::Region; origin_env::AbstractString = r.preload) =
-    RemoteTarget(r.host; transport = r.transport,
-        project = "~/.cache/kaimonslate/remote/" * _proj_key(origin_env),
-        port = (r.transport === :direct ? r.base_port : 0),
-        origin_env = origin_env, datadir = r.data_root, cache_root = r.cache_root, region = r.name,
-        sysimage = r.sysimage, curve = r.curve)
+function _region_target(r::Region; origin_env::AbstractString=r.preload)
+    return RemoteTarget(
+        r.host;
+        transport=r.transport,
+        project="~/.cache/kaimonslate/remote/" * _proj_key(origin_env),
+        port=(r.transport === :direct ? r.base_port : 0),
+        origin_env=origin_env,
+        datadir=r.data_root,
+        cache_root=r.cache_root,
+        region=r.name,
+        sysimage=r.sysimage,
+        curve=r.curve,
+    )
+end
 
 # In-flight adoption claims (hub-local). Without a claim two notebooks opening at once could both scan
 # the roster, see the same idle worker, and both adopt it.
 const _REGION_CLAIMS = Set{Tuple{String,Int}}()
 const _REGION_CLAIM_LOCK = ReentrantLock()
-_region_claimed(host, port::Int) =
-    lock(_REGION_CLAIM_LOCK) do; (String(host), port) in _REGION_CLAIMS; end
-_release_region_claim!(host, port::Int) =
-    (lock(_REGION_CLAIM_LOCK) do; delete!(_REGION_CLAIMS, (String(host), port)); end; nothing)
+_region_claimed(host, port::Int) = lock(_REGION_CLAIM_LOCK) do ;
+    return (String(host), port) in _REGION_CLAIMS
+end
+function _release_region_claim!(host, port::Int)
+    (
+        lock(_REGION_CLAIM_LOCK) do ;
+            return delete!(_REGION_CLAIMS, (String(host), port))
+        end;
+        nothing
+    )
+end
 
 # A roster entry this hub can adopt for region `name`: alive, idle, ours, tagged with this region.
-_region_warm_worker(w, name::AbstractString) =
-    w["alive"] === true && get(w, "state", "") == "idle" &&
-    _manifest_get(w["manifest"], "region") == String(name) &&
-    _manifest_get(w["manifest"], "hub") == gethostname()
+function _region_warm_worker(w, name::AbstractString)
+    return w["alive"] === true &&
+           get(w, "state", "") == "idle" &&
+           _manifest_get(w["manifest"], "region") == String(name) &&
+           _manifest_get(w["manifest"], "hub") == gethostname()
+end
 
 # Does warm worker `w` hold the ENV the adopting notebook needs? Adoption re-points PARENT_PROJECT but
 # does NOT re-instantiate, so its loaded packages must already be the notebook's — i.e. it was built
 # with the SAME env-keyed `project` (and `transport`). Empty ⇒ "don't care" (no gating). A mismatch is
 # left un-adopted so the caller cold-spawns and provisions the notebook's env fresh.
-_worker_env_fits(w, project::AbstractString, transport::AbstractString) =
-    (isempty(project)   || _manifest_get(w["manifest"], "project")   == String(project)) &&
-    (isempty(transport) || _manifest_get(w["manifest"], "transport") == String(transport))
+function _worker_env_fits(w, project::AbstractString, transport::AbstractString)
+    return (isempty(project) || _manifest_get(w["manifest"], "project") == String(project)) &&
+           (isempty(transport) || _manifest_get(w["manifest"], "transport") == String(transport))
+end
 
 # Find + claim a warm worker for region `name` on `host`. First unclaimed wins — a region's warm
 # workers are interchangeable ONLY within one env: `project`/`transport` (when given) must match the
 # adopting notebook's, because `__slate_adopt` re-points PARENT_PROJECT but does NOT re-instantiate the
 # env — a worker booted with a DIFFERENT env holds the wrong packages. A mismatch simply isn't adopted,
 # so the caller cold-spawns and provisions the notebook's env fresh. Returns (port, stream_port) | nothing.
-function _claim_region_worker!(name::AbstractString, host; project::AbstractString = "", transport::AbstractString = "")
+function _claim_region_worker!(
+    name::AbstractString, host; project::AbstractString="", transport::AbstractString=""
+)
     isempty(String(name)) && return nothing
     for w in list_remote_workers(host)
         _region_warm_worker(w, name) || continue
         _worker_env_fits(w, project, transport) || continue
-        sp = tryparse(Int, _manifest_get(w["manifest"], "stream_port")); sp === nothing && continue
+        sp = tryparse(Int, _manifest_get(w["manifest"], "stream_port"))
+        sp === nothing && continue
         port = w["port"]
         claimed = lock(_REGION_CLAIM_LOCK) do
             (String(host), port) in _REGION_CLAIMS && return false
-            push!(_REGION_CLAIMS, (String(host), port)); true
+            push!(_REGION_CLAIMS, (String(host), port))
+            return true
         end
         claimed || continue
-        return (port = port, stream_port = sp)
+        return (port=port, stream_port=sp)
     end
     return nothing
 end
@@ -3199,8 +4413,9 @@ end
 # down / ssh banner timeout / provision error) would die silently in its @async task; the outcome lands
 # here so the Regions UI can surface it.
 const _REGION_STATUS = Dict{String,Any}()
-_set_region_status!(name, ok::Bool, msg::AbstractString) =
-    (_REGION_STATUS[String(name)] = (ok = ok, msg = String(msg), ts = time()); nothing)
+function _set_region_status!(name, ok::Bool, msg::AbstractString)
+    return (_REGION_STATUS[String(name)]=(ok=ok, msg=String(msg), ts=time()); nothing)
+end
 region_status(name) = get(_REGION_STATUS, String(name), nothing)
 
 # Drive a region's host toward its `warm` count (0 drains), recording the outcome for the UI. Safe to
@@ -3222,9 +4437,15 @@ function region_reconcile!(name)
 end
 
 # Reconcile every region that keeps warm workers — the hub's desired-state driver.
-reconcile_all_regions!() = for r in regions()
-    r.warm > 0 && (try; region_reconcile!(r.name); catch; end)
-end
+reconcile_all_regions!() =
+    for r in regions()
+        r.warm > 0 && (
+            try
+                region_reconcile!(r.name)
+            catch
+            end
+        )
+    end
 
 # Reap this region's dead workers + idlers of an old preload env/transport, launch the deficit (one
 # provision pass covers them all), trim excess idlers. Never touches an attached worker, a claimed
@@ -3233,37 +4454,60 @@ function _region_reconcile_impl!(r::Region)
     host = r.host
     t = _region_target(r)
     roster = list_remote_workers(host)
-    mine = [w for w in roster
-            if _manifest_get(w["manifest"], "region") == r.name &&
-               _manifest_get(w["manifest"], "hub") == gethostname()]
+    mine = [
+        w for w in roster if _manifest_get(w["manifest"], "region") == r.name &&
+            _manifest_get(w["manifest"], "hub") == gethostname()
+    ]
     # A region's def can change (new preload/transport) — its old idle workers still carry the region tag
     # but the wrong env dir/transport, so they can't serve it. `fits` distinguishes usable warm from stale.
-    fits(w) = _manifest_get(w["manifest"], "project") == t.project &&
-              _manifest_get(w["manifest"], "transport") == string(r.transport)
-    dead  = [w for w in mine if w["alive"] !== true]
-    stale = [w for w in mine if _region_warm_worker(w, r.name) && !fits(w) && !_region_claimed(host, w["port"])]
+    fits(w) =
+        _manifest_get(w["manifest"], "project") == t.project &&
+        _manifest_get(w["manifest"], "transport") == string(r.transport)
+    dead = [w for w in mine if w["alive"] !== true]
+    stale = [
+        w for
+        w in mine if _region_warm_worker(w, r.name) && !fits(w) && !_region_claimed(host, w["port"])
+    ]
     for w in vcat(dead, stale)
         reap_remote_worker(host, w["port"])
     end
-    warm = [w for w in mine if _region_warm_worker(w, r.name) && fits(w) && !_region_claimed(host, w["port"])]
+    warm = [
+        w for
+        w in mine if _region_warm_worker(w, r.name) && fits(w) && !_region_claimed(host, w["port"])
+    ]
     deficit = r.warm - length(warm)
-    cleaned = isempty(dead) && isempty(stale) ? "" : " (cleaned $(length(dead)) dead, $(length(stale)) stale-env)"
+    cleaned = if isempty(dead) && isempty(stale)
+        ""
+    else
+        " (cleaned $(length(dead)) dead, $(length(stale)) stale-env)"
+    end
     if deficit > 0
         provision_remote!(t, r.preload)              # idempotent; one pass covers every launch below
         # Ports for the new workers. A :direct region with a pinned base marches up from it in strides of
         # 3 (each worker owns port..port+2) so you know exactly which range to open in the firewall.
         # Otherwise (tunnel, or no base) auto-assign from _next_ports, floored above the live roster —
         # stride 2 for a :tunnel region (its blob picks a worker-chosen free port, not gate+2).
-        ports = (r.transport === :direct && r.base_port > 0) ?
-            _direct_port_slots(r.base_port, deficit; roster = roster, label = "region[$(r.name)]") :
+        ports = if (r.transport === :direct && r.base_port > 0)
+            _direct_port_slots(r.base_port, deficit; roster=roster, label="region[$(r.name)]")
+        else
             begin
-                floor = _port_floor(host; workers = roster)   # never deal a live worker's ports (see _port_floor)
+                floor = _port_floor(host; workers=roster)   # never deal a live worker's ports (see _port_floor)
                 res = r.transport === :direct ? 3 : 2
-                [_next_ports(; floor, reserve = res) for _ in 1:deficit]
+                [_next_ports(; floor, reserve=res) for _ in 1:deficit]
             end
+        end
         for (port, sp) in ports
-            _launch_worker!(t, port, sp; label = "", parent = "", threads = r.threads,
-                            warm = true, region = r.name, warm_deps = !isempty(r.preload))
+            _launch_worker!(
+                t,
+                port,
+                sp;
+                label="",
+                parent="",
+                threads=r.threads,
+                warm=true,
+                region=r.name,
+                warm_deps=(!isempty(r.preload)),
+            )
         end
         return "region[$(r.name)]: launched $(length(ports)) worker(s) → $(r.warm) warm on $host$cleaned"
     elseif deficit < 0
@@ -3304,30 +4548,44 @@ function park_remote!(k)
     lock(_PARK_LOCK) do
         old = pop!(_PARKED, (t.ssh_host, k.label), nothing)   # shouldn't exist — close is serialized
         old === nothing || _close_parked!(old)
-        _PARKED[(t.ssh_host, k.label)] = ParkedRemote(k.conn, k.tunnel, k.port, k.stream_port, time())
+        return _PARKED[(t.ssh_host, k.label)] = ParkedRemote(
+            k.conn, k.tunnel, k.port, k.stream_port, time()
+        )
     end
     _ensure_park_sweeper!()
-    _rlog("park: keeping the wire to worker-$(k.port) on $(t.ssh_host) warm for '$(k.label)' (ttl $(round(Int, _park_ttl()))s)")
+    _rlog(
+        "park: keeping the wire to worker-$(k.port) on $(t.ssh_host) warm for '$(k.label)' (ttl $(round(Int, _park_ttl()))s)",
+    )
     return true
 end
 
-unpark_remote!(host, label) =
-    lock(_PARK_LOCK) do; pop!(_PARKED, (String(host), String(label)), nothing); end
+unpark_remote!(host, label) = lock(_PARK_LOCK) do ;
+    return pop!(_PARKED, (String(host), String(label)), nothing)
+end
 
 function _close_parked!(p::ParkedRemote)
-    try; _kaimon().disconnect!(p.conn); catch; end
-    p.tunnel === nothing || (try; close_tunnel(p.tunnel); catch; end)
+    try
+        _kaimon().disconnect!(p.conn)
+    catch
+    end
+    p.tunnel === nothing || (
+        try
+            close_tunnel(p.tunnel)
+        catch
+        end
+    )
     return nothing
 end
 
 # Kill-path hygiene: a parked wire to a worker that is being killed/reaped must not linger —
 # match by label (teardown kill) or by port (reap from the roster).
-function _evict_parked!(host; port::Int = 0, label::AbstractString = "")
+function _evict_parked!(host; port::Int=0, label::AbstractString="")
     lock(_PARK_LOCK) do
         for key in collect(keys(_PARKED))
             key[1] == String(host) || continue
             p = _PARKED[key]
-            ((!isempty(label) && key[2] == String(label)) || (port != 0 && p.port == port)) || continue
+            ((!isempty(label) && key[2] == String(label)) || (port != 0 && p.port == port)) ||
+                continue
             delete!(_PARKED, key)
             _close_parked!(p)
             _rlog("park: evicted wire to worker-$(p.port) on $host ('$(key[2])')")
@@ -3338,7 +4596,7 @@ end
 
 function _ensure_park_sweeper!()
     _PARK_SWEEPER[] === nothing || return nothing
-    _PARK_SWEEPER[] = Timer(60.0; interval = 60.0) do _
+    _PARK_SWEEPER[] = Timer(60.0; interval=60.0) do _
         try
             ttl = _park_ttl()
             lock(_PARK_LOCK) do
@@ -3347,7 +4605,9 @@ function _ensure_park_sweeper!()
                     time() - p.since > ttl || continue
                     delete!(_PARKED, key)
                     _close_parked!(p)
-                    _rlog("park: TTL expired — wire to worker-$(p.port) on $(key[1]) closed (worker stays warm; next open uses the record)")
+                    _rlog(
+                        "park: TTL expired — wire to worker-$(p.port) on $(key[1]) closed (worker stays warm; next open uses the record)",
+                    )
                 end
             end
         catch
@@ -3399,27 +4659,32 @@ function list_remote_workers(host)
     sh = replace(_WORKERS_PROBE_SH, "REMOTE_WORKER_DIR" => _REMOTE_WORKER)
     ok, out = _ssh_capture(host, `$sh`)   # one token → the remote login shell runs the script verbatim
     ok || return Any[]
-    i = findfirst('\x02', out); j = findlast('\x03', out)
+    i = findfirst('\x02', out)
+    j = findlast('\x03', out)
     (i === nothing || j === nothing || j <= i) && return Any[]
     payload = out[nextind(out, i):prevind(out, j)]
     workers = Any[]
-    for rec in split(payload, '\x1e'; keepempty = false)
+    for rec in split(payload, '\x1e'; keepempty=false)
         parts = split(rec, '\x1f')
         length(parts) >= 6 || continue
-        port = tryparse(Int, strip(parts[1])); port === nothing && continue
+        port = tryparse(Int, strip(parts[1]))
+        port === nothing && continue
         # state sidecar: "attached 1783659480" / "idle 1783659480" / "" (pre-sidecar worker)
         sw = split(strip(parts[5]))
-        push!(workers, Dict{String,Any}(
-            "port" => port,
-            "alive" => strip(parts[2]) == "1",
-            "lastActivity" => something(tryparse(Int, strip(parts[3])), 0),
-            "logBytes" => something(tryparse(Int, strip(parts[4])), 0),
-            "state" => isempty(sw) ? "" : String(sw[1]),
-            "stateSince" => length(sw) > 1 ? something(tryparse(Int, sw[2]), 0) : 0,
-            "manifest" => String(strip(parts[6])),
-            # latest telemetry sample (raw JSON from the worker's 2s sampler; "" pre-telemetry)
-            "stats" => length(parts) >= 7 ? String(strip(parts[7])) : "",
-        ))
+        push!(
+            workers,
+            Dict{String,Any}(
+                "port" => port,
+                "alive" => strip(parts[2]) == "1",
+                "lastActivity" => something(tryparse(Int, strip(parts[3])), 0),
+                "logBytes" => something(tryparse(Int, strip(parts[4])), 0),
+                "state" => isempty(sw) ? "" : String(sw[1]),
+                "stateSince" => length(sw) > 1 ? something(tryparse(Int, sw[2]), 0) : 0,
+                "manifest" => String(strip(parts[6])),
+                # latest telemetry sample (raw JSON from the worker's 2s sampler; "" pre-telemetry)
+                "stats" => length(parts) >= 7 ? String(strip(parts[7])) : "",
+            ),
+        )
     end
     return workers
 end
@@ -3428,7 +4693,7 @@ end
 # we wrote ourselves; a regex is enough and avoids a parser on this path).
 function _manifest_get(json::AbstractString, key::AbstractString)
     m = match(Regex("\"" * key * "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\""), json)
-    m === nothing ? "" : replace(replace(m.captures[1], "\\\"" => "\""), "\\\\" => "\\")
+    return m === nothing ? "" : replace(replace(m.captures[1], "\\\"" => "\""), "\\\\" => "\\")
 end
 
 # The first auto-assign port safely ABOVE everything the host's roster occupies (each worker owns
@@ -3436,7 +4701,7 @@ end
 # so a fresh spawn must not trust the counter alone: without this floor it re-deals a live worker's
 # ports and the new worker dies at boot on ZMQ bind. `workers` = a roster already in hand (avoid a
 # second ssh probe), else it's fetched.
-function _port_floor(host; workers = nothing)
+function _port_floor(host; workers=nothing)
     ws = workers === nothing ? list_remote_workers(host) : workers
     top = 0
     for w in ws
@@ -3454,14 +4719,17 @@ function _find_live_worker(host, label, parent)
     for w in list_remote_workers(host)
         w["alive"] === true || continue
         mf = w["manifest"]
-        (_manifest_get(mf, "notebook") == String(label) &&
-         _manifest_get(mf, "parent") == String(parent) &&
-         _manifest_get(mf, "hub") == gethostname()) || continue
-        sp = tryparse(Int, _manifest_get(mf, "stream_port")); sp === nothing && continue
+        (
+            _manifest_get(mf, "notebook") == String(label) &&
+            _manifest_get(mf, "parent") == String(parent) &&
+            _manifest_get(mf, "hub") == gethostname()
+        ) || continue
+        sp = tryparse(Int, _manifest_get(mf, "stream_port"))
+        sp === nothing && continue
         push!(matches, (w["port"], sp))
     end
     length(matches) == 1 || return nothing
-    return (port = matches[1][1], stream_port = matches[1][2])
+    return (port=matches[1][1], stream_port=matches[1][2])
 end
 
 # Evict any ConnectionManager entry the hub still holds for worker `host:port`. A superseded or
@@ -3474,16 +4742,29 @@ end
 # reap (mark it dead everywhere) and self-healingly in the dial loop when "Already connected" is hit.
 function _evict_worker_conn!(host, port::Int)
     nm = "slate-$(host)-$(port)"
-    mgr = try; _manager(); catch; return 0; end
+    mgr = try
+        _manager()
+    catch
+        return 0
+    end
     K = _kaimon()
     stale = try
-        lock(mgr.lock) do; [c for c in mgr.connections if getfield(c, :name) == nm]; end
+        lock(mgr.lock) do ;
+            return [c for c in mgr.connections if getfield(c, :name) == nm]
+        end
     catch
         return 0
     end
     for c in stale
-        st = try; getfield(c, :status); catch; "?"; end
-        try; K.disconnect!(c); catch; end
+        st = try
+            getfield(c, :status)
+        catch
+            "?"
+        end
+        try
+            K.disconnect!(c)
+        catch
+        end
         _rlog("evicted stale hub connection '$nm' (was $st) — worker superseded/reaped")
     end
     return length(stale)
@@ -3497,24 +4778,56 @@ never auto-reaps (a worker may hold results worth keeping). Returns true if the 
 """
 function reap_remote_worker(host, port::Int)
     _rlog("reap: killing worker-$port on $host (manual)")
-    try; _evict_parked!(host; port = port); catch; end        # a parked wire to it must die too
-    try; _evict_worker_conn!(host, port); catch; end          # …and any non-parked hub wire (warm/reconnect) — else a respawn on this port hits "Already connected"
-    try; _peer_route_forget!(host); catch; end                # …and any cached peer-route verdict touching this host (topology changed)
+    try
+        _evict_parked!(host; port=port)
+    catch
+    end        # a parked wire to it must die too
+    try
+        _evict_worker_conn!(host, port)
+    catch
+    end          # …and any non-parked hub wire (warm/reconnect) — else a respawn on this port hits "Already connected"
+    try
+        _peer_route_forget!(host)
+    catch
+    end                # …and any cached peer-route verdict touching this host (topology changed)
     # NOTE: the mesh-grant permitopen cache is deliberately NOT cleared here — `_mesh_finalize_port!`
     # self-corrects (re-installs when the live blob port differs from the cached one), so a respawn on a
     # new port is caught on the next transfer; clearing it would drop the "introduced" signal and skip the
     # finalize. It's cleared only on region teardown.
-    try; _evict_data_tunnels!(host; port = _blob_data_port_cached(host, port)); catch; end   # real port — a relocated tunnel worker's data forward isn't at gate+2
-    try; _blob_dport_forget!(host, port); catch; end          # …and drop its discovered-port cache (topology changed)
-    try; _attach_clear_port!(host, port); catch; end          # …and its notebook's attach record, so the next open skips a ~9s dial into the corpse
-    try; _release_region_claim!(host, port); catch; end       # release the in-flight adoption claim for this port
+    try
+        _evict_data_tunnels!(host; port=_blob_data_port_cached(host, port))
+    catch
+    end   # real port — a relocated tunnel worker's data forward isn't at gate+2
+    try
+        _blob_dport_forget!(host, port)
+    catch
+    end          # …and drop its discovered-port cache (topology changed)
+    try
+        _attach_clear_port!(host, port)
+    catch
+    end          # …and its notebook's attach record, so the next open skips a ~9s dial into the corpse
+    try
+        _release_region_claim!(host, port)
+    catch
+    end       # release the in-flight adoption claim for this port
     # SIGTERM (graceful) then SIGKILL after a short grace. A FROZEN or wedged worker — exactly the kind a
     # supersede-reap targets — never processes SIGTERM (a stopped process queues it; a signal-ignoring one
     # drops it), so the SIGKILL escalation is what actually frees its LISTEN port and RAM. Synchronous, so
     # by the time a cold spawn reuses this port the old holder is gone (no "address already in use").
     let pat = "worker-$(port).jl"
-        try; _ssh_test(host, `sh -c $("pkill -TERM -f '$pat'; sleep 1; pkill -KILL -f '$pat'; true")`); catch; end
+        try
+            _ssh_test(
+                host, `sh -c $("pkill -TERM -f '$pat'; sleep 1; pkill -KILL -f '$pat'; true")`
+            )
+        catch
+        end
     end
-    try; _ssh_ok(host, `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json") $("$_REMOTE_WORKER/worker-$port.state") $("$_REMOTE_WORKER/worker-$port.stats")`); catch; end
+    try
+        _ssh_ok(
+            host,
+            `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json") $("$_REMOTE_WORKER/worker-$port.state") $("$_REMOTE_WORKER/worker-$port.stats")`,
+        )
+    catch
+    end
     return true
 end

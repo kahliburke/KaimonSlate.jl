@@ -14,7 +14,9 @@ function _secrets_load()
     return try
         JSON.parse(read(f, String))
     catch e
-        @warn "slate: could not read secrets file — treating as unreadable" file = f exception = (e, catch_backtrace())
+        @warn "slate: could not read secrets file — treating as unreadable" file = f exception = (
+            e, catch_backtrace()
+        )
         nothing
     end
 end
@@ -25,9 +27,12 @@ function _secrets_save!(d::AbstractDict)
     mkpath(SlateHome.config_home())
     f = SlateHome.secrets_file()
     open(f, "w") do io
-        write(io, JSON.json(d, 2))
+        return write(io, JSON.json(d, 2))
     end
-    try; chmod(f, 0o600); catch; end     # best-effort: keep tokens off other users
+    try
+        chmod(f, 0o600)
+    catch
+    end     # best-effort: keep tokens off other users
     return f
 end
 
@@ -36,8 +41,10 @@ function publish_secret_set!(ref::AbstractString, value::AbstractString)
     r = String(ref)
     isempty(strip(r)) && return secret_refs()
     d = _secrets_load()
-    d === nothing && error("secrets file is unreadable — refusing to overwrite the stored tokens " *
-                           "(fix or remove $(SlateHome.secrets_file()) first)")
+    d === nothing && error(
+        "secrets file is unreadable — refusing to overwrite the stored tokens " *
+        "(fix or remove $(SlateHome.secrets_file()) first)",
+    )
     isempty(strip(String(value))) ? delete!(d, r) : (d[r] = String(value))
     _secrets_save!(d)
     return secret_refs()
@@ -72,7 +79,7 @@ function notebook_docid(nb::LiveNotebook)
         okorg, origin = _git_run(dir, `git config --get remote.origin.url`)
         (okorg && !isempty(strip(origin))) && (sourceRepo = _repo_slug(origin))
     end
-    return (; docId = _ensure_docid!(nb), sourceRepo = sourceRepo, sourcePath = sourcePath)
+    return (; docId=_ensure_docid!(nb), sourceRepo=sourceRepo, sourcePath=sourcePath)
 end
 
 # A canonical RFC-4122 v4 UUID string, without pulling in the UUIDs stdlib as a dep.
@@ -92,19 +99,23 @@ function _ensure_docid!(nb::LiveNotebook)
     if isempty(id)
         id = _uuid4_str()
         nb.report.meta["docid"] = String(id)
-        try; _persist!(nb); catch e; @warn "slate: could not persist docid" exception = e; end
+        try
+            _persist!(nb)
+        catch e
+            @warn "slate: could not persist docid" exception = e
+        end
     end
     return String(id)
 end
 
 # Ensure a Document exists for `nb` in `ledger`, refreshing its slug/title/source metadata; returns
 # (; docId, slug). Assigns the given target names to the doc so the manager shows the intended set.
-function _ensure_doc!(ledger, nb::LiveNotebook; target_names = String[])
+function _ensure_doc!(ledger, nb::LiveNotebook; target_names=String[])
     info = notebook_docid(nb)
     slug = doc_slug(nb)
     title = String(get(nb.report.meta, "title", slug))
     doc = get!(ledger.documents, info.docId) do
-        PublishLedger.Document(info.docId)
+        return PublishLedger.Document(info.docId)
     end
     doc.slug = slug
     doc.title = title
@@ -113,21 +124,39 @@ function _ensure_doc!(ledger, nb::LiveNotebook; target_names = String[])
     for n in target_names
         String(n) in doc.targets || push!(doc.targets, String(n))
     end
-    return (; docId = info.docId, slug = slug)
+    return (; docId=info.docId, slug=slug)
 end
 
 # ── ledger → view JSON ─────────────────────────────────────────────────────────────────────────────
 # The manager's read model. Targets carry only NON-secret config; we surface `secretRef` names, never
 # secret values. `available` lists the target kinds the UI can offer.
-const _TARGET_KINDS = ["github-pages", "cloudflare-pages", "netlify", "s3", "r2", "rsync", "rsync-serve", "zenodo"]
+const _TARGET_KINDS = [
+    "github-pages", "cloudflare-pages", "netlify", "s3", "r2", "rsync", "rsync-serve", "zenodo"
+]
 
-_event_view(e) = Dict{String,Any}("id" => e.id, "ts" => e.ts, "target" => e.target,
-    "status" => e.status, "url" => e.url, "doi" => e.doi, "commit" => e.commit, "note" => e.note)
+function _event_view(e)
+    return Dict{String,Any}(
+        "id" => e.id,
+        "ts" => e.ts,
+        "target" => e.target,
+        "status" => e.status,
+        "url" => e.url,
+        "doi" => e.doi,
+        "commit" => e.commit,
+        "note" => e.note,
+    )
+end
 
 function _doc_view(d)
-    return Dict{String,Any}("docId" => d.docId, "slug" => d.slug, "title" => d.title,
-        "sourceRepo" => d.sourceRepo, "sourcePath" => d.sourcePath, "targets" => copy(d.targets),
-        "events" => [_event_view(e) for e in reverse(d.events)])   # newest first for display
+    return Dict{String,Any}(
+        "docId" => d.docId,
+        "slug" => d.slug,
+        "title" => d.title,
+        "sourceRepo" => d.sourceRepo,
+        "sourcePath" => d.sourcePath,
+        "targets" => copy(d.targets),
+        "events" => [_event_view(e) for e in reverse(d.events)],
+    )   # newest first for display
 end
 
 _target_view(t) = Dict{String,Any}("name" => t.name, "kind" => t.kind, "config" => t.config)
@@ -139,21 +168,25 @@ _target_view(t) = Dict{String,Any}("name" => t.name, "kind" => t.kind, "config" 
 # A site is "dirty" (unsynced) when its build changed since that stamp — the cue to re-Sync.
 _sync_stamp_file(dir) = joinpath(dir, ".slate-synced.json")
 function _write_sync_stamp!(dir, targets, results)
-    any(r -> r.ok, results) || return
+    any(r -> r.ok, results) || return nothing
     ok = [String(n) for (n, r) in zip(targets, results) if r.ok]
-    try; write(_sync_stamp_file(dir), JSON.json(Dict("at" => round(Int, time()), "targets" => ok))); catch; end
+    try
+        write(_sync_stamp_file(dir), JSON.json(Dict("at" => round(Int, time()), "targets" => ok)))
+    catch
+    end
 end
 # (haslocal, synced-epoch, modified-epoch) — `modified` is the manifest / front-page index, which every
 # add/remove/arrange rewrites; `synced` is the stamp's mtime. modified > synced ⇒ undeployed changes.
 function _site_build_times(dir)
-    (dir === nothing || !isdir(dir)) && return (haslocal = false, synced = 0, modt = 0)
+    (dir === nothing || !isdir(dir)) && return (haslocal=false, synced=0, modt=0)
     stampf = _sync_stamp_file(dir)
     synced = isfile(stampf) ? round(Int, mtime(stampf)) : 0
     modt = 0
     for f in (_SITE_MANIFEST, "index.html")
-        p = joinpath(dir, f); isfile(p) && (modt = max(modt, round(Int, mtime(p))))
+        p = joinpath(dir, f)
+        isfile(p) && (modt = max(modt, round(Int, mtime(p))))
     end
-    return (haslocal = true, synced = synced, modt = modt)
+    return (haslocal=true, synced=synced, modt=modt)
 end
 
 # Enrich a site's manifest doc entry with computed provenance for the manager's per-doc detail view:
@@ -181,27 +214,39 @@ function _site_view(s)
     hasTargets = !isempty(s.targets)
     # Home-page staleness: the home notebook's source `.jl` mtime vs its rendered front-page template —
     # so the UI can tell whether re-staging the home would change anything.
-    homeMtime = (fp.home && !isempty(fp.homePath) && isfile(fp.homePath)) ? round(Int, mtime(fp.homePath)) : 0
+    homeMtime = if (fp.home && !isempty(fp.homePath) && isfile(fp.homePath))
+        round(Int, mtime(fp.homePath))
+    else
+        0
+    end
     homeBuilt = 0
     if dir !== nothing && isdir(dir)
         for f in (".slate-home.html", "index.html")
-            p = joinpath(dir, f); isfile(p) && (homeBuilt = round(Int, mtime(p)); break)
+            p = joinpath(dir, f)
+            isfile(p) && (homeBuilt=round(Int, mtime(p)); break)
         end
     end
-    return Dict{String,Any}("name" => s.name, "title" => s.title, "targets" => copy(s.targets),
+    return Dict{String,Any}(
+        "name" => s.name,
+        "title" => s.title,
+        "targets" => copy(s.targets),
         "paths" => copy(s.paths),               # target → subpath within it ("" = root)
         "docs" => [_enrich_site_doc(dir, d) for d in site_docs(s.name)],   # + per-doc source/build provenance
         # Front page (a `home`-tagged notebook): presence + WHICH notebook it is — title and
         # source path recorded at build time, so the manager can name it and link back to it.
-        "hasHome" => fp.home, "homeTitle" => fp.homeTitle, "homePath" => fp.homePath,
-        "homeMtime" => homeMtime, "homeBuilt" => homeBuilt,
+        "hasHome" => fp.home,
+        "homeTitle" => fp.homeTitle,
+        "homePath" => fp.homePath,
+        "homeMtime" => homeMtime,
+        "homeBuilt" => homeBuilt,
         # Local-mirror ⇄ deploy state for the Save/Preview/Sync UI. `dirty` flags DRIFT after a known
         # deploy only (needs a stamp baseline, `synced > 0`), so legacy/never-synced sites don't all
         # light up as "unsynced" — the cue appears once you've Synced and then changed the build.
         "hasLocal" => bt.haslocal,
         "previewUrl" => bt.haslocal ? ("/sites/" * _slugify(s.name) * "/") : "",
         "lastSynced" => bt.synced,
-        "dirty" => hasTargets && bt.haslocal && bt.synced > 0 && bt.modt > bt.synced)
+        "dirty" => hasTargets && bt.haslocal && bt.synced > 0 && bt.modt > bt.synced,
+    )
 end
 
 """
@@ -213,15 +258,17 @@ notebook can't be rebuilt without its kernel). Deploys NOWHERE — the staged co
 viewable at `/sites/<slug>/`. Sync later just COPIES this artifact to the destinations. Leaves the site
 "unsynced" (the sync stamp is untouched), since nothing was deployed.
 """
-function stage_site!(name::AbstractString; hub = nothing, on_event = nothing)
+function stage_site!(name::AbstractString; hub=nothing, on_event=nothing)
     dir = _site_dir(String(name))
     (dir === nothing || !isdir(dir)) &&
         error("site '$name' has no local build yet — add a notebook to it first")
     # `_resync_live_members!` already emits a `:status`/`:log` line per member — forward the sink so a
     # caller (the SSE stream, or a tool reporting gate progress) can name what's being re-exported.
-    hub === nothing || _resync_live_members!(dir, String(name), hub; on_event = on_event)
+    hub === nothing || _resync_live_members!(dir, String(name), hub; on_event=on_event)
     refresh_site_chrome!(dir)   # index + inject nav/footer into existing sub-pages (no notebook needed)
-    return Dict{String,Any}("ok" => true, "url" => "/sites/" * _slugify(String(name)) * "/", "buildDir" => dir)
+    return Dict{String,Any}(
+        "ok" => true, "url" => "/sites/" * _slugify(String(name)) * "/", "buildDir" => dir
+    )
 end
 
 # The authenticated GitHub login (for owner auto-fill so a new github-pages target only needs a repo
@@ -229,9 +276,13 @@ end
 const _GH_USER = Ref{Union{String,Nothing}}(nothing)
 function gh_user()
     _GH_USER[] === nothing || return _GH_USER[]
-    gh = Sys.which("gh"); u = ""
+    gh = Sys.which("gh")
+    u = ""
     if gh !== nothing
-        try; u = strip(read(pipeline(`$gh api user --jq .login`; stderr = devnull), String)); catch; end
+        try
+            u = strip(read(pipeline(`$gh api user --jq .login`; stderr=devnull), String))
+        catch
+        end
     end
     _GH_USER[] = String(u)
     return _GH_USER[]
@@ -244,7 +295,8 @@ function _ledger_view(ledger)
         "sites" => [_site_view(s) for s in values(ledger.sites)],
         "secretRefs" => secret_refs(),
         "ghUser" => gh_user(),
-        "availableKinds" => _TARGET_KINDS)
+        "availableKinds" => _TARGET_KINDS,
+    )
 end
 
 "The whole ledger as the manager's view model (loads via the default store — may hit the network for gist)."
@@ -253,7 +305,8 @@ function publish_ledger_view()
     view = _ledger_view(PublishLedger.load(store))
     view["backend"] = store isa PublishLedger.GistStore ? "gist" : "local"
     # The gist is the cross-machine ledger — link it so "— gist" is inspectable, not a mystery.
-    store isa PublishLedger.GistStore && store.id !== nothing &&
+    store isa PublishLedger.GistStore &&
+        store.id !== nothing &&
         (view["backendUrl"] = "https://gist.github.com/" * store.id)
     return view
 end
@@ -267,7 +320,8 @@ function publish_ledger_view_cached()
     return Dict{String,Any}(
         "sites" => [_site_view(s) for s in values(led.sites)],
         "targets" => [_target_view(t) for t in values(led.targets)],
-        "localSites" => list_local_sites())   # which sites have a local build → accurate "built?" on first paint
+        "localSites" => list_local_sites(),
+    )   # which sites have a local build → accurate "built?" on first paint
 end
 
 # ── target / secret / doc mutations (load → mutate → save; structure is authoritative) ─────────────
@@ -284,8 +338,9 @@ end
 
 function publish_target_set!(name::AbstractString, kind::AbstractString, config::AbstractDict)
     _with_ledger() do led
-        led.targets[String(name)] = PublishLedger.Target(String(name), String(kind);
-                                                          config = Dict{String,Any}(config))
+        return led.targets[String(name)] = PublishLedger.Target(
+            String(name), String(kind); config=Dict{String,Any}(config)
+        )
     end
     return publish_ledger_view()
 end
@@ -294,19 +349,21 @@ end
 reference (documents AND sites) is detached — deployed content stays live. `purge=true` also tears
 down the deployed side where feasible (see `purge_deployed!`; rsync-serve stops its remote server
 and removes the served dir). The view gains a `purgeLog` entry when a purge ran."""
-function publish_target_delete!(name::AbstractString; purge::Bool = false)
+function publish_target_delete!(name::AbstractString; purge::Bool=false)
     plog = _with_ledger() do led
         p = nothing
         if purge
             t = get(led.targets, String(name), nothing)
             if t !== nothing
                 r = try
-                    purge_deployed!(target_from_ledger(t; secrets = _secrets_or_empty()))
+                    purge_deployed!(target_from_ledger(t; secrets=_secrets_or_empty()))
                 catch e
-                    (; ok = false, log = sprint(showerror, e))
+                    (; ok=false, log=sprint(showerror, e))
                 end
                 p = "$(String(name)): $(strip(r.log))"
-                r.ok || @warn "slate: purge of deployed content failed (target removed anyway)" target = name log = r.log
+                r.ok ||
+                    @warn "slate: purge of deployed content failed (target removed anyway)" target =
+                        name log = r.log
             end
         end
         delete!(led.targets, String(name))
@@ -316,7 +373,7 @@ function publish_target_delete!(name::AbstractString; purge::Bool = false)
         for s in values(led.sites)                       # sites too — a deleted target must not linger
             filter!(!=(String(name)), s.targets)         # as a dangling site destination
         end
-        p
+        return p
     end
     view = publish_ledger_view()
     plog === nothing || (view["purgeLog"] = [plog])
@@ -325,7 +382,7 @@ end
 
 function publish_doc_delete!(docId::AbstractString)
     _with_ledger() do led
-        delete!(led.documents, String(docId))
+        return delete!(led.documents, String(docId))
     end
     return publish_ledger_view()
 end
@@ -336,18 +393,22 @@ function publish_doc_info(nb::LiveNotebook)
     led = PublishLedger.load(store)
     info = notebook_docid(nb)
     doc = get(led.documents, info.docId, nothing)
-    return Dict{String,Any}("docId" => info.docId, "slug" => doc_slug(nb),
+    return Dict{String,Any}(
+        "docId" => info.docId,
+        "slug" => doc_slug(nb),
         "title" => String(get(nb.report.meta, "title", doc_slug(nb))),
-        "sourceRepo" => info.sourceRepo, "sourcePath" => info.sourcePath,
+        "sourceRepo" => info.sourceRepo,
+        "sourcePath" => info.sourcePath,
         "assignedTargets" => doc === nothing ? String[] : copy(doc.targets),
-        "events" => doc === nothing ? Any[] : [_event_view(e) for e in reverse(doc.events)])
+        "events" => doc === nothing ? Any[] : [_event_view(e) for e in reverse(doc.events)],
+    )
 end
 
 "Assign/replace the set of target names on this notebook's document (persisted)."
 function publish_doc_set_targets!(nb::LiveNotebook, names)
     _with_ledger() do led
         di = _ensure_doc!(led, nb)
-        led.documents[di.docId].targets = collect(String, names)
+        return led.documents[di.docId].targets = collect(String, names)
     end
     return publish_doc_info(nb)
 end
@@ -360,8 +421,10 @@ end
 # Best-effort public URL for a site: the first destination target that carries a `url` in its config.
 function _site_public_url(led, s)
     for tn in s.targets
-        t = get(led.targets, tn, nothing); t === nothing && continue
-        u = strip(String(get(t.config, "url", ""))); isempty(u) || return u
+        t = get(led.targets, tn, nothing)
+        t === nothing && continue
+        u = strip(String(get(t.config, "url", "")))
+        isempty(u) || return u
     end
     return ""
 end
@@ -391,20 +454,32 @@ function publish_sites_info(nb::LiveNotebook)
         # (docs[] only) never sees. Without this a site's home notebook reported as belonging to
         # nothing, so publishing couldn't resolve a site for it.
         member = isHome || any(d -> _doc_entry_is(nb, d), site_docs(s.name))
-        push!(sites, Dict{String,Any}("name" => s.name,
-            "title" => isempty(strip(s.title)) ? s.name : s.title,
-            "targets" => copy(s.targets), "member" => member, "isHome" => isHome,
-            # Whether the site ALREADY has a front page, and which notebook — so the UI can warn that
-            # ticking ★ here will replace it (a site has exactly one front page).
-            "hasHome" => fp.home, "homeTitle" => isHome ? "" : String(fp.homeTitle),
-            "url" => _site_public_url(led, s)))
+        push!(
+            sites,
+            Dict{String,Any}(
+                "name" => s.name,
+                "title" => isempty(strip(s.title)) ? s.name : s.title,
+                "targets" => copy(s.targets),
+                "member" => member,
+                "isHome" => isHome,
+                # Whether the site ALREADY has a front page, and which notebook — so the UI can warn that
+                # ticking ★ here will replace it (a site has exactly one front page).
+                "hasHome" => fp.home,
+                "homeTitle" => isHome ? "" : String(fp.homeTitle),
+                "url" => _site_public_url(led, s),
+            ),
+        )
     end
-    sort!(sites; by = d -> lowercase(String(d["name"])))
-    return Dict{String,Any}("slug" => slug,
+    sort!(sites; by=d -> lowercase(String(d["name"])))
+    return Dict{String,Any}(
+        "slug" => slug,
         "title" => String(get(nb.report.meta, "title", slug)),
-        "homeTag" => _home_notebook(nb), "sites" => sites,
+        "homeTag" => _home_notebook(nb),
+        "sites" => sites,
         "targets" => [_target_view(t) for t in values(led.targets)],
-        "availableKinds" => _TARGET_KINDS, "ghUser" => gh_user())
+        "availableKinds" => _TARGET_KINDS,
+        "ghUser" => gh_user(),
+    )
 end
 
 # Toggle the notebook-global `home` tag that marks a notebook as a site's front page (model A). Setting
@@ -415,14 +490,15 @@ function _set_notebook_home!(nb::LiveNotebook, on::Bool)
         if !any(c -> :home in c.flags, nb.report.cells) && !isempty(nb.report.cells)
             idx = findfirst(c -> c.kind == MARKDOWN, nb.report.cells)
             idx === nothing && (idx = firstindex(nb.report.cells))
-            push!(nb.report.cells[idx].flags, :home); changed = true
+            push!(nb.report.cells[idx].flags, :home)
+            changed = true
         end
     else
         for c in nb.report.cells
-            :home in c.flags && (delete!(c.flags, :home); changed = true)
+            :home in c.flags && (delete!(c.flags, :home); changed=true)
         end
     end
-    changed && _persist!(nb; source = "publish")
+    changed && _persist!(nb; source="publish")
     return changed
 end
 
@@ -465,18 +541,29 @@ end
 optional per-target subpaths (target → path within that target; "" ⇒ its root). Refuses a
 (target, subpath) location already claimed by another site — they'd overwrite each other.
 Membership/order/sections live in its local build."""
-function publish_site_set!(name::AbstractString, targets, home::AbstractString = "",
-                           title::AbstractString = ""; paths = Dict{String,String}())
+function publish_site_set!(
+    name::AbstractString,
+    targets,
+    home::AbstractString="",
+    title::AbstractString="";
+    paths=Dict{String,String}(),
+)
     _with_ledger() do led
         tlist = collect(String, targets)
-        pmap = Dict{String,String}(String(k) => _norm_subpath(v) for (k, v) in pairs(paths) if String(k) in tlist)
+        pmap = Dict{String,String}(
+            String(k) => _norm_subpath(v) for (k, v) in pairs(paths) if String(k) in tlist
+        )
         for t in tlist
             clash = _location_clash(led, name, t, get(pmap, t, ""))
-            isempty(clash) || error("target '$t'" * (isempty(get(pmap, t, "")) ? " (root)" : " path '$(pmap[t])'") *
-                " is already used by site '$clash' — give this site a different subpath on '$t' so they don't overwrite each other")
+            isempty(clash) || error(
+                "target '$t'" *
+                (isempty(get(pmap, t, "")) ? " (root)" : " path '$(pmap[t])'") *
+                " is already used by site '$clash' — give this site a different subpath on '$t' so they don't overwrite each other",
+            )
         end
-        led.sites[String(name)] = PublishLedger.SiteGroup(String(name); targets = tlist,
-                                                          home = String(home), title = String(title), paths = pmap)
+        return led.sites[String(name)] = PublishLedger.SiteGroup(
+            String(name); targets=tlist, home=String(home), title=String(title), paths=pmap
+        )
     end
     return publish_ledger_view()
 end
@@ -484,7 +571,7 @@ end
 """Delete a site. Local removal always: the ledger definition AND the local canonical build dir go
 away. `purge=true` additionally tears down deployed content on each of the site's targets where
 feasible (see `purge_deployed!`). The view gains a `purgeLog` entry when a purge ran."""
-function publish_site_delete!(name::AbstractString; purge::Bool = false)
+function publish_site_delete!(name::AbstractString; purge::Bool=false)
     logs = _with_ledger() do led
         site = get(led.sites, String(name), nothing)
         ls = String[]
@@ -496,19 +583,24 @@ function publish_site_delete!(name::AbstractString; purge::Bool = false)
                 r = try
                     # Purge THIS site's subpath within the target — not the whole target (a sibling
                     # site may share it at a different path).
-                    purge_deployed!(with_subpath(target_from_ledger(t; secrets = secrets), get(site.paths, tn, "")))
+                    purge_deployed!(
+                        with_subpath(
+                            target_from_ledger(t; secrets=secrets), get(site.paths, tn, "")
+                        ),
+                    )
                 catch e
-                    (; ok = false, log = sprint(showerror, e))
+                    (; ok=false, log=sprint(showerror, e))
                 end
                 push!(ls, "$tn: $(strip(r.log))")
-                r.ok || @warn "slate: purge of deployed content failed (site removed anyway)" site = name target = tn log = r.log
+                r.ok || @warn "slate: purge of deployed content failed (site removed anyway)" site =
+                    name target = tn log = r.log
             end
         end
         delete!(led.sites, String(name))
-        ls
+        return ls
     end
     dir = _site_dir(String(name))                    # the canonical local build is part of the site
-    dir === nothing || rm(dir; recursive = true, force = true)
+    dir === nothing || rm(dir; recursive=true, force=true)
     view = publish_ledger_view()
     isempty(logs) || (view["purgeLog"] = logs)
     return view
@@ -518,20 +610,24 @@ end
 # source, using the build options recorded in the manifest at its last publish. Non-live members are
 # reported and left untouched. Emits per-member `:status` lines so the publish stream names exactly which
 # notebooks were re-exported. Best-effort per member — one failed rebuild is logged, the rest proceed.
-function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; on_event = nothing)
+function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; on_event=nothing)
     man = _read_site_manifest(dir)
     # Match members to open notebooks by source path, then slug, then TITLE (see `_doc_entry_is`) — so a
     # manifest written before `source` was recorded, or under a CUSTOM slug, still resolves to its open
     # notebook without a one-off re-publish.
-    nbs = lock(hub.lock) do; collect(values(hub.notebooks)); end
+    nbs = lock(hub.lock) do ;
+        return collect(values(hub.notebooks))
+    end
     say(msg) = on_event === nothing || on_event(0, :status, msg)
     note(msg) = on_event === nothing || on_event(0, :log, msg)
     members = Any[]
     hd = get(man, "homeDoc", nothing)
-    hd isa AbstractDict && !isempty(String(get(hd, "path", ""))) && push!(members, (; slug = "", entry = hd))
+    hd isa AbstractDict &&
+        !isempty(String(get(hd, "path", ""))) &&
+        push!(members, (; slug="", entry=hd))
     for d in get(man, "docs", Any[])
         d isa AbstractDict || continue
-        push!(members, (; slug = String(get(d, "slug", "")), entry = d))
+        push!(members, (; slug=String(get(d, "slug", "")), entry=d))
     end
     for m in members
         title = String(get(m.entry, "title", isempty(m.slug) ? "front page" : m.slug))
@@ -541,19 +637,26 @@ function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; o
             note("• $title — no open notebook to rebuild from, keeping last build")
             continue
         end
-        b = get(m.entry, "build", Dict{String,Any}()); b isa AbstractDict || (b = Dict{String,Any}())
+        b = get(m.entry, "build", Dict{String,Any}())
+        b isa AbstractDict || (b = Dict{String,Any}())
         say("Exporting $title …")
         try
-            export_to_site(nb, name; slug = m.slug,
-                           bundle = get(b, "bundle", false) === true,
-                           history = get(b, "history", false) === true,
-                           theme = String(get(b, "theme", "dark")),
-                           charttheme = String(get(b, "charttheme", "")),
-                           override = get(b, "override", false) === true,
-                           outputs = String(get(b, "outputs", "all")),
-                           include_source = get(b, "source", true) === true)
+            export_to_site(
+                nb,
+                name;
+                slug=m.slug,
+                bundle=get(b, "bundle", false) === true,
+                history=get(b, "history", false) === true,
+                theme=String(get(b, "theme", "dark")),
+                charttheme=String(get(b, "charttheme", "")),
+                override=get(b, "override", false) === true,
+                outputs=String(get(b, "outputs", "all")),
+                include_source=get(b, "source", true) === true,
+            )
         catch e
-            @warn "slate: sync rebuild of member failed" site = name member = title exception = (e, catch_backtrace())
+            @warn "slate: sync rebuild of member failed" site = name member = title exception = (
+                e, catch_backtrace()
+            )
             note("✗ $title — rebuild failed: $(sprint(showerror, e))")
         end
     end
@@ -562,8 +665,9 @@ end
 
 # The publish targets a `site` declares that are actually configured in the ledger (`led.targets`), in
 # the site's own order. A `nothing` site ⇒ no live targets.
-_live_target_names(led, site) =
-    site === nothing ? String[] : [n for n in site.targets if haskey(led.targets, n)]
+function _live_target_names(led, site)
+    return site === nothing ? String[] : [n for n in site.targets if haskey(led.targets, n)]
+end
 
 # Non-destructive PLAN for a Sync: per member, whether it will be RE-EXPORTED (its notebook is open) or
 # KEPT (not open / not linked), plus the destinations — the "arm → review" view the UI shows before it
@@ -574,16 +678,23 @@ function sync_site_plan(name::AbstractString, hub)
     site = get(led.sites, String(name), nothing)
     targets = _live_target_names(led, site)
     dir = _site_dir(String(name))
-    (site === nothing || dir === nothing || !isdir(dir)) &&
-        return Dict{String,Any}("site" => name, "members" => Any[], "targets" => targets,
-                                "error" => site === nothing ? "no such site" : "no local build yet")
+    (site === nothing || dir === nothing || !isdir(dir)) && return Dict{String,Any}(
+        "site" => name,
+        "members" => Any[],
+        "targets" => targets,
+        "error" => site === nothing ? "no such site" : "no local build yet",
+    )
     man = _read_site_manifest(dir)
-    nbs = lock(hub.lock) do; collect(values(hub.notebooks)); end
+    nbs = lock(hub.lock) do ;
+        return collect(values(hub.notebooks))
+    end
     entries = Any[]
     hd = get(man, "homeDoc", nothing)
-    hd isa AbstractDict && !isempty(String(get(hd, "path", ""))) && push!(entries, (slug = "", entry = hd, home = true))
+    hd isa AbstractDict &&
+        !isempty(String(get(hd, "path", ""))) &&
+        push!(entries, (slug="", entry=hd, home=true))
     for d in get(man, "docs", Any[])
-        d isa AbstractDict && push!(entries, (slug = String(get(d, "slug", "")), entry = d, home = false))
+        d isa AbstractDict && push!(entries, (slug=String(get(d, "slug", "")), entry=d, home=false))
     end
     members = Any[]
     for e in entries
@@ -605,18 +716,41 @@ function sync_site_plan(name::AbstractString, hub)
         srcmt = srcok ? round(Int, mtime(src)) : 0
         stale = built && srcok && srcmt > builtat
         action = !built ? "unbuilt" : "ship"
-        reason = !built ? "Not staged yet — it will be skipped. Stage the site (or add the notebook) first." :
-                 stale  ? "Staged copy is OLDER than its source — open the notebook and re-Stage to ship the latest." :
-                 (!srcok ? "Will be copied as staged. (No source recorded — Slate can't verify it's current.)" :
-                           "Will be copied as staged — up to date.")
-        push!(members, Dict{String,Any}(
-            "title" => title, "slug" => e.slug, "home" => e.home,
-            "action" => action, "reason" => reason, "stale" => stale,
-            "open" => matched, "linked" => hasid,
-            "source" => src, "sourceExists" => srcok,
-            "built" => built, "builtAt" => builtat, "buildPath" => bdir))
+        reason = if !built
+            "Not staged yet — it will be skipped. Stage the site (or add the notebook) first."
+        elseif stale
+            "Staged copy is OLDER than its source — open the notebook and re-Stage to ship the latest."
+        else
+            (
+                if !srcok
+                    "Will be copied as staged. (No source recorded — Slate can't verify it's current.)"
+                else
+                    "Will be copied as staged — up to date."
+                end
+            )
+        end
+        push!(
+            members,
+            Dict{String,Any}(
+                "title" => title,
+                "slug" => e.slug,
+                "home" => e.home,
+                "action" => action,
+                "reason" => reason,
+                "stale" => stale,
+                "open" => matched,
+                "linked" => hasid,
+                "source" => src,
+                "sourceExists" => srcok,
+                "built" => built,
+                "builtAt" => builtat,
+                "buildPath" => bdir,
+            ),
+        )
     end
-    return Dict{String,Any}("site" => name, "members" => members, "targets" => targets, "buildDir" => dir)
+    return Dict{String,Any}(
+        "site" => name, "members" => members, "targets" => targets, "buildDir" => dir
+    )
 end
 
 """
@@ -626,18 +760,20 @@ Deploy a site's ONE canonical local build (`_site_dir(name)`) to every one of it
 concurrently and identically. `on_event(i, phase, payload)` streams per-target progress. Throws if the
 site has no local build yet or no configured destinations. Zenodo/non-host targets report an error row.
 """
-function sync_site!(name::AbstractString; on_event = nothing, hub = nothing)
+function sync_site!(name::AbstractString; on_event=nothing, hub=nothing)
     store = PublishLedger.default_store()
     led = PublishLedger.load(store)
     site = get(led.sites, String(name), nothing)
     site === nothing && error("no site '$name'")
     dir = _site_dir(String(name))
-    (dir === nothing || !isdir(dir)) && error("site '$name' has no local build yet — Stage it first")
+    (dir === nothing || !isdir(dir)) &&
+        error("site '$name' has no local build yet — Stage it first")
     # Sync = COPY the STAGED artifact to the destinations, verbatim. The rebuild (re-exporting open
     # members) happens at STAGE time, not here — so what ships is exactly the local copy you staged and
     # can review, with no surprise re-render at deploy time. (`hub`/`on_event` kept for the API shape.)
     tnames = _live_target_names(led, site)
-    isempty(tnames) && error("site '$name' has no configured destinations — add some in the manager")
+    isempty(tnames) &&
+        error("site '$name' has no configured destinations — add some in the manager")
     secrets = _secrets_or_empty()
     results = Vector{PublishResult}(undef, length(tnames))
     @sync for (i, n) in enumerate(tnames)
@@ -645,11 +781,13 @@ function sync_site!(name::AbstractString; on_event = nothing, hub = nothing)
             # Each attachment may deploy into a SUBPATH within its target (site.paths) so sibling
             # sites can share one bucket/host; a root-only kind under a subpath is that row's error.
             r = try
-                a = with_subpath(target_from_ledger(led.targets[n]; secrets = secrets), get(site.paths, n, ""))
+                a = with_subpath(
+                    target_from_ledger(led.targets[n]; secrets=secrets), get(site.paths, n, "")
+                )
                 on_event === nothing || on_event(i, :start, a)
                 deploy_dir(a, dir)
             catch e
-                PublishResult(; ok = false, log = sprint(showerror, e))
+                PublishResult(; ok=false, log=sprint(showerror, e))
             end
             results[i] = r
             on_event === nothing || on_event(i, :done, r)
@@ -667,15 +805,22 @@ when `deploy=true` also Sync the whole build to every destination. `deploy=false
 copy is built, nothing is deployed) — the "add a notebook" path under the Stage→Sync model. `kwargs` are
 the site-build options (bundle/history/…).
 """
-function publish_to_site!(nb::LiveNotebook, siteName::AbstractString;
-                          on_event = nothing, hub = nothing, deploy::Bool = true, slug::AbstractString = "", kwargs...)
+function publish_to_site!(
+    nb::LiveNotebook,
+    siteName::AbstractString;
+    on_event=nothing,
+    hub=nothing,
+    deploy::Bool=true,
+    slug::AbstractString="",
+    kwargs...,
+)
     led = PublishLedger.load(PublishLedger.default_store())
     site = get(led.sites, String(siteName), nothing)
     # The SITE owns its display title — persisted on the SiteGroup, falling back to the site
     # name. It overrides any transient per-request `site_title` (that transient value is how a
     # stale "portfolio" title leaked into other sites' manifests).
-    stitle = site === nothing ? String(siteName) :
-             (isempty(strip(site.title)) ? site.name : site.title)
+    stitle =
+        site === nothing ? String(siteName) : (isempty(strip(site.title)) ? site.name : site.title)
     # Re-link in place: if the site already has a member with this notebook's TITLE (e.g. a legacy entry
     # built before source-tracking, under a custom slug), reuse ITS slug so we UPDATE that entry — stamping
     # the now-recorded source/id — instead of adding a duplicate under a fresh title-derived slug.
@@ -685,24 +830,33 @@ function publish_to_site!(nb::LiveNotebook, siteName::AbstractString;
         if d0 !== nothing && isdir(d0)
             want = lowercase(strip(report_frontmatter(nb.report).title))
             isempty(want) || for d in get(_read_site_manifest(d0), "docs", Any[])
-                (d isa AbstractDict && lowercase(strip(String(get(d, "title", "")))) == want) || continue
-                slg = String(get(d, "slug", "")); break
+                (d isa AbstractDict && lowercase(strip(String(get(d, "title", "")))) == want) ||
+                    continue
+                slg = String(get(d, "slug", ""))
+                break
             end
         end
     end
-    built = export_to_site(nb, String(siteName); slug = slg, kwargs..., site_title = stitle)   # stage this doc into the copy
+    built = export_to_site(nb, String(siteName); slug=slg, kwargs..., site_title=stitle)   # stage this doc into the copy
     # Stage-only, or a site with no live destinations (a local staging area): built, nothing to deploy.
     tnames = _live_target_names(led, site)
-    (deploy === false || isempty(tnames)) && return Dict{String,Any}("ok" => true, "localOnly" => true,
-        "staged" => true, "url" => built.url, "docCount" => built.docCount, "results" => Any[])
-    return sync_site!(String(siteName); on_event = on_event, hub = hub)  # push the whole build to all destinations
+    (deploy === false || isempty(tnames)) && return Dict{String,Any}(
+        "ok" => true,
+        "localOnly" => true,
+        "staged" => true,
+        "url" => built.url,
+        "docCount" => built.docCount,
+        "results" => Any[],
+    )
+    return sync_site!(String(siteName); on_event=on_event, hub=hub)  # push the whole build to all destinations
 end
 
 # The ledger name to use for a github-pages `repo` — an existing target for that repo, else a fresh
 # name auto-derived from the repo (its last path segment, e.g. "you/portfolio" → "portfolio").
 function _target_name_for_repo(led, repo::AbstractString)
     for (name, t) in led.targets
-        (t.kind == "github-pages" && String(get(t.config, "repo", "")) == String(repo)) && return name
+        (t.kind == "github-pages" && String(get(t.config, "repo", "")) == String(repo)) &&
+            return name
     end
     segs = filter(!isempty, split(String(repo), '/'))
     return isempty(segs) ? "github" : String(last(segs))
@@ -722,15 +876,24 @@ function record_publish_site!(nb::LiveNotebook, repo::AbstractString, result)
         store = PublishLedger.default_store()
         led = PublishLedger.load(store)
         tname = _target_name_for_repo(led, repo)
-        get!(led.targets, tname,
-             PublishLedger.Target(tname, "github-pages"; config = Dict{String,Any}("repo" => String(repo))))
-        di = _ensure_doc!(led, nb; target_names = [tname])
+        get!(
+            led.targets,
+            tname,
+            PublishLedger.Target(
+                tname, "github-pages"; config=Dict{String,Any}("repo" => String(repo))
+            ),
+        )
+        di = _ensure_doc!(led, nb; target_names=[tname])
         ok = get(result, :pagesEnabled, true) !== false
-        PublishLedger.record_event!(led, di.docId, tname;
-            status = ok ? "ok" : "error",
-            url = String(get(result, :docUrl, get(result, :url, ""))),
-            commit = String(get(result, :commit, "")),
-            note = String(get(result, :deployStatus, "")))
+        PublishLedger.record_event!(
+            led,
+            di.docId,
+            tname;
+            status=ok ? "ok" : "error",
+            url=String(get(result, :docUrl, get(result, :url, ""))),
+            commit=String(get(result, :commit, "")),
+            note=String(get(result, :deployStatus, "")),
+        )
         PublishLedger.save(store, led)
     catch e
         @warn "slate: ledger recording after publish failed" exception = e
@@ -741,10 +904,20 @@ end
 # ── multi-target publish with SSE progress ─────────────────────────────────────────────────────────
 # Summarise per-target results for the SSE `done` event / a tool return.
 function _publish_summary(names, results)
-    return Dict{String,Any}("ok" => all(r -> r.ok, results),
-        "results" => [Dict{String,Any}("target" => String(n), "ok" => r.ok, "status" => r.status,
-                                       "url" => r.url, "doi" => r.doi, "commit" => r.commit,
-                                       "log" => r.log) for (n, r) in zip(names, results)])
+    return Dict{String,Any}(
+        "ok" => all(r -> r.ok, results),
+        "results" => [
+            Dict{String,Any}(
+                "target" => String(n),
+                "ok" => r.ok,
+                "status" => r.status,
+                "url" => r.url,
+                "doi" => r.doi,
+                "commit" => r.commit,
+                "log" => r.log,
+            ) for (n, r) in zip(names, results)
+        ],
+    )
 end
 
 # ── Publish targets vs. archives ──────────────────────────────────────────────
@@ -790,24 +963,47 @@ named target must be a re-pushable live destination — an archive kind (Zenodo)
 deposit mints a permanent immutable version and must never ride along with a site push. With
 `archive=true` the run is a deliberate archival: every named target must be an archive kind.
 """
-function run_publish(nb::LiveNotebook, target_names; archive::Bool = false, on_event = nothing,
-                     slug = "", site_title = "",
-                     theme = "dark", outputs = "all", source = true, bundle = false, history = false)
+function run_publish(
+    nb::LiveNotebook,
+    target_names;
+    archive::Bool=false,
+    on_event=nothing,
+    slug="",
+    site_title="",
+    theme="dark",
+    outputs="all",
+    source=true,
+    bundle=false,
+    history=false,
+)
     names = collect(String, target_names)
     isempty(names) && error("no targets selected")
     store = PublishLedger.default_store()
     led = PublishLedger.load(store)
     missing = [n for n in names if !haskey(led.targets, n)]
-    isempty(missing) || error("unconfigured target(s): $(join(missing, ", ")) — add them in the manager first")
+    isempty(missing) ||
+        error("unconfigured target(s): $(join(missing, ", ")) — add them in the manager first")
     mismatch = _verb_mismatch(led, names, archive)
     mismatch === nothing || error(mismatch)
-    di = _ensure_doc!(led, nb; target_names = names)
+    di = _ensure_doc!(led, nb; target_names=names)
     secrets = _secrets_or_empty()
     slg = isempty(strip(String(slug))) ? di.slug : String(slug)
-    results = publish_document!(nb, led, di.docId, store; target_names = names, secrets = secrets,
-                               slug = slg, site_title = String(site_title), theme = String(theme),
-                               outputs = String(outputs), include_source = source, bundle = bundle,
-                               history = history, on_event = on_event)
+    results = publish_document!(
+        nb,
+        led,
+        di.docId,
+        store;
+        target_names=names,
+        secrets=secrets,
+        slug=slg,
+        site_title=String(site_title),
+        theme=String(theme),
+        outputs=String(outputs),
+        include_source=source,
+        bundle=bundle,
+        history=history,
+        on_event=on_event,
+    )
     return _publish_summary(names, results)
 end
 
@@ -819,33 +1015,61 @@ function _sse_publish(stream::HTTP.Stream, h::Hub)
     q = HTTP.queryparams(uri)
     m = match(r"^/api/([^/]+)/publish-run", uri.path)
     id = m === nothing ? "" : String(m.captures[1])
-    nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
+    nb = lock(h.lock) do ;
+        return get(h.notebooks, id, nothing)
+    end
     nb === nothing && return _sse_stream(stream, _oe -> error("no such notebook: $id"))
     names = filter(!isempty, strip.(split(get(q, "targets", ""), ',')))
     # `archive=1` marks a deliberate deposit (the 📄 Archive button) — see run_publish.
     is_archive = get(q, "archive", "0") == "1"
     # site-build options (forwarded to the adapters; ignored by archive kinds)
-    bopts = (slug = get(q, "slug", ""), site_title = get(q, "siteTitle", ""),
-             theme = get(q, "theme", "dark"), outputs = get(q, "outputs", "all"),
-             source = get(q, "source", "1") != "0", bundle = get(q, "bundle", "0") == "1",
-             history = get(q, "history", "0") == "1")
-    return _sse_stream(stream, on_event -> run_publish(nb, names; archive = is_archive, on_event = on_event,
-                       slug = bopts.slug, site_title = bopts.site_title, theme = bopts.theme,
-                       outputs = bopts.outputs, source = bopts.source, bundle = bopts.bundle,
-                       history = bopts.history); start_verb = "Publishing")
+    bopts = (
+        slug=get(q, "slug", ""),
+        site_title=get(q, "siteTitle", ""),
+        theme=get(q, "theme", "dark"),
+        outputs=get(q, "outputs", "all"),
+        source=get(q, "source", "1") != "0",
+        bundle=get(q, "bundle", "0") == "1",
+        history=get(q, "history", "0") == "1",
+    )
+    return _sse_stream(
+        stream,
+        on_event -> run_publish(
+            nb,
+            names;
+            archive=is_archive,
+            on_event=on_event,
+            slug=bopts.slug,
+            site_title=bopts.site_title,
+            theme=bopts.theme,
+            outputs=bopts.outputs,
+            source=bopts.source,
+            bundle=bopts.bundle,
+            history=bopts.history,
+        );
+        start_verb="Publishing",
+    )
 end
 
 # Shared SSE streamer: run `run_fn(on_event)` in a task feeding a channel, emit status/log/done/failed.
 # `start_verb` is the verb in the per-target `:start` status line ("Deploying to …" / "Publishing to …").
-function _sse_stream(stream::HTTP.Stream, run_fn; start_verb::AbstractString = "Deploying")
+function _sse_stream(stream::HTTP.Stream, run_fn; start_verb::AbstractString="Deploying")
     HTTP.setheader(stream, "Content-Type" => "text/event-stream")
     HTTP.setheader(stream, "Cache-Control" => "no-cache")
     HTTP.startwrite(stream)
     emit = function (ev::AbstractString, data::AbstractString)
-        io = IOBuffer(); println(io, "event: ", ev)
-        for ln in split(data, '\n'); println(io, "data: ", ln); end
+        io = IOBuffer()
+        println(io, "event: ", ev)
+        for ln in split(data, '\n')
+            println(io, "data: ", ln)
+        end
         println(io)
-        try; write(stream, String(take!(io))); return true; catch; return false; end
+        try
+            write(stream, String(take!(io)))
+            return true
+        catch
+            return false
+        end
     end
     ch = Channel{Tuple{String,String}}(128)
     task = @async begin
@@ -858,10 +1082,19 @@ function _sse_stream(stream::HTTP.Stream, run_fn; start_verb::AbstractString = "
                 elseif phase === :start
                     put!(ch, ("status", "$start_verb to $(target_name(payload))…"))
                 else
-                    r = payload; tag = r.ok ? "✓" : "✗"
-                    detail = !isempty(r.doi) ? r.doi : !isempty(r.url) ? r.url : r.status
+                    r = payload
+                    tag = r.ok ? "✓" : "✗"
+                    detail = if !isempty(r.doi)
+                        r.doi
+                    elseif !isempty(r.url)
+                        r.url
+                    else
+                        r.status
+                    end
                     put!(ch, ("log", "$tag $detail"))
-                    r.ok || isempty(strip(r.log)) || put!(ch, ("log", first(split(strip(r.log), '\n'))))
+                    r.ok ||
+                        isempty(strip(r.log)) ||
+                        put!(ch, ("log", first(split(strip(r.log), '\n'))))
                 end
             end
             put!(ch, ("done", JSON.json(run_fn(on_event))))
@@ -872,13 +1105,19 @@ function _sse_stream(stream::HTTP.Stream, run_fn; start_verb::AbstractString = "
         end
     end
     gone = false
-    for (ev, data) in ch; emit(ev, data) || (gone = true; break); end
+    for (ev, data) in ch
+        emit(ev, data) || (gone=true; break)
+    end
     # If the client vanished mid-stream, KEEP draining the channel so the producer's `put!` never blocks
     # on the 128-slot buffer (its `finally` closes `ch`, ending this loop). Otherwise `run_fn` would wedge
     # and `wait(task)` below would hang forever, leaking the handler task.
-    gone && for _ in ch; end
-    try; wait(task); catch; end
-    return
+    gone && for _ in ch
+    end
+    try
+        wait(task)
+    catch
+    end
+    return nothing
 end
 
 # Build a notebook into a site's canonical local dir, then sync the whole build to its destinations.
@@ -886,9 +1125,13 @@ end
 # notebook without the user opening it first — by a `path` query param, which is opened on demand
 # (spawns its worker + runs it, exactly like opening it in the browser would).
 function _sse_site_publish(stream::HTTP.Stream, h::Hub)
-    uri = HTTP.URI(stream.message.target); q = HTTP.queryparams(uri)
-    m = match(r"^/api/([^/]+)/site-publish", uri.path); id = m === nothing ? "" : String(m.captures[1])
-    nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
+    uri = HTTP.URI(stream.message.target)
+    q = HTTP.queryparams(uri)
+    m = match(r"^/api/([^/]+)/site-publish", uri.path)
+    id = m === nothing ? "" : String(m.captures[1])
+    nb = lock(h.lock) do ;
+        return get(h.notebooks, id, nothing)
+    end
     site = get(q, "site", "")
     if nb === nothing
         path = expanduser(String(get(q, "path", "")))
@@ -897,28 +1140,40 @@ function _sse_site_publish(stream::HTTP.Stream, h::Hub)
                 nid = open_notebook!(h, path)          # open on demand → its worker runs it
                 find_live(h, nid)
             catch e
-                return _sse_stream(stream, _oe -> error("could not open $(basename(path)): " * sprint(showerror, e)))
+                return _sse_stream(
+                    stream,
+                    _oe -> error("could not open $(basename(path)): " * sprint(showerror, e)),
+                )
             end
         end
     end
     nb === nothing && return _sse_stream(stream, _oe -> error("no such notebook: $id"))
     isempty(site) && return _sse_stream(stream, _oe -> error("no site given"))
     wq = get(q, "width", "")   # content column width: px, "full" (=100%), or unset ⇒ default
-    bopts = (slug = get(q, "slug", ""), site_title = get(q, "siteTitle", ""),
-             theme = get(q, "theme", "dark"), charttheme = get(q, "charttheme", ""),
-             override = get(q, "override", "0") == "1", outputs = get(q, "outputs", "all"),
-             include_source = get(q, "source", "1") == "1", bundle = get(q, "bundle", "0") == "1",
-             history = get(q, "history", "0") == "1",
-             width = wq == "full" ? 0 : (v = tryparse(Int, wq); v === nothing ? 900 : v))
+    bopts = (
+        slug=get(q, "slug", ""),
+        site_title=get(q, "siteTitle", ""),
+        theme=get(q, "theme", "dark"),
+        charttheme=get(q, "charttheme", ""),
+        override=get(q, "override", "0") == "1",
+        outputs=get(q, "outputs", "all"),
+        include_source=get(q, "source", "1") == "1",
+        bundle=get(q, "bundle", "0") == "1",
+        history=get(q, "history", "0") == "1",
+        width=wq == "full" ? 0 : (v=tryparse(Int, wq); v === nothing ? 900 : v),
+    )
     dep = get(q, "deploy", "1") != "0"   # deploy=0 ⇒ STAGE only (build into the local copy, no Sync)
-    _sse_stream(stream, on_event -> publish_to_site!(nb, String(site); on_event = on_event, deploy = dep, bopts...))
+    return _sse_stream(
+        stream,
+        on_event -> publish_to_site!(nb, String(site); on_event=on_event, deploy=dep, bopts...),
+    )
 end
 
 # Re-sync a site (deploy its current canonical build to all destinations) — no notebook needed.
 function _sse_site_sync(stream::HTTP.Stream, h::Hub)
     site = get(HTTP.queryparams(HTTP.URI(stream.message.target)), "site", "")
     isempty(site) && return _sse_stream(stream, _oe -> error("no site given"))
-    _sse_stream(stream, on_event -> sync_site!(String(site); on_event = on_event, hub = h))
+    return _sse_stream(stream, on_event -> sync_site!(String(site); on_event=on_event, hub=h))
 end
 
 # ── HTTP routes (called from `_make_router`) ─────────────────────────────────────────────────────────
@@ -927,155 +1182,287 @@ function _register_publish_routes!(router, h::Hub)
     HTTP.register!(router, "GET", "/api/publish/ledger", _req -> _json(publish_ledger_view()))
     # A Sync PLAN (non-destructive): what a `site-sync` will rebuild vs keep, + destinations. Drives the
     # two-stage "arm → review → sync" UI.
-    HTTP.register!(router, "GET", "/api/publish/site-sync-plan", req -> begin
-        site = get(HTTP.queryparams(HTTP.URI(req.target)), "site", "")
-        isempty(site) && return HTTP.Response(400, "no site")
-        _json(sync_site_plan(String(site), h))
-    end)
+    HTTP.register!(
+        router,
+        "GET",
+        "/api/publish/site-sync-plan",
+        req -> begin
+            site = get(HTTP.queryparams(HTTP.URI(req.target)), "site", "")
+            isempty(site) && return HTTP.Response(400, "no site")
+            _json(sync_site_plan(String(site), h))
+        end,
+    )
     # Stage: (re)build the site's LOCAL deploy copy (re-export open members, keep the rest), deploy
     # nowhere. Returns the local `/sites/<slug>/` URL to view. Sync later just COPIES this artifact.
-    HTTP.register!(router, "POST", "/api/publish/site-stage", req -> begin
-        name = strip(String(get(_body(req), "site", "")))
-        isempty(name) && return HTTP.Response(400, "missing site")
-        try; _json(stage_site!(String(name); hub = h)); catch e; HTTP.Response(422, sprint(showerror, e)); end
-    end)
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/publish/site-stage",
+        req -> begin
+            name = strip(String(get(_body(req), "site", "")))
+            isempty(name) && return HTTP.Response(400, "missing site")
+            try
+                _json(stage_site!(String(name); hub=h))
+            catch e
+                HTTP.Response(422, sprint(showerror, e))
+            end
+        end,
+    )
     # This notebook's document info (scoped).
-    HTTP.register!(router, "GET", "/api/{id}/publish/doc",
-                   req -> _withnb(h, req, nb -> _json(publish_doc_info(nb))))
+    HTTP.register!(
+        router,
+        "GET",
+        "/api/{id}/publish/doc",
+        req -> _withnb(h, req, nb -> _json(publish_doc_info(nb))),
+    )
     # Assign the set of targets to this notebook's document (scoped).
-    HTTP.register!(router, "POST", "/api/{id}/publish/doc-targets", req -> _withnb(h, req, nb -> begin
-        b = _body(req)
-        _json(publish_doc_set_targets!(nb, [String(t) for t in get(b, "targets", String[])]))
-    end))
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/{id}/publish/doc-targets",
+        req -> _withnb(
+            h,
+            req,
+            nb -> begin
+                b = _body(req)
+                _json(
+                    publish_doc_set_targets!(nb, [String(t) for t in get(b, "targets", String[])]),
+                )
+            end,
+        ),
+    )
     # This notebook's site membership + front-page state (drives the notebook Publish panel).
-    HTTP.register!(router, "GET", "/api/{id}/publish/sites",
-                   req -> _withnb(h, req, nb -> _json(publish_sites_info(nb))))
+    HTTP.register!(
+        router,
+        "GET",
+        "/api/{id}/publish/sites",
+        req -> _withnb(h, req, nb -> _json(publish_sites_info(nb))),
+    )
     # Associate/disassociate this notebook with a site's local build (member:true|false).
-    HTTP.register!(router, "POST", "/api/{id}/publish/site-membership", req -> _withnb(h, req, nb -> begin
-        b = _body(req)
-        site = strip(String(get(b, "site", "")))
-        isempty(site) && return HTTP.Response(400, "missing site")
-        _json(publish_set_membership!(nb, site, get(b, "member", true) === true))
-    end))
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/{id}/publish/site-membership",
+        req -> _withnb(
+            h,
+            req,
+            nb -> begin
+                b = _body(req)
+                site = strip(String(get(b, "site", "")))
+                isempty(site) && return HTTP.Response(400, "missing site")
+                _json(publish_set_membership!(nb, site, get(b, "member", true) === true))
+            end,
+        ),
+    )
     # Set/clear this notebook as a site's front page (home:true|false).
-    HTTP.register!(router, "POST", "/api/{id}/publish/site-home", req -> _withnb(h, req, nb -> begin
-        b = _body(req)
-        site = strip(String(get(b, "site", "")))
-        isempty(site) && return HTTP.Response(400, "missing site")
-        _json(publish_set_home!(nb, site, get(b, "home", true) === true))
-    end))
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/{id}/publish/site-home",
+        req -> _withnb(
+            h, req, nb -> begin
+                b = _body(req)
+                site = strip(String(get(b, "site", "")))
+                isempty(site) && return HTTP.Response(400, "missing site")
+                _json(publish_set_home!(nb, site, get(b, "home", true) === true))
+            end
+        ),
+    )
     # Add/update a target config (global).
-    HTTP.register!(router, "POST", "/api/publish/target", req -> begin
-        b = _body(req)
-        name = strip(String(get(b, "name", "")))
-        kind = strip(String(get(b, "kind", "")))
-        (isempty(name) || isempty(kind)) && return HTTP.Response(400, "target needs name + kind")
-        _json(publish_target_set!(name, kind, get(b, "config", Dict{String,Any}())))
-    end)
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/publish/target",
+        req -> begin
+            b = _body(req)
+            name = strip(String(get(b, "name", "")))
+            kind = strip(String(get(b, "kind", "")))
+            (isempty(name) || isempty(kind)) &&
+                return HTTP.Response(400, "target needs name + kind")
+            _json(publish_target_set!(name, kind, get(b, "config", Dict{String,Any}())))
+        end,
+    )
     # Delete a target (global). Local removal by default; `purge:true` also tears down its
     # deployed content where feasible.
-    HTTP.register!(router, "POST", "/api/publish/target-delete", req -> begin
-        b = _body(req)
-        name = strip(String(get(b, "name", "")))
-        isempty(name) && return HTTP.Response(400, "missing target name")
-        _json(publish_target_delete!(name; purge = get(b, "purge", false) === true))
-    end)
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/publish/target-delete",
+        req -> begin
+            b = _body(req)
+            name = strip(String(get(b, "name", "")))
+            isempty(name) && return HTTP.Response(400, "missing target name")
+            _json(publish_target_delete!(name; purge=get(b, "purge", false) === true))
+        end,
+    )
     # Forget a document + its history (global).
-    HTTP.register!(router, "POST", "/api/publish/doc-delete", req -> begin
-        docId = strip(String(get(_body(req), "docId", "")))
-        isempty(docId) && return HTTP.Response(400, "missing docId")
-        _json(publish_doc_delete!(docId))
-    end)
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/publish/doc-delete",
+        req -> begin
+            docId = strip(String(get(_body(req), "docId", "")))
+            isempty(docId) && return HTTP.Response(400, "missing docId")
+            _json(publish_doc_delete!(docId))
+        end,
+    )
     # List secret ref names (global; values never returned).
-    HTTP.register!(router, "GET", "/api/publish/secrets", _req -> _json(Dict("refs" => secret_refs())))
+    HTTP.register!(
+        router, "GET", "/api/publish/secrets", _req -> _json(Dict("refs" => secret_refs()))
+    )
     # Set/delete a secret by ref (global).
-    HTTP.register!(router, "POST", "/api/publish/secret", req -> begin
-        b = _body(req)
-        ref = strip(String(get(b, "ref", "")))
-        isempty(ref) && return HTTP.Response(400, "missing secret ref")
-        _json(Dict("refs" => publish_secret_set!(ref, String(get(b, "value", "")))))
-    end)
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/publish/secret",
+        req -> begin
+            b = _body(req)
+            ref = strip(String(get(b, "ref", "")))
+            isempty(ref) && return HTTP.Response(400, "missing secret ref")
+            _json(Dict("refs" => publish_secret_set!(ref, String(get(b, "value", "")))))
+        end,
+    )
     # A published github-pages site's docs (with section/order) — for the manager's reorder view (global).
-    HTTP.register!(router, "GET", "/api/publish/site-docs", req -> begin
-        repo = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "repo", "")))
-        isempty(repo) && return HTTP.Response(400, "missing repo")
-        _json(Dict("repo" => repo, "docs" => published_site_docs(String(repo))))
-    end)
+    HTTP.register!(
+        router,
+        "GET",
+        "/api/publish/site-docs",
+        req -> begin
+            repo = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "repo", "")))
+            isempty(repo) && return HTTP.Response(400, "missing repo")
+            _json(Dict("repo" => repo, "docs" => published_site_docs(String(repo))))
+        end,
+    )
     # Apply a new section/order to a site's docs and re-push just the manifest + index (global).
-    HTTP.register!(router, "POST", "/api/publish/site-reorder", req -> begin
-        b = _body(req)
-        repo = strip(String(get(b, "repo", "")))
-        ordering = get(b, "ordering", Any[])
-        isempty(repo) && return HTTP.Response(400, "missing repo")
-        try
-            r = reorder_published_site(String(repo), ordering)
-            _json(Dict("ok" => r.ok, "changed" => r.changed, "url" => r.url, "commit" => r.commit))
-        catch e
-            HTTP.Response(500, "Reorder failed: " * sprint(showerror, e))
-        end
-    end)
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/publish/site-reorder",
+        req -> begin
+            b = _body(req)
+            repo = strip(String(get(b, "repo", "")))
+            ordering = get(b, "ordering", Any[])
+            isempty(repo) && return HTTP.Response(400, "missing repo")
+            try
+                r = reorder_published_site(String(repo), ordering)
+                _json(
+                    Dict(
+                        "ok" => r.ok,
+                        "changed" => r.changed,
+                        "url" => r.url,
+                        "commit" => r.commit,
+                    ),
+                )
+            catch e
+                HTTP.Response(500, "Reorder failed: " * sprint(showerror, e))
+            end
+        end,
+    )
     # ── Sites: the logical publishing unit (a canonical build synced to many destinations) ──
     # Create/update a site: its name, the destination targets it syncs to, and an optional home doc (global).
-    HTTP.register!(router, "POST", "/api/publish/site", req -> begin
-        b = _body(req)
-        name = strip(String(get(b, "name", "")))
-        isempty(name) && return HTTP.Response(400, "missing name")
-        targets = [String(t) for t in get(b, "targets", Any[])]
-        # A body that OMITS home/title/paths keeps the site's existing values (a targets-only save
-        # must not wipe them); sending an explicit "" clears.
-        old = get(PublishLedger.load(PublishLedger.default_store()).sites, String(name), nothing)
-        home = haskey(b, "home") ? String(get(b, "home", "")) : (old === nothing ? "" : old.home)
-        title = haskey(b, "title") ? String(get(b, "title", "")) : (old === nothing ? "" : old.title)
-        paths = if haskey(b, "paths")
-            pv = get(b, "paths", Dict{String,Any}())
-            pv isa AbstractDict ? Dict{String,String}(String(k) => String(v) for (k, v) in pairs(pv)) : Dict{String,String}()
-        else
-            old === nothing ? Dict{String,String}() : copy(old.paths)
-        end
-        try
-            _json(publish_site_set!(name, targets, home, title; paths = paths))
-        catch e
-            HTTP.Response(400, "Save site failed: " * sprint(showerror, e))   # 400: usually a location clash
-        end
-    end)
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/publish/site",
+        req -> begin
+            b = _body(req)
+            name = strip(String(get(b, "name", "")))
+            isempty(name) && return HTTP.Response(400, "missing name")
+            targets = [String(t) for t in get(b, "targets", Any[])]
+            # A body that OMITS home/title/paths keeps the site's existing values (a targets-only save
+            # must not wipe them); sending an explicit "" clears.
+            old = get(
+                PublishLedger.load(PublishLedger.default_store()).sites, String(name), nothing
+            )
+            home = if haskey(b, "home")
+                String(get(b, "home", ""))
+            else
+                (old === nothing ? "" : old.home)
+            end
+            title = if haskey(b, "title")
+                String(get(b, "title", ""))
+            else
+                (old === nothing ? "" : old.title)
+            end
+            paths = if haskey(b, "paths")
+                pv = get(b, "paths", Dict{String,Any}())
+                if pv isa AbstractDict
+                    Dict{String,String}(String(k) => String(v) for (k, v) in pairs(pv))
+                else
+                    Dict{String,String}()
+                end
+            else
+                old === nothing ? Dict{String,String}() : copy(old.paths)
+            end
+            try
+                _json(publish_site_set!(name, targets, home, title; paths=paths))
+            catch e
+                HTTP.Response(400, "Save site failed: " * sprint(showerror, e))   # 400: usually a location clash
+            end
+        end,
+    )
     # Delete a site: the definition + the local build always; `purge:true` also tears down
     # deployed content on the site's targets where feasible.
-    HTTP.register!(router, "POST", "/api/publish/site-delete", req -> begin
-        b = _body(req)
-        name = strip(String(get(b, "name", "")))
-        isempty(name) && return HTTP.Response(400, "missing name")
-        try
-            _json(publish_site_delete!(name; purge = get(b, "purge", false) === true))
-        catch e
-            HTTP.Response(500, "Delete site failed: " * sprint(showerror, e))
-        end
-    end)
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/publish/site-delete",
+        req -> begin
+            b = _body(req)
+            name = strip(String(get(b, "name", "")))
+            isempty(name) && return HTTP.Response(400, "missing name")
+            try
+                _json(publish_site_delete!(name; purge=get(b, "purge", false) === true))
+            catch e
+                HTTP.Response(500, "Delete site failed: " * sprint(showerror, e))
+            end
+        end,
+    )
     # Site content management — the docs in a site's LOCAL canonical build (with section/order); reorder
     # + section them; remove one. All edit _site_dir(name) only — Sync afterward pushes to destinations.
-    HTTP.register!(router, "GET", "/api/publish/site-content", req -> begin
-        site = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "site", "")))
-        isempty(site) && return HTTP.Response(400, "missing site")
-        _json(Dict("site" => site, "docs" => site_docs(String(site))))
-    end)
-    HTTP.register!(router, "POST", "/api/publish/site-arrange", req -> begin
-        b = _body(req); site = strip(String(get(b, "site", ""))); ordering = get(b, "ordering", Any[])
-        isempty(site) && return HTTP.Response(400, "missing site")
-        try
-            r = reorder_site!(String(site), ordering)
-            _json(Dict("ok" => r.ok, "docCount" => r.docCount))
-        catch e
-            HTTP.Response(500, "Arrange failed: " * sprint(showerror, e))
-        end
-    end)
-    HTTP.register!(router, "POST", "/api/publish/site-remove", req -> begin
-        b = _body(req); site = strip(String(get(b, "site", ""))); slug = strip(String(get(b, "slug", "")))
-        (isempty(site) || isempty(slug)) && return HTTP.Response(400, "missing site/slug")
-        try
-            r = unexport_from_site(String(site), String(slug))
-            _json(Dict("ok" => true, "removed" => r.removed, "docCount" => r.docCount))
-        catch e
-            HTTP.Response(500, "Remove failed: " * sprint(showerror, e))
-        end
-    end)
+    HTTP.register!(
+        router,
+        "GET",
+        "/api/publish/site-content",
+        req -> begin
+            site = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "site", "")))
+            isempty(site) && return HTTP.Response(400, "missing site")
+            _json(Dict("site" => site, "docs" => site_docs(String(site))))
+        end,
+    )
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/publish/site-arrange",
+        req -> begin
+            b = _body(req)
+            site = strip(String(get(b, "site", "")))
+            ordering = get(b, "ordering", Any[])
+            isempty(site) && return HTTP.Response(400, "missing site")
+            try
+                r = reorder_site!(String(site), ordering)
+                _json(Dict("ok" => r.ok, "docCount" => r.docCount))
+            catch e
+                HTTP.Response(500, "Arrange failed: " * sprint(showerror, e))
+            end
+        end,
+    )
+    HTTP.register!(
+        router,
+        "POST",
+        "/api/publish/site-remove",
+        req -> begin
+            b = _body(req)
+            site = strip(String(get(b, "site", "")))
+            slug = strip(String(get(b, "slug", "")))
+            (isempty(site) || isempty(slug)) && return HTTP.Response(400, "missing site/slug")
+            try
+                r = unexport_from_site(String(site), String(slug))
+                _json(Dict("ok" => true, "removed" => r.removed, "docCount" => r.docCount))
+            catch e
+                HTTP.Response(500, "Remove failed: " * sprint(showerror, e))
+            end
+        end,
+    )
     return router
 end

@@ -25,9 +25,9 @@ scatter(1:10, rand(10))        # renders over Slate's transport — no extra por
 """
 module BonitoSlate
 
-import Bonito
-import Base64
-import Makie
+using Bonito: Bonito
+using Base64: Base64
+using Makie: Makie
 using SlateExtensionsBase
 
 include("connection.jl")
@@ -57,11 +57,12 @@ axes) and blend into the figure card — see `figure.jl` for the card itself.
 """
 function enable!()
     ctx = SlateExtensionsBase.slate_context()
-    ctx === nothing && error("BonitoSlate.enable!() must run inside a Slate cell (no execution context)")
+    ctx === nothing &&
+        error("BonitoSlate.enable!() must run inside a Slate cell (no execution context)")
     _SLATE_EMIT[] = ctx.emit
-    _SLATE_ON[]   = ctx.on
-    _SLATE_OFF[]  = ctx.off      # captured for session teardown (drop the per-session inbox handler)
-    _NB_ID[]      = String(ctx.notebook)   # for served-asset URLs (/n/<id>/served/<hash>) — see SlateAssetServer
+    _SLATE_ON[] = ctx.on
+    _SLATE_OFF[] = ctx.off      # captured for session teardown (drop the per-session inbox handler)
+    _NB_ID[] = String(ctx.notebook)   # for served-asset URLs (/n/<id>/served/<hash>) — see SlateAssetServer
     Bonito.force_connection!(SlateConnection)
     # SlateAssetServer: inline like NoServer, but serve es6 modules (the Bonito runtime) ONCE per page over
     # Slate at a stable URL instead of re-inlining the ~3.5 MB bundle into every figure (see assetserver.jl).
@@ -94,10 +95,16 @@ end
 # source edit hot-reloads via Revise on the next enable, no worker restart.
 function _register_frontend!()
     css = @pkg_asset("assets/figure.css")
-    provide_frontend!(string(
-        "(function(){var id='bonito-slate-figure-css';if(document.getElementById(id))return;",
-        "var s=document.createElement('style');s.id=id;s.textContent=", repr(css), ";",
-        "document.head.appendChild(s);})();"); id = "BonitoSlate.figure-css")
+    provide_frontend!(
+        string(
+            "(function(){var id='bonito-slate-figure-css';if(document.getElementById(id))return;",
+            "var s=document.createElement('style');s.id=id;s.textContent=",
+            repr(css),
+            ";",
+            "document.head.appendChild(s);})();",
+        );
+        id="BonitoSlate.figure-css",
+    )
     # Scroll-zoom gating (click-to-activate + sensitivity) now lives in Slate core (settings.js) as a shared
     # behaviour + a "Chart scroll-zoom" setting, so it also covers ECharts — nothing to ship here. Drop the
     # old per-figure gate script if a prior version registered it (else two gates would fight on the wheel).

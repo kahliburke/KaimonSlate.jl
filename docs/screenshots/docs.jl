@@ -1,4 +1,11 @@
-try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+try
+    using KaimonSlate: KaimonSlate
+catch
+    error(
+        "This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate.",
+    )
+end;
+KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
 
 #%% md id=title title
 @md"""

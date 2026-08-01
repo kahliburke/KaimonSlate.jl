@@ -20,11 +20,11 @@
 # task and from a cleanup callback (which runs on teardown, possibly OUTSIDE any cell eval, so it can't
 # read the task-local Slate context and must use these captured refs).
 const _SLATE_EMIT = Ref{Any}(nothing)
-const _SLATE_ON   = Ref{Any}(nothing)
-const _SLATE_OFF  = Ref{Any}(nothing)
+const _SLATE_ON = Ref{Any}(nothing)
+const _SLATE_OFF = Ref{Any}(nothing)
 
 _chan(id::AbstractString) = "__bonito:" * id
-_ctl(id::AbstractString)  = _chan(id) * ":ctl"    # sibling control channel — carries the browser teardown signal
+_ctl(id::AbstractString) = _chan(id) * ":ctl"    # sibling control channel — carries the browser teardown signal
 
 # Tear a session down when its cell re-evaluates / is deleted / the namespace rebuilds (registered via
 # `slate_on_cleanup`). Three jobs, one per resource the session holds: close the Bonito `Session` (ends
@@ -34,10 +34,24 @@ _ctl(id::AbstractString)  = _chan(id) * ":ctl"    # sibling control channel — 
 # it captures everything it needs and never touches the task-local context (unset at teardown time).
 function _teardown_session!(session)
     id = session.id
-    try; Base.isopen(session) && close(session); catch; end
-    off = _SLATE_OFF[]; off === nothing || (try; off(_chan(id)); catch; end)
+    try
+        Base.isopen(session) && close(session)
+    catch
+    end
+    off = _SLATE_OFF[]
+    off === nothing || (
+        try
+            off(_chan(id))
+        catch
+        end
+    )
     emit = _SLATE_EMIT[]
-    emit === nothing || (try; emit(_ctl(id), Dict("op" => "close")); catch; end)
+    emit === nothing || (
+        try
+            emit(_ctl(id), Dict("op" => "close"))
+        catch
+        end
+    )
     return nothing
 end
 
@@ -51,13 +65,13 @@ SlateConnection() = SlateConnection("", true)
 # fallback serializes first). Ship the raw bytes over the binary lane, tagged with this session's channel.
 function Base.write(c::SlateConnection, bytes::AbstractVector{UInt8})
     emit = _SLATE_EMIT[]
-    (emit === nothing || isempty(c.id)) && return
+    (emit === nothing || isempty(c.id)) && return nothing
     emit(_chan(c.id), SlateBinary(Vector{UInt8}(bytes)))
-    return
+    return nothing
 end
 
 Base.isopen(c::SlateConnection) = c.open
-Base.close(c::SlateConnection) = (c.open = false; nothing)
+Base.close(c::SlateConnection) = (c.open=false; nothing)
 
 # Every figure on a page shares ONE ROOT session (exactly like Bonito's IJulia/Pluto connections route
 # many figures over one channel). This is REQUIRED for arbitrary figures: WGLMakie's browser
@@ -139,7 +153,7 @@ end
 function root_announce_html()
     _ANNOUNCE_ROOT[] || return ""
     _ANNOUNCE_ROOT[] = false
-    return sprint(show, Bonito.session_dom(_PAGE_ROOT[], Bonito.App(nothing; loading_page = nothing)))
+    return sprint(show, Bonito.session_dom(_PAGE_ROOT[], Bonito.App(nothing; loading_page=nothing)))
 end
 
 # Wire the Julia RECEIVE side for `session`: a `slate_on` handler that feeds decoded browser frames into
@@ -154,20 +168,23 @@ end
 function _wire_receive!(session)
     on = _SLATE_ON[]
     on === nothing && return nothing
-    on(_chan(session.id), payload -> (put!(session.inbox, Base64.base64decode(String(payload))); nothing))
+    on(
+        _chan(session.id),
+        payload -> (put!(session.inbox, Base64.base64decode(String(payload))); nothing),
+    )
     return nothing
 end
 
 # Re-attach the persistent page-root's receiver to the CURRENT namespace (see `_wire_receive!`). No-op
 # before any root exists.
-_rewire_page_root!() = (root = _PAGE_ROOT[]; root === nothing || _wire_receive!(root); nothing)
+_rewire_page_root!() = (root=_PAGE_ROOT[]; root === nothing || _wire_receive!(root); nothing)
 
 # Called once per session before its DOM is rendered. Wire the Julia RECEIVE side (a `slate_on` handler
 # feeding `session.inbox`) and return the JS that wires the browser side (inbound decode + outbound send).
 function Bonito.setup_connection(session::Bonito.Session{SlateConnection})
     session.connection.id = session.id
     chan = _chan(session.id)
-    ctl  = _ctl(session.id)
+    ctl = _ctl(session.id)
     _wire_receive!(session)   # browser → Julia: base64 payload → raw bytes → this session's inbox
     # Runs for the page ROOT (Bonito wires the connection only for `isroot`; sub-session figures share it).
     # Hold the root so the page can be reset when a fresh browser connects and a new root is established.

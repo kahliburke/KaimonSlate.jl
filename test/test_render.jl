@@ -3,8 +3,10 @@
 using ReTest
 
 const HERE = @__DIR__
-include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine
-include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
+include(joinpath(HERE, "..", "src", "engine.jl"));
+using .ReportEngine
+include(joinpath(HERE, "..", "src", "render.jl"));
+using .ReportRender
 
 @testset "ReportRender" begin
     src = """
@@ -22,7 +24,7 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
     #%% code id=err
     error("boom")
     """
-    r = parse_report(src; title = "T")
+    r = parse_report(src; title="T")
     eval_report!(r)
     html = render_html(r)
 
@@ -76,7 +78,7 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         @test occursin("<strong>bold</strong>", m)    # ordinary markdown still works
         @test !occursin("xslatemathx", m)             # no leftover placeholders
         @test occursin("<em>", markdown_html(raw"$a_i+b$ then _real emphasis_")) &&
-              occursin(raw"$a_i+b$", markdown_html(raw"$a_i+b$ then _real emphasis_"))
+            occursin(raw"$a_i+b$", markdown_html(raw"$a_i+b$ then _real emphasis_"))
     end
 
     @testset "text/latex output chunk → KaTeX div" begin
@@ -102,7 +104,17 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         h = markdown_html("The answer is {{x}}.", [scalar])
         @test occursin("42", h) && occursin("ival", h) && !occursin("{{", h)
 
-        img = CellOutput("", [MimeChunk("image/png", UInt8[0x89, 0x50])], Any[], Any[], BindSpec[], "", nothing, nothing, 0.0)
+        img = CellOutput(
+            "",
+            [MimeChunk("image/png", UInt8[0x89, 0x50])],
+            Any[],
+            Any[],
+            BindSpec[],
+            "",
+            nothing,
+            nothing,
+            0.0,
+        )
         @test occursin("data:image/png;base64,", markdown_html("plot {{p}}", [img]))
 
         err = CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", "boom", nothing, 0.0)
@@ -118,9 +130,21 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         @test occursin("\$5", ph) && occursin("\$10", ph) && !occursin("xslatemathx", ph)
 
         # echart / table captures become inline host placeholders for the SPA.
-        ech = CellOutput("", MimeChunk[], Any[Dict("x" => 1)], Any[], BindSpec[], "", nothing, nothing, 0.0)
+        ech = CellOutput(
+            "", MimeChunk[], Any[Dict("x" => 1)], Any[], BindSpec[], "", nothing, nothing, 0.0
+        )
         @test occursin("ichart", markdown_html("chart {{e}}", [ech]))
-        tbl = CellOutput("", MimeChunk[], Any[], Any[Dict("columns" => ["a"])], BindSpec[], "", nothing, nothing, 0.0)
+        tbl = CellOutput(
+            "",
+            MimeChunk[],
+            Any[],
+            Any[Dict("columns" => ["a"])],
+            BindSpec[],
+            "",
+            nothing,
+            nothing,
+            0.0,
+        )
         @test occursin("itable", markdown_html("tbl {{t}}", [tbl]))
 
         # Inside math, an interpolation substitutes the raw value (bare TeX), not a span.
@@ -139,9 +163,12 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         # _error_origin is the TOPMOST (innermost) cell frame — closest to where it fired.
         @test ReportRender._error_origin(eo) == ("a", 1)
         # the error message jumps to that origin cell (data-cid), not the displaying cell.
-        cb = Cell("b", CODE, "tripwire()"); cb.output = eo
+        cb = Cell("b", CODE, "tripwire()")
+        cb.output = eo
         oh = output_html(cb)
-        @test occursin("errjump", oh) && occursin("data-cid=\"a\"", oh) && occursin("data-line=\"1\"", oh)
+        @test occursin("errjump", oh) &&
+            occursin("data-cid=\"a\"", oh) &&
+            occursin("data-line=\"1\"", oh)
         # _linkify_trace turns each frame into a cellref carrying its own cell id.
         lt = ReportRender._linkify_trace(bt)
         @test occursin("class=\"cellref\" data-cid=\"a\" data-line=\"1\"", lt)

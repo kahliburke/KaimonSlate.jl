@@ -4,7 +4,8 @@
 using ReTest
 using Random
 
-include(joinpath(@__DIR__, "..", "src", "engine.jl")); using .ReportEngine
+include(joinpath(@__DIR__, "..", "src", "engine.jl"));
+using .ReportEngine
 
 findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
 
@@ -14,26 +15,35 @@ mutable struct CountingKernel <: ReportEngine.Kernel
     evals::Int
 end
 ReportEngine.prepare!(::CountingKernel, r::ReportEngine.Report) = ReportEngine.report_module(r)
-ReportEngine.project_deps(::CountingKernel, ::ReportEngine.Report) =
-    [Dict{String,Any}("name" => "FakeExpPkg", "version" => "1.2.3", "source" => "registry")]
-ReportEngine.eval_capture(k::CountingKernel, r::ReportEngine.Report, ::AbstractString, ::AbstractString = "string") =
-    (k.evals += 1; ReportEngine._eval_capture(ReportEngine.report_module(r), "1"))
-ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractString) =
-    Dict{String,Any}("kind" => "module",
-                     "exports" => Any[Dict{String,Any}("name" => "fk_fun", "kind" => "function")])
+function ReportEngine.project_deps(::CountingKernel, ::ReportEngine.Report)
+    return [Dict{String,Any}("name" => "FakeExpPkg", "version" => "1.2.3", "source" => "registry")]
+end
+function ReportEngine.eval_capture(
+    k::CountingKernel, r::ReportEngine.Report, ::AbstractString, ::AbstractString="string"
+)
+    return (k.evals += 1; ReportEngine._eval_capture(ReportEngine.report_module(r), "1"))
+end
+function ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractString)
+    return Dict{String,Any}(
+        "kind" => "module",
+        "exports" => Any[Dict{String,Any}("name" => "fk_fun", "kind" => "function")],
+    )
+end
 
 @testset "ReportEngine deps" begin
-
     @testset "binding inference: reads / writes" begin
-        c = Cell("c", CODE, "y = x + 1"); infer_bindings!(c)
+        c = Cell("c", CODE, "y = x + 1")
+        infer_bindings!(c)
         @test :y in c.writes
         @test :x in c.reads
 
-        c = Cell("c", CODE, "function f(a); a + b; end"); infer_bindings!(c)
+        c = Cell("c", CODE, "function f(a); a + b; end")
+        infer_bindings!(c)
         @test :f in c.writes                 # funcdef name is a write
         @test :b in c.reads
 
-        c = Cell("c", CODE, "const K = 10"); infer_bindings!(c)
+        c = Cell("c", CODE, "const K = 10")
+        infer_bindings!(c)
         @test :K in c.writes
     end
 
@@ -41,24 +51,33 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         ce = ReportEngine._cell_effect
         E = ReportEngine
         @test ce(Cell("p", CODE, "y = f(x)")) == E.PURE                    # plain compute → transfer/cache
-        pu = Cell("u", CODE, "using LinearAlgebra"); infer_bindings!(pu)
+        pu = Cell("u", CODE, "using LinearAlgebra")
+        infer_bindings!(pu)
         @test ce(pu) == E.EVERYWHERE                                         # pure `using` → re-run everywhere
-        scaf = Cell("s", CODE, "x = 1"); push!(scaf.flags, :import_scaffold)
+        scaf = Cell("s", CODE, "x = 1")
+        push!(scaf.flags, :import_scaffold)
         @test ce(scaf) == E.EVERYWHERE                                       # import scaffold → everywhere
-        thm = Cell("t", CODE, "set_theme!(theme_dark())"); push!(thm.writes, E._THEME_SENTINEL)
+        thm = Cell("t", CODE, "set_theme!(theme_dark())")
+        push!(thm.writes, E._THEME_SENTINEL)
         @test ce(thm) == E.EVERYWHERE                                        # theme setter → everywhere (the regression)
-        res = Cell("r", CODE, "db = DuckDB.DB(p)"); push!(res.flags, :resource)
+        res = Cell("r", CODE, "db = DuckDB.DB(p)")
+        push!(res.flags, :resource)
         @test ce(res) == E.RESOURCE                                        # handle → replay at read
-        vol = Cell("v", CODE, "t = rand()"); push!(vol.flags, :volatile)
+        vol = Cell("v", CODE, "t = rand()")
+        push!(vol.flags, :volatile)
         @test ce(vol) == E.VOLATILE                                        # non-deterministic → transfer, not cache
         # an explicit tag WINS over an inferred per-side/pure shape
-        rt = Cell("rt", CODE, "set_theme!(x)"); push!(rt.flags, :resource); push!(rt.writes, E._THEME_SENTINEL)
+        rt = Cell("rt", CODE, "set_theme!(x)")
+        push!(rt.flags, :resource)
+        push!(rt.writes, E._THEME_SENTINEL)
         @test ce(rt) == E.RESOURCE
         # the AUTHOR tag and the RUNTIME declaration are distinct flags, and each reaches EVERYWHERE
         # on its own — a cell with neither an import nor a recognisable shape.
-        tag = Cell("tg", CODE, "register_op!(:foo)"); push!(tag.flags, :everywhere)
+        tag = Cell("tg", CODE, "register_op!(:foo)")
+        push!(tag.flags, :everywhere)
         @test ce(tag) == E.EVERYWHERE
-        dec = Cell("dc", CODE, "register_op!(:foo)"); push!(dec.flags, :everywhere_declared)
+        dec = Cell("dc", CODE, "register_op!(:foo)")
+        push!(dec.flags, :everywhere_declared)
         @test ce(dec) == E.EVERYWHERE
     end
 
@@ -82,13 +101,17 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         # `__ExprExpl_anon__<rand>` — synthetic AND random per analysis. If one leaks into `writes`
         # it becomes a phantom memo name (undefined post-run), which used to block caching for any
         # cell containing a lambda or do-block.
-        for src in ("vals = map(x -> x^2, 1:10)",
-                    "s = open(io -> read(io, String), \"f\")",
-                    "t = map(1:3) do i\n    i + 1\nend")
-            c = Cell("c", CODE, src); infer_bindings!(c)
+        for src in (
+            "vals = map(x -> x^2, 1:10)",
+            "s = open(io -> read(io, String), \"f\")",
+            "t = map(1:3) do i\n    i + 1\nend",
+        )
+            c = Cell("c", CODE, src)
+            infer_bindings!(c)
             @test !any(w -> startswith(String(w), "__ExprExpl_anon__"), c.writes)
         end
-        c = Cell("c", CODE, "vals = map(x -> x^2, 1:10)"); infer_bindings!(c)
+        c = Cell("c", CODE, "vals = map(x -> x^2, 1:10)")
+        infer_bindings!(c)
         @test :vals in c.writes              # the real write is still there
     end
 
@@ -96,7 +119,11 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         # ExpressionExplorer swallows an unknown macro's args whole — `@chain rotations begin … end`
         # used to yield ONLY `@chain` as a reference, silently dropping the `rotations` dataflow
         # edge (broken recompute order + wrong memo closures). The arg-scan over-approximates reads.
-        c = Cell("c", CODE, "out = @chain rotations begin\n    subset(:linked)\n    groupby(:origin)\nend")
+        c = Cell(
+            "c",
+            CODE,
+            "out = @chain rotations begin\n    subset(:linked)\n    groupby(:origin)\nend",
+        )
         infer_bindings!(c)
         @test :rotations in c.reads
         @test :subset in c.reads && :groupby in c.reads   # block calls are reads too (using-refined deps)
@@ -104,12 +131,14 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test Symbol("@chain") in c.reads                 # the macro itself stays a dep
 
         # nested macrocalls: the inner one's args are scanned as well
-        c = Cell("c", CODE, "r = @outer begin\n    @inner df\nend"); infer_bindings!(c)
+        c = Cell("c", CODE, "r = @outer begin\n    @inner df\nend")
+        infer_bindings!(c)
         @test :df in c.reads
 
         # writes are NOT taken from unexpanded macro args — no fabricated producers (an
         # assignment target inside a macro is neither a write nor a read until tier-2 expansion)
-        c = Cell("c", CODE, "@someunknownmacro q = 1"); infer_bindings!(c)
+        c = Cell("c", CODE, "@someunknownmacro q = 1")
+        infer_bindings!(c)
         @test :q ∉ c.writes
 
         # slate handler macros keep their bespoke semantics: @onclick's control is NOT a read
@@ -119,8 +148,10 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test :btn ∉ c.reads
 
         # end-to-end: the dependency edge exists — the @chain consumer follows its producer
-        r = parse_report("#%% code id=producer\nrotations = 1:10\n" *
-                         "#%% code id=consumer\ncurve = @chain rotations begin\n    sum\nend")
+        r = parse_report(
+            "#%% code id=producer\nrotations = 1:10\n" *
+            "#%% code id=consumer\ncurve = @chain rotations begin\n    sum\nend",
+        )
         build_dependencies!(r)
         @test "producer" in findcell(r, "consumer").deps
     end
@@ -131,15 +162,20 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         # (`:import_scaffold`) to re-establish scope. `:using_redundant` marks the stricter subset whose
         # replay is a proven no-op (X already in scope upstream) — a HINT, not a safety gate. This block
         # checks both the flags and that providers memoize. Mock the resolved exports so usings aren't opaque.
-        empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
+        empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._BIND_TICKS)
         ReportEngine._USING_EXPORTS["FakeMemoPkg"] = [:fakesolve]
         ReportEngine._USING_EXPORTS["OtherMemoPkg"] = [:othername]
         try
-            r = parse_report("#%% code id=anchor\nusing FakeMemoPkg\n" *
-                             "#%% code id=heavy\nusing FakeMemoPkg\nv = fakesolve()\n" *
-                             "#%% code id=novel\nusing FakeMemoPkg, OtherMemoPkg\nw = 1\n")
+            r = parse_report(
+                "#%% code id=anchor\nusing FakeMemoPkg\n" *
+                "#%% code id=heavy\nusing FakeMemoPkg\nv = fakesolve()\n" *
+                "#%% code id=novel\nusing FakeMemoPkg, OtherMemoPkg\nw = 1\n",
+            )
             build_dependencies!(r)
-            anchor = findcell(r, "anchor"); heavy = findcell(r, "heavy"); novel = findcell(r, "novel")
+            anchor = findcell(r, "anchor")
+            heavy = findcell(r, "heavy")
+            novel = findcell(r, "novel")
             @test :fakesolve in anchor.provides
             @test :import_scaffold in anchor.flags         # a provider → memoizable via import-scaffold replay
             @test !(:using_redundant in anchor.flags)      # …but the FIRST provider, so not a redundant no-op
@@ -154,18 +190,22 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         finally
             delete!(ReportEngine._USING_EXPORTS, "FakeMemoPkg")
             delete!(ReportEngine._USING_EXPORTS, "OtherMemoPkg")
-            empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
+            empty!(ReportEngine._BIND_CACHE)
+            empty!(ReportEngine._BIND_TICKS)
         end
     end
 
     @testset "manual mutation declarations (`mutates=` header tag)" begin
         # Tag grammar mirrors needs=; declared names land in cell.mutates AND cell.reads
         # (a mutation is also a read — ordering vs the writer needs the edge).
-        @test ReportEngine._manual_mutates(Set([Symbol("mutates=df,v"), :cache])) |> sort == [:df, :v]
+        @test ReportEngine._manual_mutates(Set([Symbol("mutates=df,v"), :cache])) |> sort ==
+            [:df, :v]
         @test ReportEngine._manual_mutates(Set([Symbol("mutates="), :nocache])) == Symbol[]
-        r = parse_report("#%% code id=mk\ndf = 1\n" *
-                         "#%% code id=hid mutates=df\nupdate(df)\n" *   # no bang — analysis alone can't see it
-                         "#%% code id=rd\nz = df + 1")
+        r = parse_report(
+            "#%% code id=mk\ndf = 1\n" *
+            "#%% code id=hid mutates=df\nupdate(df)\n" *   # no bang — analysis alone can't see it
+            "#%% code id=rd\nz = df + 1",
+        )
         build_dependencies!(r)
         hid = findcell(r, "hid")
         @test :df in hid.mutates
@@ -176,24 +216,27 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
 
     @testset "manual edges (`needs=` header tag)" begin
         # Tag grammar: comma list, multiple tokens union, empty segments dropped.
-        @test ReportEngine._manual_needs(Set([Symbol("needs=a,b"), Symbol("needs=c"), :cache])) |> sort ==
-              ["a", "b", "c"]
+        @test ReportEngine._manual_needs(Set([Symbol("needs=a,b"), Symbol("needs=c"), :cache])) |>
+              sort == ["a", "b", "c"]
         @test ReportEngine._manual_needs(Set([Symbol("needs="), :nocache])) == String[]
 
         # No shared variable — dataflow alone sees NO edge; the tag asserts one, and the
         # dependents index (staleness propagation) picks it up like any other dep.
-        r = parse_report("#%% code id=mktable\nsideeffect = 1\n" *
-                         "#%% code id=agg needs=mktable\nres = 2 + 2")
+        r = parse_report(
+            "#%% code id=mktable\nsideeffect = 1\n" * "#%% code id=agg needs=mktable\nres = 2 + 2"
+        )
         build_dependencies!(r)
         @test "mktable" in findcell(r, "agg").deps
         @test "agg" in dependents_of(r, ["mktable"])
 
         # Only an EARLIER CODE cell is a legal target: forward refs, unknown ids, and markdown
         # targets add no edge (and never error) — the UI flags them as inert.
-        r = parse_report("#%% code id=early needs=late,ghost\nx1 = 1\n" *
-                         "#%% md id=prose\n# words\n" *
-                         "#%% code id=late\nx2 = 2\n" *
-                         "#%% code id=mdneed needs=prose\nx3 = 3")
+        r = parse_report(
+            "#%% code id=early needs=late,ghost\nx1 = 1\n" *
+            "#%% md id=prose\n# words\n" *
+            "#%% code id=late\nx2 = 2\n" *
+            "#%% code id=mdneed needs=prose\nx3 = 3",
+        )
         build_dependencies!(r)
         @test isempty(findcell(r, "early").deps)
         @test isempty(findcell(r, "mdneed").deps)
@@ -257,7 +300,8 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
     end
 
     @testset "_BIND_CACHE is a bounded LRU (no wholesale re-inference cliff)" begin
-        empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
+        empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._BIND_TICKS)
         # Fill past the cap with distinct cell ids; correctness survives the eviction sweep —
         # inference is recomputed (cheap), not skipped or corrupted. One aggregate @test instead of
         # one per cell — thousands of near-identical assertions don't add diagnostic value here.
@@ -288,22 +332,27 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         ReportEngine.rebuild_precise!(r)
         @test haskey(ReportEngine._BIND_CACHE, "bystander")   # untouched by r's rebuild
         @test haskey(ReportEngine._BIND_CACHE, "stays")       # r's cells re-cached by the rebuild
-        empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)   # don't leak into other testsets
+        empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._BIND_TICKS)   # don't leak into other testsets
     end
 
     @testset "mutation heuristics add a write (and read)" begin
-        for (src, sym) in (("push!(data, 4)", :data),
-                           ("data[i] = 5", :data),
-                           ("obj.field = 7", :obj),
-                           ("v .= 1", :v))
-            c = Cell("c", CODE, src); infer_bindings!(c)
+        for (src, sym) in (
+            ("push!(data, 4)", :data),
+            ("data[i] = 5", :data),
+            ("obj.field = 7", :obj),
+            ("v .= 1", :v),
+        )
+            c = Cell("c", CODE, src)
+            infer_bindings!(c)
             @test sym in c.writes
             @test sym in c.reads
         end
     end
 
     @testset "@reactive sugar: name is a definer, init is read" begin
-        c = Cell("c", CODE, "@reactive level = base + 1"); infer_bindings!(c)
+        c = Cell("c", CODE, "@reactive level = base + 1")
+        infer_bindings!(c)
         @test :level in c.writes          # `@reactive x = …` DEFINES x (the reactive producer)
         @test !(:level in c.mutates)      # a definition, not a mutation → no false multidef
         @test :base in c.reads            # init free vars are reads (edge to their writer)
@@ -315,8 +364,10 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
     end
 
     @testset "graph: most-recent-prior-writer" begin
-        r = parse_report("#%% code id=a\nx = 1\n#%% code id=b\ny = x\n" *
-                         "#%% code id=c\nx = 2\n#%% code id=d\nz = x")
+        r = parse_report(
+            "#%% code id=a\nx = 1\n#%% code id=b\ny = x\n" *
+            "#%% code id=c\nx = 2\n#%% code id=d\nz = x",
+        )
         build_dependencies!(r)
         @test findcell(r, "b").deps == Set(["a"])    # reads first x
         @test findcell(r, "d").deps == Set(["c"])    # reads redefined x
@@ -326,16 +377,19 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
     end
 
     @testset "mutation creates edge to the mutating cell, not the definer" begin
-        r = parse_report("#%% code id=a\ndata = [1,2,3]\n" *
-                         "#%% code id=b\npush!(data, 4)\n#%% code id=c\nsum(data)")
+        r = parse_report(
+            "#%% code id=a\ndata = [1,2,3]\n" *
+            "#%% code id=b\npush!(data, 4)\n#%% code id=c\nsum(data)",
+        )
         build_dependencies!(r)
         @test "b" in findcell(r, "c").deps           # c depends on the mutation
         @test "a" ∉ findcell(r, "c").deps
     end
 
     @testset "pruned recompute: only stale cells re-run (output identity)" begin
-        src1 = "#%% code id=a\nbase = 10\n#%% code id=b\nderived = base * 2\n" *
-               "#%% code id=c\nindependent = 99"
+        src1 =
+            "#%% code id=a\nbase = 10\n#%% code id=b\nderived = base * 2\n" *
+            "#%% code id=c\nindependent = 99"
         r = parse_report(src1)
         build_dependencies!(r)
         eval_stale!(r)                               # first run: all stale → all eval
@@ -366,11 +420,13 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         # A plain `using X` pulls in unknowable exports, and `include` runs unseen code →
         # both must stay barriers (downstream conservatively depends).
         for src in ("using Statistics", "include(\"x.jl\")")
-            c = Cell("c", CODE, src); infer_bindings!(c)
+            c = Cell("c", CODE, src)
+            infer_bindings!(c)
             @test :opaque in c.flags
         end
-        r = parse_report("#%% code id=a\nx = 1\n#%% code id=setup\nusing Statistics\n" *
-                         "#%% code id=b\ny = 2")
+        r = parse_report(
+            "#%% code id=a\nx = 1\n#%% code id=setup\nusing Statistics\n" * "#%% code id=b\ny = 2"
+        )
         build_dependencies!(r)
         @test :opaque in findcell(r, "setup").flags
         @test "setup" in findcell(r, "b").deps               # downstream depends on the using
@@ -380,15 +436,22 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
     @testset "precise import binds names, is NOT a blanket barrier" begin
         # `import X` / `import X: a` / `using X: a` bring KNOWN names → recorded as writes, so a
         # self-contained import doesn't chain every cell below it (only cells that USE the name dep).
-        for (src, name) in (("import Dates", :Dates), ("import Dates: now", :now),
-                            ("using Dates: now", :now), ("import Dates as D", :D))
-            c = Cell("c", CODE, src); infer_bindings!(c)
+        for (src, name) in (
+            ("import Dates", :Dates),
+            ("import Dates: now", :now),
+            ("using Dates: now", :now),
+            ("import Dates as D", :D),
+        )
+            c = Cell("c", CODE, src)
+            infer_bindings!(c)
             @test !(:opaque in c.flags)
             @test name in c.writes
         end
-        r = parse_report("#%% code id=imp\nimport Dates\n" *
-                         "#%% code id=user\nDates.today()\n" *
-                         "#%% code id=indep\nz = 1")
+        r = parse_report(
+            "#%% code id=imp\nimport Dates\n" *
+            "#%% code id=user\nDates.today()\n" *
+            "#%% code id=indep\nz = 1",
+        )
         build_dependencies!(r)
         @test !(:opaque in findcell(r, "imp").flags)
         @test "imp" in findcell(r, "user").deps               # a cell that USES Dates depends on the import
@@ -401,8 +464,7 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         infer_bindings!(bad)
         @test :opaque in bad.flags
 
-        r = parse_report("#%% code id=a\nx = 1\n#%% code id=bad\nx = (\n" *
-                         "#%% code id=c\ny = 2")
+        r = parse_report("#%% code id=a\nx = 1\n#%% code id=bad\nx = (\n" * "#%% code id=c\ny = 2")
         build_dependencies!(r)
         @test :opaque in findcell(r, "bad").flags
         @test "bad" in findcell(r, "c").deps         # everything after depends on the barrier
@@ -414,10 +476,14 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         # cell has run, X is loaded and `refine_usings!` (called at the end of eval_stale!) resolves the
         # real export set and rebuilds deps precisely — downstream depends on it only if it uses a name
         # X brings in. `Dates` is a project dep, so `using Dates` actually loads here.
-        empty!(ReportEngine._USING_EXPORTS); empty!(ReportEngine._USING_TRIED); empty!(ReportEngine._BIND_CACHE)
-        r = parse_report("#%% code id=u\nusing Dates\n" *
-                         "#%% code id=user\np = Day(3)\n" *
-                         "#%% code id=indep\nz = 1 + 1")
+        empty!(ReportEngine._USING_EXPORTS)
+        empty!(ReportEngine._USING_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
+        r = parse_report(
+            "#%% code id=u\nusing Dates\n" *
+            "#%% code id=user\np = Day(3)\n" *
+            "#%% code id=indep\nz = 1 + 1",
+        )
         build_dependencies!(r)
         @test :opaque in findcell(r, "u").flags            # bare using → barrier BEFORE it runs
         @test "u" in findcell(r, "indep").deps             # conservative: even an unrelated cell depends on it
@@ -428,7 +494,9 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test "u" in findcell(r, "user").deps              # a cell that USES `Day` depends on it
         @test isempty(findcell(r, "indep").deps)           # an unrelated cell no longer does
         @test !("indep" in dependents_of(r, Set(["u"])))   # editing the using won't restale it
-        empty!(ReportEngine._USING_EXPORTS); empty!(ReportEngine._USING_TRIED); empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._USING_EXPORTS)
+        empty!(ReportEngine._USING_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
     end
 
     @testset "blank cell inserted above an opaque cell doesn't perturb its deps" begin
@@ -452,14 +520,18 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
     end
 
     @testset "macro expansion recovers macro-hidden writes (the @kwdef reactivity hole)" begin
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
         # `Base.@kwdef struct` DEFINES the struct name, but static analysis sees only the unexpanded
         # macrocall — before expansion the write edge is missing, so editing the struct never
         # restaled its readers. prewarm_macros! (inside eval_stale!) expands in the report module
         # and recovers the write.
-        r = parse_report("#%% code id=s\nBase.@kwdef struct KwFoo\n    x::Int = 1\nend\n" *
-                         "#%% code id=u\nfoo = KwFoo(x = 2)\n" *
-                         "#%% code id=indep\nq = 1")
+        r = parse_report(
+            "#%% code id=s\nBase.@kwdef struct KwFoo\n    x::Int = 1\nend\n" *
+            "#%% code id=u\nfoo = KwFoo(x = 2)\n" *
+            "#%% code id=indep\nq = 1",
+        )
         build_dependencies!(r)
         @test :macrocall in findcell(r, "s").flags          # flagged as an expansion candidate
         eval_stale!(r)
@@ -469,81 +541,113 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test "u" in dependents_of(r, Set(["s"]))           # editing the struct restales the reader
 
         # @enum: same shape — `red` used downstream must depend on the @enum cell
-        r2 = parse_report("#%% code id=e\n@enum TrafficColor tc_red tc_green\n" *
-                          "#%% code id=use\nsig = tc_red")
-        build_dependencies!(r2); eval_stale!(r2)
+        r2 = parse_report(
+            "#%% code id=e\n@enum TrafficColor tc_red tc_green\n" * "#%% code id=use\nsig = tc_red"
+        )
+        build_dependencies!(r2)
+        eval_stale!(r2)
         @test :tc_red in findcell(r2, "e").writes
         @test "e" in findcell(r2, "use").deps
 
         # A macro that only READS must not fabricate writes (the "steal an edge" guard)
         r3 = parse_report("#%% code id=a\nv = 7\n#%% code id=b\n@show v")
-        build_dependencies!(r3); eval_stale!(r3)
+        build_dependencies!(r3)
+        eval_stale!(r3)
         @test :v ∉ ReportEngine.cell_definitions(findcell(r3, "b"))
         @test "a" in findcell(r3, "b").deps                 # the read edge is still there
 
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
     end
 
     @testset "notebook-defined macros resolve post-drain (refine_macros!)" begin
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
         # The macro doesn't exist until its cell RUNS, so prewarm can't expand it (and must not mark
         # it tried); refine_macros! after the drain recovers the write and rebuilds the graph.
-        r = parse_report("#%% code id=m\nmacro defit(name)\n    esc(:(\$name = 41))\nend\n" *
-                         "#%% code id=call\n@defit auto_val\n" *
-                         "#%% code id=read\nz = auto_val + 1")
+        r = parse_report(
+            "#%% code id=m\nmacro defit(name)\n    esc(:(\$name = 41))\nend\n" *
+            "#%% code id=call\n@defit auto_val\n" *
+            "#%% code id=read\nz = auto_val + 1",
+        )
         build_dependencies!(r)
         @test isempty(findcell(r, "call").writes)           # invisible before expansion
         eval_stale!(r)
         @test :auto_val in findcell(r, "call").writes       # recovered post-drain
         @test "call" in findcell(r, "read").deps
         @test "read" in dependents_of(r, Set(["call"]))     # editing @defit's call restales the reader
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
     end
 
     @testset "refine_macros! restales readers that raced a recovered producer" begin
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
         # In a PARALLEL drain a reader can start before its (not-yet-linked) macro producer and
         # error; once refinement recovers the write edge, the reader must be restaled so the
         # re-drain runs it in order. Simulate the race by marking the reader ERRORED post-drain.
-        r = parse_report("#%% code id=m\nmacro mk(name)\n    esc(:(\$name = 5))\nend\n" *
-                         "#%% code id=call\n@mk made_val\n" *
-                         "#%% code id=read\nw = made_val * 2")
-        build_dependencies!(r); eval_stale!(r)
+        r = parse_report(
+            "#%% code id=m\nmacro mk(name)\n    esc(:(\$name = 5))\nend\n" *
+            "#%% code id=call\n@mk made_val\n" *
+            "#%% code id=read\nw = made_val * 2",
+        )
+        build_dependencies!(r)
+        eval_stale!(r)
         @test :made_val in findcell(r, "call").writes
         findcell(r, "read").state = ReportEngine.ERRORED       # pretend it raced and failed
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED)   # force re-resolution
-        @test refine_macros!(r; restale_racers = true)
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)   # force re-resolution
+        @test refine_macros!(r; restale_racers=true)
         @test findcell(r, "read").state == STALE               # queued for the follow-up drain
         # …and without the flag (serial drains can't race) nothing is restaled
         findcell(r, "read").state = ReportEngine.ERRORED
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED)
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)
         @test refine_macros!(r)
         @test findcell(r, "read").state == ReportEngine.ERRORED
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
     end
 
     @testset "macroexpand config opt-out keeps the conservative analysis" begin
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
-        r = parse_report("#%% code id=s\nBase.@kwdef struct KwOpt\n    x::Int = 1\nend\n" *
-                         "#%% code id=u\nfoo2 = KwOpt(x = 2)")
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
+        r = parse_report(
+            "#%% code id=s\nBase.@kwdef struct KwOpt\n    x::Int = 1\nend\n" *
+            "#%% code id=u\nfoo2 = KwOpt(x = 2)",
+        )
         r.meta["macroexpand"] = false
-        build_dependencies!(r); eval_stale!(r)
+        build_dependencies!(r)
+        eval_stale!(r)
         @test :KwOpt ∉ findcell(r, "s").writes              # no recovery when opted out
         @test isempty(ReportEngine.pending_macro_cells(r))  # and no round-trips queued
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
     end
 
     @testset "using-export resolution persists across sessions (disk seed, no round-trip)" begin
         tmp = joinpath(mktempdir(), "usings.json")
         oldpath = ReportEngine._USING_DISK_PATH[]
         ReportEngine._USING_DISK_PATH[] = tmp
-        wipe!() = (empty!(ReportEngine._USING_EXPORTS); empty!(ReportEngine._USING_TRIED);
-                   empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS);
-                   ReportEngine._USING_DISK[] = nothing)
+        wipe!() = (
+            empty!(ReportEngine._USING_EXPORTS);
+            empty!(ReportEngine._USING_TRIED);
+            empty!(ReportEngine._BIND_CACHE);
+            empty!(ReportEngine._BIND_TICKS);
+            ReportEngine._USING_DISK[]=nothing
+        )
         try
             wipe!()
             src = "#%% code id=u\nusing FakeExpPkg\n#%% code id=r\nfk_fun()"
-            r = parse_report(src); build_dependencies!(r)
+            r = parse_report(src)
+            build_dependencies!(r)
             k1 = CountingKernel(0)
             @test prewarm_usings!(r, k1)                     # cold: resolves via the kernel…
             @test k1.evals == 1                              # …paying exactly one import round-trip
@@ -552,7 +656,8 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
             @test isfile(tmp)                                # …and the resolution persisted
 
             wipe!()                                          # "restart": session caches gone, file stays
-            r2 = parse_report(src); build_dependencies!(r2)
+            r2 = parse_report(src)
+            build_dependencies!(r2)
             k2 = CountingKernel(0)
             @test prewarm_usings!(r2, k2)                    # warm: seeded straight from disk…
             @test k2.evals == 0                              # …with ZERO import round-trips
@@ -572,9 +677,13 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         tmp = joinpath(mktempdir(), "usings.json")
         oldpath = ReportEngine._USING_DISK_PATH[]
         ReportEngine._USING_DISK_PATH[] = tmp
-        wipe2!() = (empty!(ReportEngine._USING_EXPORTS); empty!(ReportEngine._USING_TRIED);
-                    empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS);
-                    ReportEngine._USING_DISK[] = nothing)
+        wipe2!() = (
+            empty!(ReportEngine._USING_EXPORTS);
+            empty!(ReportEngine._USING_TRIED);
+            empty!(ReportEngine._BIND_CACHE);
+            empty!(ReportEngine._BIND_TICKS);
+            ReportEngine._USING_DISK[]=nothing
+        )
         try
             wipe2!()
             c = Cell("genc", CODE, "using FakeExpPkg")
@@ -607,7 +716,9 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         r3 = parse_report("#%% code id=a\nf() = g()\n#%% code id=b\ng() = 1")
         build_dependencies!(r3)
         @test isempty(r3.meta["backref"])
-        r3b = parse_report("#%% code id=a\nfunction h()\n    later_val + 1\nend\n#%% code id=b\nlater_val = 2")
+        r3b = parse_report(
+            "#%% code id=a\nfunction h()\n    later_val + 1\nend\n#%% code id=b\nlater_val = 2"
+        )
         build_dependencies!(r3b)
         @test isempty(r3b.meta["backref"])
         # a name PROVIDED below (import) is availability, not an ordering mistake
@@ -627,9 +738,11 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
     @testset "global-theme cells wire theme→plot edges (Makie theme reactivity)" begin
         # set_theme! mutates process state no binding carries — the synthetic _THEME_SENTINEL
         # write/read pair turns that into real dataflow, so theme edits restale figures.
-        r = parse_report("#%% code id=th\nset_theme!(theme_dark())\n" *
-                         "#%% code id=plot\nfig = Figure(); lines!(Axis(fig[1, 1]), xs, ys); fig\n" *
-                         "#%% code id=pure\nz = 1 + 1")
+        r = parse_report(
+            "#%% code id=th\nset_theme!(theme_dark())\n" *
+            "#%% code id=plot\nfig = Figure(); lines!(Axis(fig[1, 1]), xs, ys); fig\n" *
+            "#%% code id=pure\nz = 1 + 1",
+        )
         build_dependencies!(r)
         @test "th" in findcell(r, "plot").deps              # figure depends on the theme setter
         @test isempty(findcell(r, "pure").deps)             # pure compute untouched
@@ -638,9 +751,11 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test isempty(r.meta["multidef"])                   # the sentinel never reads as a collision
         @test ReportEngine._memo_key(r, findcell(r, "th")) != ""   # theme setter → memoizable via theme-replay on restore
         # consecutive theme cells chain (update_theme! composes onto set_theme!'s state)
-        r2 = parse_report("#%% code id=a\nset_theme!(theme_dark())\n" *
-                          "#%% code id=b\nupdate_theme!(fontsize = 20)\n" *
-                          "#%% code id=p\nfig = Figure()")
+        r2 = parse_report(
+            "#%% code id=a\nset_theme!(theme_dark())\n" *
+            "#%% code id=b\nupdate_theme!(fontsize = 20)\n" *
+            "#%% code id=p\nfig = Figure()",
+        )
         build_dependencies!(r2)
         @test "a" in findcell(r2, "b").deps
         @test "b" in findcell(r2, "p").deps                 # the figure follows the LAST mutation
@@ -658,7 +773,10 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         # allowed (precision is best-effort); under-restale is the bug class this guards against,
         # across plain bindings, in-place mutation, markdown interpolation, deferred function refs,
         # and macro-hidden writes all at once.
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._BIND_TICKS)
         rng = Random.MersenneTwister(23)
         ok = true
         for trial in 1:15
@@ -671,12 +789,13 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
             print(io, "#%% code id=c1\nBase.@kwdef struct GT$(trial); x::Int = 1; end\n")
             writer_of[Symbol("GT$(trial)")] = 1
             print(io, "#%% code id=c2\ngtv = [GT$(trial)().x]\n")
-            push!(truedeps[2], 1); writer_of[:gtv] = 2
+            push!(truedeps[2], 1)
+            writer_of[:gtv] = 2
             for i in 3:n
                 avail = collect(keys(writer_of))
                 # a name's TRUE producers: its definer + every prior mutator
-                producers(nm, upto) = vcat(writer_of[nm],
-                                           [m for m in get(mutators_of, nm, Int[]) if m < upto])
+                producers(nm, upto) =
+                    vcat(writer_of[nm], [m for m in get(mutators_of, nm, Int[]) if m < upto])
                 style = rand(rng)
                 if style < 0.15                                        # mutation cell
                     nm = rand(rng, avail)
@@ -693,7 +812,11 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
                     writer_of[Symbol("gtf$i")] = i                     # over-restale here is fine; under isn't asserted
                 else                                                   # plain definer reading 0–3 names
                     reads = unique(rand(rng, avail, rand(rng, 0:min(3, length(avail)))))
-                    rhs = isempty(reads) ? "[$i]" : "[" * join(("sum($r)" for r in reads), " + ") * "]"
+                    rhs = if isempty(reads)
+                        "[$i]"
+                    else
+                        "[" * join(("sum($r)" for r in reads), " + ") * "]"
+                    end
                     nm = Symbol("gt$i")
                     print(io, "#%% code id=c$i\n$nm = $rhs\n")
                     for r in reads
@@ -711,7 +834,8 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
                 push!(fwd[d], i)
             end
             for seed in 1:n
-                truth = Set{Int}([seed]); queue = [seed]
+                truth = Set{Int}([seed])
+                queue = [seed]
                 while !isempty(queue)
                     for d in fwd[pop!(queue)]
                         d in truth || (push!(truth, d); push!(queue, d))
@@ -722,7 +846,10 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
             end
         end
         @test ok
-        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
+        empty!(ReportEngine._MACRO_BINDS)
+        empty!(ReportEngine._MACRO_TRIED)
+        empty!(ReportEngine._BIND_CACHE)
+        empty!(ReportEngine._BIND_TICKS)
     end
 
     @testset "structural fuzz: garbage in, invariants hold (never a throw)" begin
@@ -731,14 +858,22 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         # (1) every dep pointing at an EARLIER cell (document order = topological order),
         # (2) the dependents index an exact transpose of deps, (3) byid complete, (4) no self-deps.
         rng = Random.MersenneTwister(31)
-        garbage = ("x = (", "@nosuchmacro q = ", ")))(((", "function f(", "end end", "\"unterminated",
-                   "x = 1; y = (a b c)", "🤖 = ∅ ⊕ ∅")
+        garbage = (
+            "x = (",
+            "@nosuchmacro q = ",
+            ")))(((",
+            "function f(",
+            "end end",
+            "\"unterminated",
+            "x = 1; y = (a b c)",
+            "🤖 = ∅ ⊕ ∅",
+        )
         structural_ok(r) = begin
             pos = Dict(c.id => i for (i, c) in enumerate(r.cells))
             all(c -> all(d -> haskey(pos, d) && pos[d] < pos[c.id], c.deps), r.cells) &&
-            all(c -> !(c.id in c.deps), r.cells) &&
-            length(r.byid) == length(r.cells) &&
-            Set((p, d) for (p, ds) in r.dependents for d in ds) ==
+                all(c -> !(c.id in c.deps), r.cells) &&
+                length(r.byid) == length(r.cells) &&
+                Set((p, d) for (p, ds) in r.dependents for d in ds) ==
                 Set((d, c.id) for c in r.cells for d in c.deps)
         end
         ok = true
@@ -758,21 +893,25 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
             end
             src = mk()
             r = try
-                rr = parse_report(src); build_dependencies!(rr); rr
+                rr = parse_report(src)
+                build_dependencies!(rr)
+                rr
             catch
-                ok = false; continue
+                ok = false
+                continue
             end
             ok &= structural_ok(r)
             for _ in 1:3                     # edit cycles: mutate one random cell's source
-                cells = split(src, "#%% "; keepempty = false)
+                cells = split(src, "#%% "; keepempty=false)
                 j = rand(rng, 1:length(cells))
-                header, _ = split(String(cells[j]), '\n'; limit = 2)
+                header, _ = split(String(cells[j]), '\n'; limit=2)
                 cells[j] = header * "\nfzedit = $(rand(rng, 1:99))\n"
                 src = join(("#%% " * String(c) for c in cells), "")
                 try
                     update_source!(r, src)
                 catch
-                    ok = false; break
+                    ok = false
+                    break
                 end
                 ok &= structural_ok(r)
             end
@@ -810,7 +949,7 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
                 elseif r < 0.16 && i > 1
                     print(io, "#%% md id=c$i\nvalue is {{ x$(rand(rng, 1:i-1)) }}\n")  # interpolating md
                 else
-                    reads = i == 1 ? Int[] : unique(rand(rng, 1:i-1, rand(rng, 0:3)))
+                    reads = i == 1 ? Int[] : unique(rand(rng, 1:(i - 1), rand(rng, 0:3)))
                     rhs = isempty(reads) ? "$i" : join(("x$j" for j in reads), " + ")
                     print(io, "#%% code id=c$i\nx$i = $rhs\n")
                 end
@@ -828,7 +967,9 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
     end
 
     @testset "multidef: names defined in 2+ cells are flagged" begin
-        r = parse_report("#%% code id=a\nx = 1\ng() = 1\n#%% code id=b\nx = 2\n#%% code id=c\nz = 3")
+        r = parse_report(
+            "#%% code id=a\nx = 1\ng() = 1\n#%% code id=b\nx = 2\n#%% code id=c\nz = 3"
+        )
         build_dependencies!(r)
         md = r.meta["multidef"]
         @test "x" in md            # defined in cells a and b
@@ -840,8 +981,10 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test isempty(r2.meta["multidef"])
         # LOCALS mutated in place (let-block / comprehension / loop locals) must NOT count as global
         # writes — two cells each mutating their OWN same-named local is not a collision.
-        r3 = parse_report("#%% code id=a\nlet\n  acc = zeros(3)\n  acc[1] = 1\n  push!(acc, 0.0)\n  sum(acc)\nend\n" *
-                          "#%% code id=b\nlet\n  acc = zeros(2)\n  acc[2] = 9\n  sum(acc)\nend")
+        r3 = parse_report(
+            "#%% code id=a\nlet\n  acc = zeros(3)\n  acc[1] = 1\n  push!(acc, 0.0)\n  sum(acc)\nend\n" *
+            "#%% code id=b\nlet\n  acc = zeros(2)\n  acc[2] = 9\n  sum(acc)\nend",
+        )
         build_dependencies!(r3)
         @test isempty(r3.meta["multidef"])          # `acc` is local to each cell — no real collision
         # In-place mutation is NOT a definition, so it never counts toward the multi-def collision (which
@@ -863,17 +1006,20 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test !(:prog in cell_definitions(findcell(r4b, "b")))      # …so it is not a definer
         # `using X` in TWO cells is NOT a collision — re-importing the same exports is a no-op, not a
         # redefinition (the reported bug). Seed the resolved-exports cache (normally filled post-eval).
-        lock(ReportEngine._USING_LOCK) do; ReportEngine._USING_EXPORTS["FakeMod"] = [:foo, :bar]; end
+        lock(ReportEngine._USING_LOCK) do ;
+            ReportEngine._USING_EXPORTS["FakeMod"] = [:foo, :bar]
+        end
         r5 = parse_report("#%% code id=a\nusing FakeMod\n#%% code id=b\nusing FakeMod\nfoo()\n")
         build_dependencies!(r5)
         @test isempty(r5.meta["multidef"])                       # foo/bar are PROVIDED (imported), not defined
         @test :foo in findcell(r5, "a").writes                   # …still in `writes` (so readers get a dep edge)
         @test :foo in findcell(r5, "a").provides                 # …and marked as provided, not a definition
         # a genuine redefinition ALONGSIDE the import is still flagged; the import name is not
-        lock(ReportEngine._USING_LOCK) do; ReportEngine._USING_EXPORTS["FakeMod2"] = [:baz]; end
+        lock(ReportEngine._USING_LOCK) do ;
+            ReportEngine._USING_EXPORTS["FakeMod2"] = [:baz]
+        end
         r6 = parse_report("#%% code id=a\nusing FakeMod2\nq = 1\n#%% code id=b\nq = 2\n")
         build_dependencies!(r6)
         @test "q" in r6.meta["multidef"] && !("baz" in r6.meta["multidef"])
     end
-
 end

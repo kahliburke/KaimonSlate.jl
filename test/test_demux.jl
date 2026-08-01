@@ -15,7 +15,9 @@ include(joinpath(@__DIR__, "..", "src", "demux.jl"))
         @sync for i in 1:6
             Threads.@spawn begin
                 task_local_storage(:k, bufs[i])      # this task's sink
-                for _ in 1:200; print(d, "t$i ") end  # hammer it concurrently
+                for _ in 1:200
+                    print(d, "t$i ")
+                end  # hammer it concurrently
             end
         end
         for i in 1:6
@@ -33,7 +35,9 @@ include(joinpath(@__DIR__, "..", "src", "demux.jl"))
             @sync for i in 1:5
                 Threads.@spawn begin
                     res[i] = with_captured_output() do
-                        for _ in 1:80; print("o$i ") end
+                        for _ in 1:80
+                            print("o$i ")
+                        end
                         println(stderr, "e$i")
                         i * 100
                     end

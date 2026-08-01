@@ -20,15 +20,23 @@ const _LIVE_SVG_CACHE_MAX_BYTES = 2 * 1024 * 1024
 # Ask the open browser tab to render `cell`'s chart as vector SVG right now (see core.js
 # `_renderChartSvg`) — used only at export time, not on every chart update. `nothing` if no
 # tab is open, the round-trip times out, or the cell has no live chart.
-function _live_render_svg(nb::LiveNotebook, cell::AbstractString; theme::AbstractString = "midnight")
-    code = "window._renderChartSvg && window._renderChartSvg(" *
-           JSON.json(String(cell)) * ", " * JSON.json(String(theme)) * ")"
-    res = request_live_eval(nb, code; timeout = 6.0)
+function _live_render_svg(nb::LiveNotebook, cell::AbstractString; theme::AbstractString="midnight")
+    code =
+        "window._renderChartSvg && window._renderChartSvg(" *
+        JSON.json(String(cell)) *
+        ", " *
+        JSON.json(String(theme)) *
+        ")"
+    res = request_live_eval(nb, code; timeout=6.0)
     res isa AbstractDict || return nothing
     get(res, "ok", false) === true || return nothing
     raw = get(res, "result", nothing)
     raw isa AbstractString || return nothing
-    s = try; JSON.parse(raw); catch; nothing; end
+    s = try
+        JSON.parse(raw)
+    catch
+        nothing
+    end
     return (s isa AbstractString && !isempty(s)) ? s : nothing
 end
 
@@ -49,7 +57,11 @@ const _MITEX_SHIMS = raw"""
 # Escape for a Typst "…" string literal. Must also escape newlines/tabs — a literal can't span a
 # raw newline, so a multiline table cell / bind value (a wrapped string, a vector repr) would
 # otherwise produce invalid `.typ` and fail the WHOLE PDF export.
-_typ_str(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"", "\n" => "\\n", "\r" => "\\r", "\t" => "\\t")
+function _typ_str(s)
+    return replace(
+        String(s), "\\" => "\\\\", "\"" => "\\\"", "\n" => "\\n", "\r" => "\\r", "\t" => "\\t"
+    )
+end
 
 # Built-in style presets. `article` is the default single-column research-note look;
 # `report` is roomier with a larger title. `columns` (1 or 2) lays the body out in one
@@ -57,30 +69,70 @@ _typ_str(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"", "\n" => "\\n", 
 const _STYLES = Dict(
     # `article` — compact, unnumbered research-note look. `report` — roomier and with NUMBERED
     # sections + a larger title block, the academic-report distinction (not just a font bump).
-    "article" => (textsize = "10.5pt", margin = "(x: 2.2cm, y: 2.4cm)", titlesize = "19pt",
-                  headabove = "2.1em", headbelow = "1.2em",  parspace = "1.35em", number = false),
-    "report"  => (textsize = "11pt",   margin = "(x: 2.7cm, y: 3.0cm)", titlesize = "26pt",
-                  headabove = "2.7em", headbelow = "1.45em", parspace = "1.6em",  number = true),
+    "article" => (
+        textsize="10.5pt",
+        margin="(x: 2.2cm, y: 2.4cm)",
+        titlesize="19pt",
+        headabove="2.1em",
+        headbelow="1.2em",
+        parspace="1.35em",
+        number=false,
+    ),
+    "report" => (
+        textsize="11pt",
+        margin="(x: 2.7cm, y: 3.0cm)",
+        titlesize="26pt",
+        headabove="2.7em",
+        headbelow="1.45em",
+        parspace="1.6em",
+        number=true,
+    ),
 )
 
 # Colour palettes per theme. `light` is the publication default; `dark` matches the live
 # notebook UI (dark page, light text) — a natural fit for figures drawn with the Makie
 # dark theme. Each field is a Typst colour expression (string).
 const _PALETTES = Dict(
-    "light" => (page = "white",          text = "black",            rule = "luma(180)",
-                title = "black",         codebg = "luma(248)",      codetheme = "",
-                outbg = "luma(250)",     outfg = "rgb(\"#444444\")",
-                valbg = "rgb(\"#f0f7f1\")", valfg = "rgb(\"#177245\")",
-                errbg = "rgb(\"#fdeeee\")", errfg = "rgb(\"#b00020\")",
-                parbg = "rgb(\"#eef2fb\")", parborder = "rgb(\"#c3d0ec\")", parlabel = "rgb(\"#3a4a72\")",
-                tablestroke = "luma(200)", tableheadbg = "luma(244)", tablestripe = "luma(250)"),
-    "dark"  => (page = "rgb(\"#12141c\")", text = "rgb(\"#d6dae8\")",  rule = "luma(90)",
-                title = "white",         codebg = "rgb(\"#1b1f2b\")", codetheme = "code-dark.tmTheme",
-                outbg = "rgb(\"#181c26\")", outfg = "rgb(\"#aeb6cc\")",
-                valbg = "rgb(\"#142318\")", valfg = "rgb(\"#5fcf6e\")",
-                errbg = "rgb(\"#2a1619\")", errfg = "rgb(\"#f08a8a\")",
-                parbg = "rgb(\"#1a2233\")", parborder = "rgb(\"#2c3a57\")", parlabel = "rgb(\"#8ab4f8\")",
-                tablestroke = "luma(90)",  tableheadbg = "rgb(\"#1b1f2b\")", tablestripe = "rgb(\"#171b25\")"),
+    "light" => (
+        page="white",
+        text="black",
+        rule="luma(180)",
+        title="black",
+        codebg="luma(248)",
+        codetheme="",
+        outbg="luma(250)",
+        outfg="rgb(\"#444444\")",
+        valbg="rgb(\"#f0f7f1\")",
+        valfg="rgb(\"#177245\")",
+        errbg="rgb(\"#fdeeee\")",
+        errfg="rgb(\"#b00020\")",
+        parbg="rgb(\"#eef2fb\")",
+        parborder="rgb(\"#c3d0ec\")",
+        parlabel="rgb(\"#3a4a72\")",
+        tablestroke="luma(200)",
+        tableheadbg="luma(244)",
+        tablestripe="luma(250)",
+    ),
+    "dark" => (
+        page="rgb(\"#12141c\")",
+        text="rgb(\"#d6dae8\")",
+        rule="luma(90)",
+        title="white",
+        codebg="rgb(\"#1b1f2b\")",
+        codetheme="code-dark.tmTheme",
+        outbg="rgb(\"#181c26\")",
+        outfg="rgb(\"#aeb6cc\")",
+        valbg="rgb(\"#142318\")",
+        valfg="rgb(\"#5fcf6e\")",
+        errbg="rgb(\"#2a1619\")",
+        errfg="rgb(\"#f08a8a\")",
+        parbg="rgb(\"#1a2233\")",
+        parborder="rgb(\"#2c3a57\")",
+        parlabel="rgb(\"#8ab4f8\")",
+        tablestroke="luma(90)",
+        tableheadbg="rgb(\"#1b1f2b\")",
+        tablestripe="rgb(\"#171b25\")",
+    ),
 )
 _palette(theme) = get(_PALETTES, theme, _PALETTES["light"])
 
@@ -103,12 +155,16 @@ const _CODE_DARK_TMTHEME = """
 """
 
 # Code-listing font sizes (the `code` option, minus "hidden" which suppresses source).
-const _CODE_SIZES = Dict("normal" => "9.5pt", "small" => "8.5pt", "smaller" => "7.5pt", "tiny" => "6.5pt")
+const _CODE_SIZES = Dict(
+    "normal" => "9.5pt", "small" => "8.5pt", "smaller" => "7.5pt", "tiny" => "6.5pt"
+)
 _code_size(code) = get(_CODE_SIZES, code, _CODE_SIZES["normal"])
 
 # Body (prose) font sizes (the `body` option). Two-column layouts usually want a smaller
 # body, so the export defaults `body` to "compact" when columns == 2.
-const _BODY_SIZES = Dict("large" => "11.5pt", "normal" => "10.5pt", "compact" => "9.5pt", "small" => "8.5pt")
+const _BODY_SIZES = Dict(
+    "large" => "11.5pt", "normal" => "10.5pt", "compact" => "9.5pt", "small" => "8.5pt"
+)
 _body_size(body) = get(_BODY_SIZES, body, _BODY_SIZES["normal"])
 
 # True if the document's section headings (the level-2+ ones Typst would auto-number) are MOSTLY
@@ -116,15 +172,17 @@ _body_size(body) = get(_BODY_SIZES, body, _BODY_SIZES["normal"])
 # and let the author's numbers stand (avoids the doubled "1 3.1 · …").
 function _manual_heading_numbers(cells)
     head = r"^\s*#{2,6}\s+(.*\S)\s*$"
-    num  = r"^(\d+([.)]\s*\d+)*[.):·\-]|\d+\s|(section|part|chapter|appendix)\b)"i
-    total = 0; numbered = 0
+    num = r"^(\d+([.)]\s*\d+)*[.):·\-]|\d+\s|(section|part|chapter|appendix)\b)"i
+    total = 0
+    numbered = 0
     for c in cells
         c.kind == MARKDOWN || continue
         infence = false
         for ln in split(String(c.source), '\n')
-            occursin(r"^\s*(```|~~~)", ln) && (infence = !infence; continue)
+            occursin(r"^\s*(```|~~~)", ln) && (infence=(!infence); continue)
             infence && continue
-            m = match(head, ln); m === nothing && continue
+            m = match(head, ln)
+            m === nothing && continue
             total += 1
             occursin(num, m.captures[1]) && (numbered += 1)
         end
@@ -132,10 +190,15 @@ function _manual_heading_numbers(cells)
     return total > 0 && numbered * 2 >= total      # majority manually numbered
 end
 
-function _typst_preamble(title::AbstractString; style::AbstractString = "article",
-                         columns::Int = 1, theme::AbstractString = "light",
-                         code::AbstractString = "normal", body::AbstractString = "normal",
-                         number::Union{Bool,Nothing} = nothing)
+function _typst_preamble(
+    title::AbstractString;
+    style::AbstractString="article",
+    columns::Int=1,
+    theme::AbstractString="light",
+    code::AbstractString="normal",
+    body::AbstractString="normal",
+    number::Union{Bool,Nothing}=nothing,
+)
     pre = _typ_str(strip(replace(_MITEX_SHIMS, r"\s+" => " ")))
     st = get(_STYLES, style, _STYLES["article"])
     donumber = number === nothing ? st.number : number   # caller can force off (e.g. headings are manually numbered)
@@ -199,8 +262,12 @@ _slide_geom(ratio) = ratio == "4:3" ? ("254mm", "190.5mm") : ("254mm", "142.875m
 # Preamble for the slides layout. Reuses the same block helpers as the article preamble but on a
 # landscape slide page with bigger type, and adds `#let slide(body)` — one page per slide that
 # vertically centers its content and auto-shrinks (down to a 0.5× floor) so a tall slide still fits.
-function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "dark",
-                                ratio::AbstractString = "16:9", code::AbstractString = "small")
+function _typst_preamble_slides(
+    title::AbstractString;
+    theme::AbstractString="dark",
+    ratio::AbstractString="16:9",
+    code::AbstractString="small",
+)
     pre = _typ_str(strip(replace(_MITEX_SHIMS, r"\s+" => " ")))
     p = _palette(theme)
     csize = _code_size(code == "normal" ? "small" : code)   # listings are tighter on slides
@@ -289,7 +356,9 @@ _fig_text(num, anchor) = string("Figure ", num)
 # Rewrite one `[...]` citation group (its inner text, which contains an `@`); `emit(key,sup,form)`
 # builds each replacement (a Typst sentinel for export, an HTML link for the live view). A `fig:`
 # label resolved in `figrefs` becomes a figure cross-reference via `figemit` instead of a bib cite.
-function _rewrite_bracket_cite(inner, emit; figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text)
+function _rewrite_bracket_cite(
+    inner, emit; figrefs=Dict{String,Tuple{Int,String}}(), figemit=_fig_text
+)
     io = IOBuffer()
     for spec in split(inner, ';')
         # Accept an optional leading `-` (Pandoc suppress-author) but render normally — Typst's year
@@ -309,39 +378,66 @@ function _rewrite_bracket_cite(inner, emit; figrefs = Dict{String,Tuple{Int,Stri
 end
 # Rewrite the citation syntax in one stretch of TEXT (no code spans). Bracketed groups first, then
 # bare `@key` (prose) — the latter only for defined keys, so emails/handles are left literal.
-function _rewrite_text_citations(text, citekeys, emit; figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text)
-    t = replace(text, r"\[([^\]\n]*@[^\]\n]*)\]" => m -> begin
-        r = _rewrite_bracket_cite(m[2:end-1], emit; figrefs = figrefs, figemit = figemit); r === nothing ? m : r
-    end)
+function _rewrite_text_citations(
+    text, citekeys, emit; figrefs=Dict{String,Tuple{Int,String}}(), figemit=_fig_text
+)
+    t = replace(
+        text,
+        r"\[([^\]\n]*@[^\]\n]*)\]" =>
+            m -> begin
+                r = _rewrite_bracket_cite(m[2:(end - 1)], emit; figrefs=figrefs, figemit=figemit)
+                r === nothing ? m : r
+            end,
+    )
     (isempty(citekeys) && isempty(figrefs)) && return t
-    return replace(t, r"(?<![\w@/])@([\w:.\-]+)" => m -> begin
-        raw = m[2:end]
-        key = rstrip(raw, ['.', ',', ';', ':', ')', ']', '!', '?'])
-        suffix = raw[(ncodeunits(key) + 1):end]
-        if haskey(figrefs, key)
-            num, anchor = figrefs[key]; figemit(num, anchor) * suffix
-        elseif key in citekeys
-            emit(key, "", "p") * suffix
-        else
-            m
-        end
-    end)
+    return replace(
+        t,
+        r"(?<![\w@/])@([\w:.\-]+)" =>
+            m -> begin
+                raw = m[2:end]
+                key = rstrip(raw, ['.', ',', ';', ':', ')', ']', '!', '?'])
+                suffix = raw[(ncodeunits(key) + 1):end]
+                if haskey(figrefs, key)
+                    num, anchor = figrefs[key]
+                    figemit(num, anchor) * suffix
+                elseif key in citekeys
+                    emit(key, "", "p") * suffix
+                else
+                    m
+                end
+            end,
+    )
 end
 # Rewrite citations across a markdown source, skipping fenced code blocks AND inline `code` spans
 # (so a literal `[@key]` shown in backticks is left untouched). `emit` selects sentinel vs HTML link;
 # `figrefs`/`figemit` handle `[@fig:label]` figure cross-references.
-function _rewrite_citations(md::AbstractString, citekeys = Set{String}(); emit = _cite_sentinel,
-                            figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text)
-    out = IOBuffer(); infence = false
+function _rewrite_citations(
+    md::AbstractString,
+    citekeys=Set{String}();
+    emit=_cite_sentinel,
+    figrefs=Dict{String,Tuple{Int,String}}(),
+    figemit=_fig_text,
+)
+    out = IOBuffer()
+    infence = false
     for (li, ln) in enumerate(split(md, '\n'))
         li == 1 || print(out, '\n')
-        if occursin(r"^\s*(```|~~~)", ln); infence = !infence; print(out, ln); continue; end
-        if infence; print(out, ln); continue; end
+        if occursin(r"^\s*(```|~~~)", ln)
+            infence = !infence
+            print(out, ln)
+            continue
+        end
+        if infence
+            print(out, ln)
+            continue
+        end
         # Protect inline `code` spans, rewrite the text between them, then restore the spans.
         spans = SubString{String}[]
         masked = replace(ln, r"`[^`]*`" => s -> (push!(spans, s); "\x00$(length(spans))\x00"))
-        done = _rewrite_text_citations(masked, citekeys, emit; figrefs = figrefs, figemit = figemit)
-        for (i, s) in enumerate(spans); done = replace(done, "\x00$(i)\x00" => s); end
+        done = _rewrite_text_citations(masked, citekeys, emit; figrefs=figrefs, figemit=figemit)
+        for (i, s) in enumerate(spans)
+            done = replace(done, "\x00$(i)\x00" => s)
+        end
         print(out, done)
     end
     return String(take!(out))
@@ -358,8 +454,8 @@ function _interp_typst_text(o)
     for ch in o.display
         if ch.mime == "text/latex"
             t = strip(String(copy(ch.data)))
-            startswith(t, "\$\$") && endswith(t, "\$\$") && length(t) >= 4 && return t[3:end-2]
-            startswith(t, "\$")  && endswith(t, "\$")  && length(t) >= 2 && return t[2:end-1]
+            startswith(t, "\$\$") && endswith(t, "\$\$") && length(t) >= 4 && return t[3:(end - 2)]
+            startswith(t, "\$") && endswith(t, "\$") && length(t) >= 2 && return t[2:(end - 1)]
             return t
         end
     end
@@ -368,17 +464,20 @@ end
 
 # Markdown source with `{{ expr }}` interpolations resolved (scalars, or a text/latex value's TeX)
 # and citations rewritten to sentinels for the preamble's cite rule.
-function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{String}(),
-                       figrefs = Dict{String,Tuple{Int,String}}())
+function _md_for_typst(
+    c::Cell,
+    src::AbstractString=c.source;
+    citekeys=Set{String}(),
+    figrefs=Dict{String,Tuple{Int,String}}(),
+)
     tmpl, exprs = ReportEngine._md_template(src)
     s = tmpl
     for i in 1:length(exprs)
         o = i <= length(c.interp) ? c.interp[i] : nothing
         s = replace(s, ReportEngine._interp_token(i) => _interp_typst_text(o))
     end
-    return _rewrite_citations(s, citekeys; figrefs = figrefs)
+    return _rewrite_citations(s, citekeys; figrefs=figrefs)
 end
-
 
 # A static Typst table from a wire table spec (Dict with "columns"/"rows"). Capped.
 # Cell/header text inherits the document text colour, so it follows the theme; only the
@@ -388,26 +487,28 @@ end
 # of the CSS bar); `:heat` an alpha-shaded fill. The empty part is fully transparent so zebra shows.
 function _typ_viz_cell(v, col, inner::AbstractString)
     col isa AbstractDict || return inner
-    viz = get(col, "viz", nothing); viz === nothing && return inner
+    viz = get(col, "viz", nothing)
+    viz === nothing && return inner
     dom = get(col, "domain", nothing)
     (v isa Real && !(v isa Bool) && dom isa AbstractVector && length(dom) == 2) || return inner
     lo, hi = Float64(dom[1]), Float64(dom[2])
     f = hi > lo ? clamp((Float64(v) - lo) / (hi - lo), 0.0, 1.0) : 1.0
     if viz == "bar"
-        p = string(round(f * 100; digits = 1))
-        fill = "gradient.linear((rgb(\"#58a6ff\").transparentize(80%), 0%), " *
-               "(rgb(\"#58a6ff\").transparentize(80%), $p%), " *
-               "(rgb(\"#58a6ff\").transparentize(100%), $p%), " *
-               "(rgb(\"#58a6ff\").transparentize(100%), 100%))"
+        p = string(round(f * 100; digits=1))
+        fill =
+            "gradient.linear((rgb(\"#58a6ff\").transparentize(80%), 0%), " *
+            "(rgb(\"#58a6ff\").transparentize(80%), $p%), " *
+            "(rgb(\"#58a6ff\").transparentize(100%), $p%), " *
+            "(rgb(\"#58a6ff\").transparentize(100%), 100%))"
         return "table.cell(fill: $fill)$inner"
     elseif viz == "heat"
-        t = string(round((1 - (0.10 + 0.35 * f)) * 100; digits = 1))   # transparentize %  (0% ⇒ opaque)
+        t = string(round((1 - (0.10 + 0.35 * f)) * 100; digits=1))   # transparentize %  (0% ⇒ opaque)
         return "table.cell(fill: rgb(\"#58a6ff\").transparentize($t%))$inner"
     end
     return inner
 end
 
-function _typst_table(spec; theme::AbstractString = "light")::String
+function _typst_table(spec; theme::AbstractString="light")::String
     cols = get(spec, "columns", Any[])
     rows = get(spec, "rows", Any[])
     opts = get(spec, "opts", Dict{String,Any}())
@@ -421,22 +522,57 @@ function _typst_table(spec; theme::AbstractString = "light")::String
     io = IOBuffer()
     # per-column alignment (numbers right, bools center) + a themed grid stroke
     print(io, "#align(center)[\n")   # center the table block on the page
-    print(io, "#table(columns: ", ncol, ", inset: 5pt, align: (", join((_typalign(_col_align(c)) for c in cols), ", "), "), stroke: 0.4pt + $(p.tablestroke),\n")
+    print(
+        io,
+        "#table(columns: ",
+        ncol,
+        ", inset: 5pt, align: (",
+        join((_typalign(_col_align(c)) for c in cols), ", "),
+        "), stroke: 0.4pt + $(p.tablestroke),\n",
+    )
     # zebra: header shaded (row 0), odd body rows a subtle stripe
-    print(io, "  fill: (_, row) => if row == 0 { $(p.tableheadbg) } else if calc.odd(row) { $(p.tablestripe) },\n")
+    print(
+        io,
+        "  fill: (_, row) => if row == 0 { $(p.tableheadbg) } else if calc.odd(row) { $(p.tablestripe) },\n",
+    )
     # repeat the header on every page a long table spills onto
-    print(io, "  table.header(repeat: true, ", join(["[#text(size: 8.5pt, weight: \"bold\", \"" * _typ_str(_col_name(c)) * "\")]" for c in cols], ", "), "),\n")
+    print(
+        io,
+        "  table.header(repeat: true, ",
+        join(
+            [
+                "[#text(size: 8.5pt, weight: \"bold\", \"" * _typ_str(_col_name(c)) * "\")]" for
+                c in cols
+            ],
+            ", ",
+        ),
+        "),\n",
+    )
     maxr = Int(something(get(opts, "export_rows", nothing), 200))   # per-table export_rows hint, else default cap
     for (ri, r) in enumerate(rows)
         ri > maxr && break
-        print(io, "  ", join([cell(ci <= length(r) ? r[ci] : nothing, cols[ci], fmts[ci]) for ci in 1:ncol], ", "), ",\n")
+        print(
+            io,
+            "  ",
+            join(
+                [cell(ci <= length(r) ? r[ci] : nothing, cols[ci], fmts[ci]) for ci in 1:ncol], ", "
+            ),
+            ",\n",
+        )
     end
     print(io, ")\n")
     # accurate truncation: the wire ships at most `maxr` here AND a paged table ships only page 1,
     # so report against opts.nrows (the true total), not the shipped-row count.
     total = Int(get(opts, "nrows", length(rows)))
     shown = min(length(rows), maxr)
-    shown < total && print(io, "#text(size: 8pt, fill: gray)[… ", total - shown, " more rows (", total, " total)]\n")
+    shown < total && print(
+        io,
+        "#text(size: 8pt, fill: gray)[… ",
+        total - shown,
+        " more rows (",
+        total,
+        " total)]\n",
+    )
     print(io, "]\n")   # close #align(center)
     return String(take!(io))
 end
@@ -449,17 +585,20 @@ end
 # takes `nb.lock` — `_figure_for_export` itself must stay lock-safe, so it only ever READS
 # the cache, never triggers a round-trip), else its PNG. Returns `(bytes, ext)` with
 # `ext ∈ ("pdf","svg","png")`, or `nothing` when the cell has no figure.
-function _figure_for_export(nb::LiveNotebook, c::Cell; theme::AbstractString = "midnight", override::Bool = false)
+function _figure_for_export(
+    nb::LiveNotebook, c::Cell; theme::AbstractString="midnight", override::Bool=false
+)
     # Themed OVERRIDE: a native figure re-rendered under the chosen palette (`_warm_makie_figs!`) wins
     # over the baked-in bytes, which carry the theme the cell was last RUN in — Makie can't be re-themed
     # any other way. Falls through to the baked bytes when the re-render was unavailable.
     if override
-        fig = _snapshot_fig(nb.id, c.id, theme; raster = false)   # PDF wants the vector re-render
+        fig = _snapshot_fig(nb.id, c.id, theme; raster=false)   # PDF wants the vector re-render
         fig !== nothing && return fig
     end
     o = c.output
     if o !== nothing
-        for (mime, ext) in (("application/pdf", "pdf"), ("image/svg+xml", "svg"), ("image/png", "png"))
+        for (mime, ext) in
+            (("application/pdf", "pdf"), ("image/svg+xml", "svg"), ("image/png", "png"))
             for ch in o.display
                 ch.mime == mime && return (copy(ch.data), ext)
             end
@@ -474,8 +613,15 @@ end
 
 # Tell the open tab a chart is being rendered live for export — best-effort UI feedback (the
 # activity log; see runstatus.js `onExportProgress`), never load-bearing for the export itself.
-_export_progress(nb::LiveNotebook, cid::AbstractString) =
-    (try; _broadcast(nb, "exportprog:" * JSON.json(Dict("cell" => cid))); catch; end; nothing)
+function _export_progress(nb::LiveNotebook, cid::AbstractString)
+    return (
+        try
+            _broadcast(nb, "exportprog:" * JSON.json(Dict("cell" => cid)))
+        catch
+        end;
+        nothing
+    )
+end
 
 # Pre-warm the SVG snapshot cache for every ECharts cell that doesn't already have one, via a
 # live round-trip to an open browser tab — called BEFORE the caller takes `nb.lock` (each
@@ -485,14 +631,22 @@ _export_progress(nb::LiveNotebook, cid::AbstractString) =
 # multi-chart export is the one case this is newly slower than the old eager-render design).
 # Best-effort throughout: a cell that fails/times out just falls through to PNG in
 # `_figure_for_export`, same as when no tab is open at all.
-function _warm_chart_svgs!(nb::LiveNotebook; theme::AbstractString = "midnight", progress = nothing)
+function _warm_chart_svgs!(nb::LiveNotebook; theme::AbstractString="midnight", progress=nothing)
     targets = lock(nb.lock) do
-        [c.id for c in nb.report.cells
-         if c.output !== nothing && !isempty(c.output.echarts) && _snapshot_svg(nb.id, c.id, theme) === nothing]
+        return [
+            c.id for c in nb.report.cells if c.output !== nothing &&
+                !isempty(c.output.echarts) &&
+                _snapshot_svg(nb.id, c.id, theme) === nothing
+        ]
     end
     for cid in targets
-        progress === nothing || (try; progress(cid); catch; end)
-        live = _live_render_svg(nb, cid; theme = theme)
+        progress === nothing || (
+            try
+                progress(cid)
+            catch
+            end
+        )
+        live = _live_render_svg(nb, cid; theme=theme)
         live === nothing && continue
         # Cache small ones so tweak-and-reexport doesn't re-pay the round-trip each time — but a
         # genuinely huge chart's SVG (a downsampled heatmap can still run to a few MB) isn't
@@ -506,14 +660,21 @@ end
 # request: an explicit `charttheme` (the "As-is" case sends the notebook's live palette; Light/Dark
 # send "daylight"/"midnight") wins; otherwise fall back to the page theme's canonical palette so a
 # caller that passes only `theme=` (older callers, tests) still gets a real Slate look.
-_chart_theme(charttheme::AbstractString, theme::AbstractString) =
-    isempty(strip(charttheme)) ? (theme == "dark" ? "midnight" : "daylight") : String(strip(charttheme))
+function _chart_theme(charttheme::AbstractString, theme::AbstractString)
+    return if isempty(strip(charttheme))
+        (theme == "dark" ? "midnight" : "daylight")
+    else
+        String(strip(charttheme))
+    end
+end
 
 # True when a cell carries a native, server-rendered figure (Makie's raster/vector) — the cells the
 # themed-override path re-renders. ECharts (client-rendered) come through the SVG snapshot path, and a
 # hand-authored `text/html` / inline-SVG card isn't a re-runnable native figure, so both are excluded.
-_is_native_figure(c::Cell) = c.output !== nothing &&
-    any(ch -> ch.mime in ("application/pdf", "image/png", "image/svg+xml"), c.output.display)
+function _is_native_figure(c::Cell)
+    return c.output !== nothing &&
+           any(ch -> ch.mime in ("application/pdf", "image/png", "image/svg+xml"), c.output.display)
+end
 
 # Re-render every native figure under `theme` (a Slate palette) for a themed OVERRIDE export. Makie
 # bakes its theme at build time, so honoring a Light/Dark override means re-running those cells under
@@ -521,15 +682,28 @@ _is_native_figure(c::Cell) = c.output !== nothing &&
 # caller takes `nb.lock` (each round-trip re-evaluates a cell and can be slow), mirroring
 # `_warm_chart_svgs!`. Best-effort: a cell whose re-render fails/times out falls back to its baked
 # bytes in `_figure_for_export`. A non-gate (in-process) kernel has no worker to re-render on → skip.
-function _warm_makie_figs!(nb::LiveNotebook; theme::AbstractString, raster::Bool = false, progress = nothing)
-    k = lock(nb.lock) do; nb.kernel; end
+function _warm_makie_figs!(
+    nb::LiveNotebook; theme::AbstractString, raster::Bool=false, progress=nothing
+)
+    k = lock(nb.lock) do ;
+        return nb.kernel
+    end
     k isa ReportEngine.GateKernel || return nothing
     targets = lock(nb.lock) do
-        [(c.id, c.source) for c in nb.report.cells if _is_native_figure(c)]
+        return [(c.id, c.source) for c in nb.report.cells if _is_native_figure(c)]
     end
     for (cid, src) in targets
-        progress === nothing || (try; progress(cid); catch; end)
-        res = try; ReportEngine.rerender_fig(k, nb.report, src, theme; cellid = cid, raster = raster); catch; nothing; end
+        progress === nothing || (
+            try
+                progress(cid)
+            catch
+            end
+        )
+        res = try
+            ReportEngine.rerender_fig(k, nb.report, src, theme; cellid=cid, raster=raster)
+        catch
+            nothing
+        end
         res === nothing && continue
         set_snapshot_fig!(nb.id, cid, theme, raster, res[1], res[2])
     end
@@ -537,7 +711,9 @@ function _warm_makie_figs!(nb::LiveNotebook; theme::AbstractString, raster::Bool
 end
 
 # True if the cell's output includes a `text/html` chunk (a custom HTML card Typst can't render).
-_has_html_output(c::Cell) = c.output !== nothing && any(ch -> ch.mime == "text/html", c.output.display)
+function _has_html_output(c::Cell)
+    return c.output !== nothing && any(ch -> ch.mime == "text/html", c.output.display)
+end
 
 # Emit a code cell's outputs (value / stdout / error / figure / tables) into the doc.
 # Export output-verbosity: `"all"` (everything), `"figures"` (only figures / charts / tables / rendered
@@ -545,17 +721,25 @@ _has_html_output(c::Cell) = c.output !== nothing && any(ch -> ch.mime == "text/h
 _outputs_text_ok(outputs) = String(outputs) == "all"
 _outputs_any(outputs) = String(outputs) != "none"
 
-function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::LiveNotebook, c::Cell;
-                       theme::AbstractString = "light", charttheme::AbstractString = "",
-                       override::Bool = false, outputs::AbstractString = "all")
+function _emit_output!(
+    io::IO,
+    dir::AbstractString,
+    base::AbstractString,
+    nb::LiveNotebook,
+    c::Cell;
+    theme::AbstractString="light",
+    charttheme::AbstractString="",
+    override::Bool=false,
+    outputs::AbstractString="all",
+)
     o = c.output
-    (o === nothing || !_outputs_any(outputs)) && return
+    (o === nothing || !_outputs_any(outputs)) && return nothing
     texts = _outputs_text_ok(outputs)
     if o.exception !== nothing
-        texts || return                                # figures-only: skip error text
+        texts || return nothing                                # figures-only: skip error text
         write(joinpath(dir, base * ".err"), rstrip(o.exception))
         print(io, "#errblock(read(\"", base, ".err\"))\n")
-        return
+        return nothing
     end
     if texts && !isempty(strip(o.stdout))
         write(joinpath(dir, base * ".out"), rstrip(o.stdout))
@@ -565,13 +749,17 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
         write(joinpath(dir, base * ".val"), o.value_repr)
         print(io, "#valblock(read(\"", base, ".val\"))\n")
     end
-    fig = _figure_for_export(nb, c; theme = _chart_theme(charttheme, theme), override = override)   # vector (pdf/svg) preferred, else raster png
+    fig = _figure_for_export(nb, c; theme=_chart_theme(charttheme, theme), override=override)   # vector (pdf/svg) preferred, else raster png
     # An HTML output (a custom `text/html` card, e.g. the grading `check(...)` cells) can't be
     # rendered by Typst and isn't an embeddable figure — so rasterize the rendered card via the open
     # tab (html2canvas, same round-trip slate.inspect uses) and embed that image. Needs a live tab;
     # falls back to nothing (just the code) if none is open or the capture times out.
     if fig === nothing && _has_html_output(c)
-        png = try; cell_image_fresh(nb, c.id); catch; nothing; end
+        png = try
+            cell_image_fresh(nb, c.id)
+        catch
+            nothing
+        end
         png === nothing || (fig = (copy(png), "png"))
     end
     if fig !== nothing
@@ -581,12 +769,15 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
     elseif !isempty(_echarts_specs(c))
         # A client-rendered chart that no browser tab was open to snapshot (headless export) —
         # don't silently drop it, note the gap (mirrors the HTML export path).
-        print(io, "#notefig(\"[chart not captured — open this notebook in a browser, then re-export]\")\n")
+        print(
+            io,
+            "#notefig(\"[chart not captured — open this notebook in a browser, then re-export]\")\n",
+        )
     end
     for spec in _table_specs(c)
-        print(io, _typst_table(spec; theme = theme))
+        print(io, _typst_table(spec; theme=theme))
     end
-    return
+    return nothing
 end
 
 # A frozen snapshot of a cell's `@bind` controls: a PDF is static, so interactive
@@ -594,15 +785,21 @@ end
 # current value (what the reader is looking at). Empty string when the cell has none.
 function _emit_controls(c::Cell)::String
     isempty(c.binds) && return ""
-    item(b) = "(" * "\"" * _typ_str(string(b.name)) * "\", \"" *
-              _typ_str(_bind_value_repr(b.value)) * "\")"
-    return "#paramblock((" * join((item(b) for b in c.binds), ", ") *
+    item(b) =
+        "(" *
+        "\"" *
+        _typ_str(string(b.name)) *
+        "\", \"" *
+        _typ_str(_bind_value_repr(b.value)) *
+        "\")"
+    return "#paramblock((" *
+           join((item(b) for b in c.binds), ", ") *
            (length(c.binds) == 1 ? ",))\n" : "))\n")
 end
 
 # Render a control's current value for the parameter strip (concise, no type noise).
 function _bind_value_repr(v)::String
-    v isa AbstractFloat && return string(round(v; sigdigits = 6))
+    v isa AbstractFloat && return string(round(v; sigdigits=6))
     v isa AbstractString && return String(v)
     return string(v)
 end
@@ -615,10 +812,10 @@ function _typst_compile(typ::String, pdf::String)
     err = IOBuffer()
     try
         if sys !== nothing
-            run(pipeline(`$sys compile --root $root $typ $pdf`; stderr = err))
+            run(pipeline(`$sys compile --root $root $typ $pdf`; stderr=err))
         else
             Typst_jll.typst() do exe
-                run(pipeline(`$exe compile --root $root $typ $pdf`; stderr = err))
+                return run(pipeline(`$exe compile --root $root $typ $pdf`; stderr=err))
             end
         end
     catch e
@@ -628,7 +825,7 @@ function _typst_compile(typ::String, pdf::String)
         isempty(msg) && rethrow()
         error("typst compile failed:\n" * first(msg, 4000))
     end
-    return
+    return nothing
 end
 
 """
@@ -652,11 +849,12 @@ cell the document title falls back to the first markdown H1 (then the notebook f
 function export_pdf(nb::LiveNotebook; kwargs...)
     dir = _build_typst_project(nb; kwargs...)
     try
-        typ = joinpath(dir, "doc.typ"); pdf = joinpath(dir, "out.pdf")
+        typ = joinpath(dir, "doc.typ")
+        pdf = joinpath(dir, "out.pdf")
         _typst_compile(typ, pdf)
         return read(pdf)
     finally
-        rm(dir; recursive = true, force = true)
+        rm(dir; recursive=true, force=true)
     end
 end
 
@@ -673,7 +871,10 @@ end
 function _first_heading_depth(src::AbstractString)
     infence = false
     for ln in split(src, '\n')
-        if occursin(r"^\s*(```|~~~)", ln); infence = !infence; continue; end
+        if occursin(r"^\s*(```|~~~)", ln)
+            infence = !infence
+            continue
+        end
         infence && continue
         m = match(r"^(#{1,6})\s+\S", ln)
         m === nothing || return length(m.captures[1])
@@ -686,12 +887,18 @@ end
 # inter-break chunks (≥1); a source with no rule returns `[src]`.
 function _split_md_rules(src::AbstractString)
     parts = String[]
-    buf = IOBuffer(); infence = false
+    buf = IOBuffer()
+    infence = false
     lines = split(src, '\n')
     for ln in lines
-        if occursin(r"^\s*(```|~~~)", ln); infence = !infence; print(buf, ln, '\n'); continue; end
+        if occursin(r"^\s*(```|~~~)", ln)
+            infence = !infence
+            print(buf, ln, '\n')
+            continue
+        end
         if !infence && occursin(r"^\s*([-*_])(\s*\1){2,}\s*$", ln)
-            push!(parts, String(take!(buf))); continue
+            push!(parts, String(take!(buf)))
+            continue
         end
         print(buf, ln, '\n')
     end
@@ -703,18 +910,21 @@ end
 # chunk, else `nothing` = use the whole cell) plus the `:notes` cells attached to it.
 const SlideFrag = Tuple{Cell,Union{String,Nothing}}
 
-function _slide_segments(cells; level::Integer = 2)
+function _slide_segments(cells; level::Integer=2)
     slides = NamedTuple{(:frags, :notes),Tuple{Vector{SlideFrag},Vector{Cell}}}[]
-    frags = SlideFrag[]; notes = Cell[]
+    frags = SlideFrag[]
+    notes = Cell[]
     function flush!()
-        (isempty(frags) && isempty(notes)) && return
-        push!(slides, (frags = frags, notes = notes))
-        frags = SlideFrag[]; notes = Cell[]
+        (isempty(frags) && isempty(notes)) && return nothing
+        push!(slides, (frags=frags, notes=notes))
+        frags = SlideFrag[]
+        return notes = Cell[]
     end
     for c in cells
         (:collapsed in c.flags) && continue
         if :notes in c.flags
-            push!(notes, c); continue
+            push!(notes, c)
+            continue
         end
         d = c.kind == MARKDOWN ? _first_heading_depth(c.source) : nothing
         starts = (:slide in c.flags) || (d !== nothing && d <= level)
@@ -747,14 +957,19 @@ function _parse_title_cell(src)
         t = strip(String(s))
         for d in ("***", "**", "*", "__", "_")
             if startswith(t, d) && endswith(t, d) && ncodeunits(t) > 2ncodeunits(d)
-                return strip(t[nextind(t, firstindex(t), length(d)):prevind(t, lastindex(t), length(d))])
+                return strip(
+                    t[nextind(t, firstindex(t), length(d)):prevind(t, lastindex(t), length(d))]
+                )
             end
         end
         return t
     end
-    title = ""; subtitle = ""; byline = ""
+    title = ""
+    subtitle = ""
+    byline = ""
     for ln in split(String(src), '\n')
-        s = strip(ln); isempty(s) && continue
+        s = strip(ln)
+        isempty(s) && continue
         if isempty(title) && (m = match(r"^#\s+(.+?)\s*#*$", ln)) !== nothing
             title = unemph(m.captures[1])
         elseif isempty(subtitle) && (m = match(r"^#{2,3}\s+(.+?)\s*#*$", ln)) !== nothing
@@ -768,12 +983,18 @@ end
 
 function report_frontmatter(report)
     cells = report.cells
-    title = report.title; subtitle = ""; byline = ""; abstract = ""
-    skip = Set{String}(); titlecell = ""
+    title = report.title
+    subtitle = ""
+    byline = ""
+    abstract = ""
+    skip = Set{String}()
+    titlecell = ""
     titlei = findfirst(c -> :title in c.flags, cells)
     if titlei !== nothing
         t, s, b = _parse_title_cell(cells[titlei].source)
-        isempty(t) || (title = t); subtitle = s; byline = b
+        isempty(t) || (title = t)
+        subtitle = s
+        byline = b
         push!(skip, cells[titlei].id)
     else
         # No explicit `title` role tag → derive the document title from the FIRST markdown H1, so
@@ -784,13 +1005,17 @@ function report_frontmatter(report)
             c.kind == MARKDOWN || continue
             m = match(r"(?m)^#[ \t]+(.+?)[ \t]*#*$", c.source)
             m === nothing && continue
-            title = strip(m.captures[1]); titlecell = c.id; break
+            title = strip(m.captures[1])
+            titlecell = c.id
+            break
         end
     end
     abscells = Cell[c for c in cells if :abstract in c.flags]
     if !isempty(abscells)
         abstract = join((strip(c.source) for c in abscells), "\n\n")
-        for c in abscells; push!(skip, c.id); end
+        for c in abscells
+            push!(skip, c.id)
+        end
     end
     bibcells = Cell[c for c in cells if :bibliography in c.flags]
     has = titlei !== nothing || !isempty(strip(abstract))
@@ -820,7 +1045,8 @@ function _cell_has_figure(c::Cell)
     o = c.output
     o === nothing && return false
     return any(ch -> startswith(ch.mime, "image/"), o.display) ||
-           !isempty(_echarts_specs(c)) || !isempty(_table_specs(c))
+           !isempty(_echarts_specs(c)) ||
+           !isempty(_table_specs(c))
 end
 
 """
@@ -833,15 +1059,21 @@ Resolve figure numbering from `caption`-tagged cells (document order):
 - `capfor`   :: caption-cell-id → bound figure cell id ("" if none resolved)
 """
 function figure_index(report)
-    numbers = Dict{String,Int}(); labels = Dict{String,Tuple{Int,String}}(); capfor = Dict{String,String}()
-    lastfig = ""; n = 0
+    numbers = Dict{String,Int}()
+    labels = Dict{String,Tuple{Int,String}}()
+    capfor = Dict{String,String}()
+    lastfig = ""
+    n = 0
     for c in report.cells
         _cell_has_figure(c) && (lastfig = c.id)
         (c.kind == MARKDOWN && :caption in c.flags) || continue
-        n += 1; numbers[c.id] = n
-        forid = _flag_attr(c, "for"); forid = isempty(forid) ? lastfig : forid
+        n += 1
+        numbers[c.id] = n
+        forid = _flag_attr(c, "for")
+        forid = isempty(forid) ? lastfig : forid
         capfor[c.id] = forid
-        label = _flag_attr(c, "label"); label = isempty(label) ? c.id : label
+        label = _flag_attr(c, "label")
+        label = isempty(label) ? c.id : label
         labels[label] = (n, isempty(forid) ? c.id : forid)
     end
     return (; numbers, labels, capfor)
@@ -854,7 +1086,9 @@ function _strip_leading_h1(src::AbstractString)
     i = findfirst(l -> occursin(r"^#[ \t]+\S", l), lines)
     i === nothing && return String(src)
     deleteat!(lines, i)
-    while i <= length(lines) && isempty(strip(lines[i])); deleteat!(lines, i); end
+    while i <= length(lines) && isempty(strip(lines[i]))
+        deleteat!(lines, i)
+    end
     return join(lines, '\n')
 end
 
@@ -872,11 +1106,12 @@ function _bibliography_files!(dir::AbstractString, bibcells, nbdir::AbstractStri
             println(embedded, strip(body))
         else
             for ln in split(body, '\n')                 # external `.bib` path(s)
-                p = strip(ln); isempty(p) && continue
+                p = strip(ln)
+                isempty(p) && continue
                 src = isabspath(p) ? String(p) : joinpath(nbdir, p)
                 isfile(src) || error("bibliography file not found: $p")
                 fn = "ext_" * basename(src)
-                cp(src, joinpath(dir, fn); force = true)
+                cp(src, joinpath(dir, fn); force=true)
                 fn in files || push!(files, fn)
             end
         end
@@ -894,41 +1129,169 @@ const _BibEntry = NamedTuple{(:key, :title, :author, :year),NTuple{4,String}}
 # LaTeX accent command → the Unicode COMBINING mark it puts on the next letter; NFC then composes
 # (`c`+◌̧ → ç, `e`+◌́ → é). Covers the accents BibTeX author/title fields actually use.
 const _TEX_ACCENT = Dict{Char,Char}(
-    '\'' => '́', '`' => '̀', '^' => '̂', '"' => '̈', '~' => '̃',   # acute grave circumflex diaeresis tilde
-    '='  => '̄', '.' => '̇', 'c' => '̧', 'v' => '̌', 'u' => '̆',   # macron dot-above cedilla caron breve
-    'H'  => '̋', 'k' => '̨', 'r' => '̊', 'b' => '̱', 'd' => '̣')    # double-acute ogonek ring macron-below dot-below
+    '\'' => '́',
+    '`' => '̀',
+    '^' => '̂',
+    '"' => '̈',
+    '~' => '̃',   # acute grave circumflex diaeresis tilde
+    '=' => '̄',
+    '.' => '̇',
+    'c' => '̧',
+    'v' => '̌',
+    'u' => '̆',   # macron dot-above cedilla caron breve
+    'H' => '̋',
+    'k' => '̨',
+    'r' => '̊',
+    'b' => '̱',
+    'd' => '̣',
+)    # double-acute ogonek ring macron-below dot-below
 # Standalone LaTeX letter commands (no accent argument) → their Unicode letter. Multi-letter first so
 # `\ss` isn't split as `\s`+`s`.
-const _TEX_LETTER = ["ss" => "ß", "aa" => "å", "AA" => "Å", "ae" => "æ", "AE" => "Æ", "oe" => "œ",
-    "OE" => "Œ", "o" => "ø", "O" => "Ø", "l" => "ł", "L" => "Ł", "i" => "ı", "j" => "ȷ"]
+const _TEX_LETTER = [
+    "ss" => "ß",
+    "aa" => "å",
+    "AA" => "Å",
+    "ae" => "æ",
+    "AE" => "Æ",
+    "oe" => "œ",
+    "OE" => "Œ",
+    "o" => "ø",
+    "O" => "Ø",
+    "l" => "ł",
+    "L" => "Ł",
+    "i" => "ı",
+    "j" => "ȷ",
+]
 
-_tex_accent_sub(m::AbstractString) =
-    (mm = match(r"\\([`'^\"~=.cvuHkrbd])\s*\{?\s*([A-Za-z])\}?", m);
-     mm === nothing ? m : Base.Unicode.normalize(string(mm.captures[2], _TEX_ACCENT[mm.captures[1][1]]), :NFC))
+function _tex_accent_sub(m::AbstractString)
+    return (
+        mm=match(r"\\([`'^\"~=.cvuHkrbd])\s*\{?\s*([A-Za-z])\}?", m);
+        if mm === nothing
+            m
+        else
+            Base.Unicode.normalize(string(mm.captures[2], _TEX_ACCENT[mm.captures[1][1]]), :NFC)
+        end
+    )
+end
 
 # Common LaTeX math commands → their Unicode glyph (decoded only INSIDE `$…$`, so an operator like
 # `\cdot` isn't confused with the `\c` cedilla accent, and Greek/ops in titles render). Word commands,
 # matched with a trailing non-letter boundary; longer names win by that boundary (`\cdots` vs `\cdot`).
-const _TEX_CMD = ["cdots" => "⋯", "cdot" => "·", "times" => "×", "div" => "÷", "pm" => "±", "mp" => "∓",
-    "leq" => "≤", "geq" => "≥", "neq" => "≠", "approx" => "≈", "equiv" => "≡", "sim" => "∼", "propto" => "∝",
-    "infty" => "∞", "ldots" => "…", "dots" => "…", "rightarrow" => "→", "leftarrow" => "←", "to" => "→",
-    "partial" => "∂", "nabla" => "∇", "sum" => "∑", "prod" => "∏", "int" => "∫", "sqrt" => "√", "in" => "∈",
-    "subset" => "⊂", "cup" => "∪", "cap" => "∩", "varepsilon" => "ε", "epsilon" => "ε", "varphi" => "φ",
-    "alpha" => "α", "beta" => "β", "gamma" => "γ", "delta" => "δ", "zeta" => "ζ", "eta" => "η", "theta" => "θ",
-    "iota" => "ι", "kappa" => "κ", "lambda" => "λ", "mu" => "μ", "nu" => "ν", "xi" => "ξ", "rho" => "ρ",
-    "sigma" => "σ", "tau" => "τ", "phi" => "φ", "chi" => "χ", "psi" => "ψ", "omega" => "ω", "pi" => "π",
-    "Gamma" => "Γ", "Delta" => "Δ", "Theta" => "Θ", "Lambda" => "Λ", "Xi" => "Ξ", "Pi" => "Π", "Sigma" => "Σ",
-    "Phi" => "Φ", "Psi" => "Ψ", "Omega" => "Ω"]
-const _TEX_SUP = Dict('0'=>'⁰','1'=>'¹','2'=>'²','3'=>'³','4'=>'⁴','5'=>'⁵','6'=>'⁶','7'=>'⁷','8'=>'⁸','9'=>'⁹','+'=>'⁺','-'=>'⁻','='=>'⁼','('=>'⁽',')'=>'⁾','n'=>'ⁿ','i'=>'ⁱ')
-const _TEX_SUB = Dict('0'=>'₀','1'=>'₁','2'=>'₂','3'=>'₃','4'=>'₄','5'=>'₅','6'=>'₆','7'=>'₇','8'=>'₈','9'=>'₉','+'=>'₊','-'=>'₋','='=>'₌','('=>'₍',')'=>'₎')
+const _TEX_CMD = [
+    "cdots" => "⋯",
+    "cdot" => "·",
+    "times" => "×",
+    "div" => "÷",
+    "pm" => "±",
+    "mp" => "∓",
+    "leq" => "≤",
+    "geq" => "≥",
+    "neq" => "≠",
+    "approx" => "≈",
+    "equiv" => "≡",
+    "sim" => "∼",
+    "propto" => "∝",
+    "infty" => "∞",
+    "ldots" => "…",
+    "dots" => "…",
+    "rightarrow" => "→",
+    "leftarrow" => "←",
+    "to" => "→",
+    "partial" => "∂",
+    "nabla" => "∇",
+    "sum" => "∑",
+    "prod" => "∏",
+    "int" => "∫",
+    "sqrt" => "√",
+    "in" => "∈",
+    "subset" => "⊂",
+    "cup" => "∪",
+    "cap" => "∩",
+    "varepsilon" => "ε",
+    "epsilon" => "ε",
+    "varphi" => "φ",
+    "alpha" => "α",
+    "beta" => "β",
+    "gamma" => "γ",
+    "delta" => "δ",
+    "zeta" => "ζ",
+    "eta" => "η",
+    "theta" => "θ",
+    "iota" => "ι",
+    "kappa" => "κ",
+    "lambda" => "λ",
+    "mu" => "μ",
+    "nu" => "ν",
+    "xi" => "ξ",
+    "rho" => "ρ",
+    "sigma" => "σ",
+    "tau" => "τ",
+    "phi" => "φ",
+    "chi" => "χ",
+    "psi" => "ψ",
+    "omega" => "ω",
+    "pi" => "π",
+    "Gamma" => "Γ",
+    "Delta" => "Δ",
+    "Theta" => "Θ",
+    "Lambda" => "Λ",
+    "Xi" => "Ξ",
+    "Pi" => "Π",
+    "Sigma" => "Σ",
+    "Phi" => "Φ",
+    "Psi" => "Ψ",
+    "Omega" => "Ω",
+]
+const _TEX_SUP = Dict(
+    '0'=>'⁰',
+    '1'=>'¹',
+    '2'=>'²',
+    '3'=>'³',
+    '4'=>'⁴',
+    '5'=>'⁵',
+    '6'=>'⁶',
+    '7'=>'⁷',
+    '8'=>'⁸',
+    '9'=>'⁹',
+    '+'=>'⁺',
+    '-'=>'⁻',
+    '='=>'⁼',
+    '('=>'⁽',
+    ')'=>'⁾',
+    'n'=>'ⁿ',
+    'i'=>'ⁱ',
+)
+const _TEX_SUB = Dict(
+    '0'=>'₀',
+    '1'=>'₁',
+    '2'=>'₂',
+    '3'=>'₃',
+    '4'=>'₄',
+    '5'=>'₅',
+    '6'=>'₆',
+    '7'=>'₇',
+    '8'=>'₈',
+    '9'=>'₉',
+    '+'=>'₊',
+    '-'=>'₋',
+    '='=>'₌',
+    '('=>'₍',
+    ')'=>'₎',
+)
 # Map every char of `s` through `tbl` (super/subscript), or `nothing` if any char has no mapping.
 function _tex_mapscript(s, tbl)
     io = IOBuffer()
-    for c in s; haskey(tbl, c) ? print(io, tbl[c]) : return nothing; end
+    for c in s
+        haskey(tbl, c) ? print(io, tbl[c]) : return nothing
+    end
     return String(take!(io))
 end
-_tex_script_sub(m::AbstractString, tbl) =
-    (mm = match(r"[\^_]\{?([^{}]+)\}?", m); mm === nothing ? m : something(_tex_mapscript(mm.captures[1], tbl), m))
+function _tex_script_sub(m::AbstractString, tbl)
+    return (
+        mm=match(r"[\^_]\{?([^{}]+)\}?", m);
+        mm === nothing ? m : something(_tex_mapscript(mm.captures[1], tbl), m)
+    )
+end
 
 # Decode a `$…$` math span (the `$` are dropped): operators/Greek, then super/subscripts.
 function _tex_math_sub(m::AbstractString)
@@ -975,22 +1338,32 @@ function _parse_bibtex_entries(text::AbstractString)
         # (`year = 1984`). LaTeX-decoded for display.
         function fld(n)
             mb = match(Regex(n * raw"\s*=\s*(\{(?:[^{}]|(?1))*\})", "i"), part)
-            mb === nothing || return _delatex(strip(chop(mb.captures[1]; head = 1, tail = 1)))   # drop outer { }
+            mb === nothing || return _delatex(strip(chop(mb.captures[1]; head=1, tail=1)))   # drop outer { }
             mq = match(Regex(n * raw"\s*=\s*\"([^\"\n]*)\"", "i"), part)
             mq === nothing || return _delatex(strip(mq.captures[1]))
             mn = match(Regex(n * raw"\s*=\s*(\d[\w\-]*)", "i"), part)
-            mn === nothing ? "" : _delatex(strip(mn.captures[1]))
+            return mn === nothing ? "" : _delatex(strip(mn.captures[1]))
         end
-        push!(out, (key = String(m.captures[1]), title = fld("title"), author = fld("author"), year = fld("year")))
+        push!(
+            out,
+            (key=String(m.captures[1]), title=fld("title"), author=fld("author"), year=fld("year")),
+        )
     end
     return out
 end
 
 # Numeric CSL styles cite as [1]; the rest are author-date. Drives the LIVE citation format (the PDF
 # uses the real CSL engine either way).
-_is_numeric_style(style::AbstractString) =
-    lowercase(String(style)) in ("ieee", "vancouver", "nature", "chicago-notes",
-                                 "iso-690-numeric", "american-physics-society")
+function _is_numeric_style(style::AbstractString)
+    return lowercase(String(style)) in (
+        "ieee",
+        "vancouver",
+        "nature",
+        "chicago-notes",
+        "iso-690-numeric",
+        "american-physics-society",
+    )
+end
 
 # A compact author-date label for the live view, e.g. "Knuth, 1984" / "Cormen et al., 2009".
 function _author_year_label(author::AbstractString, year::AbstractString)
@@ -998,8 +1371,9 @@ function _author_year_label(author::AbstractString, year::AbstractString)
     surname = ""
     if !isempty(a)
         first = strip(split(a, r"\s+and\s+")[1])                 # first listed author
-        surname = occursin(",", first) ? strip(split(first, ",")[1]) :  # "Knuth, Donald"
-                  String(strip(split(first)[end]))                       # "Donald E. Knuth" → "Knuth"
+        surname =
+            occursin(",", first) ? strip(split(first, ",")[1]) :  # "Knuth, Donald"
+            String(strip(split(first)[end]))                       # "Donald E. Knuth" → "Knuth"
         occursin(r"\band\b", a) && (surname *= " et al.")
     end
     yr = strip(String(year))
@@ -1017,7 +1391,8 @@ function bibliography_index(report, nbdir::AbstractString)
             append!(entries, _parse_bibtex_entries(c.source))
         else
             for ln in split(c.source, '\n')
-                p = strip(ln); isempty(p) && continue
+                p = strip(ln)
+                isempty(p) && continue
                 src = isabspath(p) ? String(p) : joinpath(nbdir, p)
                 isfile(src) && append!(entries, _parse_bibtex_entries(read(src, String)))
             end
@@ -1036,7 +1411,10 @@ function cited_citation_keys(report)
         :bibliography in c.flags && continue
         infence = false
         for ln in split(c.source, '\n')
-            if occursin(r"^\s*(```|~~~)", ln); infence = !infence; continue; end
+            if occursin(r"^\s*(```|~~~)", ln)
+                infence = !infence
+                continue
+            end
             infence && continue
             for m in eachmatch(r"(?<![\w@])@([A-Za-z][\w:.\-]*)", ln)
                 push!(keys, String(m.captures[1]))
@@ -1050,11 +1428,13 @@ end
 # numeric CSL ordering, so the live view can show [1]/[2] like the PDF. Reuses the rewriter's exact
 # detection (code-skipping + defined-key check) via a recording emit, so it never drifts.
 function citation_numbers(report, citekeys)
-    order = String[]; seen = Set{String}()
-    rec = (key, _sup, _form) -> (k = String(key); (k in seen || (push!(order, k); push!(seen, k))); "")
+    order = String[]
+    seen = Set{String}()
+    rec =
+        (key, _sup, _form) -> (k=String(key); (k in seen || (push!(order, k); push!(seen, k))); "")
     for c in report.cells
         (c.kind == MARKDOWN && !(:bibliography in c.flags)) || continue
-        _rewrite_citations(c.source, citekeys; emit = rec)
+        _rewrite_citations(c.source, citekeys; emit=rec)
     end
     return Dict{String,Int}(k => i for (i, k) in enumerate(order))
 end
@@ -1066,9 +1446,11 @@ function bib_cell_info(cell, nbdir::AbstractString)
         es = _parse_bibtex_entries(body)
         return ("", length(es), es)
     end
-    file = ""; es = _BibEntry[]
+    file = ""
+    es = _BibEntry[]
     for ln in split(body, '\n')
-        p = strip(ln); isempty(p) && continue
+        p = strip(ln)
+        isempty(p) && continue
         file = String(p)
         src = isabspath(p) ? String(p) : joinpath(nbdir, p)
         isfile(src) && append!(es, _parse_bibtex_entries(read(src, String)))
@@ -1079,7 +1461,8 @@ end
 # Typst `#bibliography(...)` call for the resolved files, or "" when there are none.
 function _bibliography_typst(files, style::AbstractString)::String
     isempty(files) && return ""
-    farg = length(files) == 1 ? "\"$(files[1])\"" : "(" * join(("\"$f\"" for f in files), ", ") * ")"
+    farg =
+        length(files) == 1 ? "\"$(files[1])\"" : "(" * join(("\"$f\"" for f in files), ", ") * ")"
     return "#bibliography($farg, style: \"$(style)\", title: [References])\n"
 end
 
@@ -1087,25 +1470,44 @@ end
 # figures / output blocks) — into a fresh temp dir and return its path. Shared by `export_pdf`
 # (compile it) and `export_typst_bundle` (archive it). Holds `nb.lock` while reading the report;
 # the caller owns the returned dir and must `rm` it.
-function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
-                              style::AbstractString = "article", columns::Integer = 1,
-                              theme::AbstractString = "light", charttheme::AbstractString = "",
-                              override::Bool = false, code::AbstractString = "normal",
-                              body::AbstractString = "", include_params::Bool = false,
-                              layout::AbstractString = "article", notes::Bool = false,
-                              level::Integer = 2, outputs::AbstractString = "all")
+function _build_typst_project(
+    nb::LiveNotebook;
+    include_source::Bool=true,
+    style::AbstractString="article",
+    columns::Integer=1,
+    theme::AbstractString="light",
+    charttheme::AbstractString="",
+    override::Bool=false,
+    code::AbstractString="normal",
+    body::AbstractString="",
+    include_params::Bool=false,
+    layout::AbstractString="article",
+    notes::Bool=false,
+    level::Integer=2,
+    outputs::AbstractString="all",
+)
     # Slide-deck layout takes a wholly different page geometry/flow — dispatch early.
-    layout == "slides" && return _build_slides_project(nb; theme = theme, charttheme = charttheme, override = override,
-        code = code, include_source = include_source, include_params = include_params, notes = notes,
-        level = level, ratio = get(nb.report.meta, "slideratio", "16:9"), outputs = outputs)
+    layout == "slides" && return _build_slides_project(
+        nb;
+        theme=theme,
+        charttheme=charttheme,
+        override=override,
+        code=code,
+        include_source=include_source,
+        include_params=include_params,
+        notes=notes,
+        level=level,
+        ratio=get(nb.report.meta, "slideratio", "16:9"),
+        outputs=outputs,
+    )
     show_source = include_source && code != "hidden"
     cols = clamp(Int(columns), 1, 2)
     body = isempty(body) ? (cols == 2 ? "compact" : "normal") : body   # narrow columns → smaller default
     ct = _chart_theme(charttheme, theme)                               # the Slate palette charts render in
-    _warm_chart_svgs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
+    _warm_chart_svgs!(nb; theme=ct, progress=cid -> _export_progress(nb, cid))
     # Themed override: re-render native (Makie) figures under the picked palette too (see the export
     # dialog's warning). No-op when not overriding — the baked figure bytes already match the live theme.
-    override && _warm_makie_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
+    override && _warm_makie_figs!(nb; theme=ct, progress=cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()
         # Dark theme highlights code via a bundled tmTheme that Typst reads from the root.
@@ -1114,8 +1516,18 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
         # If the author manually numbers their headings ("3.1 · …", "Section 3"), suppress Typst's
         # auto-numbering so it doesn't prepend a second number ("1 3.1 · …").
         numoverride = _manual_heading_numbers(nb.report.cells) ? false : nothing
-        print(io, _typst_preamble(nb.report.title; style = style, columns = cols,
-                                  theme = theme, code = code, body = body, number = numoverride))
+        print(
+            io,
+            _typst_preamble(
+                nb.report.title;
+                style=style,
+                columns=cols,
+                theme=theme,
+                code=code,
+                body=body,
+                number=numoverride,
+            ),
+        )
         # Role-tagged metadata (title / abstract) → academic title block spanning full width;
         # the hoisted cells are then dropped from the body.
         cells = nb.report.cells
@@ -1128,16 +1540,33 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
         else
             absarg = "none"
             if !isempty(strip(fm.abstract))
-                write(joinpath(dir, "abstract.md"),
-                      _stage_typst_md_media(_rewrite_citations(fm.abstract, citekeys), dir, "abstract", _proj_root(nb)))
+                write(
+                    joinpath(dir, "abstract.md"),
+                    _stage_typst_md_media(
+                        _rewrite_citations(fm.abstract, citekeys), dir, "abstract", _proj_root(nb)
+                    ),
+                )
                 absarg = "cmarker.render(read(\"abstract.md\"), math: mathfn, scope: (image: mdimage))"
             end
-            print(io, "#metablock(", arg(fm.title), ", ", arg(fm.subtitle), ", ", arg(fm.byline), ", ", absarg, ")\n\n")
+            print(
+                io,
+                "#metablock(",
+                arg(fm.title),
+                ", ",
+                arg(fm.subtitle),
+                ", ",
+                arg(fm.byline),
+                ", ",
+                absarg,
+                ")\n\n",
+            )
         end
         cols == 2 && print(io, "#columns(2)[\n")
         # Side-by-side rows (`column=N`): wrap a multi-cell run in a Typst `grid`, each cell a `[…]` slot.
-        rowopen, rowclose, rowmembers = _column_row_brackets(cells,
-            c -> !(:collapsed in c.flags) && !(c.id in fm.skip) && !(:bibliography in c.flags))
+        rowopen, rowclose, rowmembers = _column_row_brackets(
+            cells,
+            c -> !(:collapsed in c.flags) && !(c.id in fm.skip) && !(:bibliography in c.flags),
+        )
         for (k, c) in enumerate(cells)
             base = "c$(k)"
             (:collapsed in c.flags) && continue       # folded cell → omit from the export entirely
@@ -1145,33 +1574,63 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             (:bibliography in c.flags) && continue    # rendered as #bibliography at the end, not raw
             inrow = c.id in rowmembers
             haskey(rowopen, c.id) &&                  # first cell of a multi-cell row → open the grid
-                print(io, "#grid(columns: (", join(fill("1fr", rowopen[c.id]), ", "), "), column-gutter: 1.2em, align: top,\n")
+                print(
+                    io,
+                    "#grid(columns: (",
+                    join(fill("1fr", rowopen[c.id]), ", "),
+                    "), column-gutter: 1.2em, align: top,\n",
+                )
             inrow && print(io, "[")                   # each row cell is one grid slot
             if c.kind == MARKDOWN
                 src = c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source   # hoisted H1 → not in body
-                md = _md_for_typst(c, src; citekeys = citekeys, figrefs = figidx.labels)
+                md = _md_for_typst(c, src; citekeys=citekeys, figrefs=figidx.labels)
                 md = _stage_typst_md_media(md, dir, base, _proj_root(nb))   # author-embedded images → staged files
                 if isempty(strip(md))
                     inrow || continue                # empty markdown: standalone → skip; in a row → empty slot
                 else
                     write(joinpath(dir, base * ".md"), md)
                     if haskey(figidx.numbers, c.id)  # a caption cell → numbered "Figure N." block
-                        print(io, "#figcaption(\"Figure ", figidx.numbers[c.id],
-                              "\", cmarker.render(read(\"", base, ".md\"), math: mathfn, scope: (image: mdimage)))\n\n")
+                        print(
+                            io,
+                            "#figcaption(\"Figure ",
+                            figidx.numbers[c.id],
+                            "\", cmarker.render(read(\"",
+                            base,
+                            ".md\"), math: mathfn, scope: (image: mdimage)))\n\n",
+                        )
                     else
-                        print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn, scope: (image: mdimage))\n\n")
+                        print(
+                            io,
+                            "#cmarker.render(read(\"",
+                            base,
+                            ".md\"), math: mathfn, scope: (image: mdimage))\n\n",
+                        )
                     end
                 end
             else
                 # Match the browser: `show_source` is the global toggle; also hide source for the
                 # per-cell 🙈 `hidecode` flag and for widget cells — `@bind` and `@web` — which show
                 # their widget, not code.
-                if show_source && !(:hidecode in c.flags) && isempty(c.binds) && !_is_web_cell(c) && !isempty(strip(c.source))
+                if show_source &&
+                    !(:hidecode in c.flags) &&
+                    isempty(c.binds) &&
+                    !_is_web_cell(c) &&
+                    !isempty(strip(c.source))
                     write(joinpath(dir, base * ".jl"), c.source)
                     print(io, "#codeblock(read(\"", base, ".jl\"))\n")
                 end
                 include_params && print(io, _emit_controls(c))   # frozen @bind controls — off by default
-                _emit_output!(io, dir, base, nb, c; theme = theme, charttheme = ct, override = override, outputs = outputs)
+                _emit_output!(
+                    io,
+                    dir,
+                    base,
+                    nb,
+                    c;
+                    theme=theme,
+                    charttheme=ct,
+                    override=override,
+                    outputs=outputs,
+                )
                 print(io, "\n")
             end
             if inrow                                  # close this grid slot; the row's last cell closes the grid
@@ -1189,42 +1648,83 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
 end
 
 # Emit one slide fragment (a whole cell, or a `---`-split markdown chunk) into the doc.
-function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, charttheme = "", override = false, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all")
+function _emit_slide_frag!(
+    io::IO,
+    dir,
+    base,
+    nb,
+    frag::SlideFrag;
+    theme,
+    charttheme="",
+    override=false,
+    show_source,
+    include_params,
+    citekeys=Set{String}(),
+    outputs::AbstractString="all",
+)
     c, srcoverride = frag                    # frag[2] is a per-frag SOURCE override (String/nothing), NOT the themed-render Bool `override`
     if c.kind == MARKDOWN
-        md = _md_for_typst(c, srcoverride === nothing ? c.source : srcoverride; citekeys = citekeys)
+        md = _md_for_typst(c, srcoverride === nothing ? c.source : srcoverride; citekeys=citekeys)
         md = _stage_typst_md_media(md, dir, base, _proj_root(nb))   # author-embedded images → staged files
-        isempty(strip(md)) && return
+        isempty(strip(md)) && return nothing
         write(joinpath(dir, base * ".md"), md)
-        print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn, scope: (image: mdimage))\n\n")
+        print(
+            io,
+            "#cmarker.render(read(\"",
+            base,
+            ".md\"), math: mathfn, scope: (image: mdimage))\n\n",
+        )
     else
-        if show_source && !(:hidecode in c.flags) && isempty(c.binds) && !_is_web_cell(c) && !isempty(strip(c.source))
+        if show_source &&
+            !(:hidecode in c.flags) &&
+            isempty(c.binds) &&
+            !_is_web_cell(c) &&
+            !isempty(strip(c.source))
             write(joinpath(dir, base * ".jl"), c.source)
             print(io, "#codeblock(read(\"", base, ".jl\"))\n")
         end
         include_params && print(io, _emit_controls(c))
-        _emit_output!(io, dir, base, nb, c; theme = theme, charttheme = charttheme, override = override, outputs = outputs)
+        _emit_output!(
+            io,
+            dir,
+            base,
+            nb,
+            c;
+            theme=theme,
+            charttheme=charttheme,
+            override=override,
+            outputs=outputs,
+        )
         print(io, "\n")
     end
-    return
+    return nothing
 end
 
 # Assemble a slide-DECK Typst project: one page per slide (segmented by `_slide_segments`),
 # 16:9/4:3 landscape, auto-fit. Code listings are hidden by default on slides (set `code`/
 # `include_source`). With `notes=true`, a speaker-notes appendix follows the deck.
-function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark", charttheme::AbstractString = "",
-                               override::Bool = false, ratio::AbstractString = "16:9", code::AbstractString = "hidden",
-                               include_source::Bool = false, include_params::Bool = false,
-                               notes::Bool = false, level::Integer = 2, outputs::AbstractString = "all")
+function _build_slides_project(
+    nb::LiveNotebook;
+    theme::AbstractString="dark",
+    charttheme::AbstractString="",
+    override::Bool=false,
+    ratio::AbstractString="16:9",
+    code::AbstractString="hidden",
+    include_source::Bool=false,
+    include_params::Bool=false,
+    notes::Bool=false,
+    level::Integer=2,
+    outputs::AbstractString="all",
+)
     show_source = include_source && code != "hidden"
     ct = _chart_theme(charttheme, theme)                               # the Slate palette charts render in
-    _warm_chart_svgs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
-    override && _warm_makie_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
+    _warm_chart_svgs!(nb; theme=ct, progress=cid -> _export_progress(nb, cid))
+    override && _warm_makie_figs!(nb; theme=ct, progress=cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()
         theme == "dark" && write(joinpath(dir, "code-dark.tmTheme"), _CODE_DARK_TMTHEME)
         io = IOBuffer()
-        print(io, _typst_preamble_slides(nb.report.title; theme = theme, ratio = ratio, code = code))
+        print(io, _typst_preamble_slides(nb.report.title; theme=theme, ratio=ratio, code=code))
         cells = nb.report.cells
         # Role-tagged metadata → a dedicated title slide (metablock); hoisted title/abstract cells
         # are dropped from the body slides.
@@ -1232,33 +1732,68 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
         citekeys = Set(e.key for e in bibliography_index(nb.report, dirname(abspath(nb.path))))
         arg(s) = isempty(strip(s)) ? "none" : "\"" * _typ_str(s) * "\""
         if fm.has
-            print(io, "#slide(metablock(", arg(fm.title), ", ", arg(fm.subtitle), ", ",
-                  arg(fm.byline), ", ", arg(fm.abstract), "))\n\n")
+            print(
+                io,
+                "#slide(metablock(",
+                arg(fm.title),
+                ", ",
+                arg(fm.subtitle),
+                ", ",
+                arg(fm.byline),
+                ", ",
+                arg(fm.abstract),
+                "))\n\n",
+            )
         end
-        segs = _slide_segments(cells; level = level)
+        segs = _slide_segments(cells; level=level)
         for (si, seg) in enumerate(segs)
             # drop hoisted title/abstract cells and the bibliography (rendered as a closing slide)
-            frags = [f for f in seg.frags if !(f[1].id in fm.skip) && !(:bibliography in f[1].flags)]
+            frags = [
+                f for f in seg.frags if !(f[1].id in fm.skip) && !(:bibliography in f[1].flags)
+            ]
             isempty(frags) && continue
             print(io, "#slide[\n")
             # Group consecutive `column=N` frags into side-by-side rows (anchored by the preceding
             # untagged frag), each rendered as a Typst `grid` slot — same layout as the doc flow.
             fragrows = Vector{Vector{Int}}()
             for fi in 1:length(frags)
-                (_cell_column(frags[fi][1]) >= 2 && !isempty(fragrows)) ?
-                    push!(fragrows[end], fi) : push!(fragrows, Int[fi])
+                if (_cell_column(frags[fi][1]) >= 2 && !isempty(fragrows))
+                    push!(fragrows[end], fi)
+                else
+                    push!(fragrows, Int[fi])
+                end
             end
             for row in fragrows
                 multi = length(row) > 1
-                multi && print(io, "#grid(columns: (", join(fill("1fr", length(row)), ", "),
-                                   "), column-gutter: 1.2em, align: top,\n")
+                multi && print(
+                    io,
+                    "#grid(columns: (",
+                    join(fill("1fr", length(row)), ", "),
+                    "), column-gutter: 1.2em, align: top,\n",
+                )
                 for fi in row
                     frag = frags[fi]
                     # Strip the hoisted H1 from the implicit-title cell so it isn't repeated on a body slide.
-                    f = (frag[1].id == fm.titlecell && frag[2] === nothing) ? (frag[1], _strip_leading_h1(frag[1].source)) : frag
+                    f = if (frag[1].id == fm.titlecell && frag[2] === nothing)
+                        (frag[1], _strip_leading_h1(frag[1].source))
+                    else
+                        frag
+                    end
                     multi && print(io, "[")
-                    _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme, charttheme = ct, override = override,
-                                      show_source = show_source, include_params = include_params, citekeys = citekeys, outputs = outputs)
+                    _emit_slide_frag!(
+                        io,
+                        dir,
+                        "s$(si)f$(fi)",
+                        nb,
+                        f;
+                        theme=theme,
+                        charttheme=ct,
+                        override=override,
+                        show_source=show_source,
+                        include_params=include_params,
+                        citekeys=citekeys,
+                        outputs=outputs,
+                    )
                     multi && print(io, "],\n")
                 end
                 multi && print(io, ")\n\n")
@@ -1267,17 +1802,24 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
         end
         # References slide — `:bibliography` cells rendered via Typst's CSL engine.
         biblio = _bibliography_files!(dir, fm.bibcells, dirname(abspath(nb.path)))
-        isempty(biblio) || print(io, "#slide[\n",
-            _bibliography_typst(biblio, get(nb.report.meta, "bibstyle", "ieee")), "]\n\n")
+        isempty(biblio) || print(
+            io,
+            "#slide[\n",
+            _bibliography_typst(biblio, get(nb.report.meta, "bibstyle", "ieee")),
+            "]\n\n",
+        )
         if notes
             for (si, seg) in enumerate(segs)
                 isempty(seg.notes) && continue
-                ntext = join((_md_for_typst(n; citekeys = citekeys) for n in seg.notes), "\n\n")
+                ntext = join((_md_for_typst(n; citekeys=citekeys) for n in seg.notes), "\n\n")
                 ntext = _stage_typst_md_media(ntext, dir, "notes$(si)", _proj_root(nb))   # embedded images → staged files
                 isempty(strip(ntext)) && continue
                 write(joinpath(dir, "notes$(si).md"), ntext)
-                print(io, "#slide[\n#text(fill: luma(130))[Notes · slide $(si)]\n#v(6pt)\n",
-                      "#cmarker.render(read(\"notes$(si).md\"), math: mathfn, scope: (image: mdimage))\n]\n\n")
+                print(
+                    io,
+                    "#slide[\n#text(fill: luma(130))[Notes · slide $(si)]\n#v(6pt)\n",
+                    "#cmarker.render(read(\"notes$(si).md\"), math: mathfn, scope: (image: mdimage))\n]\n\n",
+                )
             end
         end
         write(joinpath(dir, "doc.typ"), String(take!(io)))
@@ -1299,9 +1841,9 @@ function export_typst_bundle(nb::LiveNotebook; kwargs...)
         try
             return transcode(GzipCompressor, read(tarball))
         finally
-            rm(tarball; force = true)
+            rm(tarball; force=true)
         end
     finally
-        rm(dir; recursive = true, force = true)
+        rm(dir; recursive=true, force=true)
     end
 end

@@ -44,13 +44,19 @@ end
 # match. Returns the canonical name, or `nothing` if there's no case-insensitive match. Used only as a
 # fallback when the exact-case lookup misses (e.g. `regionplan` → `RegionPlan`).
 function _ci_resolve_name(where::Module, nm::AbstractString)
-    Symbol(nm) in names(where; all = true, imported = true) && return nm   # exact case takes priority
+    Symbol(nm) in names(where; all=true, imported=true) && return nm   # exact case takes priority
     target = lowercase(nm)
     cands = Set{Symbol}()
-    for s in names(where; all = true, imported = true)
+    for s in names(where; all=true, imported=true)
         push!(cands, s)
-        (isdefined(where, s) && (v = try getfield(where, s) catch; nothing end) isa Module) || continue
-        for e in names(v); push!(cands, e); end
+        (isdefined(where, s) && (v = try
+            getfield(where, s)
+        catch
+            nothing
+        end) isa Module) || continue
+        for e in names(v)
+            push!(cands, e)
+        end
     end
     Symbol(nm) in cands && return nm
     matches = sort!(String[string(s) for s in cands if lowercase(string(s)) == target])
@@ -72,32 +78,65 @@ wins), so `regionplan` finds `RegionPlan` — see `_ci_resolve_name`.
 """
 function module_help(where::Module, name::AbstractString)
     nm = String(name)
-    ex = try; Meta.parse(nm); catch; nothing; end
-    val = ex === nothing ? nothing : (try; Core.eval(where, ex); catch; nothing; end)
+    ex = try
+        Meta.parse(nm)
+    catch
+        nothing
+    end
+    val = ex === nothing ? nothing : (
+        try
+            Core.eval(where, ex)
+        catch
+            nothing
+        end
+    )
     # Wrong-case bare name (no dots) that missed → re-resolve to the correctly-cased binding, if unique.
     if val === nothing && occursin(r"^[A-Za-z_][A-Za-z0-9_!]*$", nm)
         canon = _ci_resolve_name(where, nm)
         canon === nothing || canon == nm || return module_help(where, canon)
     end
-    _kind(v) = v isa Module ? "module" :
-               v isa Type ? "type" :
-               (v isa Function || v isa Base.Callable) ? "function" :
-               v === nothing ? "unknown" : "const"
-    doc = ex === nothing ? "" : (try; strip(string(Core.eval(where, :(@doc($ex))))); catch; ""; end)
+    _kind(v) =
+        if v isa Module
+            "module"
+        elseif v isa Type
+            "type"
+        elseif (v isa Function || v isa Base.Callable)
+            "function"
+        elseif v === nothing
+            "unknown"
+        else
+            "const"
+        end
+    doc = ex === nothing ? "" : (
+        try
+            strip(string(Core.eval(where, :(@doc($ex)))))
+        catch
+            ""
+        end
+    )
     occursin("No documentation found", doc) && (doc = "")        # undocumented / undefined → no doc
     exports = Dict{String,Any}[]
     modname = ""
     if val isa Module
         modname = string(nameof(val))
         self = nameof(val)
-        for s in sort!(names(val); by = string)
+        for s in sort!(names(val); by=string)
             (s === self || !isdefined(val, s)) && continue
-            v = try; getfield(val, s); catch; nothing; end
+            v = try
+                getfield(val, s)
+            catch
+                nothing
+            end
             push!(exports, Dict{String,Any}("name" => string(s), "kind" => _kind(v)))
         end
     elseif val !== nothing
-        modname = try; string(parentmodule(val)); catch; ""; end
+        modname = try
+            string(parentmodule(val))
+        catch
+            ""
+        end
     end
-    return Dict{String,Any}("name" => nm, "module" => modname,
-                            "doc" => doc, "kind" => _kind(val), "exports" => exports)
+    return Dict{String,Any}(
+        "name" => nm, "module" => modname, "doc" => doc, "kind" => _kind(val), "exports" => exports
+    )
 end

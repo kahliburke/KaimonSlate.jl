@@ -13,15 +13,21 @@
 # the same way. What a captured object can `show` as (e.g. a CairoMakie figure →
 # image/png) is orthogonal — that lives in the worker's own project env.
 
-import REPL       # for `REPL.softscope` — REPL-style cell eval (stdlib; always available)
-import Logging    # to capture a cell's `@warn`/`@info` onto the redirected stderr (stdlib)
+using REPL: REPL       # for `REPL.softscope` — REPL-style cell eval (stdlib; always available)
+using Logging: Logging    # to capture a cell's `@warn`/`@info` onto the redirected stderr (stdlib)
 
 # The Slate display MIMEs (SlateExtensionsBase) lead the priority list, so a value with a `slate_render`
 # method is captured as a component descriptor / HTML fragment IN PREFERENCE to text/html or text/plain —
 # the richest representation wins, exactly like VS Code's `DISPLAYABLE_MIMES` scan. A plain value isn't
 # `showable` for them (its `slate_render` returns nothing), so it falls through to the standard MIMEs.
-const _RICH_MIMES = ("application/vnd.kaimonslate.component+json", "application/vnd.kaimonslate.html+html",
-                     "image/svg+xml", "image/png", "text/html", "text/latex")
+const _RICH_MIMES = (
+    "application/vnd.kaimonslate.component+json",
+    "application/vnd.kaimonslate.html+html",
+    "image/svg+xml",
+    "image/png",
+    "text/html",
+    "text/latex",
+)
 
 # ── Output size caps ─────────────────────────────────────────────────────────
 # A cell that accidentally produces a giant result (a printed 10⁷-element loop, the text repr of a
@@ -30,8 +36,8 @@ const _RICH_MIMES = ("application/vnd.kaimonslate.component+json", "application/
 # any of it travels, with a clear truncation notice. The full value still lives in the namespace.
 const _MAX_OUT_CHARS = 100_000      # per text stream: stdout, stderr, value repr (RENDERED to page)
 const _MAX_HTML_BYTES = 4_000_000   # per text/html | text/latex output chunk (RENDERED to page) —
-                                    # generous so rich HTML (dashboards, custom pages with inline images)
-                                    # renders inline; modern browsers handle a few MB fine.
+# generous so rich HTML (dashboards, custom pages with inline images)
+# renders inline; modern browsers handle a few MB fine.
 # Hard ceiling on the FULL result we keep on disk for "open the full output" (new tab / editor /
 # download). Configurable from the UI (server pushes the user's setting into this Ref). Beyond it,
 # even the saved file is clipped — guards against a pathological multi-GB repr eating the disk.
@@ -46,23 +52,40 @@ const _LIVE_OUTPUTS = Dict{String,Any}()
 
 # Hard character ceiling for a single text blob (used by tests; the live value-capping path uses
 # `_cap_keep!`). Truncates with a "… ⚠ truncated — N more characters." marker.
-_cap_text(s::AbstractString, limit::Int = _MAX_OUT_CHARS) =
-    (str = String(s); length(str) <= limit ? str :
-     string(first(str, limit), "\n\n… ⚠ truncated — ", length(str) - limit, " more characters."))
+function _cap_text(s::AbstractString, limit::Int=_MAX_OUT_CHARS)
+    return (
+        str=String(s);
+        if length(str) <= limit
+            str
+        else
+            string(
+                first(str, limit), "\n\n… ⚠ truncated — ", length(str) - limit, " more characters."
+            )
+        end
+    )
+end
 
 # Persist an oversized result so the UI can offer the full thing. Writes (up to _MAX_KEEP_BYTES) to a
 # content-addressed temp file; returns (path, bytes_kept, clipped) or nothing on failure. Same dir on
 # every machine since worker + server share the filesystem (the server serves/links the path).
 # Under $HOME (not tempdir()): the gate worker is spawned with a controlled env and may resolve a
 # DIFFERENT tempdir() than the server, which would then fail to find the file. $HOME is shared.
-_overflow_dir() = (d = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "overflow"); mkpath(d); d)
+function _overflow_dir()
+    return (
+        d=joinpath(
+            get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "overflow"
+        );
+        mkpath(d);
+        d
+    )
+end
 function _write_overflow(content::AbstractString, ext::AbstractString)
     try
         data = codeunits(String(content))
         cap = _MAX_KEEP_BYTES[]
         clipped = length(data) > cap
         kept = clipped ? data[1:cap] : data
-        path = joinpath(_overflow_dir(), string(string(hash(kept); base = 16), ".", ext))
+        path = joinpath(_overflow_dir(), string(string(hash(kept); base=16), ".", ext))
         isfile(path) || write(path, kept)
         return (path, length(kept), clipped)
     catch
@@ -70,12 +93,16 @@ function _write_overflow(content::AbstractString, ext::AbstractString)
     end
 end
 # Cap a text stream for display AND record an overflow file (for full access) when it's over-limit.
-function _cap_keep!(overflow::Vector, kind::AbstractString, full::AbstractString, ext::AbstractString = "txt")
+function _cap_keep!(
+    overflow::Vector, kind::AbstractString, full::AbstractString, ext::AbstractString="txt"
+)
     s = String(full)
     length(s) <= _MAX_OUT_CHARS && return s
     info = _write_overflow(s, ext)
-    info === nothing || push!(overflow, (kind = kind, path = info[1], bytes = info[2], clipped = info[3]))
-    return string(first(s, _MAX_OUT_CHARS), "\n\n… ⚠ truncated for display — full result available below.")
+    info === nothing || push!(overflow, (kind=kind, path=info[1], bytes=info[2], clipped=info[3]))
+    return string(
+        first(s, _MAX_OUT_CHARS), "\n\n… ⚠ truncated for display — full result available below."
+    )
 end
 
 # Evaluate a cell's `source` the way the REPL does, NOT like a file `include_string`:
@@ -98,10 +125,9 @@ _slate_mark_stmt(i::Int) = (task_local_storage(:slate_stmt, i); nothing)
 # marker spliced before each real top-level statement (original `LineNumberNode`s kept, so backtraces are
 # unchanged; markers inherit the preceding line). The per-statement deparsed sources are stashed in
 # `:slate_stmt_srcs` for the harvest to resolve each declared effect's statement index → its source text.
-function _eval_cell_source(mod::Module, source::AbstractString, filename::AbstractString = "string")
-    ast = Meta.parseall(String(source); filename = String(filename))
-    (ast isa Expr && ast.head === :toplevel) ||
-        return Core.eval(mod, REPL.softscope(ast))   # a single-expr / non-toplevel parse: no per-statement marking
+function _eval_cell_source(mod::Module, source::AbstractString, filename::AbstractString="string")
+    ast = Meta.parseall(String(source); filename=String(filename))
+    (ast isa Expr && ast.head === :toplevel) || return Core.eval(mod, REPL.softscope(ast))   # a single-expr / non-toplevel parse: no per-statement marking
     srcs = String[]
     marked = Any[]
     for a in ast.args
@@ -171,7 +197,13 @@ function _atref_span(matched::AbstractString)
     tgt = strip(replace(String(m.captures[1]), "%20" => " "))          # explicit `@ref target`, if any
     inner = m.captures[2]                                              # the link's rendered content
     sym = isempty(tgt) ? strip(replace(inner, r"<[^>]*>" => "")) : tgt  # else the symbol it displays
-    return string("<span class=\"docref\" data-name=\"", _attr_esc(_html_unescape(sym)), "\">", inner, "</span>")
+    return string(
+        "<span class=\"docref\" data-name=\"",
+        _attr_esc(_html_unescape(sym)),
+        "\">",
+        inner,
+        "</span>",
+    )
 end
 function _fix_at_refs(bytes::Vector{UInt8})
     s = String(copy(bytes))
@@ -186,18 +218,18 @@ end
 # renders a PDF. Anything without a PDF method just throws and is skipped. The chunk is
 # export-only — `_render_chunks` (browser) handles image/*, html, latex and ignores it.
 function _capture_export_vector!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
-    any(c -> c[1] == _EXPORT_VEC_MIME, chunks) && return
+    any(c -> c[1] == _EXPORT_VEC_MIME, chunks) && return nothing
     try
         bytes = Base.invokelatest(_mime_bytes, MIME(_EXPORT_VEC_MIME), x)
         isempty(bytes) || push!(chunks, (_EXPORT_VEC_MIME, bytes))
     catch
     end
-    return
+    return nothing
 end
 
 function Base.display(d::_CaptureDisplay, x)
     _capture_rich!(d.chunks, x) && return nothing
-    throw(MethodError(display, (d, x)))   # let the stack fall through to text
+    return throw(MethodError(display, (d, x)))   # let the stack fall through to text
 end
 
 # A task-local capture display for the worker's PARALLEL evaluators. One instance is pushed onto the
@@ -208,7 +240,7 @@ struct _DemuxDisplay <: AbstractDisplay end
 function Base.display(d::_DemuxDisplay, x)
     chunks = get(task_local_storage(), :slate_chunks, nothing)
     (chunks !== nothing && _capture_rich!(chunks, x)) && return nothing
-    throw(MethodError(display, (d, x)))
+    return throw(MethodError(display, (d, x)))
 end
 
 # ── Output-capture strategy (pluggable) ─────────────────────────────────────────────────────────
@@ -221,20 +253,38 @@ abstract type OutputCapture end
 # Process-global redirect + pushdisplay — one cell at a time (in-process kernel, and the worker's
 # serial lane). Exactly the original behaviour.
 mutable struct RedirectCapture <: OutputCapture
-    disp::Any; orig_out::Any; rd::Any; wr::Any; reader::Any; orig_err::Any; rde::Any; wre::Any; ereader::Any
+    disp::Any
+    orig_out::Any
+    rd::Any
+    wr::Any
+    reader::Any
+    orig_err::Any
+    rde::Any
+    wre::Any
+    ereader::Any
     RedirectCapture() = new(ntuple(_ -> nothing, 9)...)
 end
 function _begin_capture!(c::RedirectCapture, chunks)
-    c.disp = _CaptureDisplay(chunks); pushdisplay(c.disp)
-    c.orig_out = stdout; (c.rd, c.wr) = redirect_stdout(); c.reader = @async read(c.rd, String)
-    c.orig_err = stderr; (c.rde, c.wre) = redirect_stderr(); c.ereader = @async read(c.rde, String)
+    c.disp = _CaptureDisplay(chunks)
+    pushdisplay(c.disp)
+    c.orig_out = stdout
+    (c.rd, c.wr) = redirect_stdout()
+    c.reader = @async read(c.rd, String)
+    c.orig_err = stderr
+    (c.rde, c.wre) = redirect_stderr()
+    c.ereader = @async read(c.rde, String)
     return nothing
 end
 _logio(c::RedirectCapture) = stderr        # the (now redirected) stderr
 function _finish_capture!(c::RedirectCapture)
-    redirect_stdout(c.orig_out); redirect_stderr(c.orig_err)
-    close(c.wr); close(c.wre)
-    try; popdisplay(c.disp); catch; end
+    redirect_stdout(c.orig_out)
+    redirect_stderr(c.orig_err)
+    close(c.wr)
+    close(c.wre)
+    try
+        popdisplay(c.disp)
+    catch
+    end
     return (fetch(c.reader), fetch(c.ereader))
 end
 
@@ -242,18 +292,23 @@ end
 # safe: every key lives in THIS task's storage, so parallel evaluators never share a buffer. Requires
 # the demux to be installed as Base.stdout/stderr and a `_DemuxDisplay` on the stack (worker start).
 mutable struct DemuxCapture <: OutputCapture
-    out::IOBuffer; err::IOBuffer
+    out::IOBuffer
+    err::IOBuffer
     DemuxCapture() = new(IOBuffer(), IOBuffer())
 end
 function _begin_capture!(c::DemuxCapture, chunks)
     tls = task_local_storage()
-    tls[:slate_out] = c.out; tls[:slate_err] = c.err; tls[:slate_chunks] = chunks
+    tls[:slate_out] = c.out
+    tls[:slate_err] = c.err
+    tls[:slate_chunks] = chunks
     return nothing
 end
 _logio(::DemuxCapture) = stderr            # stderr IS the demux → routes to this task's :slate_err
 function _finish_capture!(c::DemuxCapture)
     tls = task_local_storage()
-    for k in (:slate_out, :slate_err, :slate_chunks); haskey(tls, k) && delete!(tls, k); end
+    for k in (:slate_out, :slate_err, :slate_chunks)
+        haskey(tls, k) && delete!(tls, k)
+    end
     return (String(take!(c.out)), String(take!(c.err)))
 end
 
@@ -261,7 +316,8 @@ end
 # `foo("#");` keeps its `;`). Only `"` strings are tracked — `'` is left alone to
 # avoid confusing adjoint (`a'`) with a char literal.
 function _strip_trailing_comment(line::AbstractString)
-    instr = false; i = firstindex(line)
+    instr = false
+    i = firstindex(line)
     while i <= lastindex(line)
         c = line[i]
         if instr
@@ -302,21 +358,35 @@ struct _ProgressLogger <: Logging.AbstractLogger
     sink                       # (id, frac::Float64, msg::String, done::Bool) -> Any  (cell progress channel)
 end
 Logging.shouldlog(::_ProgressLogger, _...) = true                          # filter in handle_message
-Logging.min_enabled_level(l::_ProgressLogger) = min(Logging.LogLevel(-1), Logging.min_enabled_level(l.parent))
+function Logging.min_enabled_level(l::_ProgressLogger)
+    return min(Logging.LogLevel(-1), Logging.min_enabled_level(l.parent))
+end
 Logging.catch_exceptions(l::_ProgressLogger) = Logging.catch_exceptions(l.parent)
 
-_progress_frac(p) = p === nothing                  ? 0.0 :
-                    p isa AbstractString           ? (p == "done" ? 1.0 : 0.0) :
-                    p isa Real                     ? (isnan(p) ? 0.0 : clamp(Float64(p), 0.0, 1.0)) : 0.0
+_progress_frac(p) =
+    if p === nothing
+        0.0
+    elseif p isa AbstractString
+        (p == "done" ? 1.0 : 0.0)
+    elseif p isa Real
+        (isnan(p) ? 0.0 : clamp(Float64(p), 0.0, 1.0))
+    else
+        0.0
+    end
 
-function Logging.handle_message(l::_ProgressLogger, level, message, _module, group, id, file, line; kwargs...)
+function Logging.handle_message(
+    l::_ProgressLogger, level, message, _module, group, id, file, line; kwargs...
+)
     if haskey(kwargs, :progress)                                            # a progress record → cell meter
         p = kwargs[:progress]
         # The log `id` keys the bar — each `@withprogress` scope (nested loops, parallel tasks) has
         # its own, so they render as separate bars. `progress="done"` ends a scope → remove its bar
         # (else each new nested scope's fresh id would pile up).
         bid = id === nothing ? "" : string(id)
-        try; l.sink(bid, _progress_frac(p), message === nothing ? "" : string(message), p === "done"); catch; end
+        try
+            l.sink(bid, _progress_frac(p), message === nothing ? "" : string(message), p === "done")
+        catch
+        end
         return nothing                                                      # consume (don't echo to stderr)
     end
     Logging.shouldlog(l.parent, level, _module, group, id) &&
@@ -340,7 +410,12 @@ _ns_defined(mod::Module, name::Symbol) = Base.invokelatest(isdefined, mod, name)
 function _progress_sink(mod::Module)
     _ns_defined(mod, :slate_progress) || return (_i, _f, _m, _d) -> nothing
     sp = _ns_read(mod, :slate_progress)
-    return (i, f, m, d) -> (try; Base.invokelatest(sp, f; msg = m, id = i, done = d); catch; end)
+    return (i, f, m, d) -> (
+        try
+            Base.invokelatest(sp, f; msg=m, id=i, done=d)
+        catch
+        end
+    )
 end
 
 """
@@ -369,13 +444,18 @@ Returns the wire form:
 # just pushes to the task-local `:slate_effects` sink, attributed to the executing statement
 # (`:slate_stmt`); `run_capture` resolves the statement index → source and returns the records in the wire.
 # A no-op outside a harvesting eval (no sink), so a package can call it unconditionally.
-function _slate_effect(kind::Symbol; names = Symbol[], data...)
+function _slate_effect(kind::Symbol; names=Symbol[], data...)
     sink = get(task_local_storage(), :slate_effects, nothing)
     sink === nothing && return nothing
-    push!(sink, (; kind = Symbol(kind),
-                   names = Symbol[Symbol(n) for n in names],
-                   stmt = Int(get(task_local_storage(), :slate_stmt, 0)),
-                   data = NamedTuple(data)))
+    push!(
+        sink,
+        (;
+            kind=Symbol(kind),
+            names=Symbol[Symbol(n) for n in names],
+            stmt=Int(get(task_local_storage(), :slate_stmt, 0)),
+            data=NamedTuple(data),
+        ),
+    )
     return nothing
 end
 
@@ -397,15 +477,25 @@ end
 AssetRef(name, path, mime) = AssetRef(name, path, mime, -1, nothing, nothing, time())
 # Interpolates to its logical path, so `Slate.asset("$ref")` / a spec URL just uses the ref inline.
 Base.print(io::IO, r::AssetRef) = print(io, r.path)
-_asset_human_bytes(n) = n < 0 ? "—" : n < 1024 ? "$(n) B" :
-    n < 1024^2 ? string(round(n/1024; digits=1), " KB") :
-    n < 1024^3 ? string(round(n/1024^2; digits=1), " MB") : string(round(n/1024^3; digits=1), " GB")
+_asset_human_bytes(n) =
+    if n < 0
+        "—"
+    elseif n < 1024
+        "$(n) B"
+    elseif n < 1024^2
+        string(round(n/1024; digits=1), " KB")
+    elseif n < 1024^3
+        string(round(n/1024^2; digits=1), " MB")
+    else
+        string(round(n/1024^3; digits=1), " GB")
+    end
 # A returned `AssetRef` renders a compact summary (a cell that ends in `save_asset(…)` shows what it made).
 function Base.show(io::IO, ::MIME"text/plain", r::AssetRef)
     print(io, "AssetRef  ", r.path)
-    r.dtype === nothing || print(io, "\n  array   ", r.dtype, r.shape === nothing ? "" : "  " * join(r.shape, "×"))
+    r.dtype === nothing ||
+        print(io, "\n  array   ", r.dtype, r.shape === nothing ? "" : "  " * join(r.shape, "×"))
     print(io, "\n  mime    ", r.mime, "   ", _asset_human_bytes(r.nbytes))
-    print(io, "\n  load    Slate.asset(\"", r.path, "\")")
+    return print(io, "\n  load    Slate.asset(\"", r.path, "\")")
 end
 Base.show(io::IO, r::AssetRef) = print(io, "AssetRef(", repr(r.path), ")")
 
@@ -418,21 +508,38 @@ function _asset_name_parts(name::AbstractString, mime::AbstractString)
     return (safe, ext)
 end
 _asset_ext_for(mime::AbstractString) =
-    occursin("json", mime) ? "json" : occursin("csv", mime) ? "csv" :
-    startswith(mime, "text/") ? "txt" : "bin"
+    if occursin("json", mime)
+        "json"
+    elseif occursin("csv", mime)
+        "csv"
+    elseif startswith(mime, "text/")
+        "txt"
+    else
+        "bin"
+    end
 _asset_mime_for(ext::AbstractString) =
-    ext == "json" ? "application/json" : ext == "csv" ? "text/csv" :
-    ext in ("txt", "md") ? "text/plain" : ext == "bin" ? "application/octet-stream" :
-    ext == "png" ? "image/png" : "application/octet-stream"
+    if ext == "json"
+        "application/json"
+    elseif ext == "csv"
+        "text/csv"
+    elseif ext in ("txt", "md")
+        "text/plain"
+    elseif ext == "bin"
+        "application/octet-stream"
+    elseif ext == "png"
+        "image/png"
+    else
+        "application/octet-stream"
+    end
 
 # Numeric eltype → a compact dtype tag the client maps to a TypedArray. `nothing` ⇒ not a packable
 # array element (fall through to JSON). Keep in sync with core.js `_SLATE_TYPED`.
 _asset_dtype(::Type{Float32}) = "f32"
 _asset_dtype(::Type{Float64}) = "f64"
-_asset_dtype(::Type{Int32})   = "i32"
-_asset_dtype(::Type{Int16})   = "i16"
-_asset_dtype(::Type{UInt8})   = "u8"
-_asset_dtype(::Type)          = nothing
+_asset_dtype(::Type{Int32}) = "i32"
+_asset_dtype(::Type{Int16}) = "i16"
+_asset_dtype(::Type{UInt8}) = "u8"
+_asset_dtype(::Type) = nothing
 
 # A path-safe stem for an asset name. Julia names are routinely non-ASCII (`σ`, `θ`, `Δt`), and blanket
 # substitution collapses them: `σ_replay` and `θ_replay` both become `__replay`. The content hash in the
@@ -444,18 +551,24 @@ function _asset_base(name::AbstractString)
     isempty(stem) && return "asset"
     safe = replace(stem, r"[^A-Za-z0-9._-]" => "_")
     safe == stem && return safe
-    return string(safe, "-", string(hash(stem) % UInt16; base = 36))
+    return string(safe, "-", string(hash(stem) % UInt16; base=36))
 end
-_asset_hash(x) = string(hash(x) % UInt32; base = 16, pad = 8)   # short id → cache-bust + dedup
+_asset_hash(x) = string(hash(x) % UInt32; base=16, pad=8)   # short id → cache-bust + dedup
 
 function _asset_push!(rec)
-    rec = merge(rec, (; created = time()))   # stamp when the cell produced it (survives memo restore)
+    rec = merge(rec, (; created=time()))   # stamp when the cell produced it (survives memo restore)
     sink = get(task_local_storage(), :slate_assets, nothing)
     sink === nothing || push!(sink, rec)
     nbytes = hasproperty(rec, :bytes) ? length(rec.bytes) : -1   # a JSON value's size is known once encoded
-    return AssetRef(rec.name, rec.path, rec.mime, nbytes,
-                    hasproperty(rec, :dtype) ? rec.dtype : nothing,
-                    hasproperty(rec, :shape) ? collect(Int, rec.shape) : nothing, rec.created)
+    return AssetRef(
+        rec.name,
+        rec.path,
+        rec.mime,
+        nbytes,
+        hasproperty(rec, :dtype) ? rec.dtype : nothing,
+        hasproperty(rec, :shape) ? collect(Int, rec.shape) : nothing,
+        rec.created,
+    )
 end
 
 """
@@ -473,32 +586,40 @@ Returns an `AssetRef` that interpolates to a stable, page-local path; load it cl
 The bytes ride with the cell's memo, are served live, and are inlined (standalone) or published as a
 sibling (site) — so a widget/chart works live, offline, and hosted alike.
 """
-function _save_asset(name::AbstractString, data; mime::AbstractString = "", dtype = nothing)
+function _save_asset(name::AbstractString, data; mime::AbstractString="", dtype=nothing)
     # Numeric array (not a raw byte vector) → column-major binary + shape/dtype/order.
     if data isa AbstractArray && !(data isa AbstractVector{UInt8}) && eltype(data) <: Real
-        A  = dtype === nothing ? data : dtype.(data)
+        A = dtype === nothing ? data : dtype.(data)
         dt = _asset_dtype(eltype(A))
         if dt !== nothing
             bytes = Vector{UInt8}(reinterpret(UInt8, vec(collect(A))))
             m = isempty(mime) ? "application/octet-stream" : String(mime)
             path = string("data/", _asset_base(name), "-", _asset_hash(bytes), ".", dt, ".bin")
-            return _asset_push!((; name = String(name), path, mime = m, bytes,
-                                   dtype = dt, shape = collect(Int, size(A)), order = "col"))
+            return _asset_push!((;
+                name=String(name),
+                path,
+                mime=m,
+                bytes,
+                dtype=dt,
+                shape=collect(Int, size(A)),
+                order="col",
+            ))
         end
     end
     if data isa AbstractVector{UInt8} || data isa AbstractString
-        bytes = data isa AbstractString ? Vector{UInt8}(codeunits(String(data))) : Vector{UInt8}(data)
-        deft  = data isa AbstractString ? "text/plain" : "application/octet-stream"
+        bytes =
+            data isa AbstractString ? Vector{UInt8}(codeunits(String(data))) : Vector{UInt8}(data)
+        deft = data isa AbstractString ? "text/plain" : "application/octet-stream"
         _, ext = _asset_name_parts(name, isempty(mime) ? deft : mime)
         m = isempty(mime) ? _asset_mime_for(ext) : String(mime)
         path = string("data/", _asset_base(name), "-", _asset_hash(bytes), ".", ext)
-        return _asset_push!((; name = String(name), path, mime = m, bytes))
+        return _asset_push!((; name=String(name), path, mime=m, bytes))
     end
     # A JSON-able Julia value — the worker has no JSON dep (like echarts/tables), so the bytes are
     # encoded server-side; `value` crosses on the output wire. Hash the value for a stable path.
     _, ext = _asset_name_parts(name, "application/json")
     path = string("data/", _asset_base(name), "-", _asset_hash(data), ".", ext)
-    return _asset_push!((; name = String(name), path, mime = "application/json", value = data))
+    return _asset_push!((; name=String(name), path, mime="application/json", value=data))
 end
 
 # Resolve the raw `:slate_effects` records (statement INDEX) against the deparsed statement sources into
@@ -506,13 +627,14 @@ end
 # declared nothing. Robust to an out-of-range index (→ "") so a bad marker can't error the harvest.
 function _harvest_effects(raw, srcs::AbstractVector)
     (raw === nothing || isempty(raw)) && return Any[]
-    out = Any[]; seen = Set{Tuple{Symbol,Vector{Symbol},String}}()
+    out = Any[]
+    seen = Set{Tuple{Symbol,Vector{Symbol},String}}()
     for e in raw
         src = (1 <= e.stmt <= length(srcs)) ? String(srcs[e.stmt]) : ""
         key = (e.kind, e.names, src)
         key in seen && continue
         push!(seen, key)
-        push!(out, (; kind = e.kind, names = e.names, stmt_src = src, data = e.data))
+        push!(out, (; kind=e.kind, names=e.names, stmt_src=src, data=e.data))
     end
     return out
 end
@@ -526,7 +648,11 @@ function _run_cell_cleanups!(reg::AbstractDict, cid::AbstractString)
     cbs === nothing && return nothing
     delete!(reg, cid)
     for cb in cbs
-        try; cb(); catch e; @warn "slate: cell cleanup failed" cell = cid exception = e; end
+        try
+            cb()
+        catch e
+            @warn "slate: cell cleanup failed" cell = cid exception = e
+        end
     end
     return nothing
 end
@@ -542,29 +668,38 @@ function _run_all_cleanups!(mod::Module)
     return nothing
 end
 
-function _build_slate_ctx(mod::Module, notebook::AbstractString, region::AbstractString,
-                          regions::AbstractVector)
+function _build_slate_ctx(
+    mod::Module, notebook::AbstractString, region::AbstractString, regions::AbstractVector
+)
     emit = _ns_defined(mod, :slate_emit) ? _ns_read(mod, :slate_emit) : (channel, value) -> nothing
     # The notebook's injected `slate_on` (registers a JS→Julia handler into `__slate_handlers`), so package
     # code can wire an interactive widget's handlers via SEB's `slate_on` accessor — mirrors `emit`.
-    on   = _ns_defined(mod, :slate_on) ? _ns_read(mod, :slate_on) : (channel, f) -> nothing
-    off  = _ns_defined(mod, :slate_off) ? _ns_read(mod, :slate_off) : (channel) -> nothing
+    on = _ns_defined(mod, :slate_on) ? _ns_read(mod, :slate_on) : (channel, f) -> nothing
+    off = _ns_defined(mod, :slate_off) ? _ns_read(mod, :slate_off) : (channel) -> nothing
     # Register a per-cell cleanup callback (see the namespace's `__slate_cleanups`) — attributed to the
     # cell currently evaluating (task-local `:slate_cell`, seeded by run_capture).
-    cleanup = _ns_defined(mod, :slate_on_cleanup) ? _ns_read(mod, :slate_on_cleanup) : (f) -> nothing
-    return (; region   = isempty(region) ? nothing : Symbol(region),
-              notebook = String(notebook),
-              side     = String(region),
-              emit     = emit,
-              regions  = Symbol[Symbol(r) for r in regions],
-              effect   = _slate_effect,          # code→Slate declaration channel (zero-dep for packages)
-              on       = on,
-              off      = off,
-              cleanup  = cleanup)
+    cleanup =
+        _ns_defined(mod, :slate_on_cleanup) ? _ns_read(mod, :slate_on_cleanup) : (f) -> nothing
+    return (;
+        region=isempty(region) ? nothing : Symbol(region),
+        notebook=String(notebook),
+        side=String(region),
+        emit=emit,
+        regions=Symbol[Symbol(r) for r in regions],
+        effect=_slate_effect,          # code→Slate declaration channel (zero-dep for packages)
+        on=on,
+        off=off,
+        cleanup=cleanup,
+    )
 end
 
-function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string";
-                     capture::OutputCapture = RedirectCapture(), slate_ctx = nothing)
+function run_capture(
+    mod::Module,
+    source::AbstractString,
+    filename::AbstractString="string";
+    capture::OutputCapture=RedirectCapture(),
+    slate_ctx=nothing,
+)
     chunks = Tuple{String,Vector{UInt8}}[]
     # Begin output capture (stdout/stderr + display) via the strategy: process-global redirect for the
     # in-process/serial kernel, or task-local demux for the worker's parallel evaluators. The strategy
@@ -587,7 +722,8 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # (a Bonito `Session`, a subscription) so a re-run doesn't leak them. Cleared in the `finally`.
     cid = replace(filename, r"^cell:" => "")
     task_local_storage(:slate_cell, cid)
-    _ns_defined(mod, :__slate_cleanups) && _run_cell_cleanups!(_ns_read(mod, :__slate_cleanups), cid)
+    _ns_defined(mod, :__slate_cleanups) &&
+        _run_cell_cleanups!(_ns_read(mod, :__slate_cleanups), cid)
 
     # Cell-effects sink (see `_slate_effect`): declarations a cell / a package it calls makes during eval,
     # attributed to the executing statement. Seeded here, harvested + cleared after the eval — like the
@@ -605,7 +741,8 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     value = nothing
     err = nothing
     btrace = nothing
-    raw_out = ""; raw_err = ""
+    raw_out = ""
+    raw_err = ""
     t0 = time_ns()
     try
         # ConsoleLogger on the captured stderr (`_logio`), so @warn/@info/@error land in this cell's
@@ -613,7 +750,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         # the cell meter instead of printing.
         _logger = _ProgressLogger(Logging.ConsoleLogger(_logio(capture)), _progress_sink(mod))
         Logging.with_logger(_logger) do
-            value = _eval_cell_source(mod, source, filename)
+            return value = _eval_cell_source(mod, source, filename)
         end
     catch e
         err = e
@@ -627,8 +764,10 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     delete!(task_local_storage(), :__slate_binds)
     # Harvest the cell-effect declarations: resolve each record's statement index → its deparsed source
     # (the replay unit), dedup by (kind, names, stmt_src). Then clear the eval-scoped task-local keys.
-    effects = _harvest_effects(get(task_local_storage(), :slate_effects, nothing),
-                               get(task_local_storage(), :slate_stmt_srcs, String[]))
+    effects = _harvest_effects(
+        get(task_local_storage(), :slate_effects, nothing),
+        get(task_local_storage(), :slate_stmt_srcs, String[]),
+    )
     for k in (:slate_effects, :slate_stmt, :slate_stmt_srcs)
         haskey(task_local_storage(), k) && delete!(task_local_storage(), k)
     end
@@ -663,7 +802,8 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         # (finally), so a re-run of the cell actually tears down what the LAST render allocated (a live
         # session, a subscription) instead of leaking it. Explicit `display(…)` during the eval already
         # ran inside the context; only the trailing return-value render falls outside it.
-        slate_ctx === nothing || (task_local_storage(:slate_ctx, slate_ctx); task_local_storage(:slate_cell, cid))
+        slate_ctx === nothing ||
+            (task_local_storage(:slate_ctx, slate_ctx); task_local_storage(:slate_cell, cid))
         try
             # A bare Matrix/SparseMatrixCSC/structured-LinearAlgebra return auto-renders via
             # slate_matrix (KaTeX / dotted notation / downsampled heatmap, picked by size and
@@ -671,13 +811,23 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
             # SAME dispatch (a heatmap comes back as an EChart; the KaTeX forms fall to the
             # generic rich-MIME branch below via their `show(io, MIME"text/latex", …)` method).
             if value isa AbstractMatrix
-                value = try; Base.invokelatest(slate_matrix, value); catch; value; end
+                value = try
+                    Base.invokelatest(slate_matrix, value)
+                catch
+                    value
+                end
             end
             if value isa EChart
                 push!(echarts, value.option)
             elseif value isa Animation
-                push!(animations, (manifest = value.manifest, frames = value.frames, lut = value.lut))
-            elseif (st = (try Base.invokelatest(_as_slate_table, value) catch; nothing end)) !== nothing
+                push!(animations, (manifest=value.manifest, frames=value.frames, lut=value.lut))
+            elseif (st = (
+                try
+                    Base.invokelatest(_as_slate_table, value)
+                catch
+                    nothing
+                end
+            )) !== nothing
                 push!(tables, _table_wire(st))
             else
                 try
@@ -686,19 +836,33 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
                 end
             end
         finally
-            slate_ctx === nothing || (delete!(task_local_storage(), :slate_ctx); delete!(task_local_storage(), :slate_cell))
+            slate_ctx === nothing || (
+                delete!(task_local_storage(), :slate_ctx);
+                delete!(task_local_storage(), :slate_cell)
+            )
         end
     end
 
     # text/plain repr — skipped when richer output exists (the renderer suppresses
     # it anyway), and `invokelatest`-guarded for the world-age reason.
     value_repr = ""
-    if err === nothing && value !== nothing && !quiet && isempty(chunks) && isempty(echarts) && isempty(tables) && isempty(animations)
+    if err === nothing &&
+        value !== nothing &&
+        !quiet &&
+        isempty(chunks) &&
+        isempty(echarts) &&
+        isempty(tables) &&
+        isempty(animations)
         try
             # `:displaysize` bounds how much `show` even generates for big containers (≈40 rows),
             # then `_cap_keep!` is the hard ceiling for anything still huge (e.g. a giant String value).
-            value_repr = Base.invokelatest(sprint, show, MIME("text/plain"), value;
-                                           context = (:limit => true, :displaysize => (40, 160)))
+            value_repr = Base.invokelatest(
+                sprint,
+                show,
+                MIME("text/plain"),
+                value;
+                context=(:limit => true, :displaysize => (40, 160)),
+            )
             value_repr = _cap_keep!(overflow, "value", value_repr, "txt")
         catch
         end
@@ -712,9 +876,15 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # actually is. `Core.eval` appears as `:eval` in boot.jl.
     bt = nothing
     if btrace !== nothing
-        k = findfirst(ip -> any(f -> f.func === :_eval_cell_source ||
-                                     (f.func === :eval && occursin("boot.jl", string(f.file))),
-                                Base.StackTraces.lookup(ip)), btrace)
+        k = findfirst(
+            ip -> any(
+                f ->
+                    f.func === :_eval_cell_source ||
+                    (f.func === :eval && occursin("boot.jl", string(f.file))),
+                Base.StackTraces.lookup(ip),
+            ),
+            btrace,
+        )
         tb = k === nothing ? btrace : btrace[1:max(1, k - 1)]
         bt = sprint((io, t) -> Base.show_backtrace(io, t), tb)
     end
@@ -725,10 +895,15 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         (m, data) = chunks[i]
         if (m == "text/html" || m == "text/latex") && length(data) > _MAX_HTML_BYTES
             info = _write_overflow(String(copy(data)), "html")
-            info === nothing || push!(overflow, (kind = "output", path = info[1], bytes = info[2], clipped = info[3]))
+            info === nothing ||
+                push!(overflow, (kind="output", path=info[1], bytes=info[2], clipped=info[3]))
             kb = round(Int, length(data) / 1024)
-            chunks[i] = ("text/html",
-                Vector{UInt8}("<div class=\"disp html\"><em>⚠ output too large to render ($(kb) KB) — full result available below.</em></div>"))
+            chunks[i] = (
+                "text/html",
+                Vector{UInt8}(
+                    "<div class=\"disp html\"><em>⚠ output too large to render ($(kb) KB) — full result available below.</em></div>",
+                ),
+            )
         end
     end
 
@@ -739,18 +914,41 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # `live` also RIDES THE WIRE (→ `CellOutput.live`): it is the one authoritative, extension-agnostic
     # answer to "is this output session-bound?", so no layer downstream has to sniff the rendered HTML for
     # an extension's marker class to find out.
-    live = err === nothing && value !== nothing && !quiet &&
-           (try Base.invokelatest(SlateExtensionsBase.slate_live_render, value) catch; false end) === true
+    live =
+        err === nothing &&
+        value !== nothing &&
+        !quiet &&
+        (
+            try
+                Base.invokelatest(SlateExtensionsBase.slate_live_render, value)
+            catch
+                false
+            end
+        ) === true
     if live
-        _LIVE_OUTPUTS[cid] = (source = String(source), filename = String(filename))
+        _LIVE_OUTPUTS[cid] = (source=String(source), filename=String(filename))
     else
         delete!(_LIVE_OUTPUTS, cid)
     end
 
-    return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
-            binds = binds, value_repr = value_repr, exception = exc, backtrace = bt,
-            duration_ms = dur_ms, trace = trace, stderr = stderr_str, overflow = overflow,
-            animations = animations, effects = effects, assets = assets, live = live)
+    return (
+        stdout=stdout_str,
+        mime=chunks,
+        echarts=echarts,
+        tables=tables,
+        binds=binds,
+        value_repr=value_repr,
+        exception=exc,
+        backtrace=bt,
+        duration_ms=dur_ms,
+        trace=trace,
+        stderr=stderr_str,
+        overflow=overflow,
+        animations=animations,
+        effects=effects,
+        assets=assets,
+        live=live,
+    )
 end
 
 # Re-render every retained live output (see `_LIVE_OUTPUTS`) fresh, for a browser that just (re)connected —
@@ -759,7 +957,10 @@ end
 # tree), then RE-RUN each retained cell's source in `mod` (a clean fresh figure, no accumulated screens) and
 # collect its wire. Returns `[(cid, wire), …]` (empty if nothing is live). Best-effort per cell.
 function rerender_live_outputs(mod::Module)
-    try; Base.invokelatest(SlateExtensionsBase.run_live_resets); catch; end
+    try
+        Base.invokelatest(SlateExtensionsBase.run_live_resets)
+    catch
+    end
     # A re-render must carry the SAME Slate execution context a normal cell eval gets. `run_capture` FIRES the
     # previous run's `slate_on_cleanup` callbacks regardless (it reads `__slate_cleanups` off the namespace),
     # but REGISTERING new ones goes through the context — so without it every live resource an extension
@@ -773,7 +974,7 @@ function rerender_live_outputs(mod::Module)
     outs = Tuple{String,Vector{Tuple{String,Vector{UInt8}}}}[]
     for (cid, spec) in collect(_LIVE_OUTPUTS)
         w = try
-            run_capture(mod, spec.source, spec.filename; capture = DemuxCapture(), slate_ctx = ctx)
+            run_capture(mod, spec.source, spec.filename; capture=DemuxCapture(), slate_ctx=ctx)
         catch
             nothing
         end
@@ -787,11 +988,13 @@ end
 # — e.g. a re-run helper — collapses to one). Each record is (; name, path, mime, bytes) from `save_asset`.
 function _harvest_assets(raw)
     (raw === nothing || isempty(raw)) && return Any[]
-    out = Any[]; seen = Set{String}()
+    out = Any[]
+    seen = Set{String}()
     for a in raw
         p = String(getfield(a, :path))
         p in seen && continue
-        push!(seen, p); push!(out, a)
+        push!(seen, p)
+        push!(out, a)
     end
     return out
 end

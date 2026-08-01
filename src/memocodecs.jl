@@ -17,7 +17,7 @@
 # AFTER the entry was stored (the safe-set is store-time knowledge). One re-run of the
 # producer re-stores the entry in copy mode.
 
-import Mmap
+using Mmap: Mmap
 
 # A loaded package by name, or nothing — soft detection, never a dependency.
 function _codec_loaded(name::String)
@@ -41,13 +41,18 @@ end
 function _codec_encode(io::IO, codec::String, v)
     if codec == "raw"
         hdr = IOBuffer()
-        write(hdr, _RAW_MAGIC); write(hdr, UInt8(ndims(v)))
-        for d in size(v); write(hdr, Int64(d)); end
+        write(hdr, _RAW_MAGIC)
+        write(hdr, UInt8(ndims(v)))
+        for d in size(v)
+            write(hdr, Int64(d))
+        end
         et = string(eltype(v))
-        write(hdr, UInt16(ncodeunits(et))); write(hdr, et)
+        write(hdr, UInt16(ncodeunits(et)))
+        write(hdr, et)
         pad = take!(hdr)
         length(pad) > 64 && error("raw codec: header too large for eltype $(et)")
-        write(io, pad); write(io, zeros(UInt8, 64 - length(pad)))
+        write(io, pad)
+        write(io, zeros(UInt8, 64 - length(pad)))
         write(io, v)
     elseif codec == "arrow"
         _codec_loaded("Arrow").write(io, v)          # pure IPC bytes — see header comment
@@ -78,9 +83,10 @@ function _codec_decode(codec::String, path::String, zc::Bool)
             close(io)   # an established mmap outlives the stream
         end
     elseif codec == "arrow"
-        A = _codec_loaded("Arrow"); D = _codec_loaded("DataFrames")
+        A = _codec_loaded("Arrow")
+        D = _codec_loaded("DataFrames")
         (A === nothing || D === nothing) && error("arrow codec: Arrow/DataFrames not loaded yet")
-        return D.DataFrame(A.Table(path); copycols = !zc)   # zc ⇒ arrow-backed (immutable) columns
+        return D.DataFrame(A.Table(path); copycols=(!zc))   # zc ⇒ arrow-backed (immutable) columns
     else
         return open(Serialization.deserialize, path, "r")
     end

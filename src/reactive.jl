@@ -52,10 +52,11 @@ end
 # __slate_set_bind when the control changes, NOT by recomputing a cell). `tokens` is the notebook's
 # per-control cancel-token dict; a new change flips the prior token (cooperative cancel, seen at the
 # next `pause`) before spawning the fresh task, so a re-trigger restarts cleanly.
-function __on_fire!(tokens, name::Symbol, f, value, ctx = nothing)
+function __on_fire!(tokens, name::Symbol, f, value, ctx=nothing)
     t = get(tokens, name, nothing)
     t === nothing || (t[] = true)
-    tok = Ref(false); tokens[name] = tok
+    tok = Ref(false)
+    tokens[name] = tok
     @async begin
         task_local_storage(:slate_cancel, tok)
         # Re-establish the notebook's Slate execution context in this spawned task so a handler that STREAMS
@@ -68,7 +69,8 @@ function __on_fire!(tokens, name::Symbol, f, value, ctx = nothing)
         catch e
             # Runs in an unawaited `@async`, so a rethrow would just vanish — LOG the handler error
             # (an @onclick/@onchange body that threw) instead. Cancellation is expected and ignored.
-            e isa _Cancelled || @error "Slate: reactive handler '$name' errored" exception = (e, catch_backtrace())
+            e isa _Cancelled ||
+                @error "Slate: reactive handler '$name' errored" exception = (e, catch_backtrace())
         end
     end
     return nothing
@@ -79,4 +81,6 @@ end
 # idle/finished handler is a no-op. (Julia can't force-kill a task — a handler with NEITHER a
 # `pause` NOR a reactive write in its body still can't be interrupted, but such a handler has no
 # visible side effect to race against anyway.)
-__on_cancel!(tokens, name::Symbol) = (t = get(tokens, name, nothing); t === nothing || (t[] = true); nothing)
+function __on_cancel!(tokens, name::Symbol)
+    return (t=get(tokens, name, nothing); t === nothing || (t[] = true); nothing)
+end

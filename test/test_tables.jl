@@ -5,16 +5,16 @@
 using ReTest
 
 const HERE = @__DIR__
-include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine
-import JSON
+include(joinpath(HERE, "..", "src", "engine.jl"));
+using .ReportEngine
+using JSON: JSON
 
 _names(t) = String[c.name for c in t.columns]              # ColumnDef → names, for terse assertions
 
 @testset "SlateTable / slate_table" begin
-
     @testset "no-dependency shapes" begin
         # Vector of NamedTuples → columns from keys, rows in order.
-        t = slate_table([(name = "a", x = 1), (name = "b", x = 2)])
+        t = slate_table([(name="a", x=1), (name="b", x=2)])
         @test t isa SlateTable
         @test _names(t) == ["name", "x"]
         @test [c.type for c in t.columns] == [:string, :int]   # inferred physical types
@@ -22,7 +22,7 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
         @test t.opts["nrows"] == 2 && t.opts["ncols"] == 2
 
         # NamedTuple of column vectors.
-        tc = slate_table((x = [1, 2, 3], y = [4, 5, 6]))
+        tc = slate_table((x=[1, 2, 3], y=[4, 5, 6]))
         @test _names(tc) == ["x", "y"]
         @test length(tc.rows) == 3 && tc.rows[3] == Any[3, 6]
 
@@ -46,38 +46,48 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
     end
 
     @testset "column type inference + default alignment" begin
-        t = slate_table((i = [1, 2], f = [1.5, 2.5], b = [true, false], s = ["a", "b"]))
+        t = slate_table((i=[1, 2], f=[1.5, 2.5], b=[true, false], s=["a", "b"]))
         @test [c.type for c in t.columns] == [:int, :float, :bool, :string]
         @test [c.align for c in t.columns] == [:right, :right, :center, :left]
         # a column with a missing/nothing mixed in still infers from the present values
-        tm = slate_table((x = [1, missing, 3],))
+        tm = slate_table((x=[1, missing, 3],))
         @test tm.columns[1].type == :int
         # all-missing / empty ⇒ :string
-        @test slate_table((x = [missing, nothing],)).columns[1].type == :string
+        @test slate_table((x=[missing, nothing],)).columns[1].type == :string
     end
 
     @testset "format / align DSL" begin
-        t = slate_table((Revenue = [45999.5, 12050.0], Margin = [0.324, 0.281], Product = ["A", "B"]);
-                        format = (Revenue = :currency, Margin = (kind = :percent, digits = 1)),
-                        align  = (Product = :center,))
+        t = slate_table(
+            (Revenue=[45999.5, 12050.0], Margin=[0.324, 0.281], Product=["A", "B"]);
+            format=(Revenue=:currency, Margin=(kind=:percent, digits=1)),
+            align=(Product=:center,),
+        )
         cols = Dict(c.name => c for c in t.columns)
         @test cols["Revenue"].format.kind == :currency && cols["Revenue"].format.digits == 2
         @test cols["Margin"].format.kind == :percent && cols["Margin"].format.digits == 1
         @test cols["Product"].align == :center
         @test cols["Revenue"].align == :right                 # inferred default preserved
         # coltype override + unknown-column typo → hard error
-        @test slate_table(["x"], [[1]]; coltype = (x = :string,)).columns[1].type == :string
-        @test_throws ArgumentError slate_table(["x"], [[1]]; format = (nope = :currency,))
+        @test slate_table(["x"], [[1]]; coltype=(x=:string,)).columns[1].type == :string
+        @test_throws ArgumentError slate_table(["x"], [[1]]; format=(nope=:currency,))
         # the trailing-comma trap: `viz = (x = :heat)` is an assignment, not a NamedTuple — the
         # bare Symbol must produce a FRIENDLY ArgumentError naming the fix, not a keys(::Symbol)
         # MethodError
-        err = try; slate_table(["x"], [[1]]; viz = :heat); nothing; catch e; e; end
+        err = try
+            slate_table(["x"], [[1]]; viz=:heat)
+            nothing
+        catch e
+            e
+        end
         @test err isa ArgumentError && occursin("trailing comma", err.msg)
     end
 
     @testset "default_format: blanket numeric format, per-column override wins" begin
-        t = slate_table((Revenue = [45999.5, 12050.0], Margin = [0.324, 0.281], Product = ["A", "B"]);
-                        default_format = :integer, format = (Margin = :percent,))
+        t = slate_table(
+            (Revenue=[45999.5, 12050.0], Margin=[0.324, 0.281], Product=["A", "B"]);
+            default_format=:integer,
+            format=(Margin=:percent,),
+        )
         cols = Dict(c.name => c for c in t.columns)
         @test cols["Revenue"].format.kind == :integer          # blanket applied (numeric, no override)
         @test cols["Margin"].format.kind == :percent           # explicit `format` wins over the blanket
@@ -85,7 +95,7 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
     end
 
     @testset "viz (bar/heat) + domain + export_rows" begin
-        t = slate_table((a = [1, 2, 3, 4], b = ["w", "x", "y", "z"]); viz = (a = :bar,), export_rows = 2)
+        t = slate_table((a=[1, 2, 3, 4], b=["w", "x", "y", "z"]); viz=(a=:bar,), export_rows=2)
         ca, cb = t.columns
         @test ca.viz == :bar
         @test ca.domain == (1.0, 4.0)                 # numeric domain inferred at capture (for scaling)
@@ -149,7 +159,7 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
 
     @testset "paged: InMemoryPagedProvider fetch_page" begin
         P = ReportEngine
-        prov = P._inmemory_provider((a = [3, 1, 2, 5, 4], b = ["c", "a", "b", "e", "d"]))
+        prov = P._inmemory_provider((a=[3, 1, 2, 5, 4], b=["c", "a", "b", "e", "d"]))
         @test prov isa P.InMemoryPagedProvider
         cols = P.page_columns(prov)
         @test [c.name for c in cols] == ["a", "b"]
@@ -164,7 +174,9 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
     end
 
     @testset "paged: capture wire + table_page round-trip" begin
-        r = parse_report("#%% code id=t\nslate_table((a=collect(1:100), b=collect(101:200)); paged=true)")
+        r = parse_report(
+            "#%% code id=t\nslate_table((a=collect(1:100), b=collect(101:200)); paged=true)"
+        )
         eval_report!(r)
         out = r.cells[1].output
         @test out.exception === nothing
@@ -178,11 +190,25 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
         @test spec["rows"][1] == Any[1, 101]
 
         # Fetch later pages / sorts via the kernel seam, using the registered id.
-        res = ReportEngine.table_page(InProcessKernel(), r, spec["tableId"],
-            Dict("page" => 2, "page_size" => 50, "sort_col" => 0, "sort_desc" => false, "search" => ""))
+        res = ReportEngine.table_page(
+            InProcessKernel(),
+            r,
+            spec["tableId"],
+            Dict(
+                "page" => 2,
+                "page_size" => 50,
+                "sort_col" => 0,
+                "sort_desc" => false,
+                "search" => "",
+            ),
+        )
         @test res.total == 100 && length(res.rows) == 50 && res.rows[1] == Any[51, 151]
-        res2 = ReportEngine.table_page(InProcessKernel(), r, spec["tableId"],
-            Dict("page" => 1, "page_size" => 3, "sort_col" => 1, "sort_desc" => true))
+        res2 = ReportEngine.table_page(
+            InProcessKernel(),
+            r,
+            spec["tableId"],
+            Dict("page" => 1, "page_size" => 3, "sort_col" => 1, "sort_desc" => true),
+        )
         @test [row[1] for row in res2.rows] == [100, 99, 98]
         # Unknown id → graceful empty page (e.g. evicted / stale after recompute).
         res3 = ReportEngine.table_page(InProcessKernel(), r, "nope", Dict("page" => 1))
@@ -192,8 +218,14 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
     @testset "paged: SQL provider plumbing (no DB needed)" begin
         P = ReportEngine
         @test P._like_arg("A'b%c") == "%a''b\\%c%"     # lowercased, quote-doubled, %/_ escaped
-        prov = P.SqlPagedProvider(nothing, "SELECT * FROM t",
-            [P.ColumnDef("x", :int, :right, nothing, true, true), P.ColumnDef("y", :string, :left, nothing, true, true)])
+        prov = P.SqlPagedProvider(
+            nothing,
+            "SELECT * FROM t",
+            [
+                P.ColumnDef("x", :int, :right, nothing, true, true),
+                P.ColumnDef("y", :string, :left, nothing, true, true),
+            ],
+        )
         w = P._sql_where(prov, P.PageRequest(1, 10, 0, false, "foo"))
         @test occursin("LOWER(CAST(\"x\" AS VARCHAR)) LIKE", w) && occursin(" OR ", w)
         @test P._sql_where(prov, P.PageRequest(1, 10, 0, false, "")) == ""
@@ -207,8 +239,10 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
         fails = String[]
         for c in cases
             got = ReportEngine._format_cell(c["value"], c["format"])
-            got == c["expected"] ||
-                push!(fails, "$(c["value"]) $(c["format"]) → $(repr(got)) (expected $(repr(c["expected"])))")
+            got == c["expected"] || push!(
+                fails,
+                "$(c["value"]) $(c["format"]) → $(repr(got)) (expected $(repr(c["expected"])))",
+            )
         end
         @test isempty(fails)   # aggregate: one assertion, all divergences listed on failure
         isempty(fails) || foreach(println, fails)
@@ -228,7 +262,9 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
             @test true
         else
             io = IOBuffer()
-            ok = success(pipeline(`$node $(joinpath(HERE, "js", "format_parity.mjs"))`; stdout = io, stderr = io))
+            ok = success(
+                pipeline(`$node $(joinpath(HERE, "js", "format_parity.mjs"))`; stdout=io, stderr=io)
+            )
             ok || print(String(take!(io)))         # surface the diverging cases on failure
             @test ok
         end

@@ -15,11 +15,13 @@ module SlateExtensionsBaseMakieExt
 using SlateExtensionsBase: SlateComponentMIME, SlateHtmlMIME
 using Makie: Figure, FigureAxisPlot, Scene
 
-const _MakieDisplayable = Union{Figure, FigureAxisPlot, Scene}
+const _MakieDisplayable = Union{Figure,FigureAxisPlot,Scene}
 
-Base.showable(m::SlateComponentMIME, x::_MakieDisplayable) =
+function Base.showable(m::SlateComponentMIME, x::_MakieDisplayable)
     @invoke Base.showable(m::SlateComponentMIME, x::Any)
-Base.showable(m::SlateHtmlMIME, x::_MakieDisplayable) =
+end
+function Base.showable(m::SlateHtmlMIME, x::_MakieDisplayable)
     @invoke Base.showable(m::SlateHtmlMIME, x::Any)
+end
 
 end # module

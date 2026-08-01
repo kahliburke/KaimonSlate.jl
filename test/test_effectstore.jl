@@ -6,7 +6,7 @@ include(joinpath(@__DIR__, "..", "src", "effectstore.jl"))
 @testset "EffectStore" begin
     root = mktempdir()
     key = "abc123def"
-    recs = [(; kind = :everywhere, names = [:scale_add, :nsum], stmt_src = "@defop scale_add out = x")]
+    recs = [(; kind=:everywhere, names=[:scale_add, :nsum], stmt_src="@defop scale_add out = x")]
 
     @test EffectStore.load(root, key) === nothing            # nothing stored yet
 
@@ -27,8 +27,10 @@ include(joinpath(@__DIR__, "..", "src", "effectstore.jl"))
     @test EffectStore.load(root, k2) !== nothing
 
     # Multiple records preserve order + fields.
-    multi = [(; kind = :everywhere, names = [:a], stmt_src = "s1"),
-             (; kind = :memoize,  names = Symbol[], stmt_src = "s2")]
+    multi = [
+        (; kind=:everywhere, names=[:a], stmt_src="s1"),
+        (; kind=:memoize, names=Symbol[], stmt_src="s2"),
+    ]
     EffectStore.store!(root, "multi", multi)
     m = EffectStore.load(root, "multi")
     @test length(m) == 2 && m[1].kind == :everywhere && m[2].kind == :memoize

@@ -63,10 +63,11 @@ end
 # Per-notebook durable settings (Slate.config footer) — incl. the new `agentmodel` override that
 # travels with the file. Typed round-trip through report.meta, idempotent serialize, no leakage.
 @testset "per-notebook config footer (Slate.config)" begin
-    src = "#%% code id=a\nx = 1\n\n" *
-          "# ╔═╡ Slate.config · per-notebook settings (Settings panel)\n" *
-          "#   agentmodel = opus\n#   parallel = false\n#   slidelevel = 3\n" *
-          "#   publishrepo = kahli/site\n#   publishslug = my-doc\n# ╚═╡\n"
+    src =
+        "#%% code id=a\nx = 1\n\n" *
+        "# ╔═╡ Slate.config · per-notebook settings (Settings panel)\n" *
+        "#   agentmodel = opus\n#   parallel = false\n#   slidelevel = 3\n" *
+        "#   publishrepo = kahli/site\n#   publishslug = my-doc\n# ╚═╡\n"
     r = parse_report(src)
     @test length(r.cells) == 1                       # config footer is not a cell
     @test r.meta["agentmodel"] == "opus"             # :string
@@ -139,9 +140,9 @@ end
     end
 
     @testset "base/forked/detached mode detection" begin
-        base   = ReportEngine.GateKernel("/repo"; parent = "/repo", envdir = "/depot/env")
-        forked = ReportEngine.GateKernel("/depot/env"; parent = "/repo", envdir = "/depot/env")
-        detach = ReportEngine.GateKernel("/depot/env"; parent = "", envdir = "/depot/env")
+        base = ReportEngine.GateKernel("/repo"; parent="/repo", envdir="/depot/env")
+        forked = ReportEngine.GateKernel("/depot/env"; parent="/repo", envdir="/depot/env")
+        detach = ReportEngine.GateKernel("/depot/env"; parent="", envdir="/depot/env")
         @test ReportEngine._base_mode(base)
         @test !ReportEngine._base_mode(forked)
         @test !ReportEngine._base_mode(detach)
@@ -194,7 +195,8 @@ include(joinpath(@__DIR__, "..", "src", "export_bundle.jl"))
     pack(entries) = begin
         io = IOBuffer()
         for (p, d) in entries
-            pb = Vector{UInt8}(p); db = Vector{UInt8}(d)
+            pb = Vector{UInt8}(p)
+            db = Vector{UInt8}(d)
             write(io, hton(UInt32(length(pb))), pb, hton(UInt64(length(db))), db)
         end
         transcode(GzipCompressor, take!(io))
@@ -205,8 +207,12 @@ include(joinpath(@__DIR__, "..", "src", "export_bundle.jl"))
     @test isfile(joinpath(d, "sub", "deep.txt"))
     @test !ispath(joinpath(dirname(d), "evil.txt"))            # escape entry dropped
     d2 = mktempdir()
-    err = try; _unpack_tree(pack([("../a.txt", "x"), ("../b.txt", "y")]), d2); ""
-          catch e; sprint(showerror, e); end
+    err = try
+        _unpack_tree(pack([("../a.txt", "x"), ("../b.txt", "y")]), d2)
+        ""
+    catch e
+        sprint(showerror, e)
+    end
     @test occursin("path guard rejected all", err)             # all-rejected → loud, not empty
 end
 
@@ -214,17 +220,22 @@ end
     cells = "#%% code id=a\nusing Foo\nFoo.greet()\n"
 
     proj = mktempdir()
-    write(joinpath(proj, "Project.toml"), "name=\"Demo\"\n[deps]\nFoo = \"00000000-0000-0000-0000-000000000001\"\n")
+    write(
+        joinpath(proj, "Project.toml"),
+        "name=\"Demo\"\n[deps]\nFoo = \"00000000-0000-0000-0000-000000000001\"\n",
+    )
     # Manifest carries Foo as a path-dep at the author's ABSOLUTE path — the bundle must
     # rewrite this to `local/Foo` or an expanded copy fails to instantiate elsewhere.
-    write(joinpath(proj, "Manifest.toml"),
-        "julia_version=\"1.12.0\"\nmanifest_format=\"2.0\"\n\n[[deps.Foo]]\npath = \"/authors/abs/path/Foo\"\nuuid = \"00000000-0000-0000-0000-000000000001\"\nversion = \"0.1.0\"\n")
+    write(
+        joinpath(proj, "Manifest.toml"),
+        "julia_version=\"1.12.0\"\nmanifest_format=\"2.0\"\n\n[[deps.Foo]]\npath = \"/authors/abs/path/Foo\"\nuuid = \"00000000-0000-0000-0000-000000000001\"\nversion = \"0.1.0\"\n",
+    )
     localpkg = mktempdir()
     mkpath(joinpath(localpkg, "src"))
     write(joinpath(localpkg, "Project.toml"), "name=\"Foo\"\n")
     write(joinpath(localpkg, "src", "Foo.jl"), "module Foo\ngreet()=\"hi\"\nend\n")
 
-    b64 = _make_bundle_b64(proj, [(name = "Foo", source = localpkg)], "demo.jl", cells)
+    b64 = _make_bundle_b64(proj, [(name="Foo", source=localpkg)], "demo.jl", cells)
     standalone = cells * "\n" * _bundle_footer(b64) * "\n"
 
     @testset "footer payload extraction" begin
@@ -243,8 +254,10 @@ end
         # strip the bundle on the FIRST edit — the file silently stopped being self-contained (no
         # longer expands; detached open can't reconstruct its env). `_persist!` now carries the
         # footers forward via `_carry_env_footers`; here we exercise that helper directly.
-        withpreview = standalone * "\n" * _footer_block(_PREVIEW_OPEN, _PREVIEW_CLOSE, "v1",
-                                                        Base64.base64encode("preview-bytes"))
+        withpreview =
+            standalone *
+            "\n" *
+            _footer_block(_PREVIEW_OPEN, _PREVIEW_CLOSE, "v1", Base64.base64encode("preview-bytes"))
         r = parse_report(withpreview)                     # the notebook as the server holds it (footers stripped)
         @test !occursin("Slate.bundle", serialize_report(r))   # the naked serialization has neither
         @test !occursin("Slate.preview", serialize_report(r))
@@ -258,7 +271,8 @@ end
         @test length(collect(eachmatch(Regex(_BUNDLE_OPEN), saved2))) == 1
         @test length(collect(eachmatch(Regex(_PREVIEW_OPEN), saved2))) == 1
         # The re-saved artifact still expands — the whole point.
-        sj = joinpath(mktempdir(), "resaved.standalone.jl"); write(sj, saved2)
+        sj = joinpath(mktempdir(), "resaved.standalone.jl")
+        write(sj, saved2)
         tdir = expand(sj)
         @test isfile(joinpath(tdir, "Project.toml")) && isfile(joinpath(tdir, "Manifest.toml"))
         # No footer at all → carry is empty, nothing appended (ordinary notebooks unaffected).
@@ -326,22 +340,35 @@ if Sys.which("git") !== nothing
     # Slate's `.slatebundle.json` locally ignored — no legacy `repo/` subdir.
     @testset "repo-rooted: external dev-dep vendored + clean git checkout" begin
         repo = mktempdir()
-        mkpath(joinpath(repo, "src")); mkpath(joinpath(repo, "notebooks"))
-        write(joinpath(repo, "Project.toml"),
-            "name=\"Demo\"\nuuid=\"00000000-0000-0000-0000-0000000000d0\"\nversion=\"0.1.0\"\n[deps]\nFoo=\"00000000-0000-0000-0000-0000000000f0\"\n")
+        mkpath(joinpath(repo, "src"))
+        mkpath(joinpath(repo, "notebooks"))
+        write(
+            joinpath(repo, "Project.toml"),
+            "name=\"Demo\"\nuuid=\"00000000-0000-0000-0000-0000000000d0\"\nversion=\"0.1.0\"\n[deps]\nFoo=\"00000000-0000-0000-0000-0000000000f0\"\n",
+        )
         write(joinpath(repo, "src", "Demo.jl"), "module Demo\nend\n")
-        foo = mktempdir(); mkpath(joinpath(foo, "src"))              # Foo lives OUTSIDE the repo
-        write(joinpath(foo, "Project.toml"), "name=\"Foo\"\nuuid=\"00000000-0000-0000-0000-0000000000f0\"\nversion=\"0.1.0\"\n")
+        foo = mktempdir()
+        mkpath(joinpath(foo, "src"))              # Foo lives OUTSIDE the repo
+        write(
+            joinpath(foo, "Project.toml"),
+            "name=\"Foo\"\nuuid=\"00000000-0000-0000-0000-0000000000f0\"\nversion=\"0.1.0\"\n",
+        )
         write(joinpath(foo, "src", "Foo.jl"), "module Foo\nend\n")
-        write(joinpath(repo, "Manifest.toml"),
-            "manifest_format=\"2.0\"\n\n[[deps.Foo]]\npath = \"$(foo)\"\nuuid = \"00000000-0000-0000-0000-0000000000f0\"\nversion = \"0.1.0\"\n")
+        write(
+            joinpath(repo, "Manifest.toml"),
+            "manifest_format=\"2.0\"\n\n[[deps.Foo]]\npath = \"$(foo)\"\nuuid = \"00000000-0000-0000-0000-0000000000f0\"\nversion = \"0.1.0\"\n",
+        )
         write(joinpath(repo, "notebooks", "nb.jl"), "#%% code id=a\nx=1\n")
-        run(pipeline(`git -C $repo init -q`; stderr = devnull))
-        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
-        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+        run(pipeline(`git -C $repo init -q`; stderr=devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr=devnull))
+        run(
+            pipeline(
+                `git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr=devnull
+            ),
+        )
 
         nbpath = joinpath(repo, "notebooks", "nb.jl")
-        deps = [(name = "Foo", source = foo)]
+        deps = [(name="Foo", source=foo)]
         cells = "#%% code id=a\nx=2\n"
         sj = joinpath(mktempdir(), "nb.standalone.jl")
         write(sj, cells * "\n" * _bundle_footer(_make_bundle_b64(repo, deps, nbpath, cells)) * "\n")
@@ -353,7 +380,7 @@ if Sys.which("git") !== nothing
         man = read(joinpath(tdir, "Manifest.toml"), String)
         @test occursin("local/Foo", man) && !occursin(foo, man)              # rewritten, no abs-path leak
         @test strip(read(`git -C $tdir rev-parse --abbrev-ref HEAD`, String)) != "HEAD"   # on a real branch
-        @test !isempty(strip(read(pipeline(`git -C $tdir log --oneline`; stderr = devnull), String)))   # log works
+        @test !isempty(strip(read(pipeline(`git -C $tdir log --oneline`; stderr=devnull), String)))   # log works
         @test isempty(strip(read(`git -C $tdir remote`, String)))            # no dangling origin (no remote)
         @test !occursin(".slatebundle.json", read(`git -C $tdir status --porcelain`, String))   # locally ignored
     end
@@ -362,19 +389,33 @@ if Sys.which("git") !== nothing
     @testset "repo-rooted: origin wired to the real remote" begin
         repo = mktempdir()
         mkpath(joinpath(repo, "notebooks"))
-        write(joinpath(repo, "Project.toml"), "name=\"Demo\"\nuuid=\"00000000-0000-0000-0000-0000000000d1\"\nversion=\"0.1.0\"\n[deps]\n")
+        write(
+            joinpath(repo, "Project.toml"),
+            "name=\"Demo\"\nuuid=\"00000000-0000-0000-0000-0000000000d1\"\nversion=\"0.1.0\"\n[deps]\n",
+        )
         write(joinpath(repo, "Manifest.toml"), "manifest_format=\"2.0\"\n")
         write(joinpath(repo, "notebooks", "nb.jl"), "#%% code id=a\nx=1\n")
-        run(pipeline(`git -C $repo init -q`; stderr = devnull))
-        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
-        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
-        run(pipeline(`git -C $repo remote add origin https://example.com/demo.git`; stderr = devnull))
+        run(pipeline(`git -C $repo init -q`; stderr=devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr=devnull))
+        run(
+            pipeline(
+                `git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr=devnull
+            ),
+        )
+        run(pipeline(`git -C $repo remote add origin https://example.com/demo.git`; stderr=devnull))
         nbpath = joinpath(repo, "notebooks", "nb.jl")
         sj = joinpath(mktempdir(), "nb.standalone.jl")
-        write(sj, "#%% code id=a\nx=1\n\n" * _bundle_footer(_make_bundle_b64(repo, NamedTuple[], nbpath, "#%% code id=a\nx=1\n")) * "\n")
+        write(
+            sj,
+            "#%% code id=a\nx=1\n\n" *
+            _bundle_footer(_make_bundle_b64(repo, NamedTuple[], nbpath, "#%% code id=a\nx=1\n")) *
+            "\n",
+        )
         tdir = expand(sj)
-        @test strip(read(`git -C $tdir remote get-url origin`, String)) == "https://example.com/demo.git"
-        @test strip(read(`git -C $repo rev-parse HEAD`, String)) == strip(read(`git -C $tdir rev-parse HEAD`, String))
+        @test strip(read(`git -C $tdir remote get-url origin`, String)) ==
+            "https://example.com/demo.git"
+        @test strip(read(`git -C $repo rev-parse HEAD`, String)) ==
+            strip(read(`git -C $tdir rev-parse HEAD`, String))
     end
 
     # Repo-rooted: the notebook + its env live INSIDE a git repo (the WindowPrimes.jl/notebooks case),
@@ -383,25 +424,37 @@ if Sys.which("git") !== nothing
     # source intact — NOT a wrapper with a vendored local/ package.
     @testset "repo-rooted: expand reproduces the project (package root + notebook subdir)" begin
         repo = mktempdir()
-        mkpath(joinpath(repo, "src")); mkpath(joinpath(repo, "notebooks"))
-        write(joinpath(repo, "Project.toml"), "name=\"WinP\"\nuuid=\"00000000-0000-0000-0000-0000000000a1\"\nversion=\"0.1.0\"\n[deps]\n")
+        mkpath(joinpath(repo, "src"))
+        mkpath(joinpath(repo, "notebooks"))
+        write(
+            joinpath(repo, "Project.toml"),
+            "name=\"WinP\"\nuuid=\"00000000-0000-0000-0000-0000000000a1\"\nversion=\"0.1.0\"\n[deps]\n",
+        )
         write(joinpath(repo, "Manifest.toml"), "manifest_format=\"2.0\"\n")
         write(joinpath(repo, "src", "WinP.jl"), "module WinP\ngo() = 42\nend\n")
         # notebook env: its OWN Project (deps + a {path=\"..\"} source), Manifest, and the notebook.
-        write(joinpath(repo, "notebooks", "Project.toml"),
-            "[deps]\nWinP = \"00000000-0000-0000-0000-0000000000a1\"\n\n[sources]\nWinP = {path = \"..\"}\n")
-        write(joinpath(repo, "notebooks", "Manifest.toml"),
-            "manifest_format=\"2.0\"\n\n[[deps.WinP]]\npath = \"..\"\nuuid = \"00000000-0000-0000-0000-0000000000a1\"\nversion = \"0.1.0\"\n")
+        write(
+            joinpath(repo, "notebooks", "Project.toml"),
+            "[deps]\nWinP = \"00000000-0000-0000-0000-0000000000a1\"\n\n[sources]\nWinP = {path = \"..\"}\n",
+        )
+        write(
+            joinpath(repo, "notebooks", "Manifest.toml"),
+            "manifest_format=\"2.0\"\n\n[[deps.WinP]]\npath = \"..\"\nuuid = \"00000000-0000-0000-0000-0000000000a1\"\nversion = \"0.1.0\"\n",
+        )
         write(joinpath(repo, "notebooks", "presentation.jl"), "#%% code id=a\nx=1\n")
         write(joinpath(repo, "notebooks", "references.bib"), "@book{k,title={T}}\n")
-        run(pipeline(`git -C $repo init -q`; stderr = devnull))
-        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
-        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
-        run(pipeline(`git -C $repo remote add origin https://example.com/winp.git`; stderr = devnull))
+        run(pipeline(`git -C $repo init -q`; stderr=devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr=devnull))
+        run(
+            pipeline(
+                `git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr=devnull
+            ),
+        )
+        run(pipeline(`git -C $repo remote add origin https://example.com/winp.git`; stderr=devnull))
 
         envdir = joinpath(repo, "notebooks")
         nbpath = joinpath(envdir, "presentation.jl")
-        deps = [(name = "WinP", source = repo)]                      # the package IS the repo root
+        deps = [(name="WinP", source=repo)]                      # the package IS the repo root
         cells = "#%% code id=a\nx=2\n"                               # LIVE cells differ from the committed file
         b64 = _make_bundle_b64(envdir, deps, nbpath, cells)
         sj = joinpath(mktempdir(), "presentation.standalone.jl")
@@ -419,12 +472,14 @@ if Sys.which("git") !== nothing
         @test occursin("{path = \"..\"}", read(joinpath(tdir, "notebooks", "Project.toml"), String))
         # the overlay wins: the expanded notebook carries the LIVE cells, not the committed ones
         @test occursin("x=2", read(joinpath(tdir, "notebooks", "presentation.jl"), String))
-        @test strip(read(`git -C $tdir remote get-url origin`, String)) == "https://example.com/winp.git"
+        @test strip(read(`git -C $tdir remote get-url origin`, String)) ==
+            "https://example.com/winp.git"
         # matching SHAs — ready to branch & PR
-        @test strip(read(`git -C $repo rev-parse HEAD`, String)) == strip(read(`git -C $tdir rev-parse HEAD`, String))
+        @test strip(read(`git -C $repo rev-parse HEAD`, String)) ==
+            strip(read(`git -C $tdir rev-parse HEAD`, String))
         @test !ispath(joinpath(tdir, "repo"))                        # no legacy repo/ hybrid
         @test strip(read(`git -C $tdir rev-parse --abbrev-ref HEAD`, String)) != "HEAD"   # a real branch, not detached
-        @test !isempty(strip(read(pipeline(`git -C $tdir log --oneline`; stderr = devnull), String)))   # git log works
+        @test !isempty(strip(read(pipeline(`git -C $tdir log --oneline`; stderr=devnull), String)))   # git log works
 
         # reconstruct coords point the kernel at the notebook env (nested), with the repo root as parent
         co = _read_coords(tdir)
@@ -440,30 +495,45 @@ if Sys.which("git") !== nothing
     # with the parent `dev`'d at `..` and the external dep vendored to `local/`.
     @testset "repo-rooted: forked depot env dev'ing the parent package" begin
         repo = mktempdir()
-        mkpath(joinpath(repo, "src")); mkpath(joinpath(repo, "notebooks"))
-        write(joinpath(repo, "Project.toml"),
-            "name=\"MyPkg\"\nuuid=\"00000000-0000-0000-0000-0000000000b1\"\nversion=\"0.1.0\"\n[deps]\n")
+        mkpath(joinpath(repo, "src"))
+        mkpath(joinpath(repo, "notebooks"))
+        write(
+            joinpath(repo, "Project.toml"),
+            "name=\"MyPkg\"\nuuid=\"00000000-0000-0000-0000-0000000000b1\"\nversion=\"0.1.0\"\n[deps]\n",
+        )
         write(joinpath(repo, "Manifest.toml"), "manifest_format=\"2.0\"\n")
         write(joinpath(repo, "src", "MyPkg.jl"), "module MyPkg\ngo() = 7\nend\n")
         write(joinpath(repo, "notebooks", "nb.jl"), "#%% code id=a\nx=1\n")
-        run(pipeline(`git -C $repo init -q`; stderr = devnull))
-        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
-        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+        run(pipeline(`git -C $repo init -q`; stderr=devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr=devnull))
+        run(
+            pipeline(
+                `git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr=devnull
+            ),
+        )
 
-        ext = mktempdir(); mkpath(joinpath(ext, "src"))              # an EXTERNAL dep, outside the repo
-        write(joinpath(ext, "Project.toml"), "name=\"Ext\"\nuuid=\"00000000-0000-0000-0000-0000000000e1\"\nversion=\"0.1.0\"\n")
+        ext = mktempdir()
+        mkpath(joinpath(ext, "src"))              # an EXTERNAL dep, outside the repo
+        write(
+            joinpath(ext, "Project.toml"),
+            "name=\"Ext\"\nuuid=\"00000000-0000-0000-0000-0000000000e1\"\nversion=\"0.1.0\"\n",
+        )
         write(joinpath(ext, "src", "Ext.jl"), "module Ext\nend\n")
         write(joinpath(ext, "junk.dat"), "x"^2048)                   # data bloat: must NOT ride along
 
         env = mktempdir()                                            # the depot FORK — OUTSIDE the repo
-        write(joinpath(env, "Project.toml"),
-            "[deps]\nMyPkg = \"00000000-0000-0000-0000-0000000000b1\"\nExt = \"00000000-0000-0000-0000-0000000000e1\"\n")
-        write(joinpath(env, "Manifest.toml"),
+        write(
+            joinpath(env, "Project.toml"),
+            "[deps]\nMyPkg = \"00000000-0000-0000-0000-0000000000b1\"\nExt = \"00000000-0000-0000-0000-0000000000e1\"\n",
+        )
+        write(
+            joinpath(env, "Manifest.toml"),
             "manifest_format=\"2.0\"\n\n[[deps.MyPkg]]\npath = \"$(repo)\"\nuuid = \"00000000-0000-0000-0000-0000000000b1\"\nversion = \"0.1.0\"\n" *
-            "\n[[deps.Ext]]\npath = \"$(ext)\"\nuuid = \"00000000-0000-0000-0000-0000000000e1\"\nversion = \"0.1.0\"\n")
+            "\n[[deps.Ext]]\npath = \"$(ext)\"\nuuid = \"00000000-0000-0000-0000-0000000000e1\"\nversion = \"0.1.0\"\n",
+        )
 
         nbpath = joinpath(repo, "notebooks", "nb.jl")
-        deps = [(name = "MyPkg", source = repo), (name = "Ext", source = ext)]
+        deps = [(name="MyPkg", source=repo), (name="Ext", source=ext)]
         cells = "#%% code id=a\nx=2\n"                               # LIVE cells differ from committed
         b64 = _make_bundle_b64(env, deps, nbpath, cells)
         sj = joinpath(mktempdir(), "nb.standalone.jl")
@@ -488,8 +558,10 @@ if Sys.which("git") !== nothing
         @test co.notebook == joinpath(tdir, "notebooks", "nb.jl")
         # the reconstruction scaffolding is locally ignored (the notebook itself legitimately shows
         # modified — it carries the LIVE cells — so `git status` is not empty, just free of our dirs)
-        status = read(pipeline(`git -C $tdir status --porcelain`; stderr = devnull), String)
-        @test !occursin("_slate_env", status) && !occursin("local/", status) && !occursin(".slatebundle", status)
+        status = read(pipeline(`git -C $tdir status --porcelain`; stderr=devnull), String)
+        @test !occursin("_slate_env", status) &&
+            !occursin("local/", status) &&
+            !occursin(".slatebundle", status)
         @test occursin("notebooks/nb.jl", status)                    # the live-cell edit is the only change
     end
 
@@ -498,33 +570,53 @@ if Sys.which("git") !== nothing
     # a PUBLIC web export. Still fully runnable (env + vendored deps + live cells in place).
     @testset "source-rooted: history=false ships source, not the git history" begin
         repo = mktempdir()
-        mkpath(joinpath(repo, "src")); mkpath(joinpath(repo, "notebooks"))
-        write(joinpath(repo, "Project.toml"),
-            "name=\"MyPkg\"\nuuid=\"00000000-0000-0000-0000-0000000000c1\"\nversion=\"0.1.0\"\n[deps]\n")
+        mkpath(joinpath(repo, "src"))
+        mkpath(joinpath(repo, "notebooks"))
+        write(
+            joinpath(repo, "Project.toml"),
+            "name=\"MyPkg\"\nuuid=\"00000000-0000-0000-0000-0000000000c1\"\nversion=\"0.1.0\"\n[deps]\n",
+        )
         write(joinpath(repo, "Manifest.toml"), "manifest_format=\"2.0\"\n")
         write(joinpath(repo, "src", "MyPkg.jl"), "module MyPkg\nend\n")
         write(joinpath(repo, "notebooks", "nb.jl"), "#%% code id=a\nx=1\n")
         write(joinpath(repo, "secret.env"), "TOKEN=hunter2\n")        # committed then DELETED: must not resurface
-        run(pipeline(`git -C $repo init -q`; stderr = devnull))
-        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
-        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+        run(pipeline(`git -C $repo init -q`; stderr=devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr=devnull))
+        run(
+            pipeline(
+                `git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr=devnull
+            ),
+        )
         rm(joinpath(repo, "secret.env"))                             # no longer tracked in the working tree
-        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t rm -q --cached secret.env`; stderr = devnull))
+        run(
+            pipeline(
+                `git -C $repo -c user.email=t@t -c user.name=t rm -q --cached secret.env`;
+                stderr=devnull,
+            ),
+        )
 
-        ext = mktempdir(); mkpath(joinpath(ext, "src"))
-        write(joinpath(ext, "Project.toml"), "name=\"Ext\"\nuuid=\"00000000-0000-0000-0000-0000000000e2\"\nversion=\"0.1.0\"\n")
+        ext = mktempdir()
+        mkpath(joinpath(ext, "src"))
+        write(
+            joinpath(ext, "Project.toml"),
+            "name=\"Ext\"\nuuid=\"00000000-0000-0000-0000-0000000000e2\"\nversion=\"0.1.0\"\n",
+        )
         write(joinpath(ext, "src", "Ext.jl"), "module Ext\nend\n")
         env = mktempdir()
-        write(joinpath(env, "Project.toml"),
-            "[deps]\nMyPkg = \"00000000-0000-0000-0000-0000000000c1\"\nExt = \"00000000-0000-0000-0000-0000000000e2\"\n")
-        write(joinpath(env, "Manifest.toml"),
+        write(
+            joinpath(env, "Project.toml"),
+            "[deps]\nMyPkg = \"00000000-0000-0000-0000-0000000000c1\"\nExt = \"00000000-0000-0000-0000-0000000000e2\"\n",
+        )
+        write(
+            joinpath(env, "Manifest.toml"),
             "manifest_format=\"2.0\"\n\n[[deps.MyPkg]]\npath = \"$(repo)\"\nuuid = \"00000000-0000-0000-0000-0000000000c1\"\nversion = \"0.1.0\"\n" *
-            "\n[[deps.Ext]]\npath = \"$(ext)\"\nuuid = \"00000000-0000-0000-0000-0000000000e2\"\nversion = \"0.1.0\"\n")
+            "\n[[deps.Ext]]\npath = \"$(ext)\"\nuuid = \"00000000-0000-0000-0000-0000000000e2\"\nversion = \"0.1.0\"\n",
+        )
 
         nbpath = joinpath(repo, "notebooks", "nb.jl")
-        deps = [(name = "MyPkg", source = repo), (name = "Ext", source = ext)]
+        deps = [(name="MyPkg", source=repo), (name="Ext", source=ext)]
         cells = "#%% code id=a\nx=2\n"
-        b64 = _make_bundle_b64(env, deps, nbpath, cells; history = false)
+        b64 = _make_bundle_b64(env, deps, nbpath, cells; history=false)
         sj = joinpath(mktempdir(), "nb.standalone.jl")
         write(sj, cells * "\n" * _bundle_footer(b64) * "\n")
         tdir = expand(sj)
@@ -549,15 +641,25 @@ if Sys.which("git") !== nothing
     # repo must not drag that whole repo into the bundle (only the project itself travels).
     @testset "nested project does not bundle the enclosing repo" begin
         root = mktempdir()
-        sub = joinpath(root, "proj"); mkpath(sub)
+        sub = joinpath(root, "proj")
+        mkpath(sub)
         write(joinpath(sub, "Project.toml"), "name=\"Nested\"\n[deps]\n")
         write(joinpath(sub, "Manifest.toml"), "manifest_format=\"2.0\"\n")
-        run(pipeline(`git -C $root init -q`; stderr = devnull))
-        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
-        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+        run(pipeline(`git -C $root init -q`; stderr=devnull))
+        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t add -A`; stderr=devnull))
+        run(
+            pipeline(
+                `git -C $root -c user.email=t@t -c user.name=t commit -q -m init`; stderr=devnull
+            ),
+        )
 
         sj = joinpath(mktempdir(), "n.standalone.jl")
-        write(sj, "#%% code id=a\nx=1\n\n" * _bundle_footer(_make_bundle_b64(sub, NamedTuple[], "nb.jl", "#%% code id=a\nx=1\n")) * "\n")
+        write(
+            sj,
+            "#%% code id=a\nx=1\n\n" *
+            _bundle_footer(_make_bundle_b64(sub, NamedTuple[], "nb.jl", "#%% code id=a\nx=1\n")) *
+            "\n",
+        )
         tdir = expand(sj)
         @test !isfile(joinpath(tdir, "repo.gitbundle"))   # enclosing repo NOT captured
         @test !ispath(joinpath(tdir, "repo"))
@@ -570,15 +672,27 @@ if Sys.which("git") !== nothing
     @testset "package-as-project carries its own src to the root" begin
         root = mktempdir()
         mkpath(joinpath(root, "src"))
-        write(joinpath(root, "Project.toml"), "name=\"Demo\"\nuuid=\"00000000-0000-0000-0000-0000000000d0\"\nversion=\"0.1.0\"\n[deps]\n")
+        write(
+            joinpath(root, "Project.toml"),
+            "name=\"Demo\"\nuuid=\"00000000-0000-0000-0000-0000000000d0\"\nversion=\"0.1.0\"\n[deps]\n",
+        )
         write(joinpath(root, "Manifest.toml"), "manifest_format=\"2.0\"\n")
         write(joinpath(root, "src", "Demo.jl"), "module Demo\ngreet() = \"hi from Demo\"\nend\n")
-        run(pipeline(`git -C $root init -q`; stderr = devnull))
-        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
-        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+        run(pipeline(`git -C $root init -q`; stderr=devnull))
+        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t add -A`; stderr=devnull))
+        run(
+            pipeline(
+                `git -C $root -c user.email=t@t -c user.name=t commit -q -m init`; stderr=devnull
+            ),
+        )
 
         sj = joinpath(mktempdir(), "p.standalone.jl")
-        write(sj, "#%% code id=a\nx=1\n\n" * _bundle_footer(_make_bundle_b64(root, NamedTuple[], "nb.jl", "#%% code id=a\nx=1\n")) * "\n")
+        write(
+            sj,
+            "#%% code id=a\nx=1\n\n" *
+            _bundle_footer(_make_bundle_b64(root, NamedTuple[], "nb.jl", "#%% code id=a\nx=1\n")) *
+            "\n",
+        )
         tdir = expand(sj)
         @test isfile(joinpath(tdir, "src", "Demo.jl"))                       # source at the project root
         @test occursin("module Demo", read(joinpath(tdir, "src", "Demo.jl"), String))
@@ -598,14 +712,20 @@ end
     write(joinpath(proj, "Project.toml"), "name=\"Demo\"\n[deps]\n")
     write(joinpath(proj, "Manifest.toml"), "manifest_format=\"2.0\"\n")
     sj = joinpath(mktempdir(), "demo.standalone.jl")
-    write(sj, cells * "\n" * _bundle_footer(_make_bundle_b64(proj, NamedTuple[], "demo.jl", cells)) * "\n")
+    write(
+        sj,
+        cells *
+        "\n" *
+        _bundle_footer(_make_bundle_b64(proj, NamedTuple[], "demo.jl", cells)) *
+        "\n",
+    )
 
     @test _has_bundle(read(sj, String))
     @test !_has_bundle("#%% code id=a\nx=1\n")
 
     # The cache is content-addressed and persists in the depot — clear this bundle's dir so `fresh`
     # is deterministic regardless of a prior run (or a prior errored run that skipped the cleanup).
-    rm(_bundle_cache_dir(_read_bundle_b64(read(sj, String))); recursive = true, force = true)
+    rm(_bundle_cache_dir(_read_bundle_b64(read(sj, String))); recursive=true, force=true)
     r1 = _reconstruct_bundle!(sj)
     @test r1.fresh                                       # first time: extracted
     @test occursin("kaimonslate-bundles", r1.root)       # depot cache, not a sibling dir
@@ -617,12 +737,18 @@ end
     @test !r2.fresh && r2.root == r1.root                # same content → cache hit, reused
 
     sj2 = joinpath(mktempdir(), "other.standalone.jl")
-    write(sj2, cells * "y=2\n\n" * _bundle_footer(_make_bundle_b64(proj, NamedTuple[], "other.jl", cells * "y=2\n")) * "\n")
+    write(
+        sj2,
+        cells *
+        "y=2\n\n" *
+        _bundle_footer(_make_bundle_b64(proj, NamedTuple[], "other.jl", cells * "y=2\n")) *
+        "\n",
+    )
     r3 = _reconstruct_bundle!(sj2)
     @test r3.root != r1.root                             # different content → different dir
 
-    rm(r1.root; recursive = true, force = true)          # don't litter the depot
-    rm(r3.root; recursive = true, force = true)
+    rm(r1.root; recursive=true, force=true)          # don't litter the depot
+    rm(r3.root; recursive=true, force=true)
 end
 
 # `SLATE_INSTALL_DIR` (run.jl's "where to set this up?" prompt) reconstructs into a DURABLE, user-owned
@@ -634,7 +760,13 @@ end
     write(joinpath(proj, "Project.toml"), "name=\"Demo\"\n[deps]\n")
     write(joinpath(proj, "Manifest.toml"), "manifest_format=\"2.0\"\n")
     sj = joinpath(mktempdir(), "demo.standalone.jl")
-    write(sj, cells * "\n" * _bundle_footer(_make_bundle_b64(proj, NamedTuple[], "demo.jl", cells)) * "\n")
+    write(
+        sj,
+        cells *
+        "\n" *
+        _bundle_footer(_make_bundle_b64(proj, NamedTuple[], "demo.jl", cells)) *
+        "\n",
+    )
 
     target = joinpath(mktempdir(), "myproject")          # a fresh, empty path
     withenv("SLATE_INSTALL_DIR" => target) do
@@ -648,7 +780,8 @@ end
         @test r2.install && !r2.fresh && r2.root == abspath(target)
 
         # refuse to clobber a non-empty directory that isn't ours
-        other = mktempdir(); write(joinpath(other, "keep.txt"), "mine")
+        other = mktempdir()
+        write(joinpath(other, "keep.txt"), "mine")
         withenv("SLATE_INSTALL_DIR" => other) do
             @test_throws ErrorException _reconstruct_bundle!(sj)
         end
@@ -668,8 +801,13 @@ end
     truncated = b64[1:(half - half % 4)]                 # chop the payload (stay base64-length-valid)
     sj = joinpath(mktempdir(), "corrupt.standalone.jl")
     write(sj, cells * "\n" * _bundle_footer(truncated) * "\n")
-    rm(_bundle_cache_dir(_read_bundle_b64(read(sj, String))); recursive = true, force = true)
-    e = try; _reconstruct_bundle!(sj); nothing; catch err; err; end
+    rm(_bundle_cache_dir(_read_bundle_b64(read(sj, String))); recursive=true, force=true)
+    e = try
+        _reconstruct_bundle!(sj)
+        nothing
+    catch err
+        err
+    end
     @test e !== nothing
     msg = sprint(showerror, e)
     @test occursin("incompatible Slate version", msg)    # actionable
@@ -682,24 +820,31 @@ end
     # non-git dep → ships *.toml + src/, drops a data dir + stray top-level file
     d = mktempdir()
     write(joinpath(d, "Project.toml"), "name=\"D2\"\n")
-    mkpath(joinpath(d, "src")); write(joinpath(d, "src", "D2.jl"), "module D2 end")
-    mkpath(joinpath(d, "data")); write(joinpath(d, "data", "big.bin"), zeros(UInt8, 2_000_000))
+    mkpath(joinpath(d, "src"))
+    write(joinpath(d, "src", "D2.jl"), "module D2 end")
+    mkpath(joinpath(d, "data"))
+    write(joinpath(d, "data", "big.bin"), zeros(UInt8, 2_000_000))
     write(joinpath(d, "stray.out"), zeros(UInt8, 2_000_000))
-    dest = mktempdir(); _copy_dep_source!(dest, d)
+    dest = mktempdir()
+    _copy_dep_source!(dest, d)
     @test isfile(joinpath(dest, "Project.toml")) && isfile(joinpath(dest, "src", "D2.jl"))
     @test !ispath(joinpath(dest, "data")) && !isfile(joinpath(dest, "stray.out"))
 
     if Sys.which("git") !== nothing
         # git dep → tracked source shipped (incl. tracked non-src like README); untracked + ignored dropped
         g = mktempdir()
-        write(joinpath(g, "Project.toml"), "name=\"G\"\n"); write(joinpath(g, "README.md"), "hi")
-        mkpath(joinpath(g, "src")); write(joinpath(g, "src", "G.jl"), "module G end")
+        write(joinpath(g, "Project.toml"), "name=\"G\"\n")
+        write(joinpath(g, "README.md"), "hi")
+        mkpath(joinpath(g, "src"))
+        write(joinpath(g, "src", "G.jl"), "module G end")
         write(joinpath(g, ".gitignore"), "output/\n")
-        mkpath(joinpath(g, "output")); write(joinpath(g, "output", "o.dat"), zeros(UInt8, 2_000_000))
+        mkpath(joinpath(g, "output"))
+        write(joinpath(g, "output", "o.dat"), zeros(UInt8, 2_000_000))
         write(joinpath(g, "test.out"), zeros(UInt8, 2_000_000))     # untracked, not ignored
-        run(pipeline(`git -C $g init -q`; stderr = devnull))
-        run(pipeline(`git -C $g add Project.toml README.md src .gitignore`; stderr = devnull))
-        dest2 = mktempdir(); _copy_dep_source!(dest2, g)
+        run(pipeline(`git -C $g init -q`; stderr=devnull))
+        run(pipeline(`git -C $g add Project.toml README.md src .gitignore`; stderr=devnull))
+        dest2 = mktempdir()
+        _copy_dep_source!(dest2, g)
         @test isfile(joinpath(dest2, "src", "G.jl")) && isfile(joinpath(dest2, "README.md"))  # tracked kept
         @test !isfile(joinpath(dest2, "test.out")) && !ispath(joinpath(dest2, "output"))      # untracked/ignored dropped
     end
@@ -708,8 +853,16 @@ end
 # Frozen-render preview: the rendered-cells payload round-trips (gzip+base64) and the footer
 # block is ignored by parse_report (it's terminal, after the cells / bundle).
 @testset "frozen-render preview round-trips" begin
-    cells = [Dict("id" => "a", "kind" => "code", "output" => "<pre>42</pre>", "echarts" => [], "tables" => []),
-             Dict("id" => "b", "kind" => "md", "output" => "<h1>Title</h1>")]
+    cells = [
+        Dict(
+            "id" => "a",
+            "kind" => "code",
+            "output" => "<pre>42</pre>",
+            "echarts" => [],
+            "tables" => [],
+        ),
+        Dict("id" => "b", "kind" => "md", "output" => "<h1>Title</h1>"),
+    ]
     sj = "#%% code id=a\nx=1\n\n" * _bundle_footer("AAAA") * "\n" * _preview_footer(cells) * "\n"
 
     @test [c.id for c in parse_report(sj).cells] == ["a"]     # footer region ignored as cells

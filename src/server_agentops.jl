@@ -6,7 +6,7 @@
 function _gen_id(report::Report)
     existing = Set(c.id for c in report.cells)
     while true
-        id = string(hash(time_ns()) % 0xffffff; base = 16, pad = 6)
+        id = string(hash(time_ns()) % 0xffffff; base=16, pad=6)
         id in existing || return id
     end
 end
@@ -24,9 +24,23 @@ function _announce_cell!(nb::LiveNotebook, idx::Int)
         bindref, hostednames = _bind_index(nb.report)
         bibctx = _bib_link_ctx(nb)
         figidx = figure_index(nb.report)
-        _broadcast(nb, "cellpre:" * JSON.json(Dict(
-            "index" => idx - 1,                         # browser cells[] is 0-based
-            "cell" => cell_json(nb.report.cells[idx], bindref, hostednames; nbid = nb.id, bibctx = bibctx, figidx = figidx, report = nb.report))))
+        _broadcast(
+            nb,
+            "cellpre:" * JSON.json(
+                Dict(
+                    "index" => idx - 1,                         # browser cells[] is 0-based
+                    "cell" => cell_json(
+                        nb.report.cells[idx],
+                        bindref,
+                        hostednames;
+                        nbid=nb.id,
+                        bibctx=bibctx,
+                        figidx=figidx,
+                        report=nb.report,
+                    ),
+                ),
+            ),
+        )
     catch
     end
     return nb
@@ -34,7 +48,7 @@ end
 
 # A structural change at index `idx` reorders state, so conservatively restale everything from
 # there on, recompute, and persist. `announce` shows the cell at `idx` (stale) before eval.
-function _commit_structure!(nb::LiveNotebook, idx::Int; announce::Bool = false, run::Bool = true)
+function _commit_structure!(nb::LiveNotebook, idx::Int; announce::Bool=false, run::Bool=true)
     # Hold nb.lock around deps + restale + persist: with async eval the runner / set_bind! hold the
     # lock intermittently, so this must serialize against them (else the persist races and is lost,
     # like the edit_cell! bug). Reentrant — the agent structural paths already hold nb.lock.
@@ -46,7 +60,7 @@ function _commit_structure!(nb::LiveNotebook, idx::Int; announce::Bool = false, 
         announce && _announce_cell!(nb, idx)
         run && _eval!(nb)                # kick the async runner (non-blocking; safe inside the lock)
         _persist!(nb)
-        _autoindex!(nb)                  # added/edited cell may introduce a new `using`
+        return _autoindex!(nb)                  # added/edited cell may introduce a new `using`
     end
     return nb
 end
@@ -69,7 +83,7 @@ function _commit_reorder!(nb::LiveNotebook)
             _eval!(nb)                   # kick the async runner (non-blocking; safe inside the lock)
             _autoindex!(nb)
         end
-        _persist!(nb)
+        return _persist!(nb)
     end
     return nb
 end
@@ -77,11 +91,20 @@ end
 _index_of(cells, id) = findfirst(c -> c.id == id, cells)
 
 # Cell-kind token ("md"/"web"/"code") → CellKind, shared by cell creation and kind-conversion.
-_cellkind(k::AbstractString) = k == "md" ? MARKDOWN : k == "web" ? WEB : CODE
+_cellkind(k::AbstractString) =
+    if k == "md"
+        MARKDOWN
+    elseif k == "web"
+        WEB
+    else
+        CODE
+    end
 
-function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractString; before::Bool = false)
+function add_cell!(
+    nb::LiveNotebook, after_id::AbstractString, kind::AbstractString; before::Bool=false
+)
     nid = _gen_id(nb.report)                          # generated up front so the undo label can name it
-    _snapshot!(nb; label = "add $nid")
+    _snapshot!(nb; label="add $nid")
     cells = nb.report.cells
     i = isempty(after_id) ? length(cells) : something(_index_of(cells, after_id), length(cells))
     cell = Cell(nid, _cellkind(kind), "")
@@ -133,7 +156,8 @@ end
 # holder IS the caller's session id, so no token is minted/threaded — the same caller's
 # later edits match implicitly.
 function acquire_floor!(nb::LiveNotebook, holder::AbstractString)
-    isempty(holder) && return (false, "no agent session — the floor can't be claimed by an unidentified caller")
+    isempty(holder) &&
+        return (false, "no agent session — the floor can't be claimed by an unidentified caller")
     lock(_FLOOR_LOCK) do
         l = get(_NB_FLOOR, nb.id, nothing)
         if l !== nothing && time() - l.renewed_at <= FLOOR_TTL && l.holder != String(holder)
@@ -146,10 +170,10 @@ end
 
 # Keep a held lease alive across a multi-op transaction (called after each commit by its holder).
 function _renew_floor!(nb::LiveNotebook, caller::AbstractString)
-    isempty(caller) && return
+    isempty(caller) && return nothing
     lock(_FLOOR_LOCK) do
         l = get(_NB_FLOOR, nb.id, nothing)
-        l !== nothing && l.holder == String(caller) && (l.renewed_at = time())
+        return l !== nothing && l.holder == String(caller) && (l.renewed_at = time())
     end
 end
 
@@ -167,7 +191,11 @@ end
 # Human-readable floor state for the read digest.
 function floor_status(nb::LiveNotebook)
     l = _live_floor(nb)
-    l === nothing ? "free" : "🔒 held by '$(l.holder)' (≈$(round(Int, time() - l.acquired_at))s)"
+    return if l === nothing
+        "free"
+    else
+        "🔒 held by '$(l.holder)' (≈$(round(Int, time() - l.acquired_at))s)"
+    end
 end
 
 # Gate one agent commit. Returns nothing to proceed, or a rejection string (the op
@@ -176,14 +204,15 @@ end
 # its own holder (or a free floor) proceeds. A floor holder skips version-CAS (exclusivity
 # guarantees freshness); a free floor still honors the optional version check, which catches
 # a lost update against an external (or sessionless) commit.
-function _guard_commit(nb::LiveNotebook; caller::AbstractString = "", expected_version::Int = -1)
+function _guard_commit(nb::LiveNotebook; caller::AbstractString="", expected_version::Int=-1)
     l = _live_floor(nb)
     if l !== nothing
         (!isempty(caller) && l.holder == String(caller)) && return nothing      # you hold the floor
         return "⛔ build-floor held by another agent ('$(l.holder)') — your change was NOT applied. Wait for it to release / expire, or coordinate."
     end
     if expected_version >= 0 && expected_version != nb.version
-        return "⚠ stale write REJECTED — you decided against v$(expected_version) but the notebook is now at v$(nb.version). Nothing was applied; re-read (slate.read) and retry.\n\n" * notebook_digest(nb)
+        return "⚠ stale write REJECTED — you decided against v$(expected_version) but the notebook is now at v$(nb.version). Nothing was applied; re-read (slate.read) and retry.\n\n" *
+               notebook_digest(nb)
     end
     return nothing
 end
@@ -198,9 +227,12 @@ end
 # "columns"/"rows"/"opts"), so an agent that VIEWS a table cell sees the actual data instead of a
 # bare "[rendered: table]". The browser still gets the full sortable table; this caps the rows/cols
 # it prints and notes what was elided (never a silent cap).
-function _table_text(t; maxrows::Int = 20, maxcols::Int = 20, maxcolw::Int = 28)
+function _table_text(t; maxrows::Int=20, maxcols::Int=20, maxcolw::Int=28)
     t isa AbstractDict || return "[rendered: table]"
-    cols = String[c isa AbstractDict ? string(get(c, "name", "")) : string(c) for c in get(t, "columns", Any[])]
+    cols = String[
+        c isa AbstractDict ? string(get(c, "name", "")) : string(c) for
+        c in get(t, "columns", Any[])
+    ]
     rows = get(t, "rows", Any[])
     opts = get(t, "opts", Dict{String,Any}())
     (isempty(cols) && isempty(rows)) && return "(empty table)"
@@ -208,8 +240,10 @@ function _table_text(t; maxrows::Int = 20, maxcols::Int = 20, maxcolw::Int = 28)
     ncols_total = Int(get(opts, "ncols", length(cols)))
     showcols = length(cols) > maxcols ? cols[1:maxcols] : cols
     elidedcols = length(cols) - length(showcols)
-    trunc1(x) = (s = x === nothing ? "" : string(x); textwidth(s) > maxcolw ? first(s, maxcolw - 1) * "…" : s)
-    header = String[showcols...]; elidedcols > 0 && push!(header, "…")
+    trunc1(x) =
+        (s=x === nothing ? "" : string(x); textwidth(s) > maxcolw ? first(s, maxcolw - 1) * "…" : s)
+    header = String[showcols...]
+    elidedcols > 0 && push!(header, "…")
     grid = Vector{Vector{String}}([header])
     for r in rows[1:min(maxrows, length(rows))]
         vals = String[trunc1(i <= length(r) ? r[i] : nothing) for i in 1:length(showcols)]
@@ -222,11 +256,13 @@ function _table_text(t; maxrows::Int = 20, maxcols::Int = 20, maxcolw::Int = 28)
     io = IOBuffer()
     println(io, line(grid[1]))
     println(io, join(("─"^w[j] for j in 1:ncol), "  "))
-    for i in 2:length(grid); println(io, line(grid[i])); end
+    for i in 2:length(grid)
+        println(io, line(grid[i]))
+    end
     shown = length(grid) - 1
     notes = String[]
-    shown < nrows_total  && push!(notes, "$(shown) of $(nrows_total) rows")
-    elidedcols > 0       && push!(notes, "$(length(showcols)) of $(ncols_total) cols")
+    shown < nrows_total && push!(notes, "$(shown) of $(nrows_total) rows")
+    elidedcols > 0 && push!(notes, "$(length(showcols)) of $(ncols_total) cols")
     isempty(notes) || println(io, "… showing ", join(notes, ", "))
     return rstrip(String(take!(io)))
 end
@@ -234,11 +270,12 @@ end
 # Compact text of a cell's result for the agent: the value/stdout, or the error,
 # plus a note that rich output (image/chart) rendered (the agent can't see the
 # pixels here, but knows it worked); tables are rendered as text so their data IS visible.
-_cell_result_text(c::Cell) = (o = c.output; o === nothing ? "(not run)" : _output_result_text(o))
+_cell_result_text(c::Cell) = (o=c.output; o === nothing ? "(not run)" : _output_result_text(o))
 # The agent-facing text for a captured eval result — shared by cells and out-of-band (scratch) evals.
 function _output_result_text(o)
-    o.exception === nothing ||
-        return "ERROR: " * o.exception * (o.backtrace === nothing ? "" : "\n" * first(o.backtrace, 800))
+    o.exception === nothing || return "ERROR: " *
+           o.exception *
+           (o.backtrace === nothing ? "" : "\n" * first(o.backtrace, 800))
     parts = String[]
     isempty(rstrip(o.stdout)) || push!(parts, rstrip(o.stdout))
     isempty(o.value_repr) || push!(parts, o.value_repr)
@@ -262,26 +299,31 @@ end
 const _READTOK = Dict{String,Tuple{Vector{String},Dict{String,String}}}()   # "nbid|token" → (cell order, id→hash)
 const _READTOK_LOCK = ReentrantLock()
 # A cell's content hash for delta detection — source AND result/state, so a re-run (new output) counts.
-_cell_state_hash(c::Cell) = string(hash((c.kind, c.source,
-                                         c.kind == CODE ? _cell_result_text(c) : "", c.state)); base = 16)
+function _cell_state_hash(c::Cell)
+    return string(
+        hash((c.kind, c.source, c.kind == CODE ? _cell_result_text(c) : "", c.state)); base=16
+    )
+end
 function _read_token!(nbid, order, hashes)
-    tok = string(hash(join((string(id, ':', hashes[id]) for id in order), '\n')); base = 16)[1:12]
+    tok = string(hash(join((string(id, ':', hashes[id]) for id in order), '\n')); base=16)[1:12]
     lock(_READTOK_LOCK) do
         length(_READTOK) > 400 && empty!(_READTOK)
-        _READTOK[string(nbid, '|', tok)] = (copy(order), copy(hashes))
+        return _READTOK[string(nbid, '|', tok)] = (copy(order), copy(hashes))
     end
     return tok
 end
-_read_token_get(nbid, tok) = lock(_READTOK_LOCK) do; get(_READTOK, string(nbid, '|', String(tok)), nothing); end
+_read_token_get(nbid, tok) = lock(_READTOK_LOCK) do ;
+    return get(_READTOK, string(nbid, '|', String(tok)), nothing)
+end
 
-_trunc(s, n::Int) = (t = String(s); length(t) <= n ? t : first(t, n) * "…")
+_trunc(s, n::Int) = (t=String(s); length(t) <= n ? t : first(t, n) * "…")
 
 # FULL content of a cell — source + result.
 function _print_cell!(io::IO, c::Cell)
     kind = c.kind == MARKDOWN ? "md" : "code"
     print(io, "\n\n### id=", c.id, "  [", kind, ", ", lowercase(string(c.state)), "]\n")
     print(io, rstrip(c.source))
-    c.kind == CODE && print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
+    return c.kind == CODE && print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
 end
 
 # ONE compact line per cell — the high-signal map (id, kind, state, defined names, a 1-line result /
@@ -294,13 +336,17 @@ function _outline_cell!(io::IO, c::Cell)
     if c.kind == MARKDOWN
         # The heading (first non-blank line) plus, when that's a heading, the first body sentence —
         # a touch more context than a bare title.
-        head = ""; body = ""
+        head = ""
+        body = ""
         for ln in split(c.source, '\n')
-            s = strip(ln); isempty(s) && continue
+            s = strip(ln)
+            isempty(s) && continue
             if isempty(head)
-                head = s; startswith(head, "#") || break        # prose cell → just its first line
+                head = s
+                startswith(head, "#") || break        # prose cell → just its first line
             elseif !startswith(s, "#")
-                body = s; break
+                body = s
+                break
             end
         end
         isempty(head) || print(io, "  ", _trunc(head, 80))
@@ -319,22 +365,39 @@ end
 #   cells="a,b"    → FULL source+output of just those cells.
 #   delta_since=t  → only the cells added/edited/removed since token `t` (else a full read).
 # Every read ends by handing back the CURRENT state token (for the next delta).
-function notebook_digest(nb::LiveNotebook; delta_since::AbstractString = "", cells::AbstractString = "")
+function notebook_digest(nb::LiveNotebook; delta_since::AbstractString="", cells::AbstractString="")
     lock(nb.lock) do
         allc = nb.report.cells
         order = String[c.id for c in allc]
         hashes = Dict{String,String}(c.id => _cell_state_hash(c) for c in allc)
         token = _read_token!(nb.id, order, hashes)
         io = IOBuffer()
-        print(io, "Notebook '", nb.id, "' — ", abspath(nb.path), " — ", length(allc),
-              " cell(s) — v", nb.version, " — state=", token, " — build-floor: ", floor_status(nb))
+        print(
+            io,
+            "Notebook '",
+            nb.id,
+            "' — ",
+            abspath(nb.path),
+            " — ",
+            length(allc),
+            " cell(s) — v",
+            nb.version,
+            " — state=",
+            token,
+            " — build-floor: ",
+            floor_status(nb),
+        )
         # explicit cell list → full content of those cells
         wanted = String[strip(x) for x in split(cells, r"[,\s]+") if !isempty(strip(x))]
         if !isempty(wanted)
             print(io, "\nFull content of ", length(wanted), " cell(s):")
             for id in wanted
                 i = _index_of(allc, id)
-                i === nothing ? print(io, "\n\n### id=", id, "  (no such cell)") : _print_cell!(io, allc[i])
+                if i === nothing
+                    print(io, "\n\n### id=", id, "  (no such cell)")
+                else
+                    _print_cell!(io, allc[i])
+                end
             end
             return String(take!(io))
         end
@@ -342,7 +405,8 @@ function notebook_digest(nb::LiveNotebook; delta_since::AbstractString = "", cel
         prev = isempty(delta_since) ? nothing : _read_token_get(nb.id, delta_since)
         if prev !== nothing
             porder, phash = prev
-            cset = Set(order); changed = 0
+            cset = Set(order)
+            changed = 0
             removed = String[id for id in porder if !(id in cset)]
             print(io, "\nChanges since ", delta_since, ":")
             for c in allc
@@ -354,13 +418,19 @@ function notebook_digest(nb::LiveNotebook; delta_since::AbstractString = "", cel
                 _print_cell!(io, c)
             end
             isempty(removed) || print(io, "\n\n[REMOVED] ", join(removed, ", "))
-            (changed == 0 && isempty(removed)) && print(io, "\n\n(no changes since ", delta_since, ")")
+            (changed == 0 && isempty(removed)) &&
+                print(io, "\n\n(no changes since ", delta_since, ")")
             return String(take!(io))
         end
         # default → compact outline
         isempty(delta_since) || print(io, "\n(delta token unknown/expired — full outline)")
-        print(io, "\nOUTLINE (one line per cell). Full source+output: slate_read(cells=\"id1,id2\"). ",
-              "Catch up after edits: slate_read(delta_since=\"", token, "\").")
+        print(
+            io,
+            "\nOUTLINE (one line per cell). Full source+output: slate_read(cells=\"id1,id2\"). ",
+            "Catch up after edits: slate_read(delta_since=\"",
+            token,
+            "\").",
+        )
         for c in allc
             _outline_cell!(io, c)
         end
@@ -377,24 +447,49 @@ _cell_exists(nb, id) = _index_of(nb.report.cells, id) !== nothing
 # Coarse relative age for a history timestamp (no Dates dep).
 function _ago(ts)
     s = max(0, round(Int, time() - Float64(ts)))
-    s < 60 ? "$(s)s ago" : s < 3600 ? "$(s ÷ 60)m ago" : s < 86400 ? "$(s ÷ 3600)h ago" : "$(s ÷ 86400)d ago"
+    if s < 60
+        "$(s)s ago"
+    elseif s < 3600
+        "$(s ÷ 60)m ago"
+    elseif s < 86400
+        "$(s ÷ 3600)h ago"
+    else
+        "$(s ÷ 86400)d ago"
+    end
 end
 
 # Per-cell edit history from the time machine: each recorded version where THIS cell's source
 # changed, newest first (version / age / origin / diff-label). Cheap — the per-entry delta IS
 # the per-cell change index (an entry lists the cell only when it changed), so no full-source
 # retrieval. `[]` if history is unavailable.
-function _cell_history(path::AbstractString, cellid::AbstractString; limit::Int = 12)
-    es = try; SlateHistory.entries(path); catch; return String[]; end
-    out = String[]; present = false
+function _cell_history(path::AbstractString, cellid::AbstractString; limit::Int=12)
+    es = try
+        SlateHistory.entries(path)
+    catch
+        return String[]
+    end
+    out = String[]
+    present = false
     for e in es
         touched = any(cd -> string(get(cd, "id", "")) == cellid, get(e, "chg", Any[]))
         gone = !touched && any(id -> string(id) == cellid, get(e, "del", Any[]))
         (touched || gone) || continue
         status = gone ? "absent" : (present ? "edited" : "created")
-        lbl = string(get(e, "label", "")); src = string(get(e, "source", ""))
-        push!(out, string("v", get(e, "seq", "?"), "  ", _ago(get(e, "ts", time())), "  ", status,
-                          isempty(src) ? "" : "  [$src]", isempty(lbl) ? "" : "  ($lbl)"))
+        lbl = string(get(e, "label", ""))
+        src = string(get(e, "source", ""))
+        push!(
+            out,
+            string(
+                "v",
+                get(e, "seq", "?"),
+                "  ",
+                _ago(get(e, "ts", time())),
+                "  ",
+                status,
+                isempty(src) ? "" : "  [$src]",
+                isempty(lbl) ? "" : "  ($lbl)",
+            ),
+        )
         present = !gone
     end
     return first(reverse(out), limit)
@@ -415,17 +510,35 @@ function cell_inspect(nb::LiveNotebook, cellid::AbstractString)
         c = nb.report.cells[idx]
         io = IOBuffer()
         kind = c.kind == MARKDOWN ? "md" : "code"
-        println(io, "Cell '", c.id, "' in '", nb.id, "' — ", kind, ", ", lowercase(string(c.state)),
-                " — position ", idx, "/", length(nb.report.cells), " — v", nb.version)
+        println(
+            io,
+            "Cell '",
+            c.id,
+            "' in '",
+            nb.id,
+            "' — ",
+            kind,
+            ", ",
+            lowercase(string(c.state)),
+            " — position ",
+            idx,
+            "/",
+            length(nb.report.cells),
+            " — v",
+            nb.version,
+        )
         if c.kind == CODE
-            isempty(c.reads)  || println(io, "reads:    ", join(sort(string.(collect(c.reads))), ", "))
+            isempty(c.reads) ||
+                println(io, "reads:    ", join(sort(string.(collect(c.reads))), ", "))
             let defs = cell_definitions(c)
-                isempty(defs)      || println(io, "writes:   ", join(sort(string.(collect(defs))), ", "))
+                isempty(defs) || println(io, "writes:   ", join(sort(string.(collect(defs))), ", "))
             end
-            isempty(c.mutates) || println(io, "mutates:  ", join(sort(string.(collect(c.mutates))), ", "))
-            isempty(c.deps)   || println(io, "deps:     ", join(sort(collect(c.deps)), ", "))
+            isempty(c.mutates) ||
+                println(io, "mutates:  ", join(sort(string.(collect(c.mutates))), ", "))
+            isempty(c.deps) || println(io, "deps:     ", join(sort(collect(c.deps)), ", "))
             o = c.output
-            (o !== nothing && o.duration_ms > 0) && println(io, "duration: ", round(o.duration_ms; digits = 2), " ms")
+            (o !== nothing && o.duration_ms > 0) &&
+                println(io, "duration: ", round(o.duration_ms; digits=2), " ms")
         end
         isempty(c.flags) || println(io, "flags:    ", join(sort(string.(collect(c.flags))), ", "))
         println(io, "\n--- source ---\n", rstrip(c.source))
@@ -441,12 +554,13 @@ function cell_inspect(nb::LiveNotebook, cellid::AbstractString)
     cap === nothing || (text *= _format_live_capture(cap))
     # Point the agent at the image tool whenever the cell has a viewable figure — a native ECharts
     # canvas / CairoMakie raster, or an html2canvas fill for a figureless cell (all via cell_image).
-    cell_image(nb, cellid) === nothing || (text *= "\n(this cell renders a figure — see it with slate.view)")
+    cell_image(nb, cellid) === nothing ||
+        (text *= "\n(this cell renders a figure — see it with slate.view)")
     return text
 end
 function _result_of(nb, id)
     i = _index_of(nb.report.cells, id)
-    i === nothing ? "(cell $id not found)" : _cell_result_text(nb.report.cells[i])
+    return i === nothing ? "(cell $id not found)" : _cell_result_text(nb.report.cells[i])
 end
 
 """
@@ -467,34 +581,55 @@ options for parity with the low-level worker eval.
 const _SCRATCH_MAX = 24
 const _SCRATCH_CELL_SEQ = Threads.Atomic{Int}(0)
 _scratch_id() = "scratch:" * string(Threads.atomic_add!(_SCRATCH_CELL_SEQ, 1) + 1)
-_broadcast_scratch(nb::LiveNotebook, cell::Cell) =
-    (try; _broadcast(nb, "scratch:" * JSON.json(cell_json(cell))); catch; end; nothing)
+function _broadcast_scratch(nb::LiveNotebook, cell::Cell)
+    return (
+        try
+            _broadcast(nb, "scratch:" * JSON.json(cell_json(cell)))
+        catch
+        end;
+        nothing
+    )
+end
 function _push_scratch!(nb::LiveNotebook, cell::Cell)
     lock(nb.lock) do
         push!(nb.scratch, cell)
-        length(nb.scratch) > _SCRATCH_MAX && deleteat!(nb.scratch, 1:(length(nb.scratch) - _SCRATCH_MAX))
+        return length(nb.scratch) > _SCRATCH_MAX &&
+               deleteat!(nb.scratch, 1:(length(nb.scratch) - _SCRATCH_MAX))
     end
     _broadcast_scratch(nb, cell)
     return cell
 end
 "Empty the notebook's scratchpad and tell the browser to clear its panel."
 function clear_scratch!(nb::LiveNotebook)
-    lock(nb.lock) do; empty!(nb.scratch); end
-    try; _broadcast(nb, "scratchclear:"); catch; end
+    lock(nb.lock) do ;
+        return empty!(nb.scratch)
+    end
+    try
+        _broadcast(nb, "scratchclear:")
+    catch
+    end
     return nothing
 end
 
-function agent_scratch_eval!(nb::LiveNotebook, source::AbstractString;
-                             ephemeral::Bool = false, memo_key::AbstractString = "",
-                             memo_names = String[], memo_threshold::Real = 0.0)
+function agent_scratch_eval!(
+    nb::LiveNotebook,
+    source::AbstractString;
+    ephemeral::Bool=false,
+    memo_key::AbstractString="",
+    memo_names=String[],
+    memo_threshold::Real=0.0,
+)
     src = ephemeral ? "let\n" * String(source) * "\nend" : String(source)
-    memo = isempty(memo_key) ? nothing :
-        (; key = String(memo_key), names = collect(String, memo_names), threshold = Float64(memo_threshold))
+    memo = if isempty(memo_key)
+        nothing
+    else
+        (; key=String(memo_key), names=collect(String, memo_names), threshold=Float64(memo_threshold))
+    end
     cell = Cell(_scratch_id(), CODE, String(source))   # display the ORIGINAL source, not the let-wrap
     ReportEngine.mark_running!(cell)
     _push_scratch!(nb, cell)                            # surface it immediately (running) in the panel
     out = lock(_eval_mutex(nb)) do
-        ReportEngine.eval_capture(nb.kernel, nb.report, src, "scratch", memo)
+        return ReportEngine.eval_capture(nb.kernel, nb.report, src, "scratch", memo)
     end
     ReportEngine.mark_result!(cell, out)
     _broadcast_scratch(nb, cell)                        # push the finished cell (result / error)
@@ -531,16 +666,27 @@ Non-blocking scratch eval. Runs `agent_scratch_eval!` on a background task and r
 jobid=<id>, text=<hint>)`, the eval continuing on the worker (poll `slate.check_eval`). The tool
 call thus never blocks past `grace`, so it can't hit the session-tool timeout.
 """
-function agent_scratch_eval_bg!(nb::LiveNotebook, source::AbstractString;
-                                ephemeral::Bool = false, grace::Real = _scratch_grace(),
-                                memo_key::AbstractString = "", memo_names = String[],
-                                memo_threshold::Real = 0.0)
+function agent_scratch_eval_bg!(
+    nb::LiveNotebook,
+    source::AbstractString;
+    ephemeral::Bool=false,
+    grace::Real=_scratch_grace(),
+    memo_key::AbstractString="",
+    memo_names=String[],
+    memo_threshold::Real=0.0,
+)
     resultref = Ref{Union{Nothing,String}}(nothing)
     doneref = Ref(false)
     task = @async begin
         r = try
-            agent_scratch_eval!(nb, source; ephemeral = ephemeral, memo_key = memo_key,
-                                memo_names = memo_names, memo_threshold = memo_threshold)
+            agent_scratch_eval!(
+                nb,
+                source;
+                ephemeral=ephemeral,
+                memo_key=memo_key,
+                memo_names=memo_names,
+                memo_threshold=memo_threshold,
+            )
         catch e
             "Scratch eval errored: " * sprint(showerror, e)
         end
@@ -550,24 +696,32 @@ function agent_scratch_eval_bg!(nb::LiveNotebook, source::AbstractString;
     end
     jid = _new_scratch_id()
     lock(_SCRATCH_LOCK) do
-        _SCRATCH_JOBS[jid] = ScratchJob(jid, nb.id, time(), task, resultref, doneref)
+        return _SCRATCH_JOBS[jid] = ScratchJob(jid, nb.id, time(), task, resultref, doneref)
     end
-    if timedwait(() -> doneref[], Float64(grace); pollint = 0.1) === :ok
-        lock(_SCRATCH_LOCK) do; delete!(_SCRATCH_JOBS, jid); end
-        return (; done = true, jobid = "", text = something(resultref[], "(no result)"))
+    if timedwait(() -> doneref[], Float64(grace); pollint=0.1) === :ok
+        lock(_SCRATCH_LOCK) do ;
+            return delete!(_SCRATCH_JOBS, jid)
+        end
+        return (; done=true, jobid="", text=something(resultref[], "(no result)"))
     end
-    hint = "⏳ Still running after $(round(Int, grace))s — promoted to background job $jid. Poll it with " *
-           "slate.check_eval(job=\"$jid\"). The eval keeps computing on the worker; the notebook's cell " *
-           "runs stay paused until it finishes."
-    return (; done = false, jobid = jid, text = hint)
+    hint =
+        "⏳ Still running after $(round(Int, grace))s — promoted to background job $jid. Poll it with " *
+        "slate.check_eval(job=\"$jid\"). The eval keeps computing on the worker; the notebook's cell " *
+        "runs stay paused until it finishes."
+    return (; done=false, jobid=jid, text=hint)
 end
 
 "Poll a background scratch job: its result if finished (and forget it), else a still-running note."
 function scratch_check(jobid::AbstractString)
-    job = lock(_SCRATCH_LOCK) do; get(_SCRATCH_JOBS, String(jobid), nothing); end
-    job === nothing && return "No such scratch job '$jobid' — it already finished and was collected, or never existed."
+    job = lock(_SCRATCH_LOCK) do ;
+        return get(_SCRATCH_JOBS, String(jobid), nothing)
+    end
+    job === nothing &&
+        return "No such scratch job '$jobid' — it already finished and was collected, or never existed."
     if job.done[]
-        lock(_SCRATCH_LOCK) do; delete!(_SCRATCH_JOBS, job.id); end
+        lock(_SCRATCH_LOCK) do ;
+            return delete!(_SCRATCH_JOBS, job.id)
+        end
         return something(job.result[], "(no result)")
     end
     return "⏳ Scratch job $jobid still running ($(round(Int, time() - job.started))s elapsed). Poll again with slate.check_eval."
@@ -578,22 +732,29 @@ return id + result. One file write (build the cell with its source up front) so 
 async file-watcher can't race the intermediate empty-cell state.
 `run=false` lands the cell STALE and returns immediately without evaluating — for composing
 several cells before one deliberate `run` (see `agent_edit_cell!`)."
-function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
-                         after::AbstractString = "", kind::AbstractString = "code",
-                         id::AbstractString = "", tags::AbstractString = "",
-                         caller::AbstractString = "", expected_version::Int = -1,
-                         run::Bool = true)
-    rej = nothing; errmsg = nothing
+function agent_add_cell!(
+    nb::LiveNotebook,
+    source::AbstractString;
+    after::AbstractString="",
+    kind::AbstractString="code",
+    id::AbstractString="",
+    tags::AbstractString="",
+    caller::AbstractString="",
+    expected_version::Int=-1,
+    run::Bool=true,
+)
+    rej = nothing
+    errmsg = nothing
     cid = lock(nb.lock) do
-        rej = _guard_commit(nb; caller = caller, expected_version = expected_version)
+        rej = _guard_commit(nb; caller=caller, expected_version=expected_version)
         rej === nothing || return ""
         cells = nb.report.cells
         # An explicit id is sanitized to `#%%`-header-safe chars and MUST be unique; else auto-generate.
         nid = ""
         if !isempty(strip(String(id)))
             nid = replace(strip(String(id)), r"[^A-Za-z0-9_]+" => "_")
-            isempty(nid)                      && (errmsg = "id cannot be empty"; return "")
-            any(c -> c.id == nid, cells)      && (errmsg = "id '$(nid)' is already in use"; return "")
+            isempty(nid) && (errmsg="id cannot be empty"; return "")
+            any(c -> c.id == nid, cells) && (errmsg="id '$(nid)' is already in use"; return "")
         else
             nid = _gen_id(nb.report)
         end
@@ -604,16 +765,17 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
         insert!(cells, i + 1, cell)
         # announce=true → push the new cell to the browser BEFORE eval, so a long-running
         # added cell is visible (stale) immediately instead of only when its eval finishes.
-        _commit_structure!(nb, i + 1; announce = true, run = run)
+        _commit_structure!(nb, i + 1; announce=true, run=run)
         return cell.id
     end
     errmsg === nothing || return "⛔ $errmsg"
     rej === nothing || return rej
     if !run
-        _renew_floor!(nb, caller); _agent_push!(nb)
+        _renew_floor!(nb, caller)
+        _agent_push!(nb)
         return "added id=$cid (stale — not run)"
     end
-    _eval!(nb; wait_for = cid)           # wait OUTSIDE the lock — the agent wants the cell's result
+    _eval!(nb; wait_for=cid)           # wait OUTSIDE the lock — the agent wants the cell's result
     _renew_floor!(nb, caller)
     _agent_push!(nb)
     return "added id=$cid →\n$(_result_of(nb, cid))"
@@ -627,41 +789,55 @@ binding across ten cells, repointing cache paths — where running after every e
 cascades (and, for an agent driving this over a transport with an idle timeout, N chances to be cut
 off mid-cascade). Make all the edits with `run=false`, then reconcile once with `agent_run!(nb)`.
 It is also the safe way to edit a notebook whose upstream cells are mid-computation."""
-function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString;
-                          tags::AbstractString = "", caller::AbstractString = "", expected_version::Int = -1,
-                          run::Bool = true)
+function agent_edit_cell!(
+    nb::LiveNotebook,
+    id::AbstractString,
+    source::AbstractString;
+    tags::AbstractString="",
+    caller::AbstractString="",
+    expected_version::Int=-1,
+    run::Bool=true,
+)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     rej = lock(nb.lock) do
-        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
+        r = _guard_commit(nb; caller=caller, expected_version=expected_version)
         r === nothing || return r
         # Tags FIRST: the edit below marks the cell stale and its eval can begin immediately, so
         # tags applied after it race the run — a freshly `cache`-tagged cell would evaluate once
         # more under its OLD flags (seen live: the tagged run didn't persist). Empty = leave
         # existing tags untouched (so an ordinary source edit never silently wipes tags).
         isempty(strip(String(tags))) || set_cell_tags!(nb, id, tags)
-        edit_cell!(nb, id, source; announce = true, run = run)   # show the edited source before its eval finishes
+        edit_cell!(nb, id, source; announce=true, run=run)   # show the edited source before its eval finishes
         return nothing
     end
     rej === nothing || return rej
     if !run
-        _renew_floor!(nb, caller); _agent_push!(nb)
+        _renew_floor!(nb, caller)
+        _agent_push!(nb)
         return "edited id=$id (stale — not run)"
     end
-    _eval!(nb; wait_for = id)            # wait OUTSIDE the lock — the agent wants the cell's result
+    _eval!(nb; wait_for=id)            # wait OUTSIDE the lock — the agent wants the cell's result
     _renew_floor!(nb, caller)
     _agent_push!(nb)
     return "edited id=$id →\n$(_result_of(nb, id))"
 end
 
 "Rename a cell's id (its label). Ids must be unique + `#%%`-header-safe; returns a status string."
-function agent_rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::AbstractString;
-                            caller::AbstractString = "", expected_version::Int = -1)
+function agent_rename_cell!(
+    nb::LiveNotebook,
+    oldid::AbstractString,
+    newid::AbstractString;
+    caller::AbstractString="",
+    expected_version::Int=-1,
+)
     _cell_exists(nb, oldid) || return "(no cell id=$oldid)"
-    rej = nothing; ok = false; msg = ""
+    rej = nothing
+    ok = false
+    msg = ""
     lock(nb.lock) do
-        rej = _guard_commit(nb; caller = caller, expected_version = expected_version)
-        rej === nothing || return
-        ok, msg = rename_cell!(nb, oldid, newid)
+        rej = _guard_commit(nb; caller=caller, expected_version=expected_version)
+        rej === nothing || return nothing
+        return ok, msg = rename_cell!(nb, oldid, newid)
     end
     rej === nothing || return rej
     ok || return "⛔ rename failed: $msg"
@@ -671,10 +847,11 @@ function agent_rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::Abst
 end
 
 "Run one cell (or recompute all stale if `id` empty); return the result(s)."
-function agent_run!(nb::LiveNotebook, id::AbstractString = "";
-                    caller::AbstractString = "", expected_version::Int = -1)
+function agent_run!(
+    nb::LiveNotebook, id::AbstractString=""; caller::AbstractString="", expected_version::Int=-1
+)
     rej = lock(nb.lock) do
-        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
+        r = _guard_commit(nb; caller=caller, expected_version=expected_version)
         r === nothing || return r
         # A specific cell → force it STALE, exactly like the browser play button
         # (edit_cell! force=true). Otherwise eval_stale! only re-runs cells our
@@ -694,7 +871,7 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
                     c = nb.report.cells[j]
                     # A locked dependent stays frozen against this cascade too — only its OWN
                     # ▶ (did == id) may re-run it, so the played cell itself bypasses the guard.
-                    ok = did == id ? (c.state = STALE; true) : ReportEngine.restale!(c)
+                    ok = did == id ? (c.state=STALE; true) : ReportEngine.restale!(c)
                     ok || continue
                     push!(frc, String(did))
                 end
@@ -704,19 +881,23 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
     end
     rej === nothing || return rej
     # Eval OUTSIDE the lock via the async runner, but WAIT (the agent wants the result back).
-    isempty(id) ? _drain!(nb) : _eval!(nb; wait_for = id)
+    isempty(id) ? _drain!(nb) : _eval!(nb; wait_for=id)
     _renew_floor!(nb, caller)
     _agent_push!(nb)
-    isempty(id) ? "ran stale cells; notebook is up to date" :
+    return if isempty(id)
+        "ran stale cells; notebook is up to date"
+    else
         (_cell_exists(nb, id) ? "id=$id →\n$(_result_of(nb, id))" : "(no cell id=$id)")
+    end
 end
 
 "Delete a cell."
-function agent_delete_cell!(nb::LiveNotebook, id::AbstractString;
-                            caller::AbstractString = "", expected_version::Int = -1)
+function agent_delete_cell!(
+    nb::LiveNotebook, id::AbstractString; caller::AbstractString="", expected_version::Int=-1
+)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     rej = lock(nb.lock) do
-        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
+        r = _guard_commit(nb; caller=caller, expected_version=expected_version)
         r === nothing || return r
         delete_cell!(nb, id)
         return nothing
@@ -731,8 +912,9 @@ end
 # run of cells makes one call, not one per id. `ids` is any iterable of cell ids; ids that don't
 # exist are reported, not fatal (the rest still delete). Mirrors `agent_delete_cell!` for the
 # build-floor guard / floor renewal / agent push, folding the whole batch into one commit.
-function agent_delete_cells!(nb::LiveNotebook, ids;
-                             caller::AbstractString = "", expected_version::Int = -1)
+function agent_delete_cells!(
+    nb::LiveNotebook, ids; caller::AbstractString="", expected_version::Int=-1
+)
     want = String[strip(String(i)) for i in ids]
     want = String[i for i in want if !isempty(i)]
     isempty(want) && return "(no cell ids given)"
@@ -740,7 +922,7 @@ function agent_delete_cells!(nb::LiveNotebook, ids;
     absent = String[id for id in want if !_cell_exists(nb, id)]
     isempty(present) && return "(no such cell$(length(want) == 1 ? "" : "s"): $(join(want, ", ")))"
     rej = lock(nb.lock) do
-        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
+        r = _guard_commit(nb; caller=caller, expected_version=expected_version)
         r === nothing || return r
         delete_cells!(nb, present)
         return nothing
@@ -767,8 +949,11 @@ function find_live(h, key::AbstractString)
 end
 
 # Split a cell into two at the editor cursor (frontend sends the before/after text).
-function split_cell!(nb::LiveNotebook, id::AbstractString, before::AbstractString, after::AbstractString)
-    i = _index_of(nb.report.cells, id); i === nothing && return nb
+function split_cell!(
+    nb::LiveNotebook, id::AbstractString, before::AbstractString, after::AbstractString
+)
+    i = _index_of(nb.report.cells, id)
+    i === nothing && return nb
     _snapshot!(nb)
     cells = nb.report.cells
     cells[i].source = String(before)
@@ -802,17 +987,18 @@ function rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::AbstractSt
         _snapshot!(nb)
         nb.report.cells[i].id = String(nid)
         build_dependencies!(nb.report)
-        _persist!(nb)
+        return _persist!(nb)
     end
     return (true, "")
 end
 
 function delete_cell!(nb::LiveNotebook, id::AbstractString)
-    i = _index_of(nb.report.cells, id); i === nothing && return nb
-    _snapshot!(nb; label = "delete $id")
+    i = _index_of(nb.report.cells, id)
+    i === nothing && return nb
+    _snapshot!(nb; label="delete $id")
     _preempt_superseded!(nb, (nb.report.cells[i],))   # deleting a RUNNING cell orphans its eval
     deleteat!(nb.report.cells, i)
-    _commit_reorder!(nb)   # recomputes only the deleted cell's (now-broken) dependents, if any
+    return _commit_reorder!(nb)   # recomputes only the deleted cell's (now-broken) dependents, if any
 end
 
 _n_cells(n) = "$(n) cell$(n == 1 ? "" : "s")"
@@ -822,12 +1008,12 @@ _op_label(verb, ids) = length(ids) == 1 ? "$verb $(first(ids))" : "$verb $(_n_ce
 # Delete several cells atomically (multi-select dd / cut) — one undo step. Restales from the
 # first removed position so downstream cells that depended on them recompute. `verb` labels the
 # undo entry ("cut"/"delete") so the UI can say "Undo cut 2 cells" / "Undo delete a1b2c3".
-function delete_cells!(nb::LiveNotebook, ids; verb::AbstractString = "delete")
+function delete_cells!(nb::LiveNotebook, ids; verb::AbstractString="delete")
     cells = nb.report.cells
     idset = Set(String(i) for i in ids)
     idxs = sort!([i for (i, c) in enumerate(cells) if c.id in idset])
     isempty(idxs) && return nb
-    _snapshot!(nb; label = _op_label(verb, [cells[i].id for i in idxs]))
+    _snapshot!(nb; label=_op_label(verb, [cells[i].id for i in idxs]))
     _preempt_superseded!(nb, [cells[i] for i in idxs])   # deleting RUNNING cells orphans their evals
     for i in Iterators.reverse(idxs)
         deleteat!(cells, i)
@@ -844,14 +1030,14 @@ function paste_cells!(nb::LiveNotebook, after_id::AbstractString, specs)
     # A single paste names the new cell in its undo label ("paste a1b2c3"); generate that id up
     # front (one id → no collision) and reuse it. Multi-cell paste labels as "paste N cells".
     single_id = n == 1 ? _gen_id(nb.report) : ""
-    _snapshot!(nb; label = n == 1 ? "paste $single_id" : "paste $(_n_cells(n))")
+    _snapshot!(nb; label=n == 1 ? "paste $single_id" : "paste $(_n_cells(n))")
     cells = nb.report.cells
     i = isempty(after_id) ? length(cells) : something(_index_of(cells, after_id), length(cells))
     pos = i
     for spec in specs
         kind = (get(spec, "kind", "code") == "md") ? MARKDOWN : CODE
-        src  = String(get(spec, "source", ""))
-        nid  = n == 1 ? single_id : _gen_id(nb.report)   # multi: _gen_id sees prior inserts → unique
+        src = String(get(spec, "source", ""))
+        nid = n == 1 ? single_id : _gen_id(nb.report)   # multi: _gen_id sees prior inserts → unique
         pos += 1
         insert!(cells, pos, Cell(nid, kind, src))
     end
@@ -861,24 +1047,29 @@ end
 
 function move_cell!(nb::LiveNotebook, id::AbstractString, dir::AbstractString)
     cells = nb.report.cells
-    i = _index_of(cells, id); i === nothing && return nb
+    i = _index_of(cells, id)
+    i === nothing && return nb
     j = dir == "up" ? i - 1 : i + 1
     (j < 1 || j > length(cells)) && return nb
     _snapshot!(nb)
     cells[i], cells[j] = cells[j], cells[i]
-    _commit_reorder!(nb)                             # reorder doesn't change reactive values
+    return _commit_reorder!(nb)                             # reorder doesn't change reactive values
 end
 
 # Move `id` to just before/after `target_id` (drag-and-drop).
-function move_cell_rel!(nb::LiveNotebook, id::AbstractString, target_id::AbstractString, before::Bool)
+function move_cell_rel!(
+    nb::LiveNotebook, id::AbstractString, target_id::AbstractString, before::Bool
+)
     cells = nb.report.cells
-    i = _index_of(cells, id); i === nothing && return nb
+    i = _index_of(cells, id)
+    i === nothing && return nb
     _snapshot!(nb)
-    c = cells[i]; deleteat!(cells, i)
+    c = cells[i]
+    deleteat!(cells, i)
     j = _index_of(cells, target_id)
     p = j === nothing ? length(cells) + 1 : (before ? j : j + 1)
     insert!(cells, p, c)
-    _commit_reorder!(nb)                             # reorder doesn't change reactive values
+    return _commit_reorder!(nb)                             # reorder doesn't change reactive values
 end
 
 # Set the `controls=` layout of one or more cells (drag-to-host: add / move /
@@ -890,11 +1081,12 @@ function set_controls_map!(nb::LiveNotebook, map)
     lock(nb.lock) do                     # serialize the mutation + persist vs the async runner
         _snapshot!(nb)
         for (id, cols) in map
-            i = _index_of(nb.report.cells, id); i === nothing && continue
+            i = _index_of(nb.report.cells, id)
+            i === nothing && continue
             cleaned = Vector{String}[String[String(n) for n in col] for col in cols]
             nb.report.cells[i].controls = filter(!isempty, cleaned)
         end
-        _persist!(nb)
+        return _persist!(nb)
     end
     return nb
 end
@@ -907,22 +1099,31 @@ Presentation only (rewrites the `.jl`, no re-eval). `controls` uses the header l
 `a,b,c` = a row of single controls; `[a,b],c` = a stacked column `[a,b]` then a column `c`; `""`
 clears the strip. Names must be `@bind` variables defined somewhere in the notebook (validated,
 so a typo is rejected with the available names rather than silently dropped)."""
-function agent_surface_controls!(nb::LiveNotebook, id::AbstractString, controls::AbstractString;
-                                 caller::AbstractString = "")
+function agent_surface_controls!(
+    nb::LiveNotebook, id::AbstractString, controls::AbstractString; caller::AbstractString=""
+)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     cols = ReportEngine._parse_controls(String(controls))
     known = Set(string(b.name) for c in nb.report.cells for b in c.binds)
     unknown = unique(String[n for col in cols for n in col if !(n in known)])
     if !isempty(unknown)
         avail = sort(collect(known))
-        return "⛔ unknown @bind control(s): $(join(unknown, ", ")). " *
-               (isempty(avail) ? "This notebook defines no @bind widgets yet." : "Available: $(join(avail, ", ")).")
+        return "⛔ unknown @bind control(s): $(join(unknown, ", ")). " * (
+            if isempty(avail)
+                "This notebook defines no @bind widgets yet."
+            else
+                "Available: $(join(avail, ", "))."
+            end
+        )
     end
     set_controls_map!(nb, Dict{String,Any}(String(id) => cols))
     _renew_floor!(nb, caller)
-    total = sum(length, cols; init = 0)
-    return total == 0 ? "cleared the control strip on id=$id" :
+    total = sum(length, cols; init=0)
+    return if total == 0
+        "cleared the control strip on id=$id"
+    else
         "surfaced $total control(s) on id=$id: " * join((join(col, "+") for col in cols), ", ")
+    end
 end
 
 # ── Cell behavior flags ──────────────────────────────────────────────────────────────────────────
@@ -938,7 +1139,7 @@ flag_reruns(flag::Symbol) = flag in _EVAL_FLAGS
 # code-only. Returns true when the flag should be SKIPPED for this kind.
 function _flag_skips(flag::Symbol, kind::CellKind)
     flag === :collapsed && return false
-    flag === :hidecode  && return !(kind == CODE || kind == WEB)
+    flag === :hidecode && return !(kind == CODE || kind == WEB)
     return kind != CODE
 end
 
@@ -949,16 +1150,27 @@ end
 # A human history label for a flag toggle — the source-diff can't derive it (flags aren't cell source):
 # "hid code · daily_fig", "showed code (all cells)", "collapsed · 3 cells", …
 function _flag_history_label(flag::Symbol, value::Bool, changed::Vector{String}, ids)
-    verb = flag === :hidecode  ? (value ? "hid code"  : "showed code") :
-           flag === :collapsed ? (value ? "collapsed" : "expanded")    :
-           flag === :trace     ? (value ? "trace on"  : "trace off")   :
-           string(value ? "set " : "cleared ", flag)
-    ids === nothing      ? string(verb, " (all cells)") :
-    length(changed) == 1 ? string(verb, " · ", changed[1]) :
-                           string(verb, " · ", length(changed), " cells")
+    verb = if flag === :hidecode
+        (value ? "hid code" : "showed code")
+    elseif flag === :collapsed
+        (value ? "collapsed" : "expanded")
+    elseif flag === :trace
+        (value ? "trace on" : "trace off")
+    else
+        string(value ? "set " : "cleared ", flag)
+    end
+    if ids === nothing
+        string(verb, " (all cells)")
+    elseif length(changed) == 1
+        string(verb, " · ", changed[1])
+    else
+        string(verb, " · ", length(changed), " cells")
+    end
 end
 
-function set_cell_flag!(nb::LiveNotebook, flag::Symbol, value::Bool; ids::Union{Nothing,AbstractVector} = nothing)
+function set_cell_flag!(
+    nb::LiveNotebook, flag::Symbol, value::Bool; ids::Union{Nothing,AbstractVector}=nothing
+)
     idset = ids === nothing ? nothing : Set(String(x) for x in ids)
     restale = flag_reruns(flag)
     return lock(nb.lock) do
@@ -972,7 +1184,7 @@ function set_cell_flag!(nb::LiveNotebook, flag::Symbol, value::Bool; ids::Union{
             push!(changed, c.id)
         end
         isempty(changed) && return false
-        _persist!(nb; label = _flag_history_label(flag, value, changed, ids))
+        _persist!(nb; label=_flag_history_label(flag, value, changed, ids))
         return true
     end
 end
@@ -989,7 +1201,8 @@ function _parse_tag_symbols(tags)
     want = Set{Symbol}()
     clean(s) = replace(s, r"[^A-Za-z0-9_]+" => "_")
     for t in items
-        s = strip(String(t)); isempty(s) && continue
+        s = strip(String(t))
+        isempty(s) && continue
         m = match(r"^([A-Za-z][A-Za-z0-9_]*)=(.*)$", s)
         if m !== nothing
             vals = [clean(v) for v in eachsplit(m.captures[2], ',') if !isempty(v)]
@@ -1010,7 +1223,8 @@ end
 function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
     unpin = nothing   # (kernel, oldkey) — an unlock's memo_pin! release, done OUTSIDE the lock (a gate RPC)
     lock(nb.lock) do
-        i = _index_of(nb.report.cells, id); i === nothing && return nb
+        i = _index_of(nb.report.cells, id)
+        i === nothing && return nb
         c = nb.report.cells[i]
         had_trace = :trace in c.flags
         had_cache = :cache in c.flags
@@ -1020,17 +1234,20 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
         had_mut = sort!(ReportEngine._manual_mutates(c.flags))
         want = _parse_tag_symbols(tags)
         keep = Set(f for f in c.flags if f === :opaque)        # re-derived each eval — keep it
-        empty!(c.flags); union!(c.flags, keep); union!(c.flags, want)
+        empty!(c.flags)
+        union!(c.flags, keep)
+        union!(c.flags, want)
         (had_trace != (:trace in c.flags)) && (c.state = STALE)
         # Flipping cache/nocache changes what the NEXT eval persists — restale so the tag takes
         # effect on the next auto-run instead of silently waiting for an unrelated source edit
         # (seen live: a freshly cache-tagged cell stayed fresh and its value never persisted).
-        (had_cache != (:cache in c.flags) || had_nocache != (:nocache in c.flags)) && (c.state = STALE)
+        (had_cache != (:cache in c.flags) || had_nocache != (:nocache in c.flags)) &&
+            (c.state = STALE)
         # A `needs=` or `mutates=` change rewires the graph: rebuild deps now (the DAG view reads
         # them from the next state pull, not the next run) and restale the cell so it re-runs under
         # the new ordering — its completion restales dependents through the ordinary reactive path.
         if had_needs != sort!(ReportEngine._manual_needs(c.flags)) ||
-           had_mut != sort!(ReportEngine._manual_mutates(c.flags))
+            had_mut != sort!(ReportEngine._manual_mutates(c.flags))
             build_dependencies!(nb.report)
             c.state = STALE
         end
@@ -1052,15 +1269,16 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
             ReportEngine._set_frozen_stamp!(c, "")   # no longer frozen → drop the freeze identity too
             isempty(old) || (unpin = (_region_route(nb, c)[1], old))
         end
-        _persist!(nb; label = "tags · $id")
+        return _persist!(nb; label="tags · $id")
     end
     unpin === nothing || ReportEngine.memo_pin!(unpin[1], nb.report, unpin[2], false)
     return nb
 end
 
-function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString; source = nothing)
+function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString; source=nothing)
     cells = nb.report.cells
-    i = _index_of(cells, id); i === nothing && return nb
+    i = _index_of(cells, id)
+    i === nothing && return nb
     _snapshot!(nb)
     old = cells[i]
     # Carry over the latest (possibly unsaved) editor text on the way through, so a convert never
@@ -1093,7 +1311,10 @@ function _body(req)
     isempty(s) && return Dict{String,Any}()
     # Tolerate malformed or non-object bodies: every handler does `get(body, key, …)`, so a bad
     # parse or a JSON array/scalar (`[1,2]`, `"x"`, `5`) must degrade to an empty dict, not 500.
-    v = try; JSON.parse(s); catch; nothing; end
+    v = try
+        JSON.parse(s)
+    catch
+        nothing
+    end
     return v isa AbstractDict ? v : Dict{String,Any}()
 end
-

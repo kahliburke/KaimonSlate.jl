@@ -7,7 +7,7 @@ const NS = KaimonSlate.NotebookServer
 
 @testset "agent cell ops" begin
     NS.SlateHistory._ROOT[] = mktempdir()
-    hub = NS.start_hub(; port = 8859)
+    hub = NS.start_hub(; port=8859)
     try
         nbp = tempname() * ".jl"
         write(nbp, "#%% md id=intro\n# T\n")
@@ -39,14 +39,14 @@ const NS = KaimonSlate.NotebookServer
             cid_r = match(r"id=(\w+)", NS.agent_add_cell!(nb, "z * 7"))[1]
             @test occursin("21", NS._result_of(nb, cid_r))
             # deferred edit: source is committed, nothing runs, the cell reports itself stale
-            r = NS.agent_edit_cell!(nb, cid_s, "z = 4"; run = false)
+            r = NS.agent_edit_cell!(nb, cid_s, "z = 4"; run=false)
             @test occursin("not run", r)
             sleep(0.2)
             src_of(id) = nb.report.cells[findfirst(c -> c.id == id, nb.report.cells)].source
             @test src_of(cid_s) == "z = 4"                                  # the edit landed …
             @test occursin("21", NS._result_of(nb, cid_r))                  # … but the old result stands
             # a deferred ADD likewise lands stale, with no result
-            ra = NS.agent_add_cell!(nb, "z * 100"; run = false)
+            ra = NS.agent_add_cell!(nb, "z * 100"; run=false)
             cid_a = match(r"id=(\w+)", ra)[1]
             @test occursin("not run", ra)
             sleep(0.2)
@@ -83,15 +83,15 @@ const NS = KaimonSlate.NotebookServer
         end
 
         @testset "add_cell with an explicit id; rename_cell" begin
-            r = NS.agent_add_cell!(nb, "1 + 1"; id = "my_sum")
+            r = NS.agent_add_cell!(nb, "1 + 1"; id="my_sum")
             @test occursin("id=my_sum", r)
             @test NS._cell_exists(nb, "my_sum")
             # a taken id errors (no cell added)
             n0 = length(nb.report.cells)
-            r2 = NS.agent_add_cell!(nb, "2"; id = "my_sum")
+            r2 = NS.agent_add_cell!(nb, "2"; id="my_sum")
             @test occursin("already in use", r2) && length(nb.report.cells) == n0
             # non-id characters fold to underscore
-            r3 = NS.agent_add_cell!(nb, "3"; id = "a b!c")
+            r3 = NS.agent_add_cell!(nb, "3"; id="a b!c")
             @test occursin("id=a_b_c", r3) && NS._cell_exists(nb, "a_b_c")
             # rename: success, collision, missing
             @test occursin("renamed my_sum → total", NS.agent_rename_cell!(nb, "my_sum", "total"))
@@ -101,23 +101,23 @@ const NS = KaimonSlate.NotebookServer
         end
 
         @testset "read modes: outline / cells / delta_since" begin
-            NS.agent_add_cell!(nb, "# " * repeat("Q", 4000) * "\n21 * 2"; id = "bigcell")  # large SOURCE, small result
+            NS.agent_add_cell!(nb, "# " * repeat("Q", 4000) * "\n21 * 2"; id="bigcell")  # large SOURCE, small result
             out = NS.notebook_digest(nb)                       # default → compact OUTLINE
             tok = match(r"state=(\w+)", out)[1]
             @test occursin("OUTLINE", out) && occursin("defines:", out)
             @test occursin("id=bigcell", out)
             @test !occursin("QQQQQ", out)                      # the big SOURCE is NOT dumped in the outline
             # cells="…" → FULL content of just those cells
-            full = NS.notebook_digest(nb; cells = "bigcell")
+            full = NS.notebook_digest(nb; cells="bigcell")
             @test occursin("QQQQQ", full) && occursin("### id=bigcell", full)
             # delta_since: no change → "(no changes)", then an add shows only it
-            @test occursin("no changes", NS.notebook_digest(nb; delta_since = tok))
-            NS.agent_add_cell!(nb, "7 + 7"; id = "delta_probe")
-            d = NS.notebook_digest(nb; delta_since = tok)
+            @test occursin("no changes", NS.notebook_digest(nb; delta_since=tok))
+            NS.agent_add_cell!(nb, "7 + 7"; id="delta_probe")
+            d = NS.notebook_digest(nb; delta_since=tok)
             @test occursin("[ADDED]", d) && occursin("id=delta_probe", d) && occursin("14", d)
             @test !occursin("id=bigcell", d)                   # unchanged cell omitted from the delta
             # an unknown token falls back to the outline
-            @test occursin("full outline", NS.notebook_digest(nb; delta_since = "deadbeef"))
+            @test occursin("full outline", NS.notebook_digest(nb; delta_since="deadbeef"))
         end
 
         @testset "find_live by id and path" begin
@@ -132,8 +132,10 @@ const NS = KaimonSlate.NotebookServer
             full = NS.slate_api_reference("all")
             @test occursin("echart", full) && occursin("@bind", full) && occursin("animate", full)
             @test occursin("playhead", full) && occursin("nocache", full)   # newest helpers present
-            @test occursin("@asset", full) && occursin("readfile", full) &&
-                  occursin("@use", full) && occursin("WebPage", full)       # front-end asset system present
+            @test occursin("@asset", full) &&
+                occursin("readfile", full) &&
+                occursin("@use", full) &&
+                occursin("WebPage", full)       # front-end asset system present
             one = NS.slate_api_reference("animate")
             @test occursin("animate", one) && !occursin("## Charts", one)     # filtered detail, not full ref
             @test occursin("No Slate API entry", NS.slate_api_reference("zzzznope"))
@@ -146,7 +148,7 @@ const NS = KaimonSlate.NotebookServer
             @test occursin("dataZoom", ec) && occursin("visualMap", ec)      # components documented
             @test occursin("candlestick", ec) && occursin("boxplot", ec)     # per-kind data shapes
             @test occursin("type=:log", NS.slate_api_reference("log axis")) ||    # searchable by concept
-                  occursin("echart", NS.slate_api_reference("log axis"))
+                occursin("echart", NS.slate_api_reference("log axis"))
             # @asset + the front-end asset system: documented in full AND teaching the non-obvious
             # bit — a LITERAL path is statically TRACKED (memo-invalidation + a file-watcher re-run),
             # while a computed path needs `readfile` (untracked). Agents get this from the reference.
@@ -155,18 +157,21 @@ const NS = KaimonSlate.NotebookServer
             @test occursin("track", lowercase(as)) && occursin("watch", lowercase(as))   # reactivity explained
             @test occursin("WebPage", as)                                    # cross-ref to the primary consumer
             @test occursin("readfile", NS.slate_api_reference("computed path")) ||    # searchable by concept
-                  occursin("@asset", NS.slate_api_reference("read a file"))
+                occursin("@asset", NS.slate_api_reference("read a file"))
             recs = NS.slate_api_records()
             @test !isempty(recs) && all(r -> r["module"] == "Slate", recs)
             @test any(r -> r["name"] == "@bind", recs) && any(r -> r["name"] == "animate", recs)
             # These records ARE what feeds `slate.search_docs` (module "Slate"), so every asset helper
             # must ride along — that's how they surface in search, not just the `slate.api` tool.
-            @test all(nm -> any(r -> r["name"] == nm, recs), ["@asset", "readfile", "@use", "WebPage"])
+            @test all(
+                nm -> any(r -> r["name"] == nm, recs), ["@asset", "readfile", "@use", "WebPage"]
+            )
             @test any(r -> r["name"] == "@asset" && occursin("track", lowercase(r["doc"])), recs)
             @test !isempty(NS.slate_api_version())
             # Drill-down / "Related" resolution: a Slate helper resolves from the registry (real doc),
             # NOT a live binding (which for a DSL constructor/macro yields "No documentation found").
-            @test NS.slate_api_entry("Checkbox") !== nothing && NS.slate_api_entry("nope_zzz") === nothing
+            @test NS.slate_api_entry("Checkbox") !== nothing &&
+                NS.slate_api_entry("nope_zzz") === nothing
             @test NS.slate_api_entry("bind") === NS.slate_api_entry("@bind")   # tolerant of a leading @
             h = NS.help_lookup(nb, "Checkbox")
             @test h["module"] == "Slate" && h["kind"] == "slate"
@@ -182,7 +187,8 @@ const NS = KaimonSlate.NotebookServer
             he = NS.help_lookup(nb, "yAxis.type")
             @test he["module"] == "ECharts" && he["kind"] == "echarts"
             @test occursin("log", lowercase(he["doc"])) && occursin("echart(", he["doc"])   # carries the DSL mapping
-            @test !isempty(NS.echarts_docs_version()) && NS.echarts_doc_entry("nope.zzz") === nothing
+            @test !isempty(NS.echarts_docs_version()) &&
+                NS.echarts_doc_entry("nope.zzz") === nothing
         end
 
         @testset "outline shows a cell's tags" begin
@@ -193,7 +199,9 @@ const NS = KaimonSlate.NotebookServer
         end
 
         @testset "table cells render as text for agents" begin
-            r = NS.agent_add_cell!(nb, "slate_table([(sym=\"AAPL\", px=42.0), (sym=\"MSFT\", px=13.5)])")
+            r = NS.agent_add_cell!(
+                nb, "slate_table([(sym=\"AAPL\", px=42.0), (sym=\"MSFT\", px=13.5)])"
+            )
             @test occursin("sym", r) && occursin("px", r)         # header
             @test occursin("AAPL", r) && occursin("42.0", r)      # data cells, not just "[rendered: table]"
             @test !occursin("[rendered: table]", r)
@@ -202,10 +210,10 @@ const NS = KaimonSlate.NotebookServer
         @testset "add_cell / edit_cell manage tags" begin
             _flags(id) = nb.report.cells[NS._index_of(nb.report.cells, id)].flags
             # add_cell applies tags (comma/space-separated) to the fresh cell
-            cid = match(r"id=(\w+)", NS.agent_add_cell!(nb, "2 + 2"; tags = "hidecode, wip"))[1]
+            cid = match(r"id=(\w+)", NS.agent_add_cell!(nb, "2 + 2"; tags="hidecode, wip"))[1]
             @test :hidecode in _flags(cid) && :wip in _flags(cid)
             # edit_cell with tags REPLACES them
-            NS.agent_edit_cell!(nb, cid, "2 + 3"; tags = "reviewed")
+            NS.agent_edit_cell!(nb, cid, "2 + 3"; tags="reviewed")
             @test :reviewed in _flags(cid) && !(:wip in _flags(cid)) && !(:hidecode in _flags(cid))
             # edit_cell WITHOUT tags leaves the existing tags untouched (no silent wipe)
             NS.agent_edit_cell!(nb, cid, "2 + 4")
@@ -240,7 +248,7 @@ const NS = KaimonSlate.NotebookServer
             NS.agent_scratch_eval!(nb, "scratch_probe = 123")
             @test occursin("123", NS.agent_scratch_eval!(nb, "scratch_probe"))
             # ephemeral wraps in a `let` child scope → the binding is discarded
-            NS.agent_scratch_eval!(nb, "ephemeral_probe = 999"; ephemeral = true)
+            NS.agent_scratch_eval!(nb, "ephemeral_probe = 999"; ephemeral=true)
             @test occursin("UndefVarError", NS.agent_scratch_eval!(nb, "ephemeral_probe"))
             # errors are CAPTURED, not thrown; still no cells added
             @test occursin("ERROR", NS.agent_scratch_eval!(nb, "sqrt(-1.0)"))
@@ -248,8 +256,10 @@ const NS = KaimonSlate.NotebookServer
         end
 
         @testset "surface @bind controls onto a cell" begin
-            NS.agent_add_cell!(nb, "@bind sfreq Slider(1:100)\n@bind samp Slider(0:0.1:1)"; id = "sctl")
-            NS.agent_add_cell!(nb, "sfreq * samp"; id = "splot")
+            NS.agent_add_cell!(
+                nb, "@bind sfreq Slider(1:100)\n@bind samp Slider(0:0.1:1)"; id="sctl"
+            )
+            NS.agent_add_cell!(nb, "sfreq * samp"; id="splot")
             _ctrls(id) = nb.report.cells[NS._index_of(nb.report.cells, id)].controls
             # a row of two single-control columns
             @test occursin("surfaced 2", NS.agent_surface_controls!(nb, "splot", "sfreq,samp"))
@@ -269,9 +279,15 @@ const NS = KaimonSlate.NotebookServer
 
         @testset "external tool calls surface in the chat panel" begin
             # Pure envelope shape — exactly what the browser's `agentEvent` consumes.
-            use, res = NS._external_tool_envelopes("ext-1", "edit_cell",
-                Dict{String,Any}("cell" => "intro", "source" => "x = 1"), "edited id=intro"; ok = true)
-            ue = NS.JSON.parse(use); re = NS.JSON.parse(res)
+            use, res = NS._external_tool_envelopes(
+                "ext-1",
+                "edit_cell",
+                Dict{String,Any}("cell" => "intro", "source" => "x = 1"),
+                "edited id=intro";
+                ok=true,
+            )
+            ue = NS.JSON.parse(use)
+            re = NS.JSON.parse(res)
             @test ue["kind"] == "tool_use" && ue["external"] === true
             @test ue["data"]["call"]["toolCallId"] == "ext-1"
             @test ue["data"]["call"]["title"] == "slate_edit_cell"          # → _prettyTool → "✏️ edit cell"
@@ -281,23 +297,33 @@ const NS = KaimonSlate.NotebookServer
             @test re["data"]["update"]["status"] == "completed"
             @test re["data"]["update"]["content"][1]["content"]["text"] == "edited id=intro"
             # ok=false → a failed (error) row
-            _, rf = NS._external_tool_envelopes("ext-2", "run", Dict{String,Any}("cell" => "x"), "⛔ nope"; ok = false)
+            _, rf = NS._external_tool_envelopes(
+                "ext-2", "run", Dict{String,Any}("cell" => "x"), "⛔ nope"; ok=false
+            )
             @test NS.JSON.parse(rf)["data"]["update"]["status"] == "failed"
 
-            loglen() = lock(NS._AGENT_LOCK) do; length(get(NS._AGENT_LOG, nb.id, String[])); end
+            loglen() = lock(NS._AGENT_LOCK) do ;
+                length(get(NS._AGENT_LOG, nb.id, String[]))
+            end
 
             # An external MCP client (agent_id "") → surfaced as a tool_use + tool_result pair.
             empty!(nb.agents)
             n0 = loglen()
-            NS.note_external_tool!(nb, "", "add_cell", Dict{String,Any}("source" => "1+1"), "added id=z1")
+            NS.note_external_tool!(
+                nb, "", "add_cell", Dict{String,Any}("source" => "1+1"), "added id=z1"
+            )
             @test loglen() == n0 + 2
             # A crew agent (its id is in nb.agents) → NOT surfaced (already relayed over the agent bus).
             nb.agents["default"] = "slate-crew-1"
             n1 = loglen()
-            NS.note_external_tool!(nb, "slate-crew-1", "add_cell", Dict{String,Any}("source" => "2"), "added id=z2")
+            NS.note_external_tool!(
+                nb, "slate-crew-1", "add_cell", Dict{String,Any}("source" => "2"), "added id=z2"
+            )
             @test loglen() == n1
             # A foreign Kaimon agent (spawned for another notebook; not our crew) → surfaced.
-            NS.note_external_tool!(nb, "slate-other-nb", "add_cell", Dict{String,Any}("source" => "3"), "added id=z3")
+            NS.note_external_tool!(
+                nb, "slate-other-nb", "add_cell", Dict{String,Any}("source" => "3"), "added id=z3"
+            )
             @test loglen() == n1 + 2
             empty!(nb.agents)
         end
@@ -307,18 +333,18 @@ const NS = KaimonSlate.NotebookServer
 end
 
 @testset "open with autorun=false: cells land STALE, untouched" begin
-    hub = NS.start_hub(; port = 8860)
+    hub = NS.start_hub(; port=8860)
     try
         nbp = tempname() * ".jl"
         write(nbp, "#%% code id=a\nbase = 10\n#%% code id=b\nderived = base * 2\n")
-        nb = hub.notebooks[NS.open_notebook!(hub, nbp; autorun = false)]
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp; autorun=false)]
         sleep(0.3)   # generous: long enough for an errant auto-run to have started/finished
         @test all(c -> c.state == KaimonSlate.ReportEngine.STALE, nb.report.cells)
         @test get(nb.report.meta, "hydrating", false) !== true
         @test nb.report.cells[1].output === nothing    # never ran — no output at all
 
         # A manual run still works normally once triggered.
-        NS._eval!(nb; wait_all = true)
+        NS._eval!(nb; wait_all=true)
         @test all(c -> c.state == KaimonSlate.ReportEngine.FRESH, nb.report.cells)
         @test nb.report.cells[2].output.value_repr == "20"
 
@@ -332,7 +358,7 @@ end
 end
 
 @testset "locked cell self-heals on a fresh autorun=false open (a cold reopen has nothing in memory)" begin
-    hub = NS.start_hub(; port = 8861)
+    hub = NS.start_hub(; port=8861)
     try
         # `b` is deliberately SELF-CONTAINED (doesn't read `a`'s `base`): InProcessKernel (this test
         # has no gate worker) has no durable memo store, so its `eval_capture` ignores `memo` and just
@@ -343,22 +369,23 @@ end
         write(nbp, "#%% code id=a\nbase = 10\n#%% code id=b\nderived = 5 * 2\n")
         id = NS.open_notebook!(hub, nbp)
         nb = hub.notebooks[id]
-        NS._eval!(nb; wait_all = true)
+        NS._eval!(nb; wait_all=true)
         @test findfirst(c -> c.id == "b", nb.report.cells) !== nothing
         NS.set_cell_tags!(nb, "b", ["locked"])
-        NS._eval!(nb; wait_all = true)   # locking a FRESH cell only QUEUES its capture force-run
+        NS._eval!(nb; wait_all=true)   # locking a FRESH cell only QUEUES its capture force-run
         bcell() = nb.report.cells[findfirst(c -> c.id == "b", nb.report.cells)]
         @test :locked in bcell().flags
         @test any(f -> startswith(String(f), "lockedkey="), bcell().flags)
 
         NS.close_notebook!(hub, id)
-        nb2 = hub.notebooks[NS.open_notebook!(hub, nbp; autorun = false)]
+        nb2 = hub.notebooks[NS.open_notebook!(hub, nbp; autorun=false)]
         # Self-heal runs in a background @async task — POLL for it to finish instead of a fixed sleep,
         # which can expire before the restore completes on a loaded / coverage-instrumented CI run
         # (leaving `output === nothing` → a spurious failure).
         bfind() = nb2.report.cells[findfirst(c -> c.id == "b", nb2.report.cells)]
-        timedwait(10.0; pollint = 0.05) do
-            bc = bfind(); bc.state == KaimonSlate.ReportEngine.FRESH && bc.output !== nothing
+        timedwait(10.0; pollint=0.05) do
+            bc = bfind()
+            bc.state == KaimonSlate.ReportEngine.FRESH && bc.output !== nothing
         end
         acell2 = nb2.report.cells[findfirst(c -> c.id == "a", nb2.report.cells)]
         bcell2 = bfind()
@@ -371,16 +398,16 @@ end
 end
 
 @testset "restart_kernel!: a locked cell restores ahead of a slow preceding cell, not queued behind it" begin
-    hub = NS.start_hub(; port = 8862)
+    hub = NS.start_hub(; port=8862)
     try
         nbp = tempname() * ".jl"
         # `slow` sleeps generously (3s) so the "fast restored WHILE slow is still running" window stays
         # open long enough to observe reliably on a loaded CI runner — a fixed sleep here was flaky.
         write(nbp, "#%% code id=slow\nsleep(3.0); slowval = 1\n#%% code id=fast\nfastval = 5 * 2\n")
         nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
-        NS._eval!(nb; wait_all = true)
+        NS._eval!(nb; wait_all=true)
         NS.set_cell_tags!(nb, "fast", ["locked"])
-        NS._eval!(nb; wait_all = true)   # runs the surgical force-run queued by locking a FRESH cell
+        NS._eval!(nb; wait_all=true)   # runs the surgical force-run queued by locking a FRESH cell
         fastcell() = nb.report.cells[findfirst(c -> c.id == "fast", nb.report.cells)]
         slowcell() = nb.report.cells[findfirst(c -> c.id == "slow", nb.report.cells)]
         @test any(f -> startswith(String(f), "lockedkey="), fastcell().flags)
@@ -390,27 +417,29 @@ end
         # completes on a loaded CI run. It self-heals out of document order (a memo-key restore, near
         # instant), so it lands FRESH well within the slow cell's 3s sleep — proving it did NOT queue
         # behind `slow`. The poll is bounded far below 3s so `slow` is guaranteed still running.
-        @test timedwait(1.5; pollint = 0.02) do
+        @test timedwait(1.5; pollint=0.02) do
             fastcell().state == KaimonSlate.ReportEngine.FRESH
         end === :ok
         @test fastcell().state == KaimonSlate.ReportEngine.FRESH   # restored already — did NOT wait on `slow`
         @test slowcell().state in (KaimonSlate.ReportEngine.STALE, KaimonSlate.ReportEngine.RUNNING)   # still queued/running
         # Wait for the slow cell to finish before teardown so `stop_hub` isn't racing a live eval task.
-        timedwait(6.0; pollint = 0.05) do; slowcell().state == KaimonSlate.ReportEngine.FRESH; end
+        timedwait(6.0; pollint=0.05) do ;
+            slowcell().state == KaimonSlate.ReportEngine.FRESH
+        end
     finally
         NS.stop_hub(hub)
     end
 end
 
 @testset "▶ force-run on an upstream cell does not restale a locked FRESH dependent" begin
-    hub = NS.start_hub(; port = 8863)
+    hub = NS.start_hub(; port=8863)
     try
         nbp = tempname() * ".jl"
         write(nbp, "#%% code id=a\nbase = 10\n#%% code id=b\nderived = base * 2\n")
         nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
-        NS._eval!(nb; wait_all = true)
+        NS._eval!(nb; wait_all=true)
         NS.set_cell_tags!(nb, "b", ["locked"])
-        NS._eval!(nb; wait_all = true)   # surgical force-run queued by locking a FRESH cell
+        NS._eval!(nb; wait_all=true)   # surgical force-run queued by locking a FRESH cell
         bcell() = nb.report.cells[findfirst(c -> c.id == "b", nb.report.cells)]
         acell() = nb.report.cells[findfirst(c -> c.id == "a", nb.report.cells)]
         @test bcell().state == KaimonSlate.ReportEngine.FRESH
@@ -418,8 +447,8 @@ end
         @test !isempty(lockedkey_before)
 
         # Pressing ▶ on `a` (edit_cell! with force=true, same source) — the play button's own path.
-        NS.edit_cell!(nb, "a", acell().source; force = true)
-        NS._eval!(nb; wait_all = true)
+        NS.edit_cell!(nb, "a", acell().source; force=true)
+        NS._eval!(nb; wait_all=true)
 
         @test acell().state == KaimonSlate.ReportEngine.FRESH        # the played cell itself re-ran
         @test bcell().state == KaimonSlate.ReportEngine.FRESH        # `b` stayed frozen — never went STALE

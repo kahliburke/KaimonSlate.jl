@@ -28,7 +28,21 @@ const RE = ReportEngine
             vars[lowercase(vm.captures[1])] = lowercase(vm.captures[2])
         end
         # every palette field must equal the CSS var of the same name (byte-for-byte, case-insensitive)
-        for k in (:bg, :bg2, :bg3, :border, :text, :dim, :accent, :green, :red, :gold, :orange, :purple, :teal)
+        for k in (
+            :bg,
+            :bg2,
+            :bg3,
+            :border,
+            :text,
+            :dim,
+            :accent,
+            :green,
+            :red,
+            :gold,
+            :orange,
+            :purple,
+            :teal,
+        )
             @test haskey(vars, String(k))
             @test vars[String(k)] == lowercase(getfield(RE.SLATE_PALETTE, k))
         end

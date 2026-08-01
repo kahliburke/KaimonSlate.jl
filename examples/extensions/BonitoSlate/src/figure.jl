@@ -7,7 +7,7 @@
 # Presentation is guarded to the WGLMakie backend: a CairoMakie figure (raster) must fall through to
 # `image/png`, so the Slate MIME is not `showable` for it and Slate's capture picks the raster MIME.
 
-_is_wgl_backend() = (b = Makie.current_backend(); b isa Module && nameof(b) === :WGLMakie)
+_is_wgl_backend() = (b=Makie.current_backend(); b isa Module && nameof(b) === :WGLMakie)
 
 # The renderer: the figure fragment (scene + live wiring), wrapped in the card. Everything shared with any
 # other Bonito output — the runtime loader, the root announcement, the render lock, session bookkeeping —
@@ -19,13 +19,18 @@ function slate_card_html(fig::Makie.FigureLike)
         # the page-root announcement ordered ahead of the fragment, the render lock, and registering the
         # sub-session this render creates so it is released when the cell re-evaluates. A figure is just one
         # kind of Bonito output, so it differs from an app only in being wrapped in the card below.
-        return _figure_card(bonito_output_html() do
-            sprint((io, x) -> show(io, MIME"text/html"(), x), fig)
-        end)
+        return _figure_card(
+            bonito_output_html() do
+                return sprint((io, x) -> show(io, MIME"text/html"(), x), fig)
+            end,
+        )
     catch e
         # Surface a render failure inline rather than let capture swallow it into a `text/plain` repr.
-        return string("<pre style=\"color:#f88;white-space:pre-wrap\">BonitoSlate figure render error:\n",
-                      sprint(showerror, e), "</pre>")
+        return string(
+            "<pre style=\"color:#f88;white-space:pre-wrap\">BonitoSlate figure render error:\n",
+            sprint(showerror, e),
+            "</pre>",
+        )
     end
 end
 
@@ -46,9 +51,10 @@ end
 # exactly ONCE (in `show`), not again on every `showable` probe.
 for T in (Makie.Figure, Makie.FigureAxisPlot, Makie.Scene)
     @eval begin
-        Base.showable(::SlateExtensionsBase.SlateHtmlMIME, ::$T)      = _is_wgl_backend()
+        Base.showable(::SlateExtensionsBase.SlateHtmlMIME, ::$T) = _is_wgl_backend()
         Base.showable(::SlateExtensionsBase.SlateComponentMIME, ::$T) = false  # a figure is HTML, never a component
-        Base.show(io::IO, ::SlateExtensionsBase.SlateHtmlMIME, fig::$T) = print(io, slate_card_html(fig))
+        Base.show(io::IO, ::SlateExtensionsBase.SlateHtmlMIME, fig::$T) =
+            print(io, slate_card_html(fig))
         # SESSION-BOUND: a WGLMakie figure's scene + interaction (e.g. Axis3 rotation) live in a worker
         # Bonito session, not in the captured HTML, so Slate re-renders it fresh for each browser page that
         # connects (a reload, a new tab). A CairoMakie figure is a self-contained raster, so it's not live.
@@ -65,7 +71,10 @@ end
 # it, scaled by their "Chart scroll-zoom" setting, instead of hijacking the page as they scroll past.
 # The value names WGLMakie's zoom surface — the canvas is what Makie listens on, not this card.
 function _figure_card(inner::AbstractString)
-    return string("<div class=\"bonito-fig-wrap\">",
-                  "<div class=\"bonito-fig-card\" tabindex=\"-1\" data-slate-zoomable=\"canvas\">",
-                  inner, "</div></div>")
+    return string(
+        "<div class=\"bonito-fig-wrap\">",
+        "<div class=\"bonito-fig-card\" tabindex=\"-1\" data-slate-zoomable=\"canvas\">",
+        inner,
+        "</div></div>",
+    )
 end

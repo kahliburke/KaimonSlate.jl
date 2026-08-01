@@ -17,10 +17,10 @@ The directory fetched PyPI widgets are installed + served from. Defaults to
 `<depot>/slate_afm/pypi`; override with `ENV["SLATE_AFM_DEPLOY"]`. Created on first use.
 """
 deploy_dir() = get(ENV, "SLATE_AFM_DEPLOY") do
-    joinpath(first(DEPOT_PATH), "slate_afm", "pypi")
+    return joinpath(first(DEPOT_PATH), "slate_afm", "pypi")
 end
 _served_root() = joinpath(deploy_dir(), "served")   # registered with provide_assets! (the /ext-assets root)
-_envs_root()   = joinpath(deploy_dir(), "envs")     # pip --target scratch envs (NOT served)
+_envs_root() = joinpath(deploy_dir(), "envs")     # pip --target scratch envs (NOT served)
 
 # The introspection program, run once per package by the system Python. Reads _esm/_css/trait-defaults off
 # the class and writes esm.js / css/widget.css / meta.json into `outdir`. argv: import-name, class, outdir.
@@ -86,15 +86,17 @@ function _pypi_python(python::AbstractString)
         w = Sys.which(c)
         w === nothing || return w
     end
-    error("pypi_afm: no `python3`/`pip` found on PATH. Install Python (it ships pip), pass " *
-          "`python=\"/path/to/python\"`, or set ENV[\"SLATE_AFM_PYTHON\"]. Or skip the installer and give " *
-          "`afm(...)` a module URL directly — a CDN URL, e.g. afm(\"https://esm.sh/…\"), or `ext_asset_url`.")
+    return error(
+        "pypi_afm: no `python3`/`pip` found on PATH. Install Python (it ships pip), pass " *
+        "`python=\"/path/to/python\"`, or set ENV[\"SLATE_AFM_PYTHON\"]. Or skip the installer and give " *
+        "`afm(...)` a module URL directly — a CDN URL, e.g. afm(\"https://esm.sh/…\"), or `ext_asset_url`.",
+    )
 end
 
 # Run a command, capturing merged stdout+stderr; return (exitcode, output).
 function _run_capture(cmd::Cmd)
     buf = IOBuffer()
-    p = run(pipeline(ignorestatus(cmd); stdout = buf, stderr = buf))
+    p = run(pipeline(ignorestatus(cmd); stdout=buf, stderr=buf))
     return (p.exitcode, String(take!(buf)))
 end
 
@@ -115,25 +117,44 @@ end
 
 # Install (if needed) + introspect a PyPI widget; returns (; sub, css_subs, defaults) with `sub`/`css_subs`
 # the served subpaths under `_PYPI_KEY`. Cached by (pkg, class): a second call is a fast disk read.
-function _resolve_pypi(pkg::AbstractString, class::AbstractString, import_as::AbstractString,
-                       python::AbstractString, force::Bool)
+function _resolve_pypi(
+    pkg::AbstractString,
+    class::AbstractString,
+    import_as::AbstractString,
+    python::AbstractString,
+    force::Bool,
+)
     py = _pypi_python(python)
-    importname = isempty(import_as) ? replace(match(r"^[A-Za-z0-9_.-]+", String(pkg)).match, "-" => "_") : import_as
+    importname = if isempty(import_as)
+        replace(match(r"^[A-Za-z0-9_.-]+", String(pkg)).match, "-" => "_")
+    else
+        import_as
+    end
     key = _sanitize(String(pkg) * (isempty(class) ? "" : "__" * class))
     outdir = joinpath(_served_root(), key)
     metaf = joinpath(outdir, "meta.json")
     if force || !isfile(metaf)
         mkpath(_served_root())
-        envdir = _ensure_env(py, pkg; force = force)
+        envdir = _ensure_env(py, pkg; force=force)
         script = joinpath(envdir, "_slate_afm_introspect.py")
         write(script, _INTROSPECT_PY)
-        code, out = _run_capture(addenv(`$py $script $importname $class $outdir`, "PYTHONPATH" => envdir))
-        code == 0 || error("pypi_afm: introspecting $pkg failed (exit $code):\n" * last(strip(out), 800))
+        code, out = _run_capture(
+            addenv(`$py $script $importname $class $outdir`, "PYTHONPATH" => envdir)
+        )
+        code == 0 ||
+            error("pypi_afm: introspecting $pkg failed (exit $code):\n" * last(strip(out), 800))
     end
     meta = JSON.parse(read(metaf, String))
     css_subs = String[key * "/" * String(c) for c in get(meta, "css", String[])]
-    defaults = Dict{String,Any}(String(k) => v for (k, v) in get(meta, "defaults", Dict{String,Any}()))
-    return (sub = key * "/esm.js", css_subs = css_subs, defaults = defaults, class = String(get(meta, "class", "")))
+    defaults = Dict{String,Any}(
+        String(k) => v for (k, v) in get(meta, "defaults", Dict{String,Any}())
+    )
+    return (
+        sub=key * "/esm.js",
+        css_subs=css_subs,
+        defaults=defaults,
+        class=String(get(meta, "class", "")),
+    )
 end
 
 """
@@ -151,9 +172,16 @@ if no pip is found — see [`deploy_dir`](@ref) for where things land.
 @bind mol pypi_afm("ipymolstar"; class = "PDBeMolStar", molecule_id = "1cbs", spin = false)
 ```
 """
-function pypi_afm(pkg::AbstractString; class::AbstractString = "", import_as::AbstractString = "",
-                  css = String[], id::AbstractString = "", python::AbstractString = "",
-                  force::Bool = false, traits...)
+function pypi_afm(
+    pkg::AbstractString;
+    class::AbstractString="",
+    import_as::AbstractString="",
+    css=String[],
+    id::AbstractString="",
+    python::AbstractString="",
+    force::Bool=false,
+    traits...,
+)
     spec = _resolve_pypi(pkg, class, import_as, python, force)
     provide_assets!(_PYPI_KEY, _served_root())   # (re)register the deploy root so it's served this session
     merged = copy(spec.defaults)
@@ -162,6 +190,10 @@ function pypi_afm(pkg::AbstractString; class::AbstractString = "", import_as::Ab
     end
     csslist = String[ext_asset_url(_PYPI_KEY, c) for c in spec.css_subs]
     append!(csslist, css isa AbstractString ? [String(css)] : String[String(c) for c in css])
-    return afm(ext_asset_url(_PYPI_KEY, spec.sub);
-               id = id, css = csslist, (Symbol(k) => v for (k, v) in merged)...)
+    return afm(
+        ext_asset_url(_PYPI_KEY, spec.sub);
+        id=id,
+        css=csslist,
+        (Symbol(k) => v for (k, v) in merged)...,
+    )
 end

@@ -38,14 +38,16 @@ end
 # Most helpers are injected DSL constructs with no reachable docstring → the registry `doc` IS the
 # source. A few (`slate_table`, `slate_query`, …) are real exported functions: point `docbinding` at
 # them and their OWN docstring drives the api tool / search / prompt, so the two can never drift.
-SlateApiEntry(name, category, summary, keywords, signature, doc) =
-    SlateApiEntry(name, category, summary, keywords, signature, doc, nothing)
+function SlateApiEntry(name, category, summary, keywords, signature, doc)
+    return SlateApiEntry(name, category, summary, keywords, signature, doc, nothing)
+end
 # Backed ENTIRELY by a real function's own docstring — no signature or prose duplicated here. The
 # docstring (which leads with its own signature lines) is the single source rendered everywhere.
 # The index summary still lives here: a docstring's first line is too long (and too variable) to
 # make a scannable index line.
-SlateApiEntry(name, category, summary, keywords, binding::Base.Docs.Binding) =
-    SlateApiEntry(name, category, summary, keywords, "", "", binding)
+function SlateApiEntry(name, category, summary, keywords, binding::Base.Docs.Binding)
+    return SlateApiEntry(name, category, summary, keywords, "", "", binding)
+end
 
 # The markdown shown for an entry: a real function's own docstring when `docbinding` is set and it
 # carries one, else the registry `doc`. Empty only if a binding entry's function somehow lost its doc.
@@ -66,22 +68,27 @@ _entry_signature(e::SlateApiEntry) = e.signature
 function _entry_markdown(e::SlateApiEntry)
     sig = _entry_signature(e)
     doc = _entry_doc(e)
-    isempty(sig) ? doc : string("`", sig, "`\n\n", doc)
+    return isempty(sig) ? doc : string("`", sig, "`\n\n", doc)
 end
 
 const SLATE_API = SlateApiEntry[
     # ── Display ──────────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("display", "Display",
+    SlateApiEntry(
+        "display",
+        "Display",
         "The cell's LAST expression renders; a trailing `;` silences it. Cells are REACTIVE.",
         ["output", "show", "return", "render", "print"],
         "<last expression of a cell>",
         """The cell's LAST expression is shown. Return a number / String / DataFrame, a CairoMakie
         figure, an `echart(…)`, a `slate_table(df)`, or an `animate(…)`. `println` writes stdout. A
         trailing `;` makes the cell quiet (no value shown). Cells are REACTIVE: a cell that READS a
-        variable re-runs when that variable changes."""),
+        variable re-runs when that variable changes.""",
+    ),
 
     # ── Charts ───────────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("echart", "Charts",
+    SlateApiEntry(
+        "echart",
+        "Charts",
         "Interactive chart DSL (ECharts) — the default for any plot you can zoom/pan/hover.",
         ["plot", "graph", "log axis", "zoom", "geo map", "heatmap", "pie", "scatter", "bar"],
         "echart(kind, x, y; title, smooth, yAxis=(type=:log,), …) | echart(series...; …) | echart(; xAxis=…, series=…)",
@@ -149,30 +156,44 @@ const SLATE_API = SlateApiEntry[
         default to `progressive=0` (ECharts' progressive layers keep a stale blit under a roaming
         coordinate system — the dots stop following the map); pass an explicit `progressive=N` to
         re-enable for huge data.
-        Worked examples: `examples/echarts_dsl.jl`, `examples/seismic_month.jl`. See also `series`."""),
+        Worked examples: `examples/echarts_dsl.jl`, `examples/seismic_month.jl`. See also `series`.""",
+    ),
     # Real functions — documented in their own docstrings (echarts_dsl.jl / animation.jl).
-    SlateApiEntry("series", "Charts",
+    SlateApiEntry(
+        "series",
+        "Charts",
         "One named series of a multi-series `echart` (mixed kinds, dual axes).",
         ["overlay", "legend", "multiple", "dual axis"],
-        Base.Docs.Binding(ReportEngine, :series)),
-
-    SlateApiEntry("use_slate_theme!", "Charts",
+        Base.Docs.Binding(ReportEngine, :series),
+    ),
+    SlateApiEntry(
+        "use_slate_theme!",
+        "Charts",
         "Make MAKIE figures match the interactive `echart` look (shared palette + transparent bg).",
         ["makie", "theme", "palette", "dark", "match", "consistent"],
-        Base.Docs.Binding(ReportEngine, :use_slate_theme!)),
-    SlateApiEntry("slate_theme", "Charts",
+        Base.Docs.Binding(ReportEngine, :use_slate_theme!),
+    ),
+    SlateApiEntry(
+        "slate_theme",
+        "Charts",
         "The Slate look as a Makie `Theme` — `set_theme!(slate_theme())`, or a local override.",
         ["makie", "theme", "palette", "colours"],
-        Base.Docs.Binding(ReportEngine, :slate_theme)),
+        Base.Docs.Binding(ReportEngine, :slate_theme),
+    ),
 
     # ── Animation ── real function, documented in its own docstring (animation.jl) ─────────────────
-    SlateApiEntry("animate", "Animation",
+    SlateApiEntry(
+        "animate",
+        "Animation",
         "Precompute frames once, play them in the browser with a scrubber.",
         ["movie", "frames", "playback", "time series", "evolution"],
-        Base.Docs.Binding(ReportEngine, :animate)),
+        Base.Docs.Binding(ReportEngine, :animate),
+    ),
 
     # ── Widgets (@bind) ────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("@bind", "Widgets",
+    SlateApiEntry(
+        "@bind",
+        "Widgets",
         "Declare a reactive input control; every cell that READS the var recomputes on change.",
         ["widget", "control", "input", "interactive", "knob", "parameter"],
         "@bind name Widget(…)",
@@ -188,57 +209,135 @@ const SLATE_API = SlateApiEntry[
         `@bind`s once (e.g. a hidden `hidecode` setup cell) and place the live knobs BESIDE a figure
         with `slate.surface(notebook, plotcell, \"a,b\")` (layout grammar: `a,b`=row, `[a,b],c`=columns;
         `\"\"` clears). Presentation only — no re-eval. Prefer surfacing so a reader tweaks the knobs
-        next to the figure they drive."""),
-    SlateApiEntry("Slider", "Widgets", "A range slider.", ["number", "range", "drag"],
+        next to the figure they drive.""",
+    ),
+    SlateApiEntry(
+        "Slider",
+        "Widgets",
+        "A range slider.",
+        ["number", "range", "drag"],
         "Slider(range; default, label) | Slider(lo, hi, default; step, label)",
-        """A range slider. `@bind n Slider(1:100; label=\"n\")` or `@bind x Slider(0.0, 1.0, 0.5; step=0.01)`."""),
-    SlateApiEntry("NumberField", "Widgets", "A numeric input box.", ["number", "spinner", "entry"],
+        """A range slider. `@bind n Slider(1:100; label=\"n\")` or `@bind x Slider(0.0, 1.0, 0.5; step=0.01)`.""",
+    ),
+    SlateApiEntry(
+        "NumberField",
+        "Widgets",
+        "A numeric input box.",
+        ["number", "spinner", "entry"],
         "NumberField(default=0; min, max, label)",
-        """A numeric input box. `@bind k NumberField(10; min=0, max=100)`."""),
-    SlateApiEntry("Checkbox", "Widgets", "A boolean checkbox.", ["bool", "flag", "on off"],
+        """A numeric input box. `@bind k NumberField(10; min=0, max=100)`.""",
+    ),
+    SlateApiEntry(
+        "Checkbox",
+        "Widgets",
+        "A boolean checkbox.",
+        ["bool", "flag", "on off"],
         "Checkbox(default=false; label)",
-        """A boolean checkbox. `@bind on Checkbox(true)`."""),
-    SlateApiEntry("Toggle", "Widgets", "A boolean toggle with optional on/off labels.",
-        ["bool", "switch", "flag"], "Toggle(default=false; label, on, off)",
-        """A boolean toggle with optional on/off labels. `@bind live Toggle(true; on=\"Live\", off=\"Paused\")`."""),
-    SlateApiEntry("TextField", "Widgets", "A single-line text input.", ["string", "entry", "name"],
+        """A boolean checkbox. `@bind on Checkbox(true)`.""",
+    ),
+    SlateApiEntry(
+        "Toggle",
+        "Widgets",
+        "A boolean toggle with optional on/off labels.",
+        ["bool", "switch", "flag"],
+        "Toggle(default=false; label, on, off)",
+        """A boolean toggle with optional on/off labels. `@bind live Toggle(true; on=\"Live\", off=\"Paused\")`.""",
+    ),
+    SlateApiEntry(
+        "TextField",
+        "Widgets",
+        "A single-line text input.",
+        ["string", "entry", "name"],
         "TextField(default=\"\"; label)",
-        """A single-line text input. `@bind name TextField(\"hi\")`."""),
-    SlateApiEntry("TextArea", "Widgets", "A multi-line text input.", ["string", "prose", "paragraph"],
+        """A single-line text input. `@bind name TextField(\"hi\")`.""",
+    ),
+    SlateApiEntry(
+        "TextArea",
+        "Widgets",
+        "A multi-line text input.",
+        ["string", "prose", "paragraph"],
         "TextArea(default=\"\"; rows=3, label)",
-        """A multi-line text input. `@bind note TextArea(\"\"; rows=5)`."""),
-    SlateApiEntry("Select", "Widgets", "A dropdown; options may be bare values or `value => label`.",
-        ["dropdown", "choice", "menu", "pick one"], "Select(options, default; label)",
+        """A multi-line text input. `@bind note TextArea(\"\"; rows=5)`.""",
+    ),
+    SlateApiEntry(
+        "Select",
+        "Widgets",
+        "A dropdown; options may be bare values or `value => label`.",
+        ["dropdown", "choice", "menu", "pick one"],
+        "Select(options, default; label)",
         """A dropdown. Options are bare values or `value => label` pairs (the bound var takes `value`;
-        `.label` reaches the label). `@bind f Select([\"sin\"=>\"sine\", \"cos\"=>\"cosine\"])`."""),
-    SlateApiEntry("Radio", "Widgets", "A radio group (rich / \$math\$ labels render).",
-        ["choice", "option", "exclusive"], "Radio(options, default; label)",
-        """A radio group (rich/`\$math\$` labels rendered). `@bind which Radio([1=>\"one\", 2=>\"two\"])`."""),
-    SlateApiEntry("MultiSelect", "Widgets", "A multi-select listbox; the value is a Vector.",
-        ["many", "list", "subset", "columns"], "MultiSelect(options, default=[]; label)",
-        """A multi-select listbox; the bound value is a Vector. `@bind picks MultiSelect(cols)`."""),
-    SlateApiEntry("MultiCheckBox", "Widgets", "A checkbox list for small discrete sets; value is a Vector.",
-        ["many", "flags", "subset"], "MultiCheckBox(options, default=[]; label)",
-        """A checkbox list (small discrete sets); value is a Vector. `@bind picks MultiCheckBox([:a,:b,:c])`."""),
-    SlateApiEntry("ColorPicker", "Widgets", "A colour picker; the value is a hex String.",
-        ["colour", "hex", "palette"], "ColorPicker(default=\"#3aa0ff\"; label)",
-        """A color picker; value is a hex String. `@bind c ColorPicker(\"#56d364\")`."""),
-    SlateApiEntry("DateField", "Widgets", "A date input.", ["calendar", "day", "when"],
-        "DateField(default; label)", """A date input. `@bind d DateField(\"2026-01-01\")`."""),
-    SlateApiEntry("TimeField", "Widgets", "A time input.", ["clock", "hour", "when"],
-        "TimeField(default; label)", """A time input. `@bind t TimeField(\"09:00\")`."""),
-    SlateApiEntry("Button", "Widgets", "An action button; the value is the click count. Pair with `@onclick`.",
-        ["click", "trigger", "run", "action", "go"], "Button(label=\"Click\")",
+        `.label` reaches the label). `@bind f Select([\"sin\"=>\"sine\", \"cos\"=>\"cosine\"])`.""",
+    ),
+    SlateApiEntry(
+        "Radio",
+        "Widgets",
+        "A radio group (rich / \$math\$ labels render).",
+        ["choice", "option", "exclusive"],
+        "Radio(options, default; label)",
+        """A radio group (rich/`\$math\$` labels rendered). `@bind which Radio([1=>\"one\", 2=>\"two\"])`.""",
+    ),
+    SlateApiEntry(
+        "MultiSelect",
+        "Widgets",
+        "A multi-select listbox; the value is a Vector.",
+        ["many", "list", "subset", "columns"],
+        "MultiSelect(options, default=[]; label)",
+        """A multi-select listbox; the bound value is a Vector. `@bind picks MultiSelect(cols)`.""",
+    ),
+    SlateApiEntry(
+        "MultiCheckBox",
+        "Widgets",
+        "A checkbox list for small discrete sets; value is a Vector.",
+        ["many", "flags", "subset"],
+        "MultiCheckBox(options, default=[]; label)",
+        """A checkbox list (small discrete sets); value is a Vector. `@bind picks MultiCheckBox([:a,:b,:c])`.""",
+    ),
+    SlateApiEntry(
+        "ColorPicker",
+        "Widgets",
+        "A colour picker; the value is a hex String.",
+        ["colour", "hex", "palette"],
+        "ColorPicker(default=\"#3aa0ff\"; label)",
+        """A color picker; value is a hex String. `@bind c ColorPicker(\"#56d364\")`.""",
+    ),
+    SlateApiEntry(
+        "DateField",
+        "Widgets",
+        "A date input.",
+        ["calendar", "day", "when"],
+        "DateField(default; label)",
+        """A date input. `@bind d DateField(\"2026-01-01\")`.""",
+    ),
+    SlateApiEntry(
+        "TimeField",
+        "Widgets",
+        "A time input.",
+        ["clock", "hour", "when"],
+        "TimeField(default; label)",
+        """A time input. `@bind t TimeField(\"09:00\")`.""",
+    ),
+    SlateApiEntry(
+        "Button",
+        "Widgets",
+        "An action button; the value is the click count. Pair with `@onclick`.",
+        ["click", "trigger", "run", "action", "go"],
+        "Button(label=\"Click\")",
         """An action button; value is the click count (Int, 0,1,2,…). Drive an action with `@onclick`.
-        `@bind go Button(\"Run\")`."""),
-    SlateApiEntry("TableSelect", "Widgets",
+        `@bind go Button(\"Run\")`.""",
+    ),
+    SlateApiEntry(
+        "TableSelect",
+        "Widgets",
         "A clickable table — binds the CLICKED ROW as a NamedTuple (`sel.price`).",
         ["row", "pick", "dataframe", "selection", "drill down"],
         "TableSelect(data; default, label, maxrows=200)",
         """A clickable table: renders `data` (a DataFrame / Tables.jl source / Vector of NamedTuples —
         anything `slate_table` takes) and binds the CLICKED ROW as a NamedTuple with a field per column.
-        No selection → `nothing`. `@bind sel TableSelect(df)` then `sel.price` / `sel.name` downstream."""),
-    SlateApiEntry("custom_widget", "Widgets",
+        No selection → `nothing`. `@bind sel TableSelect(df)` then `sel.price` / `sel.name` downstream.""",
+    ),
+    SlateApiEntry(
+        "custom_widget",
+        "Widgets",
         "Bind a control of a THIRD-PARTY kind — the Julia half of the widget extension point.",
         ["extension", "plugin", "package", "third party", "register", "custom control"],
         "custom_widget(kind, default=\"\"; params...)",
@@ -252,45 +351,55 @@ const SLATE_API = SlateApiEntry[
         The value round-trips through the identity coercion (an unknown kind passes through untouched),
         so a string-valued custom widget needs no server-side support at all. A package can also
         register a real per-kind coercion through the same seam the built-ins use — see
-        SlateExtensionsBase. Otherwise it behaves exactly like any `@bind` control."""),
-    SlateApiEntry("@replay", "Widgets",
-    "Mark an expression as answerable WITHOUT a kernel, so its control keeps working in a static export.",
-    ["offline", "export", "standalone", "bind", "precompute", "no kernel", "interactive"],
-    "@replay control expr",
-    """Mark `expr` as computable across `control`'s whole domain, so the control still works in a
-    **standalone export**, where there is no Julia to recompute anything.
+        SlateExtensionsBase. Otherwise it behaves exactly like any `@bind` control.""",
+    ),
+    SlateApiEntry(
+        "@replay",
+        "Widgets",
+        "Mark an expression as answerable WITHOUT a kernel, so its control keeps working in a static export.",
+        ["offline", "export", "standalone", "bind", "precompute", "no kernel", "interactive"],
+        "@replay control expr",
+        """Mark `expr` as computable across `control`'s whole domain, so the control still works in a
+        **standalone export**, where there is no Julia to recompute anything.
 
-    ```julia
-    @bind w Slider(1:2:15)
-    Plot(scatter(x = xs, y = @replay(w, movavg(infl, w))))
-    ```
+        ```julia
+        @bind w Slider(1:2:15)
+        Plot(scatter(x = xs, y = @replay(w, movavg(infl, w))))
+        ```
 
-    LIVE this is a pass-through: only the control's current value is computed, so the cell costs exactly
-    what the bare expression costs. The macro's job is to leave behind a MARK. At EXPORT time Slate
-    evaluates the expression once per value the control can take, packs the results as one binary array,
-    and ships it — moving the control then indexes shipped data instead of calling Julia.
+        LIVE this is a pass-through: only the control's current value is computed, so the cell costs exactly
+        what the bare expression costs. The macro's job is to leave behind a MARK. At EXPORT time Slate
+        evaluates the expression once per value the control can take, packs the results as one binary array,
+        and ships it — moving the control then indexes shipped data instead of calling Julia.
 
-    You never restate the domain: it is read from the control, so it cannot drift. You never name a trace
-    or a field either — the value is an ordinary array, and the renderer finds it wherever you put it.
+        You never restate the domain: it is read from the control, so it cannot drift. You never name a trace
+        or a field either — the value is an ordinary array, and the renderer finds it wherever you put it.
 
-    REQUIREMENTS: the control must have a finite domain (`Slider`, `Select`, `Radio`, `Checkbox`,
-    `Toggle` — not a text or open number field), and `expr` must return a numeric array of the same shape
-    for every value. Both are checked as you write the cell, not at export.
+        REQUIREMENTS: the control must have a finite domain (`Slider`, `Select`, `Radio`, `Checkbox`,
+        `Toggle` — not a text or open number field), and `expr` must return a numeric array of the same shape
+        for every value. Both are checked as you write the cell, not at export.
 
-    A `@replay` cell is never restored from the durable cache — the mark is established by RUNNING, so a
-    restored cell would export a control with no data behind it.
+        A `@replay` cell is never restored from the durable cache — the mark is established by RUNNING, so a
+        restored cell would export a control with no data behind it.
 
-    The export dialog shows what each mark will cost and offers a **resolution** (ship every n-th slider
-    position). See also `@bind`, `save_asset`."""),
-SlateApiEntry("playhead", "Widgets",
+        The export dialog shows what each mark will cost and offers a **resolution** (ship every n-th slider
+        position). See also `@bind`, `save_asset`.""",
+    ),
+    SlateApiEntry(
+        "playhead",
+        "Widgets",
         "A DRIVEN control: an animation player pushes its current frame index here.",
-        ["frame", "scrub", "player", "time"], "playhead(anim; label) -> driven control",
+        ["frame", "scrub", "player", "time"],
+        "playhead(anim; label) -> driven control",
         """A DRIVEN control: an animation player pushes its current 1-based frame index here (no input
         of its own). `@bind t playhead(anim)` lets another cell react to playback —
-        `frames[t]` / `\"t=\$t\"`. Playback never waits on Julia; updates are throttled."""),
+        `frames[t]` / `\"t=\$t\"`. Playback never waits on Julia; updates are throttled.""",
+    ),
 
     # ── Live / reactive ────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("reactive", "Live",
+    SlateApiEntry(
+        "reactive",
+        "Live",
         "A live value you PUSH to over time; reader cells re-render with no recompute.",
         ["stream", "live", "observable", "update", "progress", "monitor"],
         "reactive(:name, init) -> live value  ·  @reactive name = init",
@@ -298,28 +407,49 @@ SlateApiEntry("playhead", "Widgets",
         `level[] = v` pushes to every cell that reads it (re-renders live, no manual refresh). The
         `:name` MUST match the variable — it routes the refresh to the cells that read `name`. Prefer
         the sugar `@reactive level = 0` (= `level = reactive(:level, 0)`), which derives the name from
-        the binding so it can never drift."""),
-    SlateApiEntry("@onclick", "Live",
+        the binding so it can never drift.""",
+    ),
+    SlateApiEntry(
+        "@onclick",
+        "Live",
         "Run a body when a Button is clicked — the cell does NOT recompute.",
-        ["handler", "event", "action", "button"], "@onclick button begin … end",
+        ["handler", "event", "action", "button"],
+        "@onclick button begin … end",
         """Run a body when a Button is clicked (a NEW click cancels the still-running prior run). The
         cell does NOT recompute — the handler fires directly.
         ```julia
         @onclick go for v in 0:2:100; level[] = v; pause(0.1) end
-        ```"""),
-    SlateApiEntry("@onchange", "Live",
+        ```""",
+    ),
+    SlateApiEntry(
+        "@onchange",
+        "Live",
         "Run a body on each change of a control — the cell does NOT recompute.",
-        ["handler", "event", "watch"], "@onchange control (body)",
+        ["handler", "event", "watch"],
+        "@onchange control (body)",
         """Run a body on each change of a control; the new value is bound and the cell does NOT
-        recompute. `@onchange n (level[] = n)`."""),
-    SlateApiEntry("pause", "Live", "A CANCELLABLE sleep, for use inside `@onclick`/`@onchange` bodies.",
-        ["sleep", "delay", "wait", "throttle"], "pause(seconds)",
+        recompute. `@onchange n (level[] = n)`.""",
+    ),
+    SlateApiEntry(
+        "pause",
+        "Live",
+        "A CANCELLABLE sleep, for use inside `@onclick`/`@onchange` bodies.",
+        ["sleep", "delay", "wait", "throttle"],
+        "pause(seconds)",
         """A CANCELLABLE sleep for use inside `@onclick`/`@onchange` bodies — a new click or `cancel`
-        stops the run at its next `pause`. `pause(0.1)`."""),
-    SlateApiEntry("cancel", "Live", "Cooperatively stop a running `@onclick` handler.",
-        ["stop", "abort", "interrupt", "kill"], "cancel(:name)",
-        """Cooperatively stop a running `@onclick` handler (it stops at its next `pause`). `cancel(:level)`."""),
-    SlateApiEntry("set_bind", "Live",
+        stops the run at its next `pause`. `pause(0.1)`.""",
+    ),
+    SlateApiEntry(
+        "cancel",
+        "Live",
+        "Cooperatively stop a running `@onclick` handler.",
+        ["stop", "abort", "interrupt", "kill"],
+        "cancel(:name)",
+        """Cooperatively stop a running `@onclick` handler (it stops at its next `pause`). `cancel(:level)`.""",
+    ),
+    SlateApiEntry(
+        "set_bind",
+        "Live",
         "AGENT TOOL — drive a `@bind` from outside the browser (headless); omit `value` to CLICK a Button.",
         ["drive", "click", "headless", "test", "simulate", "agent"],
         "slate.set_bind(notebook, name; value=\"\")",
@@ -331,25 +461,37 @@ SlateApiEntry("playhead", "Widgets",
         `value` is JSON (a number \"42\", bool, string, or array). For a Button, OMIT `value`: a
         valueless set is a CLICK — the server increments the click count and fires the handler, so you
         never need to know (or race) it.
-        `slate.set_bind(nb, \"njobs\", value=\"50\")` then `slate.set_bind(nb, \"launch\")`  # set a slider, then click a button."""),
+        `slate.set_bind(nb, \"njobs\", value=\"50\")` then `slate.set_bind(nb, \"launch\")`  # set a slider, then click a button.""",
+    ),
 
     # ── Tables ─────────────────────────────────────────────────────────────────────────────────────
     # Real exported functions — documented ONCE in their own docstrings (tables.jl / paged.jl).
-    SlateApiEntry("slate_table", "Tables",
+    SlateApiEntry(
+        "slate_table",
+        "Tables",
         "Render tabular data — sortable, filterable, paged, per-column format/align/viz.",
         ["dataframe", "grid", "columns", "csv", "rows", "currency", "sparkline"],
-        Base.Docs.Binding(ReportEngine, :slate_table)),
-    SlateApiEntry("slate_query", "Tables",
+        Base.Docs.Binding(ReportEngine, :slate_table),
+    ),
+    SlateApiEntry(
+        "slate_query",
+        "Tables",
         "Render a SQL query's result set as a live table.",
         ["sql", "duckdb", "database", "connection"],
-        Base.Docs.Binding(ReportEngine, :slate_query)),
-    SlateApiEntry("slate_matrix", "Matrices",
+        Base.Docs.Binding(ReportEngine, :slate_query),
+    ),
+    SlateApiEntry(
+        "slate_matrix",
+        "Matrices",
         "Render a Matrix explicitly (a bare Matrix already auto-renders).",
         ["array", "numeric", "grid", "linear algebra"],
-        Base.Docs.Binding(ReportEngine, :slate_matrix)),
+        Base.Docs.Binding(ReportEngine, :slate_matrix),
+    ),
 
     # ── Assets & front-end ─────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("@asset", "Assets & front-end",
+    SlateApiEntry(
+        "@asset",
+        "Assets & front-end",
         "Read a sibling file's CONTENTS as a TRACKED cell input — edit the file, the cell re-runs.",
         ["file", "include", "css", "js", "html", "watch", "source"],
         "@asset \"path\" -> String   ·   @asset bytes \"path\" -> Vector{UInt8}",
@@ -372,8 +514,11 @@ SlateApiEntry("playhead", "Widgets",
         ```
         DYNAMIC caveat: a COMPUTED path can't be tracked statically — use `readfile(path)` for that
         (an escape hatch with no memo-invalidation and no watcher). Prefer `@asset "literal"` whenever
-        the path is known at author time. See also `readfile`, `@use`, `WebPage`, `datadir`."""),
-    SlateApiEntry("datadir", "Assets & front-end",
+        the path is known at author time. See also `readfile`, `@use`, `WebPage`, `datadir`.""",
+    ),
+    SlateApiEntry(
+        "datadir",
+        "Assets & front-end",
         "The notebook's portable data dir; `@sfile \"f.csv\"` is a PATH into it (read AND write).",
         ["path", "csv", "read", "write", "portable", "data file", "duckdb"],
         "datadir() -> String   ·   @sfile \"name\" -> String (path)",
@@ -390,8 +535,11 @@ SlateApiEntry("playhead", "Widgets",
         Unlike `@asset`, `@sfile` is NOT folded into the memo key (it's a read/write store, not tracked
         source). Roadmap: files referenced here transfer content-addressed over the DATA CHANNEL to
         remote workers (the same transport as memo/boundary blobs — dedup-aware, fetched by sha on
-        demand), so a notebook's data follows it across sites. See also `@asset`, `readfile`."""),
-    SlateApiEntry("readfile", "Assets & front-end",
+        demand), so a notebook's data follows it across sites. See also `@asset`, `readfile`.""",
+    ),
+    SlateApiEntry(
+        "readfile",
+        "Assets & front-end",
         "Untracked runtime read for a COMPUTED path — the escape hatch from `@asset`.",
         ["file", "dynamic path", "escape hatch"],
         "readfile(path; bytes=false) -> String | Vector{UInt8}",
@@ -402,8 +550,11 @@ SlateApiEntry("playhead", "Widgets",
         for it only when the filename is dynamic; otherwise use `@asset "literal"`.
         ```julia
         cfg = readfile("configs/\$name.json")     # path depends on a variable → @asset can't see it
-        ```"""),
-    SlateApiEntry("@use", "Assets & front-end",
+        ```""",
+    ),
+    SlateApiEntry(
+        "@use",
+        "Assets & front-end",
         "Declare a browser ES-module import (import map) so front-end JS can `import` it.",
         ["import", "esm", "cdn", "module", "d3", "npm"],
         "@use \"name\" => \"url\"    (or @use \"name\" \"url\")",
@@ -416,8 +567,11 @@ SlateApiEntry("playhead", "Widgets",
         needs a reload to take effect (editing the JS that uses it stays instant).
         ```julia
         @use \"d3\" => \"https://esm.sh/d3@7\"    # then, in front-end JS:  import * as d3 from \"d3\"
-        ```"""),
-    SlateApiEntry("WebPage", "Assets & front-end",
+        ```""",
+    ),
+    SlateApiEntry(
+        "WebPage",
+        "Assets & front-end",
         "Compose ONE self-contained HTML page from CSS/HTML/JS strings (what a `web` cell builds).",
         ["html", "custom widget", "frontend", "javascript", "visualisation"],
         "WebPage(; html=\"\", css=\"\", js=\"\", obscure=false)",
@@ -430,16 +584,22 @@ SlateApiEntry("playhead", "Widgets",
         casual View-Source). Pairs with `@use` for bare-specifier imports.
         ```julia
         WebPage(css=@asset("app.css"), js=@asset("app.js"), html=@asset("app.html"))
-        ```"""),
+        ```""",
+    ),
 
     # Real function — documented in its own docstring (capture.jl). Injected into cells as `save_asset`.
-    SlateApiEntry("save_asset", "Assets & front-end",
+    SlateApiEntry(
+        "save_asset",
+        "Assets & front-end",
         "Publish GENERATED bytes/arrays as a named cell asset — the write-side dual of `@asset`.",
         ["binary", "large data", "float32", "json", "client", "download", "generated"],
-        Base.Docs.Binding(ReportEngine, :_save_asset)),
+        Base.Docs.Binding(ReportEngine, :_save_asset),
+    ),
 
     # ── Web cells ──────────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("web cell", "Web cells",
+    SlateApiEntry(
+        "web cell",
+        "Web cells",
         "A first-class HTML/CSS/JS cell with `{{ }}` interpolation and a live JS↔Julia bridge.",
         ["javascript", "html", "css", "custom ui", "d3", "canvas", "frontend", "widget", "preact"],
         "#%% web   →   @web(html\"\"\"…\"\"\" css\"\"\"…\"\"\" js\"\"\"…\"\"\")",
@@ -480,19 +640,25 @@ SlateApiEntry("playhead", "Widgets",
                    echo(`mean = \${r.mean}`);\"\"\")
         ```
         STATIC EXPORT: client-only fragments render offline, but `slateCall` needs a live kernel — a
-        server-backed widget is live-only. See also `WebPage`, `slate_on`, `slate_emit`, `save_asset`."""),
+        server-backed widget is live-only. See also `WebPage`, `slate_on`, `slate_emit`, `save_asset`.""",
+    ),
 
     # ── Progress ───────────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("slate_progress", "Progress",
+    SlateApiEntry(
+        "slate_progress",
+        "Progress",
         "Report progress (0..1) from a running cell → its progress bar + the run chip.",
         ["bar", "percent", "status", "long running", "loop"],
         "slate_progress(frac; msg=\"\", id=\"\", done=false)",
         """Report progress (0..1) from a running cell — drives the cell's progress bar + the floating
         run chip. `@progress`/`@withprogress` loops also drive it automatically.
-        `for i in 1:n; slate_progress(i/n; msg=\"step \$i\"); end`."""),
+        `for i in 1:n; slate_progress(i/n; msg=\"step \$i\"); end`.""",
+    ),
 
     # ── Live custom stream ───────────────────────────────────────────────────────────────────────
-    SlateApiEntry("slate_emit", "Live stream",
+    SlateApiEntry(
+        "slate_emit",
+        "Live stream",
         "PUSH a value to browser JS on a channel — no recompute, no output swap (Julia → JS).",
         ["stream", "push", "live", "javascript", "low latency", "custom renderer"],
         "slate_emit(channel::AbstractString, value)",
@@ -503,9 +669,11 @@ SlateApiEntry("playhead", "Widgets",
         double-encodes: the browser would receive a quoted string, not an object). In the browser a
         handler registers `slateOnStream(channel, data => …)` and receives the parsed value.
         Region-transparent (works when the cell runs on a remote worker).
-        `slate_emit("mypanel", (node = "x", phase = "forward"))`."""),
-
-    SlateApiEntry("slate_on", "Live stream",
+        `slate_emit("mypanel", (node = "x", phase = "forward"))`.""",
+    ),
+    SlateApiEntry(
+        "slate_on",
+        "Live stream",
         "Answer CALLS from browser JS — register a handler that `window.slateCall` invokes (JS → Julia).",
         ["callback", "handler", "rpc", "slatecall", "request", "javascript", "interactive"],
         "slate_on(channel, f)  ·  slate_off(channel)  ·  slate_call(channel, args)",
@@ -527,8 +695,11 @@ SlateApiEntry("playhead", "Widgets",
         `@onclick go slate_call("compute", (n = n_slider,))`. It errors if the channel isn't registered.
 
         The registry is per-namespace and per-channel: a cell re-run REPLACES its channel's handler, and
-        a namespace rebuild drops them all. Pairs with `web cell` (its JS is the usual caller)."""),
-    SlateApiEntry("slate_on_cleanup", "Live stream",
+        a namespace rebuild drops them all. Pairs with `web cell` (its JS is the usual caller).""",
+    ),
+    SlateApiEntry(
+        "slate_on_cleanup",
+        "Live stream",
         "Release a LIVE per-cell resource before the cell re-runs or is deleted.",
         ["teardown", "dispose", "leak", "connection", "task", "subscription", "lifecycle"],
         "slate_on_cleanup(f)",
@@ -540,24 +711,36 @@ SlateApiEntry("playhead", "Widgets",
         slate_on_cleanup(() -> stop!(t))     # a re-run stops the old loop before starting a new one
         ```
         Keyed by the executing cell, so each cell cleans up only what it set up. Distinct from the
-        `resource` cell tag (which is about CACHING an external-resource cell, not tearing it down)."""),
+        `resource` cell tag (which is about CACHING an external-resource cell, not tearing it down).""",
+    ),
 
     # ── Fingerprints & the memo store ── real functions, documented in their own docstrings ─────────
-    SlateApiEntry("slate_fingerprint", "Caching",
+    SlateApiEntry(
+        "slate_fingerprint",
+        "Caching",
         "Canonical content hash of a value — what durable memo keys are built from.",
         ["hash", "cache key", "identity", "changed"],
-        Base.Docs.Binding(ReportEngine, :slate_fingerprint)),
-    SlateApiEntry("slate_memo_stats", "Caching",
+        Base.Docs.Binding(ReportEngine, :slate_fingerprint),
+    ),
+    SlateApiEntry(
+        "slate_memo_stats",
+        "Caching",
         "Shape and size of the durable memo store.",
         ["cache", "disk", "size", "stats"],
-        Base.Docs.Binding(ReportEngine, :slate_memo_stats)),
-    SlateApiEntry("slate_memo_entries", "Caching",
+        Base.Docs.Binding(ReportEngine, :slate_memo_stats),
+    ),
+    SlateApiEntry(
+        "slate_memo_entries",
+        "Caching",
         "List durable memo entries — what is cached, how big, how old.",
         ["cache", "listing", "inspect", "evict"],
-        Base.Docs.Binding(ReportEngine, :slate_memo_entries)),
+        Base.Docs.Binding(ReportEngine, :slate_memo_entries),
+    ),
 
     # ── Advanced seams ─────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("slate_refresh", "Advanced",
+    SlateApiEntry(
+        "slate_refresh",
+        "Advanced",
         "Low-level: announce that globals changed so their reader cells recompute.",
         ["restale", "recompute", "async", "background", "progressive"],
         "slate_refresh(:name, …)",
@@ -568,8 +751,11 @@ SlateApiEntry("playhead", "Widgets",
         ```
         PREFER `reactive` / `@reactive` — same effect with the name derived from the binding (so it
         can't drift) and no manual `global`. Reach for `slate_refresh` when the value is an ordinary
-        global you can't restructure. A no-op on a standalone run."""),
-    SlateApiEntry("slate_effect", "Advanced",
+        global you can't restructure. A no-op on a standalone run.""",
+    ),
+    SlateApiEntry(
+        "slate_effect",
+        "Advanced",
         "Declare a cell EFFECT the host acts on — e.g. re-establish this on every worker.",
         ["everywhere", "distributed", "package", "seam", "declare", "region"],
         "slate_effect(kind; names=…, data...)  ·  slate_everywhere(:name, …)",
@@ -581,13 +767,16 @@ SlateApiEntry("playhead", "Widgets",
         `slate_everywhere(:f, :g)` is the ergonomic case — the notebook/region analogue of
         `Distributed.@everywhere`: mark these names so Slate re-establishes them on EVERY worker
         (including one adopted later). Call it from inside the registering statement so the effect is
-        attributed there. No `@everywhere` MACRO is injected — it would clash with `Distributed`'s."""),
+        attributed there. No `@everywhere` MACRO is injected — it would clash with `Distributed`'s.""",
+    ),
 
     # ── Remote execution & regions ─────────────────────────────────────────────────────────────────
     # Discoverability SIGNPOSTS for the `slate.*` AGENT tools (not cell helpers), so `slate_api("remote")`
     # / `slate_search_docs("region")` surface them; each tool's own schema (in `create_tools`) has the
     # full per-parameter reference.
-    SlateApiEntry("remote", "Remote & regions",
+    SlateApiEntry(
+        "remote",
+        "Remote & regions",
         "AGENT TOOLS — run a WHOLE notebook's worker on another machine (SSH), transparently.",
         ["ssh", "host", "offload", "gpu", "cluster", "move", "elsewhere"],
         "slate.run_on · slate.check_remote · slate.whereis · slate.remote_workers · slate.reap_worker · slate.sync_memo",
@@ -603,8 +792,11 @@ SlateApiEntry("playhead", "Widgets",
           • `slate.sync_memo(notebook)` — push local durable-cache blobs to the remote (either transport)
             so it RESTORES cached results instead of recomputing (companion to `slate_memo_stats` /
             `slate_memo_entries` / `slate_memo_trace`).
-        To run only SOME cells elsewhere (and keep workers warm), see the `regions` entry."""),
-    SlateApiEntry("regions", "Remote & regions",
+        To run only SOME cells elsewhere (and keep workers warm), see the `regions` entry.""",
+    ),
+    SlateApiEntry(
+        "regions",
+        "Remote & regions",
         "Run SOME cells on another kernel/host; boundary values cross as content-addressed blobs.",
         ["distributed", "warm pool", "offload", "per cell", "second kernel", "hybrid"],
         "slate.region · slate.region_on · slate.regions  ·  cell tag `region=<name>`",
@@ -627,10 +819,13 @@ SlateApiEntry("playhead", "Widgets",
         compute genuinely belongs on each side (a registration call, a process-global config) rather than
         a definition. Values that a region cell reads from another side cross as blobs; functions and
         consts a notebook defines never do (they live in its anonymous module, which the far side can't
-        decode) — those are always re-established by this priming path."""),
+        decode) — those are always re-established by this priming path.""",
+    ),
 
     # ── Cell tags (header) ─────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("cell tags", "Cell tags",
+    SlateApiEntry(
+        "cell tags",
+        "Cell tags",
         "Per-cell behaviour/presentation/role tags carried in the `#%%` header.",
         ["hidecode", "nocache", "collapsed", "needs", "slide", "trace", "cache", "header"],
         "#%% code id=… <tag> …    (or the 🏷 tag editor)",
@@ -653,10 +848,13 @@ SlateApiEntry("playhead", "Widgets",
         real edges (staleness, run ordering, memo keys). Draw/remove them in the DAG pane: 🔗 arms
         link mode, then click two cells to link (click a dashed edge to unlink). Any
         other token is a free-form tag that round-trips. Expensive cells (≥150 ms) are otherwise
-        auto-cached to disk and RESTORED after a restart instead of recomputing."""),
+        auto-cached to disk and RESTORED after a restart instead of recomputing.""",
+    ),
 
     # ── Publishing to a site (GitHub Pages) ──────────────────────────────────────────────────────────
-    SlateApiEntry("site", "Document",
+    SlateApiEntry(
+        "site",
+        "Document",
         "Publish a repo as a SITE of many documents (GitHub Pages), with a custom front page.",
         ["publish", "pages", "blog", "home", "deploy", "portfolio"],
         "Export → Publish · `home` + `docindex` tags",
@@ -666,10 +864,13 @@ SlateApiEntry("playhead", "Widgets",
         default cards, tag a notebook `home`: it renders to the site ROOT, and a cell tagged `docindex`
         marks where the document listing is injected (re-filled on every publish, so it stays current).
         A `home` notebook is the portfolio/blog landing page — write intro, bio, featured links around
-        the `docindex` cell."""),
+        the `docindex` cell.""",
+    ),
 
     # ── Document metadata (front matter) ─────────────────────────────────────────────────────────────
-    SlateApiEntry("front matter", "Document",
+    SlateApiEntry(
+        "front matter",
+        "Document",
         "Document metadata as ROLE-tagged cells: `title`, `abstract`, `bibliography`.",
         ["title", "author", "byline", "abstract", "bibtex", "pdf", "paper"],
         "#%% md id=… title | abstract | bibliography",
@@ -684,8 +885,11 @@ SlateApiEntry("playhead", "Widgets",
             Inline + external can be mixed; in the live UI it renders an adaptive references card.
         With no `title` cell, the document title falls back to the first markdown H1 (then the
         filename). Per-notebook citation style is `bibstyle` (Settings → Citation style):
-        ieee/apa/chicago-author-date/mla/nature/vancouver/harvard."""),
-    SlateApiEntry("citation", "Document",
+        ieee/apa/chicago-author-date/mla/nature/vancouver/harvard.""",
+    ),
+    SlateApiEntry(
+        "citation",
+        "Document",
         "Cite a bibliography key in markdown prose: `[@key]`, `[@key, p. 7]`, bare `@key`.",
         ["bibtex", "reference", "cite", "bibliography", "footnote"],
         "[@key] · [@key, p. 7] · [@a; @b] · @key (prose)",
@@ -693,8 +897,11 @@ SlateApiEntry("playhead", "Widgets",
         (page/locator) · `[@a; @b]` (multiple) · bare `@key` (prose form: "Knuth (1984)" — for an
         author-year mention; only converts keys actually defined, so emails stay literal). Typing `[@`
         in a markdown cell autocompletes keys. Export renders linked citations + a References list in
-        the chosen `bibstyle`; the live notebook shows a references card with cited keys highlighted."""),
-    SlateApiEntry("slides", "Document",
+        the chosen `bibstyle`; the live notebook shows a references card with cited keys highlighted.""",
+    ),
+    SlateApiEntry(
+        "slides",
+        "Document",
         "Present the notebook as a 16:9 deck — a `##` heading starts a slide.",
         ["presentation", "deck", "present", "talk", "speaker notes"],
         "▶ Present  ·  Export PDF (slides)  ·  `slide` / `notes` cell tags",
@@ -703,8 +910,11 @@ SlateApiEntry("playhead", "Widgets",
         markup. For explicit control, tag a cell `slide` (force a new slide here) or `notes` (speaker
         notes — presenter view only, never rendered in the deck or the article).
         Present live in the browser (▶ Present) or Export PDF → slides for a 16:9 deck. See also
-        `cell tags`, `front matter`."""),
-    SlateApiEntry("markdown", "Document",
+        `cell tags`, `front matter`.""",
+    ),
+    SlateApiEntry(
+        "markdown",
+        "Document",
         "Prose cells (`#%% md`) with `{{ expr }}` interpolation of live values; `@md` is their skin.",
         ["md", "text", "prose", "interpolation", "narrative", "template", "standalone"],
         "#%% md id=…    ·    {{ expr }}    ·    @md\"\"\"…\"\"\"",
@@ -719,27 +929,40 @@ SlateApiEntry("playhead", "Widgets",
         (`KAIMONSLATE_QUIET_MD=1` suppresses it for a code-only run) and `standalone!` supplies the rest
         of the notebook contract (`@bind` falls back to widget defaults, live-only helpers no-op). Inside
         the Slate engine the skin is unwrapped at parse time — you never write `@md` by hand.
-        Role tags (`title`, `abstract`, `bibliography`) go on markdown cells — see `front matter`."""),
-    SlateApiEntry("@trace", "Cell tags",
+        Role tags (`title`, `abstract`, `bibliography`) go on markdown cells — see `front matter`.""",
+    ),
+    SlateApiEntry(
+        "@trace",
+        "Cell tags",
         "Inspect EVERY intermediate value in a cell (usually via the 🔍 button / `trace` tag).",
         ["debug", "values", "inspect", "step through"],
         "@trace begin … end   (or the `trace` cell tag)",
         """Inspect every intermediate value in a cell — each line's value is collected into a trace
-        table. Usually toggled via the cell's 🔍 button / `trace` tag rather than written by hand."""),
+        table. Usually toggled via the cell's 🔍 button / `trace` tag rather than written by hand.""",
+    ),
 ]
 
 # ── Renderers ──────────────────────────────────────────────────────────────────────────────────
 # Records for the semantic index: one per entry, module "Slate" so module-scoped search includes them.
 # The summary + routing keywords are folded in so a name-blind search ("log axis", "clickable row")
 # retrieves the entry even when the prose never spells the phrase.
-slate_api_records() = [Dict{String,Any}("module" => "Slate", "name" => e.name,
-                                        "doc" => string(e.summary, "\n\n", _entry_markdown(e),
-                                                        isempty(e.keywords) ? "" :
-                                                        string("\n\nkeywords: ", join(e.keywords, ", "))))
-                       for e in SLATE_API]
+function slate_api_records()
+    return [
+        Dict{String,Any}(
+            "module" => "Slate",
+            "name" => e.name,
+            "doc" => string(
+                e.summary,
+                "\n\n",
+                _entry_markdown(e),
+                isempty(e.keywords) ? "" : string("\n\nkeywords: ", join(e.keywords, ", ")),
+            ),
+        ) for e in SLATE_API
+    ]
+end
 
 # A content hash so the auto-indexer re-indexes only when the API docs actually change.
-slate_api_version() = string(hash(slate_api_records()); base = 16)
+slate_api_version() = string(hash(slate_api_records()); base=16)
 
 _api_categories() = unique(String[e.category for e in SLATE_API])
 
@@ -767,7 +990,9 @@ function slate_api_entry(name::AbstractString)
 end
 
 # Every entry of a category, in registry order.
-_api_in_category(cat::AbstractString) = [e for e in SLATE_API if lowercase(e.category) == lowercase(cat)]
+function _api_in_category(cat::AbstractString)
+    return [e for e in SLATE_API if lowercase(e.category) == lowercase(cat)]
+end
 
 # Resolve a category by name, tolerant of the spacing/punctuation a caller won't remember
 # ("assets", "assets & front-end", "web cells", "webcells"). Returns the canonical name or nothing.
@@ -789,7 +1014,8 @@ end
 # LOSSY — an index line is enough to choose what to read, never enough to write the call from. The
 # full detail is one `slate.api("name")` away, and several names can be fetched in ONE call.
 function slate_api_toc()
-    return string("# Kaimon Slate notebook API — index ($(length(SLATE_API)) helpers)\n\n",
+    return string(
+        "# Kaimon Slate notebook API — index ($(length(SLATE_API)) helpers)\n\n",
         """
         Slate-specific helpers injected into every cell. They are NOT in package docs, and a
         package-docs search for "chart"/"series" returns Makie, which will lead you astray.
@@ -799,7 +1025,9 @@ function slate_api_toc()
           slate_api("echart @bind web")   SEVERAL at once — batched into one call
           slate_api("Widgets")            a whole category   ·   slate_api("all") = every entry
 
-        """, _api_toc_body())
+        """,
+        _api_toc_body(),
+    )
 end
 
 # The index BODY — one line per helper, grouped by category. Shared by the `slate.api` index and the
@@ -808,13 +1036,17 @@ end
 # `keywords` are shown in the TOOL's index (where the reader is deciding what to fetch next, and a
 # routing term turns "log axis" into `echart`) and omitted from the CHEATSHEET, where they'd be dead
 # weight: an agent holding the prompt doesn't need to guess a search term, it just calls the tool.
-function _api_toc_body(; keywords::Bool = true)
+function _api_toc_body(; keywords::Bool=true)
     io = IOBuffer()
     w = maximum(length(e.name) for e in SLATE_API)
     for cat in _api_categories()
         println(io, "## ", cat)
         for e in _api_in_category(cat)
-            kw = (keywords && !isempty(e.keywords)) ? string("  [", join(e.keywords, " · "), "]") : ""
+            kw = if (keywords && !isempty(e.keywords))
+                string("  [", join(e.keywords, " · "), "]")
+            else
+                ""
+            end
             println(io, "  ", rpad(e.name, w), "  ", e.summary, kw)
         end
         println(io)
@@ -837,11 +1069,12 @@ end
 # Nearest entries to a topic that matched NOTHING, so a miss routes somewhere instead of dead-ending.
 # Ranked by cheap, explainable signals — a shared prefix, a substring either way, or an overlapping
 # keyword — which is all it takes to turn "binding"/"chart"/"colour" into the right suggestion.
-function _api_suggestions(t::AbstractString; limit::Int = 6)
+function _api_suggestions(t::AbstractString; limit::Int=6)
     score(e) = begin
         # Compare against the BARE name: with the sigil, "bindings" matches neither end of "@bind"
         # and the nearest entry to an obvious near-miss goes unsuggested.
-        n = lowercase(lstrip(e.name, '@')); s = 0
+        n = lowercase(lstrip(e.name, '@'))
+        s = 0
         (startswith(n, t) || startswith(t, n)) && (s += 4)
         (occursin(t, n) || occursin(n, t)) && (s += 3)
         any(k -> occursin(t, k) || occursin(k, t), lowercase.(e.keywords)) && (s += 2)
@@ -850,7 +1083,7 @@ function _api_suggestions(t::AbstractString; limit::Int = 6)
     end
     scored = [(score(e), e) for e in SLATE_API]
     filter!(p -> p[1] > 0, scored)
-    sort!(scored; by = p -> -p[1])
+    sort!(scored; by=p -> -p[1])
     return [p[2] for p in scored[1:min(limit, length(scored))]]
 end
 
@@ -867,15 +1100,18 @@ The `slate.api` tool's text.
 - anything else → entries whose name/category/keywords/doc contain every word of the topic; failing
   that, a "did you mean" list of the nearest entries rather than a dead end.
 """
-function slate_api_reference(topic::AbstractString = "")
+function slate_api_reference(topic::AbstractString="")
     t = strip(lowercase(String(topic)))
     io = IOBuffer()
     isempty(t) && return slate_api_toc()
     if t in ("all", "full", "everything")
         println(io, _SLATE_CHEATSHEET)
         println(io, "\n---\n# Full reference\n")
-        println(io, "Drill into any helper with `slate.api(\"name\")`; search them with ",
-                    "`slate.search_docs(\"…\")` (module \"Slate\").\n")
+        println(
+            io,
+            "Drill into any helper with `slate.api(\"name\")`; search them with ",
+            "`slate.search_docs(\"…\")` (module \"Slate\").\n",
+        )
         for cat in _api_categories()
             println(io, "## ", cat)
             for e in _api_in_category(cat)
@@ -915,34 +1151,65 @@ function slate_api_reference(topic::AbstractString = "")
     # Phrase query: every word of the topic must appear somewhere in the entry — now including its
     # summary and routing KEYWORDS, so "log axis" finds `echart` and "clickable row" finds TableSelect.
     words = tokens
-    hits = [e for e in SLATE_API
-            if (c = lowercase(string(e.name, " ", e.category, " ", e.summary, " ",
-                                     join(e.keywords, " "), " ", _entry_doc(e)));
-                all(w -> occursin(w, c), words))]
+    hits = [
+        e for e in SLATE_API if (
+            c=lowercase(
+                string(
+                    e.name,
+                    " ",
+                    e.category,
+                    " ",
+                    e.summary,
+                    " ",
+                    join(e.keywords, " "),
+                    " ",
+                    _entry_doc(e),
+                ),
+            );
+            all(w -> occursin(w, c), words)
+        )
+    ]
     if isempty(hits)
         # PARTIAL batch: some tokens named a helper and the rest didn't (`"echart binding"`). Answering
         # with a bare "no match" would be a silent mode switch — the caller named a real helper and got
         # nothing for it. Serve what resolved, and say what didn't (with its own suggestions), so the
         # response never depends on a rule the caller can't see. This runs only AFTER the phrase query
         # fails, so `"slate_table format"` still works as a filter rather than fragmenting into parts.
-        resolved = Pair{String,Union{Nothing,SlateApiEntry}}[String(tok) => slate_api_entry(tok) for tok in tokens]
+        resolved = Pair{String,Union{Nothing,SlateApiEntry}}[
+            String(tok) => slate_api_entry(tok) for tok in tokens
+        ]
         if length(tokens) > 1 && any(p -> p.second !== nothing, resolved)
             _render_entries(io, SlateApiEntry[p.second for p in resolved if p.second !== nothing])
             for (tok, e) in resolved
                 e === nothing || continue
-                near = _api_suggestions(tok; limit = 3)
-                println(io, "> No entry named `", tok, "`",
-                        isempty(near) ? ". `slate.api()` lists every helper." :
-                        string(" — did you mean ", join(string.("`", getfield.(near, :name), "`"), ", "), "?"))
+                near = _api_suggestions(tok; limit=3)
+                println(
+                    io,
+                    "> No entry named `",
+                    tok,
+                    "`",
+                    if isempty(near)
+                        ". `slate.api()` lists every helper."
+                    else
+                        string(
+                            " — did you mean ",
+                            join(string.("`", getfield.(near, :name), "`"), ", "),
+                            "?",
+                        )
+                    end,
+                )
             end
             return String(take!(io))
         end
         near = _api_suggestions(t)
-        isempty(near) && return "No Slate API entry matches \"$topic\". `slate.api()` lists every helper; " *
-                                "`slate.search_docs(\"$topic\")` searches the notebook's package docs too."
+        isempty(near) &&
+            return "No Slate API entry matches \"$topic\". `slate.api()` lists every helper; " *
+                   "`slate.search_docs(\"$topic\")` searches the notebook's package docs too."
         return "No Slate API entry matches \"$topic\". Did you mean: " *
                join(string.("`", getfield.(near, :name), "`"), ", ") *
-               "?  (`slate.api(\"" * near[1].name * "\")`, or `slate.api()` for the full index.)"
+               "?  (`slate.api(\"" *
+               near[1].name *
+               "\")`, or `slate.api()` for the full index.)"
     end
     _render_entries(io, hits)
     return String(take!(io))
@@ -958,7 +1225,8 @@ end
 # taught `echart(:line, x, y)` but not that `yAxis`/`grid` belong on the option rather than the
 # series — so the agent guessed. Naming the helper and withholding its signature makes the tool call
 # the cheap path instead of the redundant one.
-const _SLATE_CHEATSHEET = string("""
+const _SLATE_CHEATSHEET = string(
+    """
 # Kaimon Slate notebook API
 
 Cells run in a REACTIVE notebook: a cell that READS a variable re-runs when that variable changes,
@@ -974,6 +1242,9 @@ One call takes several names — `slate_api("echart @bind slate_table")` — so 
 helpers still costs one call. `slate_search_docs("…")` searches these alongside the notebook's
 package docs (module "Slate"); `slate_api("all")` is the whole reference at once.
 
-""", _api_toc_body(; keywords = false), """
+""",
+    _api_toc_body(; keywords=false),
+    """
 Worked examples: `examples/echarts_dsl.jl`, `examples/binds_demo.jl`, `examples/frontmatter_demo.jl`.
-""")
+""",
+)

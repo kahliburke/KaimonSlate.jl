@@ -16,8 +16,11 @@ struct ZenodoHttp <: ZenodoClient
     base::String
 end
 
-ZenodoHttp(token::AbstractString; sandbox::Bool = false) =
-    ZenodoHttp(String(token), sandbox ? "https://sandbox.zenodo.org/api" : "https://zenodo.org/api")
+function ZenodoHttp(token::AbstractString; sandbox::Bool=false)
+    return ZenodoHttp(
+        String(token), sandbox ? "https://sandbox.zenodo.org/api" : "https://zenodo.org/api"
+    )
+end
 
 zenodo_token(c::ZenodoHttp) = c.token
 
@@ -29,8 +32,9 @@ The single HTTP primitive the deposition flow is built on. `url` is either a pat
 JSON body; `file` streams a file's bytes (for bucket uploads). Returns the status and parsed-JSON body
 (or `{}` on a non-JSON/empty body); never raises on an HTTP error status.
 """
-function zenodo_request(c::ZenodoHttp, method::AbstractString, url::AbstractString;
-                        json = nothing, file = nothing)
+function zenodo_request(
+    c::ZenodoHttp, method::AbstractString, url::AbstractString; json=nothing, file=nothing
+)
     full = startswith(url, "http") ? String(url) : string(c.base, url)
     headers = Pair{String,String}["Authorization" => "Bearer $(c.token)"]
     body = UInt8[]
@@ -40,7 +44,7 @@ function zenodo_request(c::ZenodoHttp, method::AbstractString, url::AbstractStri
     elseif file !== nothing
         body = read(file)
     end
-    resp = HTTP.request(method, full, headers, body; status_exception = false)
+    resp = HTTP.request(method, full, headers, body; status_exception=false)
     parsed = try
         isempty(resp.body) ? Dict{String,Any}() : JSON.parse(String(resp.body))
     catch
@@ -57,20 +61,28 @@ struct ZenodoTarget <: PublishTarget
     metadata::Dict{String,Any}        # user overrides (title / creators / description / version / …)
 end
 
-ZenodoTarget(; name = "zenodo", client::ZenodoClient, depositionId = "",
-             metadata = Dict{String,Any}()) =
-    ZenodoTarget(String(name), client, String(depositionId), Dict{String,Any}(metadata))
+function ZenodoTarget(;
+    name="zenodo", client::ZenodoClient, depositionId="", metadata=Dict{String,Any}()
+)
+    return ZenodoTarget(String(name), client, String(depositionId), Dict{String,Any}(metadata))
+end
 
 _zok(status::Integer) = 200 <= status < 300
-_zerr(status, body) = string("Zenodo HTTP ", status,
-    (body isa AbstractDict && haskey(body, "message")) ? string(": ", body["message"]) : "")
+function _zerr(status, body)
+    return string(
+        "Zenodo HTTP ",
+        status,
+        (body isa AbstractDict && haskey(body, "message")) ? string(": ", body["message"]) : "",
+    )
+end
 
 # Start a new version of an existing deposition and return (status, draft-deposition-with-bucket).
 function _znewversion(client::ZenodoClient, depositionId::AbstractString)
     st, r = zenodo_request(client, "POST", "/deposit/depositions/$depositionId/actions/newversion")
     _zok(st) || return (st, r)
     draft = String(get(get(r, "links", Dict()), "latest_draft", ""))
-    isempty(draft) && return (500, Dict("message" => "no latest_draft link on new-version response"))
+    isempty(draft) &&
+        return (500, Dict("message" => "no latest_draft link on new-version response"))
     return zenodo_request(client, "GET", draft)
 end
 
@@ -82,46 +94,55 @@ create (or new-version from `depositionId`) → upload to the bucket → set met
 `PublishResult` carrying the minted `doi` and the new `depositionId` in `meta`. Notebook-free, so the
 orchestration is unit-testable with a fake `ZenodoClient`.
 """
-function _zenodo_deposit(client::ZenodoClient, depositionId::AbstractString, file::AbstractString,
-                         metadata::AbstractDict)
-    st, dep = isempty(depositionId) ?
-              zenodo_request(client, "POST", "/deposit/depositions"; json = Dict{String,Any}()) :
-              _znewversion(client, depositionId)
-    _zok(st) || return PublishResult(; ok = false, status = "error", log = _zerr(st, dep))
+function _zenodo_deposit(
+    client::ZenodoClient, depositionId::AbstractString, file::AbstractString, metadata::AbstractDict
+)
+    st, dep = if isempty(depositionId)
+        zenodo_request(client, "POST", "/deposit/depositions"; json=Dict{String,Any}())
+    else
+        _znewversion(client, depositionId)
+    end
+    _zok(st) || return PublishResult(; ok=false, status="error", log=_zerr(st, dep))
     depId = string(get(dep, "id", ""))
     bucket = String(get(get(dep, "links", Dict()), "bucket", ""))
-    isempty(bucket) && return PublishResult(; ok = false, status = "error",
-                                            log = "Zenodo: deposition has no bucket link")
-    stu, ub = zenodo_request(client, "PUT", string(bucket, "/", basename(file)); file = file)
-    _zok(stu) || return PublishResult(; ok = false, status = "error", log = _zerr(stu, ub))
-    stm, mb = zenodo_request(client, "PUT", "/deposit/depositions/$depId";
-                             json = Dict("metadata" => metadata))
-    _zok(stm) || return PublishResult(; ok = false, status = "error", log = _zerr(stm, mb))
+    isempty(bucket) && return PublishResult(;
+        ok=false, status="error", log="Zenodo: deposition has no bucket link"
+    )
+    stu, ub = zenodo_request(client, "PUT", string(bucket, "/", basename(file)); file=file)
+    _zok(stu) || return PublishResult(; ok=false, status="error", log=_zerr(stu, ub))
+    stm, mb = zenodo_request(
+        client, "PUT", "/deposit/depositions/$depId"; json=Dict("metadata" => metadata)
+    )
+    _zok(stm) || return PublishResult(; ok=false, status="error", log=_zerr(stm, mb))
     stp, pb = zenodo_request(client, "POST", "/deposit/depositions/$depId/actions/publish")
-    _zok(stp) || return PublishResult(; ok = false, status = "error", log = _zerr(stp, pb))
+    _zok(stp) || return PublishResult(; ok=false, status="error", log=_zerr(stp, pb))
     doi = String(get(pb, "doi", ""))
     url = String(get(get(pb, "links", Dict()), "record_html", ""))
-    return PublishResult(; ok = true, status = "ok", doi = doi, url = url,
-                         meta = Dict{String,Any}("depositionId" => depId))
+    return PublishResult(;
+        ok=true, status="ok", doi=doi, url=url, meta=Dict{String,Any}("depositionId" => depId)
+    )
 end
 
 # The Zenodo metadata block — sensible defaults from the notebook, overridable via `t.metadata`.
 function _zenodo_metadata(t::ZenodoTarget, nb, slug::AbstractString)
     title = String(get(t.metadata, "title", get(nb.report.meta, "title", slug)))
     author = String(get(nb.report.meta, "author", ""))
-    creators = get(t.metadata, "creators",
-                   Any[Dict("name" => isempty(author) ? "Unknown" : author)])
-    desc = String(get(t.metadata, "description",
-                      "Reproducible KaimonSlate notebook bundle: $title"))
-    meta = Dict{String,Any}("upload_type" => "software", "title" => title,
-                            "creators" => creators, "description" => desc)
+    creators = get(
+        t.metadata, "creators", Any[Dict("name" => isempty(author) ? "Unknown" : author)]
+    )
+    desc = String(
+        get(t.metadata, "description", "Reproducible KaimonSlate notebook bundle: $title")
+    )
+    meta = Dict{String,Any}(
+        "upload_type" => "software", "title" => title, "creators" => creators, "description" => desc
+    )
     for (k, v) in t.metadata
         k in ("title", "creators", "description") || (meta[k] = v)
     end
     return meta
 end
 
-function publish(t::ZenodoTarget, nb::LiveNotebook; slug = "", kwargs...)
+function publish(t::ZenodoTarget, nb::LiveNotebook; slug="", kwargs...)
     slg = isempty(strip(String(slug))) ? doc_slug(nb) : String(slug)
     isempty(slg) && (slg = "notebook")
     text = export_standalone(nb)
@@ -131,12 +152,14 @@ function publish(t::ZenodoTarget, nb::LiveNotebook; slug = "", kwargs...)
         write(file, text)
         return _zenodo_deposit(t.client, t.depositionId, file, _zenodo_metadata(t, nb, slg))
     finally
-        rm(dir; recursive = true, force = true)
+        rm(dir; recursive=true, force=true)
     end
 end
 
 function preflight(t::ZenodoTarget)
     tok = t.client isa ZenodoHttp ? t.client.token : "present"
-    isempty(strip(tok)) && return (; ok = false, warnings = ["no Zenodo API token configured (set the target's secretRef)"])
-    return (; ok = true, warnings = String[])
+    isempty(strip(tok)) && return (;
+        ok=false, warnings=["no Zenodo API token configured (set the target's secretRef)"]
+    )
+    return (; ok=true, warnings=String[])
 end

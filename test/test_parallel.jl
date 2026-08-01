@@ -39,7 +39,7 @@ cell(src) = RE.Cell("c", RE.CODE, src)
         try
             g = RE._graphics_export_names()
             @test :fancyplot! in g
-            mk(id, src) = (c = RE.Cell(id, RE.CODE, src); RE.infer_bindings!(c); c)
+            mk(id, src) = (c=RE.Cell(id, RE.CODE, src); RE.infer_bindings!(c); c)
             c1 = mk("gp1", "fancyplot!(data)")
             @test !RE._uses_shared_graphics(c1.source)      # regex misses the alias…
             @test RE._is_graphics_cell(c1, g)               # …provenance doesn't
@@ -49,12 +49,14 @@ cell(src) = RE.Cell("c", RE.CODE, src)
             bl = NS.par_blockers(specs)
             @test !NS.co_runnable(["ga", "gb"], bl)
         finally
-            lock(RE._USING_LOCK) do; delete!(RE._USING_EXPORTS, "CairoMakie"); end
+            lock(RE._USING_LOCK) do ;
+                delete!(RE._USING_EXPORTS, "CairoMakie")
+            end
         end
     end
 
     @testset "_preempt_victims: only running pure-compute cells are interruptible" begin
-        running(src) = (c = cell(src); c.state = RE.RUNNING; c)
+        running(src) = (c=cell(src); c.state=RE.RUNNING; c)
         # a running compute cell is a victim; the guards must hold everything else back
         @test NS._preempt_victims((running("x = sum(rand(10^8))"),)) == ["c"]
         @test isempty(NS._preempt_victims((cell("x = 1"),)))                       # not running
@@ -67,9 +69,21 @@ cell(src) = RE.Cell("c", RE.CODE, src)
 
     @testset "parallel default + per-notebook override" begin
         r = RE.Report("nb", "nb")
-        nb = NS.LiveNotebook("nb", "", r, RE.InProcessKernel(), 0, String[], String[],
-                             ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
-                             Dict{String,String}())
+        nb = NS.LiveNotebook(
+            "nb",
+            "",
+            r,
+            RE.InProcessKernel(),
+            0,
+            String[],
+            String[],
+            ReentrantLock(),
+            Channel{String}[],
+            ReentrantLock(),
+            "",
+            false,
+            Dict{String,String}(),
+        )
         old = NS.PARALLEL_DEFAULT[]
         try
             NS.PARALLEL_DEFAULT[] = true

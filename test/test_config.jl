@@ -25,7 +25,7 @@ const KS = KaimonSlate
             @test occursin("8080", read(KS._slate_config_path(), String))
 
             # a co-existing setting is preserved across a port write
-            KS.set_worker_threads!("4,1"; respawn = false)
+            KS.set_worker_threads!("4,1"; respawn=false)
             @test KS.set_configured_port!(9001) == 9001
             @test KS.worker_threads() == "4,1"
             @test KS.configured_port() == 9001
@@ -34,7 +34,11 @@ const KS = KaimonSlate
             @test KS.configured_port() == 0
             @test KS.worker_threads() == "4,1"                # clearing port leaves other keys intact
         finally
-            old === nothing ? delete!(ENV, "KAIMONSLATE_CONFIG_HOME") : (ENV["KAIMONSLATE_CONFIG_HOME"] = old)
+            if old === nothing
+                delete!(ENV, "KAIMONSLATE_CONFIG_HOME")
+            else
+                (ENV["KAIMONSLATE_CONFIG_HOME"] = old)
+            end
         end
     end
 

@@ -9,8 +9,15 @@
 
 import ExpressionExplorer as EE
 
-export infer_bindings!, build_dependencies!, dependents_of, update_source!, eval_stale!,
-       refine_usings!, prewarm_usings!, refine_macros!, prewarm_macros!
+export infer_bindings!,
+    build_dependencies!,
+    dependents_of,
+    update_source!,
+    eval_stale!,
+    refine_usings!,
+    prewarm_usings!,
+    refine_macros!,
+    prewarm_macros!
 
 # ── Binding inference ────────────────────────────────────────────────────────
 
@@ -36,14 +43,24 @@ end
 # short form). Its body may legitimately name globals defined LOWER in the document (resolved when
 # called), so such references are excluded from `reads_now` and never trip the backref diagnostic.
 # Struct definitions are NOT deferred: field types/supertypes evaluate at definition time.
-_is_deferred_def(s) = s isa Expr && (
-    s.head === :function || s.head === :macro ||
-    (s.head === :(=) && s.args[1] isa Expr && s.args[1].head in (:call, :where)))
+function _is_deferred_def(s)
+    return s isa Expr && (
+        s.head === :function ||
+        s.head === :macro ||
+        (s.head === :(=) && s.args[1] isa Expr && s.args[1].head in (:call, :where))
+    )
+end
 
 # Leaf name a dotted/`as` import path binds: `A.B.C` → :C, `M as L` → :L.
 _leaf_name(s::Symbol) = s
-_leaf_name(e::Expr) = e.head === :. ? (e.args[end] isa Symbol ? e.args[end] : nothing) :
-                      e.head === :as ? _leaf_name(e.args[end]) : nothing
+_leaf_name(e::Expr) =
+    if e.head === :.
+        (e.args[end] isa Symbol ? e.args[end] : nothing)
+    elseif e.head === :as
+        _leaf_name(e.args[end])
+    else
+        nothing
+    end
 _leaf_name(::Any) = nothing
 
 # Names a top-level `import`/`using` brings into scope (to record as WRITES), or `nothing`
@@ -58,10 +75,12 @@ function _import_names(ex)
     for a in ex.args
         if a isa Expr && a.head === :(:)              # `M: a, b` — bring the listed names
             for nm in a.args[2:end]
-                s = _leaf_name(nm); s === nothing || push!(names, s)
+                s = _leaf_name(nm)
+                s === nothing || push!(names, s)
             end
         elseif ex.head === :import                    # `import M` / `import A.B` / `import M as L`
-            s = _leaf_name(a); s === nothing || push!(names, s)
+            s = _leaf_name(a)
+            s === nothing || push!(names, s)
         else
             return nothing                            # plain `using X` → unknowable exports → barrier
         end
@@ -91,8 +110,8 @@ end
 # loaded); `_USING_TRIED` remembers paths we've already resolved OR failed to, so we attempt each
 # at most once (no ZMQ round-trip per drain for a module that's already settled).
 const _USING_EXPORTS = Dict{String,Vector{Symbol}}()   # dotted module path → its exported names
-const _USING_TRIED   = Set{String}()                   # paths already attempted (success or fail)
-const _USING_LOCK    = ReentrantLock()
+const _USING_TRIED = Set{String}()                   # paths already attempted (success or fail)
+const _USING_LOCK = ReentrantLock()
 
 # Resolution state (`_USING_EXPORTS`, `_MACRO_BINDS`, and everything derived from them — the
 # barrier→precise verdict, provenance graphics/theme classification) feeds cached inference, so a
@@ -115,7 +134,11 @@ _bump_resolution!() = (Threads.atomic_add!(_RESOLUTION_GEN, 1); nothing)
 # session-only. Best-effort throughout — a missing/corrupt file just means one more round-trip.
 const _USING_DISK = Ref{Union{Nothing,Dict{String,Any}}}(nothing)   # lazy in-memory file image
 const _USING_DISK_MAX = 500
-const _USING_DISK_PATH = Ref(joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "usings.json"))
+const _USING_DISK_PATH = Ref(
+    joinpath(
+        get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "usings.json"
+    ),
+)
 
 function _using_disk_load()
     lock(_USING_LOCK) do
@@ -139,9 +162,11 @@ end
 function _using_disk_store!(key::String, syms::Vector{Symbol})
     d = _using_disk_load()
     lock(_USING_LOCK) do
-        d[key] = Dict{String,Any}("t" => round(Int, time()), "syms" => String[string(s) for s in syms])
+        d[key] = Dict{String,Any}(
+            "t" => round(Int, time()), "syms" => String[string(s) for s in syms]
+        )
         if length(d) > _USING_DISK_MAX   # bound the file: drop the oldest entries
-            order = sort!(collect(d); by = kv -> (kv[2] isa AbstractDict ? get(kv[2], "t", 0) : 0))
+            order = sort!(collect(d); by=kv -> (kv[2] isa AbstractDict ? get(kv[2], "t", 0) : 0))
             for (k, _) in Iterators.take(order, length(d) - _USING_DISK_MAX)
                 delete!(d, k)
             end
@@ -151,7 +176,7 @@ function _using_disk_store!(key::String, syms::Vector{Symbol})
             mkpath(dirname(p))
             tmp = p * ".tmp.$(getpid())"
             write(tmp, JSON.json(d))
-            mv(tmp, p; force = true)
+            mv(tmp, p; force=true)
         catch
         end
     end
@@ -183,17 +208,24 @@ end
 
 "True when `c` touches Makie's shared global state: lexical match, or provenance — any of its
 reads/provides is an export of a resolved Makie-family module."
-_is_graphics_cell(c::Cell, gnames::Set{Symbol}) =
-    _uses_shared_graphics(c.source) ||
-    (!isempty(gnames) && (!isdisjoint(c.reads, gnames) || !isdisjoint(c.provides, gnames)))
+function _is_graphics_cell(c::Cell, gnames::Set{Symbol})
+    return _uses_shared_graphics(c.source) ||
+           (!isempty(gnames) && (!isdisjoint(c.reads, gnames) || !isdisjoint(c.provides, gnames)))
+end
 
 # name → (version, source) for the notebook env's direct deps, via the kernel's project listing
 # (one cheap tool call once the worker is up; in-process kernels return none → session-only).
 function _dep_versions(kernel::Kernel, report::Report)
     out = Dict{String,Tuple{String,String}}()
-    for d in (try; project_deps(kernel, report); catch; Dict{String,Any}[]; end)
+    for d in (
+        try
+            project_deps(kernel, report)
+        catch
+            Dict{String,Any}[]
+        end
+    )
         d isa AbstractDict || continue
-        g(k) = (v = haskey(d, k) ? d[k] : get(d, Symbol(k), nothing); v === nothing ? "" : String(v))
+        g(k) = (v=haskey(d, k) ? d[k] : get(d, Symbol(k), nothing); v === nothing ? "" : String(v))
         n = g("name")
         isempty(n) || (out[n] = (g("version"), g("source")))
     end
@@ -209,7 +241,9 @@ function _resolved_using_writes(stmt)
     lock(_USING_LOCK) do
         all(p -> haskey(_USING_EXPORTS, p), paths) || return nothing
         out = Symbol[]
-        for p in paths; append!(out, _USING_EXPORTS[p]); end
+        for p in paths
+            append!(out, _USING_EXPORTS[p])
+        end
         return out
     end
 end
@@ -225,13 +259,16 @@ const _BROADCAST_ASSIGN = Symbol(".=")
 # object to mutate it). Covers `f!(x, …)`, `x[i] = …`, `x.f = …`, `x .= …`.
 function _collect_mutations!(writes::Set{Symbol}, reads::Set{Symbol}, ex)
     if ex isa Expr
-        if ex.head === :call && length(ex.args) >= 2 &&
-           ex.args[1] isa Symbol && endswith(string(ex.args[1]), "!")
+        if ex.head === :call &&
+            length(ex.args) >= 2 &&
+            ex.args[1] isa Symbol &&
+            endswith(string(ex.args[1]), "!")
             b = _base_symbol(ex.args[2])
             b === nothing || (push!(writes, b); push!(reads, b))
         elseif (ex.head === :(=) || ex.head === _BROADCAST_ASSIGN) && !isempty(ex.args)
             lhs = ex.args[1]
-            if ex.head === _BROADCAST_ASSIGN || (lhs isa Expr && (lhs.head === :ref || lhs.head === :.))
+            if ex.head === _BROADCAST_ASSIGN ||
+                (lhs isa Expr && (lhs.head === :ref || lhs.head === :.))
                 b = _base_symbol(lhs)
                 b === nothing || (push!(writes, b); push!(reads, b))
             end
@@ -252,7 +289,8 @@ end
 # (A name the cell itself defines is already a write via `node.definitions`, so dropping its mutation
 # entry here loses nothing.)
 function _record_global_mutations!(cell::Cell, ex, globals)
-    mw = Set{Symbol}(); mr = Set{Symbol}()
+    mw = Set{Symbol}()
+    mr = Set{Symbol}()
     _collect_mutations!(mw, mr, ex)
     for s in mw
         s in globals || continue
@@ -263,7 +301,9 @@ function _record_global_mutations!(cell::Cell, ex, globals)
         s in cell.writes || push!(cell.mutates, s)
         push!(cell.writes, s)
     end
-    for s in mr; s in globals && push!(cell.reads, s); end
+    for s in mr
+        s in globals && push!(cell.reads, s)
+    end
     return nothing
 end
 
@@ -294,8 +334,13 @@ function _collect_use_imports!(dict::AbstractDict, ex)
     if ex isa Expr
         if ex.head === :macrocall && !isempty(ex.args) && ex.args[1] === Symbol("@use")
             args = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
-            if length(args) == 1 && args[1] isa Expr && args[1].head === :call && length(args[1].args) == 3 &&
-               args[1].args[1] === :(=>) && args[1].args[2] isa AbstractString && args[1].args[3] isa AbstractString
+            if length(args) == 1 &&
+                args[1] isa Expr &&
+                args[1].head === :call &&
+                length(args[1].args) == 3 &&
+                args[1].args[1] === :(=>) &&
+                args[1].args[2] isa AbstractString &&
+                args[1].args[3] isa AbstractString
                 dict[String(args[1].args[2])] = String(args[1].args[3])         # @use "name" => "url"
             elseif length(args) == 2 && args[1] isa AbstractString && args[2] isa AbstractString
                 dict[String(args[1])] = String(args[2])                          # @use "name" "url"
@@ -317,8 +362,14 @@ end
 # taken — fabricating producers from unexpanded macro args could steal an edge from a true definer.
 # Slate's own handler macros are excluded: their bodies get bespoke analysis (`@onclick`'s control
 # is intentionally NOT a read), and `@asset`/`@use` args are literals collected separately.
-const _MACRO_SCAN_SKIP = Set{Symbol}((Symbol("@bind"), Symbol("@reactive"), Symbol("@onclick"),
-    Symbol("@onchange"), Symbol("@asset"), Symbol("@use")))
+const _MACRO_SCAN_SKIP = Set{Symbol}((
+    Symbol("@bind"),
+    Symbol("@reactive"),
+    Symbol("@onclick"),
+    Symbol("@onchange"),
+    Symbol("@asset"),
+    Symbol("@use"),
+))
 function _macrocall_arg_refs!(refs::Set{Symbol}, ex)
     ex isa Expr || return refs
     if ex.head === :macrocall && !isempty(ex.args)
@@ -357,7 +408,11 @@ function _scan_imports!(report::Report)
     d = Dict{String,String}()
     for c in report.cells
         c.kind == CODE || continue
-        top = try; Meta.parseall(c.source); catch; continue; end
+        top = try
+            Meta.parseall(c.source)
+        catch
+            continue
+        end
         _collect_use_imports!(d, top)
     end
     report.meta["imports"] = d
@@ -375,7 +430,21 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # call — ≈1.5s on a 140-cell notebook, paid by EVERY structural edit. Keyed by cell id but validated
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
-const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool,Set{Symbol},Int}}()
+const _BIND_CACHE = Dict{
+    String,
+    Tuple{
+        UInt64,
+        Set{Symbol},
+        Set{Symbol},
+        Bool,
+        Vector{String},
+        Set{Symbol},
+        Set{Symbol},
+        Bool,
+        Set{Symbol},
+        Int,
+    },
+}()
 const _BIND_CACHE_LOCK = ReentrantLock()
 # Bounded LRU: entries carry a recency tick (`_BIND_TICKS`, bumped on every hit/store) and overflow
 # evicts the least-recently-used ~10% — the old clear-on-full wholesale `empty!` made a long-lived
@@ -388,7 +457,7 @@ const _BIND_TICKS = Dict{String,UInt64}()
 # Caller holds _BIND_CACHE_LOCK. Evicts the oldest tenth so evictions amortize (one O(n log n)
 # sweep per ~500 misses at the cap, instead of a 5000-cell re-inference burst).
 function _bind_cache_evict!()
-    order = sort!(collect(_BIND_TICKS); by = last)
+    order = sort!(collect(_BIND_TICKS); by=last)
     for (id, _) in Iterators.take(order, max(1, _BIND_CACHE_MAX ÷ 10))
         delete!(_BIND_CACHE, id)
         delete!(_BIND_TICKS, id)
@@ -401,24 +470,41 @@ function infer_bindings!(cell::Cell)
     hit = lock(_BIND_CACHE_LOCK) do
         v = get(_BIND_CACHE, cell.id, nothing)
         v === nothing || (_BIND_TICKS[cell.id] = (_BIND_TICK[] += 1))   # LRU: a hit refreshes recency
-        v
+        return v
     end
     if hit !== nothing && hit[1] == h && hit[10] == gen   # gen mismatch ⇒ resolution state moved ⇒ recompute
-        empty!(cell.reads);  union!(cell.reads,  hit[2])
-        empty!(cell.writes); union!(cell.writes, hit[3])
+        empty!(cell.reads)
+        union!(cell.reads, hit[2])
+        empty!(cell.writes)
+        union!(cell.writes, hit[3])
         hit[4] ? push!(cell.flags, :opaque) : delete!(cell.flags, :opaque)
-        empty!(cell.inputs); append!(cell.inputs, hit[5])   # `@asset` file deps (statically extracted)
-        empty!(cell.provides); union!(cell.provides, hit[6])   # `using`/`import`-brought names (⊆ writes)
-        empty!(cell.mutates); union!(cell.mutates, hit[7])   # in-place-mutated-only names (⊆ writes, ⊄ defines)
+        empty!(cell.inputs)
+        append!(cell.inputs, hit[5])   # `@asset` file deps (statically extracted)
+        empty!(cell.provides)
+        union!(cell.provides, hit[6])   # `using`/`import`-brought names (⊆ writes)
+        empty!(cell.mutates)
+        union!(cell.mutates, hit[7])   # in-place-mutated-only names (⊆ writes, ⊄ defines)
         hit[8] ? push!(cell.flags, :macrocall) : delete!(cell.flags, :macrocall)   # unknown-macro cell (expansion candidate)
-        empty!(cell.reads_now); union!(cell.reads_now, hit[9])   # top-level reads (backref diagnostic)
+        empty!(cell.reads_now)
+        union!(cell.reads_now, hit[9])   # top-level reads (backref diagnostic)
         return cell
     end
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
         length(_BIND_CACHE) >= _BIND_CACHE_MAX && _bind_cache_evict!()
-        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags, copy(cell.reads_now), gen)
-        _BIND_TICKS[cell.id] = (_BIND_TICK[] += 1)
+        _BIND_CACHE[cell.id] = (
+            h,
+            copy(cell.reads),
+            copy(cell.writes),
+            :opaque in cell.flags,
+            copy(cell.inputs),
+            copy(cell.provides),
+            copy(cell.mutates),
+            :macrocall in cell.flags,
+            copy(cell.reads_now),
+            gen,
+        )
+        return _BIND_TICKS[cell.id] = (_BIND_TICK[] += 1)
     end
     return cell
 end
@@ -429,21 +515,33 @@ end
 _strip_anon(names) = Iterators.filter(n -> !startswith(String(n), "__ExprExpl_anon__"), names)
 
 function _infer_bindings_uncached!(cell::Cell)
-    empty!(cell.reads); empty!(cell.reads_now); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides)
-    delete!(cell.flags, :opaque); delete!(cell.flags, :macrocall)
+    empty!(cell.reads)
+    empty!(cell.reads_now)
+    empty!(cell.writes)
+    empty!(cell.mutates)
+    empty!(cell.inputs)
+    empty!(cell.provides)
+    delete!(cell.flags, :opaque)
+    delete!(cell.flags, :macrocall)
     if cell.kind == MARKDOWN || cell.kind == WEB
         # A markdown or web cell "reads" the free variables of its `{{ expr }}` blocks, so it joins the
         # reactive graph and re-renders when they change. (A web cell's source is a `@web(...)` macrocall;
         # its interpolations live inside string sections, so harvest them here rather than via the CODE
         # path, which would only see an opaque unknown macro.) Web cells define nothing → no writes.
-        exprs = cell.kind == MARKDOWN ? _md_interp_exprs(cell.source) : _web_interp_exprs(cell.source)
+        exprs =
+            cell.kind == MARKDOWN ? _md_interp_exprs(cell.source) : _web_interp_exprs(cell.source)
         for e in exprs
-            ast = try; Meta.parse(e); catch; nothing; end
+            ast = try
+                Meta.parse(e)
+            catch
+                nothing
+            end
             ast === nothing && continue
             try
                 union!(cell.reads, EE.compute_reactive_node(Expr(:block, ast)).references)
             catch e
-                @debug "deps: {{ }} reactive-node analysis failed" cell = cell.id kind = cell.kind exception = e
+                @debug "deps: {{ }} reactive-node analysis failed" cell = cell.id kind = cell.kind exception =
+                    e
             end
         end
         union!(cell.reads_now, cell.reads)   # interpolations render immediately → all top-level
@@ -454,10 +552,12 @@ function _infer_bindings_uncached!(cell::Cell)
     top = try
         Meta.parseall(cell.source)
     catch
-        push!(cell.flags, :opaque); return cell
+        push!(cell.flags, :opaque)
+        return cell
     end
     if _has_parse_error(top)
-        push!(cell.flags, :opaque); return cell
+        push!(cell.flags, :opaque)
+        return cell
     end
     # An unknown macro hides its true bindings from the static pass (see `_macrocall_arg_refs!`);
     # flag the cell so the expansion refinement can recover them once the macro is resolvable.
@@ -482,9 +582,14 @@ function _infer_bindings_uncached!(cell::Cell)
                 w = _resolved_using_writes(s)
                 # Bring the exports into scope (writes → downstream readers depend on this cell), but mark
                 # them as PROVIDED (import, not definition) so re-`using X` in another cell isn't a collision.
-                w === nothing ? push!(cell.flags, :opaque) : (union!(cell.writes, w); union!(cell.provides, w))
+                if w === nothing
+                    push!(cell.flags, :opaque)
+                else
+                    (union!(cell.writes, w); union!(cell.provides, w))
+                end
             else
-                union!(cell.writes, imp); union!(cell.provides, imp)   # explicitly-named import → provided, not defined
+                union!(cell.writes, imp)
+                union!(cell.provides, imp)   # explicitly-named import → provided, not defined
             end
             continue
         end
@@ -496,7 +601,8 @@ function _infer_bindings_uncached!(cell::Cell)
             push!(cell.writes, rm[1])            # `@reactive x = init` DEFINES x (the reactive producer)
             try
                 refs = EE.compute_reactive_node(Expr(:block, rm[2])).references
-                union!(cell.reads, refs); union!(cell.reads_now, refs)   # init evaluates immediately
+                union!(cell.reads, refs)
+                union!(cell.reads_now, refs)   # init evaluates immediately
                 union!(cell.reads, _macrocall_arg_refs!(Set{Symbol}(), rm[2]))
             catch e
                 @debug "deps: @reactive init analysis failed" cell = cell.id exception = e
@@ -505,10 +611,12 @@ function _infer_bindings_uncached!(cell::Cell)
             push!(cell.writes, bm[1])
             try
                 refs = EE.compute_reactive_node(Expr(:block, bm[2])).references
-                union!(cell.reads, refs); union!(cell.reads_now, refs)   # widget args evaluate immediately
+                union!(cell.reads, refs)
+                union!(cell.reads_now, refs)   # widget args evaluate immediately
                 union!(cell.reads, _macrocall_arg_refs!(Set{Symbol}(), bm[2]))
             catch e
-                @debug "deps: @bind widget-expr reactive-node analysis failed" cell = cell.id exception = e
+                @debug "deps: @bind widget-expr reactive-node analysis failed" cell = cell.id exception =
+                    e
             end
         elseif om !== nothing || cm !== nothing
             # `@onclick btn body` / `@onchange ctrl body` REGISTER a handler — they deliberately do
@@ -524,7 +632,8 @@ function _infer_bindings_uncached!(cell::Cell)
                 union!(cell.writes, _strip_anon(node.definitions))
                 _record_global_mutations!(cell, body, node.references)
             catch e
-                @debug "deps: @onclick/@onchange handler reactive-node analysis failed" cell = cell.id exception = e
+                @debug "deps: @onclick/@onchange handler reactive-node analysis failed" cell =
+                    cell.id exception = e
             end
         else
             push!(nonbind, s)
@@ -548,7 +657,8 @@ function _infer_bindings_uncached!(cell::Cell)
                 union!(cell.reads_now, _macrocall_arg_refs!(Set{Symbol}(), iblk))
             end
         catch e
-            @debug "deps: cell-body reactive-node analysis failed — falling back to :opaque" cell = cell.id exception = e
+            @debug "deps: cell-body reactive-node analysis failed — falling back to :opaque" cell =
+                cell.id exception = e
             push!(cell.flags, :opaque)
         end
     end
@@ -566,10 +676,11 @@ function _infer_bindings_uncached!(cell::Cell)
         push!(cell.reads, _THEME_SENTINEL)     # a later setter composes onto the earlier one's state
         push!(cell.writes, _THEME_SENTINEL)
         push!(cell.mutates, _THEME_SENTINEL)
-    elseif _uses_shared_graphics(cell.source) ||
-           (let g = _graphics_export_names()   # provenance: aliased/re-exported plot verbs (see above);
-               !isempty(g) && !isdisjoint(cell.reads, g)   # cache-safe — resolution clears _BIND_CACHE
-           end)
+    elseif _uses_shared_graphics(cell.source) || (
+        let g = _graphics_export_names()   # provenance: aliased/re-exported plot verbs (see above);
+            !isempty(g) && !isdisjoint(cell.reads, g)   # cache-safe — resolution clears _BIND_CACHE
+        end
+    )
         push!(cell.reads, _THEME_SENTINEL)
     end
     return cell
@@ -580,7 +691,7 @@ end
 # Header-tag readers/writers share three shapes. `_tag_list` collects a comma-split multi-value tag
 # (`prefix=a,b`) into strings; `_tag_value` reads a single-valued tag (`prefix=x`); `_set_tag_value!`
 # replaces a single-valued tag in-place (dropping any prior copy, omitting an empty value).
-_tag_list(flags::AbstractSet{Symbol}, prefix::AbstractString) = begin
+function _tag_list(flags::AbstractSet{Symbol}, prefix::AbstractString)
     out = String[]
     for f in flags
         s = String(f)
@@ -589,9 +700,9 @@ _tag_list(flags::AbstractSet{Symbol}, prefix::AbstractString) = begin
             isempty(t) || push!(out, String(t))
         end
     end
-    out
+    return out
 end
-_tag_value(flags::AbstractSet{Symbol}, prefix::AbstractString) = begin
+function _tag_value(flags::AbstractSet{Symbol}, prefix::AbstractString)
     for f in flags
         s = String(f)
         startswith(s, prefix) && return chopprefix(s, prefix)
@@ -624,7 +735,9 @@ _manual_needs(c::Cell) = _manual_needs(c.flags)
 # invalidation (an undeclared hidden mutation there doesn't just go stale, it FORKS the replicas,
 # which is why this tag exists). The sibling of `needs=`: that asserts an edge, this asserts what
 # the edge means.
-_manual_mutates(flags::AbstractSet{Symbol}) = Symbol[Symbol(t) for t in _tag_list(flags, "mutates=")]
+function _manual_mutates(flags::AbstractSet{Symbol})
+    return Symbol[Symbol(t) for t in _tag_list(flags, "mutates=")]
+end
 _manual_mutates(c::Cell) = _manual_mutates(c.flags)
 
 # The `lockedkey=<key>` header tag: a `locked` cell's memo key AS OF the run it froze on — set
@@ -686,28 +799,35 @@ function revert_running!(c::Cell)
     return true
 end
 
-mark_running!(c::Cell) = (c.state = RUNNING; c)
+mark_running!(c::Cell) = (c.state=RUNNING; c)
 
 # A state flip with no output involved (markdown render, `@bind` value change, a fresh empty
 # cell) — nothing to compute, so no exception to check.
-mark_fresh!(c::Cell) = (c.state = FRESH; c)
+mark_fresh!(c::Cell) = (c.state=FRESH; c)
 
 # ANY→FRESH/ERRORED from a genuine computed output (possibly `nothing` — a scratch eval that
 # never ran). Callers that also mirror bind specs (`c.binds = out.binds`) do so themselves;
 # whether binds surface differs by site (a scratch eval never does, a real cell always does).
-mark_result!(c::Cell, out) = (c.output = out;
-    c.state = (out === nothing || out.exception === nothing) ? FRESH : ERRORED; c)
+function mark_result!(c::Cell, out)
+    return (
+        c.output=out; c.state=(out === nothing || out.exception === nothing) ? FRESH : ERRORED; c
+    )
+end
 
 # A failure that never reached the worker (region prime/presync) — synthesize the error output.
-mark_errored!(c::Cell, msg::AbstractString) = (
-    c.output = CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", msg, nothing, 0.0);
-    c.state = ERRORED; c)
+function mark_errored!(c::Cell, msg::AbstractString)
+    return (
+        c.output=CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", msg, nothing, 0.0);
+        c.state=ERRORED;
+        c
+    )
+end
 
 # Which memo key a cell's next run should target: its pinned `lockedkey=` (a locked cell, not
 # forced, already froze on a run) or a freshly computed one (everyone else, or an explicit ▶
 # force — the one thing allowed to move the lock). Single source of truth for the locked-vs-
 # computed key choice `_eval_one!` makes on every run.
-function target_key(cell::Cell, report::Report; forced::Bool = false)::String
+function target_key(cell::Cell, report::Report; forced::Bool=false)::String
     computed_key = _memo_key(report, cell)
     locked = :locked in cell.flags
     lockedkey = locked ? _locked_key(cell) : ""
@@ -746,8 +866,13 @@ function _cell_effect(cell)::CellEffect
     #    belongs on every side and which neither of the above can recognise. It replays WHOLE
     #    (`_everywhere_replay_source`), because tagging it is a statement that the whole cell is safe.
     # All three are the notebook/region analogue of `Distributed.@everywhere` (run this on every worker).
-    (_is_pure_using(cell.source) || :import_scaffold in cell.flags || :everywhere in cell.flags ||
-        :everywhere_declared in cell.flags || _THEME_SENTINEL in cell.writes) && return EVERYWHERE
+    (
+        _is_pure_using(cell.source) ||
+        :import_scaffold in cell.flags ||
+        :everywhere in cell.flags ||
+        :everywhere_declared in cell.flags ||
+        _THEME_SENTINEL in cell.writes
+    ) && return EVERYWHERE
     return PURE
 end
 
@@ -769,7 +894,7 @@ function build_dependencies!(report::Report)
         if mex && :macrocall in c.flags
             rec = lock(_MACRO_LOCK) do
                 nb = get(_MACRO_BINDS, report.id, nothing)
-                nb === nothing ? nothing : get(nb, c.src_hash, nothing)
+                return nb === nothing ? nothing : get(nb, c.src_hash, nothing)
             end
             rec === nothing || (union!(c.reads, rec[1]); union!(c.writes, rec[2]))
         end
@@ -778,7 +903,9 @@ function build_dependencies!(report::Report)
         # writer, so later readers chain off it (ordering + restale), and it's also a READ (ordered
         # after the original writer).
         for m in _manual_mutates(c)
-            push!(c.mutates, m); push!(c.writes, m); push!(c.reads, m)
+            push!(c.mutates, m)
+            push!(c.writes, m)
+            push!(c.reads, m)
         end
         empty!(c.deps)
     end
@@ -849,7 +976,9 @@ function build_dependencies!(report::Report)
     end
     report.meta["multidef"] = Set{String}(string(w) for (w, ids) in wcells if length(ids) >= 2)
     report.meta["multidef_cells"] =                       # name → the cells defining it (for the UI popup)
-        Dict{String,Vector{String}}(string(w) => ids for (w, ids) in wcells if length(ids) >= 2)
+    Dict{String,Vector{String}}(
+        string(w) => ids for (w, ids) in wcells if length(ids) >= 2
+    )
     # Import-scaffold ⇒ a `using`/`import` cell is memoizable. A cell that mixes a `using X` with
     # real compute normally can't be memoized: it PROVIDES X's names, and a plain restore would skip
     # the `using` (its method-table / name-in-scope effect), so `_memoizable` bails on any provider.
@@ -869,7 +998,8 @@ function build_dependencies!(report::Report)
     provided_upstream = Set{Symbol}()
     for c in report.cells
         c.kind == CODE || continue
-        delete!(c.flags, :using_redundant); delete!(c.flags, :import_scaffold)
+        delete!(c.flags, :using_redundant)
+        delete!(c.flags, :import_scaffold)
         if !isempty(c.provides)
             push!(c.flags, :import_scaffold)
             all(n -> n in provided_upstream, c.provides) && push!(c.flags, :using_redundant)
@@ -935,7 +1065,7 @@ their transitive dependents `STALE`. Removed cells invalidate their former
 readers. Does not evaluate — call `eval_stale!` next.
 """
 function update_source!(report::Report, new_source::AbstractString)
-    newr = parse_report(new_source; id = report.id, title = report.title)
+    newr = parse_report(new_source; id=report.id, title=report.title)
     old_by_id = Dict(c.id => c for c in report.cells)
 
     changed = Set{String}()
@@ -990,11 +1120,13 @@ function update_source!(report::Report, new_source::AbstractString)
     # import macros) can alter what its callers expand to — their sources (and cache keys) are
     # unchanged, so clear the attempt-once set and let the next drain re-expand them. Cached
     # expansions stay until overwritten (stale-but-useful beats a dropped edge).
-    definerish(c) = :opaque in c.flags || !isempty(c.provides) ||
-                    any(w -> startswith(String(w), "@"), c.writes)
+    definerish(c) =
+        :opaque in c.flags || !isempty(c.provides) || any(w -> startswith(String(w), "@"), c.writes)
     if any(c -> c.id in changed && definerish(c), report.cells) ||
-       any(id -> definerish(old_by_id[id]), removed)
-        lock(_MACRO_LOCK) do; delete!(_MACRO_TRIED, report.id); end
+        any(id -> definerish(old_by_id[id]), removed)
+        lock(_MACRO_LOCK) do ;
+            return delete!(_MACRO_TRIED, report.id)
+        end
     end
     return report
 end
@@ -1008,7 +1140,7 @@ Evaluate only `STALE` code cells, in document order, through `kernel`. Unchanged
 (`FRESH`) cells keep their cached output — their effects already live in the
 kernel's namespace from the prior eval. (First run: all cells stale ⇒ full eval.)
 """
-function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
+function eval_stale!(report::Report, kernel::Kernel=InProcessKernel())
     nbatch = count(c -> c.state == STALE, report.cells)   # cells about to run → UI shows a stable k/N
     nbatch > 0 && _emit_run_batch(report.id, nbatch)
     prepare!(kernel, report)
@@ -1036,7 +1168,11 @@ end
 # project notebook, in-process otherwise) — reusing `module_help`'s cross-kernel resolution. Empty on
 # any failure (module not loaded / not a Module) so the caller keeps the safe barrier.
 function _module_exports(kernel::Kernel, report::Report, path::AbstractString)
-    rec = try; module_help(kernel, report, path); catch; return Symbol[]; end
+    rec = try
+        module_help(kernel, report, path)
+    catch
+        return Symbol[]
+    end
     rec isa AbstractDict || return Symbol[]
     # Over the gate the wire is deserialized with SYMBOL keys (in-process keeps String keys), so read
     # both — `module_help`'s own gate wrapper re-keys only the OUTER dict, not the `exports` elements.
@@ -1047,7 +1183,8 @@ function _module_exports(kernel::Kernel, report::Report, path::AbstractString)
     out = Symbol[]
     for e in exps
         e isa AbstractDict || continue
-        nm = _k(e, "name"); nm === nothing || push!(out, Symbol(String(nm)))
+        nm = _k(e, "name")
+        nm === nothing || push!(out, Symbol(String(nm)))
     end
     return out
 end
@@ -1062,13 +1199,17 @@ drain, and narrowing a cell's dependents can only shrink the blast radius (see
 [`build_dependencies!`]). Idempotent: each module path is attempted at most once per session.
 Returns `true` iff a module was newly resolved (and deps were rebuilt).
 """
-function refine_usings!(report::Report, kernel::Kernel = InProcessKernel(); rebuild::Bool = true)
+function refine_usings!(report::Report, kernel::Kernel=InProcessKernel(); rebuild::Bool=true)
     pending = String[]
     for c in report.cells
         # Only cells that ran cleanly — an errored `using` (package didn't load) can't be resolved,
         # and leaving it un-tried lets a later successful run refine it.
         (c.kind == CODE && c.state == FRESH && :opaque in c.flags) || continue
-        top = try; Meta.parseall(c.source); catch; continue; end
+        top = try
+            Meta.parseall(c.source)
+        catch
+            continue
+        end
         stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
         for s in stmts
             s isa LineNumberNode && continue
@@ -1079,12 +1220,14 @@ function refine_usings!(report::Report, kernel::Kernel = InProcessKernel(); rebu
     newly = false
     vers = Dict{String,Tuple{String,String}}()   # fetched lazily — only if something is un-tried
     for p in unique!(pending)
-        skip = lock(_USING_LOCK) do; p in _USING_TRIED; end
+        skip = lock(_USING_LOCK) do ;
+            return p in _USING_TRIED
+        end
         skip && continue
         syms = _module_exports(kernel, report, p)
         lock(_USING_LOCK) do
             push!(_USING_TRIED, p)
-            isempty(syms) || (_USING_EXPORTS[p] = syms; newly = true)   # cache only a real export set
+            return isempty(syms) || (_USING_EXPORTS[p]=syms; newly=true)   # cache only a real export set
         end
         isempty(syms) || _bump_resolution!()
         if !isempty(syms)   # persist for the next session's cold open (registry versions only)
@@ -1124,7 +1267,11 @@ function unresolved_using_paths(report::Report)
     pending = String[]
     for c in report.cells
         (c.kind == CODE && :opaque in c.flags) || continue
-        top = try; Meta.parseall(c.source); catch; continue; end
+        top = try
+            Meta.parseall(c.source)
+        catch
+            continue
+        end
         stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
         for s in stmts
             s isa LineNumberNode && continue
@@ -1132,7 +1279,7 @@ function unresolved_using_paths(report::Report)
         end
     end
     return lock(_USING_LOCK) do
-        [p for p in unique!(pending) if !haskey(_USING_EXPORTS, p) && !(p in _USING_TRIED)]
+        return [p for p in unique!(pending) if !haskey(_USING_EXPORTS, p) && !(p in _USING_TRIED)]
     end
 end
 
@@ -1152,10 +1299,15 @@ function resolve_usings!(report::Report, kernel::Kernel, paths::Vector{String})
         # cell itself still loads the package when it runs; only the resolution is front-loaded.
         v, src = get(vers, String(first(split(p, '.'))), ("", ""))
         rec = (!isempty(v) && src == "registry") ? get(disk, "$p@$v", nothing) : nothing
-        syms = rec isa AbstractDict ? Symbol[Symbol(String(s)) for s in get(rec, "syms", Any[])] : Symbol[]
+        syms = if rec isa AbstractDict
+            Symbol[Symbol(String(s)) for s in get(rec, "syms", Any[])]
+        else
+            Symbol[]
+        end
         if !isempty(syms)
             lock(_USING_LOCK) do
-                push!(_USING_TRIED, p); _USING_EXPORTS[p] = syms
+                push!(_USING_TRIED, p)
+                return _USING_EXPORTS[p] = syms
             end
             _bump_resolution!()
             newly = true
@@ -1164,12 +1316,17 @@ function resolve_usings!(report::Report, kernel::Kernel, paths::Vector{String})
         end
     end
     for p in remaining
-        out = try; eval_capture(kernel, report, "import " * p, "prewarm:" * p); catch; nothing; end
+        out = try
+            eval_capture(kernel, report, "import " * p, "prewarm:" * p)
+        catch
+            nothing
+        end
         (out === nothing || out.exception !== nothing) && continue
         syms = _module_exports(kernel, report, p)
         isempty(syms) && continue
         lock(_USING_LOCK) do
-            push!(_USING_TRIED, p); _USING_EXPORTS[p] = syms
+            push!(_USING_TRIED, p)
+            return _USING_EXPORTS[p] = syms
         end
         _bump_resolution!()
         v, src = get(vers, String(first(split(p, '.'))), ("", ""))
@@ -1190,7 +1347,7 @@ the precise graph post-drain (`refine_usings!`) — so every cell below a `using
 between the first and second run of each session and MISSED the durable cache exactly when it
 mattered most (cold open). Returns `true` iff a module was newly resolved (deps rebuilt).
 """
-function prewarm_usings!(report::Report, kernel::Kernel = InProcessKernel())
+function prewarm_usings!(report::Report, kernel::Kernel=InProcessKernel())
     paths = unresolved_using_paths(report)
     isempty(paths) && return false
     resolve_usings!(report, kernel, paths) || return false
@@ -1210,7 +1367,7 @@ end
 # when a macro DEFINER changes so its callers get re-expanded.
 const _MACRO_BINDS = Dict{String,Dict{UInt64,Tuple{Set{Symbol},Set{Symbol}}}}()  # report.id → src_hash → (reads, writes)
 const _MACRO_TRIED = Dict{String,Set{UInt64}}()   # report.id → src_hashes attempted post-drain (failed)
-const _MACRO_LOCK  = ReentrantLock()
+const _MACRO_LOCK = ReentrantLock()
 
 "Flagged cells whose macro bindings are still unrecovered (no cache entry, not marked tried)."
 function pending_macro_cells(report::Report)
@@ -1238,7 +1395,9 @@ resolved (the caller rebuilds the graph). With `mark_tried`, a cell whose expans
 recorded so it isn't round-tripped again (post-drain semantics — its macros had their chance to be
 defined); the pre-run pass leaves failures unmarked so the post-drain pass can retry them.
 """
-function resolve_macros!(report::Report, kernel::Kernel, cells::Vector{Cell}; mark_tried::Bool = false)
+function resolve_macros!(
+    report::Report, kernel::Kernel, cells::Vector{Cell}; mark_tried::Bool=false
+)
     isempty(cells) && return false
     srcs = Dict{String,String}(c.id => c.source for c in cells)
     expanded = try
@@ -1246,7 +1405,8 @@ function resolve_macros!(report::Report, kernel::Kernel, cells::Vector{Cell}; ma
     catch e
         # A wire/kernel failure must be VISIBLE (a silent empty result reads as "nothing to
         # recover" and, post-drain, permanently tried-marks every pending cell).
-        @warn "deps: macroexpand round-trip failed — keeping conservative analysis" report = report.id exception = e
+        @warn "deps: macroexpand round-trip failed — keeping conservative analysis" report =
+            report.id exception = e
         Dict{String,Tuple{Set{Symbol},Set{Symbol}}}()
     end
     newly = false
@@ -1256,7 +1416,8 @@ function resolve_macros!(report::Report, kernel::Kernel, cells::Vector{Cell}; ma
             if binds === nothing
                 mark_tried && push!(get!(Set{UInt64}, _MACRO_TRIED, report.id), c.src_hash)
             else
-                get!(Dict{UInt64,Tuple{Set{Symbol},Set{Symbol}}}, _MACRO_BINDS, report.id)[c.src_hash] = binds
+                get!(Dict{UInt64,Tuple{Set{Symbol},Set{Symbol}}}, _MACRO_BINDS, report.id)[c.src_hash] =
+                    binds
                 newly = true
             end
         end
@@ -1275,7 +1436,7 @@ Package macros (`Base.@kwdef`, `@enum`, DataFrames' `@chain`, …) expand here b
 [`refine_macros!`](@ref). Failures are NOT marked tried — the macro may get defined during the
 run. Returns `true` iff something newly resolved (deps rebuilt).
 """
-function prewarm_macros!(report::Report, kernel::Kernel = InProcessKernel())
+function prewarm_macros!(report::Report, kernel::Kernel=InProcessKernel())
     cells = pending_macro_cells(report)
     isempty(cells) && return false
     resolve_macros!(report, kernel, cells) || return false
@@ -1299,11 +1460,12 @@ writer is restaled once ("staleness never under-invalidates") and the caller's r
 A serial drain executes in document order — a valid topological order even without the edge —
 so the default skips the restale. Returns `true` iff something newly resolved (deps rebuilt).
 """
-function refine_macros!(report::Report, kernel::Kernel = InProcessKernel(); restale_racers::Bool = false,
-                        rebuild::Bool = true)
+function refine_macros!(
+    report::Report, kernel::Kernel=InProcessKernel(); restale_racers::Bool=false, rebuild::Bool=true
+)
     cells = pending_macro_cells(report)
     isempty(cells) && return false
-    resolve_macros!(report, kernel, cells; mark_tried = true) || return false
+    resolve_macros!(report, kernel, cells; mark_tried=true) || return false
     # `rebuild=false`: this ran the kernel resolve OFF a notebook lock (the protocol); the caller re-takes
     # the lock to `rebuild_precise!`. The racer-restale needs the rebuilt graph, so it's the caller's job
     # too — its post-refine drain re-arm catches any stale cell either way.
@@ -1313,7 +1475,7 @@ function refine_macros!(report::Report, kernel::Kernel = InProcessKernel(); rest
     recovered = Set{String}()   # attempted cells whose recovery included a WRITE (new downstream edges)
     lock(_MACRO_LOCK) do
         nb = get(_MACRO_BINDS, report.id, nothing)
-        nb === nothing && return
+        nb === nothing && return nothing
         for c in cells
             rec = get(nb, c.src_hash, nothing)
             rec !== nothing && !isempty(rec[2]) && push!(recovered, c.id)

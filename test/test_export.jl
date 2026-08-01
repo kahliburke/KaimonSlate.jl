@@ -2,24 +2,25 @@
 # functions, no live hub needed).
 using ReTest
 using KaimonSlate
-import Base64
+using Base64: Base64
 using CodecZlib: GzipDecompressor            # verify the packed-asset round-trip
 using Random: Xoshiro                        # deterministic incompressible bytes
 const ReportEngine = KaimonSlate.ReportEngine
 const NS = KaimonSlate.NotebookServer
 
 # A minimal manifest doc entry.
-_doc(slug, date; series = nothing) = begin
+function _doc(slug, date; series=nothing)
     d = Dict{String,Any}("slug" => slug, "title" => uppercase(slug), "date" => date, "cells" => 3)
     series === nothing || (d["series"] = series)
-    d
+    return d
 end
 _pos(needle, hay) = first(findfirst(needle, hay))
 
 @testset "web-cell export importmap (Preact/htm/signals)" begin
     ui = NS._slate_ui_imports()
     # the bare specifiers a web-cell fragment imports, mapped to pinned-version CDN modules
-    for k in ("preact", "preact/hooks", "@preact/signals", "@preact/signals-core", "htm", "htm/preact")
+    for k in
+        ("preact", "preact/hooks", "@preact/signals", "@preact/signals-core", "htm", "htm/preact")
         @test haskey(ui, k)
         @test startswith(ui[k], "https://")
     end
@@ -74,11 +75,11 @@ end
     # Round-trips to the same numbers a Float32Array would read.
     back = reinterpret(Float32, transcode(GzipDecompressor, b))
     @test length(back) == n
-    @test all(isapprox.(back, Float32.(vals); rtol = 1e-6))
+    @test all(isapprox.(back, Float32.(vals); rtol=1e-6))
 
     # Ordering matters: narrowing FIRST leaves fewer distinct bytes, so it compresses better than
     # gzipping the f64 buffer would.
-    gz_only, _, _ = NS._pack_export_asset(spec, raw; narrow = false)
+    gz_only, _, _ = NS._pack_export_asset(spec, raw; narrow=false)
     @test length(b) < length(gz_only)
 
     # Never pay for compression that doesn't win: tiny buffers skip it, and incompressible bytes are
@@ -96,10 +97,10 @@ end
     # Both reductions are switchable, because they trade different things. Compression costs REACH — a
     # page inflates with DecompressionStream, so an old locked-down viewer (an exam machine) needs it
     # off. Narrowing costs precision only, and every browser reads a Float32Array.
-    b_off, dt_off, enc_off = NS._pack_export_asset(spec, raw; compress = false)
+    b_off, dt_off, enc_off = NS._pack_export_asset(spec, raw; compress=false)
     @test enc_off === nothing && dt_off == "f32"
     @test length(b_off) == length(raw) ÷ 2                  # narrowed, not compressed
-    _, dt_raw, enc_raw = NS._pack_export_asset(spec, raw; compress = false, narrow = false)
+    _, dt_raw, enc_raw = NS._pack_export_asset(spec, raw; compress=false, narrow=false)
     @test dt_raw === nothing && enc_raw === nothing         # untouched — exactly the bytes given
 
     # The page must be told it has to inflate, and must say so plainly if it cannot.
@@ -124,10 +125,12 @@ end
 
 @testset "site export — series grouping" begin
     @testset "_series_groups buckets & ordering" begin
-        docs = [_doc("a", "2026-01-01"; series = "Optics"),
-                _doc("b", "2026-03-01"; series = "Chaos"),
-                _doc("c", "2026-02-01"; series = "Optics"),
-                _doc("loose", "2026-04-01")]
+        docs = [
+            _doc("a", "2026-01-01"; series="Optics"),
+            _doc("b", "2026-03-01"; series="Chaos"),
+            _doc("c", "2026-02-01"; series="Optics"),
+            _doc("loose", "2026-04-01"),
+        ]
         g = NS._series_groups(docs)
         # ungrouped bucket first, then series by newest doc desc (Chaos 03-01 > Optics 02-01)
         @test String[p.first for p in g] == ["", "Chaos", "Optics"]
@@ -143,8 +146,9 @@ end
     end
 
     @testset "series ⇒ headings; ungrouped headingless & first" begin
-        grouped = NS._cards_grid_html([_doc("a", "2026-01-01"; series = "Optics"),
-                                       _doc("loose", "2026-03-01")])
+        grouped = NS._cards_grid_html([
+            _doc("a", "2026-01-01"; series="Optics"), _doc("loose", "2026-03-01")
+        ])
         @test occursin("<h2 class=\"series-hd\">Optics</h2>", grouped)
         @test _pos("LOOSE", grouped) < _pos("series-hd", grouped)              # loose card before any heading
     end
@@ -152,7 +156,12 @@ end
     @testset "empty + manifest round-trip" begin
         @test occursin("No documents published", NS._cards_grid_html(Any[]))
         m = Dict{String,Any}("docs" => Any[])
-        NS._upsert_doc!(m, Dict{String,Any}("slug" => "a", "title" => "A", "date" => "2026-01-01", "series" => "Optics"))
+        NS._upsert_doc!(
+            m,
+            Dict{String,Any}(
+                "slug" => "a", "title" => "A", "date" => "2026-01-01", "series" => "Optics"
+            ),
+        )
         @test String(m["docs"][1]["series"]) == "Optics"
     end
 
@@ -163,8 +172,10 @@ end
     end
 
     @testset "full index assembles grouped baked grid + refresh script" begin
-        manifest = Dict{String,Any}("title" => "S", "docs" => Any[
-            _doc("a", "2026-01-01"; series = "Optics"), _doc("loose", "2026-03-01")])
+        manifest = Dict{String,Any}(
+            "title" => "S",
+            "docs" => Any[_doc("a", "2026-01-01"; series="Optics"), _doc("loose", "2026-03-01")],
+        )
         html = NS._render_site_index(manifest)
         @test occursin("<h2 class=\"series-hd\">Optics</h2>", html)   # baked grouped grid
         @test occursin("id=\"slate-cards-root\"", html)              # JS mount point
@@ -176,11 +187,33 @@ end
 @testset "HTML export — table formatting + interactivity" begin
     spec = Dict{String,Any}(
         "columns" => Any[
-            Dict{String,Any}("name" => "Product", "type" => "string", "align" => "left", "format" => nothing),
-            Dict{String,Any}("name" => "Revenue", "type" => "float", "align" => "right",
-                             "format" => Dict{String,Any}("kind" => "currency", "digits" => 2, "sep" => true, "prefix" => "\$", "suffix" => "")),
-            Dict{String,Any}("name" => "Margin", "type" => "float", "align" => "right",
-                             "format" => Dict{String,Any}("kind" => "percent", "digits" => 1, "sep" => false, "prefix" => "", "suffix" => "")),
+            Dict{String,Any}(
+                "name" => "Product", "type" => "string", "align" => "left", "format" => nothing
+            ),
+            Dict{String,Any}(
+                "name" => "Revenue",
+                "type" => "float",
+                "align" => "right",
+                "format" => Dict{String,Any}(
+                    "kind" => "currency",
+                    "digits" => 2,
+                    "sep" => true,
+                    "prefix" => "\$",
+                    "suffix" => "",
+                ),
+            ),
+            Dict{String,Any}(
+                "name" => "Margin",
+                "type" => "float",
+                "align" => "right",
+                "format" => Dict{String,Any}(
+                    "kind" => "percent",
+                    "digits" => 1,
+                    "sep" => false,
+                    "prefix" => "",
+                    "suffix" => "",
+                ),
+            ),
         ],
         "rows" => Any[Any["Widget", 45999.5, 0.324]],
         "opts" => Dict{String,Any}("nrows" => 3, "ncols" => 3),   # nrows > shown rows ⇒ truncation note
@@ -201,16 +234,38 @@ end
 @testset "Typst export — table align/format/zebra/repeat/truncation" begin
     spec = Dict{String,Any}(
         "columns" => Any[
-            Dict{String,Any}("name" => "Product", "type" => "string", "align" => "left", "format" => nothing),
-            Dict{String,Any}("name" => "Revenue", "type" => "float", "align" => "right",
-                             "format" => Dict{String,Any}("kind" => "currency", "digits" => 2, "sep" => true, "prefix" => "\$", "suffix" => "")),
-            Dict{String,Any}("name" => "Margin", "type" => "float", "align" => "right",
-                             "format" => Dict{String,Any}("kind" => "percent", "digits" => 1, "sep" => false, "prefix" => "", "suffix" => "")),
+            Dict{String,Any}(
+                "name" => "Product", "type" => "string", "align" => "left", "format" => nothing
+            ),
+            Dict{String,Any}(
+                "name" => "Revenue",
+                "type" => "float",
+                "align" => "right",
+                "format" => Dict{String,Any}(
+                    "kind" => "currency",
+                    "digits" => 2,
+                    "sep" => true,
+                    "prefix" => "\$",
+                    "suffix" => "",
+                ),
+            ),
+            Dict{String,Any}(
+                "name" => "Margin",
+                "type" => "float",
+                "align" => "right",
+                "format" => Dict{String,Any}(
+                    "kind" => "percent",
+                    "digits" => 1,
+                    "sep" => false,
+                    "prefix" => "",
+                    "suffix" => "",
+                ),
+            ),
         ],
         "rows" => Any[Any["Widget", 45999.5, 0.324]],
         "opts" => Dict{String,Any}("nrows" => 250, "ncols" => 3),   # only 1 row shipped ⇒ note vs the true total
     )
-    typ = NS._typst_table(spec; theme = "light")
+    typ = NS._typst_table(spec; theme="light")
     @test occursin("align: (left, right, right)", typ)     # per-column alignment
     @test occursin("\$45,999.50", typ)                     # formatted currency (numbers no longer stringified)
     @test occursin("32.4%", typ)                           # formatted percent
@@ -223,10 +278,22 @@ end
 @testset "table export — in-cell viz + export_rows cap" begin
     spec = Dict{String,Any}(
         "columns" => Any[
-            Dict{String,Any}("name" => "n", "type" => "int", "align" => "right", "format" => nothing,
-                             "viz" => "bar", "domain" => Any[0.0, 100.0]),
-            Dict{String,Any}("name" => "h", "type" => "int", "align" => "right", "format" => nothing,
-                             "viz" => "heat", "domain" => Any[0.0, 100.0]),
+            Dict{String,Any}(
+                "name" => "n",
+                "type" => "int",
+                "align" => "right",
+                "format" => nothing,
+                "viz" => "bar",
+                "domain" => Any[0.0, 100.0],
+            ),
+            Dict{String,Any}(
+                "name" => "h",
+                "type" => "int",
+                "align" => "right",
+                "format" => nothing,
+                "viz" => "heat",
+                "domain" => Any[0.0, 100.0],
+            ),
         ],
         "rows" => Any[Any[50, 25], Any[100, 75], Any[0, 100]],
         "opts" => Dict{String,Any}("nrows" => 3, "ncols" => 2, "export_rows" => 2),
@@ -237,7 +304,7 @@ end
     @test occursin("Showing 2 of 3 rows", html)                                    # export_rows cap (not silent)
     @test occursin("data-v=\"100\"", html) && !occursin("data-v=\"0\"", html)      # only the first 2 rows emitted
 
-    typ = NS._typst_table(spec; theme = "light")
+    typ = NS._typst_table(spec; theme="light")
     @test occursin("table.cell(fill: gradient.linear", typ)                        # :bar per-cell gradient
     @test occursin("table.cell(fill: rgb(\"#58a6ff\").transparentize", typ)        # :heat per-cell fill
 end
@@ -248,12 +315,16 @@ end
 @testset "preview blob re-inline (export travel)" begin
     nbid = "previewtest_ci"
     png = vcat(UInt8[0x89, 0x50, 0x4e, 0x47], rand(UInt8, 96))     # a small figure blob in the durable store
-    h = string(hash(png); base = 16)
+    h = string(hash(png); base=16)
     NS._blob_put_durable!(string(nbid, "/", h), "image/png", png)
 
-    cells = [Dict{String,Any}("id" => "a",
-                              "output" => "<img src=\"/api/$nbid/blob/$h\" width=\"12\">",
-                              "animations" => Any[Dict{String,Any}("frames" => 3)])]
+    cells = [
+        Dict{String,Any}(
+            "id" => "a",
+            "output" => "<img src=\"/api/$nbid/blob/$h\" width=\"12\">",
+            "animations" => Any[Dict{String,Any}("frames" => 3)],
+        ),
+    ]
     NS._inline_preview_blobs!(nbid, cells)
     @test occursin("data:image/png;base64,", cells[1]["output"])  # URL → self-contained data URI
     @test !occursin("/blob/", cells[1]["output"])                 # no server-dependent URL left
@@ -261,16 +332,21 @@ end
 
     # A total budget of 0 embeds nothing — every asset is left as a URL (recomputes on hydrate).
     cells0 = [Dict{String,Any}("id" => "z", "output" => "<img src=\"/api/$nbid/blob/$h\">")]
-    NS._inline_preview_blobs!(nbid, cells0; budget = 0)
+    NS._inline_preview_blobs!(nbid, cells0; budget=0)
     @test occursin("/blob/$h", cells0[1]["output"])
 
     # The running total caps embedding: with room for exactly one asset, the first inlines and a
     # second distinct asset is left as a URL.
-    png2 = vcat(UInt8[0x89, 0x50], rand(UInt8, 160)); h2 = string(hash(png2); base = 16)
+    png2 = vcat(UInt8[0x89, 0x50], rand(UInt8, 160))
+    h2 = string(hash(png2); base=16)
     NS._blob_put_durable!(string(nbid, "/", h2), "image/png", png2)
-    cells2 = [Dict{String,Any}("id" => "d",
-                               "output" => "<img src=\"/api/$nbid/blob/$h\"><img src=\"/api/$nbid/blob/$h2\">")]
-    NS._inline_preview_blobs!(nbid, cells2; budget = length(png))  # room for exactly the first
+    cells2 = [
+        Dict{String,Any}(
+            "id" => "d",
+            "output" => "<img src=\"/api/$nbid/blob/$h\"><img src=\"/api/$nbid/blob/$h2\">",
+        ),
+    ]
+    NS._inline_preview_blobs!(nbid, cells2; budget=length(png))  # room for exactly the first
     @test occursin("data:image/png;base64,", cells2[1]["output"])  # first inlined
     @test occursin("/blob/$h2", cells2[1]["output"])               # second left — budget exhausted
 
@@ -285,21 +361,43 @@ end
 # published page. Build a notebook holding one geo spec and check both modes.
 const _RE = KaimonSlate.ReportEngine
 # A notebook whose one code cell renders `spec` as its only echart output (no live hub needed).
-_nb_with_echart(spec, id) = begin
-    out = _RE.CellOutput("", _RE.MimeChunk[], Any[spec], Any[], _RE.BindSpec[], "", nothing, nothing, 1.0)
+function _nb_with_echart(spec, id)
+    out = _RE.CellOutput(
+        "", _RE.MimeChunk[], Any[spec], Any[], _RE.BindSpec[], "", nothing, nothing, 1.0
+    )
     rep = _RE.parse_report("#%% md id=t title\n# $id\n\n#%% code id=c\nechart(1)\n")
     rep.cells[end].output = out
-    NS.LiveNotebook(id, "/tmp/$id.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
-        ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    return NS.LiveNotebook(
+        id,
+        "/tmp/$id.jl",
+        rep,
+        _RE.InProcessKernel(),
+        1,
+        String[],
+        String[],
+        ReentrantLock(),
+        Channel{String}[],
+        ReentrantLock(),
+        "",
+        false,
+        Dict{String,String}(),
+    )
 end
 
 @testset "geo map assets in export" begin
     _geo_spec() = Dict{String,Any}(
-        "registerMap" => Dict{String,Any}("name" => "world", "url" => "/assets/maps/world.json"),
+        "registerMap" =>
+            Dict{String,Any}("name" => "world", "url" => "/assets/maps/world.json"),
         "__size" => Dict{String,Any}("height" => 640),
         "geo" => Dict{String,Any}("map" => "world"),
-        "series" => [Dict{String,Any}("type" => "scatter", "coordinateSystem" => "geo",
-                     "data" => [Dict{String,Any}("name" => "ATL", "value" => [-84.4, 33.6, 12.0])])])
+        "series" => [
+            Dict{String,Any}(
+                "type" => "scatter",
+                "coordinateSystem" => "geo",
+                "data" => [Dict{String,Any}("name" => "ATL", "value" => [-84.4, 33.6, 12.0])],
+            ),
+        ],
+    )
     _geo_nb() = _nb_with_echart(_geo_spec(), "geo")
 
     # Spec-level helpers: recognise the request, resolve the vendored file, rewrite to a page-local path.
@@ -310,16 +408,17 @@ end
 
     # Standalone: the GeoJSON is INLINED (registered before setOption), no server URL is fetched, and the
     # chart div takes the spec's height rather than the 340px default.
-    standalone = NS.export_html(_geo_nb(); inline_assets = true)
+    standalone = NS.export_html(_geo_nb(); inline_assets=true)
     @test occursin("var _slateMaps=", standalone) && occursin("\"world\":", standalone)
     @test occursin("_slateEnsureMaps", standalone)                       # registers maps before setOption
     @test occursin("height:640px", standalone)                           # honours the spec height
 
     # Published: no inline map (fetched instead), the `registerMap` URL is rewritten page-relative (no
     # leading slash), and the map file is written as a page-local sibling.
-    published = NS.export_html(_geo_nb(); inline_assets = false)
+    published = NS.export_html(_geo_nb(); inline_assets=false)
     @test occursin("var _slateMaps={};", published)
-    @test occursin("\"assets/maps/world.json\"", published) && !occursin("/assets/maps/world.json", published)
+    @test occursin("\"assets/maps/world.json\"", published) &&
+        !occursin("/assets/maps/world.json", published)
 
     dir = mktempdir()
     try
@@ -327,13 +426,16 @@ end
         world = joinpath(dir, "assets", "maps", "world.json")
         @test isfile(world) && filesize(world) > 100_000                 # the vendored world GeoJSON landed
     finally
-        rm(dir; recursive = true, force = true)
+        rm(dir; recursive=true, force=true)
     end
 
     # A notebook with no geo chart writes no assets and inlines no maps.
-    plain = _nb_with_echart(Dict{String,Any}("series" => [Dict{String,Any}("type" => "line", "data" => [1, 2, 3])]), "plain")
+    plain = _nb_with_echart(
+        Dict{String,Any}("series" => [Dict{String,Any}("type" => "line", "data" => [1, 2, 3])]),
+        "plain",
+    )
     @test NS._write_page_assets!(mktempdir(), plain) == 0
-    @test occursin("var _slateMaps={}", NS.export_html(plain; inline_assets = false))
+    @test occursin("var _slateMaps={}", NS.export_html(plain; inline_assets=false))
 end
 
 # Package-vendored asset dirs (`provide_assets!` → `nb.assets`): a chart whose spec carries
@@ -349,7 +451,8 @@ end
 
     _gl_spec() = Dict{String,Any}(
         "requireScripts" => ["/ext-assets/GlobeSlate/echarts-gl.min.js"],
-        "series" => [Dict{String,Any}("type" => "surface", "data" => [[0, 0, 0]])])
+        "series" => [Dict{String,Any}("type" => "surface", "data" => [[0, 0, 0]])],
+    )
     _gl_nb() = begin
         nb = _nb_with_echart(_gl_spec(), "gl")
         nb.assets["GlobeSlate"] = pkgdir
@@ -358,28 +461,30 @@ end
 
     # Spec-level helpers: resolve the served url to its file (with traversal guard), and rewrite.
     nb = _gl_nb()
-    @test NS._ext_asset_file(nb, "/ext-assets/GlobeSlate/echarts-gl.min.js") == joinpath(pkgdir, "echarts-gl.min.js")
+    @test NS._ext_asset_file(nb, "/ext-assets/GlobeSlate/echarts-gl.min.js") ==
+        joinpath(pkgdir, "echarts-gl.min.js")
     @test NS._ext_asset_file(nb, "/ext-assets/GlobeSlate/../../etc/passwd") === nothing   # escape blocked
     @test NS._ext_asset_file(nb, "/ext-assets/Unknown/x.js") === nothing                  # unknown package
     # Whole vendored tree → page-local siblings under ext-assets/<pkg>/.
     rels = Dict(NS._package_asset_files(nb))
     @test rels["ext-assets/GlobeSlate/echarts-gl.min.js"] == joinpath(pkgdir, "echarts-gl.min.js")
-    @test rels[joinpath("ext-assets", "GlobeSlate", "sub", "extra.js")] == joinpath(pkgdir, "sub", "extra.js")
+    @test rels[joinpath("ext-assets", "GlobeSlate", "sub", "extra.js")] ==
+        joinpath(pkgdir, "sub", "extra.js")
 
     # Site rewrite → page-relative (no leading slash); standalone → inline data: URL of the bytes.
-    site = NS._rewrite_requirescripts!(_gl_spec(), nb; inline = false)
+    site = NS._rewrite_requirescripts!(_gl_spec(), nb; inline=false)
     @test site["requireScripts"] == ["ext-assets/GlobeSlate/echarts-gl.min.js"]
-    stand = NS._rewrite_requirescripts!(_gl_spec(), nb; inline = true)
+    stand = NS._rewrite_requirescripts!(_gl_spec(), nb; inline=true)
     @test startswith(stand["requireScripts"][1], "data:text/javascript;base64,")
     @test String(Base64.base64decode(split(stand["requireScripts"][1], ",")[2])) == "window.__eg=1;"
 
     # Standalone export: the render JS gates on scripts, and the lib rides inline as a data: URL.
-    standalone = NS.export_html(_gl_nb(); inline_assets = true)
+    standalone = NS.export_html(_gl_nb(); inline_assets=true)
     @test occursin("_slateEnsureScripts", standalone)
     @test occursin("data:text/javascript;base64,", standalone)
 
     # Published export: url is page-relative, and the vendored tree is written as page-local siblings.
-    published = NS.export_html(_gl_nb(); inline_assets = false)
+    published = NS.export_html(_gl_nb(); inline_assets=false)
     @test occursin("ext-assets/GlobeSlate/echarts-gl.min.js", published)
     @test !occursin("/ext-assets/GlobeSlate", published)                 # no leading-slash live route
     dir = mktempdir()
@@ -389,7 +494,7 @@ end
         @test isfile(joinpath(dir, "ext-assets", "GlobeSlate", "echarts-gl.min.js"))
         @test isfile(joinpath(dir, "ext-assets", "GlobeSlate", "sub", "extra.js"))
     finally
-        rm(dir; recursive = true, force = true)
+        rm(dir; recursive=true, force=true)
     end
 
     # Served-file MIME types a vendored dir may ship: WASM needs the exact `application/wasm` for
@@ -411,7 +516,13 @@ end
     # specifier, NOT a bare `ext-assets/…` one — a bare specifier throws in `import()` (it's not `/`, `./`, or
     # a URL, so the resolver demands an import-map entry) and the vendored lib never loads.
     fenb = _gl_nb()
-    NS._register_frontend!(fenb, "boot", "import(\"/ext-assets/GlobeSlate/globe-lib/globe-lib.js\").catch(()=>{});", true, "")
+    NS._register_frontend!(
+        fenb,
+        "boot",
+        "import(\"/ext-assets/GlobeSlate/globe-lib/globe-lib.js\").catch(()=>{});",
+        true,
+        "",
+    )
     fhead = NS._frontend_export_head(fenb)
     @test occursin("import(\"./ext-assets/GlobeSlate/globe-lib/globe-lib.js\")", fhead)   # ./-relative specifier
     @test !occursin("import(\"ext-assets/GlobeSlate/globe-lib/globe-lib.js\")", fhead)    # never a bare specifier
@@ -421,15 +532,21 @@ end
     # fails to load in exactly the export that has to carry everything (a viewer with no network, or one
     # that blocks fetched scripts). The site path keeps the sibling. Mirrors `_rewrite_ext_asset_urls!`.
     snb = _gl_nb()
-    NS._register_frontend!(snb, "boot", "fetch(\"/ext-assets/GlobeSlate/echarts-gl.min.js\");", false, "")
+    NS._register_frontend!(
+        snb, "boot", "fetch(\"/ext-assets/GlobeSlate/echarts-gl.min.js\");", false, ""
+    )
     sstand = NS._frontend_export_head(snb, true)
     @test occursin("data:application/javascript;charset=utf-8;base64,", sstand)  # mime carries no raw space
     @test !occursin("ext-assets/GlobeSlate/echarts-gl.min.js", sstand)           # no path reference survives
-    @test occursin("./ext-assets/GlobeSlate/echarts-gl.min.js", NS._frontend_export_head(snb, false))
+    @test occursin(
+        "./ext-assets/GlobeSlate/echarts-gl.min.js", NS._frontend_export_head(snb, false)
+    )
 
     # A vendored url that resolves to NO file falls back to the sibling form even standalone: one widget
     # holding a dead relative link is a better failure than a script that lost its dependency silently.
-    @test occursin("./ext-assets/GlobeSlate/globe-lib/globe-lib.js", NS._frontend_export_head(fenb, true))
+    @test occursin(
+        "./ext-assets/GlobeSlate/globe-lib/globe-lib.js", NS._frontend_export_head(fenb, true)
+    )
 
     # A vendored-asset url in a NON-`requireScripts` spec field — a globe `baseTexture` (a binary image) —
     # must be repointed too: site → the page-local sibling; standalone → a `data:<mime>;base64,…` url of the
@@ -438,14 +555,20 @@ end
     png = UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]           # PNG magic bytes
     write(joinpath(pkgdir, "earth.png"), png)
     tnb = _gl_nb()
-    _texspec() = Dict{String,Any}("globe" => Dict{String,Any}("baseTexture" => "/ext-assets/GlobeSlate/earth.png"),
-                                  "series" => [Dict{String,Any}("type" => "scatter3D")])
-    tsite = NS._rewrite_ext_asset_urls!(_texspec(), tnb; inline = false)
+    _texspec() = Dict{String,Any}(
+        "globe" => Dict{String,Any}("baseTexture" => "/ext-assets/GlobeSlate/earth.png"),
+        "series" => [Dict{String,Any}("type" => "scatter3D")],
+    )
+    tsite = NS._rewrite_ext_asset_urls!(_texspec(), tnb; inline=false)
     @test tsite["globe"]["baseTexture"] == "ext-assets/GlobeSlate/earth.png"          # page-relative sibling (image src, no ./ needed)
-    tstand = NS._rewrite_ext_asset_urls!(_texspec(), tnb; inline = true)
+    tstand = NS._rewrite_ext_asset_urls!(_texspec(), tnb; inline=true)
     @test startswith(tstand["globe"]["baseTexture"], "data:image/png;base64,")       # binary inlined, mime by extension
     @test Base64.base64decode(split(tstand["globe"]["baseTexture"], ",")[2]) == png   # exact bytes round-trip
-    cdn = NS._rewrite_ext_asset_urls!(Dict{String,Any}("globe" => Dict{String,Any}("baseTexture" => "https://cdn/x.png")), tnb; inline = false)
+    cdn = NS._rewrite_ext_asset_urls!(
+        Dict{String,Any}("globe" => Dict{String,Any}("baseTexture" => "https://cdn/x.png")),
+        tnb;
+        inline=false,
+    )
     @test cdn["globe"]["baseTexture"] == "https://cdn/x.png"                          # external url untouched
     @test NS._site_ctype("earth.png") == "image/png"                                  # image mime for the live route
 end
@@ -455,24 +578,60 @@ end
 @testset "save_asset export + serving" begin
     # A cell output carrying one generated asset (as `_save_asset` would leave it).
     _asset_nb() = begin
-        a = (; name = "airports.json", path = "data/airports-1d6b6d68.json",
-               mime = "application/json", bytes = Vector{UInt8}(codeunits("{\"ATL\":[33.6,-84.4]}")))
-        out = _RE.CellOutput("", _RE.MimeChunk[], Any[], Any[], _RE.BindSpec[], "", nothing, nothing, 1.0,
-                             Any[], "", Any[], Any[], "", "", Any[], Any[a])
-        rep = _RE.parse_report("#%% md id=t title\n# Asset\n\n#%% code id=c\nsave_asset(\"x\", d)\n")
+        a = (;
+            name="airports.json",
+            path="data/airports-1d6b6d68.json",
+            mime="application/json",
+            bytes=Vector{UInt8}(codeunits("{\"ATL\":[33.6,-84.4]}")),
+        )
+        out = _RE.CellOutput(
+            "",
+            _RE.MimeChunk[],
+            Any[],
+            Any[],
+            _RE.BindSpec[],
+            "",
+            nothing,
+            nothing,
+            1.0,
+            Any[],
+            "",
+            Any[],
+            Any[],
+            "",
+            "",
+            Any[],
+            Any[a],
+        )
+        rep = _RE.parse_report(
+            "#%% md id=t title\n# Asset\n\n#%% code id=c\nsave_asset(\"x\", d)\n"
+        )
         rep.cells[end].output = out
-        NS.LiveNotebook("assetnb", "/tmp/anb.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
-            ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+        NS.LiveNotebook(
+            "assetnb",
+            "/tmp/anb.jl",
+            rep,
+            _RE.InProcessKernel(),
+            1,
+            String[],
+            String[],
+            ReentrantLock(),
+            Channel{String}[],
+            ReentrantLock(),
+            "",
+            false,
+            Dict{String,String}(),
+        )
     end
 
     # Harvest at eval time: content-hashed page-local path, mime inference, dedup by content.
     task_local_storage(:slate_assets, Any[])
     ref = _RE._save_asset("airports.json", "{\"ATL\":[33.6,-84.4]}")
     _RE._save_asset("airports.json", "{\"ATL\":[33.6,-84.4]}")     # identical content → dedup
-    _RE._save_asset("raw", UInt8[1, 2, 3]; mime = "application/octet-stream")
+    _RE._save_asset("raw", UInt8[1, 2, 3]; mime="application/octet-stream")
     aref = _RE._save_asset("Ur", Float32[1 2 3; 4 5 6])           # numeric matrix → packed binary
     dref = _RE._save_asset("cfg", Dict("a" => 1, "b" => [1, 2]))  # Dict → JSON (server-encoded)
-    nref = _RE._save_asset("nt", (msg = "hi", n = 42))            # NamedTuple → JSON
+    nref = _RE._save_asset("nt", (msg="hi", n=42))            # NamedTuple → JSON
     harvested = _RE._harvest_assets(task_local_storage(:slate_assets))
     delete!(task_local_storage(), :slate_assets)
     @test "$(ref)" == "data/airports-1d6b6d68.json"               # AssetRef interpolates to its path
@@ -480,7 +639,10 @@ end
     @test length(harvested) == 5                                  # dup collapsed (6 saved → 5)
     @test any(a -> endswith(a.path, ".bin"), harvested)           # raw bytes → .bin
     # Numeric array: packed as column-major f32 with shape metadata on the ref + record.
-    @test aref.dtype == "f32" && aref.shape == [2, 3] && aref.nbytes == 24 && endswith(aref.path, ".f32.bin")
+    @test aref.dtype == "f32" &&
+        aref.shape == [2, 3] &&
+        aref.nbytes == 24 &&
+        endswith(aref.path, ".f32.bin")
     arec = only(a for a in harvested if a.path == aref.path)
     @test NS._asset_bytes(arec) == reinterpret(UInt8, Float32[1, 4, 2, 5, 3, 6])   # col-major flatten
     @test NS._asset_meta(arec)["dtype"] == "f32" && NS._asset_meta(arec)["shape"] == [2, 3]
@@ -491,7 +653,8 @@ end
     nrec = only(a for a in harvested if a.path == nref.path)
     @test occursin("\"msg\":\"hi\"", String(NS._asset_bytes(nrec)))
     # A returned AssetRef renders a summary (path + array shape + load hint).
-    @test occursin("f32", sprint(show, MIME("text/plain"), aref)) && occursin("2×3", sprint(show, MIME("text/plain"), aref))
+    @test occursin("f32", sprint(show, MIME("text/plain"), aref)) &&
+        occursin("2×3", sprint(show, MIME("text/plain"), aref))
 
     nb = _asset_nb()
     @test length(NS._page_save_assets(nb)) == 1
@@ -504,12 +667,12 @@ end
     @test occursin(r"^/api/assetnb/blob/", spec[1]["url"])
 
     # Standalone: the `Slate.asset` shim + the bytes inlined (base64 `data`), keyed by the path.
-    std = NS.export_html(_asset_nb(); inline_assets = true)
+    std = NS.export_html(_asset_nb(); inline_assets=true)
     @test occursin("Slate.asset=function", std)
     @test occursin("\"data\":\"", std) && occursin("data/airports-1d6b6d68.json", std)
 
     # Published: the registry points at the page-local sibling (`url`), no inlined bytes; the file lands.
-    pub = NS.export_html(_asset_nb(); inline_assets = false)
+    pub = NS.export_html(_asset_nb(); inline_assets=false)
     @test occursin("\"url\":\"data/airports-1d6b6d68.json\"", pub) && !occursin("\"data\":\"", pub)
     dir = mktempdir()
     try
@@ -517,7 +680,7 @@ end
         f = joinpath(dir, "data", "airports-1d6b6d68.json")
         @test isfile(f) && String(read(f)) == "{\"ATL\":[33.6,-84.4]}"
     finally
-        rm(dir; recursive = true, force = true)
+        rm(dir; recursive=true, force=true)
     end
 end
 
@@ -526,25 +689,59 @@ end
     # `override::Bool` to `_emit_output!`, NOT shadow it with the frag's source-override — before the fix,
     # a code cell on a slide passed `override=nothing` into a `::Bool` kwarg and threw at the call.
     rep = _RE.parse_report("#%% code id=c\n1 + 1\n")
-    nb = NS.LiveNotebook("slidenb", "/tmp/slidenb.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
-        ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    nb = NS.LiveNotebook(
+        "slidenb",
+        "/tmp/slidenb.jl",
+        rep,
+        _RE.InProcessKernel(),
+        1,
+        String[],
+        String[],
+        ReentrantLock(),
+        Channel{String}[],
+        ReentrantLock(),
+        "",
+        false,
+        Dict{String,String}(),
+    )
     c = rep.cells[end]
     @test c.kind != NS.MARKDOWN                       # the else-branch that forwards `override` is a code cell
-    io = IOBuffer(); dir = mktempdir()
+    io = IOBuffer()
+    dir = mktempdir()
     try
         # override=true is the themed-render flag; it must reach _emit_output! as a Bool (no throw).
-        @test (NS._emit_slide_frag!(io, dir, "s1f1", nb, (c, nothing); theme = "dark", override = true,
-                                    show_source = false, include_params = false); true)
+        @test (
+            NS._emit_slide_frag!(
+                io,
+                dir,
+                "s1f1",
+                nb,
+                (c, nothing);
+                theme="dark",
+                override=true,
+                show_source=false,
+                include_params=false,
+            );
+            true
+        )
     finally
-        rm(dir; recursive = true, force = true)
+        rm(dir; recursive=true, force=true)
     end
 end
 
 @testset "_apply_ordering! sets section/order in place, leaves unmatched" begin
-    docs = Any[Dict{String,Any}("slug" => "a"), Dict{String,Any}("slug" => "b"),
-               Dict{String,Any}("slug" => "keep")]
-    NS._apply_ordering!(docs, [Dict("slug" => "a", "section" => "Intro", "order" => 2),
-                               Dict("slug" => "b", "section" => "", "order" => 1)])
+    docs = Any[
+        Dict{String,Any}("slug" => "a"),
+        Dict{String,Any}("slug" => "b"),
+        Dict{String,Any}("slug" => "keep"),
+    ]
+    NS._apply_ordering!(
+        docs,
+        [
+            Dict("slug" => "a", "section" => "Intro", "order" => 2),
+            Dict("slug" => "b", "section" => "", "order" => 1),
+        ],
+    )
     @test docs[1]["section"] == "Intro" && docs[1]["order"] == 2.0    # order coerced to Float64
     @test docs[2]["section"] == "" && docs[2]["order"] == 1.0
     @test !haskey(docs[3], "section") && !haskey(docs[3], "order")     # unmatched doc untouched

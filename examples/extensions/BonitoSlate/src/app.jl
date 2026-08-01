@@ -53,7 +53,7 @@ a concurrently-rendering cell consume it in between.
 """
 function bonito_output_html(render::Function)
     announce, frag = with_render_lock() do
-        (root_announce_html(), track_new_sessions(render))
+        return (root_announce_html(), track_new_sessions(render))
     end
     return _bonito_runtime_script() * announce * frag
 end
@@ -85,13 +85,16 @@ before that sub-session's init runs.
 function slate_app_html(app::Bonito.App)
     try
         return bonito_output_html() do
-            sprint(io -> _show_app_under_root(io, app))
+            return sprint(io -> _show_app_under_root(io, app))
         end
     catch e
         # Surface a render failure inline rather than let the display capture swallow it into a `text/plain`
         # repr, which for an App is an uninformative one-liner.
-        return string("<pre style=\"color:#f88;white-space:pre-wrap\">BonitoSlate app render error:\n",
-                      sprint(showerror, e), "</pre>")
+        return string(
+            "<pre style=\"color:#f88;white-space:pre-wrap\">BonitoSlate app render error:\n",
+            sprint(showerror, e),
+            "</pre>",
+        )
     end
 end
 
@@ -121,7 +124,7 @@ function _show_app_under_root(io::IO, app::Bonito.App)
     # Session bookkeeping is NOT done here: `bonito_output_html` wraps every render in `track_new_sessions`,
     # which registers whatever the render created. Registering here as well would attach two teardowns to the
     # same session.
-    root === nothing ? Bonito.show_html(io, app) : Bonito.show_html(io, app; parent = root)
+    root === nothing ? Bonito.show_html(io, app) : Bonito.show_html(io, app; parent=root)
     return nothing
 end
 
@@ -174,7 +177,9 @@ end
 # extras. A cheap constant `showable` keeps it to exactly one render per capture.
 Base.showable(::SlateExtensionsBase.SlateHtmlMIME, ::Bonito.App) = true
 Base.showable(::SlateExtensionsBase.SlateComponentMIME, ::Bonito.App) = false   # an app is HTML, never a component
-Base.show(io::IO, ::SlateExtensionsBase.SlateHtmlMIME, app::Bonito.App) = print(io, slate_app_html(app))
+function Base.show(io::IO, ::SlateExtensionsBase.SlateHtmlMIME, app::Bonito.App)
+    return print(io, slate_app_html(app))
+end
 
 # SESSION-BOUND: the app's DOM is a handle into a worker session, so Slate re-runs the cell's source for every
 # browser page that connects — a reload, a new tab, a reconnect — exactly as a Bonito server serves a fresh

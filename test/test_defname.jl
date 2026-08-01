@@ -9,7 +9,9 @@ include(joinpath(HERE, "..", "src", "defname.jl"))
 
 p(s) = Meta.parse(s)                                   # the single top-level Expr for a snippet
 blk(args...) = Expr(:block, args...)                   # Revise's `begin <LNN> def end` wrapper
-docm(def) = Expr(:macrocall, GlobalRef(Core, Symbol("@doc")), LineNumberNode(1, :t), "the docs", def)  # docstring form
+function docm(def)
+    return Expr(:macrocall, GlobalRef(Core, Symbol("@doc")), LineNumberNode(1, :t), "the docs", def)
+end  # docstring form
 LNN = LineNumberNode(7, Symbol("SlateTest.jl"))
 
 @testset "_def_name" begin
@@ -99,8 +101,8 @@ defs(src) = _collect_defs!(Dict{String,UInt64}(), Meta.parseall(src))
     end
 
     @testset "line shifts don't change the hash; body edits do" begin
-        @test defs("g(x) = x")["g"]   == defs("\n\n\ng(x) = x")["g"]      # LNN-insensitive
-        @test defs("g(x) = x")["g"]   != defs("g(x) = x + 1")["g"]        # body-sensitive
+        @test defs("g(x) = x")["g"] == defs("\n\n\ng(x) = x")["g"]      # LNN-insensitive
+        @test defs("g(x) = x")["g"] != defs("g(x) = x + 1")["g"]        # body-sensitive
         @test defs("greet() = \"v1\"")["greet"] != defs("greet() = \"v2\"")["greet"]
     end
 

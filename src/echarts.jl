@@ -5,7 +5,7 @@
 # rendered in the browser as a live, interactive chart (zoom / pan / hover). On
 # reactive recompute (edit or widget drag) the browser calls `chart.setOption`
 # on the existing instance — a smooth in-place update, no image swap.
-import JSON
+using JSON: JSON
 
 struct EChart
     option::Dict{String,Any}

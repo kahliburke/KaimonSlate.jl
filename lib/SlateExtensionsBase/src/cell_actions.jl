@@ -36,12 +36,24 @@ end
 # quotes, spaces, or angle brackets that could break out of the attribute or the class token. `kind_for`
 # (the usual source, `Module.Type`) already satisfies this.
 const _CELL_ACTION_ID = r"^[A-Za-z][\w.\-]*$"
-CellAction(id::AbstractString; icon::AbstractString, title::AbstractString = "",
-           show::AbstractString = "", onclick::AbstractString) =
-    occursin(_CELL_ACTION_ID, id) ?
-        CellAction(String(id), String(icon), String(title), String(show), String(onclick)) :
-        throw(ArgumentError("CellAction id $(repr(id)) must be a namespaced identifier matching " *
-                            "$(_CELL_ACTION_ID) (e.g. \"MyPackage.MyButton\", as `kind_for` yields)."))
+function CellAction(
+    id::AbstractString;
+    icon::AbstractString,
+    title::AbstractString="",
+    show::AbstractString="",
+    onclick::AbstractString,
+)
+    return if occursin(_CELL_ACTION_ID, id)
+        CellAction(String(id), String(icon), String(title), String(show), String(onclick))
+    else
+        throw(
+            ArgumentError(
+                "CellAction id $(repr(id)) must be a namespaced identifier matching " *
+                "$(_CELL_ACTION_ID) (e.g. \"MyPackage.MyButton\", as `kind_for` yields).",
+            ),
+        )
+    end
+end
 
 """
     to_cell_action(x) -> CellAction
@@ -64,9 +76,14 @@ SlateExtensionsBase.to_cell_action(a::InsertSnippetButton) = auto_cell_action(a)
 The identity method means an existing `CellAction` passes through unchanged.
 """
 to_cell_action(a::CellAction) = a
-to_cell_action(x) = throw(ArgumentError(
-    "register_cell_action! expected a CellAction (or a value with a `SlateExtensionsBase.to_cell_action` " *
-    "method); got $(typeof(x))"))
+function to_cell_action(x)
+    return throw(
+        ArgumentError(
+            "register_cell_action! expected a CellAction (or a value with a `SlateExtensionsBase.to_cell_action` " *
+            "method); got $(typeof(x))",
+        ),
+    )
+end
 
 """
     auto_cell_action(x; exclude = ()) -> CellAction
@@ -81,20 +98,29 @@ package and can't collide with another extension's button. `exclude` drops named
 SlateExtensionsBase.to_cell_action(a::InsertSnippetButton) = auto_cell_action(a)   # id = "MyPackage.InsertSnippetButton"
 ```
 """
-function auto_cell_action(x; exclude = ())
+function auto_cell_action(x; exclude=())
     T = typeof(x)
     fns = fieldnames(T)
-    pick = (name, required) ->
-        if name in fns && name ∉ exclude
+    pick =
+        (name, required) -> if name in fns && name ∉ exclude
             String(getfield(x, name))
         elseif required
-            throw(ArgumentError("auto_cell_action($T): no `$name` field to reflect — add it, pass it in " *
-                                "`exclude` only if intentional, or build the CellAction explicitly."))
+            throw(
+                ArgumentError(
+                    "auto_cell_action($T): no `$name` field to reflect — add it, pass it in " *
+                    "`exclude` only if intentional, or build the CellAction explicitly.",
+                ),
+            )
         else
             ""
         end
-    return CellAction(kind_for(T); icon = pick(:icon, true), title = pick(:title, false),
-                      show = pick(:show, false), onclick = pick(:onclick, true))
+    return CellAction(
+        kind_for(T);
+        icon=pick(:icon, true),
+        title=pick(:title, false),
+        show=pick(:show, false),
+        onclick=pick(:onclick, true),
+    )
 end
 
 # A JS double-quoted string literal for `s` — Base-only (no JSON dependency), and safe to embed in an
@@ -103,14 +129,22 @@ function _js_string(s::AbstractString)
     io = IOBuffer()
     print(io, '"')
     for c in s
-        if     c == '"';       print(io, "\\\"")
-        elseif c == '\\';      print(io, "\\\\")
-        elseif c == '\n';      print(io, "\\n")
-        elseif c == '\r';      print(io, "\\r")
-        elseif c == '\t';      print(io, "\\t")
-        elseif c == '<';       print(io, "\\u003c")
-        elseif c < ' ';        print(io, "\\u", lpad(string(UInt32(c); base = 16), 4, '0'))
-        else                   print(io, c)
+        if c == '"'
+            print(io, "\\\"")
+        elseif c == '\\'
+            print(io, "\\\\")
+        elseif c == '\n'
+            print(io, "\\n")
+        elseif c == '\r'
+            print(io, "\\r")
+        elseif c == '\t'
+            print(io, "\\t")
+        elseif c == '<'
+            print(io, "\\u003c")
+        elseif c < ' '
+            print(io, "\\u", lpad(string(UInt32(c); base=16), 4, '0'))
+        else
+            print(io, c)
         end
     end
     print(io, '"')
@@ -151,6 +185,6 @@ read-only static export renders no cell toolbar, so the button simply doesn't ap
 """
 function register_cell_action!(x)
     a = to_cell_action(x)
-    provide_frontend!(_cell_action_js(a); id = "cellaction:" * a.id, esm = false)
+    provide_frontend!(_cell_action_js(a); id="cellaction:" * a.id, esm=false)
     return nothing
 end

@@ -9,7 +9,7 @@
 # id => (; js, esm, kind): the front-end script, whether it's an ES module, and — for a COMPONENT —
 # the widget kind whose default export Slate wraps + registers (`""` for a self-registering script).
 # Process-global; a re-register by the same id REPLACES (a reload doesn't stack duplicates).
-const _FRONTEND = Dict{String,@NamedTuple{js::String, esm::Bool, kind::String}}()
+const _FRONTEND = Dict{String,@NamedTuple{js::String,esm::Bool,kind::String}}()
 # Guarded: a widget's front-end can be registered from the CONCURRENT `@bind`/display path (via
 # `ensure_widget_assets!`), while the run drain reads the registry — writes and the reader iteration
 # must not race (`Multiple concurrent writes to Dict detected!`).
@@ -26,11 +26,12 @@ registers it under `kind` (see [`register_component!`](@ref)); `""` ⇒ inject t
 self-registers). The general form behind [`register_widget!`](@ref) / [`register_component!`](@ref).
 Live and in a static export; no boot cell, no ordering.
 """
-function provide_frontend!(js::AbstractString; id::AbstractString = "", esm::Bool = false,
-                           kind::AbstractString = "")
-    key = isempty(id) ? "fe:" * string(hash(js); base = 16) : String(id)
+function provide_frontend!(
+    js::AbstractString; id::AbstractString="", esm::Bool=false, kind::AbstractString=""
+)
+    key = isempty(id) ? "fe:" * string(hash(js); base=16) : String(id)
     lock(_FRONTEND_LOCK) do
-        _FRONTEND[key] = (js = String(js), esm = esm, kind = String(kind))
+        return _FRONTEND[key] = (js=String(js), esm=esm, kind=String(kind))
     end
     return nothing
 end
@@ -42,8 +43,9 @@ Auto-register a CLASSIC-script front-end renderer for a widget `kind` — call i
 `__init__`; `js` should call `window.slateRegisterWidget("<kind>", …)`. For the higher-level, signals-
 based component pattern, prefer [`register_component!`](@ref).
 """
-register_widget!(kind::AbstractString, js::AbstractString) =
-    provide_frontend!(js; id = "widget:" * String(kind), esm = false, kind = "")
+function register_widget!(kind::AbstractString, js::AbstractString)
+    return provide_frontend!(js; id="widget:" * String(kind), esm=false, kind="")
+end
 
 """
     register_component!(T::Type, js)
@@ -73,8 +75,9 @@ kind; `import`s resolve against the page's import map (Preact/htm/signals + `@sl
 offline-pinned). Live and in a static export. The string form takes an explicit (un-namespaced) kind —
 an escape hatch.
 """
-register_component!(kind::AbstractString, js::AbstractString) =
-    provide_frontend!(js; id = "widget:" * String(kind), esm = true, kind = String(kind))
+function register_component!(kind::AbstractString, js::AbstractString)
+    return provide_frontend!(js; id="widget:" * String(kind), esm=true, kind=String(kind))
+end
 register_component!(::Type{T}, js::AbstractString) where {T} = register_component!(kind_for(T), js)
 
 """
@@ -113,7 +116,7 @@ function ensure_widget_assets!(::Type{T}) where {T}
     # (possibly file-reading) `required_assets` + registration runs exactly once even under a parallel
     # bind batch. Kept OUTSIDE the lock so a slow `required_assets` doesn't serialise unrelated binds.
     newly = lock(_ASSET_LOCK) do
-        (T in _ASSET_CHECKED) ? false : (push!(_ASSET_CHECKED, T); true)
+        return (T in _ASSET_CHECKED) ? false : (push!(_ASSET_CHECKED, T); true)
     end
     newly || return nothing
     js = required_assets(T)
@@ -195,7 +198,7 @@ end
 # lazily by hash (over the gate) the first time a browser requests the URL, caches, and serves them
 # immutable (content-addressed → safe). This is how BonitoSlate serves the ~3.5 MB Bonito JS runtime ONCE
 # per page instead of re-inlining it into every figure. Keyed by content hash → automatic dedup.
-const _SERVED_ASSETS = Dict{String,@NamedTuple{mime::String, bytes::Vector{UInt8}}}()
+const _SERVED_ASSETS = Dict{String,@NamedTuple{mime::String,bytes::Vector{UInt8}}}()
 
 """
     provide_served_asset!(bytes; mime="application/octet-stream") -> String
@@ -206,10 +209,12 @@ same path (dedup). The bytes live in the worker; the hub fetches them lazily by 
 is safe to call from a hot render path (it's just a `Dict` insert). Use for a large shared runtime a page
 loads once (a WASM blob, a JS bundle) rather than re-inlining it per output.
 """
-function provide_served_asset!(bytes::AbstractVector{UInt8}; mime::AbstractString = "application/octet-stream")
+function provide_served_asset!(
+    bytes::AbstractVector{UInt8}; mime::AbstractString="application/octet-stream"
+)
     data = Vector{UInt8}(bytes)
-    hash = string(Base.hash(data); base = 16)
-    get!(_SERVED_ASSETS, hash, (mime = String(mime), bytes = data))
+    hash = string(Base.hash(data); base=16)
+    get!(_SERVED_ASSETS, hash, (mime=String(mime), bytes=data))
     return "/served/" * hash
 end
 
@@ -243,7 +248,9 @@ function _run_hooks(hooks, what::AbstractString)
         try
             Base.invokelatest(f)
         catch e
-            @error "SlateExtensionsBase: $what hook failed" hook = f exception = (e, catch_backtrace())
+            @error "SlateExtensionsBase: $what hook failed" hook = f exception = (
+                e, catch_backtrace()
+            )
         end
     end
     return nothing
@@ -281,7 +288,7 @@ Read a file bundled in the CALLING package, resolved relative to its package roo
 `register_component!("stars", @pkg_asset("assets/stars.js"))`.
 """
 macro pkg_asset(path)
-    :(read(joinpath(pkgdir($(__module__)), $(esc(path))), String))
+    return :(read(joinpath(pkgdir($(__module__)), $(esc(path))), String))
 end
 
 # ── Package-vendored asset DIRECTORIES (served from disk, not inlined) ─────────
@@ -322,9 +329,10 @@ URL for the package's tree.
 _gl = ext_asset_url(@__MODULE__, "echarts-gl.min.js")   # "/ext-assets/GlobeSlate/echarts-gl.min.js"
 ```
 """
-ext_asset_url(pkg::AbstractString, sub::AbstractString = "") =
-    EXT_ASSET_PREFIX * String(pkg) * "/" * lstrip(String(sub), '/')
-ext_asset_url(m::Module, sub::AbstractString = "") = ext_asset_url(pkg_key(m), sub)
+function ext_asset_url(pkg::AbstractString, sub::AbstractString="")
+    return EXT_ASSET_PREFIX * String(pkg) * "/" * lstrip(String(sub), '/')
+end
+ext_asset_url(m::Module, sub::AbstractString="") = ext_asset_url(pkg_key(m), sub)
 
 """
     provide_assets!(mod_or_pkg, dir) -> String
@@ -367,7 +375,7 @@ provide_assets!(m::Module, dir::AbstractString) = provide_assets!(pkg_key(m), di
 ```
 """
 macro provide_assets!(dir)
-    :(provide_assets!($(__module__), $(esc(dir))))
+    return :(provide_assets!($(__module__), $(esc(dir))))
 end
 
 """
@@ -380,8 +388,8 @@ package builds its served-asset URLs with just the subpath, no key at all:
 @ext_asset_url("echarts-gl/echarts-gl.min.js")   # "/ext-assets/GlobeSlate/echarts-gl/echarts-gl.min.js"
 ```
 """
-macro ext_asset_url(sub = "")
-    :(ext_asset_url($(__module__), $(esc(sub))))
+macro ext_asset_url(sub="")
+    return :(ext_asset_url($(__module__), $(esc(sub))))
 end
 
 """
@@ -392,7 +400,7 @@ Absolute path to a directory bundled in the CALLING package, resolved against it
 `provide_assets!("GlobeSlate", @pkg_dir("assets/echarts-gl"))`.
 """
 macro pkg_dir(path)
-    :(abspath(joinpath(pkgdir($(__module__)), $(esc(path)))))
+    return :(abspath(joinpath(pkgdir($(__module__)), $(esc(path)))))
 end
 
 """
@@ -427,19 +435,29 @@ back to whatever it vendors normally.
 Cached under `dir` keyed by a hash of `key`, the entry source and the deps, so a rebuild happens only
 when one of those actually changes. `key` is a readable prefix on the filename, nothing more.
 """
-function js_bundle(key::AbstractString, entry::AbstractString;
-                   deps::AbstractDict = Dict{String,String}(), dir::AbstractString,
-                   minify::Bool = true)
+function js_bundle(
+    key::AbstractString,
+    entry::AbstractString;
+    deps::AbstractDict=Dict{String,String}(),
+    dir::AbstractString,
+    minify::Bool=true,
+)
     # `--platform=browser` picks browser-conditional exports; `global` still has to be shimmed, because
     # npm packages that also target Node reference it directly and it does not exist in a browser.
     # Without it a bundle throws `global is not defined` on its first line, and every consumer reports a
     # missing API rather than the real cause.
-    args = ["entry.js", "--bundle", "--format=iife", "--platform=browser",
-            "--define:global=globalThis", "--outfile=bundle.js"]
+    args = [
+        "entry.js",
+        "--bundle",
+        "--format=iife",
+        "--platform=browser",
+        "--define:global=globalThis",
+        "--outfile=bundle.js",
+    ]
     minify && push!(args, "--minify")
     # The build FLAGS are part of the identity. Hashing only the sources means a changed flag silently
     # reuses the previous artifact — the build looks like it took effect and did not.
-    stamp = string(hash((String(entry), sort!(["$k@$v" for (k, v) in deps]), args)); base = 16)
+    stamp = string(hash((String(entry), sort!(["$k@$v" for (k, v) in deps]), args)); base=16)
     out = joinpath(String(dir), string(_bundle_stem(key), "-", stamp, ".js"))
     isfile(out) && filesize(out) > 0 && return out
     (Sys.which("node") === nothing || Sys.which("npx") === nothing) && return nothing
@@ -449,22 +467,30 @@ function js_bundle(key::AbstractString, entry::AbstractString;
         if !isempty(deps)
             specs = ["$k@$v" for (k, v) in deps]
             # `--no-save --no-audit --no-fund`: a throwaway tree, so npm's bookkeeping is pure latency.
-            run(pipeline(Cmd(`npm install --no-save --no-audit --no-fund --loglevel=error $specs`;
-                             dir = work); stdout = devnull, stderr = devnull))
+            run(
+                pipeline(
+                    Cmd(
+                        `npm install --no-save --no-audit --no-fund --loglevel=error $specs`;
+                        dir=work,
+                    );
+                    stdout=devnull,
+                    stderr=devnull,
+                ),
+            )
         end
-        run(pipeline(Cmd(`npx --yes esbuild $args`; dir = work); stdout = devnull, stderr = devnull))
+        run(pipeline(Cmd(`npx --yes esbuild $args`; dir=work); stdout=devnull, stderr=devnull))
         built = joinpath(work, "bundle.js")
         (isfile(built) && filesize(built) > 0) || return nothing
         mkpath(String(dir))
         # Move via a temp name in the DESTINATION so a concurrent build can't publish a partial file.
         tmp = out * ".part"
-        cp(built, tmp; force = true)
-        mv(tmp, out; force = true)
+        cp(built, tmp; force=true)
+        mv(tmp, out; force=true)
         return out
     catch
         return nothing
     finally
-        rm(work; recursive = true, force = true)
+        rm(work; recursive=true, force=true)
     end
 end
 
@@ -485,7 +511,7 @@ Every front-end script declared by the loaded packages (`id => js`) — a copy, 
 the registry. See [`extension_manifest`](@ref) for the full record (incl. module-ness) that Slate pulls.
 """
 frontend_scripts() = lock(_FRONTEND_LOCK) do
-    Dict{String,String}(k => v.js for (k, v) in _FRONTEND)
+    return Dict{String,String}(k => v.js for (k, v) in _FRONTEND)
 end
 
 """
@@ -503,8 +529,11 @@ page — Slate pulls it once per run drain and merges it into the notebook. Fiel
 Extensible: as new package-registration seams are added they surface as additional fields here, carried
 by the same query — no new transport per feature.
 """
-extension_manifest() =
-    (; frontend = lock(_FRONTEND_LOCK) do
-           [(; id = k, js = v.js, esm = v.esm, kind = v.kind) for (k, v) in _FRONTEND]
-       end,
-       assets = [(; pkg = k, dir = v) for (k, v) in _ASSETS])
+function extension_manifest()
+    (;
+        frontend=lock(_FRONTEND_LOCK) do
+            return [(; id=k, js=v.js, esm=v.esm, kind=v.kind) for (k, v) in _FRONTEND]
+        end,
+        assets=[(; pkg=k, dir=v) for (k, v) in _ASSETS],
+    )
+end

@@ -33,15 +33,25 @@
 #   'M' <fullkey>\n<toml…>           → reply "ok" — manifest written; senders order it LAST so a
 #                                      manifest can never reference blobs that aren't there yet.
 
-import Mmap
+using Mmap: Mmap
 
 # Bytes per REQ/REP round-trip on the blob channel. Bigger amortizes RTT (fat links); smaller
 # bounds per-chunk exposure (thin links). `KAIMONSLATE_BLOB_CHUNK_MB` env → default 8 MiB, min 64 KB.
 # (The hub has its own tunable `ReportEngine._blob_chunk`; this is the worker/standalone default.)
-_default_blob_chunk() = max(65_536, round(Int, 2^20 *
-    something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_CHUNK_MB", "")), 8.0)))
+function _default_blob_chunk()
+    return max(
+        65_536,
+        round(
+            Int, 2^20 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_CHUNK_MB", "")), 8.0)
+        ),
+    )
+end
 
-_is_zmq_timeout(Z, e) = (T = try; Z.TimeoutError; catch; nothing; end; T !== nothing && e isa T)
+_is_zmq_timeout(Z, e) = (T=try
+    Z.TimeoutError
+catch
+    nothing
+end; T !== nothing && e isa T)
 
 """
     blob_server!(Z, host, port, root; ctx=nothing, configure!=nothing,
@@ -53,34 +63,45 @@ caller uses it to make the socket a CURVE server + set the ZAP domain (so a shar
 allow-list gates who may connect); omit it for a plaintext channel. `on_ready()` fires once the
 socket is bound (a test can then connect without racing the bind). `Z` is the ZMQ module.
 """
-function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractString;
-                      ctx = nothing, configure! = nothing,
-                      running::Ref{Bool} = Ref(true), on_ready = nothing, control_handler = nothing)
+function blob_server!(
+    Z,
+    host::AbstractString,
+    port::Integer,
+    root::AbstractString;
+    ctx=nothing,
+    (configure!)=nothing,
+    running::Ref{Bool}=Ref(true),
+    on_ready=nothing,
+    control_handler=nothing,
+)
     sock = ctx === nothing ? Z.Socket(Z.REP) : Z.Socket(ctx, Z.REP)
     configure! === nothing || configure!(sock)     # CURVE/ZAP applied by the caller BEFORE bind
     Z.bind(sock, "tcp://$host:$port")
     sock.rcvtimeo = 500                             # wake periodically to re-check `running`
     sock.linger = 0                                 # release the bound port IMMEDIATELY on close — no lingering
-                                                    # socket, so a fast worker respawn onto the SAME data_port
-                                                    # doesn't hit "Address already in use" (the collision the
-                                                    # blob-bind retry in worker.jl backstops; this removes its cause)
+    # socket, so a fast worker respawn onto the SAME data_port
+    # doesn't hit "Address already in use" (the collision the
+    # blob-bind retry in worker.jl backstops; this removes its cause)
     on_ready === nothing || on_ready()
     open_tmps = Dict{String,Tuple{IOStream,String}}()   # hash → (io, tmppath)
     # One put chunk (either framing): append to the blob's tmp; on the last chunk verify the sha
     # and atomically land it in the CAS.
     put_chunk! = function (h::String, last::Bool, writechunk!)
         io, tmp = get!(open_tmps, h) do
-            bdir = joinpath(root, "blobs"); mkpath(bdir)
+            bdir = joinpath(root, "blobs")
+            mkpath(bdir)
             t = tempname(bdir)
-            (open(t, "w"), t)
+            return (open(t, "w"), t)
         end
         writechunk!(io)
         last || return "ok"
-        close(io); delete!(open_tmps, h)
+        close(io)
+        delete!(open_tmps, h)
         got = MemoStore.sha_file_hex(tmp)
-        got == h || (rm(tmp; force = true); return "err: hash mismatch (got $got)")
+        got == h || (rm(tmp; force=true); return "err: hash mismatch (got $got)")
         dest = MemoStore.blob_path(root, h)
-        mkpath(dirname(dest)); mv(tmp, dest; force = true)
+        mkpath(dirname(dest))
+        mv(tmp, dest; force=true)
         return "done"
     end
     try
@@ -98,14 +119,17 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
                 if cmd == 'V'
                     "2"
                 elseif cmd == 'H'
-                    hs = split(String(copy(data))[2:end], ","; keepempty = false)
+                    hs = split(String(copy(data))[2:end], ","; keepempty=false)
                     join([h for h in hs if !MemoStore.has_blob(root, String(h))], ",")
                 elseif cmd == 'p'
-                    h = String(copy(data[2:65])); last = data[66] == 0x01
+                    h = String(copy(data[2:65]))
+                    last = data[66] == 0x01
                     payload = length(frames) >= 2 ? frames[2] : Z.Message()
-                    put_chunk!(h, last, io -> GC.@preserve payload begin
-                        unsafe_write(io, pointer(payload), length(payload))
-                    end)
+                    put_chunk!(
+                        h, last, io -> GC.@preserve payload begin
+                            unsafe_write(io, pointer(payload), length(payload))
+                        end
+                    )
                 elseif cmd == 'G'
                     parts = split(String(copy(data))[2:end], ':')
                     h = String(parts[1])
@@ -126,15 +150,18 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
                     end
                 elseif cmd == 'P'
                     d = copy(data)
-                    h = String(d[2:65]); last = d[66] == 0x01
+                    h = String(d[2:65])
+                    last = d[66] == 0x01
                     put_chunk!(h, last, io -> write(io, @view d[67:end]))
                 elseif cmd == 'M'
                     s = String(copy(data))[2:end]
                     nl = findfirst('\n', s)
-                    key = s[1:nl-1]
+                    key = s[1:(nl - 1)]
                     p = MemoStore.manifest_path(root, key)
                     mkpath(dirname(p))
-                    tmp = p * ".tmp"; write(tmp, s[nl+1:end]); mv(tmp, p; force = true)
+                    tmp = p * ".tmp"
+                    write(tmp, s[(nl + 1):end])
+                    mv(tmp, p; force=true)
                     "ok"
                 elseif control_handler !== nothing
                     # Non-data verbs (transfer-control plane, e.g. X/S) → the injected handler, which must
@@ -150,7 +177,7 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
             # REP must always answer or the channel wedges. A Tuple reply = multipart ('G').
             try
                 if reply isa Tuple
-                    Z.send(sock, reply[1]; more = true)
+                    Z.send(sock, reply[1]; more=true)
                     Z.send(sock, reply[2])
                 else
                     Z.send(sock, reply)
@@ -159,7 +186,10 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
             end
         end
     finally
-        try; close(sock); catch; end
+        try
+            close(sock)
+        catch
+        end
     end
     return nothing
 end
@@ -174,9 +204,18 @@ client pinned to the server's key BEFORE `connect` (omit for plaintext). Streams
 sha-verifies against the address, atomic-renames — a truncated/corrupt transfer never lands. Dedup:
 an already-present blob returns 0 without touching the network. Returns bytes moved over the wire.
 """
-function pull_blob_into!(Z, ip::AbstractString, port::Integer, root::AbstractString, hash::AbstractString;
-                         configure! = nothing, chunk::Integer = _default_blob_chunk(),
-                         timeout_ms::Integer = 20_000, on_progress = nothing, stall_ms::Integer = 0)
+function pull_blob_into!(
+    Z,
+    ip::AbstractString,
+    port::Integer,
+    root::AbstractString,
+    hash::AbstractString;
+    (configure!)=nothing,
+    chunk::Integer=_default_blob_chunk(),
+    timeout_ms::Integer=20_000,
+    on_progress=nothing,
+    stall_ms::Integer=0,
+)
     dest = MemoStore.blob_path(root, hash)
     isfile(dest) && return 0                              # dedup: already here — nothing moved
     # Stall detection (opt-in, stall_ms>0): a recv that times out with NO progress for `stall_ms` FAILS
@@ -188,16 +227,18 @@ function pull_blob_into!(Z, ip::AbstractString, port::Integer, root::AbstractStr
     recvto = stall_ms > 0 ? min(Int(timeout_ms), Int(stall_ms)) : Int(timeout_ms)
     newsock = function ()
         s = Z.Socket(Z.REQ)
-        s.rcvtimeo = recvto; s.sndtimeo = recvto
+        s.rcvtimeo = recvto
+        s.sndtimeo = recvto
         configure! === nothing || configure!(s)          # CURVE client applied BEFORE connect
         Z.connect(s, "tcp://$ip:$port")
-        s
+        return s
     end
     sock = newsock()
     try
         mkpath(dirname(dest))
         tmp = tempname(dirname(dest))
-        total = -1; off = 0
+        total = -1
+        off = 0
         open(tmp, "w") do io
             last_progress = time()
             while total < 0 || off < total
@@ -206,9 +247,13 @@ function pull_blob_into!(Z, ip::AbstractString, port::Integer, root::AbstractStr
                     Z.recv_multipart(sock)
                 catch e
                     (_is_zmq_timeout(Z, e) && stall_ms > 0) || rethrow()
-                    (time() - last_progress) * 1000 >= stall_ms &&
-                        error("pull $hash: no progress for $(round(Int, stall_ms / 1000))s at $off/$total (link stalled)")
-                    try; Z.close(sock); catch; end        # transient timeout, progress was recent → reset + resume from off
+                    (time() - last_progress) * 1000 >= stall_ms && error(
+                        "pull $hash: no progress for $(round(Int, stall_ms / 1000))s at $off/$total (link stalled)",
+                    )
+                    try
+                        Z.close(sock)
+                    catch
+                    end        # transient timeout, progress was recent → reset + resume from off
                     sock = newsock()
                     continue
                 end
@@ -221,14 +266,19 @@ function pull_blob_into!(Z, ip::AbstractString, port::Integer, root::AbstractStr
                 off += length(payload)
                 last_progress = time()
                 on_progress === nothing || on_progress(off, total)
-                length(payload) == 0 && off < total && error("pull $hash: empty chunk at $off/$total")
+                length(payload) == 0 &&
+                    off < total &&
+                    error("pull $hash: empty chunk at $off/$total")
             end
         end
         got = MemoStore.sha_file_hex(tmp)
-        got == String(hash) || (rm(tmp; force = true); error("pull $hash: hash mismatch (got $got)"))
-        mv(tmp, dest; force = true)
+        got == String(hash) || (rm(tmp; force=true); error("pull $hash: hash mismatch (got $got)"))
+        mv(tmp, dest; force=true)
         return total < 0 ? 0 : total
     finally
-        try; Z.close(sock); catch; end
+        try
+            Z.close(sock)
+        catch
+        end
     end
 end

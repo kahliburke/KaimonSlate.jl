@@ -15,10 +15,14 @@ Base.similar(s::SlateAssetServer) = s
 
 # Everything but es6-module URLs behaves EXACTLY like NoServer (inline as `data:` URLs): forward the
 # render/import/inline machinery so only the module-URL resolution changes.
-Bonito.render_asset(session::Bonito.Session, ::SlateAssetServer, asset::Bonito.Asset) =
-    Bonito.render_asset(session, Bonito.NoServer(), asset)
-Bonito.import_in_js(io::IO, session::Bonito.Session, ::SlateAssetServer, asset::Bonito.Asset) =
-    Bonito.import_in_js(io, session, Bonito.NoServer(), asset)
+function Bonito.render_asset(session::Bonito.Session, ::SlateAssetServer, asset::Bonito.Asset)
+    return Bonito.render_asset(session, Bonito.NoServer(), asset)
+end
+function Bonito.import_in_js(
+    io::IO, session::Bonito.Session, ::SlateAssetServer, asset::Bonito.Asset
+)
+    return Bonito.import_in_js(io, session, Bonito.NoServer(), asset)
+end
 Bonito.setup_asset_server(::SlateAssetServer) = nothing
 
 # Each rendered fragment ships a small `<script type="module">` that calls `Bonito.init_session(…)` —
@@ -49,7 +53,7 @@ end
 # the bytes staying in the worker until a browser actually asks for them.
 function Bonito.url(::SlateAssetServer, asset::Bonito.BinaryAsset)
     if !isempty(_NB_ID[])
-        path = SlateExtensionsBase.provide_served_asset!(asset.data; mime = asset.mime)
+        path = SlateExtensionsBase.provide_served_asset!(asset.data; mime=asset.mime)
         return string("/n/", _NB_ID[], path)
     end
     return Bonito.url(Bonito.NoServer(), asset)   # fallback: inline (no notebook id — e.g. a bare export)
@@ -61,7 +65,7 @@ function Bonito.url(::SlateAssetServer, asset::Bonito.Asset)
     if asset.es6module && !isempty(_NB_ID[])
         bytes = _asset_bytes(asset)
         if bytes !== nothing
-            path = SlateExtensionsBase.provide_served_asset!(bytes; mime = "application/javascript")
+            path = SlateExtensionsBase.provide_served_asset!(bytes; mime="application/javascript")
             return string("/n/", _NB_ID[], path)   # → /n/<id>/served/<hash>, served by the hub
         end
     end

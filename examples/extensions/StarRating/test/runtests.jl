@@ -5,13 +5,13 @@ using Test
 @testset "StarRating extension (SDK end-to-end, Julia side)" begin
     # to_widget = auto_widget: reflects the struct under a TYPE-DERIVED, namespaced kind — `default` is
     # the value, other fields are params, an unset `label` is skipped.
-    w = to_widget(Stars(; max = 5, label = "Rate it"))
+    w = to_widget(Stars(; max=5, label="Rate it"))
     @test w isa Widget
     @test w.kind == "StarRating.Stars"                                # namespaced by the package, no collision
     @test w.params["max"] == 5 && w.params["label"] == "Rate it" && w.default == 0
     @test !haskey(w.params, "default")                                # the value isn't duplicated into params
-    @test to_widget(Stars(; max = 5, default = 3)).default == 3
-    @test to_widget(Stars(; max = 5, default = 12)).default == 5      # default clamped into range (by Stars ctor)
+    @test to_widget(Stars(; max=5, default=3)).default == 3
+    @test to_widget(Stars(; max=5, default=12)).default == 5      # default clamped into range (by Stars ctor)
     @test !haskey(to_widget(Stars()).params, "label")                 # label omitted when absent
 
     # No register_kind!: Slate infers the Int value type from `Stars`'s default and coerces to it.
@@ -20,7 +20,7 @@ using Test
     @test coerce_bind(w, "x") == 0                                     # unparseable → error-fallback to default
 
     # reconcile keeps the rating across a bind-cell re-run; a changed kind resets to the new default.
-    @test reconcile_bind(w, 4, to_widget(Stars(; max = 5))) == 4
+    @test reconcile_bind(w, 4, to_widget(Stars(; max=5))) == 4
     @test reconcile_bind(w, 4, Widget("slider", 0)) == 0              # kind changed → new default (generic)
 
     # Front-end is declared by `required_assets(::Type{Stars})` and loaded LAZILY (no __init__): it's the

@@ -23,7 +23,9 @@ if get(ENV, "KAIMONSLATE_HOME", "") == "" && get(ENV, "KAIMONSLATE_CONFIG_HOME",
 end
 ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"             # never fight over the shared extensions.json
 if get(ENV, "KAIMONSLATE_PORT", "") == ""
-    s = Sockets.listen(Sockets.localhost, 0); ENV["KAIMONSLATE_PORT"] = string(Int(Sockets.getsockname(s)[2])); close(s)
+    s = Sockets.listen(Sockets.localhost, 0)
+    ENV["KAIMONSLATE_PORT"] = string(Int(Sockets.getsockname(s)[2]))
+    close(s)
 end
 const PORT = parse(Int, ENV["KAIMONSLATE_PORT"])
 
@@ -33,9 +35,14 @@ const SH = KaimonSlate.SlateHome
 
 SH.ensure_homes!()                                   # mkpath the isolated homes
 KaimonSlate._load_slate_config!()                    # honor this home's slate.json (worker threads, parallel, run-location)
-const HUB = NS.start_hub(; port = PORT)
+const HUB = NS.start_hub(; port=PORT)
 KaimonSlate._HUB[] = HUB                             # let the gate tools / `slate` app see this hub too
-atexit(() -> (try; NS.stop_hub(HUB); catch; end))
+atexit(() -> (
+    try
+        NS.stop_hub(HUB)
+    catch
+    end
+))
 
 const URL = "http://127.0.0.1:$PORT"
 println("""
@@ -53,11 +60,14 @@ let open = get(ENV, "KAIMONSLATE_NO_OPEN", "") != "1"
         path = abspath(expanduser(ARGS[1]))
         isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
         nburl = "$URL/n/$(NS.open_notebook!(HUB, path))"
-        println("→ opened $(basename(path)) at $nburl"); flush(stdout)
+        println("→ opened $(basename(path)) at $nburl")
+        flush(stdout)
         open && NS._open_in_browser(nburl)
     elseif open
         NS._open_in_browser(URL)                     # else land on the front page
     end
 end
 
-while true; sleep(3600); end                         # serve until interrupted (atexit stops the hub)
+while true
+    sleep(3600)
+end                         # serve until interrupted (atexit stops the hub)

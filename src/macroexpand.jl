@@ -14,25 +14,47 @@
 # analysis (deps.jl) is already precise, and expanding one would fabricate bindings the analysis
 # deliberately withholds (e.g. `@onclick`'s control is intentionally NOT a read). A statement
 # whose expansion throws is skipped — failure only ever costs precision, never a real dependency.
-const _EXPAND_SKIP = (Symbol("@bind"), Symbol("@reactive"), Symbol("@onclick"), Symbol("@onchange"),
-                      Symbol("@asset"), Symbol("@use"))
+const _EXPAND_SKIP = (
+    Symbol("@bind"),
+    Symbol("@reactive"),
+    Symbol("@onclick"),
+    Symbol("@onchange"),
+    Symbol("@asset"),
+    Symbol("@use"),
+)
 
 "Expand `src`'s top-level statements in `mod` (recursively, NEVER evaluating) → the expanded
 exprs. A macro may return `Expr(:toplevel, …)` (`@enum` does) whose sub-statements still carry
 unresolved `hygienic-scope` nodes — re-expanding each one resolves them."
 function _expand_cell_statements(mod::Module, src::AbstractString)
-    top = try; Meta.parseall(String(src)); catch; return Any[]; end
+    top = try
+        Meta.parseall(String(src))
+    catch
+        return Any[]
+    end
     stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
     out = Any[]
     for s in stmts
         s isa LineNumberNode && continue
-        s isa Expr && s.head === :macrocall && !isempty(s.args) && s.args[1] in _EXPAND_SKIP && continue
-        e = try; macroexpand(mod, s; recursive = true); catch; nothing; end
+        s isa Expr &&
+            s.head === :macrocall &&
+            !isempty(s.args) &&
+            s.args[1] in _EXPAND_SKIP &&
+            continue
+        e = try
+            macroexpand(mod, s; recursive=true)
+        catch
+            nothing
+        end
         e === nothing && continue
         if e isa Expr && e.head === :toplevel
             for a in e.args
                 a isa LineNumberNode && continue
-                a2 = try; macroexpand(mod, a; recursive = true); catch; nothing; end
+                a2 = try
+                    macroexpand(mod, a; recursive=true)
+                catch
+                    nothing
+                end
                 a2 === nothing || push!(out, a2)
             end
         else
@@ -55,7 +77,7 @@ function _expanded_bindings_of(ee::Module, exprs::Vector{Any})
     catch
         return nothing
     end
-    keep(n) = (s = String(n); !occursin('#', s) && !startswith(s, "__ExprExpl_anon__"))
+    keep(n) = (s=String(n); !occursin('#', s) && !startswith(s, "__ExprExpl_anon__"))
     reads = Set{Symbol}(n for n in node.references if keep(n))
     writes = Set{Symbol}(n for n in node.definitions if keep(n))
     union!(writes, Set{Symbol}(n for n in node.funcdefs_without_signatures if keep(n)))

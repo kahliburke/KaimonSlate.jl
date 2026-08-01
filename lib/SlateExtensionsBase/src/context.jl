@@ -25,7 +25,7 @@ a plain `include`). See the typed accessors below rather than reading fields dir
 slate_context() = get(task_local_storage(), _CTX_KEY, nothing)
 
 # NamedTuple/Dict-tolerant field read (`nothing` when absent or outside a cell).
-function _ctx_field(f::Symbol, default = nothing)
+function _ctx_field(f::Symbol, default=nothing)
     c = slate_context()
     c === nothing && return default
     if c isa NamedTuple
@@ -48,7 +48,7 @@ slate_region() = _ctx_field(:region)
 
 Regions declared for the current cell (empty outside a cell or when none are declared).
 """
-slate_regions() = (r = _ctx_field(:regions); r === nothing ? Symbol[] : Symbol[Symbol(x) for x in r])
+slate_regions() = (r=_ctx_field(:regions); r === nothing ? Symbol[] : Symbol[Symbol(x) for x in r])
 
 "The current side as a string (`\"\"` = main); `\"\"` outside a cell."
 slate_side() = String(_ctx_field(:side, ""))
@@ -78,10 +78,10 @@ names = [:my_op])` asks Slate to re-establish those names on every region worker
 of `Distributed.@everywhere` for process-global state a package registers). A no-op outside a
 Slate cell.
 """
-function slate_effect(kind::Symbol; names = Symbol[], data...)
+function slate_effect(kind::Symbol; names=Symbol[], data...)
     f = _ctx_field(:effect)
     f === nothing && return nothing
-    f(kind; names = collect(names), data...)
+    f(kind; names=collect(names), data...)
     return nothing
 end
 
@@ -91,7 +91,7 @@ end
 Sugar for `slate_effect(:everywhere; names = names)` — mark process-global state (a custom op, a
 global config) registered by the current statement so Slate re-establishes it on every worker.
 """
-slate_everywhere(names::Symbol...) = slate_effect(:everywhere; names = collect(names))
+slate_everywhere(names::Symbol...) = slate_effect(:everywhere; names=collect(names))
 
 """
     slate_on(channel, f) -> nothing

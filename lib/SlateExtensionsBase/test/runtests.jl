@@ -3,71 +3,93 @@ using Test
 
 # Top-level (structs and methods can't be defined in a @testset's local scope): a custom type
 # that opts into @bind by overloading to_widget — the typed-constructor extension path.
-struct Knob; lo::Int; hi::Int; end
-SlateExtensionsBase.to_widget(k::Knob) = Widget("knob", k.lo; min = k.lo, max = k.hi)
+struct Knob
+    lo::Int
+    hi::Int
+end
+SlateExtensionsBase.to_widget(k::Knob) = Widget("knob", k.lo; min=k.lo, max=k.hi)
 
 # A custom VALUE type that teaches Slate how to coerce it, via one `coerce_value` dispatch method.
-struct Celsius; c::Float64; end
-SlateExtensionsBase.coerce_value(::Type{Celsius}, v) =
-    Celsius(Float64(v isa Number ? v : parse(Float64, string(v))))
+struct Celsius
+    c::Float64
+end
+function SlateExtensionsBase.coerce_value(::Type{Celsius}, v)
+    return Celsius(Float64(v isa Number ? v : parse(Float64, string(v))))
+end
 
 # A widget struct for `auto_widget` reflection: `default` = value; other fields = params; `note` unset → skipped.
-struct Dial; lo::Int; hi::Int; default::Int; note::Union{Nothing,String}; end
+struct Dial
+    lo::Int
+    hi::Int
+    default::Int
+    note::Union{Nothing,String}
+end
 
 # A widget type that declares its front-end lazily via `required_assets` (no __init__).
-struct Gauge; default::Int; end
+struct Gauge
+    default::Int
+end
 SlateExtensionsBase.required_assets(::Type{Gauge}) = "export default () => {}"
 
 # A package with a PACKAGE-GLOBAL front-end hook (editor ext + a JS→Julia handler, no bind to trigger
 # it): Slate calls `__slate_frontend(slate_on)`, handing it the notebook's `slate_on`. The hook registers
 # both a front-end script and a handler — the inline-math/giac shape, in miniature.
 module FakeExtPkg
-    using SlateExtensionsBase
-    function __slate_frontend(slate_on)
-        provide_frontend!("EDITOR_EXT"; id = "FakeExtPkg.editor")
-        slate_on("fake_channel", a -> a)
-    end
+using SlateExtensionsBase
+function __slate_frontend(slate_on)
+    provide_frontend!("EDITOR_EXT"; id="FakeExtPkg.editor")
+    return slate_on("fake_channel", a -> a)
+end
 end
 
 # Rich output: a value that renders as a COMPONENT descriptor, and one via the HTML escape hatch.
-struct Meter; value::Int; max::Int; end
-SlateExtensionsBase.slate_render(m::Meter) = component("Demo.Meter"; value = m.value, max = m.max)
-struct Banner; text::String; end
+struct Meter
+    value::Int
+    max::Int
+end
+SlateExtensionsBase.slate_render(m::Meter) = component("Demo.Meter"; value=m.value, max=m.max)
+struct Banner
+    text::String
+end
 SlateExtensionsBase.slate_render(b::Banner) = html_fragment("<b>" * b.text * "</b>")
 
 # Per-cell toolbar action: a struct that reflects into a CellAction (auto_cell_action), and one that
 # omits a REQUIRED field (`onclick`) so reflection must error — mirrors the Knob/Dial widget pattern.
 Base.@kwdef struct InsertBtn
-    icon::String    = "➕"
-    title::String   = "insert a snippet"
-    show::String    = "cell.kind === 'code'"
+    icon::String = "➕"
+    title::String = "insert a snippet"
+    show::String = "cell.kind === 'code'"
     onclick::String = "window.myExtInsert(cellId)"
 end
 SlateExtensionsBase.to_cell_action(a::InsertBtn) = auto_cell_action(a)
-struct NoClickBtn; icon::String; end   # no `onclick` field → auto_cell_action must throw
+struct NoClickBtn
+    icon::String
+end   # no `onclick` field → auto_cell_action must throw
 # Only the REQUIRED fields — `title`/`show` are absent, so reflection must default them to "".
-Base.@kwdef struct MinBtn; icon::String = "•"; onclick::String = "f(cellId)"; end
+Base.@kwdef struct MinBtn
+    icon::String = "•"
+    onclick::String = "f(cellId)"
+end
 SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
 
 @testset "SlateExtensionsBase" begin
-
     @testset "Widget construction" begin
         w = Widget("slider", Dict{String,Any}("min" => 0, "max" => 10), 5)
         @test w.kind == "slider"
         @test w.default == 5
         @test w.params["max"] == 10
         # keyword convenience form
-        w2 = Widget("mathfield", "x"; label = "answer", rows = 3)
+        w2 = Widget("mathfield", "x"; label="answer", rows=3)
         @test w2.kind == "mathfield"
         @test w2.default == "x"
         @test w2.params == Dict{String,Any}("label" => "answer", "rows" => 3)
         @test Widget("empty").default == ""      # default default
         # Type-derived kind: namespaced by the defining module, so two packages can't collide.
         @test kind_for(Knob) == "Main.Knob"
-        wt = Widget(Knob, 3; min = 0, max = 9)
+        wt = Widget(Knob, 3; min=0, max=9)
         @test wt.kind == "Main.Knob" && wt.default == 3 && wt.params["max"] == 9
         # NamedTuple params (ergonomic authoring form) → stored as the wire Dict.
-        wn = Widget("slider", (; min = 0, max = 10), 5)
+        wn = Widget("slider", (; min=0, max=10), 5)
         @test wn.params == Dict{String,Any}("min" => 0, "max" => 10) && wn.default == 5
     end
 
@@ -77,9 +99,10 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
         @test w.params == Dict{String,Any}("lo" => 0, "hi" => 9, "note" => "temp")  # other fields → params
         @test !haskey(w.params, "default")                       # value is NOT duplicated into params
         @test !haskey(auto_widget(Dial(0, 9, 3, nothing)).params, "note")  # a `nothing` field is skipped
-        @test auto_widget(Dial(0, 9, 3, "x"); exclude = (:lo,)).params == Dict{String,Any}("hi" => 9, "note" => "x")
+        @test auto_widget(Dial(0, 9, 3, "x"); exclude=(:lo,)).params ==
+            Dict{String,Any}("hi" => 9, "note" => "x")
         # value= picks a different value field; a missing value field errors clearly.
-        @test auto_widget(Dial(0, 9, 3, nothing); value = :hi).default == 9
+        @test auto_widget(Dial(0, 9, 3, nothing); value=:hi).default == 9
         @test_throws ArgumentError auto_widget(Knob(1, 2))       # no `default` field
     end
 
@@ -128,14 +151,16 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
         @test reconcile_bind(Widget("other", 1), "old", u) == "d"                          # kind changed → new default
 
         # A registered kind exercises all three hooks.
-        register_kind!("rating";
-            coerce = (w, v) -> clamp(round(Int, v isa Number ? v : parse(Float64, string(v))), 0, 5),
-            reconcile = (ow, ov, nw) -> ov isa Integer && 0 <= ov <= 5 ? ov : nw.default,
-            wrap = (w, v) -> (stars = v, of = 5))
+        register_kind!(
+            "rating";
+            coerce=(w, v) -> clamp(round(Int, v isa Number ? v : parse(Float64, string(v))), 0, 5),
+            reconcile=(ow, ov, nw) -> ov isa Integer && 0 <= ov <= 5 ? ov : nw.default,
+            wrap=(w, v) -> (stars=v, of=5),
+        )
         r = Widget("rating", 3)
         @test coerce_bind(r, 7.2) == 5           # clamped + rounded
         @test coerce_bind(r, "2") == 2
-        @test wrap_value(r, 4) == (stars = 4, of = 5)
+        @test wrap_value(r, 4) == (stars=4, of=5)
         @test reconcile_bind(r, 4, Widget("rating", 0)) == 4      # in range → kept
         @test reconcile_bind(r, 99, Widget("rating", 0)) == 0     # out of range → default
         @test "rating" in widget_kinds()
@@ -164,35 +189,35 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
 
     # `domain=` derives coerce (coerce-to-type then clamp/restrict) + reconcile (reset when out of domain).
     @testset "register_kind! domain=" begin
-        register_kind!("ranged"; domain = w -> 0:Int(get(w.params, "max", 5)))
-        rw = Widget("ranged", 0; max = 5)
+        register_kind!("ranged"; domain=w -> 0:Int(get(w.params, "max", 5)))
+        rw = Widget("ranged", 0; max=5)
         @test coerce_bind(rw, 99) == 5 && coerce_bind(rw, -3) == 0 && coerce_bind(rw, 3.4) == 3  # clamp+round
-        @test reconcile_bind(rw, 4, Widget("ranged", 0; max = 5)) == 4        # still in domain → kept
-        @test reconcile_bind(rw, 4, Widget("ranged", 0; max = 3)) == 0        # domain shrank → default
+        @test reconcile_bind(rw, 4, Widget("ranged", 0; max=5)) == 4        # still in domain → kept
+        @test reconcile_bind(rw, 4, Widget("ranged", 0; max=3)) == 0        # domain shrank → default
 
-        register_kind!("oneof"; domain = w -> ["a", "b", "c"])                # a collection domain
+        register_kind!("oneof"; domain=w -> ["a", "b", "c"])                # a collection domain
         ow = Widget("oneof", "a")
         @test coerce_bind(ow, "b") == "b" && coerce_bind(ow, "z") == "a"      # member kept; non-member → default
     end
 
     @testset "WebPage rendering" begin
         html(w) = sprint(show, MIME"text/html"(), w)
-        @test html(WebPage(html = "<b>hi</b>")) == "<b>hi</b>"
-        s = html(WebPage(css = "a{}", html = "<p>", js = "x=1"))
+        @test html(WebPage(html="<b>hi</b>")) == "<b>hi</b>"
+        s = html(WebPage(css="a{}", html="<p>", js="x=1"))
         @test occursin("<style>a{}</style>", s)
         @test occursin("<p>", s)
         @test occursin("<script>x=1</script>", s)
         # empty sections omitted
-        @test !occursin("<style>", html(WebPage(html = "x")))
-        @test !occursin("<script>", html(WebPage(html = "x")))
+        @test !occursin("<style>", html(WebPage(html="x")))
+        @test !occursin("<script>", html(WebPage(html="x")))
         # </script> / </style> in content can't break out: the JS's own </script> is escaped,
         # leaving exactly one real closing tag (the wrapper's).
-        sj = html(WebPage(js = "a</script>b"))
+        sj = html(WebPage(js="a</script>b"))
         @test occursin("a<\\/script>b", sj)                 # content tag escaped
         @test length(findall("</script>", sj)) == 1         # only the wrapper's closing tag remains
         # obscure packs the JS
-        @test occursin("atob(", html(WebPage(js = "secret()", obscure = true)))
-        @test !occursin("secret()", html(WebPage(js = "secret()", obscure = true)))
+        @test occursin("atob(", html(WebPage(js="secret()", obscure=true)))
+        @test !occursin("secret()", html(WebPage(js="secret()", obscure=true)))
     end
 
     @testset "register_widget_js" begin
@@ -209,23 +234,28 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
         @test slate_region() === nothing
         @test slate_regions() == Symbol[]
         @test slate_side() == "" && slate_notebook() == ""
-        @test slate_emit("ch", (a = 1,)) === nothing        # no-op, no throw
+        @test slate_emit("ch", (a=1,)) === nothing        # no-op, no throw
         @test slate_everywhere(:op) === nothing
 
         # Seed a fake context (a NamedTuple, exactly as the engine builds it) and read it back.
         emitted = Tuple{Any,Any}[]
         effects = Tuple{Symbol,Vector{Symbol}}[]
-        ctx = (region = :gpu, side = "gpu", regions = [:gpu, :cpu], notebook = "nb1",
-               emit = (ch, v) -> push!(emitted, (ch, v)),
-               effect = (kind; names = Symbol[], data...) -> push!(effects, (kind, collect(names))))
+        ctx = (
+            region=:gpu,
+            side="gpu",
+            regions=[:gpu, :cpu],
+            notebook="nb1",
+            emit=(ch, v) -> push!(emitted, (ch, v)),
+            effect=(kind; names=Symbol[], data...) -> push!(effects, (kind, collect(names))),
+        )
         task_local_storage(:slate_ctx, ctx)
         try
             @test slate_region() === :gpu
             @test slate_side() == "gpu"
             @test slate_regions() == [:gpu, :cpu]
             @test slate_notebook() == "nb1"
-            slate_emit("net", (loss = 0.5,))
-            @test emitted == [("net", (loss = 0.5,))]
+            slate_emit("net", (loss=0.5,))
+            @test emitted == [("net", (loss=0.5,))]
             slate_everywhere(:my_op, :my_rule)
             @test effects == [(:everywhere, [:my_op, :my_rule])]
         finally
@@ -249,7 +279,7 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
     @testset "front-end registry + extension_manifest" begin
         empty!(SlateExtensionsBase._FRONTEND)                     # isolate from any earlier registration
 
-        provide_frontend!("SCRIPT_A"; id = "a")                   # classic script
+        provide_frontend!("SCRIPT_A"; id="a")                   # classic script
         register_widget!("stars", "REG_STARS")                    # id "widget:stars", classic self-registering
         register_component!(Knob, "MODULE_JS")                    # TYPE form → kind "Main.Knob", ES module
         fs = frontend_scripts()
@@ -257,7 +287,7 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
         @test fs["widget:stars"] == "REG_STARS"
         @test fs["widget:Main.Knob"] == "MODULE_JS"
 
-        provide_frontend!("SCRIPT_A_V2"; id = "a")                # same id → replace, not duplicate
+        provide_frontend!("SCRIPT_A_V2"; id="a")                # same id → replace, not duplicate
         @test frontend_scripts()["a"] == "SCRIPT_A_V2"
         @test length(frontend_scripts()) == 3
 
@@ -286,7 +316,8 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
         @test asset_dirs() == Dict{String,String}()              # empty to start
         # `ext_asset_url` builds the served route; the prefix is SDK-owned (packages don't hardcode it).
         @test ext_asset_url("GlobeSlate") == "/ext-assets/GlobeSlate/"
-        @test ext_asset_url("GlobeSlate", "echarts-gl.min.js") == "/ext-assets/GlobeSlate/echarts-gl.min.js"
+        @test ext_asset_url("GlobeSlate", "echarts-gl.min.js") ==
+            "/ext-assets/GlobeSlate/echarts-gl.min.js"
         @test ext_asset_url("P", "/lead/slash.js") == "/ext-assets/P/lead/slash.js"   # leading slash trimmed
         base = provide_assets!("GlobeSlate", "assets/echarts-gl")  # a relative dir → absolutised
         @test base == "/ext-assets/GlobeSlate/"                    # returns the package's base URL
@@ -313,7 +344,8 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
         # hand-typed string, so the served key can't drift from the `ext_asset_url` calls. Any package module
         # works; `SlateExtensionsBase` stands in here (its package root name is "SlateExtensionsBase").
         @test pkg_key(SlateExtensionsBase) == "SlateExtensionsBase"
-        @test ext_asset_url(SlateExtensionsBase, "x.js") == ext_asset_url("SlateExtensionsBase", "x.js")
+        @test ext_asset_url(SlateExtensionsBase, "x.js") ==
+            ext_asset_url("SlateExtensionsBase", "x.js")
         @test ext_asset_url(SlateExtensionsBase, "x.js") == "/ext-assets/SlateExtensionsBase/x.js"
         @test provide_assets!(SlateExtensionsBase, "/abs/seb") == "/ext-assets/SlateExtensionsBase/"
         @test asset_dirs()["SlateExtensionsBase"] == "/abs/seb"
@@ -356,7 +388,7 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
         empty!(SlateExtensionsBase._FRONTEND)
         empty!(SlateExtensionsBase._MODULE_FRONTEND_DONE)
         handlers = Dict{String,Any}()                            # stand-in for a notebook's __slate_handlers
-        slate_on = (ch, f) -> (handlers[string(ch)] = f; nothing)
+        slate_on = (ch, f) -> (handlers[string(ch)]=f; nothing)
 
         @test ensure_module_frontend!(FakeExtPkg, slate_on)      # hook present → ran
         @test frontend_scripts()["FakeExtPkg.editor"] == "EDITOR_EXT"   # front-end registered
@@ -371,7 +403,7 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
 
         # A NEW slate_on = a rebuilt namespace generation → re-fires, re-installing the handlers.
         handlers2 = Dict{String,Any}()
-        slate_on2 = (ch, f) -> (handlers2[string(ch)] = f; nothing)
+        slate_on2 = (ch, f) -> (handlers2[string(ch)]=f; nothing)
         ensure_module_frontend!(FakeExtPkg, slate_on2)
         @test haskey(handlers2, "fake_channel")                  # handlers back in the fresh table
 
@@ -401,11 +433,13 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
         @test !showable(SlateComponentMIME(), 42)
 
         # `component` accepts a Type (kind derived) and a props Dict/NamedTuple.
-        @test component(Meter, (; a = 1))["component"] == "Main.Meter"
+        @test component(Meter, (; a=1))["component"] == "Main.Meter"
 
         # The minimal JSON writer: nesting, string escaping, non-finite floats → null.
         io = IOBuffer()
-        SlateExtensionsBase._write_json(io, Dict("a" => Any[1, 2.5, true, nothing], "b" => "x\"y", "c" => Inf))
+        SlateExtensionsBase._write_json(
+            io, Dict("a" => Any[1, 2.5, true, nothing], "b" => "x\"y", "c" => Inf)
+        )
         s = String(take!(io))
         @test occursin("\"a\":[1,2.5,true,null]", s)
         @test occursin("\"b\":\"x\\\"y\"", s)
@@ -416,7 +450,7 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
     @testset "slate_on context accessor" begin
         @test slate_on("ch", identity) === nothing    # outside a cell → no-op
         handlers = Dict{String,Any}()
-        task_local_storage(:slate_ctx, (; on = (c, f) -> (handlers[string(c)] = f; nothing))) do
+        task_local_storage(:slate_ctx, (; on=(c, f) -> (handlers[string(c)]=f; nothing))) do
             slate_on("compute", a -> a + 1)
         end
         @test haskey(handlers, "compute") && handlers["compute"](1) == 2
@@ -426,7 +460,7 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
     @testset "slate_off context accessor" begin
         @test slate_off("ch") === nothing             # outside a cell → no-op
         handlers = Dict{String,Any}("keep" => 1, "drop" => 2)
-        task_local_storage(:slate_ctx, (; off = c -> (delete!(handlers, string(c)); nothing))) do
+        task_local_storage(:slate_ctx, (; off=c -> (delete!(handlers, string(c)); nothing))) do
             slate_off("drop")
         end
         @test haskey(handlers, "keep") && !haskey(handlers, "drop")
@@ -436,7 +470,7 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
     @testset "slate_on_cleanup context accessor" begin
         @test slate_on_cleanup(() -> nothing) === nothing   # outside a cell → no-op
         sink = Any[]
-        task_local_storage(:slate_ctx, (; cleanup = f -> (push!(sink, f); nothing))) do
+        task_local_storage(:slate_ctx, (; cleanup=f -> (push!(sink, f); nothing))) do
             slate_on_cleanup(() -> 42)
         end
         @test length(sink) == 1 && sink[1]() == 42
@@ -446,18 +480,21 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
     @testset "cell actions" begin
         empty!(SlateExtensionsBase._FRONTEND)               # isolate from earlier registrations
         # Direct construction + keyword defaults.
-        a = CellAction("Pkg.Btn"; icon = "★", onclick = "doThing(cellId)")
-        @test (a.id, a.icon, a.title, a.show, a.onclick) == ("Pkg.Btn", "★", "", "", "doThing(cellId)")
+        a = CellAction("Pkg.Btn"; icon="★", onclick="doThing(cellId)")
+        @test (a.id, a.icon, a.title, a.show, a.onclick) ==
+            ("Pkg.Btn", "★", "", "", "doThing(cellId)")
         @test to_cell_action(a) === a                       # identity passthrough
 
         # id must be a namespaced identifier — no quotes/spaces/brackets that break the DOM emit.
-        @test_throws ArgumentError CellAction("has space"; icon = "x", onclick = "y")
-        @test_throws ArgumentError CellAction("qu'ote"; icon = "x", onclick = "y")
+        @test_throws ArgumentError CellAction("has space"; icon="x", onclick="y")
+        @test_throws ArgumentError CellAction("qu'ote"; icon="x", onclick="y")
 
         # auto_cell_action reflects fields; id is kind_for(T) (module-qualified, collision-proof).
         b = to_cell_action(InsertBtn())
         @test b.id == "Main.InsertBtn"
-        @test b.icon == "➕" && b.show == "cell.kind === 'code'" && b.onclick == "window.myExtInsert(cellId)"
+        @test b.icon == "➕" &&
+            b.show == "cell.kind === 'code'" &&
+            b.onclick == "window.myExtInsert(cellId)"
 
         # A missing REQUIRED field errors; a non-convertible value errors too.
         @test_throws ArgumentError auto_cell_action(NoClickBtn("x"))
@@ -476,8 +513,9 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
 
         # Reflection edges: a struct without `title`/`show` defaults them to ""; `exclude` drops a field.
         m = to_cell_action(MinBtn())
-        @test (m.id, m.icon, m.title, m.show, m.onclick) == ("Main.MinBtn", "•", "", "", "f(cellId)")
-        @test auto_cell_action(InsertBtn(); exclude = (:title,)).title == ""   # excluded → back to default ""
+        @test (m.id, m.icon, m.title, m.show, m.onclick) ==
+            ("Main.MinBtn", "•", "", "", "f(cellId)")
+        @test auto_cell_action(InsertBtn(); exclude=(:title,)).title == ""   # excluded → back to default ""
 
         # _js_string is the escaping that keeps injected data from breaking out of the <script> or the JS
         # string literal — the security-relevant core. Test it directly.
@@ -492,10 +530,9 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
         # Defense-in-depth end to end: a `<` in `icon` / a `"` in `title` is escaped in the emitted JS,
         # so an action's DATA fields can't break the injected registration script.
         empty!(SlateExtensionsBase._FRONTEND)
-        register_cell_action!(CellAction("Pkg.Esc"; icon = "<b>", title = "a\"b", onclick = "z()"))
+        register_cell_action!(CellAction("Pkg.Esc"; icon="<b>", title="a\"b", onclick="z()"))
         ejs = only(extension_manifest().frontend).js
         @test !occursin("<", ejs) && occursin("\\u003c", ejs)   # icon's `<` escaped, none left literal
         @test !occursin("a\"b", ejs)                            # title's quote escaped
     end
-
 end

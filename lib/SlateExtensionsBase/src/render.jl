@@ -16,7 +16,7 @@ descriptor VERSION lives in the payload (`{v, …}`), not the MIME string — on
   replaces a hand-rolled `Base.show(::MIME"text/html")`.
 """
 const SlateComponentMIME = MIME"application/vnd.kaimonslate.component+json"
-const SlateHtmlMIME      = MIME"application/vnd.kaimonslate.html+html"
+const SlateHtmlMIME = MIME"application/vnd.kaimonslate.html+html"
 
 # An HTML-fragment escape-hatch payload — `slate_render` returns one of these to render raw HTML through
 # the `html+html` MIME instead of a component. `component(...)` (a Dict) is the blessed path.
@@ -45,15 +45,17 @@ JSON-safe (Dicts/Vectors/numbers/strings/bools/nothing — the shapes the descri
 SlateExtensionsBase.slate_render(v::MyView) = component(kind_for(MyView); value = v.x, max = v.max)
 ```
 """
-component(kind::AbstractString; props...) =
-    component(kind, Dict{String,Any}(String(k) => v for (k, v) in props))
-component(kind::AbstractString, props) =
-    Dict{String,Any}("v" => 1, "component" => String(kind), "props" => _props_dict(props))
+function component(kind::AbstractString; props...)
+    return component(kind, Dict{String,Any}(String(k) => v for (k, v) in props))
+end
+function component(kind::AbstractString, props)
+    return Dict{String,Any}("v" => 1, "component" => String(kind), "props" => _props_dict(props))
+end
 component(::Type{T}, args...; kw...) where {T} = component(kind_for(T), args...; kw...)
 
 _props_dict(p::AbstractDict) = Dict{String,Any}(String(k) => v for (k, v) in p)
-_props_dict(p::NamedTuple)   = Dict{String,Any}(String(k) => v for (k, v) in pairs(p))
-_props_dict(p)               = p   # already a plain container the descriptor writer handles
+_props_dict(p::NamedTuple) = Dict{String,Any}(String(k) => v for (k, v) in pairs(p))
+_props_dict(p) = p   # already a plain container the descriptor writer handles
 
 """
     slate_render(x) -> Dict | SlateHtml | Nothing
@@ -84,11 +86,11 @@ slate_live_render(::Any) = false
 
 # `showable` == "a slate_render method returns something of this flavour". Cheap enough: capture calls it
 # once per candidate MIME while choosing the richest representation.
-Base.showable(::SlateComponentMIME, x) = (r = slate_render(x); r !== nothing && !(r isa SlateHtml))
-Base.showable(::SlateHtmlMIME, x)      = slate_render(x) isa SlateHtml
+Base.showable(::SlateComponentMIME, x) = (r=slate_render(x); r !== nothing && !(r isa SlateHtml))
+Base.showable(::SlateHtmlMIME, x) = slate_render(x) isa SlateHtml
 
 Base.show(io::IO, ::SlateComponentMIME, x) = _write_json(io, slate_render(x))
-Base.show(io::IO, ::SlateHtmlMIME, x)      = print(io, (slate_render(x)::SlateHtml).html)
+Base.show(io::IO, ::SlateHtmlMIME, x) = print(io, (slate_render(x)::SlateHtml).html)
 
 # ── Minimal JSON writer for the descriptor ────────────────────────────────────
 # SEB stays Base+stdlib only, so it can't lean on JSON.jl. The descriptor payload is small and its props
@@ -97,40 +99,53 @@ Base.show(io::IO, ::SlateHtmlMIME, x)      = print(io, (slate_render(x)::SlateHt
 function _write_json_string(io::IO, s::AbstractString)
     print(io, '"')
     for c in s
-        if c == '"';      print(io, "\\\"")
-        elseif c == '\\'; print(io, "\\\\")
-        elseif c == '\n'; print(io, "\\n")
-        elseif c == '\r'; print(io, "\\r")
-        elseif c == '\t'; print(io, "\\t")
-        elseif c < ' ';   print(io, "\\u", lpad(string(UInt16(c); base = 16), 4, '0'))
-        else              print(io, c)
+        if c == '"'
+            print(io, "\\\"")
+        elseif c == '\\'
+            print(io, "\\\\")
+        elseif c == '\n'
+            print(io, "\\n")
+        elseif c == '\r'
+            print(io, "\\r")
+        elseif c == '\t'
+            print(io, "\\t")
+        elseif c < ' '
+            print(io, "\\u", lpad(string(UInt16(c); base=16), 4, '0'))
+        else
+            print(io, c)
         end
     end
-    print(io, '"')
+    return print(io, '"')
 end
 
-_write_json(io::IO, ::Nothing)          = print(io, "null")
-_write_json(io::IO, ::Missing)          = print(io, "null")
-_write_json(io::IO, b::Bool)            = print(io, b ? "true" : "false")
-_write_json(io::IO, n::Integer)         = print(io, n)
-_write_json(io::IO, x::AbstractFloat)   = print(io, isfinite(x) ? string(Float64(x)) : "null")
-_write_json(io::IO, n::Real)            = print(io, isfinite(n) ? string(n) : "null")
-_write_json(io::IO, s::AbstractString)  = _write_json_string(io, s)
-_write_json(io::IO, s::Symbol)          = _write_json_string(io, String(s))
+_write_json(io::IO, ::Nothing) = print(io, "null")
+_write_json(io::IO, ::Missing) = print(io, "null")
+_write_json(io::IO, b::Bool) = print(io, b ? "true" : "false")
+_write_json(io::IO, n::Integer) = print(io, n)
+_write_json(io::IO, x::AbstractFloat) = print(io, isfinite(x) ? string(Float64(x)) : "null")
+_write_json(io::IO, n::Real) = print(io, isfinite(n) ? string(n) : "null")
+_write_json(io::IO, s::AbstractString) = _write_json_string(io, s)
+_write_json(io::IO, s::Symbol) = _write_json_string(io, String(s))
 function _write_json(io::IO, d::AbstractDict)
-    print(io, '{'); first = true
+    print(io, '{')
+    first = true
     for (k, v) in d
-        first || print(io, ','); first = false
-        _write_json_string(io, string(k)); print(io, ':'); _write_json(io, v)
+        first || print(io, ',')
+        first = false
+        _write_json_string(io, string(k))
+        print(io, ':')
+        _write_json(io, v)
     end
-    print(io, '}')
+    return print(io, '}')
 end
 function _write_json(io::IO, v::Union{AbstractVector,Tuple})
-    print(io, '['); first = true
+    print(io, '[')
+    first = true
     for x in v
-        first || print(io, ','); first = false
+        first || print(io, ',')
+        first = false
         _write_json(io, x)
     end
-    print(io, ']')
+    return print(io, ']')
 end
 _write_json(io::IO, x) = _write_json_string(io, string(x))   # unknown leaf → its string form

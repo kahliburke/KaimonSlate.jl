@@ -13,7 +13,6 @@ fixture_fn(x) = x
 end
 
 @testset "ReportEngine eval" begin
-
     @testset "cross-cell state sharing (warm namespace)" begin
         r = parse_report("#%% code id=a\ndata = [1, 2, 3]\n\n#%% code id=b\nsum(data)")
         eval_report!(r)
@@ -37,10 +36,12 @@ end
         # A cell defines a type + its text/latex `show`; a later cell returns an
         # instance. The capture must see the just-defined method on FIRST eval and
         # on RE-EVAL in the same warm module (the "empty until Rebuild" regression).
-        src = "#%% code id=def\nstruct TXW; s::String; end\n" *
-              "Base.show(io::IO, ::MIME\"text/latex\", t::TXW) = print(io, t.s)\n" *
-              "#%% code id=val\nTXW(\"HELLO\")\n"
-        r = parse_report(src); build_dependencies!(r)
+        src =
+            "#%% code id=def\nstruct TXW; s::String; end\n" *
+            "Base.show(io::IO, ::MIME\"text/latex\", t::TXW) = print(io, t.s)\n" *
+            "#%% code id=val\nTXW(\"HELLO\")\n"
+        r = parse_report(src)
+        build_dependencies!(r)
         k = InProcessKernel()
         eval_stale!(r, k)
         o1 = r.cells[2].output
@@ -62,7 +63,8 @@ end
 
     @testset "Slate execution context (task-local :slate_ctx)" begin
         # Pure builder: a region cell vs the main kernel. `emit` is the module's own slate_emit.
-        m = Module(:_CtxFixture); Core.eval(m, :(const slate_emit = (c, v) -> (c, v)))
+        m = Module(:_CtxFixture)
+        Core.eval(m, :(const slate_emit = (c, v) -> (c, v)))
         ctx = ReportEngine._build_slate_ctx(m, "nb-7", "rega", ["rega", "regb"])
         @test ctx.region == :rega
         @test ctx.side == "rega"
@@ -76,8 +78,14 @@ end
         # Integration: a region cell SEES the context mid-eval, and it's CLEARED once eval returns
         # (never leaks across cells sharing a task — the parallel batch reuses tasks).
         r = parse_report("#%% code id=x\nCTX = get(task_local_storage(), :slate_ctx, nothing)")
-        ReportEngine.eval_capture(InProcessKernel(), r, r.cells[1].source, "cell:x";
-                                  region = "rega", regions = ["rega", "regb"])
+        ReportEngine.eval_capture(
+            InProcessKernel(),
+            r,
+            r.cells[1].source,
+            "cell:x";
+            region="rega",
+            regions=["rega", "regb"],
+        )
         got = Base.invokelatest(getfield, ReportEngine.report_module(r), :CTX)
         @test got !== nothing
         @test got.region == :rega
@@ -94,8 +102,7 @@ end
     end
 
     @testset "cell-effects channel (declare → harvest → CellOutput.effects)" begin
-        run1(src) = (r = parse_report("#%% code id=x\n" * src);
-                     eval_report!(r); r.cells[1].output)
+        run1(src) = (r=parse_report("#%% code id=x\n" * src); eval_report!(r); r.cells[1].output)
 
         # A bare declaration is harvested with its statement source as the replay unit.
         o = run1("slate_effect(:everywhere; names=[:foo])")
@@ -109,7 +116,8 @@ end
         @test length(o2.effects) == 1
         @test o2.effects[1].kind == :everywhere && o2.effects[1].names == [:bar]
         @test occursin("slate_everywhere", o2.effects[1].stmt_src)
-        @test !occursin("a = 1", o2.effects[1].stmt_src) && !occursin("c = 3", o2.effects[1].stmt_src)
+        @test !occursin("a = 1", o2.effects[1].stmt_src) &&
+            !occursin("c = 3", o2.effects[1].stmt_src)
 
         # A cell that declares nothing harvests nothing; no task-local leak after eval.
         o4 = run1("1 + 1")
@@ -123,7 +131,8 @@ end
 
         # A recorded `:everywhere` flag classifies the cell EVERYWHERE (→ `_prime_namespace!` primes it on
         # every region worker) — the generic replacement for the import_scaffold/theme special-cases.
-        rc = parse_report("#%% code id=z\n1 + 1"); zc = rc.cells[1]
+        rc = parse_report("#%% code id=z\n1 + 1")
+        zc = rc.cells[1]
         @test ReportEngine._cell_effect(zc) == ReportEngine.PURE
         push!(zc.flags, :everywhere)
         @test ReportEngine._cell_effect(zc) == ReportEngine.EVERYWHERE
@@ -243,7 +252,7 @@ end
     @testset "Kernel seam" begin
         # Explicit InProcessKernel matches the default.
         r = parse_report("#%% code id=a\n6 * 7")
-        eval_report!(r; kernel = InProcessKernel())
+        eval_report!(r; kernel=InProcessKernel())
         @test r.cells[1].state == FRESH
         @test r.cells[1].output.value_repr == "42"
 
@@ -255,14 +264,22 @@ end
         ReportEngine.reset!(::RecordingKernel, rep) = ReportEngine.reset_module!(rep)
         ReportEngine.assign_bind!(::RecordingKernel, rep, n::Symbol, v) =
             Base.invokelatest(getfield(ReportEngine.report_module(rep), :__slate_set_bind), n, v)
-        function ReportEngine.eval_capture(::RecordingKernel, rep, src::AbstractString, filename::AbstractString = "string";
-                                           region::AbstractString = "", regions::AbstractVector = String[])
+        function ReportEngine.eval_capture(
+            ::RecordingKernel,
+            rep,
+            src::AbstractString,
+            filename::AbstractString="string";
+            region::AbstractString="",
+            regions::AbstractVector=String[],
+        )
             push!(seen, src)
-            return ReportEngine.eval_capture(InProcessKernel(), rep, src, filename; region = region, regions = regions)
+            return ReportEngine.eval_capture(
+                InProcessKernel(), rep, src, filename; region=region, regions=regions
+            )
         end
 
         r2 = parse_report("#%% code id=a\nx = 4\n\n#%% md id=m\n# hi\n\n#%% code id=b\nx + 1")
-        eval_report!(r2; kernel = RecordingKernel())
+        eval_report!(r2; kernel=RecordingKernel())
         @test seen == ["x = 4", "x + 1"]                 # only code cells, in order
         @test r2.cells[3].output.value_repr == "5"        # capture still works
     end
@@ -276,11 +293,14 @@ end
         k0 = ReportEngine._memo_key(r, b)
         @test !isempty(k0)
         @test ReportEngine._memo_key(r, b) == k0                 # stable across recomputation
-        b.source = "x + 2"; b.src_hash = hash(b.source)
+        b.source = "x + 2"
+        b.src_hash = hash(b.source)
         @test ReportEngine._memo_key(r, b) != k0                 # own-source edit invalidates
-        b.source = "x + 1"; b.src_hash = hash(b.source)
+        b.source = "x + 1"
+        b.src_hash = hash(b.source)
         @test ReportEngine._memo_key(r, b) == k0                 # reverting restores the key
-        a.source = "x = 3"; a.src_hash = hash(a.source)
+        a.source = "x = 3"
+        a.src_hash = hash(a.source)
         @test ReportEngine._memo_key(r, b) != k0                 # UPSTREAM edit invalidates (transitive)
         # a control-DECLARING cell or an import barrier is never memoized
         op = parse_report("#%% code id=c\nusing LinearAlgebra")
@@ -297,7 +317,9 @@ end
         # impurity PROPAGATES: a cell downstream of a nocache/volatile producer is unkeyable — the key
         # digests upstream SOURCES, but an impure upstream's VALUE isn't a function of its source, so a
         # restore would silently resurrect results computed from a PREVIOUS run's values.
-        imp = parse_report("#%% code id=src nocache\ndata = rand(3)\n\n#%% code id=fit\nm = sum(data)\n\n#%% code id=leaf\nm2 = m + 1")
+        imp = parse_report(
+            "#%% code id=src nocache\ndata = rand(3)\n\n#%% code id=fit\nm = sum(data)\n\n#%% code id=leaf\nm2 = m + 1",
+        )
         build_dependencies!(imp)
         @test ReportEngine._memo_key(imp, imp.cells[2]) == ""        # direct dependent of impure
         @test ReportEngine._memo_key(imp, imp.cells[3]) == ""        # transitive dependent of impure
@@ -306,7 +328,9 @@ end
         @test !isempty(ReportEngine._memo_key(pure, pure.cells[2]))  # pure upstream stays keyable
         # the `cache` tag opts IN regardless of runtime: the cell stays keyable, the flag round-trips,
         # and downstream cells are unaffected (a cache-tagged stage is still pure by declaration)
-        ca = parse_report("#%% code id=stage cache\ncleaned = [1,2,3]\n\n#%% code id=use\nsum(cleaned)")
+        ca = parse_report(
+            "#%% code id=stage cache\ncleaned = [1,2,3]\n\n#%% code id=use\nsum(cleaned)"
+        )
         build_dependencies!(ca)
         @test :cache in ca.cells[1].flags
         @test !isempty(ReportEngine._memo_key(ca, ca.cells[1]))
@@ -315,7 +339,9 @@ end
         # a PURE `using` upstream does NOT poison the key, even while :opaque (pre-refinement):
         # its effect is (source, resolved env) — both already digested — unlike include()/eval.
         # This is what lets the boot-window memo carry compute keys BEFORE anything has run.
-        us = parse_report("#%% code id=pkgs\nusing LinearAlgebra\n\n#%% code id=work cache\nv = [1.0, 2.0]; t = sum(v)")
+        us = parse_report(
+            "#%% code id=pkgs\nusing LinearAlgebra\n\n#%% code id=work cache\nv = [1.0, 2.0]; t = sum(v)",
+        )
         build_dependencies!(us)
         @test :opaque in us.cells[1].flags                            # unrefined — the carry-time state
         @test ReportEngine._memo_key(us, us.cells[1]) == ""           # the using cell itself: never memoized
@@ -326,7 +352,9 @@ end
         delete!(us.cells[1].flags, :opaque)
         @test ReportEngine._memo_key(us, us.cells[2]) == kw
         # a MIXED opaque cell (using + arbitrary code) still poisons downstream
-        mx = parse_report("#%% code id=inc\nusing LinearAlgebra; include(\"setup.jl\")\n\n#%% code id=work2\nw = 1 + 1")
+        mx = parse_report(
+            "#%% code id=inc\nusing LinearAlgebra; include(\"setup.jl\")\n\n#%% code id=work2\nw = 1 + 1",
+        )
         build_dependencies!(mx)
         if :opaque in mx.cells[1].flags
             @test ReportEngine._memo_key(mx, mx.cells[2]) == ""
@@ -350,12 +378,16 @@ end
         fig
         """
         s = ReportEngine._scaffold_replay_source(mixed)
-        @test occursin("using CairoMakie", s) && occursin("use_slate_theme!()", s) &&
-              !occursin("traj", s) && !occursin("Figure", s)
+        @test occursin("using CairoMakie", s) &&
+            occursin("use_slate_theme!()", s) &&
+            !occursin("traj", s) &&
+            !occursin("Figure", s)
         # nested setters are found (a theme call inside a `let`/helper), a plain compute cell yields
         # nothing to replay, and unparseable source degrades to "" (caller falls back to whole-cell).
-        @test occursin("set_theme!(theme_dark())",
-                       ReportEngine._scaffold_replay_source("let\n  set_theme!(theme_dark())\nend"))
+        @test occursin(
+            "set_theme!(theme_dark())",
+            ReportEngine._scaffold_replay_source("let\n  set_theme!(theme_dark())\nend"),
+        )
         @test ReportEngine._scaffold_replay_source("x = 1 + 1") == ""
         @test ReportEngine._scaffold_replay_source("function f(") == ""
     end
@@ -391,12 +423,18 @@ end
         lines!(Axis(fig[1, 1]), traj[:, 1], traj[:, 3])
         fig
         """)
-        @test occursin("using CairoMakie", smix) && !occursin("traj", smix) && !occursin("Figure", smix)
+        @test occursin("using CairoMakie", smix) &&
+            !occursin("traj", smix) &&
+            !occursin("Figure", smix)
 
         # A `const` bound to an EXPRESSION reads upstream data — compute, not definition — so it stays
         # behind, while a literal (and a literal range) crosses.
-        @test !occursin("NROWS", ReportEngine._scaffold_replay_source("using A\nconst NROWS = size(data, 1)"))
-        @test occursin("LEVELS", ReportEngine._scaffold_replay_source("using A\nconst LEVELS = 1:17"))
+        @test !occursin(
+            "NROWS", ReportEngine._scaffold_replay_source("using A\nconst NROWS = size(data, 1)")
+        )
+        @test occursin(
+            "LEVELS", ReportEngine._scaffold_replay_source("using A\nconst LEVELS = 1:17")
+        )
 
         # Types and macros are definitions too: a value crossing the boundary can't decode without them.
         sdef = ReportEngine._scaffold_replay_source("""
@@ -409,7 +447,9 @@ end
 
         # Statement KIND, not inferred reads, is the test — a definition whose BODY references an
         # upstream global still travels (it defines cleanly; the presync stages the global).
-        @test occursin("scale_it", ReportEngine._scaffold_replay_source("using A\nscale_it(x) = x * SCALE"))
+        @test occursin(
+            "scale_it", ReportEngine._scaffold_replay_source("using A\nscale_it(x) = x * SCALE")
+        )
     end
 
     @testset "@asset file deps: static extraction + memo invalidation" begin
@@ -417,7 +457,8 @@ end
         # WITHOUT running the cell; the memo key folds the file's content hash, so editing the asset
         # invalidates the entry.
         dir = mktempdir()
-        f = joinpath(dir, "a.js"); write(f, "console.log(1)")
+        f = joinpath(dir, "a.js")
+        write(f, "console.log(1)")
         r = parse_report("#%% code id=a\nhtml = @asset \"a.js\"")
         build_dependencies!(r)
         c = r.cells[1]
@@ -456,23 +497,25 @@ end
     end
 
     @testset "WebPage renders self-contained HTML" begin
-        w = ReportEngine.WebPage(css = "body{color:red}", html = "<h1>hi</h1>", js = "console.log(1)")
+        w = ReportEngine.WebPage(css="body{color:red}", html="<h1>hi</h1>", js="console.log(1)")
         h = sprint(show, MIME"text/html"(), w)
         @test h == "<style>body{color:red}</style><h1>hi</h1><script>console.log(1)</script>"
         # `</script>` / `</style>` in content are escaped so they can't close the tag early
-        w2 = ReportEngine.WebPage(js = "a='</script>'", css = "x</style>")
+        w2 = ReportEngine.WebPage(js="a='</script>'", css="x</style>")
         h2 = sprint(show, MIME"text/html"(), w2)
         @test occursin("<\\/script>", h2) && !occursin("'</script>'", h2)
         @test occursin("<\\/style>", h2)
         # obscure=true base64-wraps the JS behind a decode-and-run bootstrap (no raw source)
-        w3 = ReportEngine.WebPage(js = "SECRET_TOKEN()", obscure = true)
+        w3 = ReportEngine.WebPage(js="SECRET_TOKEN()", obscure=true)
         h3 = sprint(show, MIME"text/html"(), w3)
         @test !occursin("SECRET_TOKEN", h3) && occursin("atob(", h3)   # source is behind the curtain
     end
 
     @testset "@use import-map declarations" begin
         # `@use "name" => "url"` (or `@use "name" "url"`) is statically extracted into report.meta.
-        r = parse_report("#%% code id=a\n@use \"d3\" => \"https://esm.sh/d3@7\"\n\n#%% code id=b\n@use \"three\" \"https://esm.sh/three\"\nx = 1")
+        r = parse_report(
+            "#%% code id=a\n@use \"d3\" => \"https://esm.sh/d3@7\"\n\n#%% code id=b\n@use \"three\" \"https://esm.sh/three\"\nx = 1",
+        )
         build_dependencies!(r)
         imps = r.meta["imports"]
         @test imps["d3"] == "https://esm.sh/d3@7"
@@ -498,11 +541,14 @@ end
         @test r.duration_ms isa Float64
 
         # Rich MIME rides back as (mime, bytes) tuples.
-        rr = run_capture(Module(:WireTest2), """
-        struct W end
-        Base.show(io::IO, ::MIME"image/png", ::W) = write(io, UInt8[0x89, 0x50])
-        W()
-        """)
+        rr = run_capture(
+            Module(:WireTest2),
+            """
+struct W end
+Base.show(io::IO, ::MIME"image/png", ::W) = write(io, UInt8[0x89, 0x50])
+W()
+""",
+        )
         @test any(t -> t[1] == "image/png" && t[2] == UInt8[0x89, 0x50], rr.mime)
 
         # Errors are captured, not thrown.
@@ -530,11 +576,14 @@ end
         @test ro.value_repr == "\"hello\""
         # An over-limit text/html chunk becomes a notice, not multi-MB of markup.
         big = ReportEngine._MAX_HTML_BYTES + 5000
-        rh = run_capture(Module(:CapHtml), """
-        struct H end
-        Base.show(io::IO, ::MIME"text/html", ::H) = write(io, '<' * 'a' ^ $(big))
-        H()
-        """)
+        rh = run_capture(
+            Module(:CapHtml),
+            """
+struct H end
+Base.show(io::IO, ::MIME"text/html", ::H) = write(io, '<' * 'a' ^ $(big))
+H()
+""",
+        )
         html = String(copy(first(t for t in rh.mime if t[1] == "text/html")[2]))
         @test length(html) < 1000 && occursin("too large", html)
     end
@@ -594,5 +643,4 @@ end
         tmpl, ex = ReportEngine._md_template("v = {{ a }}.")
         @test ex == ["a"] && occursin("xslateinterp", tmpl) && !occursin("{{", tmpl)
     end
-
 end

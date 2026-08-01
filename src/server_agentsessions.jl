@@ -29,28 +29,65 @@ const _AGENT_LOG_CAP = 4000
 # but is lost on a SERVER restart. Mirror it to a per-notebook JSONL (keyed by abspath,
 # in the cache dir) so the conversation survives a restart too. Loaded on open; appended
 # as each (non-delta) envelope is relayed; compacted to the cap; wiped by "clear chat".
-_chat_log_file(path) = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
-                                "kaimonslate", "chat", SlateHistory._sha(abspath(String(path)))[1:16] * ".jsonl")
+function _chat_log_file(path)
+    return joinpath(
+        get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
+        "kaimonslate",
+        "chat",
+        SlateHistory._sha(abspath(String(path)))[1:16] * ".jsonl",
+    )
+end
 function _load_chat_log!(nb::LiveNotebook)
     f = _chat_log_file(nb.path)
-    isfile(f) || return
+    isfile(f) || return nothing
     try
         lines = filter(!isempty, readlines(f))
         length(lines) > _AGENT_LOG_CAP && (lines = last(lines, _AGENT_LOG_CAP))
-        lock(_AGENT_LOCK) do; _AGENT_LOG[nb.id] = collect(String, lines); end
+        lock(_AGENT_LOCK) do ;
+            return _AGENT_LOG[nb.id] = collect(String, lines)
+        end
     catch e
         @warn "slate: chat-log load failed" exception = (e, catch_backtrace())
     end
     return nothing
 end
-_append_chat_log(nb::LiveNotebook, line::AbstractString) =
-    (f = _chat_log_file(nb.path); try; mkpath(dirname(f)); open(f, "a") do io; println(io, line); end; catch; end; nothing)
-_rewrite_chat_log(nb::LiveNotebook, lines) =
-    (f = _chat_log_file(nb.path); try; mkpath(dirname(f)); open(f, "w") do io; for l in lines; println(io, l); end; end; catch; end; nothing)
+function _append_chat_log(nb::LiveNotebook, line::AbstractString)
+    (
+        f=_chat_log_file(nb.path);
+        try
+            mkpath(dirname(f))
+            open(f, "a") do io
+                return println(io, line)
+            end
+        catch
+        end;
+        nothing
+    )
+end
+function _rewrite_chat_log(nb::LiveNotebook, lines)
+    return (
+        f=_chat_log_file(nb.path);
+        try
+            mkpath(dirname(f))
+            open(f, "w") do io
+                for l in lines
+                    println(io, l)
+                end
+            end
+        catch
+        end;
+        nothing
+    )
+end
 function _clear_chat_log!(nb::LiveNotebook)
-    lock(_AGENT_LOCK) do; delete!(_AGENT_LOG, nb.id); end
+    lock(_AGENT_LOCK) do ;
+        return delete!(_AGENT_LOG, nb.id)
+    end
     f = _chat_log_file(nb.path)
-    try; isfile(f) && rm(f); catch; end
+    try
+        isfile(f) && rm(f)
+    catch
+    end
     return nothing
 end
 
@@ -58,11 +95,12 @@ end
 # The live SSE push (`_broadcast`) is the caller's job — this is only the persistence half,
 # shared by the built-in relay (`relay_agent_event`) and the external-tool surfacer.
 function _buffer_agent_log!(nb::LiveNotebook, s::AbstractString)
-    compact = false; bufcopy = String[]
+    compact = false
+    bufcopy = String[]
     lock(_AGENT_LOCK) do
         buf = get!(_AGENT_LOG, nb.id, String[])
         push!(buf, s)
-        length(buf) > _AGENT_LOG_CAP && (popfirst!(buf); compact = true; bufcopy = copy(buf))
+        return length(buf) > _AGENT_LOG_CAP && (popfirst!(buf); compact=true; bufcopy=copy(buf))
     end
     compact ? _rewrite_chat_log(nb, bufcopy) : _append_chat_log(nb, s)
     return nothing
@@ -81,8 +119,12 @@ end
 # Kaimon toolCallId, so we mint our own. `time_ns` keeps it unique across a server restart,
 # so a replayed transcript never merges a fresh call onto a persisted one with the same id.
 const _EXT_TOOL_SEQ = Threads.Atomic{Int}(0)
-_ext_tool_id() = "ext-" * string(time_ns(), base = 36) * "-" *
-                 string(Threads.atomic_add!(_EXT_TOOL_SEQ, 1), base = 36)
+function _ext_tool_id()
+    return "ext-" *
+           string(time_ns(); base=36) *
+           "-" *
+           string(Threads.atomic_add!(_EXT_TOOL_SEQ, 1); base=36)
+end
 
 """
     emit_external_tool!(nb, toolname, args, result; ok=true)
@@ -97,24 +139,48 @@ tool's return string; `ok=false` renders the row as an error.
 # Build the `tool_use` + `tool_result` envelope pair (as JSON strings) for one external tool
 # call — the same shape `agentEvent` consumes, sharing `toolCallId` so the pane pairs them.
 # Pure (`id` passed in) so it can be unit-tested without a live notebook.
-function _external_tool_envelopes(id::AbstractString, toolname::AbstractString,
-                                  args::AbstractDict, result::AbstractString; ok::Bool = true)
+function _external_tool_envelopes(
+    id::AbstractString,
+    toolname::AbstractString,
+    args::AbstractDict,
+    result::AbstractString;
+    ok::Bool=true,
+)
     # title == "slate_<tool>" so the pane's `_prettyTool` maps it to its icon + label.
-    call = Dict{String,Any}("toolCallId" => id, "title" => "slate_$toolname",
-                            "kind" => "slate_$toolname", "rawInput" => args)
-    use = JSON.json(Dict{String,Any}("kind" => "tool_use", "external" => true,
-                                     "data" => Dict{String,Any}("call" => call)))
-    upd = Dict{String,Any}("toolCallId" => id, "status" => ok ? "completed" : "failed",
-                           "content" => Any[Dict{String,Any}("content" =>
-                               Dict{String,Any}("type" => "text", "text" => String(result)))])
-    res = JSON.json(Dict{String,Any}("kind" => "tool_result", "external" => true,
-                                     "data" => Dict{String,Any}("update" => upd)))
+    call = Dict{String,Any}(
+        "toolCallId" => id,
+        "title" => "slate_$toolname",
+        "kind" => "slate_$toolname",
+        "rawInput" => args,
+    )
+    use = JSON.json(
+        Dict{String,Any}(
+            "kind" => "tool_use", "external" => true, "data" => Dict{String,Any}("call" => call)
+        ),
+    )
+    upd = Dict{String,Any}(
+        "toolCallId" => id,
+        "status" => ok ? "completed" : "failed",
+        "content" => Any[Dict{String,Any}(
+            "content" => Dict{String,Any}("type" => "text", "text" => String(result))
+        )],
+    )
+    res = JSON.json(
+        Dict{String,Any}(
+            "kind" => "tool_result", "external" => true, "data" => Dict{String,Any}("update" => upd)
+        ),
+    )
     return (use, res)
 end
 
-function emit_external_tool!(nb::LiveNotebook, toolname::AbstractString, args::AbstractDict,
-                             result::AbstractString; ok::Bool = true)
-    use, res = _external_tool_envelopes(_ext_tool_id(), toolname, args, result; ok = ok)
+function emit_external_tool!(
+    nb::LiveNotebook,
+    toolname::AbstractString,
+    args::AbstractDict,
+    result::AbstractString;
+    ok::Bool=true,
+)
+    use, res = _external_tool_envelopes(_ext_tool_id(), toolname, args, result; ok=ok)
     for s in (use, res)
         _broadcast(nb, "agent:" * s)
         _buffer_agent_log!(nb, s)
@@ -131,23 +197,33 @@ Gate on caller identity, then surface the write if it came from outside this not
 notebook's crew agents, whose calls the `agent:<id>` relay already streams into the pane
 (surfacing those here would double them).
 """
-function note_external_tool!(nb::LiveNotebook, agent_id::AbstractString, toolname::AbstractString,
-                             args::AbstractDict, result::AbstractString; ok::Bool = true)
+function note_external_tool!(
+    nb::LiveNotebook,
+    agent_id::AbstractString,
+    toolname::AbstractString,
+    args::AbstractDict,
+    result::AbstractString;
+    ok::Bool=true,
+)
     if !isempty(agent_id)
-        is_crew = lock(_AGENT_LOCK) do; String(agent_id) in values(nb.agents); end
+        is_crew = lock(_AGENT_LOCK) do ;
+            return String(agent_id) in values(nb.agents)
+        end
         is_crew && return nothing
     end
     try
-        emit_external_tool!(nb, toolname, args, result; ok = ok)
+        emit_external_tool!(nb, toolname, args, result; ok=ok)
     catch e
         @warn "slate: external-tool surface failed" exception = (e, catch_backtrace())
     end
     return nothing
 end
 
-_agent_available() = isdefined(Main, :Kaimon) &&
-    isdefined(getfield(Main, :Kaimon), :KaimonGate) &&
-    isdefined(getfield(Main, :Kaimon).KaimonGate, :call_tool)
+function _agent_available()
+    return isdefined(Main, :Kaimon) &&
+           isdefined(getfield(Main, :Kaimon), :KaimonGate) &&
+           isdefined(getfield(Main, :Kaimon).KaimonGate, :call_tool)
+end
 
 # Call a core Kaimon `agent_*` tool over the gate service endpoint. The handlers
 # return a JSON string on success (e.g. `{"agent_id":…}`/`{"turn":…}`) or a plain
@@ -155,8 +231,11 @@ _agent_available() = isdefined(Main, :Kaimon) &&
 function _agent_call(tool::Symbol, args::Dict{String,Any})
     raw = getfield(Main, :Kaimon).KaimonGate.call_tool(tool, args)
     s = raw isa AbstractString ? String(raw) : string(raw)
-    parsed = try; JSON.parse(s); catch; nothing; end
+    parsed = try
+        JSON.parse(s)
+    catch
+        nothing
+    end
     (parsed isa AbstractDict) || error(s)   # non-JSON ⇒ the handler's error text
     return parsed
 end
-

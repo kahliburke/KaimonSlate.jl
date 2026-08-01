@@ -30,16 +30,23 @@ struct SlateBinary{T,N}
     meta::Dict{String,Any}
 end
 SlateBinary(data::AbstractArray, meta) = SlateBinary(collect(data), _props_dict(meta))
-SlateBinary(data::AbstractArray; kw...) = SlateBinary(collect(data), Dict{String,Any}(String(k) => v for (k, v) in kw))
+function SlateBinary(data::AbstractArray; kw...)
+    return SlateBinary(collect(data), Dict{String,Any}(String(k) => v for (k, v) in kw))
+end
 
 # dtype tags — keep in sync with `_asset_dtype` (capture.jl) and core.js `_SLATE_TYPED`.
 _bin_dtype(::Type{Float32}) = 0x00
 _bin_dtype(::Type{Float64}) = 0x01
-_bin_dtype(::Type{Int32})   = 0x02
-_bin_dtype(::Type{Int16})   = 0x03
-_bin_dtype(::Type{UInt8})   = 0x04
-_bin_dtype(::Type{T}) where {T} =
-    throw(ArgumentError("SlateBinary: unsupported element type $T (use Float32/Float64/Int32/Int16/UInt8)"))
+_bin_dtype(::Type{Int32}) = 0x02
+_bin_dtype(::Type{Int16}) = 0x03
+_bin_dtype(::Type{UInt8}) = 0x04
+function _bin_dtype(::Type{T}) where {T}
+    return throw(
+        ArgumentError(
+            "SlateBinary: unsupported element type $T (use Float32/Float64/Int32/Int16/UInt8)"
+        ),
+    )
+end
 
 """
     encode_binary_frame(channel, x::SlateBinary) -> Vector{UInt8}
@@ -50,10 +57,17 @@ The channel + meta + dtype + shape are the header; the array's raw column-major 
 function encode_binary_frame(channel::AbstractString, x::SlateBinary{T,N}) where {T,N}
     io = IOBuffer()
     write(io, 0x01)                                            # version
-    ch = codeunits(String(channel)); write(io, UInt16(length(ch))); write(io, ch)
-    mb = codeunits(sprint(_write_json, x.meta)); write(io, UInt16(length(mb))); write(io, mb)
+    ch = codeunits(String(channel))
+    write(io, UInt16(length(ch)))
+    write(io, ch)
+    mb = codeunits(sprint(_write_json, x.meta))
+    write(io, UInt16(length(mb)))
+    write(io, mb)
     write(io, _bin_dtype(T))
-    write(io, UInt8(N)); for d in size(x.data); write(io, UInt32(d)); end
+    write(io, UInt8(N))
+    for d in size(x.data)
+        write(io, UInt32(d))
+    end
     write(io, reinterpret(UInt8, vec(x.data)))                # raw LE bytes, column-major
     return take!(io)
 end

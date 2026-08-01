@@ -12,10 +12,10 @@ evaluation yet — so it is testable with `Base` alone.
 """
 module ReportEngine
 
-import JSON   # durable `using`-export cache file (deps.jl)
-import Pkg    # in-process package add/remove (eval.jl)
-import Serialization   # decode base64'd slate_emit values off the gate stream (gate_kernel.jl)
-import Base64
+using JSON: JSON   # durable `using`-export cache file (deps.jl)
+using Pkg: Pkg    # in-process package add/remove (eval.jl)
+using Serialization: Serialization   # decode base64'd slate_emit values off the gate stream (gate_kernel.jl)
+using Base64: Base64
 
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
@@ -63,36 +63,296 @@ struct CellOutput
     memo::String                  # durable-cache outcome of this run: "" | "restored" | "stored" | "handle" | "uncacheable"
     memo_why::String              # human reason for a non-caching outcome (handle/uncacheable); "" otherwise
     effects::Vector{Any}          # cell-DECLARED effects harvested this run — (; kind, names, stmt_src, data) per
-                                  # `slate_effect(...)` call; drives everywhere classification + the durable effect store
+    # `slate_effect(...)` call; drives everywhere classification + the durable effect store
     assets::Vector{Any}           # `save_asset(…)` payloads (name, mime, bytes); blob'd server-side + inlined/
-                                  # published in a static export — the write-side dual of `@asset` (see assets.jl)
+    # published in a static export — the write-side dual of `@asset` (see assets.jl)
     live::Bool                    # SESSION-BOUND output: the captured HTML is a view onto state that lives in the
-                                  # WORKER (a scene, a socket), not a self-contained artifact, so it only works for
-                                  # the browser session it was rendered for. Set when the value opted in via
-                                  # `SlateExtensionsBase.slate_live_render` (see capture.jl `_LIVE_OUTPUTS`).
-                                  # Extension-agnostic: core never inspects the HTML to decide this.
+    # WORKER (a scene, a socket), not a self-contained artifact, so it only works for
+    # the browser session it was rendered for. Set when the value opted in via
+    # `SlateExtensionsBase.slate_live_render` (see capture.jl `_LIVE_OUTPUTS`).
+    # Extension-agnostic: core never inspects the HTML to decide this.
 end
 # Back-compat constructors (callers that omit trailing fields — trace/stderr through assets — get empty defaults).
-CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[], "", Any[], Any[], "", "", Any[], Any[])
-CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, Any[], Any[], "", "", Any[], Any[])
-CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, Any[], "", "", Any[], Any[])
-CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, "", "", Any[], Any[])
-CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, "", Any[], Any[])
-CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, Any[], Any[])
+function CellOutput(
+    stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms
+)
+    return CellOutput(
+        stdout,
+        display,
+        echarts,
+        tables,
+        binds,
+        value_repr,
+        exception,
+        backtrace,
+        duration_ms,
+        Any[],
+        "",
+        Any[],
+        Any[],
+        "",
+        "",
+        Any[],
+        Any[],
+    )
+end
+function CellOutput(
+    stdout,
+    display,
+    echarts,
+    tables,
+    binds,
+    value_repr,
+    exception,
+    backtrace,
+    duration_ms,
+    trace,
+    stderr,
+)
+    return CellOutput(
+        stdout,
+        display,
+        echarts,
+        tables,
+        binds,
+        value_repr,
+        exception,
+        backtrace,
+        duration_ms,
+        trace,
+        stderr,
+        Any[],
+        Any[],
+        "",
+        "",
+        Any[],
+        Any[],
+    )
+end
+function CellOutput(
+    stdout,
+    display,
+    echarts,
+    tables,
+    binds,
+    value_repr,
+    exception,
+    backtrace,
+    duration_ms,
+    trace,
+    stderr,
+    overflow,
+)
+    return CellOutput(
+        stdout,
+        display,
+        echarts,
+        tables,
+        binds,
+        value_repr,
+        exception,
+        backtrace,
+        duration_ms,
+        trace,
+        stderr,
+        overflow,
+        Any[],
+        "",
+        "",
+        Any[],
+        Any[],
+    )
+end
+function CellOutput(
+    stdout,
+    display,
+    echarts,
+    tables,
+    binds,
+    value_repr,
+    exception,
+    backtrace,
+    duration_ms,
+    trace,
+    stderr,
+    overflow,
+    animations,
+)
+    return CellOutput(
+        stdout,
+        display,
+        echarts,
+        tables,
+        binds,
+        value_repr,
+        exception,
+        backtrace,
+        duration_ms,
+        trace,
+        stderr,
+        overflow,
+        animations,
+        "",
+        "",
+        Any[],
+        Any[],
+    )
+end
+function CellOutput(
+    stdout,
+    display,
+    echarts,
+    tables,
+    binds,
+    value_repr,
+    exception,
+    backtrace,
+    duration_ms,
+    trace,
+    stderr,
+    overflow,
+    animations,
+    memo,
+)
+    return CellOutput(
+        stdout,
+        display,
+        echarts,
+        tables,
+        binds,
+        value_repr,
+        exception,
+        backtrace,
+        duration_ms,
+        trace,
+        stderr,
+        overflow,
+        animations,
+        memo,
+        "",
+        Any[],
+        Any[],
+    )
+end
+function CellOutput(
+    stdout,
+    display,
+    echarts,
+    tables,
+    binds,
+    value_repr,
+    exception,
+    backtrace,
+    duration_ms,
+    trace,
+    stderr,
+    overflow,
+    animations,
+    memo,
+    memo_why,
+)
+    return CellOutput(
+        stdout,
+        display,
+        echarts,
+        tables,
+        binds,
+        value_repr,
+        exception,
+        backtrace,
+        duration_ms,
+        trace,
+        stderr,
+        overflow,
+        animations,
+        memo,
+        memo_why,
+        Any[],
+        Any[],
+    )
+end
 # …, effects (no assets) — the wire reconstruction shape before generated assets existed.
-CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, effects) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, effects, Any[])
+function CellOutput(
+    stdout,
+    display,
+    echarts,
+    tables,
+    binds,
+    value_repr,
+    exception,
+    backtrace,
+    duration_ms,
+    trace,
+    stderr,
+    overflow,
+    animations,
+    memo,
+    memo_why,
+    effects,
+)
+    return CellOutput(
+        stdout,
+        display,
+        echarts,
+        tables,
+        binds,
+        value_repr,
+        exception,
+        backtrace,
+        duration_ms,
+        trace,
+        stderr,
+        overflow,
+        animations,
+        memo,
+        memo_why,
+        effects,
+        Any[],
+    )
+end
 # …, assets (no `live`) — the shape before session-bound outputs were modelled. Every shorter rung above
 # delegates to THIS one, so a single default keeps the whole ladder working: an output is not live unless
 # the capture explicitly says so.
-CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, effects, assets) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, effects, assets, false)
+function CellOutput(
+    stdout,
+    display,
+    echarts,
+    tables,
+    binds,
+    value_repr,
+    exception,
+    backtrace,
+    duration_ms,
+    trace,
+    stderr,
+    overflow,
+    animations,
+    memo,
+    memo_why,
+    effects,
+    assets,
+)
+    return CellOutput(
+        stdout,
+        display,
+        echarts,
+        tables,
+        binds,
+        value_repr,
+        exception,
+        backtrace,
+        duration_ms,
+        trace,
+        stderr,
+        overflow,
+        animations,
+        memo,
+        memo_why,
+        effects,
+        assets,
+        false,
+    )
+end
 
 """
 A single report cell. `id` is the persistent identity (survives edits/moves);
@@ -106,13 +366,13 @@ mutable struct Cell
     src_hash::UInt64
     reads::Set{Symbol}
     reads_now::Set{Symbol}        # the subset of `reads` made at TOP LEVEL (not deferred into a
-                                  # function/macro body) — feeds the `backref` ordering diagnostic;
-                                  # never used for edges, so under-approximation is harmless
+    # function/macro body) — feeds the `backref` ordering diagnostic;
+    # never used for edges, so under-approximation is harmless
     writes::Set{Symbol}           # rebindings/definitions ∪ in-place mutations — the full write-set used for
-                                  # ordering (most-recent-writer), parallel write-conflicts, and reactive self-trigger
+    # ordering (most-recent-writer), parallel write-conflicts, and reactive self-trigger
     mutates::Set{Symbol}          # the subset of `writes` reached ONLY via in-place mutation here (x[]=…, x.f=…,
-                                  # x .= …, f!(x)) and NOT defined in this cell — excluded from the multi-def
-                                  # collision check and the "defines" label (a mutator is not a definer)
+    # x .= …, f!(x)) and NOT defined in this cell — excluded from the multi-def
+    # collision check and the "defines" label (a mutator is not a definer)
     deps::Set{String}             # upstream cell ids (most-recent-writer, §6)
     inputs::Vector{String}        # external-input fingerprints (files)
     state::CellState
@@ -122,15 +382,31 @@ mutable struct Cell
     controls::Vector{Vector{String}}  # control strip as columns of stacked var names (§Layer 3 UX)
     interp::Vector{CellOutput}    # captured outputs of a markdown cell's `{{ }}` interpolations
     provides::Set{Symbol}         # names brought in by `using`/`import` (⊆ writes) — availability for the
-                                  # dep graph, NOT a definition: excluded from the multi-def collision check
+    # dep graph, NOT a definition: excluded from the multi-def collision check
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
 function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
-    return Cell(String(id), kind, src, hash(src),
-                Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
-                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}())
+    return Cell(
+        String(id),
+        kind,
+        src,
+        hash(src),
+        Set{Symbol}(),
+        Set{Symbol}(),
+        Set{Symbol}(),
+        Set{Symbol}(),
+        Set{String}(),
+        String[],
+        STALE,
+        nothing,
+        Set{Symbol}(),
+        BindSpec[],
+        Vector{String}[],
+        CellOutput[],
+        Set{Symbol}(),
+    )
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation
@@ -157,9 +433,17 @@ mutable struct Report
     dependents::Dict{String,Vector{String}}  # transpose of `deps`: id → cells that list it upstream
 end
 
-Report(id::AbstractString, title::AbstractString) =
-    Report(String(id), String(title), Cell[], Dict{String,Any}(), nothing,
-           Dict{String,Cell}(), Dict{String,Vector{String}}())
+function Report(id::AbstractString, title::AbstractString)
+    return Report(
+        String(id),
+        String(title),
+        Cell[],
+        Dict{String,Any}(),
+        nothing,
+        Dict{String,Cell}(),
+        Dict{String,Vector{String}}(),
+    )
+end
 
 # ── Source format ────────────────────────────────────────────────────────────
 #
@@ -200,7 +484,9 @@ const _HEADER = r"^#%%(.*)$"
 # statement — the freshly-imported module's methods are visible (the reason `import X; X.f()` works
 # at top level but not inside one function).
 const _PREAMBLE = "try; import KaimonSlate; catch; error(\"This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\\\"KaimonSlate\\\")`, or open it in Kaimon Slate.\"); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)"
-_is_preamble_line(l::AbstractString) = occursin("KaimonSlate", l) && occursin(r"\bstandalone!\s*\(", l)
+function _is_preamble_line(l::AbstractString)
+    return occursin("KaimonSlate", l) && occursin(r"\bstandalone!\s*\(", l)
+end
 
 # A markdown cell serializes its body inside `@md\"\"\"…\"\"\"` so a bare `julia notebook.jl` renders it
 # (the injected `@md` macro parses the markdown and evaluates `{{ }}`) instead of choking on prose.
@@ -227,7 +513,8 @@ function _parse_controls(s::AbstractString)
         elseif ch == ']'
             depth -= 1
         elseif ch == ',' && depth == 0
-            push!(toks, String(take!(buf))); continue
+            push!(toks, String(take!(buf)))
+            continue
         end
         print(buf, ch)
     end
@@ -236,7 +523,9 @@ function _parse_controls(s::AbstractString)
         t = strip(t)
         isempty(t) && continue
         if startswith(t, "[") && endswith(t, "]")
-            names = String[String(strip(n)) for n in split(t[2:end-1], ',') if !isempty(strip(n))]
+            names = String[
+                String(strip(n)) for n in split(t[2:(end - 1)], ',') if !isempty(strip(n))
+            ]
             isempty(names) || push!(cols, names)
         else
             push!(cols, String[t])
@@ -251,12 +540,28 @@ end
 # none of them are author tags and must never be serialized to the header. It is deliberately a
 # DIFFERENT symbol from the `everywhere` author tag below: sharing one would round-trip a runtime
 # classification back out as a tag the author never wrote.
-const _INTERNAL_FLAGS = Set{Symbol}([:opaque, :macrocall, :using_redundant, :import_scaffold,
-                                     :everywhere_declared])
+const _INTERNAL_FLAGS = Set{Symbol}([
+    :opaque, :macrocall, :using_redundant, :import_scaffold, :everywhere_declared
+])
 # Header tags Slate gives behaviour to (rendered as checkboxes in the UI tag editor). Any OTHER
 # token is kept verbatim as a free-form tag — inert metadata that still round-trips.
-const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache, :cache, :resource, :slide, :notes,
-                     :title, :abstract, :bibliography, :caption, :home, :docindex, :everywhere)
+const _KNOWN_TAGS = (
+    :collapsed,
+    :hidecode,
+    :trace,
+    :nocache,
+    :cache,
+    :resource,
+    :slide,
+    :notes,
+    :title,
+    :abstract,
+    :bibliography,
+    :caption,
+    :home,
+    :docindex,
+    :everywhere,
+)
 
 "Parse a header line's trailing tokens into (kind, id, controls, tags::Vector{Symbol}). Every token
 that isn't `id=`/`controls=`/`code`/`md` becomes a tag flag (known ones drive behaviour; the rest are
@@ -285,20 +590,23 @@ function _parse_header(rest::AbstractString)
 end
 
 "Deterministic short id from a cell's content + position (used when none given)."
-_auto_id(kind::CellKind, source::AbstractString, idx::Integer) =
-    string(hash((kind, source, idx)) % 0xffffff; base = 16, pad = 6)
+function _auto_id(kind::CellKind, source::AbstractString, idx::Integer)
+    return string(hash((kind, source, idx)) % 0xffffff; base=16, pad=6)
+end
 
 # `_auto_id` truncates to 24 bits — a birthday-bound collision becomes plausible around ~5000
 # unnamed cells in one notebook. A silent duplicate id would corrupt every id-keyed lookup
 # (dependency graph, history matching, the browser's cell map), so re-salt against `used` (every
 # id already assigned in THIS parse, explicit or auto) until unique. The common case (no
 # collision) costs one extra Set lookup; only an actual collision pays for a re-hash.
-function _unique_auto_id(kind::CellKind, source::AbstractString, idx::Integer, used::AbstractSet{String})
+function _unique_auto_id(
+    kind::CellKind, source::AbstractString, idx::Integer, used::AbstractSet{String}
+)
     id = _auto_id(kind, source, idx)
     salt = idx
     while id in used
         salt += 1
-        id = string(hash((kind, source, idx, salt)) % 0xffffff; base = 16, pad = 6)
+        id = string(hash((kind, source, idx, salt)) % 0xffffff; base=16, pad=6)
     end
     return id
 end
@@ -307,8 +615,12 @@ end
 function _strip_blank_edges(lines::Vector{<:AbstractString})
     lo = firstindex(lines)
     hi = lastindex(lines)
-    while lo <= hi && isempty(strip(lines[lo])); lo += 1; end
-    while hi >= lo && isempty(strip(lines[hi])); hi -= 1; end
+    while lo <= hi && isempty(strip(lines[lo]))
+        lo += 1
+    end
+    while hi >= lo && isempty(strip(lines[hi]))
+        hi -= 1
+    end
     return lines[lo:hi]
 end
 
@@ -344,7 +656,7 @@ function _append_implicit_cells!(report::Report, lines, used_ids::Set{String})
     n = length(lines)
     emit! = function (kind::CellKind, body)
         trimmed = _strip_blank_edges(body)
-        isempty(trimmed) && return
+        isempty(trimmed) && return nothing
         src = join(trimmed, "\n")
         kind === MARKDOWN && (src = _unwrap_md(src))
         id_ = _unique_auto_id(kind, src, length(report.cells) + 1, used_ids)
@@ -354,29 +666,40 @@ function _append_implicit_cells!(report::Report, lines, used_ids::Set{String})
     end
     i = 1
     while i <= n
-        while i <= n && isempty(strip(lines[i])); i += 1; end       # skip blank lines between cells
+        while i <= n && isempty(strip(lines[i]))
+            i += 1
+        end       # skip blank lines between cells
         i > n && break
         if _is_md_line(lines[i])
             j = i
-            while j <= n && _is_md_line(lines[j]); j += 1; end       # maximal comment run: lines[i:j-1]
+            while j <= n && _is_md_line(lines[j])
+                j += 1
+            end       # maximal comment run: lines[i:j-1]
             k = j
-            while k <= n && isempty(strip(lines[k])); k += 1; end    # peek past blanks to the next content
+            while k <= n && isempty(strip(lines[k]))
+                k += 1
+            end    # peek past blanks to the next content
             blank_gap = k > j                                        # a blank line sets the comment off from code
             code_follows = k <= n                                    # the next non-blank can only be code here
-            prose = blank_gap || !code_follows ||
-                    any(t -> _is_md_prose_marker(lines[t]), i:(j - 1))
+            prose = blank_gap || !code_follows || any(t -> _is_md_prose_marker(lines[t]), i:(j - 1))
             if prose
                 emit!(MARKDOWN, String[_strip_md(lines[t]) for t in i:(j - 1)])
                 i = j
             else
                 body = String[lines[t] for t in i:(j - 1)]           # attached comment opens a code cell…
-                while j <= n && !_is_md_line(lines[j]); push!(body, String(lines[j])); j += 1; end  # …+ the code below it
+                while j <= n && !_is_md_line(lines[j])
+                    push!(body, String(lines[j]))
+                    j += 1
+                end  # …+ the code below it
                 emit!(CODE, body)
                 i = j
             end
         else
             body = String[]
-            while i <= n && !_is_md_line(lines[i]); push!(body, String(lines[i])); i += 1; end
+            while i <= n && !_is_md_line(lines[i])
+                push!(body, String(lines[i]))
+                i += 1
+            end
             emit!(CODE, body)
         end
     end
@@ -402,7 +725,7 @@ Pure-Literate files, pure-percent files, and Literate-then-percent mixes all
 parse. (Once a `#%%` header appears, subsequent cells should also use headers —
 implicit content after a header is taken as that explicit cell's verbatim body.)
 """
-function parse_report(text::AbstractString; id::AbstractString = "r", title::AbstractString = "")
+function parse_report(text::AbstractString; id::AbstractString="r", title::AbstractString="")
     report = Report(id, title)
     lines = split(text, '\n')
     # Split off any Slate footer block (always terminal: the `env` delta and/or a standalone
@@ -450,13 +773,15 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
             push!(used_ids, id_)
             cell = Cell(id_, kind, src)
             cell.controls = ctrls
-            for t in tags; push!(cell.flags, t); end
+            for t in tags
+                push!(cell.flags, t)
+            end
             push!(report.cells, cell)
         end
         empty!(body)
         had_header = false
         ctrls = Vector{String}[]
-        tags = Symbol[]
+        return tags = Symbol[]
     end
 
     for line in view(lines, firsthdr:length(lines))
@@ -487,9 +812,12 @@ const _ENV_MARK_CLOSE = "# ╚═╡"
 function _render_env_footer(env)::String
     isempty(env) && return ""
     io = IOBuffer()
-    println(io, _ENV_MARK_OPEN, " · notebook packages (auto-maintained — manage via the package panel)")
+    println(
+        io, _ENV_MARK_OPEN, " · notebook packages (auto-maintained — manage via the package panel)"
+    )
     for p in env
-        nm = get(p, "name", ""); isempty(nm) && continue
+        nm = get(p, "name", "")
+        isempty(nm) && continue
         println(io, "#   ", nm, " ", get(p, "version", ""), " ", get(p, "uuid", ""))
     end
     print(io, _ENV_MARK_CLOSE)
@@ -502,16 +830,21 @@ function _parse_env_footer(lines)::Vector{Dict{String,Any}}
     out = Dict{String,Any}[]
     inenv = false                                       # only read entries inside the Slate.env block
     for l in lines
-        startswith(l, _ENV_MARK_OPEN) && (inenv = true; continue)
+        startswith(l, _ENV_MARK_OPEN) && (inenv=true; continue)
         inenv || continue                               # a different Slate.* block (e.g. config) → skip
         startswith(l, _ENV_MARK_CLOSE) && break
         m = match(r"^#\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?\s*$", l)
         m === nothing && continue
-        push!(out, Dict{String,Any}("name" => m.captures[1],
-                                    "version" => something(m.captures[2], ""),
-                                    "uuid" => something(m.captures[3], "")))
+        push!(
+            out,
+            Dict{String,Any}(
+                "name" => m.captures[1],
+                "version" => something(m.captures[2], ""),
+                "uuid" => something(m.captures[3], ""),
+            ),
+        )
     end
-    return sort(out; by = p -> p["name"])
+    return sort(out; by=p -> p["name"])
 end
 
 # ── Per-notebook config footer (Slate.config) ────────────────────────────────────────────────────
@@ -524,34 +857,58 @@ const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # carries its presentation style with it. `publishrepo`/`publishslug` remember WHERE this notebook
 # was last published (owner/name + slug), so the dialog pre-fills and a CI action can read the
 # target — authored intent that travels with the file (see the git-noise/sidecar discussion).
-const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "macroexpand", "agentmodel", "runon",
-                      "regions",
-                      # `@replay` export resolution, as `<mark id>:<stride>` pairs. Authored intent —
-                      # how much detail this document's controls need to carry — so it travels with the
-                      # `.jl` rather than living in one person's browser.
-                      "replaystrides",
-                      "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle",
-                      "publishrepo", "publishslug", "series", "docid")
-const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
-                           # `macroexpand` = macro-aware dependency analysis (expand unknown macros in
-                           # the kernel to recover their true reads/writes). Off = conservative static
-                           # analysis only, for the rare macro with expansion-time side effects.
-                           "macroexpand" => :bool, "replaystrides" => :string,
-                           "agentmodel" => :string,
-                           # `runon` = this notebook's DURABLE run-location override ("host[,transport]"):
-                           # a machine-specific ssh alias the author chose to bake in (the *session* and
-                           # *global* run-location layers live in runtime meta / slate.json, never here).
-                           "runon" => :string,
-                           # `regions` = the comma-separated NAMES of global regions this notebook uses;
-                           # `region=<name>`-tagged cells run on that region's worker while the main kernel
-                           # stays put, boundary values crossing as CAS blobs. Defs live in the global registry.
-                           "regions" => :string,
-                           "slidelevel" => :int, "slidetransition" => :string,
-                           "slidetheme" => :string, "slideratio" => :string, "bibstyle" => :string,
-                           "publishrepo" => :string, "publishslug" => :string, "series" => :string,
-                           # `docid` = the notebook's STABLE publish-ledger identity, generated once and
-                           # carried in the file so it never flips when the path/repo/origin changes.
-                           "docid" => :string)
+const _CONFIG_KEYS = (
+    "parallel",
+    "threads",
+    "hotreload",
+    "macroexpand",
+    "agentmodel",
+    "runon",
+    "regions",
+    # `@replay` export resolution, as `<mark id>:<stride>` pairs. Authored intent —
+    # how much detail this document's controls need to carry — so it travels with the
+    # `.jl` rather than living in one person's browser.
+    "replaystrides",
+    "slidelevel",
+    "slidetransition",
+    "slidetheme",
+    "slideratio",
+    "bibstyle",
+    "publishrepo",
+    "publishslug",
+    "series",
+    "docid",
+)
+const _CONFIG_TYPES = Dict(
+    "parallel" => :bool,
+    "threads" => :string,
+    "hotreload" => :bool,
+    # `macroexpand` = macro-aware dependency analysis (expand unknown macros in
+    # the kernel to recover their true reads/writes). Off = conservative static
+    # analysis only, for the rare macro with expansion-time side effects.
+    "macroexpand" => :bool,
+    "replaystrides" => :string,
+    "agentmodel" => :string,
+    # `runon` = this notebook's DURABLE run-location override ("host[,transport]"):
+    # a machine-specific ssh alias the author chose to bake in (the *session* and
+    # *global* run-location layers live in runtime meta / slate.json, never here).
+    "runon" => :string,
+    # `regions` = the comma-separated NAMES of global regions this notebook uses;
+    # `region=<name>`-tagged cells run on that region's worker while the main kernel
+    # stays put, boundary values crossing as CAS blobs. Defs live in the global registry.
+    "regions" => :string,
+    "slidelevel" => :int,
+    "slidetransition" => :string,
+    "slidetheme" => :string,
+    "slideratio" => :string,
+    "bibstyle" => :string,
+    "publishrepo" => :string,
+    "publishslug" => :string,
+    "series" => :string,
+    # `docid` = the notebook's STABLE publish-ledger identity, generated once and
+    # carried in the file so it never flips when the path/repo/origin changes.
+    "docid" => :string,
+)
 
 function _render_config_footer(meta)::String
     items = Tuple{String,String}[]
@@ -565,7 +922,9 @@ function _render_config_footer(meta)::String
     isempty(items) && return ""
     io = IOBuffer()
     println(io, _CFG_MARK_OPEN, " · per-notebook settings (Settings panel)")
-    for (k, v) in items; println(io, "#   ", k, " = ", v); end
+    for (k, v) in items
+        println(io, "#   ", k, " = ", v)
+    end
     print(io, _ENV_MARK_CLOSE)
     return String(take!(io))
 end
@@ -574,17 +933,22 @@ function _parse_config_footer(lines)::Dict{String,Any}
     out = Dict{String,Any}()
     incfg = false
     for l in lines
-        startswith(l, _CFG_MARK_OPEN) && (incfg = true; continue)
+        startswith(l, _CFG_MARK_OPEN) && (incfg=true; continue)
         incfg || continue
         startswith(l, _ENV_MARK_CLOSE) && break
         m = match(r"^#\s+(\w+)\s*=\s*(.+?)\s*$", l)
         m === nothing && continue
-        k = m.captures[1]; (k in _CONFIG_KEYS) || continue
+        k = m.captures[1]
+        (k in _CONFIG_KEYS) || continue
         v = strip(String(m.captures[2]))
         ty = get(_CONFIG_TYPES, k, :string)
-        out[k] = ty === :bool ? (v == "true") :
-                 ty === :int  ? something(tryparse(Int, v), nothing) :
-                 String(v)
+        out[k] = if ty === :bool
+            (v == "true")
+        elseif ty === :int
+            something(tryparse(Int, v), nothing)
+        else
+            String(v)
+        end
         out[k] === nothing && delete!(out, k)   # drop malformed ints rather than store junk
     end
     return out
@@ -592,26 +956,41 @@ end
 
 # ── Serialization ────────────────────────────────────────────────────────────
 
-_kind_token(k::CellKind) = k === MARKDOWN ? "md" : k === WEB ? "web" : "code"
+_kind_token(k::CellKind) =
+    if k === MARKDOWN
+        "md"
+    elseif k === WEB
+        "web"
+    else
+        "code"
+    end
 
 # Serialize control-strip columns back to the header grammar: single-control
 # columns as bare names, multi-control columns as `[a,b,…]`, columns joined by `,`.
-_controls_str(cols) = join((length(col) == 1 ? col[1] : "[" * join(col, ",") * "]" for col in cols), ",")
+function _controls_str(cols)
+    return join((length(col) == 1 ? col[1] : "[" * join(col, ",") * "]" for col in cols), ",")
+end
 
 "Emit one cell as a header line plus its body."
 function _cell_source(cell::Cell)
     header = "#%% $(_kind_token(cell.kind)) id=$(cell.id)"
     isempty(cell.controls) || (header *= " controls=" * _controls_str(cell.controls))
     # Known tags first (stable order), then any free-form ones (sorted); internal flags never emit.
-    for t in _KNOWN_TAGS; (t in cell.flags) && (header *= " " * string(t)); end
+    for t in _KNOWN_TAGS
+        (t in cell.flags) && (header *= " " * string(t))
+    end
     extra = sort!([string(f) for f in cell.flags if !(f in _INTERNAL_FLAGS) && !(f in _KNOWN_TAGS)])
-    for t in extra; header *= " " * t; end
+    for t in extra
+        header *= " " * t
+    end
     isempty(cell.source) && return header
     body = cell.source
     # Markdown gets the runnable `@md\"\"\"…\"\"\"` skin, EXCEPT when the body itself contains `\"\"\"`
     # (which would break the triple-quoted literal) — that rare cell falls back to the bare form,
     # which still parses in the engine (just not standalone-runnable). `_unwrap_md` reads both.
-    cell.kind === MARKDOWN && !occursin("\"\"\"", body) && (body = "@md\"\"\"\n" * body * "\n\"\"\"")
+    cell.kind === MARKDOWN &&
+        !occursin("\"\"\"", body) &&
+        (body = "@md\"\"\"\n" * body * "\n\"\"\"")
     return "$header\n$body"
 end
 
@@ -624,14 +1003,20 @@ Cell *outputs* are deliberately not serialized (regenerated by eval) — clean d
 """
 # Just the cells (no footer) — the runnable notebook body, shared by `serialize_report`
 # and the standalone-bundle export (which appends its own footer instead of the delta one).
-serialize_cells(report::Report) =
-    _PREAMBLE * "\n\n" * join((_cell_source(c) for c in report.cells), "\n\n") * "\n"
+function serialize_cells(report::Report)
+    return _PREAMBLE * "\n\n" * join((_cell_source(c) for c in report.cells), "\n\n") * "\n"
+end
 
 function serialize_report(report::Report)
     body = serialize_cells(report)
     # env footer FIRST (parse_env_footer breaks at the first close), then the config footer.
-    parts = filter(!isempty, [_render_env_footer(get(report.meta, "env", Dict{String,Any}[])),
-                              _render_config_footer(report.meta)])
+    parts = filter(
+        !isempty,
+        [
+            _render_env_footer(get(report.meta, "env", Dict{String,Any}[])),
+            _render_config_footer(report.meta),
+        ],
+    )
     isempty(parts) && return body
     return body * "\n" * join(parts, "\n") * "\n"
 end

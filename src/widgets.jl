@@ -17,12 +17,24 @@
 # registers the built-in kinds through the SAME `register_kind!` seam a third party uses. SEB reaches
 # both namespaces: the engine via KaimonSlate's Project.toml dep, the standalone worker via the
 # slate-owned worker_infra env on LOAD_PATH.
-import Markdown # stdlib — `@md` renders a standalone-run markdown cell (see `_populate_notebook_ns!`)
-import Base64   # stdlib — a replay sweep hands its packed bytes back to the export base64'd
-using SlateExtensionsBase: SlateExtensionsBase, Widget, Choice, Selection, indices, WebPage,
-                           to_widget, register_kind!, coerce_bind, reconcile_bind, wrap_value,
-                           # `@replay`: a control's finite domain, and data computed across it
-                           bind_domain, ReplayArray, replay_stack
+using Markdown: Markdown # stdlib — `@md` renders a standalone-run markdown cell (see `_populate_notebook_ns!`)
+using Base64: Base64   # stdlib — a replay sweep hands its packed bytes back to the export base64'd
+using SlateExtensionsBase:
+    SlateExtensionsBase,
+    Widget,
+    Choice,
+    Selection,
+    indices,
+    WebPage,
+    to_widget,
+    register_kind!,
+    coerce_bind,
+    reconcile_bind,
+    wrap_value,
+    # `@replay`: a control's finite domain, and data computed across it
+    bind_domain,
+    ReplayArray,
+    replay_stack
 
 # The SlateExtensionsBase extension manifest for THIS process — the front-end scripts (and, in time,
 # other package registrations) that the loaded packages declared, for the hub to mirror into the page.
@@ -34,12 +46,14 @@ using SlateExtensionsBase: SlateExtensionsBase, Widget, Choice, Selection, indic
 # (`M.__slate_frontend(slate_on)` — editor extensions + JS→Julia handlers with no bind to trigger them),
 # handing it that namespace's injected `slate_on`. So a package's editor-ext + handlers register lazily
 # from the once-per-drain manifest pull, no `__init__` and no boot cell. Idempotent (see the hook).
-function inprocess_extension_manifest(ns::Union{Module,Nothing} = nothing)
+function inprocess_extension_manifest(ns::Union{Module,Nothing}=nothing)
     if ns !== nothing && Base.invokelatest(isdefined, ns, :slate_on)
         try
             # `invokelatest`: `slate_on` is `Core.eval`'d into `ns`, possibly in a newer world than
             # here — reading it directly warns under Julia 1.12's global world-age rules.
-            SlateExtensionsBase.ensure_module_frontends!(Base.invokelatest(getglobal, ns, :slate_on))
+            SlateExtensionsBase.ensure_module_frontends!(
+                Base.invokelatest(getglobal, ns, :slate_on)
+            )
         catch
         end
     end
@@ -58,33 +72,44 @@ include(joinpath(@__DIR__, "fingerprint.jl"))
 # (substitution), AND the injected `@md` macro (standalone rendering) — so captures line up
 # positionally. Lives HERE, not in engine.jl, because widgets.jl is included into BOTH ReportEngine
 # and the standalone SlateWorker; the `@md` macro built in `_populate_notebook_ns!` needs it in both.
-_interp_token(i::Int) = "xslateinterpx" * string(i; pad = 5) * "x"
+_interp_token(i::Int) = "xslateinterpx" * string(i; pad=5) * "x"
 
 function _md_template(src::AbstractString)
-    s = String(src); out = IOBuffer(); exprs = String[]
-    i = firstindex(s); n = lastindex(s)
+    s = String(src)
+    out = IOBuffer()
+    exprs = String[]
+    i = firstindex(s)
+    n = lastindex(s)
     while i <= n
         c = s[i]
         if c == '{' && (i2 = nextind(s, i)) <= n && s[i2] == '{'
-            k = nextind(s, i2); depth = 0; instr = false; closeat = 0
+            k = nextind(s, i2)
+            depth = 0
+            instr = false
+            closeat = 0
             while k <= n
                 ck = s[k]
                 if instr
                     if ck == '\\'
-                        k = nextind(s, k); k <= n && (k = nextind(s, k)); continue
+                        k = nextind(s, k)
+                        k <= n && (k = nextind(s, k))
+                        continue
                     end
                     ck == '"' && (instr = false)
                     k = nextind(s, k)
                 elseif ck == '"'
-                    instr = true; k = nextind(s, k)
+                    instr = true
+                    k = nextind(s, k)
                 elseif ck == '{'
-                    depth += 1; k = nextind(s, k)
+                    depth += 1
+                    k = nextind(s, k)
                 elseif ck == '}'
                     if depth > 0
-                        depth -= 1; k = nextind(s, k)
+                        depth -= 1
+                        k = nextind(s, k)
                     else
                         nk = nextind(s, k)
-                        (nk <= n && s[nk] == '}') ? (closeat = k; break) : (k = nextind(s, k))
+                        (nk <= n && s[nk] == '}') ? (closeat=k; break) : (k = nextind(s, k))
                     end
                 else
                     k = nextind(s, k)
@@ -97,7 +122,8 @@ function _md_template(src::AbstractString)
                 continue
             end
         end
-        print(out, c); i = nextind(s, i)
+        print(out, c)
+        i = nextind(s, i)
     end
     return String(take!(out)), exprs
 end
@@ -119,21 +145,29 @@ _md_interp_exprs(src::AbstractString) = _md_template(src)[2]
 function _slate_json_string(io::IO, s::AbstractString)
     print(io, '"')
     for c in s
-        if c == '"';       print(io, "\\\"")
-        elseif c == '\\';  print(io, "\\\\")
-        elseif c == '\n';  print(io, "\\n")
-        elseif c == '\r';  print(io, "\\r")
-        elseif c == '\t';  print(io, "\\t")
-        elseif c == '<';   print(io, "\\u003c")   # so a value can't spell `</script>` and break out
-        elseif c == '>';   print(io, "\\u003e")
+        if c == '"'
+            print(io, "\\\"")
+        elseif c == '\\'
+            print(io, "\\\\")
+        elseif c == '\n'
+            print(io, "\\n")
+        elseif c == '\r'
+            print(io, "\\r")
+        elseif c == '\t'
+            print(io, "\\t")
+        elseif c == '<'
+            print(io, "\\u003c")   # so a value can't spell `</script>` and break out
+        elseif c == '>'
+            print(io, "\\u003e")
         elseif UInt32(c) == 0x2028 || UInt32(c) == 0x2029   # JS line terminators — invalid raw in a JS string
-            print(io, "\\u", string(UInt32(c); base = 16, pad = 4))
+            print(io, "\\u", string(UInt32(c); base=16, pad=4))
         elseif c < ' '
-            print(io, "\\u", string(UInt16(c); base = 16, pad = 4))
-        else               print(io, c)
+            print(io, "\\u", string(UInt16(c); base=16, pad=4))
+        else
+            print(io, c)
         end
     end
-    print(io, '"')
+    return print(io, '"')
 end
 
 function _slate_json_to(io::IO, x)
@@ -153,23 +187,30 @@ function _slate_json_to(io::IO, x)
         print(io, '{')
         first = true
         for k in keys(x)
-            first || print(io, ','); first = false
-            _slate_json_string(io, string(k)); print(io, ':'); _slate_json_to(io, x[k])
+            first || print(io, ',')
+            first = false
+            _slate_json_string(io, string(k))
+            print(io, ':')
+            _slate_json_to(io, x[k])
         end
         print(io, '}')
     elseif x isa AbstractDict
         print(io, '{')
         first = true
         for (k, v) in x
-            first || print(io, ','); first = false
-            _slate_json_string(io, string(k)); print(io, ':'); _slate_json_to(io, v)
+            first || print(io, ',')
+            first = false
+            _slate_json_string(io, string(k))
+            print(io, ':')
+            _slate_json_to(io, v)
         end
         print(io, '}')
     elseif x isa Union{AbstractVector,Tuple,AbstractSet}
         print(io, '[')
         first = true
         for v in x
-            first || print(io, ','); first = false
+            first || print(io, ',')
+            first = false
             _slate_json_to(io, v)
         end
         print(io, ']')
@@ -179,20 +220,26 @@ function _slate_json_to(io::IO, x)
 end
 
 "Minimal stdlib-only JSON encoding of a `{{ }}` value, safe to embed inside a `<script>`."
-_slate_json(x)::String = (io = IOBuffer(); _slate_json_to(io, x); String(take!(io)))
+_slate_json(x)::String = (io=IOBuffer(); _slate_json_to(io, x); String(take!(io)))
 
 # Per-section escapers — chosen by the section's language so an interpolated value stays confined.
-_web_esc_html(x)::String =
-    replace(string(x), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;", '\'' => "&#39;")
+_web_esc_html(x)::String = replace(
+    string(x), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;", '\'' => "&#39;"
+)
 _web_esc_js(x)::String = _slate_json(x)
 # CSS has no string-literal quoting for a bare value; keep numbers verbatim and drop the characters that
 # could close a declaration/rule/comment so a value can't inject a new rule.
 _web_esc_css(x)::String = x isa Real ? string(x) : replace(string(x), r"[{}();:<>\"'\\@]" => "")
 
-const _WEB_SECTION_MACROS = (Symbol("@html_str") => :html,
-                             Symbol("@css_str")  => :css,
-                             Symbol("@js_str")   => :js)
-_web_section_lang(nm) = (for (m, l) in _WEB_SECTION_MACROS; nm === m && return l; end; nothing)
+const _WEB_SECTION_MACROS = (
+    Symbol("@html_str") => :html, Symbol("@css_str") => :css, Symbol("@js_str") => :js
+)
+_web_section_lang(nm) = (
+    for (m, l) in _WEB_SECTION_MACROS
+        nm === m && return l
+    end;
+    nothing
+)
 
 # The tagged sections `(lang => raw)` of a `@web(...)` macrocall AST, in order — the shared reader for
 # BOTH the editor (split into panes) and dependency analysis (harvest `{{ }}` reads). Returns `nothing`
@@ -220,11 +267,17 @@ end
 
 # Every `{{ expr }}` string across a web cell's sections — used to compute the cell's reads (deps).
 function _web_interp_exprs(src::AbstractString)
-    ex = try; Base.Meta.parse(String(src)); catch; nothing; end
+    ex = try
+        Base.Meta.parse(String(src))
+    catch
+        nothing
+    end
     secs = ex === nothing ? nothing : _web_macrocall_sections(ex)
     secs === nothing && return String[]
     exprs = String[]
-    for (_, raw) in secs; append!(exprs, _md_interp_exprs(raw)); end
+    for (_, raw) in secs
+        append!(exprs, _md_interp_exprs(raw))
+    end
     return exprs
 end
 
@@ -242,13 +295,13 @@ function _web_sections(src::AbstractString)
     html, css, js = grab("html"), grab("css"), grab("js")
     # No tagged sections at all → treat the whole body as HTML (the convert-to-web landing pane).
     (isempty(html) && isempty(css) && isempty(js) && !occursin("\"\"\"", s)) && (html = s)
-    return (html = html, css = css, js = js)
+    return (html=html, css=css, js=js)
 end
 
 # Assemble a runnable `@web(...)` skin from editor panes — the on-disk source of a web cell. Parenthesized
 # and comma-separated so the sections (triple-quoted, multi-line) parse as one expression. Only non-empty
 # sections are emitted; an entirely empty cell keeps an empty html section so it still parses.
-function _web_skin(; html::AbstractString = "", css::AbstractString = "", js::AbstractString = "")
+function _web_skin(; html::AbstractString="", css::AbstractString="", js::AbstractString="")
     secs = String[]
     for (tag, body) in (("html", html), ("css", css), ("js", js))
         isempty(strip(String(body))) && continue
@@ -275,37 +328,53 @@ end
 # `Widget`s at runtime (no syntactic parsing, no `Slider`-name matching); the value lifecycle for
 # each built-in kind is registered via `register_kind!` further down.
 
-_wparams(label) = label === nothing ? Dict{String,Any}() : Dict{String,Any}("label" => String(label))
+function _wparams(label)
+    return label === nothing ? Dict{String,Any}() : Dict{String,Any}("label" => String(label))
+end
 
 # ── Constructors (real functions; args are runtime values) ────────────────────
-function Slider(r::AbstractRange; default = first(r), label = nothing)
+function Slider(r::AbstractRange; default=first(r), label=nothing)
     p = _wparams(label)
-    p["min"] = first(r); p["max"] = last(r); p["step"] = step(r)
+    p["min"] = first(r)
+    p["max"] = last(r)
+    p["step"] = step(r)
     return Widget("slider", p, default)
 end
-function Slider(lo::Real, hi::Real, default::Real = lo; step::Real = 1, label = nothing)
-    p = _wparams(label); p["min"] = lo; p["max"] = hi; p["step"] = step
+function Slider(lo::Real, hi::Real, default::Real=lo; step::Real=1, label=nothing)
+    p = _wparams(label)
+    p["min"] = lo
+    p["max"] = hi
+    p["step"] = step
     return Widget("slider", p, default)
 end
-function NumberField(default::Real = 0; min = nothing, max = nothing, label = nothing)
+function NumberField(default::Real=0; min=nothing, max=nothing, label=nothing)
     p = _wparams(label)
-    min === nothing || (p["min"] = min); max === nothing || (p["max"] = max)
+    min === nothing || (p["min"] = min)
+    max === nothing || (p["max"] = max)
     return Widget("number", p, default)
 end
-NumberField(lo::Real, hi::Real, default::Real = lo; label = nothing) =
-    Widget("number", merge(_wparams(label), Dict{String,Any}("min" => lo, "max" => hi)), default)
-Checkbox(default::Bool = false; label = nothing) = Widget("checkbox", _wparams(label), default)
+function NumberField(lo::Real, hi::Real, default::Real=lo; label=nothing)
+    return Widget(
+        "number", merge(_wparams(label), Dict{String,Any}("min" => lo, "max" => hi)), default
+    )
+end
+Checkbox(default::Bool=false; label=nothing) = Widget("checkbox", _wparams(label), default)
 # `on`/`off` are the text shown for each state (e.g. `Toggle(false; on="Live", off="Paused")`);
 # omit them to show the plain true/false value. `label` (like every widget) sets the display name.
-function Toggle(default::Bool = false; label = nothing, on = nothing, off = nothing)
+function Toggle(default::Bool=false; label=nothing, on=nothing, off=nothing)
     p = _wparams(label)
-    on  === nothing || (p["on"]  = String(on))
+    on === nothing || (p["on"] = String(on))
     off === nothing || (p["off"] = String(off))
     return Widget("toggle", p, default)
 end
-TextField(default::AbstractString = ""; label = nothing) = Widget("text", _wparams(label), String(default))
-TextArea(default::AbstractString = ""; rows::Int = 3, label = nothing) =
-    Widget("textarea", merge(_wparams(label), Dict{String,Any}("rows" => rows)), String(default))
+function TextField(default::AbstractString=""; label=nothing)
+    return Widget("text", _wparams(label), String(default))
+end
+function TextArea(default::AbstractString=""; rows::Int=3, label=nothing)
+    return Widget(
+        "textarea", merge(_wparams(label), Dict{String,Any}("rows" => rows)), String(default)
+    )
+end
 # Options for Radio/Select/MultiSelect. Each entry is a bare value (shown as its string) OR a
 # `value => label` pair — the bound variable takes `value`, while `label` is what's displayed (and
 # may carry `$math$`/markdown, rendered for Radio). Stored as `[{value,label}]`; the value keeps
@@ -313,7 +382,8 @@ TextArea(default::AbstractString = ""; rows::Int = 3, label = nothing) =
 # Returns (specs, labeled): specs is `[{value,label}]`; labeled is true if ANY option was a
 # `value => label` pair (→ the widget binds a `Choice` so the label is reachable).
 function _norm_options(options)
-    specs = Dict{String,Any}[]; labeled = false
+    specs = Dict{String,Any}[]
+    labeled = false
     for o in options
         if o isa Pair
             labeled = true
@@ -325,38 +395,59 @@ function _norm_options(options)
     return specs, labeled
 end
 _opt_values(opts) = Any[o isa AbstractDict ? o["value"] : o for o in opts]
-_opt_default(default, vals) = default === nothing ? (isempty(vals) ? nothing : first(vals)) :
-                              (default isa Pair ? default.first : default)
-_opt_params(label, specs, labeled) = begin
+function _opt_default(default, vals)
+    return if default === nothing
+        (isempty(vals) ? nothing : first(vals))
+    else
+        (default isa Pair ? default.first : default)
+    end
+end
+function _opt_params(label, specs, labeled)
     p = merge(_wparams(label), Dict{String,Any}("options" => specs))
     labeled && (p["labeled"] = true)   # bind a Choice (value + label) rather than the bare value
-    p
+    return p
 end
-function Select(options, default = nothing; label = nothing)
+function Select(options, default=nothing; label=nothing)
     specs, labeled = _norm_options(options)
-    return Widget("select", _opt_params(label, specs, labeled), _opt_default(default, _opt_values(specs)))
+    return Widget(
+        "select", _opt_params(label, specs, labeled), _opt_default(default, _opt_values(specs))
+    )
 end
-function Radio(options, default = nothing; label = nothing)
+function Radio(options, default=nothing; label=nothing)
     specs, labeled = _norm_options(options)
-    return Widget("radio", _opt_params(label, specs, labeled), _opt_default(default, _opt_values(specs)))
+    return Widget(
+        "radio", _opt_params(label, specs, labeled), _opt_default(default, _opt_values(specs))
+    )
 end
-function MultiSelect(options, default = Any[]; label = nothing)   # compact multi-select dropdown (long lists)
+function MultiSelect(options, default=Any[]; label=nothing)   # compact multi-select dropdown (long lists)
     specs, labeled = _norm_options(options)
-    return Widget("multiselect", _opt_params(label, specs, labeled), Any[d isa Pair ? d.first : d for d in default])
+    return Widget(
+        "multiselect",
+        _opt_params(label, specs, labeled),
+        Any[d isa Pair ? d.first : d for d in default],
+    )
 end
-function MultiCheckBox(options, default = Any[]; label = nothing)  # checkbox list (small discrete sets)
+function MultiCheckBox(options, default=Any[]; label=nothing)  # checkbox list (small discrete sets)
     specs, labeled = _norm_options(options)
-    return Widget("multicheck", _opt_params(label, specs, labeled), Any[d isa Pair ? d.first : d for d in default])
+    return Widget(
+        "multicheck",
+        _opt_params(label, specs, labeled),
+        Any[d isa Pair ? d.first : d for d in default],
+    )
 end
 _is_multi(kind) = kind == "multiselect" || kind == "multicheck"
-ColorPicker(default::AbstractString = "#3aa0ff"; label = nothing) = Widget("color", _wparams(label), String(default))
-DateField(default = ""; label = nothing) = Widget("date", _wparams(label), string(default))
-TimeField(default = ""; label = nothing) = Widget("time", _wparams(label), string(default))
-Button(label::AbstractString = "Click") = Widget("button", Dict{String,Any}("label" => String(label)), 0)
+function ColorPicker(default::AbstractString="#3aa0ff"; label=nothing)
+    return Widget("color", _wparams(label), String(default))
+end
+DateField(default=""; label=nothing) = Widget("date", _wparams(label), string(default))
+TimeField(default=""; label=nothing) = Widget("time", _wparams(label), string(default))
+function Button(label::AbstractString="Click")
+    return Widget("button", Dict{String,Any}("label" => String(label)), 0)
+end
 # A DRIVEN control: an animation player pushes its current 1-based frame index here (browser→Julia,
 # throttled), so `@bind t playhead(anim)` lets other cells react to playback. It has no input of its
 # own — the player IS the control. Links to its animation by the manifest's animId.
-function playhead(anim; label = nothing)
+function playhead(anim; label=nothing)
     p = _wparams(label)
     p["animId"] = hasproperty(anim, :manifest) ? String(get(anim.manifest, "animId", "")) : ""
     return Widget("playhead", p, 1)
@@ -369,13 +460,15 @@ end
 # `_wrap_choice` (mirrors how a labeled Select stores the bare value but hands the user a `Choice`).
 # `maxrows` caps the rendered/selectable rows so a huge frame stays snappy (truncation is flagged);
 # `default` is an optional 1-based initial row.
-function TableSelect(data; default = nothing, label = nothing, maxrows::Integer = 200)
+function TableSelect(data; default=nothing, label=nothing, maxrows::Integer=200)
     st = slate_table(data)   # accepts anything slate_table does (Tables.jl source, Vector{NamedTuple}, …)
     n = min(length(st.rows), Int(maxrows))
     p = _wparams(label)
     p["columns"] = Any[_col_wire(c) for c in st.columns]   # object-form columns (name/type/align/format)
     p["rows"] = st.rows[1:n]
-    o = Dict{String,Any}("nrows" => get(st.opts, "nrows", length(st.rows)), "ncols" => length(st.columns))
+    o = Dict{String,Any}(
+        "nrows" => get(st.opts, "nrows", length(st.rows)), "ncols" => length(st.columns)
+    )
     length(st.rows) > n && (o["truncated"] = true)
     p["opts"] = o
     return Widget("tableselect", p, default === nothing ? 0 : clamp(Int(default), 0, n))
@@ -400,12 +493,29 @@ end
 # value round-trips through `coerce_bind`'s identity default (unknown kinds pass through), so a
 # string-valued custom widget needs no server-side coercion. Example:
 #   @bind ans custom_widget("mathfield"; label = "your answer")
-custom_widget(kind::AbstractString, default = ""; kwargs...) =
-    Widget(String(kind), Dict{String,Any}(String(k) => v for (k, v) in kwargs), default)
+function custom_widget(kind::AbstractString, default=""; kwargs...)
+    return Widget(String(kind), Dict{String,Any}(String(k) => v for (k, v) in kwargs), default)
+end
 
-const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :TextArea,
-                       :Select, :Radio, :MultiSelect, :MultiCheckBox, :ColorPicker, :DateField,
-                       :TimeField, :Button, :playhead, :TableSelect, :custom_widget)
+const _WIDGET_CTORS = (
+    :Slider,
+    :NumberField,
+    :Checkbox,
+    :Toggle,
+    :TextField,
+    :TextArea,
+    :Select,
+    :Radio,
+    :MultiSelect,
+    :MultiCheckBox,
+    :ColorPicker,
+    :DateField,
+    :TimeField,
+    :Button,
+    :playhead,
+    :TableSelect,
+    :custom_widget,
+)
 
 # ── Value lifecycle ───────────────────────────────────────────────────────────
 # `coerce_bind` (browser value → Julia value), `reconcile_bind` (persistence across a bind-cell
@@ -430,7 +540,7 @@ function _lookup_option(w::Widget, v)
     end
     return (string(v), 0)
 end
-_choice(w::Widget, v) = (li = _lookup_option(w, v); Choice(v, li[1], li[2]))
+_choice(w::Widget, v) = (li=_lookup_option(w, v); Choice(v, li[1], li[2]))
 
 # Register the value lifecycle for each built-in kind through SlateExtensionsBase's `register_kind!`
 # — the SAME seam a third-party widget uses. Hooks: coerce(w, v) (browser value → Julia value),
@@ -440,63 +550,76 @@ function _register_builtin_kinds!()
     # Slider / Number — numeric. Key the int-vs-float coercion on the widget's DEFAULT type, not
     # `step`: a Float64 slider (`Slider(0.0, 10.0)`) defaults step to 1 (Integer), which would else
     # truncate its values to Int. Reconcile keeps the value while still within [min,max].
-    numcoerce(w, v) = v isa Number ? ((w.default isa Integer && isinteger(v)) ? Int(round(v)) : float(v)) : v
+    numcoerce(w, v) =
+        v isa Number ? ((w.default isa Integer && isinteger(v)) ? Int(round(v)) : float(v)) : v
     function numrecon(ow, ov, nw)
-        lo = get(nw.params, "min", -Inf); hi = get(nw.params, "max", Inf)
-        (ov isa Number && lo <= ov <= hi) ? ov : nw.default
+        lo = get(nw.params, "min", -Inf)
+        hi = get(nw.params, "max", Inf)
+        return (ov isa Number && lo <= ov <= hi) ? ov : nw.default
     end
     for k in ("slider", "number")
-        register_kind!(k; coerce = numcoerce, reconcile = numrecon)
+        register_kind!(k; coerce=numcoerce, reconcile=numrecon)
     end
     # Checkbox / Toggle — boolean (reconcile keeps the value: the default).
     for k in ("checkbox", "toggle")
-        register_kind!(k; coerce = (w, v) -> v === true || v == 1)
+        register_kind!(k; coerce=(w, v) -> v === true || v == 1)
     end
     # Button / playhead — an integer counter / frame index.
     for k in ("button", "playhead")
-        register_kind!(k; coerce = (w, v) -> v isa Number ? Int(round(v)) : v)
+        register_kind!(k; coerce=(w, v) -> v isa Number ? Int(round(v)) : v)
     end
     # TableSelect — the browser sends the clicked row's 1-based index; clamp to the known rows
     # (0 = none). The user-facing value is that row as a NamedTuple.
-    register_kind!("tableselect";
-        coerce = function (w, v)
+    register_kind!(
+        "tableselect";
+        coerce=function (w, v)
             n = length(get(w.params, "rows", ()))
             i = v isa Number ? Int(round(v)) : 0
-            (1 <= i <= n) ? i : 0
+            return (1 <= i <= n) ? i : 0
         end,
-        reconcile = function (ow, ov, nw)
+        reconcile=function (ow, ov, nw)
             n = length(get(nw.params, "rows", ()))
-            (ov isa Integer && 1 <= ov <= n) ? ov : nw.default
+            return (ov isa Integer && 1 <= ov <= n) ? ov : nw.default
         end,
-        wrap = (w, v) -> _row_namedtuple(w, v isa Integer ? v : 0))
+        wrap=(w, v) -> _row_namedtuple(w, v isa Integer ? v : 0),
+    )
     # Select / Radio — the browser sends the option's stringified value; map it back to the real
     # value. A labeled option binds a `Choice` (value + label); a bare option stays its value.
     for k in ("select", "radio")
-        register_kind!(k;
-            coerce = function (w, v)
+        register_kind!(
+            k;
+            coerce=function (w, v)
                 for v0 in _opt_values(get(w.params, "options", ()))
                     string(v0) == string(v) && return v0
                 end
                 return v
             end,
-            reconcile = (ow, ov, nw) -> (ov in _opt_values(get(nw.params, "options", ()))) ? ov : nw.default,
-            wrap = (w, v) -> get(w.params, "labeled", false) === true ? _choice(w, v) : v)
+            reconcile=(ow, ov, nw) ->
+                (ov in _opt_values(get(nw.params, "options", ()))) ? ov : nw.default,
+            wrap=(w, v) -> get(w.params, "labeled", false) === true ? _choice(w, v) : v,
+        )
     end
     # MultiSelect / MultiCheckBox — a set of stringified values; keep those still in the option set.
     # Labeled → a `Selection` (value+label dict); bare → the value vector.
     for k in ("multiselect", "multicheck")
-        register_kind!(k;
-            coerce = function (w, v)
+        register_kind!(
+            k;
+            coerce=function (w, v)
                 vals = _opt_values(get(w.params, "options", ()))
                 sel = v isa AbstractVector ? v : (v === nothing ? Any[] : Any[v])
                 ss = Set(string(s) for s in sel)
-                Any[v0 for v0 in vals if string(v0) in ss]
+                return Any[v0 for v0 in vals if string(v0) in ss]
             end,
-            reconcile = function (ow, ov, nw)
+            reconcile=function (ow, ov, nw)
                 vals = _opt_values(get(nw.params, "options", ()))
-                ov isa AbstractVector ? [v for v in ov if v in vals] : nw.default
+                return ov isa AbstractVector ? [v for v in ov if v in vals] : nw.default
             end,
-            wrap = (w, v) -> get(w.params, "labeled", false) === true ? Selection(Choice[_choice(w, x) for x in v]) : v)
+            wrap=(w, v) -> if get(w.params, "labeled", false) === true
+                Selection(Choice[_choice(w, x) for x in v])
+            else
+                v
+            end,
+        )
     end
     return nothing
 end
@@ -526,17 +649,19 @@ function _do_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock, n
             reconcile_bind(prev[1], prev[2], w)   # keeps the value unless the new spec rejects it
         end
         reg[name] = (w, v)
-        v
+        return v
     end
     s = get(task_local_storage(), _BIND_SINK_KEY, nothing)
-    s === nothing || push!(s, (name = name, kind = w.kind, params = w.params, value = val))
+    s === nothing || push!(s, (name=name, kind=w.kind, params=w.params, value=val))
     return wrap_value(w, val)        # user gets a Choice for labeled option widgets; bare value otherwise
 end
 
 # Host sets a control's value (browser change). Updates the registry so a later
 # re-run of the bind cell preserves it; coerces against the known widget. Locked — a browser change
 # can land while a parallel eval batch is mutating the same registry.
-function _do_set_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock, name::Symbol, value)
+function _do_set_bind(
+    reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock, name::Symbol, value
+)
     lock(reglock) do
         prev = get(reg, name, nothing)
         if prev === nothing
@@ -548,9 +673,11 @@ function _do_set_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLoc
         # value IS its click count, so this lets a caller (an agent / a script) press the button
         # without knowing — or racing — the current count. The browser always sends an explicit
         # value, so its path is unchanged.
-        cv = value === nothing && w.kind == "button" ?
-             (prev[2] isa Integer ? prev[2] : 0) + 1 :
-             coerce_bind(w, value)
+        cv = if value === nothing && w.kind == "button"
+            (prev[2] isa Integer ? prev[2] : 0) + 1
+        else
+            coerce_bind(w, value)
+        end
         reg[name] = (w, cv)
         return cv
     end
@@ -583,18 +710,37 @@ end
 # A value outside the domain is a WARNING, not an error. This runs during live editing — precisely when
 # a slider's range is being changed — and breaking the cell there would be hostile; the live result is
 # still correct, only the shipped coverage is stale.
-function _do_replay(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
-                    sweeps::Dict{String,Any}, name::Symbol, f)
-    entry = lock(reglock) do; get(reg, name, nothing); end
-    entry === nothing && error("@replay: `" * String(name) * "` is not a @bind control in this notebook " *
-                               "(declare it with `@bind " * String(name) * " Slider(…)` first)")
+function _do_replay(
+    reg::Dict{Symbol,Tuple{Widget,Any}},
+    reglock::ReentrantLock,
+    sweeps::Dict{String,Any},
+    name::Symbol,
+    f,
+)
+    entry = lock(reglock) do ;
+        return get(reg, name, nothing)
+    end
+    entry === nothing && error(
+        "@replay: `" *
+        String(name) *
+        "` is not a @bind control in this notebook " *
+        "(declare it with `@bind " *
+        String(name) *
+        " Slider(…)` first)",
+    )
     w, cur = entry
     dom = bind_domain(w)
     # Checked HERE, cheaply, even though nothing is swept yet: an author who used an unbounded control
     # should learn while writing the cell, not from an export that quietly shipped an inert knob.
-    dom === nothing && error("@replay: `" * String(name) * "` is a `" * String(w.kind) * "` control, " *
-                             "whose domain is not finite — there is no fixed set of values to compute " *
-                             "ahead of time. Use a Slider, Select, Radio, Checkbox or Toggle.")
+    dom === nothing && error(
+        "@replay: `" *
+        String(name) *
+        "` is a `" *
+        String(w.kind) *
+        "` control, " *
+        "whose domain is not finite — there is no fixed set of values to compute " *
+        "ahead of time. Use a Slider, Select, Radio, Checkbox or Toggle.",
+    )
     # LIVE THIS IS A PASS-THROUGH. Only the current value is computed, so the cell costs exactly what the
     # bare expression costs — a hundred-position control does not re-sweep every time the author edits
     # something. What it leaves behind is METADATA: the closure and the control, registered under an id
@@ -606,15 +752,14 @@ function _do_replay(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
     cell = get(task_local_storage(), :slate_cell, "")
     id = string(cell, ":", name)
     dom_any = Any[d for d in dom]
-    sweeps[id] = (; name = String(name), f = f, domain = dom_any, cell = String(cell),
-                    kind = String(w.kind))
+    sweeps[id] = (; name=String(name), f=f, domain=dom_any, cell=String(cell), kind=String(w.kind))
     i = findfirst(isequal(cur), dom)
     if i === nothing
         # The control sits outside what its widget now reports (its range was edited between runs). The
         # live value is still exactly right — warn about EXPORT COVERAGE, and never break the cell, since
         # this happens precisely while someone is adjusting a slider's range.
         @warn "@replay: `$(name)` is currently $(cur), which is not in its control's domain — the live " *
-              "value is correct, but an export would have no data for this position" domain = dom
+            "value is correct, but an export would have no data for this position" domain = dom
     end
     return ReplayArray(collect(f(cur)), id, String(name), i === nothing ? 0 : i, dom_any)
 end
@@ -641,17 +786,22 @@ function _replay_plan(sweeps::Dict{String,Any})
     out = Dict{String,Any}()
     for (id, s) in sweeps
         n = length(s.domain)
-        rec = Dict{String,Any}("control" => s.name, "cell" => s.cell, "values" => n,
-                               # Which marks a resolution setting actually affects: only a slider is
-                               # coarsened; a categorical control keeps every option.
-                               "kind" => s.kind, "strideable" => lowercase(s.kind) == "slider")
+        rec = Dict{String,Any}(
+            "control" => s.name,
+            "cell" => s.cell,
+            "values" => n,
+            # Which marks a resolution setting actually affects: only a slider is
+            # coarsened; a categorical control keeps every option.
+            "kind" => s.kind,
+            "strideable" => lowercase(s.kind) == "slider",
+        )
         try
             t0 = time()
             one = s.f(first(s.domain))
             rec["seconds_per_value"] = time() - t0
             A = replay_stack([one])
             rec["bytes_per_value"] = length(A) * sizeof(eltype(A))
-            rec["slice"] = collect(Int, size(A)[1:end-1])
+            rec["slice"] = collect(Int, size(A)[1:(end - 1)])
         catch
             # No estimate — the dialog shows the count alone rather than a number it cannot stand behind.
         end
@@ -663,9 +813,13 @@ end
 # `strides` is per-mark (id → n), not one global setting: a notebook mixes a 4-option Select with a
 # 500-position slider, and the useful decision is almost always about ONE of them. A missing id means
 # stride 1.
-function _run_replay_sweeps(sweeps::Dict{String,Any}; only = nothing,
-                            strides::AbstractDict = Dict{String,Int}(), stride::Int = 1,
-                            progress = (id, i, n) -> nothing)
+function _run_replay_sweeps(
+    sweeps::Dict{String,Any};
+    only=nothing,
+    strides::AbstractDict=Dict{String,Int}(),
+    stride::Int=1,
+    progress=(id, i, n) -> nothing,
+)
     out = Dict{String,Any}()
     for (id, s) in sweeps
         (only === nothing || id in only) || continue
@@ -691,12 +845,18 @@ function _run_replay_sweeps(sweeps::Dict{String,Any}; only = nothing,
         # be dropped and the page would resolve nothing. Returning them lets the export register the
         # asset itself, which is also where it decides how to represent it (narrow / compress).
         out[id] = Dict{String,Any}(
-            "name" => s.name * "_replay", "control" => s.name, "cell" => s.cell,
-            "domain" => dom, "slice" => collect(Int, size(A)[1:end-1]),
+            "name" => s.name * "_replay",
+            "control" => s.name,
+            "cell" => s.cell,
+            "domain" => dom,
+            "slice" => collect(Int, size(A)[1:(end - 1)]),
             "dtype" => _replay_dtype(eltype(A)),
-            "shape" => collect(Int, size(A)), "order" => "col",
-            "bytes" => length(A) * sizeof(eltype(A)), "seconds" => time() - t0,
-            "b64" => Base64.base64encode(reinterpret(UInt8, vec(A))))
+            "shape" => collect(Int, size(A)),
+            "order" => "col",
+            "bytes" => length(A) * sizeof(eltype(A)),
+            "seconds" => time() - t0,
+            "b64" => Base64.base64encode(reinterpret(UInt8, vec(A))),
+        )
     end
     return out
 end
@@ -704,10 +864,10 @@ end
 # The compact dtype tag the page maps to a TypedArray — the same vocabulary `save_asset` uses.
 _replay_dtype(::Type{Float32}) = "f32"
 _replay_dtype(::Type{Float64}) = "f64"
-_replay_dtype(::Type{Int32})   = "i32"
-_replay_dtype(::Type{Int16})   = "i16"
-_replay_dtype(::Type{UInt8})   = "u8"
-_replay_dtype(::Type)          = "f64"
+_replay_dtype(::Type{Int32}) = "i32"
+_replay_dtype(::Type{Int16}) = "i16"
+_replay_dtype(::Type{UInt8}) = "u8"
+_replay_dtype(::Type) = "f64"
 
 # `WebPage` (compose a self-contained HTML page from CSS/HTML/JS, rendering to ONE `text/html`
 # output that works live and in a static export) is defined in SlateExtensionsBase and imported
@@ -721,7 +881,9 @@ _replay_dtype(::Type)          = "f64"
 # and `haskey` work as usual; a non-identifier JSON key lands as `var"my-key"` (reach it via
 # `getproperty(args, Symbol("my-key"))`). Type-unstable by construction — fine for the fixed arg shapes
 # a given call uses (the field names ARE the type); don't route huge dynamic key-sets through it.
-_slate_args(x::AbstractDict) = NamedTuple{Tuple(Symbol.(keys(x)))}(Tuple(_slate_args(v) for v in values(x)))
+function _slate_args(x::AbstractDict)
+    return NamedTuple{Tuple(Symbol.(keys(x)))}(Tuple(_slate_args(v) for v in values(x)))
+end
 _slate_args(x::AbstractVector) = Any[_slate_args(v) for v in x]
 # A raw byte buffer (a `slateCall` binary buffer, delivered as `args.__slate_buffers`) is already a plain
 # Base type — pass it through WHOLE. Without this it would hit the `AbstractVector` clause above and explode
@@ -734,19 +896,37 @@ _slate_args(x) = x
 # the JS caller (framework-side, correlated to THIS call — the handler never sees a token or channel); a
 # 1-parameter handler `args -> …` is called with just the args, so the 1-arg form keeps working. Arity is
 # read from the handler's first method (an anonymous handler has exactly one).
-_slate_handler_nparams(f) = try; first(methods(f)).nargs - 1; catch; 1; end
-_invoke_slate_handler(f, sargs, progress) =
-    _slate_handler_nparams(f) >= 2 ? Base.invokelatest(f, sargs, progress) : Base.invokelatest(f, sargs)
+_slate_handler_nparams(f) =
+    try
+        first(methods(f)).nargs - 1
+    catch
+        1
+    end
+function _invoke_slate_handler(f, sargs, progress)
+    return if _slate_handler_nparams(f) >= 2
+        Base.invokelatest(f, sargs, progress)
+    else
+        Base.invokelatest(f, sargs)
+    end
+end
 
 # ── The namespace contract ────────────────────────────────────────────────────
 # Inject the COMPLETE, identical set of notebook-namespace names into module `m`.
 # Context-specific helper *implementations* (echart/tables/refresh) are passed in;
 # the SET of names, the widget constructors, and the `@bind` macro are defined here
 # once. The per-eval `@bind` sink is task-local (run_capture seeds it); returns the populated module.
-function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTable,
-                                slate_query, slate_refresh, slate_progress = (frac; msg = "", id = "", done = false) -> nothing,
-                                slate_emit = (channel, data) -> nothing,
-                                assetbase = () -> "")
+function _populate_notebook_ns!(
+    m::Module;
+    echart,
+    EChart,
+    slate_table,
+    SlateTable,
+    slate_query,
+    slate_refresh,
+    slate_progress=(frac; msg="", id="", done=false) -> nothing,
+    slate_emit=(channel, data) -> nothing,
+    assetbase=() -> "",
+)
     Core.eval(m, :(const echart = $echart))
     Core.eval(m, :(const EChart = $EChart))
     Core.eval(m, :(const WebPage = $WebPage))     # compose a self-contained HTML page (CSS/HTML/JS)
@@ -770,18 +950,24 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # zero-overhead path). No `@everywhere` MACRO is injected — it would clash with `Distributed.@everywhere`.
     Core.eval(m, :(const slate_effect = $_slate_effect))      # slate_effect(kind; names=…, data...) → declare a cell effect
     Core.eval(m, :(const save_asset = $_save_asset))          # save_asset(name, data) → AssetRef (write-side dual of @asset)
-    Core.eval(m, :(slate_everywhere(names::Symbol...) = slate_effect(:everywhere; names = collect(names))))
+    Core.eval(
+        m, :(slate_everywhere(names::Symbol...) = slate_effect(:everywhere; names=collect(names)))
+    )
     # JS→Julia CALLS — the request/response counterpart to `slate_emit`'s push. A cell registers
     # `slate_on("channel", args -> result)`; browser JS calls `await window.slateCall("channel", args)`.
     # The `__slate_call` worker tool (dispatched off the page WebSocket on the interactive thread) looks
     # the handler up in this per-namespace registry and invokes it. Fresh dict per namespace, so a
     # rebuild drops stale closures; a cell re-run just replaces its channel's handler.
     Core.eval(m, :(const __slate_handlers = $(Dict{String,Any}())))
-    Core.eval(m, :(const slate_on = (channel, f) -> (__slate_handlers[string(channel)] = f; nothing)))
+    Core.eval(
+        m, :(const slate_on = (channel, f) -> (__slate_handlers[string(channel)] = f; nothing))
+    )
     # Drop a JS→Julia handler — the symmetric counterpart to `slate_on`. A package that wires a
     # TRANSIENT per-cell handler (e.g. a Bonito session's inbox feed, keyed by its session id) removes
     # it here on teardown so a re-run/close doesn't leak dead closures. A no-op for an absent channel.
-    Core.eval(m, :(const slate_off = (channel) -> (delete!(__slate_handlers, string(channel)); nothing)))
+    Core.eval(
+        m, :(const slate_off = (channel) -> (delete!(__slate_handlers, string(channel)); nothing))
+    )
     # Per-cell CLEANUP callbacks (cell id => [fns]). A cell — or a package it calls — registers
     # `slate_on_cleanup(f)` to release a LIVE per-cell resource (a Bonito `Session`, a subscription, a
     # spawned task) it set up during eval. Slate runs + clears a cell's callbacks BEFORE it re-evaluates
@@ -789,18 +975,37 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # rebuild — so re-running or dropping a cell doesn't leak what the last run allocated. Keyed by the
     # executing cell (task-local `:slate_cell`, seeded by run_capture); a rebuild drops the whole dict.
     Core.eval(m, :(const __slate_cleanups = $(Dict{String,Vector{Any}}())))
-    Core.eval(m, :(const slate_on_cleanup = (f) -> (push!(get!($(Vector{Any}), __slate_cleanups,
-        get(task_local_storage(), :slate_cell, "")), f); nothing)))
+    Core.eval(
+        m,
+        :(
+            const slate_on_cleanup =
+                (f) -> (push!(
+                        get!(
+                            $(Vector{Any}),
+                            __slate_cleanups,
+                            get(task_local_storage(), :slate_cell, ""),
+                        ),
+                        f,
+                    );
+                    nothing)
+        ),
+    )
     # Invoke a `slate_on` handler FROM Julia (same as `window.slateCall` does from JS, but in-process —
     # no round-trip). For testing a handler in a cell, or wiring one to a control:
     # `@onclick go slate_call("compute", (n = n_slider,))`. Errors if the channel isn't registered.
-    Core.eval(m, :(function slate_call(channel, args = nothing)
-        f = get(__slate_handlers, string(channel), nothing)
-        f === nothing && error("no slate_on handler registered for channel '" * string(channel) * "'")
-        # NamedTuple-shape args (same as the JS call path — `args.field`); a 2-arg handler gets a no-op
-        # progress here (in-process test invoke has no browser to stream to).
-        return $(_invoke_slate_handler)(f, $(_slate_args)(args), (p) -> nothing)
-    end))
+    Core.eval(
+        m,
+        :(
+            function slate_call(channel, args=nothing)
+                f = get(__slate_handlers, string(channel), nothing)
+                f === nothing &&
+                    error("no slate_on handler registered for channel '" * string(channel) * "'")
+                # NamedTuple-shape args (same as the JS call path — `args.field`); a 2-arg handler gets a no-op
+                # progress here (in-process test invoke has no browser to stream to).
+                return $(_invoke_slate_handler)(f, $(_slate_args)(args), (p) -> nothing)
+            end
+        ),
+    )
     Core.eval(m, :(const slate_fingerprint = $slate_fingerprint))   # canonical value hash (fingerprint.jl)
     Core.eval(m, :(const slate_memo_stats = $slate_memo_stats))     # durable memo store: shape
     Core.eval(m, :(const slate_memo_entries = $slate_memo_entries)) # durable memo store: entry listing
@@ -823,28 +1028,52 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # The fire path (`__slate_set_bind` → `__on_fire!`) runs on a server task with no context; this supplies it.
     # `invokelatest`: `slate_on` was just `Core.eval`'d into `m` above, i.e. bound in a NEWER world than
     # this running method — reading it directly warns under Julia 1.12's global world-age rules.
-    bind_ctx = (; region = nothing, notebook = "", side = "", emit = slate_emit,
-                  regions = Symbol[], effect = _slate_effect,
-                  on = Base.invokelatest(getfield, m, :slate_on))
+    bind_ctx = (;
+        region=nothing,
+        notebook="",
+        side="",
+        emit=slate_emit,
+        regions=Symbol[],
+        effect=_slate_effect,
+        on=Base.invokelatest(getfield, m, :slate_on),
+    )
     Core.eval(m, :(const __slate_bind_registry = $reg))
     Core.eval(m, :(const __slate_bind = $((name, w) -> _do_bind(reg, reglock, name, w))))
     # Browser value change: coerce + update registry, set the global so readers see it, then
     # DISPATCH to any registered @onclick handler (so a button is an event — the handler fires
     # here, NOT by recomputing a cell that reads the button). Returns the coerced value for the host.
-    Core.eval(m, :(const __slate_set_bind = $((name, value) -> begin
-        cv = _do_set_bind(reg, reglock, name, value)
-        w = lock(reglock) do; reg[name][1]; end
-        wv = wrap_value(w, cv)
-        Core.eval(m, Expr(:(=), name, wv))                    # user var is a Choice (labeled); host gets bare cv
-        h = get(handlers, name, nothing)
-        h === nothing || __on_fire!(tokens, name, h, wv, bind_ctx)   # dispatch @onclick/@onchange (streaming-capable)
-        cv
-    end)))
+    Core.eval(
+        m,
+        :(
+            const __slate_set_bind = $((name, value) -> begin
+                cv = _do_set_bind(reg, reglock, name, value)
+                w = lock(reglock) do ;
+                    reg[name][1]
+                end
+                wv = wrap_value(w, cv)
+                Core.eval(m, Expr(:(=), name, wv))                    # user var is a Choice (labeled); host gets bare cv
+                h = get(handlers, name, nothing)
+                h === nothing || __on_fire!(tokens, name, h, wv, bind_ctx)   # dispatch @onclick/@onchange (streaming-capable)
+                cv
+            end)
+        ),
+    )
     # `@bind name W(args…)` → assign the reconciled value, then return `nothing` so a
     # bind cell shows no output (the assignment value isn't displayed).
-    Core.eval(m, :(macro bind(name, widget)
-        esc(Expr(:block, Expr(:(=), name, Expr(:call, :__slate_bind, QuoteNode(name), widget)), nothing))
-    end))
+    Core.eval(
+        m,
+        :(
+            macro bind(name, widget)
+                esc(
+                    Expr(
+                        :block,
+                        Expr(:(=), name, Expr(:call, :__slate_bind, QuoteNode(name), widget)),
+                        nothing,
+                    ),
+                )
+            end
+        ),
+    )
     # `@replay ctl expr` — compute `expr` for every value `ctl` can take, ship the results, return the
     # slice for the current one. The body becomes a one-argument closure whose PARAMETER is the control's
     # own name, so the expression is untouched: `movavg(infl, w)` reads the `w` being swept, shadowing the
@@ -854,22 +1083,41 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # reads it long after the cells ran; a re-run replaces its own entries in place.
     replay_sweeps = Dict{String,Any}()
     Core.eval(m, :(const __slate_replay_sweeps = $replay_sweeps))
-    Core.eval(m, :(const __slate_replay = $((name, f) -> _do_replay(reg, reglock, replay_sweeps, name, f))))
+    Core.eval(
+        m,
+        :(const __slate_replay = $((name, f) -> _do_replay(reg, reglock, replay_sweeps, name, f))),
+    )
     # The export's entry point: run the registered sweeps and pack them. Deliberately NOT called by any
     # ordinary run — the whole point of the split is that authoring never pays for it.
-    Core.eval(m, :(const __slate_run_replays = $((; only = nothing, stride = 1,
-                                                    strides = Dict{String,Int}(),
-                                                    progress = (id, i, n) -> nothing) ->
-        _run_replay_sweeps(replay_sweeps; only = only, stride = stride, strides = strides,
-                           progress = progress))))
+    Core.eval(
+        m,
+        :(
+            const __slate_run_replays = $(
+                (;
+                    only=nothing,
+                    stride=1,
+                    strides=Dict{String,Int}(),
+                    progress=(id, i, n) -> nothing,
+                ) -> _run_replay_sweeps(
+                    replay_sweeps;
+                    only=only,
+                    stride=stride,
+                    strides=strides,
+                    progress=progress,
+                )
+            )
+        ),
+    )
     # What an export needs BEFORE committing to a sweep: which controls are replayable, how many values
     # each would compute, and where they live — so a size/time estimate can be shown, and skipped or
     # strided, without running anything.
     Core.eval(m, :(const __slate_replay_plan = $(() -> _replay_plan(replay_sweeps))))
-    Core.eval(m, :(macro replay(ctl, body)
-        ctl isa Symbol || error("@replay expects a control name first: `@replay w expr`")
-        esc(Expr(:call, :__slate_replay, QuoteNode(ctl), Expr(:->, ctl, body)))
-    end))
+    Core.eval(
+        m, :(macro replay(ctl, body)
+            ctl isa Symbol || error("@replay expects a control name first: `@replay w expr`")
+            esc(Expr(:call, :__slate_replay, QuoteNode(ctl), Expr(:->, ctl, body)))
+        end)
+    )
     # `@trace begin … end` — rewrite the block to record each assignment into `__slate_trace_sink`
     # while the cell STILL RETURNS ITS REAL LAST VALUE (so the output is normal; the trace shows in
     # the inspector popup). `run_capture` reads the sink into the wire `trace` field. The sink is
@@ -887,12 +1135,17 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # `@reactive name = init` — sugar for `name = reactive(:name, init)`. Derives the reactive's NAME
     # from the binding, so the name (which routes the refresh to the cells that read `name`) can never
     # drift from the variable — removing the `reactive(:name, …)` double-spell footgun.
-    Core.eval(m, :(macro reactive(ex)
-        (ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol) ||
-            error("@reactive expects `name = init` (e.g. `@reactive level = 0`)")
-        nm = ex.args[1]
-        esc(Expr(:(=), nm, Expr(:call, :reactive, QuoteNode(nm), ex.args[2])))
-    end))
+    Core.eval(
+        m,
+        :(
+            macro reactive(ex)
+                (ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol) ||
+                    error("@reactive expects `name = init` (e.g. `@reactive level = 0`)")
+                nm = ex.args[1]
+                esc(Expr(:(=), nm, Expr(:call, :reactive, QuoteNode(nm), ex.args[2])))
+            end
+        ),
+    )
     # `@onclick`/`@onchange` REGISTER `body` as the handler for a control (they do NOT read the
     # control, so a change doesn't recompute this cell — see __slate_set_bind for the dispatch).
     # Re-running the cell just re-registers (capturing the latest closure); it never fires.
@@ -900,14 +1153,33 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # `cancel(:ctrl)` — stop the running handler for a control (e.g. from a Stop button).
     Core.eval(m, :(const cancel = $((nm::Symbol) -> __on_cancel!(tokens, nm))))
     # `@onclick btn body` — fire `body` on a click (the click count value is ignored).
-    Core.eval(m, :(macro onclick(btn, body)
-        esc(Expr(:call, :__on_register, QuoteNode(btn), Expr(:(->), Expr(:tuple, :_), body)))
-    end))
+    Core.eval(
+        m,
+        :(
+            macro onclick(btn, body)
+                esc(
+                    Expr(:call, :__on_register, QuoteNode(btn), Expr(:(->), Expr(:tuple, :_), body))
+                )
+            end
+        ),
+    )
     # `@onchange ctrl body` — fire `body` whenever `ctrl` changes; inside the body `ctrl` is the NEW
     # value (a handler parameter, so the cell doesn't read the global → no recompute on change).
-    Core.eval(m, :(macro onchange(ctrl, body)
-        esc(Expr(:call, :__on_register, QuoteNode(ctrl), Expr(:(->), Expr(:tuple, ctrl), body)))
-    end))
+    Core.eval(
+        m,
+        :(
+            macro onchange(ctrl, body)
+                esc(
+                    Expr(
+                        :call,
+                        :__on_register,
+                        QuoteNode(ctrl),
+                        Expr(:(->), Expr(:tuple, ctrl), body),
+                    ),
+                )
+            end
+        ),
+    )
     # ── Asset inclusion (`@asset` / `readfile`) ───────────────────────────────────
     # `@asset "portfolio.js"` reads a file (resolved relative to the notebook's PROJECT dir via
     # `assetbase`, or an absolute path) and returns its contents. Because the path is a source
@@ -916,21 +1188,31 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # `@asset bytes "logo.png"` → `Vector{UInt8}`. `readfile(path)` is the runtime escape hatch for a
     # COMPUTED path — not statically tracked (the documented dynamic caveat).
     Core.eval(m, :(const __slate_assetbase = $assetbase))
-    Core.eval(m, :(function __slate_readfile(p::AbstractString; bytes::Bool = false)
-        base = __slate_assetbase()
-        ap = isabspath(p) ? String(p) : joinpath(isempty(base) ? pwd() : base, String(p))
-        ap = expanduser(ap)   # a remote worker's asset base is `~/.cache/…` (tilde) — `read`/`open` don't expand it
-        return bytes ? read(ap) : read(ap, String)
-    end))
+    Core.eval(
+        m, :(function __slate_readfile(p::AbstractString; bytes::Bool=false)
+            base = __slate_assetbase()
+            ap = isabspath(p) ? String(p) : joinpath(isempty(base) ? pwd() : base, String(p))
+            ap = expanduser(ap)   # a remote worker's asset base is `~/.cache/…` (tilde) — `read`/`open` don't expand it
+            return bytes ? read(ap) : read(ap, String)
+        end)
+    )
     Core.eval(m, :(const readfile = __slate_readfile))
-    Core.eval(m, :(macro asset(args...)
-        bytes = false; path = nothing
-        for a in args
-            a === :bytes ? (bytes = true) : (path = a)
-        end
-        path === nothing && error("@asset needs a path, e.g. @asset \"file.js\" (or @asset bytes \"logo.png\")")
-        return esc(:(__slate_readfile($(path); bytes = $(bytes))))
-    end))
+    Core.eval(
+        m,
+        :(
+            macro asset(args...)
+                bytes = false;
+                path = nothing
+                for a in args
+                    a === :bytes ? (bytes = true) : (path = a)
+                end
+                path === nothing && error(
+                    "@asset needs a path, e.g. @asset \"file.js\" (or @asset bytes \"logo.png\")",
+                )
+                return esc(:(__slate_readfile($(path); bytes=($(bytes)))))
+            end
+        ),
+    )
     # ── Portable data storage (`datadir()` / `@sfile`) ────────────────────────────
     # `datadir()` is the notebook's canonical DATA directory — `<project>/data`, created on demand.
     # A stable place to read AND write data files without hardcoding a machine path, so the notebook
@@ -944,7 +1226,11 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
         # PER SITE, which is what lets `@sfile` follow the compute across a region boundary.
         r = strip(get(ENV, "KAIMONSLATE_DATADIR", ""))
         b = __slate_assetbase()
-        d = !isempty(r) ? String(r) : (isempty(b) ? joinpath(pwd(), "data") : joinpath(b, "data"))
+        d = if !isempty(r)
+            String(r)
+        else
+            (isempty(b) ? joinpath(pwd(), "data") : joinpath(b, "data"))
+        end
         try
             mkpath(d)
             gi = joinpath(d, ".gitignore")
@@ -959,7 +1245,10 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # which resolve differently (or not at all) on a remote site.
     Core.eval(m, :(function __slate_dpath(name::AbstractString)
         p = joinpath(datadir(), String(name))
-        try; mkpath(dirname(p)); catch; end
+        try
+            mkpath(dirname(p))
+        catch
+        end
         return p
     end))
     Core.eval(m, :(macro sfile(parts...)
@@ -981,20 +1270,28 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # same live or standalone. In the Slate engine this macro is never reached: `parse_report` unwraps
     # the `@md` skin and the markdown pipeline handles the cell. Returns a `Markdown.MD` (renders in a
     # display context; the value is discarded — hence inert — in a plain `julia file.jl` script run).
-    Core.eval(m, :(macro md(str)
-        str isa AbstractString ||
-            error("@md expects a string literal (e.g. @md\"\"\"# Title\"\"\")")
-        tmpl, exprs = $(_md_template)(String(str))
-        tokfn = $(_interp_token)
-        mdparse = $(Markdown.parse)
-        blk = Expr(:block, :(local __md_s = $tmpl))
-        for (i, e) in enumerate(exprs)
-            tok = tokfn(i)
-            push!(blk.args, :(__md_s = replace(__md_s, $tok => string($(esc(Base.Meta.parse(e)))))))
-        end
-        push!(blk.args, Expr(:call, $(_standalone_show_md), Expr(:call, mdparse, :__md_s)))
-        blk
-    end))
+    Core.eval(
+        m,
+        :(
+            macro md(str)
+                str isa AbstractString ||
+                    error("@md expects a string literal (e.g. @md\"\"\"# Title\"\"\")")
+                tmpl, exprs = $(_md_template)(String(str))
+                tokfn = $(_interp_token)
+                mdparse = $(Markdown.parse)
+                blk = Expr(:block, :(local __md_s = $tmpl))
+                for (i, e) in enumerate(exprs)
+                    tok = tokfn(i)
+                    push!(
+                        blk.args,
+                        :(__md_s = replace(__md_s, $tok => string($(esc(Base.Meta.parse(e)))))),
+                    )
+                end
+                push!(blk.args, Expr(:call, $(_standalone_show_md), Expr(:call, mdparse, :__md_s)))
+                blk
+            end
+        ),
+    )
     # ── Web cell (`@web html"…" css"…" js"…"`) ────────────────────────────────────
     # A web cell's SOURCE is a `@web(...)` call, so it evaluates like any code cell → a `WebPage`
     # (captured as HTML), live and standalone alike. The section macros name the language (the editor's
@@ -1002,58 +1299,98 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # substitution — HTML entity-escaped, CSS token-validated, JS as a JSON literal — so an interpolated
     # value can't break out of its context. `$`/`${}` are untouched (only `{{ }}` interpolates). The
     # bare section macros return their raw text, so `html"…"` used alone is just the string.
-    Core.eval(m, :(macro html_str(s); s; end))
-    Core.eval(m, :(macro css_str(s);  s; end))
-    Core.eval(m, :(macro js_str(s);   s; end))
-    Core.eval(m, :(macro web(args...)
-        tmplfn = $(_md_template)
-        tokfn  = $(_interp_token)
-        langfn = $(_web_section_lang)
-        escs   = (html = $(_web_esc_html), css = $(_web_esc_css), js = $(_web_esc_js))
-        parts = Tuple{Symbol,String}[]
-        for a in args
-            a isa LineNumberNode && continue
-            (a isa Expr && a.head === :macrocall) ||
-                error("@web sections must be tagged string literals — html\"\"\"…\"\"\", css\"\"\"…\"\"\", js\"\"\"…\"\"\"")
-            lang = langfn(a.args[1])
-            lang === nothing && error("@web: unknown section $(a.args[1]) — use html/css/js")
-            raw = a.args[end]
-            raw isa AbstractString || error("@web section must be a string literal")
-            push!(parts, (lang, String(raw)))
-        end
-        # Build the string-valued expr for one language: concatenate its (possibly repeated) sections,
-        # each with its `{{ }}` tokens replaced by the escaped, evaluated value.
-        secexpr = function (lang)
-            escfn = getfield(escs, lang)
-            chunks = Any[]
-            for (l, raw) in parts
-                l === lang || continue
-                tmpl, exprs = tmplfn(raw)
-                blk = Expr(:block, :(local __w = $tmpl))
-                for (i, e) in enumerate(exprs)
-                    push!(blk.args, :(__w = replace(__w, $(tokfn(i)) => $(escfn)($(esc(Base.Meta.parse(e)))))))
-                end
-                push!(blk.args, :__w)
-                push!(chunks, blk)
-            end
-            isempty(chunks) ? "" : length(chunks) == 1 ? chunks[1] : Expr(:call, :string, chunks...)
-        end
-        # Hand the JS off to the frontend runtime `Slate.runFragment` (core.js — the mirror lives in the
-        # static export too). It gives the fragment its own `root` (the cell's output element), an
-        # `echo(...)` printer, a private scope (so a top-level `const`/`let` can't collide across the
-        # re-runs of a reactive render), top-level `await` (`await import(…)`, `await Slate.asset(…)`), and
-        # renders any thrown/rejected error ONTO the cell. The macro emits just the CALL — the runtime is
-        # real, maintainable JS, not a string blob. (A JS *syntax* error can't be caught — the script never
-        # parses — so it stays a console error.)
-        jsx = secexpr(:js)
-        jsx = (jsx isa AbstractString && isempty(jsx)) ? "" :
-              Expr(:call, :string,
-                   "Slate.runFragment(document.currentScript, async function(root, echo){\n", jsx, "\n});")
-        Expr(:call, :WebPage, Expr(:parameters,
-            Expr(:kw, :html, secexpr(:html)),
-            Expr(:kw, :css,  secexpr(:css)),
-            Expr(:kw, :js,   jsx)))
+    Core.eval(m, :(macro html_str(s)
+        ;s;
     end))
+    Core.eval(m, :(macro css_str(s)
+        ;s;
+    end))
+    Core.eval(m, :(macro js_str(s)
+        ;s;
+    end))
+    Core.eval(
+        m,
+        :(
+            macro web(args...)
+                tmplfn = $(_md_template)
+                tokfn = $(_interp_token)
+                langfn = $(_web_section_lang)
+                escs = (html=($(_web_esc_html)), css=($(_web_esc_css)), js=($(_web_esc_js)))
+                parts = Tuple{Symbol,String}[]
+                for a in args
+                    a isa LineNumberNode && continue
+                    (a isa Expr && a.head === :macrocall) || error(
+                        "@web sections must be tagged string literals — html\"\"\"…\"\"\", css\"\"\"…\"\"\", js\"\"\"…\"\"\"",
+                    )
+                    lang = langfn(a.args[1])
+                    lang === nothing &&
+                        error("@web: unknown section $(a.args[1]) — use html/css/js")
+                    raw = a.args[end]
+                    raw isa AbstractString || error("@web section must be a string literal")
+                    push!(parts, (lang, String(raw)))
+                end
+                # Build the string-valued expr for one language: concatenate its (possibly repeated) sections,
+                # each with its `{{ }}` tokens replaced by the escaped, evaluated value.
+                secexpr = function (lang)
+                    escfn = getfield(escs, lang)
+                    chunks = Any[]
+                    for (l, raw) in parts
+                        l === lang || continue
+                        tmpl, exprs = tmplfn(raw)
+                        blk = Expr(:block, :(local __w = $tmpl))
+                        for (i, e) in enumerate(exprs)
+                            push!(
+                                blk.args,
+                                :(
+                                    __w = replace(
+                                        __w, $(tokfn(i)) => $(escfn)($(esc(Base.Meta.parse(e))))
+                                    )
+                                ),
+                            )
+                        end
+                        push!(blk.args, :__w)
+                        push!(chunks, blk)
+                    end
+                    if isempty(chunks)
+                        ""
+                    elseif length(chunks) == 1
+                        chunks[1]
+                    else
+                        Expr(:call, :string, chunks...)
+                    end
+                end
+                # Hand the JS off to the frontend runtime `Slate.runFragment` (core.js — the mirror lives in the
+                # static export too). It gives the fragment its own `root` (the cell's output element), an
+                # `echo(...)` printer, a private scope (so a top-level `const`/`let` can't collide across the
+                # re-runs of a reactive render), top-level `await` (`await import(…)`, `await Slate.asset(…)`), and
+                # renders any thrown/rejected error ONTO the cell. The macro emits just the CALL — the runtime is
+                # real, maintainable JS, not a string blob. (A JS *syntax* error can't be caught — the script never
+                # parses — so it stays a console error.)
+                jsx = secexpr(:js)
+                jsx = if (jsx isa AbstractString && isempty(jsx))
+                    ""
+                else
+                    Expr(
+                        :call,
+                        :string,
+                        "Slate.runFragment(document.currentScript, async function(root, echo){\n",
+                        jsx,
+                        "\n});",
+                    )
+                end
+                Expr(
+                    :call,
+                    :WebPage,
+                    Expr(
+                        :parameters,
+                        Expr(:kw, :html, secexpr(:html)),
+                        Expr(:kw, :css, secexpr(:css)),
+                        Expr(:kw, :js, jsx),
+                    ),
+                )
+            end
+        ),
+    )
     return m
 end
 
@@ -1092,14 +1429,19 @@ installed, but the live-only features degrade to no-ops.
 Idempotent: a second call — or the Slate engine re-populating the same module — is a no-op
 (guarded on the `__slate_standalone` marker), so the emitted preamble never double-injects.
 """
-function standalone!(m::Module = Main; dir::Union{Nothing,AbstractString} = nothing)
+function standalone!(m::Module=Main; dir::Union{Nothing,AbstractString}=nothing)
     isdefined(m, :__slate_standalone) && return m
     base = dir === nothing ? "" : String(dir)
-    _populate_notebook_ns!(m;
-        echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
-        slate_query = slate_query,
-        slate_refresh = (vars...) -> nothing,        # reactive recompute is the engine's job — inert here
-        assetbase = () -> base)                       # asset/data paths anchor on the notebook's dir
+    _populate_notebook_ns!(
+        m;
+        echart=echart,
+        EChart=EChart,
+        slate_table=slate_table,
+        SlateTable=SlateTable,
+        slate_query=slate_query,
+        slate_refresh=(vars...) -> nothing,        # reactive recompute is the engine's job — inert here
+        assetbase=() -> base,
+    )                       # asset/data paths anchor on the notebook's dir
     Core.eval(m, :(const __slate_standalone = true))
     return m
 end
@@ -1127,7 +1469,9 @@ _bind_macrocall(ex) = _two_arg_macrocall(ex, Symbol("@bind"))
 function _reactive_macrocall(ex)
     (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@reactive")) || return nothing
     real = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
-    (length(real) == 1 && real[1] isa Expr && real[1].head === :(=) && real[1].args[1] isa Symbol) || return nothing
+    (
+        length(real) == 1 && real[1] isa Expr && real[1].head === :(=) && real[1].args[1] isa Symbol
+    ) || return nothing
     return (real[1].args[1], real[1].args[2])
 end
 

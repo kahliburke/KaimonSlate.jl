@@ -30,23 +30,28 @@ function _read_current(ctx)
     try
         r = ctx.eval("(KaimonSlate.worker_threads(), Sys.CPU_THREADS)")
         m = match(r"\(\s*\"([^\"]*)\"\s*,\s*(\d+)", String(r.value_repr))
-        m !== nothing && (cur = String(m.captures[1]); ncpu = parse(Int, m.captures[2]))
+        m !== nothing && (cur=String(m.captures[1]); ncpu=parse(Int, m.captures[2]))
     catch e
         @warn "slate_panel: failed to read worker thread state" exception = (e, catch_backtrace())
     end
     return (cur, ncpu)
 end
 
-_items(eff) = [Tachikoma.ListItem(o == eff ? "$o   ● current" : o, Tachikoma.tstyle(:text))
-               for o in _OPTIONS]
+function _items(eff)
+    return [
+        Tachikoma.ListItem(o == eff ? "$o   ● current" : o, Tachikoma.tstyle(:text)) for
+        o in _OPTIONS
+    ]
+end
 
 function init(ctx)
     cur, ncpu = _read_current(ctx)
     eff = isempty(cur) ? "1,1" : cur
     sel = something(findfirst(==(eff), _OPTIONS), 1)
-    list = Tachikoma.SelectableList(_items(eff); selected = sel, focused = true)
-    PanelState(list, ctx, eff, ncpu,
-               "↑/↓ choose · Enter apply (respawns workers) · Esc close")
+    list = Tachikoma.SelectableList(_items(eff); selected=sel, focused=true)
+    return PanelState(
+        list, ctx, eff, ncpu, "↑/↓ choose · Enter apply (respawns workers) · Esc close"
+    )
 end
 
 update!(state, ctx) = nothing
@@ -54,18 +59,22 @@ update!(state, ctx) = nothing
 function view(state, area::Tachikoma.Rect, buf)
     hh = min(5, area.height)
     hdr = Tachikoma.Rect(area.x, area.y, area.width, hh)
-    p = Tachikoma.Paragraph(Tachikoma.Span[
-        Tachikoma.Span("Worker Julia threads\n", Tachikoma.tstyle(:title, bold = true)),
-        Tachikoma.Span("applied: ", Tachikoma.tstyle(:text_dim)),
-        Tachikoma.Span(state.current, Tachikoma.tstyle(:accent, bold = true)),
-        Tachikoma.Span("   ·   CPU threads: $(state.ncpu)\n", Tachikoma.tstyle(:text_dim)),
-        Tachikoma.Span(state.status, Tachikoma.tstyle(:text_dim)),
-    ]; wrap = Tachikoma.word_wrap)
+    p = Tachikoma.Paragraph(
+        Tachikoma.Span[
+            Tachikoma.Span("Worker Julia threads\n", Tachikoma.tstyle(:title; bold=true)),
+            Tachikoma.Span("applied: ", Tachikoma.tstyle(:text_dim)),
+            Tachikoma.Span(state.current, Tachikoma.tstyle(:accent; bold=true)),
+            Tachikoma.Span("   ·   CPU threads: $(state.ncpu)\n", Tachikoma.tstyle(:text_dim)),
+            Tachikoma.Span(state.status, Tachikoma.tstyle(:text_dim)),
+        ];
+        wrap=Tachikoma.word_wrap,
+    )
     Tachikoma.render(p, hdr, buf)
     if area.height > hh
         lrect = Tachikoma.Rect(area.x, area.y + hh, area.width, area.height - hh)
-        state.list.block = Tachikoma.Block(title = "thread spec  (compute,interactive)",
-                                           border_style = Tachikoma.tstyle(:border))
+        state.list.block = Tachikoma.Block(;
+            title="thread spec  (compute,interactive)", border_style=Tachikoma.tstyle(:border)
+        )
         Tachikoma.render(state.list, lrect, buf)
     end
 end

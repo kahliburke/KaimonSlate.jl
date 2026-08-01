@@ -19,9 +19,9 @@
 
 module MemoStore
 
-import SHA
-import TOML
-import Libdl
+using SHA: SHA
+using TOML: TOML
+using Libdl: Libdl
 
 const FMT = 3
 
@@ -33,13 +33,19 @@ const FMT = 3
 # either way, so content addresses NEVER change (no cache invalidation). Streamed over the file, so
 # a multi-GB blob never spikes RSS. Kept dependency-pure (Libdl + a runtime dlopen, no new package).
 struct _Evp
-    md::Ptr{Cvoid}; ctxnew::Ptr{Cvoid}; init::Ptr{Cvoid}; update::Ptr{Cvoid}; final::Ptr{Cvoid}; free::Ptr{Cvoid}
+    md::Ptr{Cvoid}
+    ctxnew::Ptr{Cvoid}
+    init::Ptr{Cvoid}
+    update::Ptr{Cvoid}
+    final::Ptr{Cvoid}
+    free::Ptr{Cvoid}
 end
 function _evp_digest(ev::_Evp, p::Ptr{UInt8}, n::Integer)   # one-shot, for the self-test
     h = ccall(ev.ctxnew, Ptr{Cvoid}, ())
     ccall(ev.init, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), h, ev.md, C_NULL)
     ccall(ev.update, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t), h, p, n)
-    out = Vector{UInt8}(undef, 32); nout = Ref{Cuint}(0)
+    out = Vector{UInt8}(undef, 32)
+    nout = Ref{Cuint}(0)
     ccall(ev.final, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ptr{Cuint}), h, out, nout)
     ccall(ev.free, Cvoid, (Ptr{Cvoid},), h)
     return out
@@ -53,24 +59,42 @@ Register an explicit libcrypto path — tried before the system names so a vendo
 lib (OpenSSL_jll) wins over whatever the host happens to ship. The worker calls this at startup;
 clears the cached backend so the next hash re-probes.
 """
-set_libcrypto!(path::AbstractString) = (_LIBCRYPTO[] = String(path); _EVP[] = missing; nothing)
+set_libcrypto!(path::AbstractString) = (_LIBCRYPTO[]=String(path); _EVP[]=missing; nothing)
 
 function _load_evp()
     names = String[]
     isempty(_LIBCRYPTO[]) || push!(names, _LIBCRYPTO[])
-    append!(names, ["libcrypto.so.3", "libcrypto.so.1.1", "libcrypto.so",
-                    "libcrypto.3.dylib", "libcrypto.1.1.dylib", "libcrypto.dylib", "libcrypto"])
+    append!(
+        names,
+        [
+            "libcrypto.so.3",
+            "libcrypto.so.1.1",
+            "libcrypto.so",
+            "libcrypto.3.dylib",
+            "libcrypto.1.1.dylib",
+            "libcrypto.dylib",
+            "libcrypto",
+        ],
+    )
     for name in names
         try
-            lib = Libdl.dlopen(name; throw_error = false); lib === nothing && continue
-            s(nm) = Libdl.dlsym(lib, nm; throw_error = false)
-            shafn, cn, ini, upd, fin, fr = s(:EVP_sha256), s(:EVP_MD_CTX_new), s(:EVP_DigestInit_ex),
-                                           s(:EVP_DigestUpdate), s(:EVP_DigestFinal_ex), s(:EVP_MD_CTX_free)
+            lib = Libdl.dlopen(name; throw_error=false)
+            lib === nothing && continue
+            s(nm) = Libdl.dlsym(lib, nm; throw_error=false)
+            shafn, cn, ini, upd, fin, fr = s(:EVP_sha256),
+            s(:EVP_MD_CTX_new),
+            s(:EVP_DigestInit_ex),
+            s(:EVP_DigestUpdate),
+            s(:EVP_DigestFinal_ex),
+            s(:EVP_MD_CTX_free)
             any(==(C_NULL), (shafn, cn, ini, upd, fin, fr)) && continue
-            md = ccall(shafn, Ptr{Cvoid}, ()); md == C_NULL && continue
+            md = ccall(shafn, Ptr{Cvoid}, ())
+            md == C_NULL && continue
             ev = _Evp(md, cn, ini, upd, fin, fr)
             probe = codeunits("abc")
-            ok = GC.@preserve probe (_evp_digest(ev, pointer(probe), length(probe)) == SHA.sha256(b"abc"))
+            ok = GC.@preserve probe (
+                _evp_digest(ev, pointer(probe), length(probe)) == SHA.sha256(b"abc")
+            )
             ok && return ev
         catch
         end
@@ -78,7 +102,7 @@ function _load_evp()
     return nothing
 end
 const _EVP = Ref{Any}(missing)                     # missing = not yet probed; nothing = unavailable
-_evp() = (b = _EVP[]; b === missing ? (_EVP[] = _load_evp()) : b)
+_evp() = (b=_EVP[]; b === missing ? (_EVP[] = _load_evp()) : b)
 
 """
     sha_file_hex(path) -> hex::String
@@ -95,27 +119,31 @@ function sha_file_hex(path::AbstractString)
         ccall(ev.init, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), h, ev.md, C_NULL)
         while !eof(io)
             n = readbytes!(io, buf)
-            GC.@preserve buf ccall(ev.update, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t), h, pointer(buf), n)
+            GC.@preserve buf ccall(
+                ev.update, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t), h, pointer(buf), n
+            )
         end
-        out = Vector{UInt8}(undef, 32); nout = Ref{Cuint}(0)
+        out = Vector{UInt8}(undef, 32)
+        nout = Ref{Cuint}(0)
         ccall(ev.final, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ptr{Cuint}), h, out, nout)
         ccall(ev.free, Cvoid, (Ptr{Cvoid},), h)
-        bytes2hex(out)
+        return bytes2hex(out)
     end
 end
 
 # Manifest keys become filenames — constrain to filename-safe (worker passes hex hashes).
 const _VALID_KEY = r"^[A-Za-z0-9_-]{1,200}$"
-_checkkey(key::AbstractString) =
-    occursin(_VALID_KEY, key) || throw(ArgumentError("invalid memo key: $(repr(key))"))
+function _checkkey(key::AbstractString)
+    return occursin(_VALID_KEY, key) || throw(ArgumentError("invalid memo key: $(repr(key))"))
+end
 
 # A blob NAME is a sha256 hex digest; anything else in a (corrupt) manifest must not join paths.
 _validhash(h::AbstractString) = occursin(r"^[0-9a-f]{64}$", h)
 
-blob_path(root::AbstractString, h::AbstractString) =
-    joinpath(root, "blobs", "sha256", h[1:2], h)
-manifest_path(root::AbstractString, key::AbstractString) =
-    joinpath(root, "manifests", key * ".toml")
+blob_path(root::AbstractString, h::AbstractString) = joinpath(root, "blobs", "sha256", h[1:2], h)
+function manifest_path(root::AbstractString, key::AbstractString)
+    return joinpath(root, "manifests", key * ".toml")
+end
 
 has_blob(root::AbstractString, h::AbstractString) = _validhash(h) && isfile(blob_path(root, h))
 
@@ -127,9 +155,12 @@ function _atomic_write(f, dir::AbstractString, dest::AbstractString)
     tmp = tempname(dir)
     try
         open(f, tmp, "w")
-        mv(tmp, dest; force = true)
+        mv(tmp, dest; force=true)
     catch
-        try; rm(tmp; force = true); catch; end
+        try
+            rm(tmp; force=true)
+        catch
+        end
         rethrow()
     end
     return nothing
@@ -154,15 +185,21 @@ function put_blob(f, root::AbstractString)
         n = Int(filesize(tmp))
         dest = blob_path(root, h)
         if isfile(dest)
-            try; touch(dest); catch; end
-            rm(tmp; force = true)
+            try
+                touch(dest)
+            catch
+            end
+            rm(tmp; force=true)
         else
             mkpath(dirname(dest))
-            mv(tmp, dest; force = true)
+            mv(tmp, dest; force=true)
         end
         return (h, n)
     catch
-        try; rm(tmp; force = true); catch; end
+        try
+            rm(tmp; force=true)
+        catch
+        end
         rethrow()
     end
 end
@@ -202,14 +239,22 @@ function read_manifest(root::AbstractString, key::AbstractString)
     _checkkey(key)
     p = manifest_path(root, key)
     isfile(p) || return nothing
-    d = try; TOML.parsefile(p); catch; return nothing; end
+    d = try
+        TOML.parsefile(p)
+    catch
+        return nothing
+    end
     get(d, "fmt", 0) == FMT || return nothing
     return d
 end
 
 "Mark `key` recently used (manifests are the LRU roots `gc` evicts oldest-first)."
-touch_manifest(root::AbstractString, key::AbstractString) =
-    (p = manifest_path(root, key); isfile(p) && try; touch(p); catch; end; nothing)
+function touch_manifest(root::AbstractString, key::AbstractString)
+    return (p=manifest_path(root, key); isfile(p) && try
+        touch(p)
+    catch
+    end; nothing)
+end
 
 # Every blob hash a manifest references (bindings + wire) — the gc refcount edge set.
 function _manifest_blobs(d::AbstractDict)
@@ -232,17 +277,24 @@ end
 # untrusted shared file) only the two known subtrees are written, no path escape. Missing entries
 # or blobs are silently skipped — a since-gc'd value simply recomputes on the other side.
 function pack(root::AbstractString, keys)
-    io = IOBuffer(); seen = Set{String}()
-    emit(rel, data) = (rb = Vector{UInt8}(rel);
-                       write(io, hton(UInt32(length(rb))), rb, hton(UInt64(length(data))), data))
+    io = IOBuffer()
+    seen = Set{String}()
+    emit(rel, data) = (
+        rb=Vector{UInt8}(rel);
+        write(io, hton(UInt32(length(rb))), rb, hton(UInt64(length(data))), data)
+    )
     for key in keys
         occursin(_VALID_KEY, key) || continue
-        mp = manifest_path(root, key); isfile(mp) || continue
+        mp = manifest_path(root, key)
+        isfile(mp) || continue
         emit("manifests/$key.toml", read(mp))
-        d = read_manifest(root, key); d === nothing && continue
+        d = read_manifest(root, key)
+        d === nothing && continue
         for h in _manifest_blobs(d)
-            (h in seen) && continue; push!(seen, h)
-            bp = blob_path(root, h); isfile(bp) && emit("blobs/sha256/$(h[1:2])/$h", read(bp))
+            (h in seen) && continue
+            push!(seen, h)
+            bp = blob_path(root, h)
+            isfile(bp) && emit("blobs/sha256/$(h[1:2])/$h", read(bp))
         end
     end
     return take!(io)
@@ -250,7 +302,8 @@ end
 
 function unpack(root::AbstractString, data::AbstractVector{UInt8})
     io = IOBuffer(data)
-    base = normpath(root); sep = Base.Filesystem.path_separator
+    base = normpath(root)
+    sep = Base.Filesystem.path_separator
     endswith(base, sep) || (base *= sep)
     n = 0
     while !eof(io)
@@ -260,7 +313,12 @@ function unpack(root::AbstractString, data::AbstractVector{UInt8})
         out = normpath(joinpath(root, rel))
         startswith(out, base) || continue                                                 # no path escape
         (startswith(rel, "blobs/") && isfile(out)) && continue                            # content-addressed dedup
-        mkpath(dirname(out)); try; write(out, bytes); n += 1; catch; end
+        mkpath(dirname(out))
+        try
+            write(out, bytes)
+            n += 1
+        catch
+        end
     end
     return n
 end
@@ -269,11 +327,14 @@ end
 # other keys; the export UI's density ranking wants each entry's own cost). `key => bytes`.
 function entry_bytes(root::AbstractString, key::AbstractString)
     occursin(_VALID_KEY, key) || return 0
-    mp = manifest_path(root, key); isfile(mp) || return 0
+    mp = manifest_path(root, key)
+    isfile(mp) || return 0
     b = Int(filesize(mp))
-    d = read_manifest(root, key); d === nothing && return b
+    d = read_manifest(root, key)
+    d === nothing && return b
     for h in _manifest_blobs(d)
-        bp = blob_path(root, h); isfile(bp) && (b += Int(filesize(bp)))
+        bp = blob_path(root, h)
+        isfile(bp) && (b += Int(filesize(bp)))
     end
     return b
 end
@@ -288,7 +349,11 @@ _pins_path(root::AbstractString) = joinpath(root, _PINS_FILE)
 function _read_pins(root::AbstractString)::Set{String}
     p = _pins_path(root)
     isfile(p) || return Set{String}()
-    d = try; TOML.parsefile(p); catch; return Set{String}(); end
+    d = try
+        TOML.parsefile(p)
+    catch
+        return Set{String}()
+    end
     ks = get(d, "keys", nothing)
     return ks isa AbstractVector ? Set{String}(String(k) for k in ks) : Set{String}()
 end
@@ -303,7 +368,9 @@ function set_pin!(root::AbstractString, key::AbstractString, pin::Bool)
     isdir(root) || mkpath(root)
     pins = _read_pins(root)
     pin ? push!(pins, key) : delete!(pins, key)
-    _atomic_write(io -> TOML.print(io, Dict("keys" => sort!(collect(pins)))), root, _pins_path(root))
+    _atomic_write(
+        io -> TOML.print(io, Dict("keys" => sort!(collect(pins)))), root, _pins_path(root)
+    )
     return nothing
 end
 
@@ -312,15 +379,19 @@ is_pinned(root::AbstractString, key::AbstractString) = key in _read_pins(root)
 
 "Store shape/size: `(manifests, blobs, bytes)` — cheap enough for telemetry."
 function stats(root::AbstractString)
-    nm = 0; nb = 0; bytes = 0
-    mdir = joinpath(root, "manifests"); bdir = joinpath(root, "blobs")
-    isdir(mdir) && for f in readdir(mdir; join = true)
+    nm = 0
+    nb = 0
+    bytes = 0
+    mdir = joinpath(root, "manifests")
+    bdir = joinpath(root, "blobs")
+    isdir(mdir) && for f in readdir(mdir; join=true)
         isfile(f) && (nm += 1; bytes += filesize(f))
     end
     isdir(bdir) && for (r, _, fs) in walkdir(bdir), f in fs
-        nb += 1; bytes += filesize(joinpath(r, f))
+        nb += 1
+        bytes += filesize(joinpath(r, f))
     end
-    return (manifests = nm, blobs = nb, bytes = Int(bytes))
+    return (manifests=nm, blobs=nb, bytes=Int(bytes))
 end
 
 """
@@ -337,24 +408,32 @@ durability guarantee) — pins can keep the store over `cap` indefinitely; that'
 trade (no silent cap violates the guarantee worse than an oversized store does). Best-effort
 throughout: a vanished file (another worker's gc) is skipped, never an error.
 """
-function gc(root::AbstractString; cap::Integer, grace::Real = 900.0)
+function gc(root::AbstractString; cap::Integer, grace::Real=900.0)
     isdir(root) || return nothing
     now = time()
     total = 0
     pins = _read_pins(root)
     # Legacy fmt≤2 entries lived as flat files directly in `root` — no current code can read
     # them, so they're pure dead weight; sweep unconditionally.
-    for f in readdir(root; join = true)
-        isfile(f) && f != _pins_path(root) && try; rm(f; force = true); catch; end
+    for f in readdir(root; join=true)
+        isfile(f) && f != _pins_path(root) && try
+            rm(f; force=true)
+        catch
+        end
     end
     # Inventory. Blobs live at blobs/sha256/<p>/<hash>; anything under blobs/ whose basename
     # isn't a digest is temp litter from a crashed `put_blob` — deletable past the grace window.
-    mdir = joinpath(root, "manifests"); bdir = joinpath(root, "blobs")
+    mdir = joinpath(root, "manifests")
+    bdir = joinpath(root, "blobs")
     manifests = Tuple{String,Float64,Int}[]           # (path, mtime, size) — EVICTABLE (unpinned) only
     pinned_paths = String[]                            # pinned manifests: refcounted, never evicted
-    isdir(mdir) && for f in readdir(mdir; join = true)
+    isdir(mdir) && for f in readdir(mdir; join=true)
         isfile(f) || continue
-        st = try; (Float64(mtime(f)), Int(filesize(f))); catch; continue; end
+        st = try
+            (Float64(mtime(f)), Int(filesize(f)))
+        catch
+            continue
+        end
         total += st[2]
         if splitext(basename(f))[1] in pins
             push!(pinned_paths, f)
@@ -365,11 +444,19 @@ function gc(root::AbstractString; cap::Integer, grace::Real = 900.0)
     blobinfo = Dict{String,Tuple{String,Float64,Int}}()   # hash → (path, mtime, size)
     isdir(bdir) && for (r, _, fs) in walkdir(bdir), name in fs
         p = joinpath(r, name)
-        st = try; (Float64(mtime(p)), Int(filesize(p))); catch; continue; end
+        st = try
+            (Float64(mtime(p)), Int(filesize(p)))
+        catch
+            continue
+        end
         if _validhash(name)
-            blobinfo[name] = (p, st[1], st[2]); total += st[2]
+            blobinfo[name] = (p, st[1], st[2])
+            total += st[2]
         elseif now - st[1] > grace                    # crashed put_blob temp file
-            try; rm(p; force = true); catch; end
+            try
+                rm(p; force=true)
+            catch
+            end
         end
     end
     total <= cap && return nothing
@@ -379,21 +466,36 @@ function gc(root::AbstractString; cap::Integer, grace::Real = 900.0)
     refs = Dict{String,Int}()
     msets = Dict{String,Vector{String}}()             # manifest path → its blob hashes
     for p in Iterators.flatten((first.(manifests), pinned_paths))
-        hs = (d = try; TOML.parsefile(p); catch; nothing; end) === nothing ? String[] : _manifest_blobs(d)
+        hs = (d = try
+            TOML.parsefile(p)
+        catch
+            nothing
+        end) === nothing ? String[] : _manifest_blobs(d)
         msets[p] = hs
-        for h in hs; refs[h] = get(refs, h, 0) + 1; end
+        for h in hs
+            refs[h] = get(refs, h, 0) + 1
+        end
     end
     droppable(h) = (get(refs, h, 0) <= 0 && haskey(blobinfo, h) && now - blobinfo[h][2] > grace)
-    dropblob!(h) = (try; rm(blobinfo[h][1]; force = true); catch; end; total -= blobinfo[h][3];
-                    delete!(blobinfo, h))
+    dropblob!(h) = (
+        try
+            rm(blobinfo[h][1]; force=true)
+        catch
+        end;
+        total -= blobinfo[h][3];
+        delete!(blobinfo, h)
+    )
     # Orphans first (no manifest at all — crashed stores, prior partial gc), then LRU eviction.
     for h in collect(keys(blobinfo))
         droppable(h) && dropblob!(h)
     end
-    sort!(manifests; by = m -> m[2])
+    sort!(manifests; by=m -> m[2])
     for (p, _, sz) in manifests
         total <= cap && break
-        try; rm(p; force = true); catch; end
+        try
+            rm(p; force=true)
+        catch
+        end
         total -= sz
         for h in msets[p]
             refs[h] = get(refs, h, 0) - 1

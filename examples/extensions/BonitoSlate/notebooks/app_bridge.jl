@@ -1,4 +1,11 @@
-try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+try
+    using KaimonSlate: KaimonSlate
+catch
+    error(
+        "This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate.",
+    )
+end;
+KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
 
 #%% md id=intro
 @md"""
@@ -20,7 +27,7 @@ reading any Julia.
 #%% code id=setup
 using Bonito, BonitoSlate
 BonitoSlate.enable!()
-(bonito = pkgversion(Bonito), enabled = true)
+(bonito=pkgversion(Bonito), enabled=true)
 
 #%% code id=static_app nocache
 # Step 1: the simplest possible Bonito app — static DOM, no JS, no widgets. If even this does not survive a
@@ -28,17 +35,23 @@ BonitoSlate.enable!()
 #
 # EXPECT: a green box reading "static Bonito app". FAIL: empty output, or the box vanishing after a reload.
 App() do
-    Bonito.DOM.div("static Bonito app";
-                   style = "padding:14px;border-radius:8px;background:#12321c;color:#8de08d;font:13px monospace")
+    return Bonito.DOM.div(
+        "static Bonito app";
+        style="padding:14px;border-radius:8px;background:#12321c;color:#8de08d;font:13px monospace",
+    )
 end
 
 #%% code id=widget_app nocache
 # Fresh-worker leak test, widget run C.
 App() do
     s = Bonito.Slider(1:100)
-    out = Bonito.DOM.span(s.value; style = "color:#8de08d;font:13px monospace")
-    Bonito.DOM.div(Bonito.DOM.div("drag me (C):"; style = "color:#838b9b;font:11px monospace"), s, out;
-                   style = "padding:12px;display:flex;flex-direction:column;gap:6px")
+    out = Bonito.DOM.span(s.value; style="color:#8de08d;font:13px monospace")
+    return Bonito.DOM.div(
+        Bonito.DOM.div("drag me (C):"; style="color:#838b9b;font:11px monospace"),
+        s,
+        out;
+        style="padding:12px;display:flex;flex-direction:column;gap:6px",
+    )
 end
 
 #%% code id=figure_takes_root nocache
@@ -55,7 +68,7 @@ end
 using WGLMakie
 WGLMakie.activate!()
 use_slate_theme!()
-scatter(1:10, rand(10); axis = (; title = "figure shares the one page root"))
+scatter(1:10, rand(10); axis=(; title="figure shares the one page root"))
 
 #%% code id=app_after_figure nocache
 # Step 4: THE FAILING CASE. Identical app to `static_app`, but rendered after a figure has taken the page root,
@@ -64,8 +77,10 @@ scatter(1:10, rand(10); axis = (; title = "figure shares the one page root"))
 # EXPECT (once fixed): an amber box reading "app AFTER a figure". FAIL (current): empty output — the capture
 # contains only the runtime <script> and the sub-session's DOM never lands.
 App() do
-    Bonito.DOM.div("app AFTER a figure";
-                   style = "padding:14px;border-radius:8px;background:#3a2c10;color:#ffc93c;font:13px monospace")
+    return Bonito.DOM.div(
+        "app AFTER a figure";
+        style="padding:14px;border-radius:8px;background:#3a2c10;color:#ffc93c;font:13px monospace",
+    )
 end
 
 # ╔═╡ Slate.config · per-notebook settings (Settings panel)

@@ -29,7 +29,7 @@ and `Slate.runFragment` / `Slate.asset`.
 """
 module SlateExtensionsBase
 
-import Base64   # stdlib — WebPage(obscure=true) base64 packaging
+using Base64: Base64   # stdlib — WebPage(obscure=true) base64 packaging
 
 include("controls.jl")
 include("output.jl")
@@ -49,16 +49,43 @@ export CellAction, to_cell_action, auto_cell_action, register_cell_action!
 # Output
 export WebPage, register_widget_js
 # Auto-registered front-end (no boot cell)
-export register_widget!, register_component!, provide_frontend!, @pkg_asset,
-       provide_served_asset!, served_asset, slate_live_render, on_live_reset, run_live_resets,
-on_worker_reset, run_worker_resets,
-       required_assets, ensure_widget_assets!, ensure_module_frontend!, ensure_module_frontends!,
-       frontend_scripts, extension_manifest, provide_assets!, @provide_assets!, @pkg_dir, asset_dirs,
-       js_bundle,
-       ext_asset_url, @ext_asset_url, pkg_key
+export register_widget!,
+    register_component!,
+    provide_frontend!,
+    @pkg_asset,
+    provide_served_asset!,
+    served_asset,
+    slate_live_render,
+    on_live_reset,
+    run_live_resets,
+    on_worker_reset,
+    run_worker_resets,
+    required_assets,
+    ensure_widget_assets!,
+    ensure_module_frontend!,
+    ensure_module_frontends!,
+    frontend_scripts,
+    extension_manifest,
+    provide_assets!,
+    @provide_assets!,
+    @pkg_dir,
+    asset_dirs,
+    js_bundle,
+    ext_asset_url,
+    @ext_asset_url,
+    pkg_key
 # Execution context
-export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
-       slate_emit, slate_effect, slate_everywhere, slate_on, slate_off, slate_on_cleanup
+export slate_context,
+    slate_region,
+    slate_regions,
+    slate_side,
+    slate_notebook,
+    slate_emit,
+    slate_effect,
+    slate_everywhere,
+    slate_on,
+    slate_off,
+    slate_on_cleanup
 # Rich output (Slate display MIMEs)
 export slate_render, component, html_fragment, SlateComponentMIME, SlateHtmlMIME
 # Binary numeric streaming

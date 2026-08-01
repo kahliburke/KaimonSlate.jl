@@ -22,11 +22,13 @@ top_sv = maximum(F.S)
 
 #%% code id=sv_chart
 sleep(0.6)   # pretend the chart is expensive to build
-echart(Dict(
-    "xAxis" => Dict("type" => "category", "data" => collect(1:20)),
-    "yAxis" => Dict("type" => "value"),
-    "series" => [Dict("type" => "line", "data" => [F.S[i] for i in 1:20])],
-))
+echart(
+    Dict(
+        "xAxis" => Dict("type" => "category", "data" => collect(1:20)),
+        "yAxis" => Dict("type" => "value"),
+        "series" => [Dict("type" => "line", "data" => [F.S[i] for i in 1:20])],
+    ),
+)
 
 #%% code id=anon_fn_heavy
 anon_vals = map(x -> (sleep(0.001); x^2), 1:600)   # lambda ⇒ used to block caching entirely

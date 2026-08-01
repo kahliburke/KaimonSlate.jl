@@ -19,9 +19,9 @@ self-location are the [`LedgerStore`](@ref) backends' job (this file ships the `
 """
 module PublishLedger
 
-import JSON
-import Dates
-import SHA
+using JSON: JSON
+using Dates: Dates
+using SHA: SHA
 
 using ..SlateHome
 
@@ -43,8 +43,9 @@ struct Event
     note::String
 end
 
-Event(; id, ts, target, status = "ok", url = "", doi = "", commit = "", bundle = "", note = "") =
-    Event(id, ts, target, status, url, doi, commit, bundle, note)
+function Event(; id, ts, target, status="ok", url="", doi="", commit="", bundle="", note="")
+    return Event(id, ts, target, status, url, doi, commit, bundle, note)
+end
 
 "A published document identity: where it comes from, where it publishes, and its event history."
 mutable struct Document
@@ -57,9 +58,13 @@ mutable struct Document
     events::Vector{Event}       # append-only, newest last
 end
 
-Document(docId; slug = "", title = "", sourceRepo = "", sourcePath = "",
-         targets = String[], events = Event[]) =
-    Document(docId, slug, title, sourceRepo, sourcePath, collect(String, targets), collect(Event, events))
+function Document(
+    docId; slug="", title="", sourceRepo="", sourcePath="", targets=String[], events=Event[]
+)
+    return Document(
+        docId, slug, title, sourceRepo, sourcePath, collect(String, targets), collect(Event, events)
+    )
+end
 
 "A named target config — the NON-secret parts only. A secret is referenced by `config[\"secretRef\"]`."
 struct Target
@@ -68,7 +73,7 @@ struct Target
     config::Dict{String,Any}     # repo/branch/subdir/conceptDOI/secretRef/…
 end
 
-Target(name, kind; config = Dict{String,Any}()) = Target(name, kind, Dict{String,Any}(config))
+Target(name, kind; config=Dict{String,Any}()) = Target(name, kind, Dict{String,Any}(config))
 
 "A logical site/portfolio: a canonical build (the local site dir) that deploys to a set of destination
 targets. Its document membership + order + sections live in that build's `slate-site.json` manifest."
@@ -78,12 +83,20 @@ struct SiteGroup
     home::String              # slug/docId of the home notebook, or ""
     title::String             # the site's display title (<title>/masthead); "" ⇒ the site name
     paths::Dict{String,String} # target name → subpath WITHIN that target ("",'absent' ⇒ its root) —
-                               # lets several sites share one bucket/host without overwriting each other
+    # lets several sites share one bucket/host without overwriting each other
 end
 
-SiteGroup(name; targets = String[], target = "", home = "", title = "", paths = Dict{String,String}()) =
-    SiteGroup(String(name), isempty(targets) && !isempty(target) ? [String(target)] : collect(String, targets),
-              String(home), String(title), Dict{String,String}(String(k) => String(v) for (k, v) in pairs(paths)))
+function SiteGroup(
+    name; targets=String[], target="", home="", title="", paths=Dict{String,String}()
+)
+    return SiteGroup(
+        String(name),
+        isempty(targets) && !isempty(target) ? [String(target)] : collect(String, targets),
+        String(home),
+        String(title),
+        Dict{String,String}(String(k) => String(v) for (k, v) in pairs(paths)),
+    )
+end
 
 "The whole ledger: documents ↔ targets ↔ optional site groupings."
 mutable struct Ledger
@@ -93,7 +106,11 @@ mutable struct Ledger
     sites::Dict{String,SiteGroup}
 end
 
-Ledger() = Ledger(LEDGER_VERSION, Dict{String,Document}(), Dict{String,Target}(), Dict{String,SiteGroup}())
+function Ledger()
+    return Ledger(
+        LEDGER_VERSION, Dict{String,Document}(), Dict{String,Target}(), Dict{String,SiteGroup}()
+    )
+end
 
 # ── Document identity ────────────────────────────────────────────────────────────────────────────
 # A stable id per document that survives file moves within a repo and spans machines. For a git-backed
@@ -104,13 +121,14 @@ Ledger() = Ledger(LEDGER_VERSION, Dict{String,Document}(), Dict{String,Target}()
 _canon_path(p::AbstractString) = replace(strip(String(p)), '\\' => '/')
 function _canon_remote(u::AbstractString)
     s = strip(String(u))
-    endswith(s, ".git") && (s = s[1:end-4])
+    endswith(s, ".git") && (s = s[1:(end - 4)])
     return rstrip(s, '/')
 end
 
 "docId for a git-backed notebook, from its repo-relative path and origin remote url."
-docid_git(repo_relpath::AbstractString, origin_url::AbstractString) =
-    bytes2hex(SHA.sha1(string(_canon_path(repo_relpath), '\0', _canon_remote(origin_url))))
+function docid_git(repo_relpath::AbstractString, origin_url::AbstractString)
+    return bytes2hex(SHA.sha1(string(_canon_path(repo_relpath), '\0', _canon_remote(origin_url))))
+end
 
 "docId for a non-git notebook, from its absolute path."
 docid_local(abs_path::AbstractString) = bytes2hex(SHA.sha1(_canon_path(abspath(String(abs_path)))))
@@ -120,8 +138,14 @@ docid_local(abs_path::AbstractString) = bytes2hex(SHA.sha1(_canon_path(abspath(S
 now_ts() = string(Dates.format(Dates.now(Dates.UTC), "yyyy-mm-ddTHH:MM:SS"), "Z")
 
 "A fresh, unique event id (`evt_<time><rand>`) — stable merge key, no coordination needed."
-new_event_id() = string("evt_", Dates.format(Dates.now(Dates.UTC), "yyyymmddHHMMSS"), "_",
-                        string(rand(UInt32); base = 16, pad = 8))
+function new_event_id()
+    return string(
+        "evt_",
+        Dates.format(Dates.now(Dates.UTC), "yyyymmddHHMMSS"),
+        "_",
+        string(rand(UInt32); base=16, pad=8),
+    )
+end
 
 """
     record_event!(ledger, docId, target; kwargs...) -> Event
@@ -130,11 +154,19 @@ Append a publish event to `docId`'s history (creating a bare `Document` if unkno
 stable `id` and `ts` when omitted, and ensuring `target` is in the document's target list. Returns the
 appended `Event`. `kwargs` are the `Event` fields (`status`, `url`, `doi`, `commit`, `bundle`, `note`).
 """
-function record_event!(ledger::Ledger, docId::AbstractString, target::AbstractString;
-                       id::AbstractString = new_event_id(), ts::AbstractString = now_ts(), kwargs...)
-    doc = get!(ledger.documents, String(docId)) do; Document(String(docId)); end
+function record_event!(
+    ledger::Ledger,
+    docId::AbstractString,
+    target::AbstractString;
+    id::AbstractString=new_event_id(),
+    ts::AbstractString=now_ts(),
+    kwargs...,
+)
+    doc = get!(ledger.documents, String(docId)) do ;
+        return Document(String(docId))
+    end
     String(target) in doc.targets || push!(doc.targets, String(target))
-    ev = Event(; id = String(id), ts = String(ts), target = String(target), kwargs...)
+    ev = Event(; id=String(id), ts=String(ts), target=String(target), kwargs...)
     push!(doc.events, ev)
     return ev
 end
@@ -156,8 +188,12 @@ function Base.merge!(into::Ledger, other::Ledger)
             into.documents[id] = odoc
         end
     end
-    for (k, t) in other.targets; into.targets[k] = t; end   # last-writer wins for config
-    for (k, s) in other.sites; into.sites[k] = s; end
+    for (k, t) in other.targets
+        into.targets[k] = t
+    end   # last-writer wins for config
+    for (k, s) in other.sites
+        into.sites[k] = s
+    end
     return into
 end
 
@@ -167,9 +203,13 @@ function _merge_doc!(into::Document, other::Document)
     isempty(other.title) || (into.title = other.title)
     isempty(other.sourceRepo) || (into.sourceRepo = other.sourceRepo)
     isempty(other.sourcePath) || (into.sourcePath = other.sourcePath)
-    for t in other.targets; t in into.targets || push!(into.targets, t); end
+    for t in other.targets
+        t in into.targets || push!(into.targets, t)
+    end
     seen = Set(e.id for e in into.events)
-    for e in other.events; e.id in seen || (push!(into.events, e); push!(seen, e.id)); end
+    for e in other.events
+        e.id in seen || (push!(into.events, e); push!(seen, e.id))
+    end
     return into
 end
 
@@ -195,69 +235,119 @@ function _reconcile_for_save(remote::Ledger, mine::Ledger)
         for e in rdoc.events
             e.id in seen || push!(mdoc.events, e)
         end
-        sort!(mdoc.events; by = e -> e.ts)
+        sort!(mdoc.events; by=e -> e.ts)
     end
     mine.version = max(mine.version, remote.version)
     return mine
 end
 
 # ── JSON (de)serialisation ───────────────────────────────────────────────────────────────────────
-_event_to_dict(e::Event) = Dict{String,Any}("id" => e.id, "ts" => e.ts, "target" => e.target,
-    "status" => e.status, "url" => e.url, "doi" => e.doi, "commit" => e.commit,
-    "bundle" => e.bundle, "note" => e.note)
+function _event_to_dict(e::Event)
+    return Dict{String,Any}(
+        "id" => e.id,
+        "ts" => e.ts,
+        "target" => e.target,
+        "status" => e.status,
+        "url" => e.url,
+        "doi" => e.doi,
+        "commit" => e.commit,
+        "bundle" => e.bundle,
+        "note" => e.note,
+    )
+end
 
-_str(d, k, dflt = "") = String(get(d, k, dflt))
+_str(d, k, dflt="") = String(get(d, k, dflt))
 
-_event_from_dict(d) = Event(; id = _str(d, "id"), ts = _str(d, "ts"), target = _str(d, "target"),
-    status = _str(d, "status", "ok"), url = _str(d, "url"), doi = _str(d, "doi"),
-    commit = _str(d, "commit"), bundle = _str(d, "bundle"), note = _str(d, "note"))
+function _event_from_dict(d)
+    return Event(;
+        id=_str(d, "id"),
+        ts=_str(d, "ts"),
+        target=_str(d, "target"),
+        status=_str(d, "status", "ok"),
+        url=_str(d, "url"),
+        doi=_str(d, "doi"),
+        commit=_str(d, "commit"),
+        bundle=_str(d, "bundle"),
+        note=_str(d, "note"),
+    )
+end
 
 function _doc_to_dict(d::Document)
-    return Dict{String,Any}("slug" => d.slug, "title" => d.title, "sourceRepo" => d.sourceRepo,
-        "sourcePath" => d.sourcePath, "targets" => copy(d.targets),
-        "events" => [_event_to_dict(e) for e in d.events])
+    return Dict{String,Any}(
+        "slug" => d.slug,
+        "title" => d.title,
+        "sourceRepo" => d.sourceRepo,
+        "sourcePath" => d.sourcePath,
+        "targets" => copy(d.targets),
+        "events" => [_event_to_dict(e) for e in d.events],
+    )
 end
 
 function _doc_from_dict(docId, d)
     targets = [String(t) for t in get(d, "targets", String[])]
     events = [_event_from_dict(e) for e in get(d, "events", Any[])]
-    return Document(String(docId); slug = _str(d, "slug"), title = _str(d, "title"),
-        sourceRepo = _str(d, "sourceRepo"), sourcePath = _str(d, "sourcePath"),
-        targets = targets, events = events)
+    return Document(
+        String(docId);
+        slug=_str(d, "slug"),
+        title=_str(d, "title"),
+        sourceRepo=_str(d, "sourceRepo"),
+        sourcePath=_str(d, "sourcePath"),
+        targets=targets,
+        events=events,
+    )
 end
 
 _target_to_dict(t::Target) = merge(Dict{String,Any}("kind" => t.kind), t.config)
 function _target_from_dict(name, d)
     cfg = Dict{String,Any}(k => v for (k, v) in d if k != "kind")
-    return Target(String(name), _str(d, "kind"); config = cfg)
+    return Target(String(name), _str(d, "kind"); config=cfg)
 end
 
-_site_to_dict(s::SiteGroup) = Dict{String,Any}("targets" => copy(s.targets), "home" => s.home,
-                                               "title" => s.title, "paths" => copy(s.paths))
+function _site_to_dict(s::SiteGroup)
+    return Dict{String,Any}(
+        "targets" => copy(s.targets), "home" => s.home, "title" => s.title, "paths" => copy(s.paths)
+    )
+end
 function _site_from_dict(name, d)
     p = get(d, "paths", Dict{String,Any}())
-    paths = p isa AbstractDict ? Dict{String,String}(String(k) => String(v) for (k, v) in pairs(p)) :
-                                 Dict{String,String}()
-    return SiteGroup(String(name);
-        targets = [String(t) for t in get(d, "targets", String[])], target = _str(d, "target"),
-        home = _str(d, "home"), title = _str(d, "title"), paths = paths)
+    paths = if p isa AbstractDict
+        Dict{String,String}(String(k) => String(v) for (k, v) in pairs(p))
+    else
+        Dict{String,String}()
+    end
+    return SiteGroup(
+        String(name);
+        targets=[String(t) for t in get(d, "targets", String[])],
+        target=_str(d, "target"),
+        home=_str(d, "home"),
+        title=_str(d, "title"),
+        paths=paths,
+    )
 end
 
 "Plain-`Dict` form of the ledger (the JSON shape)."
 function to_dict(l::Ledger)
-    return Dict{String,Any}("version" => l.version,
+    return Dict{String,Any}(
+        "version" => l.version,
         "documents" => Dict(id => _doc_to_dict(d) for (id, d) in l.documents),
         "targets" => Dict(k => _target_to_dict(t) for (k, t) in l.targets),
-        "sites" => Dict(k => _site_to_dict(s) for (k, s) in l.sites))
+        "sites" => Dict(k => _site_to_dict(s) for (k, s) in l.sites),
+    )
 end
 
 "Build a `Ledger` from its plain-`Dict` (parsed-JSON) form; tolerant of missing sections."
 function from_dict(d)
     l = Ledger()
     l.version = Int(get(d, "version", LEDGER_VERSION))
-    for (id, dd) in get(d, "documents", Dict()); l.documents[String(id)] = _doc_from_dict(id, dd); end
-    for (k, td) in get(d, "targets", Dict()); l.targets[String(k)] = _target_from_dict(k, td); end
-    for (k, sd) in get(d, "sites", Dict()); l.sites[String(k)] = _site_from_dict(k, sd); end
+    for (id, dd) in get(d, "documents", Dict())
+        l.documents[String(id)] = _doc_from_dict(id, dd)
+    end
+    for (k, td) in get(d, "targets", Dict())
+        l.targets[String(k)] = _target_from_dict(k, td)
+    end
+    for (k, sd) in get(d, "sites", Dict())
+        l.sites[String(k)] = _site_from_dict(k, sd)
+    end
     return l
 end
 
@@ -298,14 +388,16 @@ LocalStore() = LocalStore(joinpath(SlateHome.ledger_dir(), "kaimonslate-ledger.j
 # `strict=true` (the save path) rethrows on a PRESENT-but-unparseable store instead of degrading to
 # empty: `save` reconciles against `load`, so an empty result there would rescue zero events and the
 # next write would CLOBBER the whole history. Read-only callers keep the graceful default.
-function load(s::LocalStore; strict::Bool = false)::Ledger
+function load(s::LocalStore; strict::Bool=false)::Ledger
     isfile(s.path) || return Ledger()
     try
         return _write_cache(from_json(read(s.path, String)))
     catch e
         e isa InterruptException && rethrow()
         strict && rethrow()
-        @warn "PublishLedger: could not parse ledger; treating as empty for this read" path = s.path exception = (e, catch_backtrace())
+        @warn "PublishLedger: could not parse ledger; treating as empty for this read" path = s.path exception = (
+            e, catch_backtrace()
+        )
         return Ledger()
     end
 end
@@ -317,10 +409,11 @@ function save(s::LocalStore, ledger::Ledger)
     # unreadable store ABORTS the save (fail closed) rather than clobbering the history.
     merged = if isfile(s.path)
         remote = try
-            load(s; strict = true)
+            load(s; strict=true)
         catch e
             e isa InterruptException && rethrow()
-            @error "PublishLedger: existing ledger is unreadable — aborting save so it isn't clobbered" path = s.path exception = (e, catch_backtrace())
+            @error "PublishLedger: existing ledger is unreadable — aborting save so it isn't clobbered" path =
+                s.path exception = (e, catch_backtrace())
             rethrow()
         end
         _reconcile_for_save(remote, ledger)
@@ -337,7 +430,7 @@ locate(s::LocalStore) = isfile(s.path) ? s.path : nothing
 function _atomic_write(path::AbstractString, content::AbstractString)
     tmp = string(path, ".tmp.", getpid())
     write(tmp, content)
-    mv(tmp, path; force = true)
+    mv(tmp, path; force=true)
     return path
 end
 
@@ -378,18 +471,18 @@ gh_available() = Sys.which("gh") !== nothing
 function gh_authed()
     gh = Sys.which("gh")
     gh === nothing && return false
-    return success(pipeline(`$gh auth status`; stdout = devnull, stderr = devnull))
+    return success(pipeline(`$gh auth status`; stdout=devnull, stderr=devnull))
 end
 
 # Run `gh <args…>`, optionally feeding `stdin_str`; returns (stdout::String, ok::Bool). Never throws.
-function _gh(c::GhCli, args::Vector{String}; stdin_str::Union{Nothing,AbstractString} = nothing)
+function _gh(c::GhCli, args::Vector{String}; stdin_str::Union{Nothing,AbstractString}=nothing)
     out = IOBuffer()
     cmd = `$(c.gh) $args`
     try
         if stdin_str === nothing
-            run(pipeline(cmd; stdout = out, stderr = devnull))
+            run(pipeline(cmd; stdout=out, stderr=devnull))
         else
-            run(pipeline(cmd; stdin = IOBuffer(String(stdin_str)), stdout = out, stderr = devnull))
+            run(pipeline(cmd; stdin=IOBuffer(String(stdin_str)), stdout=out, stderr=devnull))
         end
         return (String(take!(out)), true)
     catch
@@ -398,7 +491,7 @@ function _gh(c::GhCli, args::Vector{String}; stdin_str::Union{Nothing,AbstractSt
 end
 
 # Build the PATCH/POST body GitHub's gists API expects: {description?, public?, files: {name: {content}}}.
-function _gist_body(filename::AbstractString, content::AbstractString; desc = nothing, public = nothing)
+function _gist_body(filename::AbstractString, content::AbstractString; desc=nothing, public=nothing)
     files = Dict{String,Any}(String(filename) => Dict("content" => String(content)))
     body = Dict{String,Any}("files" => files)
     desc === nothing || (body["description"] = String(desc))
@@ -411,7 +504,9 @@ function gist_list(c::GhCli)
     out, ok = _gh(c, ["api", "/gists?per_page=100"])
     ok || error("PublishLedger: `gh api /gists` failed — is `gh` authenticated? (`gh auth login`)")
     arr = JSON.parse(out)
-    return Tuple{String,String}[(String(g["id"]), String(something(get(g, "description", ""), ""))) for g in arr]
+    return Tuple{String,String}[
+        (String(g["id"]), String(something(get(g, "description", ""), ""))) for g in arr
+    ]
 end
 
 "Read `filename` out of gist `id`; `nothing` if the gist or file is gone."
@@ -424,17 +519,24 @@ function gist_read(c::GhCli, id::AbstractString, filename::AbstractString)
 end
 
 "Create a secret gist carrying the marker `desc`; returns the new gist id."
-function gist_create(c::GhCli, desc::AbstractString, filename::AbstractString, content::AbstractString)
-    body = _gist_body(filename, content; desc = desc, public = false)
-    out, ok = _gh(c, ["api", "-X", "POST", "/gists", "--input", "-"]; stdin_str = body)
+function gist_create(
+    c::GhCli, desc::AbstractString, filename::AbstractString, content::AbstractString
+)
+    body = _gist_body(filename, content; desc=desc, public=false)
+    out, ok = _gh(c, ["api", "-X", "POST", "/gists", "--input", "-"]; stdin_str=body)
     ok || error("PublishLedger: gist create failed")
     return String(JSON.parse(out)["id"])
 end
 
 "Overwrite `filename` in gist `id`."
-function gist_update(c::GhCli, id::AbstractString, filename::AbstractString, content::AbstractString)
-    _, ok = _gh(c, ["api", "-X", "PATCH", "/gists/$id", "--input", "-"];
-                stdin_str = _gist_body(filename, content))
+function gist_update(
+    c::GhCli, id::AbstractString, filename::AbstractString, content::AbstractString
+)
+    _, ok = _gh(
+        c,
+        ["api", "-X", "PATCH", "/gists/$id", "--input", "-"];
+        stdin_str=_gist_body(filename, content),
+    )
     ok || error("PublishLedger: gist update failed")
     return nothing
 end
@@ -455,10 +557,14 @@ mutable struct GistStore <: LedgerStore
     id::Union{String,Nothing}    # resolved gist id, cached in-process
 end
 
-GistStore(; client::GistClient = GhCli(), marker::AbstractString = GIST_MARKER,
-          filename::AbstractString = GIST_FILENAME,
-          pointer_file::AbstractString = joinpath(SlateHome.config_home(), "ledger-pointer.json")) =
-    GistStore(client, String(marker), String(filename), String(pointer_file), nothing)
+function GistStore(;
+    client::GistClient=GhCli(),
+    marker::AbstractString=GIST_MARKER,
+    filename::AbstractString=GIST_FILENAME,
+    pointer_file::AbstractString=joinpath(SlateHome.config_home(), "ledger-pointer.json"),
+)
+    return GistStore(client, String(marker), String(filename), String(pointer_file), nothing)
+end
 
 function _read_pointer(s::GistStore)
     isfile(s.pointer_file) || return nothing
@@ -502,7 +608,7 @@ end
 
 # See `load(::LocalStore)`: `strict=true` (the save path) rethrows on present-but-unparseable content —
 # degrading to empty there would let the next write clobber the whole history (esp. a truncated read).
-function load(s::GistStore; strict::Bool = false)::Ledger
+function load(s::GistStore; strict::Bool=false)::Ledger
     id = locate(s)
     id === nothing && return Ledger()
     content = gist_read(s.client, id, s.filename)
@@ -512,7 +618,8 @@ function load(s::GistStore; strict::Bool = false)::Ledger
     catch e
         e isa InterruptException && rethrow()
         strict && rethrow()
-        @warn "PublishLedger: could not parse gist ledger; treating as empty for this read" gist = id exception = (e, catch_backtrace())
+        @warn "PublishLedger: could not parse gist ledger; treating as empty for this read" gist =
+            id exception = (e, catch_backtrace())
         return Ledger()
     end
 end
@@ -529,10 +636,11 @@ function save(s::GistStore, ledger::Ledger)
     # fetch-before-write: reconcile against the current remote (our structure wins; rescue remote events).
     # An unreadable remote ABORTS the save (fail closed) rather than clobbering the history.
     merged = try
-        _reconcile_for_save(load(s; strict = true), ledger)
+        _reconcile_for_save(load(s; strict=true), ledger)
     catch e
         e isa InterruptException && rethrow()
-        @error "PublishLedger: existing gist ledger is unreadable — aborting save so it isn't clobbered" gist = id exception = (e, catch_backtrace())
+        @error "PublishLedger: existing gist ledger is unreadable — aborting save so it isn't clobbered" gist =
+            id exception = (e, catch_backtrace())
         rethrow()
     end
     gist_update(s.client, id, s.filename, to_json(merged))
@@ -548,7 +656,9 @@ end
 _ledger_cache_path() = joinpath(SlateHome.cache_home(), "ledger-cache.json")
 function _write_cache(ledger::Ledger)
     try
-        p = _ledger_cache_path(); mkpath(dirname(p)); write(p, to_json(ledger))
+        p = _ledger_cache_path()
+        mkpath(dirname(p))
+        write(p, to_json(ledger))
     catch
     end
     return ledger
@@ -560,7 +670,8 @@ The last ledger written to the local write-through cache — a no-network snapsh
 `nothing` if nothing has been cached yet (a fresh machine, before the first load/save).
 """
 function cached_ledger()
-    p = _ledger_cache_path(); isfile(p) || return nothing
+    p = _ledger_cache_path()
+    isfile(p) || return nothing
     try
         return from_json(read(p, String))
     catch

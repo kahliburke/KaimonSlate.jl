@@ -9,7 +9,7 @@
 # Footer layout (terminal, like `Slate.env`): an open marker, the gzip'd archive as base64
 # wrapped into commented lines, then a close marker. `parse_report` strips any `Slate.*`
 # block, so a standalone `.jl` still opens as an ordinary notebook.
-import SHA
+using SHA: SHA
 # Self-contained content hash (this file is also `include`d standalone in tests, where the
 # SlateHistory module isn't present — so don't reach into it).
 _bundle_sha(s) = bytes2hex(SHA.sha2_256(codeunits(String(s))))
@@ -20,7 +20,12 @@ const _BUNDLE_CLOSE = "# ╚═╡ Slate.bundle"
 # Wrap a base64 payload into a `Slate.*` terminal footer block: an open marker (with a one-line
 # description), the payload split into 100-char commented lines, then a close marker. Shared by
 # `_bundle_footer` and `_preview_footer` (encode side) so the two layouts can't drift apart.
-function _footer_block(open_marker::AbstractString, close_marker::AbstractString, header::AbstractString, b64::AbstractString)
+function _footer_block(
+    open_marker::AbstractString,
+    close_marker::AbstractString,
+    header::AbstractString,
+    b64::AbstractString,
+)
     io = IOBuffer()
     println(io, open_marker, " ", header)
     for i in 1:100:lastindex(b64)
@@ -33,7 +38,9 @@ end
 # Pull a footer's base64 payload out of `text` (between `open_marker`/`close_marker`), or
 # `nothing` if the marker isn't present. Shared by `_read_preview` and `_read_bundle_b64`
 # (decode side) so the two extraction passes can't drift apart.
-function _read_footer_b64(text::AbstractString, open_marker::AbstractString, close_marker::AbstractString)
+function _read_footer_b64(
+    text::AbstractString, open_marker::AbstractString, close_marker::AbstractString
+)
     lines = split(text, '\n')
     oi = findfirst(l -> startswith(l, open_marker), lines)
     oi === nothing && return nothing
@@ -43,8 +50,14 @@ function _read_footer_b64(text::AbstractString, open_marker::AbstractString, clo
     return join((startswith(l, "# ") ? SubString(l, 3) : l for l in body))
 end
 
-_bundle_footer(b64::AbstractString) = _footer_block(_BUNDLE_OPEN, _BUNDLE_CLOSE,
-    "v1 · self-contained env (Project + Manifest + local source). Expand: julia> using KaimonSlate; KaimonSlate.expand(\"this.jl\")", b64)
+function _bundle_footer(b64::AbstractString)
+    return _footer_block(
+        _BUNDLE_OPEN,
+        _BUNDLE_CLOSE,
+        "v1 · self-contained env (Project + Manifest + local source). Expand: julia> using KaimonSlate; KaimonSlate.expand(\"this.jl\")",
+        b64,
+    )
+end
 
 # ── Frozen render (preview) ───────────────────────────────────────────────────
 # A standalone `.jl` optionally embeds the cells' rendered outputs as of export time, so the
@@ -73,8 +86,14 @@ _unzb64_bytes(b64::AbstractString) = _inflate(Base64.base64decode(b64))
 _unzb64(b64::AbstractString) = String(_unzb64_bytes(b64))
 
 # `cells` is the JSON-able rendered-cells array (`state_json(nb)["cells"]`).
-_preview_footer(cells) = _footer_block(_PREVIEW_OPEN, _PREVIEW_CLOSE,
-    "v1 · frozen render shown while the live env reconstructs", _zb64(JSON.json(cells)))
+function _preview_footer(cells)
+    return _footer_block(
+        _PREVIEW_OPEN,
+        _PREVIEW_CLOSE,
+        "v1 · frozen render shown while the live env reconstructs",
+        _zb64(JSON.json(cells)),
+    )
+end
 
 # Externalized rendered figures reference the blob-serving server (`/api/<nbid>/blob/<hash>`), which
 # ISN'T there when an exported `.jl` is reopened elsewhere — so the frozen preview's images would
@@ -84,23 +103,30 @@ _preview_footer(cells) = _footer_block(_PREVIEW_OPEN, _PREVIEW_CLOSE,
 # the file); gzip-encoded blobs (animation stacks) can't be a plain data URI, so they're skipped and
 # their heavy `animations` manifests dropped from the travelling preview. Mutates + returns `cells`.
 const _BLOBURL_RE = r"/api/[^/\"]+/blob/([A-Za-z0-9]+)"
-function _inline_preview_blobs!(nbid::AbstractString, cells; budget::Integer = _PREVIEW_MAX_TOTAL)
+function _inline_preview_blobs!(nbid::AbstractString, cells; budget::Integer=_PREVIEW_MAX_TOTAL)
     total = Ref(0)
     for e in cells
         e isa AbstractDict || continue
         haskey(e, "animations") && (e["animations"] = Any[])   # frame stacks are too heavy to embed
         out = get(e, "output", nothing)
         (out isa AbstractString && occursin("/blob/", out)) || continue
-        e["output"] = replace(out, _BLOBURL_RE => function (s)
-            m = match(_BLOBURL_RE, s); h = m.captures[1]
-            b = blob_lookup(string(nbid, "/", h))
-            b === nothing && return s
-            mime, bytes, enc = b
-            (isempty(enc) && length(bytes) <= _PREVIEW_MAX_ASSET &&
-             total[] + length(bytes) <= budget) || return s
-            total[] += length(bytes)
-            string("data:", mime, ";base64,", Base64.base64encode(bytes))
-        end)
+        e["output"] = replace(
+            out,
+            _BLOBURL_RE => function (s)
+                m = match(_BLOBURL_RE, s)
+                h = m.captures[1]
+                b = blob_lookup(string(nbid, "/", h))
+                b === nothing && return s
+                mime, bytes, enc = b
+                (
+                    isempty(enc) &&
+                    length(bytes) <= _PREVIEW_MAX_ASSET &&
+                    total[] + length(bytes) <= budget
+                ) || return s
+                total[] += length(bytes)
+                return string("data:", mime, ";base64,", Base64.base64encode(bytes))
+            end,
+        )
     end
     return cells
 end
@@ -109,7 +135,11 @@ end
 function _read_preview(text::AbstractString)
     b64 = _read_footer_b64(text, _PREVIEW_OPEN, _PREVIEW_CLOSE)
     b64 === nothing && return nothing
-    return try; JSON.parse(_unzb64(b64)); catch; nothing; end
+    return try
+        JSON.parse(_unzb64(b64))
+    catch
+        nothing
+    end
 end
 
 # ── Precomputed results (memo) ────────────────────────────────────────────────
@@ -123,20 +153,33 @@ const _MEMO_OPEN = "# ╔═╡ Slate.memo"
 const _MEMO_CLOSE = "# ╚═╡ Slate.memo"
 
 # `packed` is the raw MemoStore.pack container bytes.
-_memo_footer(packed::AbstractVector{UInt8}) = _footer_block(_MEMO_OPEN, _MEMO_CLOSE,
-    "v1 · precomputed cell results (this notebook's memo entries) — restore instantly on import",
-    _zb64(packed))
+function _memo_footer(packed::AbstractVector{UInt8})
+    return _footer_block(
+        _MEMO_OPEN,
+        _MEMO_CLOSE,
+        "v1 · precomputed cell results (this notebook's memo entries) — restore instantly on import",
+        _zb64(packed),
+    )
+end
 
 # The raw memo container bytes embedded in `text` (decompressed), or `nothing` if absent.
 function _read_memo(text::AbstractString)
     b64 = _read_footer_b64(text, _MEMO_OPEN, _MEMO_CLOSE)
     b64 === nothing && return nothing
-    return try; _unzb64_bytes(b64); catch; nothing; end
+    return try
+        _unzb64_bytes(b64)
+    catch
+        nothing
+    end
 end
 
 # Slate's local memo store root — matches the worker's `_memo_dir()` and remote.jl's
 # `_slate_cache_dir()` literally (self-contained: those live in other module scopes).
-_memo_root() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "memo")
+function _memo_root()
+    return joinpath(
+        get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "memo"
+    )
+end
 
 # Copy a directory's contents into `dest`, skipping `.git` (history travels via the git
 # bundle, not as loose objects) — keeps the tarball lean and avoids nested-repo confusion.
@@ -147,7 +190,10 @@ function _copy_tree!(dest::AbstractString, src::AbstractString)
         mkpath(joinpath(dest, rel))
         for f in files
             from = joinpath(root, f)
-            try; cp(from, joinpath(dest, rel, f); force = true, follow_symlinks = true); catch; end
+            try
+                cp(from, joinpath(dest, rel, f); force=true, follow_symlinks=true)
+            catch
+            end
         end
     end
     return dest
@@ -159,8 +205,12 @@ end
 # the tree) — the working-tree copy of each tracked file, so uncommitted source edits still ride.
 function _git_tracked_files(dir::AbstractString)
     Sys.which("git") === nothing && return nothing
-    out = try; read(pipeline(`git -C $dir ls-files -z`; stderr = devnull), String); catch; return nothing; end
-    files = String[replace(String(f), '\\' => '/') for f in split(out, '\0'; keepempty = false)]
+    out = try
+        read(pipeline(`git -C $dir ls-files -z`; stderr=devnull), String)
+    catch
+        return nothing
+    end
+    files = String[replace(String(f), '\\' => '/') for f in split(out, '\0'; keepempty=false)]
     return isempty(files) ? nothing : files
 end
 
@@ -173,14 +223,20 @@ function _copy_dep_source!(dest::AbstractString, src::AbstractString)
     tracked = _git_tracked_files(src)
     if tracked !== nothing
         for rel in tracked
-            s = joinpath(src, rel); isfile(s) || continue
-            d = joinpath(dest, rel); mkpath(dirname(d))
-            try; cp(s, d; force = true, follow_symlinks = true); catch; end
+            s = joinpath(src, rel)
+            isfile(s) || continue
+            d = joinpath(dest, rel)
+            mkpath(dirname(d))
+            try
+                cp(s, d; force=true, follow_symlinks=true)
+            catch
+            end
         end
     else
         for f in readdir(src)                                             # package metadata (Project/Manifest/…)
-            endswith(lowercase(f), ".toml") && isfile(joinpath(src, f)) &&
-                (mkpath(dest); cp(joinpath(src, f), joinpath(dest, f); force = true))
+            endswith(lowercase(f), ".toml") &&
+                isfile(joinpath(src, f)) &&
+                (mkpath(dest); cp(joinpath(src, f), joinpath(dest, f); force=true))
         end
         for d in ("src", "ext", "test")                                   # the loadable source
             isdir(joinpath(src, d)) && _copy_tree!(joinpath(dest, d), joinpath(src, d))
@@ -191,13 +247,18 @@ end
 
 # Canonical path (symlinks resolved) so repo-root and project-dir comparisons line up; falls
 # back to `abspath` if the path can't be resolved.
-_safe_realpath(p::AbstractString) = try realpath(p) catch; abspath(p) end
+_safe_realpath(p::AbstractString) =
+    try
+        realpath(p)
+    catch
+        abspath(p)
+    end
 
 # The realpath of the git work-tree root containing `dir`, or `nothing` (no git / not a repo).
 function _git_toplevel(dir::AbstractString)
     Sys.which("git") === nothing && return nothing
     top = try
-        strip(read(pipeline(`git -C $dir rev-parse --show-toplevel`; stderr = devnull), String))
+        strip(read(pipeline(`git -C $dir rev-parse --show-toplevel`; stderr=devnull), String))
     catch
         return nothing
     end
@@ -214,9 +275,18 @@ end
 # success. (The size cost of full history is the price of a checkout that actually works offline.)
 function _git_bundle!(stage::AbstractString, top::AbstractString)
     try
-        run(pipeline(`git -C $top bundle create $(joinpath(stage, "repo.gitbundle")) --branches HEAD`;
-                     stdout = devnull, stderr = devnull))
-        url = try; strip(read(pipeline(`git -C $top remote get-url origin`; stderr = devnull), String)); catch; ""; end
+        run(
+            pipeline(
+                `git -C $top bundle create $(joinpath(stage, "repo.gitbundle")) --branches HEAD`;
+                stdout=devnull,
+                stderr=devnull,
+            ),
+        )
+        url = try
+            strip(read(pipeline(`git -C $top remote get-url origin`; stderr=devnull), String))
+        catch
+            ""
+        end
         isempty(url) || write(joinpath(stage, "git-remote.txt"), url)
         return true
     catch
@@ -227,7 +297,7 @@ end
 # `src`'s path relative to `top` if it lies within `top` (or IS `top` ⇒ "."), else `nothing`.
 function _within(top::AbstractString, src::AbstractString)
     rel = relpath(src, top)
-    (rel == "." || !startswith(rel, "..")) ? replace(rel, '\\' => '/') : nothing
+    return (rel == "." || !startswith(rel, "..")) ? replace(rel, '\\' => '/') : nothing
 end
 
 # Rewrite the staged `Manifest.toml` so each bundled path-dependency points at its in-bundle
@@ -236,7 +306,7 @@ end
 # "Missing source file" on a machine where that absolute path doesn't exist. `targets` maps dep
 # name → relative path. Line-oriented so the generated manifest's formatting is preserved untouched.
 function _rewrite_manifest_paths!(manifest::AbstractString, targets::AbstractDict)
-    isfile(manifest) || return
+    isfile(manifest) || return nothing
     lines = readlines(manifest)
     cur = ""
     for (i, l) in pairs(lines)
@@ -248,7 +318,7 @@ function _rewrite_manifest_paths!(manifest::AbstractString, targets::AbstractDic
         end
     end
     write(manifest, join(lines, "\n") * "\n")
-    return
+    return nothing
 end
 
 # ── Archive: a trivial (path, bytes) container, compressed ────────────────────
@@ -278,7 +348,8 @@ function _unpack_tree(packed::Vector{UInt8}, dest::AbstractString)
     base = normpath(dest)
     endswith(base, sep) || (base *= sep)
     io = IOBuffer(_inflate(packed))              # Zstd, or legacy gzip (auto-detected)
-    written = 0; rejected = 0
+    written = 0
+    rejected = 0
     while !eof(io)
         rel = String(read(io, ntoh(read(io, UInt32))))
         data = read(io, ntoh(read(io, UInt64)))
@@ -290,8 +361,11 @@ function _unpack_tree(packed::Vector{UInt8}, dest::AbstractString)
     end
     # A malicious archive may lose a few entries to the guard; losing ALL of them means the
     # guard itself is broken — fail loudly instead of leaving a convincing empty expansion.
-    written == 0 && rejected > 0 &&
-        error("bundle unpack: the path guard rejected all $(rejected) entries — this is a Slate bug, please report it")
+    written == 0 &&
+        rejected > 0 &&
+        error(
+            "bundle unpack: the path guard rejected all $(rejected) entries — this is a Slate bug, please report it",
+        )
     return dest
 end
 
@@ -307,8 +381,8 @@ _pd_name(pd) = String(pd isa NamedTuple ? pd.name : pd[1])
 # repo into the bundle. Returns the worktree root, or `nothing` (no qualifying repo → flat layout).
 function _root_repo(projectdir::AbstractString, pathdeps, nbpath::AbstractString)
     proj = _safe_realpath(projectdir)
-    is_project(top) = proj == top ||
-        any(pd -> (s = _pd_source(pd); isdir(s) && _safe_realpath(s) == top), pathdeps)
+    is_project(top) =
+        proj == top || any(pd -> (s=_pd_source(pd); isdir(s) && _safe_realpath(s) == top), pathdeps)
     for cand in (dirname(_safe_realpath(nbpath)), projectdir)
         top = _git_toplevel(cand)
         top !== nothing && is_project(top) && return top
@@ -323,15 +397,23 @@ end
 # leaks, including the parent package a forked env `dev`s at the repo root. `envroot` is where the env
 # files land (an `overlay/` for the git layout; the stage root for the source snapshot); `localroot` is
 # where `local/` lands. Shared by the repo-rooted (git-history) and source-rooted (no-history) layouts.
-function _stage_env_and_deps!(envroot::AbstractString, localroot::AbstractString,
-                              projectdir::AbstractString, pathdeps, top::AbstractString, envrel::AbstractString)
+function _stage_env_and_deps!(
+    envroot::AbstractString,
+    localroot::AbstractString,
+    projectdir::AbstractString,
+    pathdeps,
+    top::AbstractString,
+    envrel::AbstractString,
+)
     for f in ("Project.toml", "Manifest.toml")
         s = joinpath(projectdir, f)
-        isfile(s) && (mkpath(joinpath(envroot, envrel)); cp(s, joinpath(envroot, envrel, f); force = true))
+        isfile(s) &&
+            (mkpath(joinpath(envroot, envrel)); cp(s, joinpath(envroot, envrel, f); force=true))
     end
     targets = Dict{String,String}()
     for pd in pathdeps
-        s = _pd_source(pd); nm = _pd_name(pd)
+        s = _pd_source(pd)
+        nm = _pd_name(pd)
         isdir(s) || continue
         inside = _within(top, _safe_realpath(s))                              # dep's path within the repo, or `nothing`
         intree = inside === nothing ? "local/$nm" : inside
@@ -340,7 +422,7 @@ function _stage_env_and_deps!(envroot::AbstractString, localroot::AbstractString
     end
     man = joinpath(envroot, envrel, "Manifest.toml")
     (isempty(targets) || !isfile(man)) || _rewrite_manifest_paths!(man, targets)
-    return
+    return nothing
 end
 
 # Build the base64 archive from explicit coordinates (kernel-independent, so it's unit testable):
@@ -361,8 +443,15 @@ end
 # project / a committed `notebooks/` env), else a dedicated `_slate_env/` for a depot FORK outside it
 # (the common Slate case — a per-notebook env that `dev`s the parent package). Path-deps inside the repo
 # resolve from the tree; those `dev`'d from outside are vendored under `local/<name>`.
-function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::AbstractString, cells::AbstractString;
-                          history::Bool = true, assetbase::AbstractString = "", assetfiles = Dict{String,String}())
+function _make_bundle_b64(
+    projectdir::AbstractString,
+    pathdeps,
+    nbpath::AbstractString,
+    cells::AbstractString;
+    history::Bool=true,
+    assetbase::AbstractString="",
+    assetfiles=Dict{String,String}(),
+)
     stage = mktempdir()
     top = _root_repo(projectdir, pathdeps, nbpath)
     # Author-embedded media (drag/drop / paste → project files the asset route serves) is UNTRACKED,
@@ -376,7 +465,8 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
         for (rel, src) in assetfiles
             isfile(src) || continue
             dst = normpath(joinpath(destroot, placement, rel))
-            mkpath(dirname(dst)); cp(src, dst; force = true)
+            mkpath(dirname(dst))
+            cp(src, dst; force=true)
         end
     end
     if top !== nothing
@@ -391,8 +481,17 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
             let arel = _within(top, _safe_realpath(assetbase))                # untracked embedded media (if the base is in-tree)
                 arel === nothing || stage_assets!(ov, arel)
             end
-            write(joinpath(stage, "bundle.json"),
-                  JSON.json(Dict("mode" => "repo-rooted", "env" => envrel, "notebook" => nrel, "parent" => ".")))
+            write(
+                joinpath(stage, "bundle.json"),
+                JSON.json(
+                    Dict(
+                        "mode" => "repo-rooted",
+                        "env" => envrel,
+                        "notebook" => nrel,
+                        "parent" => ".",
+                    ),
+                ),
+            )
             return Base64.base64encode(_pack_tree(stage))
         elseif nrel !== nothing && !history
             # Source snapshot: the repo's TRACKED files (working-tree copy, no `.git`, no gitignored data)
@@ -404,8 +503,17 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
             let arel = _within(top, _safe_realpath(assetbase))                # untracked embedded media (if the base is in-tree)
                 arel === nothing || stage_assets!(stage, arel)
             end
-            write(joinpath(stage, "bundle.json"),
-                  JSON.json(Dict("mode" => "source-rooted", "env" => envrel, "notebook" => nrel, "parent" => ".")))
+            write(
+                joinpath(stage, "bundle.json"),
+                JSON.json(
+                    Dict(
+                        "mode" => "source-rooted",
+                        "env" => envrel,
+                        "notebook" => nrel,
+                        "parent" => ".",
+                    ),
+                ),
+            )
             return Base64.base64encode(_pack_tree(stage))
         end
         # fall through to the flat layout (notebook outside the repo, or the git bundle failed)
@@ -413,11 +521,12 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
     # ── Flat fallback: self-contained, structure-less, git-free ────────────────────────────────────
     for f in ("Project.toml", "Manifest.toml")
         s = joinpath(projectdir, f)
-        isfile(s) && cp(s, joinpath(stage, f); force = true)
+        isfile(s) && cp(s, joinpath(stage, f); force=true)
     end
     targets = Dict{String,String}()                  # dep name → in-bundle relative source path
     for pd in pathdeps
-        src = _pd_source(pd); nm = _pd_name(pd)
+        src = _pd_source(pd)
+        nm = _pd_name(pd)
         isdir(src) || continue
         _copy_dep_source!(joinpath(stage, "local", nm), src)  # source only (no data/computed bloat)
         targets[nm] = "local/" * nm
@@ -458,13 +567,14 @@ function _serialize_cells_inlining_bibs(report, nbdir::AbstractString)
         isext(c) || return c
         io = IOBuffer()
         for ln in split(c.source, '\n')
-            p = strip(ln); isempty(p) && continue
+            p = strip(ln)
+            isempty(p) && continue
             src = isabspath(p) ? String(p) : joinpath(nbdir, p)
             isfile(src) ? println(io, rstrip(read(src, String))) : println(io, p)   # keep path if missing
         end
         nc = ReportEngine.Cell(c.id, c.kind, rstrip(String(take!(io))))
         union!(nc.flags, c.flags)
-        nc
+        return nc
     end
     tmp = ReportEngine.Report(report.id, report.title)
     append!(tmp.cells, cells2)
@@ -476,7 +586,8 @@ end
 # (`unread`) and zero-copy (`safe`) hints and the compute time (for density ranking). "" key ⇒
 # not memoizable ⇒ skipped. Returns id → Dict spec, and id → compute-ms.
 function _memo_specs(report)
-    specs = Dict{String,Any}(); msof = Dict{String,Float64}()
+    specs = Dict{String,Any}()
+    msof = Dict{String,Float64}()
     for cell in report.cells
         # Key each entry by the key the RESTORE side will request (`_eval_one!` uses `target_key`),
         # not the freshly-computed one: a `locked` cell that has drifted from its upstream restores
@@ -494,14 +605,26 @@ function _memo_specs(report)
         # …minus @bind control vars too: re-established by the `@bind` replay on restore, not embedded
         # (mirrors `_eval_one!`). A MIXED cell ships only its genuine compute; its control replays.
         bindnames = Set{Symbol}(b.name for b in cell.binds)
-        defs = [w for w in cell.writes
-                if !(w in cell.provides) && !(w in bindnames) && w !== ReportEngine._THEME_SENTINEL]
-        unread = String[string(w) for w in defs if !any(o -> o !== cell && w in o.reads, report.cells)]
-        safe   = String[string(w) for w in defs if !any(o -> o !== cell && w in o.mutates, report.cells)]
+        defs = [
+            w for w in cell.writes if
+            !(w in cell.provides) && !(w in bindnames) && w !== ReportEngine._THEME_SENTINEL
+        ]
+        unread = String[
+            string(w) for w in defs if !any(o -> o !== cell && w in o.reads, report.cells)
+        ]
+        safe = String[
+            string(w) for w in defs if !any(o -> o !== cell && w in o.mutates, report.cells)
+        ]
         ms = cell.output === nothing ? 0.0 : Float64(cell.output.duration_ms)
         vrepr = cell.output === nothing ? "" : String(cell.output.value_repr)
-        specs[cell.id] = Dict{String,Any}("key" => key, "names" => String[string(w) for w in defs],
-                                          "unread" => unread, "safe" => safe, "ms" => ms, "value_repr" => vrepr)
+        specs[cell.id] = Dict{String,Any}(
+            "key" => key,
+            "names" => String[string(w) for w in defs],
+            "unread" => unread,
+            "safe" => safe,
+            "ms" => ms,
+            "value_repr" => vrepr,
+        )
         msof[cell.id] = ms
     end
     return specs, msof
@@ -516,24 +639,29 @@ function _memo_ranked(nb::LiveNotebook)
     nb.kernel isa ReportEngine.GateKernel || return Tuple{String,String,Int,Float64}[]
     specs, msof = _memo_specs(nb.report)
     isempty(specs) && return Tuple{String,String,Int,Float64}[]
-    cat = try; ReportEngine.memo_snapshot(nb.kernel, specs); catch; nothing; end
+    cat = try
+        ReportEngine.memo_snapshot(nb.kernel, specs)
+    catch
+        nothing
+    end
     (cat isa AbstractDict) || return Tuple{String,String,Int,Float64}[]
     _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
     ranked = Tuple{String,String,Int,Float64}[]           # (cell_id, fullkey, bytes, ms)
     for (id, r) in cat
         r isa AbstractDict || continue
         (_g(r, "stored", false) === true) || continue
-        fk = String(_g(r, "fullkey", "")); by = Int(_g(r, "bytes", 0))
+        fk = String(_g(r, "fullkey", ""))
+        by = Int(_g(r, "bytes", 0))
         (isempty(fk) || by <= 0) && continue
         push!(ranked, (String(id), fk, by, get(msof, String(id), 0.0)))
     end
-    sort!(ranked; by = t -> t[4] / max(t[3], 1), rev = true)   # ms per byte, densest first
+    sort!(ranked; by=t -> t[4] / max(t[3], 1), rev=true)   # ms per byte, densest first
     return ranked
 end
 
 # Build the `Slate.memo` footer for `nb`: pack the ranked subset that fits `budget` bytes (densest
 # first, so a small budget still banks the most expensive solves). "" when nothing fits / to embed.
-function _build_memo_footer(nb::LiveNotebook; budget::Integer = typemax(Int))
+function _build_memo_footer(nb::LiveNotebook; budget::Integer=typemax(Int))
     ranked = _memo_ranked(nb)
     isempty(ranked) && return ""
     # A `locked`/`cache` cell's entry is a DURABILITY guarantee, not a discretionary cache: it must
@@ -542,21 +670,28 @@ function _build_memo_footer(nb::LiveNotebook; budget::Integer = typemax(Int))
     # reader won't reproduce). The budget governs only the discretionary rest, filled densest-first
     # after the mandatory pins are banked.
     pinned = Set{String}(c.id for c in nb.report.cells if :locked in c.flags || :cache in c.flags)
-    chosen = String[]; used = 0
+    chosen = String[]
+    used = 0
     for (id, fk, by, _ms) in ranked
         (id in pinned) || continue
-        push!(chosen, fk); used += by                     # pins ALWAYS ride — no budget check
+        push!(chosen, fk)
+        used += by                     # pins ALWAYS ride — no budget check
     end
     if budget > 0
         for (id, fk, by, _ms) in ranked
             (id in pinned) && continue                    # already banked above
             used + by > budget && continue                # skip this one; a later denser/smaller may still fit
-            push!(chosen, fk); used += by
+            push!(chosen, fk)
+            used += by
         end
     end
     isempty(chosen) && return ""
-    packed = try; MemoStore.pack(_memo_root(), chosen); catch; UInt8[]; end
-    isempty(packed) ? "" : _memo_footer(packed)
+    packed = try
+        MemoStore.pack(_memo_root(), chosen)
+    catch
+        UInt8[]
+    end
+    return isempty(packed) ? "" : _memo_footer(packed)
 end
 
 # The size/compute catalog for the export slider: this notebook's embeddable results, densest
@@ -568,28 +703,45 @@ function memo_catalog(nb::LiveNotebook)
     # `_build_memo_footer`). Surface it per-entry + as a floor so the export UI can show WHICH cells
     # force the bundle size — a 1 GB locked result should be visible, not a silent surprise.
     pinned = Set{String}(c.id for c in nb.report.cells if :locked in c.flags || :cache in c.flags)
-    entries = [Dict{String,Any}("cell" => id, "bytes" => by, "ms" => round(ms; digits = 1),
-                                "pinned" => (id in pinned))
-               for (id, _fk, by, ms) in ranked]
-    return Dict{String,Any}("entries" => entries,
-                            "total_bytes" => sum(t -> t[3], ranked; init = 0),
-                            "total_ms" => round(sum(t -> t[4], ranked; init = 0.0); digits = 1),
-                            "pinned_bytes" => sum((t[3] for t in ranked if t[1] in pinned); init = 0))
+    entries = [
+        Dict{String,Any}(
+            "cell" => id, "bytes" => by, "ms" => round(ms; digits=1), "pinned" => (id in pinned)
+        ) for (id, _fk, by, ms) in ranked
+    ]
+    return Dict{String,Any}(
+        "entries" => entries,
+        "total_bytes" => sum(t -> t[3], ranked; init=0),
+        "total_ms" => round(sum(t -> t[4], ranked; init=0.0); digits=1),
+        "pinned_bytes" => sum((t[3] for t in ranked if t[1] in pinned); init=0),
+    )
 end
 
 # `memo_budget` bytes caps the embedded precomputed results (default: all memoizable results;
 # 0 disables). Entries are chosen by compute-saved-per-byte so a small budget still banks the
 # most expensive solves. See `_build_memo_footer`.
-function export_standalone(nb::LiveNotebook; include_preview::Bool = true, history::Bool = true,
-                           memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL)
+function export_standalone(
+    nb::LiveNotebook;
+    include_preview::Bool=true,
+    history::Bool=true,
+    memo_budget::Integer=typemax(Int),
+    preview_budget::Integer=_PREVIEW_MAX_TOTAL,
+)
     lock(nb.lock) do
         info = ReportEngine.bundle_info(nb.kernel, nb.report)
         isempty(info.projectdir) &&
             error("this notebook has no project environment to bundle (in-process kernel)")
         cells = _serialize_cells_inlining_bibs(nb.report, dirname(abspath(nb.path)))
-        b64 = _make_bundle_b64(info.projectdir, info.pathdeps, abspath(nb.path), cells;
-                               history = history, assetbase = String(get(nb.report.meta, "assetbase", "")),
-                               assetfiles = _embedded_asset_files(nb.report.cells, String(get(nb.report.meta, "assetbase", ""))))
+        b64 = _make_bundle_b64(
+            info.projectdir,
+            info.pathdeps,
+            abspath(nb.path),
+            cells;
+            history=history,
+            assetbase=String(get(nb.report.meta, "assetbase", "")),
+            assetfiles=_embedded_asset_files(
+                nb.report.cells, String(get(nb.report.meta, "assetbase", ""))
+            ),
+        )
         out = cells
         # Carry the reproducibility env footer (the notebook's declared package delta) so a reopened
         # standalone can LIST its packages at parse time — no instantiation needed (the inactive launch
@@ -601,12 +753,12 @@ function export_standalone(nb::LiveNotebook; include_preview::Bool = true, histo
         out *= "\n" * _bundle_footer(b64)
         (include_preview && preview_budget > 0) && try
             # Re-inline blob URLs → data URIs so the frozen render travels self-contained (capped).
-            pcells = _inline_preview_blobs!(nb.id, state_json(nb)["cells"]; budget = preview_budget)
+            pcells = _inline_preview_blobs!(nb.id, state_json(nb)["cells"]; budget=preview_budget)
             out *= "\n" * _preview_footer(pcells)   # frozen render for instant display
         catch
         end
         try
-            mf = _build_memo_footer(nb; budget = memo_budget)        # precomputed results → restore on import
+            mf = _build_memo_footer(nb; budget=memo_budget)        # precomputed results → restore on import
             isempty(mf) || (out *= "\n" * mf)
         catch
         end
@@ -631,16 +783,19 @@ end
 # it on the next hydrate. CRLF-tolerant (the markers are matched as a prefix; trailing \r stripped).
 function _carry_env_footers(text::AbstractString)
     lines = split(text, '\n')
-    io = IOBuffer(); wrote = false
-    for (openm, closem) in ((_BUNDLE_OPEN, _BUNDLE_CLOSE), (_PREVIEW_OPEN, _PREVIEW_CLOSE),
-                            (_MEMO_OPEN, _MEMO_CLOSE))
+    io = IOBuffer()
+    wrote = false
+    for (openm, closem) in
+        ((_BUNDLE_OPEN, _BUNDLE_CLOSE), (_PREVIEW_OPEN, _PREVIEW_CLOSE), (_MEMO_OPEN, _MEMO_CLOSE))
         oi = findfirst(l -> startswith(l, openm), lines)
         oi === nothing && continue
         rest = @view lines[(oi + 1):end]
         ci = findfirst(l -> startswith(l, closem), rest)
         lasti = ci === nothing ? length(lines) : oi + ci
         wrote && println(io)
-        for i in oi:lasti; println(io, rstrip(lines[i], ['\r'])); end
+        for i in oi:lasti
+            println(io, rstrip(lines[i], ['\r']))
+        end
         wrote = true
     end
     return String(take!(io))
@@ -662,34 +817,58 @@ end
 function _read_bundle_meta(dir::AbstractString)
     f = joinpath(dir, "bundle.json")
     isfile(f) || return nothing
-    return try; JSON.parse(read(f, String)); catch; nothing; end
+    return try
+        JSON.parse(read(f, String))
+    catch
+        nothing
+    end
 end
 
 _joinrel(dir, rel) = (rel == "." || isempty(rel)) ? String(dir) : normpath(joinpath(dir, rel))
 
 # Persist the expanded project's coordinates so the open/reconstruct paths (and cache hits) know the
 # ENV dir to activate, the PARENT package, and where the notebook landed — without re-deriving.
-_write_coords!(dir; mode, env, parent, notebook) =
-    write(joinpath(dir, ".slatebundle.json"),
-          JSON.json(Dict("mode" => mode, "env" => env, "parent" => parent, "notebook" => notebook)))
+function _write_coords!(dir; mode, env, parent, notebook)
+    return write(
+        joinpath(dir, ".slatebundle.json"),
+        JSON.json(Dict("mode" => mode, "env" => env, "parent" => parent, "notebook" => notebook)),
+    )
+end
 
 # Read `.slatebundle.json` → absolute coordinates `(root, envdir, parent, notebook)`.
 function _read_coords(dir::AbstractString)
     f = joinpath(dir, ".slatebundle.json")
-    m = isfile(f) ? (try; JSON.parse(read(f, String)); catch; Dict{String,Any}(); end) : Dict{String,Any}()
-    env = String(get(m, "env", ".")); parent = String(get(m, "parent", "")); nb = String(get(m, "notebook", ""))
-    return (root = String(dir), envdir = _joinrel(dir, env),
-            parent = isempty(parent) ? "" : _joinrel(dir, parent),
-            notebook = isempty(nb) ? _expanded_notebook(dir) : _joinrel(dir, nb))
+    m = isfile(f) ? (
+        try
+            JSON.parse(read(f, String))
+        catch
+            Dict{String,Any}()
+        end
+    ) : Dict{String,Any}()
+    env = String(get(m, "env", "."))
+    parent = String(get(m, "parent", ""))
+    nb = String(get(m, "notebook", ""))
+    return (
+        root=String(dir),
+        envdir=_joinrel(dir, env),
+        parent=isempty(parent) ? "" : _joinrel(dir, parent),
+        notebook=isempty(nb) ? _expanded_notebook(dir) : _joinrel(dir, nb),
+    )
 end
 
 # Move every top-level entry of `src` into `dst` (preserves `.git`; cross-filesystem safe).
 function _move_contents!(src::AbstractString, dst::AbstractString)
     mkpath(dst)
     for e in readdir(src)
-        s = joinpath(src, e); d = joinpath(dst, e)
-        rm(d; recursive = true, force = true)
-        try; mv(s, d); catch; cp(s, d; force = true, follow_symlinks = true); rm(s; recursive = true, force = true); end
+        s = joinpath(src, e)
+        d = joinpath(dst, e)
+        rm(d; recursive=true, force=true)
+        try
+            mv(s, d)
+        catch
+            cp(s, d; force=true, follow_symlinks=true)
+            rm(s; recursive=true, force=true)
+        end
     end
     return dst
 end
@@ -701,19 +880,40 @@ end
 # `git log` — no shallow graft to repair.
 function _tidy_git_checkout!(dir::AbstractString, remote_url::AbstractString)
     if isempty(strip(remote_url))
-        try; run(pipeline(`git -C $dir remote remove origin`; stdout = devnull, stderr = devnull)); catch; end
+        try
+            run(pipeline(`git -C $dir remote remove origin`; stdout=devnull, stderr=devnull))
+        catch
+        end
     else
         try
-            run(pipeline(`git -C $dir remote set-url origin $remote_url`; stdout = devnull, stderr = devnull))
+            run(
+                pipeline(
+                    `git -C $dir remote set-url origin $remote_url`; stdout=devnull, stderr=devnull
+                ),
+            )
         catch
-            try; run(pipeline(`git -C $dir remote add origin $remote_url`; stdout = devnull, stderr = devnull)); catch; end
+            try
+                run(
+                    pipeline(
+                        `git -C $dir remote add origin $remote_url`; stdout=devnull, stderr=devnull
+                    ),
+                )
+            catch
+            end
         end
     end
     # Locally ignore Slate's reconstruction artifacts so `git status` stays clean (ready to branch &
     # PR): the coords file, the forked-env dir, and any vendored external deps that landed in-tree.
     excl = joinpath(dir, ".git", "info", "exclude")
-    try; isdir(dirname(excl)) &&
-        open(io -> foreach(l -> println(io, l), (".slatebundle.json", "/_slate_env/", "/local/")), excl, "a"); catch; end
+    try
+        isdir(dirname(excl)) && open(
+            io ->
+                foreach(l -> println(io, l), (".slatebundle.json", "/_slate_env/", "/local/")),
+            excl,
+            "a",
+        )
+    catch
+    end
     return dir
 end
 
@@ -732,46 +932,61 @@ function _extract_bundle!(b64::AbstractString, dir::AbstractString)
         # A raw EOFError / bad-gzip / bad-base64 here means the payload is truncated or was written
         # by an INCOMPATIBLE Slate version (e.g. a pre-`(path,bytes)`-archive bundle) — surface an
         # actionable message rather than "EOFError: read end of file" in the hydrate banner.
-        error("This notebook's embedded bundle is corrupt or from an incompatible Slate version — " *
-              "re-export the standalone `.jl` from a current Slate. (bundle decode: $(sprint(showerror, e)))")
+        error(
+            "This notebook's embedded bundle is corrupt or from an incompatible Slate version — " *
+            "re-export the standalone `.jl` from a current Slate. (bundle decode: $(sprint(showerror, e)))",
+        )
     end
     meta = _read_bundle_meta(dir)
     if meta !== nothing && get(meta, "mode", "") == "repo-rooted"
-        Sys.which("git") === nothing && error("expand: this is a repo-rooted bundle but `git` isn't available")
+        Sys.which("git") === nothing &&
+            error("expand: this is a repo-rooted bundle but `git` isn't available")
         clone = joinpath(mktempdir(), "r")
         # The bundle is untrusted (it rides in a `.jl` anyone can hand you), so clone it with the
         # dangerous surfaces closed: no hooks (template hooks can't run), fsck the incoming objects
         # (reject malformed/oversized ones — the crafted-object CVE class), and never recurse
         # submodules (the `url = ext::…` RCE vector). Reconstruction stays inert data-materialisation.
-        run(pipeline(`git -c core.hooksPath=/dev/null -c transfer.fsckObjects=true clone -q --no-recurse-submodules $(joinpath(dir, "repo.gitbundle")) $clone`;
-                     stdout = devnull, stderr = devnull))
+        run(
+            pipeline(
+                `git -c core.hooksPath=/dev/null -c transfer.fsckObjects=true clone -q --no-recurse-submodules $(joinpath(dir, "repo.gitbundle")) $clone`;
+                stdout=devnull,
+                stderr=devnull,
+            ),
+        )
         urlf = joinpath(dir, "git-remote.txt")
         remote_url = isfile(urlf) ? strip(read(urlf, String)) : ""
         ov = joinpath(dir, "overlay")
         for f in ("repo.gitbundle", "git-remote.txt", "bundle.json")   # drop the scaffolding
-            rm(joinpath(dir, f); force = true)
+            rm(joinpath(dir, f); force=true)
         end
         ovkeep = isdir(ov) ? mktempdir() : ""
         isempty(ovkeep) || _move_contents!(ov, ovkeep)                 # stash overlay before the repo lands
-        rm(ov; recursive = true, force = true)
+        rm(ov; recursive=true, force=true)
         _move_contents!(clone, dir)                                    # the repo IS the root (incl .git)
         isempty(ovkeep) || _copy_tree_overlay!(dir, ovkeep)           # live env + notebook overwrite committed
         _tidy_git_checkout!(dir, remote_url)                          # clean origin + ignore the coords file
-        env = String(get(meta, "env", ".")); nb = String(get(meta, "notebook", ""))
-        _write_coords!(dir; mode = "repo-rooted", env = env, parent = ".", notebook = nb)
+        env = String(get(meta, "env", "."))
+        nb = String(get(meta, "notebook", ""))
+        _write_coords!(dir; mode="repo-rooted", env=env, parent=".", notebook=nb)
         return _read_coords(dir)
     elseif meta !== nothing && get(meta, "mode", "") == "source-rooted"
         # The reconstructed tree is already complete (source staged in place, live cells written) — just
         # drop the marker and record coords (env dir + repo root as parent). No clone, no git needed.
-        rm(joinpath(dir, "bundle.json"); force = true)
-        env = String(get(meta, "env", ".")); nb = String(get(meta, "notebook", ""))
-        _write_coords!(dir; mode = "source-rooted", env = env, parent = ".", notebook = nb)
+        rm(joinpath(dir, "bundle.json"); force=true)
+        env = String(get(meta, "env", "."))
+        nb = String(get(meta, "notebook", ""))
+        _write_coords!(dir; mode="source-rooted", env=env, parent=".", notebook=nb)
         return _read_coords(dir)
     end
     # FLAT — self-contained vendored tree, no git.
     nb = _expanded_notebook(dir)
-    _write_coords!(dir; mode = "flat", env = ".", parent = "",
-                   notebook = isempty(nb) ? "" : replace(relpath(nb, dir), '\\' => '/'))
+    _write_coords!(
+        dir;
+        mode="flat",
+        env=".",
+        parent="",
+        notebook=isempty(nb) ? "" : replace(relpath(nb, dir), '\\' => '/'),
+    )
     return _read_coords(dir)
 end
 
@@ -783,7 +998,10 @@ function _copy_tree_overlay!(dest::AbstractString, src::AbstractString)
         rel = relpath(root, src)
         mkpath(joinpath(dest, rel))
         for f in files
-            try; cp(joinpath(root, f), joinpath(dest, rel, f); force = true, follow_symlinks = true); catch; end
+            try
+                cp(joinpath(root, f), joinpath(dest, rel, f); force=true, follow_symlinks=true)
+            catch
+            end
         end
     end
     return dest
@@ -820,26 +1038,29 @@ function _reconstruct_bundle!(jl_path::AbstractString)
     install = strip(get(ENV, "SLATE_INSTALL_DIR", ""))
     if !isempty(install)
         dir = abspath(expanduser(String(install)))
-        isfile(joinpath(dir, ".slatebundle.json")) && return (; _read_coords(dir)..., fresh = false, install = true)  # reuse
-        (isdir(dir) && !isempty(readdir(dir))) &&
-            error("SLATE_INSTALL_DIR is a non-empty directory that isn't a Slate install: $dir\n" *
-                  "Choose an empty/new path, or remove it, and re-run.")
+        isfile(joinpath(dir, ".slatebundle.json")) &&
+            return (; _read_coords(dir)..., fresh=false, install=true)  # reuse
+        (isdir(dir) && !isempty(readdir(dir))) && error(
+            "SLATE_INSTALL_DIR is a non-empty directory that isn't a Slate install: $dir\n" *
+            "Choose an empty/new path, or remove it, and re-run.",
+        )
         _extract_bundle!(b64, dir)
-        return (; _read_coords(dir)..., fresh = true, install = true)
+        return (; _read_coords(dir)..., fresh=true, install=true)
     end
     dir = _bundle_cache_dir(b64)
-    isfile(joinpath(dir, ".slatebundle.json")) && return (; _read_coords(dir)..., fresh = false, install = false)   # cache hit
+    isfile(joinpath(dir, ".slatebundle.json")) &&
+        return (; _read_coords(dir)..., fresh=false, install=false)   # cache hit
     mkpath(dirname(dir))
     staging = dir * ".partial"
-    rm(staging; recursive = true, force = true)
+    rm(staging; recursive=true, force=true)
     _extract_bundle!(b64, staging)
     if isfile(joinpath(dir, ".slatebundle.json"))    # someone raced us → keep theirs
-        rm(staging; recursive = true, force = true)
-        return (; _read_coords(dir)..., fresh = false, install = false)
+        rm(staging; recursive=true, force=true)
+        return (; _read_coords(dir)..., fresh=false, install=false)
     end
-    rm(dir; recursive = true, force = true)
+    rm(dir; recursive=true, force=true)
     mv(staging, dir)
-    return (; _read_coords(dir)..., fresh = true, install = false)
+    return (; _read_coords(dir)..., fresh=true, install=false)
 end
 
 """
@@ -851,7 +1072,7 @@ original project (its `src/`, `notebooks/`, …) with the LIVE notebook cells in
 `origin` (branch & PR with matching SHAs). A FLAT bundle writes Project + Manifest, any `local/`
 package source, and the notebook at the root. Returns the target dir.
 """
-function expand(jl_path::AbstractString; target::AbstractString = "", force::Bool = false)
+function expand(jl_path::AbstractString; target::AbstractString="", force::Bool=false)
     txt = read(jl_path, String)
     b64 = _read_bundle_b64(txt)
     tdir = isempty(target) ? splitext(abspath(jl_path))[1] * ".expanded" : abspath(target)
@@ -859,18 +1080,32 @@ function expand(jl_path::AbstractString; target::AbstractString = "", force::Boo
     # states + leave unrelated files behind). Require force=true to extract into it.
     (isdir(tdir) && !isempty(readdir(tdir)) && !force) &&
         error("expand: target exists and is not empty: $tdir  (pass force=true to overwrite)")
-    force && isdir(tdir) && rm(tdir; recursive = true, force = true)
+    force && isdir(tdir) && rm(tdir; recursive=true, force=true)
     co = _extract_bundle!(b64, tdir)
     isrepo = isdir(joinpath(tdir, ".git"))
     @info "Expanded standalone notebook" target = tdir
     # Double quotes throughout: cmd.exe treats single quotes as literal characters, so the
     # -e '…' form hands Windows users a broken command. Double quotes parse on cmd,
     # PowerShell, AND POSIX shells (nothing in the literal needs escaping in any of them).
-    println("Expanded to: $tdir\n" *
-            "  • notebook:   $(co.notebook)\n" *
-            "  • instantiate: julia --project=\"$(co.envdir)\" -e \"using Pkg; Pkg.instantiate()\"" *
-            (isdir(joinpath(tdir, "local")) ? "\n  • local package source: $(joinpath(tdir, "local"))" : "") *
-            (isrepo ? "\n  • git checkout wired to origin (matching SHAs) — ready to branch & PR" : "") * "\n")
+    println(
+        "Expanded to: $tdir\n" *
+        "  • notebook:   $(co.notebook)\n" *
+        "  • instantiate: julia --project=\"$(co.envdir)\" -e \"using Pkg; Pkg.instantiate()\"" *
+        (
+            if isdir(joinpath(tdir, "local"))
+                "\n  • local package source: $(joinpath(tdir, "local"))"
+            else
+                ""
+            end
+        ) *
+        (
+            if isrepo
+                "\n  • git checkout wired to origin (matching SHAs) — ready to branch & PR"
+            else
+                ""
+            end
+        ) *
+        "\n",
+    )
     return tdir
 end
-

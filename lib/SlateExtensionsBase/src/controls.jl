@@ -17,13 +17,17 @@ struct Widget
     params::Dict{String,Any}
     default::Any
 end
-Widget(kind::AbstractString, default = ""; params...) =
-    Widget(String(kind), Dict{String,Any}(String(k) => v for (k, v) in params), default)
+function Widget(kind::AbstractString, default=""; params...)
+    return Widget(String(kind), Dict{String,Any}(String(k) => v for (k, v) in params), default)
+end
 
 # NamedTuple params — the ergonomic authoring form (`Widget(kind, (; max = 5), 0)`); stored as the wire
 # `Dict{String,Any}` bag. The 3-arg shape is unambiguous vs the 2-arg `Widget(kind, default)`.
-Widget(kind::AbstractString, params::NamedTuple, default) =
-    Widget(String(kind), Dict{String,Any}(String(k) => v for (k, v) in pairs(params)), default)
+function Widget(kind::AbstractString, params::NamedTuple, default)
+    return Widget(
+        String(kind), Dict{String,Any}(String(k) => v for (k, v) in pairs(params)), default
+    )
+end
 
 """
     kind_for(T::Type) -> String
@@ -46,7 +50,7 @@ registers, with no shared string to keep in sync:
 SlateExtensionsBase.to_widget(s::Stars) = Widget(Stars, s.default; max = s.max)
 ```
 """
-Widget(T::Type, default = ""; params...) = Widget(kind_for(T), default; params...)
+Widget(T::Type, default=""; params...) = Widget(kind_for(T), default; params...)
 
 """
     auto_widget(x; value = :default, exclude = ()) -> Widget
@@ -65,14 +69,18 @@ Opt-in on purpose — Slate never reflects a struct unless you ask, so an arbitr
 turned into a control, and you keep full control (write `Widget(kind_for(T), (;…), val)` by hand, or use
 `exclude`, when not every field is a param).
 """
-function auto_widget(x; value::Symbol = :default, exclude = ())
+function auto_widget(x; value::Symbol=:default, exclude=())
     T = typeof(x)
-    value in fieldnames(T) || throw(ArgumentError(
-        "auto_widget($T): no `$value` field to use as the bound value — name the value field `$value`, " *
-        "pass `value = :yourfield`, or build the Widget explicitly (`Widget(kind_for($T), (; …), val)`)."))
+    value in fieldnames(T) || throw(
+        ArgumentError(
+            "auto_widget($T): no `$value` field to use as the bound value — name the value field `$value`, " *
+            "pass `value = :yourfield`, or build the Widget explicitly (`Widget(kind_for($T), (; …), val)`).",
+        ),
+    )
     ex = (value, exclude...)
-    params = Dict{String,Any}(String(f) => getfield(x, f)
-                              for f in fieldnames(T) if f ∉ ex && getfield(x, f) !== nothing)
+    params = Dict{String,Any}(
+        String(f) => getfield(x, f) for f in fieldnames(T) if f ∉ ex && getfield(x, f) !== nothing
+    )
     return Widget(kind_for(T), params, getfield(x, value))
 end
 
@@ -92,8 +100,13 @@ The identity method means an existing `Widget` (or a built-in constructor's resu
 through unchanged.
 """
 to_widget(w::Widget) = w
-to_widget(x) = throw(ArgumentError(
-    "@bind expected a Widget (or a value with a `SlateExtensionsBase.to_widget` method); got $(typeof(x))"))
+function to_widget(x)
+    return throw(
+        ArgumentError(
+            "@bind expected a Widget (or a value with a `SlateExtensionsBase.to_widget` method); got $(typeof(x))",
+        ),
+    )
+end
 
 # ── Choice / Selection — labeled-option value semantics ───────────────────────
 # What a labeled option widget (Radio/Select/MultiSelect built from `value => label` pairs)
@@ -113,8 +126,16 @@ struct Choice{V}
     index::Int            # 1-based position in the widget's option list (0 = unknown)
 end
 Choice(value, label) = Choice(value, label, 0)
-Base.getproperty(c::Choice, s::Symbol) = s === :v ? getfield(c, :value) : s === :l ? getfield(c, :label) :
-                                         s === :i ? getfield(c, :index) : getfield(c, s)
+Base.getproperty(c::Choice, s::Symbol) =
+    if s === :v
+        getfield(c, :value)
+    elseif s === :l
+        getfield(c, :label)
+    elseif s === :i
+        getfield(c, :index)
+    else
+        getfield(c, s)
+    end
 Base.propertynames(::Choice) = (:value, :label, :index, :v, :l, :i)
 Base.show(io::IO, c::Choice) = show(io, getfield(c, :value))
 Base.print(io::IO, c::Choice) = print(io, getfield(c, :value))
@@ -132,8 +153,11 @@ Base.isequal(a::Choice, b::Choice) = isequal(getfield(a, :value), getfield(b, :v
 # typed collections, indexing, and explicit numeric construction — so a labeled option's Choice
 # flows wherever its bare value would through a `convert`. Restricted to SCALAR targets so it
 # can't shadow the Choice→Choice conversion that `Choice[…]` collections depend on.
-Base.convert(::Type{T}, c::Choice) where {T<:Union{Number,AbstractString,AbstractChar,Symbol}} =
-    convert(T, getfield(c, :value))
+function Base.convert(
+    ::Type{T}, c::Choice
+) where {T<:Union{Number,AbstractString,AbstractChar,Symbol}}
+    return convert(T, getfield(c, :value))
+end
 (::Type{T})(c::Choice) where {T<:Number} = T(getfield(c, :value))
 Base.to_index(c::Choice) = Base.to_index(getfield(c, :value))
 
@@ -148,12 +172,14 @@ struct Selection <: AbstractDict{Any,String}
     items::Vector{Choice}
 end
 Base.length(s::Selection) = length(s.items)
-Base.iterate(s::Selection, i = 1) = i > length(s.items) ? nothing : (s.items[i].value => s.items[i].label, i + 1)
+function Base.iterate(s::Selection, i=1)
+    return i > length(s.items) ? nothing : (s.items[i].value => s.items[i].label, i + 1)
+end
 function Base.getindex(s::Selection, k)
     for c in s.items
         isequal(c.value, k) && return c.label
     end
-    throw(KeyError(k))
+    return throw(KeyError(k))
 end
 Base.haskey(s::Selection, k) = any(c -> isequal(c.value, k), s.items)
 
@@ -199,9 +225,16 @@ unaffected). Built-in scalar coercions: Integer (rounds/parses), AbstractFloat, 
 """
 coerce_value(::Type, v) = v                                        # unknown value type → pass through
 coerce_value(::Type{T}, v) where {T<:Integer} =
-    v isa Integer ? T(v) : v isa Number ? round(T, v) : parse(T, strip(string(v)))
-coerce_value(::Type{T}, v) where {T<:AbstractFloat} =
-    v isa Number ? T(v) : parse(T, strip(string(v)))
+    if v isa Integer
+        T(v)
+    elseif v isa Number
+        round(T, v)
+    else
+        parse(T, strip(string(v)))
+    end
+function coerce_value(::Type{T}, v) where {T<:AbstractFloat}
+    return v isa Number ? T(v) : parse(T, strip(string(v)))
+end
 coerce_value(::Type{Bool}, v) = v === true || v == 1 || v == "true"
 coerce_value(::Type{T}, v) where {T<:AbstractString} = T(string(v))
 coerce_value(::Type{Symbol}, v) = Symbol(string(v))
@@ -211,7 +244,12 @@ coerce_value(::Type{Symbol}, v) = Symbol(string(v))
 # cell) — so a typed widget needs no `register_kind!` at all. `reconcile` keeps the user's value across
 # a re-run (the kind-changed reset is generic, in `reconcile_bind`, so a per-kind reconciler only ever
 # sees same-kind); `wrap` hands the raw value to the user.
-_default_coerce(w::Widget, v) = try coerce_value(typeof(w.default), v) catch; w.default end
+_default_coerce(w::Widget, v) =
+    try
+        coerce_value(typeof(w.default), v)
+    catch
+        w.default
+    end
 _default_reconcile(oldw::Widget, oldv, neww::Widget) = oldv
 _default_wrap(::Widget, v) = v
 
@@ -223,7 +261,11 @@ _restrict(d::AbstractRange, v, default) = clamp(v, first(d), last(d))
 _restrict(d, v, default) = v in d ? v : default
 _domain_coerce(domain) = (w::Widget, v) -> begin
     d = domain(w)
-    cv = try coerce_value(eltype(d), v) catch; return w.default end
+    cv = try
+        coerce_value(eltype(d), v)
+    catch
+        return w.default
+    end
     _restrict(d, cv, w.default)
 end
 _domain_reconcile(domain) = (ow::Widget, ov, nw::Widget) -> (ov in domain(nw) ? ov : nw.default)
@@ -245,10 +287,23 @@ often needs no call at all. Pass:
 register_kind!("stars"; domain = w -> 0:Int(get(w.params, "max", 5)))   # bounds; or omit entirely
 ```
 """
-function register_kind!(kind::AbstractString;
-                        coerce = nothing, reconcile = nothing, wrap = _default_wrap, domain = nothing)
-    co = coerce    !== nothing ? coerce    : domain !== nothing ? _domain_coerce(domain)    : _default_coerce
-    re = reconcile !== nothing ? reconcile : domain !== nothing ? _domain_reconcile(domain) : _default_reconcile
+function register_kind!(
+    kind::AbstractString; coerce=nothing, reconcile=nothing, wrap=_default_wrap, domain=nothing
+)
+    co = if coerce !== nothing
+        coerce
+    elseif domain !== nothing
+        _domain_coerce(domain)
+    else
+        _default_coerce
+    end
+    re = if reconcile !== nothing
+        reconcile
+    elseif domain !== nothing
+        _domain_reconcile(domain)
+    else
+        _default_reconcile
+    end
     _KINDS[String(kind)] = KindSpec(co, re, wrap)
     return nothing
 end
@@ -281,10 +336,11 @@ function bind_domain(w::Widget)
         opts isa AbstractVector || return nothing
         return Any[o isa AbstractDict ? get(o, "value", o) : o for o in opts]
     elseif k == "slider"
-        num(key) = (v = get(p, key, nothing); v isa Real ? Float64(v) : nothing)
+        num(key) = (v=get(p, key, nothing); v isa Real ? Float64(v) : nothing)
         lo, hi = num("min"), num("max")
         (lo === nothing || hi === nothing || hi < lo) && return nothing
-        st = num("step"); st = (st === nothing || st == 0) ? 1.0 : abs(st)
+        st = num("step")
+        st = (st === nothing || st == 0) ? 1.0 : abs(st)
         # The epsilon keeps the endpoint: a span that is an exact multiple of the step (1:2:15) otherwise
         # loses its last value to floating-point drift on the division.
         vals = Any[lo + i * st for i in 0:floor(Int, (hi - lo) / st + 1e-9)]
@@ -346,17 +402,25 @@ quietly ship the slow representation.
 """
 function replay_stack(slices::AbstractVector)
     isempty(slices) && error("replay: no values to stack (the control's domain is empty)")
-    all(s -> s isa AbstractArray, slices) ||
-        error("replay: expected an array for each value of the control; got a `" *
-              string(typeof(first(slices))) * "`. Only numeric arrays can be replayed client-side.")
+    all(s -> s isa AbstractArray, slices) || error(
+        "replay: expected an array for each value of the control; got a `" *
+        string(typeof(first(slices))) *
+        "`. Only numeric arrays can be replayed client-side.",
+    )
     shp = size(first(slices))
-    all(s -> size(s) == shp, slices) ||
-        error("replay: the values produce differently-shaped results " *
-              string(unique(size.(slices))) * ". They stack into one array, so every value of the " *
-              "control must yield the same shape.")
+    all(s -> size(s) == shp, slices) || error(
+        "replay: the values produce differently-shaped results " *
+        string(unique(size.(slices))) *
+        ". They stack into one array, so every value of the " *
+        "control must yield the same shape.",
+    )
     T = promote_type(map(eltype, slices)...)
-    T <: Real || error("replay: produces `" * string(T) * "`, which is not numeric data a plot can be " *
-                       "fed client-side")
+    T <: Real || error(
+        "replay: produces `" *
+        string(T) *
+        "`, which is not numeric data a plot can be " *
+        "fed client-side",
+    )
     # Keep the computed precision here. Narrowing is an ARTIFACT decision — it belongs to the export,
     # which owns how the page represents this data and can revisit it per export without re-running a
     # cell. Doing it here would also degrade the LIVE figure, which has the real data to hand and no
@@ -377,7 +441,9 @@ _kind(kind::AbstractString) = get(_KINDS, String(kind), nothing)
 
 Coerce a raw browser value against `w`'s registered kind (identity for an unregistered kind).
 """
-coerce_bind(w::Widget, v) = (k = _kind(w.kind); k === nothing ? _default_coerce(w, v) : k.coerce(w, v))
+function coerce_bind(w::Widget, v)
+    return (k=_kind(w.kind); k === nothing ? _default_coerce(w, v) : k.coerce(w, v))
+end
 
 """
     reconcile_bind(oldw::Widget, oldv, neww::Widget)
@@ -389,7 +455,7 @@ reconciler, or keep-as-is for an unregistered kind).
 function reconcile_bind(oldw::Widget, oldv, neww::Widget)
     oldw.kind == neww.kind || return neww.default          # widget type changed → reset
     k = _kind(neww.kind)
-    k === nothing ? _default_reconcile(oldw, oldv, neww) : k.reconcile(oldw, oldv, neww)
+    return k === nothing ? _default_reconcile(oldw, oldv, neww) : k.reconcile(oldw, oldv, neww)
 end
 
 """
@@ -398,4 +464,4 @@ end
 The registry value → the user-facing value (e.g. a [`Choice`](@ref) for a labeled option).
 Identity for an unregistered kind.
 """
-wrap_value(w::Widget, v) = (k = _kind(w.kind); k === nothing ? _default_wrap(w, v) : k.wrap(w, v))
+wrap_value(w::Widget, v) = (k=_kind(w.kind); k === nothing ? _default_wrap(w, v) : k.wrap(w, v))
