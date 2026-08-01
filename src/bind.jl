@@ -30,3 +30,9 @@ function set_bind_value!(report::Report, cell::Cell, value, kernel::Kernel = InP
     length(cell.binds) == 1 || return cell
     return set_bind_value!(report, cell, cell.binds[1].name, value, kernel)
 end
+
+# Resolve ambiguity
+function set_bind_value!(report::Report, cell::Cell, name::Symbol, kernel::Kernel)
+    length(cell.binds) == 1 || return cell
+    return set_bind_value!(report, cell, cell.binds[1].name, name, kernel)
+end
