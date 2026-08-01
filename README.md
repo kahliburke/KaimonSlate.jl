@@ -9,7 +9,7 @@
 [![Documentation](https://github.com/kahliburke/KaimonSlate.jl/actions/workflows/Docs.yml/badge.svg?branch=main)](https://github.com/kahliburke/KaimonSlate.jl/actions/workflows/Docs.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A reactive Julia notebook with a live browser UI. Notebooks are plain `.jl` files, and cells can run on other machines.
+A reactive Julia notebook for ambitious work. Cells can run across several machines, large live output stays interactive in the browser, an AI agent is available to assist in building the notebook content, and anything can be integrated through ordinary Julia packages.
 
 [Documentation](https://kahliburke.github.io/KaimonSlate.jl/dev/) · [Getting started](https://kahliburke.github.io/KaimonSlate.jl/dev/getting-started)
 
@@ -19,7 +19,9 @@ A reactive Julia notebook with a live browser UI. Notebooks are plain `.jl` file
 
 ## Overview
 
-Cells form a dependency graph. When you change a value or move a `@bind` control, only the cells downstream of it recompute; there is no hidden kernel state and no manual "run all". Because a notebook is a plain `.jl` file, the browser, the AI agent, and git all read and write the same source.
+Cells form a dependency graph. When you change a value or move a `@bind` control, only the cells downstream of it recompute; there is no hidden kernel state and no manual "run all".
+
+The graph is also the execution plan. A cell can run on a different machine, and values move between machines automatically over an encrypted, content-addressed channel, so the work is not bounded by the machine in front of you. Large outputs stream back to the browser fast enough to stay interactive. Extensions are first class: widgets, output types, front-end assets and whole subsystems are ordinary Julia packages.
 
 The rest of this page covers the parts that go beyond a standard notebook.
 

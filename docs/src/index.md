@@ -4,8 +4,8 @@ layout: home
 
 hero:
   name: KaimonSlate.jl
-  text: Reactive Julia notebooks, in the browser
-  tagline: A live, reactive notebook that edits a plain .jl file — with @bind widgets, ECharts & Makie figures, a built-in timeline, and an AI agent that builds cells alongside you.
+  text: Reactive Julia notebooks, without a ceiling
+  tagline: A reactive notebook built for ambitious work — distributed compute across a mesh of machines, agentic AI from day one, high-throughput low-latency output in the browser, an extension system that integrates anything, and beautiful rendering, publishing, and standalone exports.
   actions:
     - theme: brand
       text: Get Started
@@ -22,6 +22,10 @@ features:
     title: Reactive by construction
     link: reactivity
     details: Cells form a dependency DAG. Change a value and every downstream cell restales and recomputes automatically — no manual "run all", no stale state hiding in the kernel.
+  - icon: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="8" height="8" rx="2"/><rect x="14" y="14" width="8" height="8" rx="2"/><rect x="14" y="2" width="8" height="8" rx="2"/><path d="M6 10v6a2 2 0 0 0 2 2h6"/><path d="M18 10v4"/></svg>
+    title: Compute across machines
+    link: regions
+    details: Tag a cell with a region and it runs on a GPU box, a big-memory server, or a cloud VM while the rest of the notebook stays local. Values cross the boundary automatically over an encrypted, content-addressed channel, and the DAG shows which machine ran what.
   - icon: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
     title: Real @bind widgets
     link: widgets
@@ -38,27 +42,33 @@ features:
     title: A built-in timeline
     link: history
     details: Every edit is captured to a durable, content-addressed history. Scrub the rail, diff any checkpoint, restore non-destructively, or ▶ replay the whole buildup of the notebook.
-  - icon: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-    title: Plain .jl, shared with your editor
-    link: architecture
-    details: The notebook IS a .jl file. Edits round-trip through it, so VS Code, git, and the agent all see the same source. Export a self-contained HTML document (or print to PDF) when you're done.
+  - icon: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a3 3 0 0 1 3 3v1h3a1 1 0 0 1 1 1v3h1a3 3 0 0 1 0 6h-1v3a1 1 0 0 1-1 1h-3v-1a3 3 0 0 0-6 0v1H6a1 1 0 0 1-1-1v-3H4a3 3 0 0 1 0-6h1V8a1 1 0 0 1 1-1h3V6a3 3 0 0 1 3-3z"/></svg>
+    title: Extend anything
+    link: frontend-extensions
+    details: Widgets, output types, front-end assets, and whole subsystems arrive as ordinary Julia packages built on a lean SDK. Integrate a plotting stack, a solver, a device, or your own UI without forking the notebook.
   - icon: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><path d="M12 12v9"/><path d="m16 16-4-4-4 4"/></svg>
     title: Publish to the web
     link: publishing
-    details: Turn notebooks into a site or blog — each lands at its own URL behind a generated front page. One build deploys to GitHub Pages, Cloudflare, Netlify, S3, or your own server, and you can archive a citable DOI to Zenodo at milestones.
+    details: Turn notebooks into a site or blog — each lands at its own URL behind a generated front page. One build deploys to GitHub Pages, Cloudflare, Netlify, S3, or your own server, or export a self-contained HTML document to hand to a collaborator. Archive a citable DOI to Zenodo at milestones.
 ---
 ```
 
 # KaimonSlate.jl
 
-KaimonSlate is a reactive notebook for Julia that runs in your browser and edits a plain
-`.jl` file. It is built as a [Kaimon](https://github.com/kahliburke/Kaimon.jl) extension:
-cells evaluate in a per-notebook gate worker, the browser stays in sync over server-sent
-events, and an AI agent can drive the notebook through the same tool surface you use.
+KaimonSlate is a reactive notebook for Julia, built for ambitious work. Every cell's
+output always reflects its current inputs: cells declare what they read and write,
+KaimonSlate builds a dependency graph, and exactly the cells affected by a change
+recompute, so **nothing silently goes stale**.
 
-Every cell's output always reflects its current inputs. Cells declare what they read and
-write; KaimonSlate builds a dependency graph and recomputes exactly the cells affected by a
-change — so **nothing silently goes stale**.
+The graph is also the execution plan. A cell can run on a different machine, and values
+move between machines over an encrypted, content-addressed channel. Expensive results are
+memoized to disk. Large outputs stream back to the browser fast enough to stay
+interactive. An AI agent is available to assist in building the notebook content.
+Extensions are first class: widgets, output types, front-end assets and whole subsystems
+are ordinary Julia packages.
+
+It is built as a [Kaimon](https://github.com/kahliburke/Kaimon.jl) extension: cells
+evaluate in a per-notebook gate worker, and the browser stays in sync over a live channel.
 
 ## Quick start
 
