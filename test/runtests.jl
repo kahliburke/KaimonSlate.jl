@@ -41,10 +41,11 @@ module Extensions; include("test_extensions.jl"); end
 module Files;     include("test_files.jl");     end
 module Config;    include("test_config.jl");    end
 module WscallBinary; include("test_wscall_binary.jl"); end
+module AquaTests; include("test_aqua.jl"); end
 
 const _TESTMODS = (Defname, Prepare, Demux, Parsched, Memostore, Effectstore, Blobchannel, RemotePool, Regions, Parallel, Animation, Echarts, SlateLook, Engine, Eval, Deps,
                    Web, Bind, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi, Agentops, Repro, Slides,
-                   Frontmatter, Export, Publishing, App, Extensions, Files, Config, WscallBinary)
+                   Frontmatter, Export, Publishing, App, Extensions, Files, Config, WscallBinary, AquaTests)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.
 # ReTest matches a plain String LITERALLY (regex metacharacters escaped), so "deps|eval" would match
