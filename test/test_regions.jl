@@ -30,4 +30,20 @@ const RE = KaimonSlate.ReportEngine
         @test Meta.parseall(s1) isa Expr                               # the generated script is valid Julia
     end
 
+    # The activity monitor joins two views of an off-machine worker — the per-host ssh roster and the
+    # hub's own kernels — and that join is what makes a notebook run on a plain ssh host visible at all
+    # (nothing else names that host). Pure JS, so it's asserted from node; skips when node is absent.
+    @testset "activity.js roster merge (node, if available)" begin
+        node = Sys.which("node")
+        if node === nothing
+            @info "node not found — skipping the activity.js merge assertions"
+            @test true
+        else
+            io = IOBuffer()
+            ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", "worker_merge.mjs"))`; stdout = io, stderr = io))
+            ok || print(String(take!(io)))
+            @test ok
+        end
+    end
+
 end
