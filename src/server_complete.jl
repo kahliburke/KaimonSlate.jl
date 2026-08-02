@@ -956,6 +956,56 @@ function _make_router(h::Hub)
         sort!(out; by = d -> d["port"])
         _json(Dict("host" => "local", "workers" => out))
     end)
+    # The hub's OFF-MACHINE kernels — the mirror image of /api/local-workers: every kernel of an open
+    # notebook that runs on another machine, whether it serves the notebook itself (run-on host, no region)
+    # or a region. This is what the host rosters alone cannot tell you: /api/remote-workers is a per-host
+    # ssh probe, and the monitor only knows to probe hosts that appear in the region registry — so a
+    # notebook launched on a plain ssh host was invisible. It is also hub truth, so a worker still shows
+    # (with its notebook) when the host is unreachable or its manifest was never written. Same entry shape
+    # as the other two rosters, plus `host`/`region`, and pure in-memory — safe on the poll interval.
+    HTTP.register!(router, "GET", "/api/remote-notebook-workers", _ -> begin
+        nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+        out = Any[]
+        for nb in nbs, k in _nb_kernels(nb)
+            k isa ReportEngine.GateKernel || continue
+            tgt = k.target isa ReportEngine.RemoteTarget ? k.target : nothing
+            (tgt !== nothing || k.remote) || continue   # on this machine: /api/local-workers owns it
+            k.port == 0 && continue
+            # A `remoteworker` attach has no target: the hub only holds a forwarded wire, so there is no
+            # host to probe or reap on. Empty host marks it as such for the UI.
+            host = tgt === nothing ? "" : tgt.ssh_host
+            region = tgt === nothing ? "" : tgt.region
+            cn = try; k.conn === nothing ? "" : String(k.conn.name); catch; ""; end
+            st = isempty(cn) ? nothing : ReportEngine.kernel_stats(cn)
+            side = _kernel_side_label(nb, k)
+            push!(out, Dict{String,Any}(
+                "host" => host, "region" => region,
+                "port" => k.port,
+                # No local process to inspect — the wire IS the liveness signal here, and the liveness
+                # sweep drops a dead one, so a kernel mid-redial reads as idle rather than dead.
+                "alive" => true,
+                "lastActivity" => st === nothing ? 0 : round(Int, st.latest.rcv),
+                "logBytes" => 0,
+                "state" => k.conn === nothing ? "idle" : "attached",
+                "stateSince" => 0,
+                # `region` is "" for a notebook's own remote kernel — the marker the monitor groups on.
+                "manifest" => JSON.json(Dict("notebook" => basename(nb.path), "nbid" => nb.id,
+                    "region" => region, "side" => side,
+                    "transport" => tgt === nothing ? "forwarded" : String(tgt.transport),
+                    "project" => tgt === nothing ? k.project : tgt.project,
+                    "port" => string(k.port), "stream_port" => string(k.stream_port),
+                    "hub" => gethostname(), "path" => abspath(nb.path))),
+                "stats" => st === nothing ? "" : JSON.json(_json_finite(Dict(
+                    "cpu" => st.latest.cpu, "rss" => st.latest.rss, "gc_ms" => st.latest.gc_ms,
+                    "evals" => st.latest.evals, "running" => st.latest.running, "warm" => st.latest.warm,
+                    "memo_bytes" => st.latest.memo, "sys_cpu" => st.latest.sys_cpu, "load1" => st.latest.load1,
+                    "sys_mem_total" => st.latest.sys_mem_total, "sys_mem_free" => st.latest.sys_mem_free,
+                    "ts" => st.latest.ts))),
+            ))
+        end
+        sort!(out; by = d -> (d["host"], d["port"]))
+        _json(Dict("workers" => out))
+    end)
     # Global region registry (named compute defs) + parked wires — the hub's own view, NO ssh. Per-host
     # live rosters come from /api/remote-workers. Feeds the home-page Regions manager + Destinations picker.
     HTTP.register!(router, "GET", "/api/regions", _ -> _json(Dict(

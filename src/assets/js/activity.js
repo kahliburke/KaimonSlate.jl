@@ -1,7 +1,11 @@
 // Worker activity monitor + worker-detail popup — the FIRST home-page (index.html) Preact island.
-// Covers BOTH tiers: the hub's own workers on this machine (/api/local-workers — one per open notebook)
-// and the remote rosters per host (/api/remote-workers). Both endpoints return the same entry shape, so
-// one row component renders either; only the available ACTIONS differ (see Acts).
+// Covers every tier a worker can live in: this machine (/api/local-workers — one per open notebook), the
+// per-host rosters (/api/remote-workers — region + leftover workers, an ssh probe), and the hub's own
+// off-machine kernels (/api/remote-notebook-workers — a notebook whose run-on target is another machine).
+// All three return the same entry shape, so one row component renders any of them; only the available
+// ACTIONS differ (see Acts). The last two describe the same processes from different sides and are merged
+// on host:port by allEntries() — which is also what makes a plain ssh host visible at all, since the
+// per-host probe only ever runs against hosts something told us about.
 // Replaces the former inline innerHTML render (`_act*` / `rtWd*` in index.html): a poll assigns signals
 // and the components follow — no manual re-render or event re-wiring, no innerHTML clobbering. Reuses the
 // existing `.act*` / `.wd*` / `.modal*` CSS already in index.html (same class names), so no styles here.
@@ -20,6 +24,7 @@ const POLL_MS = 3000;
 const regions  = signal([]);     // /api/regions            → [{name,host,warm,status,…}]
 const hostData = signal([]);     // per-host live rosters    → [{host, workers:[…]}]
 const localW   = signal([]);     // /api/local-workers       → this machine's workers (same entry shape)
+const nbRemote = signal([]);     // /api/remote-notebook-workers → the hub's OFF-MACHINE kernels for open notebooks
 const history  = signal([]);     // /api/worker-stats samples for the open worker
 const reaping  = signal(null);   // {port, err?} — in-flight / failed reap for the open popup
 // `detail` (open worker popup target) is imported from ./stores.js — shared across home-page islands.
@@ -37,10 +42,10 @@ const confirmP = (msg, ok, cls) => (window.confirmDark ? window.confirmDark(msg,
 // Kill a worker + remove its files. Always confirmed and never automatic: a worker may hold results
 // nobody has fetched yet, so the human decides. The hub drops any live kernel bound to it first, so an
 // attached notebook wakes with an error instead of hanging on a dead wire.
-async function reapWorker(host, w) {
-  const mf = pj(w.manifest), port = +w.port;
+async function reapWorker(host, w, bound) {
+  const mf = mergeManifest(w, bound), port = +w.port;
   const nb = mf.notebook ? '\nIt is serving “' + String(mf.notebook).replace(/#[^#]*$/, '') + '”' +
-    (w.state === 'attached' ? ' and is ATTACHED — that notebook loses its kernel.' : '.') : '';
+    (((bound && bound.state) || w.state) === 'attached' ? ' and is ATTACHED — that notebook loses its kernel.' : '.') : '';
   if (!await confirmP('Reap worker :' + port + ' on ' + host + '?' + nb +
       '\nThis kills the process and removes its files — any un-fetched results are lost.', 'Reap', 'danger')) return;
   reaping.value = { port };
@@ -54,11 +59,12 @@ async function reapWorker(host, w) {
   } catch (_) { reaping.value = { port, err: 'request failed' }; }
 }
 
-// Restart one of THIS machine's workers, from the home page. Same route the notebook's own Restart uses
-// (`side` targets a region kernel, empty the main one), so the open tab follows along over its own feed.
-// It re-runs the notebook, which is not what a home-page click implies on its own — hence the confirm.
-async function restartLocal(w) {
-  const mf = pj(w.manifest), port = +w.port, side = mf.side === 'local' ? '' : (mf.side || '');
+// Restart a worker that is serving an open notebook, from the home page — wherever it runs. Same route
+// the notebook's own Restart uses (`side` targets a region kernel, empty the main one), so the open tab
+// follows along over its own feed. It re-runs the notebook, which is not what a home-page click implies
+// on its own — hence the confirm.
+async function restartWorker(w, bound) {
+  const mf = mergeManifest(w, bound), port = +w.port, side = mf.side === 'local' ? '' : (mf.side || '');
   if (!mf.nbid) return;
   if (!await confirmP('Restart the ' + (side ? 'region “' + side + '” worker' : 'worker') + ' for “' + (mf.notebook || mf.nbid) +
       '”?\nIts process is killed and the notebook re-runs from a fresh namespace.', 'Restart')) return;
@@ -76,20 +82,28 @@ async function tick() {
   if (inflight || document.hidden) return;
   inflight = true;
   try {
-    const [d, lw] = await Promise.all([
+    const [d, lw, rw] = await Promise.all([
       fetch('/api/regions').then(r => r.json()),
-      fetch('/api/local-workers').then(r => r.json()).catch(() => null)]);
+      fetch('/api/local-workers').then(r => r.json()).catch(() => null),
+      fetch('/api/remote-notebook-workers').then(r => r.json()).catch(() => null)]);
     if (lw) localW.value = lw.workers || [];
+    if (rw) nbRemote.value = rw.workers || [];
     const regs = d.regions || [];
     regions.value = regs;
     const hs = {}; regs.forEach(p => p.host && (hs[p.host] = 1)); (d.parked || []).forEach(p => hs[p.host] = 1);
+    // A notebook can be run on any ssh host, with no region defined and nothing parked — the registry
+    // would never name that host, so probe the hosts the hub is actually holding kernels on as well.
+    // Without this the whole host is unqueried and its workers never appear.
+    nbRemote.value.forEach(w => w.host && (hs[w.host] = 1));
     const hosts = Object.keys(hs);
     hostData.value = await Promise.all(hosts.map(h =>
       fetch('/api/remote-workers?host=' + encodeURIComponent(h)).then(r => r.json())
         .then(d => ({ host: h, workers: d.workers || [] })).catch(() => ({ host: h, workers: [] }))));
     if (detail.value) {
       const { host, port } = detail.value;
-      const s = await fetch('/api/worker-stats?host=' + encodeURIComponent(host) + '&port=' + port).then(r => r.json()).catch(() => null);
+      // A forwarded wire (an attached `remoteworker`) has no host to ask — its telemetry is in the hub's
+      // own ring, which is what host="local" resolves by port.
+      const s = await fetch('/api/worker-stats?host=' + encodeURIComponent(host || 'local') + '&port=' + port).then(r => r.json()).catch(() => null);
       if (detail.value && detail.value.host === host && detail.value.port === port) history.value = (s && s.samples) || [];
     }
   } catch (_) {}
@@ -119,11 +133,52 @@ function Spark({ samples, get, color, min, max, now }) {
     <polyline points=${pts} fill="none" stroke=${color} stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
 }
 
+// ── merging the two views of an off-machine worker ───────────────────────────────────
+// A worker on another machine is described twice, and neither description is complete on its own:
+//   • the HOST roster (/api/remote-workers) — the on-disk manifest + telemetry sidecar, and the only
+//     view that sees workers this hub isn't connected to (detached, warm-pool, another hub's).
+//   • the HUB's own kernels (/api/remote-notebook-workers) — which open notebook is on it right now,
+//     available with no ssh, and still answering when the host is unreachable or wrote no manifest.
+// Merge on host:port, preferring the host's richer record but taking the live binding from the hub.
+// Entries carry `bound` = the hub kernel, i.e. "this is serving an open notebook from here".
+// Pure over its two arguments (asserted by test/js/worker_merge.mjs — keep it that way).
+function mergeRosters(hostRosters, hubKernels) {
+  const out = [], idx = {};
+  (hostRosters || []).forEach(h => (h.workers || []).forEach(w => {
+    const e = { w, host: h.host, region: pj(w.manifest).region || '', bound: null };
+    idx[h.host + ':' + w.port] = e; out.push(e);
+  }));
+  (hubKernels || []).forEach(k => {
+    const e = idx[k.host + ':' + k.port];
+    if (e) { e.bound = k; e.region = k.region || ''; return; }
+    // Not in any roster: the host probe failed, or (forwarded wire) there is no host to probe.
+    const ne = { w: k, host: k.host, region: k.region || '', bound: k };
+    idx[k.host + ':' + k.port] = ne; out.push(ne);
+  });
+  return out;
+}
+const allEntries = () => mergeRosters(hostData.value, nbRemote.value);
+// The hub's fields win: it names the notebook on the worker NOW, and carries the `nbid` a host manifest
+// has no reason to know — which is what makes Restart / Open notebook reachable for a remote worker.
+const mergeManifest = (w, bound) => Object.assign({}, pj(w && w.manifest), bound ? pj(bound.manifest) : {});
+
+// The entry behind an open popup — same merge, plus this machine's own workers.
+function findEntry(host, port) {
+  if (host === 'local') {
+    const w = localW.value.find(x => +x.port === +port);
+    return w ? { w, host, region: '', bound: null } : null;
+  }
+  return allEntries().find(x => x.host === host && +x.w.port === +port) || null;
+}
+
 // ── monitor: one worker row ──────────────────────────────────────────────────────────
-function WorkerRow({ w, host }) {
-  const st = pj(w.stats), mf = pj(w.manifest);
+function WorkerRow({ w, host, bound }) {
+  const st = pj(w.stats), mf = mergeManifest(w, bound);
   const alive = w.alive !== false;
-  const state = !alive ? 'dead' : (w.state === 'attached' ? 'attached' : 'idle');
+  // The hub's own kernel outranks the host's `.state` sidecar, which is written by the worker and can
+  // lag a reattach — if we hold a live wire to it, it is attached.
+  const rawState = (bound && bound.state) || w.state;
+  const state = !alive ? 'dead' : (rawState === 'attached' ? 'attached' : 'idle');
   const cpu = (st.cpu !== undefined && st.cpu >= 0) ? st.cpu : null;
   const running = Array.isArray(st.running) ? st.running : [];
   const warm = st.warm || '', warming = warm.indexOf('warming') === 0;
@@ -131,9 +186,12 @@ function WorkerRow({ w, host }) {
   // A detached worker keeps its manifest, so it still knows the notebook it LAST served — show it
   // (with ↩, dimmed) rather than a bare "idle": that notebook reattaches straight back to this worker,
   // which is exactly what the row needs to convey. A warm-pool worker never served one → plain "idle".
+  // A worker the hub holds a kernel for is never "detached" — with no wire yet it is mid-connect, so it
+  // names its notebook plainly rather than claiming a reattach that hasn't happened.
   const runTxt = !alive ? 'dead' : running.length ? ('▶ ' + running.join(', ')) : warming ? ('⏳ ' + warm)
-    : warm.indexOf('ready') === 0 ? ('✓ ' + warm) : (state === 'attached' ? (nb || 'idle') : (nb ? '↩ ' + nb : 'idle'));
-  const runTip = (state !== 'attached' && nb && !running.length && !warm)
+    : warm.indexOf('ready') === 0 ? ('✓ ' + warm)
+    : (state === 'attached' || bound) ? (nb || 'idle') : (nb ? '↩ ' + nb : 'idle');
+  const runTip = (state !== 'attached' && !bound && nb && !running.length && !warm)
     ? 'detached from ' + nb + (w.stateSince ? ' · idle since ' + ago(w.stateSince) : '') + ' — reopening it reattaches here'
     : runTxt;
   const cpuPct = cpu == null ? 0 : (cpu <= 0 ? 0 : Math.max(5, Math.min(100, cpu)));
@@ -150,23 +208,34 @@ function WorkerRow({ w, host }) {
 
 // ── monitor panel ──────────────────────────────────────────────────────────────────
 function Monitor() {
-  const regs = regions.value, hd = hostData.value, lw = localW.value;
-  const all = [], mine = lw.map(w => ({ w, host: 'local', region: '' }));
-  hd.forEach(h => (h.workers || []).forEach(w => all.push({ w, host: h.host, region: pj(w.manifest).region || '' })));
+  const regs = regions.value, lw = localW.value;
+  const all = allEntries(), mine = lw.map(w => ({ w, host: 'local', region: '', bound: null }));
   // Local workers get their OWN group rather than folding into the untagged bucket — they're a different
   // tier (bound to an open notebook, not adoptable, no manifest on a host) and the actions differ.
-  const byRegion = {}; all.forEach(x => (byRegion[x.region] = byRegion[x.region] || []).push(x));
+  // Same for a notebook RUN ON a host with no region: it's a notebook's kernel that merely lives
+  // elsewhere, so it belongs next to "this machine", not in the anonymous leftovers bucket.
+  const byRegion = {}, byNbHost = {};
+  all.forEach(x => (x.bound && !x.region ? (byNbHost[x.host] = byNbHost[x.host] || [])
+                                         : (byRegion[x.region] = byRegion[x.region] || [])).push(x));
   let totRss = 0, busy = 0; const shown = {}; const groups = [];
   const rows = (xs) => xs.map(x => {
     const st = pj(x.w.stats); totRss += st.rss || 0;
     const running = Array.isArray(st.running) ? st.running : [];
     if (x.w.alive !== false && (running.length > 0 || (st.evals || 0) > 0 || (st.warm || '').indexOf('warming') === 0)) busy++;
-    return html`<${WorkerRow} w=${x.w} host=${x.host}/>`;
+    return html`<${WorkerRow} w=${x.w} host=${x.host} bound=${x.bound}/>`;
   });
   const group = (head, xs) => html`<div>${head}${xs.length ? rows(xs) : html`<div class="actempty">no workers</div>`}</div>`;
   // This machine first — it's the tier you're always running on, whether or not any host is configured.
   if (mine.length) groups.push(group(html`<div class="actgrouphd">💻 <span class="actgroupname" style="cursor:default">this machine</span>
     <span class="actgrouphost">${mine.length} notebook worker${mine.length !== 1 ? 's' : ''} · killed when the notebook closes</span></div>`, mine));
+  // Then the notebooks running ON a host — one group per host. These aren't region workers: they were
+  // spawned because a notebook's run-on target is that machine, so they're named by host, not region,
+  // and there may be no region defined there at all.
+  Object.keys(byNbHost).sort().forEach(hn => {
+    const xs = byNbHost[hn];
+    groups.push(group(html`<div class="actgrouphd">🖥 <span class="actgroupname" style="cursor:default">${hn || 'forwarded wire'}</span>
+      <span class="actgrouphost">${xs.length} notebook worker${xs.length !== 1 ? 's' : ''} · ${hn ? 'run-on host' : 'attached, hub-unmanaged'}</span></div>`, xs));
+  });
   // Registry regions first (sorted) — with host / warm / reconcile status; skip a bare def with nothing live/warm/failed.
   regs.slice().sort((a, b) => (a.name || '').localeCompare(b.name || '')).forEach(rg => {
     shown[rg.name] = 1;
@@ -194,26 +263,30 @@ function Monitor() {
 }
 
 // ── worker detail popup: action footer ───────────────────────────────────────────────
-// The two tiers get different actions. A REMOTE worker outlives every notebook, so the only thing to do
-// with one is reap it. A LOCAL worker belongs to an open notebook — killing it on its own would just
-// leave that notebook kernel-less, so the meaningful actions are to go to the notebook or restart it.
-function Acts({ host, w, isLocal }) {
+// Actions follow the worker's CAPABILITIES, not its tier. Two independent questions:
+//   • is an open notebook on it (a `nbid`)? → Restart / Open notebook are meaningful.
+//   • is it on a host we can reach? → Reap is meaningful (a local worker dies with its notebook, and a
+//     forwarded wire has no host, so neither is reapable).
+// A notebook run ON a host answers yes to both, which is why this isn't a local/remote switch.
+function Acts({ host, w, bound, isLocal }) {
   const r = reaping.value && reaping.value.port === +w.port ? reaping.value : null;
   const busy = !!(r && !r.err);
-  const mf = pj(w.manifest);
-  if (isLocal) return html`<div class="wdacts">
-    <span class="wdactnote">${r && r.err ? html`<span class="wdacterr">⚠ ${r.err}</span>`
-      : 'Bound to an open notebook — it exits when that notebook closes.'}</span>
-    <button class="rppsysbtn" disabled=${busy} title="restart this worker and re-run the notebook"
-      onClick=${() => restartLocal(w)}>${busy ? 'Restarting…' : 'Restart worker'}</button>
-    ${mf.nbid ? html`<button class="rppsysbtn" title="open this notebook"
-      onClick=${() => { window.location.href = '/n/' + encodeURIComponent(mf.nbid); }}>Open notebook</button>` : null}</div>`;
+  const mf = mergeManifest(w, bound);
+  const canReap = !isLocal && !!host;
+  const note = r && r.err ? html`<span class="wdacterr">⚠ ${r.err}</span>`
+    : isLocal ? 'Bound to an open notebook — it exits when that notebook closes.'
+    : !mf.nbid ? (w.alive === false ? 'Not running — reaping clears its leftover files on ' + host + '.'
+                                    : 'Reaping kills the process and removes its files on ' + host + '.')
+    : canReap ? 'Serving an open notebook on ' + host + '. Reaping kills it and that notebook loses its kernel.'
+              : 'An already-running worker this hub attached to — it outlives the notebook and the hub does not manage it.';
   return html`<div class="wdacts">
-    <span class="wdactnote">${r && r.err ? html`<span class="wdacterr">⚠ ${r.err}</span>`
-      : (w.alive === false ? 'Not running — reaping clears its leftover files on ' + host + '.'
-                           : 'Reaping kills the process and removes its files on ' + host + '.')}</span>
-    <button class="rppreap" disabled=${busy} title="kill this worker + remove its files"
-      onClick=${() => reapWorker(host, w)}>${busy ? 'Reaping…' : 'Reap worker'}</button></div>`;
+    <span class="wdactnote">${note}</span>
+    ${mf.nbid ? html`<button class="rppsysbtn" disabled=${busy} title="restart this worker and re-run the notebook"
+      onClick=${() => restartWorker(w, bound)}>${busy ? 'Restarting…' : 'Restart worker'}</button>
+    <button class="rppsysbtn" title="open this notebook"
+      onClick=${() => { window.location.href = '/n/' + encodeURIComponent(mf.nbid); }}>Open notebook</button>` : null}
+    ${canReap ? html`<button class="rppreap" disabled=${busy} title="kill this worker + remove its files"
+      onClick=${() => reapWorker(host, w, bound)}>${busy ? 'Reaping…' : 'Reap worker'}</button>` : null}</div>`;
 }
 
 // ── worker detail popup ──────────────────────────────────────────────────────────────
@@ -228,21 +301,22 @@ function WorkerDetail() {
   }, [d]);
   if (!d) return null;
   const host = d.host, isLocal = host === 'local';
-  const pool = isLocal ? localW.value : (hostData.value.find(h => h.host === host) || { workers: [] }).workers;
-  const w = pool.find(x => +x.port === +d.port);
+  const e = findEntry(host, d.port), w = e && e.w, bound = e && e.bound;
   const close = () => { detail.value = null; };
   const body = () => {
-    if (!w) return html`<div class="wdnodata">worker :${d.port} is no longer on ${host}.</div>`;
-    const mf = pj(w.manifest), st = pj(w.stats), samples = history.value;
+    if (!w) return html`<div class="wdnodata">worker :${d.port} is no longer on ${isLocal ? 'this machine' : (host || 'that wire')}.</div>`;
+    const mf = mergeManifest(w, bound), st = pj(w.stats), samples = history.value;
     const rows = [];
     const row = (k, v, region) => { if (v == null || v === '') return; rows.push(html`<div class="k">${k}</div><div class=${'v' + (region ? ' link' : '')} onClick=${region ? (() => { const rn = region; close(); openRegionConfig(host, rn); }) : null} style=${region ? 'cursor:pointer' : ''}>${String(v)}</div>`); };
-    // A LOCAL worker lives only as long as its open notebook, so its manifest is never stale; a remote
-    // one that is detached/idle names the notebook it LAST served, which must not read as "serving now".
-    const det = !isLocal && w.state !== 'attached';
-    row('Host', isLocal ? 'this machine' : host);
+    // A worker bound to an open notebook — on this machine or on a host — has a manifest that can't be
+    // stale. Only an unbound remote one can be detached, in which case it names the notebook it LAST
+    // served, which must not read as "serving now".
+    const state = (bound && bound.state) || w.state;
+    const det = !isLocal && !bound && state !== 'attached';
+    row('Host', isLocal ? 'this machine' : (host || 'forwarded wire (no host)'));
     if (mf.region) row('Region', mf.region, mf.region);
     row(det ? 'Last notebook' : 'Notebook', mf.notebook);
-    if (isLocal && mf.side && mf.side !== 'local') row('Region kernel', mf.side);
+    if (mf.side && mf.side !== 'local') row('Region kernel', mf.side);
     if (det && w.stateSince) row('Detached', ago(w.stateSince));
     if (isLocal && mf.pid) row('PID', mf.pid);
     row('Transport', mf.transport); row('Project', mf.project);
@@ -254,7 +328,7 @@ function WorkerDetail() {
     const axis = html`<div class="wdaxis"><span>${span > 0 ? '−' + fmtSpan(span) : ''}</span><span>now</span></div>`;
     return html`
       <div class="wdhead"><strong>${w.alive !== false ? '🟢' : '⚪'} :${w.port}</strong>
-        <span class="wdsub">${(w.state || '') + (mf.region ? ' · ' + mf.region : '')}</span></div>
+        <span class="wdsub">${(state || '') + (mf.region ? ' · ' + mf.region : '')}</span></div>
       <div class="wdgrid">${rows}</div>
       ${(det && mf.notebook && w.alive !== false) ? html`<div class="wdhint">Detached but still warm — its namespace, loaded packages and memo store survive. Reopening that notebook on this host reattaches to this worker instead of paying a cold boot.${mf.region ? ' Until then its region can hand it to another notebook with the same env.' : ' No other notebook will reuse it, so reap it if you are done with that one.'}</div>` : null}
       <div class="wdstats">
@@ -267,8 +341,8 @@ function WorkerDetail() {
         <${Spark} samples=${samples} now=${cpuNow} get=${(s) => Math.max(0, s.cpu)} color="#4f7cf0" min=${0} max=${100}/>${axis}</div>
       <div class="wdchart"><div class="wdchtitle"><span>Memory (RSS)</span><b>${fmtB2(rssNow)}</b></div>
         <${Spark} samples=${samples} now=${rssNow} get=${(s) => s.rss} color="#3fb96e" min=${0}/>${axis}</div>
-      ${samples.length < 2 ? html`<div class="pddim" style="font-size:.72rem;margin-top:2px">History builds as the hub receives telemetry from this worker${w.state !== 'attached' ? ' — only an attached worker streams in.' : '.'}</div>` : null}
-      <${Acts} host=${host} w=${w} isLocal=${isLocal}/>`;
+      ${samples.length < 2 ? html`<div class="pddim" style="font-size:.72rem;margin-top:2px">History builds as the hub receives telemetry from this worker${state !== 'attached' ? ' — only an attached worker streams in.' : '.'}</div>` : null}
+      <${Acts} host=${host} w=${w} bound=${bound} isLocal=${isLocal}/>`;
   };
   return html`<div class="modal-bg show" onMouseDown=${(e) => { if (e.target.classList.contains('modal-bg')) close(); }}>
     <div class="modal wdmodal"><button class="modalx" title="Close (Esc)" onClick=${close}>✕</button>

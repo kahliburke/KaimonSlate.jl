@@ -244,7 +244,20 @@ const REG_ROSTERS = {
   // mem-box (region `bigmem`) intentionally has no live worker here — it exists in the registry so it
   // shows as an available destination to add, without adding a third row to the activity strip.
   'mem-box': [],
+  // A plain ssh box with no region defined — it is in the fleet only because a notebook is RUN ON it.
+  'workstation': [
+    { port: 9400, alive: true, state: 'attached', manifest: mkStats({ notebook: 'seismic_month.jl', transport: 'tunnel', project: 'seismic', spawned: 'attached · 21m', stream_port: 9401 }),
+      stats: mkStats({ cpu: 46, rss: 2600 * MB, memo_bytes: 780 * MB, running: ['quakes'], warm: 'ready', sys_cpu: 51, load1: 2.4, sys_mem_total: 32000 * MB, sys_mem_free: 9000 * MB }) },
+  ],
 }
+// The hub's OFF-MACHINE kernels (/api/remote-notebook-workers) — a notebook whose run-on target is
+// another machine. `workstation` is in no region, so this is the only thing that puts it on the monitor.
+const REG_NB_REMOTE = [
+  { host: 'workstation', region: '', port: 9400, alive: true, state: 'attached', lastActivity: 0, logBytes: 0, stateSince: 0,
+    manifest: mkStats({ notebook: 'seismic_month.jl', nbid: 'nb-seismic', region: '', side: 'local',
+                        transport: 'tunnel', project: 'seismic', port: '9400', stream_port: '9401', hub: 'laptop' }),
+    stats: mkStats({ cpu: 46, rss: 2600 * MB, memo_bytes: 780 * MB, running: ['quakes'], warm: 'ready', sys_cpu: 51, load1: 2.4 }) },
+]
 // Telemetry ring for the worker-detail sparklines (/api/worker-stats). A gentle synthetic wobble.
 function regStatsHistory(port) {
   const base = port === 9300 ? 76 : port === 9200 ? 31 : 3
@@ -317,6 +330,7 @@ async function mockRegions(page) {
     const host = new URL(r.request().url()).searchParams.get('host') || ''
     r.fulfill(J({ host, workers: REG_ROSTERS[host] || [] }))
   })
+  await page.route('**/api/remote-notebook-workers', (r) => r.fulfill(J({ workers: REG_NB_REMOTE })))
   await page.route('**/api/worker-stats*', (r) => {
     const port = Number(new URL(r.request().url()).searchParams.get('port'))
     r.fulfill(J({ ok: true, port, samples: regStatsHistory(port) }))
