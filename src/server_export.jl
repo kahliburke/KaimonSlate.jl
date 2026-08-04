@@ -291,8 +291,13 @@ _export_controls_html(c) = isempty(c.binds) ? "" :
 # in RENDERED HTML; `_EMBED_MD_RE` matches a Markdown `![alt](…)` image in cell SOURCE (the PDF path
 # transforms the markdown string, not rendered HTML).
 const _EMBED_SRC_RE = Regex(raw"""\bsrc=(["'])(data:[^"']+|/n/[^"'/]+/asset/[^"']+)\1""")
-# The URL, then an OPTIONAL CommonMark title (` "…"`) before the `)` — so `![a](url "cap")` still matches.
-const _EMBED_MD_RE  = Regex(raw"""!\[([^\]]*)\]\(\s*(data:[^)\s]+|/n/[^)/\s]+/asset/[^)\s]+)(?:\s+"[^"]*")?\s*\)""")
+# The URL, then an OPTIONAL CommonMark title (` "…"`) before the `)` — so `![a](url "cap")` still matches,
+# then an OPTIONAL `{width=…}` attribute block (capture 3), which binds to the image it directly follows.
+const _EMBED_MD_RE  = Regex(raw"""!\[([^\]]*)\]\(\s*(data:[^)\s]+|/n/[^)/\s]+/asset/[^)\s]+)(?:\s+"[^"]*")?\s*\)(\{[^{}\n]*\})?""")
+# Any markdown image followed by an attribute block, whatever its URL — used to drop blocks the Typst
+# path has already consumed (or can't use), so one never reaches the page as literal prose.
+const _MD_IMG_ATTR_RE = Regex(raw"""(!\[[^\]]*\]\([^)\n]*\))\{[^{}\n]*\}""")
+_md_drop_attrs(s::AbstractString) = replace(String(s), _MD_IMG_ATTR_RE => s"\1")
 # mime → a file extension for a data-URL blob written to disk (PDF/publish externalization).
 const _MIME_EXT = Dict("image/png" => ".png", "image/jpeg" => ".jpg", "image/gif" => ".gif",
     "image/webp" => ".webp", "image/svg+xml" => ".svg", "image/bmp" => ".bmp", "image/avif" => ".avif",
@@ -421,21 +426,70 @@ end
 # sandboxed to `dir`). Each `data:`/asset IMAGE → bytes written as `<base>_media<N>.<ext>`, its
 # `![alt](…)` rewritten to that local filename. Non-image media (audio/video, which a PDF can't play)
 # and unresolvable refs collapse to their alt text — so an embedded image never aborts the compile.
-function _stage_typst_md_media(md::AbstractString, dir::AbstractString, base::AbstractString, assetbase::AbstractString)
+function _stage_typst_md_media(md::AbstractString, dir::AbstractString, base::AbstractString,
+                               assetbase::AbstractString; sizes = nothing)
     s = String(md)
-    (occursin("data:", s) || occursin("/asset/", s)) || return s
-    n = Ref(0)
-    replace(s, _EMBED_MD_RE => function (m)
-        mm = match(_EMBED_MD_RE, m); alt = String(mm.captures[1]); url = String(mm.captures[2])
-        got = _embedded_media(assetbase, url)
-        got === nothing && return isempty(alt) ? "" : _md_escape_text(alt)
-        bytes, mime, ext = got
-        startswith(lowercase(mime), "image/") || return isempty(alt) ? "" : _md_escape_text(alt)
-        n[] += 1
-        fname = string(base, "_media", n[], isempty(ext) ? _mime_ext(mime) : ext)
-        write(joinpath(dir, fname), bytes)
-        return string("![", alt, "](", fname, ")")
-    end)
+    if occursin("data:", s) || occursin("/asset/", s)
+        # Which images stand alone on their line (a figure, centred) vs sit in a run of prose (inline
+        # where the author put them) — the markdown equivalent of the HTML's `p > img:only-child`.
+        # `replace` below visits matches in document order, so this is indexed by match number.
+        alone = [strip(_line_around(s, mt.offset)) == strip(mt.match) for mt in eachmatch(_EMBED_MD_RE, s)]
+        n = Ref(0); mi = Ref(0)
+        s = replace(s, _EMBED_MD_RE => function (m)
+            mm = match(_EMBED_MD_RE, m); alt = String(mm.captures[1]); url = String(mm.captures[2])
+            mi[] += 1
+            got = _embedded_media(assetbase, url)
+            got === nothing && return isempty(alt) ? "" : _md_escape_text(alt)
+            bytes, mime, ext = got
+            startswith(lowercase(mime), "image/") || return isempty(alt) ? "" : _md_escape_text(alt)
+            n[] += 1
+            fname = string(base, "_media", n[], isempty(ext) ? _mime_ext(mime) : ext)
+            write(joinpath(dir, fname), bytes)
+            # Markdown has nowhere to hang a size or a placement, so both travel beside the document.
+            if sizes !== nothing
+                e = mm.captures[3] === nothing ? Dict{String,Any}() : _typst_media_size(String(mm.captures[3]))
+                get(alone, mi[], false) && (e["block"] = true)
+                isempty(e) || (sizes[fname] = e)
+            end
+            return string("![", alt, "](", fname, ")")
+        end)
+    end
+    return _md_drop_attrs(s)   # consumed above, or unusable — never printed
+end
+
+# A `{width=… height=…}` block → what Typst needs: `key => (magnitude, unit)`. A bare number is CSS
+# px (what a web author means), converted at 96dpi; `%`/`em` stay relative, everything else lands in pt.
+function _typst_len(v::AbstractString)
+    m = match(r"^(-?\d+(?:\.\d+)?)\s*(%|px|pt|em|cm|mm|in)?$", strip(String(v)))
+    m === nothing && return nothing
+    x = parse(Float64, m.captures[1])
+    u = m.captures[2] === nothing ? "px" : lowercase(String(m.captures[2]))
+    u == "%" && return (x, "%")
+    u == "em" && return (x, "em")
+    return (x * (u == "px" ? 0.75 : u == "cm" ? 28.3465 : u == "mm" ? 2.83465 : u == "in" ? 72.0 : 1.0), "pt")
+end
+
+function _typst_media_size(spec::AbstractString)
+    out = Dict{String,Any}()
+    for m in eachmatch(ReportRender._ATTR_ITEM_RE, spec)
+        m.captures[3] === nothing && continue
+        k = lowercase(String(m.captures[3]))
+        v = String(something(m.captures[4], m.captures[5], m.captures[6], ""))
+        if k in ("width", "height")
+            t = _typst_len(v)
+            t === nothing || (out[k] = Any[t[1], t[2]])
+        elseif k == "align" && lowercase(v) in ("left", "center", "right")
+            out["align"] = lowercase(v)
+        end
+    end
+    return out
+end
+
+# The whole line containing byte index `i` — the paragraph context a markdown image sits in.
+function _line_around(s::AbstractString, i::Integer)
+    nb = findprev('\n', s, i); ls = nb === nothing ? firstindex(s) : nextind(s, nb)
+    na = findnext('\n', s, i); le = na === nothing ? lastindex(s) : prevind(s, na)
+    return le < ls ? "" : SubString(s, ls, le)
 end
 
 # The `save_asset` blobs a notebook produced → Vector of (spec, bytes), where `spec` is the shared
@@ -805,6 +859,10 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-tbl-goto{width:3.6em;background:var(--bg3);color:var(--text);border:1px solid var(--accent);border-radius:5px;padding:1px 5px;font-size:.74rem;font-family:inherit;}
 .exp-tblnote{color:var(--dim);font-size:.74rem;margin-top:3px;font-style:italic;}
 .exp-md code{background:var(--bg3);padding:1px 5px;border-radius:4px;}
+/* An image (or dropped clip) alone in its paragraph is a figure — centred. One inside a run of prose
+   stays inline. A `{width=…}`/`{align=…}` block writes an inline style, which outranks this. */
+.exp-md p>img:only-child,.exp-md p>video:only-child,.exp-md p>audio:only-child,
+.exp-figcap p>img:only-child{display:block;margin-inline:auto;max-width:100%;height:auto;}
 .exp-code{margin:14px 0;border:1px solid var(--border);border-radius:8px;background:var(--bg2);overflow:hidden;}
 /* Side-by-side cells (a `column=N` tag): equal-width flex columns, stacking on a narrow screen. */
 .exp-row{display:flex;gap:16px;align-items:flex-start;}
@@ -3273,7 +3331,7 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
             get!(fignum_of, figid, figidx.numbers[capid])
         end
         # Rewrite `[@cite]`/`[@fig:label]` in a prose block to their markdown in-text form.
-        rw(s) = _rewrite_citations(s, citekeys; emit = citemit, figrefs = figidx.labels, figemit = _fig_text)
+        rw(s) = _md_drop_attrs(_rewrite_citations(s, citekeys; emit = citemit, figrefs = figidx.labels, figemit = _fig_text))
         io = IOBuffer()
         isempty(strip(fm.title)) || println(io, "# ", fm.title, "\n")
         isempty(strip(fm.subtitle)) || println(io, "### ", fm.subtitle, "\n")

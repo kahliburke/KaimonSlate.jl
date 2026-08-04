@@ -671,6 +671,11 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .md .ival .katex { color:var(--text); }   /* but a rendered-math value keeps prose colour (match $…$), not the scalar tint */
 .md .interr { color:var(--red); font-family:'Cascadia Code',monospace; }   /* {{ }} error */
 .md .disp.img img { max-width:min(100%, var(--fig-max, 980px)); height:auto; border-radius:4px; }       /* {{ plot }} */
+/* An image (or dropped clip) alone in its paragraph is a figure — centred, like a `{{ plot }}`. One
+   sitting in a run of prose stays inline where the author put it. An `{align=…}`/`{width=…}` block
+   writes an inline style, which outranks this. */
+.md p > img:only-child, .md p > video:only-child, .md p > audio:only-child {
+  display:block; margin-inline:auto; max-width:100%; height:auto; }
 .md .ichart { height:300px; margin:8px 0; }                                 /* {{ echart(…) }} */
 .md .itable { margin:8px 0; display:block; }                                /* {{ slate_table(…) }} */
 .srcedit { padding:4px 6px; }

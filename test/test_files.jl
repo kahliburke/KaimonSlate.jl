@@ -166,6 +166,38 @@ const NS = KaimonSlate.NotebookServer
         @test NS._site_ctype("blob.xyz") == "application/octet-stream"   # still the fallback
     end
 
+    @testset "_stage_typst_md_media carries {width=…} to the document" begin
+        root = mktempdir(); mkpath(joinpath(root, "assets"))
+        write(joinpath(root, "assets", "fig.png"), UInt8[0x89, 0x50, 0x4e, 0x47])
+        dir = mktempdir()
+
+        # Markdown has nowhere to hang a size, so it rides in the sizes table keyed by the staged name.
+        sizes = Dict{String,Any}()
+        out = NS._stage_typst_md_media("![a](/n/n1/asset/assets/fig.png){width=300}", dir, "c1", root; sizes = sizes)
+        @test out == "![a](c1_media1.png)"                          # block consumed, never printed
+        @test sizes["c1_media1.png"]["width"] == Any[225.0, "pt"]    # 300 CSS px at 96dpi
+
+        # A block on an image we don't stage is still dropped rather than printed as prose.
+        @test NS._stage_typst_md_media("![b](local.png){width=50%}", dir, "c2", root) == "![b](local.png)"
+
+        # Alone on its line ⇒ a centred figure; inside a run of prose ⇒ left inline.
+        s2 = Dict{String,Any}()
+        NS._stage_typst_md_media("![a](/n/n1/asset/assets/fig.png)", dir, "c3", root; sizes = s2)
+        @test s2["c3_media1.png"]["block"] == true
+        s3 = Dict{String,Any}()
+        NS._stage_typst_md_media("see ![a](/n/n1/asset/assets/fig.png) there", dir, "c4", root; sizes = s3)
+        @test isempty(s3)
+        # `{align=…}` overrides where a figure sits
+        s4 = Dict{String,Any}()
+        NS._stage_typst_md_media("![a](/n/n1/asset/assets/fig.png){align=right}", dir, "c5", root; sizes = s4)
+        @test s4["c5_media1.png"]["align"] == "right" && s4["c5_media1.png"]["block"] == true
+
+        @test NS._typst_len("50%") == (50.0, "%")       # relative units stay relative
+        @test NS._typst_len("2em") == (2.0, "em")
+        @test NS._typst_len("1in") == (72.0, "pt")
+        @test NS._typst_len("banana") === nothing       # unparseable ⇒ no size, not a broken document
+    end
+
     @testset "_stage_typst_md_media stages images, drops non-images" begin
         root = mktempdir(); mkpath(joinpath(root, "assets"))
         write(joinpath(root, "assets", "fig.png"), UInt8[0x89, 0x50, 0x4e, 0x47])

@@ -225,7 +225,86 @@ function _md_html(src::AbstractString, interps = CellOutput[])
     for (i, f) in enumerate(frags)
         html = replace(html, ReportEngine._interp_token(i) => f)    # remaining (text) interps → HTML fragment
     end
-    return html
+    # Last, so an image produced by a `{{ }}` interpolation can be sized like a literal one.
+    return _apply_md_attrs(html)
+end
+
+# ── Pandoc-style attribute blocks on media ────────────────────────────────────────────────────────
+# `![alt](pic.png){width=300}` sizes the image it directly follows. CommonMark has no such rule, so it
+# renders the block as literal text after the tag; this folds that text back onto the tag as real
+# attributes. Adjacency is required (as in Pandoc/Quarto) — a `{` after a space is just prose.
+#   width= / height=   a bare number is px (`300` → `300px`); any CSS length or `%` passes through
+#   align=             `center` centres the block; `left`/`right` float it with prose flowing beside
+#   .name / #name      appended to the tag's class / set as its id
+#   title=             hover text; quote the value if it has spaces
+# Applies to `<img>` and to the `<video>`/`<audio>` a dropped clip becomes. Unknown keys are dropped
+# rather than emitted, so a typo can't inject an arbitrary attribute into the page.
+const _MEDIA_ATTR_RE = r"(<(img|video|audio)\b[^<>]*?)(\s*/?>)((?:</[A-Za-z][\w-]*>)*)\{([^{}<>\n]*)\}"
+const _ATTR_ITEM_RE = r"\.([A-Za-z][\w-]*)|#([A-Za-z][\w-]*)|([A-Za-z][\w-]*)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s}]+))"
+# A bare number means pixels — the unit an author writing `{width=300}` for the web has in mind.
+_css_len(v::AbstractString) = occursin(r"^-?\d+(?:\.\d+)?$", v) ? v * "px" : String(v)
+
+# Set (or extend) one attribute on an open tag, preserving whatever the tag already carries — a
+# dropped clip arrives with its own `style`, and `{width=…}` must add to it, not replace it.
+function _set_attr(tag::AbstractString, name::AbstractString, value::AbstractString;
+                   append::Bool = false, sep::AbstractString = " ")
+    isempty(value) && return String(tag)
+    m = match(Regex("(\\s" * name * "\\s*=\\s*)([\"'])(.*?)\\2", "i"), tag)
+    m === nothing && return string(tag, " ", name, "=\"", _esc(value), "\"")
+    old = strip(String(m.captures[3]), [' ', ';'])
+    new = (append && !isempty(old)) ? string(old, sep, _esc(value)) : _esc(value)
+    return string(SubString(tag, 1, prevind(tag, m.offset)), m.captures[1], "\"", new, "\"",
+                  SubString(tag, m.offset + ncodeunits(m.match)))
+end
+
+# One attribute block → (styles, classes, id, plain attributes).
+function _media_attrs(raw::AbstractString)
+    # The block arrives as CommonMark's escaped TEXT, so a quoted value reads `&quot;…&quot;` here.
+    spec = replace(String(raw), "&quot;" => "\"", "&#39;" => "'", "&amp;" => "&")
+    styles = String[]; classes = String[]; id = ""; extra = Pair{String,String}[]
+    for m in eachmatch(_ATTR_ITEM_RE, spec)
+        if m.captures[1] !== nothing
+            push!(classes, String(m.captures[1]))
+        elseif m.captures[2] !== nothing
+            id = String(m.captures[2])
+        else
+            k = lowercase(String(m.captures[3]))
+            v = String(something(m.captures[4], m.captures[5], m.captures[6], ""))
+            if k in ("width", "height")
+                push!(styles, string(k, ":", _css_len(v)))
+            elseif k == "align"
+                a = lowercase(v)
+                a == "center" ? push!(styles, "display:block;margin-left:auto;margin-right:auto") :
+                a == "left"   ? push!(styles, "float:left;margin-right:1em") :
+                a == "right"  ? push!(styles, "float:right;margin-left:1em") : nothing
+            elseif k in ("title", "alt")
+                push!(extra, k => v)
+            elseif k == "class"
+                append!(classes, split(v))
+            elseif k == "id"
+                id = v
+            end
+        end
+    end
+    return (styles, classes, id, extra)
+end
+
+function _apply_md_attrs(html::AbstractString)
+    occursin('{', html) || return String(html)
+    return replace(html, _MEDIA_ATTR_RE => function (m)
+        mm = match(_MEDIA_ATTR_RE, m)
+        tag = String(mm.captures[1])
+        styles, classes, id, extra = _media_attrs(String(mm.captures[5]))
+        # Nothing recognised ⇒ this wasn't an attribute block. Leave the author's braces as prose.
+        (isempty(styles) && isempty(classes) && isempty(id) && isempty(extra)) && return m
+        isempty(styles)  || (tag = _set_attr(tag, "style", join(styles, ";"); append = true, sep = ";"))
+        isempty(classes) || (tag = _set_attr(tag, "class", join(classes, " "); append = true))
+        isempty(id)      || (tag = _set_attr(tag, "id", id))
+        for (k, v) in extra
+            tag = _set_attr(tag, k, v)
+        end
+        return string(tag, mm.captures[3], mm.captures[4])
+    end)
 end
 
 # Raw text of an interpolation for *math* context (inside `$…$`/`$$…$$`): a scalar's

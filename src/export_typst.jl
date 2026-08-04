@@ -160,7 +160,18 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
     #let mathfn = (s, block: false) => if block { mitex(PRE + s) } else { mi(PRE + s) }
     // Author-embedded markdown images stage into the doc root; resolve them relative to THIS file
     // (not cmarker's package dir, where its built-in image() looks) — passed to cmarker as scope.image.
-    #let mdimage(src, alt: none) = image(src, alt: alt)
+    // `media.json` carries any `{width=…}` block the author wrote (see `_stage_typst_md_media`), as
+    // (magnitude, unit) — markdown has no place to hang a size, so it travels beside the document.
+    #let MEDIASZ = json("media.json")
+    #let mdlen(e) = if e == none { auto } else if e.at(1) == "%" { e.at(0) * 1% } else if e.at(1) == "em" { e.at(0) * 1em } else { e.at(0) * 1pt }
+    #let mdalign(s) = if s == "left" { left } else if s == "right" { right } else { center }
+    // An image alone in its paragraph is a figure — centred, matching the notebook and the HTML export.
+    // One sitting in a run of prose stays inline, where the author put it.
+    #let mdimage(src, alt: none) = {
+      let a = MEDIASZ.at(src, default: (:))
+      let im = image(src, alt: alt, width: mdlen(a.at("width", default: none)), height: mdlen(a.at("height", default: none)))
+      if a.at("block", default: false) { align(mdalign(a.at("align", default: "center")), im) } else { im }
+    }
     $(_CITE_SHOW)
     #let titleblock(t) = { align(center, text(size: $(st.titlesize), weight: "bold", fill: $(p.title), t)); v(2pt); line(length: 100%, stroke: 0.5pt + $(p.rule)); v(10pt) }
     #let metablock(title, subtitle, byline, abstract) = {
@@ -221,7 +232,18 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
     #let mathfn = (s, block: false) => if block { mitex(PRE + s) } else { mi(PRE + s) }
     // Author-embedded markdown images stage into the doc root; resolve them relative to THIS file
     // (not cmarker's package dir, where its built-in image() looks) — passed to cmarker as scope.image.
-    #let mdimage(src, alt: none) = image(src, alt: alt)
+    // `media.json` carries any `{width=…}` block the author wrote (see `_stage_typst_md_media`), as
+    // (magnitude, unit) — markdown has no place to hang a size, so it travels beside the document.
+    #let MEDIASZ = json("media.json")
+    #let mdlen(e) = if e == none { auto } else if e.at(1) == "%" { e.at(0) * 1% } else if e.at(1) == "em" { e.at(0) * 1em } else { e.at(0) * 1pt }
+    #let mdalign(s) = if s == "left" { left } else if s == "right" { right } else { center }
+    // An image alone in its paragraph is a figure — centred, matching the notebook and the HTML export.
+    // One sitting in a run of prose stays inline, where the author put it.
+    #let mdimage(src, alt: none) = {
+      let a = MEDIASZ.at(src, default: (:))
+      let im = image(src, alt: alt, width: mdlen(a.at("width", default: none)), height: mdlen(a.at("height", default: none)))
+      if a.at("block", default: false) { align(mdalign(a.at("align", default: "center")), im) } else { im }
+    }
     $(_CITE_SHOW)
     #let metablock(title, subtitle, byline, abstract) = align(center + horizon)[
       #text(size: 2.4em, weight: "bold", fill: $(p.title))[#title]
@@ -1108,6 +1130,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
     override && _warm_makie_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()
+        mediasz = Dict{String,Any}()   # staged image => its `{width=…}` block, written out as media.json
         # Dark theme highlights code via a bundled tmTheme that Typst reads from the root.
         theme == "dark" && write(joinpath(dir, "code-dark.tmTheme"), _CODE_DARK_TMTHEME)
         io = IOBuffer()
@@ -1129,7 +1152,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             absarg = "none"
             if !isempty(strip(fm.abstract))
                 write(joinpath(dir, "abstract.md"),
-                      _stage_typst_md_media(_rewrite_citations(fm.abstract, citekeys), dir, "abstract", _proj_root(nb)))
+                      _stage_typst_md_media(_rewrite_citations(fm.abstract, citekeys), dir, "abstract", _proj_root(nb); sizes = mediasz))
                 absarg = "cmarker.render(read(\"abstract.md\"), math: mathfn, scope: (image: mdimage))"
             end
             print(io, "#metablock(", arg(fm.title), ", ", arg(fm.subtitle), ", ", arg(fm.byline), ", ", absarg, ")\n\n")
@@ -1150,7 +1173,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             if c.kind == MARKDOWN
                 src = c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source   # hoisted H1 → not in body
                 md = _md_for_typst(c, src; citekeys = citekeys, figrefs = figidx.labels)
-                md = _stage_typst_md_media(md, dir, base, _proj_root(nb))   # author-embedded images → staged files
+                md = _stage_typst_md_media(md, dir, base, _proj_root(nb); sizes = mediasz)   # author-embedded images → staged files
                 if isempty(strip(md))
                     inrow || continue                # empty markdown: standalone → skip; in a row → empty slot
                 else
@@ -1183,17 +1206,18 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
         biblio = _bibliography_files!(dir, fm.bibcells, dirname(abspath(nb.path)))
         print(io, _bibliography_typst(biblio, get(nb.report.meta, "bibstyle", "ieee")))
         cols == 2 && print(io, "]\n")
+        write(joinpath(dir, "media.json"), JSON.json(mediasz))   # always present: the preamble reads it
         write(joinpath(dir, "doc.typ"), String(take!(io)))
         return dir
     end
 end
 
 # Emit one slide fragment (a whole cell, or a `---`-split markdown chunk) into the doc.
-function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, charttheme = "", override = false, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all")
+function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, charttheme = "", override = false, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all", sizes = nothing)
     c, srcoverride = frag                    # frag[2] is a per-frag SOURCE override (String/nothing), NOT the themed-render Bool `override`
     if c.kind == MARKDOWN
         md = _md_for_typst(c, srcoverride === nothing ? c.source : srcoverride; citekeys = citekeys)
-        md = _stage_typst_md_media(md, dir, base, _proj_root(nb))   # author-embedded images → staged files
+        md = _stage_typst_md_media(md, dir, base, _proj_root(nb); sizes = sizes)   # author-embedded images → staged files
         isempty(strip(md)) && return
         write(joinpath(dir, base * ".md"), md)
         print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn, scope: (image: mdimage))\n\n")
@@ -1222,6 +1246,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
     override && _warm_makie_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()
+        mediasz = Dict{String,Any}()   # staged image => its `{width=…}` block, written out as media.json
         theme == "dark" && write(joinpath(dir, "code-dark.tmTheme"), _CODE_DARK_TMTHEME)
         io = IOBuffer()
         print(io, _typst_preamble_slides(nb.report.title; theme = theme, ratio = ratio, code = code))
@@ -1258,7 +1283,8 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
                     f = (frag[1].id == fm.titlecell && frag[2] === nothing) ? (frag[1], _strip_leading_h1(frag[1].source)) : frag
                     multi && print(io, "[")
                     _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme, charttheme = ct, override = override,
-                                      show_source = show_source, include_params = include_params, citekeys = citekeys, outputs = outputs)
+                                      show_source = show_source, include_params = include_params, citekeys = citekeys,
+                                      outputs = outputs, sizes = mediasz)
                     multi && print(io, "],\n")
                 end
                 multi && print(io, ")\n\n")
@@ -1273,13 +1299,14 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
             for (si, seg) in enumerate(segs)
                 isempty(seg.notes) && continue
                 ntext = join((_md_for_typst(n; citekeys = citekeys) for n in seg.notes), "\n\n")
-                ntext = _stage_typst_md_media(ntext, dir, "notes$(si)", _proj_root(nb))   # embedded images → staged files
+                ntext = _stage_typst_md_media(ntext, dir, "notes$(si)", _proj_root(nb); sizes = mediasz)   # embedded images → staged files
                 isempty(strip(ntext)) && continue
                 write(joinpath(dir, "notes$(si).md"), ntext)
                 print(io, "#slide[\n#text(fill: luma(130))[Notes · slide $(si)]\n#v(6pt)\n",
                       "#cmarker.render(read(\"notes$(si).md\"), math: mathfn, scope: (image: mdimage))\n]\n\n")
             end
         end
+        write(joinpath(dir, "media.json"), JSON.json(mediasz))   # always present: the preamble reads it
         write(joinpath(dir, "doc.typ"), String(take!(io)))
         return dir
     end

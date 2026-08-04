@@ -129,6 +129,32 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         @test occursin("e^{ 3 }", mh) && !occursin("ival", mh) && !occursin("xslateinterp", mh)
     end
 
+    @testset "media attribute blocks: ![](p){width=300}" begin
+        h = markdown_html("![a](p.png){width=300}")
+        @test occursin("style=\"width:300px\"", h) && !occursin("{width", h)
+        # a unit or percentage passes through; a bare number is px
+        @test occursin("style=\"width:50%\"", markdown_html("![a](p.png){width=50%}"))
+        @test occursin("width:20em;height:4rem", markdown_html("![a](p.png){width=20em height=4rem}"))
+        # class / id / title, and centring
+        c = markdown_html("![a](p.png){.hero #top title=\"a cat\"}")
+        @test occursin("class=\"hero\"", c) && occursin("id=\"top\"", c) && occursin("title=\"a cat\"", c)
+        @test occursin("margin-left:auto", markdown_html("![a](p.png){align=center}"))
+        @test occursin("float:right", markdown_html("![a](p.png){align=right}"))
+
+        # a dropped clip is raw HTML with its own style — the block ADDS to it, and binds past </video>
+        v = markdown_html("<video controls src=\"/n/x/asset/a.mp4\" style=\"max-width:100%\"></video>{width=400}")
+        @test occursin("style=\"max-width:100%;width:400px\"", v) && occursin("</video>", v)
+
+        # an interpolated image can be sized like a literal one
+        img = CellOutput("", [MimeChunk("image/png", UInt8[0x89, 0x50])], Any[], Any[], BindSpec[], "", nothing, nothing, 0.0)
+        @test occursin("width:120px", markdown_html("{{p}}{width=120}", [img]))
+
+        # NOT an attribute block: prose braces, a detached block, an unknown key
+        @test occursin("{hello}", markdown_html("![a](p.png) {hello}"))
+        @test occursin("{ping=1}", markdown_html("![a](p.png){ping=1}"))
+        @test occursin("{x}", markdown_html("set {x} of points"))
+    end
+
     @testset "cross-cell error frames: line + clickable cellref" begin
         # A backtrace with frames from two cells (`cell:<id>:N`, the eval filename).
         bt = "[1] f() @ Main cell:a:1\n[2] top-level scope @ cell:b:3"

@@ -74,6 +74,23 @@ inside math (`$…$`) too.
 
 ![A markdown cell with interpolated values and typeset LaTeX math](./assets/markdown.png)
 
+## Images and clips
+
+An image alone in its paragraph is treated as a figure and centred; one sitting inside a run of
+prose stays inline where you put it. An attribute block directly after the image (no space, as in
+Pandoc/Quarto) overrides how it is drawn:
+
+```markdown
+![A phase portrait](plot.png){width=300}
+![Logo](logo.svg){width=40% align=right}
+![Detail](detail.png){.zoomable #fig-detail title="click to enlarge"}
+```
+
+`width`/`height` take a bare number as pixels (`300` → `300px`) or any CSS length or percentage;
+`align` is `left`, `right`, or `center`; `.name` adds a class, `#name` sets an id. The same block
+works on a `<video>` or `<audio>` you dropped into the cell, and on an interpolated `{{ }}` image.
+Sizes carry into the HTML export and the PDF; unrecognised keys are dropped rather than emitted.
+
 ## Completion
 
 Tab-completion uses Julia's REPL completions against the live kernel **plus** the cell's own
