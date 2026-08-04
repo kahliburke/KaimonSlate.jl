@@ -1030,7 +1030,11 @@ function create_tools(GateTool::Type)
         add_cell(notebook, source, after, kind) -> String
 
     Append a cell containing `source`, RUN it, and return its result (value/output,
-    or the error to fix). `after` = the id to insert after ("" = end of notebook).
+    or the error to fix). A cell that outruns a short grace window is PROMOTED to a background
+    job: you get the cell id plus a job id immediately and poll `check_eval(notebook, job)` for
+    the result, while the run continues on the worker. So a slow cell costs you a poll, never a
+    lost result — and `background=true` skips the wait entirely when you already know the cell is
+    expensive. `after` = the id to insert after ("" = end of notebook).
     `kind` = "code" or "md". `id` = an optional explicit cell id (a meaningful label like
     "ground_state"); must be UNIQUE — errors if already in use — and is folded to header-safe
     characters (letters/digits/underscore). Omit it to auto-generate. `tags` = optional cell tags
@@ -1046,9 +1050,10 @@ function create_tools(GateTool::Type)
     `slate.api` for the reference before plotting or adding interactivity; their names are not in
     package docs.
     """
-    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "", tags::String = "", run::Bool = true)::String
+    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "", tags::String = "", run::Bool = true, background::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_add_cell!(nb, source; after = after, kind = kind, id = id, tags = tags, run = run, caller = _caller())
+        res = agent_add_cell!(nb, source; after = after, kind = kind, id = id, tags = tags, run = run,
+                              background = background, caller = _caller())
         return _surfaced(nb, "add_cell",
             Dict{String,Any}("source" => source, "after" => after, "kind" => kind, "id" => id, "tags" => tags, "run" => run), res)
     end
@@ -1074,15 +1079,20 @@ function create_tools(GateTool::Type)
     cell's tags — behaviour tags (`hidecode`, `collapsed`, `trace`, `nocache`, …) and free-form
     metadata; omit it to leave the existing tags unchanged.
 
+    A cell that outruns a short grace window is PROMOTED to a background job: you get a job id
+    immediately and poll `check_eval(notebook, job)`, while the run continues on the worker. Pass
+    `background=true` to skip the wait when you already know the cell is expensive.
+
     `run=false` writes the source and leaves the cell (and its dependents) STALE without running it,
     returning immediately. Use it for a BULK refactor — renaming a binding across many cells,
     repointing paths — where running after every edit means one reactive cascade per edit: make all
     the edits with `run=false`, then reconcile ONCE with `run(notebook, "")`. It is also the safe way
     to edit a notebook whose cells are mid-computation.
     """
-    function edit_cell(notebook::String, cell::String, source::String; tags::String = "", run::Bool = true)::String
+    function edit_cell(notebook::String, cell::String, source::String; tags::String = "", run::Bool = true, background::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_edit_cell!(nb, cell, source; tags = tags, run = run, caller = _caller())
+        res = agent_edit_cell!(nb, cell, source; tags = tags, run = run,
+                               background = background, caller = _caller())
         return _surfaced(nb, "edit_cell",
             Dict{String,Any}("cell" => cell, "source" => source, "tags" => tags, "run" => run), res)
     end
@@ -1091,10 +1101,15 @@ function create_tools(GateTool::Type)
         run(notebook, cell, token, expected_version) -> String
 
     Run cell `cell` and return its result; `cell` = "" recomputes all stale cells.
+
+    A run that outruns a short grace window is PROMOTED to a background job: you get a job id
+    immediately and poll `check_eval(notebook, job)`, while it continues on the worker. Pass
+    `background=true` to skip the wait outright — worth doing for `cell=""`, which recomputes
+    every stale cell and is the likeliest call here to be long.
     """
-    function run_cell(notebook::String, cell::String)::String
+    function run_cell(notebook::String, cell::String; background::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_run!(nb, cell; caller = _caller())
+        res = agent_run!(nb, cell; background = background, caller = _caller())
         return _surfaced(nb, "run", Dict{String,Any}("cell" => cell), res)
     end
 
@@ -1902,6 +1917,20 @@ function create_tools(GateTool::Type)
         @warn "KaimonSlate hub auto-start failed" exception = (e, catch_backtrace())
     end
 
+    # Declared silence budgets. Kaimon's session-tool deadline is refreshed by every progress
+    # frame, so a tool that reports progress through `_say` (site_publish) needs nothing here,
+    # and neither does one that returns straight away and leaves the work to an @async task
+    # (run_on). These are the ones that BLOCK and stay SILENT while they do, where the client
+    # would otherwise give up on a perfectly healthy call.
+    #
+    # run/add_cell/edit_cell PROMOTE to a background job once they outrun the grace window, so
+    # they never block for a cell's full duration — their budget only has to outlast that window.
+    # Derived from the grace rather than hardcoded, so raising KAIMONSLATE_SCRATCH_GRACE can't
+    # silently push the blocking path past a budget that stayed put.
+    CELL_RUN_MS = round(Int, (NotebookServer._scratch_grace() + 120) * 1000)
+    DEPLOY_MS   = 1_800_000   # package precompile / a build + deploy round-trip
+    RENDER_MS   =   900_000   # Typst render + figure warm, doc harvest — one silent round-trip
+
     return [
         GateTool("api", api),
         GateTool("open", nb_open),
@@ -1922,10 +1951,10 @@ function create_tools(GateTool::Type)
         GateTool("whereis", whereis),
         GateTool("memo_trace", memo_trace),
         GateTool("read", read_cells),
-        GateTool("add_cell", add_cell),
-        GateTool("edit_cell", edit_cell),
+        GateTool("add_cell", add_cell; timeout_ms = CELL_RUN_MS),
+        GateTool("edit_cell", edit_cell; timeout_ms = CELL_RUN_MS),
         GateTool("rename_cell", rename_cell),
-        GateTool("run", run_cell),
+        GateTool("run", run_cell; timeout_ms = CELL_RUN_MS),
         GateTool("delete_cell", delete_cell),
         GateTool("surface", surface_controls),
         GateTool("acquire_floor", acquire_floor),
@@ -1937,12 +1966,12 @@ function create_tools(GateTool::Type)
         GateTool("eval", scratch_eval),
         GateTool("check_eval", check_scratch_eval),
         GateTool("eval_js", eval_js),
-        GateTool("export_pdf", export_pdf_tool),
-        GateTool("index_docs", index_docs),
+        GateTool("export_pdf", export_pdf_tool; timeout_ms = RENDER_MS),
+        GateTool("index_docs", index_docs; timeout_ms = RENDER_MS),
         GateTool("search_docs", search_docs_tool),
-        GateTool("pkg", pkg),
-        GateTool("publish", publish_tool),
-        GateTool("archive", archive_tool),
+        GateTool("pkg", pkg; timeout_ms = DEPLOY_MS),
+        GateTool("publish", publish_tool; timeout_ms = DEPLOY_MS),
+        GateTool("archive", archive_tool; timeout_ms = DEPLOY_MS),
         GateTool("publish_history", publish_history_tool),
         GateTool("publish_targets", publish_targets_tool),
         GateTool("sites", sites_tool),

@@ -428,3 +428,82 @@ end
         NS.stop_hub(hub)
     end
 end
+
+# Liveness reporting for a BLOCKED agent call. `_note_run_progress` only fires after
+# _AGENT_PROGRESS_EVERY seconds of blocking, so no ordinary test path reaches it — call it
+# directly, or a rename/typo here (it reaches across into ReportEngine) ships silently.
+@testset "agent run progress line" begin
+    NS.SlateHistory._ROOT[] = mktempdir()
+    hub = NS.start_hub(; port = 8861)
+    try
+        nbp = tempname() * ".jl"
+        write(nbp, "#%% md id=intro\n# T\n")
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        NS.agent_add_cell!(nb, "z = 1"; id = "zcell")
+        NS._eval!(nb; wait_all = true)
+
+        # Must not throw: it calls ReportEngine._gate_progress across a module boundary, and
+        # `progress` itself is a no-op outside a gate request — the whole thing has to be inert
+        # when nobody's listening rather than erroring inside a run.
+        @test NS._note_run_progress(nb, "zcell", time() - 5) === nothing
+        @test NS._note_run_progress(nb, "", time() - 5) === nothing
+
+        # A slate_progress frame is RECORDED for sampling (latest-value-wins) rather than pushed
+        # per-frame — that's what stops a 10Hz loop flooding the agent.
+        NS.ReportEngine._do_userprog(nb.report.id, 0.5, "halfway", "bar1", false)
+        rec = lock(NS._USERPROG_LOCK) do; NS._LAST_USERPROG[nb.id]; end
+        @test rec[1] == 0.5 && rec[2] == "halfway"
+        # A burst collapses: the stash holds only the most recent reading.
+        for i in 1:20
+            NS.ReportEngine._do_userprog(nb.report.id, i / 20, "step $i", "bar1", false)
+        end
+        rec2 = lock(NS._USERPROG_LOCK) do; NS._LAST_USERPROG[nb.id]; end
+        @test rec2[2] == "step 20"
+        @test NS._note_run_progress(nb, "zcell", time() - 5) === nothing
+
+        # Closing must drop the reading: notebook ids are reused on reopen, so a leftover would
+        # be reported against the next notebook's first run as if it described it.
+        NS._unwire_callbacks!(nb)
+        @test !haskey(lock(NS._USERPROG_LOCK) do; NS._LAST_USERPROG; end, nb.id)
+    finally
+        NS.stop_hub(hub)
+    end
+end
+
+# A promoted job's poll must carry the cell's own progress. After promotion the caller is off
+# the gate request, so the poll is the ONLY channel left for slate_progress to reach them —
+# without it a poll can't tell "70% through" from "wedged".
+@testset "check_eval surfaces in-cell progress" begin
+    NS.SlateHistory._ROOT[] = mktempdir()
+    hub = NS.start_hub(; port = 8863)
+    try
+        nbp = tempname() * ".jl"
+        write(nbp, "#%% md id=intro\n# T\n")
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+
+        @test NS._userprog_note(nb.id) == ""                       # nothing reported yet
+        NS.ReportEngine._do_userprog(nb.report.id, 0.45, "step 9/20", "bar", false)
+        note = NS._userprog_note(nb.id)
+        @test occursin("45%", note) && occursin("step 9/20", note)
+
+        # A FINISHED bar must not be reported as live state — it would read as current progress
+        # for whatever runs next.
+        NS.ReportEngine._do_userprog(nb.report.id, 1.0, "all done", "bar", true)
+        @test NS._userprog_note(nb.id) == ""
+
+        # And it reaches the actual poll response for a running job.
+        NS.ReportEngine._do_userprog(nb.report.id, 0.7, "phase two", "bar", false)
+        r = NS._run_bg(nb, "probe"; grace = 0) do
+            sleep(5); "done"
+        end
+        @test !r.done && !isempty(r.jobid)
+        polled = NS.scratch_check(r.jobid)
+        @test occursin("still running", polled)
+        @test occursin("70%", polled) && occursin("phase two", polled)
+
+        # Unknown job ids stay a clean message, not an error.
+        @test occursin("No such scratch job", NS.scratch_check("nope"))
+    finally
+        NS.stop_hub(hub)
+    end
+end

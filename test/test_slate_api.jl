@@ -64,7 +64,13 @@ module StubGate
 struct GateTool
     name::String
     handler::Function
+    timeout_ms::Union{Nothing,Int}
 end
+# Mirrors KaimonGate's constructor — `create_tools` declares a silence budget on the tools that
+# block silently. There is no caller-facing override by design.
+GateTool(name::AbstractString, handler::Function;
+         timeout_ms::Union{Nothing,Integer} = nothing) =
+    GateTool(String(name), handler, timeout_ms === nothing ? nothing : Int(timeout_ms))
 current_caller() = nothing
 current_agent_id() = nothing
 end
@@ -201,6 +207,34 @@ end
         api = only(t for t in tools if t.name == "api").handler
         @test occursin("### echart", api(topic = "echart"))
         @test occursin("— index", api())
+    end
+
+    @testset "declared timeout budgets" begin
+        tools = KaimonSlate.create_tools(StubGate.GateTool)
+        byname = Dict(t.name => t for t in tools)
+
+        # The cell-eval tools PROMOTE past the grace window, so their budget only has to outlast
+        # that window — and it's derived from the grace so the two can't drift. A hardcoded value
+        # here would silently become too small the moment someone raised KAIMONSLATE_SCRATCH_GRACE.
+        expected = round(Int, (NS._scratch_grace() + 120) * 1000)
+        for n in ("run", "add_cell", "edit_cell")
+            @test byname[n].timeout_ms == expected
+            @test byname[n].timeout_ms > round(Int, NS._scratch_grace() * 1000)
+        end
+
+        # These genuinely block AND stay silent, so their budget must cover the whole operation.
+        for n in ("pkg", "publish", "archive")
+            @test byname[n].timeout_ms == 1_800_000
+        end
+        for n in ("export_pdf", "index_docs")
+            @test byname[n].timeout_ms == 900_000
+        end
+
+        # No budget where one would be wrong. `site_publish` reports progress (`_say`), so the
+        # inactivity refresh already keeps it alive; `run_on` returns straight away and leaves
+        # the drain to an @async task. Declaring budgets here would paper over that distinction.
+        @test byname["site_publish"].timeout_ms === nothing
+        @test byname["run_on"].timeout_ms === nothing
     end
 
     @testset "search records carry summary + keywords" begin

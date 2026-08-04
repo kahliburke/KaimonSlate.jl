@@ -140,7 +140,16 @@ function _wire_callbacks!(nb::LiveNotebook)
     register_srcchange!(nb.report.id, (names, err) -> server_src_changed(nb, names, err))  # parent /src reloaded (Revise)
     register_progress!(nb.report.id, c -> _broadcast_progress(nb, c))                      # stream per-cell run status to the UI
     register_runbatch!(nb.report.id, n -> (try; _broadcast(nb, "runbatch:$n"); catch; end))   # run size → stable k/N
-    register_userprog!(nb.report.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
+    register_userprog!(nb.report.id, (frac, msg, id, done) -> begin
+        # Record before broadcasting: an agent BLOCKED on this run samples the latest reading
+        # from its own task (see `_note_run_progress`) rather than being pushed every frame,
+        # so a cell calling slate_progress at 10 Hz can't flood the agent's context. The
+        # browser keeps the unthrottled stream below — it drives a live progress bar.
+        lock(_USERPROG_LOCK) do
+            _LAST_USERPROG[nb.id] = (Float64(frac), String(msg), String(id), done === true, time())
+        end
+        try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end
+    end)
     register_prepare!(nb.report.id, json -> (try; _broadcast(nb, "prepare:" * json); catch; end))   # env precompile progress → "Preparing packages" banner
     register_emit!(nb.report.id, (channel, payload) -> (try; _ws_emit!(nb, channel, payload); catch; end))   # slate_emit → push over the page WebSocket (NOT the coalescing SSE); payload is a Julia value, JSON-encoded in _ws_emit!
     register_bin_emit!(nb.report.id, frame -> (try; _ws_broadcast_bin!(nb, frame); catch; end))   # slate_emit_bin → forward the raw binary frame over the page WebSocket as-is
@@ -149,6 +158,9 @@ function _wire_callbacks!(nb::LiveNotebook)
     return nb
 end
 function _unwire_callbacks!(nb::LiveNotebook)
+    # A notebook id is REUSED the instant the same file is reopened, so a leftover reading here
+    # would be reported against the new notebook's first run as if it described it.
+    lock(_USERPROG_LOCK) do; delete!(_LAST_USERPROG, nb.id); end
     unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id)
     unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
     unregister_userprog!(nb.report.id); unregister_emit!(nb.report.id); unregister_celldone!(nb.report.id)
@@ -2681,6 +2693,8 @@ function _eval!(nb::LiveNotebook; wait_for::AbstractString = "", wait_all::Bool 
     p > 0 && _emit_pending(nb, p)
     _ensure_runner!(nb)
     (isempty(wait_for) && !wait_all) && return nb
+    t0 = time()
+    last_note = t0
     while true
         done = lock(nb.lock) do
             if !isempty(wait_for)
@@ -2694,8 +2708,49 @@ function _eval!(nb::LiveNotebook; wait_for::AbstractString = "", wait_all::Bool 
             # wait_all also waits for the runner task itself to clear (so callers can persist after).
             lock(_RUNNER_LOCK) do; get(_RUNNERS, nb.id, false); end || return nb
         end
+        # Liveness for a BLOCKED agent caller. This loop runs on the caller's own task, so the
+        # gate request id that `progress` keys off is already bound here — no re-seeding needed
+        # (unlike a callback firing on the stream-poller task). Emitting from here also means a
+        # SILENT cell still reports "running <id> (Ns)", so waiting stays distinguishable from
+        # wedged even when the cell never calls slate_progress.
+        if time() - last_note >= _AGENT_PROGRESS_EVERY
+            last_note = time()
+            _note_run_progress(nb, wait_for, t0)
+        end
         sleep(0.02)
     end
+end
+
+# How often a blocking agent call reports upstream. Deliberately coarse: the job is to refresh
+# the caller's deadline and say what's happening, NOT to mirror the browser's progress bar. The
+# reading is latest-value-wins, so a burst of slate_progress frames collapses into one line.
+const _AGENT_PROGRESS_EVERY = 15.0
+# nb.id → the most recent slate_progress reading (frac, msg, bar id, done, when).
+const _LAST_USERPROG = Dict{String,Tuple{Float64,String,String,Bool,Float64}}()
+const _USERPROG_LOCK = ReentrantLock()
+
+# One agent-visible status line for a run we're blocked on: which cell, how far in, how much is
+# left, and whatever the cell last reported through `slate_progress`.
+function _note_run_progress(nb::LiveNotebook, wait_for::AbstractString, t0::Float64)
+    running, pending = lock(nb.lock) do
+        ([c.id for c in nb.report.cells if c.state == RUNNING],
+         count(c -> c.state in (STALE, RUNNING), nb.report.cells))
+    end
+    parts = String[isempty(running) ?
+                   (isempty(wait_for) ? "draining" : "waiting on $wait_for") :
+                   "running " * join(running, ", ")]
+    pending > 1 && push!(parts, "$pending pending")
+    up = lock(_USERPROG_LOCK) do; get(_LAST_USERPROG, nb.id, nothing); end
+    # Ignore a stale reading: a leftover from an earlier cell would otherwise be reported as if
+    # it described the one running now.
+    if up !== nothing && !up[4] && time() - up[5] <= 2 * _AGENT_PROGRESS_EVERY
+        frac, msg = up[1], up[2]
+        pct = (isfinite(frac) && 0.0 <= frac <= 1.0) ? "$(round(Int, 100 * frac))%" : ""
+        detail = strip(join(filter(!isempty, [pct, strip(msg)]), " "))
+        isempty(detail) || push!(parts, detail)
+    end
+    ReportEngine._gate_progress("⏳ " * join(parts, " · ") * "  ($(round(Int, time() - t0))s)")
+    return nothing
 end
 
 # Wait for the notebook to fully drain (no stale cells, runner idle).

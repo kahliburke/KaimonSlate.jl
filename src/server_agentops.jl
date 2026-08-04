@@ -562,6 +562,69 @@ function agent_scratch_eval_bg!(nb::LiveNotebook, source::AbstractString;
     return (; done = false, jobid = jid, text = hint)
 end
 
+"""
+    _run_bg(work, nb, label; grace) -> (; done, jobid, text)
+
+Race a blocking piece of agent work against `grace` seconds: finished in time → its result;
+still going → a job id, with `work` continuing in the background (poll `slate.check_eval`).
+
+Same machinery and registry as `agent_scratch_eval_bg!`, for the same reason: an agent must not
+be held open — or cut off by a transport idle timeout — by a cell that turns out to be slow, and
+it cannot reliably predict which cells those are. `grace <= 0` promotes immediately.
+
+Note this races the RUN, not the structural edit: callers commit the cell (so its id and
+existence are certain) and pass only the wait-and-format step here.
+"""
+function _run_bg(work::Function, nb::LiveNotebook, label::AbstractString; grace::Real)
+    resultref = Ref{Union{Nothing,String}}(nothing)
+    doneref = Ref(false)
+    # Task-locals are NOT inherited by a child task, so re-seed the gate request id that
+    # `progress` keys off — without it the in-run status lines (`_note_run_progress`) would
+    # vanish for the whole grace window, which is exactly when the caller is still listening.
+    rid = get(task_local_storage(), :gate_request_id, nothing)
+    task = @async begin
+        rid === nothing || task_local_storage(:gate_request_id, rid)
+        r = try
+            work()
+        catch e
+            "⛔ $label errored: " * sprint(showerror, e)
+        end
+        resultref[] = r
+        doneref[] = true
+        r
+    end
+    jid = _new_scratch_id()
+    lock(_SCRATCH_LOCK) do
+        _SCRATCH_JOBS[jid] = ScratchJob(jid, nb.id, time(), task, resultref, doneref)
+    end
+    if grace > 0 && timedwait(() -> doneref[], Float64(grace); pollint = 0.05) === :ok
+        lock(_SCRATCH_LOCK) do; delete!(_SCRATCH_JOBS, jid); end
+        return (; done = true, jobid = "", text = something(resultref[], "(no result)"))
+    end
+    hint = "⏳ still running$(grace > 0 ? " after $(round(Int, grace))s" : "") — promoted to " *
+           "background job $jid. Poll it with slate.check_eval(job=\"$jid\"). The run continues " *
+           "on the worker; you can keep editing with run=false meanwhile."
+    return (; done = false, jobid = jid, text = hint)
+end
+
+"""What the notebook's cells last reported through `slate_progress`, as a short suffix (or "").
+
+Once a run is PROMOTED the caller is no longer on the other end of a gate request, so in-run
+progress has nowhere to stream to — the poll is where it can still reach them. Without this a
+poll can only say how long it's been, which doesn't distinguish "70% through" from "wedged".
+"""
+function _userprog_note(nbid::AbstractString)
+    up = lock(_USERPROG_LOCK) do; get(_LAST_USERPROG, String(nbid), nothing); end
+    up === nothing && return ""
+    # Ignore a done/stale reading: reporting a finished bar (or a leftover from an earlier cell)
+    # as this job's live state would be worse than saying nothing.
+    (up[4] || time() - up[5] > 120.0) && return ""
+    frac, msg = up[1], up[2]
+    pct = (isfinite(frac) && 0.0 <= frac <= 1.0) ? "$(round(Int, 100 * frac))%" : ""
+    detail = strip(join(filter(!isempty, [pct, strip(msg)]), " · "))
+    return isempty(detail) ? "" : " — $detail"
+end
+
 "Poll a background scratch job: its result if finished (and forget it), else a still-running note."
 function scratch_check(jobid::AbstractString)
     job = lock(_SCRATCH_LOCK) do; get(_SCRATCH_JOBS, String(jobid), nothing); end
@@ -570,7 +633,8 @@ function scratch_check(jobid::AbstractString)
         lock(_SCRATCH_LOCK) do; delete!(_SCRATCH_JOBS, job.id); end
         return something(job.result[], "(no result)")
     end
-    return "⏳ Scratch job $jobid still running ($(round(Int, time() - job.started))s elapsed). Poll again with slate.check_eval."
+    return "⏳ Scratch job $jobid still running ($(round(Int, time() - job.started))s elapsed)" *
+           _userprog_note(job.nb) * ". Poll again with slate.check_eval."
 end
 
 "Add a cell (default code) after `after` (end if empty) WITH `source`, run it,
@@ -582,7 +646,7 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
                          after::AbstractString = "", kind::AbstractString = "code",
                          id::AbstractString = "", tags::AbstractString = "",
                          caller::AbstractString = "", expected_version::Int = -1,
-                         run::Bool = true)
+                         run::Bool = true, background::Bool = false)
     rej = nothing; errmsg = nothing
     cid = lock(nb.lock) do
         rej = _guard_commit(nb; caller = caller, expected_version = expected_version)
@@ -613,10 +677,15 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
         _renew_floor!(nb, caller); _agent_push!(nb)
         return "added id=$cid (stale — not run)"
     end
-    _eval!(nb; wait_for = cid)           # wait OUTSIDE the lock — the agent wants the cell's result
-    _renew_floor!(nb, caller)
-    _agent_push!(nb)
-    return "added id=$cid →\n$(_result_of(nb, cid))"
+    # The cell is committed above, so its id is certain regardless of how the run goes — only the
+    # WAIT is raced. A slow cell hands back a job id instead of holding the caller open.
+    r = _run_bg(nb, "add_cell $cid"; grace = background ? 0 : _scratch_grace()) do
+        _eval!(nb; wait_for = cid)       # wait OUTSIDE the lock — the agent wants the cell's result
+        _renew_floor!(nb, caller)
+        _agent_push!(nb)
+        "added id=$cid →\n$(_result_of(nb, cid))"
+    end
+    return r.done ? r.text : "added id=$cid (running)\n$(r.text)"
 end
 
 """Replace a cell's source, run it, return its result.
@@ -629,7 +698,7 @@ off mid-cascade). Make all the edits with `run=false`, then reconcile once with 
 It is also the safe way to edit a notebook whose upstream cells are mid-computation."""
 function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString;
                           tags::AbstractString = "", caller::AbstractString = "", expected_version::Int = -1,
-                          run::Bool = true)
+                          run::Bool = true, background::Bool = false)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     rej = lock(nb.lock) do
         r = _guard_commit(nb; caller = caller, expected_version = expected_version)
@@ -647,10 +716,13 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
         _renew_floor!(nb, caller); _agent_push!(nb)
         return "edited id=$id (stale — not run)"
     end
-    _eval!(nb; wait_for = id)            # wait OUTSIDE the lock — the agent wants the cell's result
-    _renew_floor!(nb, caller)
-    _agent_push!(nb)
-    return "edited id=$id →\n$(_result_of(nb, id))"
+    r = _run_bg(nb, "edit_cell $id"; grace = background ? 0 : _scratch_grace()) do
+        _eval!(nb; wait_for = id)        # wait OUTSIDE the lock — the agent wants the cell's result
+        _renew_floor!(nb, caller)
+        _agent_push!(nb)
+        "edited id=$id →\n$(_result_of(nb, id))"
+    end
+    return r.done ? r.text : "edited id=$id (running)\n$(r.text)"
 end
 
 "Rename a cell's id (its label). Ids must be unique + `#%%`-header-safe; returns a status string."
@@ -672,7 +744,8 @@ end
 
 "Run one cell (or recompute all stale if `id` empty); return the result(s)."
 function agent_run!(nb::LiveNotebook, id::AbstractString = "";
-                    caller::AbstractString = "", expected_version::Int = -1)
+                    caller::AbstractString = "", expected_version::Int = -1,
+                    background::Bool = false)
     rej = lock(nb.lock) do
         r = _guard_commit(nb; caller = caller, expected_version = expected_version)
         r === nothing || return r
@@ -703,12 +776,18 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
         return nothing
     end
     rej === nothing || return rej
-    # Eval OUTSIDE the lock via the async runner, but WAIT (the agent wants the result back).
-    isempty(id) ? _drain!(nb) : _eval!(nb; wait_for = id)
-    _renew_floor!(nb, caller)
-    _agent_push!(nb)
-    isempty(id) ? "ran stale cells; notebook is up to date" :
-        (_cell_exists(nb, id) ? "id=$id →\n$(_result_of(nb, id))" : "(no cell id=$id)")
+    # Eval OUTSIDE the lock via the async runner, but WAIT (the agent wants the result back) —
+    # racing that wait so a slow cell, or a whole-notebook drain, hands back a job instead of
+    # holding the caller. A bare `run` (drain) is the likeliest to be long: it is N cells.
+    r = _run_bg(nb, isempty(id) ? "run (all stale)" : "run $id";
+                grace = background ? 0 : _scratch_grace()) do
+        isempty(id) ? _drain!(nb) : _eval!(nb; wait_for = id)
+        _renew_floor!(nb, caller)
+        _agent_push!(nb)
+        isempty(id) ? "ran stale cells; notebook is up to date" :
+            (_cell_exists(nb, id) ? "id=$id →\n$(_result_of(nb, id))" : "(no cell id=$id)")
+    end
+    return r.text
 end
 
 "Delete a cell."
