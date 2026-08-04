@@ -29,18 +29,15 @@ Ollama if you want the agent. This gives KaimonSlate its gate workers and the ag
 
 ### 2. Install the `slate` app
 
-KaimonSlate and its extension packages are published through **SlateRegistry**. Add it once per
-machine, then install KaimonSlate as an **app** — this puts a `slate` launcher on your `PATH`. From
-the Pkg REPL (press `]`):
+KaimonSlate is in the **General** registry. Install it as an **app** — this puts a `slate` launcher
+on your `PATH`. From the Pkg REPL (press `]`):
 
 ```julia-repl
-pkg> registry add https://github.com/kahliburke/SlateRegistry
 pkg> app add KaimonSlate
 ```
 
-The registry is public, so this needs no credentials. It sits alongside General rather than replacing
-it: Pkg searches every installed registry, so ordinary packages continue to resolve as usual and only
-the Slate packages come from here.
+The SDK it builds on, `SlateExtensionsBase`, is in General too, so writing an extension needs nothing
+beyond the default registry.
 
 Registries are cached locally, so a newly published version isn't visible until you refresh:
 

@@ -77,12 +77,10 @@ each notebook its own worker and powers the AI agent — then install the **`sla
 Pkg REPL:
 
 ```julia-repl
-pkg> registry add https://github.com/kahliburke/SlateRegistry   # once per machine
-pkg> app add KaimonSlate                                        # installs the `slate` launcher
+pkg> app add KaimonSlate      # installs the `slate` launcher
 ```
 
-The registry is public and needs no credentials — see [Installation](installation.md) for the full
-steps and for extension packages.
+See [Installation](installation.md) for the full steps.
 
 That installs a **`slate` executable** in Julia's app bin (`~/.julia/bin`, or `slate.bat` on Windows);
 add that directory to your `PATH` and run it **from your shell**, not from the Julia REPL:

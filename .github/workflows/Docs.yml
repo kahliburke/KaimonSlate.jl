@@ -29,15 +29,13 @@ jobs:
       - uses: julia-actions/cache@v2
 
       - name: Install Julia dependencies
-        # SlateRegistry carries SlateExtensionsBase; Pkg requires the package to be registered
-        # somewhere even though the develop below resolves it from lib/.
+        # Pkg requires SlateExtensionsBase to be registered somewhere even though the develop
+        # below resolves it from lib/. General carries it.
         run: |
           julia --project=docs -e '
             using Pkg
             regs = [r.name for r in Pkg.Registry.reachable_registries()]
             "General" in regs || Pkg.Registry.add("General")
-            "SlateRegistry" in regs ||
-                Pkg.Registry.add(RegistrySpec(url = "https://github.com/kahliburke/SlateRegistry.git"))
             Pkg.develop(path="lib/SlateExtensionsBase")
             Pkg.develop(PackageSpec(path=pwd()))
             Pkg.instantiate()'

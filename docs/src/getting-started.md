@@ -5,8 +5,7 @@ a task to the AI agent.
 
 ## Open a notebook
 
-Run the **`slate` app** (install it with `pkg> registry add
-https://github.com/kahliburke/SlateRegistry` followed by `pkg> app add KaimonSlate` — see
+Run the **`slate` app** (install it with `pkg> app add KaimonSlate` — see
 [Installation](installation.md) for the full steps):
 
 ```sh

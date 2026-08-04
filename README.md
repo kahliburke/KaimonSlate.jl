@@ -88,16 +88,11 @@ Every run is recorded. The timeline steps back through a notebook's earlier stat
 
 The `slate` app is the usual entry point. **Requires Julia 1.12+.**
 
-KaimonSlate is published through its own package registry. Add that once, then install the app — from
-the Pkg REPL (press `]`):
+KaimonSlate is in the General registry. Install the app from the Pkg REPL (press `]`):
 
 ```julia-repl
-pkg> registry add https://github.com/kahliburke/SlateRegistry
 pkg> app add KaimonSlate
 ```
-
-The registry is public, so no credentials are needed. Adding it is a one-time step per machine; after
-that, KaimonSlate and its extension packages install like any other Julia package.
 
 Installing the app writes a **`slate` executable** — a shell script, or `slate.bat` on Windows — into
 Julia's app bin directory, `~/.julia/bin`. That directory isn't on your `PATH` by default (`app add`
