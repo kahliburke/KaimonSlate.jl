@@ -132,6 +132,34 @@ again **attaches** to that hub as a live status viewer.
 opens more by path — or just **ask the 💬 agent** to open one (`slate.open`). See
 [The AI Agent](agent.md) for the full tool surface.
 
+## Extension packages
+
+Extensions add output types, widgets, assets and agent context to a notebook. They are ordinary
+Julia packages built on `SlateExtensionsBase` — you `add` them to a **notebook's environment**,
+not to the app.
+
+Packages that live in General install directly. The rest are published through **SlateRegistry**,
+a registry that sits alongside General; add it once per machine:
+
+```julia-repl
+pkg> registry add https://github.com/kahliburke/SlateRegistry
+pkg> add SlatePlotly      # into the notebook's environment
+```
+
+Pkg searches every installed registry, so adding it changes nothing about how ordinary packages
+resolve — KaimonSlate and `SlateExtensionsBase` still come from General.
+
+Several of those extension repositories are **private**, and installing one needs git credentials
+for GitHub. The registry records repository locations as HTTPS URLs, so an SSH key alone is not
+enough:
+
+```sh
+gh auth login          # choose HTTPS for the git protocol
+gh auth setup-git      # writes the credential helper; a separate step, easily missed
+```
+
+A newly published version isn't visible until `pkg> registry update`.
+
 ## Standalone (without Kaimon)
 
 `slate --own` runs the hub **in-process**, without Kaimon (also the default when Kaimon isn't
