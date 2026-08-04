@@ -135,8 +135,8 @@ opens more by path — or just **ask the 💬 agent** to open one (`slate.open`)
 ## Extension packages
 
 Extensions add output types, widgets, assets and agent context to a notebook. They are ordinary
-Julia packages built on `SlateExtensionsBase` — you `add` them to a **notebook's environment**,
-not to the app.
+Julia packages built on `SlateExtensionsBase` (see [Writing an Extension](extensions.md)) — you
+`add` them to a **notebook's environment**, not to the app.
 
 Packages that live in General install directly. The rest are published through **SlateRegistry**,
 a registry that sits alongside General; add it once per machine:

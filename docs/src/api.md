@@ -29,6 +29,16 @@ KaimonSlate.NotebookServer.stop_hub
 Modules = [KaimonSlate]
 ```
 
+## Extension SDK
+
+`SlateExtensionsBase` is the separate, dependency-light package an extension builds against — see
+[Writing an Extension](extensions.md). It is public API: unlike the submodules below, these are the
+names a third-party package is meant to use.
+
+```@autodocs
+Modules = [SlateExtensionsBase]
+```
+
 The sections below document the internal submodules. These are not part of the stable public
 API — they're listed for contributors and the curious. Each `@autodocs` block picks up every
 remaining docstring in its module (the entry points above are not repeated).

@@ -1,6 +1,7 @@
 using Documenter
 using DocumenterVitepress
 using KaimonSlate
+using SlateExtensionsBase
 
 # Copy demo assets into VitePress public/assets/.
 # In CI (KAIMONSLATE_ASSET_BASE set) the generated GIFs/MP4s are served from the
@@ -42,6 +43,7 @@ makedocs(;
         KaimonSlate.NotebookServer.SlateHistory,
         KaimonSlate.ReportEngine,
         KaimonSlate.ReportRender,
+        SlateExtensionsBase,
     ],
     remotes = nothing,
     format = DocumenterVitepress.MarkdownVitepress(;
@@ -68,6 +70,7 @@ makedocs(;
             "Tables" => "tables.md",
             "Animation" => "animation.md",
             "Front-end Extensions" => "frontend-extensions.md",
+            "Writing an Extension" => "extensions.md",
             "Documents & Citations" => "documents.md",
             "Slides & Present" => "slides.md",
             "The AI Agent" => "agent.md",

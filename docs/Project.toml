@@ -4,10 +4,12 @@ Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 DocumenterVitepress = "4710194d-e776-4893-9690-8d956a29c365"
 FreeTypeAbstraction = "663a7486-cb36-511b-a19d-713bb74d65c9"
 KaimonSlate = "f7b954f5-0334-4562-ac21-b005218ce1da"
+SlateExtensionsBase = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
 Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
 
 [sources]
 KaimonSlate = {path = ".."}
+SlateExtensionsBase = {path = "../lib/SlateExtensionsBase"}
 
 [compat]
 Documenter = "1"
