@@ -297,7 +297,8 @@ const _EMBED_MD_RE  = Regex(raw"""!\[([^\]]*)\]\(\s*(data:[^)\s]+|/n/[^)/\s]+/as
 const _MIME_EXT = Dict("image/png" => ".png", "image/jpeg" => ".jpg", "image/gif" => ".gif",
     "image/webp" => ".webp", "image/svg+xml" => ".svg", "image/bmp" => ".bmp", "image/avif" => ".avif",
     "image/x-icon" => ".ico", "audio/mpeg" => ".mp3", "audio/wav" => ".wav", "audio/ogg" => ".ogg",
-    "audio/flac" => ".flac", "video/mp4" => ".mp4", "video/webm" => ".webm")
+    "audio/flac" => ".flac", "audio/mp4" => ".m4a", "video/mp4" => ".mp4", "video/webm" => ".webm",
+    "video/quicktime" => ".mov", "video/x-m4v" => ".m4v", "video/ogg" => ".ogv")
 _mime_ext(mime::AbstractString) = get(_MIME_EXT, lowercase(strip(String(mime))), ".bin")
 # Backslash-escape CommonMark-active punctuation so fallback alt text renders LITERALLY (never as
 # math/code/emphasis) when it lands in a `.md` fed to cmarker — e.g. an alt of `price $5–$9` must not
@@ -339,21 +340,39 @@ function _embedded_media(assetbase::AbstractString, url::AbstractString)
     return (bytes, first(split(_site_ctype(p), ';')), lowercase(splitext(p)[2]))
 end
 
+_data_url_mime(u::AbstractString) = (m = match(r"^data:([^;,]*)", String(u)); m === nothing ? "" : String(m.captures[1]))
+# Video/audio can't ride a `data:` URL the way an image can: a media element wants byte-RANGE access to
+# start and seek, and a `data:` resource has no ranges — so a clip that plays live degrades to a dead
+# player (and an origin complaint) once the page is opened from `file://`. Standalone export therefore
+# parks media bytes in a registry and hands each element a `blob:` URL on load (`_EXPORT_MEDIA_JS`).
+_is_blob_media(mime::AbstractString) = (m = lowercase(String(mime)); startswith(m, "video/") || startswith(m, "audio/"))
+
 # Make author-embedded media in a rendered-HTML fragment survive a static export. `inline=true`
-# (standalone) rewrites an asset-route `src` to an inline `data:` URI; `inline=false` (published)
-# rewrites it to a page-relative path (the file itself is copied by `_write_page_assets!` via
-# `_markdown_asset_files`). Already-inline `data:` srcs are self-contained and pass through untouched.
-function _export_embed_html(html::AbstractString, assetbase::AbstractString; inline::Bool)
+# (standalone) rewrites an asset-route `src` to an inline `data:` URI — or, for video/audio, moves the
+# bytes into `media` and leaves a `data-slate-media` marker; `inline=false` (published) rewrites it to a
+# page-relative path (the file itself is copied by `_write_page_assets!` via `_markdown_asset_files`).
+# An already-inline `data:` image is self-contained and passes through untouched.
+function _export_embed_html(html::AbstractString, assetbase::AbstractString; inline::Bool, media = nothing)
     s = String(html)
-    occursin("/n/", s) || return s   # fast path: only asset-route srcs need rewriting (data: is already fine)
+    # Fast path: asset-route srcs always need rewriting; a data: src only when it's media awaiting a blob.
+    (occursin("/n/", s) || (media !== nothing && occursin("data:", s))) || return s
     replace(s, _EMBED_SRC_RE => function (m)
         mm = match(_EMBED_SRC_RE, m); q = mm.captures[1]; url = String(mm.captures[2])
-        startswith(url, "data:") && return m
+        isdata = startswith(url, "data:")
         if inline
+            # A data: image is already fine as-is; only media is re-homed onto a blob.
+            (isdata && !(media !== nothing && _is_blob_media(_data_url_mime(url)))) && return m
             got = _embedded_media(assetbase, url); got === nothing && return m
             bytes, mime, _ = got
+            if media !== nothing && _is_blob_media(mime)
+                key = string("m", length(media) + 1)
+                push!(media, (key, String(mime), Base64.base64encode(bytes)))
+                return string("data-slate-media=", q, key, q)
+            end
+            isdata && return m
             return string("src=", q, "data:", mime, ";base64,", Base64.base64encode(bytes), q)
         else
+            isdata && return m
             am = match(r"^/n/[^/]+/asset/(.*)$", url); am === nothing && return m
             rel = HTTP.URIs.unescapeuri(String(am.captures[1]))
             href = join((HTTP.URIs.escapeuri(x) for x in split(rel, '/')), "/")
@@ -361,6 +380,18 @@ function _export_embed_html(html::AbstractString, assetbase::AbstractString; inl
         end
     end)
 end
+
+# Give every `data-slate-media` element (see `_export_embed_html`) a real, seekable resource: decode its
+# registered bytes once and hand it a `blob:` URL carrying the true mime. Runs at the end of <body>, so
+# the elements exist and no failed `data:` load is ever attempted. With scripting off the player stays
+# empty — the honest outcome for bytes that only a script can hand over.
+const _EXPORT_MEDIA_JS = raw"""
+(function(){var R=window.__slateMedia||{};
+Array.prototype.forEach.call(document.querySelectorAll("[data-slate-media]"),function(el){
+var m=R[el.getAttribute("data-slate-media")];if(!m)return;
+var b=atob(m.b64),n=b.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=b.charCodeAt(i);
+try{el.src=URL.createObjectURL(new Blob([u],{type:m.mime}));}catch(e){}});})();
+"""
 
 # Every project file a notebook references through the asset route — `![](/n/<id>/asset/…)` or a raw
 # `<img src="/n/<id>/asset/…">`, in ANY cell's SOURCE (markdown / web panes) or in a code/web cell's
@@ -1378,6 +1409,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               "<style>", _export_css(palette, code, width), "</style></head><body>", _asset_head,
               _frontend_export_head(nb, inline_assets, compress_data), "<article class=\"export\">")
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
+        # Author-embedded video/audio hoisted out of the body (key, mime, base64) → the blob registry
+        # emitted with the trailing scripts. Standalone only: a published page keeps its sibling file.
+        mediareg = Tuple{String,String,String}[]
+        media = inline_assets ? mediareg : nothing
         # Geo-map GeoJSON referenced by the charts. `inline_assets` (standalone) ⇒ inline each map here
         # (name => local file, read into the page). Otherwise (published page) the map rides as a
         # page-local sibling `assets/maps/` file (written by the site builder) and `registerMap` is
@@ -1397,7 +1432,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         isempty(strip(fm.byline)) || print(io, "<div class=\"exp-byline\">", _esc(fm.byline), "</div>")
         if !isempty(strip(fm.abstract))
             print(io, "<div class=\"exp-abstract\"><span class=\"exp-abslabel\">Abstract</span>",
-                  _export_embed_html(markdown_html(rw(fm.abstract), CellOutput[]), _proj_root(nb); inline = inline_assets), "</div>")
+                  _export_embed_html(markdown_html(rw(fm.abstract), CellOutput[]), _proj_root(nb); inline = inline_assets, media = media), "</div>")
         end
         runnable && print(io, "<div class=\"exp-run\"><button id=\"exp-run-btn\">▶ Run this notebook live</button></div>")
         print(io, "</header>")
@@ -1423,10 +1458,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 if haskey(figidx.numbers, c.id)     # caption cell → numbered "Figure N." block
                     print(io, "<figcaption class=\"exp-figcap\" id=\"fig-", _esc(c.id), "\"><b>Figure ",
                           figidx.numbers[c.id], ".</b> ",
-                          _export_embed_html(markdown_html(mdsrc, c.interp), _proj_root(nb); inline = inline_assets), "</figcaption>")
+                          _export_embed_html(markdown_html(mdsrc, c.interp), _proj_root(nb); inline = inline_assets, media = media), "</figcaption>")
                 else
                     print(io, "<section class=\"exp-md\">",
-                          _export_embed_html(markdown_html(mdsrc, c.interp), _proj_root(nb); inline = inline_assets), "</section>")
+                          _export_embed_html(markdown_html(mdsrc, c.interp), _proj_root(nb); inline = inline_assets, media = media), "</section>")
                 end
             else
                 print(io, "<section class=\"exp-code\">")
@@ -1447,12 +1482,12 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                         themed === nothing ?
                             # Wrap so an author-embedded `/asset/` <img> in a code/web cell's HTML output
                             # is inlined/rewritten like a markdown image (see `_export_embed_html`).
-                            print(io, "<div class=\"exp-out\">", _export_embed_html(output_html(c), _proj_root(nb); inline = inline_assets), "</div>") :
+                            print(io, "<div class=\"exp-out\">", _export_embed_html(output_html(c), _proj_root(nb); inline = inline_assets, media = media), "</div>") :
                             print(io, "<div class=\"exp-out\">", _output_text_only_html(c),
                                   "<div class=\"dispwrap\">", _themed_fig_html(themed[1], themed[2]), "</div></div>")
                     elseif o !== nothing && !isempty(o.display)
                         print(io, "<div class=\"exp-out\"><div class=\"dispwrap\">",
-                              themed === nothing ? _export_embed_html(ReportRender._render_chunks(o.display), _proj_root(nb); inline = inline_assets) : _themed_fig_html(themed[1], themed[2]),
+                              themed === nothing ? _export_embed_html(ReportRender._render_chunks(o.display), _proj_root(nb); inline = inline_assets, media = media) : _themed_fig_html(themed[1], themed[2]),
                               "</div></div>")
                     end
                     for (si, spec) in enumerate(_echarts_specs(c))   # embed each chart's spec → client renders it
@@ -1538,6 +1573,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # ride here at the end (they run against the finished DOM).
         print(io, "<script>")
         print(io, _EXPORT_TABLE_JS)   # hydrate every `.exp-table` → sortable/filterable/paged + CSV (no server)
+        # Author-embedded video/audio → blob: URLs (the bytes were hoisted out of the body above).
+        isempty(mediareg) || print(io, "window.__slateMedia={",
+            join((string(JSON.json(k), ":{\"mime\":", JSON.json(mime), ",\"b64\":", JSON.json(b64), "}")
+                  for (k, mime, b64) in mediareg), ","), "};", _EXPORT_MEDIA_JS)
         if !isempty(charts)
             # Register the Slate ECharts theme from the page's CSS vars (the SAME brand palette as the
             # chrome) and render every embedded spec under it — so an exported page's charts match the
@@ -2600,7 +2639,24 @@ _site_ctype(p) = (e = lowercase(splitext(p)[2]);
     e in (".jpg", ".jpeg") ? "image/jpeg" :
     e == ".svg" ? "image/svg+xml" :
     e == ".gif" ? "image/gif" :
+    e == ".webp" ? "image/webp" :
+    e == ".avif" ? "image/avif" :
+    e == ".bmp" ? "image/bmp" :
     e == ".ico" ? "image/x-icon" :
+    # Media a cell can embed by drag/drop. A media element dispatches its decoder on the declared type,
+    # so `application/octet-stream` here is not a harmless default — it makes the clip unplayable
+    # anywhere the bytes aren't content-sniffed (an inlined `data:` URL, a `nosniff` route).
+    e == ".mp4" ? "video/mp4" :
+    e == ".m4v" ? "video/x-m4v" :
+    e == ".webm" ? "video/webm" :
+    e == ".mov" ? "video/quicktime" :
+    e == ".ogv" ? "video/ogg" :
+    e == ".mp3" ? "audio/mpeg" :
+    e == ".wav" ? "audio/wav" :
+    e in (".ogg", ".oga", ".opus") ? "audio/ogg" :
+    e == ".flac" ? "audio/flac" :
+    e in (".m4a", ".aac") ? "audio/mp4" :
+    e == ".pdf" ? "application/pdf" :
     e == ".woff2" ? "font/woff2" :
     e == ".woff" ? "font/woff" :
     e == ".ttf" ? "font/ttf" :

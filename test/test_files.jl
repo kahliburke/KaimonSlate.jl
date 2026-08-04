@@ -121,6 +121,51 @@ const NS = KaimonSlate.NotebookServer
         @test NS._export_embed_html(miss, root; inline = true) == miss
     end
 
+    @testset "_export_embed_html routes video/audio onto the blob registry" begin
+        root = mktempdir(); mkpath(joinpath(root, "assets"))
+        write(joinpath(root, "assets", "clip.mp4"), UInt8[0, 0, 0, 0x20, 0x66, 0x74, 0x79, 0x70])
+        vid = "<p><video controls src=\"/n/xyz/asset/assets/clip.mp4\"></video></p>"
+
+        # standalone: the bytes leave the body, the element keeps only its registry key
+        reg = Tuple{String,String,String}[]
+        out = NS._export_embed_html(vid, root; inline = true, media = reg)
+        @test occursin("data-slate-media=\"m1\"", out)
+        @test !occursin("src=", out) && !occursin("data:", out)
+        @test length(reg) == 1 && reg[1][1] == "m1" && reg[1][2] == "video/mp4"
+        @test NS.Base64.base64decode(reg[1][3]) == read(joinpath(root, "assets", "clip.mp4"))
+
+        # a drop-time-inlined data: clip is re-homed too — `data:` media is what fails on file://
+        reg2 = Tuple{String,String,String}[]
+        dvid = "<video controls src=\"data:video/webm;base64,AAAA\"></video>"
+        out2 = NS._export_embed_html(dvid, root; inline = true, media = reg2)
+        @test occursin("data-slate-media=\"m1\"", out2) && !occursin("data:", out2)
+        @test length(reg2) == 1 && reg2[1][2] == "video/webm"
+
+        # ...but a data: IMAGE still passes straight through, registry or not
+        img = "<img src=\"data:image/gif;base64,AAAA\">"
+        @test NS._export_embed_html(img, root; inline = true, media = reg2) == img
+        @test length(reg2) == 1
+
+        # published: media stays a page-relative sibling file (seekable over HTTP), registry untouched
+        reg3 = Tuple{String,String,String}[]
+        pub = NS._export_embed_html(vid, root; inline = false, media = reg3)
+        @test occursin("src=\"assets/clip.mp4\"", pub) && isempty(reg3)
+        # ...and with no registry at all (PDF/legacy callers) inlining still yields a typed data: URI
+        @test occursin("src=\"data:video/mp4;base64,", NS._export_embed_html(vid, root; inline = true))
+    end
+
+    @testset "_site_ctype types media by extension" begin
+        # `application/octet-stream` here makes a clip unplayable wherever the bytes aren't sniffed
+        @test NS._site_ctype("a/clip.mp4") == "video/mp4"
+        @test NS._site_ctype("clip.webm") == "video/webm"
+        @test NS._site_ctype("clip.MOV") == "video/quicktime"
+        @test NS._site_ctype("track.mp3") == "audio/mpeg"
+        @test NS._site_ctype("track.flac") == "audio/flac"
+        @test NS._site_ctype("pic.webp") == "image/webp"
+        @test NS._site_ctype("doc.pdf") == "application/pdf"
+        @test NS._site_ctype("blob.xyz") == "application/octet-stream"   # still the fallback
+    end
+
     @testset "_stage_typst_md_media stages images, drops non-images" begin
         root = mktempdir(); mkpath(joinpath(root, "assets"))
         write(joinpath(root, "assets", "fig.png"), UInt8[0x89, 0x50, 0x4e, 0x47])

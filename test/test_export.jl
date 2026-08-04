@@ -293,6 +293,37 @@ _nb_with_echart(spec, id) = begin
         ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
 end
 
+# A dropped clip lands in a markdown cell as `<video src="/n/<id>/asset/…">`. A standalone page has no
+# server to serve it from and a media element can't seek a `data:` URL — so the bytes must leave the body
+# for the blob registry. A published page keeps its sibling file, which HTTP can range-request.
+@testset "embedded video in export" begin
+    root = mktempdir(); mkpath(joinpath(root, "assets"))
+    write(joinpath(root, "assets", "clip.mp4"), UInt8[0, 0, 0, 0x20, 0x66, 0x74, 0x79, 0x70, 1, 2, 3])
+    _vid_nb() = begin
+        rep = _RE.parse_report("#%% md id=t title\n# vid\n\n#%% md id=v\n<video controls src=\"/n/vid/asset/assets/clip.mp4\"></video>\n")
+        rep.meta["assetbase"] = root
+        NS.LiveNotebook("vid", joinpath(root, "vid.jl"), rep, _RE.InProcessKernel(), 1, String[], String[],
+            ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    end
+
+    standalone = NS.export_html(_vid_nb(); inline_assets = true)
+    @test occursin("data-slate-media=\"m1\"", standalone)
+    @test occursin("window.__slateMedia={\"m1\":{\"mime\":\"video/mp4\"", standalone)
+    @test occursin("URL.createObjectURL", standalone)
+    @test !occursin("data:video/", standalone)      # no unseekable data: URL survives
+    @test !occursin("/n/vid/asset/", standalone)    # and no dead server route either
+
+    published = NS.export_html(_vid_nb(); inline_assets = false)
+    @test occursin("src=\"assets/clip.mp4\"", published) && !occursin("__slateMedia", published)
+    dir = mktempdir()
+    try
+        NS._write_page_assets!(dir, _vid_nb())
+        @test isfile(joinpath(dir, "assets", "clip.mp4"))   # the sibling the published page points at
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
+
 @testset "geo map assets in export" begin
     _geo_spec() = Dict{String,Any}(
         "registerMap" => Dict{String,Any}("name" => "world", "url" => "/assets/maps/world.json"),
