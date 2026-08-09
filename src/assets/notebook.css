@@ -418,15 +418,47 @@ body.zen .zenexit:hover { opacity:1; color:var(--text); border-color:var(--accen
 .ftbtn { border:1px solid var(--border); background:none; color:var(--text); border-radius:5px;
   padding:2px 9px; font-size:.74rem; cursor:pointer; text-decoration:none; line-height:1.5; }
 .ftbtn:hover { border-color:var(--accent); color:var(--accent); }
+.ftbtn.on { border-color:var(--accent); color:var(--accent); }
+.filesfilterbar { display:flex; align-items:center; gap:6px; padding:4px 8px; border-bottom:1px solid var(--border); }
+.filesfilter { flex:1; min-width:0; background:var(--bg3); border:1px solid var(--border); border-radius:5px;
+  color:var(--text); font-size:.76rem; padding:3px 7px; font-family:'Cascadia Code',ui-monospace,monospace; }
+.filesfilter:focus { outline:none; border-color:var(--accent); }
+.filesfilterbar .hint { font-size:.68rem; white-space:nowrap; }
+/* Drag handle between the tree and the editor column. */
+.filesgrip { flex:0 0 5px; cursor:col-resize; background:transparent; }
+.filesgrip:hover, body.resizing .filesgrip { background:var(--accent); opacity:.35; }
+body.resizing { cursor:col-resize; user-select:none; }
+/* Open notebooks on this hub — the Files panel doubles as the notebook switcher. */
+.filesnbs { flex:0 0 auto; max-height:26vh; overflow:auto; padding:4px 0; border-bottom:1px solid var(--border); }
+.ftnb { color:var(--text); }
+.ftnb.current { color:var(--accent); cursor:default; }
+.ftnb.current:hover { background:none; }
+.ftnberr { color:var(--red); font-size:.66rem; margin-left:6px; }
+.ftnbindex { display:block; color:var(--dim); font-size:.76rem; text-decoration:none; }
 .filestree { flex:1; overflow:auto; padding:6px 0; }
+.filestree:focus { outline:none; }
 .ftrow { padding:3px 8px; font-size:.82rem; cursor:pointer; white-space:nowrap; overflow:hidden;
   text-overflow:ellipsis; color:var(--dim); user-select:none; border-radius:4px; }
 .ftrow:hover { background:var(--bg3); color:var(--text); }
 .ftrow.ftdir { color:var(--text); font-weight:600; }
+.ftrow.fthidden { opacity:.6; }                 /* a dotfile, shown only with the ·/hidden toggle on */
+.ftrow.ftdrop { background:rgba(86,156,214,.22); box-shadow:inset 0 0 0 1px var(--accent); }
 .fttw { display:inline-block; width:12px; color:var(--dim); font-size:.7rem; }
 .ftico { display:inline-block; width:16px; text-align:center; }
-.ftfile.sel { background:rgba(86,156,214,.16); color:var(--accent); }
+.ftrow.sel { background:rgba(86,156,214,.16); color:var(--accent); }
 .ftfile .ftsize { color:var(--dim); font-size:.68rem; margin-left:5px; opacity:.7; }
+.ftself { color:var(--accent); font-size:.62rem; margin-left:6px; border:1px solid var(--accent);
+  border-radius:3px; padding:0 4px; opacity:.8; }
+/* Right-click menu on a tree row (new / rename / duplicate / delete). */
+.ftmenu { position:fixed; z-index:60; min-width:160px; background:var(--bg2); border:1px solid var(--border);
+  border-radius:7px; padding:4px; box-shadow:0 8px 26px rgba(0,0,0,.5); display:flex; flex-direction:column; }
+.ftmitem { background:none; border:none; color:var(--text); text-align:left; font-size:.8rem;
+  padding:5px 10px; border-radius:5px; cursor:pointer; }
+.ftmitem:hover { background:var(--bg3); }
+.ftmitem.danger:hover { background:rgba(224,108,117,.18); color:#e06c75; }
+.ftmitem.disabled { color:var(--dim); opacity:.5; cursor:default; }
+.ftmitem.disabled:hover { background:none; }
+.ftmsep { height:1px; background:var(--border); margin:4px 6px; }
 /* Media / binary preview pane (shares the edit column; the CM editor hides while it shows). */
 .filepreview { flex:1; overflow:auto; min-height:0; display:flex; flex-direction:column;
   align-items:center; justify-content:flex-start; gap:12px; padding:18px; }
@@ -442,6 +474,7 @@ body.zen .zenexit:hover { opacity:1; color:var(--text); border-color:var(--accen
 .filesedit-wrap { flex:1; display:flex; flex-direction:column; min-width:0; }
 .filebar { display:flex; align-items:center; gap:8px; padding:5px 10px; border-bottom:1px solid var(--border); }
 .filedirty { color:var(--accent); font-size:.62rem; visibility:hidden; }
+.filestale { color:#e5c07b; font-size:.68rem; border:1px solid #e5c07b; border-radius:3px; padding:0 5px; opacity:.85; }
 .filepath { flex:1; font-family:'Cascadia Code',ui-monospace,monospace; font-size:.78rem;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .filesave { border:1px solid var(--border); background:none; color:var(--text); border-radius:5px;
@@ -1616,6 +1649,11 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
          box-shadow:0 16px 48px rgba(0,0,0,.55); }
 .modal .msg { color:var(--text); font-size:.92rem; line-height:1.5; margin-bottom:16px; white-space:pre-wrap; word-break:break-word; }
 .modal .row { display:flex; justify-content:flex-end; gap:10px; }
+/* Text entry inside the shared modal (promptDark) — the app's `window.prompt` replacement. */
+.modal .modalinput { display:block; width:100%; box-sizing:border-box; margin-top:12px; background:var(--bg3);
+  color:var(--text); border:1px solid var(--border); border-radius:7px; padding:7px 10px; font-size:.86rem;
+  font-family:'Cascadia Code',ui-monospace,monospace; }
+.modal .modalinput:focus { outline:none; border-color:var(--accent); }
 .modal button { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:7px 16px; cursor:pointer; font-size:.85rem; }
 .modal button:hover { border-color:var(--accent); color:var(--accent); }
 .modal button.primary { background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }

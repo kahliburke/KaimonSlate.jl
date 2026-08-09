@@ -425,6 +425,8 @@ end
 # writes to disk; the worker's Revise hot-reload watcher picks it up exactly like an external edit.
 const _TREE_SKIP_DIRS = Set{String}([".git", ".julia", "node_modules", "compiled", "build",
                                      ".cache", "__pycache__", ".vscode", ".claude", ".ipynb_checkpoints"])
+# Never worth showing, even when hidden files are revealed — OS/editor droppings, not project content.
+const _TREE_SKIP_FILES = Set{String}([".DS_Store", "Thumbs.db", ".gitkeep"])
 # Extensions that open in the built-in CM6 text editor. Source, config, and the web assets a
 # notebook pulls in (`.js`/`.css`/`.html`/`.json`/…) — the whole point of the browser is to edit
 # the files a notebook references, not just its Julia source.
@@ -434,6 +436,14 @@ const _TREE_TEXT_EXTS = Set{String}([
     ".json", ".jsonl", ".ndjson", ".xml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties",
     ".sh", ".bash", ".zsh", ".fish", ".glsl", ".wgsl", ".frag", ".vert", ".comp",
     ".c", ".h", ".hpp", ".cc", ".cpp", ".rs", ".go", ".lua", ".sql", ".tex", ".typ", ".log",
+])
+# Text files with no usable extension — a dotfile IS its name (`splitext(".gitignore")` yields no
+# extension), and the conventional extensionless project files are text too. Everything else without
+# an extension stays "binary" (the read route still guards on UTF-8, so a mistake is recoverable).
+const _TREE_TEXT_NAMES = Set{String}([
+    ".gitignore", ".gitattributes", ".gitmodules", ".dockerignore", ".editorconfig", ".env",
+    ".npmrc", ".prettierrc", ".eslintrc", ".babelrc",
+    "Dockerfile", "Makefile", "LICENSE", "README", "CITATION", "Procfile", "Justfile",
 ])
 # Media that render inline via the notebook's `/n/{id}/asset/**` byte route (no base64-through-JSON).
 const _TREE_IMG_EXTS   = Set{String}([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".avif"])
@@ -446,12 +456,39 @@ const _TREE_TEXT_MAX = 4_000_000
 # opens in the editor, "binary" gets a guarded info card. `.svg` counts as an image (preview by
 # default) but is still text — the client's "open as text" reads it through `?as=text`.
 function _file_kind(name::AbstractString)
+    name in _TREE_TEXT_NAMES && return "text"
     e = lowercase(splitext(name)[2])
     e in _TREE_IMG_EXTS   && return "image"
     e in _TREE_AUDIO_EXTS && return "audio"
     e in _TREE_VIDEO_EXTS && return "video"
     e in _TREE_TEXT_EXTS  && return "text"
     return "binary"
+end
+
+# Is this `.jl` a Slate notebook (rather than module/script source)? The Files tree marks those so
+# they can be OPENED as notebooks instead of only text-edited. A notebook's cells start with `#%%`
+# (within the preamble at worst) and a self-contained bundle carries the `# ╔═╡ Slate.` footer — so a
+# bounded head + tail read decides it. `_looks_like_notebook` (server_sse_import.jl) scans up to 4000
+# lines, which is right for classifying ONE path the user typed but would re-read every module file
+# in the project on every tree load.
+const _NB_SNIFF_HEAD = 64 * 1024
+const _NB_SNIFF_TAIL = 8 * 1024
+function _is_notebook_file(path::AbstractString)
+    lowercase(splitext(path)[2]) == ".jl" || return false
+    try
+        sz = filesize(path)
+        open(path, "r") do io
+            head = String(read(io, min(sz, _NB_SNIFF_HEAD)))
+            (startswith(head, "#%%") || occursin("\n#%%", head)) && return true
+            if sz > _NB_SNIFF_TAIL
+                seek(io, sz - _NB_SNIFF_TAIL)
+                return occursin("# ╔═╡ Slate.", String(read(io)))
+            end
+            return occursin("# ╔═╡ Slate.", head)
+        end
+    catch
+        false
+    end
 end
 
 # The notebook's project root (its parent project dir — the `@asset` base). "" ⇒ in-process / no project.
@@ -469,28 +506,99 @@ function _safe_proj_path(root::AbstractString, rel::AbstractString)
 end
 
 # Project tree under `root`: dirs (that contain something) before files, alphabetical, skipping
-# VCS/build/hidden noise. Every non-hidden file shows — each node carries a `kind` (text/image/
-# audio/video/binary) so the client can route the click (edit vs preview vs download). Each node:
-# {name, path (root-relative), dir}; files add {kind, bytes}, dirs carry `children`.
-function _proj_tree(root::AbstractString, dir::AbstractString; depth::Int = 0)
+# VCS/build noise. Each node carries a `kind` (text/image/audio/video/binary) so the client can route
+# the click (edit vs preview vs download). Each node: {name, path (root-relative), dir}; files add
+# {kind, bytes, mtime}, dirs carry `children`; a dotfile/dotdir adds `hidden`.
+# `hidden = true` reveals dotfiles and dot-dirs — `.gitignore`, `.JuliaFormatter.toml`,
+# `.github/workflows/*` are real, editable project files. `_TREE_SKIP_DIRS` (`.git`, caches) is
+# skipped either way: those aren't hand-edited and would swamp the tree.
+function _proj_tree(root::AbstractString, dir::AbstractString; depth::Int = 0, hidden::Bool = false)
     nodes = Any[]
     depth > 10 && return nodes
     entries = try; sort!(readdir(dir)); catch; return nodes; end
+    _skip(name) = isempty(name) || (!hidden && startswith(name, "."))
     for name in entries                                    # directories first
-        (isempty(name) || startswith(name, ".") || name in _TREE_SKIP_DIRS) && continue
+        (_skip(name) || name in _TREE_SKIP_DIRS) && continue
         p = joinpath(dir, name); isdir(p) || continue
-        kids = _proj_tree(root, p; depth = depth + 1)
+        kids = _proj_tree(root, p; depth = depth + 1, hidden = hidden)
         isempty(kids) && continue                          # prune dirs with nothing visible inside
-        push!(nodes, Dict{String,Any}("name" => name, "path" => relpath(p, root), "dir" => true, "children" => kids))
+        n = Dict{String,Any}("name" => name, "path" => relpath(p, root), "dir" => true, "children" => kids)
+        startswith(name, ".") && (n["hidden"] = true)
+        push!(nodes, n)
     end
-    for name in entries                                    # then files (all non-hidden, tagged by kind)
-        startswith(name, ".") && continue
+    for name in entries                                    # then files, tagged by kind
+        (_skip(name) || name in _TREE_SKIP_FILES) && continue
         p = joinpath(dir, name); isfile(p) || continue
-        push!(nodes, Dict{String,Any}("name" => name, "path" => relpath(p, root), "dir" => false,
-                                      "kind" => _file_kind(name),
-                                      "bytes" => (try; filesize(p); catch; 0; end)))
+        n = Dict{String,Any}("name" => name, "path" => relpath(p, root), "dir" => false,
+                             "kind" => _file_kind(name),
+                             "bytes" => (try; filesize(p); catch; 0; end),
+                             "mtime" => (try; mtime(p); catch; 0.0; end))
+        startswith(name, ".") && (n["hidden"] = true)
+        _is_notebook_file(p) && (n["notebook"] = true)     # openable as a notebook, not just editable
+        push!(nodes, n)
     end
     return nodes
+end
+
+# True when the file on disk has moved since the client read it — the lost-update guard for a save.
+# `base` is the mtime the client was handed by GET /api/file; a missing/zero base opts out.
+_mtime_conflict(ap::AbstractString, base) =
+    isfile(ap) && base isa Real && base > 0 && abs(mtime(ap) - Float64(base)) > 1e-6
+
+# Structural file operation inside a project root: rename/move, duplicate, delete, mkdir. Returns
+# `(status, payload)` — 200 with a Dict for the route to serialise, or an error status with a
+# message. Every path is confined to `root` by `_safe_proj_path`, and `selfpath` (the notebook's own
+# source, absolute) is refused: renaming or deleting it would cut the running session loose.
+# Deleting a directory needs `recursive` (the client confirms against a counted preview).
+function _file_op(root::AbstractString, selfpath::AbstractString, op::AbstractString;
+                  path::AbstractString = "", to::AbstractString = "", recursive::Bool = false)
+    isempty(root) && return (409, "notebook has no project root")
+    ap = _safe_proj_path(root, path)
+    isempty(ap) && return (400, "bad or out-of-project path")
+    isself(p) = !isempty(selfpath) && normpath(p) == normpath(selfpath)
+    dest() = isempty(to) ? "" : _safe_proj_path(root, to)
+    if op == "rename"
+        isself(ap) && return (409, "can't rename the notebook's own file from here")
+        ispath(ap) || return (404, "no such file or directory")
+        dst = dest()
+        isempty(dst) && return (400, "bad or out-of-project destination")
+        ispath(dst) && return (409, "destination already exists")
+        try; mkpath(dirname(dst)); mv(ap, dst); catch e
+            return (500, "rename failed: " * first(sprint(showerror, e), 200)); end
+        return (200, Dict{String,Any}("ok" => true, "path" => relpath(dst, root)))
+    elseif op == "duplicate"
+        isfile(ap) || return (400, "only files can be duplicated")
+        dst = dest()
+        if isempty(dst)                                  # auto-name: name-copy.ext, uniquified
+            stem, ext = splitext(ap); dst = stem * "-copy" * ext; i = 1
+            while ispath(dst); i += 1; dst = stem * "-copy$(i)" * ext; end
+        end
+        ispath(dst) && return (409, "destination already exists")
+        try; mkpath(dirname(dst)); cp(ap, dst); catch e
+            return (500, "duplicate failed: " * first(sprint(showerror, e), 200)); end
+        return (200, Dict{String,Any}("ok" => true, "path" => relpath(dst, root)))
+    elseif op == "delete"
+        isself(ap) && return (409, "can't delete the notebook's own file from here")
+        ispath(ap) || return (404, "no such file or directory")
+        isdir(ap) || return _rm_ok(ap, root, false)
+        recursive || return (409, "deleting a directory needs recursive:true")
+        # A directory holding the notebook's own source would take it with it.
+        for (d, _, names) in walkdir(ap), n in names
+            isself(joinpath(d, n)) && return (409, "that directory holds the notebook's own file")
+        end
+        return _rm_ok(ap, root, true)
+    elseif op == "mkdir"
+        ispath(ap) && return (409, "path already exists")
+        try; mkpath(ap); catch e
+            return (500, "mkdir failed: " * first(sprint(showerror, e), 200)); end
+        return (200, Dict{String,Any}("ok" => true, "path" => relpath(ap, root), "dir" => true))
+    end
+    return (400, "unknown op (expected rename/duplicate/delete/mkdir)")
+end
+function _rm_ok(ap, root, recursive)
+    try; rm(ap; recursive = recursive, force = false); catch e
+        return (500, "delete failed: " * first(sprint(showerror, e), 200)); end
+    return (200, Dict{String,Any}("ok" => true, "path" => relpath(ap, root), "deleted" => true))
 end
 
 # ── Portable data-dir transport: sync `datadir()` to a remote worker ────────────────────────────────
@@ -1629,8 +1737,13 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/tree", req -> _withnb(h, req, nb -> begin
         root = _proj_root(nb)
         isempty(root) && return _json(Dict("root" => "", "detached" => true, "tree" => Any[]))
-        _json(Dict("root" => root, "name" => basename(normpath(root)),
-                   "detached" => false, "tree" => _proj_tree(root, root)))
+        hidden = get(HTTP.queryparams(HTTP.URI(req.target)), "hidden", "0") == "1"
+        # The notebook's own file, so the client can mark it and refuse to delete/rename it out
+        # from under the running session.
+        self = try; relpath(abspath(nb.path), normpath(root)); catch; ""; end
+        startswith(self, "..") && (self = "")               # notebook lives outside its project root
+        _json(Dict("root" => root, "name" => basename(normpath(root)), "self" => self,
+                   "detached" => false, "tree" => _proj_tree(root, root; hidden = hidden)))
     end))
     HTTP.register!(router, "GET", "/api/{id}/file", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
@@ -1647,7 +1760,10 @@ function _make_router(h::Hub)
         sz > _TREE_TEXT_MAX && return HTTP.Response(413, "file too large to edit here ($(sz) bytes)")
         bytes = read(ap)
         isvalid(String, bytes) || return HTTP.Response(415, "not a text file (invalid UTF-8)")
-        _json(Dict("path" => rel, "kind" => "text", "content" => String(bytes), "bytes" => sz))
+        # `mtime` is the concurrency token: the client echoes it back on save and we refuse a write
+        # that would clobber an edit made elsewhere (an external editor, a `git checkout`) meanwhile.
+        _json(Dict("path" => rel, "kind" => "text", "content" => String(bytes), "bytes" => sz,
+                   "mtime" => mtime(ap)))
     end))
     HTTP.register!(router, "POST", "/api/{id}/file", req -> _withnb(h, req, nb -> begin
         body = try; JSON.parse(String(req.body)); catch; Dict{String,Any}(); end
@@ -1662,6 +1778,16 @@ function _make_router(h::Hub)
             ispath(ap) && return HTTP.Response(409, "path already exists")
             try; mkpath(dirname(ap)); catch e
                 return HTTP.Response(500, "could not create parent dir: " * first(sprint(showerror, e), 200)); end
+        else
+            # Lost-update guard: the client sends the mtime it opened the file at. If disk moved on
+            # since (external editor, git operation, another browser tab), refuse and hand back the
+            # current bytes so the client can offer reload-vs-overwrite. `force:true` skips the check.
+            if get(body, "force", false) !== true && _mtime_conflict(ap, get(body, "mtime", nothing))
+                raw = try; read(ap); catch; UInt8[]; end
+                return HTTP.Response(409, ["Content-Type" => "application/json"],
+                    JSON.json(Dict("conflict" => true, "path" => rel, "mtime" => mtime(ap),
+                                   "content" => (isvalid(String, raw) ? String(raw) : ""))))
+            end
         end
         try
             write(ap, content)
@@ -1671,7 +1797,17 @@ function _make_router(h::Hub)
         # The write lands on disk; the worker's Revise hot-reload watcher picks it up (restaling the
         # affected cells) AND kicks a background `Pkg.precompile()` in the warm worker to refresh the
         # now-stale on-disk cache — see `_kick_bg_precompile!` in worker.jl (logs to the worker log).
-        _json(Dict("ok" => true, "path" => rel, "bytes" => sizeof(content)))
+        _json(Dict("ok" => true, "path" => rel, "bytes" => sizeof(content), "mtime" => mtime(ap)))
+    end))
+    # Structural file operations on the notebook's project — rename/move, duplicate, delete, mkdir.
+    # Body: {op, path, to?, recursive?}. The work (and every guard) is in `_file_op`.
+    HTTP.register!(router, "POST", "/api/{id}/file-op", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        selfpath = try; String(abspath(nb.path)); catch; ""; end
+        status, payload = _file_op(_proj_root(nb), selfpath, String(get(b, "op", ""));
+                                   path = String(get(b, "path", "")), to = String(get(b, "to", "")),
+                                   recursive = get(b, "recursive", false) === true)
+        status == 200 ? _json(payload) : HTTP.Response(status, String(payload))
     end))
     # Attach a dropped/pasted media file into the notebook's project so a cell can reference it by
     # URL. Bytes land in `<project>/assets/` (content-deduped: an identical file is reused, a name
@@ -1686,7 +1822,10 @@ function _make_router(h::Hub)
         raw = basename(String(get(body, "name", "")))
         name = replace(raw, r"[^\w.\-]" => "_"); isempty(name) && (name = "file")
         startswith(name, ".") && (name = "_" * name)            # never an accidental dotfile
-        subdir = replace(String(get(body, "subdir", "assets")), r"[^\w/\-]" => "_")
+        # A subdir may be any project-relative directory (a drop onto a folder in the Files tree sends
+        # that folder's path). Containment is enforced by `_safe_proj_path` below — no `..`, no
+        # absolute path — so the name itself needn't be mangled; only an empty one is defaulted.
+        subdir = String(get(body, "subdir", "assets"))
         isempty(strip(subdir, ['/', ' '])) && (subdir = "assets")
         bytes = try
             Vector{UInt8}(Base64.base64decode(String(get(body, "contentB64", ""))))

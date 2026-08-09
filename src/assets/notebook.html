@@ -197,16 +197,27 @@
     <button class="pclose" onclick="toggleFiles()" title="close">✕</button></div>
   <div class="filesbody">
     <div class="filestree-wrap">
-      <div class="filestreebar">
+      <div id="filestreebar" class="filestreebar">
         <button id="filesnew" class="ftbtn" onclick="_filesNewFile()" title="Create a new file">＋ New</button>
+        <button id="fileshidden" class="ftbtn" onclick="_filesToggleHidden()" title="Show dotfiles">·</button>
         <button id="filesrefresh" class="ftbtn" onclick="_filesLoadTree()" title="Refresh the tree">⟳</button>
       </div>
-      <div id="filestree" class="filestree"></div>
+      <div class="filesfilterbar">
+        <input id="filesfilter" class="filesfilter" type="text" placeholder="filter files…" autocomplete="off"
+               oninput="_filesSetFilter(this.value)"
+               onkeydown="event.stopPropagation(); if(event.key==='Escape'){this.value='';_filesSetFilter('');this.blur();}">
+        <span id="filescount" class="hint"></span>
+      </div>
+      <div id="filesnbs" class="filesnbs"></div>
+      <div id="filestree" class="filestree" tabindex="0" onkeydown="_filesTreeKey(event)"></div>
     </div>
+    <div id="filesgrip" class="filesgrip" title="drag to resize"></div>
     <div class="filesedit-wrap">
       <div class="filebar">
         <span id="filedirty" class="filedirty" title="unsaved changes">●</span>
         <span id="filepath" class="filepath hint">select a file</span>
+        <span id="filestale" class="filestale" style="display:none" title="this file changed on disk while you were editing it">changed on disk</span>
+        <button id="fileopennb" class="ftbtn" style="display:none" title="open this file as a notebook">📓 Open as notebook</button>
         <a id="filedownload" class="ftbtn" style="display:none" download>⭳ Download</a>
         <button id="filesave" class="filesave" onclick="_filesSave()" disabled>Saved</button>
       </div>
@@ -214,7 +225,7 @@
       <div id="filepreview" class="filepreview" style="display:none"></div>
     </div>
   </div>
-  <div class="pfoot hint">Browse &amp; edit the notebook's project files — source, config, and the .js/.css/media it uses. Save (⌘S) writes to disk; Revise reloads code and restales the cells that use it.</div>
+  <div class="pfoot hint">Browse &amp; edit the notebook's project files — source, config, and the .js/.css/media it uses. Save (⌘S) writes to disk; Revise reloads code and restales the cells that use it. Right-click for new/rename/duplicate/delete; drop files onto a folder to add them; ⌘F searches the open file.</div>
 </aside>
 <aside id="agentpanel" class="agentpanel">
   <div class="aphead"><strong>🤖 Agent</strong><span id="apstatus" class="hint"></span>

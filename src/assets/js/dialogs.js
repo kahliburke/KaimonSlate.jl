@@ -1,6 +1,8 @@
 // ── Dark modal + loading overlay (shared confirm/alert + wait UX) ─────────────
-let _modalResolve = null;
+let _modalResolve = null, _promptDone = null;
 function _modalClose(v) {
+  if (_promptDone) { const d = _promptDone; _promptDone = null;
+    document.getElementById('modalbg').classList.remove('show'); d(null); return; }   // a prompt cancels
   if (_modalResolve) { const r = _modalResolve; _modalResolve = null;
     document.getElementById('modalbg').classList.remove('show'); r(v); }
 }
@@ -21,6 +23,42 @@ function dlg(message, buttons, opts) {
 const _escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const confirmDark = (msg, ok, cls) => dlg(msg, [{ label: 'Cancel', value: false }, { label: ok || 'OK', value: true, cls: cls || 'primary' }]);
 const alertDark = msg => dlg(msg, [{ label: 'OK', value: true, cls: 'primary' }]);
+// Text entry in the same dark shell (the app's replacement for `window.prompt`, which is unstyled
+// and blocks the event loop). Resolves to the trimmed string, or null on cancel/empty. Enter
+// accepts, Escape cancels; a filename's extension is left out of the initial selection so typing
+// replaces the stem. `opts`: {ok, cls, placeholder, selectAll}.
+function promptDark(message, value, opts) {
+  opts = opts || {};
+  return new Promise(resolve => {
+    _modalResolve = null;
+    const row = document.getElementById('modalrow'), msgEl = document.getElementById('modalmsg');
+    msgEl.textContent = message;
+    const inp = document.createElement('input');
+    inp.type = 'text'; inp.className = 'modalinput'; inp.value = value || '';
+    inp.placeholder = opts.placeholder || '';
+    msgEl.appendChild(inp);
+    row.innerHTML = '';
+    const done = v => { if (!_promptDone) return; _promptDone = null;
+      document.getElementById('modalbg').classList.remove('show'); resolve(v); };
+    _promptDone = done;
+    const mk = (label, cls, fn) => { const b = document.createElement('button'); b.textContent = label;
+      if (cls) b.className = cls; b.onclick = fn; row.appendChild(b); };
+    mk('Cancel', '', () => done(null));
+    mk(opts.ok || 'OK', opts.cls || 'primary', () => done(inp.value.trim() || null));
+    inp.onkeydown = e => {
+      e.stopPropagation();                       // notebook hotkeys must not fire while typing here
+      if (e.key === 'Enter') { e.preventDefault(); done(inp.value.trim() || null); }
+      else if (e.key === 'Escape') { e.preventDefault(); done(null); }
+    };
+    document.getElementById('modalbg').classList.add('show');
+    setTimeout(() => {
+      inp.focus();
+      const base = inp.value.lastIndexOf('/') + 1, dot = inp.value.lastIndexOf('.');
+      if (!opts.selectAll && dot > base) inp.setSelectionRange(base, dot); else inp.select();
+    }, 0);
+  });
+}
+window.promptDark = promptDark;
 function showLoading(m) { document.getElementById('lmsg').textContent = m || 'Working…'; document.getElementById('loading').classList.add('show'); }
 function hideLoading() { document.getElementById('loading').classList.remove('show'); }
 document.addEventListener('keydown', e => {

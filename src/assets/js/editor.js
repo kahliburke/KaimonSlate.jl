@@ -14,7 +14,8 @@
           syntaxErrorLinter,
 
           autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
-          completionStatus, startCompletion, acceptCompletion, snippet } = CM;
+          completionStatus, startCompletion, acceptCompletion, snippet,
+          cmSearch, cmView } = CM;
 
   // ── code-highlight theme (Settings → Editor syntax). Each theme is a COMPLETE look — token
   //    colours AND editor chrome (background, gutter, selection, active line, caret) — defined once
@@ -38,8 +39,10 @@
   // Live-apply the autocomplete typing-delay across every open editor (Settings → Editing).
   window.setCompleteDelay = ms => {
     localStorage.setItem('slateCompleteDelay', String(parseInt(ms, 10) || 0));
-    for (const v of Object.values(window.editors || {}))
+    for (const v of Object.values(window.editors || {})) {
+      if (v._noAcomp) continue;                      // plain-text editor — no completion source to retune
       try { v.dispatch({ effects: acompComp.reconfigure(_acompExt(!!v._wrapMd)) }); } catch (_) {}
+    }
   };
   const _wrapExt = isMd => (isMd || _wrapCodePref()) ? EditorView.lineWrapping : [];
   // Live-toggle code-editor wrapping across every open editor (markdown stays wrapped regardless).
@@ -429,12 +432,19 @@
   // Pick a CM6 section grammar from the file extension. The bundle vendors html/css/js (for web
   // cells); everything else (Julia, .py, .toml, .sh, …) falls through to the default Julia tree —
   // acceptable highlighting, and no regression from the old Julia-for-everything behaviour.
+  // The bundle carries four grammars (Julia, HTML, CSS, JS). Map a filename onto the closest one,
+  // and fall back to PLAIN text rather than Julia for everything else: `#`-comment languages
+  // (Python, shell, TOML, YAML, R, …) read acceptably through the Julia tree — same comment
+  // character, same string quoting — but C-family and friends do not, and a wrong highlight is
+  // worse than none.
+  const _JULIAISH = /\.(jl|py|pyi|r|toml|ya?ml|sh|bash|zsh|fish|ini|cfg|conf|properties|jltxt)$/;
   const _fileLang = fn => {
     const e = (fn || '').toLowerCase();
     if (/\.(css|scss|less)$/.test(e)) return 'css';
     if (/\.(html?|xml|svg|vue)$/.test(e)) return 'html';
     if (/\.(m?js|cjs|jsx|tsx?|json|jsonl|ndjson)$/.test(e)) return 'js';
-    return undefined;                          // Julia default
+    if (_JULIAISH.test(e) || !/\.[^./\\]+$/.test(e)) return undefined;   // Julia tree (extensionless too)
+    return 'plain';
   };
   // What kind of reference a dropped/pasted file should become, by editor context — or null when the
   // editor isn't an embeddable notebook cell (a Files-tab file editor has `filename`; we don't embed
@@ -447,15 +457,52 @@
     if (opts.cellId) return 'julia';                            // a plain code cell
     return null;
   };
+  // A whole-file editor (the Files panel) — unlike a cell, it's a document you scroll and navigate,
+  // so it gets what a cell deliberately doesn't: line numbers + active-line highlight, and CM6's
+  // find/replace panel (⌘F / ⌘⌥F, ⌘G to step). Both ship inside cm6.bundle.js already.
+  const _fileExtras = () => {
+    const ex = [];
+    if (cmView) ex.push(cmView.lineNumbers(), cmView.highlightActiveLineGutter(), cmView.highlightActiveLine());
+    if (cmSearch) ex.push(cmSearch.search({ top: true }), cmSearch.highlightSelectionMatches(),
+                          keymap.of(cmSearch.searchKeymap));
+    ex.push(EditorView.theme({
+      '.cm-gutters': { background: 'transparent', border: 'none', opacity: '.55' },
+      '.cm-panels': { background: 'var(--bg2)', color: 'var(--text)' },
+      '.cm-panels.cm-panels-top': { borderBottom: '1px solid var(--border)' },
+      '.cm-textfield': { background: 'var(--bg3)', color: 'var(--text)', border: '1px solid var(--border)' },
+      '.cm-button': { background: 'var(--bg3)', color: 'var(--text)', border: '1px solid var(--border)', backgroundImage: 'none' },
+    }));
+    return ex;
+  };
   window.mkFileEditor = (parent, text, opts = {}) => {
     const md = /\.(md|markdown|qmd)$/i.test(opts.filename || '');
-    return mkEditor(parent, {
+    const view = mkEditor(parent, {
       doc: text,
       markdown: md,
       lang: md ? undefined : _fileLang(opts.filename),
+      extra: _fileExtras(),
       keys: opts.onSave ? [{ key: 'Mod-s', run: () => { opts.onSave(); return true; } }] : [],
       onDoc: () => { if (opts.onChange) opts.onChange(); },
     });
+    // Restore where this file was last left (cursor + scroll), clamped to the current document —
+    // the file may have changed on disk since.
+    const st = opts.state;
+    if (st && st.anchor != null) {
+      const max = view.state.doc.length;
+      const anchor = Math.min(Math.max(0, st.anchor | 0), max);
+      const head = Math.min(Math.max(0, (st.head == null ? anchor : st.head) | 0), max);
+      try {
+        view.dispatch({ selection: { anchor, head }, scrollIntoView: !st.scrollTop });
+        if (st.scrollTop) requestAnimationFrame(() => { try { view.scrollDOM.scrollTop = st.scrollTop; } catch (_) {} });
+      } catch (_) {}
+    }
+    return view;
+  };
+  // Where a Files-tab editor is currently parked, for `opts.state` on the next open.
+  window.fileEditorState = view => {
+    if (!view) return null;
+    const s = view.state.selection.main;
+    return { anchor: s.anchor, head: s.head, scrollTop: (view.scrollDOM || {}).scrollTop || 0 };
   };
   window.edFocus = id => { const v = window.ensureEditor(id); if (v) v.focus(); };
   window.edInsert = (id, text) => { const v = editors[id]; if (!v) return; v.dispatch(v.state.replaceSelection(text)); v.focus(); };
@@ -624,9 +671,13 @@
     // The JS pane uses `jsEmbed` (highlights html`…`/css`…` template literals); html/css use their
     // own grammar. Completion: the JS pane completes in-scope locals + real page globals (document.,
     // Slate., root., Math.…); html/css use their grammar's native completion (tags/attrs, properties).
-    const webLang = !opts.markdown && ({ html: htmlLang, css: cssLang, js: jsEmbed }[opts.lang]);
-    const lang = opts.markdown ? themed : webLang ? [webLang(), ...themed] : [julia(), ...themed];
-    const acompExt = !webLang ? _acompExt(!!opts.markdown)
+    // `lang:'plain'` = no grammar at all (theme chrome only). Used by the Files-tab editor for
+    // languages the bundle has no parser for — running C/Rust/SQL through the Julia tree mis-colours
+    // `//` comments and string literals, which is worse than no highlighting.
+    const plainLang = !opts.markdown && opts.lang === 'plain';
+    const webLang = !opts.markdown && !plainLang && ({ html: htmlLang, css: cssLang, js: jsEmbed }[opts.lang]);
+    const lang = (opts.markdown || plainLang) ? themed : webLang ? [webLang(), ...themed] : [julia(), ...themed];
+    const acompExt = plainLang ? [] : !webLang ? _acompExt(!!opts.markdown)
       : opts.lang === 'js'
         ? autocompletion({ icons: true, activateOnTypingDelay: _completeDelay(),
             override: [localCompletionSource, scopeCompletionSource(globalThis)] })
@@ -659,6 +710,9 @@
         // later registration can reconfigure this open editor. Before the keymap below so a
         // returned keymap out-precedences the defaults.
         _editorExtComp.of(_buildEditorExts(_edctx)),
+        // Per-editor extras (the Files-tab editor's gutters + find/replace). Ahead of the keymap
+        // below so an extra's bindings — ⌘F, ⌘G — take precedence over the defaults.
+        ...(opts.extra || []),
         keymap.of([
           ...completionKeymap,                  // popup nav/close (Escape) takes precedence over cell keys
           ...cellKeys,                          // a cell's own Escape (e.g. cancelSource) wins over the blur below
@@ -743,6 +797,7 @@
       ],
     });
     view._wrapMd = !!opts.markdown;   // markdown views stay wrapped when the code-wrap toggle flips
+    view._noAcomp = !!plainLang;      // plain-text views never get a completion source back
     view._edctx = _edctx;             // ctx for reconfiguring registered editor extensions
     if (opts.cellId) window.editors[opts.cellId] = view;
     return view;

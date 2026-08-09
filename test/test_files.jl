@@ -21,6 +21,10 @@ const NS = KaimonSlate.NotebookServer
         @test NS._file_kind("blob.bin")       == "binary"
         @test NS._file_kind("archive.zip")    == "binary"
         @test NS._file_kind("noext")          == "binary"
+        # A dotfile IS its name (splitext finds no extension) — the conventional ones are text.
+        @test NS._file_kind(".gitignore")     == "text"
+        @test NS._file_kind("Dockerfile")     == "text"
+        @test NS._file_kind(".hidden")        == "binary"    # unknown & extensionless ⇒ still guarded
     end
 
     @testset "_safe_proj_path confinement" begin
@@ -72,6 +76,104 @@ const NS = KaimonSlate.NotebookServer
         proj = only(n for n in tree if n["name"] == "Project.toml")
         @test proj["kind"] == "text"
         @test proj["path"] == "Project.toml"
+        @test proj["mtime"] > 0                              # the save-conflict token
+    end
+
+    @testset "_proj_tree hidden=true reveals dotfiles, never skip-dirs" begin
+        root = mktempdir()
+        mkpath(joinpath(root, ".github", "workflows"))
+        mkpath(joinpath(root, ".git", "refs"))               # skip-dir: hidden or not, never shown
+        write(joinpath(root, ".gitignore"), "*.tmp")
+        write(joinpath(root, ".DS_Store"), "junk")           # OS dropping: never shown
+        write(joinpath(root, ".git", "refs", "HEAD"), "x")
+        write(joinpath(root, ".github", "workflows", "ci.yml"), "on: push")
+        write(joinpath(root, "README.md"), "hi")
+
+        plain = Set(n["name"] for n in NS._proj_tree(root, root))
+        @test plain == Set(["README.md"])
+
+        tree = NS._proj_tree(root, root; hidden = true)
+        names = Set(n["name"] for n in tree)
+        @test names == Set([".github", ".gitignore", "README.md"])
+        gi = only(n for n in tree if n["name"] == ".gitignore")
+        @test gi["hidden"] === true && gi["kind"] == "text"
+        @test !haskey(only(n for n in tree if n["name"] == "README.md"), "hidden")
+        wf = only(n for n in tree if n["name"] == ".github")
+        @test only(only(wf["children"])["children"])["name"] == "ci.yml"
+    end
+
+    @testset "_is_notebook_file marks openable notebooks in the tree" begin
+        root = mktempdir()
+        nb = joinpath(root, "demo.jl");   write(nb, "#%% md id=intro\n# Hi\n#%% code\n1+1\n")
+        mod = joinpath(root, "Mod.jl");   write(mod, "module Mod\nf(x) = x + 1\nend\n")
+        # A standalone/runnable notebook leads with a preamble; the first `#%%` is further down.
+        pre = joinpath(root, "standalone.jl")
+        write(pre, "# preamble\n" * repeat("using Foo\n", 200) * "#%% code id=a\n1\n")
+        # A bundle is recognised by its footer, past the head window.
+        bun = joinpath(root, "bundle.jl")
+        write(bun, repeat("x = 1\n", 20_000) * "# ╔═╡ Slate.bundle\n")
+        write(joinpath(root, "notes.md"), "#%% not julia\n")
+
+        @test NS._is_notebook_file(nb)
+        @test NS._is_notebook_file(pre)
+        @test NS._is_notebook_file(bun)
+        @test !NS._is_notebook_file(mod)
+        @test !NS._is_notebook_file(joinpath(root, "notes.md"))     # only `.jl` is ever a notebook
+        @test !NS._is_notebook_file(joinpath(root, "gone.jl"))      # missing file, no throw
+
+        tree = NS._proj_tree(root, root)
+        marked = Set(n["name"] for n in tree if get(n, "notebook", false) === true)
+        @test marked == Set(["demo.jl", "standalone.jl", "bundle.jl"])
+    end
+
+    @testset "_mtime_conflict lost-update guard" begin
+        root = mktempdir(); p = joinpath(root, "a.jl")
+        write(p, "x")
+        m = mtime(p)
+        @test !NS._mtime_conflict(p, m)                      # unchanged since the client read it
+        @test !NS._mtime_conflict(p, nothing)                # no token ⇒ opted out
+        @test !NS._mtime_conflict(p, 0)
+        @test NS._mtime_conflict(p, m - 5)                   # disk moved on ⇒ refuse the write
+        @test !NS._mtime_conflict(joinpath(root, "gone.jl"), m - 5)   # nothing to clobber
+    end
+
+    @testset "_file_op rename / duplicate / delete / mkdir" begin
+        root = mktempdir()
+        mkpath(joinpath(root, "src"))
+        write(joinpath(root, "src", "a.jl"), "code")
+        self = joinpath(root, "nb.jl"); write(self, "notebook")
+
+        # mkdir, then rename a file INTO it (a rename with a `/` is a move)
+        @test NS._file_op(root, self, "mkdir"; path = "src/sub")[1] == 200
+        @test isdir(joinpath(root, "src", "sub"))
+        st, pl = NS._file_op(root, self, "rename"; path = "src/a.jl", to = "src/sub/b.jl")
+        @test st == 200 && pl["path"] == joinpath("src", "sub", "b.jl")
+        @test isfile(joinpath(root, "src", "sub", "b.jl")) && !isfile(joinpath(root, "src", "a.jl"))
+
+        # duplicate auto-names, and won't overwrite
+        st, pl = NS._file_op(root, self, "duplicate"; path = "src/sub/b.jl")
+        @test st == 200 && basename(pl["path"]) == "b-copy.jl"
+        @test read(joinpath(root, pl["path"]), String) == "code"
+        @test NS._file_op(root, self, "duplicate"; path = "src/sub/b.jl", to = "src/sub/b.jl")[1] == 409
+        @test basename(NS._file_op(root, self, "duplicate"; path = "src/sub/b.jl")[2]["path"]) == "b-copy2.jl"
+
+        # the notebook's own file is off limits, by either name for the same path
+        @test NS._file_op(root, self, "rename"; path = "nb.jl", to = "other.jl")[1] == 409
+        @test NS._file_op(root, self, "delete"; path = "nb.jl")[1] == 409
+        @test NS._file_op(root, self, "delete"; path = ".", recursive = true)[1] == 409   # nor the dir holding it
+        @test isfile(self)
+
+        # a directory needs `recursive`
+        @test NS._file_op(root, self, "delete"; path = "src/sub")[1] == 409
+        @test NS._file_op(root, self, "delete"; path = "src/sub", recursive = true)[1] == 200
+        @test !ispath(joinpath(root, "src", "sub"))
+
+        # confinement + bad input
+        @test NS._file_op(root, self, "delete"; path = "../outside")[1] == 400
+        @test NS._file_op(root, self, "rename"; path = "src", to = "../escape")[1] == 400
+        @test NS._file_op(root, self, "delete"; path = "src/gone.jl")[1] == 404
+        @test NS._file_op(root, self, "frobnicate"; path = "src")[1] == 400
+        @test NS._file_op("", self, "delete"; path = "src")[1] == 409          # detached notebook
     end
 
     # ── Embedded-media export helpers (make drag/drop assets survive HTML/PDF/publish exports) ────────
@@ -252,18 +354,21 @@ const NS = KaimonSlate.NotebookServer
         @test files["media/b.png"] == joinpath(root, "media", "b.png")
     end
 
-    # The drag/drop snippet map ((file kind, editor syntax) → inserted reference) lives in files.js;
-    # assert it from JS so the client stays honest. Skips cleanly when node isn't installed.
-    @testset "embed snippet map: JS _embedSnippet (node, if available)" begin
+    # Pure front-end logic that the Julia side can't see: the drag/drop snippet map ((file kind,
+    # editor syntax) → inserted reference) and the tree's filter/expansion model. Asserted from JS so
+    # the client stays honest. Skips cleanly when node isn't installed.
+    @testset "files.js pure logic (node, if available)" begin
         node = Sys.which("node")
         if node === nothing
-            @info "node not found — skipping JS _embedSnippet assertion"
+            @info "node not found — skipping the files.js JS assertions"
             @test true
         else
-            io = IOBuffer()
-            ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", "embed_snippet.mjs"))`; stdout = io, stderr = io))
-            ok || print(String(take!(io)))
-            @test ok
+            for script in ("embed_snippet.mjs", "files_tree.mjs")
+                io = IOBuffer()
+                ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", script))`; stdout = io, stderr = io))
+                ok || print(String(take!(io)))
+                @test ok
+            end
         end
     end
 end
