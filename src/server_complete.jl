@@ -2495,6 +2495,7 @@ function close_notebook!(h::Hub, id::AbstractString)
     try; _save_preview!(nb; force = true); catch; end   # final rendered state → next reopen's interim preview
     _close_listeners(nb)
     _stop_live_rerender!(nb)               # end this notebook's live-re-render debouncer task
+    _stop_watchers!(nb)                    # end its file/@asset watchers, heartbeat and history net
     _close_agent!(nb)
     _unwire_callbacks!(nb)
     # Signal any in-flight runner to stop — its `Threads.@spawn` task isn't otherwise interruptible, and a
@@ -2521,7 +2522,7 @@ function stop_hub(h::Hub)
         v
     end
     for nb in nbs
-        _close_listeners(nb); _stop_live_rerender!(nb); _unwire_callbacks!(nb)
+        _close_listeners(nb); _stop_live_rerender!(nb); _stop_watchers!(nb); _unwire_callbacks!(nb)
         _interrupt_inflight!(nb)
         try; shutdown!(nb.kernel); catch; end
         _teardown_region!(nb)

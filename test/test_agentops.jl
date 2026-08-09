@@ -331,6 +331,35 @@ end
     end
 end
 
+@testset "close stops the notebook's watcher loops (a reopen must not leave a zombie snapshotting)" begin
+    hub = NS.start_hub(; port = 8867)
+    try
+        nbp = tempname() * ".jl"
+        write(nbp, "#%% code id=a\nbase = 10\n")
+        id = NS.open_notebook!(hub, nbp; autorun = false)
+        nb = hub.notebooks[id]
+
+        # The flag the four `_start_watcher!` loops close over, captured before the close so we
+        # hold the SAME object the tasks do — a reopen reuses the id and installs a fresh one.
+        flag = NS._WATCHER_STOP[id]
+        @test flag[] == false
+
+        NS.close_notebook!(hub, id)
+        @test flag[] == true                       # every loop's `while !stop[]` now ends
+        @test !haskey(NS._WATCHER_STOP, id)        # entry cleared, so a reopen starts clean
+
+        # Reopening installs a fresh flag; the closed notebook's tasks keep the old (set) one.
+        # Without this, both notebooks' 60s `_history!` snapshots write to the same path-keyed
+        # history forever, one of them from a report frozen at the close.
+        id2 = NS.open_notebook!(hub, nbp; autorun = false)
+        @test id2 == id                            # same path ⇒ same id
+        @test NS._WATCHER_STOP[id][] == false
+        @test NS._WATCHER_STOP[id] !== flag
+    finally
+        NS.stop_hub(hub)
+    end
+end
+
 @testset "locked cell self-heals on a fresh autorun=false open (a cold reopen has nothing in memory)" begin
     hub = NS.start_hub(; port = 8861)
     try

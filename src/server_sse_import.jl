@@ -332,16 +332,38 @@ end
 # a tight loop. `stat`/mtime touches nothing, so an atime-only event leaves the signal unchanged.
 _asset_mtime(f) = try; mtime(f); catch; 0.0; end
 
+# Cancellation for the loops `_start_watcher!` spawns — same shape as the live-re-render
+# debouncer above. A reopen reuses the notebook id, so each loop captures the flag OBJECT once
+# rather than looking it up: a lookup would hand an old task the reopened notebook's flag.
+const _WATCHER_LOCK = ReentrantLock()
+const _WATCHER_STOP = Dict{String,Threads.Atomic{Bool}}()
+
+_watcher_flag!(nb::LiveNotebook) = lock(_WATCHER_LOCK) do
+    get!(() -> Threads.Atomic{Bool}(false), _WATCHER_STOP, nb.id)
+end
+
+"Stop a notebook's file/@asset watchers, heartbeat and periodic history snapshot. Teardown only."
+function _stop_watchers!(nb::LiveNotebook)
+    lock(_WATCHER_LOCK) do
+        f = get(_WATCHER_STOP, nb.id, nothing)
+        f === nothing || (f[] = true)
+        delete!(_WATCHER_STOP, nb.id)
+    end
+    return nothing
+end
+
 # Watch the file for external edits (VS Code / agent) → sync → push instantly.
 # `watch_file` returns on change (instant) or after a 2s safety timeout (covers
 # editors that save via atomic rename). Server's own writes match canonically in
 # `sync_from_file!`, so they don't echo back.
 function _start_watcher!(nb::LiveNotebook)
+    stop = _watcher_flag!(nb)          # captured by value: see the note on id reuse above
     @async begin
         last = _asset_mtime(nb.path)
-        while true
+        while !stop[]
             try
                 FileWatching.watch_file(nb.path, 2.0)
+                stop[] && break
                 # Guard the atime self-wake loop: `sync_from_file!` READS + RE-PARSES the whole .jl, and
                 # that read bumps the file's atime, which `watch_file` reports as a change (NOTE_ATTRIB)
                 # → without this it re-parses in a tight CPU loop (an intermittent 300%+ spin that
@@ -363,7 +385,7 @@ function _start_watcher!(nb::LiveNotebook)
     # with a 2 s ceiling that re-derives the set (picks up newly-added deps) and covers atomic-rename
     # saves a single-file watch can miss — the same idiom as the notebook-file watcher above. A
     # content-hash diff means a metadata-only touch (or our own read) never triggers a recompute.
-    @async while true
+    @async while !stop[]
         try
             files = _asset_files(nb)
             if isempty(files)
@@ -378,6 +400,7 @@ function _start_watcher!(nb::LiveNotebook)
                 end
             end
             take!(ch)                                 # wake on the first event (or the 2 s ceiling)
+            stop[] && break
             changed = String[f for f in files if _asset_mtime(f) != get(prev, f, 0.0)]
             isempty(changed) || server_asset_changed(nb, changed)
             sleep(0.2)                                # floor: bound any event storm (e.g. an editor's
@@ -386,15 +409,17 @@ function _start_watcher!(nb::LiveNotebook)
             sleep(0.5)
         end
     end
-    @async while true
+    @async while !stop[]
         sleep(15)
-        _broadcast(nb, "hb")
+        stop[] || _broadcast(nb, "hb")
     end
     # Periodic safety net: a low-frequency snapshot of the current state, deduped by
     # hash so it's free when nothing changed. Catches any state that slipped past the
     # op-level checkpoints (and guarantees the "at least every minute" capture).
-    @async while true
+    # History is keyed by path, so a closed notebook must not still be snapshotting here.
+    @async while !stop[]
         sleep(60)
+        stop[] && break
         try; _history!(nb; source = "auto", kind = "draft"); catch; end
     end
 end
