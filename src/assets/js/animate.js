@@ -286,8 +286,24 @@
     _sizeCanvas() {
       // Honor the data aspect ratio (fixes squished heatmaps); back the canvas at on-screen size ×dpr
       // so the GPU upscales the texture smoothly (LINEAR) rather than scaling a tiny bitmap.
-      const cssW = Math.max(80, this.box.clientWidth || 320);
-      const cssH = Math.round(cssW * this.H / Math.max(1, this.W));
+      //
+      // Aspect is preserved throughout, so height and width are two ways of saying the same thing and
+      // the cell width is always the hard bound. Without a constraint the height follows the aspect
+      // unbounded, which is a wall for a stack taller than it is wide — hence maxheight.
+      const box = Math.max(80, this.box.clientWidth || 320);
+      const sz = (this.manifest && this.manifest.size) || {};
+      const aspect = this.H / Math.max(1, this.W);
+      let cssW = sz.width ? Math.min(sz.width, box) : box;
+      let cssH = Math.round(cssW * aspect);
+      if (sz.height) {
+        cssH = sz.height;
+        cssW = Math.round(cssH / Math.max(1e-6, aspect));
+        if (cssW > box) { cssW = box; cssH = Math.round(cssW * aspect); }
+      }
+      if (sz.maxheight && cssH > sz.maxheight) {
+        cssH = sz.maxheight;
+        cssW = Math.round(cssH / Math.max(1e-6, aspect));
+      }
       this.canvas.style.width = cssW + 'px'; this.canvas.style.height = cssH + 'px';
       if (this.gl) {
         const dpr = Math.min(2, window.devicePixelRatio || 1);

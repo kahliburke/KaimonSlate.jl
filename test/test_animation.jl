@@ -93,6 +93,30 @@ end
         @test a.manifest["bits"] == 8
     end
 
+    @testset "manifest carries displayed-size constraints" begin
+        # The player preserves the frame aspect and fills the cell width, so height is unbounded
+        # for a stack taller than it is wide. `maxheight` is the default guard and applies to both
+        # kinds; `height`/`width` are the explicit override.
+        a = animate([Float64[0 1], Float64[1 2]])
+        @test a.manifest["size"]["maxheight"] == 560.0
+        @test a.manifest["size"]["height"] === nothing
+        @test a.manifest["size"]["width"] === nothing
+
+        b = animate([Float64[0 1], Float64[1 2]]; height = 240, width = 400, maxheight = 900)
+        @test b.manifest["size"] == Dict{String,Any}("height" => 240.0, "width" => 400.0,
+                                                     "maxheight" => 900.0)
+
+        c = animate([Float64[0 1], Float64[1 2]]; maxheight = nothing)
+        @test c.manifest["size"]["maxheight"] === nothing
+
+        nt(r, g, b) = (r = r, g = g, b = b)
+        img = animate([fill(nt(1.0, 0.0, 0.0), 2, 2)]; kind = :image, height = 300)
+        @test img.manifest["size"]["height"] == 300.0
+
+        @test_throws ArgumentError animate([Float64[0 1]]; height = 0)
+        @test_throws ArgumentError animate([Float64[0 1]]; width = "80%")
+    end
+
     @testset "function-generator overload" begin
         a = animate(i -> fill(Float64(i), 2, 2), 3)
         @test a.manifest["shape"] == [3, 2, 2]

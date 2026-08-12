@@ -198,11 +198,25 @@ function _overlay_json(overlay, nf)
 end
 _overlay_point(p) = length(p) >= 3 ? [Float64(p[1]), Float64(p[2]), Int(p[3])] : [Float64(p[1]), Float64(p[2]), 0]
 
+# Displayed-size constraints for the player, in CSS px. The canvas otherwise takes the full cell
+# width and derives its height from the frame aspect, which is unbounded: a stack that is taller
+# than it is wide renders at whatever height that implies, and a 200x64 field is a wall. `maxheight`
+# is the default guard; `height`/`width` are the explicit override, matching `echart`'s surface.
+function _size_json(height, width, maxheight)
+    px(v, name) = v === nothing ? nothing :
+        (v isa Real && v > 0 ? Float64(v) :
+         throw(ArgumentError("animate: `$name` must be a positive number of CSS pixels (got $(repr(v)))")))
+    return Dict{String,Any}("height" => px(height, "height"),
+                            "width" => px(width, "width"),
+                            "maxheight" => px(maxheight, "maxheight"))
+end
+
 # ── Public API ──────────────────────────────────────────────────────────────────────────────────
 """
     animate(frames; kind=:heatmap, fps=30, colormap=:auto, clim=:global, transform=nothing,
             dither=true, bits=8, x=nothing, y=nothing, title="", colorbar=true,
-            loop=true, autoplay=false, overlay=nothing, maxbytes=128_000_000) -> Animation
+            loop=true, autoplay=false, overlay=nothing, maxbytes=128_000_000,
+            height=nothing, width=nothing, maxheight=560) -> Animation
 
 Precompute a stack of frames ONCE, then play it back entirely in the browser on a WebGL canvas —
 nothing touches Julia during playback, so a slow simulation still plays at 60 fps. The heavy compute
@@ -213,6 +227,11 @@ where `clim` is `:global` (comparable frames) | `:symmetric` (signed fields → 
 `transform`) | `:perframe` | `(lo, hi)`. `kind=:image` takes real color frames — a vector of H×W
 color matrices (e.g. `Matrix{RGB}` from VideoIO.jl/Images.jl) or H×W×3 arrays — played back true
 color, no colormap.
+
+`height` / `width` set the player's displayed size in CSS pixels, preserving the frame aspect and
+never exceeding the cell width; give either one and the other follows. Without them the canvas
+takes the full cell width and derives its height from the aspect, which is why `maxheight` (560 px)
+caps it: a frame stack taller than it is wide would otherwise render as a wall.
 
 `overlay` (either kind) draws frame-synced markers on top: a vector with one entry per frame, each a
 list of `(x, y[, id])` points in frame pixel space; `id` keeps a point's color/trail stable across
@@ -231,7 +250,8 @@ function animate(frames::AbstractVector;
                  dither::Bool = true, bits::Integer = 8,
                  x = nothing, y = nothing, title::AbstractString = "",
                  colorbar::Bool = true, loop::Bool = true, autoplay::Bool = false,
-                 overlay = nothing, maxbytes::Integer = 128_000_000)
+                 overlay = nothing, maxbytes::Integer = 128_000_000,
+                 height = nothing, width = nothing, maxheight = 560)
     kind === :heatmap || kind === :image ||
         throw(ArgumentError("animate: kind must be :heatmap or :image (got $kind)"))
     isempty(frames) && throw(ArgumentError("animate: `frames` is empty"))
@@ -262,6 +282,7 @@ function animate(frames::AbstractVector;
                              "y" => y === nothing ? nothing : Float64.(collect(y)),
                              "title" => String(title), "colorbar" => false),
             "controls" => Dict("loop" => loop, "autoplay" => autoplay),
+            "size"   => _size_json(height, width, maxheight),
             "overlay" => _overlay_json(overlay, nf),
         )
         return Animation(manifest, buf, lut)
@@ -304,6 +325,7 @@ function animate(frames::AbstractVector;
                          "y" => y === nothing ? nothing : Float64.(collect(y)),
                          "title" => String(title), "colorbar" => colorbar),
         "controls" => Dict("loop" => loop, "autoplay" => autoplay),
+        "size"   => _size_json(height, width, maxheight),
         "overlay" => _overlay_json(overlay, nf),
     )
     return Animation(manifest, buf, lut)
