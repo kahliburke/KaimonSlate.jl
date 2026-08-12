@@ -52,6 +52,16 @@ const RE = ReportEngine
         @test RE.slate_tools() isa AbstractString      # the "nothing registered" notice
     end
 
+    @testset "the summary line skips a leading fenced signature" begin
+        # A gate tool's docstring opens with a fenced signature, so a naive "first line" is a ```
+        # fence and the next is the signature — the summary column came out empty.
+        doc = "```julia\nstart_job(experiment; max_epochs) -> String\n```\n\nStart training.\n"
+        @test RE._first_prose_line(doc) == "Start training."
+        @test RE._first_prose_line("") == ""
+        @test RE._first_prose_line("```\nonly a fence\n```") == ""
+        @test RE._first_prose_line("plain first line\nsecond") == "plain first line"
+    end
+
     @testset "result records render as fields" begin
         # `key=value` run listings and `key: value` reports are the two shapes gate tools return.
         f = RE._result_fields("a1b2c3d4  kind=train  status=completed  epoch=4")
@@ -59,8 +69,14 @@ const RE = ReportEngine
         @test ("status" => "completed") in f
         g = RE._result_fields("path: /tmp/run/metrics.jsonl")
         @test g == ["path" => "/tmp/run/metrics.jsonl"]
-        # Prose is left alone rather than shredded into bogus fields.
+        # Prose is left alone rather than shredded into bogus fields — including prose that happens
+        # to CONTAIN key=value fragments, which is what start_job's own reply looks like.
         @test isempty(RE._result_fields("started run 49765781, poll job_status for progress"))
+        @test isempty(RE._result_fields(
+            "started run 9fef1170 (kind=train, experiment=Main.NB.Widget). " *
+            "Poll `job_status(run_id=\"9fef1170\")`; stop with `job_cancel(run_id=\"9fef1170\")`."))
+        # A genuine multi-run listing still parses.
+        @test length(RE._result_fields("a1 kind=train status=done\nb2 kind=eval status=failed")) == 4
     end
 
     @testset "html rendering shows the call, its schema slots and the outcome" begin

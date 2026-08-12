@@ -46,6 +46,23 @@ function _tool_meta(tool)
     end
 end
 
+# A gate tool's docstring conventionally OPENS with a fenced signature block, so "the first line"
+# is a ``` fence and the line after it is the signature. The first line worth showing is the first
+# non-empty one outside any fence.
+function _first_prose_line(doc::AbstractString)
+    infence = false
+    for ln in split(doc, '\n')
+        s = strip(ln)
+        if startswith(s, "```")
+            infence = !infence
+            continue
+        end
+        (infence || isempty(s)) && continue
+        return String(s)
+    end
+    return ""
+end
+
 _param_type(a) = begin
     tm = get(a, "type_meta", nothing)
     tm isa AbstractDict ? String(get(tm, "julia_type", get(tm, "kind", "any"))) : "any"
@@ -175,9 +192,8 @@ function slate_tools(; filter::AbstractString = "")
         meta = _tool_meta(t)
         ps = get(meta, "arguments", [])
         req = count(a -> get(a, "required", false) === true, ps)
-        doc = String(get(meta, "description", ""))
-        line = strip(first(split(replace(doc, r"```julia|```" => ""), '\n'; limit = 2), 1)[1])
-        push!(rows, (tool = nm, params = length(ps), required = req, summary = String(line)))
+        summary = _short(_first_prose_line(String(get(meta, "description", ""))), 110)
+        push!(rows, (tool = nm, params = length(ps), required = req, summary = summary))
     end
     sort!(rows; by = r -> r.tool)
     return isempty(rows) ? "no gate tools registered in this session" : slate_table(rows)
@@ -206,6 +222,11 @@ function _result_fields(text::AbstractString)
         end
         kvs = collect(eachmatch(r"(\w+)=([^\s]+)", s))
         length(kvs) >= 2 || return Pair{String,String}[]   # not a record line — give up on the whole thing
+        # Prose can contain `key=value` fragments too ("started run 9fef… (kind=train, …). Poll
+        # `job_status(run_id="…")`"), and shredding a sentence into fields loses the sentence.
+        # A real record line is MOSTLY its fields, so require the matches to cover most of it.
+        covered = sum(length(kv.match) for kv in kvs)
+        covered >= 0.6 * length(replace(s, r"\s+" => "")) || return Pair{String,String}[]
         for kv in kvs
             push!(fields, String(kv.captures[1]) => String(kv.captures[2]))
         end
@@ -230,9 +251,10 @@ function Base.show(io::IO, ::MIME"text/html", tc::ToolCall)
         <span style="flex:1"></span>
         <span style="color:var(--muted);font-size:11px">$(tc.seconds)s &middot; $(_h(tc.at))</span></div>""")
 
-    isempty(tc.description) ||
+    blurb = _first_prose_line(tc.description)
+    isempty(blurb) ||
         print(io, """<div style="padding:6px 12px;color:var(--muted);border-bottom:1px solid var(--border)">
-            $(_h(_short(strip(first(split(tc.description, '\n'; limit = 2), 1)[1]), 160)))</div>""")
+            $(_h(_short(blurb, 160)))</div>""")
 
     # Parameters: the tool's whole declared surface, not just what this call sent. An omitted
     # required parameter is the single most common reason a tool call is wrong, so it is marked.
