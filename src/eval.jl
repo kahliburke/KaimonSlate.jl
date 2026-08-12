@@ -16,6 +16,33 @@ export register_emit!, unregister_emit!, register_bin_emit!, unregister_bin_emit
 export register_celldone!, unregister_celldone!
 export register_cleanup_cells!, unregister_cleanup_cells!, run_cleanups!
 
+# ── Out-of-band callback registries ───────────────────────────────────────────
+#
+# Every registry below maps a report id to a server callback, and all of them are written from
+# CONCURRENT tasks: one per notebook being wired, plus the pollers routing worker traffic. `Dict`
+# is not thread-safe, and two simultaneous `setindex!` can leave its internal storage half-written.
+# That surfaces later as an `UndefRefError` out of `ht_keyindex2_shorthash!` — on whichever notebook
+# touches the registry next, which is generally NOT the one whose write broke it, so the report
+# blames an innocent bystander and a restart appears to "fix" it.
+#
+# One lock covers all of them: each is only ever touched for a single get/set, so contention is
+# irrelevant and a shared lock is simpler to keep correct than ten.
+#
+# The callback is invoked OUTSIDE the lock, deliberately. A handler can be slow, can block on the
+# network, and can register another callback; holding the lock across it would serialise every
+# notebook's live updates behind the slowest one and invite a deadlock.
+const _REGISTRY_LOCK = ReentrantLock()
+
+function _reg_set!(reg::Dict{String,Any}, id, cb)
+    Base.@lock _REGISTRY_LOCK reg[String(id)] = cb
+    return nothing
+end
+function _reg_del!(reg::Dict{String,Any}, id)
+    Base.@lock _REGISTRY_LOCK delete!(reg, String(id))
+    return nothing
+end
+_reg_get(reg::Dict{String,Any}, id) = Base.@lock _REGISTRY_LOCK get(reg, String(id), nothing)
+
 # ── Async reactivity hook ─────────────────────────────────────────────────────
 #
 # A cell's background task can call `slate_refresh(:data, …)` to announce that
@@ -24,10 +51,10 @@ export register_cleanup_cells!, unregister_cleanup_cells!, run_cleanups!
 # The callback is registered out-of-band so the dependency-light engine needn't
 # know about the HTTP/SSE layer.
 const _REFRESH_REGISTRY = Dict{String,Any}()
-register_refresh!(report_id::AbstractString, cb) = (_REFRESH_REGISTRY[String(report_id)] = cb; nothing)
-unregister_refresh!(report_id::AbstractString) = (delete!(_REFRESH_REGISTRY, String(report_id)); nothing)
+register_refresh!(report_id::AbstractString, cb) = _reg_set!(_REFRESH_REGISTRY, report_id, cb)
+unregister_refresh!(report_id::AbstractString) = _reg_del!(_REFRESH_REGISTRY, report_id)
 function _do_refresh(report_id::AbstractString, vars)
-    cb = get(_REFRESH_REGISTRY, String(report_id), nothing)   # registry keys are String (sibling _do_* convert too)
+    cb = _reg_get(_REFRESH_REGISTRY, report_id)
     cb === nothing || cb(Symbol[Symbol(v) for v in vars])
     return nothing
 end
@@ -37,10 +64,10 @@ end
 # instant it lands) instead of one update at the end of a whole run. Registered per report id,
 # out-of-band, so the engine needn't know about the SSE layer. The callback takes the Cell.
 const _PROGRESS_REGISTRY = Dict{String,Any}()
-register_progress!(report_id::AbstractString, cb) = (_PROGRESS_REGISTRY[String(report_id)] = cb; nothing)
-unregister_progress!(report_id::AbstractString) = (delete!(_PROGRESS_REGISTRY, String(report_id)); nothing)
+register_progress!(report_id::AbstractString, cb) = _reg_set!(_PROGRESS_REGISTRY, report_id, cb)
+unregister_progress!(report_id::AbstractString) = _reg_del!(_PROGRESS_REGISTRY, report_id)
 function _emit_progress(report_id::AbstractString, cell)
-    cb = get(_PROGRESS_REGISTRY, report_id, nothing)
+    cb = _reg_get(_PROGRESS_REGISTRY, report_id)
     cb === nothing && return nothing
     try; cb(cell); catch e; @debug "eval: progress callback failed" report_id exception = e; end   # best-effort — a push failure must never break eval
     return nothing
@@ -50,10 +77,10 @@ end
 # run so the UI's progress reads a stable "k / N" (N = total to run) instead of guessing from the
 # sequential per-cell stream. Same out-of-band registry pattern.
 const _RUNBATCH_REGISTRY = Dict{String,Any}()
-register_runbatch!(report_id::AbstractString, cb) = (_RUNBATCH_REGISTRY[String(report_id)] = cb; nothing)
-unregister_runbatch!(report_id::AbstractString) = (delete!(_RUNBATCH_REGISTRY, String(report_id)); nothing)
+register_runbatch!(report_id::AbstractString, cb) = _reg_set!(_RUNBATCH_REGISTRY, report_id, cb)
+unregister_runbatch!(report_id::AbstractString) = _reg_del!(_RUNBATCH_REGISTRY, report_id)
 function _emit_run_batch(report_id::AbstractString, n::Integer)
-    cb = get(_RUNBATCH_REGISTRY, report_id, nothing)
+    cb = _reg_get(_RUNBATCH_REGISTRY, report_id)
     cb === nothing && return nothing
     try; cb(n); catch e; @debug "eval: run-batch callback failed" report_id exception = e; end
     return nothing
@@ -63,10 +90,10 @@ end
 # far along it is; the server relays it to the UI (a bar on the cell + the "currently running" chip).
 # Same out-of-band registry pattern; the callback takes (frac::Float64, msg::String).
 const _USERPROG_REGISTRY = Dict{String,Any}()
-register_userprog!(report_id::AbstractString, cb) = (_USERPROG_REGISTRY[String(report_id)] = cb; nothing)
-unregister_userprog!(report_id::AbstractString) = (delete!(_USERPROG_REGISTRY, String(report_id)); nothing)
+register_userprog!(report_id::AbstractString, cb) = _reg_set!(_USERPROG_REGISTRY, report_id, cb)
+unregister_userprog!(report_id::AbstractString) = _reg_del!(_USERPROG_REGISTRY, report_id)
 function _do_userprog(report_id::AbstractString, frac, msg, id = "", done = false)
-    cb = get(_USERPROG_REGISTRY, String(report_id), nothing)
+    cb = _reg_get(_USERPROG_REGISTRY, report_id)
     cb === nothing && return nothing
     f = try; clamp(Float64(frac), 0.0, 1.0); catch; 0.0; end
     try; cb(f, String(msg), String(id), done === true); catch e; @debug "eval: user-progress callback failed" report_id exception = e; end
@@ -78,10 +105,10 @@ end
 # and the server relays it to the browser's "Preparing packages" banner. Same out-of-band registry; the
 # callback takes the JSON string verbatim (the worker already encoded it — the hub just forwards).
 const _PREPARE_REGISTRY = Dict{String,Any}()
-register_prepare!(report_id::AbstractString, cb) = (_PREPARE_REGISTRY[String(report_id)] = cb; nothing)
-unregister_prepare!(report_id::AbstractString) = (delete!(_PREPARE_REGISTRY, String(report_id)); nothing)
+register_prepare!(report_id::AbstractString, cb) = _reg_set!(_PREPARE_REGISTRY, report_id, cb)
+unregister_prepare!(report_id::AbstractString) = _reg_del!(_PREPARE_REGISTRY, report_id)
 function _do_prepare(report_id::AbstractString, json::AbstractString)
-    cb = get(_PREPARE_REGISTRY, String(report_id), nothing)
+    cb = _reg_get(_PREPARE_REGISTRY, report_id)
     cb === nothing && return nothing
     try; cb(String(json)); catch e; @debug "eval: prepare callback failed" report_id exception = e; end
     return nothing
@@ -93,10 +120,10 @@ end
 # for a custom `@asset` renderer that owns its cell's output. Same out-of-band registry pattern; the
 # server callback JSON-encodes and broadcasts a `cellstream:` frame. The callback takes (channel, data).
 const _EMIT_REGISTRY = Dict{String,Any}()
-register_emit!(report_id::AbstractString, cb) = (_EMIT_REGISTRY[String(report_id)] = cb; nothing)
-unregister_emit!(report_id::AbstractString) = (delete!(_EMIT_REGISTRY, String(report_id)); nothing)
+register_emit!(report_id::AbstractString, cb) = _reg_set!(_EMIT_REGISTRY, report_id, cb)
+unregister_emit!(report_id::AbstractString) = _reg_del!(_EMIT_REGISTRY, report_id)
 function _do_emit(report_id::AbstractString, channel, payload)
-    cb = get(_EMIT_REGISTRY, String(report_id), nothing)
+    cb = _reg_get(_EMIT_REGISTRY, report_id)
     cb === nothing && return nothing
     try; cb(String(channel), payload); catch e; @debug "eval: emit callback failed" report_id exception = e; end   # payload is a Julia VALUE (gate: deserialized; in-process: passed straight through) — the emit callback JSON-encodes it
     return nothing
@@ -106,10 +133,10 @@ end
 # (SlateExtensionsBase.encode_binary_frame — channel+meta+dtype+shape+raw bytes) that the server callback
 # forwards to the page as a binary WS frame AS-IS (no deserialize, no JSON). Same out-of-band registry.
 const _BIN_EMIT_REGISTRY = Dict{String,Any}()
-register_bin_emit!(report_id::AbstractString, cb) = (_BIN_EMIT_REGISTRY[String(report_id)] = cb; nothing)
-unregister_bin_emit!(report_id::AbstractString) = (delete!(_BIN_EMIT_REGISTRY, String(report_id)); nothing)
+register_bin_emit!(report_id::AbstractString, cb) = _reg_set!(_BIN_EMIT_REGISTRY, report_id, cb)
+unregister_bin_emit!(report_id::AbstractString) = _reg_del!(_BIN_EMIT_REGISTRY, report_id)
 function _do_emit_bin(report_id::AbstractString, frame::Vector{UInt8})
-    cb = get(_BIN_EMIT_REGISTRY, String(report_id), nothing)
+    cb = _reg_get(_BIN_EMIT_REGISTRY, report_id)
     cb === nothing && return nothing
     try; cb(frame); catch e; @debug "eval: bin emit callback failed" report_id exception = e; end
     return nothing
@@ -121,10 +148,10 @@ end
 # single-cell patch — so a fast cell renders while a slow sibling is still running. Same out-of-band
 # registry. The callback takes (run_id, cell_id, wire).
 const _CELLDONE_REGISTRY = Dict{String,Any}()
-register_celldone!(report_id::AbstractString, cb) = (_CELLDONE_REGISTRY[String(report_id)] = cb; nothing)
-unregister_celldone!(report_id::AbstractString) = (delete!(_CELLDONE_REGISTRY, String(report_id)); nothing)
+register_celldone!(report_id::AbstractString, cb) = _reg_set!(_CELLDONE_REGISTRY, report_id, cb)
+unregister_celldone!(report_id::AbstractString) = _reg_del!(_CELLDONE_REGISTRY, report_id)
 function _do_celldone(report_id::AbstractString, run_id, cell_id, wire)
-    cb = get(_CELLDONE_REGISTRY, String(report_id), nothing)
+    cb = _reg_get(_CELLDONE_REGISTRY, report_id)
     cb === nothing && return nothing
     try; cb(String(run_id), String(cell_id), wire); catch e; @warn "slate: celldone merge failed" cell = cell_id exception = e; end
     return nothing
@@ -136,10 +163,10 @@ end
 # broadcasts to its kernel(s); a re-eval/rebuild path fires cleanups worker-locally without this. Same
 # out-of-band registry as celldone. The callback takes the removed cell ids.
 const _CLEANUP_CELLS_REGISTRY = Dict{String,Any}()
-register_cleanup_cells!(report_id::AbstractString, cb) = (_CLEANUP_CELLS_REGISTRY[String(report_id)] = cb; nothing)
-unregister_cleanup_cells!(report_id::AbstractString) = (delete!(_CLEANUP_CELLS_REGISTRY, String(report_id)); nothing)
+register_cleanup_cells!(report_id::AbstractString, cb) = _reg_set!(_CLEANUP_CELLS_REGISTRY, report_id, cb)
+unregister_cleanup_cells!(report_id::AbstractString) = _reg_del!(_CLEANUP_CELLS_REGISTRY, report_id)
 function _do_cleanup_cells(report_id::AbstractString, ids)
-    cb = get(_CLEANUP_CELLS_REGISTRY, String(report_id), nothing)
+    cb = _reg_get(_CLEANUP_CELLS_REGISTRY, report_id)
     cb === nothing && return nothing
     sids = String[String(i) for i in ids]
     isempty(sids) && return nothing
@@ -151,17 +178,17 @@ end
 # server registers a per-report callback (out-of-band, like refresh) that applies the
 # revisions and invalidates the cells that read the changed definitions.
 const _SRCCHANGE_REGISTRY = Dict{String,Any}()
-register_srcchange!(report_id::AbstractString, cb) = (_SRCCHANGE_REGISTRY[String(report_id)] = cb; nothing)
-unregister_srcchange!(report_id::AbstractString) = (delete!(_SRCCHANGE_REGISTRY, String(report_id)); nothing)
+register_srcchange!(report_id::AbstractString, cb) = _reg_set!(_SRCCHANGE_REGISTRY, report_id, cb)
+unregister_srcchange!(report_id::AbstractString) = _reg_del!(_SRCCHANGE_REGISTRY, report_id)
 # The callback takes (changed_names, error_msg): a normal reload passes the names + ""; a
 # parse/apply error passes [] + the message. One registry covers both.
 function _do_src_changed(report_id::AbstractString, names)
-    cb = get(_SRCCHANGE_REGISTRY, String(report_id), nothing)
+    cb = _reg_get(_SRCCHANGE_REGISTRY, report_id)
     cb === nothing || cb(String[String(n) for n in names], "")
     return nothing
 end
 function _do_src_error(report_id::AbstractString, msg)
-    cb = get(_SRCCHANGE_REGISTRY, String(report_id), nothing)
+    cb = _reg_get(_SRCCHANGE_REGISTRY, report_id)
     cb === nothing || cb(String[], String(msg))
     return nothing
 end
