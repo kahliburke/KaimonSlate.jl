@@ -68,6 +68,14 @@ function seed_env_project!(envdir::AbstractString, parent::AbstractString)
     haskey(pt, "deps") && (seed["deps"] = pt["deps"])
     haskey(pt, "compat") && (seed["compat"] = pt["compat"])
     haskey(pt, "sources") && (seed["sources"] = _abs_sources(pt["sources"], parent))
+    # `[weakdeps]`/`[extras]` come along because `[compat]` is allowed to name them, and Pkg
+    # REJECTS a compat entry naming nothing the project declares ("Compat `X` not listed in
+    # `deps`, `weakdeps` or `extras`"). Copying compat while dropping the sections it refers to
+    # made every parent with a weakdep or a test-only extra unforkable, and the error names the
+    # fork's Project.toml rather than the parent it was seeded from. Neither section installs
+    # anything on instantiate, so carrying them costs nothing.
+    haskey(pt, "weakdeps") && (seed["weakdeps"] = pt["weakdeps"])
+    haskey(pt, "extras") && (seed["extras"] = pt["extras"])
     open(joinpath(envdir, "Project.toml"), "w") do io; Pkg.TOML.print(io, seed); end
     pmf = joinpath(parent, "Manifest.toml")
     if isfile(pmf)
