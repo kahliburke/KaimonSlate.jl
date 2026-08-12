@@ -78,7 +78,7 @@ catch e
     "caught $(typeof(e))"
 end
 
-#%% code id=method_error
+#%% code id=method_error trace
 ## MethodError with elaborate type params in the signature.
 Dict{Tuple{Int,String},Vector{Float64}}() + 1
 

@@ -195,7 +195,7 @@ slate_table([
 A cell that reads a name defined *below* it silently gets last-run semantics —
 document order can't represent the edge. Uncomment to see it: `early_reader`
 errors on a fresh run, works on re-run, editing `late_writer` never restales it,
-**and a ⇅ chip appears on `early_reader`** naming the definer below (click to
+**and a ⤵️ chip appears on `early_reader`** naming the definer below (click to
 jump). Function-body forward refs (`f() = g()` with `g` below) are exempt.
 
 #%% code id=early_reader

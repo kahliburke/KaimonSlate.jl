@@ -1,4 +1,7 @@
+try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+
 #%% md id=intro
+@md"""
 # 📊 ECharts DSL
 
 `echart` is a thin, Julian surface over [Apache ECharts](https://echarts.apache.org) —
@@ -11,11 +14,53 @@ Three forms, all sugar over the raw option dict (so nothing in ECharts is out of
 
 Dark theme + tooltip are on by default; a legend appears when several series are named, and
 extra kwargs / top-level components (`grid`, `dataZoom`, `visualMap`, …) pass straight through.
+"""
+
+#%% md id=h_theme
+@md"""
+## Theme — one palette, every chart
+
+These charts don't use ECharts' generic dark theme — they read the **Slate** brand palette straight
+from the notebook's CSS variables, so they match the UI and *follow* whatever theme is active. The same
+brand palette drives **Makie** server-side (`use_slate_theme!()`), so a rendered Makie figure and an
+interactive ECharts figure read as one system. Pick a theme and watch every chart below recolor in place:
+"""
+
+#%% code id=theme_pick hidecode
+HTML(raw"""
+<style>
+  .stp{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:4px 0;}
+  .stp-lbl{color:var(--dim);font-weight:600;font-size:.8rem;margin-right:2px;}
+  .stp-btn{padding:3px 10px;border-radius:7px;cursor:pointer;font-size:.78rem;line-height:1.3;
+    background:var(--bg2);color:var(--text);border:1px solid var(--border);
+    transition:background .12s,border-color .12s,color .12s;}
+  .stp-btn:hover{border-color:var(--accent);}
+  .stp-btn.on{background:var(--accent);border-color:var(--accent);color:var(--bg);font-weight:600;}
+</style>
+<div class="stp"><span class="stp-lbl">🎨 Theme</span><span id="slate-theme-picker"></span></div>
+<script>(function(){
+  var host = document.getElementById('slate-theme-picker');
+  if (!host || typeof SLATE_UI_THEMES === 'undefined') return;
+  function draw() {
+    var cur = window.curSlateTheme ? window.curSlateTheme() : 'midnight';
+    host.innerHTML = SLATE_UI_THEMES.map(function(t){
+      return '<button class="stp-btn' + (t.name === cur ? ' on' : '') + '" data-t="' + t.name + '">'
+        + t.label.replace(' (default)','') + '</button>';
+    }).join(' ');
+    host.querySelectorAll('.stp-btn').forEach(function(b){
+      b.onclick = function(){ if (window.setSlateTheme) window.setSlateTheme(b.dataset.t); draw(); };
+    });
+  }
+  draw();
+})();</script>
+""")
 
 #%% md id=h_express
+@md"""
 ## Express — one series, one line
 
 The x-axis is inferred from the data: string x → category axis, numeric x → value axis.
+"""
 
 #%% code id=line
 echart(:line, ["Mon", "Tue", "Wed", "Thu", "Fri"], [120, 200, 150, 80, 70];
@@ -32,11 +77,13 @@ echart(:scatter, randn(800), randn(800); symbolSize = 2, color=col, title = "Gau
 echart(:pie, ["Search", "Direct", "Email", "Ads"], [1048, 735, 580, 300]; title = "Traffic")
 
 #%% md id=h_reactive
+@md"""
 ## Reactive — drive a chart with `@bind`
 
 Drag the slider and switch the wave; the chart `setOption`s in place — no image swap.
 `wave` is a `Radio` of `value => label` pairs, so it compares as its value (`wave == "sin"`)
 while `wave.label` gives the pretty name.
+"""
 
 #%% code id=ctrl
 @bind freq Slider(1:0.5:12; label = "frequency")
@@ -50,10 +97,12 @@ echart(:line, collect(x), f.(freq .* x);
        title = "$(wave.label)(freq·x)   ·   freq = $freq", smooth = smooth)
 
 #%% md id=h_multi
+@md"""
 ## Composable — several series
 
 Each `series(:kind, …)` is one trace; `echart(series…; layout…)` assembles the shared axes,
 legend and theme. Mixed types (line + bar here) just work.
+"""
 
 #%% code id=multi
 t = range(0, 2π; length = 140)
@@ -65,11 +114,13 @@ echart(
 )
 
 #%% md id=h_ergonomic
+@md"""
 ## Ergonomic kinds — heatmap · candlestick · radar · boxplot
 
 These know their data shape and bring the components they imply — category axes + a
 `visualMap` for the heatmap, the `radar` component, a scaled value axis for OHLC — with no
 hand-assembly. `boxplot` even computes the five-number summary from raw samples.
+"""
 
 #%% code id=heatmap
 hours = ["12a", "3a", "6a", "9a", "12p", "3p", "6p", "9p"]
@@ -96,10 +147,12 @@ samples = [randn(60) .+ g for g in 1:4]                # raw samples → 5-numbe
 echart(:boxplot, groups, samples; title = "Distributions")
 
 #%% md id=h_relational
+@md"""
 ## Relational, hierarchical, geo & calendar
 
 Flows, networks, hierarchies, map trajectories, and calendar heatmaps get the same one-liner
 treatment — nodes, links, and hierarchies inferred from friendly Julia data.
+"""
 
 #%% code id=sankey
 echart(:sankey, [("coal", "grid", 40), ("gas", "grid", 30), ("solar", "grid", 25),
@@ -133,12 +186,14 @@ echart(:lines, [(-74.0, 40.7), (2.35, 48.85), (139.7, 35.7)],        # from: NYC
        effect = (show = true, symbol = "arrow", symbolSize = 5), lineStyle = (curveness = 0.2, width = 1.5))
 
 #%% md id=h_raw
+@md"""
 ## Async + a button — a live gauge
 
 The clean way to stream into a chart: a **`reactive`** value plus an **`@onclick`** handler — no
 globals, no generation counters, no manual `slate_refresh`. Click **Fill ▸** and the handler
 spawns a cancellable ramp to a random target; `level[] = v` pushes each step to the gauge (a
 reader of `level`), which `setOption`s in place. Click again and the prior ramp is cancelled.
+"""
 
 #%% code id=gauge_ctrl
 @bind fill Button("Fill ▸")
@@ -176,8 +231,10 @@ echart(series(:gauge; min = 0, max = 100,
 level[]
 
 #%% md id=h_fullraw
+@md"""
 And the fully-raw escape hatch — a plain ECharts option, no helpers, Symbol/NamedTuple-friendly,
 with a `dataZoom` slider added for free:
+"""
 
 #%% code id=fullraw
 echart(
