@@ -87,7 +87,13 @@ struct ToolCall
     error::String
     seconds::Float64
     at::String
+    channel::String                     # JS→Julia channel for re-invoking from the panel ("" = inert)
 end
+
+# Positional-light constructor, so a hand-built ToolCall (tests, a caller with no gate) needs no
+# channel and simply renders without the Invoke control.
+ToolCall(name, args, params, description, ok, result, error, seconds, at) =
+    ToolCall(name, args, params, description, ok, result, error, seconds, at, "")
 
 """
     slate_tool(name; kwargs...) -> ToolCall
@@ -105,7 +111,7 @@ a clear error rather than a `MethodError`.
 """
 slate_tool(name::AbstractString; kwargs...) = slate_tool(name, _kw_pairs(kwargs))
 
-function slate_tool(name::AbstractString, args::AbstractVector)
+function slate_tool(name::AbstractString, args::AbstractVector; handlers = nothing)
     args = Pair{String,Any}[String(first(p)) => last(p) for p in args]
     tool = _find_tool(name)
     at = _clock_now()
@@ -115,6 +121,25 @@ function slate_tool(name::AbstractString, args::AbstractVector)
                         isempty(avail) ?
                         "No gate tools are registered in this session (is a Kaimon gate running?)." :
                         "No tool named `$name` in this session. Available: $avail", 0.0, at)
+    end
+
+    # Register the panel's Invoke path. The browser calls back on this channel with the edited
+    # parameters, so re-running the tool never needs the cell to re-run — which matters because a
+    # cell re-run would also re-execute everything downstream of it.
+    channel = ""
+    if handlers !== nothing
+        channel = "__tool:" * String(name)
+        handlers[channel] = function (a)
+            supplied = Pair{String,Any}[]
+            for (k, v) in pairs(a)
+                sv = v isa AbstractString ? String(v) : v
+                (sv isa AbstractString && isempty(strip(sv))) && continue
+                push!(supplied, String(k) => _parse_arg(sv))
+            end
+            tc = slate_tool(String(name), supplied)
+            return (ok = tc.ok, seconds = tc.seconds, at = tc.at,
+                    text = tc.ok ? tc.result : tc.error)
+        end
     end
     meta = _tool_meta(tool)
     params = Vector{Dict{String,Any}}(get(meta, "arguments", Dict{String,Any}[]))
@@ -127,11 +152,26 @@ function slate_tool(name::AbstractString, args::AbstractVector)
         res = Base.invokelatest(getfield(g, :_dispatch_tool_call), getfield(tool, :handler),
                                 argdict; tool_name = String(name))
         return ToolCall(String(name), args, params, desc, true, _as_text(res), "",
-                        round(time() - t0, digits = 3), at)
+                        round(time() - t0, digits = 3), at, channel)
     catch e
         return ToolCall(String(name), args, params, desc, false, "",
-                        sprint(showerror, e), round(time() - t0, digits = 3), at)
+                        sprint(showerror, e), round(time() - t0, digits = 3), at, channel)
     end
+end
+
+# Values arrive from the browser as strings. A gate tool's own dispatcher coerces against the
+# handler signature, so the only job here is to recover the literals a text input cannot carry —
+# numbers and booleans — and leave everything else as the string it is.
+function _parse_arg(v)
+    v isa AbstractString || return v
+    s = strip(String(v))
+    s == "true" && return true
+    s == "false" && return false
+    n = tryparse(Int, s)
+    n === nothing || return n
+    f = tryparse(Float64, s)
+    f === nothing || return f
+    return String(v)
 end
 
 _kw_pairs(kwargs) = Pair{String,Any}[String(k) => v for (k, v) in kwargs]
@@ -258,6 +298,11 @@ function Base.show(io::IO, ::MIME"text/html", tc::ToolCall)
 
     # Parameters: the tool's whole declared surface, not just what this call sent. An omitted
     # required parameter is the single most common reason a tool call is wrong, so it is marked.
+    # Each row's value is an INPUT when the panel can call back, so the call can be adjusted and
+    # re-fired in place — a tool call is a thing you tune, and re-running the cell to change one
+    # argument would also re-run everything downstream of it.
+    live = !isempty(tc.channel)
+    uid = "tc" * string(hash((tc.name, tc.at)); base = 16)
     if !isempty(tc.params)
         print(io, """<table style="width:100%;border-collapse:collapse">
             <thead><tr style="color:var(--muted);font-size:11px;text-align:left">
@@ -269,17 +314,37 @@ function Base.show(io::IO, ::MIME"text/html", tc::ToolCall)
             nm = String(get(p, "name", "?"))
             req = get(p, "required", false) === true
             has = haskey(supplied, nm)
-            val = has ? _h(_short(repr(supplied[nm]))) :
-                  (req ? "<span style=\"color:crimson\">missing</span>" :
-                         "<span style=\"color:var(--muted)\">—</span>")
-            dim = has ? "" : "opacity:.55;"
+            dim = has ? "" : "opacity:.62;"
+            cell = if live
+                v = has ? _h(_argtext(supplied[nm])) : ""
+                ph = req ? "required" : "default"
+                """<input data-arg="$(_h(nm))" value="$(v)" placeholder="$(ph)" style="width:100%;
+                   box-sizing:border-box;background:transparent;color:var(--fg);border:1px solid
+                   var(--border);border-radius:4px;padding:2px 6px;font-family:ui-monospace,monospace;
+                   font-size:12px">"""
+            elseif has
+                _h(_short(repr(supplied[nm])))
+            elseif req
+                "<span style=\"color:crimson\">missing</span>"
+            else
+                "<span style=\"color:var(--muted)\">—</span>"
+            end
             print(io, """<tr style="border-top:1px solid var(--border);$(dim)">
-                <td style="padding:4px 12px;font-family:ui-monospace,monospace">$(_h(nm))</td>
-                <td style="padding:4px 8px;color:var(--muted)">$(_h(_param_type(p)))</td>
+                <td style="padding:4px 12px;font-family:ui-monospace,monospace;white-space:nowrap">$(_h(nm))</td>
+                <td style="padding:4px 8px;color:var(--muted);white-space:nowrap">$(_h(_param_type(p)))</td>
                 <td style="padding:4px 8px;color:var(--muted)">$(req ? "yes" : "")</td>
-                <td style="padding:4px 12px;font-family:ui-monospace,monospace">$(val)</td></tr>""")
+                <td style="padding:4px 12px;font-family:ui-monospace,monospace;width:55%">$(cell)</td></tr>""")
         end
         print(io, "</tbody></table>")
+    end
+
+    if live
+        print(io, """<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;
+            border-top:1px solid var(--border)">
+            <button data-invoke style="background:color-mix(in srgb, var(--accent) 25%, transparent);
+                color:var(--fg);border:1px solid var(--border);border-radius:5px;padding:3px 14px;
+                cursor:pointer;font-size:12px">Invoke</button>
+            <span data-status style="color:var(--muted);font-size:11px"></span></div>""")
     end
 
     # Result: as fields when the text is a record, otherwise verbatim.
@@ -296,12 +361,44 @@ function Base.show(io::IO, ::MIME"text/html", tc::ToolCall)
         end
         print(io, "</div>")
     else
-        print(io, """<pre style="margin:0;padding:0 12px 10px;white-space:pre-wrap;
+        print(io, """<pre data-result style="margin:0;padding:0 12px 10px;white-space:pre-wrap;
             font-family:ui-monospace,monospace">$(_h(_short(body, 4000)))</pre>""")
+    end
+
+    # The Invoke path. `window.slateCall` is Slate's JS→Julia bridge; the handler registered above
+    # re-runs the tool and returns the new outcome, which is written back into this panel. The guard
+    # matters because a cell's output HTML is revived on every render.
+    if live
+        print(io, """<script>(function(){
+          var root = document.currentScript.closest('.slate-toolcall'); if(!root||root.__wired) return;
+          root.__wired = true;
+          var btn = root.querySelector('[data-invoke]'),
+              st  = root.querySelector('[data-status]');
+          btn.addEventListener('click', async function(){
+            var args = {};
+            root.querySelectorAll('input[data-arg]').forEach(function(i){
+              if(i.value !== '') args[i.getAttribute('data-arg')] = i.value; });
+            btn.disabled = true; st.textContent = 'calling…';
+            try {
+              var r = await window.slateCall($(repr(tc.channel)), args);
+              st.textContent = (r.ok ? 'ok' : 'error') + ' · ' + r.seconds + 's · ' + r.at;
+              var out = root.querySelector('[data-result]');
+              if(!out){ out = document.createElement('pre');
+                        out.setAttribute('data-result',''); root.appendChild(out); }
+              out.style.cssText = 'margin:0;padding:0 12px 10px;white-space:pre-wrap;font-family:ui-monospace,monospace';
+              out.textContent = r.text;
+            } catch(e) { st.textContent = 'call failed: ' + e; }
+            btn.disabled = false;
+          });
+        })();</script>""")
     end
     print(io, "</div>")
     return nothing
 end
+
+# How a supplied value is shown INSIDE an input: a string without its quotes (you are editing the
+# text, not a Julia literal), anything else as it prints.
+_argtext(v) = v isa AbstractString ? String(v) : string(v)
 
 function Base.show(io::IO, tc::ToolCall)
     print(io, "ToolCall(", tc.name, ", ", tc.ok ? "ok" : "error", ", ", tc.seconds, "s)")

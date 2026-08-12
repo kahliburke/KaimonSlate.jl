@@ -100,6 +100,32 @@ const RE = ReportEngine
         @test !occursin("#15171c", html)
     end
 
+    @testset "browser values are recovered to literals" begin
+        # A text input hands back strings; the gate's dispatcher coerces against the signature, so
+        # only the literals text cannot carry need recovering here.
+        @test RE._parse_arg("4") === 4
+        @test RE._parse_arg("2.5") === 2.5
+        @test RE._parse_arg("true") === true
+        @test RE._parse_arg("false") === false
+        @test RE._parse_arg("Main.NB.Widget") == "Main.NB.Widget"
+        @test RE._parse_arg("lr=2e-3, tag=\"x\"") == "lr=2e-3, tag=\"x\""
+        @test RE._parse_arg(7) === 7          # non-strings pass through untouched
+    end
+
+    @testset "a panel with a channel is invokable, without one is inert" begin
+        params = [Dict{String,Any}("name" => "run_id", "required" => true,
+                                   "type_meta" => Dict{String,Any}("julia_type" => "String"))]
+        live = RE.ToolCall("t", ["run_id" => "abc"], params, "", true, "fine", "", 0.1,
+                           "00:00:00", "__tool:t")
+        inert = RE.ToolCall("t", ["run_id" => "abc"], params, "", true, "fine", "", 0.1, "00:00:00")
+        lh, ih = sprint(show, MIME("text/html"), live), sprint(show, MIME("text/html"), inert)
+        @test occursin("data-invoke", lh) && occursin("slateCall", lh)
+        @test occursin("input data-arg=\"run_id\"", lh)
+        # No channel (a hand-built call, or no gate) → a plain read-only panel, no dead button.
+        @test !occursin("data-invoke", ih) && !occursin("slateCall", ih)
+        @test occursin("abc", ih)
+    end
+
     @testset "html escapes hostile content" begin
         tc = RE.ToolCall("x", ["a" => "<script>alert(1)</script>"], Dict{String,Any}[], "",
                          false, "", "<img onerror=1>", 0.0, "00:00:00")

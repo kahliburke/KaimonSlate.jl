@@ -776,7 +776,8 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # The `__slate_call` worker tool (dispatched off the page WebSocket on the interactive thread) looks
     # the handler up in this per-namespace registry and invokes it. Fresh dict per namespace, so a
     # rebuild drops stale closures; a cell re-run just replaces its channel's handler.
-    Core.eval(m, :(const __slate_handlers = $(Dict{String,Any}())))
+    slate_handlers = Dict{String,Any}()   # hoisted: `slate_tool` registers its Invoke channel here
+    Core.eval(m, :(const __slate_handlers = $slate_handlers))
     Core.eval(m, :(const slate_on = (channel, f) -> (__slate_handlers[string(channel)] = f; nothing)))
     # Drop a JS→Julia handler — the symmetric counterpart to `slate_on`. A package that wires a
     # TRANSIENT per-cell handler (e.g. a Bonito session's inbox feed, keyed by its session id) removes
@@ -884,8 +885,11 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # process. `@tool` is call syntax over `slate_tool`, so an action taken by an agent can be
     # written down as a cell instead of happening off-page.
     # The `ToolCall` TYPE is deliberately not injected: a cell needs to call a tool and see the
-    # result, not to name or dispatch on the value's type.
-    Core.eval(m, :(const slate_tool = $slate_tool))
+    # result, not to name or dispatch on the value's type. The injected `slate_tool` closes over
+    # THIS namespace's JS→Julia handler registry, so the rendered panel's Invoke button can re-fire
+    # the call without re-running the cell (and everything downstream of it).
+    Core.eval(m, :(const slate_tool = $((nm, args = Pair{String,Any}[]; kwargs...) ->
+        slate_tool(nm, isempty(args) ? _kw_pairs(kwargs) : args; handlers = slate_handlers))))
     Core.eval(m, :(const slate_tools = $slate_tools))
     Core.eval(m, :(macro tool(ex)
         $(_tool_expand)(ex)     # escapes the VALUES only — see `_tool_expand`
