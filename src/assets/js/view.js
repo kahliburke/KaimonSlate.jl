@@ -320,7 +320,7 @@ function _effectBadge(c) {
   return `<span class="effectbadge" title="${_esc(tip)}">⚙ ${_esc(label + shown)}</span>`;
 }
 function cellHeaderInner(c) {
-  const isCode = (c.kind === 'code' || c.kind === 'web') && !hasBinds(c);   // web cells run too (▶)
+  const isCode = (c.kind === 'code' || c.kind === 'web' || c.kind === 'tool') && !hasBinds(c);   // web + tool cells run too (▶)
   // ✎ edit source — on EVERY cell. md/@bind hide their source behind a rendered view, so it reveals the
   // source overlay; code/web edit inline, so it just focuses the editor (see editCellSource). NOT </> —
   // that's the "convert to web cell" glyph below, and both show on a @bind cell, so a shared icon would
@@ -369,8 +369,8 @@ function cellHeaderInner(c) {
       `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
       // Kind switch: show the TWO kinds this cell ISN'T, each converting on click. Markdown is always
       // last (code · web · md), so the prose toggle sits in a consistent spot.
-      ['code', 'web', 'md'].filter(k => k !== c.kind).map(k =>
-        `<button class="kindbtn" onclick="toggleType('${c.id}','${k}')" title="convert to ${k === 'md' ? 'markdown' : k} cell">${k === 'code' ? '{·}' : k === 'md' ? 'M↓' : '&lt;/&gt;'}</button>`).join('') +
+      ['code', 'web', 'tool', 'md'].filter(k => k !== c.kind).map(k =>
+        `<button class="kindbtn" onclick="toggleType('${c.id}','${k}')" title="convert to ${k === 'md' ? 'markdown' : k === 'tool' ? 'tool call' : k} cell">${k === 'code' ? '{·}' : k === 'md' ? 'M↓' : k === 'tool' ? '⌁' : '&lt;/&gt;'}</button>`).join('') +
       cellActions +
       `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
     '</span>' +

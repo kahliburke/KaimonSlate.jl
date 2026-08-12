@@ -77,7 +77,7 @@ end
 _index_of(cells, id) = findfirst(c -> c.id == id, cells)
 
 # Cell-kind token ("md"/"web"/"code") → CellKind, shared by cell creation and kind-conversion.
-_cellkind(k::AbstractString) = k == "md" ? MARKDOWN : k == "web" ? WEB : CODE
+_cellkind(k::AbstractString) = k == "md" ? MARKDOWN : k == "web" ? WEB : k == "tool" ? TOOL : CODE
 
 function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractString; before::Bool = false)
     nid = _gen_id(nb.report)                          # generated up front so the undo label can name it
@@ -278,17 +278,18 @@ _trunc(s, n::Int) = (t = String(s); length(t) <= n ? t : first(t, n) * "…")
 
 # FULL content of a cell — source + result.
 function _print_cell!(io::IO, c::Cell)
-    kind = c.kind == MARKDOWN ? "md" : "code"
-    print(io, "\n\n### id=", c.id, "  [", kind, ", ", lowercase(string(c.state)), "]\n")
+    print(io, "\n\n### id=", c.id, "  [", ReportEngine._kind_token(c.kind), ", ",
+          lowercase(string(c.state)), "]\n")
     print(io, rstrip(c.source))
-    c.kind == CODE && print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
+    ReportEngine.is_code_kind(c.kind) &&
+        print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
 end
 
 # ONE compact line per cell — the high-signal map (id, kind, state, defined names, a 1-line result /
 # the md heading). Keeps a big notebook's read small; the agent drills into specific cells from here.
 function _outline_cell!(io::IO, c::Cell)
-    kind = c.kind == MARKDOWN ? "md" : "code"
-    print(io, "\nid=", rpad(c.id, 16), " [", kind, ",", lowercase(string(c.state)), "]")
+    print(io, "\nid=", rpad(c.id, 16), " [", ReportEngine._kind_token(c.kind), ",",
+          lowercase(string(c.state)), "]")
     tags = sort!(String[string(f) for f in c.flags if f !== :opaque])   # user tags (not the inferred :opaque)
     isempty(tags) || print(io, " {", join(tags, " "), "}")
     if c.kind == MARKDOWN
@@ -414,10 +415,10 @@ function cell_inspect(nb::LiveNotebook, cellid::AbstractString)
         idx === nothing && return nothing
         c = nb.report.cells[idx]
         io = IOBuffer()
-        kind = c.kind == MARKDOWN ? "md" : "code"
-        println(io, "Cell '", c.id, "' in '", nb.id, "' — ", kind, ", ", lowercase(string(c.state)),
+        println(io, "Cell '", c.id, "' in '", nb.id, "' — ", ReportEngine._kind_token(c.kind), ", ",
+                lowercase(string(c.state)),
                 " — position ", idx, "/", length(nb.report.cells), " — v", nb.version)
-        if c.kind == CODE
+        if ReportEngine.is_code_kind(c.kind)
             isempty(c.reads)  || println(io, "reads:    ", join(sort(string.(collect(c.reads))), ", "))
             let defs = cell_definitions(c)
                 isempty(defs)      || println(io, "writes:   ", join(sort(string.(collect(defs))), ", "))
@@ -1017,8 +1018,8 @@ flag_reruns(flag::Symbol) = flag in _EVAL_FLAGS
 # code-only. Returns true when the flag should be SKIPPED for this kind.
 function _flag_skips(flag::Symbol, kind::CellKind)
     flag === :collapsed && return false
-    flag === :hidecode  && return !(kind == CODE || kind == WEB)
-    return kind != CODE
+    flag === :hidecode  && return !ReportEngine.is_code_kind(kind)
+    return !(kind == CODE || kind == ReportEngine.TOOL)
 end
 
 # Set (`value=true`) or clear a single flag across one or many cells in ONE persist. `ids === nothing`

@@ -474,7 +474,10 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   // you author flows naturally in the notebook and exports interpret the role for placement.
   const roleCls = (c.roleTitle ? ' role-title' : '') + (c.roleAbstract ? ' role-abstract' : '')
     + (c.roleBib ? ' role-bib' : '') + (c.roleCaption ? ' role-caption' : '');
-  const cls = 'cell ' + (c.kind === 'md' ? 'md' : c.kind === 'web' ? 'web' : (isBind ? 'bind' : 'code')) + ' state-' + state
+  // A tool cell keeps the `code` class (its body IS a code editor) and adds `tool`, so the chrome
+  // can mark it without re-implementing the editor mounting.
+  const cls = 'cell ' + (c.kind === 'md' ? 'md' : c.kind === 'web' ? 'web'
+                        : c.kind === 'tool' ? 'code tool' : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
     + roleCls + selCls + (focusId === c.id ? ' dep-focus' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;

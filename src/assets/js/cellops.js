@@ -54,7 +54,8 @@ function addMenu(e, cellId, before = false) {
   const m = document.getElementById('addmenu');
   m.innerHTML = '';
   const where = before ? 'above' : 'below';
-  [['code', '＋ code ' + where], ['md', '＋ markdown ' + where], ['web', '＋ web widget ' + where]].forEach(([k, label]) => {
+  [['code', '＋ code ' + where], ['md', '＋ markdown ' + where], ['web', '＋ web widget ' + where],
+   ['tool', '⌁ tool call ' + where]].forEach(([k, label]) => {
     const b = document.createElement('button'); b.textContent = label;
     b.onclick = () => { hideAddMenu(); addCell(cellId, k, before); }; m.appendChild(b);
   });

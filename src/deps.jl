@@ -1009,7 +1009,12 @@ Evaluate only `STALE` code cells, in document order, through `kernel`. Unchanged
 kernel's namespace from the prior eval. (First run: all cells stale ⇒ full eval.)
 """
 function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
-    nbatch = count(c -> c.state == STALE, report.cells)   # cells about to run → UI shows a stable k/N
+    # A TOOL cell is never swept up by an automatic run. Its source is a call OUT of the notebook
+    # with real consequences — `start_job` starts training — so opening a document, or recomputing
+    # a stale neighbour, must not fire one on the reader's behalf. It stays STALE until someone runs
+    # it deliberately, which `eval_cell!` still does.
+    auto(c) = c.state == STALE && runs_automatically(c.kind)
+    nbatch = count(auto, report.cells)   # cells about to run → UI shows a stable k/N
     nbatch > 0 && _emit_run_batch(report.id, nbatch)
     prepare!(kernel, report)
     prewarm_usings!(report, kernel)   # precise graph BEFORE keys are computed → stable memo keys
@@ -1023,7 +1028,7 @@ function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
     for c in report.cells
         if c.kind == MARKDOWN
             c.state == STALE && eval_cell!(report, c, kernel)   # interpolating md → after its deps ran
-        elseif c.state == STALE
+        elseif auto(c)
             eval_cell!(report, c, kernel)
         end
     end

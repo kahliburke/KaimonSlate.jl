@@ -576,6 +576,20 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .echart, .ichart, [data-slate-zoomable] { border-radius:6px; outline:none; }
 .echart:focus-within, .ichart:focus-within, [data-slate-zoomable]:focus-within {
   box-shadow:0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+/* Tool cells (#%% tool) — a call OUT of the notebook, so it reads as an action rather than a
+   computation: an accent rail, a marker in the header, and a source pane that is secondary to the
+   rendered panel. It never runs on open, which the badge says so nobody waits for it. */
+.cell.tool { border-left:2px solid color-mix(in srgb, var(--accent) 55%, transparent); }
+.cell.tool > .cellhead .cid::before { content:"⌁ "; opacity:.75; }
+.cell.tool > .cellhead .cid { color:color-mix(in srgb, var(--accent) 80%, var(--fg)); }
+.cell.tool.state-stale > .cellhead .cid::after {
+  content:"not run"; margin-left:8px; padding:0 6px; border-radius:8px; font-size:10px;
+  color:var(--muted); background:color-mix(in srgb, var(--fg) 8%, transparent); }
+/* The source is the call; the panel below is the interface. Dim it until hovered/focused so the
+   eye lands on the rendered parameters rather than on `@tool start_job(...)`. */
+.cell.tool > .srchost { opacity:.62; transition:opacity .12s ease; }
+.cell.tool:hover > .srchost, .cell.tool.selected > .srchost { opacity:1; }
+
 /* Animation player (animate(frames; …) → WebGL2 canvas + transport bar) */
 .anim:not(:empty) { padding:8px 10px; border-top:1px solid var(--border); }
 .animplayer { margin-bottom:10px; }

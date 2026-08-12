@@ -19,7 +19,11 @@ import Base64
 
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
-export MARKDOWN, CODE, WEB, FRESH, STALE, RUNNING, ERRORED
+export MARKDOWN, CODE, WEB, TOOL, FRESH, STALE, RUNNING, ERRORED
+# Kind predicates, exported alongside the kinds themselves: sibling modules (`ReportRender`,
+# `NotebookServer`) reach the enum by `using ..ReportEngine`, so a helper that is not exported is
+# invisible to exactly the code that classifies cells.
+export is_code_kind, runs_automatically
 export parse_report, serialize_report, serialize_cells, source_text, cell_definitions
 export standalone!
 
@@ -28,7 +32,13 @@ export standalone!
 # A web cell's `source` IS a runnable `@web(html"…", css"…", js"…")` skin — so it EVALUATES
 # exactly like a code cell (→ a `WebPage`, captured as HTML). The distinct kind only drives the
 # 3-pane HTML/CSS/JS editor and the `#%% web` serialization token; body handling is verbatim (code).
-@enum CellKind MARKDOWN CODE WEB
+# TOOL is a CODE cell in every respect that concerns evaluation — its source is a runnable `@tool`
+# call, it participates in the dependency graph, and it produces a value. What the kind buys is the
+# two things a tool call needs and code does not: distinct chrome (the rendered panel IS the
+# interface, so the editor is secondary), and exclusion from automatic runs. A tool call has side
+# effects out in the world — `start_job` starts training — so reopening a notebook must not fire
+# it. It runs when someone, or some agent, asks for it.
+@enum CellKind MARKDOWN CODE WEB TOOL
 @enum CellState FRESH STALE RUNNING ERRORED   # never-run ≡ STALE
 
 "One representation of a cell's output (MIME-generic display bundle, §7)."
@@ -275,6 +285,8 @@ function _parse_header(rest::AbstractString)
             kind = MARKDOWN
         elseif tok == "web"
             kind = WEB
+        elseif tok == "tool"
+            kind = TOOL
         elseif tok == "code"
             kind = CODE
         else
@@ -592,7 +604,15 @@ end
 
 # ── Serialization ────────────────────────────────────────────────────────────
 
-_kind_token(k::CellKind) = k === MARKDOWN ? "md" : k === WEB ? "web" : "code"
+_kind_token(k::CellKind) = k === MARKDOWN ? "md" : k === WEB ? "web" : k === TOOL ? "tool" : "code"
+
+"""A cell whose source is Julia the engine evaluates. TOOL joins CODE here: everything about
+evaluation, dependencies and capture is identical, and only presentation and WHEN it runs differ."""
+is_code_kind(k::CellKind) = k === CODE || k === WEB || k === TOOL
+
+"""Kinds excluded from automatic runs. A tool call reaches outside the notebook, so opening a
+document, or recomputing a stale neighbour, must never fire one on the reader's behalf."""
+runs_automatically(k::CellKind) = k !== TOOL
 
 # Serialize control-strip columns back to the header grammar: single-control
 # columns as bare names, multi-control columns as `[a,b,…]`, columns joined by `,`.

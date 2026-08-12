@@ -759,7 +759,8 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
                            figrefs = figrefs, figemit = _fig_link_emit) : c.source
     d = Dict{String,Any}(
         "id"      => c.id,
-        "kind"    => c.kind == MARKDOWN ? "md" : c.kind == WEB ? "web" : "code",
+        "kind"    => c.kind == MARKDOWN ? "md" : c.kind == WEB ? "web" :
+                     c.kind == ReportEngine.TOOL ? "tool" : "code",
         "source"  => c.source,
         # Canonical per-cell content hash (the SAME SHA the history uses) — a version token the browser
         # keys reconcile off, instead of a fuzzy string comparison that can drift.
@@ -781,7 +782,8 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "deps"    => collect(c.deps),
         # Top-level names this cell defines — drives ⌘-click go-to-definition in the editor. A name the
         # cell only MUTATES (`prog[] = …`) isn't defined here, so it's excluded (go-to-def lands on the definer).
-        "defs"    => c.kind == CODE ? sort!(String[string(w) for w in cell_definitions(c)]) : String[],
+        "defs"    => c.kind == CODE || c.kind == ReportEngine.TOOL ?
+                     sort!(String[string(w) for w in cell_definitions(c)]) : String[],
     )
     # A web cell ships its three panes (split from the `@web(...)` source) so the editor can mount a
     # per-language HTML/CSS/JS editor instead of showing the raw skin.
