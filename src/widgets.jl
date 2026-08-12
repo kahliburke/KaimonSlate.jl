@@ -879,6 +879,17 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(macro trace(blk)
         esc($(_trace_transform)(blk))
     end))
+    # ── Session tool calls (tools.jl) ────────────────────────────────────────────
+    # The gate tools an AGENT can call are callable from a cell too, since they run in this same
+    # process. `@tool` is call syntax over `slate_tool`, so an action taken by an agent can be
+    # written down as a cell instead of happening off-page.
+    # The `ToolCall` TYPE is deliberately not injected: a cell needs to call a tool and see the
+    # result, not to name or dispatch on the value's type.
+    Core.eval(m, :(const slate_tool = $slate_tool))
+    Core.eval(m, :(const slate_tools = $slate_tools))
+    Core.eval(m, :(macro tool(ex)
+        $(_tool_expand)(ex)     # escapes the VALUES only — see `_tool_expand`
+    end))
     # ── Reactive async primitives (reactive.jl) ──────────────────────────────────
     Core.eval(m, :(const Reactive = $Reactive))
     Core.eval(m, :(const pause = $pause))

@@ -348,6 +348,34 @@ SlateApiEntry("playhead", "Widgets",
         ["array", "numeric", "grid", "linear algebra"],
         Base.Docs.Binding(ReportEngine, :slate_matrix)),
 
+    # ── Session tools ──────────────────────────────────────────────────────────────────────────────
+    # Real functions — documented once in their own docstrings (tools.jl).
+    SlateApiEntry("slate_tool", "Session tools",
+        "Call one of this session's gate tools (the ones an AGENT sees) and render the call.",
+        ["mcp", "agent", "gate tool", "invoke", "extension verb", "tool call"],
+        Base.Docs.Binding(ReportEngine, :slate_tool)),
+    SlateApiEntry("@tool", "Session tools",
+        "Call syntax for `slate_tool`: `@tool start_job(max_epochs = 4)`.",
+        ["mcp", "agent", "call a tool", "invoke", "sugar"],
+        "@tool name(arg = value, …)",
+        """Sugar over [`slate_tool`](@ref), so a tool call reads the way its own documentation
+        does, which is the form an agent would have used:
+        ```julia
+        @tool start_job(experiment = "MyPkg.Widget", max_epochs = 40)
+        @tool list_jobs()
+        ```
+        Keyword arguments only. The value is a `ToolCall`, rendered as a panel showing the tool's
+        FULL declared parameter list (type, required, and whether this call supplied it) beside
+        the result — a wrong call is visible rather than merely failing.
+
+        The point of writing a tool call as a cell is that agent actions become part of the
+        document: durable, inspectable, and re-runnable, instead of happening off-page in a
+        transcript nobody keeps."""),
+    SlateApiEntry("slate_tools", "Session tools",
+        "List the gate tools this session exposes, with parameter counts and summaries.",
+        ["what tools", "available", "discover", "mcp", "agent", "registry"],
+        Base.Docs.Binding(ReportEngine, :slate_tools)),
+
     # ── Assets & front-end ─────────────────────────────────────────────────────────────────────────
     SlateApiEntry("@asset", "Assets & front-end",
         "Read a sibling file's CONTENTS as a TRACKED cell input — edit the file, the cell re-runs.",

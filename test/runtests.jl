@@ -22,6 +22,7 @@ module Engine;    include("test_engine.jl");    end
 module Eval;      include("test_eval.jl");      end
 module Deps;      include("test_deps.jl");      end
 module Envprep;   include("test_envprep.jl");   end
+module Tools;     include("test_tools.jl");     end
 module Web;       include("test_web.jl");       end
 module Bind;      include("test_bind.jl");      end
 module Render;    include("test_render.jl");    end
