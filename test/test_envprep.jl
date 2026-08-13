@@ -62,6 +62,27 @@ end
         @test r.seeded["deps"]["Statistics"] == "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
     end
 
+    @testset "a rebuild puts the notebook's own packages back" begin
+        # Seeding rebuilds the fork from the PARENT, which knows nothing about what the notebook
+        # added — so a parent Project.toml edit stales the fork, the rebuild re-seeds, and every
+        # package the notebook installed disappears. The failure lands at the notebook's first
+        # `using`, far from the upstream edit that caused it.
+        delta = [Dict{String,Any}("name" => "FFTW", "version" => "1.10.0",
+                                  "uuid" => "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"),
+                 Dict{String,Any}("name" => "NNlib", "version" => "0.9.43",
+                                  "uuid" => "872c559c-99b0-510c-b3b7-b6c96a88d5cd")]
+        code = ReportEngine.env_add_code(delta)
+        @test occursin("Pkg.add(", code)
+        @test occursin("name=raw\"FFTW\"", code)
+        @test occursin("uuid=raw\"7a1cc6ca-52ef-59f5-83cd-3a7055c09341\"", code)
+        @test occursin("name=raw\"NNlib\"", code)
+        # The recorded VERSION is deliberately not pinned — it would fight the parent's fresh resolve.
+        @test !occursin("1.10.0", code)
+        # A notebook that added nothing rebuilds exactly as before.
+        @test ReportEngine.env_add_code(Dict{String,Any}[]) == ""
+        @test ReportEngine.env_add_code(nothing) == ""
+    end
+
     @testset "a named parent is reported, and the fork is not itself a package" begin
         r = seed_from("")
         @test r.pname == "Parent"

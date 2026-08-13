@@ -233,12 +233,15 @@ end
 # with ONE reset-and-retry from the authoritative parent. The local mirror of the remote provisioner's
 # self-healing `build_env!`, and the counterpart to the worker's in-process `_seed_notebook_env!` for
 # when the worker can't run yet (a stale env would crash it at boot). Streams into the boot banner.
-function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; online = nothing)
+function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; online = nothing,
+                                delta = Dict{String,Any}[])
     build = function ()
         pname = ReportEngine.seed_env_project!(envdir, parent)
         dev = isempty(pname) ? "" :
               "Pkg.develop(Pkg.PackageSpec(path=raw\"$(parent)\"); preserve=Pkg.PRESERVE_ALL); "
-        ok = _instantiate_env!(envdir; online = online, code = "using Pkg; $(dev)Pkg.instantiate()")
+        ok = _instantiate_env!(envdir; online = online,
+                               code = "using Pkg; $(dev)Pkg.instantiate()" *
+                                      ReportEngine.env_add_code(delta))
         ok && ReportEngine.stamp_env!(envdir, parent)
         return ok
     end
@@ -351,7 +354,9 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             # worker at boot on `using` a dep the fork never received. Self-healing, before spawn.
             if ReportEngine.env_stale(envdir, parent)
                 ReportEngine._rlog("_select_kernel: notebook env stale vs parent → rebuilding $(basename(envdir))")
-                _rebuild_notebook_env!(envdir, parent; online = online)
+                # `delta` matters here: the re-seed comes from the PARENT, which knows nothing about
+                # what this notebook added, so its own packages have to be put back.
+                _rebuild_notebook_env!(envdir, parent; online = online, delta = delta)
             end
             return GateKernel(envdir; parent = parent, envdir = envdir, threads = th, extra_flags = ef, label = lbl, online = online)
         else

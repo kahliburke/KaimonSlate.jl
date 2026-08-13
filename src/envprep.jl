@@ -85,6 +85,32 @@ function seed_env_project!(envdir::AbstractString, parent::AbstractString)
     return (haskey(pt, "name") && haskey(pt, "uuid")) ? String(pt["name"]) : ""
 end
 
+"""
+    env_add_code(delta) -> String
+
+Pkg code that re-adds the notebook's OWN packages (its `Slate.env` footer) after a re-seed.
+
+Seeding rebuilds a fork from its PARENT, which knows nothing about what the notebook added. So
+without this, any upstream `Project.toml` edit stales the fork, the rebuild re-seeds, and every
+package the notebook installed disappears — surfacing much later as "Package X not found" at the
+notebook's first `using`, with nothing to connect it to the upstream change.
+
+Packages are added by name and uuid and left to resolve. The footer records a version too, but
+pinning it would fight the parent's fresh resolution, which is the thing that just changed.
+"""
+function env_add_code(delta)
+    specs = String[]
+    for e in (delta isa AbstractVector ? delta : ())
+        e isa AbstractDict || continue
+        nm = String(get(e, "name", ""))
+        isempty(nm) && continue
+        uu = String(get(e, "uuid", ""))
+        push!(specs, isempty(uu) ? "Pkg.PackageSpec(name=raw\"$(nm)\")" :
+                                   "Pkg.PackageSpec(name=raw\"$(nm)\", uuid=raw\"$(uu)\")")
+    end
+    return isempty(specs) ? "" : "; Pkg.add([" * join(specs, ", ") * "])"
+end
+
 # The parent fingerprint the fork was seeded from — its Project.toml + Manifest.toml content. Any
 # change (a dep added, a re-resolve) flips it, so a fork seeded from the old state reads as stale.
 function env_parent_fingerprint(parent::AbstractString)
