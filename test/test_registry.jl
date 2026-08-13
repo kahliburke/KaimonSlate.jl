@@ -39,6 +39,20 @@ const RE_R = ReportEngine
         @test all(id -> RE_R._reg_get(RE_R._REFRESH_REGISTRY, id) === nothing, ids)
     end
 
+    @testset "a run-batch announcement says whether it starts a run" begin
+        # The frontend keeps a running completed-count so the pill stays monotonic while cells are
+        # queued mid-run, and can only clear it when told a NEW run began. Its other reset is an
+        # idle gap, which never arrives in a notebook that streams continuously — so without this
+        # flag the counters climb across everything, and a 36-cell notebook reports "386/394".
+        seen = Tuple{Int,Bool}[]
+        RE_R.register_runbatch!("rb", (n, fresh) -> push!(seen, (n, fresh)))
+        RE_R._emit_run_batch("rb", 5)              # default: a user asked for work
+        RE_R._emit_run_batch("rb", 3, false)       # a reactive cascade continuing the run
+        RE_R._emit_run_batch("rb", 2, true)
+        @test seen == [(5, true), (3, false), (2, true)]
+        RE_R.unregister_runbatch!("rb")
+    end
+
     @testset "every registry goes through the lock helpers" begin
         # A registry added later that writes its Dict directly would reintroduce the bug silently,
         # so assert the pattern rather than trusting review.

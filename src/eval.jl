@@ -15,6 +15,7 @@ export register_prepare!, unregister_prepare!
 export register_emit!, unregister_emit!, register_bin_emit!, unregister_bin_emit!
 export register_celldone!, unregister_celldone!
 export register_cleanup_cells!, unregister_cleanup_cells!, run_cleanups!
+export register_toolcall!, unregister_toolcall!
 
 # ── Out-of-band callback registries ───────────────────────────────────────────
 #
@@ -79,10 +80,15 @@ end
 const _RUNBATCH_REGISTRY = Dict{String,Any}()
 register_runbatch!(report_id::AbstractString, cb) = _reg_set!(_RUNBATCH_REGISTRY, report_id, cb)
 unregister_runbatch!(report_id::AbstractString) = _reg_del!(_RUNBATCH_REGISTRY, report_id)
-function _emit_run_batch(report_id::AbstractString, n::Integer)
+# `fresh` says whether this announcement STARTS a run or continues one already in progress. The
+# frontend keeps a running completed-count so the pill stays monotonic while cells are queued
+# mid-run, and it can only reset that count when told a new run has begun. Without the distinction
+# it resets on an idle gap instead — which never arrives in a notebook that streams continuously,
+# so `k`/`N` climb across what the reader sees as one run.
+function _emit_run_batch(report_id::AbstractString, n::Integer, fresh::Bool = true)
     cb = _reg_get(_RUNBATCH_REGISTRY, report_id)
     cb === nothing && return nothing
-    try; cb(n); catch e; @debug "eval: run-batch callback failed" report_id exception = e; end
+    try; cb(n, fresh); catch e; @debug "eval: run-batch callback failed" report_id exception = e; end
     return nothing
 end
 
@@ -171,6 +177,21 @@ function _do_cleanup_cells(report_id::AbstractString, ids)
     sids = String[String(i) for i in ids]
     isempty(sids) && return nothing
     try; cb(sids); catch e; @warn "slate: cell-delete cleanup failed" ids = sids exception = e; end
+    return nothing
+end
+
+# Agent tool calls: an agent reaching this session over MCP dispatches a gate tool in the WORKER,
+# which publishes the call on `slate_toolcall`. The poller routes it here and the server appends a
+# TOOL cell recording it — so an action taken from outside the notebook lands IN the notebook
+# instead of only in some transcript. Same out-of-band registry. The callback takes the payload
+# NamedTuple (; name, args, ok, seconds, at, text).
+const _TOOLCALL_REGISTRY = Dict{String,Any}()
+register_toolcall!(report_id::AbstractString, cb) = _reg_set!(_TOOLCALL_REGISTRY, report_id, cb)
+unregister_toolcall!(report_id::AbstractString) = _reg_del!(_TOOLCALL_REGISTRY, report_id)
+function _do_toolcall(report_id::AbstractString, payload)
+    cb = _reg_get(_TOOLCALL_REGISTRY, report_id)
+    cb === nothing && return nothing
+    try; cb(payload); catch e; @warn "slate: recording an agent tool call failed" exception = e; end
     return nothing
 end
 

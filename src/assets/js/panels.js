@@ -447,7 +447,7 @@ function connectLive() {
     if (e.data.startsWith('closed:')) { _notebookClosed(); return; }   // deliberate close — overlay, no auto-reopen
     if (e.data.startsWith('agent:')) { try { agentEvent(JSON.parse(e.data.slice(6))); } catch (_) {} return; }
     if (e.data.startsWith('refresh:')) { try { patchCells(JSON.parse(e.data.slice(8)).cells); } catch (_) {} return; }   // targeted: only the changed cells, inline
-    if (e.data.startsWith('runbatch:')) { window.onRunBatch && window.onRunBatch(parseInt(e.data.slice(9), 10) || 0); return; }   // N cells about to run → stable k/N
+    if (e.data.startsWith('runbatch:')) { const _rb = e.data.slice(9).split(':'); window.onRunBatch && window.onRunBatch(parseInt(_rb[0], 10) || 0, _rb[1] === '1'); return; }   // N cells about to run (+ whether it STARTS a run) → stable k/N
     if (e.data.startsWith('cellpre:')) { try { const r = JSON.parse(e.data.slice(8)); window.onCellPre && window.onCellPre(r.index, r.cell); } catch (_) {} return; }   // agent add/edit: show the (stale) cell BEFORE its eval finishes
     if (e.data.startsWith('cellrun:')) { window.onCellRun && window.onCellRun(e.data.slice(8)); return; }   // a cell started running (live status)
     if (e.data.startsWith('celldone:')) { try { const c = JSON.parse(e.data.slice(9)); patchCells([c]); window.onCellDone && window.onCellDone(c); } catch (_) {} return; }   // a cell finished — patch + status

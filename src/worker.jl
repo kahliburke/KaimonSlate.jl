@@ -759,6 +759,13 @@ function _eval_one(source::String, filename::String, memo_key::String,
     return r
 end
 
+# Publish one agent tool call for the hub to record as a cell. Same envelope as `slate_emit`
+# (Serialization + base64) because the gate stream carries strings.
+_publish_toolcall(p) = KaimonGate._publish_stream("slate_toolcall",
+    Base64.base64encode(Serialization.serialize, p))
+
+_wrap_tools_now() = watch_session_tools!(_publish_toolcall)
+
 "Evaluate a cell's source in the warm namespace; return the wire-form capture. `filename` (a
 kwarg — GateTool drops optional positionals) becomes the parse/backtrace location, `cell:<id>`.
 `memo_*` (when set) enable durable caching: restore an expensive cell's result on a cold start, or
@@ -782,6 +789,10 @@ function __slate_eval(source::String; filename::String = "string",
                          memo_always, memo_unread, memo_safe; slate_ctx = ctx)
     finally
         lock(_CANCEL_LOCK) do; delete!(_RUNNING_TASKS, cid); end
+        # A cell that loaded a package registers ITS gate tools during this eval (a model package's
+        # `using` is how they arrive), so the wrap runs after every cell rather than once at boot.
+        # Idempotent and cheap: a no-op once every tool is wrapped.
+        try; _wrap_tools_now(); catch; end
     end
 end
 

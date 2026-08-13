@@ -139,7 +139,7 @@ function _wire_callbacks!(nb::LiveNotebook)
     register_refresh!(nb.report.id, vars -> server_refresh(nb, vars))                      # async slate_refresh → recompute readers
     register_srcchange!(nb.report.id, (names, err) -> server_src_changed(nb, names, err))  # parent /src reloaded (Revise)
     register_progress!(nb.report.id, c -> _broadcast_progress(nb, c))                      # stream per-cell run status to the UI
-    register_runbatch!(nb.report.id, n -> (try; _broadcast(nb, "runbatch:$n"); catch; end))   # run size → stable k/N
+    register_runbatch!(nb.report.id, (n, fresh) -> (try; _broadcast(nb, "runbatch:$n:$(fresh ? 1 : 0)"); catch; end))   # run size + is-this-a-new-run → stable k/N
     register_userprog!(nb.report.id, (frac, msg, id, done) -> begin
         # Record before broadcasting: an agent BLOCKED on this run samples the latest reading
         # from its own task (see `_note_run_progress`) rather than being pushed every frame,
@@ -155,6 +155,7 @@ function _wire_callbacks!(nb::LiveNotebook)
     register_bin_emit!(nb.report.id, frame -> (try; _ws_broadcast_bin!(nb, frame); catch; end))   # slate_emit_bin → forward the raw binary frame over the page WebSocket as-is
     register_celldone!(nb.report.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
     register_cleanup_cells!(nb.report.id, ids -> (try; _cleanup_deleted_cells(nb, ids); catch; end))   # deleted-cell slate_on_cleanup teardown
+    register_toolcall!(nb.report.id, p -> (try; server_toolcall(nb, p); catch; end))   # an agent's tool call → a TOOL cell
     return nb
 end
 function _unwire_callbacks!(nb::LiveNotebook)
@@ -164,6 +165,7 @@ function _unwire_callbacks!(nb::LiveNotebook)
     unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id)
     unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
     unregister_userprog!(nb.report.id); unregister_emit!(nb.report.id); unregister_celldone!(nb.report.id)
+    unregister_toolcall!(nb.report.id)
     unregister_prepare!(nb.report.id); unregister_bin_emit!(nb.report.id); unregister_cleanup_cells!(nb.report.id)
     return nb
 end
@@ -599,7 +601,10 @@ function _reactive_refresh!(nb::LiveNotebook, seed_predicate)
             i === nothing && continue
             ReportEngine.restale!(nb.report.cells[i]) && push!(changed, id)
         end
-        _eval!(nb)
+        # A reactive push CONTINUES whatever is running rather than starting a run: a dashboard that
+        # pushes every few steps produces a long train of these, and treating each as a new run would
+        # reset the pill constantly (as treating none of them as one makes it count forever).
+        _eval!(nb; fresh = false)
         bindref, hostednames = _bind_index(nb.report)
         bibctx = _bib_link_ctx(nb)
         figidx = figure_index(nb.report)
@@ -2300,7 +2305,8 @@ end
 
 # Tell the UI how many cells are still pending (stale or running) — the run-batch signal. The frontend
 # adds its own completed-count, so the pill's N grows as cells are queued mid-run (not frozen).
-_emit_pending(nb::LiveNotebook, pending::Integer) = ReportEngine._emit_run_batch(nb.report.id, pending)
+_emit_pending(nb::LiveNotebook, pending::Integer; fresh::Bool = false) =
+    ReportEngine._emit_run_batch(nb.report.id, pending, fresh)
 
 # ── Parallel (inter-cell) batch execution — opt-in via meta["parallel"] ──────────────────────────
 # When enabled and a gate worker backs the notebook, the runner hands ALL stale code cells to the
@@ -2485,6 +2491,45 @@ function _run_code_batch!(nb::LiveNotebook)
     end)
     delete!(_PARALLEL_CANCEL, nb.id)
     return true
+end
+
+# Record one agent tool call as a TOOL cell.
+#
+# The cell lands STALE and is NOT run: the call already happened, and running it would fire the
+# tool a second time — for `start_job` that is a second training run. What it carries instead is
+# the outcome of the call that DID happen, written straight into the cell's output, plus the
+# `@tool` source so the reader can re-fire it deliberately from the panel's Invoke button.
+function server_toolcall(nb::LiveNotebook, p)
+    name = String(get(p, :name, ""))
+    isempty(name) && return nothing
+    args = get(p, :args, Pair{String,Any}[])
+    src = ReportEngine.toolcall_source(name, args)
+    ok = get(p, :ok, true) === true
+    text = String(get(p, :text, ""))
+    secs = Float64(get(p, :seconds, 0.0))
+    at = String(get(p, :at, ""))
+    head = ok ? "called by an agent" : "called by an agent — failed"
+    html = "<div style=\"border:1px solid var(--border);border-left:2px solid " *
+        "color-mix(in srgb, var(--accent) 55%, transparent);border-radius:6px;font-size:13px\">" *
+        "<div style=\"padding:6px 12px;color:var(--muted);font-size:11px;" *
+        "border-bottom:1px solid var(--border)\">$(head) &middot; $(secs)s &middot; $(at)</div>" *
+        "<pre style=\"margin:0;padding:8px 12px;white-space:pre-wrap;" *
+        "font-family:ui-monospace,monospace\">$(ReportEngine._h(text))</pre></div>"
+    out = ReportEngine.CellOutput("", ReportEngine.MimeChunk[
+                ReportEngine.MimeChunk("text/html", Vector{UInt8}(html))],
+            Any[], Any[], ReportEngine.BindSpec[], "", nothing, nothing, secs * 1000)
+    lock(nb.lock) do
+        cells = nb.report.cells
+        cid = _gen_id(nb.report)
+        cell = ReportEngine.Cell(cid, ReportEngine.TOOL, src)
+        cell.output = out
+        ReportEngine.mark_fresh!(cell)
+        push!(cells, cell)
+        _commit_reorder!(nb)
+    end
+    _persist!(nb)
+    try; _broadcast(nb, "reload"); catch; end
+    return nothing
 end
 
 # Merge one streamed parallel-batch result (from the worker's slate_celldone) into the notebook,
@@ -2686,11 +2731,17 @@ end
 # Kick the runner; optionally BLOCK (no lock held) until a specific cell finishes, or until the whole
 # notebook drains (wait_for=""+wait_all). Callers that need a synchronous result (the agent tools,
 # startup/restore) wait; interactive UI paths don't (results stream over SSE).
-function _eval!(nb::LiveNotebook; wait_for::AbstractString = "", wait_all::Bool = false)
+function _eval!(nb::LiveNotebook; wait_for::AbstractString = "", wait_all::Bool = false,
+                fresh::Bool = true)
     # Refresh the pill's pending count NOW (e.g. a cell queued while a long cell is mid-run, before
     # the runner reaches its next iteration), so the k/N updates immediately rather than at 1/1.
+    #
+    # `fresh` defaults TRUE because almost every caller is a user asking for work — a run request, an
+    # edit, an agent's add/edit, a restart. The exception is a reactive cascade, which continues the
+    # run in progress and says so; making that the explicit case rather than the default means a new
+    # call site is counted as a run rather than silently folded into the previous one.
     p = lock(nb.lock) do; count(c -> c.state in (STALE, RUNNING), nb.report.cells); end
-    p > 0 && _emit_pending(nb, p)
+    p > 0 && _emit_pending(nb, p; fresh = fresh)
     _ensure_runner!(nb)
     (isempty(wait_for) && !wait_all) && return nb
     t0 = time()

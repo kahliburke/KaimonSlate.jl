@@ -126,6 +126,18 @@ const RE = ReportEngine
         @test occursin("abc", ih)
     end
 
+    @testset "a recorded call renders as re-runnable source" begin
+        # The materialised cell has to be a call an author could have written, not a transcript,
+        # or the reader cannot re-fire it.
+        @test RE.toolcall_source("list_jobs", Pair{String,Any}[]) == "@tool list_jobs()"
+        s = RE.toolcall_source("start_job",
+                               Pair{String,Any}["experiment" => "M.Widget", "max_epochs" => 4])
+        @test occursin("@tool start_job(", s)
+        @test occursin("experiment = \"M.Widget\"", s)   # strings keep their quotes: it must parse
+        @test occursin("max_epochs = 4", s)
+        @test RE._tool_expand(Meta.parse(s)).args[2] == "start_job"   # round-trips through @tool
+    end
+
     @testset "html escapes hostile content" begin
         tc = RE.ToolCall("x", ["a" => "<script>alert(1)</script>"], Dict{String,Any}[], "",
                          false, "", "<img onerror=1>", 0.0, "00:00:00")

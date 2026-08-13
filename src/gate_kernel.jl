@@ -406,6 +406,7 @@ function _ensure_poller!()
                 emits = Tuple{String,String,Any}[]   # ordered slate_emit pushes (rid, channel, deserialized VALUE) — NOT coalesced; each event matters
                 binemits = Tuple{String,Vector{UInt8}}[]   # ordered slate_emit_bin frames (rid, raw binary frame) — forwarded to the page WS as-is
                 prepares = Dict{String,String}()     # notebook → LATEST env-prep status JSON (coalesced per wake; a burst collapses harmlessly)
+                toolcalls = Tuple{String,Any}[]      # ordered agent tool calls (rid, payload) — each one becomes a cell, so never coalesced
                 # Block until a gate-stream message arrives (drain-first, then park in poll() on
                 # the SUB FDs up to a 250 ms idle ceiling) instead of busy-polling at 20 Hz: an
                 # idle extension now costs ~no CPU, and a streaming cell wakes us on arrival (lower
@@ -451,7 +452,17 @@ function _ensure_poller!()
                         _relay_log!(m.conn_name, String(m.data))
                     elseif m.channel == "slate_prepare"       # env precompile progress → "Preparing packages" banner
                         prepares[rid] = String(m.data)
+                    elseif m.channel == "slate_toolcall"      # an agent called a session tool → record it as a cell
+                        val = try
+                            Serialization.deserialize(IOBuffer(Base64.base64decode(String(m.data))))
+                        catch
+                            nothing
+                        end
+                        val === nothing || push!(toolcalls, (rid, val))
                     end
+                end
+                for (rid, payload) in toolcalls
+                    _do_toolcall(rid, payload)
                 end
                 for (rid, vars) in pending
                     isempty(vars) || _do_refresh(rid, collect(vars))

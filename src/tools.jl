@@ -148,9 +148,14 @@ function slate_tool(name::AbstractString, args::AbstractVector; handlers = nothi
     g = _gate_module()
     argdict = Dict{String,Any}(k => v for (k, v) in args)
     t0 = time()
+    # Suppress the agent-call recorder for the duration of this dispatch. `slate_tool` goes through
+    # the SAME handler an agent's call does, so without this a `@tool` cell would append a second
+    # cell recording itself on every run.
     try
-        res = Base.invokelatest(getfield(g, :_dispatch_tool_call), getfield(tool, :handler),
-                                argdict; tool_name = String(name))
+        res = task_local_storage(_IN_CELL_TOOLCALL, true) do
+            Base.invokelatest(getfield(g, :_dispatch_tool_call), getfield(tool, :handler),
+                              argdict; tool_name = String(name))
+        end
         return ToolCall(String(name), args, params, desc, true, _as_text(res), "",
                         round(time() - t0, digits = 3), at, channel)
     catch e
@@ -399,6 +404,66 @@ end
 # How a supplied value is shown INSIDE an input: a string without its quotes (you are editing the
 # text, not a Julia literal), anything else as it prints.
 _argtext(v) = v isa AbstractString ? String(v) : string(v)
+
+# ── Recording an agent's calls ───────────────────────────────────────────────────────────────────
+#
+# The tools an agent reaches over MCP are dispatched IN THIS PROCESS, by the gate's message loop.
+# Wrapping their handlers is therefore enough to notice a call and record it as a cell — which is
+# the point: an action taken from outside the notebook otherwise leaves no trace in the document,
+# only in a transcript nobody keeps.
+#
+# A call made BY a cell (`@tool …`) is skipped: it already has a cell, and recording it would
+# append a duplicate on every run. The two paths are told apart by a task-local flag rather than by
+# inspecting the call, because `slate_tool` invokes the very same handler.
+
+const _IN_CELL_TOOLCALL = :__slate_in_cell_toolcall
+const _TOOLS_WATCHED = Ref(false)
+
+_recording_suppressed() = get(task_local_storage(), _IN_CELL_TOOLCALL, false) === true
+
+"""Render one recorded call as the source of a TOOL cell: the `@tool` form an author would have
+written, so the cell is re-runnable rather than a transcript of something that happened."""
+function toolcall_source(name::AbstractString, args)
+    isempty(args) && return "@tool $(name)()"
+    parts = String[]
+    for (k, v) in args
+        push!(parts, string(k, " = ", v isa AbstractString ? repr(String(v)) : repr(v)))
+    end
+    body = join(parts, ",\n" * " "^(length(name) + 7))
+    return "@tool $(name)($(body))"
+end
+
+"""Start publishing every session tool call an agent makes, for the hub to record as a cell.
+
+Registers a gate OBSERVER rather than wrapping handlers. Wrapping was the obvious approach and is
+wrong: a handler's signature IS its MCP schema (`_reflect_tool` reads it), so a wrapper with
+`(args...; kwargs...)` silently strips a tool's parameters and the agent can no longer call it.
+Observing leaves the tool untouched.
+
+Idempotent — safe to call after every cell, which is what catches the tools a package registers
+when a cell first loads it."""
+function watch_session_tools!(publish)
+    _TOOLS_WATCHED[] && return false
+    g = _gate_module()
+    (g === nothing || !isdefined(g, :observe_tools!)) && return false
+    Base.invokelatest(getfield(g, :observe_tools!), function (name, args, ok, result, seconds)
+        # A call made BY a cell (`@tool …`) already has a cell; recording it would append a
+        # duplicate on every run. The two paths share this handler, so they are told apart by a
+        # task-local flag rather than by inspecting the call.
+        _recording_suppressed() && return nothing
+        startswith(String(name), "__slate_") && return nothing   # Slate's own plumbing, not an action
+        publish((; name = String(name),
+                   args = Pair{String,Any}[String(k) => v for (k, v) in args],
+                   ok = ok === true,
+                   seconds = round(Float64(seconds), digits = 3),
+                   at = _clock_now(),
+                   text = result isa AbstractString ? String(result) :
+                          sprint(show, MIME("text/plain"), result)))
+        return nothing
+    end)
+    _TOOLS_WATCHED[] = true
+    return true
+end
 
 function Base.show(io::IO, tc::ToolCall)
     print(io, "ToolCall(", tc.name, ", ", tc.ok ? "ok" : "error", ", ", tc.seconds, "s)")

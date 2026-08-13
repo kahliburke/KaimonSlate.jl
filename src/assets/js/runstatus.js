@@ -180,9 +180,14 @@
   // The server announced a run of N cells. Reset the batch counters (a fresh streak) and show the pill.
   // The server reports PENDING cells (stale + running); N = what we've finished + what's pending, so
   // the pill grows as cells are queued mid-run. Only a FRESH streak (none active) resets the counters.
-  window.onRunBatch = function (n) {
+  window.onRunBatch = function (n, fresh) {
     clearTimeout(idleTimer);
-    if (!active()) { done = 0; restored = 0; errCursor = 0; }
+    // Reset on a NEW run, or when nothing is in flight. The idle check alone was the whole story,
+    // and it never fires for a notebook that streams: a dashboard pushing a reactive value every
+    // few steps keeps `active()` true for minutes, so `done` never cleared and the pill counted
+    // every cell of every cascade as if they belonged to one run — "Running 386/394" in a notebook
+    // with 36 cells. The server now says which announcements start a run.
+    if (fresh || !active()) { done = 0; restored = 0; errCursor = 0; }
     total = done + n;
     // A real batch (startup / run-all) shows from the FIRST cell so a fast restore/parallel burst is
     // visible instead of snapping to "done"; a lone reactive cell stays deferred (BATCH_REVEAL_MIN).
