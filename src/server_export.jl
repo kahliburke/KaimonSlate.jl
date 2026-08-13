@@ -511,24 +511,88 @@ function _page_save_assets(nb::LiveNotebook)
     return out
 end
 
+# The RELATIVE module specifiers a JS source imports — `./x.js`, `../y/z.js` — across static imports,
+# re-exports and dynamic `import()`. Bare specifiers ("preact", "@slate/widget") are deliberately left
+# alone: those resolve through the page's import map, not the asset tree.
+function _js_rel_imports(src::AbstractString)
+    out = String[]
+    pats = (r"(?:^|[\s;}])(?:import|export)\b[^;]*?\bfrom\s*[\"']([^\"']+)[\"']"m,
+            r"\bimport\s*\(\s*[\"']([^\"']+)[\"']\s*\)",
+            r"(?:^|[\s;}])import\s*[\"']([^\"']+)[\"']")
+    for pat in pats, m in eachmatch(pat, src)
+        s = String(m.captures[1])
+        (startswith(s, "./") || startswith(s, "../")) && push!(out, s)
+    end
+    return unique(out)
+end
+
+_js_module_path(rel, spec) = replace(normpath(joinpath(dirname(rel), spec)), '\\' => '/')
+_is_js(rel) = (e = lowercase(splitext(rel)[2]); e == ".js" || e == ".mjs")
+
 # The `@asset` JS MODULES a web cell imports — `Slate.assetUrl("…")` (preferred) or the legacy
 # `location.pathname + "/asset/…"` — as `relative-path => file bytes`, read from the notebook's asset
 # root. So a static export ships the widget's CODE (not just its `save_asset` DATA) and loads it offline.
-# (Cell-source scan; one level — a module that itself imports another `@asset` module isn't followed yet.)
+#
+# A cell names only the ENTRY module, so imports are FOLLOWED transitively: a front end split across
+# several files would otherwise export with everything but its entry point missing, and fail to mount
+# with a 404 that only shows up in a browser console nobody is watching.
 function _web_asset_modules(nb::LiveNotebook)
     out = Dict{String,Vector{UInt8}}()
     base = String(get(nb.report.meta, "assetbase", "")); isempty(base) && return out
     rootn = normpath(base)
     pats = (r"location\.pathname\s*\+\s*[\"']/asset/([^\"']+)[\"']", r"assetUrl\(\s*[\"']([^\"']+)[\"']")
+    queue = String[]
     for c in nb.report.cells                       # scan ALL cells — a `@web` cell is its own kind, not CODE
         for pat in pats, m in eachmatch(pat, c.source)
-            rel = String(m.captures[1]); haskey(out, rel) && continue
-            p = normpath(joinpath(rootn, strip(rel, '/')))
-            (p == rootn || startswith(p, rootn * "/") || startswith(p, rootn * "\\")) && isfile(p) || continue
-            out[rel] = read(p)
+            push!(queue, String(m.captures[1]))
+        end
+    end
+    while !isempty(queue)
+        rel = String(strip(popfirst!(queue), '/'))
+        haskey(out, rel) && continue
+        p = normpath(joinpath(rootn, rel))
+        # Containment: an asset path is author-controlled, and `../` must not walk out of the tree.
+        (p == rootn || startswith(p, rootn * "/") || startswith(p, rootn * "\\")) && isfile(p) || continue
+        out[rel] = read(p)
+        _is_js(rel) || continue
+        for spec in _js_rel_imports(String(copy(out[rel])))
+            push!(queue, _js_module_path(rel, spec))
         end
     end
     return out
+end
+
+# Inlining a module turns it into a `data:` URL, and a data: module has NO base URL to resolve its own
+# `./x.js` against — the import throws before a line of it runs. So each specifier is replaced by the
+# dependency's own data URL, which means resolving depth-first: a parent can't be encoded until every
+# child it names already has its final bytes.
+function _inline_js_modules(wm::Dict{String,Vector{UInt8}})
+    done = Dict{String,Vector{UInt8}}()
+    doing = Set{String}()
+    dataurl(b) = string("data:text/javascript;base64,", Base64.base64encode(b))
+    function resolve(rel)
+        haskey(done, rel) && return done[rel]
+        haskey(wm, rel) && _is_js(rel) || return get(wm, rel, nothing)
+        if rel in doing
+            # Cyclic imports are legal ES modules but cannot be expressed as nested data URLs — each
+            # would have to contain the other. Left as-is so the failure is a specific console error
+            # rather than a hang here.
+            @warn "Slate export: circular JS imports can't be inlined for a standalone page" mod = rel
+            return wm[rel]
+        end
+        push!(doing, rel)
+        src = String(copy(wm[rel]))
+        for spec in _js_rel_imports(src)
+            dep = resolve(_js_module_path(rel, spec))
+            dep === nothing && continue            # not shipped (missing file) — leave it to fail loudly
+            url = dataurl(dep)
+            src = replace(src, "\"$spec\"" => "\"$url\"", "'$spec'" => "'$url'")
+        end
+        delete!(doing, rel)
+        return done[rel] = Vector{UInt8}(src)
+    end
+    for rel in keys(wm); resolve(rel); end
+    return done
 end
 
 # The page-local assets a notebook's outputs reference → relative path => source (a local FILE path for
@@ -1435,9 +1499,13 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                     end
                     push!(ents, string(JSON.json(spec["path"]), ":", JSON.json(e)))
                 end
+                # Standalone rewrites each module's relative imports to its dependencies' data URLs;
+                # a published site keeps them as-is, since there the modules are page-local siblings
+                # and the browser resolves `./x.js` against the entry module's own URL.
+                wmi = inline_assets ? _inline_js_modules(wm) : wm
                 for (rel, bytes) in wm
                     e = Dict{String,Any}("path" => rel, "name" => basename(rel), "mime" => "text/javascript")
-                    inline_assets ? (e["data"] = Base64.base64encode(bytes)) : (e["url"] = rel)
+                    inline_assets ? (e["data"] = Base64.base64encode(get(wmi, rel, bytes))) : (e["url"] = rel)
                     push!(ents, string(JSON.json(rel), ":", JSON.json(e)))
                 end
                 string("<script>", _EXPORT_ASSET_JS,

@@ -324,6 +324,61 @@ end
     end
 end
 
+# A front end split across several ES modules: the cell names only the ENTRY point, so the exporter
+# has to follow its imports or the page ships with everything but that one file missing. Standalone
+# additionally has to REWRITE the specifiers — a `data:` module has no base URL to resolve `./x.js`
+# against, so nesting is the only way the dependency can travel with it.
+@testset "multi-file JS modules in export" begin
+    root = mktempdir(); mkpath(joinpath(root, "assets", "lib"))
+    write(joinpath(root, "assets", "app.js"),
+          "import { u } from \"./lib/util.js\";\nimport { html } from \"htm/preact\";\nexport const go = () => u(html);\n")
+    write(joinpath(root, "assets", "lib", "util.js"),
+          "import { S } from \"../shared.js\";\nexport const u = (h) => S + h;\n")
+    write(joinpath(root, "assets", "shared.js"), "export const S = 42;\n")
+    write(joinpath(root, "assets", "unused.js"), "export const nope = 1;\n")
+    _mod_nb() = begin
+        rep = _RE.parse_report("#%% md id=t title\n# mods\n\n#%% web id=w\n@web(js\"\"\"\n" *
+                               "const m = await import(window.Slate.assetUrl(\"assets/app.js\"));\nm.go();\n\"\"\")\n")
+        rep.meta["assetbase"] = root
+        NS.LiveNotebook("mods", joinpath(root, "mods.jl"), rep, _RE.InProcessKernel(), 1, String[], String[],
+            ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    end
+
+    wm = NS._web_asset_modules(_mod_nb())
+    @test sort(collect(keys(wm))) == ["assets/app.js", "assets/lib/util.js", "assets/shared.js"]
+    @test !haskey(wm, "assets/unused.js")        # only what is actually reachable rides along
+
+    # Bare specifiers stay bare — those resolve through the page's import map, not the asset tree.
+    inlined = NS._inline_js_modules(wm)
+    app = String(inlined["assets/app.js"])
+    @test occursin("\"htm/preact\"", app)
+    @test !occursin("\"./lib/util.js\"", app)
+    @test occursin("import { u } from \"data:text/javascript;base64,", app)
+    # util.js travels INSIDE app.js, and must itself already have shared.js nested in it.
+    util = String(Base64.base64decode(match(r"data:text/javascript;base64,([^\"]+)\"", app).captures[1]))
+    @test !occursin("\"../shared.js\"", util)
+    @test occursin("data:text/javascript;base64,", util)
+
+    standalone = NS.export_html(_mod_nb(); inline_assets = true)
+    for k in ("assets/app.js", "assets/lib/util.js", "assets/shared.js")
+        @test occursin("\"$k\":{", standalone)
+    end
+
+    # Published: modules stay page-local siblings with their relative imports intact, and every one
+    # of them is actually written out next to the page.
+    published = NS.export_html(_mod_nb(); inline_assets = false)
+    @test occursin("\"url\":\"assets/lib/util.js\"", published)
+    dir = mktempdir()
+    try
+        NS._write_page_assets!(dir, _mod_nb())
+        @test isfile(joinpath(dir, "assets", "lib", "util.js"))
+        @test isfile(joinpath(dir, "assets", "shared.js"))
+        @test occursin("\"../shared.js\"", read(joinpath(dir, "assets", "lib", "util.js"), String))
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
+
 @testset "geo map assets in export" begin
     _geo_spec() = Dict{String,Any}(
         "registerMap" => Dict{String,Any}("name" => "world", "url" => "/assets/maps/world.json"),
