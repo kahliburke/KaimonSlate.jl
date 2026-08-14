@@ -139,7 +139,7 @@ end
 # all in one eval. Those methods land in a world newer than this frame, so a direct
 # `showable`/`show` would miss them and yield an empty chunk (notably on a cell's
 # first run). `invokelatest` pins the dispatch to the latest world.
-function _capture_rich!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
+function _rich_scan!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
     for m in _RICH_MIMES
         if Base.invokelatest(showable, m, x)
             bytes = Base.invokelatest(_mime_bytes, MIME(m), x)
@@ -151,6 +151,23 @@ function _capture_rich!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
     end
     return false
 end
+
+# `with_render_memo` needs SlateExtensionsBase 0.9.1. Treat it as OPTIONAL, the way `_EE_OK` treats
+# ExpressionExplorer: a notebook project that declares an older SEB shadows the slate-owned infra env,
+# because it comes first on LOAD_PATH. Calling a missing function here raises `UndefVarError` inside
+# the caller's `catch`, which drops EVERY rich output to its text repr with nothing logged.
+const _RENDER_MEMO_OK = isdefined(SlateExtensionsBase, :with_render_memo)
+_RENDER_MEMO_OK ||
+    @warn "slate: SlateExtensionsBase $(pkgversion(SlateExtensionsBase)) predates `with_render_memo` — a rich render runs 2-3 times per display (upgrade to 0.9.1)"
+
+# The scan asks the two Slate MIMEs before the rest, and SEB answers `showable` for them by RUNNING
+# `slate_render`. `with_render_memo` marks this scan as one display, so those probes and the `show`
+# that follows share ONE render (see SEB `render.jl`) — an extension whose render is expensive, or
+# opens a session, does the work once. The memo covers only this call and is cleared on the way out,
+# so a value shown twice, or changed between two displays, renders again.
+_capture_rich!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x) =
+    _RENDER_MEMO_OK ? SlateExtensionsBase.with_render_memo(() -> _rich_scan!(chunks, x)) :
+                      _rich_scan!(chunks, x)
 
 # Documenter `[foo](@ref)` cross-references render (via Markdown/CommonMark, e.g. a cell's `@doc name`
 # output) as `<a href="@ref">…</a>`, whose relative href resolves to `/n/@ref` → 404. Rewrite each to an
