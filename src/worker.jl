@@ -764,7 +764,15 @@ end
 _publish_toolcall(p) = KaimonGate._publish_stream("slate_toolcall",
     Base64.base64encode(Serialization.serialize, p))
 
-_wrap_tools_now() = watch_session_tools!(_publish_toolcall)
+# The notebook's JS→Julia registry, read fresh on every call: a namespace reset replaces the module,
+# so a captured reference would register the recorded panel's callback into a dead one.
+_ns_handlers() = try
+    Base.invokelatest(getglobal, _NS[], :__slate_handlers)
+catch
+    nothing
+end
+
+_wrap_tools_now() = watch_session_tools!(_publish_toolcall; handlers = _ns_handlers)
 
 "Evaluate a cell's source in the warm namespace; return the wire-form capture. `filename` (a
 kwarg — GateTool drops optional positionals) becomes the parse/backtrace location, `cell:<id>`.

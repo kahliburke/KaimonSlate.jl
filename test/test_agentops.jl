@@ -536,3 +536,23 @@ end
         NS.stop_hub(hub)
     end
 end
+
+@testset "a recorded tool call lands next to its tool" begin
+    RE = NS.ReportEngine
+    cell(id, kind, src) = RE.Cell(id, kind, src)
+    cells = [cell("intro", RE.MARKDOWN, "# about start_job"),
+             cell("setup", RE.CODE, "x = 1"),
+             cell("train", RE.TOOL, "@tool start_job(size = 4)"),
+             cell("plot", RE.CODE, "plot(x)")]
+
+    # After the cell that already calls it, not at the tail — a recorded call belongs where the
+    # reader is already looking, and repeated calls stack there in call order.
+    @test NS._toolcall_slot(cells, "start_job") == 4
+    # Prose that merely NAMES a tool is not a call site.
+    @test NS._toolcall_slot(cells, "list_jobs") == 5
+    # The function form counts too, and the LAST mention wins so calls accumulate in order.
+    push!(cells, cell("again", RE.CODE, "slate_tool(\"start_job\"; size = 8)"))
+    @test NS._toolcall_slot(cells, "start_job") == 6
+    # A tool the document has never mentioned has nowhere better than the end.
+    @test NS._toolcall_slot(RE.Cell[], "start_job") == 1
+end

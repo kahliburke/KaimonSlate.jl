@@ -2498,10 +2498,30 @@ function _run_code_batch!(nb::LiveNotebook)
     return true
 end
 
+# Where a recorded call belongs.
+#
+# Appending every one at the tail turns a working session into a growing pile of unrelated calls at
+# the bottom of the document, each of them far from the cell it actually relates to. A recorded call
+# goes after the last cell that already concerns the SAME tool — the hand-written `@tool` cell it
+# echoes, or the previous recording of it — so repeated calls stack in call order, in the part of
+# the notebook the reader is already looking at. A tool the document has not mentioned yet has no
+# such place, and the tail is the only honest answer for it.
+#
+# Only code and tool cells count: prose that happens to NAME a tool is not a call site.
+function _toolcall_slot(cells, name::AbstractString)
+    needles = ("@tool " * name * "(", "slate_tool(\"" * name * "\"")
+    slot = length(cells) + 1
+    for (i, c) in enumerate(cells)
+        (c.kind === ReportEngine.CODE || c.kind === ReportEngine.TOOL) || continue
+        any(n -> occursin(n, c.source), needles) && (slot = i + 1)
+    end
+    return slot
+end
+
 # Record one agent tool call as a TOOL cell.
 #
 # The cell lands STALE and is NOT run: the call already happened, and running it would fire the
-# tool a second time — for `start_job` that is a second training run. What it carries instead is
+# tool a second time, which for a tool that starts work is a second job. What it carries instead is
 # the outcome of the call that DID happen, written straight into the cell's output, plus the
 # `@tool` source so the reader can re-fire it deliberately from the panel's Invoke button.
 function server_toolcall(nb::LiveNotebook, p)
@@ -2513,13 +2533,18 @@ function server_toolcall(nb::LiveNotebook, p)
     text = String(get(p, :text, ""))
     secs = Float64(get(p, :seconds, 0.0))
     at = String(get(p, :at, ""))
-    head = ok ? "called by an agent" : "called by an agent — failed"
-    html = "<div style=\"border:1px solid var(--border);border-left:2px solid " *
-        "color-mix(in srgb, var(--accent) 55%, transparent);border-radius:6px;font-size:13px\">" *
-        "<div style=\"padding:6px 12px;color:var(--muted);font-size:11px;" *
-        "border-bottom:1px solid var(--border)\">$(head) &middot; $(secs)s &middot; $(at)</div>" *
+    head = ok ? "called by an agent" : "called by an agent, failed"
+    # The worker renders the panel (it has the tool registry and the notebook's call-back handlers);
+    # the hub only attributes it. Without a panel — no gate, a worker that could not build one — the
+    # reply text is shown as it came, which is all the hub can say about it.
+    panel = String(get(p, :html, ""))
+    body = isempty(panel) ?
         "<pre style=\"margin:0;padding:8px 12px;white-space:pre-wrap;" *
-        "font-family:ui-monospace,monospace\">$(ReportEngine._h(text))</pre></div>"
+        "font-family:ui-monospace,monospace\">$(ReportEngine._h(text))</pre>" : panel
+    html = "<div style=\"border-left:2px solid color-mix(in srgb, var(--accent) 55%, transparent);" *
+        "padding-left:8px;font-size:13px\">" *
+        "<div style=\"padding:2px 0 4px;color:var(--muted);font-size:11px\">$(head)</div>" *
+        body * "</div>"
     out = ReportEngine.CellOutput("", ReportEngine.MimeChunk[
                 ReportEngine.MimeChunk("text/html", Vector{UInt8}(html))],
             Any[], Any[], ReportEngine.BindSpec[], "", nothing, nothing, secs * 1000)
@@ -2529,7 +2554,7 @@ function server_toolcall(nb::LiveNotebook, p)
         cell = ReportEngine.Cell(cid, ReportEngine.TOOL, src)
         cell.output = out
         ReportEngine.mark_fresh!(cell)
-        push!(cells, cell)
+        insert!(cells, _toolcall_slot(cells, name), cell)
         _commit_reorder!(nb)
     end
     _persist!(nb)

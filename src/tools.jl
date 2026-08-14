@@ -1,6 +1,6 @@
 # Tool calls as cell values — `slate_tool` / `@tool` / `slate_tools`.
 #
-# A Kaimon session's gate tools (`start_job`, an extension's verbs, anything registered with
+# A Kaimon session's gate tools (an extension's verbs, anything registered with
 # `KaimonGate.serve(tools=…)`) are normally reachable only by an AGENT, over MCP. They run in this
 # very process, so the notebook can call them too, and that is the point of this file: a tool call
 # becomes an ordinary cell value with a rich rendering, so an action an agent took is a durable,
@@ -68,6 +68,69 @@ _param_type(a) = begin
     tm isa AbstractDict ? String(get(tm, "julia_type", get(tm, "kind", "any"))) : "any"
 end
 
+# ── What a reply advertises as its next call ─────────────────────────────────────────────────────
+#
+# A tool that starts work in the background cannot return its outcome, so it returns a HANDLE and
+# names the call that reads it:
+#
+#     started job a1b2c3d4. Poll `job_status(job_id="a1b2c3d4")`;
+#     stop with `job_cancel(job_id="a1b2c3d4")`.
+#
+# That sentence is already a contract, so the panel reads it rather than being told about any one
+# tool: a backticked call inside a result is a FOLLOW-UP, and one the surrounding prose asks you to
+# POLL is the call that tracks the work to completion. This is what makes a cell recording such a
+# call a live view of the work it started instead of a record of the reply that started it, without
+# anything here knowing what kind of work any tool does.
+
+"""One call a tool's reply names as the next step: `poll` marks the one that tracks the work."""
+struct FollowUp
+    name::String
+    args::Vector{Pair{String,String}}
+    poll::Bool
+end
+
+const _FOLLOWUP_CALL = r"`([A-Za-z_][A-Za-z0-9_!]*)\(([^`()]*)\)`"
+const _FOLLOWUP_ARG = r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\"([^\"]*)\"|([^,\s]+))"
+
+"""Every backticked call a result advertises, in the order stated, deduplicated."""
+function _followups(text::AbstractString; limit::Int = 4)
+    out = FollowUp[]
+    isempty(text) && return out
+    for m in eachmatch(_FOLLOWUP_CALL, text)
+        args = Pair{String,String}[]
+        for a in eachmatch(_FOLLOWUP_ARG, m.captures[2])
+            v = a.captures[2] === nothing ? String(a.captures[3]) : String(a.captures[2])
+            push!(args, String(a.captures[1]) => v)
+        end
+        # Only the prose distinguishes "poll this until it finishes" from "here is another thing
+        # you may want to do", and it is stated in the CLAUSE introducing the call. Take the text
+        # back to the last clause boundary rather than a fixed number of characters: a window wide
+        # enough to hold one clause also reaches back into the previous one, so "Poll `a`; stop
+        # with `b`" marked both as polls once a tool name grew by a character.
+        before = text[1:prevind(text, m.offset)]
+        bound = findlast(c -> c in ('.', ';', '\n'), before)
+        lead = bound === nothing ? before : before[nextind(before, bound):end]
+        fu = FollowUp(String(m.captures[1]), args, occursin(r"poll"i, lead))
+        any(f -> f.name == fu.name && f.args == fu.args, out) && continue
+        push!(out, fu)
+        length(out) >= limit && break
+    end
+    return out
+end
+
+# Where a poll got to. `status` is the conventional field name and `_result_fields` already
+# recovers it from either record shape; a reply that does not say is polled ONCE and then left to
+# the reader, rather than guessed at on a timer forever.
+const _RUNNING_STATES = ("running", "starting", "queued", "pending", "in_progress", "active")
+
+function _poll_state(text::AbstractString)
+    for (k, v) in _result_fields(text)
+        lowercase(k) == "status" || continue
+        return lowercase(strip(v)) in _RUNNING_STATES ? "running" : "done"
+    end
+    return "unknown"
+end
+
 # ── The value a tool call produces ───────────────────────────────────────────────────────────────
 
 """
@@ -88,12 +151,39 @@ struct ToolCall
     seconds::Float64
     at::String
     channel::String                     # JS→Julia channel for re-invoking from the panel ("" = inert)
+    followups::Vector{FollowUp}         # the next calls this reply named (see above)
 end
 
-# Positional-light constructor, so a hand-built ToolCall (tests, a caller with no gate) needs no
-# channel and simply renders without the Invoke control.
+# Positional-light constructors. The follow-ups are READ OFF the result rather than passed in, so
+# every way of building a ToolCall gets them; a hand-built one (tests, a caller with no gate) also
+# needs no channel and simply renders without the Invoke control.
+ToolCall(name, args, params, description, ok, result, error, seconds, at, channel) =
+    ToolCall(name, args, params, description, ok, result, error, seconds, at, channel,
+             ok ? _followups(result) : FollowUp[])
 ToolCall(name, args, params, description, ok, result, error, seconds, at) =
     ToolCall(name, args, params, description, ok, result, error, seconds, at, "")
+
+"""
+    tool_handle(tc::ToolCall) -> Union{String, Nothing}
+
+The identifier a tool handed back, recovered from the follow-up call its reply names.
+
+Work that runs in the background returns a handle rather than an outcome, and states the call that
+reads it. This picks that handle out, so a cell can thread it onward instead of copying it by eye:
+
+```julia
+job = @tool start_job(size = 12)
+@tool job_status(job_id = tool_handle(job))
+```
+
+`nothing` when the reply names no follow-up carrying an id.
+"""
+function tool_handle(tc::ToolCall)
+    for f in tc.followups, (k, v) in f.args
+        (k == "id" || endswith(k, "_id")) && return v
+    end
+    return nothing
+end
 
 """
     slate_tool(name; kwargs...) -> ToolCall
@@ -105,11 +195,39 @@ agent driving it act on one session rather than two copies of it. Arguments are 
 the handler's signature by the gate's own dispatcher, so a wrong name or an unconvertible value is
 a clear error rather than a `MethodError`.
 
-    slate_tool("start_job"; experiment = "Main.NB.Widget", max_epochs = 4)
+    slate_tool("start_job"; target = "Main.NB.Widget", size = 4)
 
 `@tool` is the same thing in call syntax. `slate_tools()` lists what is available.
 """
 slate_tool(name::AbstractString; kwargs...) = slate_tool(name, _kw_pairs(kwargs))
+
+"""Register the panel's call-back path and return its channel (`""` when there is nowhere to
+register, which renders an inert panel).
+
+The browser calls back on this channel with the edited parameters, so re-running a tool never needs
+the CELL to re-run, which matters because a cell re-run would also re-execute everything downstream
+of it. One handler serves the panel's whole surface: Invoke re-fires this tool, and a follow-up
+button fires the tool the reply named by passing `__tool`, so a tracked run stays on the channel the
+cell already registered."""
+function _register_invoke!(handlers, name::AbstractString)
+    handlers === nothing && return ""
+    channel = "__tool:" * String(name)
+    handlers[channel] = function (a)
+        called = String(_payload_get(a, "__tool", name))
+        supplied = Pair{String,Any}[]
+        for (k, v) in pairs(a)
+            startswith(String(k), "__") && continue          # a panel control key, not an argument
+            sv = v isa AbstractString ? String(v) : v
+            (sv isa AbstractString && isempty(strip(sv))) && continue
+            push!(supplied, String(k) => _parse_arg(sv))
+        end
+        tc = slate_tool(called, supplied)
+        text = tc.ok ? tc.result : tc.error
+        return (ok = tc.ok, seconds = tc.seconds, at = tc.at, text = text,
+                tool = called, state = tc.ok ? _poll_state(text) : "done")
+    end
+    return channel
+end
 
 function slate_tool(name::AbstractString, args::AbstractVector; handlers = nothing)
     args = Pair{String,Any}[String(first(p)) => last(p) for p in args]
@@ -123,24 +241,7 @@ function slate_tool(name::AbstractString, args::AbstractVector; handlers = nothi
                         "No tool named `$name` in this session. Available: $avail", 0.0, at)
     end
 
-    # Register the panel's Invoke path. The browser calls back on this channel with the edited
-    # parameters, so re-running the tool never needs the cell to re-run — which matters because a
-    # cell re-run would also re-execute everything downstream of it.
-    channel = ""
-    if handlers !== nothing
-        channel = "__tool:" * String(name)
-        handlers[channel] = function (a)
-            supplied = Pair{String,Any}[]
-            for (k, v) in pairs(a)
-                sv = v isa AbstractString ? String(v) : v
-                (sv isa AbstractString && isempty(strip(sv))) && continue
-                push!(supplied, String(k) => _parse_arg(sv))
-            end
-            tc = slate_tool(String(name), supplied)
-            return (ok = tc.ok, seconds = tc.seconds, at = tc.at,
-                    text = tc.ok ? tc.result : tc.error)
-        end
-    end
+    channel = _register_invoke!(handlers, name)
     meta = _tool_meta(tool)
     params = Vector{Dict{String,Any}}(get(meta, "arguments", Dict{String,Any}[]))
     desc = String(get(meta, "description", ""))
@@ -179,6 +280,15 @@ function _parse_arg(v)
     return String(v)
 end
 
+# The browser's payload arrives as a Dict or a NamedTuple depending on the bridge, so read it by
+# iteration rather than assuming either one's `get`.
+function _payload_get(a, key::AbstractString, default)
+    for (k, v) in pairs(a)
+        String(k) == key && return v
+    end
+    return default
+end
+
 _kw_pairs(kwargs) = Pair{String,Any}[String(k) => v for (k, v) in kwargs]
 _as_text(x) = x isa AbstractString ? String(x) : sprint(show, MIME("text/plain"), x)
 
@@ -205,7 +315,7 @@ as `["run_id" => x]` sidesteps hygiene entirely, because a string is not a symbo
 """
 function _tool_expand(ex)
     (ex isa Expr && ex.head === :call) ||
-        error("@tool expects a call, e.g. `@tool list_jobs()` or `@tool start_job(max_epochs = 4)`")
+        error("@tool expects a call, e.g. `@tool list_jobs()` or `@tool start_job(size = 4)`")
     name = String(ex.args[1])
     pairs = Any[]
     for a in ex.args[2:end]
@@ -252,6 +362,60 @@ _h(s) = replace(string(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" =>
 
 _short(s, n = 120) = (t = string(s); length(t) <= n ? t : first(t, n - 1) * "…")
 
+# JSON for a follow-up's arguments, carried in a data- attribute (which `_h` then escapes).
+_jesc(s) = replace(string(s), "\\" => "\\\\", "\"" => "\\\"")
+_json_args(args) = "{" * join([string("\"", _jesc(k), "\":\"", _jesc(v), "\"") for (k, v) in args], ",") * "}"
+
+# ── Controls, chosen by the parameter's declared type ────────────────────────────────────────────
+# The schema is right there, so a Bool has no business being a free-text box you can type "ture"
+# into and an enum's values should not have to be remembered. Everything a type does not pin down
+# stays a text input, and the gate's dispatcher still coerces whatever comes back.
+
+const _CTL_STYLE = "width:100%;box-sizing:border-box;background:transparent;color:var(--fg);" *
+    "border:1px solid var(--border);border-radius:4px;padding:2px 6px;" *
+    "font-family:ui-monospace,monospace;font-size:12px"
+
+function _param_kind(p)
+    tm = get(p, "type_meta", nothing)
+    tm isa AbstractDict || return "string"
+    k = get(tm, "kind", nothing)
+    k === nothing || return String(k)
+    # A hand-built parameter, or an older gate, carries only the Julia type name.
+    jt = String(get(tm, "julia_type", ""))
+    return startswith(jt, "Bool") ? "boolean" :
+        (startswith(jt, "Int") || startswith(jt, "UInt")) ? "integer" :
+        startswith(jt, "Float") ? "number" : "string"
+end
+
+function _param_values(p)
+    tm = get(p, "type_meta", nothing)
+    tm isa AbstractDict || return String[]
+    return String[String(v) for v in get(tm, "enum_values", String[])]
+end
+
+"""The control for one parameter: a select where the type enumerates its values, a number field
+where it is numeric, a text input otherwise. An empty selection means "not supplied", which is how
+a call omits an optional parameter and lets the tool's own default stand."""
+function _arg_control(nm::AbstractString, p, val)
+    kind = _param_kind(p)
+    ph = get(p, "required", false) === true ? "required" : "default"
+    cur = val === nothing ? "" : _argtext(val)
+    opts = kind == "boolean" ? ["true", "false"] : kind == "enum" ? _param_values(p) : String[]
+    if !isempty(opts)
+        io = IOBuffer()
+        print(io, """<select data-arg="$(_h(nm))" style="$(_CTL_STYLE)">""")
+        print(io, """<option value=""$(isempty(cur) ? " selected" : "")>$(ph)</option>""")
+        for o in opts
+            print(io, """<option value="$(_h(o))"$(o == cur ? " selected" : "")>$(_h(o))</option>""")
+        end
+        print(io, "</select>")
+        return String(take!(io))
+    end
+    num = kind == "integer" ? " type=\"number\" step=\"1\"" :
+        kind == "number" ? " type=\"number\" step=\"any\"" : ""
+    return """<input data-arg="$(_h(nm))"$(num) value="$(_h(cur))" placeholder="$(ph)" style="$(_CTL_STYLE)">"""
+end
+
 # A gate tool returns text, and much of it is `key=value` or `key: value` records (a run listing, a
 # status report). Rendering those as fields rather than a wall of text is most of what makes the
 # result readable; anything else falls back to preformatted text unchanged.
@@ -267,8 +431,8 @@ function _result_fields(text::AbstractString)
         end
         kvs = collect(eachmatch(r"(\w+)=([^\s]+)", s))
         length(kvs) >= 2 || return Pair{String,String}[]   # not a record line — give up on the whole thing
-        # Prose can contain `key=value` fragments too ("started run 9fef… (kind=train, …). Poll
-        # `job_status(run_id="…")`"), and shredding a sentence into fields loses the sentence.
+        # Prose can contain `key=value` fragments too ("started job a1b2… (kind=build, …). Poll
+        # `job_status(job_id="…")`"), and shredding a sentence into fields loses the sentence.
         # A real record line is MOSTLY its fields, so require the matches to cover most of it.
         covered = sum(length(kv.match) for kv in kvs)
         covered >= 0.6 * length(replace(s, r"\s+" => "")) || return Pair{String,String}[]
@@ -292,8 +456,14 @@ function Base.show(io::IO, ::MIME"text/html", tc::ToolCall)
     print(io, """<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;
         background:color-mix(in srgb, var(--fg) 4%, transparent);border-bottom:1px solid var(--border)">
         <span style="font-weight:600;font-family:ui-monospace,monospace">$(_h(tc.name))</span>
-        <span style="padding:1px 8px;border-radius:10px;font-size:11px;background:$(pill_bg)">$(pill_txt)</span>
-        <span style="flex:1"></span>
+        <span style="padding:1px 8px;border-radius:10px;font-size:11px;background:$(pill_bg)">$(pill_txt)</span>""")
+    # The handle a background call returned, held where it can be read rather than left buried in
+    # the reply text: it is the one thing about such a call you actually need afterwards.
+    handle = tool_handle(tc)
+    handle === nothing ||
+        print(io, """<span style="font-family:ui-monospace,monospace;font-size:11px;
+            color:var(--muted)">$(_h(handle))</span>""")
+    print(io, """<span style="flex:1"></span>
         <span style="color:var(--muted);font-size:11px">$(tc.seconds)s &middot; $(_h(tc.at))</span></div>""")
 
     blurb = _first_prose_line(tc.description)
@@ -321,12 +491,7 @@ function Base.show(io::IO, ::MIME"text/html", tc::ToolCall)
             has = haskey(supplied, nm)
             dim = has ? "" : "opacity:.62;"
             cell = if live
-                v = has ? _h(_argtext(supplied[nm])) : ""
-                ph = req ? "required" : "default"
-                """<input data-arg="$(_h(nm))" value="$(v)" placeholder="$(ph)" style="width:100%;
-                   box-sizing:border-box;background:transparent;color:var(--fg);border:1px solid
-                   var(--border);border-radius:4px;padding:2px 6px;font-family:ui-monospace,monospace;
-                   font-size:12px">"""
+                _arg_control(nm, p, has ? supplied[nm] : nothing)
             elseif has
                 _h(_short(repr(supplied[nm])))
             elseif req
@@ -352,6 +517,22 @@ function Base.show(io::IO, ::MIME"text/html", tc::ToolCall)
             <span data-status style="color:var(--muted);font-size:11px"></span></div>""")
     end
 
+    # What the reply said to do next, as buttons. The polled one is a toggle: it starts (or stops)
+    # tracking the work, so a run that takes minutes reports into the cell that started it.
+    if live && !isempty(tc.followups)
+        print(io, """<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+            padding:8px 12px;border-top:1px solid var(--border)">
+            <span style="color:var(--muted);font-size:11px;text-transform:uppercase;
+                letter-spacing:.04em">next</span>""")
+        for f in tc.followups
+            print(io, """<button data-follow="$(_h(f.name))" data-args="$(_h(_json_args(f.args)))"\
+                $(f.poll ? " data-poll" : "") style="background:transparent;color:var(--fg);
+                border:1px solid var(--border);border-radius:5px;padding:2px 10px;cursor:pointer;
+                font-size:12px;font-family:ui-monospace,monospace">$(_h(f.name))</button>""")
+        end
+        print(io, """<span data-follow-status style="color:var(--muted);font-size:11px"></span></div>""")
+    end
+
     # Result: as fields when the text is a record, otherwise verbatim.
     body = tc.ok ? tc.result : tc.error
     label = tc.ok ? "result" : "error"
@@ -359,7 +540,7 @@ function Base.show(io::IO, ::MIME"text/html", tc::ToolCall)
         color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em">$(label)</div>""")
     fields = tc.ok ? _result_fields(body) : Pair{String,String}[]
     if !isempty(fields)
-        print(io, """<div style="display:flex;flex-wrap:wrap;gap:6px 18px;padding:0 12px 10px">""")
+        print(io, """<div data-fields style="display:flex;flex-wrap:wrap;gap:6px 18px;padding:0 12px 10px">""")
         for (k, v) in fields
             print(io, """<div><div style="color:var(--muted);font-size:11px">$(_h(k))</div>
                 <div style="font-family:ui-monospace,monospace">$(_h(_short(v, 60)))</div></div>""")
@@ -370,30 +551,75 @@ function Base.show(io::IO, ::MIME"text/html", tc::ToolCall)
             font-family:ui-monospace,monospace">$(_h(_short(body, 4000)))</pre>""")
     end
 
-    # The Invoke path. `window.slateCall` is Slate's JS→Julia bridge; the handler registered above
-    # re-runs the tool and returns the new outcome, which is written back into this panel. The guard
-    # matters because a cell's output HTML is revived on every render.
+    # The Invoke and follow-up paths. `window.slateCall` is Slate's JS→Julia bridge; the handler
+    # registered above runs the tool and returns the new outcome, which is written back into this
+    # panel. The `__wired` guard matters because a cell's output HTML is revived on every render,
+    # and its absence in a static export is why `slateCall` is checked for at all.
     if live
         print(io, """<script>(function(){
           var root = document.currentScript.closest('.slate-toolcall'); if(!root||root.__wired) return;
+          if(!window.slateCall) return;
           root.__wired = true;
-          var btn = root.querySelector('[data-invoke]'),
-              st  = root.querySelector('[data-status]');
-          btn.addEventListener('click', async function(){
+          var CH  = $(repr(tc.channel)),
+              btn = root.querySelector('[data-invoke]'),
+              st  = root.querySelector('[data-status]'),
+              fst = root.querySelector('[data-follow-status]');
+
+          function setResult(text){
+            var f = root.querySelector('[data-fields]'); if(f) f.style.display = 'none';
+            var out = root.querySelector('[data-result]');
+            if(!out){ out = document.createElement('pre');
+                      out.setAttribute('data-result',''); root.appendChild(out); }
+            out.style.cssText = 'margin:0;padding:0 12px 10px;white-space:pre-wrap;font-family:ui-monospace,monospace';
+            out.textContent = text;
+          }
+          async function call(tool, args){
+            var payload = Object.assign({__tool: tool}, args);
+            var r = await window.slateCall(CH, payload);
+            setResult(r.text);
+            return r;
+          }
+
+          if(btn) btn.addEventListener('click', async function(){
             var args = {};
-            root.querySelectorAll('input[data-arg]').forEach(function(i){
+            root.querySelectorAll('[data-arg]').forEach(function(i){
               if(i.value !== '') args[i.getAttribute('data-arg')] = i.value; });
             btn.disabled = true; st.textContent = 'calling…';
             try {
-              var r = await window.slateCall($(repr(tc.channel)), args);
+              var r = await call($(repr(tc.name)), args);
               st.textContent = (r.ok ? 'ok' : 'error') + ' · ' + r.seconds + 's · ' + r.at;
-              var out = root.querySelector('[data-result]');
-              if(!out){ out = document.createElement('pre');
-                        out.setAttribute('data-result',''); root.appendChild(out); }
-              out.style.cssText = 'margin:0;padding:0 12px 10px;white-space:pre-wrap;font-family:ui-monospace,monospace';
-              out.textContent = r.text;
             } catch(e) { st.textContent = 'call failed: ' + e; }
             btn.disabled = false;
+          });
+
+          // Tracking. A polled follow-up keeps calling until the run reports a status that is not
+          // a running one, so the panel follows the work instead of freezing on the reply that
+          // started it. A reply that never says `status` is polled once and then left alone.
+          var timer = null;
+          function stop(){ if(timer){ clearInterval(timer); timer = null; } }
+          root.querySelectorAll('[data-follow]').forEach(function(b){
+            var tool  = b.getAttribute('data-follow'),
+                args  = JSON.parse(b.getAttribute('data-args') || '{}'),
+                polls = b.hasAttribute('data-poll');
+            async function once(){
+              try {
+                var r = await call(tool, args);
+                if(fst) fst.textContent = tool + ' · ' + (r.ok ? r.state : 'error') + ' · ' + r.at;
+                if(!r.ok || r.state !== 'running') stop();
+                return r.ok ? r.state : 'done';
+              } catch(e){ if(fst) fst.textContent = tool + ' failed: ' + e; stop(); return 'done'; }
+            }
+            b.addEventListener('click', function(){
+              if(!polls) return once();
+              if(timer){ stop(); if(fst) fst.textContent = 'stopped tracking ' + tool; return; }
+              once().then(function(s){ if(s === 'running' && !timer) timer = setInterval(once, 2000); });
+            });
+            // Opening the notebook picks a live run back up, and settles a finished one to its
+            // final status in one call.
+            if(polls && !root.__polled){
+              root.__polled = true;
+              once().then(function(s){ if(s === 'running' && !timer) timer = setInterval(once, 2000); });
+            }
           });
         })();</script>""")
     end
@@ -433,6 +659,29 @@ function toolcall_source(name::AbstractString, args)
     return "@tool $(name)($(body))"
 end
 
+"""
+    recorded_toolcall(name, args, ok, text, seconds, at; handlers) -> ToolCall
+
+The panel for a call that ALREADY happened, without dispatching it again.
+
+An agent's call is observed after the fact, so there is nothing left to run: the outcome is handed
+in and only the tool's declared schema is looked up. What this buys is that a recorded call renders
+as the same panel a `@tool` cell does, rather than as a transcript of its reply, so it carries the
+handle, the parameter surface, and the follow-up the reply named. That is what lets a recorded call
+that started background work track it, instead of freezing on the sentence that started it.
+"""
+function recorded_toolcall(name::AbstractString, args, ok::Bool, text::AbstractString,
+                           seconds::Real, at::AbstractString; handlers = nothing)
+    args = Pair{String,Any}[String(first(p)) => last(p) for p in args]
+    tool = _find_tool(name)
+    meta = tool === nothing ? Dict{String,Any}() : _tool_meta(tool)
+    params = Vector{Dict{String,Any}}(get(meta, "arguments", Dict{String,Any}[]))
+    desc = String(get(meta, "description", ""))
+    return ToolCall(String(name), args, params, desc, ok, ok ? String(text) : "",
+                    ok ? "" : String(text), round(Float64(seconds), digits = 3), String(at),
+                    _register_invoke!(handlers, name))
+end
+
 """Start publishing every session tool call an agent makes, for the hub to record as a cell.
 
 Registers a gate OBSERVER rather than wrapping handlers. Wrapping was the obvious approach and is
@@ -441,8 +690,11 @@ wrong: a handler's signature IS its MCP schema (`_reflect_tool` reads it), so a 
 Observing leaves the tool untouched.
 
 Idempotent — safe to call after every cell, which is what catches the tools a package registers
-when a cell first loads it."""
-function watch_session_tools!(publish)
+when a cell first loads it.
+
+`handlers` is a thunk returning the notebook's JS→Julia handler registry (the namespace is replaced
+on reset, so it cannot be captured once), used to make the recorded panel callable."""
+function watch_session_tools!(publish; handlers = () -> nothing)
     _TOOLS_WATCHED[] && return false
     g = _gate_module()
     (g === nothing || !isdefined(g, :observe_tools!)) && return false
@@ -452,13 +704,23 @@ function watch_session_tools!(publish)
         # task-local flag rather than by inspecting the call.
         _recording_suppressed() && return nothing
         startswith(String(name), "__slate_") && return nothing   # Slate's own plumbing, not an action
-        publish((; name = String(name),
-                   args = Pair{String,Any}[String(k) => v for (k, v) in args],
-                   ok = ok === true,
-                   seconds = round(Float64(seconds), digits = 3),
-                   at = _clock_now(),
-                   text = result isa AbstractString ? String(result) :
-                          sprint(show, MIME("text/plain"), result)))
+        pairs_ = Pair{String,Any}[String(k) => v for (k, v) in args]
+        text = result isa AbstractString ? String(result) : sprint(show, MIME("text/plain"), result)
+        at = _clock_now()
+        # The panel is built HERE, in the worker, because that is where the tool registry and the
+        # notebook's JS→Julia handlers both live; the hub has neither and could only render the
+        # reply as text. `handlers()` is the notebook's registry, so a recorded call arrives in the
+        # document already able to call back.
+        html = try
+            hs = handlers()
+            tc = recorded_toolcall(String(name), pairs_, ok === true, text, seconds, at;
+                                   handlers = hs isa AbstractDict ? hs : nothing)
+            sprint(show, MIME("text/html"), tc)
+        catch
+            ""      # the hub falls back to rendering the reply text
+        end
+        publish((; name = String(name), args = pairs_, ok = ok === true,
+                   seconds = round(Float64(seconds), digits = 3), at, text, html))
         return nothing
     end)
     _TOOLS_WATCHED[] = true

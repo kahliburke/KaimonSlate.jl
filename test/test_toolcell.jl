@@ -83,7 +83,10 @@ const RE_T = ReportEngine
         @test cell.state === RE_T.STALE
         RE_T.eval_cell!(r, cell, RE_T.InProcessKernel())
         @test cell.state === RE_T.FRESH
-        @test occursin("42", RE_T.output_html(cell))
+        # `output_html` lives in render.jl, which the server includes and `engine.jl` does not, so
+        # the captured output is read directly here rather than through the server's renderer.
+        @test occursin("42", cell.output.value_repr) ||
+            any(occursin("42", String(copy(ch.data))) for ch in cell.output.display)
     end
 
 end

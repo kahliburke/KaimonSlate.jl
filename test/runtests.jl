@@ -46,7 +46,11 @@ module Files;     include("test_files.jl");     end
 module Config;    include("test_config.jl");    end
 module WscallBinary; include("test_wscall_binary.jl"); end
 
+# Every module above belongs here. A file that is `include`d but left out of this tuple is still
+# COMPILED, so it never looks broken — it is simply never run, and its testsets pass silently by
+# not existing.
 const _TESTMODS = (Defname, Prepare, Demux, Parsched, Memostore, Effectstore, Blobchannel, RemotePool, Regions, Parallel, Animation, Echarts, SlateLook, Engine, Eval, Deps,
+                   Envprep, Tools, Registry, Toolcell,
                    Web, Bind, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi, Agentops, Repro, Slides,
                    Frontmatter, Export, Publishing, App, Extensions, Files, Config, WscallBinary)
 

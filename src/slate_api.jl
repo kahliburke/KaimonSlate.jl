@@ -355,13 +355,13 @@ SlateApiEntry("playhead", "Widgets",
         ["mcp", "agent", "gate tool", "invoke", "extension verb", "tool call"],
         Base.Docs.Binding(ReportEngine, :slate_tool)),
     SlateApiEntry("@tool", "Session tools",
-        "Call syntax for `slate_tool`: `@tool start_job(max_epochs = 4)`.",
+        "Call syntax for `slate_tool`: `@tool start_job(size = 4)`.",
         ["mcp", "agent", "call a tool", "invoke", "sugar"],
         "@tool name(arg = value, …)",
         """Sugar over [`slate_tool`](@ref), so a tool call reads the way its own documentation
         does, which is the form an agent would have used:
         ```julia
-        @tool start_job(experiment = "MyPkg.Widget", max_epochs = 40)
+        @tool start_job(target = "MyPkg.Widget", size = 40)
         @tool list_jobs()
         ```
         Keyword arguments only. The value is a `ToolCall`, rendered as a panel showing the tool's
@@ -375,6 +375,10 @@ SlateApiEntry("playhead", "Widgets",
         "List the gate tools this session exposes, with parameter counts and summaries.",
         ["what tools", "available", "discover", "mcp", "agent", "registry"],
         Base.Docs.Binding(ReportEngine, :slate_tools)),
+    SlateApiEntry("tool_handle", "Session tools",
+        "The run id a background tool call returned, for threading into the next call.",
+        ["run id", "job id", "handle", "background", "poll", "async", "status"],
+        Base.Docs.Binding(ReportEngine, :tool_handle)),
 
     # ── Assets & front-end ─────────────────────────────────────────────────────────────────────────
     SlateApiEntry("@asset", "Assets & front-end",

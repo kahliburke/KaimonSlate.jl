@@ -891,6 +891,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const slate_tool = $((nm, args = Pair{String,Any}[]; kwargs...) ->
         slate_tool(nm, isempty(args) ? _kw_pairs(kwargs) : args; handlers = slate_handlers))))
     Core.eval(m, :(const slate_tools = $slate_tools))
+    Core.eval(m, :(const tool_handle = $tool_handle))
     Core.eval(m, :(macro tool(ex)
         $(_tool_expand)(ex)     # escapes the VALUES only — see `_tool_expand`
     end))

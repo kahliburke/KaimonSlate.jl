@@ -36,7 +36,7 @@ export standalone!
 # call, it participates in the dependency graph, and it produces a value. What the kind buys is the
 # two things a tool call needs and code does not: distinct chrome (the rendered panel IS the
 # interface, so the editor is secondary), and exclusion from automatic runs. A tool call has side
-# effects out in the world — `start_job` starts training — so reopening a notebook must not fire
+# effects out in the world — it starts a job, writes a file, spends money — so reopening a notebook must not fire
 # it. It runs when someone, or some agent, asks for it.
 @enum CellKind MARKDOWN CODE WEB TOOL
 @enum CellState FRESH STALE RUNNING ERRORED   # never-run ≡ STALE

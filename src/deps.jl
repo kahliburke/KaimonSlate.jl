@@ -1010,7 +1010,7 @@ kernel's namespace from the prior eval. (First run: all cells stale ⇒ full eva
 """
 function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
     # A TOOL cell is never swept up by an automatic run. Its source is a call OUT of the notebook
-    # with real consequences — `start_job` starts training — so opening a document, or recomputing
+    # with real consequences — it starts a job, writes a file, spends money — so opening a document, or recomputing
     # a stale neighbour, must not fire one on the reader's behalf. It stays STALE until someone runs
     # it deliberately, which `eval_cell!` still does.
     auto(c) = c.state == STALE && runs_automatically(c.kind)
