@@ -657,6 +657,48 @@ function _spawn_worker!(k::GateKernel)
     return k
 end
 
+# A worker that EXITED can't answer its port, and the connect error only ever says "connection
+# refused" — which describes the socket, not the cause, and sends the reader off to check ports and
+# firewalls while the real error sits in the log. Only a LOCAL spawn owns a process to judge: an
+# attached/remote kernel has no `proc`, so it keeps waiting out the deadline as before.
+_worker_died(k::GateKernel) = k.proc isa Base.Process && process_exited(k.proc)
+
+# The worker's own failure, for the boot error. The log is written by the pump task of `_spawn_worker!`
+# a line at a time, so the last lines can still be in flight when the process is reaped — wait briefly
+# for an `ERROR` to land rather than reporting a cause of nothing. Falls back to the log's tail, which
+# is where a worker that died without an `ERROR:` (a signal, an OOM kill) leaves its evidence.
+function _worker_error_lines(path::AbstractString; max_lines::Int = 20, wait_s::Real = 2.0)
+    deadline = time() + wait_s
+    while true
+        lines = try
+            isfile(path) ? readlines(path) : String[]
+        catch
+            String[]
+        end
+        i = findfirst(l -> startswith(lstrip(l), "ERROR"), lines)
+        i === nothing || return lines[i:min(lastindex(lines), i + max_lines - 1)]
+        time() < deadline || return isempty(lines) ? String[] :
+                                    lines[max(firstindex(lines), lastindex(lines) - max_lines + 1):end]
+        sleep(0.1)
+    end
+end
+
+function _boot_failure_message(k::GateKernel)
+    code = try
+        k.proc.exitcode
+    catch
+        nothing
+    end
+    io = IOBuffer()
+    print(io, "GateKernel: the worker on port $(k.port) exited during boot")
+    code === nothing || print(io, " (code $code)")
+    for line in _worker_error_lines(k.logpath)
+        print(io, "\n  ", rstrip(line))
+    end
+    print(io, "\n  full log: ", k.logpath)
+    return String(take!(io))
+end
+
 function _connect!(k::GateKernel)
     K = _kaimon()
     mgr = _manager()
@@ -669,10 +711,14 @@ function _connect!(k::GateKernel)
                                     label = k.label)
             return k
         catch e
-            last = sprint(showerror, e); sleep(0.5)
+            last = sprint(showerror, e)
+            # Stop the moment the worker is gone: waiting out the remaining deadline can't help, and
+            # the crash is the answer the caller needs.
+            _worker_died(k) && error(_boot_failure_message(k))
+            sleep(0.5)
         end
     end
-    error("GateKernel: could not reach worker on port $(k.port): $last")
+    error("GateKernel: could not reach worker on port $(k.port): $last\n  worker log: $(k.logpath)")
 end
 
 # Kill a worker process (SIGTERM, then SIGKILL if it ignores it — e.g. wedged in precompile),
