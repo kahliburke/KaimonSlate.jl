@@ -82,13 +82,59 @@ SlateExtensionsBase.slate_live_render(::MyLiveThing) = true
 """
 slate_live_render(::Any) = false
 
-# `showable` == "a slate_render method returns something of this flavour". Cheap enough: capture calls it
-# once per candidate MIME while choosing the richest representation.
-Base.showable(::SlateComponentMIME, x) = (r = slate_render(x); r !== nothing && !(r isa SlateHtml))
-Base.showable(::SlateHtmlMIME, x)      = slate_render(x) isa SlateHtml
+# ── One render for each display ───────────────────────────────────────────────
+# `showable` == "a slate_render method returns something of this flavour", so it must RUN the render to
+# answer. The display capture then asks `showable` for each Slate MIME and calls `show` on the winner —
+# 3 calls of the same render for an HTML fragment, 2 for a component descriptor. A render is not always
+# cheap: a WGLMakie figure's render OPENS a Bonito session, and it must run one time only.
+#
+# The caller marks the span of ONE display with `with_render_memo`. Inside the span the first render is
+# kept and the other calls read it. Outside the span nothing is kept, and `slate_render` runs on every
+# call.
+#
+# The memo holds the value ITSELF and compares it with `===`. Do not key it on `objectid`: for a mutable
+# value `objectid` comes from the address, which the garbage collector can give to a different value
+# later. The strong reference also keeps that address occupied for as long as the memo lives.
+const _RENDER_MEMO = :slate_render_memo
 
-Base.show(io::IO, ::SlateComponentMIME, x) = _write_json(io, slate_render(x))
-Base.show(io::IO, ::SlateHtmlMIME, x)      = print(io, (slate_render(x)::SlateHtml).html)
+"""
+    with_render_memo(f)
+
+Run `f`, and make `slate_render` run ONE time for each value that `f` shows through a Slate MIME.
+
+Slate's display capture wraps the `showable` + `show` calls of one value in this. The memo is
+task-local, so parallel cells do not share it, and `finally` always clears it — a value that is shown
+again, or is changed between two displays, gets a fresh render.
+
+This is host plumbing. An extension defines `slate_render` and never calls this.
+"""
+function with_render_memo(f)
+    tls = task_local_storage()
+    prev = get(tls, _RENDER_MEMO, nothing)
+    tls[_RENDER_MEMO] = Ref{Any}(nothing)
+    try
+        return f()
+    finally
+        prev === nothing ? delete!(tls, _RENDER_MEMO) : (tls[_RENDER_MEMO] = prev)
+    end
+end
+
+# `slate_render(x)`, through the memo when a `with_render_memo` span is open.
+function _render(x)
+    memo = get(task_local_storage(), _RENDER_MEMO, nothing)
+    memo === nothing && return slate_render(x)
+    entry = memo[]
+    entry isa Tuple && entry[1] === x && return entry[2]
+    r = slate_render(x)
+    memo[] = (x, r)
+    return r
+end
+
+Base.showable(::SlateComponentMIME, x) = (r = _render(x); r !== nothing && !(r isa SlateHtml))
+Base.showable(::SlateHtmlMIME, x)      = _render(x) isa SlateHtml
+
+Base.show(io::IO, ::SlateComponentMIME, x) = _write_json(io, _render(x))
+Base.show(io::IO, ::SlateHtmlMIME, x)      = print(io, (_render(x)::SlateHtml).html)
 
 # ── Minimal JSON writer for the descriptor ────────────────────────────────────
 # SEB stays Base+stdlib only, so it can't lean on JSON.jl. The descriptor payload is small and its props

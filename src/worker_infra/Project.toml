@@ -16,7 +16,7 @@ SlateExtensionsBase = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
 
 [compat]
 ExpressionExplorer = "1.1.4"   # keep in lockstep with the engine's pin (macroexpand.jl)
-SlateExtensionsBase = "0.9"
+SlateExtensionsBase = "0.9.1"
 
 [sources]
 SlateExtensionsBase = {path = "../../lib/SlateExtensionsBase"}

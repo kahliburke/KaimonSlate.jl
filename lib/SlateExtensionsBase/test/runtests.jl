@@ -34,6 +34,11 @@ struct Meter; value::Int; max::Int; end
 SlateExtensionsBase.slate_render(m::Meter) = component("Demo.Meter"; value = m.value, max = m.max)
 struct Banner; text::String; end
 SlateExtensionsBase.slate_render(b::Banner) = html_fragment("<b>" * b.text * "</b>")
+# A render that COUNTS its calls, and whose result follows a field the test changes — to check how many
+# times one display runs it, and that a changed value is not served an old render.
+mutable struct Counted; v::Int; end
+const COUNTED_CALLS = Ref(0)
+SlateExtensionsBase.slate_render(c::Counted) = (COUNTED_CALLS[] += 1; html_fragment("<i>$(c.v)</i>"))
 
 # Per-cell toolbar action: a struct that reflects into a CellAction (auto_cell_action), and one that
 # omits a REQUIRED field (`onclick`) so reflection must error — mirrors the Knob/Dial widget pattern.
@@ -399,6 +404,57 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
 
         @test slate_render(42) === nothing            # a plain value → not Slate-renderable
         @test !showable(SlateComponentMIME(), 42)
+
+        # ONE display runs the render ONE time. `showable` has to RUN `slate_render` to answer, and the
+        # capture asks both Slate MIMEs before it calls `show`. A `with_render_memo` span makes those
+        # calls share one render.
+        c = Counted(1)
+        COUNTED_CALLS[] = 0
+        SlateExtensionsBase.with_render_memo() do
+            @test !showable(SlateComponentMIME(), c)
+            @test showable(SlateHtmlMIME(), c)
+            @test sprint(show, SlateHtmlMIME(), c) == "<i>1</i>"
+        end
+        @test COUNTED_CALLS[] == 1
+
+        # Outside a span the memo keeps nothing: every call renders.
+        COUNTED_CALLS[] = 0
+        showable(SlateHtmlMIME(), c)
+        showable(SlateHtmlMIME(), c)
+        @test COUNTED_CALLS[] == 2
+
+        # A span always clears the memo, so a value that CHANGED between two displays renders again and
+        # shows its new state.
+        COUNTED_CALLS[] = 0
+        SlateExtensionsBase.with_render_memo() do
+            @test sprint(show, SlateHtmlMIME(), c) == "<i>1</i>"
+        end
+        c.v = 2
+        SlateExtensionsBase.with_render_memo() do
+            @test sprint(show, SlateHtmlMIME(), c) == "<i>2</i>"
+        end
+        @test COUNTED_CALLS[] == 2
+
+        # The memo holds ONE value, so a second value in the same span gets its own render.
+        c2 = Counted(9)
+        COUNTED_CALLS[] = 0
+        SlateExtensionsBase.with_render_memo() do
+            @test sprint(show, SlateHtmlMIME(), c) == "<i>2</i>"
+            @test sprint(show, SlateHtmlMIME(), c2) == "<i>9</i>"
+        end
+        @test COUNTED_CALLS[] == 2
+
+        # A span that throws still clears the memo.
+        COUNTED_CALLS[] = 0
+        @test_throws ErrorException SlateExtensionsBase.with_render_memo() do
+            showable(SlateHtmlMIME(), c)
+            error("boom")
+        end
+        @test !haskey(task_local_storage(), SlateExtensionsBase._RENDER_MEMO)
+        SlateExtensionsBase.with_render_memo() do
+            @test sprint(show, SlateHtmlMIME(), c) == "<i>2</i>"
+        end
+        @test COUNTED_CALLS[] == 2
 
         # `component` accepts a Type (kind derived) and a props Dict/NamedTuple.
         @test component(Meter, (; a = 1))["component"] == "Main.Meter"
