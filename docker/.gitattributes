@@ -1,0 +1,3 @@
+# entrypoint.sh runs inside a Linux container — CRLF would break its shebang.
+*.sh text eol=lf
+Dockerfile text eol=lf

@@ -1,0 +1,31 @@
+{
+  "name": "Kaimon Slate",
+
+  // Pull the prebuilt image rather than building in the codespace: the build precompiles the
+  // Makie stack and would burn most of a free Codespaces allowance. Swap to `"build":
+  // {"dockerfile": "../docker/Dockerfile"}` if you're iterating on the image itself.
+  "image": "ghcr.io/kahliburke/slate:latest",
+
+  // The image's entrypoint starts Ollama, the socat forwarders and Kaimon. Dev containers
+  // replace the command with `sleep infinity` unless told otherwise, which would leave
+  // nothing running.
+  "overrideCommand": false,
+
+  "forwardPorts": [18765, 12828],
+  "portsAttributes": {
+    "18765": { "label": "Slate hub", "onAutoForward": "openBrowser" },
+    "12828": { "label": "Kaimon MCP", "onAutoForward": "silent" }
+  },
+
+  // Codespaces gives 2 cores / 8 GB on the free tier. That's fine for a warm image but tight
+  // if a notebook precompiles something heavy that isn't already baked in.
+  "hostRequirements": { "cpus": 2, "memory": "8gb", "storage": "32gb" },
+
+  "workspaceFolder": "/work/notebooks",
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["julialang.language-julia"]
+    }
+  }
+}
