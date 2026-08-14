@@ -8,6 +8,8 @@
 
 export GateKernel
 
+import Sockets   # loopback bind probe for `_port_free` (see the port allocator below)
+
 # Worker Julia-thread spec ("<compute>,<interactive>"), set by the server from persisted config /
 # the Kaimon TUI panel. Empty → fall back to env / the adaptive default. Read at each worker spawn.
 const WORKER_THREADS = Ref{String}("")
@@ -152,10 +154,52 @@ function _infra_env()::String
     end
 end
 
-# Per-worker TCP ports. A simple counter (no Sockets dep); collisions are unlikely
-# and surface as a worker bind error rather than silent crosstalk.
-const _GATE_PORT = Ref(9100)
+# Per-worker TCP ports. A counter hands out the next block, and every port in it is PROBED before it
+# is handed out — because a counter alone is not enough and the failure it produces is silent.
+#
+# The counter is module state, so an extension restart resets it to `_PORT_BASE` while WARM WORKERS
+# SURVIVE (that is the whole point of them). The next spawns then walk straight back over ports that
+# are still held. Of the two ports a worker owns, only the GATE port fails loudly on reuse — the
+# worker's own `bind` errors and it dies at boot. The STREAM port does not: the hub DIALS it, so a
+# SUB socket wired to a surviving worker's PUB simply receives someone else's frames, or none. That
+# shows up as a notebook whose calls all work while every stream frame — reactivity, progress bars,
+# and anything a cell streams — goes silently missing, with nothing logged anywhere.
+const _PORT_BASE = 9100
+const _PORT_CEILING = 9999          # scan bound; past this the block wraps back to the base
+const _PORT_SCAN_MAX = 512          # give up rather than spin if every block really is taken
+const _GATE_PORT = Ref(_PORT_BASE)
 const _PORT_LOCK = ReentrantLock()
+
+# Is this port available? TWO probes, because neither is portable on its own.
+#
+# CONNECT asks "is someone serving here?", and it means the same thing on every platform. It is also
+# the question that actually matters: we are looking for LIVE workers holding a port, not TIME_WAIT
+# residue. A bound ZMQ socket accepts, so this finds one.
+#
+# BIND then confirms we could really take it. It cannot be the only probe: on Windows `SO_REUSEADDR`
+# does NOT mean what it means on Unix — it permits binding an address another socket already holds
+# (which is why `SO_EXCLUSIVEADDRUSE` exists at all) — so depending on what libuv sets underneath, a
+# bind-only probe there can call a live port free and silently reinstate the bug this prevents.
+# A remote worker binds `0.0.0.0`, which collides with a loopback listen, so those are caught too.
+#
+# Inherently racy either way: a port can be taken between the probe and the worker's bind. That race
+# is rare and fails LOUDLY at the bind, whereas blind reuse is systematic and fails silently.
+function _port_free(p::Int)
+    try
+        s = Sockets.connect(Sockets.localhost, p)   # accepted ⇒ someone is serving ⇒ occupied
+        close(s)
+        return false
+    catch
+        # refused ⇒ nobody is listening; fall through and check we can take it
+    end
+    try
+        s = Sockets.listen(Sockets.localhost, p)
+        close(s)
+        return true
+    catch
+        return false                                 # held without listening (or not ours to bind)
+    end
+end
 # A worker owns its GATE port `p` (main REP) and STREAM port `p+1` (PUB) — both HUB-DIALED, so the hub
 # reserves them here. `reserve` is how many consecutive ports to burn. The DEFAULT is 2: a worker whose
 # blob channel needs no reserved slot — a LOCAL worker (runs no blob server; `data_port` unset) or a
@@ -168,8 +212,18 @@ const _PORT_LOCK = ReentrantLock()
 function _next_ports(; floor::Int = 0, reserve::Int = 2)
     lock(_PORT_LOCK) do            # atomic bump — concurrent spawns must not grab the same port
         _GATE_PORT[] = max(_GATE_PORT[], floor)
-        p = _GATE_PORT[]; _GATE_PORT[] += reserve
-        return (p, p + 1)
+        for _ in 1:_PORT_SCAN_MAX
+            p = _GATE_PORT[]
+            if p + reserve - 1 > _PORT_CEILING
+                p = max(_PORT_BASE, floor)   # wrap: blocks down there were freed long ago
+            end
+            _GATE_PORT[] = p + reserve
+            # EVERY port in the block, not just the gate: the stream port is the one whose reuse is
+            # silent, so skipping the block is the whole fix.
+            all(_port_free, p:(p + reserve - 1)) && return (p, p + 1)
+        end
+        error("slate: no free worker port block of $reserve in $_PORT_BASE:$_PORT_CEILING " *
+              "after $_PORT_SCAN_MAX probes — are there stale workers holding ports?")
     end
 end
 

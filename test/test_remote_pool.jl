@@ -3,6 +3,7 @@
 # claim set, parked-connection bookkeeping, and manifest parsing. Pure/local — no ssh, no
 # workers; roster entries are hand-built Dicts shaped like `list_remote_workers` output.
 using ReTest
+import Sockets   # squat on a port to prove the allocator probes before handing one out
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl"))
 using .ReportEngine
@@ -25,12 +26,37 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         # never lands at a fixed offset — see the reserve= doc at gate_kernel.jl's _next_ports.
         base, bstream = RE._next_ports(reserve = 3)
         nxt, _ = RE._next_ports(reserve = 3)
-        @test nxt - base == 3                               # main/stream/data → stride 3, not 2
+        # `>=`, not `==`: the allocator PROBES and skips a block whose ports are in use, so on a
+        # machine with anything squatting in 9100-9999 — a normal state, since that is where live
+        # workers live — it advances further than one stride. The invariant that matters is that
+        # consecutive blocks never overlap; a 2-stride here would hand the next worker's gate the
+        # previous one's data port.
+        @test nxt - base >= 3                               # main/stream/data → stride 3, not 2
         @test bstream == base + 1
         floored, _ = RE._next_ports(floor = nxt + 100, reserve = 3)
-        @test floored == nxt + 100
-        @test first(RE._next_ports(reserve = 3)) == floored + 3   # counter advanced FROM the floor
+        @test floored >= nxt + 100
+        @test first(RE._next_ports(reserve = 3)) >= floored + 3   # counter advanced FROM the floor
         @test first(RE._next_ports(floor = 1)) > 9100       # a low floor never rewinds the counter
+    end
+
+    @testset "_next_ports never hands out a port already in use" begin
+        # The bug this guards: the counter is module state, so an extension restart rewinds it to the
+        # base while WARM WORKERS SURVIVE, and the next spawns walk back over ports still held. Only
+        # the GATE port fails loudly on reuse (the worker's own bind errors). The STREAM port is
+        # silent — the hub DIALS it, so its SUB socket lands on another worker's PUB and the notebook
+        # loses every stream frame while its calls keep working.
+        p, _ = RE._next_ports()
+        squat = Sockets.listen(Sockets.localhost, p + 2)     # hold where the NEXT block would land
+        try
+            @test !RE._port_free(p + 2)                      # the probe sees it
+            RE._GATE_PORT[] = p + 2                          # rewind, as an extension restart does
+            got, stream = RE._next_ports()
+            @test got != p + 2                               # …so the held block is skipped
+            @test stream == got + 1
+            @test RE._port_free(got) && RE._port_free(stream)
+        finally
+            close(squat)
+        end
     end
 
     @testset "_port_floor: above every live worker's 3-port block; dead ports are free" begin
