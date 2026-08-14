@@ -21,6 +21,12 @@ the wire instead of Serialization+JSON, for high-rate frames. `meta` (a NamedTup
 values) rides alongside as a compact header; the browser handler receives `{…meta, d}` with `d` a typed
 array. Element type must be one of `Float32`/`Float64`/`Int32`/`Int16`/`UInt8`.
 
+A dense `Array` is held by REFERENCE, so the frame carries whatever it holds when it is ENCODED —
+emit and move on, and reusing one buffer across frames costs nothing. Mutating the array between
+construction and emit therefore changes what is sent; pass `snapshot = true` for a copy taken at
+construction instead. Any other `AbstractArray` (a view, a range, an adjoint) is copied either way,
+since its bytes aren't contiguous.
+
 ```julia
 slate_emit("field", SlateBinary(frame; i = idx, t = time()))   # frame::Matrix{Float32}
 ```
@@ -28,9 +34,26 @@ slate_emit("field", SlateBinary(frame; i = idx, t = time()))   # frame::Matrix{F
 struct SlateBinary{T,N}
     data::Array{T,N}
     meta::Dict{String,Any}
+    # Spelled out so Julia does NOT generate the default outer `SlateBinary(::Array, ::Dict)`. The
+    # constructors below need that signature to carry `snapshot`, and redefining a generated method
+    # is method overwriting, which a precompiled module rejects outright.
+    SlateBinary{T,N}(data::Array{T,N}, meta::Dict{String,Any}) where {T,N} = new{T,N}(data, meta)
 end
-SlateBinary(data::AbstractArray, meta) = SlateBinary(collect(data), _props_dict(meta))
-SlateBinary(data::AbstractArray; kw...) = SlateBinary(collect(data), Dict{String,Any}(String(k) => v for (k, v) in kw))
+# Anything non-contiguous has to be gathered, so it copies regardless; `snapshot` is accepted and
+# ignored there so callers need not know which kind of array they hold.
+SlateBinary(data::AbstractArray, meta; snapshot::Bool = false) = SlateBinary(collect(data), _props_dict(meta))
+SlateBinary(data::AbstractArray; snapshot::Bool = false, kw...) =
+    SlateBinary(collect(data), Dict{String,Any}(String(k) => v for (k, v) in kw))
+# A dense array is kept by REFERENCE — at this path's rates a per-frame copy of the payload is most
+# of its cost, and a sender reusing one buffer would copy it again for nothing. `snapshot = true` is
+# for a caller that HOLDS the value instead of emitting it straight away: a copy taken at
+# construction, immune to whatever happens to the array afterwards.
+SlateBinary(data::Array{T,N}, meta::Dict{String,Any}; snapshot::Bool = false) where {T,N} =
+    SlateBinary{T,N}(snapshot ? copy(data) : data, meta)
+SlateBinary(data::Array{T,N}, meta; snapshot::Bool = false) where {T,N} =
+    SlateBinary(data, _props_dict(meta); snapshot)
+SlateBinary(data::Array{T,N}; snapshot::Bool = false, kw...) where {T,N} =
+    SlateBinary(data, Dict{String,Any}(String(k) => v for (k, v) in kw); snapshot)
 
 # dtype tags — keep in sync with `_asset_dtype` (capture.jl) and core.js `_SLATE_TYPED`.
 _bin_dtype(::Type{Float32}) = 0x00
@@ -48,10 +71,15 @@ Serialize a [`SlateBinary`](@ref) into the self-describing binary streaming fram
 The channel + meta + dtype + shape are the header; the array's raw column-major bytes are the payload.
 """
 function encode_binary_frame(channel::AbstractString, x::SlateBinary{T,N}) where {T,N}
-    io = IOBuffer()
+    ch = codeunits(String(channel))
+    mb = codeunits(sprint(_write_json, x.meta))
+    # Sized exactly: unhinted, the buffer doubles its way to the payload and allocates a multiple of
+    # the frame it produces — per frame, on the task that is streaming.
+    n = 1 + 2 + length(ch) + 2 + length(mb) + 1 + 1 + 4N + sizeof(x.data)
+    io = IOBuffer(; sizehint = n)
     write(io, 0x01)                                            # version
-    ch = codeunits(String(channel)); write(io, UInt16(length(ch))); write(io, ch)
-    mb = codeunits(sprint(_write_json, x.meta)); write(io, UInt16(length(mb))); write(io, mb)
+    write(io, UInt16(length(ch))); write(io, ch)
+    write(io, UInt16(length(mb))); write(io, mb)
     write(io, _bin_dtype(T))
     write(io, UInt8(N)); for d in size(x.data); write(io, UInt32(d)); end
     write(io, reinterpret(UInt8, vec(x.data)))                # raw LE bytes, column-major

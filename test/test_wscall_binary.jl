@@ -53,7 +53,49 @@ const NS = KaimonSlate.NotebookServer
         @test args.__slate_buffers[1] == UInt8[9, 8, 7]
     end
 
-    @testset "in-process slate_emit routes SlateBinary to the binary frame path" begin
+    @testset "SlateBinary keeps a dense array by reference, copies anything else" begin
+    # This path exists for high-rate frames, so the payload must not be copied once per frame — a
+    # sender streaming audio would otherwise reallocate its whole buffer every block for nothing.
+    buf = Float32[1, 2, 3, 4]
+    @test SEB.SlateBinary(buf; i = 1).data === buf          # dense ⇒ by reference
+    @test SEB.SlateBinary(buf, (; i = 1)).data === buf      # …by either constructor
+    # Non-contiguous bytes have to be gathered, so those still copy.
+    v = @view buf[2:3]
+    b = SEB.SlateBinary(v; i = 1)
+    @test b.data !== v && b.data == Float32[2, 3]
+    @test SEB.SlateBinary(1.0f0:4.0f0; i = 1).data isa Array{Float32,1}
+
+    # `snapshot` is for a caller that holds the value rather than emitting it straight away.
+    snap = SEB.SlateBinary(buf; snapshot = true, i = 1)
+    @test snap.data !== buf && snap.data == buf
+    @test SEB.SlateBinary(buf, Dict{String,Any}("i" => 1); snapshot = true).data !== buf
+    @test !haskey(snap.meta, "snapshot")                     # a control, not metadata
+    @test SEB.SlateBinary(@view(buf[1:2]); snapshot = true).data == buf[1:2]   # accepted, already a copy
+
+    # The frame is built at ENCODE time, which is what makes buffer reuse safe for a streaming
+    # sender: emit, overwrite, emit again, and each frame carries what the buffer held at its emit.
+    sb = SEB.SlateBinary(buf; i = 1)
+    f1 = SEB.encode_binary_frame("c", sb)
+    buf .= Float32[9, 9, 9, 9]
+    f2 = SEB.encode_binary_frame("c", sb)
+    @test f1 != f2
+    _, _, _, p2 = NS._decode_uplink_frame(f2)
+    @test reinterpret(Float32, p2) == Float32[9, 9, 9, 9]
+end
+
+@testset "encode_binary_frame sizes its buffer exactly" begin
+    # An unhinted IOBuffer doubles its way to the payload size, allocating several times the frame
+    # it produces — every frame, on whatever task is streaming.
+    big = rand(Float32, 4096)
+    mk() = SEB.encode_binary_frame("chan", SEB.SlateBinary(big; i = 1))
+    mk()                                                     # compile before measuring
+    frame = mk()
+    @test length(frame) == 1 + 2 + 4 + 2 + length(codeunits(sprint(SEB._write_json, Dict{String,Any}("i" => 1)))) + 1 + 1 + 4 + sizeof(big)
+    # Room for the frame and its small header, not for a doubling ladder on top of them.
+    @test (@allocated mk()) < 2 * length(frame)
+end
+
+@testset "in-process slate_emit routes SlateBinary to the binary frame path" begin
         r = RE.parse_report("#%% code id=a\n1 + 1\n")
         m = RE.report_module(r)
         emit = getglobal(m, :slate_emit)
