@@ -53,7 +53,9 @@ jobs:
       - name: Use the in-repo SlateExtensionsBase
         # lib/ holds the SDK at this commit — develop it so the suite tests this checkout's
         # source rather than whatever version the registry currently serves.
-        run: julia -e 'using Pkg; Pkg.develop(path="lib/SlateExtensionsBase")'
+        # `--project=.` is load-bearing: buildpkg and runtest resolve the project env, so a develop
+        # into the default env leaves the suite testing the registry's copy.
+        run: julia --project=. -e 'using Pkg; Pkg.develop(path="lib/SlateExtensionsBase")'
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
       - name: Save Julia depot cache on cancel or failure
