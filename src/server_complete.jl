@@ -2740,6 +2740,9 @@ function close_notebook!(h::Hub, id::AbstractString)
         ReportEngine._rlog("slate: closing $(id) with its runner still draining — signalling it to stop")
         lock(_RUNNER_LOCK) do; _RUNNER_CANCEL[id] = true; end
     end
+    # An id is REUSED when the same file is reopened, so a leftover re-run marker would make the
+    # reopened notebook restale a cell once for no reason (see `_DIRTY_WHILE_RUNNING`).
+    delete!(_DIRTY_WHILE_RUNNING, id)
     _interrupt_inflight!(nb)               # stop an in-flight eval so `shutdown!` doesn't block behind it
     try; shutdown!(nb.kernel); catch; end
     _teardown_region!(nb)                  # detach — a remote region idles warm like the main kernel

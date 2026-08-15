@@ -605,6 +605,9 @@ function _reactive_refresh!(nb::LiveNotebook, seed_predicate)
         seed = String[]
         for c in nb.report.cells
             seed_predicate(c) || continue
+            # Note it BEFORE restaling — `restale!` overwrites RUNNING, so afterwards there is no
+            # way to tell that this cell's in-flight run is now answering a stale question.
+            c.state == RUNNING && push!(get!(Set{String}, _DIRTY_WHILE_RUNNING, nb.id), c.id)
             ReportEngine.restale!(c) && push!(seed, c.id)
         end
         isempty(seed) && return
@@ -698,6 +701,20 @@ const _RUNNER_CANCEL = Dict{String,Bool}()
 # leaving a notebook silently wedged until something notices and restarts the whole hub.
 const _RUNNER_STARTED = Dict{String,Float64}()
 const _RUNNER_STALE_HITS = Dict{String,Int}()         # nb.id → consecutive stuck-sweep confirmations
+# nb.id → ids of cells that were RESTALED WHILE RUNNING by a reactive push, and so must run again.
+#
+# A cell's run reads its inputs once, at the start. If a reactive value it reads changes while that
+# run is in flight, the result is already answering a stale question — and `mark_result!` then marks
+# the cell FRESH, overwriting the STALE that `restale!` set mid-run. Nothing restales it again (the
+# push has been and gone), so the cell sits FRESH holding output computed from values that have
+# since moved, indefinitely.
+#
+# `_eval_one!` already handles the SOURCE version of this hazard by comparing `src_hash` across the
+# run; this is the same idea for values, which carry no hash. A handler writing several reactives in
+# a burst (`msg[] = …; result[] = …; busy[] = false`) is the case that hits it, and it hits the LAST
+# write — so the symptom is a progress bar that never clears while every value behind it is correct.
+# Guarded by `nb.lock`: every reader and writer here already holds it.
+const _DIRTY_WHILE_RUNNING = Dict{String,Set{String}}()
 const _RUNNER_STALE_AFTER = 600.0                     # 10 min with pending work + no progress ⇒ suspect
 const _RUNNER_STALE_CONFIRMATIONS = 3                 # consecutive 5s sweeps before self-healing (~15s)
 
@@ -2278,7 +2295,13 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
             ReportEngine.revert_running!(c)
             return nothing
         end
+        # …and the same for VALUES: a reactive push restaled this cell while it was running, so the
+        # result in hand was computed from inputs that have since changed. KEEP it (a stale answer
+        # still beats a blank cell while the re-run lands) but leave the cell STALE afterwards so the
+        # runner comes back to it — the state is what decides whether anything ever recomputes.
+        _dirty = pop!(get!(Set{String}, _DIRTY_WHILE_RUNNING, nb.id), c.id, nothing) !== nothing
         ReportEngine.mark_result!(c, out)
+        _dirty && ReportEngine.restale!(c)
         c.binds = out.binds
         _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :everywhere classification)
         _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
@@ -2585,7 +2608,11 @@ function server_celldone(nb::LiveNotebook, run_id::AbstractString, cid::Abstract
             ReportEngine.revert_running!(c)                # edited mid-batch → re-run with new source
             return
         end
+        # Restaled by a reactive push mid-batch → keep the result, but stay STALE so it runs again
+        # (see `_DIRTY_WHILE_RUNNING`; the same hazard as the src_hash check above, for values).
+        _dirty = pop!(get!(Set{String}, _DIRTY_WHILE_RUNNING, nb.id), c.id, nothing) !== nothing
         ReportEngine.mark_result!(c, out)
+        _dirty && ReportEngine.restale!(c)
         c.binds = out.binds
         _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :everywhere classification)
         _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
