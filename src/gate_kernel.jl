@@ -228,6 +228,45 @@ function _next_ports(; floor::Int = 0, reserve::Int = 2)
 end
 
 _kaimon() = getfield(Main, :Kaimon)
+
+# Drop any CURVE server pin for a loopback port we are ABOUT TO TAKE with a freshly spawned worker.
+#
+# Kaimon pins gate server keys trust-on-first-use, keyed by `host:port` (`known_servers`, SSH
+# known_hosts style). That identity holds for a long-lived gate on a fixed port. It does not hold for
+# these workers: their ports are ephemeral and recycled within seconds — close a notebook, reopen it,
+# and the new worker is routinely handed the port the old one just released.
+#
+# When that port carries a pin from some earlier CURVE gate, the client resolves the pinned key
+# (explicit > env > pinned) and attempts an ENCRYPTED handshake against a worker running plain
+# (`Auth: none`). The gate never answers. TCP is open, so the reachability probe passes and the dial
+# just times out — for the full 90s connect deadline, after which the hub kills a perfectly healthy
+# worker and respawns it on another port. Observed: a three-week-old pin for `127.0.0.1:9104` made
+# every notebook that landed on that port stall for 90s, with its worker logging `ready` throughout.
+#
+# Removing the pin here is safe in a way it would NOT be in general: we spawned this process
+# ourselves, moments ago, on loopback, with no CURVE. Any pin that predates it necessarily describes
+# a DIFFERENT, dead process, so it cannot be the key-change warning TOFU exists to raise — there is
+# no wire to intercept and we own both ends. Only for locally spawned workers: a `:direct` region's
+# CURVE pin is a real remote identity and is left alone.
+#
+# Both spellings of loopback: we dial by IP, but a pin under `localhost` is the same stale claim
+# about the same port and would trip anything that dials by name.
+function _clear_stale_pin!(port::Integer)
+    try
+        K = _kaimon()
+        isdefined(K, :KaimonGate) || return nothing
+        G = getfield(K, :KaimonGate)
+        isdefined(G, :unpin_server!) || return nothing      # older Kaimon: nothing to do
+        for host in ("127.0.0.1", "localhost")
+            G.unpin_server!("$host:$port") === :removed &&
+                _rlog("gate connect: dropped a stale CURVE pin for $host:$port before spawning a " *
+                      "worker there — the port was reused and the pin named a process that is gone")
+        end
+    catch e
+        _rlog("gate connect: could not check CURVE pins for port $port: $(sprint(showerror, e))")
+    end
+    return nothing
+end
 "True when running inside the Kaimon extension (gate client available)."
 gate_available() = isdefined(Main, :Kaimon) &&
     isdefined(_kaimon(), :ConnectionManager) && isdefined(_kaimon(), :connect_tcp!)
@@ -597,6 +636,7 @@ function _spawn_worker!(k::GateKernel)
                     # (worker crash → prepare! replaces it) left a fresh namespace looking unchanged.
     port, stream_port = _next_ports()
     k.port = port; k.stream_port = stream_port
+    _clear_stale_pin!(port)
     logdir = joinpath(tempdir(), "kaimonslate"); mkpath(logdir)
     # Worker stdout/stderr can carry notebook data — keep the shared tmp dir private (0700) so
     # other local users can't read the logs; the file itself is locked to 0600 when opened below.
@@ -714,23 +754,44 @@ end
 function _connect!(k::GateKernel)
     K = _kaimon()
     mgr = _manager()
-    deadline = time() + _connect_deadline_local()   # worker Julia startup + KaimonGate load is slow
+    t0 = time()
+    deadline = t0 + _connect_deadline_local()   # worker Julia startup + KaimonGate load is slow
     last = ""
+    attempts = 0
+    # Retries used to be silent: up to 180 attempts over 90s collapsed into ONE final message
+    # carrying only the LAST error. When a healthy worker can't be dialled — it logs `ready`, the
+    # port accepts, and the dial still fails for the whole deadline — that last error says what the
+    # symptom was and nothing about the shape of the failure. Whether every attempt failed the same
+    # way (a stuck registry entry, a key mismatch) or the reason CHANGED partway (still booting, then
+    # something else) is the diagnostic, and it was being discarded.
+    #
+    # So: log the first failure, and any time the reason changes after that. A stable reason stays at
+    # two lines however long the deadline runs; a shifting one leaves a trail.
     while time() < deadline
+        attempts += 1
         try
             k.conn = K.connect_tcp!(mgr, "127.0.0.1", k.port;
                                     name = "slate-$(k.port)", stream_port = k.stream_port,
                                     label = k.label)
+            attempts > 1 && _rlog("gate connect: reached worker on port $(k.port) after $attempts " *
+                                  "attempts ($(round(time() - t0; digits = 1))s)")
             return k
         catch e
-            last = sprint(showerror, e)
+            msg = sprint(showerror, e)
+            if msg != last
+                _rlog("gate connect: worker on port $(k.port) not reachable yet " *
+                      "(attempt $attempts, $(round(time() - t0; digits = 1))s): $msg")
+            end
+            last = msg
             # Stop the moment the worker is gone: waiting out the remaining deadline can't help, and
             # the crash is the answer the caller needs.
             _worker_died(k) && error(_boot_failure_message(k))
             sleep(0.5)
         end
     end
-    error("GateKernel: could not reach worker on port $(k.port): $last\n  worker log: $(k.logpath)")
+    error("GateKernel: could not reach worker on port $(k.port) after $attempts attempts over " *
+          "$(round(time() - t0; digits = 1))s — the worker's own log may show it healthy, in which " *
+          "case the DIAL is what failed, not the boot.\n  last error: $last\n  worker log: $(k.logpath)")
 end
 
 # Kill a worker process (SIGTERM, then SIGKILL if it ignores it — e.g. wedged in precompile),
