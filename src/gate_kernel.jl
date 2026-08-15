@@ -461,6 +461,7 @@ function _ensure_poller!()
                 binemits = Tuple{String,Vector{UInt8}}[]   # ordered slate_emit_bin frames (rid, raw binary frame) — forwarded to the page WS as-is
                 prepares = Dict{String,String}()     # notebook → LATEST env-prep status JSON (coalesced per wake; a burst collapses harmlessly)
                 toolcalls = Tuple{String,Any}[]      # ordered agent tool calls (rid, payload) — each one becomes a cell, so never coalesced
+                setbinds = Tuple{String,String,Any}[]  # ordered `set_bind` calls (rid, bind name, value) — see `_do_setbind`
                 # Block until a gate-stream message arrives (drain-first, then park in poll() on
                 # the SUB FDs up to a 250 ms idle ceiling) instead of busy-polling at 20 Hz: an
                 # idle extension now costs ~no CPU, and a streaming cell wakes us on arrival (lower
@@ -498,6 +499,14 @@ function _ensure_poller!()
                             val = try; Serialization.deserialize(IOBuffer(Base64.base64decode(String(parts[2])))); catch; nothing; end
                             push!(emits, (rid, String(parts[1]), val))
                         end
+                    elseif m.channel == "slate_setbind"       # "name\x1fb64" — a cell driving a @bind
+                        parts = split(String(m.data), '\x1f'; limit = 2)
+                        if length(parts) == 2
+                            val = try; Serialization.deserialize(IOBuffer(Base64.base64decode(String(parts[2])))); catch; nothing; end
+                            # Ordered, never coalesced: two writes to the same control are two
+                            # deliberate acts, and keeping only the last would silently drop one.
+                            push!(setbinds, (rid, String(parts[1]), val))
+                        end
                     elseif m.channel == "slate_emit_bin"      # a raw binary numeric frame (bytes carry channel+meta+dtype+shape+payload)
                         m.data isa Vector{UInt8} && push!(binemits, (rid, m.data))
                     elseif m.channel == "slate_telemetry"     # worker's 2s sample — per-kernel ring + WS push
@@ -532,6 +541,9 @@ function _ensure_poller!()
                 end
                 for (rid, json) in prepares
                     _do_prepare(rid, json)
+                end
+                for (rid, name, val) in setbinds
+                    _do_setbind(rid, name, val)
                 end
                 for (rid, ch, d) in emits
                     _do_emit(rid, ch, d)

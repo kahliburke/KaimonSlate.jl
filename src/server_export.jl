@@ -695,6 +695,24 @@ Slate.assetInfo=function(path){var a=window.__slateAssets[path];if(!a)return nul
 var kind=a.dtype?"ndarray":m.indexOf("json")>=0?"json":m.indexOf("text/")===0?"text":"binary";
 return {path:path,kind:kind,mime:a.mime,dtype:a.dtype||null,shape:a.shape||null,order:a.order||null};};
 Slate.assetPaths=function(){return Object.keys(window.__slateAssets);};
+/* `download_button(...)` — the static mirror of core.js's `Slate.download`. A frozen page must still
+   hand the reader the FILE (that is the entire point of the control), so an inlined asset is turned
+   back into a Blob here — inflating first when it was stored gzipped, or the saved file would be
+   compressed bytes wearing a .csv name. */
+Slate.download=function(path,filename){var a=window.__slateAssets[path];
+if(!a){console.error("Slate.download: unknown asset "+path);return;}
+var name=filename||a.name||String(path).split("/").pop();
+var save=function(href,revoke){var el=document.createElement("a");el.href=href;el.download=name;
+el.style.display="none";document.body.appendChild(el);el.click();el.remove();
+if(revoke)setTimeout(function(){URL.revokeObjectURL(revoke);},30000);};
+if(a.data===undefined){save(a.url,null);return;}
+var b=atob(a.data),n=b.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=b.charCodeAt(i);
+var mk=function(buf){var h=URL.createObjectURL(new Blob([buf],{type:a.mime||"application/octet-stream"}));save(h,h);};
+if(a.enc==="gzip")_slateInflate(u).then(mk).catch(function(e){console.error(e);});else mk(u);};
+document.addEventListener("click",function(e){
+var el=e.target&&e.target.closest?e.target.closest("[data-slate-download]"):null;
+if(!el)return;e.preventDefault();
+Slate.download(el.getAttribute("data-slate-download"),el.getAttribute("download")||"");});
 Slate.isLive=function(){return false;};
 /* `@replay`: a control driving shipped data, with no kernel. The static mirror of core.js's
    `Slate.replay` — everything about a replayed control EXCEPT the one call that puts a slice on
@@ -1723,13 +1741,24 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                   "if(_slateMaps[r.name]){try{echarts.registerMap(r.name,_slateMaps[r.name]);}catch(e){}return Promise.resolve();}",
                   "if(!r.url)return Promise.resolve();",
                   "return fetch(r.url).then(function(x){return x.json();}).then(function(j){echarts.registerMap(r.name,j);}).catch(function(){});}));}",
-                  # `registerMap`/`__size`/`requireScripts`, and a series' `__replay` mark, are Slate extensions
-                  # rather than ECharts options — strip them before setOption.
+                  # `registerMap`/`__size`/`requireScripts`/`__valuefmt`, and a series' `__replay` mark, are
+                  # Slate extensions rather than ECharts options — strip them before setOption.
+                  # `__valuefmt` becomes a real `tooltip.valueFormatter` here — the static mirror of core.js's
+                  # `_valueFormatter`. The spec crosses as DATA (a JSON option has no reviver, so a function
+                  # cannot) and is turned back into one at render, using `fmtCell` — the same renderer the
+                  # tables use. Where that isn't on the page the value falls back to its plain string rather
+                  # than throwing inside ECharts' tooltip path, which would wedge the axisPointer.
+                  "function _slateValueFmt(f){return function(v){if(v==null||v==='')return '—';",
+                  "try{return fmtCell(v,f);}catch(e){return String(v);}};}",
                   "function _slateSansMaps(o){if(!o)return o;",
-                  "var mk=Array.isArray(o.series)&&o.series.some(function(x){return x&&x.__replay;});",
-                  "if(!o.registerMap&&!o.__size&&!o.requireScripts&&!mk)return o;",
+                  "var mk=Array.isArray(o.series)&&o.series.some(function(x){return x&&(x.__replay||x.__valuefmt);});",
+                  "if(!o.registerMap&&!o.__size&&!o.requireScripts&&!o.__valuefmt&&!mk)return o;",
                   "var c=Object.assign({},o);delete c.registerMap;delete c.__size;delete c.requireScripts;",
-                  "if(mk)c.series=o.series.map(function(x){if(!x||!x.__replay)return x;var y=Object.assign({},x);delete y.__replay;return y;});",
+                  "if(mk)c.series=o.series.map(function(x){if(!x||(!x.__replay&&!x.__valuefmt))return x;",
+                  "var y=Object.assign({},x);delete y.__replay;",
+                  "if(y.__valuefmt){y.tooltip=Object.assign({},y.tooltip,{valueFormatter:_slateValueFmt(y.__valuefmt)});delete y.__valuefmt;}",
+                  "return y;});",
+                  "if(c.__valuefmt){c.tooltip=Object.assign({},c.tooltip,{valueFormatter:_slateValueFmt(c.__valuefmt)});delete c.__valuefmt;}",
                   "return c;}",
                   # ── `@replay` in an ECharts figure ───────────────────────────────────────────────────────
                   # `Slate.replay.wire` (emitted with the asset shim above) owns everything except the call
@@ -1927,12 +1956,30 @@ const _SITE_BUNDLE = "notebook.standalone.jl"   # generic fallback name (kept fo
 const _SITE_RUNJL = "run.jl"                     # the generated bootstrap script
 const _SITE_PS1 = "run.ps1"                      # Windows launcher (PowerShell): runs run.jl
 const _SITE_BAT = "run.bat"                      # Windows double-click launcher → run.ps1
+const _SITE_SH = "run.sh"                        # macOS/Linux launcher: runs run.jl
 
 # A per-notebook bundle filename so a downloaded/sidecar bundle is recognisable (e.g.
 # `01_whispering_gallery.standalone.jl`, matching the `/export.standalone.jl` download). Same
 # sanitisation as the export routes. `run.jl` reads THIS name beside it, so the two always agree.
 _bundle_filename(nb::LiveNotebook) =
     replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".standalone.jl"
+
+# The project root holding `srcdir`, when that is a working checkout rather than an installed
+# package. Pkg unpacks a release into a read-only, content-addressed depot directory
+# (`…/packages/<Name>/<slug>`), so "is it under a depot?" is the distinction that matters — a
+# checkout anywhere else is something someone is editing, and an app exported from it should run
+# against it. Returns "" for an installed package.
+function _dev_checkout_path(srcdir::AbstractString)
+    # `normpath` can leave a trailing separator here; strip it so the path compares and reads cleanly.
+    root = try; rstrip(abspath(normpath(joinpath(srcdir, ".."))), '/'); catch; return ""; end
+    isempty(root) && return ""
+    isfile(joinpath(root, "Project.toml")) || return ""
+    for d in DEPOT_PATH
+        p = try; abspath(joinpath(String(d), "packages")); catch; continue; end
+        startswith(root * "/", p * "/") && return ""
+    end
+    return root
+end
 
 # The `run.jl` bootstrap. Installs Kaimon + KaimonSlate into a DEDICATED environment (never the user's
 # default — avoids clobbering their setup), fetches the notebook's reproducible bundle, and serves it —
@@ -1941,9 +1988,18 @@ _bundle_filename(nb::LiveNotebook) =
 # `Main.Kaimon` the notebook would fall back to running cells in this bootstrap env (wrong packages). It
 # also enables the in-notebook agent. `bundle_url` is where to fetch the bundle when there's no sibling.
 # Discrete step functions so it's easy to extend/audit. Idempotent.
-function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name::AbstractString = _SITE_BUNDLE)
+function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name::AbstractString = _SITE_BUNDLE,
+                     app::Bool = false, appdefaults::AbstractDict = Dict{String,Any}(), port::Int = 0,
+                     apptitle::AbstractString = "")
     SLATE = "https://github.com/kahliburke/KaimonSlate.jl"
     KAIMON = "https://github.com/kahliburke/Kaimon.jl"
+    # An app exported from a DEV checkout has to run against that checkout. `_add_pkg` otherwise
+    # prefers the registered release, which is the right default for a published notebook and wrong
+    # here: a bundle exported from a working tree can depend on behaviour no release has yet, and the
+    # failure surfaces as a MethodError deep in the launcher after several minutes of precompiling.
+    # Baked as a DEFAULT, so `SLATE_KAIMONSLATE_PATH` still overrides it and a release build (the
+    # source living under a package depot) bakes nothing at all and resolves normally.
+    SLATEDEV = _dev_checkout_path(@__DIR__)
     agentnote = agent ? """
         println(""\"
         ┌ Kaimon is installed alongside KaimonSlate, so the in-notebook AI agent is available.
@@ -1958,7 +2014,7 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     #
     # Steps are separate functions so this is easy to extend or audit.
     using Pkg, Sockets, Downloads
-
+$(app ? _run_app_help(apptitle, port > 0 ? port : _APP_DEFAULT_PORT) : "")
     # Don't auto-register into the user's Kaimon config — this is a self-contained standalone run.
     ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"
 
@@ -1997,12 +2053,18 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     #   3. until then, track `main` on GitHub. `rev="main"` is deliberate: a plain `Pkg.add(url=…)` on a
     #      package already pinned to an OLDER `main` commit is a no-op ("already satisfied") and never
     #      advances to the tip — pinning the branch re-resolves to the CURRENT tip each run.
-    # `force_main` skips step 2 even when a registry has the UUID — for a package whose registered
-    # release is STALE/incompatible with its sibling (so we must track the branch tip until a
-    # compatible version is registered). Quiet-git wraps LibGit2 noise.
-    function _add_pkg(name, uuid, url, env_path; force_main::Bool = false)
-        src = strip(get(ENV, env_path, ""))
-        registered = !force_main && try
+    # `default_path` is a checkout baked in at EXPORT time — set when the exporting Slate was itself a
+    # working checkout, so the app runs against the build that produced it. The env var still wins.
+    # Quiet-git wraps LibGit2 noise.
+    function _add_pkg(name, uuid, url, env_path; default_path = "")
+        src = strip(get(ENV, env_path, default_path))
+        # A baked path that has since moved is worse than useless — it would `develop` a dead
+        # directory. Fall through to the normal resolution and say so.
+        if !isempty(src) && !isdir(expanduser(String(src)))
+            @warn "The \$name checkout this app was exported from is gone — resolving \$name normally" path = src
+            src = ""
+        end
+        registered = try
             any(r -> haskey(r.pkgs, Base.UUID(uuid)), Pkg.Registry.reachable_registries())
         catch; false; end
         Base.CoreLogging.with_logger(_QuietGit(Base.CoreLogging.current_logger())) do
@@ -2022,11 +2084,9 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
         mkpath(ENVDIR); Pkg.activate(ENVDIR)
         # Kaimon FIRST: it provides the compute gate the notebook's env reconstructs through (and the
         # agent). KaimonSlate second — both want HTTP 2, so they co-resolve into one env.
-        # NOTE: Kaimon's currently-REGISTERED release predates KaimonSlate's move to HTTP 2 (its compat
-        # pins HTTP 1.x), so it can't co-resolve with KaimonSlate. Track Kaimon's `main` tip (HTTP 2)
-        # for now via force_main — DROP that once a HTTP-2 Kaimon is registered (then it self-switches).
-        _add_pkg("Kaimon", "d3856c55-31fd-4246-b7e8-380411123c01", "$KAIMON", "SLATE_KAIMON_PATH"; force_main = true)
-        _add_pkg("KaimonSlate", "f7b954f5-0334-4562-ac21-b005218ce1da", "$SLATE", "SLATE_KAIMONSLATE_PATH")
+        _add_pkg("Kaimon", "d3856c55-31fd-4246-b7e8-380411123c01", "$KAIMON", "SLATE_KAIMON_PATH")
+        _add_pkg("KaimonSlate", "f7b954f5-0334-4562-ac21-b005218ce1da", "$SLATE", "SLATE_KAIMONSLATE_PATH";
+                 default_path = raw"$SLATEDEV")
     end
 
     # Prefer the bundle shipped NEXT TO this script (extracted site tarball, or downloaded alongside
@@ -2067,10 +2127,22 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
         isempty(ans) ? default : abspath(expanduser(String(ans)))
     end
 
+    # An APP does not ask. "Where should I set this up?" is a question for someone who downloaded a
+    # notebook to a temp dir; for an app the folder you are standing in IS the distribution, so the
+    # answer is already known. Asking anyway would be worse than noise: a prompt blocks on stdin,
+    # which makes the app impossible to start unattended — no systemd unit, no container, no
+    # `nohup ./run.sh &`. It expands beside the launcher (a dot-dir, so re-exporting over this
+    # folder never mixes bundle files with expanded ones). SLATE_INSTALL_DIR still overrides.
+    function app_install_dir()
+        pre = strip(get(ENV, "SLATE_INSTALL_DIR", ""))
+        isempty(pre) || return abspath(expanduser(String(pre)))
+        return joinpath(@__DIR__, ".app")
+    end
+
     # `using` + serve run at TOP LEVEL (not inside a function): the world age advances between
     # top-level statements, so the just-loaded `KaimonSlate` binding is visible for the serve call.
     const NB = setup()
-    let dir = choose_install_dir()
+    let dir = $(app ? "app_install_dir()" : "choose_install_dir()")
         isempty(dir) || (ENV["SLATE_INSTALL_DIR"] = dir; println("→ Setting up in ", dir))
         # Keep THIS run's Slate state — prefs/secrets, the publish ledger, local site builds — OFF the
         # machine-global homes (~/.config, ~/.local/share, ~/.cache under kaimonslate), so a standalone
@@ -2082,8 +2154,33 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
             ENV["KAIMONSLATE_HOME"] = isempty(dir) ? mktempdir(; prefix = "kaimonslate-run-") :
                                                      joinpath(dir, ".kaimonslate")
         end
+        # …and the same for KAIMON's cache, which is a separate home and the one that actually leaks.
+        # A worker's gate announces itself by dropping a session-metadata file into `<cache>/kaimon/sock`,
+        # and a Kaimon running on this machine WATCHES that directory and connects to every local gate it
+        # finds there. So on a machine that also runs Kaimon, it adopts THIS run's workers: two clients
+        # on one gate, and the hub's calls to its own worker start timing out — which reads as workers
+        # "failing" and being respawned, while the worker is healthy and idle throughout.
+        #
+        # Pointing the cache at this run's own folder announces its gates where nothing else is
+        # watching. A throwaway run gets a temp dir, so it still leaves no trace. An explicitly-set
+        # XDG_CACHE_HOME / LOCALAPPDATA wins, exactly as with the home above.
+        #
+        # Note WHERE: beside the install dir, never inside it. `dir` is where the bundle is about to
+        # be reconstructed, and that refuses to extract into a non-empty directory which isn't already
+        # a Slate install (it must not clobber someone's folder). The cache is populated as soon as
+        # the hub touches its history — before the notebook is opened, hence before extraction — so a
+        # cache under `dir` makes the install dir non-empty and fails the run with a message about
+        # SLATE_INSTALL_DIR that points nowhere near the cause. This folder holds the launcher, so
+        # the state stays self-contained: delete the folder and it's all gone.
+        let cachevar = Sys.iswindows() ? "LOCALAPPDATA" : "XDG_CACHE_HOME"
+            if get(ENV, cachevar, "") == ""
+                ENV[cachevar] = isempty(dir) ? mktempdir(; prefix = "kaimonslate-cache-") :
+                                               joinpath(@__DIR__, ".cache")
+            end
+        end
     end
-    port = free_port()
+    $(app ? _run_app_bind(port) :
+            "port = something(tryparse(Int, get(ENV, \"SLATE_PORT\", \"\")), free_port())\n    host = \"127.0.0.1\"")
     println("Starting the notebook server (first run compiles the environment)…")
     # We only need Kaimon as the compute-gate CLIENT (it spawns/drives the notebook's worker) — pure
     # code, no services. Its __init__ would auto-start a gate SERVER if a kaimon.toml [gate] / KAIMON_GATE_*
@@ -2099,10 +2196,125 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     get(ENV, "KAIMONSLATE_NO_OPEN", "") == "" && (ENV["KAIMONSLATE_NO_OPEN"] = "1")
     import Kaimon        # defines Main.Kaimon → the compute gate that spawns the worker + reconstructs the env
     using KaimonSlate
+$(app ? _run_serve_app(appdefaults) : _run_serve_notebook())
+    """
+end
+
+# The serve call at the tail of `run.jl`, in each of the two postures. Split out so the difference
+# between "someone is opening a notebook" and "this machine is running an application" is one thing
+# you can read side by side, rather than a flag threaded through a 150-line string.
+
+_run_serve_notebook() = """
     # serve_notebook blocks; once the hub answers HTTP it prints a framed banner with the URL + keys.
     # `inactive=true`: open as a static preview (no worker/precompile) until you press `b` to go live.
-    KaimonSlate.serve_notebook(NB; port = port, inactive = true)
+    KaimonSlate.serve_notebook(NB; port = port, inactive = true)"""
+
+# Default port for an exported app. Deliberately NOT 8765: that is the Slate extension's port, and
+# an app is very likely to be started on a machine where someone also runs Slate — colliding by
+# default would make the first launch fail for a reason nobody could guess.
+const _APP_DEFAULT_PORT = 7373
+
+# `--help`, emitted at the very TOP of an app's `run.jl` — before the install step, so asking what
+# this thing does doesn't first spend several minutes precompiling an environment to answer.
+#
+# Someone handed this folder has no other way to find out what it is or how to point it at a
+# different address; the alternative is reading a generated Julia script, which is not a reasonable
+# thing to ask. So it names the app, the flags, the env equivalents for a unit file, and the two
+# facts that surprise people: the first run is slow, and there is no login.
+function _run_app_help(title::AbstractString, port::Int)
+    name = isempty(strip(String(title))) ? "A Kaimon Slate app" : strip(String(title))
+    return """
+    if !isempty(ARGS) && any(a -> a in ("--help", "-h", "help"), ARGS)
+        println(\"\"\"
+    $name — a Kaimon Slate app
+
+      ./run.sh [options]        macOS / Linux
+      julia run.jl [options]    any platform   ·   Windows: double-click run.bat
+
+    Options
+      --host <addr>  address to bind. Default 0.0.0.0 — reachable from your whole
+                     network. Use 127.0.0.1 to keep it to this machine.
+      --port <n>     port to serve on. Default $port.
+      --help         this message.
+
+    Environment (same meanings — for a service unit or a container)
+      SLATE_HOST, SLATE_PORT
+      SLATE_ALLOWED_HOSTS  extra names people will type in the browser (a DNS alias,
+                           a proxy). This machine's own names are already admitted.
+      SLATE_INSTALL_DIR    where to unpack the app. Default: .app beside this file.
+      SLATE_BROWSER        which browser to open (e.g. "Google Chrome").
+
+    Good to know
+      The FIRST run installs and precompiles the environment — several minutes is
+      normal. Later starts are fast.
+      Nothing waits for input, so this runs unattended: systemd, docker, nohup.
+      Once it is up, /status reports worker health, uptime, failures and logs.
+      There is NO login. Anyone who can reach the port can use the app and read its
+      results.
+    \"\"\")
+        exit(0)
+    end
     """
+end
+
+# Where an app binds, from (in precedence order) the command line, the environment, then the
+# export-time default. Both `--host/--port` and SLATE_HOST/SLATE_PORT are accepted: a shell alias
+# or a systemd unit reaches for flags, a container reaches for env, and neither should have to
+# translate. Emitted into `run.jl`; `run.sh`/`run.ps1` forward their arguments through.
+function _run_app_bind(port::Int)
+    dflt = port > 0 ? port : _APP_DEFAULT_PORT
+    return """
+    # ── Where to listen ──────────────────────────────────────────────────────────────────────────
+    #   ./run.sh --host 0.0.0.0 --port $dflt        (flags)
+    #   SLATE_HOST=0.0.0.0 SLATE_PORT=$dflt ./run.sh   (environment)
+    function _arg(flag, envvar, dflt)
+        i = findfirst(==(flag), ARGS)
+        (i !== nothing && i < length(ARGS)) && return ARGS[i + 1]
+        v = strip(get(ENV, envvar, ""))
+        return isempty(v) ? dflt : String(v)
+    end
+    host = _arg("--host", "SLATE_HOST", "0.0.0.0")
+    port = something(tryparse(Int, _arg("--port", "SLATE_PORT", "$dflt")), $dflt)
+    # Binding beyond loopback means the app is meant to be reached BY NAME, and Slate's origin
+    # guard pins the Host header to loopback plus the bind address — so `http://labpc:$dflt` would
+    # be refused with a bare 403 that looks like the app is broken. Binding wide is an explicit
+    # statement of intent, so admit this machine's own names automatically; SLATE_ALLOWED_HOSTS
+    # adds any others (a DNS alias, a reverse proxy's name).
+    if host != "127.0.0.1" && host != "localhost"
+        names = String[gethostname(), host]
+        for ip in try; Sockets.getipaddrs(); catch; []; end
+            push!(names, string(ip))
+        end
+        extra = strip(get(ENV, "SLATE_ALLOWED_HOSTS", ""))
+        isempty(extra) || push!(names, String(extra))
+        ENV["KAIMONSLATE_ALLOWED_HOSTS"] = join(unique(filter(!isempty, names)), ",")
+    end"""
+end
+
+function _run_serve_app(appdefaults::AbstractDict)
+    defs = join(("\"" * String(k) * "\" => " * JSON.json(v) for (k, v) in appdefaults), ", ")
+    return """
+    # APP MODE. This process serves the notebook as an application: the reading view (prose, results,
+    # figures and live controls — no code, no cell chrome) with the authoring API refused server-side.
+    # See KaimonSlate's server_app.jl for exactly what that does and does not guarantee — in
+    # particular there is NO authentication, so anything that can reach this port can drive the app.
+    #
+    # `inactive=false` (the default) so the environment precompiles and the worker warms up NOW,
+    # while the operator is still watching the terminal — rather than making the first visitor wait
+    # several minutes behind a "launch" button they were never told about.
+    #
+    # Nothing below blocks on stdin, so this runs unattended — a systemd unit, a container, or
+    # `nohup ./run.sh &` all work. Stop it with Ctrl-C, `q` (when there IS a terminal), or a
+    # SIGTERM from whatever supervises it.
+    #
+    # Operator page: http://<host>:\$port/status — worker vitals, uptime, recent failures, logs.
+    #
+    # NOTE the default bind is 0.0.0.0 — reachable from the network, which is what a shared lab
+    # machine is for, and which also means there is NOTHING between the network and this app: it
+    # has no login. Anyone who can reach the port can drive it and read its results. Bind
+    # `--host 127.0.0.1` to keep it to this machine.
+    KaimonSlate.serve_notebook(NB; port = port, host = host, app = true,
+                               appdefaults = Dict{String,Any}($defs))"""
 end
 
 # The Windows launcher (`run.ps1`). PowerShell is the modern Windows shell, so it holds the launch
@@ -2129,7 +2341,7 @@ function _run_ps1()
         Write-Host "Install it from https://julialang.org/downloads/  (or run:  winget install julia )"
         Hold; exit 1
     }
-    julia (Join-Path \$PSScriptRoot "$(_SITE_RUNJL)")
+    julia (Join-Path \$PSScriptRoot "$(_SITE_RUNJL)") @args   # forward --host/--port through
     Hold
     """
 end
@@ -2150,6 +2362,85 @@ function _run_bat()
         "rem script (e.g. locked-down machine), so the error is readable rather than flashing shut.",
         "pause",
     ], "\r\n") * "\r\n"
+end
+
+# The Unix launcher (`run.sh`). The Windows pair above had no peer on macOS/Linux, which is the
+# wrong way round for the deployment this is actually for — a lab machine is likelier Linux than
+# Windows, and "run this folder" should not require knowing that the entry point is a `.jl`.
+# Same shape as run.ps1: check Julia is on PATH (guide to juliaup if not — it does NOT install
+# Julia), then hand off to run.jl, which does the real work. Written executable by the exporter.
+# The banner's one or two `printf` lines. Built here rather than as a shell conditional because the
+# condition is known at EXPORT time — a generated `if [ -n "a Kaimon Slate app" ]` is a test that can
+# only ever pass, i.e. dead code shipped to whoever reads the launcher. Both values are printf
+# ARGUMENTS, never part of a format string, so a `%` in a title stays a `%`.
+# The caller places this at the template's indent; continuation lines carry their own (2 spaces, to
+# match the generated file inside its `if` block).
+function _sh_banner(name::AbstractString, subtitle::AbstractString)
+    line(style, text) = "printf '  %s▍%s %s%s%s\\n' \"\$A\" \"\$R\" \"$style\" \"$text\" \"\$R\""
+    out = line("\$B", name)
+    isempty(subtitle) || (out *= "\n  " * line("\$D", subtitle))
+    return out
+end
+
+function _run_sh(title::AbstractString = "")
+    # The second line says what this thing IS, which is worth a line when the first line is the app's
+    # own name — and is pure noise when the app has no name and the first line already said it.
+    named = !isempty(strip(String(title)))
+    name = named ? strip(String(title)) : "Kaimon Slate app"
+    # Emitted as a shell variable rather than interpolated into the template: a conditional LINE would
+    # have to carry its own indentation through `"""` dedenting, and gets it wrong.
+    subtitle = named ? "a Kaimon Slate app" : ""
+    return """
+    #!/usr/bin/env bash
+    # ── Run this Kaimon Slate app ────────────────────────────────────────────────────────────────
+    # Auto-generated. Runs the sibling $(_SITE_RUNJL), which installs Kaimon + KaimonSlate into a
+    # dedicated environment, reconstructs this notebook's exact packages, and serves it.
+    # Prerequisite: Julia 1.10+ (https://julialang.org/downloads or juliaup).
+    #
+    #   ./$(_SITE_SH)                              # run it (binds 0.0.0.0 — the whole network)
+    #   ./$(_SITE_SH) --port 9000                  # a specific port
+    #   ./$(_SITE_SH) --host 127.0.0.1             # this machine only
+    #   ./$(_SITE_SH) --help                       # every option
+    # SLATE_HOST / SLATE_PORT work too, for a unit file or a container.
+    set -euo pipefail
+    cd "\$(dirname "\${BASH_SOURCE[0]}")"
+
+    # Colour only when it can actually be seen: a real terminal, a terminal that understands it,
+    # and no NO_COLOR (https://no-color.org). Piped into a file or a log collector — which is
+    # exactly where an unattended deployment sends this — it stays plain text, because escape
+    # codes in a log are worse than no colour at all.
+    if [ -t 1 ] && [ -z "\${NO_COLOR:-}" ] && [ "\${TERM:-dumb}" != "dumb" ]; then
+      A=\$'\\033[38;5;117m'; B=\$'\\033[1m'; D=\$'\\033[2m'; W=\$'\\033[38;5;215m'; R=\$'\\033[0m'
+    else
+      A=''; B=''; D=''; W=''; R=''
+    fi
+
+    # `run.jl` prints its own help, so don't stack a banner on top of it.
+    show_banner=1
+    for a in "\$@"; do
+      case "\$a" in --help|-h|help) show_banner=0 ;; esac
+    done
+
+    if [ "\$show_banner" = 1 ]; then
+      printf '\\n'
+      $(_sh_banner(name, subtitle))
+      printf '\\n'
+    fi
+
+    if ! command -v julia >/dev/null 2>&1; then
+      printf '  %s✗ Julia was not found on your PATH.%s\\n' "\$W" "\$R"
+      printf '    %sInstall it from https://julialang.org/downloads/%s\\n' "\$D" "\$R"
+      printf '    %sor:  curl -fsSL https://install.julialang.org | sh%s\\n\\n' "\$D" "\$R"
+      exit 1
+    fi
+
+    if [ "\$show_banner" = 1 ]; then
+      printf '  %sstarting — the first run installs and precompiles the environment,%s\\n' "\$D" "\$R"
+      printf '  %swhich can take several minutes. Later starts are fast.%s\\n\\n' "\$D" "\$R"
+    fi
+
+    exec julia "$(_SITE_RUNJL)" "\$@"
+    """
 end
 
 """
@@ -2225,6 +2516,199 @@ function _write_runnable_bundle!(dir::AbstractString, nb::LiveNotebook; base_url
     write(joinpath(dir, _SITE_PS1), _run_ps1())
     write(joinpath(dir, _SITE_BAT), _run_bat())
     return dir
+end
+
+# ── Exporting an APP ─────────────────────────────────────────────────────────────────────────────
+
+# The bundle filename for an APP, which also becomes the served id — so it is what a reader sees in
+# the URL (`/n/band-deconvolution`) and what the folder is recognised by.
+#
+# A notebook bundle is named after its FILE, which is right when the artifact is "this notebook":
+# you went looking for `app.jl` and you get `app.standalone.jl`. It is wrong for a deployed app,
+# where the file is an implementation detail nobody chose and half the notebooks in the world are
+# called `app.jl` — a reader landing on `/n/app_standalone` learns nothing. So an app is named for
+# what it IS: the explicit `title`, else the document's own title (its `role=title` cell), and only
+# as a last resort the filename.
+function _app_bundle_filename(nb::LiveNotebook, title::AbstractString = "")
+    # `report_frontmatter`, not `report.title`: the latter defaults to the FILENAME, so a notebook
+    # called `app.jl` titled "Band Deconvolution" would still have shipped as `app.standalone.jl`.
+    # The frontmatter reads the `role=title` cell (or the first H1) — the document's real title.
+    t = isempty(strip(String(title))) ?
+        (try; strip(report_frontmatter(nb.report).title); catch; ""; end) : strip(String(title))
+    # Guard the fallback: when there is no title cell the frontmatter hands back `report.title`,
+    # which IS the filename — fine as a last resort, but it must not look like a real choice.
+    slug = lowercase(replace(String(t), r"[^A-Za-z0-9]+" => "-"))
+    slug = strip(slug, '-')
+    # Untitled (or a title that slugs to nothing) → the notebook's own filename stem. NOT
+    # `_bundle_filename`, which appends `.standalone` — the whole point here is that an app's file
+    # never carries that suffix, and this branch is exactly where it would sneak back in.
+    isempty(slug) && (slug = lowercase(replace(first(splitext(basename(nb.path))), r"[^A-Za-z0-9]+" => "-")))
+    slug = strip(slug, '-')
+    isempty(slug) && (slug = "app")
+    # Plain `<title>.jl`, NOT `<title>.standalone.jl`. The suffix marks a bundle you were handed on
+    # its own and have to recognise; here the file lives inside the app's folder next to its
+    # launcher, so it names nothing a reader needs. It DOES leak: the served id comes from the
+    # filename, so `.standalone` reached the URL (`/n/band_deconvolution_standalone`) and every
+    # place the notebook is named. Detection is by CONTENT (`_has_bundle` reads the footer), never
+    # by extension, so dropping the suffix costs nothing.
+    return first(slug, 60) * ".jl"
+end
+
+#
+# The deployable form of a notebook that is meant to be USED rather than read: a folder you copy to
+# whichever machine is going to run it. It reuses the standalone bundle wholesale — the notebook's
+# exact environment, its locked results, its data — and differs only in the `run.jl` it ships, which
+# serves in app mode instead of opening the authoring UI.
+#
+# Nothing here is a separate export format. An app IS the standalone bundle; "app" is a posture the
+# launcher takes, which is why upgrading a deployed app is `export_app` again over the same folder.
+
+"""
+    export_app(nb, dir; appdefaults=Dict(), port=0, agent=false, history=false) -> String
+
+Write a self-contained **application** for `nb` into `dir` (created if absent), and return `dir`.
+
+The folder holds the notebook's reproducible bundle plus launchers. Running `julia run.jl` inside
+it — here, or on any machine you copy it to, needing only Julia 1.10+ — installs the environment,
+reconstructs the notebook's exact packages, and serves it as an app: prose, results, figures and
+live controls, with the authoring API refused server-side. Windows users double-click `run.bat`.
+
+`appdefaults` sets the presentation a visitor gets before expressing a preference of their own
+(build it with [`app_defaults`](@ref)). `port` pins the port (0 = pick a free one; `SLATE_PORT`
+overrides at run time). `agent=false` by default — an app's readers are not authoring, so the
+in-notebook agent is off unless you ask for it.
+
+**What ships**: by default the project's git-TRACKED files — the right default, since it carries
+the source and leaves out build output, scratch and stray artifacts. `include` names extra
+project-relative files or directories to carry anyway. Reach for it when part of the app is
+deliberately untracked: reference data under the notebook's `datadir()` is git-ignored *by
+construction* (that directory self-ignores so a stray database is never committed), so an app whose
+samples live there arrives unable to load them —
+
+    export_app(nb, dir; include = ["assets/spectra"])
+
+A project with **no commits** has no tracked files at all, so the bundle falls back to a partial
+copy; `export_app` warns when it sees that, because the result looks fine until it is deployed.
+
+There is **no authentication**. Anything that can reach the port can drive the app and read its
+results; treat "who can reach this port" as the entire access-control story.
+"""
+function export_app(nb::LiveNotebook, dir::AbstractString; appdefaults::AbstractDict = Dict{String,Any}(),
+                    port::Integer = 0, agent::Bool = false, history::Bool = false,
+                    include = String[], title::AbstractString = "")
+    d = abspath(String(dir))
+    mkpath(d)
+    bname = _app_bundle_filename(nb, title)
+    _warn_untracked_project(nb)
+    write(joinpath(d, bname), export_standalone(nb; history = history, include = include))
+    apptitle = isempty(strip(String(title))) ?
+        (try; strip(report_frontmatter(nb.report).title); catch; ""; end) : strip(String(title))
+    write(joinpath(d, _SITE_RUNJL), _run_script(""; agent = agent, bundle_name = bname,
+                                                app = true, appdefaults = appdefaults, port = Int(port),
+                                                apptitle = apptitle))
+    write(joinpath(d, _SITE_PS1), _run_ps1())
+    write(joinpath(d, _SITE_BAT), _run_bat())
+    sh = joinpath(d, _SITE_SH)
+    write(sh, _run_sh(apptitle))
+    # Executable, or `./run.sh` fails with "permission denied" and the launcher may as well not
+    # exist — the whole point is that the folder runs without knowing what's inside it.
+    Sys.isunix() && (try; chmod(sh, 0o755); catch; end)
+    write(joinpath(d, "README.md"), _app_readme(nb, bname, Int(port)))
+    return d
+end
+
+# A bundle ships the project's git-TRACKED files, so a project with no commits has NOTHING to
+# track and falls back to a partial copy — source and metadata, but not the rest of the tree. The
+# export still succeeds and the folder still looks right; it fails only once deployed, as missing
+# files at run time. That is exactly the failure worth a word up front.
+function _untracked_project(nb::LiveNotebook)
+    root = _proj_root(nb)
+    (isempty(root) || !isdir(joinpath(root, ".git"))) && return false
+    Sys.which("git") === nothing && return false
+    n = try
+        length(split(read(pipeline(`git -C $root ls-files -z`; stderr = devnull), String), '\0'; keepempty = false))
+    catch; return false; end
+    return n == 0
+end
+
+function _warn_untracked_project(nb::LiveNotebook)
+    root = _proj_root(nb)
+    _untracked_project(nb) && @warn """
+        This project has no committed files, so the app bundle carries only a partial copy of it \
+        (an export ships the repo's TRACKED files). Commit the project, or name what else the app \
+        needs with `include=[…]` — otherwise the app will start and then fail on missing files.""" project = root
+    return nothing
+end
+
+# What the person deploying this needs to know, in the folder they're deploying. They are usually
+# not the author, and often not a Julia programmer — so it says what to run, what to expect the
+# first time (a long precompile), where the status page is, and what the security model is.
+function _app_readme(nb::LiveNotebook, bundle_name::AbstractString, port::Int)
+    title = let t = strip(nb.report.title); isempty(t) ? "Slate app" : t; end
+    p = port > 0 ? string(port) : "<printed on startup>"
+    return """
+    # $title
+
+    A [Kaimon Slate](https://github.com/kahliburke/KaimonSlate.jl) application. Everything it needs
+    is in this folder.
+
+    ## Running it
+
+    Install Julia 1.10 or newer (<https://julialang.org/downloads>), then from this folder:
+
+    | | |
+    |---|---|
+    | macOS / Linux | `./run.sh` |
+    | Windows | double-click `run.bat` |
+    | any | `julia run.jl` |
+
+    **The first run takes a while** — several minutes is normal. It installs the application's
+    packages and precompiles them. Later starts are fast. When it's ready the terminal prints the
+    address to open, something like `http://127.0.0.1:$p`.
+
+    Leave the terminal window open: closing it stops the application. Press `q` to stop it
+    deliberately.
+
+    ## Settings
+
+    | variable | what it does |
+    |---|---|
+    | `--port` / `SLATE_PORT` | the port to serve on (default `$(port > 0 ? port : _APP_DEFAULT_PORT)`) |
+    | `--host` / `SLATE_HOST` | the address to bind (default `0.0.0.0` — the whole network; use `127.0.0.1` for this machine only) |
+    | `SLATE_ALLOWED_HOSTS` | extra names people will type in the browser (a DNS alias, a proxy); this machine's own names are admitted automatically |
+    | `SLATE_INSTALL_DIR` | where to unpack the application (default: `.app` beside this file) |
+
+    ```
+    ./run.sh --host 127.0.0.1 --port 9000
+    ```
+
+    Nothing here waits for input, so it also runs unattended — under systemd, in a container, or
+    as `nohup ./run.sh &`.
+
+    ## If something goes wrong
+
+    Open `/status` on the same address — e.g. `http://127.0.0.1:$p/status`. It shows whether the
+    server and its worker process are healthy, how long they've been up, how much memory they're
+    using, any step that failed with its error message, and the worker's log.
+
+    ## Access
+
+    There is **no login and no authentication**. Anyone who can reach the port can use the
+    application and see its results.
+
+    It binds `0.0.0.0` by default — reachable from your whole network, which is the point of
+    putting it on a shared machine, and which also means nothing stands between the network and
+    this app. Run it on a network you trust, or bind `--host 127.0.0.1` to keep it to this
+    machine.
+
+    Readers cannot edit the notebook, install packages, browse the filesystem, or publish — those
+    routes are refused by the server, not merely hidden.
+
+    ## Updating it
+
+    Re-export over this same folder. The bundle (`$bundle_name`) is the application; `run.jl` only
+    launches it.
+    """
 end
 
 # Materialise the site into `dir`: index.html (wired to the og-image sidecar) + og-image.png +

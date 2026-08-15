@@ -19,7 +19,7 @@
 # slate-owned worker_infra env on LOAD_PATH.
 import Markdown # stdlib — `@md` renders a standalone-run markdown cell (see `_populate_notebook_ns!`)
 import Base64   # stdlib — a replay sweep hands its packed bytes back to the export base64'd
-using SlateExtensionsBase: SlateExtensionsBase, Widget, Choice, Selection, indices, WebPage,
+using SlateExtensionsBase: SlateExtensionsBase, Widget, Choice, Selection, UploadedFile, indices, WebPage,
                            to_widget, register_kind!, coerce_bind, reconcile_bind, wrap_value,
                            # `@replay`: a control's finite domain, and data computed across it
                            bind_domain, ReplayArray, replay_stack
@@ -353,6 +353,70 @@ ColorPicker(default::AbstractString = "#3aa0ff"; label = nothing) = Widget("colo
 DateField(default = ""; label = nothing) = Widget("date", _wparams(label), string(default))
 TimeField(default = ""; label = nothing) = Widget("time", _wparams(label), string(default))
 Button(label::AbstractString = "Click") = Widget("button", Dict{String,Any}("label" => String(label)), 0)
+
+"""
+    RangeSlider(range; default=nothing, label=nothing) -> Widget
+    RangeSlider(min, max; step=1, default=nothing, label=nothing) -> Widget
+
+A slider with two thumbs, binding an interval as a `(lo, hi)` NamedTuple.
+
+For choosing a span — a region of a signal, a date window, an axis limit pair — where the two
+ends are one decision. Two separate sliders make the reader hold "lo must stay below hi" in their
+head and let them cross; one control with two thumbs cannot be put into that state.
+
+```julia
+@bind span RangeSlider(400:4000; default = (1500, 1800), label = "region")
+
+lo, hi = span          # destructures
+span.lo, span.hi       # or by name
+```
+"""
+function RangeSlider(r::AbstractRange; default = nothing, label = nothing)
+    lo, hi, st = float(first(r)), float(last(r)), float(step(r))
+    return _rangeslider(lo, hi, st, default, label)
+end
+RangeSlider(lo::Real, hi::Real; step::Real = 1, default = nothing, label = nothing) =
+    _rangeslider(float(lo), float(hi), float(step), default, label)
+
+function _rangeslider(lo, hi, st, default, label)
+    lo, hi = minmax(lo, hi)
+    d = default === nothing ? (lo, hi) : default
+    a, b = d isa NamedTuple ? (d.lo, d.hi) : (first(d), last(d))
+    a, b = minmax(clamp(float(a), lo, hi), clamp(float(b), lo, hi))
+    p = merge(_wparams(label), Dict{String,Any}("min" => lo, "max" => hi, "step" => st))
+    # The wire value is a plain 2-element vector — JSON-native, and what the browser sends back.
+    # `wrap` is what turns it into the NamedTuple cells see.
+    return Widget("rangeslider", p, Any[a, b])
+end
+
+"""
+    FileUpload(; accept="", label=nothing, maxbytes=0) -> Widget
+
+A file the READER supplies. The browser sends the bytes to the server, which stores them under the
+notebook's `datadir()` and binds an [`UploadedFile`](@ref) — so downstream cells get a real path
+and recompute exactly as they would for a moved slider. Before anything is uploaded the value is
+`nothing`.
+
+`accept` is the file-picker filter, in the HTML `accept` vocabulary (`".csv"`, `".csv,.txt"`,
+`"text/*"`); it is a convenience for the reader, not a guarantee — validate what you actually got.
+`maxbytes` rejects anything larger (0 = the server default).
+
+```julia
+@bind datafile FileUpload(; accept = ".csv", label = "Data")
+
+if datafile === nothing
+    md"Upload a file to begin."
+else
+    CSV.read(datafile.path, DataFrame)
+end
+```
+"""
+function FileUpload(; accept::AbstractString = "", label = nothing, maxbytes::Integer = 0)
+    p = _wparams(label)
+    isempty(accept) || (p["accept"] = String(accept))
+    maxbytes > 0 && (p["maxbytes"] = Int(maxbytes))
+    return Widget("fileupload", p, nothing)
+end
 # A DRIVEN control: an animation player pushes its current 1-based frame index here (browser→Julia,
 # throttled), so `@bind t playhead(anim)` lets other cells react to playback. It has no input of its
 # own — the player IS the control. Links to its animation by the manifest's animId.
@@ -405,7 +469,8 @@ custom_widget(kind::AbstractString, default = ""; kwargs...) =
 
 const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :TextArea,
                        :Select, :Radio, :MultiSelect, :MultiCheckBox, :ColorPicker, :DateField,
-                       :TimeField, :Button, :playhead, :TableSelect, :custom_widget)
+                       :TimeField, :Button, :FileUpload, :RangeSlider, :playhead, :TableSelect,
+                       :custom_widget)
 
 # ── Value lifecycle ───────────────────────────────────────────────────────────
 # `coerce_bind` (browser value → Julia value), `reconcile_bind` (persistence across a bind-cell
@@ -423,14 +488,45 @@ const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :T
 function _lookup_option(w::Widget, v)
     for (i, o) in enumerate(get(w.params, "options", ()))
         if o isa AbstractDict
-            isequal(get(o, "value", nothing), v) && return (String(o["label"]), i)
-        elseif isequal(o, v)
+            # `_same_option`, not `isequal`: the value may still be the browser's string form, and
+            # a labeled option that failed to match here silently lost its LABEL (the `Choice`
+            # fell back to the raw value's string, so `pick.label` showed "10000000" instead of
+            # "very stiff").
+            _same_option(get(o, "value", nothing), v) && return (String(o["label"]), i)
+        elseif _same_option(o, v)
             return (string(o), i)
         end
     end
     return (string(v), 0)
 end
 _choice(w::Widget, v) = (li = _lookup_option(w, v); Choice(v, li[1], li[2]))
+
+# Does a browser-returned option value name this option? An `<option>` carries its value as TEXT,
+# so what comes back is a String and has to be matched against the real Julia value.
+#
+# A plain `string(v0) == string(v)` is not enough, because the two ends stringify numbers
+# differently: Julia writes `1.0e7`, JavaScript writes `10000000`, and `10000.0` vs `10000`. So a
+# `Select` whose options were NUMBERS silently failed to round-trip — the bind kept the raw String,
+# and a cell doing arithmetic on it got a `TypeError` naming a type the author never chose. (It
+# looked fine until the reader first CHANGED the dropdown, because the default never makes the
+# round trip.)
+#
+# Compare numerically when both sides can be read as numbers, and fall back to the string form
+# otherwise — so `1e7` matches `"10000000"`, while string options keep matching exactly.
+# Decimal places implied by a step — 1 → 0, 0.05 → 2. Used to round a snapped value back to the
+# precision the step describes; mirrors `precision()` in js/widget-rangeslider.js, which decides
+# how the same value is DISPLAYED, so the shown and stored forms agree.
+function _step_digits(st::Real)
+    (st <= 0 || st >= 1 || !isfinite(st)) && return 0
+    return clamp(ceil(Int, -log10(st)) + 1, 0, 10)
+end
+
+function _same_option(v0, v)
+    string(v0) == string(v) && return true
+    n0 = v0 isa Number ? float(v0) : tryparse(Float64, string(v0))
+    n1 = v isa Number ? float(v) : tryparse(Float64, string(v))
+    return n0 !== nothing && n1 !== nothing && n0 == n1
+end
 
 # Register the value lifecycle for each built-in kind through SlateExtensionsBase's `register_kind!`
 # — the SAME seam a third-party widget uses. Hooks: coerce(w, v) (browser value → Julia value),
@@ -456,6 +552,55 @@ function _register_builtin_kinds!()
     for k in ("button", "playhead")
         register_kind!(k; coerce = (w, v) -> v isa Number ? Int(round(v)) : v)
     end
+    # RangeSlider — two numbers that are one decision. Coercion is where the invariant lives: the
+    # pair is always sorted and inside the widget's own bounds, so a cell reading `span.lo` can
+    # never see it above `span.hi` no matter what the browser sent.
+    function _rs_pair(w, v)
+        lo = float(get(w.params, "min", 0)); hi = float(get(w.params, "max", 1))
+        st = float(get(w.params, "step", 1))
+        d = w.default isa AbstractVector && length(w.default) == 2 ? w.default : Any[lo, hi]
+        (v isa AbstractVector && length(v) == 2 && all(x -> x isa Number, v)) || return d
+        # SNAP to the control's own step. The thumb can only ever sit on a step, but another input
+        # device can hand over anything — an `echart(…; select = …)` brush posts raw axis
+        # coordinates, so a drag produced values like `733.206106870229`. Left unsnapped that is
+        # meaningless precision the reader never asked for, it leaks into every axis label and
+        # readout downstream, and the slider thumb cannot actually represent it, so the two inputs
+        # disagree by up to a step. Snapping here — in the ONE place a value enters the bind —
+        # keeps every writer honest instead of asking each one to round.
+        # `lo + n*st` reintroduces the very noise the snap exists to remove (a 0.05 step lands on
+        # 0.30000000000000004), so the result is rounded to the step's own precision.
+        dg = _step_digits(st)
+        snap(x) = st > 0 ? round(lo + round((clamp(float(x), lo, hi) - lo) / st) * st; digits = dg) :
+                           clamp(float(x), lo, hi)
+        a, b = minmax(clamp(snap(v[1]), lo, hi), clamp(snap(v[2]), lo, hi))
+        return Any[a, b]
+    end
+    register_kind!("rangeslider";
+        coerce = _rs_pair,
+        # A re-run of the bind cell keeps the reader's span when it still fits the (possibly new)
+        # bounds — the same rule the single Slider uses.
+        reconcile = function (ow, ov, nw)
+            lo = float(get(nw.params, "min", 0)); hi = float(get(nw.params, "max", 1))
+            (ov isa AbstractVector && length(ov) == 2 &&
+             all(x -> x isa Number && lo <= x <= hi, ov)) ? ov : nw.default
+        end,
+        wrap = (w, v) -> begin
+            p = v isa AbstractVector && length(v) == 2 ? v : w.default
+            (; lo = float(p[1]), hi = float(p[2]))
+        end)
+    # FileUpload — the SERVER sets this one, not the browser: the upload route stores the bytes and
+    # binds the resulting record (a plain Dict, so it survives the wire and the notebook footer).
+    # `wrap` turns it into the `UploadedFile` cells actually see. Reconcile keeps an uploaded file
+    # across a re-run of its bind cell — re-running the cell that declares the control must not
+    # silently discard the reader's file and leave the app looking like it never happened.
+    _uploaded(v) = v isa AbstractDict && !isempty(String(get(v, "path", ""))) ?
+        UploadedFile(String(get(v, "name", "")), String(get(v, "path", "")),
+                     Int(get(v, "size", 0)), String(get(v, "mime", "")),
+                     Float64(get(v, "uploaded", 0.0))) : nothing
+    register_kind!("fileupload";
+        coerce = (w, v) -> v isa AbstractDict ? v : nothing,
+        reconcile = (ow, ov, nw) -> ov isa AbstractDict ? ov : nw.default,
+        wrap = (w, v) -> _uploaded(v))
     # TableSelect — the browser sends the clicked row's 1-based index; clamp to the known rows
     # (0 = none). The user-facing value is that row as a NamedTuple.
     register_kind!("tableselect";
@@ -475,7 +620,7 @@ function _register_builtin_kinds!()
         register_kind!(k;
             coerce = function (w, v)
                 for v0 in _opt_values(get(w.params, "options", ()))
-                    string(v0) == string(v) && return v0
+                    _same_option(v0, v) && return v0
                 end
                 return v
             end,
@@ -489,8 +634,7 @@ function _register_builtin_kinds!()
             coerce = function (w, v)
                 vals = _opt_values(get(w.params, "options", ()))
                 sel = v isa AbstractVector ? v : (v === nothing ? Any[] : Any[v])
-                ss = Set(string(s) for s in sel)
-                Any[v0 for v0 in vals if string(v0) in ss]
+                Any[v0 for v0 in vals if any(s -> _same_option(v0, s), sel)]
             end,
             reconcile = function (ow, ov, nw)
                 vals = _opt_values(get(nw.params, "options", ()))
@@ -746,6 +890,7 @@ _invoke_slate_handler(f, sargs, progress) =
 function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTable,
                                 slate_query, slate_refresh, slate_progress = (frac; msg = "", id = "", done = false) -> nothing,
                                 slate_emit = (channel, data) -> nothing,
+                                set_bind = (name, value) -> nothing,
                                 assetbase = () -> "")
     Core.eval(m, :(const echart = $echart))
     Core.eval(m, :(const EChart = $EChart))
@@ -761,6 +906,11 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const slate_refresh = $slate_refresh))
     Core.eval(m, :(const slate_progress = $slate_progress))   # slate_progress(frac; msg) → live cell progress
     Core.eval(m, :(const slate_emit = $slate_emit))           # slate_emit(channel, data) → live push to a cell's custom JS (cellstream:)
+    # `set_bind(:name, value)` — the notebook driving one of its OWN controls. Takes the same path a
+    # browser change takes (coerce → restale readers → sync the widget → persist), so a value set
+    # from a cell is indistinguishable from one the reader typed. Without it a control can be left
+    # contradicting what the app is showing, with no way to correct it. Inert on a standalone run.
+    Core.eval(m, :(const set_bind = $set_bind))
     # code→Slate cell-effects channel: a cell (or a package it calls) DECLARES an effect, attributed to the
     # executing statement, harvested into the wire (`CellOutput.effects`). `slate_effect` is transport-free
     # (task-local push, same impl everywhere — unlike slate_emit). Ergonomic sugar `slate_everywhere(names…)`
@@ -770,6 +920,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # zero-overhead path). No `@everywhere` MACRO is injected — it would clash with `Distributed.@everywhere`.
     Core.eval(m, :(const slate_effect = $_slate_effect))      # slate_effect(kind; names=…, data...) → declare a cell effect
     Core.eval(m, :(const save_asset = $_save_asset))          # save_asset(name, data) → AssetRef (write-side dual of @asset)
+    Core.eval(m, :(const download_button = $_download_button))  # download_button(name, data) → a button that saves it to the reader's disk
     Core.eval(m, :(slate_everywhere(names::Symbol...) = slate_effect(:everywhere; names = collect(names))))
     # JS→Julia CALLS — the request/response counterpart to `slate_emit`'s push. A cell registers
     # `slate_on("channel", args -> result)`; browser JS calls `await window.slateCall("channel", args)`.
@@ -915,6 +1066,16 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const __on_register = $((nm, f) -> (handlers[nm] = f; nothing))))
     # `cancel(:ctrl)` — stop the running handler for a control (e.g. from a Stop button).
     Core.eval(m, :(const cancel = $((nm::Symbol) -> __on_cancel!(tokens, nm))))
+    # …and the exception a cancelled handler unwinds with, so its own `catch` can TELL a cancellation
+    # from a genuine failure:
+    #
+    #     catch e
+    #         msg[] = e isa Cancelled ? "Stopped." : "It didn't finish: " * sprint(showerror, e)
+    #     end
+    #
+    # Without it the two are indistinguishable from inside a notebook, and a reader who pressed Stop
+    # gets shown an error for having done so.
+    Core.eval(m, :(const Cancelled = $_Cancelled))
     # `@onclick btn body` — fire `body` on a click (the click count value is ignored).
     Core.eval(m, :(macro onclick(btn, body)
         esc(Expr(:call, :__on_register, QuoteNode(btn), Expr(:(->), Expr(:tuple, :_), body)))

@@ -16,6 +16,7 @@ export register_emit!, unregister_emit!, register_bin_emit!, unregister_bin_emit
 export register_celldone!, unregister_celldone!
 export register_cleanup_cells!, unregister_cleanup_cells!, run_cleanups!
 export register_toolcall!, unregister_toolcall!
+export register_setbind!, unregister_setbind!
 
 # ── Out-of-band callback registries ───────────────────────────────────────────
 #
@@ -195,6 +196,28 @@ function _do_toolcall(report_id::AbstractString, payload)
     return nothing
 end
 
+# `set_bind(:name, value)` from cell code: a notebook DRIVING one of its own controls. Cells run in
+# the worker and the bind registry lives in the hub, so the call publishes on the gate stream and
+# the poller routes it here — the same out-of-band shape as `slate_refresh` and `slate_toolcall`.
+#
+# It exists because a control that can't be moved from Julia forces a whole class of UI to lie: an
+# app that reacts to an upload cannot make the "which file?" dropdown agree with what it is showing,
+# and a chart that sets a range cannot move the slider bound to it. Everything downstream (coerce,
+# reconcile, restaling readers, syncing the widget, persisting to the `.jl`) is the SAME path the
+# browser POST and the agent's `slate.set_bind` already take — this only adds a third caller, so a
+# value set from a cell is indistinguishable from one the reader typed.
+const _SETBIND_REGISTRY = Dict{String,Any}()
+register_setbind!(report_id::AbstractString, cb) = _reg_set!(_SETBIND_REGISTRY, report_id, cb)
+unregister_setbind!(report_id::AbstractString) = _reg_del!(_SETBIND_REGISTRY, report_id)
+function _do_setbind(report_id::AbstractString, name::AbstractString, value)
+    cb = _reg_get(_SETBIND_REGISTRY, report_id)
+    cb === nothing && return nothing
+    try; cb(String(name), value); catch e
+        @warn "slate: set_bind from a cell failed" bind = name exception = e
+    end
+    return nothing
+end
+
 # Parent-project /src hot-reload: the worker's Revise watcher fires `files_changed`; the
 # server registers a per-report callback (out-of-band, like refresh) that applies the
 # revisions and invalidates the cells that read the changed definitions.
@@ -231,6 +254,9 @@ function _new_module(report::Report)
         slate_emit = (channel, data) -> data isa SlateExtensionsBase.SlateBinary ?
             _do_emit_bin(rid, SlateExtensionsBase.encode_binary_frame(string(channel), data)) :
             _do_emit(rid, channel, data),
+        # In-process: no wire to cross, so it goes straight to the same callback the worker's
+        # published message ends up at.
+        set_bind = (name, value) -> _do_setbind(rid, string(name), value),
         assetbase = () -> String(get(report.meta, "assetbase", "")))   # `@asset` base (notebook project dir)
     return m
 end

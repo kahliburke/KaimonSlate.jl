@@ -374,8 +374,13 @@ function _slate_normalize!(opt::Dict{String,Any})
             e isa AbstractDict || continue
             fragile = get(e, "coordinateSystem", "") == "geo" || get(e, "type", "") == "heatmap"
             fragile && !haskey(e, "progressive") && (e["progressive"] = 0)
+            # Per-series `valuefmt` → the same wire marker as the top-level one.
+            haskey(e, "valuefmt") && (e["__valuefmt"] = _valuefmt_wire(pop!(e, "valuefmt")))
         end
     end
+    haskey(opt, "valuefmt") && (opt["__valuefmt"] = _valuefmt_wire(pop!(opt, "valuefmt")))
+    haskey(opt, "zoom") && _apply_zoom!(opt, pop!(opt, "zoom"))
+    haskey(opt, "select") && _apply_select!(opt, pop!(opt, "select"))
     sz = Dict{String,Any}()
     for k in ("height", "width")
         haskey(opt, k) && (sz[k] = pop!(opt, k))
@@ -383,6 +388,143 @@ function _slate_normalize!(opt::Dict{String,Any})
     isempty(sz) || (opt["__size"] = sz)
     return opt
 end
+
+# ── `select`: drag on a chart to set a `@bind` range ─────────────────────────────────────────────
+#
+# `select = :span` makes the chart's x-range a live INPUT: drag across it and the `@bind`ed variable
+# `span` takes the range you swept. The control that declares `span` — a `RangeSlider`, say — moves
+# with it, and every cell that reads it recomputes. Drag on the chart or move the slider; they are
+# two input devices for one value.
+#
+# The bind stays the single source of truth. The brush does not hold selection state of its own: it
+# forwards the gesture through the SAME endpoint the widget's own thumb posts to, and then reflects
+# whatever the bind ended up as. That is what makes the two agree by construction rather than by
+# two copies being kept in step — and it means the chart is never a second place a region "really"
+# lives.
+#
+# Requires the bound widget's value to be a two-element range (`RangeSlider`). ECharts' `brush` in
+# `lineX` mode is the component doing the work; nothing about selection is reimplemented here.
+#
+#   @bind span RangeSlider(400:4000; default = (1500, 1800))
+#   echart(:line, ν, absorbance; select = :span)
+#
+# An explicit `brush` wins, so the styling/mode can be overridden without losing the link.
+function _apply_select!(opt::Dict{String,Any}, name)
+    nm = String(name isa Symbol ? String(name) : name)
+    isempty(nm) && return opt
+    # The front-end resolves this name to its DEFINING cell from the notebook state (that is where
+    # the bind→cell mapping already lives), so Julia only has to say WHICH variable.
+    opt["__select"] = Dict{String,Any}("name" => nm)
+    if !haskey(opt, "brush")
+        # `lineX` sweeps the full height over an x range — the gesture this is for. `single` because
+        # a bound range is one interval, and `debounce` so a drag commits when it settles instead of
+        # recomputing the notebook on every pixel.
+        opt["brush"] = Dict{String,Any}(
+            "xAxisIndex" => 0, "brushType" => "lineX", "brushMode" => "single",
+            "transformable" => true, "throttleType" => "debounce", "throttleDelay" => 220,
+            "removeOnClick" => false,
+            "brushStyle" => Dict{String,Any}("borderWidth" => 1,
+                                             "color" => "rgba(124,192,255,0.12)",
+                                             "borderColor" => "#7cc0ff"))
+        # The brush toolbar would otherwise appear and put the chart into "pick a brush tool" mode.
+        # Here the brush is permanently armed (`_wireEchartSelect` enables it), so the buttons are
+        # noise — unless the caller asked for a toolbox themselves.
+        haskey(opt, "toolbox") || (opt["toolbox"] = Dict{String,Any}("show" => false))
+    end
+    return opt
+end
+
+# ── `zoom`: make a chart zoomable ────────────────────────────────────────────────────────────────
+#
+# ECharts does not zoom AT ALL unless a `dataZoom` component is declared — a reasonable default for
+# a library, and a surprising one for anyone who has used an interactive chart before. Declaring it
+# by hand is easy; declaring it WELL is the repetitive part, because `dataZoom = [(type="inside",)]`
+# on its own is a trap:
+#
+#   • it is invisible — nothing on screen says the chart zooms, and Slate additionally gates the
+#     wheel behind click-to-activate (so a chart never hijacks the page scroll), which means a
+#     reader who doesn't already know the gesture will never find it;
+#   • there is no way back — once zoomed in, `inside` offers no reset.
+#
+# So `zoom = true` gives the gesture AND the two affordances that make it usable: a box-zoom button
+# and a reset. That is the shape most charts want, and it is one word instead of a dozen lines
+# repeated per chart.
+#
+#   zoom = true / :buttons   gesture + a toolbox (zoom to a region · undo · reset)
+#   zoom = :inside           the gesture only — for a chart whose chrome must stay bare
+#   zoom = :slider           a draggable range bar under the axis (visible by construction)
+#   zoom = :both             slider AND gesture
+#
+# An explicit `dataZoom`/`toolbox` always wins: this only fills in what the caller didn't say, so
+# reaching for the raw ECharts components stays a clean escape hatch.
+function _apply_zoom!(opt::Dict{String,Any}, mode)
+    mode === false && return opt
+    m = mode === true ? "buttons" : String(mode isa Symbol ? String(mode) : mode)
+    m in ("buttons", "inside", "slider", "both") ||
+        throw(ArgumentError("zoom must be true/false or one of :buttons :inside :slider :both (got $(repr(mode)))"))
+    # Every x axis, so a multi-panel chart (a plot over its residual, sharing one x) zooms as ONE
+    # thing. Zooming one panel of a stacked pair and not the other would misalign exactly the
+    # comparison the layout exists to support.
+    nx = (a = get(opt, "xAxis", nothing); a isa AbstractVector ? length(a) : 1)
+    axes = collect(0:(nx - 1))
+    if !haskey(opt, "dataZoom")
+        dz = Any[]
+        # `start`/`end` are set EXPLICITLY to the full range. Without them the component has no
+        # declared extent, and the toolbox `restore` — which resets to the option as ECharts first
+        # received it — had nothing well-defined to go back to: on a chart that re-renders
+        # reactively it would "reset" to some earlier window that need not even contain the data
+        # currently plotted. Naming the full range makes reset mean reset.
+        # `filterMode="none"` keeps out-of-range points influencing the line rather than clipping
+        # the series to the window, so zooming doesn't lop the curve at the edges.
+        m in ("inside", "buttons", "both") &&
+            push!(dz, Dict{String,Any}("type" => "inside", "xAxisIndex" => axes,
+                                       "filterMode" => "none", "start" => 0, "end" => 100))
+        m in ("slider", "both") &&
+            push!(dz, Dict{String,Any}("type" => "slider", "xAxisIndex" => axes,
+                                       "filterMode" => "none", "start" => 0, "end" => 100))
+        opt["dataZoom"] = dz
+    end
+    # The toolbox is what makes zoom DISCOVERABLE and reversible. Icon colours are left to the
+    # registered Slate theme rather than hardcoded here, so it follows the reader's chosen palette.
+    if m == "buttons" && !haskey(opt, "toolbox")
+        opt["toolbox"] = Dict{String,Any}(
+            "right" => 18, "top" => 4, "itemSize" => 13,
+            "feature" => Dict{String,Any}(
+                "dataZoom" => Dict{String,Any}("yAxisIndex" => "none",
+                    "title" => Dict{String,Any}("zoom" => "zoom to a region", "back" => "undo zoom")),
+                "restore" => Dict{String,Any}("title" => "reset the view")))
+    end
+    return opt
+end
+
+# ── `valuefmt`: number formatting for tooltips ───────────────────────────────────────────────────
+#
+# ECharts prints whatever number it was handed, so a chart of small or wide-ranging values shows a
+# tooltip mixing `0.000317515` with `5.789e-5` in one column — unreadable side by side. ECharts'
+# own fix is `tooltip.valueFormatter`, a JS FUNCTION, and a Slate option is serialised to JSON with
+# no reviver: a function can't cross. (Passing a function-shaped STRING doesn't work either — it
+# arrives as a string, ECharts calls it, and every tooltip update throws, which wedges the
+# axisPointer rather than failing visibly.)
+#
+# So the spec crosses as DATA under a Slate-only key (`__valuefmt`) and the front-end turns it into
+# a function at `setOption` time. The vocabulary is deliberately the one `slate_table` already
+# uses — presets `:fixed :scientific :percent :integer :currency :bytes` plus
+# `(kind, digits, sep, prefix, suffix)` — so there is ONE way to describe number formatting in a
+# notebook, and the browser applies it with the SAME `fmtCell` the tables use rather than growing a
+# second implementation that drifts from it.
+#
+#   echart(:line, x, y; valuefmt = :scientific)
+#   echart(:line, x, y; valuefmt = (kind = :fixed, digits = 5))
+#   echart(series(:line, x, a; valuefmt = :percent), series(:line, x, b; valuefmt = :currency))
+#
+# Per-series wins over top-level, which is what a mixed-unit chart needs.
+# A preset arrives here as a STRING, not a Symbol: `_ec` has already walked the kwargs and turned
+# every Symbol into its ECharts string form (which is right for real ECharts keys like
+# `type = :value`). Convert back at this boundary rather than special-casing `valuefmt` inside
+# `_ec` — the spec is Slate's, not ECharts', and this is the one place that knows it. A
+# NamedTuple has likewise become a Dict by now, which `_parse_col_format` already accepts.
+_valuefmt_wire(spec::AbstractString) = _format_wire(_parse_col_format(Symbol(spec)))
+_valuefmt_wire(spec) = _format_wire(_parse_col_format(spec))
 
 """
     echart(kind::Symbol, args...; title, legend, tooltip, theme, kwargs...)  # Express: one series
@@ -441,6 +583,20 @@ echart(; xAxis = (type = :category, data = days), yAxis = (type = :value,),
          series = [(type = :bar, data = counts)], dataZoom = [(type = :slider,)])
 ```
 
+# Zoom — ECharts does NOT zoom unless asked; `zoom` asks, discoverably
+```julia
+echart(:line, x, y; zoom = true)      # gesture + buttons (zoom to a region · undo · reset)
+echart(:line, x, y; zoom = :slider)   # a draggable range bar under the axis
+echart(:line, x, y; zoom = :inside)   # the gesture alone (bare chrome)
+```
+
+# Tooltip number formatting — the same spec `slate_table(…; format=…)` takes
+```julia
+echart(:line, x, y; valuefmt = (kind = :fixed, digits = 5))            # 0.00032, not 3.17515e-4
+echart(series(:line, x, a; valuefmt = :percent),                       # per series wins
+       series(:line, x, b; valuefmt = :currency))
+```
+
 # Series styling — any kwarg that ISN'T a top-level component styles the series
 ```julia
 echart(:bar,  x, a; stack = "total")                                   # stacked bars
@@ -466,7 +622,12 @@ const _EC_TOPLEVEL = Set{String}(["xAxis", "yAxis", "grid", "dataZoom", "visualM
     # declares a geo map to fetch + `echarts.registerMap` before render (vector for several); the
     # front-end registers each map once per page and strips the key. `height`/`width` size the chart's
     # DIV (px number or any CSS length) — split into `__size` by `_slate_normalize!`.
-    "registerMap", "height", "width"])
+    # `valuefmt` is a Slate key too — tooltip number formatting, in the same vocabulary
+    # `slate_table(…; format=…)` uses. Top-level here; `series(…; valuefmt=…)` sets it per series
+    # (and wins). Both become the `__valuefmt` wire marker in `_slate_normalize!`.
+    # `zoom` likewise expands to the `dataZoom` (+ `toolbox`) components — see `_apply_zoom!`;
+    # `select = :binding` makes the chart's x-range an INPUT for a `@bind` — see `_apply_select!`.
+    "registerMap", "height", "width", "valuefmt", "zoom", "select"])
 
 # Express: a single series + simple layout. Kwargs naming a top-level component (xAxis/yAxis/grid/…)
 # go on the OPTION (so `yAxis=(type=:log,)` makes a log axis); everything else styles the series.

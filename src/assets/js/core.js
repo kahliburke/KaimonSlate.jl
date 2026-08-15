@@ -2,6 +2,16 @@
 const NB_ID = decodeURIComponent((location.pathname.match(/^\/n\/([^\/]+)/) || ['', ''])[1]);
 const _apipath = p => p.replace(/^\/api\//, '/api/' + NB_ID + '/');
 
+// Is this page an APP (server_app.jl)? Read from the bootstrap object the server injects into
+// <head>, so it is true from the very first script — `body.app` is only added on DOMContentLoaded
+// and is therefore useless to anything that can run earlier.
+//
+// An app's server refuses the authoring API, so any BACKGROUND caller that keeps polling one of
+// those routes doesn't just fail — it fails repeatedly, filling a reader's console with 403s and
+// making a working app look broken to anyone who opens dev tools. The fix belongs at the callers:
+// they should not be asking for authoring facilities on a page that has none.
+const SLATE_IS_APP = !!(window.__SLATE_APP__ && window.__SLATE_APP__.on);
+
 const editors = {};
 const charts = {};            // cell id -> [echarts instances]
 const tableState = {};        // cell id -> [{sort,filter,page,pageSize} per table] (view prefs, sticky)
@@ -47,6 +57,10 @@ function _pubSpec(spec) {
 const _snapPending = {};
 window._cancelSnap = cellId => { clearTimeout(_snapPending[cellId]); delete _snapPending[cellId]; };
 function _snapCell(cellId, insts, spec) {
+  // The snapshot exists for the AGENT's slate_view and for PDF export — neither of which an app
+  // has. Skipping saves a repeated 403 on every settle AND the `getDataURL` that precedes it,
+  // which rasterises the whole chart at 2× before we'd have thrown the result away.
+  if (SLATE_IS_APP) return;
   clearTimeout(_snapPending[cellId]);
   _snapPending[cellId] = setTimeout(() => {
     delete _snapPending[cellId];
@@ -124,17 +138,43 @@ function _ensureMaps(spec) {
 // model rather than rejecting it, so they come off at the one place every setOption goes through.
 function _sansMaps(s) {
   if (!s) return s;
-  const marked = Array.isArray(s.series) && s.series.some(x => x && x.__replay);
-  if (!s.registerMap && !s.__size && !s.requireScripts && !marked) return s;
+  const marked = Array.isArray(s.series) && s.series.some(x => x && (x.__replay || x.__valuefmt));
+  if (!s.registerMap && !s.__size && !s.requireScripts && !s.__valuefmt && !s.__select && !marked) return s;
   const c = Object.assign({}, s);
-  delete c.registerMap; delete c.__size; delete c.requireScripts;
+  delete c.registerMap; delete c.__size; delete c.requireScripts; delete c.__select;
   // Shallow-copy only the series that carry a mark — the DATA arrays are shared, not cloned, so this
   // stays cheap on a spec holding a few thousand points.
   if (marked) c.series = s.series.map(x => {
-    if (!x || !x.__replay) return x;
-    const y = Object.assign({}, x); delete y.__replay; return y;
+    if (!x || (!x.__replay && !x.__valuefmt)) return x;
+    const y = Object.assign({}, x);
+    delete y.__replay;
+    if (y.__valuefmt) {
+      // Per-series formatting lives on the series' own tooltip, which is what lets one chart mix
+      // units — a percentage series beside a currency one.
+      y.tooltip = Object.assign({}, y.tooltip, { valueFormatter: _valueFormatter(y.__valuefmt) });
+      delete y.__valuefmt;
+    }
+    return y;
   });
+  if (c.__valuefmt) {
+    c.tooltip = Object.assign({}, c.tooltip, { valueFormatter: _valueFormatter(c.__valuefmt) });
+    delete c.__valuefmt;
+  }
   return c;
+}
+
+// `valuefmt` — the DATA half of tooltip number formatting (see echarts_dsl.jl `_valuefmt_wire`).
+// ECharts wants a FUNCTION here, and a Slate spec is JSON with no reviver, so the spec crosses as
+// a format object and becomes a function at the one place every setOption goes through. It reuses
+// `fmtCell`, the same renderer the tables use, so a number is formatted identically whether it
+// appears in a table cell or a chart tooltip. Guarded: an unformattable value falls back to its
+// plain string rather than rendering "undefined" or throwing inside ECharts' tooltip path — a
+// throw there wedges the axisPointer rather than failing visibly.
+function _valueFormatter(fmt) {
+  return function (v) {
+    if (v == null || v === '') return '—';
+    try { return fmtCell(v, fmt); } catch (_) { return String(v); }
+  };
 }
 
 // Package-vendored front-end libraries (SlateExtensionsBase `provide_assets!`): a spec may carry
@@ -230,6 +270,38 @@ window.Slate.assetPaths = function () {
   ((window.__slateState || {}).cells || []).forEach(_registerAssets);
   return Object.keys(window.__slateAssets);
 };
+// Save a generated asset to the reader's disk. The whole point of a `download_button` is that the
+// reader ends the session with a FILE — the result of what they just computed — so this resolves
+// the asset the same way `Slate.asset` does and hands it to the browser's download machinery.
+// Works identically live (the asset is a served blob URL) and in a static export (it's inlined
+// base64), because both shapes come out of the same registry.
+window.Slate.download = function (path, filename) {
+  const a = _lookupAsset(path);
+  if (!a) { console.error('Slate.download: unknown asset ' + path); return; }
+  const name = filename || a.name || String(path).split('/').pop();
+  let href = a.url, revoke = null;
+  if (a.data !== undefined) {                        // inlined (static export) → a Blob URL
+    const b = atob(a.data), n = b.length, u = new Uint8Array(n);
+    for (let i = 0; i < n; i++) u[i] = b.charCodeAt(i);
+    href = URL.createObjectURL(new Blob([u], { type: a.mime || 'application/octet-stream' }));
+    revoke = href;
+  }
+  const el = document.createElement('a');
+  el.href = href; el.download = name; el.style.display = 'none';
+  document.body.appendChild(el); el.click(); el.remove();
+  // Give the download a moment to start before releasing the object URL — revoking synchronously
+  // races the browser and yields an empty file.
+  if (revoke) setTimeout(() => URL.revokeObjectURL(revoke), 30000);
+};
+// Delegated: a `download_button(...)` output renders a plain anchor carrying its asset path, so it
+// survives any re-render and needs no per-instance wiring.
+document.addEventListener('click', function (e) {
+  const el = e.target && e.target.closest ? e.target.closest('[data-slate-download]') : null;
+  if (!el) return;
+  e.preventDefault();
+  window.Slate.download(el.getAttribute('data-slate-download'), el.getAttribute('download') || '');
+});
+
 // True inside a LIVE notebook (served at /n/<id> with a Julia kernel + WebSocket), false in a static
 // export / published page. Server-backed widgets branch on this to pick a live vs offline data path.
 // Mirrored (as a constant `false`) in the static-export Slate shim, so it's always defined.
@@ -506,7 +578,8 @@ window.chartRuntime = {
     _applySize(el, inst, spec);
     return _ensurePrereqs(spec)
       .then(() => _geoSafeSetOption(inst, spec))
-      .then(() => _wireEchartReplay(inst, spec));
+      .then(() => _wireEchartReplay(inst, spec))
+      .then(() => _wireEchartSelect(inst, spec));
   },
   dispose(el, inst) { try { inst.dispose(); } catch (_) {} if (el) el.__inst = null; },
   // `window.charts` is read all over (slides fitting, the SVG snapshot, inspect, the resize listener),
@@ -592,6 +665,77 @@ function _replayEntries(cur, m, slice) {
   if (m.comp === null || m.comp === undefined) return slice;
   if (m.rank === 2) return cur.map(p => { const q = p.slice(); q[m.comp] = slice[p[1]][p[0]]; return q; });
   return cur.map((p, i) => { const q = p.slice(); q[m.comp] = slice[i]; return q; });
+}
+
+// ── `select`: drag on a chart to set a `@bind` range ──────────────────────────────────────────
+// The DSL's `select = :name` (echarts_dsl.jl `_apply_select!`) marks a spec with `__select`. Here
+// that becomes a live link in BOTH directions, with the bind as the single source of truth:
+//
+//   chart → bind : a finished brush POSTs the swept range to the SAME endpoint the widget's own
+//                  thumb posts to, so the widget, the reactive graph and the `.jl` all update
+//                  through the one path that already exists;
+//   bind → chart : every re-render reflects the bind's CURRENT value back onto the brush, so
+//                  moving the slider moves the brush.
+//
+// The chart holds no selection state of its own — which is what makes the two agree by
+// construction instead of by two copies being nudged into step.
+
+// The cell that DECLARES a bind, from the notebook state. That mapping already exists there, so
+// the Julia side only has to name the variable.
+function _bindOwner(name) {
+  const cells = ((window.__slateState || window.nbState || {}).cells) || [];
+  for (const c of cells) {
+    for (const b of (c.binds || [])) if (b && b.name === name) return { cell: c.id, value: b.value };
+  }
+  return null;
+}
+
+function _wireEchartSelect(inst, spec) {
+  const sel = spec && spec.__select;
+  if (!inst || !sel || !sel.name) return;
+  const owner = _bindOwner(sel.name);
+  if (!owner) return;                               // the bind isn't declared (yet) — nothing to link
+  const cur = Array.isArray(owner.value) && owner.value.length === 2
+    ? [Math.min(owner.value[0], owner.value[1]), Math.max(owner.value[0], owner.value[1])] : null;
+
+  if (!inst.__selectWired) {
+    inst.__selectWired = true;
+    // Permanently armed, so the reader just drags — no brush tool to pick up first.
+    try { inst.dispatchAction({ type: 'takeGlobalCursor', key: 'brush', brushOption: { brushType: 'lineX', brushMode: 'single' } }); } catch (_) {}
+    // A `brushEnd` counts as a GESTURE only if a pointer went down on this chart first.
+    //
+    // The alternative — flag the programmatic reflect below and clear it on a timer — looked
+    // equivalent and is not: `dispatchAction` can fire `brushEnd` after the current tick, by which
+    // point the flag is clear, so the reflect is read as a drag and POSTs a value back. That is
+    // not merely a redundant write. On a fresh page or a just-restarted worker it can land BEFORE
+    // the `@bind` cell has run in the new namespace, and a value arriving for an unknown name
+    // makes `_do_set_bind` fabricate a `"?"` placeholder widget (widgets.jl). Until that cell runs
+    // again the control has no registered kind, so nothing coerces or wraps its value — a
+    // RangeSlider silently starts handing cells a raw array instead of `(lo, hi)`.
+    // Keying on a real pointer removes the timing question entirely.
+    try {
+      inst.getDom().addEventListener('pointerdown', function () { inst.__selectUser = true; }, true);
+    } catch (_) {}
+    inst.on('brushEnd', function (p) {
+      if (!inst.__selectUser) return;               // programmatic reflect, not a drag
+      inst.__selectUser = false;
+      const a = (p.areas || [])[0], r = a && a.coordRange;
+      if (!r || r.length !== 2) return;
+      const lo = Math.min(r[0], r[1]), hi = Math.max(r[0], r[1]);
+      if (!(hi > lo)) return;                       // a click, not a sweep
+      const own = _bindOwner(sel.name);
+      if (!own) return;
+      api('POST', '/api/bind/' + own.cell, { name: sel.name, value: [lo, hi] })
+        .then(updateStates).catch(() => {});
+    });
+  }
+  // Reflect the bind onto the brush, so moving the slider moves the brush. Never counts as a
+  // gesture (no pointer went down), so it cannot echo back.
+  if (cur) {
+    try {
+      inst.dispatchAction({ type: 'brush', areas: [{ brushType: 'lineX', xAxisIndex: 0, coordRange: cur }] });
+    } catch (_) {}
+  }
 }
 
 function _wireEchartReplay(inst, spec) {

@@ -23,12 +23,40 @@ mutable struct Reactive
     refresh::Any              # this notebook's slate_refresh
 end
 Base.getindex(r::Reactive) = getfield(r, :value)
+
+# Has this task been cancelled — and is this the FIRST checkpoint to notice?
+#
+# The check fires ONCE per task, and that "once" is the whole point. Cancelling has to abort the
+# handler's work, which one throw does: it unwinds the streaming loop and everything around it. But
+# a handler also has to CLEAN UP, and cleanup is written where cleanup belongs —
+#
+#     try
+#         busy[] = true; …work…
+#     finally
+#         busy[] = false          # ← a Reactive write, in the unwinding path
+#     end
+#
+# — so a checkpoint that kept throwing would abort the cleanup too, on every attempt, and strand the
+# UI in the state the cancelled handler was last able to push (a progress bar that never stops). The
+# recommended pattern would be broken exactly when it is most needed. After the first throw the task
+# is already unwinding, so later writes are cleanup and are allowed through.
+#
+# The cost: a body that CATCHES `_Cancelled` inside its own loop and keeps going is no longer stopped
+# by subsequent writes. That is a loop actively swallowing its own cancellation, and it was already
+# uninterruptible between checkpoints.
+function _cancel_fired!()
+    tok = get(task_local_storage(), :slate_cancel, nothing)
+    (tok === nothing || !tok[]) && return false
+    get(task_local_storage(), :slate_cancel_fired, false) && return false
+    task_local_storage(:slate_cancel_fired, true)
+    return true
+end
+
 # A write is ALSO a cancellation checkpoint (same check `pause` does) — so a superseded @onclick
 # handler that streams values (`level[] = v` in a loop) stops at its next write even with no
 # explicit `pause()` call, instead of running to completion and racing the new handler's writes.
 function Base.setindex!(r::Reactive, v)
-    tok = get(task_local_storage(), :slate_cancel, nothing)
-    (tok !== nothing && tok[]) && throw(_Cancelled())
+    _cancel_fired!() && throw(_Cancelled())
     setfield!(r, :value, v)
     getfield(r, :refresh)(getfield(r, :name))     # restale + recompute the cells that read this value
     return v
@@ -41,10 +69,9 @@ struct _Cancelled <: Exception end
 # `pause` inside an @onclick body is a CANCELLABLE sleep — it aborts the run cleanly the moment a
 # newer click supersedes it. Used outside an @onclick (no token in the task), it's a plain sleep.
 function pause(dt)
-    tok = get(task_local_storage(), :slate_cancel, nothing)
-    (tok !== nothing && tok[]) && throw(_Cancelled())
+    _cancel_fired!() && throw(_Cancelled())
     sleep(dt)
-    (tok !== nothing && tok[]) && throw(_Cancelled())
+    _cancel_fired!() && throw(_Cancelled())
     return nothing
 end
 

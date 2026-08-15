@@ -41,9 +41,11 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_delete_cells!, agent_rename_cell!, agent_scratch_eval!, agent_scratch_eval_bg!, scratch_check, agent_surface_controls!,
                       acquire_floor!, release_floor!, floor_status,
                       index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
-                      request_live_eval, export_standalone, export_pdf, expand
+                      request_live_eval, export_standalone, export_pdf, expand,
+    export_app, app_defaults
 
 export serve_notebook, LiveNotebook, expand, standalone!, register_extension
+export export_app, app_defaults
 
 # ── Auto-registration as a Kaimon extension ───────────────────────────────────
 # The intended path is zero-setup: install KaimonSlate, and if Kaimon is present on
@@ -128,6 +130,15 @@ end
 # silently re-registers — even after a previous Yes). Best-effort and idempotent — never breaks
 # loading; opt out with `ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"`.
 function __init__()
+    # Re-register the built-in widget kinds' value lifecycle (coerce/reconcile/wrap).
+    # widgets.jl also calls this at module load, which is what the WORKER relies on — but that call
+    # runs during PRECOMPILATION here, and it mutates a dict owned by SlateExtensionsBase, so the
+    # registrations do not survive into the loaded image: `widget_kinds()` came back empty in a
+    # fresh process. Every hook then silently fell back to the generic path, which is a quiet wrong
+    # answer rather than an error (a labeled Select handing back a bare value instead of a Choice,
+    # a `fileupload` handing back a raw Dict instead of an `UploadedFile`). Registering here — at
+    # RUNTIME, in every process that loads KaimonSlate — is the fix. Idempotent.
+    ReportEngine._register_builtin_kinds!()
     ReportEngine._snapshot_inprocess_base_deps!()   # this process's own deps, before any notebook `pkg_op`
     # Read the hub port at RUNTIME (skipped during precompilation), so a launcher/config UI can pin
     # it reliably — a top-level `const` would bake in whatever env produced the `.ji`. Precedence:
@@ -1428,6 +1439,62 @@ function create_tools(GateTool::Type)
     end
 
     """
+        export_app(notebook, dir; theme="", pagewidth="", port="0", agent="0") -> String
+
+    Write this notebook to `dir` as a self-contained **application**. Running `julia run.jl` inside
+    that folder — here, or on any machine you copy it to, needing only Julia 1.10+ — installs the
+    environment, reconstructs the notebook's exact packages, and serves it as an app: prose,
+    results, figures and live controls, with the authoring API refused server-side. Windows users
+    double-click `run.bat`.
+
+    `title` names the app — it becomes the bundle filename and the served id, so a reader sees
+    `/n/band-deconvolution` rather than `/n/app_standalone`. Omitted, it comes from the document's
+    own title (its `role=title` cell), falling back to the notebook filename only if there is none.
+
+    `theme`/`pagewidth` set what a visitor sees before expressing a preference of their own
+    (a Slate palette name — "daylight", "midnight", "nord", … — and a column width in px). `port`
+    pins the port (0 = pick a free one; `SLATE_PORT` overrides at run time). `agent="1"` includes
+    the in-notebook AI agent, off by default since an app's readers are not authoring.
+
+    WHAT SHIPS: by default the project's git-TRACKED files — right, because it carries the source
+    and omits build output, scratch and strays. `include` is a comma-separated list of extra
+    project-relative files/directories to carry anyway, for parts of the app that are deliberately
+    untracked. The common case is reference data under the notebook's `datadir()`, which is
+    git-ignored BY CONSTRUCTION (that dir self-ignores so a stray database is never committed) —
+    so an app whose samples live there arrives unable to load them:
+    `include="assets/spectra,reference"`. A project with NO commits has no tracked files at all and
+    falls back to a partial copy; that is warned about, because it looks fine until deployed.
+
+    There is **no authentication**: anything that can reach the port can drive the app and read its
+    results. Treat "who can reach this port" as the whole access-control story.
+    """
+    function export_app_tool(notebook::String, dir::String; theme::String = "", pagewidth::String = "",
+                             port::String = "0", agent::String = "0", include::String = "",
+                             title::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        kw = Dict{Symbol,Any}()
+        isempty(theme) || (kw[:theme] = theme)
+        isempty(pagewidth) || (kw[:pagewidth] = pagewidth)
+        extra = String[strip(s) for s in split(include, ','; keepempty = false) if !isempty(strip(s))]
+        out = try
+            export_app(nb, dir; appdefaults = app_defaults(; kw...),
+                       port = something(tryparse(Int, port), 0), agent = agent == "1",
+                       include = extra, title = title)
+        catch e
+            return "App export failed: " * sprint(showerror, e)
+        end
+        files = join(sort(readdir(out)), ", ")
+        return """
+        Wrote the app → $out
+          $files
+
+        To run it there:  cd $out && julia run.jl
+        First run installs + precompiles the environment (minutes); later starts are fast.
+        Operator page once it's up: /status  ·  no authentication — the port is the access control.
+        """
+    end
+
+    """
         pkg(notebook; op="list", name="") -> String
 
     View or manage THIS NOTEBOOK's own package dependencies — the packages it adds on top of its
@@ -1972,6 +2039,7 @@ function create_tools(GateTool::Type)
         GateTool("check_eval", check_scratch_eval),
         GateTool("eval_js", eval_js),
         GateTool("export_pdf", export_pdf_tool; timeout_ms = RENDER_MS),
+        GateTool("export_app", export_app_tool; timeout_ms = DEPLOY_MS),
         GateTool("index_docs", index_docs; timeout_ms = RENDER_MS),
         GateTool("search_docs", search_docs_tool),
         GateTool("pkg", pkg; timeout_ms = DEPLOY_MS),

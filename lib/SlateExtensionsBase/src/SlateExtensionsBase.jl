@@ -40,7 +40,7 @@ include("render.jl")
 include("binary.jl")
 
 # Controls
-export Widget, Choice, Selection, indices, to_widget, auto_widget, kind_for
+export Widget, Choice, Selection, UploadedFile, indices, to_widget, auto_widget, kind_for
 export register_kind!, widget_kinds, coerce_bind, reconcile_bind, wrap_value, coerce_value
 # Replayable data — a control's finite domain, and data computed across it (see controls.jl)
 export bind_domain, ReplayArray, ReplayVector, ReplayMatrix, replay_stack

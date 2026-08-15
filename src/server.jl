@@ -27,6 +27,7 @@ include("history.jl")   # module SlateHistory — durable content-addressed time
 include("parsched.jl")  # ParCell / par_blockers / run_scheduled — the parallel dataflow scheduler
 
 export serve_notebook, start_server, stop_server, LiveNotebook
+export export_app, app_defaults          # deploy a notebook as an application (server_app.jl / server_export.jl)
 export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
 export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_delete_cells!, agent_rename_cell!, agent_scratch_eval!, agent_scratch_eval_bg!, scratch_check, agent_surface_controls!
 export cell_image, set_snapshot!
@@ -156,6 +157,13 @@ function _wire_callbacks!(nb::LiveNotebook)
     register_celldone!(nb.report.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
     register_cleanup_cells!(nb.report.id, ids -> (try; _cleanup_deleted_cells(nb, ids); catch; end))   # deleted-cell slate_on_cleanup teardown
     register_toolcall!(nb.report.id, p -> (try; server_toolcall(nb, p); catch; end))   # an agent's tool call → a TOOL cell
+    # `set_bind(:name, v)` from cell code → the SAME path the browser POST takes. Async because the
+    # handler runs on the poller task and `set_bind!` does worker round-trips (coerce, then run the
+    # readers): blocking the poller would stall every other notebook's reactivity behind this one.
+    register_setbind!(nb.report.id, (name, value) ->
+        (@async try; set_bind_by_name!(nb, name, value); catch e
+            @warn "slate: set_bind from a cell failed" bind = name exception = e
+        end))
     return nb
 end
 function _unwire_callbacks!(nb::LiveNotebook)
@@ -165,7 +173,7 @@ function _unwire_callbacks!(nb::LiveNotebook)
     unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id)
     unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
     unregister_userprog!(nb.report.id); unregister_emit!(nb.report.id); unregister_celldone!(nb.report.id)
-    unregister_toolcall!(nb.report.id)
+    unregister_toolcall!(nb.report.id); unregister_setbind!(nb.report.id)
     unregister_prepare!(nb.report.id); unregister_bin_emit!(nb.report.id); unregister_cleanup_cells!(nb.report.id)
     return nb
 end
@@ -2972,20 +2980,28 @@ include("server_export.jl")
 include("publish_targets.jl")  # PublishTarget adapters (github-pages, generic-upload) + multi-target fan-out
 include("publish_zenodo.jl")   # Zenodo archival target — versioned citable DOI
 include("server_hub.jl")
+# After server_hub.jl: its signatures dispatch on `Hub`, which is defined there.
+include("server_app.jl")       # app mode (served-as-an-application posture) + the /status page
 include("server_publish.jl")   # Publishing manager service layer (ledger view, targets, secrets, SSE publish)
 include("server_complete.jl")
 
 # ── Standalone convenience (one notebook) ─────────────────────────────────────
 
 """
-    start_server(path; host="127.0.0.1", port=8765) -> Hub
+    start_server(path; host="127.0.0.1", port=8765, app=false, appdefaults=Dict()) -> Hub
 
 Start a hub and open the single notebook at `path`. Non-blocking; returns the
 `Hub` (stop it with [`stop_hub`](@ref)). The notebook is served at `/n/<id>`
 (printed); `/` is the index. For a blocking launcher use [`serve_notebook`](@ref).
+
+`app=true` serves the notebook as an **application**: the reading view (markdown, output,
+figures and live `@bind` controls — no code, no cell chrome) with the authoring API refused
+server-side. Presentation defaults for visitors go in `appdefaults`; build it with
+[`app_defaults`](@ref). See `server_app.jl` for what app mode does and does not guarantee.
 """
-function start_server(path::AbstractString; host = "127.0.0.1", port = 8765, inactive::Bool = false)
-    h = start_hub(; host = host, port = port)
+function start_server(path::AbstractString; host = "127.0.0.1", port = 8765, inactive::Bool = false,
+                      app::Bool = false, appdefaults::AbstractDict = Dict{String,Any}())
+    h = start_hub(; host = host, port = port, app = app, appdefaults = appdefaults)
     id = open_notebook!(h, path; inactive = inactive)
     @info "Notebook" url = "$(_hub_url(h))/n/$id" file = abspath(path)
     return h
@@ -3033,32 +3049,52 @@ end
 # A prominent, framed "your notebook is live" banner with the openable URL emphasized (bold + underline,
 # the terminal's default hyperlinking makes it clickable). Printed once the hub answers HTTP.
 function _print_ready_banner(url::AbstractString; logpath::AbstractString = "",
-                             keys::Bool = false, inactive::Bool = false)
+                             keys::Bool = false, inactive::Bool = false, app::Bool = false,
+                             apptitle::AbstractString = "", io::IO = stdout)
     rule = "─"^72
-    printstyled("\n", rule, "\n"; color = :green)
-    printstyled(inactive ? "  ✓  Your Kaimon Slate notebook is ready (inactive)\n\n" :
-                           "  ✓  Your Kaimon Slate notebook is live\n\n"; color = :green, bold = true)
-    print("      →  ")
-    printstyled(url; color = :cyan, bold = true, underline = true)
-    if keys
-        print("\n\n")
-        inactive && print("  It opens as a static preview — nothing runs until you launch it.\n\n")
-        print("  Press  ")
-        printstyled("b"; color = :cyan, bold = true); print(" browser + launch (go live)    ")
-        printstyled("p"; color = :cyan, bold = true); print(" browser, stay a preview    ")
-        printstyled("q"; color = :cyan, bold = true); print(" stop the server\n")
-        print("  Tip: set ")
-        printstyled("SLATE_BROWSER"; color = :light_black)
-        print(" (e.g. \"Google Chrome\") to choose which browser b/p open.\n")
+    printstyled(io, "\n", rule, "\n"; color = :green)
+    printstyled(io, app ? "  ✓  " * (isempty(apptitle) ? "Your app" : apptitle) * " is running\n\n" :
+                    inactive ? "  ✓  Your Kaimon Slate notebook is ready (inactive)\n\n" :
+                               "  ✓  Your Kaimon Slate notebook is live\n\n"; color = :green, bold = true)
+    print(io, "      →  ")
+    printstyled(io, url; color = :cyan, bold = true, underline = true)
+    if keys && app
+        # `b`/`p` below distinguish "open AND launch" from "open, stay a preview" — a lifecycle an app
+        # does not have: it is warmed before this banner prints (see `_await_app_warm`), so there is
+        # nothing to launch and no preview to stay in. One key to open it, one to stop it.
+        print(io, "\n\n  Press  ")
+        printstyled(io, "b"; color = :cyan, bold = true); print(io, " open in a browser    ")
+        printstyled(io, "q"; color = :cyan, bold = true); print(io, " stop the app\n")
+        print(io, "  Tip: set ")
+        printstyled(io, "SLATE_BROWSER"; color = :light_black)
+        print(io, " (e.g. \"Google Chrome\") to choose which browser b opens.\n")
+    elseif keys
+        print(io, "\n\n")
+        inactive && print(io, "  It opens as a static preview — nothing runs until you launch it.\n\n")
+        print(io, "  Press  ")
+        printstyled(io, "b"; color = :cyan, bold = true); print(io, " browser + launch (go live)    ")
+        printstyled(io, "p"; color = :cyan, bold = true); print(io, " browser, stay a preview    ")
+        printstyled(io, "q"; color = :cyan, bold = true); print(io, " stop the server\n")
+        print(io, "  Tip: set ")
+        printstyled(io, "SLATE_BROWSER"; color = :light_black)
+        print(io, " (e.g. \"Google Chrome\") to choose which browser b/p open.\n")
     else
-        print("\n\n  Open the link above in a browser. Press q or Ctrl-C here to stop the server.\n")
+        print(io, "\n\n  Open the link above in a browser. Press q or Ctrl-C here to stop the server.\n")
+    end
+    # `/status` for EVERY app path, not just the interactive one. A deployed app is normally started
+    # without a terminal — backgrounded, under a unit file, output piped to a log — which is exactly
+    # the case where nobody can ask it how it's doing, and exactly the branch that used to omit the
+    # one address that answers. It's also what someone reads back out of that log later.
+    if app
+        print(io, "  Operator page (vitals, logs): ")
+        printstyled(io, replace(rstrip(url, '/'), r"/n/[^/]+$" => "") * "/status", "\n"; color = :light_black)
     end
     if !isempty(logpath)
-        print("  Detailed server log: ")
-        printstyled(logpath, "\n"; color = :light_black)
+        print(io, "  Detailed server log: ")
+        printstyled(io, logpath, "\n"; color = :light_black)
     end
-    printstyled(rule, "\n\n"; color = :green)
-    flush(stdout)
+    printstyled(io, rule, "\n\n"; color = :green)
+    flush(io)
 end
 
 # ── Standalone console hygiene ─────────────────────────────────────────────────
@@ -3130,7 +3166,7 @@ function _serve_key(b::UInt8, h, url::AbstractString)
 end
 
 """
-    serve_notebook(path; host="127.0.0.1", port=8765, quiet=true)
+    serve_notebook(path; host="127.0.0.1", port=8765, quiet=true, app=false, appdefaults=Dict())
 
 Open the notebook at `path` in a hub and serve it. **Blocks** until stopped (Ctrl-C shuts the hub
 and its workers down cleanly). Once the hub is answering HTTP, prints a framed banner with the
@@ -3140,7 +3176,8 @@ detail (worker spawns, connects, warnings) goes to a file in the same tmp dir as
 the banner shows the path; only errors still print.
 """
 function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, quiet::Bool = true,
-                        inactive::Bool = false)
+                        inactive::Bool = false, app::Bool = false,
+                        appdefaults::AbstractDict = Dict{String,Any}())
     # Swap the logger BEFORE anything spawns so worker-spawn infos land in the file.
     logpath = joinpath(tempdir(), "kaimonslate", "hub-$port.log")
     logio = nothing
@@ -3158,14 +3195,29 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
             logio = nothing                  # log hygiene must never block serving
         end
     end
-    h = start_server(path; host = host, port = port, inactive = inactive)
+    h = start_server(path; host = host, port = port, inactive = inactive,
+                     app = app, appdefaults = appdefaults)
     id = isempty(h.notebooks) ? "" : first(keys(h.notebooks))
-    url = "$(_hub_url(h))/n/$id"
+    # An APP advertises the server ROOT. `/` on an app hub redirects to its notebook (see
+    # `_app_root_target`), so the two land in the same place — but the root is the address someone
+    # types, bookmarks, puts on a wiki, or reads out loud. `/n/<id>` exposes an internal id that is
+    # derived from a filename and means nothing to the person using the thing.
+    url = app ? _hub_url(h) : "$(_hub_url(h))/n/$id"
     _await_http_ready(_hub_url(h))          # wait until the server actually answers before announcing it
+    # …and, for an app, until it has something to SHOW: its reader has no cell-level progress to read,
+    # so a URL handed out mid-bring-up looks broken. Times out rather than hangs (see _await_app_warm).
+    app && _await_app_warm(h)
     # Interactive keys (b/p/q) only work on the raw-tty path below (a `julia run.jl` launch), not a REPL.
     # (Named `showkeys`, not `keys` — a local `keys` would shadow `Base.keys` used just above.)
     showkeys = !isinteractive() && stdin isa Base.TTY
-    _print_ready_banner(url; logpath = logio === nothing ? "" : logpath, keys = showkeys, inactive = inactive)
+    # An app is named by its DOCUMENT (the `role=title` cell), not by the file it lives in — the same
+    # title the browser tab and the app bar carry.
+    apptitle = !app ? "" : try
+        nb1 = lock(h.lock) do; isempty(h.notebooks) ? nothing : first(values(h.notebooks)); end
+        nb1 === nothing ? "" : strip(report_frontmatter(nb1.report).title)
+    catch; ""; end
+    _print_ready_banner(url; logpath = logio === nothing ? "" : logpath, keys = showkeys,
+                        inactive = inactive, app = app, apptitle = apptitle)
     _open_in_browser(url)                    # best-effort auto-open (a no-op under KAIMONSLATE_NO_OPEN, which run.jl sets so its b/p keys drive opening instead)
     # Block until stopped — and make Ctrl-C actually stop it. Signals are a dead end
     # here (verified against a live hub): once the threaded HTTP listener runs, a

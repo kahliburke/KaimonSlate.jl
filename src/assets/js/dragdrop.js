@@ -386,8 +386,9 @@ document.addEventListener('dragend', () => {
   if (ctrlDrag !== null) { ctrlDrag = null; document.body.classList.remove('cdnd'); clearCtrlDrop(); }
 });
 
-if (localStorage.getItem('slateFullWidth') === '1') document.body.classList.add('fullwidth');
-if (localStorage.getItem('slateWrapOutput') === '1') document.body.classList.add('wrap-output');   // opt-in: wrap wide output
+// The body-level reader settings (full width, output wrap) — applied from the one definition in
+// settings.js, so the authoring UI and app mode restore identical state on load.
+applyDisplaySettings();
 
 // Persist & restore scroll position + selected cell per notebook, so a reload lands you back where
 // you were instead of snapping to the top. Keyed on the notebook's path.

@@ -362,7 +362,8 @@ end
 # (the common Slate case — a per-notebook env that `dev`s the parent package). Path-deps inside the repo
 # resolve from the tree; those `dev`'d from outside are vendored under `local/<name>`.
 function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::AbstractString, cells::AbstractString;
-                          history::Bool = true, assetbase::AbstractString = "", assetfiles = Dict{String,String}())
+                          history::Bool = true, assetbase::AbstractString = "", assetfiles = Dict{String,String}(),
+                          extra = String[])
     stage = mktempdir()
     top = _root_repo(projectdir, pathdeps, nbpath)
     # Author-embedded media (drag/drop / paste → project files the asset route serves) is UNTRACKED,
@@ -379,6 +380,29 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
             mkpath(dirname(dst)); cp(src, dst; force = true)
         end
     end
+    # Author-declared extras (`include=`): project-relative files or DIRECTORIES staged verbatim,
+    # whether or not git tracks them.
+    #
+    # The default — the repo's tracked files — is the right one: it ships the source and leaves out
+    # build output, scratch and stray artifacts, which is what makes a bundle small and
+    # reproducible. But "tracked" and "part of the app" are not the same set, and the gap is silent:
+    # data under the notebook's `datadir()` is git-ignored BY CONSTRUCTION (it self-ignores so a
+    # stray database is never committed), so an app whose reference data lives there arrives unable
+    # to load it, with nothing in the export to say so. This is how an author names the difference.
+    stage_extra!(destroot::AbstractString, root::AbstractString) = begin
+        for rel in extra
+            r = replace(strip(String(rel)), '\\' => '/')
+            (isempty(r) || isabspath(r) || occursin("..", r)) && continue   # stay inside the project
+            src = normpath(joinpath(root, r))
+            ispath(src) || continue
+            dst = normpath(joinpath(destroot, r))
+            if isdir(src)
+                mkpath(dst); _copy_tree!(dst, src)
+            else
+                mkpath(dirname(dst)); cp(src, dst; force = true)
+            end
+        end
+    end
     if top !== nothing
         nrel = _within(top, _safe_realpath(nbpath))                           # notebook file relative to repo
         prel = _within(top, _safe_realpath(projectdir))                       # env dir relative to repo, or `nothing`
@@ -391,6 +415,7 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
             let arel = _within(top, _safe_realpath(assetbase))                # untracked embedded media (if the base is in-tree)
                 arel === nothing || stage_assets!(ov, arel)
             end
+            stage_extra!(ov, top)                                             # author-declared `include=`
             write(joinpath(stage, "bundle.json"),
                   JSON.json(Dict("mode" => "repo-rooted", "env" => envrel, "notebook" => nrel, "parent" => ".")))
             return Base64.base64encode(_pack_tree(stage))
@@ -404,6 +429,7 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
             let arel = _within(top, _safe_realpath(assetbase))                # untracked embedded media (if the base is in-tree)
                 arel === nothing || stage_assets!(stage, arel)
             end
+            stage_extra!(stage, top)                                          # author-declared `include=`
             write(joinpath(stage, "bundle.json"),
                   JSON.json(Dict("mode" => "source-rooted", "env" => envrel, "notebook" => nrel, "parent" => ".")))
             return Base64.base64encode(_pack_tree(stage))
@@ -431,6 +457,7 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
     end
     write(joinpath(stage, basename(nbpath)), cells)
     stage_assets!(stage, ".")                        # flat layout: notebook + assets/ at the expanded root
+    stage_extra!(stage, projectdir)                  # author-declared `include=` (project-relative here)
     return Base64.base64encode(_pack_tree(stage))
 end
 
@@ -581,7 +608,8 @@ end
 # 0 disables). Entries are chosen by compute-saved-per-byte so a small budget still banks the
 # most expensive solves. See `_build_memo_footer`.
 function export_standalone(nb::LiveNotebook; include_preview::Bool = true, history::Bool = true,
-                           memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL)
+                           memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL,
+                           include = String[])
     lock(nb.lock) do
         info = ReportEngine.bundle_info(nb.kernel, nb.report)
         isempty(info.projectdir) &&
@@ -589,7 +617,8 @@ function export_standalone(nb::LiveNotebook; include_preview::Bool = true, histo
         cells = _serialize_cells_inlining_bibs(nb.report, dirname(abspath(nb.path)))
         b64 = _make_bundle_b64(info.projectdir, info.pathdeps, abspath(nb.path), cells;
                                history = history, assetbase = String(get(nb.report.meta, "assetbase", "")),
-                               assetfiles = _embedded_asset_files(nb.report.cells, String(get(nb.report.meta, "assetbase", ""))))
+                               assetfiles = _embedded_asset_files(nb.report.cells, String(get(nb.report.meta, "assetbase", ""))),
+                               extra = include)
         out = cells
         # Carry the reproducibility env footer (the notebook's declared package delta) so a reopened
         # standalone can LIST its packages at parse time — no instantiation needed (the inactive launch

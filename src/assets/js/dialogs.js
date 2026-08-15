@@ -270,6 +270,68 @@ async function exportStandalone() {
   } catch (e) { await alertDark('Standalone export failed: ' + e); }
   finally { hideLoading(); }
 }
+// ── App export ────────────────────────────────────────────────────────────────
+// The odd one out: every other format produces ONE artifact the browser downloads, so it can hand
+// back a blob. An app is a folder — launchers, a bundle, a README — written on the machine running
+// Slate. There is nothing to download, so this reports the path it wrote instead, in the dialog,
+// which stays open. Long-running (it tars the environment + source), hence its own progress line.
+async function exportApp() {
+  const dir = (document.getElementById('appdir').value || '').trim();
+  const out = document.getElementById('appout'), row = document.getElementById('appoutrow');
+  const btn = document.getElementById('appexportbtn');
+  if (!dir) { row.style.display = ''; out.textContent = 'Give it a folder to write into.'; return; }
+  const body = {
+    dir: dir,
+    title: (document.getElementById('apptitle').value || '').trim(),
+    theme: document.getElementById('appexptheme').value || '',
+    pagewidth: (document.getElementById('apppagewidth').value || '').trim(),
+    port: (document.getElementById('appport').value || '').trim(),
+    include: (document.getElementById('appinclude').value || '').trim(),
+  };
+  // Remembered per notebook-independent preference, like every other format's options.
+  ['appdir', 'apptitle', 'appexptheme', 'apppagewidth', 'appport', 'appinclude'].forEach(id =>
+    localStorage.setItem('slate_' + id, document.getElementById(id).value || ''));
+  // `.publog` collapses whitespace — `.publogln` is the line element that doesn't (and carries the
+  // ok/err/st colours). Same idiom as the publish log, so the two read alike. Each line scrolls the
+  // box to the bottom: the log is short enough to fit at first and then isn't, so without this the
+  // newest line — including the one saying it finished — lands out of sight.
+  const line = (cls, html) => {
+    const d = document.createElement('div');
+    d.className = 'publogln' + (cls ? ' ' + cls : '');
+    d.innerHTML = html;
+    out.appendChild(d);
+    out.scrollTop = out.scrollHeight;
+  };
+  // In-flight state on the button itself (spinner + progress cursor + a label that says what is
+  // happening), not just `disabled` — a greyed-out button and an unresponsive one look identical,
+  // and this write takes tens of seconds. Shares the styling with Publish.
+  const label = btn.textContent;
+  const setBusy = on => {
+    btn.disabled = on;
+    btn.classList.toggle('busy', on);
+    btn.textContent = on ? 'Writing…' : label;
+  };
+  row.style.display = ''; out.innerHTML = ''; line('st', 'Packaging the environment + source…');
+  setBusy(true);
+  try {
+    const r = await fetch(_apipath('/api/export-app'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    out.innerHTML = '';
+    if (!r.ok || !j.ok) { line('err', '✗ ' + _esc(j.error || 'export failed')); return; }
+    line('st', 'Wrote to <code>' + _esc(j.dir) + '</code>');
+    (j.files || []).forEach(f => line('', '   ' + _esc(f)));
+    line('st', 'Run it:  <code>cd ' + _esc(j.dir) + ' &amp;&amp; ./run.sh</code>');
+    if (j.warning) line('err', '⚠ ' + _esc(j.warning));
+    // The completion marker goes LAST, so "done" is what the log ends on and what the auto-scroll
+    // brings into view. Led with a ✓ before, which put the only success signal at the top — above
+    // a file list that pushed it out of sight, on a box that looks identical while still running.
+    line('ok', '✓ Export complete — ' + (j.files || []).length + ' files');
+  } catch (e) { out.innerHTML = ''; line('err', '✗ App export failed: ' + _esc(String(e))); }
+  finally { setBusy(false); }
+}
+window.exportApp = exportApp;
+
 // ── Precomputed-results (memo) quality slider ─────────────────────────────────
 // The standalone / runnable-HTML formats can embed THIS notebook's memoizable cell results so it
 // springs to life on import (expensive cells RESTORE instead of recompute). The slider is a byte
@@ -600,6 +662,18 @@ function openExport(preset) {
   ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   const hw = document.getElementById('htmlwidth'); if (hw) hw.value = localStorage.getItem('slate_htmlwidth') || '900'; _htmlWidthSync();
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
+  ['appdir', 'apptitle', 'appexptheme', 'apppagewidth', 'appport', 'appinclude'].forEach(id => {
+    const el = document.getElementById(id), v = localStorage.getItem('slate_' + id);
+    if (el && v != null) el.value = v;
+  });
+  // Seed the destination with `dist/<notebook>` — the conventional place for build output, and a
+  // per-notebook subfolder so exporting a second notebook doesn't write over the first. FILLED IN
+  // rather than left as a placeholder: the reader can see exactly where it will land and edit it,
+  // instead of finding out afterwards from the log. A remembered value (above) wins.
+  const _ad = document.getElementById('appdir');
+  if (_ad && !_ad.value) _ad.value = 'dist/' + (_slug((nbState && nbState.title) || (nbState && nbState.id) || '') || 'app');
+  // Last run's result belongs to last run — a reopened dialog shouldn't claim it just wrote a folder.
+  const _ar = document.getElementById('appoutrow'); if (_ar) _ar.style.display = 'none';
   _memoCat = null;                                          // re-measure precomputed results per dialog open
   const mq = document.getElementById('memoquality'); if (mq) mq.value = localStorage.getItem('slate_memoquality') || '100';
   document.getElementById('exfmt').onchange = _exSyncRows;
@@ -658,6 +732,7 @@ function closeExport(go) {
     return exportMarkdown(go === 'copy' ? 'copy' : 'file');
   }
   if (fmt === 'website') return;   // publishing runs via the ☁ button → publishToSite(), not through closeExport
+  if (fmt === 'app') return;       // …and the app export via "Write app folder" → exportApp(), which keeps the dialog open
   if (fmt === 'standalone') return exportStandalone();
   return _runPdfExport();
 }

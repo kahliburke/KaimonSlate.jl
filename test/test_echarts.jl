@@ -108,6 +108,94 @@ const RE = ReportEngine
         @test o["xAxis"]["type"] == "category"
         @test o["series"][1]["type"] == "bar"
     end
+
+    # `zoom` — ECharts declares no zoom by default, and the bare `inside` component is invisible
+    # and irreversible. `zoom=true` is the one-word form that also supplies the affordances.
+    @testset "zoom: expands to dataZoom (+ toolbox), never clobbering an explicit one" begin
+        o = RE.echart(:line, [1, 2], [3, 4]; zoom = true).option
+        @test o["dataZoom"][1]["type"] == "inside"
+        @test o["dataZoom"][1]["xAxisIndex"] == [0]
+        # The full range is stated explicitly so `restore` has a defined target — without it the
+        # toolbox reset jumps to whatever window ECharts first saw, which on a reactively
+        # re-rendered chart need not contain the data now plotted.
+        @test o["dataZoom"][1]["start"] == 0 && o["dataZoom"][1]["end"] == 100
+        @test haskey(o["toolbox"]["feature"], "dataZoom") && haskey(o["toolbox"]["feature"], "restore")
+        @test !haskey(o, "zoom")                                   # the Slate kwarg never survives
+        # Gesture only — no toolbox.
+        ins = RE.echart(:line, [1, 2], [3, 4]; zoom = :inside).option
+        @test ins["dataZoom"][1]["type"] == "inside" && !haskey(ins, "toolbox")
+        # Slider, and both.
+        sl = RE.echart(:line, [1, 2], [3, 4]; zoom = :slider).option
+        @test only(sl["dataZoom"])["type"] == "slider"
+        @test Set(d["type"] for d in RE.echart(:line, [1, 2], [3, 4]; zoom = :both).option["dataZoom"]) ==
+              Set(["inside", "slider"])
+        # Multi-panel: EVERY x axis, so stacked panels zoom together rather than drifting apart.
+        multi = RE.echart(:line, [1, 2], [3, 4]; zoom = true,
+                          xAxis = [(type = :value,), (type = :value, gridIndex = 1)]).option
+        @test multi["dataZoom"][1]["xAxisIndex"] == [0, 1]
+        # An explicit component wins — the raw escape hatch stays clean.
+        exp1 = RE.echart(:line, [1, 2], [3, 4]; zoom = true,
+                         dataZoom = [(type = :slider,)]).option
+        @test only(exp1["dataZoom"])["type"] == "slider"
+        # zoom=false is a no-op, not an empty component.
+        @test !haskey(RE.echart(:line, [1, 2], [3, 4]; zoom = false).option, "dataZoom")
+        # Raw form too, and a bad mode fails loudly.
+        @test RE.echart(; series = [(type = "line", data = [1])], zoom = :slider).option["dataZoom"][1]["type"] == "slider"
+        @test_throws ArgumentError RE.echart(:line, [1, 2], [3, 4]; zoom = :sideways)
+    end
+
+    # `select` — the chart's x-range as an INPUT for a `@bind`. Julia names the variable; the
+    # front-end resolves it to its defining cell and does the two-way link (core.js
+    # `_wireEchartSelect`). What's asserted here is the wire contract and that the brush component
+    # is set up so the reader can just drag.
+    @testset "select: chart drag drives a @bind range" begin
+        o = RE.echart(:line, [1, 2], [3, 4]; select = :span).option
+        @test o["__select"]["name"] == "span"
+        @test !haskey(o, "select")                            # the Slate kwarg never survives
+        @test o["brush"]["brushType"] == "lineX" && o["brush"]["brushMode"] == "single"
+        @test o["brush"]["throttleType"] == "debounce"        # commit on settle, not per pixel
+        @test o["toolbox"]["show"] === false                  # permanently armed; no tool to pick
+        # A String names the same thing as a Symbol.
+        @test RE.echart(:line, [1, 2], [3, 4]; select = "span").option["__select"]["name"] == "span"
+        # An explicit brush wins — styling/mode stays overridable without losing the link.
+        ov = RE.echart(:line, [1, 2], [3, 4]; select = :span,
+                       brush = (brushType = :rect,)).option
+        @test ov["brush"]["brushType"] == "rect" && ov["__select"]["name"] == "span"
+        # No marker at all when unused.
+        @test !haskey(RE.echart(:line, [1, 2], [3, 4]).option, "__select")
+    end
+
+    # `valuefmt` — tooltip number formatting. A JS function can't cross a JSON option (no reviver),
+    # so the spec travels as DATA under `__valuefmt` and the front-end (`_valueFormatter`, core.js)
+    # turns it into a `tooltip.valueFormatter`. What matters here: the spec is normalised through
+    # the SAME `_parse_col_format` the tables use (so the two vocabularies can't drift), the raw
+    # kwarg never survives onto the option (ECharts would carry an unknown key into its model), and
+    # it works in all four call forms.
+    @testset "valuefmt: tooltip number formatting, shared with the table format DSL" begin
+        wire(o) = get(o, "__valuefmt", nothing)
+        # Preset (arrives as a String — `_ec` stringifies Symbols before normalisation) + overrides.
+        pre = RE.echart(:line, [1.0, 2.0], [0.001, 0.002]; valuefmt = :scientific).option
+        @test wire(pre)["kind"] == "scientific" && wire(pre)["digits"] == 3
+        ovr = RE.echart(:line, [1.0, 2.0], [0.001, 0.002];
+                        valuefmt = (kind = :fixed, digits = 5)).option
+        @test wire(ovr)["kind"] == "fixed" && wire(ovr)["digits"] == 5
+        # The Slate-only kwarg must NOT reach the option as itself.
+        @test !haskey(ovr, "valuefmt")
+        # Per series — for a chart whose series carry different units.
+        ser = RE.echart(RE.series(:line, [1.0, 2.0], [0.1, 0.2]; name = "a", valuefmt = :percent),
+                        RE.series(:line, [1.0, 2.0], [3.0, 4.0]; name = "b")).option
+        @test wire(ser["series"][1])["kind"] == "percent"
+        @test wire(ser["series"][2]) === nothing           # untouched
+        @test !haskey(ser["series"][1], "valuefmt")
+        @test wire(ser) === nothing                        # not lifted to the option
+        # Raw form gets it too (every echart form funnels through `_slate_normalize!`).
+        raw = RE.echart(; series = [(type = "bar", data = [[1, 2]])], valuefmt = :integer).option
+        @test wire(raw)["kind"] == "integer" && wire(raw)["sep"] === true
+        # A chart with no valuefmt carries no marker at all.
+        @test wire(RE.echart(:line, [1, 2], [3, 4]).option) === nothing
+        # Unknown presets fail loudly rather than silently formatting as :fixed.
+        @test_throws ArgumentError RE.echart(:line, [1, 2], [3, 4]; valuefmt = :nonsense)
+    end
     # (The reference-is-surfaced-to-agents assertions live in test_agentops.jl, where NotebookServer's
     #  `slate_api_reference` is already in scope.)
 

@@ -12,7 +12,18 @@ mutable struct Hub
     host::String
     port::Int
     lock::ReentrantLock
+    # App mode (see server_app.jl): this hub serves its notebooks as finished applications and
+    # refuses the authoring API. A property of the PROCESS, so one flag covers every route —
+    # including the SSE/WebSocket branches that never reach the router.
+    app::Bool
+    # Presentation defaults for an app's visitors: theme, page/figure width, scroll-zoom feel.
+    # Reader preferences live in localStorage, which is per-browser — so an app deployed with a
+    # light theme would still open midnight-dark for everyone who hadn't already changed it. These
+    # are what a visitor gets BEFORE they express a preference; their own choice still wins.
+    appdefaults::Dict{String,Any}
 end
+Hub(notebooks, server, host, port, lock) =
+    Hub(notebooks, server, host, port, lock, false, Dict{String,Any}())
 
 _hub_url(h::Hub) = "http://$(h.host):$(h.port)"
 _esc(s) = replace(String(s), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;")

@@ -224,6 +224,9 @@ function renderAgentMsgs() {
 // Replay the buffered conversation after a page reload (in-memory agentMsgs is
 // gone, but the server kept every relayed envelope). Idempotent — clears first.
 async function loadAgentLog() {
+  // An app ships without the agent (export_app defaults `agent=false`) and its server refuses the
+  // route outright, so there is no conversation to replay — only a 403 on every load.
+  if (typeof SLATE_IS_APP !== 'undefined' && SLATE_IS_APP) return;
   try {
     const r = await api('GET', '/api/agent-log');
     if (!r || !r.events || !r.events.length) return;

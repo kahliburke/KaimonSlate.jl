@@ -142,7 +142,10 @@ window.onMeshBuild = m => {
 };
 
 // A tab that loaded AFTER the hub raised a pending consent (missed the live SSE) still shows it.
+// Not on an app: the peer mesh is an authoring facility, the route is refused there, and a reader
+// would just get a 403 in the console 800ms after every load.
 setTimeout(async () => {
+  if (typeof SLATE_IS_APP !== 'undefined' && SLATE_IS_APP) return;
   try {
     const d = await window.api('GET', '/api/mesh-consent');
     if (d && d.pending) consent.value = d;

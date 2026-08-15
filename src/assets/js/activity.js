@@ -350,12 +350,19 @@ function WorkerDetail() {
 }
 
 // ── mount ────────────────────────────────────────────────────────────────────────────
-const mon = document.getElementById('actmon');
-if (mon) render(html`<${Monitor}/>`, mon);
-const popHost = document.createElement('div');
-document.body.appendChild(popHost);
-render(html`<${WorkerDetail}/>`, popHost);
+// Not on an app. This monitor is about WHERE work runs — regions, hosts, warm pools — which is an
+// operator's question, and its UI is authoring chrome the reading view hides anyway. Left mounted it
+// would poll `/api/regions`, `/api/local-workers` and `/api/remote-notebook-workers` on a timer
+// forever, and every one of those is refused: a console full of 403s, restarting every POLL_MS, on a
+// page where nothing can act on the answer. An app's operator view is `/status`.
+if (!(window.__SLATE_APP__ && window.__SLATE_APP__.on)) {
+  const mon = document.getElementById('actmon');
+  if (mon) render(html`<${Monitor}/>`, mon);
+  const popHost = document.createElement('div');
+  document.body.appendChild(popHost);
+  render(html`<${WorkerDetail}/>`, popHost);
 
-start();
-document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
-window.addEventListener('pageshow', () => tick());
+  start();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+  window.addEventListener('pageshow', () => tick());
+}

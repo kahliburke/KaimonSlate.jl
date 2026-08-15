@@ -252,14 +252,35 @@ body.hyd-preview #runstale, body.hyd-preview #addcellbtn { opacity:.7; }
 /* Cross-fade on enter/exit (toggleZen dips opacity, swaps the mode, fades back). */
 #nb { transition:opacity .2s ease; }
 #nb.zen-fading { opacity:0; }
-body.zen .topbar, body.zen .hydbanner, body.zen #runchip, body.zen #runstale, body.zen #scratchrun,
+/* App mode (server_app.jl) IS this reading view — appmode.js puts `zen` on the body alongside
+   `app`, so every rule here applies to an app for free and there is exactly one definition of
+   "the reading view" to keep correct. `body.app` below adds only what an app has ON TOP: the app
+   bar, the display-settings popover, and plain-language failures. */
+body.zen .topbar, body.zen #runchip, body.zen #runstale, body.zen #scratchrun,
 body.zen .focusbar, body.zen .dagpane, body.zen .agentpanel, body.zen .filespanel, body.zen #healthbadge,
+/* The floating "📖 Docs" launcher and its panel — Julia API help, i.e. for whoever WRITES the
+   notebook. Same class of tool panel as the agent/files panes on the line above. */
+body.zen #doclauncher, body.zen #docpanel,
 body.zen .cellhead, body.zen .coldrop, body.zen .cellprog, body.zen .cell .controls.empty,
+/* Add-cell affordances: the hover rule between cells and its ⊕, plus the end-of-notebook button.
+   They sit BETWEEN cells rather than inside one, so the per-cell rules above never reached them. */
+body.zen .cellgap, body.zen #addcellbtn,
 /* the "⊞ … surfaced in ‘cell’" chip is authoring chrome — the live control renders in its host cell */
 body.zen .hostedph { display:none !important; }
+/* An author in zen can hit Esc and watch the cells run; an app reader cannot, so bring-up progress is
+   the ONLY signal they get that the thing is alive. Keep the banner for an app, hide it for zen. */
+body.zen:not(.app) .hydbanner { display:none !important; }
 body.zen .cell > textarea, body.zen .cell .cm-editor, body.zen .cell .srcedit { display:none !important; }
 body.zen .cell { border:none !important; background:none !important; box-shadow:none !important;
   padding:2px 0 !important; margin:0 !important; }
+/* The selection/edit/dependency rings are drawn with `outline`, which the reset above doesn't reach
+   (it covers border/background/box-shadow). They answer an authoring question — which cell am I
+   about to act on — and in a reading view there is no such act: the page is one document, and a
+   box drawn round one paragraph of it just asks the reader why that paragraph is special.
+   `.deck-slide` drops them for the same reason while presenting. Note these carry no focus
+   affordance: real focus rings belong to the inputs and buttons inside a cell, not to `.cell`. */
+body.zen .cell.selected, body.zen .cell.multisel,
+body.zen .cell.editing, body.zen .cell.dep-focus { outline:none !important; }
 body.zen .cell .md { margin:0; padding:7px 16px; }   /* reading flow: tighter vertical rhythm between blocks */
 /* Width follows the page's own mode (the column-width slider / Full-page-width toggle on `.page`) —
    zen only frees vertical space by adding a little top room now that the topbar is hidden. */
@@ -275,6 +296,160 @@ body.zen .zenexit { display:inline-flex; align-items:center; gap:6px; position:f
   z-index:120; background:var(--bg2); color:var(--dim); border:1px solid var(--border); border-radius:8px;
   padding:6px 11px; font-size:.8rem; cursor:pointer; opacity:.45; transition:opacity .15s ease; }
 body.zen .zenexit:hover { opacity:1; color:var(--text); border-color:var(--accent); }
+/* …but an APP has no zen to exit. App mode wears `zen` to reuse the reading view, which would
+   otherwise inherit its escape hatch — a button offering to leave a mode the reader never entered,
+   into an editor the server refuses to serve. */
+body.app .zenexit { display:none !important; }
+/* Document-metadata roles keep their own presentation in the reading view. `body.zen .cell .md`
+   is more specific than `.cell.role-title .md`, so the generic reading-flow padding was winning
+   and the title lost its block spacing — it still centred, but sat jammed against the cell above
+   it like body text that happened to be large. Restated here so the title reads as a title. */
+body.zen .cell.role-title .md, body.app .cell.role-title .md {
+  text-align:center; padding:10px 16px 4px; }
+body.zen .cell.role-abstract .md, body.app .cell.role-abstract .md { padding:4px 16px 10px; }
+/* An app leads with its title; the app bar already names it, so the document title carries the
+   page rather than competing with the bar. */
+body.app .cell.role-title .md h1 { margin-top:4px; }
+
+/* ── App mode chrome ────────────────────────────────────────────────────────────────────────────
+   Deliberately NOT a bar. The document opens with its own title cell, so chrome repeating that title
+   is a second heading competing with the real one — and a strip of vertical space spent, on every
+   screen, saying what the page already says. What survives is what the document CAN'T say for
+   itself: whether it is busy, and how to change the display. Both float in the top-right corner,
+   clear of the reading column. Attribution goes at the END, as a colophon. */
+/* `html.app-boot` is set by the head script so the authoring chrome never paints for a frame while
+   the scripts load; `body.app` takes over once appmode.js has finished. */
+html.app-boot .topbar, html.app-boot #runchip { display:none !important; }
+html.app-boot body { visibility:hidden; }            /* revealed by appmode.js on the same frame it adds body.app */
+.appctl, .appfoot { display:none; }
+/* FIXED: the markup sits after `.page` (among the other overlays), and anything flow-positioned
+   there lands at the BOTTOM of the document — which is exactly where the settings control used to
+   end up. Out of flow, the markup's position stops mattering. */
+body.app .appctl { display:flex; align-items:center; gap:10px; position:fixed; top:14px; right:18px;
+  z-index:110; }
+body.app .appstatus { display:inline-flex; align-items:center; gap:7px; color:var(--dim);
+  font-size:.82rem; background:var(--bg2); border:1px solid var(--border); border-radius:999px;
+  padding:4px 12px; }
+/* The pill is only meaningful while something is running — empty, it's a stray dot in the corner. */
+body.app .appstatus:not(.busy) { display:none; }
+body.app .appstatus .appspin { width:11px; height:11px; border-radius:50%; border:2px solid var(--border);
+  border-top-color:var(--accent); animation:appspin .8s linear infinite; display:none; }
+body.app .appstatus.busy .appspin { display:inline-block; }
+@keyframes appspin { to { transform:rotate(360deg); } }
+/* The ONLY control an app's reader has over how the page looks, so it has to be findable without
+   hunting: a visible resting border and a real hit target, not a dim glyph that appears on hover. */
+body.app .appgear { background:var(--bg2); border:1px solid var(--border);
+  color:var(--text); cursor:pointer; font-size:1.15rem; line-height:1; padding:6px 11px;
+  border-radius:8px; box-shadow:0 2px 10px #0004; }
+body.app .appgear:hover { color:var(--accent); border-color:var(--accent); }
+/* Colophon. Centred on the reading column, separated by a rule, and quiet — it is the last thing on
+   the page, not something competing with the results above it. */
+body.app .appfoot { display:block; margin:56px auto 34px; max-width:var(--page-max,980px);
+  padding-top:16px; border-top:1px solid var(--border); text-align:center;
+  color:var(--dim); font-size:.78rem; }
+body.app .appfoot a { color:var(--dim); text-decoration:underline; text-underline-offset:2px; }
+body.app .appfoot a:hover { color:var(--accent); }
+/* With no bar there is nothing to clear — the document starts at the top of the page, which is the
+   point. Just enough room that the title cell isn't jammed against the edge, and a right margin on
+   the FIRST block so a long heading can't run under the floating gear. */
+body.app #nb { margin-top:26px; }
+body.app #nb > .cell:first-child { padding-right:70px !important; }
+/* The bring-up banner has no bar to sit under any more; it sticks to the top of the viewport. */
+body.app .hydbanner { top:0; }
+
+/* Display-settings popover — the reader-facing subset of Settings (theme + widths + scroll-zoom).
+   Every control drives the SAME setter settings.js uses, so the two views can never disagree. */
+.appsetpop { display:none; }
+/* Anchored to the gear it belongs to (`.appctl` is fixed, so it's this popover's offset parent)
+   rather than to fixed page coordinates that were only right while there was a bar. */
+body.app .appsetpop.open { display:block; position:absolute; top:calc(100% + 8px); right:0; z-index:130;
+  background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:12px 14px;
+  min-width:290px; box-shadow:0 12px 34px rgba(0,0,0,.5); }
+.appsetpop .asrow { display:flex; align-items:center; gap:10px; margin:7px 0; font-size:.82rem; }
+.appsetpop .asrow label { color:var(--dim); flex:0 0 128px; }
+.appsetpop .asrow select { flex:1; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+  border-radius:6px; padding:3px 6px; font-size:.82rem; }
+.appsetpop .asrow input[type=range] { flex:1; accent-color:var(--accent); }
+.appsetpop .asv { color:var(--dim); font-size:.74rem; min-width:34px; text-align:right;
+  font-variant-numeric:tabular-nums; }
+.appsetpop .asnote { color:var(--dim); font-size:.72rem; margin-top:9px; padding-top:8px;
+  border-top:1px solid var(--border); }
+
+/* ── Failures, in language a non-programmer can act on ──────────────────────────────────────────
+   A backtrace is the right default when the reader can edit the code. In an app they can't, so it
+   is pure alarm — forty lines of package internals for something that is usually "that file isn't
+   the shape I expected". The MESSAGE stays (the actionable half); the trace moves behind a disclosure so
+   whoever deployed the app can still get at it without leaving the page. */
+body.app .err .err-bt { display:none; }
+body.app .err.showtrace .err-bt { display:block; }
+body.app .err { border-left:3px solid var(--bad,#f85149); background:rgba(248,81,73,.07);
+  border-radius:0 8px 8px 0; padding:10px 14px; position:relative; }
+body.app .err::after { content:"details"; position:absolute; top:8px; right:12px; font-size:.7rem;
+  color:var(--dim); cursor:pointer; border:1px solid var(--border); border-radius:6px; padding:1px 7px; }
+body.app .err.showtrace::after { content:"hide details"; }
+body.app .err .errjump { cursor:default; }   /* nothing to jump TO — the editor isn't there */
+
+/* The page-level failure banner: says WHICH step failed, in the app's own words. */
+.appfail { display:none; }
+body.app .appfail { display:flex; align-items:center; gap:10px; margin:0 auto; max-width:var(--page-max,980px);
+  padding:11px 16px; background:rgba(248,81,73,.1); border:1px solid rgba(248,81,73,.35);
+  border-radius:9px; font-size:.85rem; color:var(--text); }
+body.app .appfail .appfailicon { color:var(--bad,#f85149); font-size:1rem; }
+body.app .appfail .appfailtext { flex:1; }
+body.app .appfail .appfailjump { background:var(--bg3); color:var(--dim); border:1px solid var(--border);
+  border-radius:7px; padding:3px 10px; font-size:.76rem; cursor:pointer; }
+body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--accent); }
+
+/* Download button (`download_button`) — a result on its way to the reader's disk. Styled as a
+   primary action rather than a link: in an app it is often the last thing they came to do. */
+.dlbtn { display:inline-flex; align-items:center; gap:7px; text-decoration:none; cursor:pointer;
+  background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:8px;
+  padding:6px 13px; font-size:.83rem; transition:border-color .12s, background .12s; }
+.dlbtn:hover { border-color:var(--accent); background:var(--bg2); color:var(--text); }
+.dlbtn .dlicon { color:var(--accent); font-size:.95rem; }
+
+/* ── RangeSlider (js/widget-rangeslider.js) ──────────────────────────────────────────────────────
+   Two range inputs stacked on one track. Both inputs are transparent and pointer-transparent
+   EXCEPT their thumbs, so the visible track/fill below shows through and each thumb still takes
+   its own clicks — that is the whole trick that makes two native sliders read as one control. */
+.customwidget[data-widget="rangeslider"] { display:inline-flex; align-items:center; gap:11px; }
+.rsbox { position:relative; display:inline-block; width:190px; height:20px; }
+.rstrack { position:absolute; left:0; right:0; top:8px; height:4px; border-radius:2px;
+  background:var(--bg3); border:1px solid var(--border); }
+.rsfill { position:absolute; top:0; bottom:0; background:var(--accent); border-radius:2px; opacity:.85; }
+.rsin { position:absolute; left:0; top:0; width:100%; height:20px; margin:0;
+  -webkit-appearance:none; appearance:none; background:none; pointer-events:none; }
+.rsin:focus { outline:none; }
+.rsin::-webkit-slider-thumb { -webkit-appearance:none; pointer-events:auto; cursor:grab;
+  width:14px; height:14px; border-radius:50%; background:var(--text); border:2px solid var(--accent);
+  box-shadow:0 1px 3px rgba(0,0,0,.5); }
+.rsin::-webkit-slider-thumb:active { cursor:grabbing; }
+.rsin::-moz-range-thumb { pointer-events:auto; cursor:grab;
+  width:14px; height:14px; border-radius:50%; background:var(--text); border:2px solid var(--accent);
+  box-shadow:0 1px 3px rgba(0,0,0,.5); }
+.rsin:focus-visible::-webkit-slider-thumb { outline:2px solid var(--accent); outline-offset:2px; }
+.rsin::-moz-range-track { background:none; border:none; }
+.rsval { color:var(--dim); font-size:.76rem; font-variant-numeric:tabular-nums; white-space:nowrap; }
+
+/* ── FileUpload control (js/widget-fileupload.js) ───────────────────────────────────────────────
+   Sized to sit inline in a control strip beside sliders and selects, so a form of mixed controls
+   reads as one row of controls rather than a form with an attachment box bolted on. */
+.customwidget[data-widget="fileupload"] { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.fudrop { display:inline-flex; align-items:center; gap:7px; cursor:pointer; padding:4px 11px;
+  border:1px dashed var(--border); border-radius:8px; background:var(--bg3); transition:border-color .12s, background .12s; }
+.fudrop:hover, .fudrop.over { border-color:var(--accent); background:var(--bg2); }
+.fudrop.over { border-style:solid; }
+.fudrop .fucta { color:var(--text); font-size:.8rem; }
+.fudrop .fuhint { color:var(--dim); font-size:.72rem; }
+.fufile { display:inline-flex; align-items:center; gap:6px; color:var(--text); font-size:.79rem;
+  background:var(--bg3); border:1px solid var(--border); border-radius:7px; padding:3px 9px; max-width:280px; }
+.fufile .fusize { color:var(--dim); font-size:.71rem; }
+.fuerr { color:var(--bad,#f85149); font-size:.75rem; max-width:340px; }
+.fuprog { display:inline-flex; align-items:center; gap:9px; }
+.fuprog .fubar { width:130px; height:5px; border-radius:3px; background:var(--bg3); overflow:hidden; }
+.fuprog .fufill { display:block; height:100%; background:var(--accent); transition:width .12s linear; }
+.fuprog .fulabel { color:var(--dim); font-size:.75rem; }
+
 .cellhead .trace.on { color:var(--accent); }
 
 /* Trace inspector modal: source lines with captured values shown beneath each line. */
@@ -1756,10 +1931,12 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .publogln { white-space:pre-wrap; line-height:1.45; color:var(--dim); }
 .publogln.st { color:var(--text); } .publogln.ok { color:var(--accent); } .publogln.err { color:var(--red); }
 .publogln.ok a { color:var(--accent); text-decoration:underline; }
-/* Publish button, in-flight: spinner + dimmed + progress cursor, so it plainly reads as working
-   (not a still-clickable "Publish"). The label text is swapped to "Publishing…" from JS. */
-#sitepublishbtn.busy { position:relative; opacity:.75; cursor:progress; padding-left:26px; }
-#sitepublishbtn.busy::before { content:""; position:absolute; left:9px; top:50%; width:11px; height:11px;
+/* A long-running action button, in-flight: spinner + dimmed + progress cursor, so it plainly reads
+   as working (not a still-clickable button). The label text is swapped from JS.
+   Shared by Publish and the app export — both write for many seconds, and a reader who can't tell
+   whether the first click registered will click again. */
+#sitepublishbtn.busy, #appexportbtn.busy { position:relative; opacity:.75; cursor:progress; padding-left:26px; }
+#sitepublishbtn.busy::before, #appexportbtn.busy::before { content:""; position:absolute; left:9px; top:50%; width:11px; height:11px;
   margin-top:-6px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%;
   animation:pubspin .7s linear infinite; }
 @keyframes pubspin { to { transform:rotate(360deg); } }

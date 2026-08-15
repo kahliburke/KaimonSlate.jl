@@ -54,7 +54,9 @@ window._backupSoon = _backupSoon;
 // Safety net: a low-frequency sweep of all editors, so capture never depends on a per-editor
 // change hook being wired. Idle-cheap — a single DOM check gates the per-editor getValue() work,
 // so when nothing is dirty (no cell marked `edited`) the sweep costs ~one querySelector.
-setInterval(() => { if (_reconcileRan && document.querySelector('.cell.state-edited')) backupEdits(); }, 2000);
+// (`_reconcileRan` stays false on an app — reconcileBackup returns before setting it — so this
+// sweep is already inert there; the explicit check just says so rather than relying on it.)
+setInterval(() => { if (!SLATE_IS_APP && _reconcileRan && document.querySelector('.cell.state-edited')) backupEdits(); }, 2000);
 // Capture on tab close. `pagehide` covers Safari/iOS, where `beforeunload` is unreliable.
 window.addEventListener('beforeunload', backupEdits);
 window.addEventListener('pagehide', backupEdits);
@@ -93,6 +95,13 @@ const _isEmpty = s => !s || !s.trim();
 // reconcile walkthrough (diff + choose). We don't write editors at reconcile time beyond the
 // auto-fills; the walkthrough applies on the user's click, when editors definitely exist.
 function reconcileBackup(state) {
+  // Never on an app. This restores UNSAVED EDITOR CONTENT, and an app has no editors — so the
+  // backup can only be a leftover from an authoring session in the same browser (same origin, e.g.
+  // testing an export locally). Shown to a reader it's a diff of Julia source they didn't write,
+  // offering to restore work they never did, over a document they can't edit anyway.
+  // The file still LOADS: notebook.js and view.js index `window._pendingRestore` unguarded, so the
+  // globals have to exist. It just does nothing.
+  if (SLATE_IS_APP) { _reconcileDone = true; return; }
   if (_reconcileDone) return; _reconcileDone = true; _reconcileRan = true;   // capture may now manage the backup
   const b = _readBackup();
   if (!Object.keys(b).length) return;

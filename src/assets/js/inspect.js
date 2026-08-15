@@ -113,4 +113,12 @@ async function _slateEvalJs(reqid, code) {
 window._slateEvalJs = _slateEvalJs;
 // Warm html2canvas at idle so the FIRST inspect doesn't blow its server-side timeout on a cold
 // load (CDN fetch + parse). Kept off the boot path — fires ~2s after load, best-effort.
-setTimeout(() => { _loadHtml2Canvas().catch(() => {}); }, 2000);
+//
+// Skipped on an app: rendered-DOM inspection is something an AGENT asks for, and an app has no
+// agent — so this would be a third-party CDN request on every load, made on behalf of a feature
+// that can't be invoked. It also breaks the deployment story an app is supposed to have: a lab
+// machine may have no route off its own network, and this is the one thing on the page that
+// reaches outside it.
+if (!(window.__SLATE_APP__ && window.__SLATE_APP__.on)) {
+  setTimeout(() => { _loadHtml2Canvas().catch(() => {}); }, 2000);
+}

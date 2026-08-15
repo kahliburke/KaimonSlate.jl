@@ -9,9 +9,20 @@
 <script src="/assets/js/diag.js"></script>
 <!-- Detect the host OS early so keyboard hints render in its convention (Ctrl vs ⌘). -->
 <script src="/assets/js/platform.js"></script>
+<!-- App-mode posture + this deployment's presentation defaults, stamped in by the server
+     (`_inject_app`). Null on a plain authoring hub. -->
+<script>window.__SLATE_APP__=null;</script>
+<!-- Seed the deployment's presentation defaults into localStorage for any setting this visitor has
+     NOT already chosen. Doing it here — before a single reader runs — means every existing consumer
+     (the theme script below, settings.js, dragdrop.js) picks them up with no changes, and a visitor
+     who HAS a preference keeps it, because an existing key is never overwritten. -->
+<script>try{var _a=window.__SLATE_APP__;if(_a&&_a.defaults){for(var _k in _a.defaults){if(localStorage.getItem(_k)===null)localStorage.setItem(_k,_a.defaults[_k]);}}}catch(e){}</script>
 <!-- Apply the saved Slate UI theme BEFORE any CSS paints, so there's no dark→light flash. The
      palette lives in notebook.css under html[data-slate-theme="…"]; "midnight" is the bare default. -->
 <script>try{var _t=localStorage.getItem('slateTheme');if(_t&&_t!=='midnight')document.documentElement.dataset.slateTheme=_t;}catch(e){}</script>
+<!-- App mode paints from the very first frame: the class goes on <html> here rather than on <body>
+     from a script, so the authoring chrome is never briefly visible on a slow load. -->
+<script>try{if(window.__SLATE_APP__&&window.__SLATE_APP__.on)document.documentElement.classList.add('app-boot');}catch(e){}</script>
 <!-- Inline SVG favicon (data URI → no extra request, no /favicon.ico 404). -->
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48' fill='none'><rect x='2.5' y='2.5' width='43' height='43' rx='12' fill='%23141828' stroke='%232a2e40' stroke-width='1.5'/><path d='M16 15 L33 20 M33 20 L22 34 M16 15 L22 34' stroke='%23566089' stroke-width='2' stroke-linecap='round'/><circle cx='16' cy='15' r='4' fill='%237cc0ff'/><circle cx='33' cy='20' r='4' fill='%23c586c0'/><circle cx='22' cy='34' r='4' fill='%2356d364'/></svg>"/>
 <!-- All third-party assets are served locally from /assets/vendor/* (the server fetches +
@@ -276,6 +287,43 @@
 <div id="healthpanel" class="healthpanel"></div>
 <!-- Zen reading-mode exit (shown only while body.zen is on; the topbar toggle is hidden then). -->
 <div class="zenexit" onclick="window.exitZen && window.exitZen()" title="exit zen mode (Esc)">✕ Exit zen</div>
+<!-- ── App mode chrome (body.app only; built + driven by js/appmode.js) ────────────────────────
+     NOT a bar. The document already opens with its own title cell, so a chrome bar repeating that
+     title (and naming the tool that served it) is a second heading competing with the real one, and
+     it costs a strip of vertical space on every screen. What's left is what a visitor actually
+     needs and the page cannot say for itself: whether it is busy, and how to change the display.
+     Both float in the corner, out of the reading column.
+     No panels and no exit control — app mode is enforced by the server, so an escape hatch here
+     would only ever produce a wall of 403s. -->
+<div id="appctl" class="appctl">
+  <span class="appstatus" id="appstatus"><span class="appspin"></span><span id="appstatustext"></span></span>
+  <button class="appgear" onclick="appSettingsToggle(event)" title="display settings">⚙</button>
+  <div class="appsetpop" id="appsetpop" onclick="event.stopPropagation()">
+    <div class="asrow"><label for="apptheme">Theme</label><select id="apptheme"></select></div>
+    <div class="asrow"><label for="appwide">Full page width</label><input type="checkbox" id="appwide"/></div>
+    <div class="asrow"><label for="apppage">Column width</label>
+      <input type="range" id="apppage" min="720" max="2200" step="20"/><span class="asv" id="apppagev"></span></div>
+    <div class="asrow"><label for="appfig">Figure width</label>
+      <input type="range" id="appfig" min="480" max="2200" step="20"/><span class="asv" id="appfigv"></span></div>
+    <div class="asrow"><label for="appzoom">Chart scroll-zoom</label>
+      <input type="range" id="appzoom" min="0" max="100" step="4"/><span class="asv" id="appzoomv"></span></div>
+    <div class="asrow"><label for="appwrap">Wrap wide output</label><input type="checkbox" id="appwrap"/></div>
+    <div class="asnote">Saved in this browser.</div>
+  </div>
+</div>
+<!-- A failure banner in plain language. The cell's own error block still carries the exact message
+     (a backtrace behind a disclosure); this is the part a non-programmer can act on. -->
+<div id="appfail" class="appfail" style="display:none">
+  <span class="appfailicon">⚠</span>
+  <span class="appfailtext" id="appfailtext"></span>
+  <button class="appfailjump" id="appfailjump" onclick="appFailJump()">show me</button>
+</div>
+<!-- Attribution, at the END of the document where a colophon belongs — not in chrome above the
+     content. It names the tool for someone who wants to know what this is built with, and stays out
+     of the way of someone who just wants their results. `rel=noopener` because it's a new tab. -->
+<div id="appfoot" class="appfoot">
+  powered by <a href="https://github.com/kahliburke/KaimonSlate.jl" target="_blank" rel="noopener">Kaimon Slate</a>
+</div>
 <aside id="dagpane" class="dagpane">
   <div class="daggrip" id="daggrip" title="drag to resize"></div>
   <div class="aphead"><strong>🕸 Pipeline</strong><span id="dagcount" class="hint"></span>
@@ -427,6 +475,7 @@
       <option value="markdown">Markdown — file or clipboard</option>
       <option value="website" hidden>Website — publishable page (+ og:image)</option>
       <option value="standalone">Standalone .jl — reproducible bundle</option>
+      <option value="app">App — a folder that runs as an application</option>
     </select></div>
   <div class="setrow exrow fmt-pdf fmt-html fmt-website fmt-markdown"><label title="Filter which cell outputs appear">Outputs</label>
     <select id="exoutputs">
@@ -563,11 +612,48 @@
       style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>
   <div class="setrow exrow fmt-website sethint" id="sitehint"><span></span>Renders this notebook into the site at <code>/&lt;path&gt;/</code> (the site's index links to every document in it — others are preserved), then syncs the whole build to the site's destinations. A site with no destinations just stages locally at <code>/sites/&lt;name&gt;/</code> — add destinations in the Publishing manager, then hit <b>▶ Sync</b>.</div>
   <div class="setrow exrow fmt-standalone sethint"><span></span>Packages the whole environment (Project + Manifest + source; a git bundle when the project is a repo) into ONE <code>.jl</code>. Reopen it with the Open box or <code>KaimonSlate.expand</code>.</div>
+  <!-- App: unlike every other format this WRITES A FOLDER on the machine running Slate rather than
+       downloading a file — the result is a directory tree (launchers + bundle), not one artifact. So
+       it asks for a destination path, and reports where it landed instead of saving anything. -->
+  <div class="setrow exrow fmt-app"><label title="Folder to write the app into, on THIS machine. Relative paths resolve against the notebook's project. Created if it doesn't exist; re-exporting over it replaces the launchers and bundle.">Folder</label>
+    <input id="appdir" type="text" placeholder="dist/my-app" autocomplete="off" spellcheck="false"
+      style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>
+  <div class="setrow exrow fmt-app"><label title="Names the app: the browser tab, the launcher banner, and the URL a reader sees. Blank = the document's own title (its title cell / first heading).">Name</label>
+    <input id="apptitle" type="text" placeholder="from the document's title" autocomplete="off"
+      style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-size:.82rem"/></div>
+  <!-- `appexptheme`, not `apptheme`: the app-mode settings popover already owns that id, and a
+       duplicate would resolve to whichever comes first in the document (the popover) — so this
+       picker would silently read someone else's element. -->
+  <div class="setrow exrow fmt-app"><label for="appexptheme" title="What a visitor sees before choosing their own. They can still change it in the app's settings.">Theme</label>
+    <select id="appexptheme">
+      <option value="">Midnight (default)</option>
+      <option value="graphite">Graphite</option>
+      <option value="nord">Nord</option>
+      <option value="dracula">Dracula</option>
+      <option value="solarized-dark">Solarized Dark</option>
+      <option value="daylight">Daylight</option>
+      <option value="solarized-light">Solarized Light</option>
+    </select></div>
+  <div class="setrow exrow fmt-app"><label title="Reading-column width in px. Wide suits dashboards; the default suits prose.">Page width</label>
+    <input id="apppagewidth" type="number" min="720" max="3000" step="20" placeholder="980"
+      style="width:110px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-size:.82rem"/>
+    <span style="color:var(--dim);font-size:.78rem;margin-left:8px">px</span></div>
+  <div class="setrow exrow fmt-app"><label title="Port the app listens on. 0 = pick a free one at run time. SLATE_PORT / --port override it on the target machine.">Port</label>
+    <input id="appport" type="number" min="0" max="65535" placeholder="7373"
+      style="width:110px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-size:.82rem"/></div>
+  <div class="setrow exrow fmt-app"><label title="Extra project-relative files/directories to ship beyond the git-tracked ones, comma-separated. The usual case is reference data under datadir(), which is git-ignored by construction.">Also ship</label>
+    <input id="appinclude" type="text" placeholder="e.g. assets/spectra, reference" autocomplete="off" spellcheck="false"
+      style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>
+  <div class="setrow exrow fmt-app sethint"><span></span>Writes a self-contained folder. Running <code>run.sh</code> (macOS/Linux) or <code>run.bat</code> (Windows) inside it installs the Julia packages, reconstructs this notebook's exact environment, and serves it as an <b>app</b>: prose, results and live controls, with the authoring API refused by the server. Copy it to another machine or keep it here — it needs only Julia 1.10+. Ships the project's <b>git-tracked</b> files; add anything else under “Also ship”. <b>No authentication</b> — whoever can reach the port can drive it.</div>
+  <div class="setrow exrow fmt-app" id="appoutrow" style="display:none"><span></span><div id="appout" class="publog" style="flex:1;margin:0"></div></div>
   <div class="setrow" id="sitepubrow" style="display:none"><div id="sitepublog" class="publog" style="flex:1;margin:0"></div></div>
   <div class="row"><button id="excancel" onclick="closeExport(false)">Cancel</button>
     <button class="exrow fmt-markdown" onclick="closeExport('copy')">Copy to clipboard</button>
     <button class="exrow fmt-website primary" id="sitepublishbtn" onclick="publishToSite()">☁ Publish into site</button>
-    <button class="exrow fmt-pdf fmt-html fmt-markdown fmt-standalone primary" onclick="closeExport(true)">Export</button></div>
+    <button class="exrow fmt-pdf fmt-html fmt-markdown fmt-standalone primary" onclick="closeExport(true)">Export</button>
+    <!-- The app export stays IN the dialog: it writes a folder rather than downloading, so the modal
+         is the only place its destination path can be reported back. -->
+    <button class="exrow fmt-app primary" id="appexportbtn" onclick="exportApp()">Write app folder</button></div>
 </div></div>
 <div class="palette-bg" id="cmdbg"><div class="cmdpal">
   <input id="cmdin" placeholder="Type a command…" autocomplete="off" spellcheck="false"/>
@@ -589,6 +675,10 @@
 <script src="/assets/js/wscall.js"></script>   <!-- window.slateCall: JS→Julia calls over the page WebSocket -->
 <script src="/assets/js/editor.js"></script>
 <script src="/assets/js/view.js"></script>
+<!-- Built-in widget kinds whose UI is more than one <input>, implemented through the same public
+     slateRegisterWidget seam a third-party widget uses. -->
+<script src="/assets/js/widget-fileupload.js"></script>
+<script src="/assets/js/widget-rangeslider.js"></script>
 <script src="/assets/js/prepare.js"></script>   <!-- structured "Preparing packages" banner (precompile k/N) + collapsible build log -->
 
 <script src="/assets/js/restore.js"></script>
@@ -596,6 +686,8 @@
 <script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/keyboard.js"></script>
 <script src="/assets/js/settings.js"></script>
+<script src="/assets/js/appmode.js"></script>   <!-- app mode: reading view, app bar, plain-language failures -->
+
 <script src="/assets/js/publishing.js"></script>
 <script src="/assets/js/palette.js"></script>
 <script src="/assets/js/outputs.js"></script>

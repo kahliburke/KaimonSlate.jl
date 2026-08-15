@@ -113,6 +113,110 @@ echart(
     title = "Trig mix", legend = true,
 )
 
+#%% md id=h_valuefmt
+@md"""
+## Tooltip numbers — `valuefmt`
+
+ECharts prints whatever number it was handed, so small or wide-ranging values arrive in the tooltip
+as a mix of `0.000317515` and `5.789e-5` — impossible to compare at a glance. `valuefmt` takes the
+**same spec `slate_table(…; format=…)` takes** — presets `:fixed :scientific :percent :integer
+:currency :bytes`, or `(kind, digits, sep, prefix, suffix)` — and applies it with the same renderer,
+so a number reads identically in a table cell and a chart tooltip.
+
+Set it on the whole chart, or per series when the series carry different units — the series wins.
+
+> A JS **function** can't be passed here (or to any `formatter`): an option is serialised to JSON
+> with no reviver, so a function-shaped string arrives as a *string*, and ECharts calling it throws
+> on every tooltip update — which wedges the crosshair rather than failing visibly. `valuefmt`
+> exists because that route doesn't work.
+"""
+
+#%% code id=valuefmt
+ν = range(1500, 1800; length = 300)
+absorb = @. 0.18 * exp(-((ν - 1725) / 12)^2) + 0.04 * exp(-((ν - 1600) / 30)^2) + 3e-5
+
+# Hover: without `valuefmt` these read "0.000317515" next to "5.789e-5".
+echart(:line, collect(ν), absorb; title = "Same spec as a table column",
+       symbol = "none", valuefmt = (kind = :fixed, digits = 5),
+       xAxis = (type = :value, inverse = true, name = "cm⁻¹"),
+       yAxis = (type = :value, name = "absorbance"))
+
+#%% code id=valuefmt_series
+qtr = ["Q1", "Q2", "Q3", "Q4"]
+
+# Two series, two units — so the format goes on each series rather than on the chart.
+# (The second y-axis is here to make one compact example; two scales on one chart is usually the
+# wrong call — prefer two charts, or index both series to a common base.)
+echart(series(:bar, qtr, [128_400, 156_900, 141_200, 187_500];
+              name = "revenue", valuefmt = :currency),
+       series(:line, qtr, [0.182, 0.211, 0.174, 0.246];
+              name = "margin", valuefmt = :percent, yAxisIndex = 1, symbolSize = 8);
+       title = "Per-series formatting", legend = true,
+       yAxis = [(type = :value, name = "revenue"), (type = :value, name = "margin")])
+
+#%% md id=h_zoom
+@md"""
+## Zoom — `zoom`
+
+**ECharts does not zoom by default.** It only zooms when a `dataZoom` component is declared, and
+`dataZoom = [(type = "inside",)]` on its own is a trap: it's invisible (Slate also gates the wheel
+behind click-to-activate, so a chart can't hijack the page scroll as you pass over it), and once
+you've zoomed in there's no way back.
+
+`zoom = true` asks for it *discoverably* — the gesture plus a toolbox with box-zoom, undo and
+reset. All of it is stock ECharts (`dataZoom` + `toolbox.feature.dataZoom`/`restore`); the DSL adds
+the shorthand and two defaults worth having: it covers **every** x axis, so a multi-panel chart
+zooms as one thing, and `filterMode="none"`, so zooming doesn't clip the curve at the window edge.
+
+| | |
+|---|---|
+| `zoom = true` / `:buttons` | gesture + toolbox (zoom to a region · undo · reset) |
+| `zoom = :inside` | the gesture alone, for a chart whose chrome must stay bare |
+| `zoom = :slider` | a draggable range bar under the axis |
+| `zoom = :both` | slider *and* gesture |
+
+An explicit `dataZoom`/`toolbox` always wins, so the raw components stay a clean escape hatch.
+"""
+
+#%% code id=zoomdemo
+tz = range(0, 40π; length = 4000)
+sig = @. sin(tz) * exp(-tz / 90) + 0.06 * sin(11 * tz)
+
+# Zoom right in on the fine oscillation — then press the reset icon to come back.
+echart(:line, collect(tz), sig; title = "zoom = true — drag the box icon, or click in and scroll",
+       symbol = "none", lineStyle = (width = 1.2,), zoom = true, height = 320,
+       valuefmt = (kind = :fixed, digits = 4))
+
+#%% md id=h_select
+@md"""
+## Select a range on the chart — `select`
+
+`select = :name` makes the chart's x-range a live **input**: drag across it and the `@bind`ed
+variable takes the range you swept. The control that declares it moves too, and every cell reading
+it recomputes. Drag on the chart or move the slider — two input devices, one value.
+
+The **bind is the single source of truth**. The brush holds no selection state of its own: it
+forwards the gesture through the same endpoint the widget's own thumb posts to, then reflects
+whatever the bind ended up as. That's what makes the two agree *by construction*, rather than by
+keeping two copies in step — and it means the chart is never a second place the range "really"
+lives.
+
+Pair it with a `RangeSlider` (the bound value has to be a two-element range). ECharts' `brush` in
+`lineX` mode does the work; an explicit `brush` overrides the styling without losing the link.
+"""
+
+#%% code id=selectctl
+@bind window RangeSlider(0:200; default = (60, 140), label = "window")
+
+#%% code id=selectdemo
+xs = collect(0:200)
+ys = @. sin(xs / 9) * exp(-xs / 260) + 0.25
+
+# Drag across the chart — the `window` slider follows. Move the slider — the brush follows.
+echart(:line, xs, ys; title = "select = :window — drag here, or move the slider",
+       symbol = "none", select = :window, height = 300,
+       valuefmt = (kind = :fixed, digits = 3))
+
 #%% md id=h_ergonomic
 @md"""
 ## Ergonomic kinds — heatmap · candlestick · radar · boxplot
@@ -244,3 +348,7 @@ echart(
     dataZoom = [(type = :slider,)],
     backgroundColor = "transparent",
 )
+
+# ╔═╡ Slate.config · per-notebook settings (Settings panel)
+#   docid = 059d2432-2d87-4535-9adf-42c3d2255f67
+# ╚═╡

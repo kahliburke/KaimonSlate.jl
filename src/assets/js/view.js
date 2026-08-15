@@ -3,6 +3,11 @@
 // by both the standalone @bind cell and any cell's control strip — wherever a
 // widget renders, changing it drives recompute the same way.
 const _esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// Is this page an APP? Read from the bootstrap object the server injects into <head>, NOT from
+// `body.app` — that class is added by appmode.js on DOMContentLoaded, while a state can render
+// before then. Anything here that asks "am I an app?" before that moment would get `false` and act
+// like an authoring page (see the `<title>` it used to overwrite in updateChrome).
+const _APPMODE = !!(window.__SLATE_APP__ && window.__SLATE_APP__.on);
 const _showVal = v => Array.isArray(v) ? v.join(', ') : v;
 // Order-independent key for a control's value — used by the stale-echo guard so an in-flight
 // server echo (which may reorder a multi-select) can't reset a control the user just changed.
@@ -777,7 +782,14 @@ window.onBringup = function (line) {
 // Topbar/banner bits that live outside #nb (title, worker dot, vscode link, hydrating banner).
 function updateChrome(state) {
   document.getElementById('title').textContent = state.title || 'Notebook';
-  document.title = (state.title ? state.title + ' · ' : '') + 'Kaimon Slate';   // browser tab
+  // `state.title` is the notebook's FILENAME — an authoring fact ("app.standalone"), and the right
+  // thing for a tab you have six of. A deployed app is named by its document, which the server
+  // already substituted into <title>; don't overwrite that with the file it happens to live in.
+  // (And appmode.js seeds the app BAR from `document.title`, so clobbering it here put the filename
+  // at the top of the page as well as in the tab.)
+  if (!_APPMODE) {
+    document.title = (state.title ? state.title + ' · ' : '') + 'Kaimon Slate';   // browser tab
+  }
   const w = state.worker || {}, dot = document.getElementById('wdot');
   if (dot) {
     // Worker dot semantics: green = healthy (worker connected — incl. while a run streams — OR a
@@ -810,12 +822,20 @@ function updateChrome(state) {
   // (cold local worker spawn), "remote" (worker provisioning), and "env" (bundle reconstruction)
   // have no per-cell equivalent — there's no worker yet to show per-cell progress against — so
   // those keep a status banner, narrated live by the same `bringup:` stream in all three cases.
-  if (state.hydrating && state.hydratingKind !== 'run') {
+  // An app hides the code cells, so the per-cell running state the "run" case relies on below is
+  // invisible to its reader — a cold start reads as a page of headings that does nothing for
+  // minutes. There, and only there, the plain autorun gets a banner too.
+  const _isApp = _APPMODE;
+  if (state.hydrating && (_isApp || state.hydratingKind !== 'run')) {
     hb.className = 'hydbanner'; hb.style.display = 'flex';
     // Short headline per kind — shown only until structured status arrives, then prepare.js hides it so the
     // banner stays compact (the #hydprep line becomes the headline). Specifics (precompile k/N, current
     // package, elapsed) ride #hydprep; raw Pkg output tucks into the collapsed build log.
-    const msg = state.hydratingKind === 'remote'
+    // An app's reader is a domain expert, not a Julia user: "worker", "environment" and
+    // "reconstructing" name Slate's internals and mean nothing to them. Same states, said plainly.
+    const msg = _isApp
+        ? (state.hydratingKind === 'run' ? 'Computing…' : 'Starting up — this can take a few minutes the first time…')
+      : state.hydratingKind === 'remote'
         ? ('Starting the worker on <b>' + _esc(state.hydratingHost || 'the remote host') + '</b>…')
       : state.hydratingKind === 'boot'
         ? 'Starting the worker…'
@@ -830,8 +850,9 @@ function updateChrome(state) {
     // static, non-live render — that's the one case where clicking in is genuinely meaningless
     // (your edit would target a snapshot, not the real notebook). "boot"/"remote" already show
     // the real cells, just not-yet-computed — those stay fully interactive.
+    // "run" reaches here only in an app, and its cells are the real, live ones — never a snapshot.
     document.body.classList.toggle('hyd-preview',
-      state.hydratingKind !== 'remote' && state.hydratingKind !== 'boot');
+      state.hydratingKind !== 'remote' && state.hydratingKind !== 'boot' && state.hydratingKind !== 'run');
   } else if (state.hydrateError) {
     hb.className = 'hydbanner err'; hb.style.display = 'flex';
     hb.textContent = '⚠ ' + state.hydrateError;   // worker bring-up / env reconstruction failed (message is self-contained)

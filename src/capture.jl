@@ -518,6 +518,44 @@ function _save_asset(name::AbstractString, data; mime::AbstractString = "", dtyp
     return _asset_push!((; name = String(name), path, mime = "application/json", value = data))
 end
 
+"""
+    download_button(name, data; label=nothing, mime="") -> HTML
+    download_button(ref::AssetRef; label=nothing) -> HTML
+
+A button that saves a generated result to the reader's disk. `name` is the filename they get.
+
+Reading a table on screen is not the same as leaving with it. A notebook author can always tell
+someone to copy the output, but an app's reader has no cell to run and no filesystem to look in —
+so anything they are meant to keep needs an explicit way out. This is that way out: `data` goes
+through [`save_asset`](@ref), and the button hands the reader those exact bytes.
+
+`data` is whatever `save_asset` accepts (a `String`, `Vector{UInt8}`, numeric array, or a JSON-able
+value); pass `mime` when the extension doesn't imply it. Works live, in a standalone export, and on
+a published page — the export inlines the bytes, so a frozen page still downloads.
+
+```julia
+io = IOBuffer(); CSV.write(io, results)
+download_button("results.csv", String(take!(io)); label = "Download the results")
+```
+"""
+function _download_button(ref::AssetRef; label = nothing)
+    txt = label === nothing ? "Download " * ref.name : String(label)
+    # A plain anchor carrying the asset's logical path. core.js (live) and the export shim both
+    # delegate off `data-slate-download`, so the button needs no per-instance wiring and survives
+    # any re-render. `href="#"` keeps it a real link for keyboard/middle-click affordances.
+    return HTML(string(
+        "<a class=\"dlbtn\" href=\"#\" data-slate-download=\"", _esc_attr(ref.path), "\"",
+        " download=\"", _esc_attr(ref.name), "\"",
+        " title=\"", _esc_attr(string(ref.name, "  ", _asset_human_bytes(ref.nbytes))), "\">",
+        "<span class=\"dlicon\">⭳</span>", _esc_attr(txt), "</a>"))
+end
+_download_button(name::AbstractString, data; label = nothing, mime::AbstractString = "") =
+    _download_button(_save_asset(name, data; mime = mime); label = label)
+
+# Minimal attribute escaping — these strings are author-supplied (a filename, a label), so they are
+# not hostile, but they routinely contain quotes and ampersands.
+_esc_attr(s) = replace(String(s), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;")
+
 # Resolve the raw `:slate_effects` records (statement INDEX) against the deparsed statement sources into
 # wire records (`stmt_src` — the replay unit), deduped by (kind, names, stmt_src). Empty when the cell
 # declared nothing. Robust to an out-of-range index (→ "") so a bad marker can't error the harvest.

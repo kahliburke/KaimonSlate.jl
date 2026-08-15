@@ -913,6 +913,23 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     return d
 end
 
+"""
+    set_bind_by_name!(nb, name, value) -> nb
+
+Set a `@bind` by NAME — what `set_bind(:name, value)` in cell code resolves to. No-op if nothing
+declares it, so a stale name in a handler can't break a run.
+
+The cell id comes from [`ReportEngine.bind_owner`](@ref): the browser and the agent both already
+know which cell holds a control, but cell code names only the variable, which is the point — a
+notebook shouldn't have to know which of its own cells happens to declare a control in order to
+move it.
+"""
+function set_bind_by_name!(nb::LiveNotebook, name::AbstractString, value)
+    id = ReportEngine.bind_owner(nb.report, name)
+    isempty(id) && return nb
+    return set_bind!(nb, id, name, value)
+end
+
 # Set widget `name` (defined by cell `id`) → recompute its dependents (the
 # reactive heart of @bind). A group cell's blast radius is by cell id, which is
 # conservative (touches readers of any of its vars) but never under-invalidates.

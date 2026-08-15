@@ -274,9 +274,13 @@ x = 1
         @test occursin("SLATE_KAIMONSLATE_PATH", rj) && occursin("Pkg.develop", rj)      # local-checkout override for dev/forks
         @test occursin("Kaimon.jl", rj) && occursin("import Kaimon", rj)                 # Kaimon installed + loaded (the compute gate)
         @test occursin("reachable_registries", rj) && occursin("rev = \"main\"", rj)   # registered release once published, else track main tip
-        # Kaimon's registered release is stale (HTTP 1.x) vs KaimonSlate (HTTP 2) → force its main tip
-        # until a HTTP-2 Kaimon is registered. (Drop this assertion + `force_main=true` at that point.)
-        @test occursin("force_main = true", rj)
+        # Both packages resolve the ordinary way — the registered release whenever the UUID is in a
+        # registry. (Kaimon once needed a `force_main` override: its registered 1.x pinned HTTP 1.x
+        # while KaimonSlate wanted HTTP 2, so the two could not co-resolve and the launcher had to
+        # track Kaimon's branch tip instead. Kaimon 2.x is registered with `HTTP = "2"`, so that no
+        # longer holds — and a deployed app tracking a branch tip is worse than one on a release:
+        # unpinned, and it needs GitHub reachable at install time.)
+        @test !occursin("force_main", rj)
         @test occursin("SLATE_KAIMON_PATH", rj)                      # local Kaimon override too
         @test occursin("KAIMON_GATE_MODE", rj) && occursin("KAIMONSLATE_NO_AUTOINDEX", rj)   # pure code, no services
         # the doc-index background service is on by default (extension) but off under the standalone flag

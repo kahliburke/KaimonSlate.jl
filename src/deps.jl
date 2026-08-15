@@ -699,6 +699,23 @@ mark_result!(c::Cell, out) = (c.output = out;
     c.state = (out === nothing || out.exception === nothing) ? FRESH : ERRORED; c)
 
 # A failure that never reached the worker (region prime/presync) — synthesize the error output.
+"""
+    bind_owner(report, name) -> String
+
+The id of the cell that DECLARES `@bind name`, or `""` if none does.
+
+Cell code driving a control (`set_bind(:name, value)`) names only the VARIABLE — a notebook
+shouldn't have to know which of its own cells happens to hold a control in order to move it. The
+browser and the agent both already carry the cell id; this is how the third caller finds it.
+"""
+function bind_owner(report::Report, name::AbstractString)
+    nsym = Symbol(name)
+    for c in report.cells, b in c.binds
+        b.name == nsym && return c.id
+    end
+    return ""
+end
+
 mark_errored!(c::Cell, msg::AbstractString) = (
     c.output = CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", msg, nothing, 0.0);
     c.state = ERRORED; c)

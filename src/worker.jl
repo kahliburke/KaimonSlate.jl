@@ -89,6 +89,10 @@ function _new_ns()
             KaimonGate._publish_stream_raw("slate_emit_bin", SlateExtensionsBase.encode_binary_frame(string(channel), value)) :
             KaimonGate._publish_stream("slate_emit",
                 string(channel) * "\x1f" * Base64.base64encode(Serialization.serialize, value)),
+        # `set_bind(:name, value)` — the bind registry lives in the HUB, so this publishes and the
+        # poller applies it (`_do_setbind`). Same `name\x1fb64` wire shape as `slate_emit`.
+        set_bind = (name, value) -> KaimonGate._publish_stream("slate_setbind",
+                string(name) * "\x1f" * Base64.base64encode(Serialization.serialize, value)),
         # `@asset`/`readfile` resolve relative paths against the notebook's project dir (what
         # `pkgdir(...)` gives, and where a package notebook's assets live). Read at call time so a
         # provenance change is picked up; falls back to the active project when PARENT_PROJECT is unset.
@@ -2849,5 +2853,14 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
         sleep(1)
     end
 end
+
+
+# The built-in widget kinds' value lifecycle, re-registered at RUNTIME. widgets.jl already calls
+# this when it's included, which is enough while this module is loaded from source — but that call
+# happens at PRECOMPILE time for anyone who packages this module, and it mutates a dict owned by
+# SlateExtensionsBase, so the registrations would silently not survive (see KaimonSlate.__init__ for
+# the same fix and what it looked like when it broke). Idempotent; belongs here so packaging the
+# worker can never quietly regress the widget value lifecycle.
+__init__() = _register_builtin_kinds!()
 
 end # module SlateWorker

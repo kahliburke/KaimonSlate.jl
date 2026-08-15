@@ -151,6 +151,37 @@ const SLATE_API = SlateApiEntry[
         re-enable for huge data.
         Worked examples: `examples/echarts_dsl.jl`, `examples/seismic_month.jl`. See also `series`."""),
     # Real functions — documented in their own docstrings (echarts_dsl.jl / animation.jl).
+    SlateApiEntry("zoom", "Charts",
+        "Make a chart zoomable — ECharts does NOT zoom by default. `zoom=true` adds the gesture AND visible buttons.",
+        ["zoom", "pan", "datazoom", "scroll", "magnify", "range", "slider", "toolbox", "reset"],
+        "echart(…; zoom = true | :inside | :slider | :both)",
+        """Make a chart zoomable. ECharts does **not** zoom at all unless a `dataZoom` component is
+declared, and `dataZoom=[(type="inside",)]` alone is a trap: it is invisible (Slate also gates the
+wheel behind click-to-activate so a chart can't hijack page scroll), and once zoomed there is no
+way back. `zoom = true` gives the gesture plus the affordances that make it usable.
+- `true` / `:buttons` — gesture + toolbox (zoom to a region · undo · reset)
+- `:inside` — the gesture only  ·  `:slider` — a range bar  ·  `:both`
+Applies to EVERY x axis, so a multi-panel chart (a plot over its residual) zooms as one thing. An
+explicit `dataZoom`/`toolbox` always wins."""),
+    SlateApiEntry("valuefmt", "Charts",
+        "Number formatting for a chart's TOOLTIP — the same format vocabulary `slate_table` uses.",
+        ["format", "decimals", "digits", "tooltip", "rounding", "scientific", "percent", "currency",
+         "units", "precision"],
+        "echart(…; valuefmt = :fixed)  ·  valuefmt = (kind = :fixed, digits = 5)",
+        """Number formatting for a chart's tooltip. ECharts prints whatever it was handed, so small
+or wide-ranging values arrive as a mix of `0.000317515` and `5.789e-5` in one column. `valuefmt`
+takes the SAME spec as `slate_table(…; format=…)` — presets `:fixed :scientific :percent :integer
+:currency :bytes`, or `(kind, digits, sep, prefix, suffix)` — and applies it with the same
+renderer, so a number reads identically in a table cell and a chart tooltip.
+```julia
+echart(:line, x, y; valuefmt = (kind = :fixed, digits = 5))
+echart(series(:line, x, a; valuefmt = :percent),      # per series wins over top-level —
+       series(:line, x, b; valuefmt = :currency))     # for a mixed-unit chart
+```
+Note a JS function CANNOT be passed here (or to any `formatter`): an option is serialised to JSON
+with no reviver, so a function-shaped string arrives as a string, and ECharts calling it throws on
+every tooltip update — which wedges the crosshair rather than failing visibly. `valuefmt` exists
+precisely because that route doesn't work."""),
     SlateApiEntry("series", "Charts",
         "One named series of a multi-series `echart` (mixed kinds, dual axes).",
         ["overlay", "legend", "multiple", "dual axis"],
@@ -227,6 +258,30 @@ const SLATE_API = SlateApiEntry[
         "DateField(default; label)", """A date input. `@bind d DateField(\"2026-01-01\")`."""),
     SlateApiEntry("TimeField", "Widgets", "A time input.", ["clock", "hour", "when"],
         "TimeField(default; label)", """A time input. `@bind t TimeField(\"09:00\")`."""),
+    SlateApiEntry("RangeSlider", "Widgets",
+        "A slider with TWO thumbs; binds an interval as a `(lo, hi)` NamedTuple.",
+        ["range", "interval", "span", "between", "two", "window", "min max", "region", "limits"],
+        "RangeSlider(range; default, label)",
+        """A slider with two thumbs, binding an interval as a `(lo, hi)` NamedTuple. For a span
+where the two ends are ONE decision (a region of a signal, a date window, axis limits) — two
+separate sliders let the reader cross them; this cannot be put into that state.
+```julia
+@bind span RangeSlider(400:4000; default = (1500, 1800), label = "region")
+lo, hi = span            # destructures  ·  span.lo / span.hi by name
+```"""),
+    SlateApiEntry("FileUpload", "Widgets",
+        "A file the READER supplies; binds an `UploadedFile` with a real `.path` under `datadir()`.",
+        ["upload", "file", "csv", "import", "attach", "drop", "browse", "data"],
+        "FileUpload(; accept, label, maxbytes)",
+        """A file the READER supplies (browse or drag-and-drop). The bytes are stored under the
+notebook's `datadir()` and the control binds an `UploadedFile` — `.path` (a real path you can
+`CSV.read`), `.name`, `.size`, `.mime` — so reader cells recompute exactly as for any other
+control. `nothing` until something is uploaded. `accept` is the picker filter (`".csv"`), a
+convenience not a guarantee — validate what you got. `maxbytes` caps the size.
+```julia
+@bind datafile FileUpload(; accept = ".csv", label = "Data")
+datafile === nothing ? md"Upload a file to begin." : CSV.read(datafile.path, DataFrame)
+```"""),
     SlateApiEntry("Button", "Widgets", "An action button; the value is the click count. Pair with `@onclick`.",
         ["click", "trigger", "run", "action", "go"], "Button(label=\"Click\")",
         """An action button; value is the click count (Int, 0,1,2,…). Drive an action with `@onclick`.
@@ -319,6 +374,43 @@ SlateApiEntry("playhead", "Widgets",
     SlateApiEntry("cancel", "Live", "Cooperatively stop a running `@onclick` handler.",
         ["stop", "abort", "interrupt", "kill"], "cancel(:name)",
         """Cooperatively stop a running `@onclick` handler (it stops at its next `pause`). `cancel(:level)`."""),
+    SlateApiEntry("Cancelled", "Live",
+        "The exception a cancelled handler unwinds with — lets a `catch` tell a stop from a failure.",
+        ["cancel", "stop", "exception", "error", "catch", "interrupt"], "e isa Cancelled",
+        """The exception type a handler unwinds with when it is cancelled — by `cancel(:name)`, or by a
+        new click superseding the running one. Without it a `catch` cannot tell "the reader pressed
+        Stop" from "the computation failed", and reports the reader's own action as an error:
+        ```julia
+        @onclick fit begin
+            busy[] = true
+            try
+                result[] = expensive(x)          # written LAST: reaching it means we finished
+            catch e
+                msg[] = e isa Cancelled ? "Stopped." : "Failed: " * sprint(showerror, e)
+            finally
+                busy[] = false                   # runs even when cancelled — see below
+            end
+        end
+        ```
+        Every reactive write is a cancellation checkpoint, so a cancelled handler throws at the FIRST
+        write after the cancel — which is why anything you don't want discarded (here `result`) goes
+        last. The checkpoint fires only ONCE per run, so writes in `catch`/`finally` still land and
+        your cleanup (clearing a busy flag, a progress bar) always runs."""),
+    SlateApiEntry("set_bind (in a cell)", "Live",
+        "Drive one of the notebook's OWN `@bind` controls from cell code — the control moves with it.",
+        ["set", "drive", "move", "control", "programmatic", "sync", "override", "select"],
+        "set_bind(:name, value)",
+        """Set a `@bind` from cell code. The control itself moves, its reader cells recompute, and
+the value persists — it takes the SAME path a browser change takes, so a value set here is
+indistinguishable from one the reader typed.
+```julia
+@onchange upload set_bind(:sample, "— uploaded file —")   # an upload takes over the picker
+```
+Use it when the app knows something the control doesn't yet: an upload that should override a
+dropdown, a chart selection that should move its slider, a "reset" button. Without it a control can
+sit visibly contradicting what the app is showing, with no way to correct it.
+No-op if nothing declares `name`, and inert on a standalone run. Distinct from the AGENT tool
+`slate.set_bind` below, which drives a control from OUTSIDE the notebook."""),
     SlateApiEntry("set_bind", "Live",
         "AGENT TOOL — drive a `@bind` from outside the browser (headless); omit `value` to CLICK a Button.",
         ["drive", "click", "headless", "test", "simulate", "agent"],
@@ -465,6 +557,19 @@ SlateApiEntry("playhead", "Widgets",
         ```"""),
 
     # Real function — documented in its own docstring (capture.jl). Injected into cells as `save_asset`.
+    SlateApiEntry("download_button", "Assets & front-end",
+        "A button that saves a generated result to the READER's disk (live, standalone and published).",
+        ["download", "save", "export", "csv", "results", "file", "give", "take away"],
+        "download_button(name, data; label, mime)",
+        """A button that saves a generated result to the reader's disk — `name` is the filename they
+get. `data` is anything `save_asset` accepts (String, bytes, numeric array, JSON-able value). Works
+live, in a standalone export and on a published page. The way a reader LEAVES with a result they
+have no cell to run and no filesystem to look in.
+```julia
+io = IOBuffer(); CSV.write(io, results)
+download_button("results.csv", String(take!(io)); label = "Download the results")
+```
+See also `save_asset`, `FileUpload`."""),
     SlateApiEntry("save_asset", "Assets & front-end",
         "Publish GENERATED bytes/arrays as a named cell asset — the write-side dual of `@asset`.",
         ["binary", "large data", "float32", "json", "client", "download", "generated"],

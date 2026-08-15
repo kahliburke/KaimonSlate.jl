@@ -729,7 +729,25 @@ end
 
 function _make_router(h::Hub)
     router = HTTP.Router()
-    HTTP.register!(router, "GET", "/", _ -> _html(_index_html()))   # front page + inlined last-known ledger (see _index_html)
+    # Front page + inlined last-known ledger (see `_index_html`). An APP hub has no front page: the
+    # notebook-switcher is authoring chrome, and a visitor who lands on `/` wants the application.
+    HTTP.register!(router, "GET", "/", _ -> begin
+        if h.app
+            t = _app_root_target(h)
+            return t === nothing ? HTTP.Response(503, "No notebook is open yet.") :
+                                   HTTP.Response(302, ["Location" => t])
+        end
+        _html(_index_html())
+    end)
+    # Operator status — vitals for the hub process and its worker(s), plus the worker log. Served in
+    # BOTH postures: it's just as useful when developing the app as when running it.
+    HTTP.register!(router, "GET", "/status", _ -> _html(_status_html()))
+    HTTP.register!(router, "GET", "/api/status", _ -> _json(_status_json(h)))
+    HTTP.register!(router, "GET", "/api/status/log", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        _json(_status_log(h, get(q, "doc", ""),
+                          clamp(something(tryparse(Int, get(q, "lines", "300")), 300), 1, 5000)))
+    end)
     HTTP.register!(router, "GET", "/assets/notebook.css", _ -> _asset(read(_CSS_ASSET, String), "text/css; charset=utf-8"))
     # Vendored third-party assets (offline cache, pinned in vendor.json). Greedy `**` so
     # nested paths work (CodeMirror modes/addons, KaTeX fonts). First hit fetches+caches.
@@ -1215,8 +1233,11 @@ function _make_router(h::Hub)
         nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
         nb === nothing && return HTTP.Response(302, ["Location" => "/"])          # not open → home
         # Merge the notebook's `@use` import-map entries into the shell's single importmap (so
-        # front-end JS can `import` them); verbatim shell when there are none.
-        _html(_inject_imports(read(_ASSET, String), get(nb.report.meta, "imports", nothing)))
+        # front-end JS can `import` them); verbatim shell when there are none. Then stamp the app
+        # posture + presentation defaults into the shell, so the page knows which UI to build
+        # before its first paint (a page that painted the authoring chrome and then tore it down
+        # would flash every control app mode exists to hide).
+        _html(_inject_app(_inject_imports(read(_ASSET, String), get(nb.report.meta, "imports", nothing)), h, nb))
     end)
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
     # A worker's log tail + status for the topbar worker/region status popup. `?side=` selects the
@@ -1718,6 +1739,38 @@ function _make_router(h::Hub)
         HTTP.Response(200, ["Content-Type" => "text/x-julia; charset=utf-8",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], jl)
     end))
+    # The app export: a deployable FOLDER (launchers + bundle + README), written on this machine.
+    # Unlike every other export it returns no artifact — there is nothing for the browser to download
+    # — so it answers with the path it wrote and what landed there. A relative `dir` resolves against
+    # the notebook's own project, which is what "dist/my-app" means to whoever typed it.
+    HTTP.register!(router, "POST", "/api/{id}/export-app", req -> _withnb(h, req, nb -> begin
+        body = try; JSON.parse(String(req.body)); catch; Dict{String,Any}(); end
+        # No folder given → `dist/<notebook>`, the conventional place for build output with a
+        # per-notebook subfolder so a second export doesn't land on top of the first. Defaulted HERE
+        # as well as in the dialog so every caller agrees — the route is reachable without it.
+        dir = strip(String(get(body, "dir", "")))
+        isempty(dir) && (dir = joinpath("dist", _slugify(nb.id)))
+        root = _proj_root(nb)
+        dest = isabspath(dir) ? dir : joinpath(isempty(root) ? dirname(abspath(nb.path)) : root, dir)
+        kw = Dict{Symbol,Any}()
+        th = strip(String(get(body, "theme", "")));      isempty(th) || (kw[:theme] = th)
+        pw = strip(String(get(body, "pagewidth", "")));  isempty(pw) || (kw[:pagewidth] = pw)
+        extra = String[strip(s) for s in split(String(get(body, "include", "")), ','; keepempty = false)
+                       if !isempty(strip(s))]
+        out = try
+            export_app(nb, dest; appdefaults = app_defaults(; kw...),
+                       port = something(tryparse(Int, strip(String(get(body, "port", "")))), 0),
+                       agent = false, include = extra,
+                       title = strip(String(get(body, "title", ""))))
+        catch e
+            return _json(Dict("ok" => false, "error" => sprint(showerror, e)))
+        end
+        # A project with no commits has no git-tracked files, so the bundle is a partial copy. That
+        # looks fine here and fails on the target machine — say so where the person can still act.
+        warning = _untracked_project(nb) ?
+            "This project has no commits, so nothing is git-tracked and the bundle is a partial copy. Commit it, or list what it needs under “Also ship”." : ""
+        _json(Dict("ok" => true, "dir" => out, "files" => sort(readdir(out)), "warning" => warning))
+    end))
     # Precomputed-results catalog for the export dialog's size/quality slider: this notebook's
     # embeddable memo entries ranked by compute-saved-per-byte (densest first), with totals.
     # Snapshots current values into the store as a side effect (idempotent), so the numbers are exact.
@@ -1888,6 +1941,37 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/bind/{cid}", req -> _withnb(h, req, nb -> begin
         body = _body(req)
         set_bind!(nb, HTTP.getparam(req, "cid"), get(body, "name", ""), get(body, "value", nothing))
+        _json(state_json(nb))
+    end))
+    # `FileUpload`: raw bytes in the body, the filename + target bind in headers (a scalar-JSON bind
+    # POST can't carry a 40 MB file without base64-inflating it by a third). Stores the file under
+    # the notebook's datadir, then hands off to the SAME `set_bind!` every other control uses.
+    HTTP.register!(router, "POST", "/api/{id}/upload-file", req -> _withnb(h, req, nb -> begin
+        cid  = String(HTTP.header(req, "X-Slate-Cell", ""))
+        name = String(HTTP.header(req, "X-Slate-Bind", ""))
+        # Percent-decoded: HTTP header values are latin-1, and a reader's filename routinely isn't
+        # (accents, CJK), so the browser sends it encoded rather than mangled.
+        fname = try; HTTP.URIs.unescapeuri(String(HTTP.header(req, "X-Slate-Filename", ""))); catch; ""; end
+        (isempty(cid) || isempty(name)) &&
+            return HTTP.Response(400, "upload needs X-Slate-Cell and X-Slate-Bind")
+        bytes = Vector{UInt8}(req.body)
+        # The cap is the widget's own `maxbytes` when it set one. Enforced here as well as in the
+        # browser: the browser check is a courtesy to the reader, this one is the actual limit.
+        lim = _UPLOAD_MAX_DEFAULT
+        for c in nb.report.cells, b in c.binds
+            String(b.name) == name || continue
+            m = get(b.params, "maxbytes", 0)
+            m isa Number && m > 0 && (lim = Int(m))
+        end
+        length(bytes) > lim &&
+            return HTTP.Response(413, "that file is larger than this control accepts ($(lim) bytes)")
+        rec = try
+            _store_upload!(nb, isempty(fname) ? "upload" : fname, bytes,
+                           String(HTTP.header(req, "Content-Type", "application/octet-stream")))
+        catch e
+            return HTTP.Response(500, "could not store the upload: " * first(sprint(showerror, e), 200))
+        end
+        set_bind!(nb, cid, name, rec)
         _json(state_json(nb))
     end))
     HTTP.register!(router, "POST", "/api/{id}/table-page", req -> _withnb(h, req, nb -> begin
@@ -2538,14 +2622,17 @@ function _bringup_broadcast(h, line::AbstractString)
     return nothing
 end
 
-function start_hub(; host = "127.0.0.1", port = 8765)
+function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
+                   appdefaults::AbstractDict = Dict{String,Any}())
     # Stamp the payload SHA the running hub code was loaded from — `_hub_src_stale()` compares the live
     # on-disk SHA to this to flag "Slate src changed since this server started; restart to apply".
     _HUB_START_SHA[] = try; ReportEngine._payload_sha(); catch; ""; end
+    _HUB_STARTED[] = time()                  # `/status` reports uptime from here
     try; SlateHistory.migrate_once!(); catch e   # one-time: compact legacy history logs + compress objects
         @warn "KaimonSlate: history migration failed" exception = (e, catch_backtrace())
     end
-    h = Hub(Dict{String,LiveNotebook}(), nothing, host, port, ReentrantLock())
+    h = Hub(Dict{String,LiveNotebook}(), nothing, host, port, ReentrantLock(),
+            app, Dict{String,Any}(String(k) => v for (k, v) in appdefaults))
     # Surface a remote worker's live bring-up output (streamed instantiate/precompile) in the browser
     # hydrating banner, not just remote.log — the provisioner narrates each line through this sink hook.
     try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
@@ -2557,6 +2644,16 @@ function start_hub(; host = "127.0.0.1", port = 8765)
             HTTP.setstatus(stream, 403); HTTP.startwrite(stream); return
         end
         target = stream.message.target
+        # App mode's lockdown sits HERE rather than in the router because several endpoints — the SSE
+        # streams, the per-page WebSocket, the publish/site-publish handlers — are dispatched below on
+        # the raw stream and never reach a route table at all. A gate the router owned would leave
+        # exactly those open, and `publish` is not something an app's visitor should be able to reach.
+        if h.app && !_app_route_allowed(stream.message.method, target)
+            r = _app_denied(target)
+            HTTP.setstatus(stream, 403)
+            for (k, v) in r.headers; HTTP.setheader(stream, k => v); end
+            HTTP.startwrite(stream); write(stream, r.body); return
+        end
         m = match(_EVENTS_RE, target)
         if m !== nothing
             nb = lock(h.lock) do; get(h.notebooks, m.captures[1], nothing); end

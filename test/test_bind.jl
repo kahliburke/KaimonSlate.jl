@@ -44,6 +44,76 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test RE.coerce_bind(RE.ColorPicker(), "#123456") == "#123456"
     end
 
+    # An `<option>` can only carry TEXT, so a numeric option comes back as the BROWSER's string
+    # form — and the two ends stringify numbers differently (Julia writes `1.0e7`, JavaScript
+    # writes `10000000`). Matching on `string(...)` alone therefore failed for every numeric
+    # Select: the bind kept the raw String, arithmetic on it threw a TypeError naming a type the
+    # author never chose, and a labeled option lost its label as well. It looked fine until the
+    # reader first CHANGED the control, because a default never makes the round trip.
+    @testset "numeric Select options survive the browser's string round-trip" begin
+        w = RE.Select([1e4 => "soft", 1e5 => "medium", 1e7 => "very stiff"], 1e5)
+        rt(s) = RE.wrap_value(w, RE.coerce_bind(w, s))
+        @test rt("10000000").value == 1e7          # what JS actually sends for 1.0e7
+        @test rt("10000000").value isa Float64     # …not a String
+        @test rt("10000000").label == "very stiff" # the label survives too
+        @test rt("10000").value == 1e4
+        @test rt("1.0e7").value == 1e7             # Julia's own form still matches
+        @test rt(1e7).value == 1e7                 # and a real number
+        # String options are untouched by the numeric path.
+        ws = RE.Select(["a" => "Apple", "b" => "Banana"])
+        @test RE.wrap_value(ws, RE.coerce_bind(ws, "b")).label == "Banana"
+        # An unknown value passes through rather than being silently snapped to an option.
+        @test RE.coerce_bind(w, "nope") == "nope"
+        # Multi-select shares the matcher.
+        @test RE.coerce_bind(RE.MultiSelect([1e4 => "soft", 1e7 => "stiff"]), ["10000000"]) == Any[1e7]
+    end
+
+    # A RangeSlider's thumb can only sit on a step, but another input device can hand over
+    # anything — an `echart(…; select = …)` brush posts raw axis coordinates. Snapping in the
+    # coercion (the one place a value enters the bind) keeps every writer honest, instead of the
+    # slider and the chart disagreeing by up to a step and meaningless precision leaking into every
+    # axis label downstream.
+    @testset "RangeSlider: coercion sorts, clamps and snaps to the step" begin
+        w = RE.RangeSlider(400:5:4000; default = (1500, 1800))
+        c(v) = RE.coerce_bind(w, v)
+        @test c([733.206106870229, 1334.351145038168]) == Any[735.0, 1335.0]   # snapped
+        @test c([1900, 1200]) == Any[1200.0, 1900.0]     # crossed thumbs → sorted
+        @test c([-50, 99999]) == Any[400.0, 4000.0]      # out of range → clamped
+        @test c("nonsense") == w.default                 # garbage → the default
+        # A fractional step keeps its precision rather than being rounded to integers.
+        wf = RE.RangeSlider(0, 1; step = 0.05, default = (0.2, 0.8))
+        @test RE.coerce_bind(wf, [0.31, 0.77]) == Any[0.30, 0.75]
+        # The user-facing value destructures and reads by name.
+        s = RE.wrap_value(w, c([1500, 1800]))
+        @test s.lo == 1500 && s.hi == 1800
+        @test (first(s), last(s)) == (1500.0, 1800.0)
+    end
+
+    # `set_bind(:name, v)` from cell code names only the VARIABLE — a notebook shouldn't have to
+    # know which of its own cells happens to declare a control in order to move it. `bind_owner` is
+    # how that name is resolved to the cell id the setter needs.
+    @testset "bind_owner: resolve a control's declaring cell by name" begin
+        r = RE.parse_report("""
+        #%% code id=ctl
+        @bind pick Select(["a", "b", "c"], "a")
+        @bind n Slider(0:10)
+
+        #%% code id=other
+        @bind flag Checkbox(false)
+
+        #%% code id=reader
+        chosen = pick
+        """)
+        RE.eval_report!(r)
+        @test RE.bind_owner(r, "pick") == "ctl"
+        @test RE.bind_owner(r, "n") == "ctl"        # a group cell owns every var it declares
+        @test RE.bind_owner(r, "flag") == "other"
+        # Unknown → "", which the caller turns into a silent no-op: a stale name left in a handler
+        # must not break a run.
+        @test RE.bind_owner(r, "nosuchbind") == ""
+        @test RE.bind_owner(r, "chosen") == ""      # an ordinary global is not a control
+    end
+
     @testset "custom_widget: third-party kind passes through the value contract" begin
         w = RE.custom_widget("mathfield"; label = "answer")
         @test w.kind == "mathfield" && w.default == "" && w.params["label"] == "answer"
@@ -222,6 +292,51 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test !done1[]            # handler1 never completed — cancelled at (or before) its first write
         @test 1 ∉ log             # handler1's loop body never executed, not even its first iteration
         @test r[] == 99           # handler2's write landed cleanly; handler1 never raced it
+    end
+
+    @testset "@onclick: a cancelled handler still runs its cleanup" begin
+        # The reason the checkpoint fires only ONCE per task. A handler that raises a busy flag and
+        # clears it in `finally` is the documented shape for "show progress while this runs" — and if
+        # the cancellation kept throwing, the `finally` write would throw too and the flag would stay
+        # raised forever. The visible failure is a progress bar that never stops, on a notebook whose
+        # code is correct: nothing in the handler is reachable to fix it.
+        tokens = Dict{Symbol,Any}()
+        busy = RE.Reactive(:busy, false, _ -> nothing)
+        msg  = RE.Reactive(:msg, "", _ -> nothing)
+        r    = RE.Reactive(:level, 0, _ -> nothing)
+        ran_finally, ran_catch, working = Ref(false), Ref(false), Ref(false)
+        handler1 = _ -> begin
+            try
+                busy[] = true
+                working[] = true             # plain Ref: signals "inside the try" without a checkpoint
+                for i in 1:500
+                    sleep(0.01)
+                    r[] = i                  # cancelled at one of these
+                end
+            catch
+                ran_catch[] = true
+                msg[] = "interrupted"        # a Reactive write on the CATCH path
+                rethrow()
+            finally
+                ran_finally[] = true
+                busy[] = false               # …and on the FINALLY path — the one that must land
+            end
+        end
+        done2 = Ref(false)
+        RE.__on_fire!(tokens, :fit, handler1, nothing)
+        # Let it get INTO the try before superseding it — cancelling a handler that hasn't started
+        # yet is the other test above, and has no cleanup to run.
+        for _ in 1:300; working[] && break; sleep(0.01); end
+        @test working[]
+        RE.__on_fire!(tokens, :fit, _ -> (done2[] = true), nothing)   # supersedes handler1
+        for _ in 1:300
+            (done2[] && ran_finally[]) && break
+            sleep(0.01)
+        end
+        @test ran_catch[] && ran_finally[]   # both unwinding paths were reached…
+        @test busy[] == false                # …and their writes actually took effect
+        @test msg[] == "interrupted"
+        @test r[] < 500                      # the WORK was still aborted, not run to completion
     end
 
     @testset "valueless set on a button is a click: server increments the count" begin

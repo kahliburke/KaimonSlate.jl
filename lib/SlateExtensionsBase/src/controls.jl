@@ -164,6 +164,45 @@ Each selected option's 1-based position in the widget's original option list.
 """
 indices(s::Selection) = Int[c.index for c in s.items]
 
+"""
+    UploadedFile
+
+A file a reader uploaded through a `FileUpload` control. `path` is a real path under the
+notebook's [`datadir`](@ref) — so it opens with `CSV.read`, `open`, `load`, anything — while
+`name` keeps what the file was called on the reader's machine.
+
+```julia
+@bind datafile FileUpload(; accept = ".csv", label = "Data")
+
+datafile === nothing && return          # nothing has been uploaded yet
+df = CSV.read(datafile.path, DataFrame)
+```
+
+Interpolates and converts to its `path`, so `read(datafile, String)` and `"\$datafile"` do the
+obvious thing. Fields: `name`, `path`, `size` (bytes), `mime`, `uploaded` (unix time).
+"""
+struct UploadedFile
+    name::String       # the filename on the reader's machine
+    path::String       # where it landed, under the notebook's datadir
+    size::Int
+    mime::String
+    uploaded::Float64
+end
+# Behaves like its path wherever a path is what's wanted — the overwhelmingly common use.
+Base.print(io::IO, f::UploadedFile) = print(io, f.path)
+Base.String(f::UploadedFile) = f.path
+Base.convert(::Type{String}, f::UploadedFile) = f.path
+Base.abspath(f::UploadedFile) = abspath(f.path)
+Base.isfile(f::UploadedFile) = isfile(f.path)
+Base.filesize(f::UploadedFile) = f.size
+Base.open(f::UploadedFile, args...; kw...) = open(f.path, args...; kw...)
+Base.read(f::UploadedFile, args...) = read(f.path, args...)
+function Base.show(io::IO, ::MIME"text/plain", f::UploadedFile)
+    kb = f.size < 1024 ? "$(f.size) B" : string(round(f.size / 1024; digits = 1), " KB")
+    print(io, "UploadedFile  ", f.name, "  (", kb, ")\n  path  ", f.path)
+end
+Base.show(io::IO, f::UploadedFile) = print(io, "UploadedFile(", repr(f.name), ")")
+
 # ── Per-kind behaviour registry ───────────────────────────────────────────────
 # The value lifecycle of a control kind has three hooks; a kind registers whichever it needs and
 # falls back to a sensible default for the rest. This is the SAME seam Slate's built-in kinds use

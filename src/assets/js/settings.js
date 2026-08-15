@@ -146,6 +146,68 @@ document.addEventListener('wheel', function (e) {
   if (!_wheelRaf) _wheelRaf = requestAnimationFrame(_flushWheel);
 }, { capture: true, passive: false });
 
+// ── Reader-facing display settings ────────────────────────────────────────────
+// The subset of Settings that shapes what a READER sees rather than how an author works: theme,
+// how wide the column and figures run, whether the wheel zooms a chart, whether wide output wraps.
+// Two views offer it — the authoring Settings modal and app mode's display popover — so the
+// bindings live HERE, once, parameterised by element id. Adding a reader setting means adding it
+// in this function and nowhere else; the two views cannot drift, and neither can invent its own
+// idea of a default or a storage key.
+//
+// `ids` maps a setting to the elements that drive it: `{theme, wide, page, pagev, fig, figv,
+// zoom, zoomv, wrap}`. A missing id is simply skipped, so a view can offer a subset.
+function bindDisplaySettings(ids) {
+  const el = k => (ids[k] ? document.getElementById(ids[k]) : null);
+  const th = el('theme');
+  if (th) {
+    th.innerHTML = SLATE_UI_THEMES.map(t => `<option value="${t.name}">${t.label}</option>`).join('');
+    th.value = curSlateTheme();
+    th.onchange = () => setSlateTheme(th.value);
+  }
+  // Full page width overrides the column width, so the two are wired together: the column slider
+  // is disabled (not hidden) while full width is on, which shows the reader why it stopped working.
+  const wide = el('wide'), page = el('page'), pagev = el('pagev');
+  const syncPage = () => { if (page && wide) page.disabled = wide.checked; };
+  if (wide) {
+    wide.checked = document.body.classList.contains('fullwidth');
+    wide.onchange = () => {
+      document.body.classList.toggle('fullwidth', wide.checked);
+      localStorage.setItem('slateFullWidth', wide.checked ? '1' : '0');
+      syncPage();
+    };
+  }
+  // Each range is live: the setters apply through CSS vars, so nothing re-renders — which matters
+  // when the thing being resized is a chart in the middle of a long computation.
+  const range = (input, out, get, set) => {
+    if (!input) return;
+    input.value = get(); if (out) out.textContent = get();
+    input.oninput = () => { if (out) out.textContent = input.value; set(input.value); };
+  };
+  range(page, pagev, _pageMax, setPageMax); syncPage();
+  range(el('fig'), el('figv'), _figMax, setFigMax);
+  range(el('zoom'), el('zoomv'),
+        () => { const n = parseInt(localStorage.getItem('slateScrollZoom'), 10); return Number.isFinite(n) ? n : _ZOOM_DEFAULT; },
+        v => localStorage.setItem('slateScrollZoom', v));
+  const wrap = el('wrap');
+  if (wrap) {
+    wrap.checked = document.body.classList.contains('wrap-output');
+    wrap.onchange = () => {
+      document.body.classList.toggle('wrap-output', wrap.checked);
+      localStorage.setItem('slateWrapOutput', wrap.checked ? '1' : '0');
+    };
+  }
+}
+window.bindDisplaySettings = bindDisplaySettings;
+
+// Apply the persisted reader settings that live on the BODY (the CSS-var ones apply themselves at
+// load, above). Called once at startup by whichever view boots — both postures need it, so neither
+// owns it. `dragdrop.js` historically did the full-width half; this is the single place now.
+function applyDisplaySettings() {
+  document.body.classList.toggle('fullwidth', localStorage.getItem('slateFullWidth') === '1');
+  document.body.classList.toggle('wrap-output', localStorage.getItem('slateWrapOutput') === '1');
+}
+window.applyDisplaySettings = applyDisplaySettings;
+
 // ── Settings modal ────────────────────────────────────────────────────────────
 function openSettings() {
   const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
@@ -165,35 +227,11 @@ function openSettings() {
     ct.value = localStorage.getItem('slateCompleteTab') || 'accept';
     ct.onchange = () => localStorage.setItem('slateCompleteTab', ct.value);
   }
-  const wide = document.getElementById('setwide');
-  // Notebook column width (live via --page-max); disabled while Full page width overrides it.
-  const page = document.getElementById('setpage'), pagev = document.getElementById('setpagev');
-  const _syncPage = () => { if (page) page.disabled = wide.checked; };
-  wide.checked = document.body.classList.contains('fullwidth');
-  wide.onchange = () => { document.body.classList.toggle('fullwidth', wide.checked); localStorage.setItem('slateFullWidth', wide.checked ? '1' : '0'); _syncPage(); };
-  if (page) {
-    page.value = _pageMax(); pagev.textContent = _pageMax(); _syncPage();
-    page.oninput = () => { pagev.textContent = page.value; setPageMax(page.value); };
-  }
-  // Figure display-width cap (live via the --fig-max CSS var; most visible in full-page-width mode).
-  const fig = document.getElementById('setfig'), figv = document.getElementById('setfigv');
-  if (fig) {
-    fig.value = _figMax(); figv.textContent = _figMax();
-    fig.oninput = () => { figv.textContent = fig.value; setFigMax(fig.value); };
-  }
-  // Chart scroll-zoom sensitivity (0 = off). Read live by the scroll-zoom gate above — no re-render needed.
-  const zm = document.getElementById('setzoom'), zmv = document.getElementById('setzoomv');
-  if (zm) {
-    const _z = () => { const n = parseInt(localStorage.getItem('slateScrollZoom'), 10); return Number.isFinite(n) ? n : _ZOOM_DEFAULT; };
-    zm.value = _z(); zmv.textContent = _z();
-    zm.oninput = () => { zmv.textContent = zm.value; localStorage.setItem('slateScrollZoom', zm.value); };
-  }
-  // Wrap wide text output (default off → matrices/wide tables scroll horizontally instead of wrapping).
-  const wrap = document.getElementById('setwrap');
-  if (wrap) {
-    wrap.checked = document.body.classList.contains('wrap-output');
-    wrap.onchange = () => { document.body.classList.toggle('wrap-output', wrap.checked); localStorage.setItem('slateWrapOutput', wrap.checked ? '1' : '0'); };
-  }
+  // Theme + widths + scroll-zoom + output wrap — the reader-facing block, shared verbatim with app
+  // mode's display popover (see `bindDisplaySettings` above).
+  bindDisplaySettings({ theme: 'settheme', wide: 'setwide', page: 'setpage', pagev: 'setpagev',
+                        fig: 'setfig', figv: 'setfigv', zoom: 'setzoom', zoomv: 'setzoomv',
+                        wrap: 'setwrap' });
   // Soft-wrap long lines in the CODE editor (markdown editors always wrap). Live across all editors.
   const wraped = document.getElementById('setwraped');
   if (wraped) {
@@ -203,12 +241,7 @@ function openSettings() {
   // Per-notebook settings (hot-reload, parallel, threads, slides, bibstyle, agent-model override)
   // now live in the "🎚 Notebook config" panel (config.js) — a single view with effective value +
   // source badge + clear-override, instead of being scattered here.
-  // Overall Slate UI theme — applied by toggling html[data-slate-theme] (palette in notebook.css),
-  // persisted as `slateTheme`, and re-applied at load by the inline head script (no flash).
-  const th = document.getElementById('settheme');
-  th.innerHTML = SLATE_UI_THEMES.map(t => `<option value="${t.name}">${t.label}</option>`).join('');
-  th.value = curSlateTheme();
-  th.onchange = () => setSlateTheme(th.value);
+  // (The overall Slate UI theme is bound above, with the rest of the reader-facing settings.)
   // Editor syntax theme — options come from the cm6 theme registry (window._syntaxThemes), so adding
   // a theme in entry.js surfaces here automatically. Live-applied across all editors (tokens + chrome)
   // via window.setSyntaxTheme (editor.js).

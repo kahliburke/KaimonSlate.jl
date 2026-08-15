@@ -17,6 +17,8 @@ const BIND_SNIPPETS = [
   ['DateField',   '@bind d DateField()'],
   ['TimeField',   '@bind t TimeField()'],
   ['Button',      '@bind go Button("Run")'],
+  ['FileUpload',  '@bind f FileUpload(; accept = ".csv", label = "Data")'],
+  ['RangeSlider', '@bind span RangeSlider(0:100; default = (20, 80), label = "range")'],
   ['TableSelect', '@bind sel TableSelect(df)   # click a row → sel is a NamedTuple (sel.col)'],
 ];
 async function insertBind(snippet) {
