@@ -306,10 +306,16 @@ async function exportApp() {
   // happening), not just `disabled` — a greyed-out button and an unresponsive one look identical,
   // and this write takes tens of seconds. Shares the styling with Publish.
   const label = btn.textContent;
+  let done = false;
   const setBusy = on => {
     btn.disabled = on;
     btn.classList.toggle('busy', on);
-    btn.textContent = on ? 'Writing…' : label;
+    // Once it has written, the primary button means "do it AGAIN", and Cancel has nothing left to
+    // cancel — so it becomes Close. Leaving both as they were makes a finished dialog look exactly
+    // like one that never ran, which is the same confusion the log's completion line fixes.
+    // `_resetPubUi()` (openExport) puts both back to idle, so reopening never inherits this.
+    btn.textContent = on ? 'Writing…' : (done ? 'Write again' : label);
+    if (!on && done) _setCancelLabel('Close');
   };
   row.style.display = ''; out.innerHTML = ''; line('st', 'Packaging the environment + source…');
   setBusy(true);
@@ -327,6 +333,7 @@ async function exportApp() {
     // brings into view. Led with a ✓ before, which put the only success signal at the top — above
     // a file list that pushed it out of sight, on a box that looks identical while still running.
     line('ok', '✓ Export complete — ' + (j.files || []).length + ' files');
+    done = true;   // read by setBusy in the `finally` below, which runs after this
   } catch (e) { out.innerHTML = ''; line('err', '✗ App export failed: ' + _esc(String(e))); }
   finally { setBusy(false); }
 }
