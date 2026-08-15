@@ -580,7 +580,8 @@ function editSource(id, mode) {
     const ta = sed.querySelector('textarea'); if (ta) ta.style.display = 'none';   // CM6 mounts a sibling editor
     window.mkEditor(sed, {
       doc: srcMap[id] || '', cellId: id, markdown: mode === 'markdown',
-      onDoc: () => { if (edText(id) !== (srcMap[id] || '')) { setState(id, 'edited'); window._backupSoon && window._backupSoon(); } },
+      onDoc: () => { if (!window.slateStore.srcEq(edText(id), srcMap[id] || '')) { setState(id, 'edited'); window._backupSoon && window._backupSoon(); }
+                     else window.slateStore.clearEdited(id); },
       onFocus: () => setEditing(id, true), onBlur: () => setEditing(id, false),
       keys: [
         { key: 'Shift-Enter', run: () => commitSource(id) },
@@ -649,17 +650,21 @@ function patchCells(cells) {
     // `_prevSrc`, sees editor ≠ baseline, and pops a phantom "a change just landed while you were
     // editing" conflict for a cell you never touched. Mirror notebook.js: fast-forward only when
     // there are no local edits; a genuine divergence is left for the reconcile flow.
-    const _eqw = (a, b) => (a || '').replace(/\s+$/, '') === (b || '').replace(/\s+$/, '');
+    // store.js is a module, so it lands after this classic script — fall back until it does. Same
+    // comparison, not a second opinion: two divergent copies of this were the whitespace bug.
+    const _store = window.slateStore || {};
+    const _eqw = _store.srcEq || ((a, b) => (a || '').replace(/\s+$/, '') === (b || '').replace(/\s+$/, ''));
     const _prevSrc = srcMap[nc.id];
     srcMap[nc.id] = nc.source;
     if (editors[nc.id]) {
       const _mine = edText(nc.id);
       if (_eqw(_mine, _prevSrc) && !_eqw(_mine, nc.source)) edSetText(nc.id, nc.source);
     }
-    // A cell you're actively editing is YOURS until you resolve: if its editor still diverges from the
-    // incoming source (a live conflict), freeze its source/output/charts — don't let the external run
-    // replace what you're looking at. Same rule as notebook.js; the reconcile flow re-applies on accept.
-    const _conflicted = editors[nc.id] && !_eqw(edText(nc.id), nc.source);
+    // A cell you're actively editing is YOURS until you resolve: if YOUR unapplied typing still
+    // diverges from the incoming source (a live conflict), freeze its source/output/charts — don't
+    // let the external run replace what you're looking at. Same rule as notebook.js; the reconcile
+    // flow re-applies on accept. An editor merely left open over an agent's edit is NOT a conflict.
+    const _conflicted = !!(_store.isDirty && _store.isDirty(nc.id, nc.source));
     const cell = document.getElementById('cell-' + nc.id);
     if (cell) {
       cell.className = cell.className.replace(/\bstate-\S+/, 'state-' + (_conflicted ? 'edited' : nc.state));

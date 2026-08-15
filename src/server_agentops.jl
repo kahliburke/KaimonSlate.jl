@@ -638,11 +638,26 @@ function scratch_check(jobid::AbstractString)
            _userprog_note(job.nb) * ". Poll again with slate.check_eval."
 end
 
+"""What a `run=false` write left behind, for its return string.
+
+An agent that never sees its debt doesn't pay it: `run=false` returns before anything evaluates,
+so this string is the only place the outstanding work can surface. Report the whole stale set (the
+edit's cascade plus anything already outstanding), not just the cell touched — the point is the
+running total, which is what a caller deciding "reconcile now or keep editing" actually needs."""
+function _stale_note(nb::LiveNotebook)
+    ids = lock(nb.lock) do
+        String[c.id for c in nb.report.cells if c.state == STALE]
+    end
+    isempty(ids) && return "nothing left stale"
+    shown = length(ids) > 8 ? string(join(first(ids, 8), ", "), ", … (+$(length(ids) - 8) more)") : join(ids, ", ")
+    return "$(length(ids)) cell$(length(ids) == 1 ? "" : "s") stale: $shown — reconcile with run(notebook, \"\")"
+end
+
 "Add a cell (default code) after `after` (end if empty) WITH `source`, run it,
 return id + result. One file write (build the cell with its source up front) so the
 async file-watcher can't race the intermediate empty-cell state.
-`run=false` lands the cell STALE and returns immediately without evaluating — for composing
-several cells before one deliberate `run` (see `agent_edit_cell!`)."
+`run=false` lands the cell STALE without evaluating (see `agent_edit_cell!` for when that is
+actually wanted — it is the exception, not the cheap default)."
 function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
                          after::AbstractString = "", kind::AbstractString = "code",
                          id::AbstractString = "", tags::AbstractString = "",
@@ -676,7 +691,7 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
     rej === nothing || return rej
     if !run
         _renew_floor!(nb, caller); _agent_push!(nb)
-        return "added id=$cid (stale — not run)"
+        return "added id=$cid (NOT RUN) — $(_stale_note(nb))"
     end
     # The cell is committed above, so its id is certain regardless of how the run goes — only the
     # WAIT is raced. A slow cell hands back a job id instead of holding the caller open.
@@ -691,12 +706,14 @@ end
 
 """Replace a cell's source, run it, return its result.
 
-`run=false` writes the source and leaves the cell (and its dependents) STALE without evaluating,
-returning as soon as the edit is committed. That is the mode for a BULK refactor — renaming a
-binding across ten cells, repointing cache paths — where running after every edit means N reactive
-cascades (and, for an agent driving this over a transport with an idle timeout, N chances to be cut
-off mid-cascade). Make all the edits with `run=false`, then reconcile once with `agent_run!(nb)`.
-It is also the safe way to edit a notebook whose upstream cells are mid-computation."""
+`run=false` writes the source and leaves the cell (and its dependents) STALE without evaluating.
+It is NOT the cheap version of an edit: it returns no result, so the caller learns nothing about
+whether the new source even works, and the notebook is left in a state no one has verified. Two
+cases genuinely want it — a BULK refactor (renaming a binding across ten cells, repointing cache
+paths), where running after every edit means N reactive cascades and N chances for a caller on a
+transport with an idle timeout to be cut off mid-cascade; and editing a notebook whose upstream
+cells are mid-computation. Both end the same way: `agent_run!(nb)` to reconcile. Editing cells one
+at a time is the DEFAULT, and wanting the result back sooner is not a reason to skip the run."""
 function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString;
                           tags::AbstractString = "", caller::AbstractString = "", expected_version::Int = -1,
                           run::Bool = true, background::Bool = false)
@@ -715,7 +732,7 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
     rej === nothing || return rej
     if !run
         _renew_floor!(nb, caller); _agent_push!(nb)
-        return "edited id=$id (stale — not run)"
+        return "edited id=$id (NOT RUN) — $(_stale_note(nb))"
     end
     r = _run_bg(nb, "edit_cell $id"; grace = background ? 0 : _scratch_grace()) do
         _eval!(nb; wait_for = id)        # wait OUTSIDE the lock — the agent wants the cell's result

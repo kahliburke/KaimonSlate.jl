@@ -1042,8 +1042,10 @@ function create_tools(GateTool::Type)
     and free-form metadata. Add ONE cell at a time and read its result before the next — do not
     compose the whole notebook up front.
 
-    `run=false` lands the cell STALE without evaluating it and returns immediately — for composing
-    several cells (or editing during a long computation) before one deliberate `run(notebook, "")`.
+    `run=false` lands the cell STALE without evaluating it. Default to leaving it alone: an added
+    cell you haven't run is a cell you don't know works, and it returns no result to check. Reach
+    for it only when adding several cells whose FIRST one can't run yet (a later cell defines what
+    it needs), or when the notebook is mid-computation — then reconcile with `run(notebook, "")`.
 
     Cells run in a REACTIVE notebook with Slate helpers injected (charts via `echart`, widgets
     via `@bind`, live updates via `reactive`/`@onclick`, tables via `slate_table`) — call
@@ -1083,11 +1085,14 @@ function create_tools(GateTool::Type)
     immediately and poll `check_eval(notebook, job)`, while the run continues on the worker. Pass
     `background=true` to skip the wait when you already know the cell is expensive.
 
-    `run=false` writes the source and leaves the cell (and its dependents) STALE without running it,
-    returning immediately. Use it for a BULK refactor — renaming a binding across many cells,
-    repointing paths — where running after every edit means one reactive cascade per edit: make all
-    the edits with `run=false`, then reconcile ONCE with `run(notebook, "")`. It is also the safe way
-    to edit a notebook whose cells are mid-computation.
+    `run=false` writes the source and leaves the cell (and its dependents) STALE without running it.
+    It is not a faster edit — it is an UNVERIFIED one: you get no result back, so you don't know the
+    new source works, and the stale cells are yours to clear. Two cases want it: a BULK refactor
+    (renaming a binding across many cells, repointing paths), where running after every edit means
+    one reactive cascade per edit — make all the edits, then reconcile ONCE with `run(notebook, "")`;
+    and editing a notebook whose cells are mid-computation. Otherwise edit one cell at a time and
+    read the result. Every `run=false` result tells you how many cells are stale — that count is
+    work you still owe; don't finish a task with it outstanding.
     """
     function edit_cell(notebook::String, cell::String, source::String; tags::String = "", run::Bool = true, background::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err

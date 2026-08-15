@@ -40,7 +40,10 @@ const NS = KaimonSlate.NotebookServer
             @test occursin("21", NS._result_of(nb, cid_r))
             # deferred edit: source is committed, nothing runs, the cell reports itself stale
             r = NS.agent_edit_cell!(nb, cid_s, "z = 4"; run = false)
-            @test occursin("not run", r)
+            # The result must carry the DEBT, not just "not run" — the edited cell, the dependent it
+            # restaled, and the running total are the only signal a caller gets that work is owed.
+            @test occursin("NOT RUN", r) && occursin("2 cells stale", r) &&
+                  occursin(cid_s, r) && occursin(cid_r, r)
             sleep(0.2)
             src_of(id) = nb.report.cells[findfirst(c -> c.id == id, nb.report.cells)].source
             @test src_of(cid_s) == "z = 4"                                  # the edit landed …
@@ -48,7 +51,7 @@ const NS = KaimonSlate.NotebookServer
             # a deferred ADD likewise lands stale, with no result
             ra = NS.agent_add_cell!(nb, "z * 100"; run = false)
             cid_a = match(r"id=(\w+)", ra)[1]
-            @test occursin("not run", ra)
+            @test occursin("NOT RUN", ra) && occursin("3 cells stale", ra)   # the total ACCUMULATES across deferred writes
             sleep(0.2)
             # one deliberate reconcile picks up every deferred edit at once
             NS.agent_run!(nb)

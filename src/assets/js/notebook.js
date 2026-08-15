@@ -10,7 +10,7 @@
 import { html, render } from 'htm/preact';
 import { useRef, useEffect } from 'preact/hooks';
 import { effect, signal } from '@preact/signals';
-import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal } from './store.js';
+import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal, localDirty as dirtySignal, isDirty, srcEq, clearEdited } from './store.js';
 
 const raw = s => ({ __html: s || '' });
 const _reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -120,7 +120,9 @@ function Editor({ cell }) {
         // else applying an agent/external edit via edSetText (which fires this) would look like a USER
         // edit, falsely marking the cell `edited` + backing it up, which later pops phantom reconcile
         // popups for cells you never touched. (Mirrors the editSource editor.)
-        onDoc: () => { if (primed && window.edText(cell.id) !== (window.srcMap[cell.id] || '')) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); } },
+        onDoc: () => { if (!primed) return;
+          if (!srcEq(window.edText(cell.id), window.srcMap[cell.id] || '')) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); }
+          else clearEdited(cell.id); },
         onFocus: () => window.setEditing(cell.id, true),
         onBlur: () => window.setEditing(cell.id, false),
         keys: [
@@ -183,7 +185,9 @@ function WebEditor({ cell }) {
       js:   panes.js   ? panes.js.state.doc.toString()   : '',
     });
     const onAnyDoc = () => {
-      if (primed && assemble() !== (window.srcMap[cell.id] || '')) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); }
+      if (!primed) return;
+      if (!srcEq(assemble(), window.srcMap[cell.id] || '')) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); }
+      else clearEdited(cell.id);
     };
     const setPrimary = () => {                            // a real view for edited-state/measure
       const first = _WEB_LANGS.map(x => x[0]).find(l => panes[l]);
@@ -327,12 +331,12 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   const ref = useRef(null);
   const last = useRef({ bindKey: undefined, ctrlKey: undefined, out: undefined, vis: undefined });
   let state = (live && live[c.id]) || c.state;   // transient (running/edited) wins until server state arrives
-  // A cell whose editor diverges from its saved source stays `edited` even after a server-state
-  // push clears the transient live mark (applyState wipes liveStates) — derive it from the editor
-  // so an unsaved edit doesn't silently read as `fresh`. Covers code cells and OPEN markdown/@bind
-  // source editors; `running` still wins (it's executing).
+  // A cell you typed into stays `edited` even after a server-state push clears the transient live
+  // mark (applyState wipes liveStates) — re-derive it from the durable dirty mark so an unsaved
+  // edit doesn't silently read as `fresh`. Covers code cells and OPEN markdown/@bind source
+  // editors; `running` still wins (it's executing).
   if (state !== 'running') {
-    if (window.editors[c.id] && window.edText(c.id) !== c.source) state = 'edited';
+    if (isDirty(c.id, c.source)) state = 'edited';
   }
 
   // Dep-focus: cells outside the focused cone collapse out of the flow (and expand back) rather
@@ -372,7 +376,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     window.srcHash[c.id] = c.hash;
     // Compare trailing-whitespace-insensitively: a lone trailing newline (which CM6 and the server
     // can disagree on) is not a real edit and must NOT pop the conflict modal.
-    const _eq = (a, b) => (a || '').replace(/\s+$/, '') === (b || '').replace(/\s+$/, '');
+    const _eq = srcEq;
     // The server's per-cell content hash is the authoritative "did THIS cell change" signal — immune to
     // browser-side srcMap drift. Fall back to a string compare only if an older state carries no hash.
     const _serverMoved = (c.hash != null && _prevHash != null) ? c.hash !== _prevHash : !_eq(c.source, _prevSrc);
@@ -442,7 +446,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     // that diverge from the incoming server source (a live conflict — the modal above is offering the
     // choice), DON'T let the external run's output/charts replace what you're looking at. Freeze the
     // presentation; the reconcile flow re-applies the incoming result if you pick "use the change".
-    const _conflicted = window.editors[c.id] && !_eq(window.edText(c.id), c.source);
+    const _conflicted = isDirty(c.id, c.source);
     const out = el.querySelector('.output');
     if (!_conflicted && out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output, c.live); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
@@ -592,6 +596,7 @@ if (nbHost) {
 
     const selSet = selectedSetSignal.value;
     _updateSelCount(selSet);
+    dirtySignal.value;   // <Cell> derives `edited` from it — read it here so the effect re-runs on a change
     render(html`<${Notebook} cells=${cellsSignal.value} cone=${cone} selectedId=${selectedSignal.value} selSet=${selSet} live=${liveSignal.value} focusId=${fid} />`, nbHost);
 
     if (beforeTop != null) {
