@@ -643,8 +643,31 @@ function _geoSafeSetOption(inst, s) {
   try {
     const reqs = s && s.registerMap ? [].concat(s.registerMap) : [];
     const ready = reqs.every(r => r && r.name && echarts.getMap && echarts.getMap(r.name));
-    if (reqs.length && ready && !inst.__mapsReady) { inst.clear(); inst.__mapsReady = true; }
-    inst.setOption(_sansMaps(s));
+    let cleared = false;
+    if (reqs.length && ready && !inst.__mapsReady) { inst.clear(); inst.__mapsReady = true; cleared = true; }
+    const _opt = _sansMaps(s);
+    // Skip an IDENTICAL re-apply. A single run delivers the cell TWICE — the `celldone:` push and
+    // the run's HTTP-response render — and each arrives as an equal-but-distinct spec object, so the
+    // reference compare upstream can't see they match. Re-applying used to be invisible (merging
+    // identical data changes nothing on screen); replacing the series below makes it a second entry
+    // animation, i.e. the chart visibly redrawing a beat after it drew. Same guard `_swapOutput`
+    // already uses on `__slateOut` for HTML output. A clear() above always forces the re-apply —
+    // otherwise the map-ready heal would skip and leave an emptied chart.
+    let sig = null;
+    try { sig = JSON.stringify(_opt); } catch (_) {}
+    const same = !cleared && sig !== null && sig === inst.__slateOptSig;
+    if (!same) {
+      inst.__slateOptSig = sig;
+      // `replaceMerge: series` — ECharts merges series BY INDEX by default, so a render with fewer
+      // series than the last one leaves the surplus on the canvas: a fit that drops from 11 component
+      // bands to 6 draws 6 fresh curves over 5 corpses, under a title that correctly says 6. Every
+      // other component still merges, which is what keeps the user's roam/zoom across a re-render —
+      // `notMerge: true` would reset all of it.
+      // Only when the spec actually CARRIES series: with `replaceMerge` an option that omits them
+      // (a theme-only or axis-only patch) would be read as "remove every series".
+      Array.isArray(_opt && _opt.series) ? inst.setOption(_opt, { replaceMerge: ['series'] })
+                                         : inst.setOption(_opt);
+    }
     // Canvas-size self-heal: if layout/CSS changed the div since init (fonts settling, panel
     // toggles), the internal canvas keeps the stale size and every component lays out against it.
     const dom = inst.getDom();
