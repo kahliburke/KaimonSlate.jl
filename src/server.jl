@@ -635,7 +635,23 @@ end
 # READ those vars (but NOT the producers that WRITE them, so we don't re-trigger the task). MARKDOWN
 # readers seed too — a `{{ level[] }}` interpolation is a reader; md never writes, so the guard passes.
 function server_refresh(nb::LiveNotebook, vars)
-    syms = Set{Symbol}(vars)
+    # Wire form is `name` or `name:digest` — a `Reactive` write carries the identity of the value it
+    # just stored (reactive.jl `_write_digest`), a bare `slate_refresh(:data)` from a cell's own async
+    # task does not. Record the digest BEFORE restaling: the cells restaled below recompute their memo
+    # keys on the way through, and those keys have to see the value that caused the push, not the one
+    # before it. Restaling still happens on the bare NAME, exactly as it always has.
+    syms = Set{Symbol}()
+    for v in vars
+        s = String(v)
+        i = findfirst(==(':'), s)
+        if i === nothing
+            push!(syms, Symbol(s))
+        else
+            name = s[1:prevind(s, i)]
+            push!(syms, Symbol(name))
+            ReportEngine.note_state_write!(nb.report.id, name, s[nextind(s, i):end])
+        end
+    end
     return _reactive_refresh!(nb, c -> !isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms))
 end
 

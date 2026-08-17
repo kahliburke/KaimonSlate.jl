@@ -1049,8 +1049,12 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # ── Reactive async primitives (reactive.jl) ──────────────────────────────────
     Core.eval(m, :(const Reactive = $Reactive))
     Core.eval(m, :(const pause = $pause))
-    # `reactive(:name, init)` — a live value bound to THIS notebook's slate_refresh.
-    Core.eval(m, :(const reactive = $((nm, init) -> Reactive(nm, init, slate_refresh))))
+    # `reactive(:name, init)` — a live value bound to THIS notebook's slate_refresh, reached through
+    # the notifier registry rather than captured in the value, so a reactive can cross to a region
+    # worker like any other binding (see `_REFRESH_REGISTRY`). The id is per-MODULE: an in-process hub
+    # runs several notebooks in one process and a write in one must not wake another's cells.
+    _nsid = register_refresh_ns!(string(nameof(m), "-", objectid(m)), slate_refresh)
+    Core.eval(m, :(const reactive = $((nm, init) -> Reactive(nm, init, _nsid))))
     # `@reactive name = init` — sugar for `name = reactive(:name, init)`. Derives the reactive's NAME
     # from the binding, so the name (which routes the refresh to the cells that read `name`) can never
     # drift from the variable — removing the `reactive(:name, …)` double-spell footgun.

@@ -2743,6 +2743,10 @@ function close_notebook!(h::Hub, id::AbstractString)
     # An id is REUSED when the same file is reopened, so a leftover re-run marker would make the
     # reopened notebook restale a cell once for no reason (see `_DIRTY_WHILE_RUNNING`).
     delete!(_DIRTY_WHILE_RUNNING, id)
+    # …and the session-state digests, for the same reason: the reopened notebook's reactives are back
+    # at their declared initial values, so last session's identities describe values that no longer
+    # exist (see `_STATE_DIGESTS`).
+    ReportEngine.forget_state_writes!(id)
     _interrupt_inflight!(nb)               # stop an in-flight eval so `shutdown!` doesn't block behind it
     try; shutdown!(nb.kernel); catch; end
     _teardown_region!(nb)                  # detach — a remote region idles warm like the main kernel

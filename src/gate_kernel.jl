@@ -492,7 +492,12 @@ function _ensure_poller!()
                 # events at once. Union the changed vars per notebook and fire ONE recompute
                 # per notebook per wake instead of one per message — otherwise a tight async
                 # loop floods every SSE client with redundant re-renders.
-                pending = Dict{String,Set{String}}()
+                # notebook → (var name → its LATEST wire form this wake). Keyed by NAME, not by the
+                # whole string: a refresh now carries `name:digest`, so two writes to the same
+                # reactive in one wake are two DIFFERENT strings. A Set would keep both and hand them
+                # back in arbitrary order, letting the hub record the OLDER digest as current — a key
+                # computed against a superseded value, i.e. a stale restore. Last write wins.
+                pending = Dict{String,Dict{String,String}}()
                 srcnames = Dict{String,Set{String}}()   # parent /src edits → changed def-names
                 srcerr = Dict{String,String}()          # parent /src parse/apply errors
                 prog = Dict{Tuple{String,String},Tuple{Float64,String,Bool}}()   # (notebook, bar id) → LATEST (frac,msg,done)
@@ -515,9 +520,13 @@ function _ensure_poller!()
                     rid = lock(_GATE_SESSION_LOCK) do; get(_GATE_SESSION, m.conn_name, nothing); end
                     rid === nothing && continue
                     if m.channel == "slate_refresh"
-                        s = get!(pending, rid, Set{String}())
+                        d = get!(pending, rid, Dict{String,String}())
                         for v in split(m.data, ","; keepempty = false)
-                            push!(s, String(v))
+                            s = String(v)
+                            i = findfirst(==(':'), s)
+                            # Messages are drained in arrival order, so a later write to the same
+                            # name overwrites an earlier one — which is the whole point.
+                            d[i === nothing ? s : s[1:prevind(s, i)]] = s
                         end
                     elseif m.channel == "slate_revise"        # worker's hot-reload watcher: applied; here are the changed names
                         s = get!(srcnames, rid, Set{String}())
@@ -567,7 +576,7 @@ function _ensure_poller!()
                     _do_toolcall(rid, payload)
                 end
                 for (rid, vars) in pending
-                    isempty(vars) || _do_refresh(rid, collect(vars))
+                    isempty(vars) || _do_refresh(rid, collect(values(vars)))
                 end
                 for (rid, names) in srcnames
                     isempty(names) || _do_src_changed(rid, collect(names))

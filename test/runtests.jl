@@ -27,6 +27,7 @@ module Registry;  include("test_registry.jl");  end
 module Toolcell;  include("test_toolcell.jl");  end
 module Web;       include("test_web.jl");       end
 module Bind;      include("test_bind.jl");      end
+module ReactiveState; include("test_reactive_state.jl"); end
 module Render;    include("test_render.jl");    end
 module LiveOutput; include("test_live_output.jl"); end
 module Tables;    include("test_tables.jl");    end
@@ -53,7 +54,7 @@ module WscallBinary; include("test_wscall_binary.jl"); end
 # not existing.
 const _TESTMODS = (Defname, Prepare, Demux, Parsched, Memostore, Effectstore, Blobchannel, RemotePool, Regions, Parallel, Animation, Echarts, SlateLook, Engine, Eval, Deps,
                    Envprep, Tools, Registry, Toolcell,
-                   Web, Bind, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi, Agentops, Repro, Slides,
+                   Web, Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi, Agentops, Repro, Slides,
                    Frontmatter, Export, Bootfail, Publishing, App, AppMode, Extensions, Files, Config, WscallBinary)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.

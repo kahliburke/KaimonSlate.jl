@@ -17,12 +17,80 @@
 # and server_refresh restales only READERS that don't write — so the handler isn't re-triggered,
 # while the chart (a pure reader of `level`) recomputes and live-pushes.
 
+# namespace id → that namespace's `slate_refresh`. The notifier lives HERE, reached by a plain
+# String, instead of inside the value.
+#
+# A `Reactive` that carries its own notifier closure cannot leave the process it was built in: the
+# closure either refuses to serialize, or crosses and arrives still bound to the ORIGIN's gate
+# stream, so a write on the far side notifies the wrong hub. That is the sole reason a reactive
+# could not be read from a region worker while a `@bind` value could — the cross-kernel transport
+# (`transfer_binding!`) is name-addressed and would otherwise have carried it years ago. With only
+# `name`/`value`/`nsid` in the struct it serializes like any other value.
+#
+# Keyed per NAMESPACE, not per process: an in-process hub serves several notebooks from one process,
+# and a write in one must not wake another's cells.
+const _REFRESH_REGISTRY = Dict{String,Any}()
+const _LOCAL_NSID = Ref("")
+
+# Identifies this PROCESS, and it has to, because single-writer is a rule about KERNELS and not about
+# namespace instances. A namespace id alone can't tell the two apart: a `Reactive` restored from this
+# notebook's own memo store — or one that outlived a namespace rebuild — names an instance that no
+# longer exists, and is indistinguishable from a replica that arrived from another worker unless the
+# id says which process minted it. Refusing those was a live regression: the declarations cell
+# restored, its reactives came back stamped with a dead namespace, and every write in every handler
+# threw, so buttons did nothing at all.
+const _PROC_TOKEN = Ref("")
+function _proc_token()
+    isempty(_PROC_TOKEN[]) && (_PROC_TOKEN[] = string(getpid(), "-", string(rand(UInt64); base = 36)))
+    return _PROC_TOKEN[]
+end
+
+function register_refresh_ns!(nsid::AbstractString, refresh)
+    full = _proc_token() * "|" * String(nsid)
+    _REFRESH_REGISTRY[full] = refresh
+    _LOCAL_NSID[] = full
+    return full
+end
+
+# The notifier for a write to a reactive that says it belongs to `nsid` — and the enforcement point
+# for SINGLE-WRITER discipline: a reactive is written on the kernel that declared it, and read
+# anywhere.
+#
+# A replica that crossed a kernel boundary names a namespace that does not exist here. Writing it
+# would update this copy and no other: the declaring kernel keeps the old value, the hub is told the
+# value moved, and the two disagree with nothing to reconcile them. Rather than let a write mean
+# something different depending on which side ran it, refuse — the same call `_region_presync!`
+# already makes for cross-boundary mutation of an ordinary global, so reactives don't get a private
+# rule.
+#
+# No namespace registered AT ALL is a different case: a standalone `julia notebook.jl` run has no hub
+# to notify, so a write is simply inert.
 mutable struct Reactive
     name::Symbol
     value::Any
-    refresh::Any              # this notebook's slate_refresh
+    nsid::String              # which namespace to notify — see `_REFRESH_REGISTRY`
 end
 Base.getindex(r::Reactive) = getfield(r, :value)
+
+function _notifier_for_write(r::Reactive)
+    nsid = String(getfield(r, :nsid))
+    f = get(_REFRESH_REGISTRY, nsid, nothing)
+    f === nothing || return f
+    isempty(_REFRESH_REGISTRY) && return nothing
+    # Minted by THIS process, but by a namespace that no longer exists — a memo restore, or a
+    # namespace rebuilt under it. Same kernel, so single-writer is satisfied; re-bind to the live
+    # namespace rather than refusing a write the author is entitled to make.
+    startswith(nsid, _proc_token() * "|") &&
+        return get(_REFRESH_REGISTRY, _LOCAL_NSID[], nothing)
+    error("""
+          cannot write the reactive `$(getfield(r, :name))` from here: this is a copy that crossed a \
+          kernel boundary, and writing it would change only this copy — the kernel that declared it \
+          would keep the old value.
+
+          Reactives are single-writer: written on the kernel that declares them, read anywhere. Move \
+          the write to a cell on the declaring kernel (the one holding its `reactive(...)`/`@reactive`), \
+          and read it here.""")
+end
 
 # Has this task been cancelled — and is this the FIRST checkpoint to notice?
 #
@@ -52,13 +120,57 @@ function _cancel_fired!()
     return true
 end
 
+# Session-local ordinal for values `hash` refuses. Only ever produces cache MISSES (see below).
+const _WRITE_SEQ = Ref(0)
+
+# The IDENTITY of a write, computed here and carried to the hub alongside the push.
+#
+# The memo key digests a cell's source, its upstream cells' sources, the `@bind` values it reads and
+# its `@asset` contents. A Reactive is none of those — it's an ordinary global, not a `BindSpec` — so
+# a cell reading only reactives computes the SAME key on every run and, once cached, is served a
+# result computed from values that have since moved. (That is not hypothetical: it froze a progress
+# bar in an exported app, where the status cell crossed the auto-cache threshold on cold-JIT alone.)
+#
+# Digesting at WRITE time, not per key computation, is the load-bearing part: keys are computed on
+# every eval, and hashing a large value there would put the whole payload on the hot path. A write
+# happens once.
+#
+# `slate_fingerprint`, NOT `hash`. This has to answer "is this the same VALUE?", and `hash` answers a
+# different question: for anything holding heap references it is derived from object identity, so two
+# structurally identical values digest differently (`hash(f) != hash(deepcopy(f))` for a plain
+# immutable struct with a Vector field), and — worse — an address freed and reused can make two
+# genuinely different values digest the SAME, which is a stale restore rather than a harmless
+# recompute. `fingerprint.jl` exists for exactly this and says so in its own docstring.
+#
+# Content-addressed also makes the digest deterministic ACROSS processes, which is what lets an
+# exported bundle's entries match a reader's cold open when the state genuinely agrees.
+#
+# It costs more than `hash` — canonical serialization plus SHA-256 — which is affordable precisely
+# because it happens once per write and never per key computation. A reactive pushing large arrays at
+# high frequency would feel it; that's a measurement to take if it ever bites, not a reason to go back
+# to an answer that is wrong.
+function _write_digest(v)
+    try
+        return slate_fingerprint(v)
+    catch
+        _WRITE_SEQ[] += 1                     # unfingerprintable → session-local ordinal: always a miss, never a false hit
+        return "w" * string(_WRITE_SEQ[])
+    end
+end
+
 # A write is ALSO a cancellation checkpoint (same check `pause` does) — so a superseded @onclick
 # handler that streams values (`level[] = v` in a loop) stops at its next write even with no
 # explicit `pause()` call, instead of running to completion and racing the new handler's writes.
 function Base.setindex!(r::Reactive, v)
     _cancel_fired!() && throw(_Cancelled())
+    # Resolved BEFORE the value is stored, so a refused cross-kernel write leaves this copy untouched
+    # rather than diverging from the declaring kernel by exactly the write we just rejected.
+    f = _notifier_for_write(r)
     setfield!(r, :value, v)
-    getfield(r, :refresh)(getfield(r, :name))     # restale + recompute the cells that read this value
+    # Wire form `name:digest`. The hub restales on the NAME (as it always has) and mirrors the digest
+    # so the memo key can move with the value. A bare `slate_refresh(:data)` from a cell's own async
+    # task carries no digest and keeps its existing behaviour.
+    f === nothing || f(string(getfield(r, :name), ":", _write_digest(v)))
     return v
 end
 Base.show(io::IO, r::Reactive) = show(io, getfield(r, :value))                       # displays as its value

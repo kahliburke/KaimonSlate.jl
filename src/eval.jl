@@ -639,6 +639,19 @@ function _memoizable(cell::Cell)
     # cell always re-runs. The cost is nil by construction: `@replay` is a pass-through during a run
     # (only the control's current value is computed), which is what makes re-running it cheap.
     occursin(r"@replay\b", cell.source) && return false
+    # A cell that DECLARES reactive state has the same property, for the same reason: `reactive(...)`
+    # creates live session state BY RUNNING, and that state is bound to the namespace — and the
+    # process — that made it. Restoring such a cell skips the body, so the `Reactive` objects arrive
+    # by deserialization instead: the notebook comes up holding a PREVIOUS session's values as though
+    # they were this one's (a status line reporting a fit nobody ran, a chart of results from another
+    # day), attached to a namespace that no longer exists, so every subsequent write to them is
+    # writing to an orphan. Seen in the field: a declarations cell that crossed the auto-cache
+    # threshold at 391ms restored a 25KB fit result from a previous session, and the notebook's
+    # buttons then did nothing at all.
+    #
+    # Cheap to re-run by construction — declaring a reactive is an allocation — so, as with `@replay`,
+    # the cost of exempting it is nil next to the failure it prevents.
+    occursin(r"(@reactive\b|\breactive\s*\()", cell.source) && return false
     # Process-state and non-deterministic cells are never cached — read off the SAME `_cell_effect`
     # classifier the REGION layer uses to decide re-run-vs-transfer, so the two determinations can't
     # drift (the theme regression). RESOURCE — a live DB/socket/file handle that can't/shouldn't be
@@ -780,6 +793,77 @@ function _key_poisoned(byid, closure)
     return false
 end
 
+# ── Named session state, by identity ──────────────────────────────────────────────────────────────
+# `@bind` and `reactive` are the same thing wearing two access syntaxes: state a cell reads, which
+# lives for the session, and whose change must invalidate whatever was computed from it. They were
+# built as two mechanisms, and only one of them was ever finished — binds reached the memo key, and
+# reactives did not, so a cell reading only reactives keyed identically forever and, once cached, was
+# served results computed from values that had since moved.
+#
+# So the key asks ONE question — "what is the identity of every piece of named state this cell
+# reads?" — and the answer is assembled from wherever that state actually lives:
+#
+#   `@bind`     the hub holds the coerced value in the BindSpec ⇒ digest it inline, always available,
+#               including the defaults a notebook opens with (no write required).
+#   `reactive`  the hub holds NO value (a reactive can carry a whole fit result, and a replica on the
+#               hub would be both expensive and a lie) ⇒ the worker digests at write time and the
+#               digest rides the refresh push it was already sending. See `_REFRESH_REGISTRY`.
+#
+# The asymmetry is in where the value lives, not in what the key means. What matters — and what the
+# whole memo layer rests on — is that the key stays computable hub-side without asking a worker
+# anything, which both halves preserve.
+const _STATE_DIGESTS = Dict{String,Dict{String,String}}()
+const _STATE_DIGESTS_LOCK = ReentrantLock()
+
+# The identity of a value, matching the worker's `_write_digest` so both halves speak one language:
+# a canonical CONTENT fingerprint, not `hash` (which for anything holding heap references answers
+# object identity — see `_write_digest`). A control's value is small, so the cost is nil here.
+_state_digest(v) = try; slate_fingerprint(v); catch; "?"; end
+
+# …and a control's digest is computed ONCE PER VALUE, not once per key computation. Fingerprinting is
+# canonical serialization plus SHA-256; keys are recomputed on every eval, and a notebook of ten
+# controls would pay for all of them on every cell, every run. (Measured the hard way: the suite went
+# from 150s to a 10-minute timeout.) Keyed by `===` on the value, so a control that has actually moved
+# re-digests and one that hasn't is a dict lookup — the identity check is exactly the question being
+# asked, and cheap for the scalars controls carry.
+const _BIND_DIGEST_CACHE = Dict{Tuple{String,String},Tuple{Any,String}}()
+function _bind_digest(rid::AbstractString, name::AbstractString, v)
+    k = (String(rid), String(name))
+    hit = lock(_STATE_DIGESTS_LOCK) do; get(_BIND_DIGEST_CACHE, k, nothing); end
+    hit !== nothing && hit[1] === v && return hit[2]
+    # Fingerprinted OFF the lock: the parallel batch computes keys for several cells at once, and
+    # serializing them behind one SHA-256 would hand back the cost this cache exists to remove. Two
+    # threads racing the same control both compute and both store the same answer — harmless.
+    d = _state_digest(v)
+    lock(_STATE_DIGESTS_LOCK) do; _BIND_DIGEST_CACHE[k] = (v, d); end
+    return d
+end
+
+function note_state_write!(rid::AbstractString, name::AbstractString, digest::AbstractString)
+    lock(_STATE_DIGESTS_LOCK) do
+        get!(Dict{String,String}, _STATE_DIGESTS, String(rid))[String(name)] = String(digest)
+    end
+    return nothing
+end
+
+# A snapshot, so the caller can't hold the live dict across a key computation.
+state_digests(rid::AbstractString) =
+    lock(_STATE_DIGESTS_LOCK) do
+        d = get(_STATE_DIGESTS, String(rid), nothing)
+        d === nothing ? nothing : copy(d)
+    end
+
+# Ids are REUSED when the same file is reopened — a leftover digest would key the reopened
+# notebook's cells against a session whose values are gone (see the same hazard in close_notebook!).
+forget_state_writes!(rid::AbstractString) =
+    lock(_STATE_DIGESTS_LOCK) do
+        delete!(_STATE_DIGESTS, String(rid))
+        for k in collect(keys(_BIND_DIGEST_CACHE))      # …and the per-control digest cache for that id
+            k[1] == String(rid) && delete!(_BIND_DIGEST_CACHE, k)
+        end
+        nothing
+    end
+
 function _memo_key(report::Report, cell::Cell)
     _memoizable(cell) || return ""
     byid = report.byid
@@ -798,11 +882,23 @@ function _memo_key(report::Report, cell::Cell)
     end
     sort!(frozen)
     readnames = copy(cell.reads); for id in closure; union!(readnames, byid[id].reads); end
-    bvals = Tuple{String,Any}[]
+    # Every piece of named session state this cell reads, by identity — controls and reactives in one
+    # list, because to the key they are one thing (see `_STATE_DIGESTS`). Digests rather than raw
+    # values: it keeps a large value out of the hashed tuple, and it is the only shape a reactive can
+    # contribute, since the hub never holds its value.
+    sdig = state_digests(report.id)
+    svals = Tuple{String,String}[]
     for c in report.cells, b in c.binds
-        b.name in readnames && push!(bvals, (string(b.name), b.value))
+        b.name in readnames && push!(svals, (string(b.name), _bind_digest(report.id, string(b.name), b.value)))
     end
-    sort!(bvals; by = first)
+    if sdig !== nothing
+        for n in readnames
+            s = string(n)
+            haskey(sdig, s) && push!(svals, (s, sdig[s]))
+        end
+    end
+    sort!(svals; by = first)
+    unique!(first, svals)
     # `@asset` file deps (this cell + its transitive upstream, mirroring `depsrc`): fold each
     # referenced file's CURRENT content hash into the key so editing an asset invalidates the memo
     # entry (no stale restore on cold start). Paths resolve against `assetbase` (the notebook's
@@ -816,7 +912,7 @@ function _memo_key(report::Report, cell::Cell)
         h = try; isfile(ap) ? hash(read(ap)) : UInt(0); catch; UInt(0); end
         push!(assets, (rel, h))
     end
-    core = (cell.source, (:trace in cell.flags), depsrc, bvals)
+    core = (cell.source, (:trace in cell.flags), depsrc, svals)
     isempty(frozen) || (core = (core..., frozen))   # locked-upstream freeze stamps (cells with none keep their old key)
     isempty(assets) || (core = (core..., assets))   # @asset file content (asset-free cells keep their old key)
     return string(hash(core); base = 16)

@@ -8,6 +8,11 @@ using ReTest
 include(joinpath(@__DIR__, "..", "src", "engine.jl")); using .ReportEngine
 const RE = ReportEngine
 findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
+# A `Reactive` names the namespace it notifies rather than carrying the notifier, so that it can
+# cross a process boundary (see `_REFRESH_REGISTRY`). These tests only exercise the cancellation
+# semantics of a write, so they register a no-op notifier and hand out its id.
+_noop_refresh(_) = nothing
+const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
 
 @testset "ReportEngine bind" begin
 
@@ -268,7 +273,7 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
     @testset "@onclick: a superseded handler is cancelled at its next Reactive write (no pause needed)" begin
         tokens = Dict{Symbol,Any}()
         log = Int[]
-        r = RE.Reactive(:level, 0, _ -> nothing)
+        r = RE.Reactive(:level, 0, _TESTNS)
         done1, done2 = Ref(false), Ref(false)
         handler1 = _ -> begin       # NO `pause()` calls — relies on the write itself being a checkpoint
             for i in 1:5
@@ -301,9 +306,9 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         # raised forever. The visible failure is a progress bar that never stops, on a notebook whose
         # code is correct: nothing in the handler is reachable to fix it.
         tokens = Dict{Symbol,Any}()
-        busy = RE.Reactive(:busy, false, _ -> nothing)
-        msg  = RE.Reactive(:msg, "", _ -> nothing)
-        r    = RE.Reactive(:level, 0, _ -> nothing)
+        busy = RE.Reactive(:busy, false, _TESTNS)
+        msg  = RE.Reactive(:msg, "", _TESTNS)
+        r    = RE.Reactive(:level, 0, _TESTNS)
         ran_finally, ran_catch, working = Ref(false), Ref(false), Ref(false)
         handler1 = _ -> begin
             try
