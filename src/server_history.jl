@@ -759,6 +759,9 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
                            figrefs = figrefs, figemit = _fig_link_emit) : c.source
     d = Dict{String,Any}(
         "id"      => c.id,
+        # How recent this payload is. The same cell reaches the browser over two transports, and
+        # without this the client can only apply whichever lands last (see `bump_rev!`).
+        "rev"     => c.rev,
         "kind"    => c.kind == MARKDOWN ? "md" : c.kind == WEB ? "web" :
                      c.kind == ReportEngine.TOOL ? "tool" : "code",
         "source"  => c.source,

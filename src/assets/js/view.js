@@ -635,8 +635,34 @@ function updateStates(state) { _publishState(state); window.loadScratch && windo
 // — with NO full-state GET and NO all-cells re-render. nbState.cells is mutated in place so the
 // signal identity is unchanged (Preact doesn't re-render); a structural change (kind / bind-ness)
 // falls back to a full publish.
+// Payload recency, per cell. The same cell reaches the browser over TWO transports — the live
+// `celldone:`/`refresh:` push and the full state every mutating request answers with — and until each
+// payload carried a `rev` the client could only apply whichever arrived last: a redundant re-render
+// at best (a second chart animation), an older payload overwriting a newer one at worst. `rev` is
+// monotonic per SERVER PROCESS, so "not newer than what I already applied" is always the right test.
+//
+// Reset on (re)connect: the server may have restarted and taken its counter back to zero with it, and
+// a client still holding old highwater marks would then ignore everything it sends.
+// Testing and SPENDING a stamp are deliberately separate. A payload can arrive for a cell whose
+// element isn't mounted yet, and consuming the stamp there would mark it applied when nothing was
+// drawn — leaving that cell blank until its next change. A stamp is spent only where the payload
+// actually reaches the DOM.
+const _cellRev = {};
+function revIsNew(c) {
+  if (!c || typeof c.rev !== 'number') return true;   // a server without revs, or a synthetic payload
+  const seen = _cellRev[c.id];
+  return seen === undefined || c.rev > seen;
+}
+function revMark(c) { if (c && typeof c.rev === 'number') _cellRev[c.id] = c.rev; }
+function resetCellRevs() { for (const k in _cellRev) delete _cellRev[k]; }
+window.slateRevIsNew = revIsNew;
+window.slateRevMark = revMark;
+window.slateResetCellRevs = resetCellRevs;
+
 function patchCells(cells) {
   if (!cells || !cells.length || !nbState) return;
+  cells = cells.filter(revIsNew);           // drop anything not newer than what's already applied
+  if (!cells.length) return;
   const list = nbState.cells || [];
   const idx = {}; list.forEach((c, i) => idx[c.id] = i);
   let structural = false;
@@ -680,6 +706,8 @@ function patchCells(cells) {
       }
     }
     if (!_conflicted) { renderCharts(nc); renderTables(nc); syncControlValues({ cells: [nc] }); }
+    // Spend the stamp only now, and only if the cell was actually on the page — see `revIsNew`.
+    if (cell) revMark(nc);
   });
   window.onCellsPatched && window.onCellsPatched(cells);       // states/durations moved (DAG panel)
   window.renderRunPill && window.renderRunPill();              // a cell just changed state → refresh the error pill

@@ -661,6 +661,7 @@ end
 function restale!(c::Cell)
     (:locked in c.flags && c.state == FRESH) && return false
     c.state = STALE
+    bump_rev!(c)
     return true
 end
 
@@ -686,17 +687,30 @@ function revert_running!(c::Cell)
     return true
 end
 
-mark_running!(c::Cell) = (c.state = RUNNING; c)
+# Every change worth pushing gets a new stamp, from ONE process-wide counter.
+#
+# The browser is told about a cell over two transports — the live `celldone:`/`refresh:` push and the
+# full state that every mutating request answers with — and neither payload says how old it is, so the
+# client applies whichever arrives last. Usually they agree and the redelivery is merely wasted work
+# (and a second chart animation); when they don't, the older one wins by arriving second.
+#
+# Monotonic per PROCESS rather than per cell: a cell can be replaced wholesale (reorder, re-parse,
+# restore) and a per-cell counter would restart underneath the client. A global one is never reused,
+# so "not newer than what I hold" is always the right test.
+const _REV = Threads.Atomic{Int}(0)
+bump_rev!(c::Cell) = (c.rev = Threads.atomic_add!(_REV, 1) + 1; c)
+
+mark_running!(c::Cell) = (c.state = RUNNING; bump_rev!(c))
 
 # A state flip with no output involved (markdown render, `@bind` value change, a fresh empty
 # cell) — nothing to compute, so no exception to check.
-mark_fresh!(c::Cell) = (c.state = FRESH; c)
+mark_fresh!(c::Cell) = (c.state = FRESH; bump_rev!(c))
 
 # ANY→FRESH/ERRORED from a genuine computed output (possibly `nothing` — a scratch eval that
 # never ran). Callers that also mirror bind specs (`c.binds = out.binds`) do so themselves;
 # whether binds surface differs by site (a scratch eval never does, a real cell always does).
 mark_result!(c::Cell, out) = (c.output = out;
-    c.state = (out === nothing || out.exception === nothing) ? FRESH : ERRORED; c)
+    c.state = (out === nothing || out.exception === nothing) ? FRESH : ERRORED; bump_rev!(c))
 
 # A failure that never reached the worker (region prime/presync) — synthesize the error output.
 """
@@ -718,7 +732,7 @@ end
 
 mark_errored!(c::Cell, msg::AbstractString) = (
     c.output = CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", msg, nothing, 0.0);
-    c.state = ERRORED; c)
+    c.state = ERRORED; bump_rev!(c))
 
 # Which memo key a cell's next run should target: its pinned `lockedkey=` (a locked cell, not
 # forced, already froze on a run) or a freshly computed one (everyone else, or an explicit ▶

@@ -367,6 +367,11 @@ async function _probe() {
   _connDown = false;
   clearTimeout(_graceTimer); clearInterval(_probeTimer); _graceTimer = _probeTimer = null;
   connectLive();                                 // fresh SSE — the old one gave up on the 404
+  // Drop the per-cell payload highwater marks BEFORE the resync. The server we just reached may be a
+  // RESTARTED one, whose revision counter began again at zero; a client still holding marks from the
+  // previous process would read every payload as older than what it has and quietly ignore all of
+  // them — a notebook that looks connected and never updates again. (See `revIsNew` in view.js.)
+  window.slateResetCellRevs && window.slateResetCellRevs();
   updateStates(state);                           // resync (editors preserved)
   window.reconcileBackup && window.reconcileBackup(state);   // if boot 404'd, restore unsaved edits now that we have state
   if (_modalShown) {

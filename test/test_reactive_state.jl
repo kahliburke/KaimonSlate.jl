@@ -54,6 +54,32 @@ end
     @test isempty(RE._memo_key(r, r.cells[1]))
 end
 
+# Payload recency. (Lives here rather than in its own file because this one already has both modules
+# in scope; it belongs with delivery, not with reactive state, if this grows.) The browser is told
+# about a cell over two transports — the live push and the full state every mutating request answers
+# with — so every payload has to say how recent it is or the client can only apply whichever lands
+# last.
+@testset "a cell's revision advances on every pushed change" begin
+    c = RE.Cell("c", RE.CODE, "1+1")
+    r0 = c.rev
+    RE.mark_running!(c);          r1 = c.rev
+    RE.mark_result!(c, nothing);  r2 = c.rev
+    RE.restale!(c);               r3 = c.rev
+    @test r1 > r0 && r2 > r1 && r3 > r2
+
+    # Monotonic per PROCESS, not per cell: a cell can be replaced wholesale (reorder, re-parse,
+    # restore) and a per-cell counter would restart underneath a client holding a highwater mark.
+    d = RE.Cell("d", RE.CODE, "2+2"); RE.mark_fresh!(d)
+    @test d.rev > r3
+
+    # A locked-and-fresh cell refuses the restale, so nothing was pushed and the stamp must not move.
+    l = RE.Cell("l", RE.CODE, "3+3"); RE.mark_result!(l, nothing); push!(l.flags, :locked)
+    rl = l.rev
+    @test RE.restale!(l) == false && l.rev == rl
+
+    @test NS.cell_json(c)["rev"] == c.rev        # …and it reaches the wire
+end
+
 @testset "a reactive write moves the memo key" begin
     src = "#%% code id=decl\nbusy = reactive(:busy, false)\nnothing\n" *
           "#%% code id=reads\nstring(busy[])\n" *

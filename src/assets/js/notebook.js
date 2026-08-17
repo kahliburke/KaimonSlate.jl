@@ -447,17 +447,23 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     // choice), DON'T let the external run's output/charts replace what you're looking at. Freeze the
     // presentation; the reconcile flow re-applies the incoming result if you pick "use the change".
     const _conflicted = isDirty(c.id, c.source);
+    // …and don't re-apply a payload that isn't newer than one already applied. A full-state publish
+    // (every mutating request answers with one) carries the same cell the live push just delivered,
+    // as a distinct object, so the reference compares below can't tell it's the same result — which
+    // is what made one run draw a chart twice. `slateAcceptRev` is the single arbiter of recency;
+    // see its definition in view.js.
+    const _stale = window.slateRevIsNew ? !window.slateRevIsNew(c) : false;
     const out = el.querySelector('.output');
-    if (!_conflicted && out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output, c.live); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
+    if (!_conflicted && !_stale && out && c.output !== last.current.out) { window.slateRevMark && window.slateRevMark(c); last.current.out = c.output; window._swapOutput(out, c.output, c.live); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     window._applyMissingPkg && window._applyMissingPkg(c);   // "Package X not found" → one-click install banner
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
     // compare, since a selection click or live-state tick re-renders with the SAME nbState (same cell
     // objects). Without this, every such re-render re-ran setOption on EVERY chart in the notebook
     // (a real CPU sink during slider drags). Data changes produce a fresh cell object → fresh array.
-    if (!_conflicted && c.echarts !== last.current.echarts) { last.current.echarts = c.echarts; window.renderCharts(c); }
-    if (!_conflicted && c.tables !== last.current.tables) { last.current.tables = c.tables; window.renderTables(c); }
-    if (!_conflicted && c.animations !== last.current.animations) { last.current.animations = c.animations; window.renderAnimation && window.renderAnimation(c); }
+    if (!_conflicted && !_stale && c.echarts !== last.current.echarts) { last.current.echarts = c.echarts; window.renderCharts(c); }
+    if (!_conflicted && !_stale && c.tables !== last.current.tables) { last.current.tables = c.tables; window.renderTables(c); }
+    if (!_conflicted && !_stale && c.animations !== last.current.animations) { last.current.animations = c.animations; window.renderAnimation && window.renderAnimation(c); }
     if ((c.binds && c.binds.length) || (c.controls && c.controls.length)) window.syncControlValues({ cells: [c] });
 
     // Only a plain code cell has the always-on <Editor> to refresh once it becomes visible.

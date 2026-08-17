@@ -133,6 +133,11 @@ mutable struct Cell
     interp::Vector{CellOutput}    # captured outputs of a markdown cell's `{{ }}` interpolations
     provides::Set{Symbol}         # names brought in by `using`/`import` (⊆ writes) — availability for the
                                   # dep graph, NOT a definition: excluded from the multi-def collision check
+    rev::Int                      # bumped on every change worth pushing — see `bump_rev!`. The browser
+                                  # receives the same cell over two transports (the live `celldone:`
+                                  # push and the full state a mutating request answers with) and, with
+                                  # no way to tell new from old, applies whichever lands last. This is
+                                  # how it tells.
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -140,7 +145,7 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
-                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}())
+                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0)
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation
