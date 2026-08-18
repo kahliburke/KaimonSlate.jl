@@ -880,7 +880,7 @@ function _make_router(h::Hub)
         b = _body(req)
         path = expanduser(strip(String(get(b, "path", ""))))   # resolve ~ (tab-complete emits ~ paths)
         isempty(path) && return HTTP.Response(400, "missing path")
-        isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
+        ReportEngine.ensure_notebook_file!(path)
         # Optional run-location chosen in the open/new-notebook picker ("host[,transport]"); "" = follow
         # the file's own choice / the global default. Only applied when the notebook isn't already open.
         # `autorun=false` opens WITHOUT the initial run (cells land STALE) — e.g. to tag a cell `locked`

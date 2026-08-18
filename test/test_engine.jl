@@ -403,3 +403,20 @@ end
     @test ReportEngine.slate_memo_stats().manifests == 0
     @test isempty(ReportEngine.slate_memo_entries())
 end
+
+@testset "opening a new path creates the directories leading to it" begin
+    # Opening a path that doesn't exist has always meant "make me this notebook". It created the
+    # FILE and then failed on a missing parent — so `notebooks/x.jl` in a project with no
+    # `notebooks/` yet errored on the directory it was about to write into. One definition now,
+    # shared by the tool, the CLI and the /api/open route, so they can't drift.
+    root = mktempdir()
+    p = joinpath(root, "notebooks", "deeper", "nb.jl")
+    @test !isdir(dirname(p))
+    ReportEngine.ensure_notebook_file!(p)
+    @test isfile(p) && occursin("#%%", read(p, String))
+
+    # Existing files are left ALONE — this must never be a way to blank a notebook.
+    write(p, "#%% code id=keep\n1 + 1\n")
+    ReportEngine.ensure_notebook_file!(p)
+    @test occursin("id=keep", read(p, String))
+end

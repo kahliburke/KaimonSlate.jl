@@ -166,7 +166,7 @@ _fetch_notebooks(mode::Symbol) =
 # Open `path` (creating the file like slate.open does) and return its URL.
 function _open_notebook_url(mode::Symbol, path::AbstractString)
     path = abspath(expanduser(path))
-    isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
+    ReportEngine.ensure_notebook_file!(path)
     if mode == :owner
         return "$(_base())/n/$(open_notebook!(_hub(), path))"
     end

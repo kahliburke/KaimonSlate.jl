@@ -542,7 +542,7 @@ function create_tools(GateTool::Type)
     """
     function nb_open(path::String; threads::String = "", autorun::Bool = true)::String
         path = expanduser(path)
-        isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
+        ReportEngine.ensure_notebook_file!(path)   # creates the file AND the dirs leading to it
         h = _hub()
         id = open_notebook!(h, path; threads = threads, autorun = autorun)
         return "Serving $(abspath(path)) at $(_base())/n/$id"

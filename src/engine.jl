@@ -154,6 +154,27 @@ end
 # here stays a definition (it isn't in `mutates`). Returns a fresh Set.
 cell_definitions(c::Cell) = setdiff(c.writes, c.mutates)
 
+"""
+    ensure_notebook_file!(path) -> path
+
+The file a notebook is opened from, created if it isn't there yet — **including the directories
+leading to it**.
+
+Opening a path that doesn't exist has always meant "make me this notebook", and every entry point
+(the `slate.open` tool, the CLI, the `/api/open` route) agreed on that for the FILE while failing on
+a missing parent. Callers reach for `notebooks/<name>.jl` in a project that has no `notebooks/` yet,
+and refusing over the directory when we were about to create the file inside it anyway is a
+distinction without a difference to whoever is on the other end. One definition here so those three
+can't drift apart on what "open a new path" means.
+"""
+function ensure_notebook_file!(path::AbstractString)
+    isfile(path) && return String(path)
+    d = dirname(abspath(path))
+    isempty(d) || mkpath(d)
+    write(path, "#%% md id=intro\n# New Notebook\n")
+    return String(path)
+end
+
 # Markdown `{{ expr }}` interpolation helpers (`_interp_token` / `_md_template` / `_md_interp_exprs`)
 # live in `widgets.jl` — the file shared by BOTH ReportEngine (this module) and the standalone
 # SlateWorker — because the injected `@md` macro needs them there too. widgets.jl is included below,
