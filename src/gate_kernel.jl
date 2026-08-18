@@ -482,9 +482,18 @@ end
 
 # Single background task: drain the gate stream and dispatch `slate_refresh`
 # events (published by a worker's async cell) to the matching notebook.
+#
+# On the INTERACTIVE pool, not the default one. This task wakes once per published frame, and a
+# high-rate stream (audio at a few hundred frames a second) makes that the hottest thing in the
+# process — not for the work it does, which is forwarding a few hundred bytes, but for what a wake
+# costs: the scheduler scans one run queue PER THREAD looking for work, so the cost is frames ×
+# threads. Profiling a synth at 375 fps found `multiq_deletemin` and `task_get_next` at the top and
+# no application code anywhere near it. The interactive pool is small and reserved for exactly this
+# — latency-sensitive work that must not queue behind compute — so a wake scans a handful of queues
+# instead of one per core.
 function _ensure_poller!()
     _POLLER[] === nothing || return
-    _POLLER[] = Threads.@spawn begin
+    _POLLER[] = Threads.@spawn :interactive begin
         K = _kaimon()
         while true
             try

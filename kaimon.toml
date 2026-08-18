@@ -13,3 +13,21 @@ description = "KaimonSlate — a warm-session reactive notebook with a live brow
 # TUI config panel (Extensions tab → press `u`): set the worker Julia-thread count for parallel
 # cell execution. Built with Tachikoma widgets; see src/slate_panel.jl.
 tui_file = "src/slate_panel.jl"
+
+# NOTE on the interactive pool, which the stream poller and every socket's drain task run on (see
+# `_ensure_poller!`): leave it at Julia's default of ONE thread. A second was tried, on the reasoning
+# that those tasks should not wait behind each other, and it cost three times the CPU — 22% of a core
+# for a streaming notebook became 66%. Every ready task wakes the sibling thread, which scans for
+# work, finds none, and parks; at a few hundred frames a second that ripple dwarfs what the thread
+# buys. The waiting it was meant to prevent does not arise: these tasks only ever block on I/O, and a
+# socket write yields at that boundary — it parks the TASK, it does not hold the thread.
+
+# The hub is an I/O relay: it forwards frames between a worker and a browser and has no compute to
+# overlap. Julia's default is for a thread woken by an arriving task to spin for 4ms before parking,
+# on the bet that more work is coming — a good bet for a compute pool, a bad one here. A stream at a
+# few hundred frames a second arrives faster than that window expires, so every thread spins
+# continuously to move a few hundred bytes at a time: measured at 156% of a core for one notebook
+# streaming audio, and 22% with the spin switched off. Nothing about the relay is slower for it —
+# the extra wake latency is a rounding error next to the ZMQ and WebSocket hops on the same path.
+[extension.env]
+JULIA_THREAD_SLEEP_THRESHOLD = "0"

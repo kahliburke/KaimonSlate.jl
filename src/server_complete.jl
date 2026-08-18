@@ -1938,10 +1938,25 @@ function _make_router(h::Hub)
     end))
     # Watchdog health: stall/runaway alerts the 5s supervisor sweep classified (also rides state meta).
     HTTP.register!(router, "GET", "/api/{id}/health", req -> _withnb(h, req, nb -> _json(_health_json(nb))))
+    # A control change answers with an ACK, not the notebook.
+    #
+    # This is the hot path — it fires on every slider nudge, every click — and it used to answer with
+    # `state_json`, i.e. every cell's output including every chart spec: measured at 278 KB on a real
+    # notebook, 198 KB of it two charts, shipped and re-rendered to deliver what the live push was
+    # already delivering. The cost scaled with the size of the notebook rather than with what changed.
+    #
+    # What the caller actually needs is proof the write landed and a way to notice a push that never
+    # arrived — `celldone` is best-effort by construction (see `_broadcast_progress`). So: the version,
+    # and every cell's revision. The client applies pushes as they come and, if a revision named here
+    # hasn't shown up shortly after, pulls `/state` once. Dropping a push costs one late fetch instead
+    # of a silently stale page.
+    #
+    # STRUCTURAL routes (split/merge/delete/paste/reorder) deliberately keep answering with full
+    # state: they're rare, and they change what the cells ARE, which is exactly what a snapshot is for.
     HTTP.register!(router, "POST", "/api/{id}/bind/{cid}", req -> _withnb(h, req, nb -> begin
         body = _body(req)
         set_bind!(nb, HTTP.getparam(req, "cid"), get(body, "name", ""), get(body, "value", nothing))
-        _json(state_json(nb))
+        _json(_ack_json(nb))
     end))
     # `FileUpload`: raw bytes in the body, the filename + target bind in headers (a scalar-JSON bind
     # POST can't carry a 40 MB file without base64-inflating it by a third). Stores the file under
@@ -2399,8 +2414,31 @@ end
 mutable struct _WSConn
     out::Channel{Union{String,Vector{UInt8}}}   # a String → text frame; Vector{UInt8} → binary frame (numeric stream)
     dropped::Threads.Atomic{Int}
+    # The socket, so the drain task can be a plain function of the connection (and so a test can put
+    # a stand-in here). One writer only — a WebSocket cannot interleave concurrent sends.
+    ws::Any
+    wlock::ReentrantLock
 end
-_wsconn(cap::Int) = _WSConn(Channel{Union{String,Vector{UInt8}}}(cap), Threads.Atomic{Int}(0))
+_wsconn(cap::Int) = _WSConn(Channel{Union{String,Vector{UInt8}}}(cap), Threads.Atomic{Int}(0), nothing, ReentrantLock())
+
+# The one place bytes reach the socket. A named function rather than an inline call so the ordering
+# rules below can be tested against a stand-in socket — they are concurrency invariants, and a real
+# WebSocket is the one thing a test of them does not need.
+_raw_send(ws, frame) = HTTP.WebSockets.send(ws, frame)
+
+# Drain whatever is queued, in order, until the channel closes. `wait` parks until something is
+# queued WITHOUT removing it, so a frame only ever leaves the queue with the write lock held — which
+# is what makes the fast path's emptiness check in `_ws_send!` trustworthy. Taking first and locking
+# second would leave a window where the queue reads empty while a frame is still in flight, and a
+# direct send would overtake it: an audio block delivered out of order.
+function _ws_drain!(c::_WSConn)
+    while true
+        wait(c.out)
+        lock(c.wlock) do
+            while isready(c.out); _raw_send(c.ws, take!(c.out)); end
+        end
+    end
+end
 
 const _WS_CONNS = Dict{String,Vector{_WSConn}}()   # nb id → live page sockets (slate_emit push targets)
 const _WS_LOCK = ReentrantLock()
@@ -2419,6 +2457,10 @@ function _ws_send!(c::_WSConn, msg::Union{AbstractString,Vector{UInt8}})
     end
     d = Threads.atomic_xchg!(c.dropped, 0)
     d > 0 && (try; put!(c.out, "{\"t\":\"dropped\",\"n\":$d}"); catch; end)
+    # Always through the queue. Writing straight to the socket here would save a task wake per frame,
+    # and it was tried: it blocks the CALLER for the duration of the write, so one slow page stalls
+    # the poller — and with it every notebook's stream, not just the slow one's. A test measured 2.6s
+    # to emit 50 frames at a 50ms client. The wake is worth paying; this guarantee is not for sale.
     try; put!(c.out, msg isa AbstractString ? String(msg) : msg); catch; end
     return nothing
 end
@@ -2534,10 +2576,24 @@ function _ws_calls(stream, nb::LiveNotebook)
     end
     HTTP.WebSockets.upgrade(stream) do ws
         c = _wsconn(1024)
+        c.ws = ws                                # the drain task is a plain function of the connection
         _ws_register!(nb, c)
-        writer = @async try                      # single writer per socket (a WS can't interleave concurrent sends)
-            for msg in c.out; HTTP.WebSockets.send(ws, msg); end
-        catch; end
+        # The backlog drain. Only frames that could NOT take the fast path arrive here — a burst, or a
+        # client slow enough to have a queue. It takes the same lock as the fast path (a WS cannot
+        # interleave sends) and empties everything currently queued before parking again, so a backlog
+        # costs one wake rather than one per frame.
+        # `@async`, which makes this STICKY to the thread that accepted the upgrade — deliberately NOT
+        # the interactive thread the poller runs on, and deliberately not `@spawn`.
+        #
+        # Not interactive: that pool has one thread, and the poller does real per-message work on it
+        # — routing, JSON encoding, dispatching recomputes. Sharing it would put every socket's writes
+        # behind whatever the poller is doing, which for an audio stream is the one queue that must
+        # not stall. A second interactive thread would separate them and costs three times the CPU.
+        #
+        # Not `@spawn`: a sticky task lives on its own thread's queue and never enters the multiqueue,
+        # so waking it costs no scan. That is the cheap half of what the pool change bought, and it is
+        # available here without giving up the isolation.
+        writer = @async try; _ws_drain!(c); catch; end
         try; _ws_send!(c, string("{\"t\":\"health\",\"data\":", JSON.json(_health_json(nb)), "}")); catch; end   # initial health snapshot
         # Binary buffers a `slateCall` sends ride as native binary WS frames (first byte 0x01) that arrive
         # BEFORE their JSON call — accumulate them per call id here, then hand them to the dispatch when the
