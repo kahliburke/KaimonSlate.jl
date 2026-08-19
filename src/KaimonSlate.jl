@@ -1090,7 +1090,9 @@ function create_tools(GateTool::Type)
     Replace cell `cell`'s source, run it, and return its result. Use to fix a cell
     that errored, or to revise one in place. `tags` (optional, comma/space-separated) REPLACES the
     cell's tags — behaviour tags (`hidecode`, `collapsed`, `trace`, `nocache`, …) and free-form
-    metadata; omit it to leave the existing tags unchanged.
+    metadata. OMIT it to leave the existing tags unchanged; pass an EMPTY string (`tags=""`) to
+    CLEAR every tag on the cell. Those are deliberately different: an ordinary source edit must
+    never silently wipe tags, but removing a tag has to be possible.
 
     A cell that outruns a short grace window is PROMOTED to a background job: you get a job id
     immediately and poll `check_eval(notebook, job)`, while the run continues on the worker. Pass
@@ -1105,12 +1107,18 @@ function create_tools(GateTool::Type)
     read the result. Every `run=false` result tells you how many cells are stale — that count is
     work you still owe; don't finish a task with it outstanding.
     """
-    function edit_cell(notebook::String, cell::String, source::String; tags::String = "", run::Bool = true, background::Bool = false)::String
+    # `tags` is deliberately UNTYPED: it is tri-state (absent / "" / a tag list), and the gate's
+    # arg coercion would have to convert an incoming "" into a `Union{Nothing,String}`. Taking it
+    # as Any and normalizing here keeps that off the dispatch boundary.
+    function edit_cell(notebook::String, cell::String, source::String;
+                       tags = nothing, run::Bool = true, background::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_edit_cell!(nb, cell, source; tags = tags, run = run,
+        t = tags === nothing ? nothing : String(tags)
+        res = agent_edit_cell!(nb, cell, source; tags = t, run = run,
                                background = background, caller = _caller())
         return _surfaced(nb, "edit_cell",
-            Dict{String,Any}("cell" => cell, "source" => source, "tags" => tags, "run" => run), res)
+            Dict{String,Any}("cell" => cell, "source" => source,
+                             "tags" => something(t, ""), "run" => run), res)
     end
 
     """

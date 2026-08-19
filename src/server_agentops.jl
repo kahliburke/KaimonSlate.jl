@@ -715,7 +715,8 @@ transport with an idle timeout to be cut off mid-cascade; and editing a notebook
 cells are mid-computation. Both end the same way: `agent_run!(nb)` to reconcile. Editing cells one
 at a time is the DEFAULT, and wanting the result back sooner is not a reason to skip the run."""
 function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString;
-                          tags::AbstractString = "", caller::AbstractString = "", expected_version::Int = -1,
+                          tags::Union{Nothing,AbstractString} = nothing, caller::AbstractString = "",
+                          expected_version::Int = -1,
                           run::Bool = true, background::Bool = false)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     rej = lock(nb.lock) do
@@ -723,9 +724,13 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
         r === nothing || return r
         # Tags FIRST: the edit below marks the cell stale and its eval can begin immediately, so
         # tags applied after it race the run — a freshly `cache`-tagged cell would evaluate once
-        # more under its OLD flags (seen live: the tagged run didn't persist). Empty = leave
-        # existing tags untouched (so an ordinary source edit never silently wipes tags).
-        isempty(strip(String(tags))) || set_cell_tags!(nb, id, tags)
+        # more under its OLD flags (seen live: the tagged run didn't persist).
+        #
+        # OMITTED (`nothing`) = leave existing tags untouched, so an ordinary source edit never
+        # silently wipes tags. An EXPLICIT `""` CLEARS them: those are different intents, and
+        # collapsing both onto the empty string left no way to remove a tag at all (the caller
+        # could add `nocache` but never take it back off).
+        tags === nothing || set_cell_tags!(nb, id, tags)
         edit_cell!(nb, id, source; announce = true, run = run)   # show the edited source before its eval finishes
         return nothing
     end
