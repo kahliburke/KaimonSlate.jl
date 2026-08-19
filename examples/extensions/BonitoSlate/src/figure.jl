@@ -9,6 +9,47 @@
 
 _is_wgl_backend() = (b = Makie.current_backend(); b isa Module && nameof(b) === :WGLMakie)
 
+# ── Workaround: WGLMakie loses every line when BOTH backgrounds are transparent ───────────────────
+# WGLMakie (0.13 / Makie 0.24) renders NO line primitives when the figure background AND the axis
+# background are both `:transparent`: `lines!`, `linesegments!` and the axis's own gridlines and
+# spines all vanish, while `scatter!`, `band!`, `barplot!` and text still draw. It throws nothing —
+# the figure just comes back with the lines missing, which reads as a bug in the plotting code.
+# Either transparent background ALONE is fine; only the combination trips it. A near-zero alpha
+# (0.004) does not dodge it — the panel has to be genuinely opaque.
+#
+# That matters here because `use_slate_theme!()` sets exactly that pair (transparent figure so it
+# blends into the card, transparent axis so the palette shows through), so a themed WGLMakie
+# notebook silently loses every line it draws.
+#
+# This is a WGLMakie bug, not a Slate one, and the real fix belongs upstream. Until then: if the
+# figure background is transparent, paint any transparent axis panel in the card's own colour. On
+# the card that is visually identical, and it puts the line shader back on its normal path. Applied
+# at RENDER time rather than in `enable!` because a notebook may call `use_slate_theme!()` after
+# `enable!()`, so enable-time is too early to see the theme that will actually be used.
+const _CARD_BG = Makie.RGBAf(0x1b / 255, 0x1e / 255, 0x24 / 255, 1)   # #1b1e24, see assets/figure.css
+
+_is_transparent(c) = try Makie.alpha(Makie.to_color(c)) == 0 catch; false end
+
+function _patch_transparent_axes!(fig)
+    try
+        scene = fig isa Makie.Figure    ? fig.scene :
+                fig isa Makie.Scene     ? fig       :
+                fig isa Makie.FigureAxisPlot ? fig.figure.scene : nothing
+        scene === nothing && return fig
+        # Only intervene when the FIGURE is transparent; a solid figure background is already fine.
+        _is_transparent(scene.backgroundcolor[]) || return fig
+        contents = fig isa Makie.Figure ? fig.content :
+                   fig isa Makie.FigureAxisPlot ? fig.figure.content : ()
+        for ax in contents
+            ax isa Makie.Axis || continue
+            _is_transparent(ax.backgroundcolor[]) && (ax.backgroundcolor[] = _CARD_BG)
+        end
+    catch
+        # Never let a cosmetic workaround take down a render — worst case the lines stay missing.
+    end
+    return fig
+end
+
 # The renderer: the figure fragment (scene + live wiring), wrapped in the card. Everything shared with any
 # other Bonito output — the runtime loader, the root announcement, the render lock, session bookkeeping —
 # lives in `bonito_output_html` (app.jl), since a figure is one kind of Bonito output rather than a separate
@@ -19,6 +60,7 @@ function slate_card_html(fig::Makie.FigureLike)
         # the page-root announcement ordered ahead of the fragment, the render lock, and registering the
         # sub-session this render creates so it is released when the cell re-evaluates. A figure is just one
         # kind of Bonito output, so it differs from an app only in being wrapped in the card below.
+        _patch_transparent_axes!(fig)   # see the WGLMakie transparent-background note above
         return _figure_card(bonito_output_html() do
             sprint((io, x) -> show(io, MIME"text/html"(), x), fig)
         end)
