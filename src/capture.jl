@@ -725,7 +725,14 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
             # type) instead of dumping the terminal grid below — replace, then fall through the
             # SAME dispatch (a heatmap comes back as an EChart; the KaTeX forms fall to the
             # generic rich-MIME branch below via their `show(io, MIME"text/latex", …)` method).
-            if value isa AbstractMatrix
+            # …EXCEPT when the matrix already knows how to typeset itself. A package whose
+            # element type carries its own `show(io, MIME"text/latex", ::AbstractArray{T})`
+            # (e.g. `Matrix{Sym}` from SymPy/SymPyCore) renders exact symbolic entries that
+            # `_matrix_texnum` cannot format at all — hijacking it discards the better
+            # rendering AND throws a MethodError from inside `show`, where the `try` above
+            # can no longer help. Defer to the value's own LaTeX in that case.
+            if value isa AbstractMatrix &&
+               !(try Base.invokelatest(showable, MIME"text/latex"(), value) catch; false end)
                 value = try; Base.invokelatest(slate_matrix, value); catch; value; end
             end
             if value isa EChart
