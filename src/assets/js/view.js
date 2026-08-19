@@ -414,7 +414,7 @@ function wireControl(el) {
     // unknown value, so this is inert for every other bind.
     if (name === 'ui_theme' && window.setSlateTheme) { try { window.setSlateTheme(v); } catch (_) {} }
     api('POST', '/api/bind/' + id, { name, value: v })
-      .then(updateStates)
+      .then(applyAck)
       .finally(() => { inflight = false; if (pending !== null) schedule(pending); });
   };
   const schedule = v => {                       // throttled, coalescing
@@ -658,6 +658,30 @@ function resetCellRevs() { for (const k in _cellRev) delete _cellRev[k]; }
 window.slateRevIsNew = revIsNew;
 window.slateRevMark = revMark;
 window.slateResetCellRevs = resetCellRevs;
+
+// The receipt from a control change. The response no longer carries the notebook — the live push
+// does that — so this is the write's confirmation plus where every cell stood when it answered.
+//
+// The one thing the old full-state reply gave us for free was cover for a DROPPED push: `celldone`
+// is best-effort, and a lost frame simply didn't matter when the response re-sent everything. It
+// matters now, so we check: a moment after the ack, any cell whose revision we were told about but
+// never applied means a push went missing, and we pull `/state` once to catch up.
+//
+// The grace period is not a guess about the network — it's the run itself. A control change kicks an
+// evaluation, so the revisions in the ack are mid-flight by construction and the pushes that settle
+// them arrive over the following moments. Checking immediately would fetch on every interaction and
+// give back exactly the payload we just stopped sending.
+let _gapTimer = null;
+function applyAck(ack) {
+  if (!ack || !ack.revs) { if (ack && ack.cells) updateStates(ack); return; }   // older server: full state
+  clearTimeout(_gapTimer);
+  _gapTimer = setTimeout(async () => {
+    const missing = Object.keys(ack.revs).some(id => revIsNew({ id, rev: ack.revs[id] }));
+    if (!missing) return;
+    try { updateStates(await api('GET', '/api/state')); } catch (_) {}   // a push was lost — resync once
+  }, 2000);
+}
+window.slateApplyAck = applyAck;
 
 function patchCells(cells) {
   if (!cells || !cells.length || !nbState) return;

@@ -409,7 +409,7 @@
       this._lastFrame = frame; this._lastPush = now;
       try {
         api('POST', '/api/bind/' + target.cellId, { name: target.name, value: frame })
-          .then(s => { if (typeof updateStates === 'function') updateStates(s); })
+          .then(s => { (window.slateApplyAck || updateStates)(s); })   // ack, not full state — see applyAck
           .catch(() => {});
       } catch (_) {}
     }

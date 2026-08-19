@@ -254,3 +254,21 @@ end
         NS.stop_hub(hub)
     end
 end
+
+# The receipt a control change now gets instead of the notebook. Its whole reason for existing is
+# that its size tracks the number of CELLS, not the size of their outputs — the old reply was
+# measured at 278KB on a real notebook, 198KB of it two chart specs, shipped on every slider nudge.
+@testset "the ack names every cell's revision and carries no output" begin
+    r = RE.parse_report("#%% code id=a\n1\n#%% code id=b\n2\n")
+    RE.build_dependencies!(r)
+    RE.mark_result!(r.cells[1], nothing)
+    nb = (; version = 7, report = r)
+    ack = NS._ack_json(nb)
+
+    @test ack["ok"] === true && ack["version"] == 7
+    @test Set(keys(ack["revs"])) == Set(["a", "b"])
+    @test ack["revs"]["a"] == r.cells[1].rev
+
+    # The guarantee, asserted rather than assumed: no cell output rides along.
+    @test !occursin("output", lowercase(string(ack)))
+end

@@ -742,6 +742,14 @@ _live_output_placeholder() =
         "<span style=\"color:#8891a5;font-size:0.9em\">⟳ interactive output — connecting…</span>",
         "</div>")
 
+# The receipt for a mutating call: the write landed, here is the notebook version, and here is where
+# every cell stands. Bytes are O(cells), not O(outputs) — the point of it (see the bind route).
+_ack_json(nb) = Dict{String,Any}(
+    "ok"      => true,
+    "version" => nb.version,
+    "revs"    => Dict{String,Any}(c.id => c.rev for c in nb.report.cells),
+)
+
 function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
                    multidef::Set{String} = Set{String}(), nbid::AbstractString = "",

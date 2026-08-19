@@ -749,7 +749,7 @@ function _wireEchartSelect(inst, spec) {
       const own = _bindOwner(sel.name);
       if (!own) return;
       api('POST', '/api/bind/' + own.cell, { name: sel.name, value: [lo, hi] })
-        .then(updateStates).catch(() => {});
+        .then(window.slateApplyAck || window.updateStates).catch(() => {});
     });
   }
   // Reflect the bind onto the brush, so moving the slider moves the brush. Never counts as a
