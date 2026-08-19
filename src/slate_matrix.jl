@@ -115,6 +115,11 @@ function _matrix_texnum(x::Complex, digits)
     r, i = round(real(x); digits = digits), round(imag(x); digits = digits)
     i == 0 ? string(r) : string(r, i < 0 ? "-" : "+", abs(i), "i")
 end
+# Anything with no numeric rounding to apply (a symbolic expression, a unitful quantity, a
+# string label) prints as itself rather than throwing a MethodError from inside `show`.
+# A type that renders itself better should define `show(io, MIME"text/latex", ::AbstractArray{T})`
+# — capture.jl defers to that and never reaches here.
+_matrix_texnum(x, digits) = string(x)
 
 struct MatrixTeX
     m::AbstractMatrix
