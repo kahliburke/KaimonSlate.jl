@@ -1034,7 +1034,7 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
     # Applies to EVERY worker, main included (the main/local worker is treated like any other pill now).
     if k isa ReportEngine.GateKernel
         remote = k.target isa ReportEngine.RemoteTarget || k.remote
-        since = remote ? get(_KERNEL_UNRESPONSIVE_SINCE, k, nothing) : nothing   # liveness clock is remote-only
+        since = get(_KERNEL_UNRESPONSIVE_SINCE, k, nothing)   # tracked for local kernels too
         if k.conn === nothing
             d["status"] = k.redial_hold ? "disconnected" : "connecting"
             d["note"]   = k.redial_hold ?
@@ -1042,7 +1042,12 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
         elseif since !== nothing
             el = round(Int, time() - something(since, time()))
             d["status"] = "degraded"
-            d["note"]   = "no liveness reply for $(el)s — auto-drops & reconnects at $(round(Int, _DEAD_WIRE_GRACE))s"
+            # Only a remote wire auto-drops, so only a remote pill promises it. A local worker that
+            # stops answering is a wedge the user has to break — say that instead of a countdown to
+            # a recovery that will never come.
+            d["note"]   = remote ?
+                "no liveness reply for $(el)s — auto-drops & reconnects at $(round(Int, _DEAD_WIRE_GRACE))s" :
+                "no liveness reply for $(el)s — the worker may be wedged; interrupt it or reboot the worker"
         else
             d["status"] = "ok"
         end

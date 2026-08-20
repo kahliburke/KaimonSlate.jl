@@ -1491,6 +1491,13 @@ const _KERNEL_UNRESPONSIVE_SINCE = WeakKeyDict{Any,Float64}()   # kernel → wal
 const _DEAD_WIRE_GRACE = something(tryparse(Float64, get(ENV, "KAIMONSLATE_DEADWIRE_GRACE", "")), 45.0)  # s of continuous silence ⇒ dead
 const _LIVENESS_PING_TIMEOUT = 8.0   # per-ping timeout; also how far to BACKDATE first-silence — when a ping first fails the worker has already been silent this long, so the countdown starts at ~8s, not 0
 const _LAST_RUNNING = Dict{String,Tuple{Set{String},Bool}}()   # nb id → (running ids, anyok) from the last sweep
+# Repeat-suppression for the unresponsive log. A wire that stays silent used to write one identical
+# line per sweep — an outage lasting a working day produced hundreds of KB of the same sentence, which
+# buries the events that actually explain it. Log the FIRST failure, one line per interval while it
+# stays silent (carrying the elapsed time, so the log says how long rather than how many times), and
+# one line when it answers again.
+const _LIVENESS_LOG_EVERY = 300.0                     # s between repeat "still silent" lines
+const _LIVENESS_LOG_LAST = WeakKeyDict{Any,Float64}() # kernel → when we last logged its silence
 
 # Retry policy after a dead-wire drop (global for now; per-region later). `manual` (default): flag the
 # dropped kernel `redial_hold` so ONLY an explicit run reconnects it — a reactive cascade errors rather
@@ -1529,7 +1536,7 @@ function _liveness_sweep!(nb::LiveNotebook)
     ids = Set{String}(); anyok = false
     for k in _nb_kernels(nb)
         (k isa ReportEngine.GateKernel && k.conn !== nothing) || continue
-        ok = false
+        ok = false; err = nothing
         try
             r = ReportEngine._tool(k, "__slate_running", Dict{String,Any}(); timeout = _LIVENESS_PING_TIMEOUT)
             run = r isa NamedTuple ? get(r, :running, nothing) :
@@ -1539,29 +1546,63 @@ function _liveness_sweep!(nb::LiveNotebook)
                 anyok = true; ok = true
             end
         catch e
-            ReportEngine._rlog("liveness: __slate_running failed on $(nb.id)/$(_kernel_side_label(nb, k)): " * first(sprint(showerror, e), 120))
+            err = e
         end
         if ok
             if haskey(_KERNEL_UNRESPONSIVE_SINCE, k)   # was unwell → recovered this sweep
+                el = round(Int, time() - _KERNEL_UNRESPONSIVE_SINCE[k])
                 delete!(_KERNEL_UNRESPONSIVE_SINCE, k) # any reply resets the clock — a blip is forgiven
+                if pop!(_LIVENESS_LOG_LAST, k, nothing) !== nothing   # we said it went silent — say it came back
+                    ReportEngine._rlog("liveness: $(nb.id)/$(_kernel_side_label(nb, k)) is answering again after $(el)s")
+                end
                 try; _workers_push!(nb); catch; end    # pill back to green immediately
             end
-        elseif k.target isa ReportEngine.RemoteTarget || k.remote   # remote-only auto-drop
-            since = get!(() -> time() - _LIVENESS_PING_TIMEOUT, _KERNEL_UNRESPONSIVE_SINCE, k)   # stamp the first silent sweep, backdated by the ping timeout it already waited
+        else
+            # Stamp the first silent sweep — backdated by the ping timeout it already waited — for EVERY
+            # kernel, LOCAL included. The clock used to be remote-only, which meant a local worker that
+            # stopped answering showed a healthy green pill indefinitely while the log filled up: the one
+            # state nobody could see was the one that mattered. Only the auto-DROP stays remote-only —
+            # a local process is ours to inspect, and re-dialling a wedged-but-alive worker reconnects
+            # to the same wedge.
+            since = get!(() -> time() - _LIVENESS_PING_TIMEOUT, _KERNEL_UNRESPONSIVE_SINCE, k)
             unresp = time() - since
-            if unresp >= _DEAD_WIRE_GRACE
-                delete!(_KERNEL_UNRESPONSIVE_SINCE, k)
+            logged = _log_liveness_silence(nb, k, err, unresp)
+            if (k.target isa ReportEngine.RemoteTarget || k.remote) && unresp >= _DEAD_WIRE_GRACE
+                delete!(_KERNEL_UNRESPONSIVE_SINCE, k); delete!(_LIVENESS_LOG_LAST, k)
                 _heal_dead_wire!(nb, k, unresp)        # → amber "disconnected" (pushes inside)
-            else
+            elseif k.target isa ReportEngine.RemoteTarget || k.remote
                 # Still CONNECTED but missing pings: surface it as a muted-yellow "degraded" pill NOW (an
                 # early warning, well before the drop), and re-push each sweep so its unresponsive-countdown
                 # ticks live in the pill/popup.
+                try; _workers_push!(nb); catch; end
+            elseif logged
+                # Local: nothing counts down, so push only when the state actually changed rather than
+                # re-sending the same pill every 8s for as long as the worker stays silent.
                 try; _workers_push!(nb); catch; end
             end
         end
     end
     _LAST_RUNNING[nb.id] = (ids, anyok)
     return nothing
+end
+
+# Is this kernel's silence due to be logged? The first failure always is; after that, once per
+# interval. Stamps the clock when it says yes, so callers must not ask twice for one sweep.
+function _liveness_due_to_log!(k, now::Float64 = time())
+    last = get(_LIVENESS_LOG_LAST, k, nothing)
+    (last !== nothing && now - last < _LIVENESS_LOG_EVERY) && return false
+    _LIVENESS_LOG_LAST[k] = now
+    return true
+end
+
+# Log a kernel's silence at most once per `_LIVENESS_LOG_EVERY`. Returns whether it logged, which the
+# sweep uses as its "the state changed" signal.
+function _log_liveness_silence(nb::LiveNotebook, k, err, unresp::Real)
+    _liveness_due_to_log!(k) || return false
+    reason = err === nothing ? "no running-set in the reply" : first(sprint(showerror, err), 120)
+    ReportEngine._rlog("liveness: __slate_running failed on $(nb.id)/$(_kernel_side_label(nb, k)) " *
+                       "(silent for $(round(Int, unresp))s): " * reason)
+    return true
 end
 
 # Union of the cell ids every connected kernel said it's evaluating on the last liveness sweep, or
