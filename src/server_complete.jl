@@ -2295,14 +2295,85 @@ end
 # Allow the request iff its Host is loopback/allowlisted AND its Origin (when present)
 # resolves to an allowlisted host. Returns false to reject with 403.
 function _request_allowed(h::Hub, msg)::Bool
-    allowed = _allowed_hosts(h)
     host = _hostonly(HTTP.header(msg, "Host", ""))
-    (isempty(host) || host in allowed) || return false
     origin = strip(HTTP.header(msg, "Origin", ""))
+    # A token-protected network listener may legitimately be reached through any LAN IP/DNS name.
+    # Still require browser subrequests to be same-origin; tokenless listeners retain the strict
+    # allowlist below as their DNS-rebinding defence.
+    if !isempty(h.auth_token)
+        (isempty(origin) || origin == "null") && return true
+        ohost = try; _hostonly(HTTP.URI(origin).host); catch; ""; end
+        return !isempty(host) && ohost == host
+    end
+    allowed = _allowed_hosts(h)
+    (isempty(host) || host in allowed) || return false
     if !isempty(origin) && origin != "null"
         ohost = try; _hostonly(HTTP.URI(origin).host); catch; ""; end
         (ohost in allowed) || return false
     end
+    return true
+end
+
+const _AUTH_COOKIE = "kaimonslate_session"
+_random_token() = bytes2hex(rand(Random.RandomDevice(), UInt8, 32))
+
+function _secret_equal(a::AbstractString, b::AbstractString)::Bool
+    aa, bb = codeunits(a), codeunits(b)
+    d = UInt(xor(length(aa), length(bb)))
+    for i in 1:max(length(aa), length(bb))
+        xa = i <= length(aa) ? aa[i] : 0x00
+        xb = i <= length(bb) ? bb[i] : 0x00
+        d |= UInt(xor(xa, xb))
+    end
+    return d == 0
+end
+
+function _cookie_value(msg, name::AbstractString)
+    for part in split(HTTP.header(msg, "Cookie", ""), ';')
+        kv = split(strip(part), '='; limit = 2)
+        length(kv) == 2 && kv[1] == name && return kv[2]
+    end
+    return ""
+end
+
+function _query_token(target::AbstractString)
+    try
+        String(get(HTTP.queryparams(HTTP.URI(target)), "token", ""))
+    catch
+        ""
+    end
+end
+
+function _without_token(target::AbstractString)
+    pieces = split(String(target), '?'; limit = 2)
+    length(pieces) == 1 && return pieces[1]
+    kept = filter(p -> !startswith(p, "token="), split(pieces[2], '&'; keepempty = false))
+    isempty(kept) ? pieces[1] : pieces[1] * "?" * join(kept, '&')
+end
+
+function _authorized(h::Hub, msg)::Bool
+    isempty(h.auth_token) && return true
+    _secret_equal(_cookie_value(msg, _AUTH_COOKIE), h.session_token) && return true
+    auth = strip(HTTP.header(msg, "Authorization", ""))
+    startswith(lowercase(auth), "bearer ") || return false
+    _secret_equal(strip(auth[8:end]), h.auth_token)
+end
+
+function _redeem_query_token!(stream::HTTP.Stream, h::Hub)::Bool
+    isempty(h.auth_token) && return false
+    supplied = _query_token(stream.message.target)
+    isempty(supplied) && return false
+    if !_secret_equal(supplied, h.auth_token)
+        HTTP.setstatus(stream, 401)
+        HTTP.setheader(stream, "Cache-Control" => "no-store")
+        HTTP.startwrite(stream)
+        return true
+    end
+    HTTP.setstatus(stream, 303)
+    HTTP.setheader(stream, "Location" => _without_token(stream.message.target))
+    HTTP.setheader(stream, "Set-Cookie" => "$(_AUTH_COOKIE)=$(h.session_token); Path=/; HttpOnly; SameSite=Strict")
+    HTTP.setheader(stream, "Cache-Control" => "no-store")
+    HTTP.startwrite(stream)
     return true
 end
 
@@ -2686,16 +2757,17 @@ removed while it runs with [`open_notebook!`](@ref) and [`close_notebook!`](@ref
 shuts it down. This is the layer the `slate` app itself runs on — reach for it when you are embedding
 Slate in your own script rather than opening a single notebook with [`serve_notebook`](@ref).
 
-`host` defaults to loopback, so the hub is reachable only from this machine; bind `"0.0.0.0"` to
-serve a network. **There is no authentication at any bind address** — whatever can reach the port can
-drive every notebook on it.
+`host` defaults to loopback, so the hub is reachable only from this machine. A non-loopback bind
+(such as `"0.0.0.0"`) is always token-protected: pass `token=...` or let Slate generate a random
+token. The initial `?token=...` URL is exchanged for an HttpOnly session cookie and immediately
+redirected to a clean URL. Supplying a token also enables authentication on loopback.
 
 `app = true` serves in application mode: prose, results, figures and live controls, with the
 authoring routes refused server-side rather than merely hidden. `appdefaults` (build it with
 [`app_defaults`](@ref)) sets what a visitor sees before choosing for themselves.
 """
 function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
-                   appdefaults::AbstractDict = Dict{String,Any}())
+                   appdefaults::AbstractDict = Dict{String,Any}(), token::AbstractString = "")
     # Stamp the payload SHA the running hub code was loaded from — `_hub_src_stale()` compares the live
     # on-disk SHA to this to flag "Slate src changed since this server started; restart to apply".
     _HUB_START_SHA[] = try; ReportEngine._payload_sha(); catch; ""; end
@@ -2703,8 +2775,12 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     try; SlateHistory.migrate_once!(); catch e   # one-time: compact legacy history logs + compress objects
         @warn "KaimonSlate: history migration failed" exception = (e, catch_backtrace())
     end
-    h = Hub(Dict{String,LiveNotebook}(), nothing, host, port, ReentrantLock(),
-            app, Dict{String,Any}(String(k) => v for (k, v) in appdefaults))
+    tok = strip(String(token))
+    loopback = String(host) in ("127.0.0.1", "localhost", "::1")
+    !loopback && isempty(tok) && (tok = _random_token())
+    session = isempty(tok) ? "" : _random_token()
+    h = Hub(Dict{String,LiveNotebook}(), nothing, String(host), port, ReentrantLock(),
+            app, Dict{String,Any}(String(k) => v for (k, v) in appdefaults), tok, session)
     # Surface a remote worker's live bring-up output (streamed instantiate/precompile) in the browser
     # hydrating banner, not just remote.log — the provisioner narrates each line through this sink hook.
     try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
@@ -2714,6 +2790,13 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
         # Reject cross-origin / rebinding requests before ANY handler (router or SSE) runs.
         if !_request_allowed(h, stream.message)
             HTTP.setstatus(stream, 403); HTTP.startwrite(stream); return
+        end
+        _redeem_query_token!(stream, h) && return
+        if !_authorized(h, stream.message)
+            HTTP.setstatus(stream, 401)
+            HTTP.setheader(stream, "WWW-Authenticate" => "Bearer realm=\"KaimonSlate\"")
+            HTTP.setheader(stream, "Cache-Control" => "no-store")
+            HTTP.startwrite(stream); return
         end
         target = stream.message.target
         # App mode's lockdown sits HERE rather than in the router because several endpoints — the SSE
@@ -2754,7 +2837,7 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     end
     h.server = server
     _ensure_run_supervisor!(h)   # eval-level self-healing: reconcile orphaned RUNNING cells every 5s
-    @info "Kaimon Slate hub" url = _hub_url(h)
+    @info "Kaimon Slate hub" url = _hub_url(h) authenticated = !isempty(h.auth_token)
     return h
 end
 
@@ -2845,4 +2928,3 @@ function stop_hub(h::Hub)
     h.server === nothing || close(h.server)
     return nothing
 end
-

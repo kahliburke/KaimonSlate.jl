@@ -3,7 +3,9 @@
 # tempdir (SlateHome re-reads ENV per call) so the real `slate.json` is never touched.
 using ReTest
 using KaimonSlate
+using HTTP
 const KS = KaimonSlate
+const NS = KaimonSlate.NotebookServer
 
 @testset "port-config" begin
     @testset "_resolve_boot_port precedence" begin
@@ -48,7 +50,31 @@ const KS = KaimonSlate
             @test KS._app_main(["--port", "abc"]) == 2        # non-numeric
             @test KS._app_main(["--port", "99999"]) == 2      # out of 1–65535 range
             @test KS._app_main(["--port"]) == 2               # missing value
+            @test KS._app_main(["--host"]) == 2               # missing value
+            @test KS._app_main(["--token"]) == 2              # missing value
             @test KS._app_main(["--bogus"]) == 2              # unknown option still rejected
         end
+    end
+
+    @testset "token authentication helpers" begin
+        h = NS.Hub(Dict{String,NS.LiveNotebook}(), nothing, "0.0.0.0", 8765, ReentrantLock())
+        h.auth_token = "access-secret"
+        h.session_token = "session-secret"
+
+        req(headers = Pair{String,String}[], target = "/") = HTTP.Request("GET", target, headers)
+        @test !NS._authorized(h, req())
+        @test !NS._authorized(h, req(["Authorization" => "Bearer wrong"]))
+        @test NS._authorized(h, req(["Authorization" => "Bearer access-secret"]))
+        @test NS._authorized(h, req(["Cookie" => "x=1; kaimonslate_session=session-secret"]))
+        @test NS._query_token("/n/demo?token=access-secret") == "access-secret"
+        @test NS._without_token("/n/demo?a=1&token=secret&b=2") == "/n/demo?a=1&b=2"
+        @test NS._secret_equal("same", "same")
+        @test !NS._secret_equal("same", "different")
+
+        # Token auth permits LAN names, but browser traffic must remain same-origin.
+        @test NS._request_allowed(h, req(["Host" => "slate.lan:8765",
+                                          "Origin" => "http://slate.lan:8765"]))
+        @test !NS._request_allowed(h, req(["Host" => "slate.lan:8765",
+                                           "Origin" => "https://attacker.example"]))
     end
 end

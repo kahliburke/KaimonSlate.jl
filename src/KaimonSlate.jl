@@ -146,6 +146,9 @@ function __init__()
     # (set via the TUI or `set_configured_port!`) > the 8765 default. Before the early returns below
     # so it always runs, even for a non-extension load (`slate --own`).
     _PORT[] = _resolve_boot_port(get(ENV, "KAIMONSLATE_PORT", ""), configured_port())
+    _HOST[] = strip(get(ENV, "KAIMONSLATE_HOST", "127.0.0.1"))
+    isempty(_HOST[]) && (_HOST[] = "127.0.0.1")
+    _TOKEN[] = strip(get(ENV, "KAIMONSLATE_TOKEN", ""))
     get(ENV, "KAIMONSLATE_NO_AUTOREGISTER", "0") in ("1", "true") && return nothing
     haskey(ENV, "KAIMON_EXTENSION") || return nothing
     try
@@ -176,6 +179,8 @@ end
 # config UI / launcher can pin it; the hub auto-starts at extension init. Held in a `Ref` and set
 # from the env in `__init__` (RUNTIME) — a top-level `const` reading ENV would be frozen at precompile.
 const _PORT = Ref(8765)
+const _HOST = Ref("127.0.0.1")
+const _TOKEN = Ref("")
 const _HUB = Ref{Union{Hub,Nothing}}(nothing)
 const _LOCK = ReentrantLock()
 
@@ -184,7 +189,7 @@ _base() = "http://127.0.0.1:$(_PORT[])"
 # The running hub (started lazily on first open).
 function _hub()
     lock(_LOCK) do
-        _HUB[] === nothing && (_HUB[] = start_hub(; port = _PORT[]))
+        _HUB[] === nothing && (_HUB[] = start_hub(; host = _HOST[], port = _PORT[], token = _TOKEN[]))
         # (Re)register the remote bring-up → browser-banner sink HERE too, not only in `start_hub`: this
         # runs on every hub access, so a Revise reload of the server picks it up WITHOUT a full restart
         # (start_hub only runs once, at boot). The closure reads `_HUB[]` at call time → always the live hub.

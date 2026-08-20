@@ -128,4 +128,17 @@ using KaimonSlate
 serve_notebook("notebook.jl"; port = 8765)   # blocks; open http://127.0.0.1:8765
 ```
 
+To listen on the network, Slate requires token authentication. It generates a strong token when
+none is supplied and prints a one-time login URL; after login the browser uses an HttpOnly cookie:
+
+```sh
+slate --own --host 0.0.0.0 notebook.jl
+# or choose a stable secret without putting it in shell history:
+KAIMONSLATE_HOST=0.0.0.0 KAIMONSLATE_TOKEN="$SLATE_SECRET" slate --own notebook.jl
+```
+
+The Julia API accepts the same settings as `host` and `token` keyword arguments. Put TLS in front
+of Slate (reverse proxy, VPN, or SSH tunnel) when the connection crosses an untrusted network;
+the token prevents unauthorized access but plaintext HTTP does not encrypt traffic.
+
 See the [installation guide](https://kahliburke.github.io/KaimonSlate.jl/dev/installation) and the [architecture overview](https://kahliburke.github.io/KaimonSlate.jl/dev/architecture) for details.

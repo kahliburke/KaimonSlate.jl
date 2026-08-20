@@ -21,11 +21,16 @@ mutable struct Hub
     # light theme would still open midnight-dark for everyone who hadn't already changed it. These
     # are what a visitor gets BEFORE they express a preference; their own choice still wins.
     appdefaults::Dict{String,Any}
+    auth_token::String
+    session_token::String
 end
 Hub(notebooks, server, host, port, lock) =
-    Hub(notebooks, server, host, port, lock, false, Dict{String,Any}())
+    Hub(notebooks, server, host, port, lock, false, Dict{String,Any}(), "", "")
 
 _hub_url(h::Hub) = "http://$(h.host):$(h.port)"
+_auth_url(h::Hub, url::AbstractString = _hub_url(h)) =
+    isempty(h.auth_token) ? String(url) : String(url) * (occursin('?', url) ? "&" : "?") *
+                                             "token=" * HTTP.URIs.escapeuri(h.auth_token)
 _esc(s) = replace(String(s), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;")
 
 # A unique id from the filename (deduped against the registry).
@@ -249,4 +254,3 @@ function _path_completions(q::AbstractString; limit::Int = 500)
     sort!(keep; by = p -> ((endswith(p, '/') || endswith(p, '\\')) ? 0 : (endswith(p, ".jl") ? 1 : 2), lowercase(p)))
     return (items = first(keep, limit), truncated = length(keep) > limit)
 end
-

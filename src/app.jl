@@ -108,12 +108,15 @@ end
 
 # ── Hub probe / attach ─────────────────────────────────────────────────────────
 
+_hub_headers(extra::Vector{Pair{String,String}} = Pair{String,String}[]) =
+    isempty(_TOKEN[]) ? extra : [extra...; "Authorization" => "Bearer $(_TOKEN[])"]
+
 # Is a hub already answering on our port? (Kaimon extension or another `slate`.)
 # Must be checked BEFORE `_hub()` so we never bind-clash; a 200 on /api/notebooks
 # distinguishes a real hub from some unrelated service squatting the port.
 function _hub_running()
     r = try
-        HTTP.get(_base() * "/api/notebooks"; retry = false, status_exception = false)
+        HTTP.get(_base() * "/api/notebooks", _hub_headers(); retry = false, status_exception = false)
     catch
         return false
     end
@@ -149,7 +152,10 @@ function _own_hub!()
     _reap_orphan_workers!()
     ReportEngine._reap_orphan_ssh!()   # …and any ssh tunnel/master procs a hard-killed prior hub orphaned
     atexit(on_shutdown)          # backstop — cleanup! also stops the hub on a clean quit
-    _hub()
+    h = _hub()
+    if !isempty(h.auth_token)
+        println("  Slate access URL: ", NotebookServer._auth_url(h, _base()))
+    end
     return nothing
 end
 
@@ -159,7 +165,7 @@ _fetch_notebooks(mode::Symbol) =
         h = _HUB[]
         h === nothing ? Any[] : NotebookServer._notebooks_json(h)
     else
-        r = HTTP.get(_base() * "/api/notebooks"; retry = false)
+        r = HTTP.get(_base() * "/api/notebooks", _hub_headers(); retry = false)
         JSON.parse(String(r.body))
     end
 
@@ -168,9 +174,10 @@ function _open_notebook_url(mode::Symbol, path::AbstractString)
     path = abspath(expanduser(path))
     ReportEngine.ensure_notebook_file!(path)
     if mode == :owner
-        return "$(_base())/n/$(open_notebook!(_hub(), path))"
+        h = _hub()
+        return NotebookServer._auth_url(h, "$(_base())/n/$(open_notebook!(h, path))")
     end
-    r = HTTP.post(_base() * "/api/open", ["Content-Type" => "application/json"],
+    r = HTTP.post(_base() * "/api/open", _hub_headers(["Content-Type" => "application/json"]),
                   JSON.json(Dict("path" => path)); retry = false)
     return _base() * String(get(JSON.parse(String(r.body)), "url", "/"))
 end
@@ -342,7 +349,7 @@ function _close_selected!(m::SlateModel)
                 h = _HUB[]
                 h === nothing || close_notebook!(h, id)
             else
-                HTTP.post(_base() * "/api/close", ["Content-Type" => "application/json"],
+                HTTP.post(_base() * "/api/close", _hub_headers(["Content-Type" => "application/json"]),
                           JSON.json(Dict("path" => path)); retry = false)
             end
             _refresh!(m)
@@ -672,12 +679,17 @@ Usage:
                         registered (default is to WAIT for the extension's hub)
   slate --port <n>      run the hub on port <n> for this launch (one-off; to set
                         it durably press [p] in the TUI or set KAIMONSLATE_PORT)
+  slate --host <addr>   listen on an address (e.g. 0.0.0.0); non-loopback binds
+                        are token-protected and generate a token when omitted
+  slate --token <token> set the access token (prefer KAIMONSLATE_TOKEN in scripts)
   slate --status        print the hub status and open notebooks, then exit
                         (exit code 0 = hub up, 1 = no hub)
   slate -h | --help     show this help
 
 Environment:
   KAIMONSLATE_PORT      hub port — overrides the persisted [p] setting; else 8765
+  KAIMONSLATE_HOST      bind address — default 127.0.0.1
+  KAIMONSLATE_TOKEN     access token; generated automatically for network binds
   KAIMONSLATE_NO_OPEN   =1 → never open a browser
 """
 
@@ -713,10 +725,13 @@ function _app_main(args::Vector{String})::Int
     file = nothing
     own = false
     port_arg = nothing
-    want_port = false
+    host_arg = nothing
+    token_arg = nothing
+    want_value = nothing
     for a in args
-        if want_port
-            want_port = false; port_arg = a
+        if want_value !== nothing
+            want_value == :port ? (port_arg = a) : want_value == :host ? (host_arg = a) : (token_arg = a)
+            want_value = nothing
         elseif a in ("-h", "--help")
             print(_APP_HELP)
             return 0
@@ -725,9 +740,17 @@ function _app_main(args::Vector{String})::Int
         elseif a == "--own"
             own = true
         elseif a == "--port"
-            want_port = true                       # value is the next argument
+            want_value = :port
+        elseif a == "--host"
+            want_value = :host
+        elseif a == "--token"
+            want_value = :token
         elseif startswith(a, "--port=")
             port_arg = a[length("--port=")+1:end]
+        elseif startswith(a, "--host=")
+            host_arg = a[length("--host=")+1:end]
+        elseif startswith(a, "--token=")
+            token_arg = a[length("--token=")+1:end]
         elseif startswith(a, "-")
             println(stderr, "slate: unknown option '$a'\n")
             print(stderr, _APP_HELP)
@@ -739,8 +762,8 @@ function _app_main(args::Vector{String})::Int
             return 2
         end
     end
-    if want_port
-        println(stderr, "slate: --port needs a value (e.g. --port 8080)")
+    if want_value !== nothing
+        println(stderr, "slate: --$(want_value) needs a value")
         return 2
     end
     if port_arg !== nothing
@@ -751,6 +774,12 @@ function _app_main(args::Vector{String})::Int
         end
         _PORT[] = p                                # this run only — highest precedence; not persisted
     end
+    if host_arg !== nothing
+        h = strip(String(host_arg))
+        isempty(h) && (println(stderr, "slate: --host cannot be empty"); return 2)
+        _HOST[] = h
+    end
+    token_arg !== nothing && (_TOKEN[] = strip(String(token_arg)))
     if _maybe_onboard!()
         # Kaimon scans for extensions dynamically, so the entry we just wrote is picked up
         # without a restart. Don't exit — fall through to `:waiting`, where the TUI polls for
