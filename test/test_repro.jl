@@ -301,6 +301,74 @@ end
         @test occursin("path = \"local/Foo\"", man)
         @test !occursin("/authors/abs/path/Foo", man)
     end
+
+    # Re-exporting over an app's folder is the documented way to UPDATE it (the generated README
+    # says so). A durable install used to be reused on sight of `.slatebundle.json`, whatever it
+    # contained, so the update never landed and the app served the old notebook indefinitely —
+    # with nothing on screen to say so. The install is stamped with its bundle's digest now.
+    @testset "a durable install tracks its bundle" begin
+        # v1 → a fresh install dir.
+        cells1 = "#%% code id=a\nx = 1\n"
+        b1 = _make_bundle_b64(proj, [(name = "Foo", source = localpkg)], "demo.jl", cells1)
+        sj = joinpath(mktempdir(), "demo.standalone.jl")
+        write(sj, cells1 * "\n" * _bundle_footer(b1) * "\n")
+        inst = joinpath(mktempdir(), "app")
+        withenv("SLATE_INSTALL_DIR" => inst) do
+            r1 = _reconstruct_bundle!(sj)
+            @test r1.fresh && r1.install
+            @test _read_bundle_stamp(inst).sha == _bundle_sha(b1)
+            @test occursin("x = 1", read(joinpath(inst, "demo.jl"), String))
+
+            # Re-running with the SAME bundle is a pure reuse — no re-extraction.
+            @test !_reconstruct_bundle!(sj).fresh
+
+            # Things the app accumulated beside its bundle, which an update must not destroy.
+            mkpath(joinpath(inst, "data"))
+            write(joinpath(inst, "data", "saved.csv"), "user,data\n")
+            write(joinpath(inst, "stale.jl"), "# carried by v1, dropped in v2\n")
+            _write_bundle_stamp!(inst, _read_bundle_stamp(inst).sha,
+                                 vcat(_read_bundle_stamp(inst).files, ["stale.jl"]))
+
+            # v2 written over the same folder → the install refreshes in place.
+            cells2 = "#%% code id=a\nx = 2\n"
+            b2 = _make_bundle_b64(proj, [(name = "Foo", source = localpkg)], "demo.jl", cells2)
+            write(sj, cells2 * "\n" * _bundle_footer(b2) * "\n")
+            r2 = _reconstruct_bundle!(sj)
+            @test r2.fresh && r2.install
+            @test _read_bundle_stamp(inst).sha == _bundle_sha(b2)
+            @test occursin("x = 2", read(joinpath(inst, "demo.jl"), String))   # the update actually landed
+            @test read(joinpath(inst, "data", "saved.csv"), String) == "user,data\n"  # user data survives
+            @test !ispath(joinpath(inst, "stale.jl"))    # a file v2 no longer carries is not left behind
+            @test isfile(joinpath(inst, "Project.toml")) && isfile(joinpath(inst, ".slatebundle.json"))
+        end
+    end
+
+    # A repo-rooted install is a real git checkout the reader may have committed to, so a changed
+    # bundle must NOT be copied over it — it is left alone and reported instead.
+    @testset "a repo-rooted install is never overwritten in place" begin
+        repo = mktempdir(); mkpath(joinpath(repo, "notebooks"))
+        write(joinpath(repo, "Project.toml"), "name=\"R\"\nuuid=\"00000000-0000-0000-0000-0000000000ff\"\n")
+        write(joinpath(repo, "Manifest.toml"), "manifest_format=\"2.0\"\n")
+        write(joinpath(repo, "notebooks", "nb.jl"), "#%% code id=a\nx=1\n")
+        for c in (`init -q`, `add -A`, `commit -q -m init`)
+            run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t $c`; stderr = devnull))
+        end
+        nbpath = joinpath(repo, "notebooks", "nb.jl")
+        cells = "#%% code id=a\nx=1\n"
+        sj = joinpath(mktempdir(), "nb.standalone.jl")
+        write(sj, cells * "\n" * _bundle_footer(_make_bundle_b64(repo, NamedTuple[], nbpath, cells)) * "\n")
+        inst = joinpath(mktempdir(), "checkout")
+        withenv("SLATE_INSTALL_DIR" => inst) do
+            @test _reconstruct_bundle!(sj).fresh
+            @test _install_mode(inst) == "repo-rooted"
+            @test isempty(_read_bundle_stamp(inst).files)   # no pointless inventory of the whole .git
+            write(joinpath(inst, "MY_WORK.txt"), "local edits\n")
+            _write_bundle_stamp!(inst, "0" ^ 64, String[])  # pretend the bundle moved on
+            r = @test_logs (:warn,) match_mode = :any _reconstruct_bundle!(sj)
+            @test !r.fresh                                  # refused, not refreshed
+            @test read(joinpath(inst, "MY_WORK.txt"), String) == "local edits\n"
+        end
+    end
 end
 
 # Make `git` discoverable even under a minimal GUI-launched PATH (macOS apps often omit

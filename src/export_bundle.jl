@@ -818,6 +818,70 @@ function _copy_tree_overlay!(dest::AbstractString, src::AbstractString)
     return dest
 end
 
+# ── Keeping a durable install in step with its bundle ───────────────────────────────────────────
+# An app is UPDATED by re-exporting over its folder — the generated README says exactly that. That
+# only works if the install can tell the bundle beside it has moved on, so stamp it with the bundle's
+# digest and the paths that extraction produced. Kept beside the coords rather than inside them: it
+# describes the EXTRACTION, not the project's layout, and an install written by an older Slate simply
+# has no stamp and refreshes itself once.
+_bundle_stamp_file(dir) = joinpath(dir, ".slatebundle.sha")
+function _read_bundle_stamp(dir::AbstractString)
+    f = _bundle_stamp_file(dir)
+    isfile(f) || return (sha = "", files = String[])
+    m = try; JSON.parse(read(f, String)); catch; Dict{String,Any}(); end
+    return (sha = String(get(m, "sha", "")), files = String[String(x) for x in get(m, "files", [])])
+end
+_write_bundle_stamp!(dir, sha, files) =
+    (try; write(_bundle_stamp_file(dir), JSON.json(Dict("sha" => sha, "files" => files))); catch; end; nothing)
+
+# Every file under `dir`, project-relative with `/` separators — what an extraction just laid down.
+function _tree_files(dir::AbstractString)
+    out = String[]
+    for (root, _, files) in walkdir(dir), f in files
+        rel = relpath(joinpath(root, f), dir)
+        push!(out, replace(rel, '\\' => '/'))
+    end
+    return out
+end
+
+# The extraction mode recorded in an install's coords (`_read_coords` doesn't carry it).
+function _install_mode(dir::AbstractString)
+    f = joinpath(dir, ".slatebundle.json")
+    isfile(f) || return ""
+    m = try; JSON.parse(read(f, String)); catch; Dict{String,Any}(); end
+    return String(get(m, "mode", ""))
+end
+
+# Land a re-exported bundle on an existing install. File-by-file: everything the bundle carries is
+# replaced, and everything the app accumulated BESIDE it — its datadir, saved results, memo cache —
+# is left exactly where it is, which is why this isn't just an `rm -rf` and re-extract. Files the
+# previous bundle carried and this one no longer does are removed, so a deleted source file doesn't
+# linger and get loaded; that's what the stamped file list is for. A repo-rooted bundle expands to a
+# real git checkout the user may have committed to, so it is refused rather than overwritten.
+# Returns whether the install was refreshed.
+function _refresh_install!(b64::AbstractString, dir::AbstractString, sha::AbstractString)
+    if _install_mode(dir) == "repo-rooted"
+        @warn "The bundle beside this app has changed, but its install is a git checkout — refusing " *
+              "to overwrite it. Expand the new bundle into a fresh directory to update." dir
+        return false
+    end
+    was = _read_bundle_stamp(dir).files
+    staging = mktempdir()
+    try
+        _extract_bundle!(b64, staging)
+        now = _tree_files(staging)
+        _copy_tree_overlay!(dir, staging)
+        for rel in setdiff(was, now)              # carried before, gone now → drop the leftover
+            try; rm(joinpath(dir, rel); force = true); catch; end
+        end
+        _write_bundle_stamp!(dir, sha, now)
+    finally
+        rm(staging; recursive = true, force = true)
+    end
+    @info "Updated the installed app from the re-exported bundle" dir
+    return true
+end
+
 # Content-addressed cache dir under the depot for a bundle payload, keyed by a SHA-256 of the
 # bundle bytes: identical content reuses the same extracted env (instant reopen), a changed
 # bundle lands in a fresh dir. Uses SHA (like history.jl) — NOT `hash`, which is non-cryptographic,
@@ -849,11 +913,23 @@ function _reconstruct_bundle!(jl_path::AbstractString)
     install = strip(get(ENV, "SLATE_INSTALL_DIR", ""))
     if !isempty(install)
         dir = abspath(expanduser(String(install)))
-        isfile(joinpath(dir, ".slatebundle.json")) && return (; _read_coords(dir)..., fresh = false, install = true)  # reuse
+        sha = _bundle_sha(b64)
+        if isfile(joinpath(dir, ".slatebundle.json"))
+            # Reuse only when the install was built from THIS bundle. It used to reuse unconditionally,
+            # which meant re-exporting over an app's folder — the documented way to update one — left it
+            # serving the old notebook indefinitely, with nothing on screen to say so.
+            _read_bundle_stamp(dir).sha == sha &&
+                return (; _read_coords(dir)..., fresh = false, install = true)
+            return (; _read_coords(dir)...,
+                    fresh = _refresh_install!(b64, dir, sha), install = true)
+        end
         (isdir(dir) && !isempty(readdir(dir))) &&
             error("SLATE_INSTALL_DIR is a non-empty directory that isn't a Slate install: $dir\n" *
                   "Choose an empty/new path, or remove it, and re-run.")
         _extract_bundle!(b64, dir)
+        # A repo-rooted install is a git checkout and is never refreshed in place, so don't inventory
+        # it — that would walk the whole `.git` and stamp tens of thousands of paths to no purpose.
+        _write_bundle_stamp!(dir, sha, _install_mode(dir) == "repo-rooted" ? String[] : _tree_files(dir))
         return (; _read_coords(dir)..., fresh = true, install = true)
     end
     dir = _bundle_cache_dir(b64)
