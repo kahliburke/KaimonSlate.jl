@@ -168,7 +168,7 @@ indices(s::Selection) = Int[c.index for c in s.items]
     UploadedFile
 
 A file a reader uploaded through a `FileUpload` control. `path` is a real path under the
-notebook's [`datadir`](@ref) — so it opens with `CSV.read`, `open`, `load`, anything — while
+notebook's `datadir()` — so it opens with `CSV.read`, `open`, `load`, anything — while
 `name` keeps what the file was called on the reader's machine.
 
 ```julia

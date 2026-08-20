@@ -2678,6 +2678,22 @@ function _bringup_broadcast(h, line::AbstractString)
     return nothing
 end
 
+"""
+    start_hub(; host = "127.0.0.1", port = 8765, app = false, appdefaults = Dict()) -> Hub
+
+Start one HTTP server that hosts many notebooks, and return the `Hub`. Notebooks are added and
+removed while it runs with [`open_notebook!`](@ref) and [`close_notebook!`](@ref); [`stop_hub`](@ref)
+shuts it down. This is the layer the `slate` app itself runs on — reach for it when you are embedding
+Slate in your own script rather than opening a single notebook with [`serve_notebook`](@ref).
+
+`host` defaults to loopback, so the hub is reachable only from this machine; bind `"0.0.0.0"` to
+serve a network. **There is no authentication at any bind address** — whatever can reach the port can
+drive every notebook on it.
+
+`app = true` serves in application mode: prose, results, figures and live controls, with the
+authoring routes refused server-side rather than merely hidden. `appdefaults` (build it with
+[`app_defaults`](@ref)) sets what a visitor sees before choosing for themselves.
+"""
 function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
                    appdefaults::AbstractDict = Dict{String,Any}())
     # Stamp the payload SHA the running hub code was loaded from — `_hub_src_stale()` compares the live

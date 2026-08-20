@@ -110,8 +110,28 @@ const _APP_SETTING_KEYS = Dict{String,String}(
     "scrollzoom" => "slateScrollZoom",   # percent; 0 = wheel never zooms a chart
     "wrapoutput" => "slateWrapOutput")   # true → wrap wide text output instead of scrolling it
 
-# Normalize whatever the caller passed (`theme = "daylight", fullwidth = true, pagewidth = 1400`)
-# into the localStorage keys the page uses. Unknown names are dropped rather than guessed at.
+"""
+    app_defaults(; theme, fullwidth, pagewidth, figwidth, scrollzoom, wrapoutput) -> Dict{String,Any}
+
+The presentation an app's visitor gets **before expressing a preference of their own**. Pass the
+result as `appdefaults` to [`export_app`](@ref) or [`start_server`](@ref).
+
+These are defaults, not enforcement: a visitor who has chosen keeps their choice, because the app's
+settings popover offers the same reader-facing subset and `localStorage` still wins.
+
+- `theme` — a Slate palette name (`"daylight"`, `"midnight"`, `"nord"`, …)
+- `fullwidth` — `true` spans the window instead of a constrained reading column
+- `pagewidth` / `figwidth` — px: the reading column, and a cap on rendered figures
+- `scrollzoom` — percent; `0` means the wheel never zooms a chart
+- `wrapoutput` — `true` wraps wide text output instead of scrolling it
+
+An unrecognised name is dropped rather than guessed at, so a typo silently has no effect rather than
+being applied to the wrong setting.
+
+```julia
+export_app(nb, "dist/myapp"; appdefaults = app_defaults(theme = "midnight", pagewidth = 1400))
+```
+"""
 function app_defaults(; kw...)
     d = Dict{String,Any}()
     for (k, v) in pairs(kw)

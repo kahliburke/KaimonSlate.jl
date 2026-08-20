@@ -527,7 +527,7 @@ A button that saves a generated result to the reader's disk. `name` is the filen
 Reading a table on screen is not the same as leaving with it. A notebook author can always tell
 someone to copy the output, but an app's reader has no cell to run and no filesystem to look in —
 so anything they are meant to keep needs an explicit way out. This is that way out: `data` goes
-through [`save_asset`](@ref), and the button hands the reader those exact bytes.
+through `save_asset`, and the button hands the reader those exact bytes.
 
 `data` is whatever `save_asset` accepts (a `String`, `Vector{UInt8}`, numeric array, or a JSON-able
 value); pass `mime` when the extension doesn't imply it. Works live, in a standalone export, and on
