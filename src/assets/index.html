@@ -101,6 +101,13 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .toast.ok{border-color:#2f5a3c;} .toast.err{border-color:#5a2a35;}
 .importmodal{max-width:640px;}
 .imrow{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;}
+/* New-notebook modal. The path field is the same completer as the opener, so it reuses
+   .pathwrap/.comp; the dropdown must escape the modal box, hence no overflow clipping here. */
+.newnbmodal{max-width:640px;position:relative;}
+.newnbmodal .imrow{margin-bottom:8px;}
+.nnhint{color:#6a7090;font-size:.78rem;min-height:1.1em;margin:2px 0 14px;word-break:break-all;}
+.nnhint.err{color:#e57575;}
+.nnhint code{color:#9fd0f5;font-family:Menlo,monospace;}
 /* Remotes manager modal */
 .remotesmodal{max-width:640px;position:relative;}
 /* Standard top-right modal close (✕) — consistent across modals; Esc also closes. `.modal .modalx`
@@ -448,6 +455,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       <input type="checkbox" id="openlaunch" checked onchange="_saveLaunchPref()"/> Launch worker on open
     </label>
     <button id="openbtn">Open</button>
+    <button id="newnbbtn" title="Create an empty notebook at a path you choose">＋ New notebook</button>
     <button id="uploadbtn" title="Upload from this computer — a .jl notebook or bundle, or a runnable .html export">⬆ Upload</button>
     <input type="file" id="uploadin" accept=".jl,.html,.htm" style="display:none"/>
   </div>
@@ -478,6 +486,19 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 <!-- Remotes modal — rendered by the remotes.js Preact island (host setup + SSE preflight + known-hosts
      list + xfer settings + the region focus view). -->
 <div class="modal-bg" id="remotesbg"></div>
+<div class="modal-bg" id="newnbbg"><div class="modal newnbmodal">
+  <button class="modalx" id="nnx" title="Close">✕</button>
+  <div class="msg" style="margin-bottom:12px"><strong>New notebook</strong> <span style="color:#7a82a4;font-weight:400">— choose where it lives</span></div>
+  <div class="imrow"><label>Path</label>
+    <div class="pathwrap">
+      <input id="nnpath" autocomplete="off" spellcheck="false"
+             placeholder="~/path/to/notebook.jl — Tab to complete a directory"/>
+      <ul id="nncomp" class="comp"></ul>
+    </div>
+  </div>
+  <div class="nnhint" id="nnhint"></div>
+  <div class="row"><button id="nncancel">Cancel</button><button id="nncreate" class="primary">Create &amp; open</button></div>
+</div></div>
 <div class="modal-bg" id="importbg"><div class="modal importmodal">
   <div class="msg"><strong>Self-contained notebook</strong> <span style="color:#7a82a4;font-weight:400">— run it now (temporary), or import into a project you own</span></div>
   <div class="imrow"><label>Source</label><span id="imsrc" class="impath"></span></div>
@@ -489,7 +510,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 </div></div>
 <script>
 (function(){
-  var inp=document.getElementById('pathin'), comp=document.getElementById('comp'), items=[], sel=-1, moreTrunc=false;
+  var inp=document.getElementById('pathin'), comp=document.getElementById('comp');
   var modalBg=document.getElementById('modalbg'), modalMsg=document.getElementById('modalmsg'),
       modalRow=document.getElementById('modalrow'), loadEl=document.getElementById('loading'),
       loadMsg=document.getElementById('lmsg'), _resolve=null;
@@ -614,52 +635,133 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   // The Remotes modal (host setup + SSE preflight + known-hosts list + xfer + region focus view) is a
   // Preact island now (remotes.js). It shares the dark confirm dialog with the notebook side:
   window.confirmDark=confirmDark;
-  function render(){var html=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
-    if(moreTrunc)html+='<li class="more">… more entries — keep typing to filter</li>';
-    comp.innerHTML=html;comp.style.display=(items.length||moreTrunc)?'block':'none';}
-  function fetchComp(){return fetch('/api/path-complete?q='+encodeURIComponent(inp.value))
-    .then(function(r){return r.json();}).then(function(d){items=d.completions||[];moreTrunc=!!d.truncated;sel=-1;render();});}
-  function commonPrefix(a){if(!a.length)return '';var p=a[0];for(var k=0;k<a.length;k++){var s=a[k],i=0;
-    while(i<p.length&&i<s.length&&p[i]===s[i])i++;p=p.slice(0,i);}return p;}
+  // ── Path completion, shared ─────────
+  // Binds an <input> + <ul> pair to /api/path-complete: Tab completes to the common prefix then
+  // cycles, arrows move the highlight, `/` descends into a directory, Enter calls `onSubmit`.
+  // Descending into a directory is handled in here, so a consumer only ever has to think about
+  // files. `active()` is the suggestion Enter would act on (highlighted, else the first) — the
+  // opener acts on it; the New-notebook dialog deliberately doesn't (see nnSubmit).
+  function makeCompleter(inp, comp, onSubmit){
+    var items=[], sel=-1, moreTrunc=false, t;
+    function render(){var html=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
+      if(moreTrunc)html+='<li class="more">… more entries — keep typing to filter</li>';
+      comp.innerHTML=html;comp.style.display=(items.length||moreTrunc)?'block':'none';}
+    function fetchComp(){return fetch('/api/path-complete?q='+encodeURIComponent(inp.value))
+      .then(function(r){return r.json();}).then(function(d){items=d.completions||[];moreTrunc=!!d.truncated;sel=-1;render();});}
+    function commonPrefix(a){if(!a.length)return '';var p=a[0];for(var k=0;k<a.length;k++){var s=a[k],i=0;
+      while(i<p.length&&i<s.length&&p[i]===s[i])i++;p=p.slice(0,i);}return p;}
+    inp.addEventListener('input',function(){clearTimeout(t);t=setTimeout(fetchComp,110);});
+    // Completion follows focus: load on focus, hide on blur (small delay so a
+    // click on a suggestion lands first).
+    inp.addEventListener('focus',function(){fetchComp();});
+    inp.addEventListener('blur',function(){setTimeout(function(){comp.style.display='none';},120);});
+    inp.addEventListener('keydown',function(e){
+      if(e.key==='Tab'){e.preventDefault();
+        if(!items.length)return;
+        if(e.shiftKey){sel=sel<=0?items.length-1:sel-1;inp.value=items[sel];render();return;}   // ⇧Tab cycles backwards
+        if(items.length===1){inp.value=items[0];fetchComp();}
+        else{var cp=commonPrefix(items);
+          if(cp.length>inp.value.length){inp.value=cp;fetchComp();}
+          else{sel=(sel+1)%items.length;inp.value=items[sel];render();}}}
+      else if(e.key==='/'||e.key==='\\'){var idx=sel>=0?sel:(items.length?0:-1);   // commit a dir + descend
+        if(idx>=0&&isdir(items[idx])){e.preventDefault();inp.value=items[idx];fetchComp();}}
+      else if(e.key==='ArrowDown'){e.preventDefault();if(items.length){sel=(sel+1)%items.length;inp.value=items[sel];render();}}
+      else if(e.key==='ArrowUp'){e.preventDefault();if(items.length){sel=(sel-1+items.length)%items.length;inp.value=items[sel];render();}}
+      else if(e.key==='Enter'){e.preventDefault();onSubmit();}
+      else if(e.key==='Escape'){items=[];render();}});
+    // A click commits the suggestion: a directory descends, a file becomes the highlighted
+    // item and submits — so `active()` reports what was clicked, not items[0].
+    comp.addEventListener('mousedown',function(e){var li=e.target.closest('li');if(!li||li.classList.contains('more'))return;e.preventDefault();
+      var i=+li.dataset.i, pick=items[i];inp.value=pick;inp.focus();
+      if(isdir(pick)){fetchComp();return;}
+      sel=i;render();onSubmit();});
+    return {refresh:fetchComp,
+            active:function(){var i=sel>=0?sel:(items.length?0:-1);return i>=0?items[i]:null;},
+            clear:function(){items=[];sel=-1;moreTrunc=false;render();}};
+  }
   // Enter / Open: act on the active suggestion (highlighted, else the first),
   // else on the typed text. Directories are descended (never opened); a new
   // path is confirmed and offered a .jl extension before creating.
   async function submit(){
-    var idx = sel>=0?sel:(items.length?0:-1);
-    if(idx>=0){var pick=items[idx];inp.value=pick;
-      if(isdir(pick)){fetchComp();return;}     // commit dir + show subpaths, don't open
-      openMaybeStandalone(pick);return;}       // file suggestion → open (or offer import)
+    var pick=openComp.active();
+    if(pick){inp.value=pick;
+      if(isdir(pick)){openComp.refresh();return;}   // commit dir + show subpaths, don't open
+      openMaybeStandalone(pick);return;}            // file suggestion → open (or offer import)
     var p=inp.value.trim(); if(!p)return;
     var info=await fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();});
-    if(info.isdir){if(!isdir(p))inp.value=p+window.PLATFORM.sep;fetchComp();return;} // never open a directory
+    if(info.isdir){if(!isdir(p))inp.value=p+window.PLATFORM.sep;openComp.refresh();return;} // never open a directory
     if(info.isfile){_dispatchOpen(p, info);return;}                                 // route by kind (bundle/notebook/plain/html)
     if(!await confirmDark('Create new notebook “'+p+'”?','Create'))return;          // confirm new file
     if(p.slice(-3).toLowerCase()!=='.jl'){ if(await confirmDark('“'+p+'” has no .jl extension. Add it?','Add .jl'))p=p+'.jl'; }
     openPath(p);
   }
-  var t;inp.addEventListener('input',function(){clearTimeout(t);t=setTimeout(fetchComp,110);});
-  // Completion follows focus: load on focus, hide on blur (small delay so a
-  // click on a suggestion lands first).
-  inp.addEventListener('focus',function(){fetchComp();});
-  inp.addEventListener('blur',function(){setTimeout(function(){comp.style.display='none';},120);});
-  inp.addEventListener('keydown',function(e){
-    if(e.key==='Tab'){e.preventDefault();
-      if(!items.length)return;
-      if(e.shiftKey){sel=sel<=0?items.length-1:sel-1;inp.value=items[sel];render();return;}   // ⇧Tab cycles backwards
-      if(items.length===1){inp.value=items[0];fetchComp();}
-      else{var cp=commonPrefix(items);
-        if(cp.length>inp.value.length){inp.value=cp;fetchComp();}
-        else{sel=(sel+1)%items.length;inp.value=items[sel];render();}}}
-    else if(e.key==='/'||e.key==='\\'){var idx=sel>=0?sel:(items.length?0:-1);   // commit a dir + descend
-      if(idx>=0&&isdir(items[idx])){e.preventDefault();inp.value=items[idx];fetchComp();}}
-    else if(e.key==='ArrowDown'){e.preventDefault();if(items.length){sel=(sel+1)%items.length;inp.value=items[sel];render();}}
-    else if(e.key==='ArrowUp'){e.preventDefault();if(items.length){sel=(sel-1+items.length)%items.length;inp.value=items[sel];render();}}
-    else if(e.key==='Enter'){e.preventDefault();submit();}
-    else if(e.key==='Escape'){items=[];render();}});
-  comp.addEventListener('mousedown',function(e){var li=e.target.closest('li');if(!li||li.classList.contains('more'))return;e.preventDefault();
-    var pick=items[+li.dataset.i];inp.value=pick;inp.focus();
-    isdir(pick)?fetchComp():openMaybeStandalone(pick);});   // click dir = descend, click file = open/import
+  var openComp=makeCompleter(inp, comp, submit);
   document.getElementById('openbtn').onclick=function(){submit();};
+  // ── New notebook ─────────
+  // Typing a fresh path into the opener has always created a notebook, but nothing said so. This
+  // is the same act made discoverable: a dialog that starts you in the last directory you opened
+  // from, with a free "untitled" name pre-selected, and the same path completion.
+  var newNbBg=document.getElementById('newnbbg'), nnPath=document.getElementById('nnpath'),
+      nnComp=document.getElementById('nncomp'), nnHint=document.getElementById('nnhint');
+  function nnSetHint(msg,err){nnHint.innerHTML=msg||'';nnHint.className='nnhint'+(err?' err':'');}
+  // Suggest the first free untitled[-N].jl in `dir`, and pre-select just the stem so typing
+  // renames without disturbing the directory.
+  function nnSuggest(dir){
+    return fetch('/api/path-complete?q='+encodeURIComponent(dir+'untitled'))
+      .then(function(r){return r.json();})
+      .then(function(d){
+        var taken={};(d.completions||[]).forEach(function(c){taken[c.toLowerCase()]=1;});
+        var n=1,p;do{p=dir+'untitled'+(n>1?('-'+n):'')+'.jl';n++;}while(taken[p.toLowerCase()]&&n<200);
+        return p;})
+      .catch(function(){return dir+'untitled.jl';});
+  }
+  function openNewNb(){
+    var dir='';try{dir=localStorage.getItem('slateLastDir')||'';}catch(e){}
+    if(!dir) dir='~'+window.PLATFORM.sep;
+    nnSetHint('');nnPath.value=dir;newNbBg.classList.add('show');
+    nnSuggest(dir).then(function(p){
+      nnPath.value=p;nnSetHint('Creates <code>'+esc(p)+'</code>');nnPath.focus();
+      try{nnPath.setSelectionRange(dir.length,p.length-3);}catch(e){nnPath.select();}   // select the stem, not .jl
+    });
+  }
+  function closeNewNb(){newNbBg.classList.remove('show');nnComp0.clear();}
+  // Create acts on the TYPED text, never on the highlighted suggestion — in a create dialog,
+  // Enter silently retargeting to a nearby existing file would be the wrong answer. Tab and
+  // clicking still accept suggestions, which is how you get into the right directory.
+  async function nnSubmit(){
+    var p=nnPath.value.trim(); if(!p){nnSetHint('Give the notebook a path.',true);return;}
+    if(isdir(p)){nnSetHint('That’s a directory — add a file name.',true);nnComp0.refresh();return;}
+    // Ask rather than append silently — same question, same wording, as typing a new path into the
+    // opener. Declining is a real answer: a notebook doesn't have to be called .jl.
+    if(p.slice(-3).toLowerCase()!=='.jl'){
+      if(await confirmDark('“'+p+'” has no .jl extension. Add it?','Add .jl'))p=p+'.jl';
+    }
+    var info=await fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();})
+      .catch(function(){return null;});
+    if(!info){nnSetHint('Could not reach the server.',true);return;}
+    if(info.isdir){nnPath.value=p+window.PLATFORM.sep;nnComp0.refresh();return;}
+    if(info.isfile){    // an existing file isn't an error — offer the open it clearly wants to be
+      if(!await confirmDark('“'+baseName(p)+'” already exists. Open it instead?','Open'))return;
+      closeNewNb();_dispatchOpen(p,info);return;}
+    closeNewNb();openPath(p);
+  }
+  var nnComp0=makeCompleter(nnPath, nnComp, nnSubmit);
+  // Say what Create will do, so the implicit ".jl" and the directory-vs-file distinction are
+  // visible before you commit rather than as a surprise afterwards.
+  nnPath.addEventListener('input',function(){
+    var p=nnPath.value.trim();
+    if(!p){nnSetHint('');return;}
+    if(isdir(p)){nnSetHint('Pick a file name inside <code>'+esc(p)+'</code>');return;}
+    nnSetHint(p.slice(-3).toLowerCase()==='.jl'
+      ? 'Creates <code>'+esc(p)+'</code>'
+      : 'Creates <code>'+esc(p)+'</code> — you’ll be asked about adding <code>.jl</code>');
+  });
+  document.getElementById('newnbbtn').onclick=openNewNb;
+  document.getElementById('nncreate').onclick=nnSubmit;
+  document.getElementById('nncancel').onclick=closeNewNb;
+  document.getElementById('nnx').onclick=closeNewNb;
+  newNbBg.addEventListener('mousedown',function(e){if(e.target===newNbBg)closeNewNb();});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&newNbBg.classList.contains('show')&&!modalBg.classList.contains('show'))closeNewNb();});
   // Upload a local file from the browser (this machine) — a .jl notebook/bundle or a runnable .html
   // export → the server saves it and we classify + open it via the normal flow (a self-contained
   // bundle routes through the import helper; a runnable HTML has its bundle extracted first).
