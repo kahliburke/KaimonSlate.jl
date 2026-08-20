@@ -602,8 +602,36 @@ window.chartRuntime = {
 // creating and destroying a chart div is Preact's keyed diff rather than a reconciler hand-written to
 // survive one. What is left is the inline case, where the placeholder is authored inside rendered
 // markdown and has no component around it.
+// ── "did this cell's chart output actually change?" — answered once, for every caller ───────────
+// A cell reaches the page over two transports (the `celldone:` push and the full state a mutating
+// request answers with) and through two render paths (Preact's effect and the imperative
+// `patchCells`), so `renderCharts` was entered several times per run with the SAME data. That was
+// invisible but not free: each entry stringifies the resolved option to compare it, and a real
+// figure's spec runs to ~100 KB.
+//
+// `c.echarts` is a fresh array whenever the data changed and the same array otherwise, so a
+// reference compare settles it without touching the specs. The generation is part of the key
+// because a theme switch disposes every instance and bumps it — identical specs must re-render then.
+// This replaces the per-cell compare `notebook.js` used to keep: recency (`rev`) and content
+// (`__slateOptSig`) are separate questions, both still load-bearing, and this is neither.
+const _lastCharts = new Map();                      // cell id -> {specs, gen}
+function _chartsUnchanged(c) {
+  const prev = _lastCharts.get(c.id);
+  if (!prev || prev.specs !== c.echarts || prev.gen !== window.chartRuntime.gen) return false;
+  // An inline `{{ echart(…) }}` placeholder is created by THIS function, not by a component, and the
+  // markdown around it may have just been re-rendered from under us — leaving a fresh, empty div. A
+  // cell is only skippable once every placeholder it has is backed by a live instance.
+  const inline = document.querySelectorAll('#cell-' + c.id + ' .ichart');
+  for (let i = 0; i < inline.length; i++) if (!inline[i]._inst) return false;
+  return true;
+}
+
 function renderCharts(c) {
   _registerAssets(c);                               // publish this cell's save_asset blobs → Slate.asset
+  // Assets first: they're keyed off the cell, not off its charts, so a spec-identical redelivery can
+  // still be carrying new ones.
+  if (_chartsUnchanged(c)) return;
+  _lastCharts.set(c.id, { specs: c.echarts, gen: window.chartRuntime.gen });
   const specs = c.echarts || [];
   // A code cell's chart DIVS belong to Preact (`EChartHost` in notebook.js) — but this function is
   // also called from the IMPERATIVE patch path (view.js `patchCells`), which updates a cell without

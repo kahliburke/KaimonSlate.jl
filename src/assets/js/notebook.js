@@ -461,7 +461,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     // compare, since a selection click or live-state tick re-renders with the SAME nbState (same cell
     // objects). Without this, every such re-render re-ran setOption on EVERY chart in the notebook
     // (a real CPU sink during slider drags). Data changes produce a fresh cell object → fresh array.
-    if (!_conflicted && !_stale && c.echarts !== last.current.echarts) { last.current.echarts = c.echarts; window.renderCharts(c); }
+    // Charts make that judgement themselves now (`_chartsUnchanged`, core.js), so that the imperative
+    // patch path gets it too rather than each caller keeping its own copy of the answer.
+    if (!_conflicted && !_stale) window.renderCharts(c);
     if (!_conflicted && !_stale && c.tables !== last.current.tables) { last.current.tables = c.tables; window.renderTables(c); }
     if (!_conflicted && !_stale && c.animations !== last.current.animations) { last.current.animations = c.animations; window.renderAnimation && window.renderAnimation(c); }
     if ((c.binds && c.binds.length) || (c.controls && c.controls.length)) window.syncControlValues({ cells: [c] });
