@@ -140,6 +140,16 @@ end
 # `showable`/`show` would miss them and yield an empty chunk (notably on a cell's
 # first run). `invokelatest` pins the dispatch to the latest world.
 function _rich_scan!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
+    # Lazily load this type's front-end, the display counterpart of the `@bind` path's call in
+    # `_do_bind`. Without it `required_assets` only ever fires for a BOUND value, so a type that is
+    # merely RETURNED — a `slate_render` component, or a markdown fence's value — emits a mount
+    # placeholder for a kind whose module was never registered, and renders nothing at all, silently.
+    # Once per type per process (a set lookup after the first), and a no-op for any type without a
+    # `required_assets` method — which is every built-in and every plain value.
+    try
+        SlateExtensionsBase.ensure_widget_assets!(typeof(x))
+    catch
+    end
     for m in _RICH_MIMES
         if Base.invokelatest(showable, m, x)
             bytes = Base.invokelatest(_mime_bytes, MIME(m), x)
