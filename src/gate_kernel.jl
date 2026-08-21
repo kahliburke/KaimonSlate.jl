@@ -153,6 +153,13 @@ const _INFRA_ENV_ROOT = joinpath(get(DEPOT_PATH, 1, joinpath(homedir(), ".julia"
                                  "scratchspaces", "kaimonslate-infra")
 const _INFRA_ENV_LOCK = ReentrantLock()
 
+# The rewritten path below lands inside a TOML BASIC string, where `\` is the ESCAPE character. A
+# Windows path therefore can't be substituted in raw: `C:\Users\…` puts `\U` in front of the parser,
+# which reads it as TOML's 8-hex-digit unicode escape, finds `sers\Use`, and rejects the whole file
+# with "invalid unicode scalar" — before a single package can be resolved from it. Unix paths have no
+# backslashes, so this is invisible on macOS/Linux and fatal on every Windows install.
+_toml_escape(s::AbstractString) = replace(s, '\\' => "\\\\", '"' => "\\\"")
+
 function _infra_env()::String
     proj = joinpath(_INFRA_ENV, "Project.toml")
     isfile(proj) || return _INFRA_ENV
@@ -171,7 +178,8 @@ function _infra_env()::String
         buildlog = joinpath(dir, "build.log")
         try
             mkpath(dir)
-            write(joinpath(dir, "Project.toml"), replace(ptoml, "../../lib/SlateExtensionsBase" => seb))
+            write(joinpath(dir, "Project.toml"),
+                  replace(ptoml, "../../lib/SlateExtensionsBase" => _toml_escape(seb)))
             code = "using Pkg; Pkg.instantiate()"   # no Manifest ⇒ resolve for THIS Julia, then install
             open(buildlog, "w") do io
                 run(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$dir -e $code`;

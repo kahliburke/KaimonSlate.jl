@@ -3,6 +3,7 @@
 # sends the reader off to check firewalls while the real cause sits in the worker's log.
 using ReTest
 using KaimonSlate
+using TOML
 const RE = KaimonSlate.ReportEngine
 
 # `wait_s = 0` throughout: the grace period exists so a log line still in the pump can land, and
@@ -118,6 +119,34 @@ const RE = KaimonSlate.ReportEngine
         @testset "the reason is capped so it can ride in an error message" begin
             log = tempname(); write(log, "ERROR: " * repeat("x", 5000) * "\n")
             @test length(RE._env_build_error(log)) <= 300
+        end
+
+        # A WINDOWS path substituted into the infra env's `[sources]` entry. That entry is a TOML basic
+        # string, so `\` escapes: `C:\Users\…` hands the parser `\U`, TOML reads an 8-hex-digit unicode
+        # escape, and the generated Project.toml is rejected outright — no package resolves and the
+        # worker dies. Unix paths carry no backslashes, so this was invisible off Windows and fatal on
+        # it (reported from a Windows install, 2026-08). Asserted by ROUND-TRIP, so it fails on any host.
+        @testset "a Windows path survives the [sources] rewrite" begin
+            win = "C:\\Users\\User\\.julia\\packages\\KaimonSlate\\7osCm\\lib\\SlateExtensionsBase"
+            tmpl = """
+                   [deps]
+                   SlateExtensionsBase = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
+
+                   [sources]
+                   SlateExtensionsBase = {path = "../../lib/SlateExtensionsBase"}
+                   """
+            good = tempname()
+            write(good, replace(tmpl, "../../lib/SlateExtensionsBase" => RE._toml_escape(win)))
+            @test TOML.parsefile(good)["sources"]["SlateExtensionsBase"]["path"] == win   # native path back out
+
+            # And prove the test bites: the unescaped substitution is what shipped, and it does not parse.
+            bad = tempname()
+            write(bad, replace(tmpl, "../../lib/SlateExtensionsBase" => win))
+            @test_throws Exception TOML.parsefile(bad)
+
+            # A POSIX path is unchanged — the escape must not disturb the platform that was already fine.
+            posix = "/home/u/.julia/packages/KaimonSlate/7osCm/lib/SlateExtensionsBase"
+            @test RE._toml_escape(posix) == posix
         end
 
         # The predicate that decides fail-closed vs fall-back. A Project.toml alone resolves nothing;
