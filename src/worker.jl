@@ -1848,7 +1848,8 @@ page to mirror: `{frontend:[{id, js, esm, kind}]}` (widget renderers + editor ex
 server pulls this once per run drain and injects the scripts into the page. Empty when no such package
 is loaded."
 function __slate_extension_manifest()
-    out = Dict{String,Any}("frontend" => Dict{String,Any}[], "assets" => Dict{String,Any}[])
+    out = Dict{String,Any}("frontend" => Dict{String,Any}[], "assets" => Dict{String,Any}[],
+                           "imports" => Dict{String,Any}[], "fences" => String[])
     try
         m = inprocess_extension_manifest(_NS[])
         out["frontend"] = Dict{String,Any}[Dict{String,Any}(
@@ -1856,6 +1857,14 @@ function __slate_extension_manifest()
             for e in m.frontend]
         out["assets"] = Dict{String,Any}[Dict{String,Any}(
             "pkg" => String(e.pkg), "dir" => String(e.dir)) for e in m.assets]
+        # Read separately (and only if present): a notebook project pinning an older SEB yields a
+        # manifest without this field, and reading it inside the block above would drop `frontend` and
+        # `assets` too — every extension's front-end silently vanishing over one missing seam.
+        if hasproperty(m, :imports)
+            out["imports"] = Dict{String,Any}[Dict{String,Any}(
+                "spec" => String(e.spec), "url" => String(e.url)) for e in m.imports]
+        end
+        hasproperty(m, :fences) && (out["fences"] = String[String(f) for f in m.fences])
     catch
     end
     return out

@@ -205,6 +205,19 @@ return that URL PATH (root-relative, e.g. `/served/<hash>`). Registering the sam
 same path (dedup). The bytes live in the worker; the hub fetches them lazily by hash and caches — so this
 is safe to call from a hot render path (it's just a `Dict` insert). Use for a large shared runtime a page
 loads once (a WASM blob, a JS bundle) rather than re-inlining it per output.
+
+!!! warning "Live only — no export path"
+    That URL is answered by the RUNNING hub, out of the LIVE worker's memory. A static export has
+    neither, so a served URL 404s in an exported or published page — and unlike [`provide_assets!`](@ref)
+    (page-local siblings for a site, `data:` for a standalone) nothing rewrites it.
+
+    This suits its intended user, a session-bound output ([`slate_live_render`](@ref)), which is
+    re-rendered per browser connection and never replayed into a static page regardless. For bytes a
+    SELF-CONTAINED output needs to keep after export, use `provide_assets!` instead.
+
+    Note also that this registry is filled at RENDER time, not at load time: unlike the `__init__` /
+    `__slate_frontend` registrations, it does not survive a worker restart until the cell that produced
+    the bytes runs again.
 """
 function provide_served_asset!(bytes::AbstractVector{UInt8}; mime::AbstractString = "application/octet-stream")
     data = Vector{UInt8}(bytes)
@@ -478,6 +491,52 @@ so callers can't mutate the registry. See [`extension_manifest`](@ref) for what 
 """
 asset_dirs() = copy(_ASSETS)
 
+# ── Package-declared ES module imports ────────────────────────────────────────
+# The package-level counterpart of a notebook's `@use`: an extension that ships front-end code
+# importing a third-party module declares the specifier ONCE here, instead of every notebook author
+# writing the same `@use` line. Merged UNDER the notebook's own `@use` map, so an author can always
+# pin a different build of the same specifier.
+const _IMPORTS_LOCK = ReentrantLock()
+const _IMPORTS = Dict{String,String}()   # bare specifier => url
+
+"""
+    provide_import!(spec, url) -> url
+
+Declare a browser ES-module import for every notebook that loads this package — the package-level
+counterpart of a notebook's `@use`. Front-end code the extension ships (a component module, a
+[`provide_frontend!`](@ref) script) can then `import` the bare `spec` both live and in an export,
+with nothing declared in the notebook.
+
+Last-wins and idempotent, so it belongs in `__init__` or the per-notebook `__slate_frontend` hook. A
+notebook's own `@use` of the same specifier WINS, so an author can always override the build.
+
+Pin an exact version rather than a range: an export resolves the URL to bytes, and a moving target
+means two exports of the same notebook can ship different libraries.
+
+```julia
+provide_import!("mermaid", "https://esm.sh/mermaid@11.4.1")
+```
+"""
+function provide_import!(spec::AbstractString, url::AbstractString)
+    s, u = String(strip(spec)), String(strip(url))
+    (isempty(s) || isempty(u)) &&
+        throw(ArgumentError("provide_import!: specifier and url must both be non-empty"))
+    lock(_IMPORTS_LOCK) do
+        _IMPORTS[s] = u
+    end
+    return u
+end
+
+"""
+    package_imports() -> Dict{String,String}
+
+Every package-declared ES-module import (`specifier => url`) — a copy, so callers can't mutate the
+registry. Carried in [`extension_manifest`](@ref); see [`provide_import!`](@ref).
+"""
+package_imports() = lock(_IMPORTS_LOCK) do
+    copy(_IMPORTS)
+end
+
 """
     frontend_scripts() -> Dict{String,String}
 
@@ -499,6 +558,12 @@ page — Slate pulls it once per run drain and merges it into the notebook. Fiel
 - `assets`: the package-vendored asset DIRECTORIES (`(; pkg, dir)` each) from [`provide_assets!`](@ref) —
   Slate serves each `dir` at `/ext-assets/<pkg>/…` while the package is loaded and copies it into a
   static export.
+- `imports`: the ES-module import-map entries (`(; spec, url)` each) from [`provide_import!`](@ref).
+  Slate merges them UNDER the notebook's own `@use` declarations, live and in an export.
+- `fences`: the markdown fence languages claimed via [`register_fence_renderer!`](@ref). Slate does not
+  need these to ROUTE a fence — it rewrites every tagged fence and lets the worker answer — but it does
+  need them to INVALIDATE: a markdown cell caches its interpolation results, so a block rendered before
+  an extension was loaded keeps its plain-code fallback until something restales the cell.
 
 Extensible: as new package-registration seams are added they surface as additional fields here, carried
 by the same query — no new transport per feature.
@@ -507,4 +572,6 @@ extension_manifest() =
     (; frontend = lock(_FRONTEND_LOCK) do
            [(; id = k, js = v.js, esm = v.esm, kind = v.kind) for (k, v) in _FRONTEND]
        end,
-       assets = [(; pkg = k, dir = v) for (k, v) in _ASSETS])
+       assets = [(; pkg = k, dir = v) for (k, v) in _ASSETS],
+       imports = [(; spec = k, url = v) for (k, v) in package_imports()],
+       fences = fence_languages())

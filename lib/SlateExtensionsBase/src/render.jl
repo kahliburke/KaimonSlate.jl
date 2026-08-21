@@ -82,6 +82,83 @@ SlateExtensionsBase.slate_live_render(::MyLiveThing) = true
 """
 slate_live_render(::Any) = false
 
+# ── Fenced code blocks claimed by an extension ────────────────────────────────
+# A markdown fence carries a language (```mermaid), and an extension can CLAIM one: the block then
+# renders as that extension's output instead of a <pre><code>. The renderer maps the block to an ordinary
+# Julia VALUE, which Slate displays through the very same `slate_render` dispatch a RETURNED value uses —
+# so a package that already renders its type gets fences for one line, and there is no second payload
+# format to keep in step with the first. Keyed by the lower-cased tag, so the language string lives in
+# exactly one place.
+const _FENCE_LOCK = ReentrantLock()
+const _FENCE_RENDERERS = Dict{String,Any}()
+
+_fence_key(lang::AbstractString) = lowercase(strip(String(lang)))
+
+"""
+    register_fence_renderer!(lang, f)
+
+Claim markdown fenced code blocks tagged `lang` (```` ```lang ````). `f` is called as `f(source, info)`
+— the block's body and its full info string — or as `f(source)` when that is all it accepts, and returns
+the VALUE the block should render as (displayed via [`slate_render`](@ref), exactly like a value a cell
+returned), or `nothing` to decline and leave an ordinary code block.
+
+Last-wins and idempotent, so it is safe from `__init__` or from the per-notebook `__slate_frontend`
+hook, which runs every drain. `lang` matches case-insensitively.
+
+```julia
+register_fence_renderer!("mermaid", src -> MermaidDiagram(src))
+```
+"""
+function register_fence_renderer!(lang::AbstractString, f)
+    key = _fence_key(lang)
+    isempty(key) && throw(ArgumentError("register_fence_renderer!: the language tag must not be empty"))
+    lock(_FENCE_LOCK) do
+        _FENCE_RENDERERS[key] = f
+    end
+    return nothing
+end
+
+"""
+    fence_renderer(lang) -> f | nothing
+
+The renderer claiming fenced blocks tagged `lang`, or `nothing` when none does.
+"""
+fence_renderer(lang::AbstractString) = lock(_FENCE_LOCK) do
+    get(_FENCE_RENDERERS, _fence_key(lang), nothing)
+end
+
+"""
+    fence_languages() -> Vector{String}
+
+Every fence language currently claimed, lower-cased and sorted. Introspection only — Slate does not
+consult it: it rewrites every tagged fence into an interpolation and lets [`render_fence`](@ref) answer
+`nothing` for the ones nobody claimed.
+"""
+fence_languages() = lock(_FENCE_LOCK) do
+    sort!(collect(keys(_FENCE_RENDERERS)))
+end
+
+"""
+    render_fence(lang, source, info = lang) -> Any
+
+The value a ```` ```lang ```` block renders as — `nothing` when no extension claims `lang`, the renderer
+declines, or it throws. Containing a throw is deliberate: a broken extension degrades that one block to
+plain code instead of taking down the markdown cell around it.
+
+Slate calls this in the WORKER, where extensions are loaded, while evaluating a markdown cell.
+"""
+function render_fence(lang::AbstractString, source::AbstractString, info::AbstractString = lang)
+    f = fence_renderer(lang)
+    f === nothing && return nothing
+    src, inf = String(source), String(info)
+    return try
+        applicable(f, src, inf) ? f(src, inf) : f(src)
+    catch err
+        @warn "slate: fence renderer for `$lang` failed — rendering it as plain code" exception = (err, catch_backtrace())
+        nothing
+    end
+end
+
 # ── One render for each display ───────────────────────────────────────────────
 # `showable` == "a slate_render method returns something of this flavour", so it must RUN the render to
 # answer. The display capture then asks `showable` for each Slate MIME and calls `show` on the winner —

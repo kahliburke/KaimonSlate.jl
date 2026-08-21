@@ -60,8 +60,70 @@ include(joinpath(@__DIR__, "fingerprint.jl"))
 # and the standalone SlateWorker; the `@md` macro built in `_populate_notebook_ns!` needs it in both.
 _interp_token(i::Int) = "xslateinterpx" * string(i; pad = 5) * "x"
 
+# ── Fenced code blocks → interpolations ───────────────────────────────────────────────────────────
+# A fenced block carrying a language (```mermaid) is rewritten into a `{{ slate_render_fence(…) }}`
+# interpolation, so a package that CLAIMED that language (SEB `register_fence_renderer!`) renders the
+# block as its own value — through the very capture/splice path `{{ }}` already uses, which is why this
+# needs no new transport, no front-end code and no export path of its own.
+#
+# EVERY tagged fence is rewritten, not just the claimed ones. The claim registry lives in the WORKER
+# and this runs on the SERVER, so an unconditional rewrite is what keeps token positions identical
+# across the five callers that share `_md_template` (deps' reads-analysis, the renderer, Typst export,
+# the standalone `@md`, and eval). A language nobody claimed answers `nothing` and `_md_html` emits the
+# ordinary code block, so the cost of the uniformity is one cheap call per fenced block.
+const _FENCE_OPEN = r"^( {0,3})(`{3,}|~{3,})[ \t]*(\S[^\n]*)?$"
+
+# Strip up to `n` leading spaces from each line — a fence indented inside a list carries that indent
+# into its body, and the renderer must see the block as authored, not shifted right.
+function _fence_dedent(body::AbstractString, n::Int)
+    n <= 0 && return String(body)
+    strip1(l) = (k = 0; for c in l; (c == ' ' && k < n) || break; k += 1; end; l[(k + 1):end])
+    return join((strip1(l) for l in split(String(body), '\n'; keepempty = true)), '\n')
+end
+
+function _desugar_fences(src::AbstractString)
+    s = String(src)
+    (occursin("```", s) || occursin("~~~", s)) || return s
+    lines = split(s, '\n'; keepempty = true)
+    out = String[]; i = 1
+    while i <= length(lines)
+        m = match(_FENCE_OPEN, lines[i])
+        if m === nothing
+            push!(out, String(lines[i])); i += 1; continue
+        end
+        indent, marker = m[1], m[2]
+        info = m[3] === nothing ? "" : String(strip(m[3]))
+        # The closing fence: same character, at least as long, nothing but whitespace after it.
+        close = Regex("^ {0,3}\\" * marker[1:1] * "{" * string(length(marker)) * ",}[ \t]*\$")
+        j = i + 1
+        while j <= length(lines) && match(close, lines[j]) === nothing
+            j += 1
+        end
+        lang = isempty(info) ? "" : lowercase(first(split(info)))
+        if isempty(lang)
+            append!(out, String.(lines[i:min(j, length(lines))]))   # untagged → leave it to CommonMark
+        else
+            body = j > i + 1 ? join(lines[(i + 1):(j - 1)], '\n') : ""
+            push!(out, string(indent, "{{ slate_render_fence(", repr(lang), ", ",
+                              repr(_fence_dedent(body, length(indent))), ", ", repr(info), ") }}"))
+        end
+        i = j + 1
+    end
+    return join(out, '\n')
+end
+
+# The (lang, body, info) a desugared fence carries, or `nothing` for an ordinary `{{ expr }}` — how the
+# renderer recovers the block it must fall back to when no extension claimed the language.
+function _fence_call(expr::AbstractString)
+    startswith(expr, "slate_render_fence(") || return nothing
+    ast = try; Meta.parse(expr); catch; nothing; end
+    (ast isa Expr && ast.head === :call && length(ast.args) == 4 &&
+     all(a -> a isa String, ast.args[2:4])) || return nothing
+    return (lang = ast.args[2]::String, body = ast.args[3]::String, info = ast.args[4]::String)
+end
+
 function _md_template(src::AbstractString)
-    s = String(src); out = IOBuffer(); exprs = String[]
+    s = _desugar_fences(src); out = IOBuffer(); exprs = String[]
     i = firstindex(s); n = lastindex(s)
     while i <= n
         c = s[i]
@@ -103,6 +165,15 @@ function _md_template(src::AbstractString)
 end
 
 _md_interp_exprs(src::AbstractString) = _md_template(src)[2]
+
+# What a desugared fence evaluates to, in the notebook namespace (injected by `_populate_notebook_ns!`).
+# Guarded the way `with_render_memo` is in capture.jl: a notebook project pinning an older SEB shadows
+# the slate-owned infra env, and an unguarded call would raise `UndefVarError` inside the interpolation
+# capture — turning every fenced block in the notebook into an error span. Absent the seam, every fence
+# is simply unclaimed, which is exactly the pre-existing behaviour.
+const _FENCE_SEAM_OK = isdefined(SlateExtensionsBase, :render_fence)
+_slate_render_fence(lang, body, info = lang) =
+    _FENCE_SEAM_OK ? SlateExtensionsBase.render_fence(String(lang), String(body), String(info)) : nothing
 
 # ── Web cell: `{{ }}` interpolation, per-section escaping, and the `@web` skin ──────────────────
 # A web cell is authored as tagged sections — `html"…"`, `css"…"`, `js"…"` — whose PREFIX names the
@@ -902,6 +973,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const slate_table = $slate_table))
     Core.eval(m, :(const SlateTable = $SlateTable))
     Core.eval(m, :(const slate_matrix = $slate_matrix))   # explicit override — bare Matrix returns auto-render (capture.jl)
+    Core.eval(m, :(const slate_render_fence = $_slate_render_fence))   # ```lang fence → the claiming extension's value
     Core.eval(m, :(const slate_query = $slate_query))
     Core.eval(m, :(const slate_refresh = $slate_refresh))
     Core.eval(m, :(const slate_progress = $slate_progress))   # slate_progress(frac; msg) → live cell progress

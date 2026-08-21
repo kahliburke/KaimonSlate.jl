@@ -161,7 +161,7 @@ self-contained `text/html` output, identical live and in a static export.
 | One component module for a widget type | [`required_assets`](@ref) |
 | One script, not tied to a widget | [`provide_frontend!`](@ref) / [`register_component!`](@ref) |
 | A directory — a library with workers, fonts, wasm | [`provide_assets!`](@ref) |
-| A large blob shared across outputs | [`provide_served_asset!`](@ref) |
+| A large blob shared across outputs, **live only** | [`provide_served_asset!`](@ref) |
 
 Read files off disk rather than embedding JS in Julia strings, so your front-end stays a real
 `.js` file you can lint and debug: [`@pkg_asset`](@ref) for a file, [`@pkg_dir`](@ref) for a
@@ -183,6 +183,18 @@ const GL_URL = @ext_asset_url("echarts-gl/echarts-gl.min.js")
 registers bytes at a content-addressed URL and returns the path. The bytes stay in the worker; the
 hub fetches them once, by hash, and caches them immutably. That is how a multi-megabyte JS runtime
 is served once per page instead of being inlined into every figure.
+
+!!! warning "A served asset is live-only"
+    Unlike the three mechanisms above it, `provide_served_asset!` has **no export path**. Its URL is
+    answered by the running hub (`/n/<id>/served/<hash>`), which fetches the bytes from the live
+    worker; a frozen export has neither, so the URL 404s in an exported or published page.
+
+    That is a deliberate fit for its intended user — a session-bound output ([`slate_live_render`](@ref),
+    e.g. a Bonito figure) is re-rendered per browser connection and never replayed into a static page
+    anyway, so the runtime it loads has nothing to be exported *for*. But if your output is
+    self-contained and you want it to survive an export, ship the bytes with [`provide_assets!`](@ref)
+    instead: a vendored directory is rewritten to page-local siblings for a published site and inlined
+    as `data:` URLs for a standalone page.
 
 If a vendored library is far larger than what you use of it, [`js_bundle`](@ref) tree-shakes an ES
 entry module with esbuild. It returns `nothing` on any failure — no node, no network, a bad entry

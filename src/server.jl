@@ -60,11 +60,19 @@ mutable struct LiveNotebook
     assets::Dict{String,String}          # package-vendored asset DIRECTORIES (pkg → absolute dir on disk), from the
                                          # same manifest (`provide_assets!`). Served at `/ext-assets/<pkg>/…` while the
                                          # package is loaded, and copied into a static export. See `_register_assets!`.
-    # Inner constructor takes the original 13 fields and starts empty scratchpad + frontend/asset registries, so every
-    # existing positional call site (server + tests) is unchanged; all are populated at runtime.
+    pkgimports::Dict{String,String}      # package-declared ES module imports (specifier → url), from the same manifest
+                                         # (`provide_import!`) — an extension's own `@use`. Merged UNDER the notebook's
+                                         # `@use` map wherever an import map is emitted. See `_register_import!`.
+    fences::Set{String}                  # markdown fence languages an extension claims (`register_fence_renderer!`),
+                                         # from the same manifest. Tracked only to notice a CHANGE: a markdown cell
+                                         # caches its interpolation results, so cells holding a now-claimed (or
+                                         # now-unclaimed) fence must be restaled. See `_refresh_fences!`.
+    # Inner constructor takes the original 13 fields and starts empty scratchpad + frontend/asset/import registries, so
+    # every existing positional call site (server + tests) is unchanged; all are populated at runtime.
     LiveNotebook(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents) =
         new(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents,
-            Cell[], @NamedTuple{id::String, js::String, esm::Bool, kind::String}[], Dict{String,String}())
+            Cell[], @NamedTuple{id::String, js::String, esm::Bool, kind::String}[], Dict{String,String}(),
+            Dict{String,String}(), Set{String}())
 end
 
 # ── Notebook-lock protocol (`nb.lock`) ─────────────────────────────────────────────────────────────
@@ -1165,6 +1173,60 @@ function _register_assets!(nb::LiveNotebook, pkg::AbstractString, dir::AbstractS
     return true
 end
 
+# Add/replace one package-declared import-map entry (specifier → url) — an extension's `provide_import!`,
+# the package-level counterpart of a cell's `@use`. Returns true if the registry CHANGED, so the caller
+# bumps the version and the browser picks up a fresh head. Like `@use`, a change needs a page reload to
+# take effect: the browser fixes its import map at load.
+function _register_import!(nb::LiveNotebook, spec::AbstractString, url::AbstractString)
+    (isempty(spec) || isempty(url)) && return false
+    s, u = String(spec), String(url)
+    get(nb.pkgimports, s, nothing) == u && return false
+    nb.pkgimports[s] = u
+    return true
+end
+
+# The fence languages a markdown cell actually uses — read through the SAME desugaring the renderer
+# runs, so this can never disagree with what would be rendered (a language mentioned in prose, or a
+# fence nested inside another, doesn't count; only a block that really became an interpolation).
+function _cell_fence_langs(c::Cell)
+    c.kind == MARKDOWN || return String[]
+    out = String[]
+    for e in ReportEngine._md_interp_exprs(c.source)
+        f = ReportEngine._fence_call(e)
+        f === nothing || push!(out, f.lang)
+    end
+    return out
+end
+
+# Reconcile the notebook against the fence languages extensions currently claim, restaling any markdown
+# cell whose fences just changed hands. This is what makes installing (or removing) a fence-providing
+# extension VISIBLE: a markdown cell caches its `{{ }}` results, and a fence is one of those — so a
+# block rendered while nobody claimed `mermaid` holds a plain-code fallback, and stays FRESH holding it,
+# forever. Nothing about reloading the page, restarting the worker, or fixing the extension touches it;
+# only a re-run does. Without this an extension reads as simply broken on first install.
+# Returns whether anything changed. Caller holds `nb.lock`.
+function _refresh_fences!(nb::LiveNotebook, claimed::Set{String})
+    moved = symdiff(claimed, nb.fences)          # newly claimed OR newly released
+    isempty(moved) && return false
+    empty!(nb.fences); union!(nb.fences, claimed)
+    hit = false
+    for c in nb.report.cells
+        any(l -> l in moved, _cell_fence_langs(c)) || continue
+        ReportEngine.restale!(c) && (hit = true)
+    end
+    return hit
+end
+
+# The notebook's effective import map: package declarations UNDER the notebook's own `@use`, so an
+# author's `@use` of a specifier always wins over the package that shipped it. Shared by the live shell
+# head and the export, so the two can't drift.
+function _effective_imports(nb::LiveNotebook)
+    uses = get(nb.report.meta, "imports", nothing)
+    usemap = uses === nothing ? Dict{String,String}() :
+             Dict{String,String}(String(k) => String(v) for (k, v) in uses)
+    return merge(nb.pkgimports, usemap)
+end
+
 # Refresh the notebook's front-end registry from the worker's SlateExtensionsBase extension manifest
 # (`{frontend: [{id, js}]}`) — the packages loaded this session declare their front-end from `__init__`,
 # which may run during namespace priming (no harvestable eval), so the process-global registry is the
@@ -1206,6 +1268,20 @@ function _refresh_extensions!(nb::LiveNotebook)
             end && (changed = true)
         end
     end
+    im = _manifest_field(manifest, :imports)
+    if im !== nothing
+        for e in im
+            spec = _manifest_field(e, :spec); url = _manifest_field(e, :url)
+            (spec === nothing || url === nothing) && continue
+            lock(nb.lock) do
+                _register_import!(nb, String(spec), String(url))
+            end && (changed = true)
+        end
+    end
+    fl = _manifest_field(manifest, :fences)
+    fl === nothing || (lock(nb.lock) do
+        _refresh_fences!(nb, Set{String}(String(f) for f in fl))
+    end && (changed = true))
     return changed
 end
 

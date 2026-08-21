@@ -1427,9 +1427,105 @@ end
 # The export's full importmap: the Slate UI stack (Preact/htm/signals) + the widget SDK are included when
 # a web cell OR an ESM (component) front-end widget is present — they're what import those specifiers —
 # MERGED UNDER the notebook's `@use` declarations (a `@use` wins on a key clash).
+# ── Module imports (`@use` / `provide_import!`) in an OFFLINE export ──────────────────────────────
+# Slate's own UI stack inlines from the version-pinned vendor cache, but a notebook's (or an
+# extension's) module imports have no such manifest — so fetch each remote target once, cache it by url
+# next to the vendor files, and inline it as a `data:` module. Without this an `offline` export still
+# carried `https://…` import-map targets and needed the network on open, which is the one thing offline
+# mode exists to prevent. A target that is already local passes through; one that can't be fetched keeps
+# its remote url, degrading to online behaviour for that module rather than shipping a dead import —
+# the same trade `_lib_script` makes for a library.
+# A function, not a const: `_VENDOR_CACHE` lives in server_hub.jl and this must not depend on include order.
+_import_cache_dir() = joinpath(_VENDOR_CACHE, "imports")
+
+_is_remote_url(u::AbstractString) = startswith(u, "http://") || startswith(u, "https://")
+
+function _fetch_import(url::AbstractString)
+    dest = joinpath(_import_cache_dir(), string(hash(String(url)); base = 16) * ".mjs")
+    isfile(dest) && return try; read(dest); catch; nothing; end
+    return lock(_VENDOR_LOCK) do
+        isfile(dest) && return try; read(dest); catch; nothing; end
+        mkpath(dirname(dest))
+        tmp = dest * ".part"
+        try
+            r = HTTP.get(String(url); redirect = true, retry = false, status_exception = true,
+                         connect_timeout = 10, request_timeout = 60)
+            write(tmp, r.body); mv(tmp, dest; force = true); r.body
+        catch
+            rm(tmp; force = true); nothing
+        end
+    end
+end
+
+# Inlining ONE fetched file is not enough. A CDN commonly answers with a small stub that re-exports the
+# real module by relative path (esm.sh: `export * from "/pkg@1.2.3/es2022/pkg.bundle.mjs"`), and a
+# relative specifier inside a `data:` module has no base to resolve against — so a naive inline yields a
+# page that silently loads nothing. We therefore walk the module GRAPH: fetch, rewrite every specifier
+# that needs a base into a nested `data:` module, and inline that too. BARE specifiers ("preact") are
+# left alone — the page's own import map resolves those.
+const _MOD_SPEC_PATS = (r"(?:^|[\s;}])(?:import|export)\b[^;'\"]*?\bfrom\s*[\"']([^\"']+)[\"']"m,
+                        r"\bimport\s*\(\s*[\"']([^\"']+)[\"']\s*\)",
+                        r"(?:^|[\s;}])import\s*[\"']([^\"']+)[\"']")
+
+# Nesting base64 costs 4/3 per level, so an unbounded graph is a real memory/size hazard; and an ESM
+# CYCLE simply cannot be expressed as nested data: urls. Both bail to the remote url rather than emit
+# something broken.
+const _INLINE_MAX_BYTES = 16_000_000
+const _INLINE_MAX_DEPTH = 8
+
+_needs_base(s::AbstractString) = startswith(s, "./") || startswith(s, "../") || startswith(s, "/") ||
+                                 _is_remote_url(s)
+_resolve_url(base, spec) = try; string(HTTP.URIs.resolvereference(base, spec)); catch; nothing; end
+
+# `url` as a self-contained `data:` module, or `nothing` if the graph can't be closed (fetch failure,
+# cycle, depth/size cap) — the caller then keeps the remote url.
+function _inline_module(url::AbstractString, seen::Set{String}, budget::Ref{Int}, depth::Int = 0)
+    depth > _INLINE_MAX_DEPTH && return nothing
+    url in seen && return nothing                     # a cycle on THIS path — inexpressible as data: urls
+    bytes = _fetch_import(url)
+    bytes === nothing && return nothing
+    budget[] -= length(bytes)
+    budget[] < 0 && return nothing
+    js = try; String(copy(bytes)); catch; return nothing; end
+    push!(seen, url)
+    try
+        for pat in _MOD_SPEC_PATS, m in eachmatch(pat, js)
+            spec = String(m.captures[1])
+            _needs_base(spec) || continue
+            target = _resolve_url(url, spec)
+            target === nothing && return nothing
+            nested = _inline_module(target, seen, budget, depth + 1)
+            nested === nothing && return nothing
+            js = replace(js, "\"" * spec * "\"" => "\"" * nested * "\"")
+            js = replace(js, "'" * spec * "'" => "'" * nested * "'")
+        end
+    finally
+        delete!(seen, url)                            # path-scoped: a diamond is not a cycle
+    end
+    return string("data:text/javascript;base64,", Base64.base64encode(js))
+end
+
+function _localize_imports(imports::AbstractDict)
+    out = Dict{String,String}()
+    for (spec, url) in imports
+        s, u = String(spec), String(url)
+        if !_is_remote_url(u)
+            out[s] = u; continue          # already a data:/relative/ext-assets target
+        end
+        inlined = _inline_module(u, Set{String}(), Ref(_INLINE_MAX_BYTES))
+        if inlined === nothing
+            @warn "slate: offline export could not fully inline module `$s`, so the page will still need the network for it (unreachable url, an import cycle, or over the size/depth cap)" url = u
+            out[s] = u
+        else
+            out[s] = inlined
+        end
+    end
+    return out
+end
+
 function _export_importmap_for(nb::LiveNotebook, offline::Bool = false)
-    uses = get(nb.report.meta, "imports", nothing)
-    usemap = uses === nothing ? Dict{String,String}() : Dict{String,String}(String(k) => String(v) for (k, v) in uses)
+    usemap = _effective_imports(nb)                       # package `provide_import!`s under the notebook's `@use`
+    offline && (usemap = _localize_imports(usemap))
     esm = _has_esm_frontend(nb)
     uimap = (esm || any(c -> c.kind == ReportEngine.WEB, nb.report.cells)) ? _slate_ui_imports(offline) : Dict{String,String}()
     sdk = esm ? _slate_widget_sdk_import() : Dict{String,String}()

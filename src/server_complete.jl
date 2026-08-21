@@ -1237,7 +1237,7 @@ function _make_router(h::Hub)
         # posture + presentation defaults into the shell, so the page knows which UI to build
         # before its first paint (a page that painted the authoring chrome and then tore it down
         # would flash every control app mode exists to hide).
-        _html(_inject_app(_inject_imports(read(_ASSET, String), get(nb.report.meta, "imports", nothing)), h, nb))
+        _html(_inject_app(_inject_imports(read(_ASSET, String), _effective_imports(nb)), h, nb))
     end)
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
     # A worker's log tail + status for the topbar worker/region status popup. `?side=` selects the

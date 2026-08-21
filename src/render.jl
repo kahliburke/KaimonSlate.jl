@@ -181,6 +181,17 @@ function _interp_scalar(s::AbstractString)
     return replace(inner, "\\\"" => "\"", "\\\$" => "\$", "\\\\" => "\\", "\\n" => "\n", "\\t" => "\t")
 end
 
+# Nothing to splice: the interpolation produced no output at all. `nothing` reprs as `"nothing"`, which
+# is what an unclaimed fence renderer returns, so it counts as empty here too — a `{{ }}` that genuinely
+# evaluates to `nothing` already rendered as blank prose before this existed.
+# Does this fragment open with a block-level tag? Decides whether it may sit inside a `<p>`.
+_is_block_frag(f::AbstractString) =
+    startswith(f, "<pre") || startswith(f, "<div") || startswith(f, "<figure") || startswith(f, "<table")
+
+_is_empty_output(o) =
+    o.exception === nothing && isempty(o.display) && isempty(o.echarts) && isempty(o.tables) &&
+    (isempty(o.value_repr) || o.value_repr == "nothing")
+
 # Render markdown, splicing each `{{ expr }}` capture in. Self-contained outputs
 # (image / HTML / LaTeX / scalar) embed directly; echarts & interactive tables
 # emit a host placeholder (`.ichart`/`.itable` keyed by index) that the SPA
@@ -190,7 +201,15 @@ function _md_html(src::AbstractString, interps = CellOutput[])
     frags = String[]; ec = 0; tc = 0
     for i in 1:length(exprs)
         o = i <= length(interps) ? interps[i] : nothing
-        if o === nothing
+        # A desugared ```lang fence whose language no extension claimed (or whose renderer declined)
+        # comes back empty — emit the code block CommonMark would have, so an unclaimed fence is
+        # indistinguishable from one that was never rewritten. Checked before the empty-output cases
+        # below, which would otherwise swallow the block entirely.
+        fence = ReportEngine._fence_call(exprs[i])
+        if fence !== nothing && (o === nothing || _is_empty_output(o))
+            push!(frags, "<pre><code class=\"language-" * _esc(fence.lang) * "\">" *
+                         _esc(fence.body) * "</code></pre>")
+        elseif o === nothing
             push!(frags, "")
         elseif o.exception !== nothing
             push!(frags, "<span class=\"interr\">⟨" * _esc(o.exception) * "⟩</span>")
@@ -223,7 +242,13 @@ function _md_html(src::AbstractString, interps = CellOutput[])
         html = replace(html, _math_token(i) => _esc(tex))           # raw TeX, escaped; KaTeX reads the text node
     end
     for (i, f) in enumerate(frags)
-        html = replace(html, ReportEngine._interp_token(i) => f)    # remaining (text) interps → HTML fragment
+        tok = ReportEngine._interp_token(i)
+        # A BLOCK-level fragment (a fence's code block, a rich display, a chart/table host) standing
+        # alone in its own paragraph: drop the `<p>` CommonMark wrapped the bare token in, since a `<p>`
+        # cannot legally contain a `<pre>`/`<div>` and the browser's repair splits it into stray empties.
+        # An inline fragment (a scalar span) keeps its paragraph — that spacing is the intended prose.
+        _is_block_frag(f) && (html = replace(html, "<p>" * tok * "</p>" => f))
+        html = replace(html, tok => f)                              # remaining (text) interps → HTML fragment
     end
     # Last, so an image produced by a `{{ }}` interpolation can be sized like a literal one.
     return _apply_md_attrs(html)

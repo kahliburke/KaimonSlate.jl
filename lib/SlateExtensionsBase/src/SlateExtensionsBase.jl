@@ -55,12 +55,14 @@ on_worker_reset, run_worker_resets,
        required_assets, ensure_widget_assets!, ensure_module_frontend!, ensure_module_frontends!,
        frontend_scripts, extension_manifest, provide_assets!, @provide_assets!, @pkg_dir, asset_dirs,
        js_bundle,
-       ext_asset_url, @ext_asset_url, pkg_key
+       ext_asset_url, @ext_asset_url, pkg_key, provide_import!, package_imports
 # Execution context
 export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
        slate_emit, slate_effect, slate_everywhere, slate_on, slate_off, slate_on_cleanup
 # Rich output (Slate display MIMEs)
 export slate_render, component, html_fragment, SlateComponentMIME, SlateHtmlMIME
+# Markdown fenced blocks claimed by an extension (```mermaid → that package's value)
+export register_fence_renderer!, fence_renderer, fence_languages, render_fence
 # Binary numeric streaming
 export SlateBinary, encode_binary_frame
 

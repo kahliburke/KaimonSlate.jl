@@ -32,6 +32,7 @@ const UNDOCUMENTED_BY_DESIGN = Dict(
     "js_str"      => "ditto",
     "web"         => "the `@web` skin — documented as `web cell`",
     "md"          => "the `@md` skin — documented as `markdown`",
+    "slate_render_fence" => "emitted by the ```lang fence desugaring, never written by hand — the fence syntax itself is the documented surface (`markdown` entry)",
     "sfile"       => "documented inside the `datadir` entry",
     "bind"        => "documented as `@bind`",
     "trace"       => "documented as `@trace`",

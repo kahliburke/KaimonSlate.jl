@@ -446,6 +446,11 @@ function _infer_bindings_uncached!(cell::Cell)
                 @debug "deps: {{ }} reactive-node analysis failed" cell = cell.id kind = cell.kind exception = e
             end
         end
+        # A ```lang fence desugars to a `slate_render_fence(…)` call of string literals (see
+        # `_desugar_fences`). The helper is injected into every notebook namespace, never defined by a
+        # cell, so it can carry no edge — but left in `reads` it would show up in the cell's "reads"
+        # diagnostics as a phantom dependency on a name the author never wrote.
+        delete!(cell.reads, :slate_render_fence)
         union!(cell.reads_now, cell.reads)   # interpolations render immediately → all top-level
         return cell
     end

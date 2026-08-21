@@ -856,7 +856,11 @@ See also `save_asset`, `FileUpload`."""),
         (`KAIMONSLATE_QUIET_MD=1` suppresses it for a code-only run) and `standalone!` supplies the rest
         of the notebook contract (`@bind` falls back to widget defaults, live-only helpers no-op). Inside
         the Slate engine the skin is unwrapped at parse time — you never write `@md` by hand.
-        Role tags (`title`, `abstract`, `bibliography`) go on markdown cells — see `front matter`."""),
+        Role tags (`title`, `abstract`, `bibliography`) go on markdown cells — see `front matter`.
+        A FENCED block whose language an extension claimed (SlateExtensionsBase
+        `register_fence_renderer!`) renders as that extension's output instead of a code block, through
+        the same machinery a returned value uses — so it works live and in a static export. A language
+        nobody claimed stays an ordinary code block, so this costs an existing notebook nothing."""),
     SlateApiEntry("@trace", "Cell tags",
         "Inspect EVERY intermediate value in a cell (usually via the 🔍 button / `trace` tag).",
         ["debug", "values", "inspect", "step through"],
