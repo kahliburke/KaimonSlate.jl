@@ -7,6 +7,21 @@
 // review. Backups self-clear as cells are saved (mine === server) and on explicit discard.
 
 const _BK_KEY = () => 'slate:backup:' + NB_ID;
+// Is this text the same EDIT as that one? Trailing whitespace is never an edit (`srcEq`, store.js —
+// the one definition, since private copies of it drifted before). For a WEB cell there's a second,
+// sharper way for two texts to mean the same thing: the page holds three panes and reassembles them
+// with `_webSkin`, so an equivalent-but-non-canonical stored skin (`js"""x"""` vs `js"""\nx\n"""`)
+// differs from the reassembly by whitespace INSIDE the source, which a trailing trim can't see. The
+// server now canonicalises on write, so this is for sources stored before that — without it those
+// cells report a phantom edit on every load, forever, for a difference the page invented itself.
+function _sameEdit(a, b) {
+  const store = window.slateStore || {};
+  const eq = store.srcEq || ((x, y) => (x || '').replace(/\s+$/, '') === (y || '').replace(/\s+$/, ''));
+  if (eq(a, b)) return true;
+  if (!window._webSkin || !window._webSections) return false;
+  const canon = s => { try { return window._webSkin(window._webSections(s || '')); } catch (_) { return s || ''; } };
+  return eq(canon(a), canon(b));
+}
 function _readBackup() { try { return JSON.parse(localStorage.getItem(_BK_KEY()) || '{}'); } catch (_) { return {}; } }
 // Single writer, deduped: only touches localStorage when the backup actually changed. Returns
 // whether it wrote, so callers can log only on real change (the 2s timer calls this constantly).
@@ -38,10 +53,13 @@ function backupEdits() {
   for (const id of Object.keys(window.editors)) {
     if (!window.editors[id]) continue;
     const mine = window.edText(id), base = window.srcMap[id] || '';
-    if (mine !== base) {
-      // `ts` = when THIS text was captured (browser-snapshot time). Keep it stable while the text is
-      // unchanged so the backup dedup still short-circuits (a fresh ts every sweep would rewrite it).
-      const p = prev[id], ts = (p && p.mine === mine && p.ts) ? p.ts : Math.floor(Date.now() / 1000);
+    if (!_sameEdit(mine, base)) {
+      // `ts` = when THIS text was captured (browser-snapshot time), in MILLISECONDS — the unit
+      // `Date.now()` and every consumer use. It was seconds, so anything ageing these records out
+      // measured the gap in units 1000× too small and computed decades, expiring nothing, ever.
+      // Keep it stable while the text is unchanged so the backup dedup still short-circuits (a fresh
+      // ts every sweep would rewrite it).
+      const p = prev[id], ts = (p && p.mine === mine && p.ts) ? p.ts : Date.now();
       b[id] = { mine, base, ts }; _pendingIds.delete(id);                        // live edit → capture; no longer just pending
     }
   }
@@ -112,10 +130,10 @@ function reconcileBackup(state) {
     const cell = byId[id];
     if (!cell) continue;                                          // cell deleted — drop the entry
     const server = cell.source != null ? cell.source : '';
-    if (server === mine) continue;                               // already saved — drop
+    if (_sameEdit(server, mine)) continue;                       // already saved (or never differed) — drop
     if (_isEmpty(server) && !_isEmpty(mine)) { _applyRestore(id, mine); keep[id] = b[id]; autoFilled++; continue; }  // empty cell ← content: silent auto-accept
     // ts = when the browser snapshot was captured; serverTs = the notebook file's on-disk mtime.
-    cands.push({ id, mine, server, conflict: server !== base, ts: (b[id] || {}).ts, serverTs: state.savedAt || 0 });
+    cands.push({ id, mine, server, conflict: !_sameEdit(server, base), ts: (b[id] || {}).ts, serverTs: state.savedAt || 0 });
     keep[id] = b[id];
   }
   _writeBackup(keep);

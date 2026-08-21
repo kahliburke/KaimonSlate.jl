@@ -1194,6 +1194,21 @@ function state_json(nb::LiveNotebook)
     return meta
 end
 
+# A web cell's source in the exact form `_web_skin` emits, so the browser's pane reassembly matches it
+# byte for byte. Idempotent: canonical source round-trips to itself. Source that isn't a recognisable
+# skin is left alone — `_web_sections` would fold the whole body into the HTML pane, which would be a
+# silent rewrite rather than a normalisation.
+function _canonical_web_source(source::AbstractString)
+    s = String(source)
+    # No tagged section yet — a cell just converted FROM code, whose body `_web_sections` would fold
+    # into the HTML pane. Rewriting it here would be a silent conversion rather than a normalisation;
+    # the browser sends back a real skin the moment it reassembles, and that is what gets canonicalised.
+    occursin(r"(?:html|css|js)\"\"\"", s) || return s
+    secs = ReportEngine._web_sections(s)
+    (isempty(secs.html) && isempty(secs.css) && isempty(secs.js)) && return s
+    return ReportEngine._web_skin(; html = secs.html, css = secs.css, js = secs.js)
+end
+
 # Edit a cell's source → reconcile (mark it + dependents stale) → run stale →
 # persist back to the `.jl`.
 function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString; announce::Bool = false, force::Bool = false, run::Bool = true)
@@ -1205,6 +1220,14 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
         cells = nb.report.cells
         idx = findfirst(c -> c.id == id, cells)
         idx === nothing && return
+        # A WEB cell's stored source must be the CANONICAL `@web(...)` skin, because the browser edits it
+        # as three panes and reassembles it with `_webSkin` on every keystroke-check. Store a merely
+        # equivalent spelling — `js"""x"""` where the skin writes `js"""\nx\n"""`, which is what an
+        # agent or a hand-edit naturally produces — and that reassembly differs from what the server
+        # holds, so the page diffs its own output against the source and reports an edit the user never
+        # made, on every load, permanently. Round-tripping through the same split/assemble the browser
+        # uses makes the invariant `_web_sections` documents actually hold, at the one place it can.
+        source = cells[idx].kind == WEB ? _canonical_web_source(source) : String(source)
         if cells[idx].source != String(source)
             _snapshot!(nb)
             _preempt_superseded!(nb, (cells[idx],))   # a RUNNING old-source eval is now worthless
