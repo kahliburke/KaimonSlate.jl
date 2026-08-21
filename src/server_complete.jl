@@ -734,8 +734,15 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/", _ -> begin
         if h.app
             t = _app_root_target(h)
+            # `no-store`, because WHERE this redirect points is mutable state — which notebook the app
+            # currently serves. A bare 302 is the case browsers cache most inconsistently, and a port
+            # picked as "any free one" gets REUSED by a different app later: a browser replaying the
+            # cached hop lands on an id this hub doesn't have, `/n/{id}` sends it back here, and the two
+            # ping-pong until the browser gives up (Safari renders that as `about:blank`; Chrome, with
+            # no cached entry, follows the live redirect and looks fine — so it fails for one reader and
+            # not another, on the app's FRONT DOOR).
             return t === nothing ? HTTP.Response(503, "No notebook is open yet.") :
-                                   HTTP.Response(302, ["Location" => t])
+                                   HTTP.Response(302, ["Location" => t, "Cache-Control" => "no-store"])
         end
         _html(_index_html())
     end)
@@ -1231,7 +1238,15 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/n/{id}", req -> begin
         id = HTTP.getparam(req, "id")
         nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
-        nb === nothing && return HTTP.Response(302, ["Location" => "/"])          # not open → home
+        # Not open → home, so a stale link lands somewhere useful. EXCEPT in an app, where `/` is
+        # itself a redirect BACK to the current notebook: bouncing an unknown id there can only ever
+        # close a loop, never resolve. An app has no notebook switcher to send anyone to anyway, so
+        # the honest answer is that this document isn't here.
+        if nb === nothing
+            return h.app ? HTTP.Response(404, ["Cache-Control" => "no-store"],
+                                         "No such notebook in this app.") :
+                           HTTP.Response(302, ["Location" => "/"])
+        end
         # Merge the notebook's `@use` import-map entries into the shell's single importmap (so
         # front-end JS can `import` them); verbatim shell when there are none. Then stamp the app
         # posture + presentation defaults into the shell, so the page knows which UI to build
