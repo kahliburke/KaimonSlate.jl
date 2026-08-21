@@ -289,7 +289,7 @@ For a `[compat]` entry, pin the SDK:
 
 ```toml
 [compat]
-SlateExtensionsBase = "0.9"
+SlateExtensionsBase = "0.10"
 ```
 
 ## Worked examples

@@ -599,8 +599,8 @@ end
 # a vendored asset like a geo map, or raw BYTES for a `save_asset` blob / an `@asset` JS module). The site
 # builders write these into the PAGE's own dir so a published output doesn't depend on the server;
 # standalone inlines them.
-function _referenced_page_assets(nb::LiveNotebook)
-    files = Dict{String,Union{String,Vector{UInt8}}}()
+function _referenced_page_assets(nb::LiveNotebook; imports::Symbol = :cdn)
+    files = _import_page_files(nb, imports)   # module graph → `imports/<hash>.mjs` siblings (`:sibling` only)
     for c in nb.report.cells
         c.kind == CODE || continue
         for spec in _echarts_specs(c), (_, url) in _spec_geomaps(spec)     # geo maps → vendored file
@@ -644,8 +644,8 @@ end
 # published page finds them as plain siblings. A file source is copied; raw bytes are written. Returns
 # how many were written. Page-local (not shared) keeps references prefix-free and robust to where the
 # site is mounted.
-function _write_page_assets!(page_dir::AbstractString, nb::LiveNotebook)
-    files = _referenced_page_assets(nb)
+function _write_page_assets!(page_dir::AbstractString, nb::LiveNotebook; imports::Symbol = :cdn)
+    files = _referenced_page_assets(nb; imports = imports)
     for (rel, src) in files
         dst = joinpath(page_dir, rel)
         mkpath(dirname(dst))
@@ -1467,25 +1467,36 @@ const _MOD_SPEC_PATS = (r"(?:^|[\s;}])(?:import|export)\b[^;'\"]*?\bfrom\s*[\"']
                         r"\bimport\s*\(\s*[\"']([^\"']+)[\"']\s*\)",
                         r"(?:^|[\s;}])import\s*[\"']([^\"']+)[\"']")
 
-# Nesting base64 costs 4/3 per level, so an unbounded graph is a real memory/size hazard; and an ESM
-# CYCLE simply cannot be expressed as nested data: urls. Both bail to the remote url rather than emit
-# something broken.
-const _INLINE_MAX_BYTES = 16_000_000
-const _INLINE_MAX_DEPTH = 8
+# An ESM CYCLE cannot be expressed as nested `data:` urls at all — each module must be fully encoded
+# before whatever imports it, and a cycle has no such order — so the walk is depth-guarded and
+# path-scoped. There is deliberately NO SIZE cap: an export that asked to be self-contained asked for
+# whatever that costs, and a cap here silently produced a page that still needed the network.
+const _IMPORT_MAX_DEPTH = 12
 
 _needs_base(s::AbstractString) = startswith(s, "./") || startswith(s, "../") || startswith(s, "/") ||
                                  _is_remote_url(s)
 _resolve_url(base, spec) = try; string(HTTP.URIs.resolvereference(base, spec)); catch; nothing; end
 
-# `url` as a self-contained `data:` module, or `nothing` if the graph can't be closed (fetch failure,
-# cycle, depth/size cap) — the caller then keeps the remote url.
-function _inline_module(url::AbstractString, seen::Set{String}, budget::Ref{Int}, depth::Int = 0)
-    depth > _INLINE_MAX_DEPTH && return nothing
-    url in seen && return nothing                     # a cycle on THIS path — inexpressible as data: urls
+# Where the three modes differ, and nowhere else:
+#   :cdn      — leave the remote url alone (the default; page stays small, reader needs the network)
+#   :sibling  — write each module of the graph beside the page as `imports/<hash>.mjs`
+#   :inline   — nest each module into its parent as a `data:` url (a single self-contained file)
+# `:sibling` is the better offline form wherever a page can have neighbours: base64 costs 4/3 PER
+# NESTING LEVEL and compounds, while flat files don't inflate at all, are cached per-module by the
+# browser, and are shared by every page of a site.
+_import_file_name(url::AbstractString) = string(hash(String(url)); base = 16) * ".mjs"
+
+# One module of the graph, with every specifier that needs a base rewritten to its localized form.
+# Returns the SIBLING FILENAME (`:sibling`) or the `data:` url (`:inline`); `nothing` if the graph
+# can't be closed. `files` collects the sibling bytes; `done` memoises a url so a diamond is walked
+# once rather than duplicated.
+function _localize_module(url::AbstractString, mode::Symbol, files::AbstractDict,
+                          done::AbstractDict, seen::Set{String}, depth::Int = 0)
+    depth > _IMPORT_MAX_DEPTH && return nothing
+    haskey(done, url) && return done[url]
+    url in seen && return nothing                     # a cycle on THIS path
     bytes = _fetch_import(url)
     bytes === nothing && return nothing
-    budget[] -= length(bytes)
-    budget[] < 0 && return nothing
     js = try; String(copy(bytes)); catch; return nothing; end
     push!(seen, url)
     try
@@ -1494,38 +1505,83 @@ function _inline_module(url::AbstractString, seen::Set{String}, budget::Ref{Int}
             _needs_base(spec) || continue
             target = _resolve_url(url, spec)
             target === nothing && return nothing
-            nested = _inline_module(target, seen, budget, depth + 1)
-            nested === nothing && return nothing
-            js = replace(js, "\"" * spec * "\"" => "\"" * nested * "\"")
-            js = replace(js, "'" * spec * "'" => "'" * nested * "'")
+            child = _localize_module(target, mode, files, done, seen, depth + 1)
+            child === nothing && return nothing
+            # A sibling child sits in the SAME directory as this module, so it's referenced bare.
+            ref = mode === :sibling ? "./" * child : child
+            js = replace(js, "\"" * spec * "\"" => "\"" * ref * "\"")
+            js = replace(js, "'" * spec * "'" => "'" * ref * "'")
         end
     finally
         delete!(seen, url)                            # path-scoped: a diamond is not a cycle
     end
-    return string("data:text/javascript;base64,", Base64.base64encode(js))
+    out = if mode === :sibling
+        name = _import_file_name(url)
+        files[joinpath("imports", name)] = Vector{UInt8}(js)
+        name
+    else
+        string("data:text/javascript;base64,", Base64.base64encode(js))
+    end
+    mode === :sibling && (done[url] = out)            # only siblings dedup; an inline child is nested per use
+    return out
 end
 
-function _localize_imports(imports::AbstractDict)
+"""
+Localize an import map for an export. `:cdn` passes remote urls through; the offline modes resolve
+each one to bytes and REWRITE the whole module graph, because a CDN commonly answers with a stub that
+re-exports by relative path — inlining just the entry file yields a page that silently loads nothing.
+
+An import that can't be closed is an ERROR in an offline mode, not a warning: the export was asked to
+stand alone, and quietly emitting a network-dependent page defers the failure to whoever opens it,
+possibly years later.
+"""
+function _localize_imports(imports::AbstractDict, mode::Symbol = :inline,
+                           files::AbstractDict = Dict{String,Union{String,Vector{UInt8}}}())
     out = Dict{String,String}()
+    done = Dict{String,String}()
     for (spec, url) in imports
         s, u = String(spec), String(url)
-        if !_is_remote_url(u)
-            out[s] = u; continue          # already a data:/relative/ext-assets target
+        if mode === :cdn || !_is_remote_url(u)
+            out[s] = u; continue                      # already a data:/relative/ext-assets target
         end
-        inlined = _inline_module(u, Set{String}(), Ref(_INLINE_MAX_BYTES))
-        if inlined === nothing
-            @warn "slate: offline export could not fully inline module `$s`, so the page will still need the network for it (unreachable url, an import cycle, or over the size/depth cap)" url = u
-            out[s] = u
-        else
-            out[s] = inlined
-        end
+        got = _localize_module(u, mode, files, done, Set{String}())
+        got === nothing && error("slate: this export cannot be made self-contained — module `$s` " *
+                                 "($u) could not be resolved (unreachable, an import cycle, or " *
+                                 "deeper than $_IMPORT_MAX_DEPTH). Export without `offline` to " *
+                                 "load it from the network instead.")
+        out[s] = mode === :sibling ? "imports/" * got : got
     end
     return out
 end
 
-function _export_importmap_for(nb::LiveNotebook, offline::Bool = false)
+# How an export resolves its module imports. Derived from the flags an export already carries — a
+# single file has no siblings to point at, a published page does — with an explicit override for the
+# one case the flags can't express: a SITE that deliberately wants CDN targets to keep the repo small.
+function _import_mode(offline::Bool, inline_assets::Bool, override::Symbol = :auto)
+    override === :auto || return override
+    offline || return :cdn
+    return inline_assets ? :inline : :sibling
+end
+
+# The import mode a SITE page will use, read off the kwargs it forwards to `export_html`. The assets
+# are written before the page is rendered, so both halves have to reach the same answer independently
+# — deriving it in one place is what keeps the files on disk and the map in the head agreeing. A site
+# page is never a single file, hence `inline_assets = false`.
+_site_import_mode(kwargs) =
+    _import_mode(get(kwargs, :offline, false), false, get(kwargs, :imports, :auto))
+
+# The module files a page must carry beside it (`:sibling` only) as `imports/<hash>.mjs => bytes`.
+function _import_page_files(nb::LiveNotebook, mode::Symbol)
+    mode === :sibling || return Dict{String,Union{String,Vector{UInt8}}}()
+    files = Dict{String,Union{String,Vector{UInt8}}}()
+    _localize_imports(_effective_imports(nb), mode, files)   # fetches are disk-cached, so this is cheap
+    return files
+end
+
+function _export_importmap_for(nb::LiveNotebook, offline::Bool = false, mode::Symbol = :auto)
     usemap = _effective_imports(nb)                       # package `provide_import!`s under the notebook's `@use`
-    offline && (usemap = _localize_imports(usemap))
+    m = mode === :auto ? (offline ? :inline : :cdn) : mode
+    m === :cdn || (usemap = _localize_imports(usemap, m))
     esm = _has_esm_frontend(nb)
     uimap = (esm || any(c -> c.kind == ReportEngine.WEB, nb.report.cells)) ? _slate_ui_imports(offline) : Dict{String,String}()
     sdk = esm ? _slate_widget_sdk_import() : Dict{String,String}()
@@ -1541,6 +1597,13 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                      runnable::Bool = false, embed_bundle::Bool = false, history::Bool = false,
                      memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL,
                      inline_assets::Bool = true, width::Integer = 900, offline::Bool = false,
+                     # How `@use` / `provide_import!` modules are resolved. `:auto` derives it from the
+                     # two flags above — a single file has no siblings to point at, a published page
+                     # does — which is right except for the one case they can't express: a SITE that
+                     # deliberately wants CDN targets to keep the repo small. `:cdn` · `:sibling` ·
+                     # `:inline` force it. Under an offline mode an unresolvable module FAILS the
+                     # export rather than quietly leaving a page that still needs the network.
+                     imports::Symbol = :auto,
                      # How an INLINED data asset is represented. Both apply ONLY to the single-file path
                      # — a published site writes its assets as plain sibling files, readable by anything.
                      # `compress_data` is the one with a compatibility cost: inflating uses the platform's
@@ -1637,7 +1700,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               # The page's import map → so an exported page's front-end JS resolves the same bare
               # specifiers it used live: the notebook's `@use` modules PLUS Slate's Preact/htm/signals
               # stack when a web cell uses it. Emitted in <head> before any body module runs.
-              _export_importmap_for(nb, offline),
+              _export_importmap_for(nb, offline, _import_mode(offline, inline_assets, imports)),
               _og_tags(; title = fm0.title, desc = rawdesc, image = og_image, url = og_url, type = og_type),
               # KaTeX + ECharts + dagre: CDN tags, or the bytes inlined from the vendor cache under
               # `offline` (a page that must open with no network at all). See `_thirdparty_head`.
@@ -2820,7 +2883,7 @@ function _build_site_dir!(dir::AbstractString, nb::LiveNotebook; bundle::Bool = 
         write(joinpath(dir, "og-image.png"), img); ogpath = "og-image.png"
     end
     bundle && _write_runnable_bundle!(dir, nb; base_url = base_url, agent = agent, history = history)
-    _write_page_assets!(dir, nb)   # referenced assets → page-local siblings (this page IS at `dir`)
+    _write_page_assets!(dir, nb; imports = _site_import_mode(kwargs))   # referenced assets → page-local siblings (this page IS at `dir`)
     write(joinpath(dir, "index.html"),
           export_html(nb; og_image = ogpath, runnable = bundle, history = history, inline_assets = false, kwargs...))
     write(joinpath(dir, ".nojekyll"), "")   # GitHub Pages: serve files verbatim (no Jekyll processing)
@@ -2918,7 +2981,7 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
     bundle && _write_runnable_bundle!(docdir, nb; base_url = base_url, agent = agent, history = history)
     # Referenced assets → this doc's OWN dir (<site>/<slug>/), so `registerMap` etc. use a plain
     # page-relative path with no "../" — resolves wherever the site is mounted.
-    _write_page_assets!(docdir, nb)
+    _write_page_assets!(docdir, nb; imports = _site_import_mode(kwargs))
     write(joinpath(docdir, "index.html"),
           export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, history = history,
                       inline_assets = false, site_home = site_home, site_home_label = site_home_label, kwargs...))
@@ -3204,7 +3267,7 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
             write(joinpath(dir, "og-image.png"), himg)
             hogpath = isempty(su) ? "og-image.png" : su * "og-image.png"       # absolute when hosted
         end
-        _write_page_assets!(dir, nb)   # referenced assets → page-local siblings (home page IS at `dir`)
+        _write_page_assets!(dir, nb; imports = _site_import_mode(kwargs))   # referenced assets → page-local siblings (home page IS at `dir`)
         write(htmpl, export_html(nb; runnable = false, og_image = hogpath, inline_assets = false,
                                  og_url = su, og_type = "website", kwargs...))  # carries `docindex`
         manifest["home"] = true
