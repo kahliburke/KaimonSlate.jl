@@ -798,15 +798,20 @@ function _frontend_export_head(nb, inline::Bool = false, compress::Bool = false)
     # textContent/Blob and is immune); the sequence is inert JS once the parser is past the string boundary.
     safe(js) = replace(rw(js), r"</script"i => "<\\/script")
     parts = String[]
-    if any(e -> !e.esm, fe)
-        # The registration globals a classic widget script expects, PLUS the mount step. Registering a
-        # kind only records an implementation; something has to walk the page's component descriptors and
-        # actually call `wire`. Live that is `wireOutputComponent` in view.js, which a frozen page does not
-        # ship — so without this a `slate_render` component registers correctly and then renders nothing at
-        # all, silently, for every extension. Mounting runs on BOTH edges (a kind registering, and the
-        # document finishing parse) because either can happen first: this block sits at body top, so the
-        # descriptors below it do not exist yet, while a late-registering kind arrives after they do.
-        push!(parts, raw"""<script>window.slateWidgets=window.slateWidgets||{};
+    # The registration globals a classic widget script expects, PLUS the mount step. Registering a
+    # kind only records an implementation; something has to walk the page's component descriptors and
+    # actually call `wire`. Live that is `wireOutputComponent` in view.js, which a frozen page does not
+    # ship — so without this a `slate_render` component registers correctly and then renders nothing at
+    # all, silently, for every extension. Mounting runs on BOTH edges (a kind registering, and the
+    # document finishing parse) because either can happen first: this block sits at body top, so the
+    # descriptors below it do not exist yet, while a late-registering kind arrives after they do.
+    #
+    # Emitted for EVERY front-end, not only when a classic script is present. An ESM-only extension
+    # needs it more, not less: the SDK's `registerComponent` calls `window.slateRegisterWidget`, which
+    # is defined right here — so gating this on a classic script left a component-only package throwing
+    # `slateRegisterWidget is not a function` on load and, had it survived that, with nothing to mount
+    # it. That is precisely the silent-blank-output this block exists to prevent.
+    push!(parts, raw"""<script>window.slateWidgets=window.slateWidgets||{};
 window.__slateMountComponents=function(){
   document.querySelectorAll('script.slatecomponent-desc').forEach(function(s){
     if(s._slateMounted)return;
@@ -823,7 +828,6 @@ window.slateRegisterWidget=window.slateRegisterWidget||function(k,i){window.slat
 window.slateRegisterEditorExtension=window.slateRegisterEditorExtension||function(){};
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',window.__slateMountComponents);
 else window.__slateMountComponents();</script>""")
-    end
     for e in fe
         if !isempty(e.kind)
             # Component module: import its default export (inlined as a data: module) + register under the kind.
@@ -1630,6 +1634,13 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
     # (worker round-trip), mirroring the PDF path.
     palette = _resolve_export_theme(isempty(strip(String(charttheme))) ? theme : charttheme)
     override && _warm_makie_figs!(nb; theme = palette, raster = true)
+    # The import map is resolved BEFORE nb.lock, for the same reason the Makie warm above is: an
+    # offline mode FETCHES each module and walks its graph, which is a network call per module and
+    # can run to minutes on a cold cache. `nb.lock` guards the in-memory report, and holding it across
+    # a blocking call is the teardown-deadlock hazard the protocol note in server.jl warns about — it
+    # would stall the runner, the UI and every other reader of this notebook for the whole download.
+    # Reads `report.meta`/`cells` off-lock exactly as `_warm_makie_figs!` does.
+    importmap_html = _export_importmap_for(nb, offline, _import_mode(offline, inline_assets, imports))
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
         title = _esc(fm0.title)
@@ -1700,7 +1711,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               # The page's import map → so an exported page's front-end JS resolves the same bare
               # specifiers it used live: the notebook's `@use` modules PLUS Slate's Preact/htm/signals
               # stack when a web cell uses it. Emitted in <head> before any body module runs.
-              _export_importmap_for(nb, offline, _import_mode(offline, inline_assets, imports)),
+              importmap_html,   # resolved off-lock above — see the note there
               _og_tags(; title = fm0.title, desc = rawdesc, image = og_image, url = og_url, type = og_type),
               # KaTeX + ECharts + dagre: CDN tags, or the bytes inlined from the vendor cache under
               # `offline` (a page that must open with no network at all). See `_thirdparty_head`.
