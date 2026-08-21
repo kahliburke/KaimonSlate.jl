@@ -81,4 +81,53 @@ const RE = KaimonSlate.ReportEngine
         wait(dead.proc)
         @test RE._worker_died(dead) == true
     end
+
+    # The error at the top of this file — "SlateExtensionsBase … is required but does not seem to be
+    # installed" — is what a worker reports when its infra env was never resolved. That names a
+    # package, but the fault is one step earlier: the env build failed and the old code fell back to a
+    # dir with no Manifest, discarding the reason. These two helpers are what let the build report
+    # itself instead.
+    @testset "a failed env build explains itself" begin
+        @testset "the reason is the log's first ERROR line" begin
+            log = tempname()
+            write(log, """
+                  Installing known registries into `~/.julia`
+                  Resolving package versions...
+                  ERROR: Unsatisfiable requirements detected for package SlateExtensionsBase [bc31d39e]:
+                   Restricted by compat entry to versions: 0.9.1
+                  """)
+            r = RE._env_build_error(log)
+            @test startswith(r, "ERROR: Unsatisfiable requirements")
+            @test !occursin("Resolving package versions", r)   # the noise above it is dropped
+        end
+
+        @testset "no ERROR line falls back to the tail, never to silence" begin
+            log = tempname()
+            write(log, "Resolving...\n\nfailed to clone from https://example.invalid\n  network is unreachable\n")
+            r = RE._env_build_error(log)
+            @test occursin("network is unreachable", r)
+            @test occursin("failed to clone", r)               # a few lines of context, joined
+        end
+
+        @testset "a missing or empty log says so rather than throwing" begin
+            @test occursin("no build log", RE._env_build_error(joinpath(mktempdir(), "absent.log")))
+            empty_log = tempname(); write(empty_log, "   \n\n")
+            @test occursin("empty", RE._env_build_error(empty_log))
+        end
+
+        @testset "the reason is capped so it can ride in an error message" begin
+            log = tempname(); write(log, "ERROR: " * repeat("x", 5000) * "\n")
+            @test length(RE._env_build_error(log)) <= 300
+        end
+
+        # The predicate that decides fail-closed vs fall-back. A Project.toml alone resolves nothing;
+        # only a Manifest means the dir is usable on a worker's LOAD_PATH.
+        @testset "an env counts as usable only once it has a Manifest" begin
+            d = mktempdir()
+            write(joinpath(d, "Project.toml"), "name = \"x\"\n")
+            @test RE._env_instantiated(d) == false
+            write(joinpath(d, "Manifest.toml"), "manifest_format = \"2.0\"\n")
+            @test RE._env_instantiated(d) == true
+        end
+    end
 end

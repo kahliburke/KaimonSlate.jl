@@ -79,6 +79,28 @@ const _KGATE_ENV_ROOT = joinpath(get(DEPOT_PATH, 1, joinpath(homedir(), ".julia"
                                  "scratchspaces", "kaimonslate-kgate")
 const _KGATE_ENV_LOCK = ReentrantLock()
 
+# ── Worker-env build diagnosis ───────────────────────────────────────────────────────────────────
+# When one of the env builds below fails, the sentence that explains it is already in its build log —
+# Pkg leads with `ERROR: …` (unsatisfiable requirements, a `[sources]` path that isn't there, no
+# network). Lift that line out so the failure can be reported AT the failure, instead of being
+# rediscovered later from a worker that died several steps downstream naming some package.
+function _env_build_error(buildlog::AbstractString; tail::Int = 3)
+    isfile(buildlog) || return "no build log was written"
+    txt = try; read(buildlog, String); catch; return "build log unreadable ($buildlog)"; end
+    lines = filter(!isempty, strip.(split(txt, '\n')))
+    isempty(lines) && return "the build log is empty"
+    for l in lines
+        startswith(l, "ERROR") && return first(l, 300)
+    end
+    return first(join(lines[max(1, end - tail + 1):end], " ⏎ "), 300)   # unrecognised shape → its tail
+end
+
+# An env is only usable on a worker's LOAD_PATH once it has been RESOLVED. A Project.toml with no
+# Manifest resolves nothing, and the worker dies with "<package> is required but does not seem to be
+# installed" — which names a package when the actual fault is an env that was never built. Only a dev
+# checkout that instantiated the raw dir in place passes this.
+_env_instantiated(dir::AbstractString) = isfile(joinpath(dir, "Manifest.toml"))
+
 function _kgate_env()::String
     kgate = joinpath(Base.pkgdir(_kaimon()), "lib", "KaimonGate")
     proj = joinpath(kgate, "Project.toml")
@@ -102,7 +124,17 @@ function _kgate_env()::String
             write(joinpath(dir, ".ready"), kgate)
             return dir
         catch e
-            @warn "slate: could not materialise the KaimonGate worker env — falling back to the raw project dir (the worker may fail if its deps aren't installed)" kgate buildlog exception = e
+            reason = _env_build_error(buildlog)
+            # Falling back to the raw project dir only ever worked for a dev checkout that had
+            # instantiated it in place. Anywhere else it hands the worker an env that cannot load
+            # KaimonGate, and the boot failure names ZMQ (or whichever dep resolved first) rather than
+            # this build. Fail here, while the cause is still in hand.
+            _env_instantiated(kgate) || error(
+                "could not prepare the worker's KaimonGate environment.\n" *
+                "  reason:    $reason\n" *
+                "  build log: $buildlog\n" *
+                "  source:    $kgate")
+            @warn "slate: could not materialise the KaimonGate worker env — falling back to the raw project dir, which this checkout has instantiated in place" kgate buildlog reason exception = e
             return kgate
         end
     end
@@ -148,7 +180,23 @@ function _infra_env()::String
             write(joinpath(dir, ".ready"), seb)
             return dir
         catch e
-            @warn "slate: could not materialise the infra worker env — falling back to the raw dir (works only if it carries a resolvable Manifest, e.g. a dev checkout that instantiated it in place)" _INFRA_ENV buildlog exception = e
+            reason = _env_build_error(buildlog)
+            # A `[sources]` path that isn't there is worth naming outright: it means the KaimonSlate
+            # install is incomplete (no `lib/SlateExtensionsBase`), which reads nothing like the
+            # "SlateExtensionsBase is not installed" the worker would otherwise report.
+            note = isdir(seb) ? "" :
+                "\n  note:      this KaimonSlate install has no lib/SlateExtensionsBase at $seb, so the " *
+                "env's [sources] path resolves to nothing — an incomplete checkout or a partial install."
+            # Same reasoning as `_kgate_env()`: the raw dir is only viable for a dev checkout that
+            # instantiated it in place, and its Manifest is deliberately not committed. Returning it
+            # anywhere else guarantees a worker that dies blaming SlateExtensionsBase.
+            _env_instantiated(_INFRA_ENV) || error(
+                "could not prepare the worker's infra environment " *
+                "(Revise + ExpressionExplorer + SlateExtensionsBase).\n" *
+                "  reason:    $reason\n" *
+                "  build log: $buildlog\n" *
+                "  env:       $dir" * note)
+            @warn "slate: could not materialise the infra worker env — falling back to the raw dir, which this checkout has instantiated in place" _INFRA_ENV buildlog reason exception = e
             return _INFRA_ENV
         end
     end
