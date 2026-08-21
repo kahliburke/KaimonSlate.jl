@@ -448,6 +448,7 @@ end
 # is DECODED before anything is ASSIGNED, so a missing/corrupt blob (partial gc, a concurrent
 # worker's eviction) is a clean miss, never a half-mutated namespace. Returns nothing (miss) or the wire.
 function _memo_restore(cellkey::String; unread::Vector{String} = String[],
+                       writes::Vector{String} = String[],
                        trace::Union{Nothing,Dict{String,Any}} = nothing)
     # `trace` (when given) receives the decision detail — a hit's per-binding blobs, or the exact
     # miss reason. `miss(why)` centralizes the fall-through so no exit forgets to explain itself.
@@ -456,6 +457,17 @@ function _memo_restore(cellkey::String; unread::Vector{String} = String[],
     root = _memo_dir(); key = _memo_fullkey(cellkey)
     mf = MemoStore.read_manifest(root, key)
     mf === nothing && return miss("no manifest for fullkey $key")
+    # An entry that binds NOTHING cannot stand in for a cell that DEFINES something: restoring it
+    # hands back the cell's output, binds none of its names, and skips the body, so every downstream
+    # reader throws `UndefVarError` — and because run-all restores too, the notebook has no way back
+    # except running that one cell by hand. The store side refuses to WRITE such an entry (and now
+    # evicts one it finds), but this is the half that matters for entries already on disk: written
+    # before that guard existed, imported from an export bundle's memo, or synced from a peer, none
+    # of which any local store-side check ever saw. Costs a recompute for the rare cell that declares
+    # writes and legitimately defines none (every branch skipped) — the safe direction to be wrong in.
+    if MemoStore.restores_no_bindings(mf) && !isempty(writes)
+        return miss("entry binds nothing but the cell defines $(join(writes, ", ")) — refusing an unfaithful restore")
+    end
     # An entry that ELIDED a display object (stored the wire image, not the object — see
     # `_memo_store`) is only faithful while that name stays UNREAD. A reader added since means the
     # real object is needed → treat as a miss; the re-run re-stores WITH the object (its name is no
@@ -576,10 +588,28 @@ end
 function _memo_store(cellkey::String, names::Vector{String}, wire;
                      unread::Vector{String} = String[], safe::Vector{String} = String[],
                      trace::Union{Nothing,Dict{String,Any}} = nothing)
-    fail(why) = (trace === nothing || (trace["store_fail"] = why); false)
+    # Where to evict from, once the key is known. A refusal below is not just "don't write": whether a
+    # cell is cacheable depends on what it ACTUALLY defined this run, not on its source, so the same
+    # key can store cleanly one run and be refused the next (a notebook-local function that only
+    # appears on a full run, say). Declining alone would leave the earlier entry live, and restoring
+    # it returns the cell's OUTPUT while binding none of its names and skipping its body — every
+    # downstream reader then throws, and a run-all re-restores it, so the notebook cannot heal itself.
+    # Evict instead, so the verdict is two-way.
+    evict = Ref{Tuple{String,String}}(("", ""))
+    # `evict = false` for a refusal that is NOT a verdict on the cell — an I/O failure says nothing
+    # about whether the value is cacheable, and the manifest write is atomic, so a previously-good
+    # entry is still intact and worth keeping.
+    function fail(why; evict_stale::Bool = true)
+        trace === nothing || (trace["store_fail"] = why)
+        r, k = evict[]
+        (evict_stale && !isempty(k) && MemoStore.drop_manifest(r, k)) &&
+            @info "slate memo: dropped a stale entry for a cell that is no longer cacheable" cell = cellkey why = why
+        return false
+    end
     _MEMO_OK || return fail("memo layer disabled (see worker boot log)")
     m = _NS[]
     root = _memo_dir(); key = _memo_fullkey(cellkey)
+    evict[] = (root, key)
     entries = Dict{String,Any}[]
     elided = Dict{String,Any}[]
     # Read each declared write at the LATEST world age. A global the cell defines for the FIRST
@@ -668,7 +698,7 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
         return true
     catch e
         @info "slate memo: not cached" cell = cellkey reason = first(split(sprint(showerror, e), '\n'))
-        return fail("manifest/wire write failed: $(first(sprint(showerror, e), 120))")
+        return fail("manifest/wire write failed: $(first(sprint(showerror, e), 120))"; evict_stale = false)
     end
 end
 
@@ -695,7 +725,9 @@ function _eval_one(source::String, filename::String, memo_key::String,
     # `memo_force` (the ▶ play button): an explicit run request — never satisfy it from the cache.
     # The fresh result still stores below, replacing the entry.
     if !isempty(memo_key) && !memo_force
-        w = _memo_restore(memo_key; unread = memo_unread, trace = tr)
+        # `memo_names` = the cell's declared writes; the restore needs them to reject an entry that
+        # would define none of them (see `_memo_restore`).
+        w = _memo_restore(memo_key; unread = memo_unread, writes = memo_names, trace = tr)
         # A restored cell is memoized WITHOUT running its source, so its cheap global side effects —
         # `using X` (a provider's imported names) and `set_theme!` (the ambient Makie theme) — are
         # replayed here so any downstream cell that later re-runs sees the right scope + theme. A
@@ -1016,7 +1048,8 @@ function __slate_blob_of(name::String; cellkey::String = "")
         # cross-region transfer succeeds instead of erroring "no global named". The hub supplies the
         # producing cell's `cellkey` (the worker's own name→cell index doesn't survive the swap that caused
         # this). A non-memoized producer has no entry to restore → the cell must re-run on its side first.
-        restored = !isempty(cellkey) && (try; _memo_restore(cellkey) !== nothing; catch; false; end)
+        restored = !isempty(cellkey) &&
+                   (try; _memo_restore(cellkey; writes = [name]) !== nothing; catch; false; end)
         m = _NS[]
         (restored && Base.invokelatest(isdefined, m, s)) || return (; error = "no global named '$name'" *
             (isempty(cellkey) ? "" : " (absent from the live namespace and no memo entry restores it — its cell must re-run on its side)"))

@@ -211,6 +211,31 @@ end
 touch_manifest(root::AbstractString, key::AbstractString) =
     (p = manifest_path(root, key); isfile(p) && try; touch(p); catch; end; nothing)
 
+"""
+    restores_no_bindings(manifest) -> Bool
+
+Whether restoring `manifest` would define no globals at all. Combined with the caller's knowledge of
+what the cell DECLARES it writes, this separates a faithful entry from one that would hand back a
+cell's output while binding none of its names — a restore that silently skips the body and leaves
+every downstream reader undefined.
+"""
+restores_no_bindings(manifest::AbstractDict) = isempty(get(manifest, "bindings", Any[]))
+
+"""
+    drop_manifest(root, key) -> Bool
+
+Evict the entry for `key`, returning whether one was there. Dropping the manifest IS the eviction:
+`gc` refcount-sweeps every blob no surviving manifest references, and a blob shared with another
+entry must not be removed here regardless. Used when a cell turns out not to be cacheable, where
+leaving an earlier entry in place would go on serving it.
+"""
+function drop_manifest(root::AbstractString, key::AbstractString)
+    _checkkey(key)
+    p = manifest_path(root, key)
+    isfile(p) || return false
+    return try; rm(p; force = true); true; catch; false; end
+end
+
 # Every blob hash a manifest references (bindings + wire) — the gc refcount edge set.
 function _manifest_blobs(d::AbstractDict)
     hs = String[]

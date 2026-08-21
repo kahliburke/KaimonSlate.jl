@@ -67,6 +67,41 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
         end
     end
 
+    # Whether a cell is cacheable depends on what it ACTUALLY defined on a given run, not on its
+    # source — a notebook-local function is refused, and one can appear on a full run but not a
+    # partial one. So the same key can store cleanly once and be refused later. Declining to write
+    # is not enough: the earlier entry stays live, and restoring it returns the cell's OUTPUT while
+    # binding none of its names and skipping its body, so every downstream reader throws and a
+    # run-all restores it again. These are the two halves that close that.
+    @testset "an entry for a no-longer-cacheable cell can be evicted" begin
+        mktempdir() do root
+            hA, _ = MemoStore.put_blob(io -> Serialization.serialize(io, [1, 2, 3]), root)
+            MemoStore.write_manifest(root, "evictme", mkmanifest(["x" => hA], hA))
+            @test MemoStore.read_manifest(root, "evictme") !== nothing
+            @test MemoStore.drop_manifest(root, "evictme") == true        # evicted...
+            @test MemoStore.read_manifest(root, "evictme") === nothing    # ...and gone
+            @test MemoStore.drop_manifest(root, "evictme") == false       # idempotent: nothing left to drop
+            @test MemoStore.drop_manifest(root, "neverwas") == false
+            @test_throws ArgumentError MemoStore.drop_manifest(root, "../evil")   # same key hygiene
+            # The blob is left for `gc` to refcount-sweep — dropping one entry must never yank a
+            # blob another entry still references.
+            @test isfile(MemoStore.blob_path(root, hA))
+        end
+    end
+
+    @testset "an entry that would define nothing is recognisable" begin
+        hA = "0" ^ 64
+        @test MemoStore.restores_no_bindings(mkmanifest(Pair{String,String}[], hA)) == true
+        @test MemoStore.restores_no_bindings(mkmanifest(["x" => hA], hA)) == false
+        @test MemoStore.restores_no_bindings(Dict{String,Any}("wire" => Dict())) == true   # absent key
+        # The rule the restore applies: refuse ONLY when the cell declares writes. A display-only
+        # cell legitimately binds nothing and must still restore — that is most of the cache.
+        unfaithful(mf, writes) = MemoStore.restores_no_bindings(mf) && !isempty(writes)
+        @test unfaithful(mkmanifest(Pair{String,String}[], hA), ["note"]) == true
+        @test unfaithful(mkmanifest(Pair{String,String}[], hA), String[]) == false
+        @test unfaithful(mkmanifest(["full" => hA], hA), ["full"]) == false
+    end
+
     @testset "worker-shaped round-trip through Serialization" begin
         mktempdir() do root
             val = Dict("df" => rand(10), "n" => 42)
