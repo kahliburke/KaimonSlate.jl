@@ -11,6 +11,7 @@ module NotebookServer
 
 using HTTP, JSON, FileWatching, CodecZlib, CodecZstd
 import Base64
+import Random
 import Dates                                  # publish dates for the multi-doc site manifest
 import Logging                                # standalone serve: route hub log detail to a file
 import REPL                                   # standalone serve: raw-mode ^C byte (see _wait_for_ctrl_c)
@@ -3084,8 +3085,9 @@ server-side. Presentation defaults for visitors go in `appdefaults`; build it wi
 [`app_defaults`](@ref). See `server_app.jl` for what app mode does and does not guarantee.
 """
 function start_server(path::AbstractString; host = "127.0.0.1", port = 8765, inactive::Bool = false,
-                      app::Bool = false, appdefaults::AbstractDict = Dict{String,Any}())
-    h = start_hub(; host = host, port = port, app = app, appdefaults = appdefaults)
+                      app::Bool = false, appdefaults::AbstractDict = Dict{String,Any}(),
+                      token::AbstractString = "")
+    h = start_hub(; host = host, port = port, app = app, appdefaults = appdefaults, token = token)
     id = open_notebook!(h, path; inactive = inactive)
     @info "Notebook" url = "$(_hub_url(h))/n/$id" file = abspath(path)
     return h
@@ -3261,7 +3263,7 @@ the banner shows the path; only errors still print.
 """
 function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, quiet::Bool = true,
                         inactive::Bool = false, app::Bool = false,
-                        appdefaults::AbstractDict = Dict{String,Any}())
+                        appdefaults::AbstractDict = Dict{String,Any}(), token::AbstractString = "")
     # Swap the logger BEFORE anything spawns so worker-spawn infos land in the file.
     logpath = joinpath(tempdir(), "kaimonslate", "hub-$port.log")
     logio = nothing
@@ -3280,13 +3282,13 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
         end
     end
     h = start_server(path; host = host, port = port, inactive = inactive,
-                     app = app, appdefaults = appdefaults)
+                     app = app, appdefaults = appdefaults, token = token)
     id = isempty(h.notebooks) ? "" : first(keys(h.notebooks))
     # An APP advertises the server ROOT. `/` on an app hub redirects to its notebook (see
     # `_app_root_target`), so the two land in the same place — but the root is the address someone
     # types, bookmarks, puts on a wiki, or reads out loud. `/n/<id>` exposes an internal id that is
     # derived from a filename and means nothing to the person using the thing.
-    url = app ? _hub_url(h) : "$(_hub_url(h))/n/$id"
+    url = _auth_url(h, app ? _hub_url(h) : "$(_hub_url(h))/n/$id")
     _await_http_ready(_hub_url(h))          # wait until the server actually answers before announcing it
     # …and, for an app, until it has something to SHOW: its reader has no cell-level progress to read,
     # so a URL handed out mid-bring-up looks broken. Times out rather than hangs (see _await_app_warm).
