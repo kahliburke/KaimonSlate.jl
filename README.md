@@ -112,6 +112,17 @@ slate my_analysis.jl  # open a notebook in the browser (created if missing)
 (At the `julia>` prompt it would just be an undefined variable; shell out with `;slate my_analysis.jl`
 if you're already in the REPL.)
 
+To upgrade, update the app and then run it once — launching `slate` is what points Kaimon at the new
+install, which a running Kaimon picks up within a few seconds:
+
+```julia-repl
+pkg> registry update
+pkg> app up KaimonSlate
+```
+```sh
+slate
+```
+
 <div align="center">
 <img src="https://github.com/kahliburke/KaimonSlate.jl/releases/download/docs-assets/slate-tui.gif" alt="The slate status TUI" width="560"/>
 </div>

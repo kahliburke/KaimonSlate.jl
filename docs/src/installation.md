@@ -39,23 +39,36 @@ pkg> app add KaimonSlate
 The SDK it builds on, `SlateExtensionsBase`, is in General too, so writing an extension needs nothing
 beyond the default registry.
 
-Registries are cached locally, so a newly published version isn't visible until you refresh:
-
-```julia-repl
-pkg> registry update
-pkg> app update KaimonSlate
-```
-
-Note the `app` prefix: an installed app lives in its own environment, so a plain `update KaimonSlate`
-acts on whatever environment is active and won't find it.
-
-If a package or version "does not exist" and you believe it should, `registry update` first — a stale
-registry is the most common cause.
+Note the `app` prefix: an installed app lives in its own environment, so a plain `add KaimonSlate`
+acts on whatever environment is active and won't install the launcher.
 
 !!! note "Upgrading from a pre-release install"
     Earlier instructions used `app dev` plus a manual `instantiate` of `~/.julia/dev/KaimonSlate`.
     That still works but pins you to whatever is in that clone. To switch, run `pkg> app rm
     KaimonSlate`, add the registry, then `pkg> app add KaimonSlate`. The old clone can be deleted.
+
+#### Upgrading
+
+Two steps, and the second one matters:
+
+```julia-repl
+pkg> registry update          # registries are cached; a new version isn't visible until you refresh
+pkg> app up KaimonSlate       # `up` is short for `update`
+```
+
+```sh
+slate                         # then run it once
+```
+
+Running `slate` is what tells **Kaimon** about the upgrade. Each version installs into its own
+directory (`packages/KaimonSlate/<slug>`, named after the version's contents), while Kaimon's
+`extensions.json` still points at the previous one — which is usually still on disk, so nothing
+errors and the update simply appears not to have happened. Launching `slate` re-points that entry at
+the new install; a running Kaimon reloads the extension within a few seconds, and the TUI's `Version`
+row reports what the hub is actually serving.
+
+If a package or version "does not exist" and you believe it should, `registry update` first — a stale
+registry is the most common cause.
 
 ### 3. Put `slate` on your `PATH`
 
