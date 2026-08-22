@@ -1490,11 +1490,22 @@ _resolve_url(base, spec) = try; string(HTTP.URIs.resolvereference(base, spec)); 
 # browser, and are shared by every page of a site.
 _import_file_name(url::AbstractString) = string(hash(String(url)); base = 16) * ".mjs"
 
+# `:inline` does NOT nest a child inside its parent. Nesting base64s a module once per level and again
+# per path that reaches it, so a deep or diamond-shaped graph explodes — which is the whole reason an
+# author would otherwise have to know to ask their CDN for a pre-bundled build. An import map can name
+# ANY specifier, so instead every module is emitted ONCE, flat, under a synthetic bare specifier that
+# the map resolves to its `data:` url; cross-module imports are rewritten to those specifiers. One
+# base64 layer, shared modules stored once, and depth costs nothing — the same shape `:sibling` gets
+# from real files, in a single file. (A bare specifier, not a `scheme:`-looking one: a specifier with a
+# colon is parsed as a URL and would bypass the map.)
+_import_mod_spec(url::AbstractString) = "@slate-mod/" * string(hash(String(url)); base = 16)
+
 # One module of the graph, with every specifier that needs a base rewritten to its localized form.
-# Returns the SIBLING FILENAME (`:sibling`) or the `data:` url (`:inline`); `nothing` if the graph
-# can't be closed. `files` collects the sibling bytes; `done` memoises a url so a diamond is walked
-# once rather than duplicated.
-function _localize_module(url::AbstractString, mode::Symbol, files::AbstractDict,
+# Returns the reference OTHER MODULES use for it — a sibling filename, or a synthetic bare specifier —
+# or `nothing` if the graph can't be closed. `mods` collects what has to ship: sibling path => bytes,
+# or specifier => data: url. `done` memoises a url, so a module reached twice is walked (and stored)
+# once in BOTH modes.
+function _localize_module(url::AbstractString, mode::Symbol, mods::AbstractDict,
                           done::AbstractDict, seen::Set{String}, depth::Int = 0)
     depth > _IMPORT_MAX_DEPTH && return nothing
     haskey(done, url) && return done[url]
@@ -1509,9 +1520,10 @@ function _localize_module(url::AbstractString, mode::Symbol, files::AbstractDict
             _needs_base(spec) || continue
             target = _resolve_url(url, spec)
             target === nothing && return nothing
-            child = _localize_module(target, mode, files, done, seen, depth + 1)
+            child = _localize_module(target, mode, mods, done, seen, depth + 1)
             child === nothing && return nothing
-            # A sibling child sits in the SAME directory as this module, so it's referenced bare.
+            # A sibling child sits in the SAME directory as this module, so it's referenced relatively;
+            # an inline child is already a bare specifier the import map resolves.
             ref = mode === :sibling ? "./" * child : child
             js = replace(js, "\"" * spec * "\"" => "\"" * ref * "\"")
             js = replace(js, "'" * spec * "'" => "'" * ref * "'")
@@ -1521,12 +1533,14 @@ function _localize_module(url::AbstractString, mode::Symbol, files::AbstractDict
     end
     out = if mode === :sibling
         name = _import_file_name(url)
-        files[joinpath("imports", name)] = Vector{UInt8}(js)
+        mods[joinpath("imports", name)] = Vector{UInt8}(js)
         name
     else
-        string("data:text/javascript;base64,", Base64.base64encode(js))
+        spec = _import_mod_spec(url)
+        mods[spec] = string("data:text/javascript;base64,", Base64.base64encode(js))
+        spec
     end
-    mode === :sibling && (done[url] = out)            # only siblings dedup; an inline child is nested per use
+    done[url] = out
     return out
 end
 
@@ -1538,23 +1552,33 @@ re-exports by relative path — inlining just the entry file yields a page that 
 An import that can't be closed is an ERROR in an offline mode, not a warning: the export was asked to
 stand alone, and quietly emitting a network-dependent page defers the failure to whoever opens it,
 possibly years later.
+
+`:inline` returns the entry specifiers PLUS one synthetic `@slate-mod/…` entry per module of the graph
+(see `_import_mod_spec`); `:sibling` puts the modules in `files` and returns page-relative paths.
 """
 function _localize_imports(imports::AbstractDict, mode::Symbol = :inline,
                            files::AbstractDict = Dict{String,Union{String,Vector{UInt8}}}())
     out = Dict{String,String}()
     done = Dict{String,String}()
+    # `:inline` module bodies belong in the MAP, not in the page's sibling files.
+    mods = mode === :sibling ? files : Dict{String,String}()
     for (spec, url) in imports
         s, u = String(spec), String(url)
         if mode === :cdn || !_is_remote_url(u)
             out[s] = u; continue                      # already a data:/relative/ext-assets target
         end
-        got = _localize_module(u, mode, files, done, Set{String}())
+        got = _localize_module(u, mode, mods, done, Set{String}())
         got === nothing && error("slate: this export cannot be made self-contained — module `$s` " *
-                                 "($u) could not be resolved (unreachable, an import cycle, or " *
-                                 "deeper than $_IMPORT_MAX_DEPTH). Export without `offline` to " *
-                                 "load it from the network instead.")
-        out[s] = mode === :sibling ? "imports/" * got : got
+                                 "($u) could not be resolved: it is unreachable, its graph contains " *
+                                 "an import cycle, or it nests deeper than $_IMPORT_MAX_DEPTH. Export " *
+                                 "without `offline` to load it from the network instead.")
+        out[s] = mode === :sibling ? "imports/" * got : mods[got]
     end
+    # The graph an export absorbed is otherwise invisible until someone notices the file size. A
+    # package pulled in unbundled brings its whole dependency tree, which is legal and works — it is
+    # just much bigger, and the author has no other way to find that out.
+    isempty(done) || @info "slate export: module graph resolved" mode = mode modules = length(done) bytes = sum(length(v) for v in values(mods); init = 0)
+    mode === :sibling || merge!(out, mods)            # every module reachable by its own specifier
     return out
 end
 
