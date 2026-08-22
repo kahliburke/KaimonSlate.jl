@@ -25,7 +25,14 @@ end
 Hub(notebooks, server, host, port, lock) =
     Hub(notebooks, server, host, port, lock, false, Dict{String,Any}())
 
-_hub_url(h::Hub) = "http://$(h.host):$(h.port)"
+# The URL to SHOW someone, which is not the address we BIND. `0.0.0.0` (and `::`) mean "every
+# interface" to a listener and are not destinations at all: they name no host to connect to. Chrome
+# papers over that by rewriting them to loopback, Safari does not — it navigates nowhere and leaves a
+# blank tab, so an app served on the default `--host 0.0.0.0` looked broken in one browser and fine in
+# another, from the very URL its own launcher printed. Bind wide, advertise loopback.
+_display_host(h::AbstractString) =
+    h in ("0.0.0.0", "*", "") ? "127.0.0.1" : h in ("::", "[::]", "::0") ? "[::1]" : h
+_hub_url(h::Hub) = "http://$(_display_host(h.host)):$(h.port)"
 _esc(s) = replace(String(s), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;")
 
 # A unique id from the filename (deduped against the registry).
