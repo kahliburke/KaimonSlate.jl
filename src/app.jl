@@ -42,6 +42,12 @@ import Tachikoma
 # are injectable for tests.
 function _maybe_onboard!(; input::IO = stdin, output::IO = stdout)::Bool
     isdir(_kaimon_dir()) || return false
+    # An UPDATE moves a Pkg install to a new `<slug>` directory, leaving the entry naming the version
+    # that was replaced — so Kaimon keeps loading the old Slate and the update looks inert. The app
+    # runs from the updated environment, so it is the one place that loads the NEW package and can
+    # see the drift. Repairing a path the user already consented to is not registering behind their
+    # back; a REMOVED entry still falls through to the prompt below.
+    try; repair_registration!(); catch; end
     _slate_registered() && return false
     ext_prompt_choice() == "dismissed" && return false
     input === stdin && !(stdin isa Base.TTY) && return false

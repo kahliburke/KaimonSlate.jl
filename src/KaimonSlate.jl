@@ -74,6 +74,34 @@ function _is_slate_project(path::AbstractString)
     return occursin(r"(?m)^\s*name\s*=\s*\"KaimonSlate\"", read(f, String))
 end
 
+# Is `path` a Pkg-managed copy of this package — `<depot>/packages/KaimonSlate/<slug>`? The slug is
+# derived from a version's tree hash, so a Pkg-installed KaimonSlate lands in a DIFFERENT directory
+# on every upgrade. Matching on the depot layout is what separates "an install that moved" from "a
+# second checkout the user is deliberately working in".
+function _is_depot_copy(path::AbstractString)
+    isempty(path) && return false
+    p = normpath(abspath(String(path)))
+    parent = basename(dirname(p))
+    return parent == "KaimonSlate" && basename(dirname(dirname(p))) == "packages"
+end
+
+# Should the registered entry at `old` be replaced by the running package at `new`? Only where the
+# answer is unambiguous, because the identity-dedup this feeds is deliberate — a git worktree must
+# not be able to hijack the registration just by being loaded.
+#
+#   1. `old` is gone, or is no longer a KaimonSlate project. Nothing to protect; re-point.
+#   2. Both are depot copies under different slugs. An upgrade moved the install, and the entry still
+#      names the version that was replaced — which is worse than a dead path, because the old slug
+#      usually still EXISTS (Pkg keeps it until a `gc`), so Kaimon goes on loading the OLD Slate with
+#      nothing on screen to say the update did not take effect.
+#
+# Two genuine checkouts fall through to neither and are left alone.
+function _stale_registration(old::AbstractString, new::AbstractString)
+    _is_slate_project(old) || return true
+    normpath(abspath(String(old))) == normpath(abspath(String(new))) && return false
+    return _is_depot_copy(old) && _is_depot_copy(new)
+end
+
 """
     register_extension(; auto_start=true, enabled=true, force=false, project_path=pkgdir(KaimonSlate)) -> Bool
 
@@ -111,10 +139,27 @@ function register_extension(; auto_start::Bool = true, enabled::Bool = true, for
     # git worktree, or the packaged install), don't add another — multiple entries spawn multiple
     # hubs that fight over ports. Just working in a worktree must not pollute the config. `force=true`
     # re-points to a specific checkout (drops other KaimonSlate entries first).
-    slate_idx = findall(e -> e isa AbstractDict && _is_slate_project(String(get(e, "project_path", ""))), exts)
+    # Any entry naming THIS package, live or stale. `_is_slate_project` alone can't see a registration
+    # left behind by an upgrade: a Pkg install moves to a new `<slug>` directory each version, and the
+    # old one usually still exists, so it still reads as a valid Slate project.
+    slate_idx = findall(exts) do e
+        e isa AbstractDict || return false
+        p = String(get(e, "project_path", ""))
+        _is_slate_project(p) || _is_depot_copy(p)            # `||`: a gc'd slug is a dead path, still ours
+    end
     if !isempty(slate_idx)
-        force || return false                                # already have one — leave it be
-        deleteat!(exts, slate_idx)                           # force: replace whatever was there
+        # Repair a registration the running package has outgrown — an install that moved, or a path
+        # that no longer resolves. Anything else (a second checkout, a worktree) is left as it is:
+        # merely loading from one must not repoint the config away from the user's chosen install.
+        stale = all(i -> _stale_registration(String(get(exts[i], "project_path", "")), path), slate_idx)
+        if !force && !stale
+            return false                                     # a live, different registration — leave it be
+        end
+        if !force
+            was = [String(get(exts[i], "project_path", "")) for i in slate_idx]
+            @info "KaimonSlate: the registered extension path is stale (an update moved it) — re-pointing" from = was to = path
+        end
+        deleteat!(exts, slate_idx)                           # replace whatever was there
     end
     push!(exts, Dict("project_path" => path, "enabled" => enabled, "auto_start" => auto_start))
     data["extensions"] = exts
@@ -154,6 +199,42 @@ function __init__()
         @debug "KaimonSlate auto-registration skipped" exception = (e, catch_backtrace())
     end
     return nothing
+end
+
+"""
+    repair_registration!() -> Bool
+
+Re-point an extension registration that an UPDATE invalidated, returning whether it wrote anything.
+
+A Pkg-installed KaimonSlate lives at `<depot>/packages/KaimonSlate/<slug>`, and the slug is derived
+from the version's tree hash — so every upgrade lands in a NEW directory while `extensions.json` goes
+on naming the old one. The old slug usually still exists (Pkg keeps it until a `gc`), so nothing
+errors: Kaimon simply keeps loading the version that was replaced, and the update appears not to have
+taken effect.
+
+This is deliberately narrow. It only acts when EVERY entry naming this package is stale — the path is
+gone, or it is a different slug of the same Pkg install — so a second checkout or a git worktree is
+never repointed. `enabled`/`auto_start` are carried across, because repairing a path must not quietly
+re-enable an extension the user turned off. A REMOVED entry is not damage but a choice, and is left
+for the app's prompt.
+"""
+function repair_registration!(; project_path = pkgdir(@__MODULE__))
+    file = joinpath(_kaimon_dir(), "extensions.json")
+    isfile(file) || return false
+    data = try; JSON.parsefile(file); catch; return false; end
+    exts = get(data, "extensions", nothing)
+    exts isa AbstractVector || return false
+    me = project_path
+    me === nothing && return false
+    ours = [e for e in exts if e isa AbstractDict &&
+            (_is_slate_project(String(get(e, "project_path", ""))) ||
+             _is_depot_copy(String(get(e, "project_path", ""))))]
+    isempty(ours) && return false                            # never registered → the app's prompt owns this
+    all(e -> _stale_registration(String(get(e, "project_path", "")), me), ours) || return false
+    prev = first(ours)                                       # carry the user's own settings across
+    return register_extension(; force = true, project_path = me,
+                              enabled = get(prev, "enabled", true) === true,
+                              auto_start = get(prev, "auto_start", true) === true)
 end
 
 # Is a KaimonSlate checkout (any identity, see `_is_slate_project`) already in Kaimon's extension

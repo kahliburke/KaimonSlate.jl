@@ -178,6 +178,93 @@ end
     end
 end
 
+# A Pkg install lives at `<depot>/packages/KaimonSlate/<slug>`, and the slug follows the version's
+# tree hash — so an UPGRADE lands in a new directory while extensions.json still names the old one.
+# The old slug normally still exists (Pkg keeps it until a gc), so nothing errors: Kaimon just goes
+# on loading the version that was replaced, and the update looks like it did nothing.
+@testset "a registration outlived by an update is re-pointed" begin
+    # Build a fake depot copy: <root>/packages/KaimonSlate/<slug>/Project.toml
+    _depot_copy(root, slug) = begin
+        d = joinpath(root, "packages", "KaimonSlate", slug); mkpath(d)
+        write(joinpath(d, "Project.toml"), "name = \"KaimonSlate\"\nuuid = \"f7b954f5-0334-4562-ac21-b005218ce1da\"\n")
+        d
+    end
+    _write_entry(tmp, path; enabled = true, auto_start = true) = begin
+        sub = Sys.iswindows() ? "Kaimon" : "kaimon"
+        kdir = joinpath(tmp, sub); mkpath(kdir)
+        write(joinpath(kdir, "extensions.json"),
+              JSON.json(Dict("extensions" => [Dict("project_path" => path,
+                                                   "enabled" => enabled, "auto_start" => auto_start)])))
+    end
+
+    @testset "the classifier" begin
+        old = _depot_copy(mktempdir(), "aaaaa")
+        new = _depot_copy(mktempdir(), "bbbbb")
+        @test KS._is_depot_copy(old) && KS._is_depot_copy(new)
+        @test !KS._is_depot_copy(mktempdir())                       # a plain checkout dir isn't one
+        @test KS._stale_registration(old, new)                      # different slugs of the same install
+        @test !KS._stale_registration(old, old)                     # same path is never stale
+        @test KS._stale_registration(joinpath(mktempdir(), "gone"), new)  # path vanished (gc'd)
+        # Two REAL checkouts: neither is a depot copy, so neither is stale — a worktree must not
+        # repoint the config merely by being loaded.
+        a, b = mktempdir(), mktempdir()
+        for d in (a, b); write(joinpath(d, "Project.toml"), "name = \"KaimonSlate\"\n"); end
+        @test !KS._stale_registration(a, b)
+    end
+
+    # The real upgrade: BOTH sides are depot copies, differing only by slug. `project_path` stands in
+    # for the running package, which in this suite is a dev checkout — and a dev checkout genuinely
+    # must not repoint a depot registration, which is the next case down.
+    @testset "a stale depot entry is repaired, keeping the user's settings" begin
+        _with_isolated_config() do tmp
+            depot = mktempdir()
+            _write_entry(tmp, _depot_copy(depot, "oldslug"); enabled = true, auto_start = false)
+            new = _depot_copy(depot, "newslug")
+            @test KS.repair_registration!(; project_path = new)
+            e = only(_ext_entries(tmp))                              # repaired, not duplicated
+            @test String(e["project_path"]) == abspath(new)          # now names the upgraded install
+            @test e["auto_start"] === false                          # NOT silently re-enabled
+            @test e["enabled"] === true
+        end
+    end
+
+    @testset "a dev checkout does not repoint a depot registration" begin
+        _with_isolated_config() do tmp
+            old = _depot_copy(mktempdir(), "installed")
+            _write_entry(tmp, old)
+            dev = mktempdir(); write(joinpath(dev, "Project.toml"), "name = \"KaimonSlate\"\n")
+            @test !KS.repair_registration!(; project_path = dev)
+            @test String(only(_ext_entries(tmp))["project_path"]) == old
+        end
+    end
+
+    @testset "a vanished path is repaired too" begin
+        _with_isolated_config() do tmp
+            _write_entry(tmp, joinpath(mktempdir(), "packages", "KaimonSlate", "goneslug"))
+            @test KS.repair_registration!()                          # gone ⇒ stale for any running copy
+            @test length(_ext_entries(tmp)) == 1                     # repaired, not duplicated
+        end
+    end
+
+    @testset "a live registration is left alone" begin
+        _with_isolated_config() do tmp
+            other = mktempdir()                                      # a second real checkout
+            write(joinpath(other, "Project.toml"), "name = \"KaimonSlate\"\n")
+            _write_entry(tmp, other)
+            @test !KS.repair_registration!()                         # nothing written
+            @test String(only(_ext_entries(tmp))["project_path"]) == other
+        end
+    end
+
+    @testset "no entry at all is left to the prompt, not repaired" begin
+        _with_isolated_config() do tmp
+            sub = Sys.iswindows() ? "Kaimon" : "kaimon"; mkpath(joinpath(tmp, sub))
+            @test !KS.repair_registration!()                         # a removed entry is a choice
+            @test isempty(_ext_entries(tmp))
+        end
+    end
+end
+
 @testset "slateapp entry args" begin
     @test KS._app_main(["-h"]) == 0
     @test KS._app_main(["--help"]) == 0
