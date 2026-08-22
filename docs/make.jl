@@ -76,6 +76,7 @@ makedocs(;
             "The AI Agent" => "agent.md",
             "Timeline" => "history.md",
             "Export" => "export.md",
+            "App Mode" => "app-mode.md",
             "Publishing" => "publishing.md",
             "Packages" => "packages.md",
             "Configuration" => "configuration.md",
