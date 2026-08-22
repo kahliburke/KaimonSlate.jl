@@ -1593,6 +1593,15 @@ end
 
 # Tear down a remote kernel's silent wire and surface the auto-recovery (log + the woken eval's error).
 # Under the manual policy also flag the kernel so prepare! won't auto-reconnect it until an explicit run.
+# Has this kernel's worker PROCESS exited? Decidable instantly and with certainty, unlike silence —
+# which a busy worker and a dead one produce identically. `false` for anything we didn't spawn (a
+# remote or attached kernel has no local handle), so callers keep their existing remote-only rules.
+function _kernel_proc_dead(k)
+    p = try; getfield(k, :proc); catch; nothing; end
+    p === nothing && return false
+    return try; !process_running(p); catch; false; end
+end
+
 function _heal_dead_wire!(nb::LiveNotebook, k, unresp_s::Real = 0.0)
     side = _kernel_side_label(nb, k)
     auto = _region_autoretry()
@@ -1637,13 +1646,18 @@ function _liveness_sweep!(nb::LiveNotebook)
             # Stamp the first silent sweep — backdated by the ping timeout it already waited — for EVERY
             # kernel, LOCAL included. The clock used to be remote-only, which meant a local worker that
             # stopped answering showed a healthy green pill indefinitely while the log filled up: the one
-            # state nobody could see was the one that mattered. Only the auto-DROP stays remote-only —
-            # a local process is ours to inspect, and re-dialling a wedged-but-alive worker reconnects
-            # to the same wedge.
+            # state nobody could see was the one that mattered. The auto-DROP stays remote-only for a
+            # worker that is merely SILENT — a local process is ours to inspect, and re-dialling a
+            # wedged-but-alive worker reconnects to the same wedge — but a local process that has EXITED
+            # is neither inspectable nor re-dialable, and holding its connection open only feeds an
+            # unbounded wait to everything that reaches for it. `_kernel_proc_dead` separates the two;
+            # silence alone can't, which is why a crashed local worker used to sit "silent for Ns" for
+            # as long as the hub was up.
             since = get!(() -> time() - _LIVENESS_PING_TIMEOUT, _KERNEL_UNRESPONSIVE_SINCE, k)
             unresp = time() - since
             logged = _log_liveness_silence(nb, k, err, unresp)
-            if (k.target isa ReportEngine.RemoteTarget || k.remote) && unresp >= _DEAD_WIRE_GRACE
+            if (k.target isa ReportEngine.RemoteTarget || k.remote || _kernel_proc_dead(k)) &&
+               unresp >= _DEAD_WIRE_GRACE
                 delete!(_KERNEL_UNRESPONSIVE_SINCE, k); delete!(_LIVENESS_LOG_LAST, k)
                 _heal_dead_wire!(nb, k, unresp)        # → amber "disconnected" (pushes inside)
             elseif k.target isa ReportEngine.RemoteTarget || k.remote
