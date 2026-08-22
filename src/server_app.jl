@@ -43,6 +43,7 @@ const _APP_GET = (
     r"^/api/[^/]+/blob/",            # figures, animation frames, `save_asset` bytes (→ downloads)
     r"^/api/[^/]+/output/",          # the full text behind a truncated result
     r"^/api/[^/]+/health$",          # watchdog badge
+    r"^/api/version$",               # which Slate is serving this app — the first line of any report
 )
 
 # What a player needs to POST. Every one of these drives the *running* document; none of them can
@@ -422,6 +423,9 @@ function _status_json(h::Hub)
             "url" => _hub_url(h),
             "host" => h.host, "port" => h.port,
             "julia" => string(VERSION),
+            # Which Slate built and is serving this. An app is usually operated by someone who did
+            # not author it, from a machine where nothing else says what version is installed.
+            "version" => (try; string(pkgversion(@__MODULE__)); catch; ""; end),
             "uptimeSec" => _HUB_STARTED[] == 0 ? 0.0 : round(time() - _HUB_STARTED[]; digits = 1),
             "uptime" => _uptime_str(_HUB_STARTED[] == 0 ? 0 : time() - _HUB_STARTED[]),
             # `maxrss` is the process PEAK, not the current footprint — labelled as such on the page
@@ -552,9 +556,16 @@ function render(d) {
   \$('#mode').textContent = d.app ? 'app mode' : 'authoring';
   \$('#mode').className = 'pill ' + (d.app ? 'ok' : '');
   const h = d.hub;
+  // The version links to its release notes: the operator reading this page is the person who has to
+  // say which build is running, and often can't get at a Julia REPL to ask.
+  const ver = h.version
+    ? ` · <a href="https://github.com/kahliburke/KaimonSlate.jl/releases/tag/v\${encodeURIComponent(h.version)}"
+             target="_blank" rel="noopener">Slate v\${esc(h.version)}</a>`
+    : '';
   \$('#hubline').innerHTML =
-    `Server up <strong>\${esc(h.uptime)}</strong> · pid \${h.pid} · Julia \${esc(h.julia)} · \${esc(h.host)}:\${h.port}`;
+    `Server up <strong>\${esc(h.uptime)}</strong> · pid \${h.pid} · Julia \${esc(h.julia)} · \${esc(h.host)}:\${h.port}\${ver}`;
   let out = `<div class="card"><div class="grid">
+      \${stat('slate', h.version ? 'v' + esc(h.version) : '—')}
       \${stat('uptime', esc(h.uptime))}
       \${stat('julia heap', h.heapMB + ' MB')}
       \${stat('peak memory', h.peakRssMB + ' MB')}

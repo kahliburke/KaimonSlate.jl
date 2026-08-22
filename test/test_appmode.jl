@@ -17,6 +17,8 @@ const NS = KaimonSlate.NotebookServer
                   "GET /n/demo", "GET /n/demo/asset/plot.png", "GET /api/demo/state",
                   "GET /api/demo/events", "GET /api/demo/ws", "GET /api/demo/blob/abc",
                   "GET /api/demo/health",
+                  # Which Slate is serving this — the operator of an app is often not its author.
+                  "GET /api/version",
                   "POST /api/demo/bind/x", "POST /api/demo/upload-file",
                   "POST /api/demo/table-page", "POST /api/demo/cancel"]
         # One assertion over the whole table: a per-request @test in a loop reports "14 passed" and

@@ -429,6 +429,13 @@ function _index_html()
                    "window.__SLATE_VERSION__=" * JSON.json(ver) * ";"; count = 1)
 end
 
+# Which Slate is answering on this port, and from where. The `slate` TUI attaches to whatever hub is
+# already up — usually Kaimon's extension, which is a DIFFERENT install from the one the app was
+# launched from. When an update moves the extension and Kaimon goes on running the copy it started
+# with, the two disagree, and until this the disagreement was invisible from both ends.
+_version_json() = Dict("version" => (try; string(pkgversion(@__MODULE__)); catch; ""; end),
+                       "project" => something(pkgdir(@__MODULE__), ""))
+
 # ── Project source browser (the Files tab) ────────────────────────────────────────────────────────
 # The notebook develops its OWN package: `project/src` + `project/notebooks`. These helpers back the
 # Files tab — browse + edit text source under the notebook's project root, path-guarded. A save just
@@ -890,6 +897,7 @@ function _make_router(h::Hub)
                             "Access-Control-Allow-Origin" => "*"], got[2])
     end)
     HTTP.register!(router, "GET", "/api/notebooks", _ -> _json(_notebooks_json(h)))
+    HTTP.register!(router, "GET", "/api/version", _ -> _json(_version_json()))
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors
     # `KaimonSlate.create_tools`'s open: creates the file if it doesn't exist.

@@ -270,7 +270,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .hero{display:flex;align-items:center;gap:16px;margin:0 0 22px;}
 /* Running version beside the title — quiet enough to ignore, present enough to quote in a bug report. */
 .ver{font-size:.72rem;font-weight:500;color:#6a7090;letter-spacing:.02em;vertical-align:middle;
-  border:1px solid #2a2e40;border-radius:6px;padding:2px 7px;margin-left:9px;font-family:Menlo,monospace;}
+  border:1px solid #2a2e40;border-radius:6px;padding:2px 7px;margin-left:9px;font-family:Menlo,monospace;
+  text-decoration:none;}
+.ver:hover{color:#7cc0ff;border-color:#3c4468;}
 .hero .logo{width:50px;height:50px;flex:0 0 auto;filter:drop-shadow(0 2px 10px rgba(86,156,214,.25));}
 .hero h1{font-size:1.6rem;margin:0;line-height:1.1;font-weight:700;letter-spacing:-.01em;
   background:linear-gradient(90deg,#7cc0ff 10%,#c586c0 55%,#56d364 100%);-webkit-background-clip:text;background-clip:text;color:transparent;}
@@ -437,7 +439,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     <circle cx="33" cy="20" r="4" fill="#c586c0"/>
     <circle cx="22" cy="34" r="4" fill="#56d364"/>
   </svg>
-  <div><h1>Kaimon Slate <span class="ver" id="slatever" title="the running KaimonSlate version"></span></h1><div class="tag">reactive Julia notebooks · live · agent-assisted</div></div>
+  <div><h1>Kaimon Slate <a class="ver" id="slatever" target="_blank" rel="noopener"></a></h1><div class="tag">reactive Julia notebooks · live · agent-assisted</div></div>
   <div class="heroactions">
     <button id="remotesbtn" class="herobtn" title="Set up &amp; test remote hosts for running notebooks">🖧 Remotes</button>
     <button id="pubdashbtn" class="herobtn" title="Manage publishing — targets, secrets, history">☁ Publishing</button>
@@ -1851,8 +1853,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   try{var last=localStorage.getItem('slateLastDir'); if(last){inp.value=last;}}catch(e){}
   // Running version, inlined by the server (`_index_html`). Absent — an old asset, or a page served
   // some other way — simply shows nothing rather than an empty chip.
+  // The release the running version came from. Built from the version rather than served as a URL:
+  // TagBot names every tag `v<version>`, and a link that 404s on an unreleased dev build is a better
+  // answer than no link at all (it says the build isn't a release).
   try{var _v=window.__SLATE_VERSION__, _ve=document.getElementById('slatever');
-      if(_ve&&_v){_ve.textContent='v'+_v;}else if(_ve){_ve.style.display='none';}}catch(e){}
+      if(_ve&&_v){_ve.textContent='v'+_v;
+                  _ve.href='https://github.com/kahliburke/KaimonSlate.jl/releases/tag/v'+_v;
+                  _ve.title='KaimonSlate v'+_v+' — release notes on GitHub';}
+      else if(_ve){_ve.style.display='none';}}catch(e){}
 })();
 </script>
 <a class="docslink" href="https://kahliburke.github.io/KaimonSlate.jl/" target="_blank" rel="noopener"

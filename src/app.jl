@@ -169,6 +169,22 @@ _fetch_notebooks(mode::Symbol) =
         JSON.parse(String(r.body))
     end
 
+# The version of the Slate ANSWERING on the port, which in viewer mode is a different install from
+# this process: `slate` attaches to Kaimon's extension hub. `""` when the hub can't be reached;
+# `"?"` when it answers but has no `/api/version` — that is itself the diagnosis, since only a build
+# older than the one that added the endpoint behaves that way.
+function _hub_version(mode::Symbol)::String
+    mode == :owner && return string(pkgversion(@__MODULE__))
+    r = try
+        HTTP.get(_base() * "/api/version"; retry = false, status_exception = false)
+    catch
+        return ""
+    end
+    r.status == 200 || return "?"
+    v = try; String(get(JSON.parse(String(r.body)), "version", "")); catch; ""; end
+    return isempty(v) ? "?" : v
+end
+
 # Open `path` (creating the file like slate.open does) and return its URL.
 function _open_notebook_url(mode::Symbol, path::AbstractString)
     path = abspath(expanduser(path))
@@ -191,10 +207,11 @@ mutable struct SlateModel <: Model
     tick::Int
     msg::String                  # transient status-bar message ("" → key hints)
     msg_until::Float64
-    lock::ReentrantLock          # guards notebooks/ok/registered (refresher task ↔ view)
+    lock::ReentrantLock          # guards notebooks/ok/registered/hub_version (refresher ↔ view)
     notebooks::Vector{Any}
     ok::Bool                     # last refresh reached a hub
     registered::Bool             # Slate present in Kaimon's extensions.json
+    hub_version::String          # version of the hub we're attached to ("" = not asked/not up)
     pending::Union{Nothing,String}  # notebook to open once a hub exists (waiting mode)
     layout::ResizableLayout      # header / table / status bar — divider mouse-draggable
     table::Union{DataTable,Nothing}  # persistent across frames: owns selection, scroll,
@@ -209,8 +226,8 @@ mutable struct SlateModel <: Model
 end
 SlateModel(mode::Symbol; pending = nothing) =
     SlateModel(mode, _base(), false, 0, "", 0.0,
-               ReentrantLock(), Any[], false, false, pending,
-               ResizableLayout(Vertical, [Fixed(5), Fill(1), Fixed(1)]),
+               ReentrantLock(), Any[], false, false, "", pending,
+               ResizableLayout(Vertical, [Fixed(6), Fill(1), Fixed(1)]),
                nothing, Any[], UInt(0), false, nothing, "", 0.0, nothing)
 
 # Open the notebook that was queued while we waited for a hub (then browser it).
@@ -247,7 +264,7 @@ end
 
 # Snapshot the shared status under the lock (the refresher task writes it).
 _status(m::SlateModel) = lock(m.lock) do
-    (copy(m.notebooks), m.ok, m.registered)
+    (copy(m.notebooks), m.ok, m.registered, m.hub_version)
 end
 
 # Pull fresh status into the model (called from the background refresher).
@@ -262,7 +279,7 @@ function _refresh!(m::SlateModel)
         else
             reg = try; _slate_registered(); catch; false; end
             lock(m.lock) do
-                m.notebooks = Any[]; m.ok = false; m.registered = reg
+                m.notebooks = Any[]; m.ok = false; m.registered = reg; m.hub_version = ""
             end
             return nothing
         end
@@ -274,8 +291,13 @@ function _refresh!(m::SlateModel)
     end
     m.mode == :owner && _HUB[] === nothing && (ok = false)
     reg = try; _slate_registered(); catch; false; end
+    # Ask the hub what it is once per hub LIFETIME: cleared whenever it stops answering, so a hub
+    # that Kaimon replaces under us (an update repointing the extension) re-reports on reattach
+    # instead of showing the version of a process that is gone.
+    ver = lock(m.lock) do; m.hub_version; end
+    ver = !ok ? "" : isempty(ver) ? _hub_version(m.mode) : ver
     lock(m.lock) do
-        m.notebooks = nbs; m.ok = ok; m.registered = reg
+        m.notebooks = nbs; m.ok = ok; m.registered = reg; m.hub_version = ver
     end
     return nothing
 end
@@ -442,10 +464,10 @@ end
 
 function Tachikoma.view(m::SlateModel, f::Frame)
     m.tick += 1
-    nbs, ok, registered = _status(m)
+    nbs, ok, registered, hubver = _status(m)
     panes = split_layout(m.layout, f.area)
     length(panes) == 3 || return
-    _view_header(m, panes[1], f.buffer, ok, registered)
+    _view_header(m, panes[1], f.buffer, ok, registered, hubver)
     _sync_table!(m, nbs)
     m.table === nothing || (m.table.tick = m.tick; render(m.table, panes[2], f.buffer))
     _view_statusbar(m, panes[3], f.buffer, ok)
@@ -487,7 +509,8 @@ function _view_detail(m::SlateModel, f::Frame)
     return nothing
 end
 
-function _view_header(m::SlateModel, area::Rect, buf::Buffer, ok::Bool, registered::Bool)
+function _view_header(m::SlateModel, area::Rect, buf::Buffer, ok::Bool, registered::Bool,
+                      hubver::AbstractString)
     inner = render(Block(title = " slate — KaimonSlate ",
                          border_style = tstyle(:accent),
                          title_style = tstyle(:accent, bold = true)),
@@ -513,12 +536,30 @@ function _view_header(m::SlateModel, area::Rect, buf::Buffer, ok::Bool, register
     end
     lbl(1, "URL")
     set_string!(buf, x + 8, inner.y + 1, m.base, tstyle(:accent), inner)
-    lbl(2, "Kaimon")
+    lbl(2, "Version")
+    vtxt, vst = _version_line(m.mode, hubver)
+    set_string!(buf, x + 8, inner.y + 2, vtxt, vst, inner)
+    lbl(3, "Kaimon")
     ktxt, kst = !isdir(_kaimon_dir()) ? ("not installed", tstyle(:text_dim)) :
                 registered            ? ("extension registered", tstyle(:success)) :
                                         ("installed — extension not registered", tstyle(:warning))
-    set_string!(buf, x + 8, inner.y + 2, ktxt, kst, inner)
+    set_string!(buf, x + 8, inner.y + 3, ktxt, kst, inner)
     return nothing
+end
+
+# The Version row. In viewer mode the hub is a DIFFERENT install from this process — Kaimon's
+# extension — so the two versions are reported separately and a disagreement is called out: that is
+# what an update looks like when Kaimon is still running the copy it started with. `"?"` means the
+# hub answered but has no `/api/version`, which only an older build does. Pure, so it's unit-tested.
+function _version_line(mode::Symbol, hubver::AbstractString)
+    mine = string(pkgversion(@__MODULE__))
+    mode == :waiting && return ("v$mine (no hub yet)", tstyle(:text_dim))
+    mode == :owner && return ("v$mine — this process", tstyle(:text))
+    isempty(hubver) && return ("v$mine here; hub not answering", tstyle(:text_dim))
+    hubver == mine && return ("v$mine", tstyle(:text))
+    shown = hubver == "?" ? "an older build" : "v$hubver"
+    return ("hub is $shown, this slate is v$mine — Kaimon is serving a different install",
+            tstyle(:warning))
 end
 
 # Relative "edited" age from a unix mtime — compact, single unit.
@@ -699,6 +740,9 @@ function _print_status()::Int
     nbs = try; _fetch_notebooks(:viewer); catch; Any[]; end
     printstyled("  ● hub up at $(_base())"; color = :green, bold = true)
     println(" — $(length(nbs)) notebook$(length(nbs) == 1 ? "" : "s") open")
+    let (line, _) = _version_line(:viewer, _hub_version(:viewer))
+        println("    $line")
+    end
     for nb in nbs
         nb isa AbstractDict || continue
         geti(k) = (v = get(nb, k, 0); v isa Number ? Int(v) : 0)

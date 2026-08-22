@@ -289,6 +289,38 @@ end
     @test KS.Tachikoma.should_quit(m)
 end
 
+@testset "the TUI reports which Slate the hub is running" begin
+    # `slate` attaches to whatever hub is already up — normally Kaimon's extension, a DIFFERENT
+    # install from this process. When an update moves the extension and Kaimon is still running the
+    # copy it started with, the two disagree, and that disagreement is the whole diagnosis.
+    mine = string(pkgversion(KS))
+    line(mode, hub) = first(KS._version_line(mode, hub))
+
+    @test line(:owner, mine) == "v$mine — this process"
+    @test line(:viewer, mine) == "v$mine"                      # agreement stays quiet
+    @test occursin("no hub yet", line(:waiting, ""))
+    @test occursin("hub not answering", line(:viewer, ""))     # up-then-gone, or never reached
+
+    stale = line(:viewer, "0.9.9")
+    @test occursin("v0.9.9", stale) && occursin("v$mine", stale)
+    @test occursin("different install", stale)
+    # A hub with no /api/version can only be a build older than the one that added it — say so
+    # rather than printing a bare "?".
+    @test occursin("an older build", line(:viewer, "?"))
+
+    # The model carries it, cleared while no hub answers so a replaced hub re-reports on reattach.
+    old = KS._PORT[]
+    try
+        KS._PORT[] = 9917                             # nothing listens here (a live dev hub would)
+        m = KS.SlateModel(:viewer)
+        @test m.hub_version == ""
+        KS._refresh!(m)
+        @test last(KS._status(m)) == ""
+    finally
+        KS._PORT[] = old
+    end
+end
+
 @testset "hub port is a runtime Ref, read live (issue #6)" begin
     # The port must be a mutable Ref set from ENV in `__init__` (runtime) — NOT a precompile-baked
     # `const`, which would freeze whatever env produced the `.ji` and ignore a launcher's KAIMONSLATE_PORT.

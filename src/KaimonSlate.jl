@@ -114,7 +114,7 @@ loads only self-register when spawned AS the extension (see `__init__`). Call it
 (re)register a specific `project_path` or to flip `auto_start`.
 """
 function register_extension(; auto_start::Bool = true, enabled::Bool = true, force::Bool = false,
-                            project_path = pkgdir(@__MODULE__))
+                            announce::Bool = true, project_path = pkgdir(@__MODULE__))
     kdir = _kaimon_dir()
     isdir(kdir) || return false                              # Kaimon not installed / no config dir here
     project_path === nothing && return false                 # can't locate ourselves (unusual)
@@ -164,7 +164,10 @@ function register_extension(; auto_start::Bool = true, enabled::Bool = true, for
     push!(exts, Dict("project_path" => path, "enabled" => enabled, "auto_start" => auto_start))
     data["extensions"] = exts
     write(file, JSON.json(data, 2))
-    @info "Registered KaimonSlate as a Kaimon extension — launch Kaimon and open the browser." file
+    # `announce=false` for a repair, which says something different and would otherwise claim a
+    # first-time registration the user has already made (see `repair_registration!`).
+    announce &&
+        @info "Registered KaimonSlate as a Kaimon extension — launch Kaimon and open the browser." file
     return true
 end
 
@@ -232,9 +235,14 @@ function repair_registration!(; project_path = pkgdir(@__MODULE__))
     isempty(ours) && return false                            # never registered → the app's prompt owns this
     all(e -> _stale_registration(String(get(e, "project_path", "")), me), ours) || return false
     prev = first(ours)                                       # carry the user's own settings across
-    return register_extension(; force = true, project_path = me,
-                              enabled = get(prev, "enabled", true) === true,
-                              auto_start = get(prev, "auto_start", true) === true)
+    was = String(get(prev, "project_path", ""))
+    ok = register_extension(; force = true, project_path = me, announce = false,
+                            enabled = get(prev, "enabled", true) === true,
+                            auto_start = get(prev, "auto_start", true) === true)
+    ok && @info "KaimonSlate: the registered extension path was left behind by an update — " *
+                "re-pointed it at this install. A running Kaimon reloads the extension within a " *
+                "few seconds; an older Kaimon needs a restart." from = was to = me
+    return ok
 end
 
 # Is a KaimonSlate checkout (any identity, see `_is_slate_project`) already in Kaimon's extension
