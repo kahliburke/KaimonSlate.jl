@@ -1175,8 +1175,9 @@ end
 
 # Add/replace one package-declared import-map entry (specifier → url) — an extension's `provide_import!`,
 # the package-level counterpart of a cell's `@use`. Returns true if the registry CHANGED, so the caller
-# bumps the version and the browser picks up a fresh head. Like `@use`, a change needs a page reload to
-# take effect: the browser fixes its import map at load.
+# bumps the version and the browser picks up a fresh head. A NEW specifier reaches an already-open page
+# over the state push (`moduleImports`), which extends the page's import map — so an extension installed
+# mid-session works without a reload. Changing the URL of a specifier already declared still needs one.
 function _register_import!(nb::LiveNotebook, spec::AbstractString, url::AbstractString)
     (isempty(spec) || isempty(url)) && return false
     s, u = String(spec), String(url)

@@ -1191,6 +1191,11 @@ function state_json(nb::LiveNotebook)
     # browser injects each `<script>` once (deduped by id) so a package's widget renderer / editor
     # extension registers with no boot cell (see `_frontend_scripts`, view.js `injectFrontendScripts`).
     let fe = _frontend_scripts_json(nb); isempty(fe) || (meta["frontendScripts"] = fe); end
+    # The specifiers those scripts import (`provide_import!` under the notebook's `@use`). The served
+    # <head> only knows the ones that existed when the page was served; a package declares its own when
+    # it loads. Pushing the whole effective map lets the browser extend its import map with whatever is
+    # missing, so a specifier works in the session that installed it (see view.js `applyPackageImports`).
+    let im = _effective_imports(nb); isempty(im) || (meta["moduleImports"] = im); end
     return meta
 end
 

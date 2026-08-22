@@ -662,4 +662,28 @@ x = 1
         @test sj[1]["id"] == "widget:Pkg.Stars" && sj[1]["js"] == "REG_STARS_V2"
         @test sj[1]["esm"] == true && sj[1]["kind"] == "Pkg.Stars"
     end
+
+    # The module specifiers those scripts import ride the SAME push. A package declares its imports
+    # when it LOADS, which is after the page was served — so a specifier missing from `state_json` is
+    # a specifier the browser can never resolve without a reload, no matter what the head said.
+    @testset "package imports → state_json.moduleImports" begin
+        nb = _mknb("#%% code id=c\n1 + 1\n")
+        @test !haskey(NS.state_json(nb), "moduleImports")    # absent when nothing declares an import
+
+        @test NS._register_import!(nb, "mermaid", "https://esm.sh/mermaid@11.4.1")   # new → changed
+        @test !NS._register_import!(nb, "mermaid", "https://esm.sh/mermaid@11.4.1")  # identical → no change
+        @test NS._register_import!(nb, "mermaid", "https://esm.sh/mermaid@11.5.0")   # new url → changed
+        @test !NS._register_import!(nb, "", "https://x")     # a blank half is not a declaration
+        @test !NS._register_import!(nb, "d3", "")
+
+        im = NS.state_json(nb)["moduleImports"]
+        @test im["mermaid"] == "https://esm.sh/mermaid@11.5.0"
+        @test !haskey(im, "d3")
+
+        # A notebook's own `@use` outranks the package that shipped the specifier, and the pushed map
+        # is the SAME `_effective_imports` the head and the export use — so the three can't disagree.
+        nb.report.meta["imports"] = Dict("mermaid" => "https://example.test/mine.js")
+        @test NS.state_json(nb)["moduleImports"]["mermaid"] == "https://example.test/mine.js"
+        @test NS.state_json(nb)["moduleImports"] == NS._effective_imports(nb)
+    end
 end

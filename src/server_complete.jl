@@ -401,8 +401,11 @@ include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-conta
 
 # Splice a notebook's `@use` entries into the shell's single `<script type="importmap">` (right
 # after `"imports": {`), so front-end JS can `import` them. Values are JSON-encoded (safe for URLs /
-# quotes). No-op when empty. One import map per document → we MERGE, never add a second (the base
-# preact/htm/signals entries follow the injected ones).
+# quotes). No-op when empty. Merged into the shell's own map rather than emitted as a second one; the
+# base preact/htm/signals entries follow the injected ones, so on a key clash with those the base wins
+# (duplicate JSON keys resolve last-wins). Entries that only become known after the page is served — a
+# package's `provide_import!` from a `using` in this session — reach the open page as an appended map
+# instead (see `state_json`, view.js `applyPackageImports`).
 function _inject_imports(html::AbstractString, imports)
     (imports === nothing || isempty(imports)) && return String(html)
     entries = join(("  " * JSON.json(String(k)) * ": " * JSON.json(String(v)) * "," for (k, v) in imports), "\n  ")

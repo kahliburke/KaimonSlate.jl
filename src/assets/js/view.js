@@ -81,6 +81,45 @@ window.teardownCustomWidgets = function (root) {
 //   • classic   → a self-registering `<script>` (calls `window.slateRegisterWidget(...)`).
 // A re-declaration keeps the same id → not re-run here (the registry replaces on the Julia side; a reload
 // re-runs from a clean page). Already-mounted controls are re-wired by slateRegisterWidget itself.
+// ES module specifiers the page can resolve (`nbState.moduleImports` = {specifier: url}) — a package's
+// `provide_import!` merged under the notebook's `@use`. The served <head> carries whatever was known
+// when the page was served, but a package declares its imports when it LOADS — after that. So the
+// first `using SomeExtension` on a fresh page would leave its specifiers unresolvable, and its
+// component module would fail to import them, until a reload.
+//
+// The HTML spec allows MULTIPLE import maps: they merge, and one appended later applies to any
+// specifier not already resolved. That's exactly this case — every entry we add here is a specifier
+// nothing has imported yet — so the map can be extended at runtime the same way a front-end script
+// is injected at runtime. An inline import map takes effect synchronously on insertion, so the
+// module scripts appended right after this call already resolve against it.
+//
+// Only ADDING is possible: a specifier already in the document keeps its URL (the spec ignores a
+// redefinition, and something may already have resolved it), so a package that CHANGES a URL it
+// previously declared needs a reload. A browser supporting only one import map ignores the append
+// and behaves as before — the entries are in the served <head> on the next load either way.
+window._slateImports = null;                    // specifiers the document already declares; seeded on first use
+function applyPackageImports(state) {
+  const want = (state && state.moduleImports) || null;
+  if (!want) return;
+  if (!window._slateImports) {
+    window._slateImports = new Set();
+    document.querySelectorAll('script[type="importmap"]').forEach(s => {
+      try { Object.keys((JSON.parse(s.textContent) || {}).imports || {}).forEach(k => window._slateImports.add(k)); }
+      catch (e) { console.error('unparseable import map on the page', e); }
+    });
+  }
+  const add = {};
+  for (const spec of Object.keys(want)) if (!window._slateImports.has(spec)) add[spec] = want[spec];
+  if (!Object.keys(add).length) return;
+  try {
+    const s = document.createElement('script');
+    s.type = 'importmap';
+    s.textContent = JSON.stringify({ imports: add });
+    document.head.appendChild(s);
+    Object.keys(add).forEach(k => window._slateImports.add(k));
+  } catch (e) { console.error('import map append failed', e); }
+}
+
 window._slateFEInjected = window._slateFEInjected || new Set();
 function injectFrontendScripts(state) {
   const list = (state && state.frontendScripts) || [];
@@ -820,6 +859,7 @@ function _publishState(state) {
                                                 // module) can seed from it even if it loads AFTER
                                                 // this first ran (the boot reload() is async).
   if (selectedId && !(state.cells || []).some(c => c.id === selectedId)) selectedId = null;   // dropped/renamed
+  applyPackageImports(state);                   // module specifiers those scripts resolve — strictly before them
   injectFrontendScripts(state);                 // package-declared widget/editor scripts (before the re-render)
   window.slateStore && window.slateStore.applyState(state);   // → Preact re-renders #nb reactively
   window.onNbState && window.onNbState(state);                // graph-shaped consumers (DAG panel)

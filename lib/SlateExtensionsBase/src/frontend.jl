@@ -510,6 +510,12 @@ with nothing declared in the notebook.
 Last-wins and idempotent, so it belongs in `__init__` or the per-notebook `__slate_frontend` hook. A
 notebook's own `@use` of the same specifier WINS, so an author can always override the build.
 
+A specifier declared here works in the session that loaded the package — the page extends its import
+map with any specifier it doesn't yet declare, the same way it injects a front-end script. So a
+`using YourExtension` in an open notebook makes `import "spec"` resolve without a reload. Re-pointing
+a specifier the page ALREADY declares is the one case that needs one, since a document can't redefine
+a specifier something may already have resolved.
+
 Pin an exact version rather than a range: an export resolves the URL to bytes, and a moving target
 means two exports of the same notebook can ship different libraries.
 
@@ -565,8 +571,8 @@ page — Slate pulls it once per run drain and merges it into the notebook. Fiel
   need them to INVALIDATE: a markdown cell caches its interpolation results, so a block rendered before
   an extension was loaded keeps its plain-code fallback until something restales the cell.
 
-Extensible: as new package-registration seams are added they surface as additional fields here, carried
-by the same query — no new transport per feature.
+Extensible: a new kind of package registration surfaces as another field here, carried by the same
+query — no new transport per feature.
 """
 extension_manifest() =
     (; frontend = lock(_FRONTEND_LOCK) do

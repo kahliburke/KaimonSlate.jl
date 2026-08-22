@@ -536,8 +536,9 @@ No-op if nothing declares `name`, and inert on a standalone run. Distinct from t
         extracted statically and merged into the page's single `<script type=\"importmap\">`, injected
         in BOTH the live shell `<head>` and the static export `<head>`. So notebook front-end JS (in a
         `WebPage`, an `@asset`ed script, or inline) can `import` the bare specifier, live AND in an
-        exported/published page. The import map is fixed at page load, so adding or changing a `@use`
-        needs a reload to take effect (editing the JS that uses it stays instant).
+        exported/published page. A NEW specifier reaches an already-open page too (the import map is
+        extended in place); re-pointing one that page already declares needs a reload, since a
+        specifier can't be redefined once the document declares it.
         ```julia
         @use \"d3\" => \"https://esm.sh/d3@7\"    # then, in front-end JS:  import * as d3 from \"d3\"
         ```"""),
