@@ -419,7 +419,14 @@ function _index_html()
     html = read(_INDEX_ASSET, String)
     v = try; publish_ledger_view_cached(); catch; nothing; end
     js = v === nothing ? "null" : replace(JSON.json(v), "</" => "<\\/")   # </script>-in-string guard
-    return replace(html, "window.__SLATE_LEDGER__=null;" => "window.__SLATE_LEDGER__=" * js * ";"; count = 1)
+    html = replace(html, "window.__SLATE_LEDGER__=null;" => "window.__SLATE_LEDGER__=" * js * ";"; count = 1)
+    # The running version, read from the loaded package rather than written down anywhere — a string
+    # baked into an asset goes stale the release after someone forgets it. Injected the same way as
+    # the ledger so it paints in the first frame, and so the page needs no extra request to say what
+    # it is. This is the first thing to ask for in a bug report, and until now nothing displayed it.
+    ver = try; string(pkgversion(@__MODULE__)); catch; ""; end
+    return replace(html, "window.__SLATE_VERSION__=null;" =>
+                   "window.__SLATE_VERSION__=" * JSON.json(ver) * ";"; count = 1)
 end
 
 # ── Project source browser (the Files tab) ────────────────────────────────────────────────────────
@@ -2772,7 +2779,10 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     end
     h.server = server
     _ensure_run_supervisor!(h)   # eval-level self-healing: reconcile orphaned RUNNING cells every 5s
-    @info "Kaimon Slate hub" url = _hub_url(h)
+    # Stamp the running version into the hub log's first line. A report arrives as a log excerpt far
+    # more often than as a screenshot, and "which Slate is this?" was previously unanswerable from
+    # one — including for the operator of an exported app, who is often not its author.
+    @info "Kaimon Slate hub" url = _hub_url(h) version = try; string(pkgversion(@__MODULE__)); catch; "?"; end
     return h
 end
 
