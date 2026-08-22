@@ -778,6 +778,18 @@ function _spawn_worker!(k::GateKernel)
         finally
             close(io)
         end
+        # EOF on the pipe means the PROCESS is gone. That is the one death signal which is exact and
+        # immediate — the liveness probe can only ever infer death from silence, and silence is also
+        # what a busy worker looks like. Unreported (this task used to just end here), a crashed
+        # worker is indistinguishable from a slow one: the hub goes on probing a port with nothing
+        # behind it, logging "silent for Ns" at Info indefinitely, while anything reaching for that
+        # kernel blocks. A clean teardown reaches this line too, so only a NON-ZERO exit is a warning.
+        code = try; wait(k.proc); k.proc.exitcode; catch; -1; end
+        if code == 0
+            @info "SlateWorker exited" project = k.project port = port
+        else
+            @warn "SlateWorker exited unexpectedly — this kernel is dead, not slow" project = k.project port = port exitcode = code log = k.logpath
+        end
     end
     @info "SlateWorker spawned" project = k.project port = port log = k.logpath
     return k
