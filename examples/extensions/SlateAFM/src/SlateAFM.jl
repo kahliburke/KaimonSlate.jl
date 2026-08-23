@@ -4,7 +4,7 @@
 Host **Anywidget Front-End Modules (AFM)** in a Slate notebook. An AFM is a framework-agnostic ES module
 that `export default`s `{ initialize?, render? }`, driving a host-provided `model` (get/set/on/
 save_changes/send) and rendering into an `HTMLElement`. This package implements the AFM host contract on
-top of Slate's own seams — no fork of the server:
+top of Slate's own extension points — no fork of the server:
 
 - `provide_frontend!` injects the **host shim** (`assets/afm-host.js`), which registers the `SlateAFM.AFM`
   widget kind via Slate's low-level `slateRegisterWidget` and adapts Slate's bound value into an AFM

@@ -44,6 +44,45 @@ async function addCell(after, kind, before, edit) {
   }));
   return neu;
 }
+// Add a code cell that ALREADY HAS SOURCE — the snippet-insert path (palette @bind/recipe
+// snippets, an extension's starter cell).
+//
+// It does not poke the new cell's editor. `addCell` mounts that editor from inside a double
+// requestAnimationFrame but returns before it, so `editors[id]` is usually still empty when the
+// caller resumes: writing through `edSetText` there silently drops the text and leaves an empty
+// cell. Committing the source over `/api/cell/<id>` instead is race-free, and it runs the cell, so
+// a `using` lights up straight away.
+//
+// `name` is an optional cell id to rename to (deduped against the ids in play, since a collision is
+// a 400). A rename failure is not fatal — the cell keeps its generated id and still gets its source.
+async function addCellWithSource(after, source, name) {
+  const id = await addCell(after || '', 'code', false, false);
+  if (!id) { window.toast && window.toast('Still loading — try again in a moment', 3000); return null; }
+  let cid = id;
+  if (name) {
+    const want = uniqueCellId(name, id);
+    if (want && want !== id) {
+      try {
+        const st = await api('POST', '/api/cell-rename/' + id, { newid: want });
+        if (st && st.cells) { cid = want; renderAll(st); }
+      } catch (_) { /* keep the generated id */ }
+    }
+  }
+  renderAll(await api('POST', '/api/cell/' + cid, { source }));
+  selectCell(cid, true);
+  return cid;
+}
+// A header-safe cell id derived from `base`, not colliding with any existing cell (`self` excluded —
+// it's the cell being renamed). Falls back to base_2, base_3, …
+function uniqueCellId(base, self) {
+  const clean = String(base).replace(/[^A-Za-z0-9_]/g, '_').replace(/^_+|_+$/g, '').toLowerCase();
+  if (!clean) return null;
+  const taken = new Set(cellIds().filter(x => x !== self));
+  if (!taken.has(clean)) return clean;
+  for (let i = 2; i < 100; i++) if (!taken.has(clean + '_' + i)) return clean + '_' + i;
+  return null;
+}
+
 // ⌘/Ctrl-⇧-Enter in edit mode: run (or commit) the cell, then open a fresh code
 // cell below and drop into it — the keyboard-driven "next cell" flow.
 async function runAndAddBelow(id)    { await runCell(id);       await addCell(id, 'code', false, true); }

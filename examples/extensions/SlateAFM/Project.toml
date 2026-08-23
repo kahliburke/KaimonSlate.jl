@@ -4,7 +4,7 @@ authors = ["Kahli Burke <kahli@kahliburke.com>"]
 version = "0.1.0"
 
 # A Slate extension that hosts Anywidget Front-end Modules (AFM). Depends ONLY on SlateExtensionsBase —
-# it dogfoods provide_frontend! (the host shim), provide_assets! (served modules) and the widget seam to
+# it dogfoods provide_frontend! (the host shim), provide_assets! (served modules) and the widget interface to
 # run framework-agnostic AFM widgets (anywidget-style) inside a Slate notebook.
 [deps]
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"

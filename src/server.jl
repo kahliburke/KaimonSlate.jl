@@ -3149,6 +3149,7 @@ include("server_sse_import.jl")
 include("server_agentsessions.jl")
 include("server_docs.jl")
 include("server_snapshots.jl")
+include("server_catalog.jl")   # extension catalog: the published artifact, its cache, and installs
 include("slate_api.jl")        # Slate notebook-API registry (SSOT for the api tool, search, prompt)
 include("echarts_docs.jl")     # curated ECharts option reference, mapped to the DSL, indexed for search
 include("server_export.jl")

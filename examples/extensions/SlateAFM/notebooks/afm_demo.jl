@@ -6,7 +6,7 @@ try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — runni
 
 **SlateAFM** hosts **Anywidget Front-End Modules (AFM)** — framework-agnostic ES modules that
 `export default { initialize?, render? }` and drive a host `model`. It implements the AFM contract on
-Slate's own seams: `provide_frontend!` injects the host shim, `provide_assets!` serves the modules, and
+Slate's own extension points: `provide_frontend!` injects the host shim, `provide_assets!` serves the modules, and
 the bound value becomes the widget's **traits dict**.
 """
 

@@ -22,12 +22,12 @@ using StarRating
 {{rating > 0 ? "You rated it " : "Oh come on, tell us how you really feel!"}} {{rating > 0 ? join(repeat(['⭐'],rating)) : "" }} — click the stars above and this line updates reactively.
 """
 
-#%% md id=seams
+#%% md id=extpoints
 @md"""
-## …and two more extension seams — try them here
+## …and two more extension points — try them here
 
 StarRating is a **testbed for the whole extension SDK**, so beyond the `@bind` widget above it wires up
-two *front-end* seams from its `__slate_frontend` hook (no `__init__`, no boot cell). Both act on the
+two *front-end* extension points from its `__slate_frontend` hook (no `__init__`, no boot cell). Both act on the
 **code cells** in this notebook — hover a code cell's header:
 
 - **Toolbar action** (`register_cell_action!`) — every code cell's header has a **★** button. Click it to

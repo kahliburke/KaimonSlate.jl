@@ -489,6 +489,15 @@ its `KAIMONSLATE_*` env equivalent, and its default. Empty ⇒ every timing keep
 remote_config()::Dict{String,Any} =
     (r = get(_slate_config(), "remote", nothing); r isa AbstractDict ? Dict{String,Any}(r) : Dict{String,Any}())
 
+"""
+The optional `"catalog"` object in slate.json — where the Extensions gallery gets its data:
+`{"catalog": {"url": "…/catalog.json", "registry": "SlateRegistry", "registry_url": "…"}}`. Edited
+by hand; installed into the server at init. Point all three elsewhere to run a fork's or a mirror's
+catalog. Empty ⇒ the built-in curated registry.
+"""
+catalog_config()::Dict{String,Any} =
+    (c = get(_slate_config(), "catalog", nothing); c isa AbstractDict ? Dict{String,Any}(c) : Dict{String,Any}())
+
 "Persist the transfer-preview threshold and apply it live. -1 clears to default; 0 disables."
 function set_xfer_confirm_s!(s::Real)
     v = Float64(s) < 0 ? -1.0 : Float64(s)
@@ -563,6 +572,7 @@ function _load_slate_config!()
     NotebookServer.PARALLEL_DEFAULT[] = parallel_default()
     NotebookServer.RUNON_DEFAULT[] = run_location_default()
     ReportEngine._REMOTE_CFG[] = remote_config()   # SSH/connect/tunnel/transfer timing overrides (slate.json "remote")
+    NotebookServer._CATALOG_CFG[] = catalog_config()  # extension-catalog url/registry overrides (slate.json "catalog")
     # Persist hook for the browser Settings panel's transfer knobs (route in server_complete.jl —
     # NotebookServer has no JSON-config ownership, same pattern as _RUNON_PERSIST).
     NotebookServer._XFER_PERSIST[] = function (chunk_mb, carry_s, confirm_s)

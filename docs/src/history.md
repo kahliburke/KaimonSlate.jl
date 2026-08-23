@@ -42,6 +42,13 @@ history and records it.
 
 ## Undo / redo
 
-Separately from the durable history, **⌘Z / ⌘⇧Z** provide in-session undo/redo over source
-snapshots for quick reversals (deferring to the editor's own text undo when a cell editor is
-focused).
+**⌘Z / ⌘⇧Z** step back through source snapshots for quick reversals, deferring to the editor's
+own text undo while a cell editor is focused. Each entry is labelled with the action it reverses,
+so the menu reads **↶ Undo cut 3 cells**.
+
+The stack lives in the hub alongside the open notebook — not in the page — so it **survives a
+reload, a closed tab, and a reconnect days later**. You come back to a notebook and pick up where
+you left off instead of a blank undo stack. It holds the last 100 steps.
+
+The Timeline is the durable, unbounded counterpart: it outlives the hub, and since undo and restore
+are themselves recorded as new checkpoints, nothing you do can lose earlier state.

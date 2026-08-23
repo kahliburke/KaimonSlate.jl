@@ -1,6 +1,6 @@
 // StarRating's package-global front-end — the parts that aren't tied to a single `@bind`. Shipped as a
 // classic (non-module) script and injected once by Slate from the package's `__slate_frontend` hook via
-// `provide_frontend!` (no boot cell). It contributes TWO of the extension seams:
+// `provide_frontend!` (no boot cell). It contributes TWO of the extension points:
 //
 //   1. window._starRatingInsert(cellId) — the helper a per-cell TOOLBAR ACTION calls (registered in
 //      Julia via `register_cell_action!`): it scaffolds a `@bind rating Stars()` snippet into the cell's
@@ -8,7 +8,7 @@
 //   2. An EDITOR EXTENSION (`slateRegisterEditorExtension`): a CodeMirror keymap, on code cells only,
 //      that inserts a ★ glyph at the cursor with Ctrl-Alt-8 — the smallest useful editor add-on.
 //
-// Both guard against racing the core bundle (poll briefly for the host seam), mirroring how a cell
+// Both guard against racing the core bundle (poll briefly for the host global), mirroring how a cell
 // action's own injected script waits for `window.slateRegisterCellAction`.
 (function () {
   // (1) Toolbar-action helper: append a Stars() scaffold to a cell and focus it. `window.editors[id]`

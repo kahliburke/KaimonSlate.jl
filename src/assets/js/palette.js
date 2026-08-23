@@ -23,9 +23,7 @@ const BIND_SNIPPETS = [
 ];
 async function insertBind(snippet) {
   if (selectedId && editors[selectedId]) { const cur = edText(selectedId); edInsert(selectedId, (cur.trim() ? '\n' : '') + snippet); return; }
-  const id = await addCell(selectedId || '', 'code', false, true);   // fresh cell below, in edit mode
-  if (id && editors[id]) { edSetText(id, snippet); edFocus(id); }
-  else if (!id) window.toast && window.toast('Still loading — try again in a moment', 3000);
+  await addCellWithSource(selectedId || '', snippet);   // race-free: commits source server-side
 }
 // ── Recipes ───────────────────────────────────────────────────────────────────
 // Starter code for common tasks (mostly Makie plots, dark theme). Each drops into a
@@ -114,10 +112,20 @@ echart(
 )`],
 ];
 async function insertRecipe(code) {
-  const id = await addCell(selectedId || '', 'code', false, true);   // fresh cell below, in edit mode
-  if (id && editors[id]) { edSetText(id, code); edFocus(id); }
-  else if (!id) window.toast && window.toast('Still loading — try again in a moment', 3000);
+  await addCellWithSource(selectedId || '', code);      // race-free: commits source server-side
 }
+
+// ── Extension-contributed commands ────────────────────────────────────────────
+// The host global behind SlateExtensionsBase's `register_palette_command!`, mirroring
+// `slateRegisterCellAction`. An extension's injected script calls this once per command; we key by
+// `id` so a re-injection (every run drain re-runs `__slate_frontend`) replaces rather than stacks.
+// Insertion order is preserved so a package's commands stay grouped.
+const _extCmds = new Map();
+window.slateRegisterCommand = function (spec) {
+  if (!spec || !spec.id || typeof spec.run !== 'function') return;
+  _extCmds.set(spec.id, spec);
+};
+window.slateUnregisterCommand = function (id) { _extCmds.delete(id); };
 
 // ── Command palette (⌘K) ──────────────────────────────────────────────────────
 function paletteCommands() {
@@ -176,9 +184,16 @@ function paletteCommands() {
     ...RECIPES.map(([name, code]) => ({ tag: 'recipe', label: 'Recipe: ' + name, run: () => insertRecipe(code) })),
     { label: 'Open notebook in VS Code', run: () => { const p = nbState && nbState.path; if (p) location.href = 'vscode://file' + p; } },
     { label: 'Open project in VS Code', run: () => { const d = nbState && (nbState.project || window.PLATFORM.dirOf(nbState.path || '').replace(/[\/\\]$/, '')); if (d) location.href = 'vscode://file' + d; } },
+    { label: 'Extensions… (browse the Slate extension catalog)', tag: 'panel', run: () => window.openExtensions && window.openExtensions() },
     { label: 'Settings…', run: openSettings },
     { label: 'All notebooks', run: () => { location.href = '/'; } },
   ];
+  // Extension-contributed commands, badged with the owning package (see slateRegisterCommand).
+  // `run` gets the selected cell id so a command can act on it without reaching into our globals.
+  _extCmds.forEach(c => cmds.push({
+    tag: c.tag || 'ext', key: c.key || '', label: c.label,
+    run: () => { try { c.run(selectedId || ''); } catch (e) { window.toast && window.toast('Command failed: ' + e.message, 4000); } },
+  }));
   cellIds().forEach(id => cmds.push({ tag: 'cell', label: 'Jump to cell: ' + id, run: () => selectCell(id, true) }));
   return cmds;
 }

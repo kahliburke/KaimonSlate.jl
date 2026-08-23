@@ -1484,6 +1484,19 @@ function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::Abstrac
     end
 end
 
+# Install a registry into the WORKER's depot (see `registry_add` in eval.jl for why it can't be the
+# hub's). Shares `pkg_op`'s generous timeout: a first `registry add` clones the registry.
+function registry_add(k::GateKernel, report::Report, url::AbstractString)
+    prepare!(k, report)
+    try
+        r = _tool(k, "__slate_registry_add", Dict{String,Any}("url" => String(url)); timeout = _pkg_op_timeout())
+        r === nothing && return Dict{String,Any}("ok" => false, "message" => "no response from worker")
+        return Dict{String,Any}(String(kk) => v for (kk, v) in r)
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
+
 # Hash of the parent's Manifest (its content) — the baseline a forked env was seeded from.
 # Stored in the env as a marker so we can detect parent drift and auto re-resolve on open.
 _parent_manifest_hash(parent::AbstractString) =

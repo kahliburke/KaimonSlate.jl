@@ -24,8 +24,16 @@ the `Widget` struct itself never crosses a process boundary.
 ## Front-end contract (JS globals; no Julia dependency)
 
 Pair a control with `window.slateRegisterWidget("<kind>", {wire, sync, destroy})`. Other globals
-the page exposes: `window.slateRegisterEditorExtension`, `window.slateCall` / `window.slateOnStream`,
-and `Slate.runFragment` / `Slate.asset`.
+the page exposes: `window.slateRegisterEditorExtension`, `window.slateRegisterCellAction`,
+`window.slateRegisterCommand`, `window.slateCall` / `window.slateOnStream`, and
+`Slate.runFragment` / `Slate.asset`.
+
+## Catalog listing
+
+An extension registered in a Slate extension registry is listed in the notebook's Extensions
+gallery with no work at all — name, version, repo and README blurb are harvested automatically. To
+enrich the listing (tagline, categories, icon, screenshots, a starter snippet), add an optional
+`SlateExtension.toml` at your package root; every key in it is optional.
 """
 module SlateExtensionsBase
 
@@ -36,6 +44,7 @@ include("output.jl")
 include("context.jl")
 include("frontend.jl")
 include("cell_actions.jl")
+include("palette.jl")
 include("render.jl")
 include("binary.jl")
 
@@ -46,6 +55,8 @@ export register_kind!, widget_kinds, coerce_bind, reconcile_bind, wrap_value, co
 export bind_domain, ReplayArray, ReplayVector, ReplayMatrix, replay_stack
 # Per-cell toolbar actions
 export CellAction, to_cell_action, auto_cell_action, register_cell_action!
+# ⌘K command-palette commands
+export PaletteCommand, to_palette_command, auto_palette_command, register_palette_command!
 # Output
 export WebPage, register_widget_js
 # Auto-registered front-end (no boot cell)

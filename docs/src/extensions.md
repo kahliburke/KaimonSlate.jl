@@ -267,6 +267,32 @@ SlateExtensionsBase.to_cell_action(b::InsertSnippetButton) = auto_cell_action(b)
 `cell`, `onclick` statements with `cellId`, `cell` and `event` in scope. The id is derived from
 the type, so it is namespaced to your package.
 
+## Command-palette commands
+
+A toolbar button acts on one cell. For anything notebook-global — open a panel, insert a worked
+example, reconnect a device — contribute a ⌘K command instead, authored the same way:
+
+```julia
+Base.@kwdef struct OpenLayerPanel
+    label::String = "Globe: open the layer panel"
+    run::String   = "window.globeSlateOpenPanel()"
+end
+SlateExtensionsBase.to_palette_command(c::OpenLayerPanel) = auto_palette_command(c)
+
+function __slate_frontend(slate_on)
+    register_palette_command!(OpenLayerPanel())
+end
+```
+
+`run` is raw JavaScript your extension owns, with `selectedId` (the selected cell's id, or `""`)
+in scope. Optional `tag` and `key` control the badge and the shortcut *hint* on the right of the
+row — registering a command does not bind a key.
+
+The tag defaults to your package name, so a user who has just installed your extension can type
+that name in the palette and see everything it added. That is the main discovery path after an
+install, which is why it's worth registering a command even when a cell action already covers the
+same job.
+
 ## Lifecycle hooks
 
 Long-lived state needs to know when the ground shifts underneath it:
@@ -291,6 +317,55 @@ For a `[compat]` entry, pin the SDK:
 [compat]
 SlateExtensionsBase = "0.10"
 ```
+
+### Getting into the Extensions gallery
+
+Slate's Extensions gallery (⌘K → "Extensions") browses a curated registry and installs from it.
+**Registering your package is the only requirement** — there is no manifest to write and no
+approval form. A package with no extra files still gets a real listing: name, version, repository
+and compat come from the registry, and the description is harvested from your `README.md`,
+`Project.toml` `description`, or module docstring, whichever exists.
+
+To enrich the listing, add an optional `SlateExtension.toml` at your package root. Every key in it
+is optional, so you can add one field or all of them, whenever you like:
+
+```toml
+title    = "Star Rating"
+tagline  = "A ★ rating control for @bind"
+icon     = "★"                          # an emoji, or an image URL
+categories  = ["controls", "examples"]
+screenshots = ["https://you.github.io/YourPkg.jl/shot.png"]
+example  = "notebooks/stars_demo.jl"    # a demo notebook you already maintain — linked, and photographed
+snippet  = """
+using StarRating
+@bind rating Stars(; max = 5)
+"""
+```
+
+**Host your images, don't commit them.** A repo-relative path works (it resolves against your
+default branch), but screenshots get regenerated often and a package repository is a poor place to
+accumulate binaries. Point at GitHub Pages, a release asset, or any CDN — the catalog build mirrors
+whatever it can fetch into the published artifact, so the gallery serves its own copy and your host
+only needs to be reachable when the catalog is built.
+
+To get a starting screenshot, run this from the KaimonSlate repository:
+
+```sh
+node docs/generate_extension_assets.mjs --path /path/to/YourPkg.jl
+```
+
+It builds a throwaway project, runs your `example` notebook headless, photographs the page, and
+writes it to a scratch directory for you to upload. It is deliberately unclever — a picture of your
+own notebook, nothing composed. If you want better imagery, make it yourself.
+
+`snippet` is worth filling in: it is offered as a starter cell immediately after install, which is
+what turns an installed package into a working one — installing does not `using` it.
+
+Prose and images are read from your default branch, so fixing a description doesn't need a release.
+Versions always come from the registry.
+
+`examples/extensions/StarRating` in this repository has a fully populated `SlateExtension.toml` to
+copy from.
 
 ## Worked examples
 

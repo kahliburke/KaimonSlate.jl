@@ -10,7 +10,8 @@ using StarRating
 rating                             # an Int 0…max, reactive like any @bind
 ```
 
-It doubles as a **testbed for the extension system**, exercising four SEB seams with no `__init__`:
+It doubles as a **testbed for the extension system**, exercising the SEB extension points with no
+`__init__`:
 - [`Stars`](@ref) + `to_widget` — a typed `@bind` control. Because its `default::Int`, Slate coerces
   browser values to `Int` automatically (with error-fallback). (Add `register_kind!("StarRating.Stars";
   domain = w -> 0:…)` only to clamp bounds.)
@@ -19,9 +20,11 @@ It doubles as a **testbed for the extension system**, exercising four SEB seams 
   notebook actually uses load their JS.
 - [`InsertStarsButton`](@ref) + `to_cell_action` — a per-cell TOOLBAR ACTION: a ★ button on every code
   cell that scaffolds a `@bind rating Stars()` snippet.
+- [`InsertStarsCommand`](@ref) + `to_palette_command` — a ⌘K COMMAND-PALETTE entry doing the same,
+  badged with the package name.
 - An EDITOR extension — a CodeMirror keymap (Ctrl-Alt-8 inserts ★ on code cells).
 
-The last two register from the package-global hook `__slate_frontend(slate_on)` (front-end shipped in
+The last three register from the package-global hook `__slate_frontend(slate_on)` (front-end shipped in
 `assets/star_tools.js`), which Slate calls once per notebook that has StarRating loaded.
 """
 module StarRating
@@ -43,7 +46,7 @@ end
 Stars(; max::Int = 5, label = nothing, default::Int = 0) =
     Stars(max, label === nothing ? nothing : String(label), clamp(default, 0, max))
 
-# The `to_widget` seam: reflect the struct into its wire `Widget`. `auto_widget` uses `default` as the
+# `to_widget`: reflect the struct into its wire `Widget`. `auto_widget` uses `default` as the
 # value and the other fields (`max`, and `label` when set) as params, under the type-derived, namespaced
 # kind "StarRating.Stars" — no manual param bag, no hand-typed kind string.
 SlateExtensionsBase.to_widget(s::Stars) = auto_widget(s)
@@ -53,7 +56,7 @@ SlateExtensionsBase.to_widget(s::Stars) = auto_widget(s)
 # `__init__`, and a package's widget JS loads only when a notebook actually uses that widget.
 SlateExtensionsBase.required_assets(::Type{Stars}) = @pkg_asset("assets/stars.js")
 
-# ── Extension seams beyond the @bind widget ───────────────────────────────────────────────────────
+# ── Extension points beyond the @bind widget ──────────────────────────────────────────────────────
 # The `@bind` widget above needs no page-global front-end. These two do, so they register from the
 # package-global hook `__slate_frontend(slate_on)` — Slate calls it once per notebook that has
 # StarRating loaded (method-presence detection; no `__init__`, no boot cell).
@@ -74,14 +77,35 @@ Base.@kwdef struct InsertStarsButton
 end
 SlateExtensionsBase.to_cell_action(b::InsertStarsButton) = auto_cell_action(b)
 
+"""
+    InsertStarsCommand(; label, tag, run)
+
+A ⌘K COMMAND-PALETTE entry (the palette counterpart of [`InsertStarsButton`](@ref)): typing "star"
+in the palette offers to scaffold a `@bind rating Stars()` control. Authored the same way as the
+widget and the cell action — a typed struct plus a `to_palette_command` overload.
+
+A cell action is per-cell and lives in the cell toolbar; a palette command is notebook-global. This
+one deliberately does the same job through both, because the palette is where a user goes when they
+have just installed the extension and don't yet know what it added.
+"""
+Base.@kwdef struct InsertStarsCommand
+    label::String = "Insert a Stars() rating control"
+    run::String   = "window._starRatingInsert(selectedId)"
+end
+SlateExtensionsBase.to_palette_command(c::InsertStarsCommand) = auto_palette_command(c)
+
 # The package-global front-end hook. `slate_on` (for JS→Julia RPC handlers) is unused here — this demo's
-# extras are purely front-end — but the signature is fixed. Idempotent: `provide_frontend!` dedups by id
-# and `register_cell_action!` by the action's id, so Slate can re-run it every drain safely.
+# extras are purely front-end — but the signature is fixed. Idempotent: `provide_frontend!` dedups by id,
+# `register_cell_action!` by the action's id and `register_palette_command!` by the command's, so Slate
+# can re-run it every drain safely.
 function __slate_frontend(slate_on)
     # A page-global editor extension + the toolbar-action helper (one classic script).
     provide_frontend!(@pkg_asset("assets/star_tools.js"); id = "StarRating.tools")
     # A ★ button on every code cell's header toolbar.
     register_cell_action!(InsertStarsButton())
+    # The same scaffold from ⌘K, badged "StarRating" so the package's contributions are findable
+    # by name once the catalog has installed it.
+    register_palette_command!(InsertStarsCommand())
     return nothing
 end
 

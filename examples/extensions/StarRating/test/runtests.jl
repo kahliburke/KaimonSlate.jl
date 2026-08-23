@@ -37,7 +37,7 @@ using Test
     @test stars.js == js && stars.esm == true && stars.kind == "StarRating.Stars"
 end
 
-@testset "StarRating: cell action + editor extension (__slate_frontend seam)" begin
+@testset "StarRating: cell action + editor extension (__slate_frontend hook)" begin
     empty!(SlateExtensionsBase._FRONTEND)
 
     # The toolbar action reflects into a CellAction, on code cells, wired to the insert helper.

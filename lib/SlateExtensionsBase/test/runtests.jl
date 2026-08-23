@@ -54,6 +54,14 @@ struct NoClickBtn; icon::String; end   # no `onclick` field → auto_cell_action
 Base.@kwdef struct MinBtn; icon::String = "•"; onclick::String = "f(cellId)"; end
 SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
 
+# ⌘K palette commands — the same reflection pattern: only `label`/`run` are required, a struct
+# missing `run` must error, and an explicit `tag` overrides the package-name default.
+Base.@kwdef struct OpenCmd; label::String = "Demo: open"; run::String = "window.demoOpen()"; end
+SlateExtensionsBase.to_palette_command(c::OpenCmd) = auto_palette_command(c)
+struct NoRunCmd; label::String; end     # no `run` field → auto_palette_command must throw
+Base.@kwdef struct TaggedCmd; label::String = "Demo: tagged"; tag::String = "demo"; run::String = "g()"; end
+SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
+
 @testset "SlateExtensionsBase" begin
 
     @testset "Widget construction" begin
@@ -552,6 +560,50 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
         ejs = only(extension_manifest().frontend).js
         @test !occursin("<", ejs) && occursin("\\u003c", ejs)   # icon's `<` escaped, none left literal
         @test !occursin("a\"b", ejs)                            # title's quote escaped
+    end
+
+    # ⌘K palette commands — notebook-global, where a cell action is per-cell.
+    @testset "palette commands" begin
+        empty!(SlateExtensionsBase._FRONTEND)
+        c = PaletteCommand("Pkg.Open"; label = "Pkg: open the panel", run = "window.pkgOpen()")
+        @test (c.id, c.label, c.tag, c.key, c.run) ==
+              ("Pkg.Open", "Pkg: open the panel", "", "", "window.pkgOpen()")
+        @test to_palette_command(c) === c                    # identity passthrough
+
+        # Same id discipline as CellAction: it's emitted into JS and used as the dedup key.
+        @test_throws ArgumentError PaletteCommand("has space"; label = "x", run = "y")
+        @test_throws ArgumentError PaletteCommand("qu'ote"; label = "x", run = "y")
+        @test_throws ArgumentError to_palette_command(42)
+
+        # auto_palette_command reflects fields; the id is kind_for(T), so two packages can each
+        # ship an "Open" command without colliding.
+        r = to_palette_command(OpenCmd())
+        @test r.id == "Main.OpenCmd" && r.label == "Demo: open" && r.run == "window.demoOpen()"
+        @test r.tag == "" && r.key == ""                     # absent optional fields default to ""
+        @test_throws ArgumentError auto_palette_command(NoRunCmd("x"))
+        @test auto_palette_command(TaggedCmd()).tag == "demo"
+
+        # An unset tag becomes the OWNING PACKAGE at emit time, so typing a package's name in the
+        # palette surfaces everything it contributed — the discovery path after a catalog install.
+        @test SlateExtensionsBase._palette_tag(c) == "Pkg"
+        @test SlateExtensionsBase._palette_tag(PaletteCommand("Pkg.X"; label = "l", tag = "custom", run = "r")) == "custom"
+
+        # Registration injects a plain (non-esm) script calling the host global, deduped by id.
+        register_palette_command!(c)
+        entry = only(filter(e -> e.id == "palettecmd:Pkg.Open", extension_manifest().frontend))
+        @test entry.esm == false
+        @test occursin("window.slateRegisterCommand", entry.js)
+        @test occursin("selectedId", entry.js)               # the run body receives the selection
+        n_before = length(extension_manifest().frontend)
+        register_palette_command!(c)
+        @test length(extension_manifest().frontend) == n_before
+
+        # Data fields are escaped; only `run` is the extension's own raw JS.
+        empty!(SlateExtensionsBase._FRONTEND)
+        register_palette_command!(PaletteCommand("Pkg.Esc"; label = "a\"b </script>", run = "z()"))
+        ejs = only(extension_manifest().frontend).js
+        @test !occursin("a\"b", ejs) && occursin("\\u003c", ejs)
+        @test occursin("z()", ejs)                           # run body passes through unescaped
     end
 
 end

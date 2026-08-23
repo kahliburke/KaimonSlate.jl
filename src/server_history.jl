@@ -117,7 +117,7 @@ end
 # `slate.pkg` agent tool — so both paths behave identically. `op` is "add" or "rm".
 function notebook_pkg_op!(nb::LiveNotebook, op::AbstractString, name::AbstractString;
                           target::AbstractString = "notebook")
-    (op in ("add", "rm")) || return Dict{String,Any}("ok" => false, "message" => "bad op '$op'")
+    (op in ("add", "rm", "update")) || return Dict{String,Any}("ok" => false, "message" => "bad op '$op'")
     # `pkg_op` is a long worker round-trip (resolve + precompile — minutes on a fresh env) — run it OFF
     # nb.lock (protocol), serialized vs eval on the notebook's gate mutex. Holding nb.lock across it was a
     # teardown-deadlock hazard: a concurrent close/restart needing nb.lock would wedge behind the install.

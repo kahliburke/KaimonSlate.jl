@@ -23,6 +23,11 @@ function dlg(message, buttons, opts) {
 const _escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const confirmDark = (msg, ok, cls) => dlg(msg, [{ label: 'Cancel', value: false }, { label: ok || 'OK', value: true, cls: cls || 'primary' }]);
 const alertDark = msg => dlg(msg, [{ label: 'OK', value: true, cls: 'primary' }]);
+// These are `const`s in a classic script, so they are NOT properties of `window` and an ES module
+// island can't reach them. Publish them explicitly — the modules use the same dialogs as everything
+// else rather than growing their own.
+window.confirmDark = confirmDark;
+window.alertDark = alertDark;
 // Text entry in the same dark shell (the app's replacement for `window.prompt`, which is unstyled
 // and blocks the event loop). Resolves to the trimmed string, or null on cancel/empty. Enter
 // accepts, Escape cancels; a filename's extension is left out of the initial selection so typing

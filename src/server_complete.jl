@@ -1969,6 +1969,31 @@ function _make_router(h::Hub)
         tgt = String(get(b, "target", "notebook")); tgt in ("notebook", "project") || (tgt = "notebook")
         _json(notebook_pkg_op!(nb, String(get(b, "op", "")), String(get(b, "name", "")); target = tgt))
     end))
+    # ── Extension catalog ─────────────────────────────────────────────────────
+    # The gallery's data: catalog entries annotated with this notebook's install state. `refresh=1`
+    # bypasses the cache TTL (the "check for new extensions" action) — an ordinary open should not
+    # hit the network. Never fails: the payload's `meta.source` says whether it came from the
+    # published artifact, the cache, or the local registry clone.
+    HTTP.register!(router, "GET", "/api/{id}/catalog", req -> _withnb(h, req, nb -> begin
+        force = get(HTTP.queryparams(HTTP.URI(req.target)), "refresh", "") in ("1", "true")
+        _json(catalog_view(nb; force))
+    end))
+    # Install an extension. Adds the registry first if it's missing — consented separately in the
+    # UI, but carried out here so the user isn't left with an unexplainable "package not found".
+    HTTP.register!(router, "POST", "/api/{id}/catalog/install", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        tgt = String(get(b, "target", "notebook")); tgt in ("notebook", "project") || (tgt = "notebook")
+        _json(catalog_install!(nb, String(get(b, "name", "")); target = tgt))
+    end))
+    # Upgrade an installed extension the registry has moved past.
+    HTTP.register!(router, "POST", "/api/{id}/catalog/update", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        tgt = String(get(b, "target", "notebook")); tgt in ("notebook", "project") || (tgt = "notebook")
+        _json(catalog_update!(nb, String(get(b, "name", "")); target = tgt))
+    end))
+    # Add the extension registry on its own (depot-global, so it has its own consent + action).
+    HTTP.register!(router, "POST", "/api/{id}/catalog/registry", req ->
+        _withnb(h, req, nb -> _json(catalog_add_registry!(nb))))
     # Watchdog health: stall/runaway alerts the 5s supervisor sweep classified (also rides state meta).
     HTTP.register!(router, "GET", "/api/{id}/health", req -> _withnb(h, req, nb -> _json(_health_json(nb))))
     # A control change answers with an ACK, not the notebook.

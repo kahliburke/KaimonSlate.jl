@@ -1941,6 +1941,12 @@ function __slate_pkg(op, name)
         if o == "rm"
             Pkg.rm(String.(tokens))
             return Dict{String,Any}("ok" => true, "message" => "removed $(join(tokens, ", "))")
+        elseif o == "update"
+            # Distinct from `add`: adding a package that's already a dep keeps the resolved version,
+            # so an upgrade needs `Pkg.update`. Scoped to the named packages — a bare update would
+            # move the notebook's whole environment, which is not what "update this one" means.
+            Pkg.update(String.(tokens))
+            return Dict{String,Any}("ok" => true, "message" => "updated $(join(tokens, ", "))")
         elseif o == "add"
             s = _pkg_add_specs(tokens)
             isempty(s.adds) || Pkg.add(s.adds)
@@ -1949,6 +1955,25 @@ function __slate_pkg(op, name)
         else
             return Dict{String,Any}("ok" => false, "message" => "unknown op '$o'")
         end
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
+
+"Install a package registry into THIS worker's depot — the depot the notebook actually resolves
+against, which for a remote region is not the hub's. Idempotent: an already-installed registry
+(matched by url or by name) reports success without touching anything. Returns `{ok, message}`."
+function __slate_registry_add(url)
+    u = String(url)
+    isempty(strip(u)) && return Dict{String,Any}("ok" => false, "message" => "no registry url")
+    want = basename(rstrip(replace(u, r"\.git$" => ""), '/'))
+    try
+        for r in Pkg.Registry.reachable_registries()
+            (r.url == u || r.name == want) &&
+                return Dict{String,Any}("ok" => true, "message" => "registry $(r.name) already installed")
+        end
+        Pkg.Registry.add(Pkg.RegistrySpec(; url = u))
+        return Dict{String,Any}("ok" => true, "message" => "added registry $want")
     catch e
         return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     end
@@ -2410,6 +2435,7 @@ function tools()
         KaimonGate.GateTool("__slate_worker_reset", __slate_worker_reset),
         KaimonGate.GateTool("__slate_pkg", __slate_pkg),
         KaimonGate.GateTool("__slate_pkg_parent", __slate_pkg_parent),
+        KaimonGate.GateTool("__slate_registry_add", __slate_registry_add),
         KaimonGate.GateTool("__slate_revise", __slate_revise),
     ]
 end

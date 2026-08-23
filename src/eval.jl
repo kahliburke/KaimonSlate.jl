@@ -433,6 +433,7 @@ env_info(k::PendingKernel, report::Report) = env_info(_await_real(k), report)
 bundle_info(k::PendingKernel, report::Report) = bundle_info(_await_real(k), report)
 pkg_op(k::PendingKernel, report::Report, op::AbstractString, name::AbstractString; target::AbstractString = "notebook") =
     pkg_op(_await_real(k), report, op, name; target)
+registry_add(k::PendingKernel, report::Report, url::AbstractString) = registry_add(_await_real(k), report, url)
 
 """
     complete(kernel, report, code, pos) -> (; items, from, to)
@@ -606,10 +607,35 @@ Returns `{ok, message}`.
 """
 function pkg_op(::InProcessKernel, ::Report, op::AbstractString, name::AbstractString;
                 target::AbstractString = "notebook")
-    op in ("add", "rm") || return Dict{String,Any}("ok" => false, "message" => "bad op '$op'")
+    op in ("add", "rm", "update") || return Dict{String,Any}("ok" => false, "message" => "bad op '$op'")
     try
-        op == "add" ? Pkg.add(String(name)) : Pkg.rm(String(name))
+        op == "add"    ? Pkg.add(String(name)) :
+        op == "update" ? Pkg.update(String(name)) :
+                         Pkg.rm(String(name))
         return Dict{String,Any}("ok" => true, "message" => "")
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
+
+"""
+    registry_add(kernel, report, url) -> Dict{String,Any}
+
+Install a package registry into the depot the kernel's code runs in. Unlike [`pkg_op`](@ref) this
+is depot-GLOBAL — it affects every project on that machine — which is why it's a separate call with
+its own consent in the UI rather than something an install quietly does.
+
+It has to run kernel-side rather than in the hub: a notebook on a remote region resolves against
+the REMOTE depot, so adding the registry in the hub's depot would leave the install still failing.
+Adding a registry that's already present is a no-op, not an error. Returns `{ok, message}`.
+"""
+function registry_add(::InProcessKernel, ::Report, url::AbstractString)
+    try
+        any(r -> r.url == url || r.name == basename(rstrip(String(url), '/')),
+            Pkg.Registry.reachable_registries()) &&
+            return Dict{String,Any}("ok" => true, "message" => "registry already installed")
+        Pkg.Registry.add(Pkg.RegistrySpec(; url = String(url)))
+        return Dict{String,Any}("ok" => true, "message" => "registry added")
     catch e
         return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     end

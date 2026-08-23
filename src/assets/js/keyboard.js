@@ -4,6 +4,9 @@
 // markdown/code, Enter to edit. Edit mode: focus inside the CodeMirror (green
 // ring); Esc returns to command mode.
 let selectedId = null, anchorId = null, _dPending = false, _dTimer = null;
+// `selectedId` is a classic-script `let`, so it is NOT a property of `window` and an ES module
+// island can't read it. Islands that need the selection (the Extensions gallery) call this.
+window.slateSelectedId = () => selectedId || '';
 const cellIds = () => ((nbState && nbState.cells) || []).map(c => c.id);
 // The current selection as an ordered (notebook-order) id list; falls back to the active cell.
 function selectedIds() {
