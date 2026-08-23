@@ -218,6 +218,13 @@ style.textContent = `
   .extzoom img{max-width:100%;max-height:100%;border-radius:10px;border:1px solid #2a2e40;
     box-shadow:0 24px 70px rgba(0,0,0,.6);}
   .extzoomhint{position:fixed;bottom:16px;left:0;right:0;text-align:center;color:#6a7090;font-size:.72rem;}
+  /* Full width, like the screenshots, and capped to the same height so a card with a video and a
+     card with a still read the same. preload="none" plus a poster means opening a card fetches the
+     poster image only — the video downloads when the user presses play, not before.
+     NB: no backticks in this comment. The whole block is a template literal, so one would end the
+     string and the rest of the stylesheet would be parsed as JavaScript. */
+  .extvideo{width:100%;max-height:380px;display:block;margin-bottom:16px;border-radius:9px;
+    border:1px solid #2a2e40;background:#0b0e18;object-fit:cover;object-position:top;}
   .extdesc{color:#c2c8dd;font-size:.8rem;line-height:1.55;margin-bottom:16px;white-space:pre-wrap;}
   .extsection{color:#6a7090;font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;margin:16px 0 7px;}
   .extprov li{color:#c2c8dd;font-size:.78rem;line-height:1.5;}
@@ -281,6 +288,9 @@ function Detail({ e }) {
   if (!e) return html`<div class="extright"><div class="extempty">No extension matches that search.</div></div>`;
   const d = data.value || {};
   const shots = e.screenshots || [];
+  // With a video, the first screenshot becomes its poster — so the video downloads nothing until
+  // the user presses play, and that image isn't also shown a second time in the strip below.
+  const stills = e.video ? shots.slice(1) : shots;
   const provides = e.provides || [];
   const installing = busy.value === e.name;
   return html`
@@ -294,7 +304,10 @@ function Detail({ e }) {
           : e.inParent ? html`<span class="extpill parent">in project${e.installedVersion ? ' ' + e.installedVersion : ''}</span>` : null}
       </div>
       ${e.tagline ? html`<div class="exttag">${e.tagline}</div>` : null}
-      ${shots.length ? html`<div class="extshots">${shots.map((s) => html`
+      ${e.video ? html`
+        <video class="extvideo" src=${e.video} poster=${shots[0] || ''} preload="none"
+               controls loop muted playsinline></video>` : null}
+      ${stills.length ? html`<div class="extshots">${stills.map((s) => html`
         <img src=${s} alt="" loading="lazy" title="click to zoom" onClick=${() => (zoom.value = s)} />`)}</div>` : null}
       ${e.description ? html`<div class="extdesc">${e.description}</div>` : null}
       ${!e.description && !e.tagline ? html`
@@ -325,10 +338,6 @@ function Detail({ e }) {
       ${e.snippet ? html`
         <div class="extsection">Getting started</div>
         <div class="extsnip">${e.snippet}</div>` : null}
-
-      ${e.video ? html`
-        <div class="extsection">Demo</div>
-        <video src=${e.video} controls loop muted style="max-width:100%;border-radius:9px;border:1px solid #2a2e40" />` : null}
 
       <div class="extsection">Package</div>
       <div class="extnote">
