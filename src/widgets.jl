@@ -808,21 +808,48 @@ function _do_replay(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
     # Checked HERE, cheaply, even though nothing is swept yet: an author who used an unbounded control
     # should learn while writing the cell, not from an export that quietly shipped an inert knob.
     dom === nothing && error("@replay: `" * String(name) * "` is a `" * String(w.kind) * "` control, " *
-                             "whose domain is not finite — there is no fixed set of values to compute " *
-                             "ahead of time. Use a Slider, Select, Radio, Checkbox or Toggle.")
+                             "whose domain is not finite (or is combinatorially too large — a range " *
+                             "slider past ~200 stops, a multi-select past ~14 options). Bound it, " *
+                             "coarsen its step, or use a Slider, Select, Radio, Checkbox, Toggle, " *
+                             "RangeSlider, TableSelect, MultiSelect or a bounded NumberField.")
     # LIVE THIS IS A PASS-THROUGH. Only the current value is computed, so the cell costs exactly what the
     # bare expression costs — a hundred-position control does not re-sweep every time the author edits
     # something. What it leaves behind is METADATA: the closure and the control, registered under an id
     # the export can find. The sweep belongs to the export, which is where the artifact is decided, where
     # the time can be shown, and where an author can trade resolution against size.
     #
-    # Keyed by cell + control so a re-run REPLACES its own entry rather than accumulating, and a deleted
-    # or edited cell's stale sweep does not ride along into an export.
     cell = get(task_local_storage(), :slate_cell, "")
-    id = string(cell, ":", name)
+    # Keyed by cell + control so a re-run REPLACES its own entry rather than accumulating — but a cell
+    # may hold SEVERAL marks on ONE control, which is how a stacked chart or a dual-axis figure gets
+    # both of its series replayed. Those must not collide: the first keeps the bare key (so an id
+    # already written into an exported page still resolves), and each later one is suffixed by its
+    # order of appearance. `:slate_replay_seq` restarts with every eval, so the numbering a chart spec
+    # embeds during this run is the numbering the export's sweeps are registered under.
+    base = string(cell, ":", name)
+    seq = get(task_local_storage(), :slate_replay_seq, nothing)
+    id = if seq isa AbstractDict
+        n = get(seq, base, 0)
+        seq[base] = n + 1
+        n == 0 ? base : string(base, "#", n)
+    else
+        base
+    end
     dom_any = Any[d for d in dom]
-    sweeps[id] = (; name = String(name), f = f, domain = dom_any, cell = String(cell),
-                    kind = String(w.kind))
+    # The domain holds WIRE values, because that is what has to ship and what the page can compare a
+    # control's state against. The author's expression is written against the value a CELL sees — a
+    # `Choice` for a labeled Select, a row NamedTuple for a TableSelect, `(lo, hi)` for a RangeSlider —
+    # so the sweep wraps on the way in, through the same `wrap_value` the live bind uses. Without this
+    # `@replay(sel, f(sel.product))` would sweep integers and fail on the first field access.
+    wrap = v -> wrap_value(w, v)
+    # Under `reglock`, because INDEPENDENT CELLS EVALUATE IN PARALLEL and every marked figure writes
+    # here. An unguarded `setindex!` from several tasks can catch the Dict mid-rehash and leave a slot
+    # holding an undefined reference — after which the whole registry throws `UndefRefError` on the
+    # next iteration. The export catches that and ships a page with NO sweeps at all: every control
+    # renders disabled, nothing is logged, and the notebook looks like it simply has no `@replay`.
+    lock(reglock) do
+        sweeps[id] = (; name = String(name), f = f, wrap = wrap, domain = dom_any,
+                        cell = String(cell), kind = String(w.kind))
+    end
     i = findfirst(isequal(cur), dom)
     if i === nothing
         # The control sits outside what its widget now reports (its range was edited between runs). The
@@ -831,7 +858,7 @@ function _do_replay(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
         @warn "@replay: `$(name)` is currently $(cur), which is not in its control's domain — the live " *
               "value is correct, but an export would have no data for this position" domain = dom
     end
-    return ReplayArray(collect(f(cur)), id, String(name), i === nothing ? 0 : i, dom_any)
+    return ReplayArray(collect(f(wrap(cur))), id, String(name), i === nothing ? 0 : i, dom_any)
 end
 
 # Run the registered sweeps and pack each into an asset. Called at EXPORT time (never during an ordinary
@@ -852,17 +879,30 @@ end
 #
 # Nothing here throws: a mark whose expression fails simply reports no estimate rather than blocking the
 # dialog — the export will surface the real error if the author goes ahead.
-function _replay_plan(sweeps::Dict{String,Any})
+# `stride` is the export's resolution control: ship every n-th position and let the page offer only
+# those. It applies to the controls whose domain is an ordered sweep of ONE NUMBER, where dropping
+# intermediate positions costs resolution and nothing else — and where the page can snap a control to
+# the nearest position that did ship (`Slate.replay.index`), so the track stays continuous.
+#
+# Everything else is refused, for two different reasons. A Select, Radio, Checkbox or TableSelect is
+# CATEGORICAL: every value is a distinct thing the reader can ask for, so striding would silently
+# delete choices rather than coarsen a scale. A RangeSlider or MultiSelect is COMPOSITE: its key is a
+# pair or a subset, and there is no "nearest" pair to snap to, so a strided domain would leave real
+# positions of the control dead. Those bound their cost through the control itself — a coarser `step`,
+# fewer options — which is a decision with a visible consequence rather than an invisible one.
+_replay_strideable(kind) = lowercase(String(kind)) in ("slider", "number")
+
+function _replay_plan(sweeps::Dict{String,Any}, lk::ReentrantLock = ReentrantLock())
     out = Dict{String,Any}()
-    for (id, s) in sweeps
+    for (id, s) in lock(() -> copy(sweeps), lk)   # snapshot: a cell may be registering as we read
         n = length(s.domain)
         rec = Dict{String,Any}("control" => s.name, "cell" => s.cell, "values" => n,
                                # Which marks a resolution setting actually affects: only a slider is
                                # coarsened; a categorical control keeps every option.
-                               "kind" => s.kind, "strideable" => lowercase(s.kind) == "slider")
+                               "kind" => s.kind, "strideable" => _replay_strideable(s.kind))
         try
             t0 = time()
-            one = s.f(first(s.domain))
+            one = s.f(get(s, :wrap, identity)(first(s.domain)))
             rec["seconds_per_value"] = time() - t0
             A = replay_stack([one])
             rec["bytes_per_value"] = length(A) * sizeof(eltype(A))
@@ -878,26 +918,22 @@ end
 # `strides` is per-mark (id → n), not one global setting: a notebook mixes a 4-option Select with a
 # 500-position slider, and the useful decision is almost always about ONE of them. A missing id means
 # stride 1.
-function _run_replay_sweeps(sweeps::Dict{String,Any}; only = nothing,
+function _run_replay_sweeps(sweeps::Dict{String,Any}, lk::ReentrantLock = ReentrantLock();
+                            only = nothing,
                             strides::AbstractDict = Dict{String,Int}(), stride::Int = 1,
                             progress = (id, i, n) -> nothing)
     out = Dict{String,Any}()
-    for (id, s) in sweeps
+    for (id, s) in lock(() -> copy(sweeps), lk)   # snapshot: sweeping is long, and cells keep running
         (only === nothing || id in only) || continue
-        # `stride` is the export's resolution control: ship every n-th position and let the page offer
-        # only those. It applies ONLY to a slider, whose domain is an ordered sweep of one quantity where
-        # dropping intermediate positions costs resolution and nothing else. A Select, Radio or Checkbox
-        # is CATEGORICAL — every value is a distinct thing the reader can ask for — so striding it would
-        # silently delete choices rather than coarsen a scale. The shipped `domain` is whatever survives,
-        # so the page never offers a position it has no data for.
-        strideable = lowercase(get(s, :kind, "")) == "slider"
+        strideable = _replay_strideable(get(s, :kind, ""))
         st = max(1, Int(get(strides, id, stride)))
         dom = (st > 1 && strideable) ? s.domain[1:st:end] : s.domain
         n = length(dom)
         t0 = time()
+        wrap = get(s, :wrap, identity)
         slices = Vector{Any}(undef, n)
         for (i, v) in enumerate(dom)
-            slices[i] = s.f(v)
+            slices[i] = s.f(wrap(v))
             progress(id, i, n)
         end
         A = replay_stack(slices)
@@ -1084,12 +1120,12 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const __slate_run_replays = $((; only = nothing, stride = 1,
                                                     strides = Dict{String,Int}(),
                                                     progress = (id, i, n) -> nothing) ->
-        _run_replay_sweeps(replay_sweeps; only = only, stride = stride, strides = strides,
+        _run_replay_sweeps(replay_sweeps, reglock; only = only, stride = stride, strides = strides,
                            progress = progress))))
     # What an export needs BEFORE committing to a sweep: which controls are replayable, how many values
     # each would compute, and where they live — so a size/time estimate can be shown, and skipped or
     # strided, without running anything.
-    Core.eval(m, :(const __slate_replay_plan = $(() -> _replay_plan(replay_sweeps))))
+    Core.eval(m, :(const __slate_replay_plan = $(() -> _replay_plan(replay_sweeps, reglock))))
     Core.eval(m, :(macro replay(ctl, body)
         ctl isa Symbol || error("@replay expects a control name first: `@replay w expr`")
         esc(Expr(:call, :__slate_replay, QuoteNode(ctl), Expr(:->, ctl, body)))

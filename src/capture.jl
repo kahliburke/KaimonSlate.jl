@@ -658,6 +658,12 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # attributed to the executing statement. Seeded here, harvested + cleared after the eval — like the
     # `@bind` sink. `:slate_stmt`/`:slate_stmt_srcs` are (re)set by `_eval_cell_source`'s statement markers.
     task_local_storage(:slate_effects, Any[])
+    # Per-eval occurrence counter for `@replay` marks (see `_do_replay`). A sweep is keyed by cell +
+    # control, so a cell holding TWO marks on ONE control — the ordinary way to replay a stacked chart
+    # or a dual axis — had them collide, and every marked series silently drew the last one's data.
+    # Seeded per eval so the numbering restarts with the cell and is identical on every run, which is
+    # what lets the chart spec written during this eval name the sweep the export will register.
+    task_local_storage(:slate_replay_seq, Dict{String,Int}())
 
     # Generated-asset sink (see `save_asset`): a cell registers bytes for the front-end here (out-of-band —
     # an `AssetRef` is USED inside another value, not returned), harvested into the output like `@bind`.
@@ -687,6 +693,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         raw_out, raw_err = _finish_capture!(capture)
         slate_ctx === nothing || delete!(task_local_storage(), :slate_ctx)   # never outlive this eval
         delete!(task_local_storage(), :slate_cell)
+        delete!(task_local_storage(), :slate_replay_seq)
     end
     binds = copy(get(task_local_storage(), :__slate_binds, NamedTuple[]))
     delete!(task_local_storage(), :__slate_binds)

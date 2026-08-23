@@ -204,7 +204,15 @@ _inline_ext_asset_urls(nb::LiveNotebook, js::AbstractString; compress::Bool = fa
 # a sweep is never a precondition for exporting.
 function _replay_sweep_assets(nb::LiveNotebook; stride::Integer = 1, strides = nothing)
     nb.kernel isa ReportEngine.GateKernel || return (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}())
-    got = try; ReportEngine.run_replays(nb.kernel; stride = stride, strides = strides); catch; nothing; end
+    # A sweep that fails must not take the whole export down — the page is still worth having with its
+    # controls frozen. But it must not vanish either: swallowing this silently produces an export that
+    # looks complete and has every control disabled, with nothing anywhere saying why.
+    got = try
+        ReportEngine.run_replays(nb.kernel; stride = stride, strides = strides)
+    catch e
+        @warn "@replay sweeps failed — exporting with controls frozen" exception = (e, catch_backtrace())
+        nothing
+    end
     (got isa AbstractDict) || return (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}())
     _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
     assets = Tuple{Dict{String,Any},Vector{UInt8}}[]
@@ -249,8 +257,12 @@ function _export_control_html(b)
     p = b.params
     label = _esc(String(get(p, "label", name)))
     val = b.value
-    attrs = string(" data-name=\"", _esc(name), "\" data-widget=\"", _esc(kind), "\" disabled",
-                   " title=\"This control needs data shipped with the page to do anything.\"")
+    inert = " title=\"This control needs data shipped with the page to do anything.\""
+    attrs = string(" data-name=\"", _esc(name), "\" data-widget=\"", _esc(kind), "\" disabled", inert)
+    # A control whose host is NOT an input (a range slider's pair, a table select's rows) carries the
+    # identity on a wrapper and `data-off` in place of `disabled`, which a div does not have.
+    hostattrs = string(" data-name=\"", _esc(name), "\" data-widget=\"", _esc(kind), "\" data-off=\"1\"", inert)
+    wide = false
     body = if kind == "slider"
         string("<input type=\"range\" min=\"", _ctl_num(p, "min", "0"), "\" max=\"", _ctl_num(p, "max", "100"),
                "\" step=\"", _ctl_num(p, "step", "1"), "\" value=\"", _esc(string(val)), "\"", attrs, "/>",
@@ -270,13 +282,64 @@ function _export_control_html(b)
         String(take!(io))
     elseif kind in ("checkbox", "toggle")
         string("<input type=\"checkbox\"", val === true ? " checked" : "", attrs, "/>")
+    elseif kind == "number"
+        # Replayable exactly when the author bounded it — `bind_domain` agrees, and an unbounded one
+        # falls through to the frozen branch below rather than rendering a box that does nothing.
+        (get(p, "min", nothing) isa Real && get(p, "max", nothing) isa Real) ?
+            string("<input type=\"number\" min=\"", _ctl_num(p, "min", "0"), "\" max=\"", _ctl_num(p, "max", "100"),
+                   "\" step=\"", _ctl_num(p, "step", "1"), "\" value=\"", _esc(string(val)), "\"", attrs, "/>") :
+            string("<span class=\"exp-ctl-frozen\">", _esc(string(val)), "</span>")
+    elseif kind == "rangeslider"
+        lo, hi = val isa AbstractVector && length(val) == 2 ? (val[1], val[2]) :
+                 (get(p, "min", 0), get(p, "max", 100))
+        mn, mx, st = _ctl_num(p, "min", "0"), _ctl_num(p, "max", "100"), _ctl_num(p, "step", "1")
+        thumb(cls, v) = string("<input type=\"range\" class=\"", cls, "\" min=\"", mn, "\" max=\"", mx,
+                               "\" step=\"", st, "\" value=\"", _esc(string(v)), "\" disabled", inert, "/>")
+        string("<span class=\"exp-rs\"", hostattrs, ">", thumb("exp-rs-lo", lo), thumb("exp-rs-hi", hi),
+               "</span><output class=\"exp-ctl-val\">", _esc(string(lo, " – ", hi)), "</output>")
+    elseif kind == "tableselect"
+        rows = get(p, "rows", nothing)
+        cols = get(p, "columns", nothing)
+        (rows isa AbstractVector && cols isa AbstractVector) || return ""
+        wide = true
+        sel = val isa Integer ? Int(val) : 0
+        io = IOBuffer()
+        print(io, "<div class=\"exp-ts\"", hostattrs, " data-selrow=\"", sel, "\"><table><thead><tr>")
+        for c in cols
+            print(io, "<th>", _esc(string(c isa AbstractDict ? get(c, "name", "") : c)), "</th>")
+        end
+        print(io, "</tr></thead><tbody>")
+        for (i, r) in enumerate(rows)
+            print(io, "<tr", i == sel ? " class=\"sel\"" : "", ">")
+            for cell in (r isa AbstractVector ? r : Any[r])
+                print(io, "<td>", _esc(cell === nothing ? "" : string(cell)), "</td>")
+            end
+            print(io, "</tr>")
+        end
+        print(io, "</tbody></table></div>")
+        String(take!(io))
+    elseif kind in ("multiselect", "multicheck")
+        opts = get(p, "options", nothing)
+        opts isa AbstractVector || return ""
+        chosen = val isa AbstractVector ? Set(string.(val)) : Set{String}()
+        io = IOBuffer()
+        print(io, "<select multiple size=\"", min(length(opts), 6), "\"", attrs, ">")
+        for o in opts
+            v = o isa AbstractDict ? get(o, "value", o) : o
+            l = o isa AbstractDict ? String(get(o, "label", string(v))) : string(v)
+            print(io, "<option value=\"", _esc(string(v)), "\"",
+                  string(v) in chosen ? " selected" : "", ">", _esc(l), "</option>")
+        end
+        print(io, "</select>")
+        String(take!(io))
     else
-        # Unbounded or free-form (text, number, date, colour…). There is no finite set of answers to ship,
-        # so show the value the page was built at rather than a control that cannot work. Same honesty as
-        # the PDF's frozen parameter strip.
+        # Unbounded or free-form (text, date, colour, an unbounded number…). There is no finite set of
+        # answers to ship, so show the value the page was built at rather than a control that cannot
+        # work. Same honesty as the PDF's frozen parameter strip.
         string("<span class=\"exp-ctl-frozen\">", _esc(string(val)), "</span>")
     end
-    return string("<label class=\"exp-ctl\"><span class=\"exp-ctl-lbl\">", label, "</span>", body, "</label>")
+    return string("<label class=\"exp-ctl", wide ? " exp-ctl-wide" : "", "\"><span class=\"exp-ctl-lbl\">",
+                  label, "</span>", body, "</label>")
 end
 
 _export_controls_html(c) = isempty(c.binds) ? "" :
@@ -668,6 +731,92 @@ end
 # blob (`data`, base64, standalone) or a page-local sibling (`url`, published). Returns a Promise of the
 # parsed JSON / decoded text / raw ArrayBuffer, keyed off the asset's mime — the SAME contract as live,
 # so a widget's code is identical in the notebook, a standalone file, and a hosted site.
+# The ECharts runtime an exported page carries: map registration, the Slate-key stripper, the
+# tooltip formatter, the `@replay` wiring, and the render bootstrap. Lifted out of the writer
+# verbatim so it is a NAMED CONSTANT — which is the only way the parse check in
+# test/test_assets_syntax.jl can see it. This is JS living inside Julia string literals, so it
+# goes through Julia's escape processing on the way out and the text here is not what a browser
+# receives; checking the constant checks what actually ships.
+#
+# `_slateMaps` and `_slateCharts` are defined by the writer immediately before this is emitted.
+const _EXPORT_CHART_RUNTIME_JS = string(
+    "function _slateEnsureMaps(reqs){return Promise.all((reqs||[]).map(function(r){",
+    "if(!r||!r.name||(echarts.getMap&&echarts.getMap(r.name)))return Promise.resolve();",
+    "if(_slateMaps[r.name]){try{echarts.registerMap(r.name,_slateMaps[r.name]);}catch(e){}return Promise.resolve();}",
+    "if(!r.url)return Promise.resolve();",
+    "return fetch(r.url).then(function(x){return x.json();}).then(function(j){echarts.registerMap(r.name,j);}).catch(function(){});}));}",
+    # `registerMap`/`__size`/`requireScripts`/`__valuefmt`, and a series' `__replay` mark, are
+    # Slate extensions rather than ECharts options — strip them before setOption.
+    # `__valuefmt` becomes a real `tooltip.valueFormatter` here — the static mirror of core.js's
+    # `_valueFormatter`. The spec crosses as DATA (a JSON option has no reviver, so a function
+    # cannot) and is turned back into one at render, using `fmtCell` — the same renderer the
+    # tables use. Where that isn't on the page the value falls back to its plain string rather
+    # than throwing inside ECharts' tooltip path, which would wedge the axisPointer.
+    "function _slateValueFmt(f){return function(v){if(v==null||v==='')return '—';",
+    "try{return fmtCell(v,f);}catch(e){return String(v);}};}",
+    "function _slateSansMaps(o){if(!o)return o;",
+    "var mk=Array.isArray(o.series)&&o.series.some(function(x){return x&&(x.__replay||x.__valuefmt);});",
+    "if(!o.registerMap&&!o.__size&&!o.requireScripts&&!o.__valuefmt&&!mk)return o;",
+    "var c=Object.assign({},o);delete c.registerMap;delete c.__size;delete c.requireScripts;",
+    "if(mk)c.series=o.series.map(function(x){if(!x||(!x.__replay&&!x.__valuefmt))return x;",
+    "var y=Object.assign({},x);delete y.__replay;",
+    "if(y.__valuefmt){y.tooltip=Object.assign({},y.tooltip,{valueFormatter:_slateValueFmt(y.__valuefmt)});delete y.__valuefmt;}",
+    "return y;});",
+    "if(c.__valuefmt){c.tooltip=Object.assign({},c.tooltip,{valueFormatter:_slateValueFmt(c.__valuefmt)});delete c.__valuefmt;}",
+    "return c;}",
+    # ── `@replay` in an ECharts figure ───────────────────────────────────────────────────────
+    # `Slate.replay.wire` (emitted with the asset shim above) owns everything except the call
+    # that puts a slice on screen. What is left is the only ECharts-specific part: the DSL ZIPS,
+    # so a line is `[[x,y],…]` and a heatmap `[[x,y,v],…]`, and the mark (echarts_dsl.jl
+    # `_mark_replay!`) names which COMPONENT of each drawn entry the shipped array feeds.
+    # Rewriting that one slot in the entries ALREADY DRAWN reuses their coordinates, so the zip
+    # layout is expressed once, in Julia, and never restated here.
+    "function _slateReplayEntries(cur,m,sl){if(m.comp===null||m.comp===undefined)return sl;",
+    # A heatmap triple carries its own [xIndex,yIndex], so index the slice by those rather than
+    # by position — correct however the entries happen to be ordered.
+    "if(m.rank===2)return cur.map(function(p){var q=p.slice();q[m.comp]=sl[p[1]][p[0]];return q;});",
+    "return cur.map(function(p,i){var q=p.slice();q[m.comp]=sl[i];return q;});}",
+    # `visualMap` may be one component or a list; either is piecewise if any entry
+    # declares `pieces` (or says so by `type`).
+    "function _slateVmPiecewise(vm){return [].concat(vm).some(function(v){",
+    "return v&&(v.pieces||v.type==='piecewise');});}",
+    "function _slateWireReplay(ch,opt){var marks=[];",
+    "((opt&&opt.series)||[]).forEach(function(s,i){if(s&&s.__replay)",
+    "marks.push(Object.assign({series:i,base:s.data||[]},s.__replay));});",
+    "if(!marks.length)return;",
+    "Slate.replay.wire(marks,function(sl,m){",
+    # series merge by INDEX, so naming only the changed one leaves the reader's zoom and legend
+    # state untouched through every step of a drag.
+    "var arr=[];for(var k=0;k<m.series;k++)arr.push({});",
+    "arr.push({data:_slateReplayEntries(m.base,m,sl)});var patch={series:arr};",
+    # A colour scale was fitted to whichever slice drew first; leaving it pinned clips
+    # every other one. ANY rank — a calendar heatmap is rank 1 and was silently
+    # excluded, so a replayed calendar kept the first region's range. A PIECEWISE map is
+    # left alone: its `pieces` are an authored statement about what the colours mean.
+    "if(opt.visualMap&&!_slateVmPiecewise(opt.visualMap)){var lo=Infinity,hi=-Infinity;",
+    "var scan=function(v){if(Array.isArray(v))v.forEach(scan);",
+    "else if(typeof v==='number'&&isFinite(v)){if(v<lo)lo=v;if(v>hi)hi=v;}};scan(sl);",
+    "if(isFinite(lo)&&isFinite(hi))patch.visualMap={min:lo,max:hi};}",
+    "ch.setOption(patch);});}",
+    # Load a chart's `requireScripts` (echarts-gl etc.) before render — ONE <script> per url
+    # (shared promise), ordered so a lib sees its deps; a failed load resolves so it can't wedge.
+    "var _slateScripts={};function _slateLoadScript(u){if(_slateScripts[u])return _slateScripts[u];",
+    "_slateScripts[u]=new Promise(function(res){var s=document.createElement('script');s.src=u;s.async=false;",
+    "s.onload=function(){res();};s.onerror=function(){res();};document.head.appendChild(s);});return _slateScripts[u];}",
+    "function _slateEnsureScripts(reqs){return Promise.all((reqs?[].concat(reqs):[]).map(function(u){return u?_slateLoadScript(u):Promise.resolve();}));}",
+    "function _slateRenderCharts(){if(!window.echarts)return;",
+    "try{echarts.registerTheme('slate',_slateExportTheme());}catch(e){}",
+    "_slateCharts.forEach(function(c){",
+    "var el=document.getElementById(c[0]);if(!el)return;var opt=c[1];",
+    "var reqs=opt&&opt.registerMap?[].concat(opt.registerMap):[];",
+    # A GL lib (requireScripts) must load BEFORE echarts.init — an instance created before
+    # echarts-gl registers its 3D views renders a GL series blank. So init INSIDE the .then.
+    "Promise.all([_slateEnsureMaps(reqs),_slateEnsureScripts(opt&&opt.requireScripts)]).then(function(){",
+    "var ch=echarts.init(el,'slate');ch.setOption(_slateSansMaps(opt));_slateWireReplay(ch,opt);",
+    "window.addEventListener('resize',function(){ch.resize();});});});}",
+    "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);"
+)
+
 const _EXPORT_ASSET_JS = raw"""
 window.Slate=window.Slate||{};window.__slateAssets=window.__slateAssets||{};
 function _slateTyped(d,b){return d==="f32"?new Float32Array(b):d==="f64"?new Float64Array(b):d==="i32"?new Int32Array(b):d==="i16"?new Int16Array(b):new Uint8Array(b);}
@@ -720,18 +869,77 @@ Slate.isLive=function(){return false;};
    does the work: live, `isLive()` is true and the whole thing stays out of the kernel's way.
    Any renderer inlined into an export (SlatePlotly's widget, the chart runtime below) uses it. */
 Slate.replay={
-control:function(name){var hosts=document.querySelectorAll("[data-name]");
-for(var i=0;i<hosts.length;i++){var h=hosts[i];
+/* EVERY host for a bound name. One name marks several nodes — a live cell shows three for a slider,
+   and a control surfaced beside N figures renders N times. Taking only the first left every copy but
+   one inert: the reader drags a strip and nothing moves. */
+hosts:function(name){var out=[],nodes=document.querySelectorAll("[data-name]");
+for(var i=0;i<nodes.length;i++){var h=nodes[i];
 if(h.getAttribute("data-name")!==String(name))continue;
-var inp=(h.matches&&h.matches("input,select"))?h:h.querySelector("input,select");
-if(inp)return inp;}
-return null;},
-/* Matched NUMERICALLY where both sides are numbers — a DOM control reports "8" as a string and Julia
-   may have written 8.0, so comparing text would miss. String equality for categorical domains. */
-index:function(domain,raw){var n=Number(raw);
-if(!isNaN(n)){for(var i=0;i<domain.length;i++)if(Number(domain[i])===n)return i;}
-for(var j=0;j<domain.length;j++)if(String(domain[j])===String(raw))return j;
-return -1;},
+if(h.getAttribute("data-widget")){out.push(h);continue;}
+if(h.matches&&h.matches("input,select")){out.push(h);continue;}
+var inp=h.querySelector&&h.querySelector("input,select");if(inp)out.push(inp);}
+return out;},
+kind:function(h){return String(h.getAttribute("data-widget")||"").toLowerCase();},
+_inputs:function(h){return (h.matches&&h.matches("input,select"))?[h]:h.querySelectorAll("input,select");},
+truthy:function(v){return v===true||v==="true"||v===1||v==="1";},
+/* A control's position as a KEY comparable against `bind_domain`'s wire values. Not every control is
+   one input holding one scalar: a range slider is two thumbs binding a pair, a table select is a div
+   whose state is an attribute, a multi-select is a set. */
+read:function(h){var R=Slate.replay,k=R.kind(h);
+if(k==="rangeslider"){var a=h.querySelector(".exp-rs-lo"),b=h.querySelector(".exp-rs-hi");
+if(!a||!b)return null;var lo=Number(a.value),hi=Number(b.value);return lo<=hi?[lo,hi]:[hi,lo];}
+if(k==="tableselect")return Number(h.getAttribute("data-selrow")||0);
+if(k==="multiselect"||k==="multicheck"){var s=(h.matches&&h.matches("select"))?h:h.querySelector("select");
+if(s)return Array.prototype.map.call(s.selectedOptions,function(o){return o.value;});
+return Array.prototype.map.call(h.querySelectorAll('input[type=checkbox]:checked'),function(c){return c.value;});}
+if(k==="checkbox"||k==="toggle"){var c=(h.matches&&h.matches("input"))?h:h.querySelector("input");
+return c?!!c.checked:null;}
+var inp=R._inputs(h)[0];return inp?inp.value:null;},
+/* Put a key back on the copies of a control the reader did NOT touch. */
+mirror:function(h,key){var R=Slate.replay,k=R.kind(h),want=Array.isArray(key)?key.map(String):null;
+if(k==="rangeslider"){var a=h.querySelector(".exp-rs-lo"),b=h.querySelector(".exp-rs-hi");
+if(a&&b&&Array.isArray(key)){a.value=key[0];b.value=key[1];}return;}
+if(k==="tableselect"){h.setAttribute("data-selrow",String(key));
+Array.prototype.forEach.call(h.querySelectorAll("tbody tr"),function(r,i){r.classList.toggle("sel",i+1===Number(key));});return;}
+if(k==="checkbox"||k==="toggle"){var c=(h.matches&&h.matches("input"))?h:h.querySelector("input");
+if(c)c.checked=R.truthy(key);return;}
+if((k==="multiselect"||k==="multicheck")&&want){var s=(h.matches&&h.matches("select"))?h:h.querySelector("select");
+var set=function(el){el.selected=want.indexOf(el.value)>=0;};
+if(s){Array.prototype.forEach.call(s.options,set);return;}
+Array.prototype.forEach.call(h.querySelectorAll('input[type=checkbox]'),function(c){c.checked=want.indexOf(c.value)>=0;});return;}
+var inp=R._inputs(h)[0];if(inp)inp.value=key;},
+/* Inputs fire input/change; a table select has no input at all, so its rows ARE the control. */
+listen:function(h,run){var R=Slate.replay;
+if(R.kind(h)==="tableselect"){var rows=h.querySelectorAll("tbody tr");
+Array.prototype.forEach.call(rows,function(tr,i){tr.addEventListener("click",function(){
+if(h.getAttribute("data-off")==="1")return;R.mirror(h,i+1);run();});});return;}
+Array.prototype.forEach.call(R._inputs(h),function(i){i.addEventListener("input",run);i.addEventListener("change",run);});},
+enable:function(h,on){var R=Slate.replay;h.setAttribute("data-off",on?"0":"1");
+if(on)h.removeAttribute("title");
+Array.prototype.forEach.call(R._inputs(h),function(i){i.disabled=!on;if(on)i.removeAttribute("title");});},
+label:function(key){return Array.isArray(key)?key.join(" – "):String(key);},
+/* Equality across the shapes a key can take. Matched NUMERICALLY where both sides are numbers — a DOM
+   control reports "8" as a string and Julia may have written 8.0 — and elementwise for the composite
+   keys (a pair, a subset), whose order Julia and the DOM agree on. */
+same:function(a,b){var R=Slate.replay;
+if(Array.isArray(a)||Array.isArray(b)){
+if(!Array.isArray(a)||!Array.isArray(b)||a.length!==b.length)return false;
+for(var i=0;i<a.length;i++)if(!R.same(a[i],b[i]))return false;return true;}
+if(typeof a==="boolean"||typeof b==="boolean")return R.truthy(a)===R.truthy(b);
+var x=Number(a),y=Number(b);
+if(!isNaN(x)&&!isNaN(y)&&a!==""&&b!==""&&a!==null&&b!==null)return x===y;
+return String(a)===String(b);},
+index:function(domain,key){var R=Slate.replay;
+for(var i=0;i<domain.length;i++)if(R.same(domain[i],key))return i;
+/* Nearest match, NUMERIC SCALAR domains only. A strided export ships every n-th slider position while
+   the rendered slider keeps its original step, so most of the track had no exact column and the
+   control was dead between the ones that shipped. Categorical and composite have no "nearest". */
+var n=Number(key);
+if(Array.isArray(key)||isNaN(n)||key===""||key===null)return -1;
+var best=-1,bd=Infinity;
+for(var j=0;j<domain.length;j++){var d=Number(domain[j]);if(isNaN(d))return -1;
+var gap=Math.abs(d-n);if(gap<bd){bd=gap;best=j;}}
+return best;},
 /* Slices stack along the LAST dimension and the buffer is column-major, so one control value is a
    contiguous run — a view, never a gather. A 2-D slice becomes rows: (r,c) sits at c*rows+r, so this
    transposes on the way out rather than shipping a second, row-major copy. */
@@ -749,19 +957,23 @@ wire:function(marks,apply){if(Slate.isLive())return;
 /* A mark names a SWEEP, not an asset: what shipped — and at what resolution — is the export's
    decision, published in this table. A mark with no entry never wires, so a figure whose sweep was
    skipped leaves its control visibly disabled instead of failing at the first drag. */
+var R=Slate.replay;
 var sweep=(window.__slateReplays||{})[m.id];if(!sweep)return;
-var input=Slate.replay.control(m.control);if(!input)return;
+var hosts=R.hosts(m.control);if(!hosts.length)return;
 var loaded=Slate.asset(sweep.asset);
-var readout=input.parentElement&&input.parentElement.querySelector(".exp-ctl-val");
-var run=function(){var i=Slate.replay.index(sweep.domain||[],input.value);if(i<0)return;
-if(readout)readout.textContent=input.value;
-loaded.then(function(packed){apply(Slate.replay.slice(packed,sweep,i),m);})
+var run=function(src){var key=R.read(src);var i=R.index(sweep.domain||[],key);if(i<0)return;
+/* A control surfaced beside several figures renders once per cell. Push the mover's state onto its
+   copies, or the reader drags one strip and the others sit there stating something false. */
+hosts.forEach(function(h){if(h!==src)R.mirror(h,key);
+var ro=h.parentElement&&h.parentElement.querySelector(".exp-ctl-val");
+if(ro)ro.textContent=R.label(key);});
+loaded.then(function(packed){apply(R.slice(packed,sweep,i),m);})
 .catch(function(e){console.error("replay failed",e);});};
-input.addEventListener("input",run);input.addEventListener("change",run);
+hosts.forEach(function(h){R.listen(h,function(){run(h);});});
 /* Every exported control renders DISABLED, because one that moves without changing anything reads as
    a broken page. Enabling here — and only here — means a control is live exactly when data for it
    actually rode along, with no coordination between the two sides. */
-loaded.then(function(){input.disabled=false;input.removeAttribute("title");}).catch(function(){});});}
+loaded.then(function(){hosts.forEach(function(h){R.enable(h,true);});}).catch(function(){});});}
 };
 Slate.assetUrl=function(path){var a=window.__slateAssets[path];if(!a)return path;
 if(a.data!==undefined)return "data:"+(a.mime||"application/octet-stream")+";base64,"+a.data;return a.url||path;};
@@ -972,6 +1184,23 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-ctl input:disabled,.exp-ctl select:disabled{opacity:.45;cursor:not-allowed;}
 .exp-ctl-val{color:var(--text);font-variant-numeric:tabular-nums;min-width:2.5em;}
 .exp-ctl-frozen{color:var(--text);font-variant-numeric:tabular-nums;}
+/* A range slider is two thumbs on one track. Stacking them keeps the pair reading as ONE control
+   (which is the whole reason it isn't two sliders) without needing an overlay that fights the
+   native inputs for hit-testing. */
+.exp-rs{display:inline-flex;flex-direction:column;gap:2px;}
+.exp-rs input[type=range]{width:210px;height:14px;}
+/* A table select's rows ARE its control, so the whole thing renders and a click picks one. Disabled
+   until data lands, same as every other control — `data-off` is the flag the wiring toggles. */
+.exp-ts{max-height:230px;overflow:auto;border:1px solid var(--border);border-radius:6px;}
+.exp-ts table{border-collapse:collapse;width:100%;font-size:.82rem;}
+.exp-ts th{position:sticky;top:0;background:var(--bg2);text-align:left;padding:3px 8px;
+  border-bottom:1px solid var(--border);white-space:nowrap;}
+.exp-ts td{padding:2px 8px;border-bottom:1px solid var(--border);white-space:nowrap;}
+.exp-ts tbody tr{cursor:pointer;}
+.exp-ts tbody tr:hover{background:var(--bg3);}
+.exp-ts tbody tr.sel{background:var(--accent);color:var(--bg);}
+.exp-ctl [data-off="1"],.exp-ctl.exp-ctl-wide [data-off="1"]{opacity:.45;cursor:not-allowed;}
+.exp-ctl-wide{align-items:flex-start;flex-direction:column;gap:4px;width:100%;}
 @media print{ .exp-ctls{opacity:.7;} }
 @media print{ body{-webkit-print-color-adjust:exact;print-color-adjust:exact;} .exp-code{break-inside:avoid;} }
 """
@@ -1930,74 +2159,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                   # Register a chart's geo maps before its first paint: an inlined map (`_slateMaps`)
                   # registers synchronously, otherwise fetch the (rewritten) url. A registered/absent map
                   # resolves immediately, so a non-geo chart pays nothing.
-                  "function _slateEnsureMaps(reqs){return Promise.all((reqs||[]).map(function(r){",
-                  "if(!r||!r.name||(echarts.getMap&&echarts.getMap(r.name)))return Promise.resolve();",
-                  "if(_slateMaps[r.name]){try{echarts.registerMap(r.name,_slateMaps[r.name]);}catch(e){}return Promise.resolve();}",
-                  "if(!r.url)return Promise.resolve();",
-                  "return fetch(r.url).then(function(x){return x.json();}).then(function(j){echarts.registerMap(r.name,j);}).catch(function(){});}));}",
-                  # `registerMap`/`__size`/`requireScripts`/`__valuefmt`, and a series' `__replay` mark, are
-                  # Slate extensions rather than ECharts options — strip them before setOption.
-                  # `__valuefmt` becomes a real `tooltip.valueFormatter` here — the static mirror of core.js's
-                  # `_valueFormatter`. The spec crosses as DATA (a JSON option has no reviver, so a function
-                  # cannot) and is turned back into one at render, using `fmtCell` — the same renderer the
-                  # tables use. Where that isn't on the page the value falls back to its plain string rather
-                  # than throwing inside ECharts' tooltip path, which would wedge the axisPointer.
-                  "function _slateValueFmt(f){return function(v){if(v==null||v==='')return '—';",
-                  "try{return fmtCell(v,f);}catch(e){return String(v);}};}",
-                  "function _slateSansMaps(o){if(!o)return o;",
-                  "var mk=Array.isArray(o.series)&&o.series.some(function(x){return x&&(x.__replay||x.__valuefmt);});",
-                  "if(!o.registerMap&&!o.__size&&!o.requireScripts&&!o.__valuefmt&&!mk)return o;",
-                  "var c=Object.assign({},o);delete c.registerMap;delete c.__size;delete c.requireScripts;",
-                  "if(mk)c.series=o.series.map(function(x){if(!x||(!x.__replay&&!x.__valuefmt))return x;",
-                  "var y=Object.assign({},x);delete y.__replay;",
-                  "if(y.__valuefmt){y.tooltip=Object.assign({},y.tooltip,{valueFormatter:_slateValueFmt(y.__valuefmt)});delete y.__valuefmt;}",
-                  "return y;});",
-                  "if(c.__valuefmt){c.tooltip=Object.assign({},c.tooltip,{valueFormatter:_slateValueFmt(c.__valuefmt)});delete c.__valuefmt;}",
-                  "return c;}",
-                  # ── `@replay` in an ECharts figure ───────────────────────────────────────────────────────
-                  # `Slate.replay.wire` (emitted with the asset shim above) owns everything except the call
-                  # that puts a slice on screen. What is left is the only ECharts-specific part: the DSL ZIPS,
-                  # so a line is `[[x,y],…]` and a heatmap `[[x,y,v],…]`, and the mark (echarts_dsl.jl
-                  # `_mark_replay!`) names which COMPONENT of each drawn entry the shipped array feeds.
-                  # Rewriting that one slot in the entries ALREADY DRAWN reuses their coordinates, so the zip
-                  # layout is expressed once, in Julia, and never restated here.
-                  "function _slateReplayEntries(cur,m,sl){if(m.comp===null||m.comp===undefined)return sl;",
-                  # A heatmap triple carries its own [xIndex,yIndex], so index the slice by those rather than
-                  # by position — correct however the entries happen to be ordered.
-                  "if(m.rank===2)return cur.map(function(p){var q=p.slice();q[m.comp]=sl[p[1]][p[0]];return q;});",
-                  "return cur.map(function(p,i){var q=p.slice();q[m.comp]=sl[i];return q;});}",
-                  "function _slateWireReplay(ch,opt){var marks=[];",
-                  "((opt&&opt.series)||[]).forEach(function(s,i){if(s&&s.__replay)",
-                  "marks.push(Object.assign({series:i,base:s.data||[]},s.__replay));});",
-                  "if(!marks.length)return;",
-                  "Slate.replay.wire(marks,function(sl,m){",
-                  # series merge by INDEX, so naming only the changed one leaves the reader's zoom and legend
-                  # state untouched through every step of a drag.
-                  "var arr=[];for(var k=0;k<m.series;k++)arr.push({});",
-                  "arr.push({data:_slateReplayEntries(m.base,m,sl)});var patch={series:arr};",
-                  # A heatmap's colour scale was fitted to whichever slice drew first; leaving it pinned would
-                  # clip every other one. Refit to what is actually on screen.
-                  "if(m.rank===2&&opt.visualMap){var lo=Infinity,hi=-Infinity;",
-                  "sl.forEach(function(r){r.forEach(function(v){if(v<lo)lo=v;if(v>hi)hi=v;});});",
-                  "if(isFinite(lo)&&isFinite(hi))patch.visualMap={min:lo,max:hi};}",
-                  "ch.setOption(patch);});}",
-                  # Load a chart's `requireScripts` (echarts-gl etc.) before render — ONE <script> per url
-                  # (shared promise), ordered so a lib sees its deps; a failed load resolves so it can't wedge.
-                  "var _slateScripts={};function _slateLoadScript(u){if(_slateScripts[u])return _slateScripts[u];",
-                  "_slateScripts[u]=new Promise(function(res){var s=document.createElement('script');s.src=u;s.async=false;",
-                  "s.onload=function(){res();};s.onerror=function(){res();};document.head.appendChild(s);});return _slateScripts[u];}",
-                  "function _slateEnsureScripts(reqs){return Promise.all((reqs?[].concat(reqs):[]).map(function(u){return u?_slateLoadScript(u):Promise.resolve();}));}",
-                  "function _slateRenderCharts(){if(!window.echarts)return;",
-                  "try{echarts.registerTheme('slate',_slateExportTheme());}catch(e){}",
-                  "_slateCharts.forEach(function(c){",
-                  "var el=document.getElementById(c[0]);if(!el)return;var opt=c[1];",
-                  "var reqs=opt&&opt.registerMap?[].concat(opt.registerMap):[];",
-                  # A GL lib (requireScripts) must load BEFORE echarts.init — an instance created before
-                  # echarts-gl registers its 3D views renders a GL series blank. So init INSIDE the .then.
-                  "Promise.all([_slateEnsureMaps(reqs),_slateEnsureScripts(opt&&opt.requireScripts)]).then(function(){",
-                  "var ch=echarts.init(el,'slate');ch.setOption(_slateSansMaps(opt));_slateWireReplay(ch,opt);",
-                  "window.addEventListener('resize',function(){ch.resize();});});});}",
-                  "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);")
+                  _EXPORT_CHART_RUNTIME_JS)
         end
         if runnable
             print(io, "(function(){var q=function(id){return document.getElementById(id);};",

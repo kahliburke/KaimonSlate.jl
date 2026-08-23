@@ -319,32 +319,154 @@ window.Slate.isLive = function () { return /^\/n\/[^\/]+/.test(location.pathname
 // arrives, so taking over would fight the kernel and serve stale columns. It engages only where there
 // is no kernel to ask, which is exactly what `isLive()` reports.
 window.Slate.replay = {
-  // The control that owns a bound variable. Slate marks a rendered control with `data-name`; the
-  // actual input may be that node or sit inside it.
+  // EVERY host for a bound variable. Slate marks a rendered control with `data-name`, and — when it
+  // knows the kind — `data-widget`; the actual input may be that node or sit inside it.
   //
   // Scanned rather than `querySelector`'d on the name, for two reasons. A bound name is arbitrary
   // Julia — `σ` is already in use — and building a selector out of it means escaping it correctly.
-  // More importantly ONE name can mark several nodes (a live cell shows three for a single slider,
-  // and only the middle one holds the input), so first-match would return a host with no control and
-  // the wiring would fail silently. Take the first host that actually yields an input.
-  control: function (name) {
-    const hosts = document.querySelectorAll('[data-name]');
-    for (let i = 0; i < hosts.length; i++) {
-      const h = hosts[i];
+  // More importantly ONE name marks several nodes: a live cell shows three for a single slider (only
+  // the middle one holds the input), and a control surfaced beside N figures renders N times. Taking
+  // only the first meant every copy but one was inert — the reader drags a strip and nothing happens.
+  hosts: function (name) {
+    const out = [];
+    const nodes = document.querySelectorAll('[data-name]');
+    for (let i = 0; i < nodes.length; i++) {
+      const h = nodes[i];
       if (h.getAttribute('data-name') !== String(name)) continue;
-      const inp = (h.matches && h.matches('input,select')) ? h : h.querySelector('input,select');
-      if (inp) return inp;
+      if (h.getAttribute('data-widget')) { out.push(h); continue; }   // knows its own kind
+      if (h.matches && h.matches('input,select')) { out.push(h); continue; }
+      const inp = h.querySelector && h.querySelector('input,select');
+      if (inp) out.push(inp);
     }
-    return null;
+    return out;
   },
-  // Which column a control's current value selects. Matched NUMERICALLY where both sides are numbers —
-  // a DOM control reports "8" as a string and Julia may have written 8.0, so comparing text would miss.
-  // Falls back to string equality for categorical domains.
-  index: function (domain, raw) {
-    const n = Number(raw);
-    if (!Number.isNaN(n)) { for (let i = 0; i < domain.length; i++) if (Number(domain[i]) === n) return i; }
-    for (let j = 0; j < domain.length; j++) if (String(domain[j]) === String(raw)) return j;
-    return -1;
+  kind: function (h) { return String(h.getAttribute('data-widget') || '').toLowerCase(); },
+  _inputs: function (h) {
+    return (h.matches && h.matches('input,select')) ? [h] : h.querySelectorAll('input,select');
+  },
+  truthy: function (v) { return v === true || v === 'true' || v === 1 || v === '1'; },
+  // A control's current position as a KEY comparable against `bind_domain`'s wire values. Not every
+  // control is one input holding one scalar: a range slider is two thumbs binding a pair, a table
+  // select is a div whose state is an attribute, a multi-select is a set. Each reads back exactly the
+  // shape Julia enumerated, so the comparison downstream stays a dumb equality.
+  read: function (h) {
+    const R = window.Slate.replay, k = R.kind(h);
+    if (k === 'rangeslider') {
+      const a = h.querySelector('.exp-rs-lo'), b = h.querySelector('.exp-rs-hi');
+      if (!a || !b) return null;
+      const lo = Number(a.value), hi = Number(b.value);
+      return lo <= hi ? [lo, hi] : [hi, lo];    // thumbs can be dragged past each other
+    }
+    if (k === 'tableselect') return Number(h.getAttribute('data-selrow') || 0);
+    if (k === 'multiselect' || k === 'multicheck') {
+      const sel = (h.matches && h.matches('select')) ? h : h.querySelector('select');
+      if (sel) return Array.prototype.map.call(sel.selectedOptions, function (o) { return o.value; });
+      return Array.prototype.map.call(h.querySelectorAll('input[type="checkbox"]:checked'),
+                                      function (c) { return c.value; });
+    }
+    if (k === 'checkbox' || k === 'toggle') {
+      const c = (h.matches && h.matches('input')) ? h : h.querySelector('input');
+      return c ? !!c.checked : null;
+    }
+    const inp = R._inputs(h)[0];
+    return inp ? inp.value : null;
+  },
+  // Put a key back on a host — for the copies of a control the reader did NOT touch.
+  mirror: function (h, key) {
+    const R = window.Slate.replay, k = R.kind(h), want = Array.isArray(key) ? key.map(String) : null;
+    if (k === 'rangeslider') {
+      const a = h.querySelector('.exp-rs-lo'), b = h.querySelector('.exp-rs-hi');
+      if (a && b && Array.isArray(key)) { a.value = key[0]; b.value = key[1]; }
+      return;
+    }
+    if (k === 'tableselect') {
+      h.setAttribute('data-selrow', String(key));
+      Array.prototype.forEach.call(h.querySelectorAll('tbody tr'), function (r, i) {
+        r.classList.toggle('sel', i + 1 === Number(key));
+      });
+      return;
+    }
+    if (k === 'checkbox' || k === 'toggle') {
+      const c = (h.matches && h.matches('input')) ? h : h.querySelector('input');
+      if (c) c.checked = R.truthy(key);
+      return;
+    }
+    if ((k === 'multiselect' || k === 'multicheck') && want) {
+      const sel = (h.matches && h.matches('select')) ? h : h.querySelector('select');
+      const set = function (el) { el.selected = want.indexOf(el.value) >= 0; };
+      if (sel) { Array.prototype.forEach.call(sel.options, set); return; }
+      Array.prototype.forEach.call(h.querySelectorAll('input[type="checkbox"]'), function (c) {
+        c.checked = want.indexOf(c.value) >= 0;
+      });
+      return;
+    }
+    const inp = R._inputs(h)[0];
+    if (inp) inp.value = key;
+  },
+  // Subscribe to a host's changes. Inputs fire `input`/`change`; a table select has no input at all,
+  // so its rows ARE the control and clicking one is the event.
+  listen: function (h, run) {
+    const R = window.Slate.replay;
+    if (R.kind(h) === 'tableselect') {
+      const rows = h.querySelectorAll('tbody tr');
+      Array.prototype.forEach.call(rows, function (tr, i) {
+        tr.addEventListener('click', function () {
+          if (h.getAttribute('data-off') === '1') return;      // no data shipped → not a control
+          R.mirror(h, i + 1);
+          run();
+        });
+      });
+      return;
+    }
+    Array.prototype.forEach.call(R._inputs(h), function (i) {
+      i.addEventListener('input', run);
+      i.addEventListener('change', run);
+    });
+  },
+  enable: function (h, on) {
+    const R = window.Slate.replay;
+    h.setAttribute('data-off', on ? '0' : '1');
+    if (on) h.removeAttribute('title');
+    Array.prototype.forEach.call(R._inputs(h), function (i) {
+      i.disabled = !on;
+      if (on) i.removeAttribute('title');
+    });
+  },
+  label: function (key) { return Array.isArray(key) ? key.join(' – ') : String(key); },
+  // Equality across the shapes a key can take. Matched NUMERICALLY where both sides are numbers — a
+  // DOM control reports "8" as a string and Julia may have written 8.0, so comparing text would miss —
+  // and elementwise for the composite keys (a pair, a subset), whose order Julia and the DOM agree on.
+  same: function (a, b) {
+    const R = window.Slate.replay;
+    if (Array.isArray(a) || Array.isArray(b)) {
+      if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) if (!R.same(a[i], b[i])) return false;
+      return true;
+    }
+    if (typeof a === 'boolean' || typeof b === 'boolean') return R.truthy(a) === R.truthy(b);
+    const x = Number(a), y = Number(b);
+    if (!Number.isNaN(x) && !Number.isNaN(y) && a !== '' && b !== '' && a !== null && b !== null)
+      return x === y;
+    return String(a) === String(b);
+  },
+  // Which column a control's current key selects.
+  index: function (domain, key) {
+    const R = window.Slate.replay;
+    for (let i = 0; i < domain.length; i++) if (R.same(domain[i], key)) return i;
+    // Nearest match, but only on a NUMERIC SCALAR domain. A strided export ships every n-th slider
+    // position while the rendered slider keeps its original step, so most of the track has no exact
+    // column and the control was simply dead between the ones that shipped. Snapping keeps it
+    // continuous. Categorical and composite domains have no "nearest" worth guessing at.
+    const n = Number(key);
+    if (Array.isArray(key) || Number.isNaN(n) || key === '' || key === null) return -1;
+    let best = -1, bd = Infinity;
+    for (let i = 0; i < domain.length; i++) {
+      const d = Number(domain[i]);
+      if (Number.isNaN(d)) return -1;
+      const gap = Math.abs(d - n);
+      if (gap < bd) { bd = gap; best = i; }
+    }
+    return best;
   },
   // Slices are stacked along the LAST dimension and the buffer is column-major, so the slice for one
   // control value is a contiguous run — a view, never a gather, however large the data.
@@ -371,31 +493,37 @@ window.Slate.replay = {
   // `marks` each carry at least `{id, control}`; `apply(slice, mark)` is the renderer's one step.
   wire: function (marks, apply) {
     if (window.Slate.isLive()) return;
+    const R = window.Slate.replay;
     (marks || []).forEach(function (m) {
       // A mark names a SWEEP, not an asset: what shipped — and at what resolution — is the export's
       // decision, published in this table. A mark with no entry simply never wires, so a figure whose
       // sweep was skipped leaves its control visibly disabled instead of failing at the first drag.
       const sweep = (window.__slateReplays || {})[m.id];
       if (!sweep) return;
-      const input = window.Slate.replay.control(m.control);
-      if (!input) return;
+      const hosts = R.hosts(m.control);
+      if (!hosts.length) return;
       const loaded = window.Slate.asset(sweep.asset);
-      const readout = input.parentElement && input.parentElement.querySelector('.exp-ctl-val');
-      const run = function () {
-        const i = window.Slate.replay.index(sweep.domain || [], input.value);
+      const run = function (src) {
+        const key = R.read(src);
+        const i = R.index(sweep.domain || [], key);
         if (i < 0) return;
-        if (readout) readout.textContent = input.value;
-        loaded.then(packed => apply(window.Slate.replay.slice(packed, sweep, i), m))
-              .catch(e => console.error('replay failed', e));
+        // A control surfaced beside several figures renders once per cell. Push the mover's state onto
+        // its copies, or the reader drags one strip and the others sit there stating something false.
+        hosts.forEach(function (h) {
+          if (h !== src) R.mirror(h, key);
+          const ro = h.parentElement && h.parentElement.querySelector('.exp-ctl-val');
+          if (ro) ro.textContent = R.label(key);
+        });
+        loaded.then(function (packed) { apply(R.slice(packed, sweep, i), m); })
+              .catch(function (e) { console.error('replay failed', e); });
       };
-      // `input` fires continuously while a slider is dragged; the data is already in memory, so
-      // redrawing per event is cheap and gives the same feel as the live kernel path at its best.
-      input.addEventListener('input', run);
-      input.addEventListener('change', run);
+      // Inputs fire continuously while a thumb is dragged; the data is already in memory, so redrawing
+      // per event is cheap and gives the same feel as the live kernel path at its best.
+      hosts.forEach(function (h) { R.listen(h, function () { run(h); }); });
       // The export renders every control DISABLED, because one that moves without changing anything
       // reads as a broken page. Enabling here — and only here — means a control is live exactly when
       // data for it actually rode along, with no coordination between the two sides.
-      loaded.then(function () { input.disabled = false; input.removeAttribute('title'); })
+      loaded.then(function () { hosts.forEach(function (h) { R.enable(h, true); }); })
             .catch(function () { /* data missing → the control stays inert, which is the truth */ });
     });
   }
@@ -712,6 +840,12 @@ function _geoSafeSetOption(inst, s) {
 //
 // A rank-2 slice arrives as ROWS, and a heatmap triple carries its own `[xIndex, yIndex]`, so it is
 // indexed by those rather than by position — correct however the entries end up ordered.
+// `visualMap` may be one component or a list of them; either is piecewise if any entry declares
+// `pieces` (or says so by `type`).
+function _vmPiecewise(vm) {
+  return [].concat(vm).some(v => v && (v.pieces || v.type === 'piecewise'));
+}
+
 function _replayEntries(cur, m, slice) {
   if (m.comp === null || m.comp === undefined) return slice;
   if (m.rank === 2) return cur.map(p => { const q = p.slice(); q[m.comp] = slice[p[1]][p[0]]; return q; });
@@ -803,11 +937,18 @@ function _wireEchartReplay(inst, spec) {
     for (let k = 0; k < m.series; k++) arr.push({});
     arr.push({ data: _replayEntries(m.base, m, slice) });
     const patch = { series: arr };
-    // A heatmap's colour scale was fitted to whichever slice drew first; leaving it pinned would clip
-    // every other one. Refit it to what is actually on screen.
-    if (m.rank === 2 && spec.visualMap) {
+    // A colour scale was fitted to whichever slice drew first; leaving it pinned clips every other
+    // one. This applies to ANY rank — a calendar heatmap is rank 1 and was silently excluded, so a
+    // replayed calendar kept the first region's range and saturated on a busier one.
+    //
+    // A PIECEWISE visualMap is left alone: its `pieces` are an authored statement about what the
+    // colours mean, and refitting bounds it doesn't use would either do nothing or quietly change
+    // that meaning between control positions.
+    if (spec.visualMap && !_vmPiecewise(spec.visualMap)) {
       let lo = Infinity, hi = -Infinity;
-      slice.forEach(row => row.forEach(v => { if (v < lo) lo = v; if (v > hi) hi = v; }));
+      const scan = v => Array.isArray(v) ? v.forEach(scan)
+                      : (typeof v === 'number' && isFinite(v) && ((v < lo && (lo = v)), (v > hi && (hi = v))));
+      scan(slice);
       if (isFinite(lo) && isFinite(hi)) patch.visualMap = { min: lo, max: hi };
     }
     inst.setOption(patch);

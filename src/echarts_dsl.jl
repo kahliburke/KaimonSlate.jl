@@ -265,6 +265,10 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
         ds = [string(d) for d in dates]                    # Date shows as ISO "yyyy-mm-dd" — no Dates dep needed
         opt["type"] = "heatmap"; opt["coordinateSystem"] = "calendar"
         opt["data"] = Any[Any[ds[i], vals[i]] for i in eachindex(ds, vals)]
+        # Slot 1 of each `[date, value]` pair — the same routing a line or bar gets for its `y`. Without
+        # this a `@replay`ed calendar swept and shipped its data like any other, and then had nothing to
+        # apply it to: the control moved and the grid sat still, with no error to notice.
+        _mark_replay!(opt, vals, 1)
         lo, hi = extrema(vals)
         y1, y2 = minimum(ds)[1:4], maximum(ds)[1:4]
         layout["calendar"] = Dict{String,Any}("range" => (y1 == y2 ? y1 : [y1, y2]), "cellSize" => Any["auto", 16])
@@ -361,13 +365,19 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
 end
 
 # Final Slate-side normalisation of a finished option, applied to EVERY echart form (incl. raw):
-# 1. Geo-bound and heatmap series default to `progressive = 0`. ECharts progressively renders any
+# 1. A bare-string `title` becomes `{text = …}`. ECharts rejects a String here, and it rejects it by
+#    THROWING inside setOption — so the chart keeps its instance, renders nothing, and reports no
+#    error anywhere. `_echart_build` already did this for the two series-taking forms; doing it here
+#    covers `echart(; title = "…", series = […])`, which otherwise silently drew a blank div.
+# 2. Geo-bound and heatmap series default to `progressive = 0`. ECharts progressively renders any
 #    series past ~3k points onto its own layer, and that layer keeps a STALE blit when the
 #    coordinate system relays out — most visibly a `geo` roam, where the dots stop following the
 #    map ("zoom disconnected from the scatter"). Pass an explicit `progressive = N` to opt back in.
-# 2. Top-level `height`/`width` become `__size` — a Slate front-end directive (the chart div is
+# 3. Top-level `height`/`width` become `__size` — a Slate front-end directive (the chart div is
 #    sized before init/resize), NOT an ECharts option key, so it's split out and stripped client-side.
 function _slate_normalize!(opt::Dict{String,Any})
+    t = get(opt, "title", nothing)
+    (t isa AbstractString || t isa Symbol) && (opt["title"] = Dict{String,Any}("text" => String(t)))
     s = get(opt, "series", nothing)
     if s isa AbstractVector
         for e in s

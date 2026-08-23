@@ -383,4 +383,167 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         @test fires[] == 2                                       # the handler fired on each click
     end
 
+    # ── `@replay` domains ────────────────────────────────────────────────────
+    # `bind_domain` is the single gate on whether a control survives a static export: `@replay` asks
+    # for every value the control can take and refuses anything that answers `nothing`. These are the
+    # WIRE values (what the registry stores and the browser sends back), not the wrapped form a cell
+    # sees — that distinction is what keeps a TableSelect's domain a run of integers instead of a
+    # shipped copy of its own table.
+    @testset "bind_domain: every control with an enumerable domain" begin
+        @test RE.bind_domain(RE.Slider(1:2:15)) == [1, 3, 5, 7, 9, 11, 13, 15]   # endpoint kept
+        @test RE.bind_domain(RE.Checkbox()) == [false, true]
+        @test RE.bind_domain(RE.Select(["a", "b"])) == ["a", "b"]
+
+        # A range slider's two thumbs are ONE value, so the domain is ordered pairs — lo ≤ hi, since a
+        # crossed pair is not a state the control can be put into. n stops → n(n+1)/2, not n².
+        rs = RE.bind_domain(RE.RangeSlider(0:1:3))
+        @test length(rs) == 10
+        @test rs[1] == [0, 0] && rs[end] == [3, 3]
+        @test all(p -> p[1] <= p[2], rs)
+        @test allunique(rs)
+
+        # A table select enumerates ROW INDICES (0 = nothing selected), which is why it is cheaper to
+        # replay than a categorical control, not more expensive.
+        ts = RE.TableSelect([(a = 1, b = "x"), (a = 2, b = "y"), (a = 3, b = "z")])
+        @test RE.bind_domain(ts) == [0, 1, 2, 3]
+
+        # A multi-select is the POWER SET, enumerated by increasing bitmask so the empty set is first.
+        ms = RE.bind_domain(RE.MultiSelect(["a", "b"]))
+        @test ms == [[], ["a"], ["b"], ["a", "b"]]
+
+        # A number field is finite exactly when the author bounded it; unbounded is free text with arrows.
+        @test RE.bind_domain(RE.NumberField(0; min = 0, max = 4)) == [0, 1, 2, 3, 4]
+        @test RE.bind_domain(RE.NumberField(3)) === nothing
+
+        # Genuinely unbounded, and driven-by-something-else, stay refused.
+        for w in (RE.TextField("hi"), RE.DateField("2026-01-01"), RE.ColorPicker("#fff"),
+                  RE.Button("go"), RE.FileUpload())
+            @test RE.bind_domain(w) === nothing
+        end
+    end
+
+    # The cap exists because these two grow faster than the control looks like it does: a range slider
+    # is quadratic in its steps and a multi-select exponential in its options, so an innocuous-looking
+    # control can ask for a domain nothing should enumerate. Refusing here means the author gets
+    # `@replay`'s error while writing the cell rather than an export that grinds.
+    @testset "bind_domain: combinatorial domains are capped, not enumerated forever" begin
+        @test RE.bind_domain(RE.RangeSlider(0:1:150)) !== nothing     # 11 476 pairs — under the cap
+        @test RE.bind_domain(RE.RangeSlider(0:1:400)) === nothing     # 80 601 — refused
+        @test RE.bind_domain(RE.MultiSelect(string.(1:10))) !== nothing   # 1 024 subsets
+        @test RE.bind_domain(RE.MultiSelect(string.(1:20))) === nothing   # 1 048 576 — refused
+    end
+
+    # A sweep evaluates the author's expression, which is written against the value a CELL sees. For
+    # most controls the wire value and the cell value are the same thing; for these they are not, and
+    # sweeping the wire value would hand `sel.product` an integer.
+    @testset "bind_domain values wrap into what a cell actually sees" begin
+        ts = RE.TableSelect([(a = 1, b = "x"), (a = 2, b = "y")])
+        @test RE.wrap_value(ts, 0) === nothing                  # 0 is "nothing selected"
+        @test RE.wrap_value(ts, 2).b == "y"                     # a row NamedTuple, field per column
+
+        rs = RE.RangeSlider(0:1:3)
+        w = RE.wrap_value(rs, [1, 3])
+        @test w.lo == 1 && w.hi == 3                            # the (lo, hi) NamedTuple, not a vector
+    end
+
+    # `Slate.replay` exists twice — core.js for a page that can load it, and a hand-mirrored copy
+    # inside a Julia string in server_export.jl for a static page that cannot. Nothing enforced that
+    # they agree, and a fix applied to one and not the other shows up as an exported control quietly
+    # selecting the wrong column. This asserts both copies against the same cases and each other.
+    @testset "replay matching parity: core.js vs the export mirror (node, if available)" begin
+        node = Sys.which("node")
+        if node === nothing
+            @info "node not found — skipping Slate.replay parity check"
+            @test true
+        else
+            io = IOBuffer()
+            script = joinpath(@__DIR__, "js", "replay_parity.mjs")
+            ok = success(pipeline(`$node $script`; stdout = io, stderr = io))
+            ok || print(String(take!(io)))     # surface the diverging cases on failure
+            @test ok
+        end
+    end
+
+    # A sweep is keyed by cell + control, which is what makes a re-run replace its own entry instead of
+    # accumulating. But a cell may hold SEVERAL marks on ONE control — the ordinary way to replay a
+    # stacked chart or a dual-axis figure, where every series is a different expression of the same
+    # knob. Those used to collide on the shared key: the second registration overwrote the first, so
+    # both series resolved to the same sweep and an exported page drew one expression twice while
+    # reporting no error at all.
+    @testset "several @replay marks on one control in one cell get distinct sweeps" begin
+        r = parse_report("""
+        #%% code id=ctl
+        @bind k Slider(1:4)
+        #%% code id=two
+        a = @replay(k, [k, k])
+        b = @replay(k, [10k, 10k])
+        (a, b)
+        """)
+        build_dependencies!(r)
+        eval_stale!(r)
+
+        sweeps = Base.invokelatest(getproperty, r.mod, :__slate_replay_sweeps)
+        ids = sort(collect(keys(sweeps)))
+        @test ids == ["two:k", "two:k#1"]          # first keeps the bare key, later ones are suffixed
+
+        # …and they are the DIFFERENT expressions, in source order — not one registration twice.
+        # `invokelatest`, because the closures were defined by the eval above and are newer than this
+        # test's world age — the same reason the reads around here go through it.
+        @test Base.invokelatest(sweeps["two:k"].f, 3) == [3, 3]
+        @test Base.invokelatest(sweeps["two:k#1"].f, 3) == [30, 30]
+
+        # Re-running replaces those two rather than adding two more, which is the property the shared
+        # key was there to give and which the suffix must not cost.
+        findcell(r, "two").state = STALE; eval_stale!(r)
+        @test sort(collect(keys(Base.invokelatest(getproperty, r.mod, :__slate_replay_sweeps)))) == ids
+    end
+
+    # `@replay` sweeps the value a CELL sees, not the wire value the registry holds. For a slider or a
+    # select those are the same thing; for a TableSelect the wire value is a row index and the cell
+    # value is the row, so sweeping unwrapped would hand `sel.b` an integer and fail on field access.
+    @testset "@replay sweeps wrapped values, so a row-valued control works" begin
+        r = parse_report("""
+        #%% code id=ctl
+        @bind sel TableSelect([(a = 1, b = 10.0), (a = 2, b = 20.0)]; default = 1)
+        #%% code id=use
+        v = @replay(sel, [sel === nothing ? 0.0 : sel.b])
+        """)
+        build_dependencies!(r)
+        eval_stale!(r)
+
+        sweeps = Base.invokelatest(getproperty, r.mod, :__slate_replay_sweeps)
+        s = sweeps["use:sel"]
+        @test s.domain == [0, 1, 2]                    # WIRE values: row indices, 0 = nothing selected
+        # …wrapped into the row (or `nothing`) on the way in, which is what the author's expression
+        # is written against. `invokelatest` for the same world-age reason as above.
+        @test Base.invokelatest(s.f, Base.invokelatest(s.wrap, 0)) == [0.0]
+        @test Base.invokelatest(s.f, Base.invokelatest(s.wrap, 2)) == [20.0]
+    end
+
+    # `@replay` now sweeps the WRAPPED value, which for a labeled Select is a `Choice` rather than the
+    # bare option. That is a behaviour change, and the reason it is the right one is here: before it,
+    # the value a cell saw LIVE and the value the sweep computed with were different types, so an
+    # expression could work in the notebook and quietly compute something else in the export.
+    @testset "a labeled Select sweeps the same value the cell sees live" begin
+        r = parse_report("""
+        #%% code id=ctl
+        @bind pick Select(["a" => "Apple", "b" => "Banana"])
+        #%% code id=use
+        v = @replay(pick, [pick == "b" ? 1.0 : 0.0])
+        """)
+        build_dependencies!(r)
+        eval_stale!(r)
+
+        live = Base.invokelatest(getproperty, r.mod, :pick)
+        s = Base.invokelatest(getproperty, r.mod, :__slate_replay_sweeps)["use:pick"]
+        swept = Base.invokelatest(s.wrap, first(s.domain))
+        @test typeof(swept) === typeof(live)          # the same TYPE, not just an equal value
+        @test swept == live == "a"                    # …and transparent against the bare option
+        @test s.domain == ["a", "b"]                  # the domain itself stays bare — it has to ship
+
+        # The expression therefore computes the same thing at both ends.
+        @test Base.invokelatest(s.f, Base.invokelatest(s.wrap, "b")) == [1.0]
+        @test Base.invokelatest(s.f, Base.invokelatest(s.wrap, "a")) == [0.0]
+    end
+
 end

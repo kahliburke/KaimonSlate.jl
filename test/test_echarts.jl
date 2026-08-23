@@ -109,6 +109,50 @@ const RE = ReportEngine
         @test o["series"][1]["type"] == "bar"
     end
 
+    # A String `title` reaching ECharts throws inside setOption, which leaves the chart with a live
+    # instance, nothing drawn, and no error raised anywhere — so the raw form used to fail silently
+    # on the most obvious thing to write. Normalising in `_slate_normalize!` covers all three forms.
+    @testset "title: a bare String normalises to {text} in EVERY form" begin
+        for o in (RE.echart(; title = "T", series = [(type = :bar, data = [1])]).option,
+                  RE.echart(; title = :T, series = [(type = :bar, data = [1])]).option,
+                  RE.echart(:bar, ["a"], [1]; title = "T").option,
+                  RE.echart(RE.series(:bar, ["a"], [1]); title = "T").option)
+            @test o["title"] isa AbstractDict
+            @test o["title"]["text"] == "T"
+        end
+        # An explicit component is the caller's — untouched, including its extra keys.
+        o = RE.echart(; title = (text = "T", left = "center"),
+                      series = [(type = :bar, data = [1])]).option
+        @test o["title"]["text"] == "T" && o["title"]["left"] == "center"
+    end
+
+    # A `@replay`ed value has to be routed as well as shipped: the DSL zips, so a line is `[[x,y],…]`
+    # and a calendar `[[date,v],…]`, and the mark records which COMPONENT of each drawn entry the
+    # shipped array feeds. A kind that builds zipped data and forgets to mark it looks completely
+    # normal — it sweeps, it packs, it ships — and then the control moves and the figure sits still,
+    # with nothing logged. That is how the calendar shipped 21 KB of data it could not apply.
+    @testset "every kind that can carry a @replay routes its mark" begin
+        mk(v) = RE.ReplayArray(v, "cell:x", "x", 1, Any[1, 2])
+        # A CATEGORY x axis doesn't zip — the categories go on the axis and `data` IS the series, so
+        # the shipped array replaces it wholesale and there is no component to name.
+        for kind in (:line, :bar, :area)
+            m = RE.echart(kind, ["a", "b"], mk([1.0, 2.0])).option["series"][1]["__replay"]
+            @test m["comp"] === nothing && m["rank"] == 1 && m["control"] == "x"
+        end
+        # A numeric x zips to `[x, y]`, so the mark names slot 1 — or slot 0 when it is X that moves.
+        @test RE.echart(:line, [1.0, 2.0], mk([3.0, 4.0])).option["series"][1]["__replay"]["comp"] == 1
+        @test RE.echart(:line, mk([1.0, 2.0]), [3.0, 4.0]).option["series"][1]["__replay"]["comp"] == 0
+        # Scatter always zips, whatever the x.
+        @test RE.echart(:scatter, ["a", "b"], mk([1.0, 2.0])).option["series"][1]["__replay"]["comp"] == 1
+        # Calendar: `[date, value]`, so slot 1 — the case that was missing, and the one that fails
+        # silently, because a calendar with an unrouted mark still sweeps, packs and ships.
+        @test RE.echart(:calendar, ["2024-01-01", "2024-01-02"],
+                        mk([1.0, 2.0])).option["series"][1]["__replay"]["comp"] == 1
+        # Heatmap: `[xIndex, yIndex, value]`, so slot 2, and rank 2 so the page refits the colour scale.
+        m = RE.echart(:heatmap, mk([1.0 2.0; 3.0 4.0])).option["series"][1]["__replay"]
+        @test m["comp"] == 2 && m["rank"] == 2
+    end
+
     # `zoom` — ECharts declares no zoom by default, and the bare `inside` component is invisible
     # and irreversible. `zoom=true` is the one-word form that also supplies the affordances.
     @testset "zoom: expands to dataZoom (+ toolbox), never clobbering an explicit one" begin

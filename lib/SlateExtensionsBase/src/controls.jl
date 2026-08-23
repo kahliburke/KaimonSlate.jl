@@ -302,10 +302,42 @@ widget_kinds() = sort!(collect(keys(_KINDS)))
 # package can consume them without depending on KaimonSlate, exactly like `Widget` itself.
 
 """
+Ceiling on a COMBINATORIAL domain — one whose size grows faster than the control's own step count.
+A slider's domain is as big as the reader made it and that is the reader's business; a range slider's
+is quadratic in its steps and a multi-select's is exponential in its options, so the same innocuous
+control can ask for a domain nothing should enumerate. Past this, `bind_domain` reports `nothing` and
+the author gets `@replay`'s "not finite" error while writing the cell, rather than an export that
+grinds. The cap is generous: 20 000 positions is a 200-stop range slider, or 14 checkboxes.
+"""
+const REPLAY_DOMAIN_CAP = 20_000
+
+# The evenly-spaced grid a min/max/step control offers, or `nothing` if it isn't bounded. Shared by the
+# slider, the range slider (which pairs it with itself) and a bounded number field.
+function _step_grid(p)
+    num(key) = (v = get(p, key, nothing); v isa Real ? Float64(v) : nothing)
+    lo, hi = num("min"), num("max")
+    (lo === nothing || hi === nothing || hi < lo) && return nothing
+    st = num("step"); st = (st === nothing || st == 0) ? 1.0 : abs(st)
+    # The epsilon keeps the endpoint: a span that is an exact multiple of the step (1:2:15) otherwise
+    # loses its last value to floating-point drift on the division.
+    vals = Any[lo + i * st for i in 0:floor(Int, (hi - lo) / st + 1e-9)]
+    # An integer control must present integers — the value a reader's control reports is `8`, and `8.0`
+    # would not match it.
+    return all(isinteger, vals) ? Any[Int(v) for v in vals] : vals
+end
+
+"""
     bind_domain(w::Widget) -> Vector | Nothing
 
 Every value `w` can take, in the order the control presents them, or `nothing` when the domain is not
-finite (free text, an open number field, a date — nothing to enumerate).
+finite (free text, an unbounded number field, a date — nothing to enumerate).
+
+The values are WIRE values — what the registry stores and the browser sends back — not the wrapped
+form a cell sees. A `TableSelect` enumerates row indices, not row NamedTuples; a `RangeSlider`
+enumerates `[lo, hi]` pairs, not `(lo = …, hi = …)`. That keeps the domain JSON-light enough to ship
+with the page (which is the whole point of having one) and lets the client match a control's state to
+a column by comparing exactly what the control reports. `wrap_value` turns a wire value into the one
+the author's expression is written against, and `@replay` applies it on the way in.
 
 This is the single source of truth for a control's domain: an author never restates it, so it cannot
 drift from the control it belongs to.
@@ -320,19 +352,40 @@ function bind_domain(w::Widget)
         opts isa AbstractVector || return nothing
         return Any[o isa AbstractDict ? get(o, "value", o) : o for o in opts]
     elseif k == "slider"
-        num(key) = (v = get(p, key, nothing); v isa Real ? Float64(v) : nothing)
-        lo, hi = num("min"), num("max")
-        (lo === nothing || hi === nothing || hi < lo) && return nothing
-        st = num("step"); st = (st === nothing || st == 0) ? 1.0 : abs(st)
-        # The epsilon keeps the endpoint: a span that is an exact multiple of the step (1:2:15) otherwise
-        # loses its last value to floating-point drift on the division.
-        vals = Any[lo + i * st for i in 0:floor(Int, (hi - lo) / st + 1e-9)]
-        # An integer slider must present integers — the value a reader's control reports is `8`, and `8.0`
-        # would not match it.
-        return all(isinteger, vals) ? Any[Int(v) for v in vals] : vals
+        return _step_grid(p)
+    elseif k == "number"
+        # Finite exactly when the author bounded it. An unbounded spinner is free text with arrows.
+        return _step_grid(p)
+    elseif k == "rangeslider"
+        # Ordered pairs over the shared grid: `lo ≤ hi`, so n stops give n(n+1)/2 positions, not n².
+        # A crossed pair is not a state the control can be put into, so shipping one would be dead
+        # weight. Lo-major ordering makes the run for a fixed `lo` contiguous, which is the order a
+        # reader sweeps when they drag the right-hand thumb.
+        g = _step_grid(p)
+        g === nothing && return nothing
+        n = length(g)
+        (n * (n + 1)) ÷ 2 > REPLAY_DOMAIN_CAP && return nothing
+        return Any[Any[g[i], g[j]] for i in 1:n for j in i:n]
+    elseif k == "tableselect"
+        # The rows ARE the domain, and they already ride with the page. The wire value is the 1-based
+        # row index (0 = nothing selected), so the domain is a run of small integers — cheaper than any
+        # categorical control, despite "the domain is the data" sounding like the opposite.
+        rows = get(p, "rows", nothing)
+        rows isa AbstractVector || return nothing
+        return Any[i for i in 0:length(rows)]
+    elseif k in ("multiselect", "multicheck")
+        # The POWER SET of the options. Exponential, hence the cap — but a handful of checkboxes is a
+        # perfectly ordinary control and 2^n is small until it suddenly isn't. Enumerated by increasing
+        # bitmask so the empty selection comes first and the order is stable across runs.
+        opts = get(p, "options", nothing)
+        opts isa AbstractVector || return nothing
+        vals = Any[o isa AbstractDict ? get(o, "value", o) : o for o in opts]
+        n = length(vals)
+        (n > 62 || (1 << n) > REPLAY_DOMAIN_CAP) && return nothing
+        return Any[Any[vals[i+1] for i in 0:(n-1) if (mask >> i) & 1 == 1] for mask in 0:((1 << n) - 1)]
     end
-    # number / text / textarea / date / time / color / file — unbounded. Multi-selects are finite in
-    # principle but their domain is the POWER SET of the options, which is not something to enumerate.
+    # text / textarea / date / time / color / file / button / playhead — unbounded, or driven by
+    # something other than the reader.
     return nothing
 end
 

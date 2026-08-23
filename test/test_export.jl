@@ -5,6 +5,7 @@ using KaimonSlate
 import Base64
 using CodecZlib: GzipDecompressor            # verify the packed-asset round-trip
 using Random: Xoshiro                        # deterministic incompressible bytes
+import JSON                                  # hand the @replay control fixture to node
 const ReportEngine = KaimonSlate.ReportEngine
 const NS = KaimonSlate.NotebookServer
 
@@ -640,4 +641,67 @@ end
     @test NS._split_region_csv("east, west , , east ,north") == ["east", "west", "north"]
     @test NS._split_region_csv("") == String[]
     @test NS._split_region_csv("  ,  ") == String[]
+end
+
+# ── The `@replay` export contract ────────────────────────────────────────────────────────────────
+# Julia decides two things about a control independently: what markup it renders as in a static
+# export (`_export_control_html`) and what values it can take (`bind_domain`). The browser then has
+# to look at that markup, read the control's position back, and find it in that domain.
+#
+# Nothing checked that those three agreed, and disagreement is SILENT — the page renders, the control
+# moves, the figure doesn't, and nothing is logged. Every `@replay` bug found so far was of exactly
+# that shape, and every one was found by hand.
+#
+# So the fixture is built HERE, from the real functions, and handed to node to drive: every control
+# kind, moved to every position in its own domain, read back, against both copies of `Slate.replay`.
+@testset "@replay export contract: markup ↔ domain ↔ client" begin
+    RE = ReportEngine
+    # One entry per replayable control kind. `NumberField` must be bounded to have a domain at all;
+    # `MultiCheckBox` renders as a multi-select listbox in an export (a checkbox column is a live-UI
+    # affordance, and the listbox binds the same set), which is precisely the sort of live/export
+    # divergence this test exists to hold honest.
+    widgets = Any[
+        ("region",  RE.Select(["All", "APAC", "EMEA"])),
+        ("mode",    RE.Radio(["fast", "slow"])),
+        ("on",      RE.Checkbox(true)),
+        ("live",    RE.Toggle(false)),
+        ("w",       RE.Slider(1:2:9)),
+        ("k",       RE.NumberField(2; min = 0, max = 5)),
+        ("span",    RE.RangeSlider(0:1:3)),
+        ("picks",   RE.MultiSelect(["a", "b", "c"])),
+        ("flags",   RE.MultiCheckBox(["x", "y"])),
+        ("sel",     RE.TableSelect([(a = 1, b = "p"), (a = 2, b = "q"), (a = 3, b = "r")])),
+    ]
+
+    fixture = Any[]
+    for (name, w) in widgets
+        dom = RE.bind_domain(w)
+        @test dom !== nothing                       # every kind listed here must be replayable
+        dom === nothing && continue
+        html = NS._export_control_html(RE.BindSpec(Symbol(name), w.kind, w.params, w.default))
+        @test !isempty(html)                        # …and must render as something a reader can drive
+        @test occursin("data-name=\"$name\"", html) # …carrying the identity the client looks it up by
+        e = Dict{String,Any}("name" => name, "kind" => w.kind, "html" => html, "domain" => dom)
+        # Only a control that sweeps ONE NUMBER may be strided (`_replay_strideable`); for those,
+        # hand the client the coarsened domain too, so it can check that every position the RENDERED
+        # control still offers resolves to something that shipped.
+        RE._replay_strideable(w.kind) && (e["strided"] = dom[1:2:end])
+        push!(fixture, e)
+    end
+
+    node = Sys.which("node")
+    if node === nothing
+        @info "node not found — skipping the @replay export contract (fixture built, not driven)"
+        @test true
+    else
+        mktempdir() do dir
+            path = joinpath(dir, "controls.json")
+            open(io -> JSON.print(io, fixture), path, "w")
+            io = IOBuffer()
+            script = joinpath(@__DIR__, "js", "export_contract.mjs")
+            ok = success(pipeline(`$node $script $path`; stdout = io, stderr = io))
+            ok || print(String(take!(io)))          # surface every diverging control on failure
+            @test ok
+        end
+    end
 end

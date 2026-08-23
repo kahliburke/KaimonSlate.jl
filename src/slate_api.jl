@@ -328,15 +328,31 @@ datafile === nothing ? md"Upload a file to begin." : CSV.read(datafile.path, Dat
     You never restate the domain: it is read from the control, so it cannot drift. You never name a trace
     or a field either — the value is an ordinary array, and the renderer finds it wherever you put it.
 
-    REQUIREMENTS: the control must have a finite domain (`Slider`, `Select`, `Radio`, `Checkbox`,
-    `Toggle` — not a text or open number field), and `expr` must return a numeric array of the same shape
-    for every value. Both are checked as you write the cell, not at export.
+    REQUIREMENTS: the control must have a finite domain, and `expr` must return a numeric array of the
+    same shape for every value. Both are checked as you write the cell, not at export.
+
+    Every control whose domain can be enumerated qualifies, which is more of them than it sounds:
+
+      `Slider` `Select` `Radio` `Checkbox` `Toggle`  — the value itself
+      `RangeSlider`   — ordered `(lo, hi)` pairs, so n stops give n(n+1)/2 positions (not n²)
+      `TableSelect`   — its ROWS; the swept value is the row NamedTuple, exactly as live
+      `MultiSelect` / `MultiCheckBox` — the power set of the options
+      `NumberField`   — when you bounded it with `min`/`max`
+
+    Refused: free text, a date, a colour, an unbounded number field — and a *combinatorial* domain past
+    ~20 000 positions (a range slider beyond ~200 stops, a multi-select beyond ~14 options), which is a
+    size nothing should enumerate. Coarsen the control's own `step`, or offer fewer options.
+
+    The swept value is the one a CELL sees, not the wire value — `@replay(sel, f(sel.product))` over a
+    `TableSelect` gets row NamedTuples, and `@replay(span, g(span.lo, span.hi))` gets the pair.
 
     A `@replay` cell is never restored from the durable cache — the mark is established by RUNNING, so a
     restored cell would export a control with no data behind it.
 
-    The export dialog shows what each mark will cost and offers a **resolution** (ship every n-th slider
-    position). See also `@bind`, `save_asset`."""),
+    The export dialog shows what each mark will cost and offers a **resolution** (ship every n-th
+    position) for the controls that sweep ONE number — a slider or a bounded number field. A categorical
+    or composite domain is never strided: there is no coarser version of a choice.
+    See also `@bind`, `save_asset`."""),
 SlateApiEntry("playhead", "Widgets",
         "A DRIVEN control: an animation player pushes its current frame index here.",
         ["frame", "scrub", "player", "time"], "playhead(anim; label) -> driven control",
