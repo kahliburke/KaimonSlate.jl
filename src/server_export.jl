@@ -492,6 +492,15 @@ end
 # also keeps this function honest — the export never has to know what data rode along.
 _ctl_num(p, k, dflt) = (v = get(p, k, nothing); v isa Real ? string(v) : dflt)
 
+# What a control's readout SAYS, as distinct from the value it holds. A bound endpoint arrives as
+# whatever the author's range produced, and a range written `(0, 24_000)` against a float step gives
+# one Int and one Float — printed raw, the reader sees "0 – 24000.0" under a slider whose every stop
+# is a whole number. An integral float drops its tail here; the `value=` attribute keeps the real
+# number, since that is what the client matches against the shipped domain.
+_ctl_valtext(v::Integer) = string(v)
+_ctl_valtext(v::Real) = (isfinite(v) && v == round(v)) ? string(Int(round(v))) : string(v)
+_ctl_valtext(v) = string(v)
+
 function _export_control_html(b)
     name = String(b.name)
     kind = lowercase(String(b.widget))
@@ -507,7 +516,7 @@ function _export_control_html(b)
     body = if kind == "slider"
         string("<input type=\"range\" min=\"", _ctl_num(p, "min", "0"), "\" max=\"", _ctl_num(p, "max", "100"),
                "\" step=\"", _ctl_num(p, "step", "1"), "\" value=\"", _esc(string(val)), "\"", attrs, "/>",
-               "<output class=\"exp-ctl-val\">", _esc(string(val)), "</output>")
+               "<output class=\"exp-ctl-val\">", _esc(_ctl_valtext(val)), "</output>")
     elseif kind in ("select", "radio")
         opts = get(p, "options", nothing)
         opts isa AbstractVector || return ""
@@ -548,7 +557,8 @@ function _export_control_html(b)
                "<span class=\"rstrack\"><span class=\"rsfill\" style=\"left:", round(span(lo); digits = 3),
                "%;right:", round(100 - span(hi); digits = 3), "%\"></span></span>",
                thumb("exp-rs-lo", lo), thumb("exp-rs-hi", hi),
-               "</span><output class=\"exp-ctl-val rsval\">", _esc(string(lo, " – ", hi)), "</output>")
+               "</span><output class=\"exp-ctl-val rsval\">",
+               _esc(string(_ctl_valtext(lo), " – ", _ctl_valtext(hi))), "</output>")
     elseif kind == "tableselect"
         rows = get(p, "rows", nothing)
         cols = get(p, "columns", nothing)
@@ -1493,7 +1503,23 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-ctls{display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding:8px 14px;font-size:.86rem;}
 .exp-ctl{display:flex;align-items:center;gap:9px;color:var(--dim);}
 .exp-ctl-lbl{white-space:nowrap;}
-.exp-ctl input[type=range]{width:210px;accent-color:var(--accent);cursor:pointer;}
+/* A plain slider draws its own track and thumb instead of trusting `accent-color`, which Safari
+   ignores on a range input: the control then renders as native chrome — a light grey track and a
+   white thumb — which on a dark page is the one element that visibly is not part of the document.
+   The range slider further down already draws its own, so without this the two sliders on the same
+   page do not even match each other. `.rsin` is excluded, being that pair. */
+.exp-ctl input[type=range]:not(.rsin){-webkit-appearance:none;appearance:none;width:210px;height:16px;
+  background:none;cursor:pointer;}
+.exp-ctl input[type=range]:not(.rsin)::-webkit-slider-runnable-track{height:4px;border-radius:2px;
+  background:var(--bg3);border:1px solid var(--border);}
+.exp-ctl input[type=range]:not(.rsin)::-moz-range-track{height:4px;border-radius:2px;
+  background:var(--bg3);border:1px solid var(--border);}
+.exp-ctl input[type=range]:not(.rsin)::-webkit-slider-thumb{-webkit-appearance:none;margin-top:-6px;
+  width:14px;height:14px;border-radius:50%;background:var(--text);border:2px solid var(--accent);
+  box-shadow:0 1px 3px rgba(0,0,0,.5);}
+.exp-ctl input[type=range]:not(.rsin)::-moz-range-thumb{width:14px;height:14px;border-radius:50%;
+  background:var(--text);border:2px solid var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.5);}
+.exp-ctl input[type=range]:not(.rsin):focus{outline:none;}
 .exp-ctl input:disabled,.exp-ctl select:disabled{opacity:.45;cursor:not-allowed;}
 .exp-ctl-val{color:var(--text);font-variant-numeric:tabular-nums;min-width:2.5em;}
 .exp-ctl-frozen{color:var(--text);font-variant-numeric:tabular-nums;}
@@ -1526,7 +1552,10 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
   width:14px;height:14px;border-radius:50%;background:var(--text);border:2px solid var(--accent);
   box-shadow:0 1px 3px rgba(0,0,0,.5);}
 .rsin::-moz-range-track{background:none;border:none;}
-.rsval{color:var(--dim);font-size:.76rem;font-variant-numeric:tabular-nums;white-space:nowrap;}
+/* The thumb is 14px wide and centred on the track's end, so at maximum it overhangs `.rsbox` by half
+   its width and eats the flex gap — the readout then starts underneath it. The margin is that overhang. */
+.rsval{color:var(--dim);font-size:.76rem;font-variant-numeric:tabular-nums;white-space:nowrap;
+  margin-left:8px;}
 /* Surfaced strips keep their authored columns: `controls=[freq,amp],phase` is two columns, the
    first stacking two knobs. */
 .exp-ctlcol{display:flex;flex-direction:column;gap:6px;}
