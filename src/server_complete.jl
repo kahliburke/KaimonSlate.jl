@@ -943,6 +943,96 @@ function _make_router(h::Hub)
                                    "Set-Cookie" => KaimonSlateHub.expired_session_cookie(),
                                    "Cache-Control" => "no-store"])
     end)
+    # ---- User management (admin only) ----
+    # Resolve the admin user record for the current session, or nothing.
+    _admin_record = (req -> begin
+        h.auth_hub === nothing && return nothing
+        cookie = _cookie_value(req, _AUTH_COOKIE)
+        isempty(cookie) && return nothing
+        auth = KaimonSlateHub.authenticate!(h.auth_hub.sessions, cookie)
+        auth === nothing && return nothing
+        rec = KaimonSlateHub.get_user(h.auth_hub.users, auth.principal_id)
+        rec === nothing || rec.disabled ? nothing : (rec.is_admin ? rec : nothing)
+    end)
+    HTTP.register!(router, "GET", "/api/users", req -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        _admin_record(req) === nothing && return HTTP.Response(403, ["Content-Type" => "application/json"],
+                                                                body = JSON.json(Dict("error" => "not authorized")))
+        users = [Dict("username" => u, "is_admin" => KaimonSlateHub.get_user(h.auth_hub.users, u).is_admin,
+                      "disabled" => KaimonSlateHub.get_user(h.auth_hub.users, u).disabled)
+                    for u in KaimonSlateHub.list_users(h.auth_hub.users)]
+        return HTTP.Response(200, ["Content-Type" => "application/json"], body = JSON.json(Dict("users" => users)))
+    end)
+    HTTP.register!(router, "POST", "/api/users", req -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        _admin_record(req) === nothing && return HTTP.Response(403, ["Content-Type" => "application/json"],
+                                                                body = JSON.json(Dict("error" => "not authorized")))
+        payload = isempty(req.body) ? Dict{String,Any}() : JSON.parse(String(req.body))
+        username = String(get(payload, "username", ""))
+        password = String(get(payload, "password", ""))
+        is_admin = Bool(get(payload, "is_admin", false))
+        try
+            KaimonSlateHub.create_user!(h.auth_hub.users, username, password; is_admin = is_admin)
+            return HTTP.Response(201, ["Content-Type" => "application/json"],
+                                 body = JSON.json(Dict("username" => username, "is_admin" => is_admin)))
+        catch e
+            return HTTP.Response(400, ["Content-Type" => "application/json"],
+                                 body = JSON.json(Dict("error" => String(e.msg))))
+        end
+    end)
+    HTTP.register!(router, "POST", "/api/users/{username}/disable", req -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        _admin_record(req) === nothing && return HTTP.Response(403, ["Content-Type" => "application/json"],
+                                                                body = JSON.json(Dict("error" => "not authorized")))
+        u = HTTP.getparam(req, "username")
+        KaimonSlateHub.disable_user!(h.auth_hub.users, u) ||
+            return HTTP.Response(404, ["Content-Type" => "application/json"], body = JSON.json(Dict("error" => "not found")))
+        return HTTP.Response(200, ["Content-Type" => "application/json"], body = JSON.json(Dict("username" => u, "disabled" => true)))
+    end)
+    HTTP.register!(router, "POST", "/api/users/{username}/enable", req -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        _admin_record(req) === nothing && return HTTP.Response(403, ["Content-Type" => "application/json"],
+                                                                body = JSON.json(Dict("error" => "not authorized")))
+        u = HTTP.getparam(req, "username")
+        KaimonSlateHub.enable_user!(h.auth_hub.users, u) ||
+            return HTTP.Response(404, ["Content-Type" => "application/json"], body = JSON.json(Dict("error" => "not found")))
+        return HTTP.Response(200, ["Content-Type" => "application/json"], body = JSON.json(Dict("username" => u, "disabled" => false)))
+    end)
+    # Admin user-management page (admin only; the gate already enforced a valid session).
+    HTTP.register!(router, "GET", "/admin/users", req -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        _admin_record(req) === nothing && return HTTP.Response(403, "not authorized")
+        me = _admin_record(req)
+        return HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], body = """
+        <!doctype html><html><head><meta charset="utf-8"><title>KaimonSlate — Users</title>
+        <style>body{font:14px system-ui;max-width:760px;margin:40px auto;padding:0 16px}
+        table{width:100%;border-collapse:collapse}th,td{padding:6px 8px;border-bottom:1px solid #eee;text-align:left}
+        .row{display:flex;gap:8px;align-items:center}input{padding:6px}button{padding:6px 10px;cursor:pointer}
+        .muted{color:#888}a{color:#06c}</style></head><body>
+        <h2>Users <span class="muted">— admin: $(me.username)</span></h2>
+        <p><a href="/">← notebooks</a> · <a href="/logout">sign out</a></p>
+        <h3>Create user</h3>
+        <form id="create" class="row"><input name="username" placeholder="username" required>
+        <input name="password" type="password" placeholder="password" required>
+        <label><input type="checkbox" name="is_admin"> admin</label>
+        <button>Create</button></form><p id="ce" style="color:#c00"></p>
+        <h3>Users</h3><table id="t"><thead><tr><th>username</th><th>admin</th><th>state</th><th>actions</th></tr></thead><tbody></tbody></table>
+        <script>
+        const ce=document.getElementById('ce');
+        async function refresh(){const r=await fetch('/api/users');const d=await r.json();const tb=document.querySelector('#t tbody');tb.innerHTML='';
+        for(const u of d.users){const tr=document.createElement('tr');
+        tr.innerHTML='<td>'+u.username+'</td><td>'+(u.is_admin?'✓':'')+'</td><td class="muted">'+(u.disabled?'disabled':'active')+'</td>';
+        const a=document.createElement('td');const b=document.createElement('button');
+        b.textContent=u.disabled?'enable':'disable';
+        b.onclick=async()=>{await fetch('/api/users/'+encodeURIComponent(u.username)+'/'+(u.disabled?'enable':'disable'),{method:'POST'});refresh();};
+        a.appendChild(b);tr.appendChild(a);tb.appendChild(tr);}}
+        document.getElementById('create').onsubmit=async(e)=>{e.preventDefault();ce.textContent='';
+        const f=e.target;const r=await fetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({username:f.username.value,password:f.password.value,is_admin:f.is_admin.checked})});
+        if(r.ok){f.reset();refresh();}else{const d=await r.json().catch(()=>({}));ce.textContent=d.error||('failed ('+r.status+')');}};
+        refresh();
+        </script></body></html>""")
+    end)
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors
     # `KaimonSlate.create_tools`'s open: creates the file if it doesn't exist.
