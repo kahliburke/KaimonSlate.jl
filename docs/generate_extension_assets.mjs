@@ -21,7 +21,8 @@
 //   --path <dir>       the extension package (must contain Project.toml)
 //   --notebook <file>  demo notebook; default: the `example` key of SlateExtension.toml
 //   --out <dir>        output directory; default: a scratch dir under the system temp dir
-//   --full             capture the whole scrolling page instead of the first screenful
+//   --cell <id>        frame this cell; default: the first one that rendered a visual output
+//   --full             capture the whole scrolling page instead of one screenful
 //   --port <n>         port for the throwaway hub (default 8797)
 //
 // Requires `npx playwright install chromium` once, and `julia` on PATH.
@@ -72,7 +73,9 @@ const PORT = Number(arg('port', '8797'))
 const BASE = `http://127.0.0.1:${PORT}`
 // `serve_notebook` mounts the notebook at /n/<stem>; BASE alone is the notebook CHOOSER, which has
 // no cells and would just time out waiting for one.
-const NBURL = `${BASE}/n/${basename(NOTEBOOK).replace(/\.jl$/, '')}`
+const NB_ID = basename(NOTEBOOK).replace(/\.jl$/, '')
+const NBURL = `${BASE}/n/${NB_ID}`
+const FEATURE = arg('cell', '')     // '' = pick the first cell that rendered a visual output
 const SHOT = join(OUT, `${PKGNAME}-notebook.png`)
 
 mkdirSync(OUT, { recursive: true })
@@ -150,6 +153,9 @@ async function main() {
   process.on('SIGINT', () => { cleanup(); process.exit(1) })
   try {
     await waitForServer()
+    // No WebGL flags needed: Playwright's headless Chromium already reports
+    // "ANGLE (SwiftShader)" and passes a webgl2 context, so a blank 3-D canvas is an asset-loading
+    // or timing problem rather than a missing GPU. Verified rather than assumed.
     browser = await chromium.launch({ headless: true })
     const ctx = await browser.newContext({ viewport: { width: 1100, height: 860 }, deviceScaleFactor: 2, colorScheme: 'dark' })
     await ctx.addInitScript(() => { try { localStorage.setItem('slateTheme', 'dark'); localStorage.setItem('slateSyntaxTheme', 'dark-plus') } catch (_) {} })
@@ -164,10 +170,13 @@ async function main() {
     log('waiting for the worker and environment')
     await settle(page, 600_000)
 
-    const nbid = await page.evaluate(() => window.NB_ID)
+    // The id comes from OUR side, not the page. `NB_ID` is a top-level `const` in a classic script,
+    // so it lives in script scope and `window.NB_ID` is undefined — every re-run request was going to
+    // `/api/undefined/rerun-all` and silently 404ing, leaving the notebook on whatever its initial
+    // autorun produced. (docs/generate_assets.mjs reads it the same way and has the same bug.)
     await page.evaluate(async (id) => {
       try { await fetch(`/api/${id}/rerun-all`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }) } catch (_) {}
-    }, nbid)
+    }, NB_ID)
     log('running the notebook')
     await settle(page, 600_000)
 
@@ -175,8 +184,25 @@ async function main() {
     // the run pill / progress toast, which are about Slate rather than about the extension.
     await page.addStyleTag({ content: '.warn,#doclauncher,#runpill{display:none!important}' })
     await sleep(1400)
-    await page.evaluate(() => window.scrollTo(0, 0))
-    await sleep(300)
+
+    // Frame the first cell that actually DREW something, not the top of the document. A good demo
+    // notebook opens with prose explaining itself, so capturing from the top reliably photographs
+    // the introduction and leaves the chart the extension exists to produce below the fold.
+    //
+    // "Drew something" is decided by the rendered output containing a canvas/svg/image — the shapes
+    // every visual output takes — rather than by guessing at cell ids or the extension's semantics.
+    const framed = await page.evaluate((wanted) => {
+      const cells = [...document.querySelectorAll('.cell')]
+      const target = wanted
+        ? cells.find((c) => c.dataset.cid === wanted)
+        : cells.find((c) => c.querySelector('.output canvas, .output svg, .output img, .echart canvas, .echart svg'))
+      if (!target) return null
+      target.scrollIntoView({ block: 'start' })
+      window.scrollBy(0, -12)                       // a sliver of the cell above, so it doesn't read as cropped
+      return target.dataset.cid || ''
+    }, FEATURE)
+    log(framed === null ? 'no rendered output found — framing the top of the notebook' : `framing cell ${framed}`)
+    await sleep(600)
     await page.screenshot({ path: SHOT, fullPage: flag('full') })
 
     log(`✓ ${SHOT}`)
