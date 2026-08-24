@@ -747,6 +747,13 @@ _hub_current_user(h::Hub, req) = begin
     auth === nothing ? nothing : KaimonSlateHub.get_user(h.auth_hub.users, auth.principal_id)
 end
 
+# A user row for OteraEngine template rendering (struct fields, not Dict keys).
+struct HubUserRow
+    username::String
+    is_admin::Bool
+    disabled::Bool
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     # Front page + inlined last-known ledger (see `_index_html`). An APP hub has no front page: the
@@ -1061,8 +1068,8 @@ function _make_router(h::Hub)
         h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
         me = _admin_record(req)
         me === nothing && return HTTP.Response(403, "not authorized")
-        users = [Dict("username" => u, "is_admin" => KaimonSlateHub.get_user(h.auth_hub.users, u).is_admin,
-                      "disabled" => KaimonSlateHub.get_user(h.auth_hub.users, u).disabled)
+        users = [HubUserRow(u, KaimonSlateHub.get_user(h.auth_hub.users, u).is_admin,
+                           KaimonSlateHub.get_user(h.auth_hub.users, u).disabled)
                   for u in KaimonSlateHub.list_users(h.auth_hub.users)]
         content = _hub_tmpl("hub_admin_users.html.tmpl")(init = Dict{Symbol,Any}(:users => users))
         return _html(_hub_tmpl("hub_base.html.tmpl")(init = Dict{Symbol,Any}(:title => "KaimonSlate — Users",
