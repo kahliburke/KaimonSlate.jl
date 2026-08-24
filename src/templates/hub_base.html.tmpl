@@ -11,10 +11,22 @@
   --text:#d4d8e8; --dim:#6a7090; --accent:#569cd6; --green:#56d364;
   --red:#e57575; --gold:#ffd700; --input:#10131f;
 }
+@media (prefers-color-scheme: light){
+  :root[data-theme="auto"]{
+    --bg:#f7f8fb; --bg2:#ffffff; --bg3:#eef1f6; --border:#d8dde8;
+    --text:#1a1e2e; --dim:#5a6080; --accent:#2a6db0; --green:#2e8b3d;
+    --red:#c0392b; --gold:#b8860b; --input:#ffffff;
+  }
+}
 :root[data-theme="light"]{
   --bg:#f7f8fb; --bg2:#ffffff; --bg3:#eef1f6; --border:#d8dde8;
   --text:#1a1e2e; --dim:#5a6080; --accent:#2a6db0; --green:#2e8b3d;
   --red:#c0392b; --gold:#b8860b; --input:#ffffff;
+}
+:root[data-theme="dark"]{
+  --bg:#0d1120; --bg2:#141828; --bg3:#1a1e2e; --border:#2a2e40;
+  --text:#d4d8e8; --dim:#6a7090; --accent:#569cd6; --green:#56d364;
+  --red:#e57575; --gold:#ffd700; --input:#10131f;
 }
 *{box-sizing:border-box;}
 html{background:var(--bg);color-scheme:dark;}
@@ -49,8 +61,20 @@ th{color:var(--dim);font-size:.74rem;text-transform:uppercase;letter-spacing:.05
 label.chk{display:inline-flex;align-items:center;gap:6px;color:var(--dim);font-size:.85rem;margin:8px 0;}
 </style>
 <script>{% raw %}
-(function(){try{var t=localStorage.getItem('hub-theme')||'dark';document.documentElement.dataset.theme=t;var b=document.querySelector&&document.querySelector('.theme-toggle');if(b)b.textContent=t==='dark'?'☀':'🌙';}catch(e){}})();
-function toggleTheme(){var h=document.documentElement;var n=h.dataset.theme==='dark'?'light':'dark';h.dataset.theme=n;try{localStorage.setItem('hub-theme',n);}catch(e){}var b=document.querySelector('.theme-toggle');if(b)b.textContent=n==='dark'?'☀':'🌙';}
+(function(){
+  var t = localStorage.getItem('hub-theme') || 'auto';
+  document.documentElement.dataset.theme = t;
+  var icons = {auto:'🖥', light:'☀', dark:'🌙'};
+  function setIcon(){var b=document.querySelector('.theme-toggle'); if(b) b.textContent = icons[document.documentElement.dataset.theme] || '🖥';}
+  setIcon();
+  window.cycleTheme = function(){
+    var cur = document.documentElement.dataset.theme;
+    var nxt = cur==='auto' ? 'light' : cur==='light' ? 'dark' : 'auto';
+    document.documentElement.dataset.theme = nxt;
+    try{localStorage.setItem('hub-theme', nxt);}catch(e){}
+    setIcon();
+  };
+})();
 {% endraw %}</script>
 </head>
 <body>
@@ -63,7 +87,7 @@ function toggleTheme(){var h=document.documentElement;var n=h.dataset.theme==='d
     <a href="/logout">Sign out</a>
     <span class="spacer"></span>
     <span class="muted" style="font-size:.8rem">{{ current_user }}</span>
-    <button class="theme-toggle" onclick="toggleTheme()">{% if theme == "light" %}🌙{% else %}☀{% end %}</button>
+    <button class="theme-toggle" onclick="cycleTheme()" title="auto → light → dark">🖥</button>
   </div>
   {% block content %}{% end %}
 </div>
