@@ -89,7 +89,7 @@ label.chk{display:inline-flex;align-items:center;gap:6px;color:var(--dim);font-s
     <span class="muted" style="font-size:.8rem">{{ current_user }}</span>
     <button class="theme-toggle" onclick="cycleTheme()" title="auto → light → dark">🖥</button>
   </div>
-  {% block content %}{% end %}
+  {{ content |> safe }}
 </div>
 </body>
 </html>

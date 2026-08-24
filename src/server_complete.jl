@@ -896,8 +896,10 @@ function _make_router(h::Hub)
     # Browser login page (only active when a KaimonSlateHub control plane is attached).
     HTTP.register!(router, "GET", "/login", _ -> begin
         h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
-        return _html(_hub_tmpl("hub_login.html.tmpl")(init = Dict(:title => "KaimonSlate — Sign in",
-                                                  :current_user => "", :is_admin => false, :theme => "dark")))
+        content = _hub_tmpl("hub_login.html.tmpl")(init = Dict())
+        return _html(_hub_tmpl("hub_base.html.tmpl")(init = Dict(:title => "KaimonSlate — Sign in",
+                                                   :current_user => "", :is_admin => false,
+                                                   :theme => "auto", :content => content)))
     end)
     # Multi-user login (only active when a KaimonSlateHub control plane is attached).
     HTTP.register!(router, "POST", "/api/login", req -> begin
@@ -1048,9 +1050,11 @@ function _make_router(h::Hub)
         h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
         rec = _hub_current_user(h, req)
         rec === nothing && return HTTP.Response(401, "unauthenticated")
-        return _html(_hub_tmpl("hub_account.html.tmpl")(init = Dict(:title => "KaimonSlate — Account",
+        content = _hub_tmpl("hub_account.html.tmpl")(init = Dict(:current_user => rec.username,
+                                                                  :is_admin => rec.is_admin))
+        return _html(_hub_tmpl("hub_base.html.tmpl")(init = Dict(:title => "KaimonSlate — Account",
                                                    :current_user => rec.username, :is_admin => rec.is_admin,
-                                                   :theme => "dark")))
+                                                   :theme => "auto", :content => content)))
     end)
     # Admin user-management page (admin only; the gate already enforced a valid session).
     HTTP.register!(router, "GET", "/admin/users", req -> begin
@@ -1060,9 +1064,10 @@ function _make_router(h::Hub)
         users = [Dict("username" => u, "is_admin" => KaimonSlateHub.get_user(h.auth_hub.users, u).is_admin,
                       "disabled" => KaimonSlateHub.get_user(h.auth_hub.users, u).disabled)
                   for u in KaimonSlateHub.list_users(h.auth_hub.users)]
-        return _html(_hub_tmpl("hub_admin_users.html.tmpl")(init = Dict(:title => "KaimonSlate — Users",
-                                                 :current_user => me.username, :is_admin => true,
-                                                 :theme => "dark", :users => users)))
+        content = _hub_tmpl("hub_admin_users.html.tmpl")(init = Dict(:users => users))
+        return _html(_hub_tmpl("hub_base.html.tmpl")(init = Dict(:title => "KaimonSlate — Users",
+                                                   :current_user => me.username, :is_admin => true,
+                                                   :theme => "auto", :content => content)))
     end)
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors

@@ -1,5 +1,3 @@
-{% extends "hub_base.html.tmpl" %}
-{% block content %}
 <h1>Users</h1>
 <p class="muted">Administration — create accounts and manage access.</p>
 
@@ -51,4 +49,3 @@ document.getElementById('create').onsubmit=async(e)=>{e.preventDefault();ce.text
     body:JSON.stringify({username:f.username.value,password:f.password.value,is_admin:f.is_admin.checked})});
   if(r.ok){reload();}else{const d=await r.json().catch(()=>({}));ce.textContent=d.error||('failed ('+r.status+')');}};
 {% endraw %}</script>
-{% end %}
