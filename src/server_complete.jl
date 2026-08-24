@@ -1593,6 +1593,9 @@ function _make_router(h::Hub)
     # which controls need computing and how many values each holds, and to offer a resolution, before
     # anything is paid for. Cheap: it reads a registry, it does not evaluate.
     HTTP.register!(router, "GET", "/api/{id}/replay-plan", req -> _withnb(h, req, nb -> begin
+        # Compose the graph-derived marks FIRST (a table whose control is a hop upstream), or the dialog
+        # would price a smaller export than the one it is about to build.
+        try; _register_chain_sweeps!(nb); catch; end
         plan = nb.kernel isa ReportEngine.GateKernel ?
                (try; ReportEngine.replay_plan(nb.kernel); catch; nothing; end) : nothing
         _json(Dict{String,Any}("replays" => plan === nothing ? Dict{String,Any}() : plan))

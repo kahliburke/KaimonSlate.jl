@@ -706,6 +706,326 @@ end
     end
 end
 
+# ── A `@replay`-marked table ──────────────────────────────────────────────────────────────────────
+# A figure follows its control in a static export; a table did not. That is worse than no control at
+# all: the knob sits above the table, moves the charts beside it, and leaves the rows alone — which
+# reads as a live page rather than a frozen one.
+#
+# What ships for a table is the UNION of the rows across the control's positions, written into the page
+# once, plus a per-position ORDER over that union. This checks the Julia half of that (the union, the
+# packing, the markup) and then hands the real bytes and the real markup to node to drive.
+@testset "@replay table: union rows, per-position order, and the page that reads them" begin
+    RE = ReportEngine
+    # "All" then a subset then a REORDER of a subset — a filtering control and a sorting control are
+    # the same thing here, and only the second one distinguishes an order from a present/absent flag.
+    byregion = Dict("All"  => [("a", 1), ("b", 2), ("c", 3)],
+                    "APAC" => [("b", 2), ("c", 3)],
+                    "EMEA" => [("c", 3), ("a", 1)])
+    mk = region -> RE.slate_table(["product", "n"], [Any[p, n] for (p, n) in byregion[region]])
+
+    w = RE.Select(["All", "APAC", "EMEA"])
+    dom = RE.bind_domain(w)
+    # A hand-built sweeps entry, which is what the `@replay` macro registers: the notebook eval path is
+    # covered in test_bind.jl, and building it here keeps this test about what an EXPORT does with one.
+    # `wrap = identity` for the same reason — a bare Select's wrapping is tested where wrapping lives.
+    sweeps = Dict{String,Any}("tbl:region" =>
+        (; name = "region", f = mk, wrap = identity, domain = Any[dom...], cell = "tbl", kind = w.kind))
+    got = RE._run_replay_sweeps(sweeps)
+    r = got["tbl:region"]
+
+    @test r["target"] == "table"                     # the page must drive a table, not a chart series
+    @test r["dtype"] == "i16"                        # …and the order packs as one of the native dtypes
+    @test r["rows"] == Any[Any["a", 1], Any["b", 2], Any["c", 3]]   # union, in first-seen order
+    @test r["slice"] == [3] && r["shape"] == [3, 3]  # one entry per union row, per position
+
+    # The order itself: 1-based indices into the union, 0 for "no row". Column-major, so a position is
+    # a contiguous run — the layout `Slate.replay.slice` reads.
+    A = reshape(reinterpret(Int16, Base64.base64decode(r["b64"])), 3, 3)
+    @test A[:, 1] == Int16[1, 2, 3]                  # All  → every row, as written
+    @test A[:, 2] == Int16[2, 3, 0]                  # APAC → two of them, padded
+    @test A[:, 3] == Int16[3, 1, 0]                  # EMEA → reordered, which a mask could not say
+
+    # The live table carries the mark; the export swaps the union in behind it.
+    spec = RE._table_wire(RE._mark_table_replay!(mk("All"), "tbl:region", "region", 1))
+    @test NS._table_replay_mark(spec)["id"] == "tbl:region"
+    sub = NS._replay_base_spec(spec, Dict{String,Any}("tbl:region" => r["rows"]))
+    @test sub["rows"] == r["rows"]
+    @test sub["opts"]["nrows"] == 3
+    tablehtml = NS._export_table_html(sub)
+    @test occursin("data-replay=\"tbl:region\"", tablehtml)   # what the enhancer registers itself under
+
+    # An unmarked table, and a marked one whose sweep produced nothing, are both left exactly alone —
+    # a failed sweep must leave a normal static table, not a broken one.
+    plain = RE._table_wire(mk("All"))
+    @test NS._replay_base_spec(plain, Dict{String,Any}()) === plain
+    @test !occursin("data-replay", NS._export_table_html(plain))
+    @test NS._replay_base_spec(spec, Dict{String,Any}()) === spec
+
+    node = Sys.which("node")
+    if node === nothing
+        @info "node not found — skipping the @replay table drive (fixture built, not driven)"
+        @test true
+    else
+        fixture = Dict{String,Any}(
+            "control" => Dict{String,Any}(
+                "name" => "region", "domain" => r["domain"],
+                "html" => NS._export_control_html(RE.BindSpec(:region, w.kind, w.params, w.default))),
+            "tableHtml" => tablehtml,
+            "sweep" => Dict{String,Any}("id" => "tbl:region", "asset" => "data/region_replay.i16.bin",
+                                        "control" => "region", "domain" => r["domain"],
+                                        "slice" => r["slice"], "target" => "table"),
+            "packed" => Dict{String,Any}("dtype" => r["dtype"], "shape" => r["shape"], "b64" => r["b64"]),
+            "col" => 0,                                     # assert on the product column
+            "expect" => Any[["a", "b", "c"], ["b", "c"], ["c", "a"]],
+            # The reader's filter is their state, not the control's: moving the knob changes which rows
+            # exist and must not clear it.
+            "filter" => Dict{String,Any}("text" => "c", "position" => 0, "expect" => ["c"]))
+        mktempdir() do dir
+            path = joinpath(dir, "table.json")
+            open(io -> JSON.print(io, fixture), path, "w")
+            io = IOBuffer()
+            script = joinpath(@__DIR__, "js", "table_replay.mjs")
+            ok = success(pipeline(`$node $script $path`; stdout = io, stderr = io))
+            ok || print(String(take!(io)))
+            @test ok
+        end
+    end
+end
+
+# ── The chain sweep: a table a hop or more from its control ────────────────────────────────────────
+# `@replay` marks one expression. The shape that actually occurs is a table two cells away from the
+# control — `slate_table(selected)` where `selected` is what reads `region` — and there is no expression
+# to mark. The cells in between are in the graph, so the export composes them into one closure.
+#
+# Composing SOURCE is the part that has to be conservative: it runs code the author did not write in
+# that form, once per position of a control. So the analysis is tested for what it REFUSES as much as
+# for what it composes.
+@testset "chain sweep: composing the cells between a control and a table" begin
+    RE = ReportEngine
+    # A stub table output — enough for `_table_specs` to find a candidate spec on a cell.
+    _tblout(rows) = RE.CellOutput("", RE.MimeChunk[], Any[],
+                                  Any[Dict{String,Any}("columns" => Any["a"], "rows" => rows,
+                                                        "opts" => Dict{String,Any}("nrows" => length(rows)))],
+                                  RE.BindSpec[], "", nothing, nothing, 0.0)
+
+    # The notebook shape this exists for: two controls upstream, one of them surfaced on the table.
+    r = RE.parse_report("""
+    #%% code id=data
+    using Dates
+    ORDERS = [(revenue = 1.0, region = "All"), (revenue = 2.0, region = "APAC")]
+    orders_in(r) = r == "All" ? ORDERS : filter(o -> o.region == r, ORDERS)
+
+    #%% code id=ctl
+    @bind region Select(["All", "APAC"])
+    @bind band Slider(0:100)
+
+    #%% code id=selection
+    selected = filter(o -> o.revenue <= band, orders_in(region))
+
+    #%% code id=table_filtered controls=region
+    slate_table(selected)
+    """)
+    RE.build_dependencies!(r)
+    byid = Dict(c.id => c for c in r.cells)
+    # Stand in for a run: the specs the `@bind` cell registered, and the table the last cell produced.
+    _spec(name, w) = RE.BindSpec(name, w.kind, w.params, w.default)
+    byid["ctl"].binds = [_spec(:region, RE.Select(["All", "APAC"])), _spec(:band, RE.Slider(0:100))]
+    byid["table_filtered"].output = _tblout(Any[Any[1.0]])
+
+    # `selection` reads `band`, so the graph makes `table_filtered` downstream of BOTH controls. Only
+    # one may be swept — the cross product is 2 × 101 evaluations of the same chain — and `controls=`
+    # is the author saying which knob belongs to this table.
+    plan = NS._chain_sweep_plan(r.cells)
+    @test length(plan) == 1
+    p = only(plan)
+    @test p.control == "region" && p.cell == "table_filtered"
+    @test p.id == "table_filtered:region"
+    @test p.key == "table_filtered#1"
+    @test p.blocked === nothing
+    # …and the other one is REPORTED, not silently ignored. HELD, not frozen: `band` still works on the
+    # page for anything with its own data — what is baked in is the value it had at export.
+    @test p.held == ["band"]
+
+    # The composed closure: the control is the parameter, the chain's assignments are inside a `let`,
+    # and `data` is NOT in it — it does not read the control, so it is a global the chain reads as usual
+    # (which is what keeps a `using Dates` cell out of a scope that cannot hold one).
+    @test startswith(p.source, "region -> let\n")
+    @test occursin("selected = filter", p.source)
+    @test occursin("slate_table(selected)", p.source)
+    @test !occursin("ORDERS = ", p.source)
+    @test (Meta.parse(p.source); true)            # …and it is one parseable expression
+
+    # A `let` is what makes this safe: the chain assigns `selected`, and a sweep over a hundred
+    # positions must not leave the notebook's global holding the last one.
+    m = Module(:ChainScope)
+    Core.eval(m, :(ORDERS = [(revenue = 1.0, region = "All"), (revenue = 2.0, region = "APAC")]))
+    Core.eval(m, :(orders_in(r) = r == "All" ? ORDERS : filter(o -> o.region == r, ORDERS)))
+    Core.eval(m, :(band = 100))
+    Core.eval(m, :(selected = :untouched))
+    Core.eval(m, :(slate_table = identity))
+    f = Core.eval(m, Meta.parse(NS._chain_sweep_source([byid["selection"], byid["table_filtered"]], "region")))
+    @test length(Base.invokelatest(f, "All")) == 2
+    @test Base.invokelatest(getproperty, m, :selected) === :untouched
+
+    # ── What it refuses ──
+    bad = RE.parse_report("""
+    #%% code id=ctl
+    @bind k Slider(1:3)
+
+    #%% code id=uses
+    using Statistics
+    u = k + 1
+
+    #%% code id=consts
+    const C = k
+
+    #%% code id=side resource
+    h = k
+
+    #%% code id=marked
+    z = @replay(k, [k])
+
+    #%% code id=fine
+    w = k * 2
+    """)
+    RE.build_dependencies!(bad)
+    bb = Dict(c.id => c for c in bad.cells)
+    @test occursin("using", NS._replay_chain_blocker(bb["uses"]))
+    @test occursin("const", NS._replay_chain_blocker(bb["consts"]))
+    @test occursin("@replay", NS._replay_chain_blocker(bb["marked"]))
+    # A declared side effect is refused by its EFFECT CLASS, not by reading its source: a cell that
+    # opens a handle should not be re-run once per position of a slider.
+    @test occursin("resource", NS._replay_chain_blocker(bb["side"]))
+    @test NS._replay_chain_blocker(bb["ctl"]) !== nothing          # a @bind cell never composes
+    @test NS._replay_chain_blocker(bb["fine"]) === nothing         # …and an ordinary cell composes
+    # A markdown cell is not a link in a chain — the chain is code.
+    md = RE.parse_report("#%% md id=m\n@md\"\"\"hi\"\"\"\n")
+    @test NS._replay_chain_blocker(md.cells[1]) == "is not a code cell"
+
+    # A chain whose middle is refused reports the CELL and the reason, and composes nothing.
+    r2 = RE.parse_report("""
+    #%% code id=ctl
+    @bind k Slider(1:3)
+
+    #%% code id=mid
+    using Statistics
+    picked = k
+
+    #%% code id=tbl
+    slate_table(picked)
+    """)
+    RE.build_dependencies!(r2)
+    b2 = Dict(c.id => c for c in r2.cells)
+    b2["ctl"].binds = [_spec(:k, RE.Slider(1:3))]
+    b2["tbl"].output = _tblout(Any[Any[1.0]])
+    p2 = only(NS._chain_sweep_plan(r2.cells))
+    @test p2.blocked !== nothing && occursin("mid", p2.blocked)
+
+    # A table that already carries its own mark is left alone — the author was more specific than the
+    # graph, and composing a second sweep for the same table would ship the rows twice.
+    b3 = Dict(c.id => c for c in r.cells)
+    spec = Dict{String,Any}("columns" => Any["a"], "rows" => Any[Any[1.0]],
+                            "opts" => Dict{String,Any}("__replay" => Dict{String,Any}("id" => "x:y")))
+    b3["table_filtered"].output = RE.CellOutput("", RE.MimeChunk[], Any[], Any[spec],
+                                                RE.BindSpec[], "", nothing, nothing, 0.0)
+    @test isempty(NS._chain_sweep_plan(r.cells))
+
+    # A server-paged table has no rows to ship — they are fetched from the kernel a page at a time.
+    b3["table_filtered"].output = RE.CellOutput("", RE.MimeChunk[], Any[],
+        Any[Dict{String,Any}("columns" => Any["a"], "paged" => true, "rows" => Any[])],
+        RE.BindSpec[], "", nothing, nothing, 0.0)
+    @test isempty(NS._chain_sweep_plan(r.cells))
+
+    # A composed sweep is INFERRED, not asked for, so it declines a domain nobody chose. An author who
+    # wants it writes `@replay` and sees the cost in the export dialog.
+    r4 = RE.parse_report("""
+    #%% code id=ctl
+    @bind span RangeSlider(0:1:120)
+
+    #%% code id=mid
+    picked = span.lo
+
+    #%% code id=tbl
+    slate_table(picked)
+    """)
+    RE.build_dependencies!(r4)
+    b4 = Dict(c.id => c for c in r4.cells)
+    _stub!(cell, name, w) = (cell.binds = [RE.BindSpec(name, w.kind, w.params, w.default)])
+    rs = RE.RangeSlider(0:1:120)
+    _stub!(b4["ctl"], :span, rs)
+    b4["tbl"].output = _tblout(Any[Any[1.0]])
+    @test length(RE.bind_domain(rs)) > NS._CHAIN_MAX_POSITIONS   # 7 381 ordered pairs — replayable, not automatic
+    p4 = only(NS._chain_sweep_plan(r4.cells))
+    @test p4.blocked !== nothing && occursin("positions", p4.blocked)
+
+    # …and the same chain under the ceiling composes.
+    _stub!(b4["ctl"], :span, RE.Slider(0:1:120))
+    p5 = only(NS._chain_sweep_plan(r4.cells))
+    @test p5.blocked === nothing && p5.control == "span"
+
+    # A substring macro check refused cells over names that merely START with a refused one, which reads
+    # as an unexplainable refusal with no way to find the cause.
+    okmac = RE.parse_report("#%% code id=z\nq = @tracepoint \"x\" 1 + 1\n")
+    @test NS._replay_chain_blocker(okmac.cells[1]) === nothing
+end
+
+# The chain path end to end, in-process: compose the cells between a control and a table, register the
+# result as a sweep, and let the ordinary sweep pack it. The only piece not exercised here is the gate
+# round trip, which carries the source string and nothing else.
+@testset "chain sweep: a composed closure sweeps like a written one, and retires" begin
+    RE = ReportEngine
+    r = RE.parse_report("""
+    #%% code id=data
+    ROWS = [(city = "oslo", n = 1), (city = "lima", n = 3), (city = "bergen", n = 2)]
+
+    #%% code id=ctl
+    @bind north Checkbox(true)
+
+    #%% code id=selection
+    picked = filter(o -> (o.n < 3) == north, ROWS)
+
+    #%% code id=tbl
+    slate_table(picked)
+    """)
+    RE.build_dependencies!(r)
+    RE.eval_stale!(r)
+
+    sweeps = Base.invokelatest(getproperty, r.mod, :__slate_replay_sweeps)
+    @test isempty(sweeps)                    # nothing in the notebook mentions the control and the table
+
+    byid = Dict(c.id => c for c in r.cells)
+    src = NS._chain_sweep_source([byid["selection"], byid["tbl"]], "north")
+    f = Core.eval(r.mod, Meta.parse(src))
+    register = Base.invokelatest(getproperty, r.mod, :__slate_replay_chain)
+    res = Base.invokelatest(register, [(; id = "tbl:north", name = :north, f = f, cell = "tbl")])
+    @test res["tbl:north"] == "ok"
+
+    # From here on it is an ordinary mark: the domain came from the control, not from the export.
+    got = Base.invokelatest(Base.invokelatest(getproperty, r.mod, :__slate_run_replays))
+    s = got["tbl:north"]
+    @test s["target"] == "table" && s["control"] == "north" && s["cell"] == "tbl"
+    @test s["domain"] == Any[false, true]
+    @test s["rows"] == Any[Any["lima", 3], Any["oslo", 1], Any["bergen", 2]]
+    A = reshape(reinterpret(Int16, Base64.base64decode(s["b64"])), 3, 2)
+    @test A[:, 1] == Int16[1, 0, 0]           # unchecked → the one row with n ≥ 3
+    @test A[:, 2] == Int16[2, 3, 0]           # checked   → the other two, in the chain's own order
+
+    # …and the sweep did not leave the notebook holding the last position's value.
+    @test length(Base.invokelatest(getproperty, r.mod, :picked)) == 2
+
+    # A composed sweep is RETIRED when a later pass stops asking for it — the graph is re-derived on
+    # every export, so a deleted table must stop being swept rather than billing the page forever.
+    @test Base.invokelatest(register, []) isa AbstractDict
+    @test isempty(Base.invokelatest(getproperty, r.mod, :__slate_replay_sweeps))
+
+    # Only entries this mechanism created are retired — an author's `@replay` is theirs, and a pass that
+    # found no chains must not silently strip the marks the notebook actually declares.
+    sweeps["mine:north"] = (; name = "north", f = (v -> [1.0]), wrap = identity,
+                              domain = Any[false, true], cell = "mine", kind = "checkbox")
+    Base.invokelatest(register, [])
+    @test haskey(Base.invokelatest(getproperty, r.mod, :__slate_replay_sweeps), "mine:north")
+end
+
 # Surfacing MOVES a control, it does not copy it. `controls=` on a figure's header puts the knob
 # beside the thing it drives, and the live page then renders NOTHING where that control was declared
 # — which is the whole point, since a lone copy above the definition is the layout the author was

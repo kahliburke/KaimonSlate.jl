@@ -29,6 +29,8 @@ export class El {
     this.listeners = {};
     this.text = '';
   }
+  get className() { return this.getAttribute('class') || ''; }
+  set className(v) { this.setAttribute('class', v); }
   getAttribute(n) { return Object.prototype.hasOwnProperty.call(this.attrs, n) ? this.attrs[n] : null; }
   setAttribute(n, v) { this.attrs[n] = String(v); }
   removeAttribute(n) { delete this.attrs[n]; }
@@ -74,6 +76,54 @@ export class El {
   set checked(b) { b ? this.setAttribute('checked', '') : this.removeAttribute('checked'); }
   get disabled() { return this.hasAttribute('disabled'); }
   set disabled(b) { b ? this.setAttribute('disabled', '') : this.removeAttribute('disabled'); }
+
+  // ── tree mutation ───────────────────────────────────────────────────────────────────────────
+  // Enough for the export's table enhancer, which builds its own filter/pager chrome and then moves
+  // rows in and out of the tbody on every render. A moved node is DETACHED from its old parent first,
+  // because the enhancer keeps its own list of every row and re-appends from it — a stub that let a
+  // node sit in two parents would render each row twice and call it a pass.
+  get parentNode() { return this.parentElement; }
+  _detach(child) {
+    const i = this.children.indexOf(child);
+    if (i >= 0) this.children.splice(i, 1);
+  }
+  appendChild(child) {
+    if (child.parentElement) child.parentElement._detach(child);
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }
+  insertBefore(child, ref) {
+    if (child.parentElement) child.parentElement._detach(child);
+    child.parentElement = this;
+    const i = ref ? this.children.indexOf(ref) : -1;
+    i < 0 ? this.children.push(child) : this.children.splice(i, 0, child);
+    return child;
+  }
+  remove() { if (this.parentElement) this.parentElement._detach(this); this.parentElement = null; }
+  get nextSibling() {
+    if (!this.parentElement) return null;
+    const s = this.parentElement.children;
+    return s[s.indexOf(this) + 1] || null;
+  }
+  // Only `innerHTML = ''` is supported — that is the one form the enhancer uses (clear, then re-append
+  // the visible rows). Anything else would need a parser here and would be a different function.
+  get innerHTML() { return ''; }
+  set innerHTML(v) {
+    if (String(v) !== '') throw new Error('minidom: innerHTML= only supports clearing ("")');
+    this.children.forEach(c => { c.parentElement = null; });
+    this.children = [];
+  }
+  closest(sel) {
+    for (let e = this; e && e.matches; e = e.parentElement) if (e.matches(sel)) return e;
+    return null;
+  }
+
+  // ── the table interface the enhancer reads ──────────────────────────────────────────────────
+  get tHead() { return this.children.find(c => c.tag === 'thead') || null; }
+  get tBodies() { return this.children.filter(c => c.tag === 'tbody'); }
+  get rows() { return this.children.filter(c => c.tag === 'tr'); }
+  get cells() { return this.children.filter(c => c.tag === 'td' || c.tag === 'th'); }
 
   // ── selectors ───────────────────────────────────────────────────────────────────────────────
   descendants(out = []) {
@@ -150,11 +200,16 @@ export function parse(html) {
   return root;
 }
 
-// A `document` with the two methods the replay code calls on it.
+// A `document` with the methods the replay code and the export's table enhancer call on it. `body` is
+// where a detached node ends up (the CSV download builds a link there); nothing reads it back.
 export function makeDocument(html) {
   const root = parse(html);
+  const body = new El('body');
+  root.appendChild(body);
   return {
     root,
+    body,
+    createElement: tag => new El(tag),
     querySelectorAll: sel => root.queryAll(sel),
     querySelector: sel => root.queryAll(sel)[0] || null,
   };

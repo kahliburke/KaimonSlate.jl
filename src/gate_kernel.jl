@@ -1565,6 +1565,18 @@ function memo_snapshot(k::GateKernel, cells::AbstractDict)
     return _tool(k, "__slate_memo_snapshot", Dict{String,Any}("cells" => cells); timeout = 120.0)
 end
 
+# Register sweeps composed from the cell graph — a table whose control is a hop or more upstream, so no
+# cell carries a mark for it. `sweeps` is a list of {id, control, cell, source}; returns id → "ok" or the
+# reason it could not be built. Must run BEFORE `replay_plan`/`run_replays`, which read the same registry.
+# See worker.jl `__slate_replay_chain`.
+# An EMPTY list is meaningful and is still sent: the pass retires composed sweeps it no longer asks for,
+# so a table that was deleted or given a mark of its own stops being swept. Skipping the call would leave
+# the notebook paying for it for the rest of the session.
+function register_chain_replays(k::GateKernel, sweeps::AbstractVector)
+    k.conn === nothing && return nothing
+    return _tool(k, "__slate_replay_chain", Dict{String,Any}("sweeps" => sweeps); timeout = 60.0)
+end
+
 # What the `@replay` marks in this notebook WOULD cost, without computing any of it: id → {control, cell,
 # values}. Cheap enough to call whenever an export dialog opens. See worker.jl `__slate_replay_plan`.
 function replay_plan(k::GateKernel)

@@ -454,7 +454,11 @@ function replay_stack(slices::AbstractVector)
     # cell. Doing it here would also degrade the LIVE figure, which has the real data to hand and no
     # reason to draw a reduced copy. `Int` (Int64) is the exception: the asset writer cannot pack it, so
     # it would silently fall through to JSON — widen it to Float64 rather than ship that.
-    E = T in (Float32, Float64, Int32, Int16, UInt8) ? T : Float64
+    # `Bool` is packable as one byte and nothing else: it is a per-element yes/no, so widening it to
+    # Float64 would carry eight bytes to say what one says. `Bool <: Real` passes the check above, and
+    # `Bool` is not in the packable list, so without this clause a boolean slice fell through to Float64.
+    E = T === Bool ? UInt8 :
+        T in (Float32, Float64, Int32, Int16, UInt8) ? T : Float64
     out = Array{E}(undef, shp..., length(slices))
     for (i, s) in enumerate(slices)
         selectdim(out, ndims(out), i) .= s

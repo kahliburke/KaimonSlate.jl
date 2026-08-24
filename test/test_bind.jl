@@ -4,6 +4,7 @@
 # `@bind` is real Julia: widgets are constructors, `@bind name W(…)` runs as code
 # (so dynamic args work), and the control is reported back through eval — not parsed.
 using ReTest
+import Base64                            # decode a swept table's packed row order
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl")); using .ReportEngine
 const RE = ReportEngine
@@ -544,6 +545,67 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         # The expression therefore computes the same thing at both ends.
         @test Base.invokelatest(s.f, Base.invokelatest(s.wrap, "b")) == [1.0]
         @test Base.invokelatest(s.f, Base.invokelatest(s.wrap, "a")) == [0.0]
+    end
+
+    # A TABLE is replayable too, and it is not an array of numbers: the mark rides on the table's own
+    # spec (a `ReplayArray` could neither hold a `SlateTable` nor be handed on to the things that
+    # consume one), and the sweep packs to the UNION of the rows plus a per-position order over it.
+    @testset "@replay on a table marks the table and sweeps to a union + row order" begin
+        r = parse_report("""
+        #%% code id=ctl
+        @bind region Select(["north", "south"])
+        #%% code id=tbl
+        t = @replay(region, slate_table(["city", "n"],
+            region == "north" ? [["oslo", 1], ["bergen", 2]] : [["lima", 3]]))
+        """)
+        build_dependencies!(r)
+        eval_stale!(r)
+
+        # LIVE, the cell's value is the ordinary table for the position the control is on — with the
+        # mark added, which is the only thing the export needs and the only thing that changed.
+        t = Base.invokelatest(getproperty, r.mod, :t)
+        @test length(Base.invokelatest(getproperty, t, :rows)) == 2
+        mk = Base.invokelatest(getproperty, t, :opts)["__replay"]
+        @test mk["id"] == "tbl:region" && mk["control"] == "region" && mk["index"] == 0
+
+        # `invokelatest` twice: once to read the binding, once to CALL it — the sweep closures were
+        # defined by the eval above and are newer than this test's world age.
+        got = Base.invokelatest(Base.invokelatest(getproperty, r.mod, :__slate_run_replays))
+        s = got["tbl:region"]
+        @test s["target"] == "table"                 # the page drives a table, not a chart series
+        @test s["rows"] == Any[Any["oslo", 1], Any["bergen", 2], Any["lima", 3]]   # first-seen order
+        @test s["dtype"] == "i16" && s["shape"] == [3, 2]
+        A = reshape(reinterpret(Int16, Base64.base64decode(s["b64"])), 3, 2)
+        @test A[:, 1] == Int16[1, 2, 0]              # north: its two rows, then padding
+        @test A[:, 2] == Int16[3, 0, 0]              # south: the one row only its position has
+
+        # An estimate the export dialog can show without sweeping the whole domain: one position's rows
+        # at two bytes each. A floor, and labelled a table so the dialog can say what it is.
+        p = Base.invokelatest(Base.invokelatest(getproperty, r.mod, :__slate_replay_plan))["tbl:region"]
+        @test p["target"] == "table" && p["bytes_per_value"] == 4 && p["slice"] == [2]
+    end
+
+    # One mark's failure used to cost the whole export. `_replay_sweep_assets` catches what escapes the
+    # sweep and ships the page with EVERY control frozen — so a single expression that dislikes a single
+    # position of a single control disabled every figure on the page, with one warning to explain it.
+    @testset "a failing sweep costs its own control, not the whole export" begin
+        good = (; name = "a", f = (v -> [Float64(v)]), wrap = identity, domain = Any[1, 2],
+                  cell = "c1", kind = "slider")
+        bad = (; name = "b", f = (v -> error("no")), wrap = identity, domain = Any[1, 2],
+                 cell = "c2", kind = "slider")
+        got = RE._run_replay_sweeps(Dict{String,Any}("c1:a" => good, "c2:b" => bad))
+        @test haskey(got["c1:a"], "b64")                # the working mark still ships
+        @test !haskey(got["c2:b"], "b64")               # …the failing one ships nothing
+        @test occursin("no", got["c2:b"]["error"])      # …and says why, rather than vanishing
+    end
+
+    # `replay_stack` packs whatever a marked expression returns. A boolean array is numeric and stacks
+    # fine, but `Bool` is not a dtype the asset writer can pack, so it used to widen to Float64 —
+    # eight bytes to carry a yes/no.
+    @testset "a boolean slice packs as one byte, not eight" begin
+        A = RE.replay_stack([[true, false], [false, true]])
+        @test eltype(A) === UInt8
+        @test A == UInt8[1 0; 0 1]
     end
 
 end

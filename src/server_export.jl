@@ -192,18 +192,251 @@ _inline_ext_asset_urls(nb::LiveNotebook, js::AbstractString; compress::Bool = fa
                       Base64.base64encode(bytes))
     end)
 
+# ── A table a hop or more from its control: the chain sweep ──────────────────────────────────────────
+# `@replay` marks ONE EXPRESSION that reads a control, and re-evaluates that closure per position. A
+# table is usually further away than that:
+#
+#   #%% selection        selected = filter(o -> band.lo ≤ o.revenue ≤ band.hi, orders_in(region))
+#   #%% table_filtered   slate_table(selected)
+#
+# `table_filtered.reads` is `{selected}` — it never mentions `region`, so there is no expression to mark,
+# and telling an author to restructure their notebook to get an export feature is the wrong trade. The
+# cells in between are already in the graph. Compose their sources into one closure and the existing
+# sweep runs it unchanged.
+#
+# The composition is a `let`, which is what makes this safe rather than clever: every name the chain
+# ASSIGNS (`selected`) becomes a local, so evaluating a hundred positions cannot leave the notebook's
+# globals holding the last one. No export-time execution mode, nothing to save and restore, and the cost
+# dialog prices it like any other mark.
+#
+# Everything here is a REFUSAL until proven otherwise. A composed closure is riskier than a written one,
+# and the failure mode to avoid is a page that looks interactive and is quietly wrong — so each blocker
+# below stops the sweep and says which cell and why, rather than emitting something that might work.
+
+# Cells reachable upstream of `id` through `deps` (exclusive of `id` itself).
+function _replay_chain_upstream(byid, id::AbstractString)
+    out = Set{String}()
+    stack = String[id]
+    while !isempty(stack)
+        c = get(byid, pop!(stack), nothing)
+        c === nothing && continue
+        for d in c.deps
+            d in out && continue
+            push!(out, d); push!(stack, d)
+        end
+    end
+    return out
+end
+
+# The cells that re-run when `name` changes: those that read it, plus everything downstream of those.
+# This is the reactive cone, so it is the same set the live notebook recomputes — which is the point,
+# since the chain has to reproduce what moving the control actually does.
+function _replay_chain_cone(cells, name::Symbol)
+    out = Set{String}(c.id for c in cells if name in c.reads)
+    changed = true
+    while changed
+        changed = false
+        for c in cells
+            c.id in out && continue
+            any(d -> d in out, c.deps) || continue
+            push!(out, c.id); changed = true
+        end
+    end
+    return out
+end
+
+# Why this cell cannot be a link in a composed chain, or `nothing` if it can.
+#
+# The first two are about SIDE EFFECTS: `_cell_effect` already classifies a cell that opens a handle,
+# reads the clock, or primes process state, and none of those should run once per position of a slider.
+# The rest are about the `let`: a top-level `using`, a `const`, or a macro that rewrites the cell (or
+# declares a control) is not something a local scope accepts, and emitting it anyway would throw at
+# export time with a synthesized-source backtrace nobody can act on.
+const _CHAIN_REFUSED_MACROS = ("@bind", "@replay", "@onclick", "@trace", "@md", "@web", "@tool")
+
+# How many positions a COMPOSED sweep will run without being asked. An author who writes `@replay` has
+# stated they want the sweep and the export dialog prices it; a chain sweep is inferred, so it has to
+# decline the ones nobody chose. 512 covers every categorical control, a several-hundred-stop slider and
+# a `TableSelect`, and excludes the combinatorial domains — a `RangeSlider`'s ordered pairs, a
+# `MultiSelect`'s power set — where the chain would be evaluated thousands of times to save a `filter`.
+# Past this the answer is to mark the expression by hand, which is a decision with a visible cost.
+const _CHAIN_MAX_POSITIONS = 512
+
+function _replay_chain_blocker(c)
+    c.kind == ReportEngine.CODE || return "is not a code cell"
+    eff = ReportEngine._cell_effect(c)
+    eff == ReportEngine.PURE || return string("is ", lowercase(string(eff)), " — it would run once per position")
+    # The SOURCE decides this, not `provides`: an UNRESOLVED `using` (a package this process has not
+    # loaded) is marked `:opaque` and leaves `provides` empty, so a `provides`-only check waves through
+    # exactly the cell most likely to break — and what a `let` will accept is a syntactic question anyway.
+    occursin(r"^\s*(using|import)\s"m, c.source) &&
+        return "brings names in with `using`/`import`, which a `let` cannot hold"
+    :opaque in c.flags && return "is opaque — the graph cannot say what it reads"
+    occursin(r"^\s*const\s"m, c.source) && return "declares a `const`, which a `let` cannot hold"
+    occursin(r"^\s*global\s"m, c.source) && return "declares a `global`, which would escape the sweep"
+    for mac in _CHAIN_REFUSED_MACROS
+        # Word-boundary, so `@md` does not refuse a cell over `@mdoc` and `@tool` does not refuse
+        # `@toolbar`. A substring match here reads as a mysterious refusal with no way to find the cause.
+        occursin(Regex(mac * "\\b"), c.source) &&
+            return string("uses `", mac, "`, which does not compose into a `let`")
+    end
+    return nothing
+end
+
+# The synthesized closure, as source. One expression: the control's name is the PARAMETER, so the chain's
+# own references to it resolve to the swept value and shadow the notebook global for the duration —
+# exactly what `@replay`'s macro does for a hand-written mark.
+function _chain_sweep_source(chain, control::AbstractString)
+    io = IOBuffer()
+    print(io, control, " -> let\n")
+    for c in chain
+        print(io, c.source, "\n")
+    end
+    print(io, "end")
+    return String(take!(io))
+end
+
+# Is this table spec a candidate — an eager table with no mark of its own?
+_replay_chain_candidate(spec) =
+    spec isa AbstractDict && haskey(spec, "rows") && get(spec, "paged", false) !== true &&
+    _table_replay_mark(spec) === nothing
+
+# The chain sweeps this notebook admits: one per (cell, table) that has a replayable control upstream and
+# a clean chain to it. Returns a list of `(; key, id, control, cell, source, held, blocked)` — `key` is
+# how the writer finds the mark for a given table spec, and `held`/`blocked` are what the export says
+# about the controls it did NOT sweep.
+#
+# ONE control per table, never a cross-product: two controls with 5 and 4 753 positions is 23 765 sweeps
+# of the same chain, which is not a trade anyone would choose if asked.
+#
+# The others are HELD, which is a third state and not the same as frozen. A frozen control is DISABLED —
+# nothing shipped for it, so it says so by not moving. A held one is enabled and working: it drives
+# whatever else on the page has its own data, while the value it had AT EXPORT is baked into this table's
+# shipped rows. So the band slider still moves the band figure and does not move the table, which is a
+# true statement about precomputed data rather than a broken control.
+function _chain_sweep_plan(cells)
+    byid = Dict(c.id => c for c in cells)
+    order = Dict(c.id => i for (i, c) in enumerate(cells))
+    # control name → (declaring cell id, its domain length)
+    ctls = Dict{Symbol,Tuple{String,Int}}()
+    for c in cells, b in c.binds
+        dom = try
+            ReportEngine.bind_domain(ReportEngine.Widget(b.widget, b.params, b.value))
+        catch
+            nothing
+        end
+        dom === nothing && continue
+        ctls[b.name] = (c.id, length(dom))
+    end
+    isempty(ctls) && return NamedTuple[]
+    cones = Dict(v => _replay_chain_cone(cells, v) for v in keys(ctls))
+
+    out = NamedTuple[]
+    for c in cells
+        c.kind == ReportEngine.CODE || continue
+        specs = _table_specs(c)
+        isempty(specs) && continue
+        up = _replay_chain_upstream(byid, c.id)
+        # Controls whose cone reaches this cell, cheapest domain first.
+        reach = sort!([v for v in keys(ctls) if c.id in cones[v]]; by = v -> (ctls[v][2], String(v)))
+        isempty(reach) && continue
+        # An author who surfaced a control ON this cell has said which knob belongs to it — a stronger
+        # signal than a domain size, and the reason `table_filtered` picks `region` over `band`.
+        surfaced = Set{String}(n for col in c.controls for n in col)
+        pick = isempty(surfaced) ? reach : (let s = [v for v in reach if String(v) in surfaced]
+                                               isempty(s) ? reach : s
+                                           end)
+        v = first(pick)
+        chain = sort!(Cell[byid[i] for i in intersect(up, cones[v]) if haskey(byid, i)];
+                      by = x -> order[x.id])
+        push!(chain, c)
+        # Every link, INCLUDING the table's own cell — it is the closure's body, so a `@bind` or an
+        # `@replay` sitting beside the table would be re-run once per position just the same.
+        blocked = nothing
+        for lk in chain
+            b = _replay_chain_blocker(lk)
+            b === nothing && continue
+            blocked = string("`", lk.id, "` ", b)
+            break
+        end
+        if blocked === nothing && ctls[v][2] > _CHAIN_MAX_POSITIONS
+            blocked = string("`", v, "` has ", ctls[v][2], " positions, past the ",
+                             _CHAIN_MAX_POSITIONS, " a composed sweep will run unasked — mark the ",
+                             "expression with `@replay` to ask for it")
+        end
+        held = String[String(x) for x in reach if x != v]
+        for (si, spec) in enumerate(specs)
+            _replay_chain_candidate(spec) || continue
+            push!(out, (; key = string(c.id, "#", si), id = string(c.id, ":", v),
+                        control = String(v), cell = c.id,
+                        source = _chain_sweep_source(chain, String(v)),
+                        held = held, blocked = blocked))
+        end
+    end
+    return out
+end
+
+# Register them in the worker, and hand back the marks the writer attaches to each table spec. Called on
+# both export paths that read the sweep registry — the cost dialog and the export itself — so what the
+# dialog priced is what the page ships.
+function _register_chain_sweeps!(nb::LiveNotebook)
+    marks = Dict{String,Any}()
+    nb.kernel isa ReportEngine.GateKernel || return marks
+    plan = try
+        _chain_sweep_plan(nb.report.cells)
+    catch e
+        @warn "@replay: could not analyse the cell graph for table chains" exception = (e, catch_backtrace())
+        return marks
+    end
+    # A refusal is reported once, here, with the cell and the reason — the whole point of the blocker
+    # list is that an author can act on it, which they cannot do if it never leaves this function.
+    for p in plan
+        p.blocked === nothing && continue
+        @info "@replay: `$(p.cell)`'s table cannot follow `$(p.control)` offline — $(p.blocked)"
+    end
+    ok = [p for p in plan if p.blocked === nothing]
+    # Sent even when EMPTY: the call is also what retires composed sweeps from an earlier shape of the
+    # notebook, so returning early here would leave a deleted table's sweep running for the session.
+    res = try
+        ReportEngine.register_chain_replays(nb.kernel,
+            Any[Dict{String,Any}("id" => p.id, "control" => p.control, "cell" => p.cell,
+                                 "source" => p.source) for p in ok])
+    catch e
+        @warn "@replay: registering composed table sweeps failed" exception = (e, catch_backtrace())
+        nothing
+    end
+    res isa AbstractDict || return marks
+    for p in ok
+        st = String(get(res, p.id, ""))
+        if st != "ok"
+            @warn "@replay: `$(p.cell)`'s table could not be composed into a sweep" control = p.control reason = st
+            continue
+        end
+        isempty(p.held) ||
+            @info "@replay: `$(p.cell)`'s table follows `$(p.control)`; $(join(p.held, ", ")) held at the value this export was taken on"
+        marks[p.key] = Dict{String,Any}("id" => p.id, "control" => p.control, "index" => -1)
+    end
+    return marks
+end
+
 # ── `@replay` sweeps at export time ──────────────────────────────────────────────────────────────────
 # `@replay` is a pass-through while a notebook is being edited: it computes the control's current value
 # and registers the closure, nothing more. THIS is where the marked expressions are actually evaluated
 # across their domains — once, when an artifact is being built, so authoring never pays for it and the
 # whole cost is attributable to the export that asked for it.
 #
-# Returns (assets, table): `assets` are `(spec, bytes)` pairs in the same shape `_page_save_assets`
+# Returns (assets, table, rows): `assets` are `(spec, bytes)` pairs in the same shape `_page_save_assets`
 # produces, so they flow through the existing narrow/compress/inline path unchanged; `table` is what the
 # page resolves a figure's route id against. Empty for an in-process kernel or a notebook with no marks —
 # a sweep is never a precondition for exporting.
+#
+# `rows` is the union a replayed TABLE ships, mark id → rows, held apart from `table` on purpose: `table`
+# is JSON'd into `window.__slateReplays`, and putting the rows there would carry every one of them twice
+# — once as data, once as the table body the reader actually sees. The writer substitutes them into the
+# table spec instead (`_replay_base_spec`).
 function _replay_sweep_assets(nb::LiveNotebook; stride::Integer = 1, strides = nothing)
-    nb.kernel isa ReportEngine.GateKernel || return (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}())
+    nb.kernel isa ReportEngine.GateKernel ||
+        return (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}(), Dict{String,Any}())
     # A sweep that fails must not take the whole export down — the page is still worth having with its
     # controls frozen. But it must not vanish either: swallowing this silently produces an export that
     # looks complete and has every control disabled, with nothing anywhere saying why.
@@ -213,10 +446,12 @@ function _replay_sweep_assets(nb::LiveNotebook; stride::Integer = 1, strides = n
         @warn "@replay sweeps failed — exporting with controls frozen" exception = (e, catch_backtrace())
         nothing
     end
-    (got isa AbstractDict) || return (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}())
+    (got isa AbstractDict) ||
+        return (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}(), Dict{String,Any}())
     _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
     assets = Tuple{Dict{String,Any},Vector{UInt8}}[]
     table = Dict{String,Any}()
+    rows = Dict{String,Any}()
     for (id, r) in got
         r isa AbstractDict || continue
         b64 = String(_g(r, "b64", "")); isempty(b64) && continue
@@ -236,8 +471,14 @@ function _replay_sweep_assets(nb::LiveNotebook; stride::Integer = 1, strides = n
             "domain" => _g(r, "domain", Any[]), "slice" => collect(Int, _g(r, "slice", Int[])),
             # Carried for the export summary: what this mark cost to compute and what it adds to the file.
             "bytes" => Int(_g(r, "bytes", 0)), "seconds" => Float64(_g(r, "seconds", 0.0)))
+        # A table mark: the shipped slice is an ORDER over the union rows, and the page has to be told
+        # that much so it drives a table rather than looking for a chart series.
+        if String(_g(r, "target", "")) == "table"
+            table[String(id)]["target"] = "table"
+            rows[String(id)] = _g(r, "rows", Any[])
+        end
     end
-    return (assets, table)
+    return (assets, table, rows)
 end
 
 # ── `@bind` controls in a static export ──────────────────────────────────────────────────────────────
@@ -1362,7 +1603,7 @@ function enh(table){
   var thead=table.tHead,tb=table.tBodies[0];if(!thead||!tb)return;
   var ths=[].slice.call(thead.rows[0].cells),allRows=[].slice.call(tb.rows);
   var wrap=table.closest('.exp-tblwrap')||table.parentNode;
-  var st={sort:-1,dir:1,filter:'',page:0,pageSize:allRows.length>25?25:0};
+  var st={sort:-1,dir:1,filter:'',page:0,order:null,pageSize:allRows.length>25?25:0};
   var bar=document.createElement('div');bar.className='exp-tbl-bar';
   var fi=document.createElement('input');fi.type='text';fi.placeholder='filter…';fi.className='exp-tbl-filter';
   var info=document.createElement('span');info.className='exp-tbl-info';
@@ -1373,8 +1614,13 @@ function enh(table){
   ths.forEach(function(th){th.setAttribute('data-label',th.textContent);});
   function val(tr,ci){var td=tr.cells[ci];if(!td)return '';var dv=td.getAttribute('data-v');return dv!==null?parseFloat(dv):td.textContent;}
   function cmp(a,b){if(typeof a==='number'&&typeof b==='number')return a-b;return String(a).localeCompare(String(b),undefined,{numeric:true});}
+  /* `st.order` is the `@replay` hook: 1-based indices into the rows the page was written with, `0` for
+     "no row", naming which of them the control's current position shows and in what order. Every row is
+     already here, so a position is a re-selection of what the DOM holds — no fetch, no kernel. Null
+     until (and unless) a sweep for this table shipped, which is why an unreplayed table is unchanged. */
   function view(){var f=st.filter.trim().toLowerCase();
-    var rows=allRows.filter(function(tr){return !f||[].some.call(tr.cells,function(td){return td.textContent.toLowerCase().indexOf(f)>=0;});});
+    var rows=st.order?st.order.reduce(function(a,j){if(j>0&&allRows[j-1])a.push(allRows[j-1]);return a;},[]):allRows;
+    rows=rows.filter(function(tr){return !f||[].some.call(tr.cells,function(td){return td.textContent.toLowerCase().indexOf(f)>=0;});});
     if(st.sort>=0)rows=rows.slice().sort(function(x,y){return cmp(val(x,st.sort),val(y,st.sort))*st.dir;});
     return rows;}
   function render(){var rows=view(),total=rows.length,ps=st.pageSize||total,pages=Math.max(1,Math.ceil(total/ps));
@@ -1398,9 +1644,30 @@ function enh(table){
     view().forEach(function(tr){lines.push([].map.call(tr.cells,function(td){return esc(td.textContent);}).join(','));});
     var blob=new Blob([lines.join('\n')],{type:'text/csv'}),u=URL.createObjectURL(blob),a=document.createElement('a');
     a.href=u;a.download='table.csv';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(u);});
+  /* A replayed table publishes the ONE thing its control needs: set the row order and redraw. Keyed by
+     the mark id, which is what `Slate.replay.wire` has in hand. `st` is closed over, so the reader's
+     filter, sort and page survive a move of the control — the position changes which rows exist, not
+     what the reader was looking at. Page reset because the new position may be shorter. */
+  var rid=table.getAttribute('data-replay');
+  if(rid)(window.__slateTableReplay=window.__slateTableReplay||{})[rid]=
+    function(order){st.order=order;st.page=0;render();};
   render();
 }
 [].forEach.call(document.querySelectorAll('table.exp-table'),enh);
+})();"""
+
+# The one `@replay` step that is TABLE-specific — the mirror of `_slateWireReplay` for a chart: hand the
+# shipped order to the enhancer that registered itself above. Everything else (finding the control's
+# hosts, reading its position, resolving that against the domain, mirroring the other copies, enabling
+# what has data) is `Slate.replay.wire`'s, and is shared with every figure on the page.
+#
+# Emitted after `_EXPORT_TABLE_JS`, which must have run for the registry to exist; `_slateTableMarks` is
+# written by the export immediately before it.
+const _EXPORT_TABLE_REPLAY_JS = raw"""(function(){
+if(!window.Slate||!Slate.replay||!window._slateTableMarks||!_slateTableMarks.length)return;
+Slate.replay.wire(_slateTableMarks,function(order,m){
+var set=(window.__slateTableReplay||{})[m.id];
+if(set)set(order);});
 })();"""
 
 # Inline background for an in-cell `:bar`/`:heat` column, scaled over the column's numeric domain
@@ -1432,12 +1699,85 @@ _col_numeric(c) = c isa AbstractDict && (t = string(get(c, "type", "")); t == "i
 _capped_rows(rows, opts) =
     (cap = get(opts, "export_rows", nothing); (cap !== nothing && length(rows) > cap) ? view(rows, 1:cap) : rows)
 
+# The `@replay` mark a table carries (`_mark_table_replay!` put it in `opts`), or `nothing`.
+_table_replay_mark(spec) =
+    (o = get(spec, "opts", nothing); o isa AbstractDict ? get(o, "__replay", nothing) : nothing)
+
+# A table whose control is upstream rather than in its own expression has no mark from the worker — the
+# connection was found in the graph at export time (`_chain_sweep_plan`), so the mark is attached here.
+# Identical in shape to one `@replay` wrote, so nothing downstream can tell the two apart.
+function _chain_marked(spec, marks::AbstractDict, cellid::AbstractString, si::Integer)
+    isempty(marks) && return spec
+    mk = get(marks, string(cellid, "#", si), nothing)
+    (mk === nothing || _table_replay_mark(spec) !== nothing) && return spec
+    out = copy(spec)
+    o = copy(get(spec, "opts", Dict{String,Any}()))
+    o["__replay"] = mk
+    out["opts"] = o
+    return out
+end
+
+# Strip a mark whose sweep did not resolve. The table then writes as the ordinary static one it would
+# have been — the position the author left it on — instead of carrying a `data-replay` attribute and a
+# registered row-order setter that nothing will ever call.
+function _unmarked_spec(spec)
+    out = copy(spec)
+    o = copy(get(spec, "opts", Dict{String,Any}()))
+    delete!(o, "__replay")
+    out["opts"] = o
+    return out
+end
+
+# A replayed table's body is the UNION of the rows across the control's positions, not the rows of the
+# position the author happened to leave it on — the shipped order indexes that union. Swapped in here,
+# after the sweep has run and before the table is written.
+#
+# The columns stay the LIVE ones: they carry the author's `format=`/`align=`/`viz=` overlays, and every
+# position went through the same `slate_table` call, so they agree. Their `:bar`/`:heat` domains do not —
+# those were fitted to one position, and the bars are drawn server-side against the union — so widen
+# them, or a row from another position draws off the end of its own scale.
+function _replay_base_spec(spec, rows::AbstractDict)
+    mk = _table_replay_mark(spec)
+    mk isa AbstractDict || return spec
+    base = get(rows, String(get(mk, "id", "")), nothing)
+    (base isa AbstractVector && !isempty(base)) || return spec
+    out = copy(spec)
+    out["rows"] = base
+    out["columns"] = Any[_widen_viz_domain(c, base, ci) for (ci, c) in enumerate(get(spec, "columns", Any[]))]
+    # `nrows` drove the "showing N of M" note against the live position's count; the body is the union now.
+    o = copy(get(spec, "opts", Dict{String,Any}()))
+    o["nrows"] = length(base)
+    # `export_rows` caps the rows a FIXED export writes, which is the wrong instrument here: the shipped
+    # order indexes the union by position, so truncating the body leaves indices pointing past the end of
+    # the table and the control drops rows at random. A replayed table is client-paged anyway — the reader
+    # sees a page at a time whatever its length — so the cap has nothing left to buy.
+    delete!(o, "export_rows")
+    out["opts"] = o
+    return out
+end
+
+function _widen_viz_domain(c, rows, ci)
+    (c isa AbstractDict && haskey(c, "viz") && haskey(c, "domain")) || return c
+    lo = hi = nothing
+    for r in rows
+        v = (r isa AbstractVector && ci <= length(r)) ? r[ci] : nothing
+        (v isa Real && !(v isa Bool)) || continue
+        lo = lo === nothing ? Float64(v) : min(lo, Float64(v))
+        hi = hi === nothing ? Float64(v) : max(hi, Float64(v))
+    end
+    lo === nothing && return c
+    d = copy(c); d["domain"] = Any[lo, hi]; return d
+end
+
 function _export_table_html(spec)
     cols = get(spec, "columns", Any[])
     rows = get(spec, "rows", Any[])
     opts = get(spec, "opts", Dict{String,Any}())
+    mk = _table_replay_mark(spec)
+    # The id the page registers this table's row-order setter under, so `Slate.replay.wire` can find it.
+    rattr = mk isa AbstractDict ? string(" data-replay=\"", _esc(String(get(mk, "id", ""))), "\"") : ""
     io = IOBuffer()
-    print(io, "<div class=\"exp-tblwrap\"><table class=\"exp-table\"><thead><tr>")
+    print(io, "<div class=\"exp-tblwrap\"><table class=\"exp-table\"", rattr, "><thead><tr>")
     for c in cols
         print(io, "<th class=\"", _col_numeric(c) ? "num " : "", "align-", _col_align(c), "\">", _esc(_col_name(c)), "</th>")
     end
@@ -2012,8 +2352,15 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # when it runs during body parse — otherwise the widget dies on "Slate is not defined".
         # `@replay` marks are evaluated across their domains HERE and nowhere else. Their packed arrays
         # join the ordinary asset stream, so they narrow/compress/inline exactly like any other data.
-        replay_assets, replay_table = _replay_sweep_assets(nb; stride = replay_stride,
-                                                           strides = replay_strides)
+        # A table whose control is a hop or more upstream carries no mark of its own; the graph is where
+        # that connection lives, so it is composed into a sweep HERE, before the registry is read. Keyed
+        # `<cell>#<n>` — the writer looks each table spec up as it emits it.
+        chain_marks = _register_chain_sweeps!(nb)
+        replay_assets, replay_table, replay_rows = _replay_sweep_assets(nb; stride = replay_stride,
+                                                                       strides = replay_strides)
+        # Table marks, collected as the body is written: a replayed table needs its own one-line wiring
+        # (see `_EXPORT_TABLE_REPLAY_JS`) and the enhancer that receives it only exists at the end.
+        tablemarks = Dict{String,Any}[]
         _asset_head = let sa = vcat(_page_save_assets(nb), replay_assets), wm = _web_asset_modules(nb),
                           has_web = any(c -> occursin("@web", c.source) || occursin("Slate.runFragment", c.source), nb.report.cells)
             if !(has_web || !isempty(sa) || !isempty(wm))
@@ -2180,8 +2527,24 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                         print(io, "<div class=\"exp-chart\" id=\"", did, "\" style=\"width:100%;height:", _chart_css_height(spec), "\"></div>")
                         push!(charts, (did, JSON.json(spec)))
                     end
-                    for spec in _table_specs(c)
-                        print(io, _export_table_html(spec))
+                    for (si, spec) in enumerate(_table_specs(c))
+                        # A replayed table — marked in its own cell, or composed from the graph — is
+                        # written with the UNION of its control's positions as its body, and the shipped
+                        # order picks one of them. A mark whose sweep did NOT resolve is stripped rather
+                        # than emitted: the table degrades to the ordinary static one, instead of
+                        # carrying an attribute and a registration nothing will ever drive.
+                        sub = _chain_marked(spec, chain_marks, c.id, si)
+                        mk = _table_replay_mark(sub)
+                        if mk isa AbstractDict
+                            if haskey(replay_table, String(get(mk, "id", "")))
+                                push!(tablemarks, Dict{String,Any}("id" => String(mk["id"]),
+                                                                   "control" => String(get(mk, "control", ""))))
+                                sub = _replay_base_spec(sub, replay_rows)
+                            else
+                                sub = _unmarked_spec(sub)
+                            end
+                        end
+                        print(io, _export_table_html(sub))
                     end
                 end
                 print(io, "</section>")
@@ -2242,6 +2605,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # ride here at the end (they run against the finished DOM).
         print(io, "<script>")
         print(io, _EXPORT_TABLE_JS)   # hydrate every `.exp-table` → sortable/filterable/paged + CSV (no server)
+        # …then let a `@replay`-marked table follow its control, using the hook each enhancer just
+        # registered. Nothing is emitted for a notebook with no replayed table.
+        isempty(tablemarks) || print(io, "var _slateTableMarks=", JSON.json(tablemarks), ";",
+                                     _EXPORT_TABLE_REPLAY_JS)
         # Author-embedded video/audio → blob: URLs (the bytes were hoisted out of the body above).
         isempty(mediareg) || print(io, "window.__slateMedia={",
             join((string(JSON.json(k), ":{\"mime\":", JSON.json(mime), ",\"b64\":", JSON.json(b64), "}")

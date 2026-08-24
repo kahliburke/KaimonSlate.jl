@@ -46,18 +46,32 @@ export function unescapeJuliaString(s) {
   return out;
 }
 
+// The body of a `const NAME = raw"""…"""` in a Julia source. `raw` means Julia does NOT process the
+// escapes, so unlike the `Slate.replay` mirror this text IS what the browser receives.
+export function rawJuliaConst(src, name) {
+  const m = new RegExp('const\\s+' + name + '\\s*=\\s*raw"""([\\s\\S]*?)"""').exec(src);
+  if (!m) { console.error(`no raw"""…""" constant named ${name}`); process.exit(2); }
+  return m[1];
+}
+
 // Both copies refer to themselves — core.js as `window.Slate.replay`, the export mirror as
 // `Slate.replay`. Binding one object under both names lets either style resolve unchanged, so
 // neither is edited to be testable. `doc` becomes the copy's `document`.
-export function instantiate(objText, label, doc = undefined) {
+//
+// `env.window` / `env.slate` let a caller supply the REST of the page: `wire()` reaches for
+// `window.__slateReplays` and `Slate.asset`, so a test that drives a whole route rather than one
+// matching function has to hand those in. The window object is used as given, not copied, so a script
+// run outside this sandbox (the table enhancer) and the copy inside it see the same globals.
+export function instantiate(objText, label, doc = undefined, env = {}) {
   try {
-    return new Function('document', `
+    return new Function('document', 'env', `
       "use strict";
-      const Slate = { isLive: function () { return false; } };
-      const window = { Slate: Slate };
+      const Slate = Object.assign({ isLive: function () { return false; } }, env.slate || {});
+      const window = env.window || {};
+      window.Slate = Slate;
       Slate.replay = ${objText};
       return Slate.replay;
-    `)(doc);
+    `)(doc, env);
   } catch (e) {
     console.error(`${label} does not parse as JavaScript — ${e.message}`);
     if (/input\[type="checkbox"\]/.test(objText))
@@ -66,15 +80,16 @@ export function instantiate(objText, label, doc = undefined) {
   }
 }
 
-// Both implementations, ready to run. `doc` is the `document` each should see.
-export function loadReplayCopies(doc = undefined) {
+// Both implementations, ready to run. `doc` is the `document` each should see; `env` the rest of the
+// page (see `instantiate`). Each copy gets its OWN env, or the two would share one `window`.
+export function loadReplayCopies(doc = undefined, env = () => ({})) {
   const core = readFileSync(join(ROOT, 'src', 'assets', 'js', 'core.js'), 'utf8');
   const exp = readFileSync(join(ROOT, 'src', 'server_export.jl'), 'utf8');
   return {
     live: instantiate(objectLiteralAfter(core, 'window.Slate.replay =', 'core.js copy'),
-                      'core.js copy', doc),
+                      'core.js copy', doc, env('live')),
     stat: instantiate(unescapeJuliaString(objectLiteralAfter(exp, 'Slate.replay={',
                                                              'server_export.jl mirror')),
-                      'server_export.jl mirror (after Julia string escapes)', doc),
+                      'server_export.jl mirror (after Julia string escapes)', doc, env('stat')),
   };
 }

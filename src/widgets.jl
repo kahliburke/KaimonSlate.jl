@@ -858,7 +858,138 @@ function _do_replay(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
         @warn "@replay: `$(name)` is currently $(cur), which is not in its control's domain — the live " *
               "value is correct, but an export would have no data for this position" domain = dom
     end
-    return ReplayArray(collect(f(wrap(cur))), id, String(name), i === nothing ? 0 : i, dom_any)
+    pos = i === nothing ? 0 : i
+    val = f(wrap(cur))
+    # A TABLE is replayable too, and it is not an array of numbers — so it carries its mark in its own
+    # spec rather than in a `ReplayArray`, which could neither hold it nor be handed on to the things
+    # that consume a `SlateTable`. What actually ships for it is decided in `_table_replay_pack`.
+    val isa SlateTable && return _mark_table_replay!(val, id, String(name), pos)
+    nameof(typeof(val)) === :SlatePagedTable && error(
+        "@replay: `" * String(name) * "` drives a server-paged table (`slate_table(…; paged=true)`), " *
+        "whose rows are fetched from the kernel one page at a time — there is nothing to ship. Build " *
+        "an eager table over the rows this control selects instead.")
+    return ReplayArray(collect(val), id, String(name), pos, dom_any)
+end
+
+# Register a sweep whose closure the EXPORT synthesized rather than an author writing it — the cells
+# between a control and a table, composed into one `let` (see `_chain_sweep_source`). `@replay` marks one
+# expression that reads a control; a table is usually further away than that, and the graph already knows
+# what sits in between.
+#
+# Everything after this point is shared with `@replay`, deliberately: the domain comes from the CONTROL
+# (never restated), the wrap from its kind, and the entry lands in the same dict — so the plan, the cost
+# dialog, striding and the sweep itself treat a composed closure exactly like a written one.
+function _register_chain_replay(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
+                                sweeps::Dict{String,Any}, id::AbstractString, name::Symbol, f,
+                                cell::AbstractString)
+    entry = lock(reglock) do; get(reg, name, nothing); end
+    entry === nothing && error("replay: `" * String(name) * "` is not a @bind control in this notebook")
+    w, _ = entry
+    dom = bind_domain(w)
+    dom === nothing && error("replay: `" * String(name) * "` is a `" * String(w.kind) *
+                             "` control, whose domain is not finite")
+    lock(reglock) do
+        sweeps[String(id)] = (; name = String(name), f = f, wrap = v -> wrap_value(w, v),
+                                domain = Any[d for d in dom], cell = String(cell), kind = String(w.kind),
+                                # Tagged, so the next pass can retire it — see `_register_chain_replays!`.
+                                chain = true)
+    end
+    return String(id)
+end
+
+# Register a whole pass of composed sweeps and RETIRE the ones it did not ask for. The graph is re-derived
+# on every export, so a table that was deleted, given a mark of its own, or had its chain broken by an
+# edit must stop being swept — otherwise the notebook keeps paying for a route the page cannot resolve,
+# and it would keep paying for the rest of the session because this dict outlives every run.
+#
+# Only entries this mechanism created are ever removed. An author's `@replay` is theirs.
+function _register_chain_replays!(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
+                                  sweeps::Dict{String,Any}, entries)
+    out = Dict{String,Any}()
+    keep = Set{String}()
+    for e in entries
+        id = String(e.id)
+        out[id] = try
+            _register_chain_replay(reg, reglock, sweeps, id, e.name, e.f, e.cell)
+            push!(keep, id)
+            "ok"
+        catch err
+            string("failed: ", sprint(showerror, err))
+        end
+    end
+    lock(reglock) do
+        for (k, s) in collect(sweeps)
+            (get(s, :chain, false) === true && !(k in keep)) && delete!(sweeps, k)
+        end
+    end
+    return out
+end
+
+# ── A replayed TABLE ─────────────────────────────────────────────────────────────────────────────────
+# A figure's replay ships numbers and the page redraws them. A table cannot work that way: its value is
+# ROWS, and shipping a whole copy of the table per position of the control is what made this look
+# impossible.
+#
+# What ships instead is the UNION of the rows across every position — written into the page once, as an
+# ordinary export table — plus, per position, the ORDER: which of those rows that position shows and in
+# what order, as 1-based indices into the union with `0` for "no row". Fixed shape (one entry per union
+# row), `Int16` (`_MAX_TABLE_ROWS` caps a table far below 32 767), so it packs, narrows and compresses
+# through the same path as any other sweep.
+#
+# An ORDER rather than a present/absent mask, which is the cheaper thing and was the first design. Two
+# cases a per-row flag cannot express, and both are ordinary: a control that REORDERS its table (a sort
+# key) is no stranger than one that filters it, and a table may hold DUPLICATE rows, which a flag can
+# only say "present" about and cannot count. Two bytes per row per position instead of one buys both,
+# and against the union rows themselves — which are where a replayed table's size actually goes — the
+# difference does not register.
+#
+# The union is bounded. A control whose positions select disjoint row sets multiplies the rows the page
+# carries, and past some point shipping the notebook is the wrong artifact; that is refused with the
+# number, not silently truncated into a table that looks complete.
+const _REPLAY_TABLE_MAX_ROWS = 20_000
+
+function _mark_table_replay!(t::SlateTable, id::AbstractString, control::AbstractString, index::Int)
+    t.opts["__replay"] = Dict{String,Any}("id" => String(id), "control" => String(control),
+                                          "index" => index - 1)   # 0-based, like a series' mark
+    return t
+end
+
+# Returns (union rows, order matrix). The matrix is (union rows × positions) so one position is a
+# contiguous column — the layout `Slate.replay.slice` already reads.
+function _table_replay_pack(slices::AbstractVector)
+    ncol = length(first(slices).columns)
+    base = Vector{Any}[]
+    at = Dict{Tuple{Vector{Any},Int},Int}()   # (row, which occurrence of it) → its place in `base`
+    seen = Dict{Vector{Any},Int}()            # occurrences of each row SO FAR in the current position
+    idxs = Vector{Vector{Int}}(undef, length(slices))
+    for (si, t) in enumerate(slices)
+        length(t.columns) == ncol || error("replay: the control's values produce tables with different " *
+            "column counts (" * string(ncol) * " and " * string(length(t.columns)) * "). A replayed " *
+            "table writes ONE header into the page, so every position must agree on its columns.")
+        empty!(seen)
+        idx = Int[]
+        for r in t.rows
+            n = get(seen, r, 0) + 1
+            seen[r] = n
+            k = (r, n)
+            j = get(at, k, 0)
+            if j == 0
+                length(base) < _REPLAY_TABLE_MAX_ROWS || error(
+                    "replay: the control's values select more than " * string(_REPLAY_TABLE_MAX_ROWS) *
+                    " distinct rows between them. A replayed table carries the union of every " *
+                    "position's rows, so this would write that whole union into the page. Filter " *
+                    "further, coarsen the control, or page the table instead of replaying it.")
+                push!(base, r); j = length(base); at[k] = j
+            end
+            push!(idx, j)
+        end
+        idxs[si] = idx
+    end
+    A = zeros(Int16, length(base), length(slices))
+    for (si, idx) in enumerate(idxs), (k, j) in enumerate(idx)
+        A[k, si] = Int16(j)
+    end
+    return base, A
 end
 
 # Run the registered sweeps and pack each into an asset. Called at EXPORT time (never during an ordinary
@@ -904,9 +1035,20 @@ function _replay_plan(sweeps::Dict{String,Any}, lk::ReentrantLock = ReentrantLoc
             t0 = time()
             one = s.f(get(s, :wrap, identity)(first(s.domain)))
             rec["seconds_per_value"] = time() - t0
-            A = replay_stack([one])
-            rec["bytes_per_value"] = length(A) * sizeof(eltype(A))
-            rec["slice"] = collect(Int, size(A)[1:end-1])
+            if one isa SlateTable
+                # A table's per-position cost is its ORDER (two bytes a row). Measured from one real
+                # position, so it is a floor: the union across positions can only be longer, and the
+                # union rows — carried once, not per position — are the size that dominates. Reporting
+                # the union would mean sweeping the whole domain, which is the work this dialog exists
+                # to let someone decline.
+                rec["bytes_per_value"] = 2 * length(one.rows)
+                rec["slice"] = Int[length(one.rows)]
+                rec["target"] = "table"
+            else
+                A = replay_stack([one])
+                rec["bytes_per_value"] = length(A) * sizeof(eltype(A))
+                rec["slice"] = collect(Int, size(A)[1:end-1])
+            end
         catch
             # No estimate — the dialog shows the count alone rather than a number it cannot stand behind.
         end
@@ -925,6 +1067,12 @@ function _run_replay_sweeps(sweeps::Dict{String,Any}, lk::ReentrantLock = Reentr
     out = Dict{String,Any}()
     for (id, s) in lock(() -> copy(sweeps), lk)   # snapshot: sweeping is long, and cells keep running
         (only === nothing || id in only) || continue
+        # ONE mark's failure costs that mark, not the export. Previously anything thrown in here escaped
+        # to the caller, which caught it and shipped a page with NO sweeps at all — every control on
+        # every figure disabled because one expression didn't like one position of one control. The
+        # export skips an entry that carries no bytes, so recording the reason here is enough to leave
+        # exactly the offending control frozen; the warning is what stops that being silent.
+        try
         strideable = _replay_strideable(get(s, :kind, ""))
         st = max(1, Int(get(strides, id, stride)))
         dom = (st > 1 && strideable) ? s.domain[1:st:end] : s.domain
@@ -936,18 +1084,32 @@ function _run_replay_sweeps(sweeps::Dict{String,Any}, lk::ReentrantLock = Reentr
             slices[i] = s.f(wrap(v))
             progress(id, i, n)
         end
-        A = replay_stack(slices)
+        # A table sweep packs to the same SHAPE as an array sweep — one contiguous slice per position —
+        # so everything downstream of here (the asset, the narrowing, the routing table, the page's
+        # `slice()`) is shared. What it adds is `rows`: the union the page writes as its table body.
+        A, extra = if !isempty(slices) && first(slices) isa SlateTable
+            rows, M = _table_replay_pack(slices)
+            (M, Dict{String,Any}("target" => "table", "rows" => rows))
+        else
+            (replay_stack(slices), Dict{String,Any}())
+        end
         # Bytes are handed BACK rather than pushed through `save_asset`. That writes into a task-local
         # sink seeded by a running cell, and an export-time sweep has no cell running — the record would
         # be dropped and the page would resolve nothing. Returning them lets the export register the
         # asset itself, which is also where it decides how to represent it (narrow / compress).
-        out[id] = Dict{String,Any}(
+        out[id] = merge(Dict{String,Any}(
             "name" => s.name * "_replay", "control" => s.name, "cell" => s.cell,
             "domain" => dom, "slice" => collect(Int, size(A)[1:end-1]),
             "dtype" => _replay_dtype(eltype(A)),
             "shape" => collect(Int, size(A)), "order" => "col",
             "bytes" => length(A) * sizeof(eltype(A)), "seconds" => time() - t0,
-            "b64" => Base64.base64encode(reinterpret(UInt8, vec(A))))
+            "b64" => Base64.base64encode(reinterpret(UInt8, vec(A)))), extra)
+        catch e
+            msg = sprint(showerror, e)
+            @warn "@replay: sweeping `$(get(s, :name, id))` failed — that control exports frozen" id msg
+            out[id] = Dict{String,Any}("control" => String(get(s, :name, "")),
+                                       "cell" => String(get(s, :cell, "")), "error" => msg)
+        end
     end
     return out
 end
@@ -1115,6 +1277,11 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     replay_sweeps = Dict{String,Any}()
     Core.eval(m, :(const __slate_replay_sweeps = $replay_sweeps))
     Core.eval(m, :(const __slate_replay = $((name, f) -> _do_replay(reg, reglock, replay_sweeps, name, f))))
+    # The export's way in for a sweep NO cell declared: a table two hops from its control, whose closure
+    # is composed from the graph rather than written by hand (see `_register_chain_replay`). Registering
+    # rather than running keeps the one expensive step in one place — the sweep below.
+    Core.eval(m, :(const __slate_replay_chain =
+        $(entries -> _register_chain_replays!(reg, reglock, replay_sweeps, entries))))
     # The export's entry point: run the registered sweeps and pack them. Deliberately NOT called by any
     # ordinary run — the whole point of the split is that authoring never pays for it.
     Core.eval(m, :(const __slate_run_replays = $((; only = nothing, stride = 1,

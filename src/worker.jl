@@ -389,6 +389,42 @@ function __slate_replays(; stride::Int = 1, only = nothing, strides = nothing)
     return Base.invokelatest(f; stride = max(1, Int(stride)), only = only2, strides = sd)
 end
 
+# Register sweeps the EXPORT composed from the cell graph — a table two hops from its control, whose
+# closure no cell declares (see server_export.jl `_chain_sweep_source`). The source arrives as ONE
+# expression, `<control> -> let … end`, and is evaluated in the notebook namespace so the chain's cells
+# read the globals they normally read; the `let` keeps every name they ASSIGN local, so a sweep over a
+# hundred positions leaves the notebook exactly as it found it.
+#
+# Registering, not running: what lands here is an entry in the same dict `@replay` writes, so the cost
+# dialog prices it and the sweep below runs it, with no second code path for a composed closure.
+#
+# Per-sweep results, so a chain that fails to parse or to bind names says so instead of taking the other
+# marks down with it — the export reads these back and leaves that one control frozen.
+function __slate_replay_chain(; sweeps = Any[])
+    m = _NS[]
+    isdefined(m, :__slate_replay_chain) || return Dict{String,Any}()
+    reg = Base.invokelatest(getfield, m, :__slate_replay_chain)
+    out = Dict{String,Any}()
+    entries = NamedTuple[]
+    for s in (sweeps isa AbstractVector ? sweeps : Any[])
+        s isa AbstractDict || continue
+        id = String(_g(s, "id", "")); isempty(id) && continue
+        try
+            f = Base.invokelatest(Core.eval, m, Meta.parse(String(_g(s, "source", ""))))
+            push!(entries, (; id = id, name = Symbol(String(_g(s, "control", ""))), f = f,
+                              cell = String(_g(s, "cell", ""))))
+        catch e
+            # A synthesized source that will not parse or compile is reported per-sweep, not thrown: the
+            # other tables on the page are unaffected and the export says which one it dropped.
+            out[id] = string("failed: ", sprint(showerror, e))
+        end
+    end
+    # ONE call, so the pass can also retire composed sweeps it no longer asks for.
+    res = Base.invokelatest(reg, entries)
+    res isa AbstractDict && merge!(out, Dict{String,Any}(String(k) => v for (k, v) in res))
+    return out
+end
+
 function __slate_memo_snapshot(; cells::Dict = Dict{String,Any}())
     out = Dict{String,Any}()
     _MEMO_OK || return out
@@ -2401,6 +2437,8 @@ function tools()
         # neither, because the macro is a pass-through while a notebook is being edited.
         KaimonGate.GateTool("__slate_replay_plan", __slate_replay_plan),
         KaimonGate.GateTool("__slate_replays", __slate_replays),
+        # …plus the marks the export COMPOSES from the graph rather than reading off a cell.
+        KaimonGate.GateTool("__slate_replay_chain", __slate_replay_chain),
         KaimonGate.GateTool("__slate_memo_pin", __slate_memo_pin),
         KaimonGate.GateTool("__slate_blob_of", __slate_blob_of),
         KaimonGate.GateTool("__slate_bind_blob", __slate_bind_blob),

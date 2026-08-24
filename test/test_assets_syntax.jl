@@ -74,10 +74,10 @@ end
         NS = KaimonSlate.NotebookServer
         # Each is a complete script the export writes into a <script> tag of its own.
         blobs = [(name, getfield(NS, name)) for name in
-                 (:_EXPORT_ASSET_JS, :_EXPORT_TABLE_JS, :_EXPORT_MEDIA_JS, :_EXPORT_ECHARTS_THEME_JS,
-                  :_EXPORT_CHART_RUNTIME_JS)
+                 (:_EXPORT_ASSET_JS, :_EXPORT_TABLE_JS, :_EXPORT_TABLE_REPLAY_JS, :_EXPORT_MEDIA_JS,
+                  :_EXPORT_ECHARTS_THEME_JS, :_EXPORT_CHART_RUNTIME_JS)
                  if isdefined(NS, name)]
-        @test length(blobs) == 5          # a renamed constant must fail loudly, not silently skip
+        @test length(blobs) == 6          # a renamed constant must fail loudly, not silently skip
         bad = String[]
         dir = mktempdir()
         for (name, src) in blobs
