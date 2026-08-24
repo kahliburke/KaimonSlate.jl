@@ -873,6 +873,25 @@ function _make_router(h::Hub)
                             "Access-Control-Allow-Origin" => "*"], got[2])
     end)
     HTTP.register!(router, "GET", "/api/notebooks", _ -> _json(_notebooks_json(h)))
+    # Browser login page (only active when a KaimonSlateHub control plane is attached).
+    HTTP.register!(router, "GET", "/login", _ -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        return HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], body = """
+        <!doctype html><html><head><meta charset="utf-8"><title>KaimonSlate — Sign in</title>
+        <style>body{font:14px system-ui;max-width:320px;margin:80px auto}input,button{display:block;width:100%;margin:6px 0;padding:8px;box-sizing:border-box}button{cursor:pointer}</style>
+        </head><body><h2>Sign in</h2>
+        <form id="f"><input name="username" placeholder="username" autofocus>
+        <input name="password" type="password" placeholder="password">
+        <button type="submit">Sign in</button></form>
+        <p id="e" style="color:#c00"></p>
+        <script>const f=document.getElementById('f'),e=document.getElementById('e');
+        f.onsubmit=async(ev)=>{ev.preventDefault();e.textContent='';
+        const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({username:f.username.value,password:f.password.value})});
+        if(r.ok){const next=new URLSearchParams(location.search).get('next')||'/';location.href=next;}
+        else{e.textContent='Invalid credentials';}};</script>
+        </body></html>""")
+    end)
     # Multi-user login (only active when a KaimonSlateHub control plane is attached).
     HTTP.register!(router, "POST", "/api/login", req -> begin
         h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
@@ -2840,8 +2859,10 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
         end
         _redeem_query_token!(stream, h) && return
         # Multi-user login is its own public endpoint; it must bypass the session gate.
-        _login_public = h.auth_hub !== nothing && stream.message.method == "POST" &&
-                        startswith(stream.message.target, "/api/login")
+        _login_public = h.auth_hub !== nothing && (
+            (stream.message.method == "POST" && startswith(stream.message.target, "/api/login")) ||
+            (stream.message.method == "GET" && stream.message.target == "/login")
+        )
         if !_login_public && !_authorized(h, stream.message)
             HTTP.setstatus(stream, 401)
             HTTP.setheader(stream, "WWW-Authenticate" => "Bearer realm=\"KaimonSlate\"")
