@@ -1,7 +1,7 @@
 name = "BonitoSlate"
 uuid = "9172b072-6bcf-488b-b185-96c3319d1521"
 authors = ["Kahli Burke <kahli@kahliburke.com>"]
-version = "0.1.0"
+version = "0.1.1"
 
 # A Slate extension bringing first-class Bonito.jl support — and with it WGLMakie's interactive
 # WebGL figures and the wider Bonito widget ecosystem — into KaimonSlate's reactive notebook.
