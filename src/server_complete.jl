@@ -2864,6 +2864,17 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
             (stream.message.method == "GET" && stream.message.target == "/login")
         )
         if !_login_public && !_authorized(h, stream.message)
+            # In multi-user mode, redirect browser navigations to the login page
+            # (API clients still get a 401 with a WWW-Authenticate challenge).
+            if h.auth_hub !== nothing
+                accept = HTTP.header(stream.message, "Accept", "")
+                if occursin("text/html", accept) && !occursin("application/json", accept)
+                    HTTP.setstatus(stream, 302)
+                    HTTP.setheader(stream, "Location" => "/login?next=" * HTTP.URIs.escapeuri(stream.message.target))
+                    HTTP.setheader(stream, "Cache-Control" => "no-store")
+                    HTTP.startwrite(stream); return
+                end
+            end
             HTTP.setstatus(stream, 401)
             HTTP.setheader(stream, "WWW-Authenticate" => "Bearer realm=\"KaimonSlate\"")
             HTTP.setheader(stream, "Cache-Control" => "no-store")
