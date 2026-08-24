@@ -896,8 +896,8 @@ function _make_router(h::Hub)
     # Browser login page (only active when a KaimonSlateHub control plane is attached).
     HTTP.register!(router, "GET", "/login", _ -> begin
         h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
-        content = _hub_tmpl("hub_login.html.tmpl")(init = Dict())
-        return _html(_hub_tmpl("hub_base.html.tmpl")(init = Dict(:title => "KaimonSlate — Sign in",
+        content = _hub_tmpl("hub_login.html.tmpl")(init = Dict{Symbol,Any}())
+        return _html(_hub_tmpl("hub_base.html.tmpl")(init = Dict{Symbol,Any}(:title => "KaimonSlate — Sign in",
                                                    :current_user => "", :is_admin => false,
                                                    :theme => "auto", :content => content)))
     end)
@@ -1050,9 +1050,9 @@ function _make_router(h::Hub)
         h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
         rec = _hub_current_user(h, req)
         rec === nothing && return HTTP.Response(401, "unauthenticated")
-        content = _hub_tmpl("hub_account.html.tmpl")(init = Dict(:current_user => rec.username,
+        content = _hub_tmpl("hub_account.html.tmpl")(init = Dict{Symbol,Any}(:current_user => rec.username,
                                                                   :is_admin => rec.is_admin))
-        return _html(_hub_tmpl("hub_base.html.tmpl")(init = Dict(:title => "KaimonSlate — Account",
+        return _html(_hub_tmpl("hub_base.html.tmpl")(init = Dict{Symbol,Any}(:title => "KaimonSlate — Account",
                                                    :current_user => rec.username, :is_admin => rec.is_admin,
                                                    :theme => "auto", :content => content)))
     end)
@@ -1064,8 +1064,8 @@ function _make_router(h::Hub)
         users = [Dict("username" => u, "is_admin" => KaimonSlateHub.get_user(h.auth_hub.users, u).is_admin,
                       "disabled" => KaimonSlateHub.get_user(h.auth_hub.users, u).disabled)
                   for u in KaimonSlateHub.list_users(h.auth_hub.users)]
-        content = _hub_tmpl("hub_admin_users.html.tmpl")(init = Dict(:users => users))
-        return _html(_hub_tmpl("hub_base.html.tmpl")(init = Dict(:title => "KaimonSlate — Users",
+        content = _hub_tmpl("hub_admin_users.html.tmpl")(init = Dict{Symbol,Any}(:users => users))
+        return _html(_hub_tmpl("hub_base.html.tmpl")(init = Dict{Symbol,Any}(:title => "KaimonSlate — Users",
                                                    :current_user => me.username, :is_admin => true,
                                                    :theme => "auto", :content => content)))
     end)
