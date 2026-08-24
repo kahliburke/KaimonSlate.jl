@@ -23,9 +23,15 @@ mutable struct Hub
     appdefaults::Dict{String,Any}
     auth_token::String
     session_token::String
+    # Optional multi-user control plane (KaimonSlateHub.HubServer). When set, the
+    # auth gate checks the per-principal session cookie against this store
+    # instead of the legacy single bootstrap token. `nothing` keeps legacy auth.
+    auth_hub::Any
 end
 Hub(notebooks, server, host, port, lock) =
-    Hub(notebooks, server, host, port, lock, false, Dict{String,Any}(), "", "")
+    Hub(notebooks, server, host, port, lock, false, Dict{String,Any}(), "", "", nothing)
+Hub(notebooks, server, host, port, lock, app, appdefaults, auth_token, session_token) =
+    Hub(notebooks, server, host, port, lock, app, appdefaults, auth_token, session_token, nothing)
 
 _hub_url(h::Hub) = "http://$(h.host):$(h.port)"
 _auth_url(h::Hub, url::AbstractString = _hub_url(h)) =

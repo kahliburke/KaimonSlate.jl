@@ -10,6 +10,7 @@ the engine (`ReportEngine`) and per-cell renderer (`ReportRender`).
 module NotebookServer
 
 using HTTP, JSON, FileWatching, CodecZlib, CodecZstd
+import KaimonSlateHub      # multi-user control plane; referenced qualified to avoid a `Hub` name clash
 import Base64
 import Random
 import Dates                                  # publish dates for the multi-doc site manifest

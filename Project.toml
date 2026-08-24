@@ -14,6 +14,7 @@ FileWatching = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+KaimonSlateHub = "ca26f490-bc68-4489-97cc-95a4c39097e5"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
@@ -32,6 +33,9 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
 Tar = "a4e569a6-e804-4fa4-b0f3-eef7a1d5b13e"
 Typst_jll = "eb4b1da6-20f6-5c66-9826-fdb8ad410d0e"
+
+[sources]
+KaimonSlateHub = {path = "../KaimonSlateHub.jl"}
 
 [compat]
 Base64 = "1.11.0"

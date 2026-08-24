@@ -873,6 +873,40 @@ function _make_router(h::Hub)
                             "Access-Control-Allow-Origin" => "*"], got[2])
     end)
     HTTP.register!(router, "GET", "/api/notebooks", _ -> _json(_notebooks_json(h)))
+    # Multi-user login (only active when a KaimonSlateHub control plane is attached).
+    HTTP.register!(router, "POST", "/api/login", req -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        payload = isempty(req.body) ? Dict{String,Any}() : JSON.parse(String(req.body))
+        username = String(get(payload, "username", ""))
+        password = String(get(payload, "password", ""))
+        principal = KaimonSlateHub.authenticate_user(h.auth_hub.users, username, password)
+        if principal === nothing
+            return HTTP.Response(401, ["Content-Type" => "application/json"],
+                                 body = JSON.json(Dict("error" => "invalid credentials")))
+        end
+        identifier = KaimonSlateHub.create_session!(h.auth_hub.sessions, principal; credential_version = 1)
+        record = KaimonSlateHub.get_user(h.auth_hub.users, username)
+        body = JSON.json(Dict("username" => username, "principal_id" => principal,
+                              "is_admin" => record !== nothing && record.is_admin))
+        return HTTP.Response(200, [
+            "Content-Type" => "application/json",
+            "Set-Cookie" => "$(_AUTH_COOKIE)=$identifier; Path=/; HttpOnly; SameSite=Strict",
+        ], body = body)
+    end)
+    HTTP.register!(router, "GET", "/api/me", req -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        cookie = _cookie_value(req, _AUTH_COOKIE)
+        auth = isempty(cookie) ? nothing : KaimonSlateHub.authenticate!(h.auth_hub.sessions, cookie)
+        auth === nothing && return HTTP.Response(401, ["Content-Type" => "application/json"],
+                                                body = JSON.json(Dict("error" => "unauthenticated")))
+        record = KaimonSlateHub.get_user(h.auth_hub.users, auth.principal_id)
+        record === nothing && return HTTP.Response(401, ["Content-Type" => "application/json"],
+                                                  body = JSON.json(Dict("error" => "unauthenticated")))
+        return HTTP.Response(200, ["Content-Type" => "application/json"],
+                             body = JSON.json(Dict("username" => record.username,
+                                                   "principal_id" => record.principal_id,
+                                                   "is_admin" => record.is_admin)))
+    end)
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors
     # `KaimonSlate.create_tools`'s open: creates the file if it doesn't exist.
@@ -2352,6 +2386,12 @@ function _without_token(target::AbstractString)
 end
 
 function _authorized(h::Hub, msg)::Bool
+    # Multi-user mode: a valid per-principal session cookie authorizes the request.
+    if h.auth_hub !== nothing
+        cookie = _cookie_value(msg, _AUTH_COOKIE)
+        isempty(cookie) && return false
+        return KaimonSlateHub.authenticate!(h.auth_hub.sessions, cookie) !== nothing
+    end
     isempty(h.auth_token) && return true
     _secret_equal(_cookie_value(msg, _AUTH_COOKIE), h.session_token) && return true
     auth = strip(HTTP.header(msg, "Authorization", ""))
@@ -2767,7 +2807,8 @@ authoring routes refused server-side rather than merely hidden. `appdefaults` (b
 [`app_defaults`](@ref)) sets what a visitor sees before choosing for themselves.
 """
 function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
-                   appdefaults::AbstractDict = Dict{String,Any}(), token::AbstractString = "")
+                   appdefaults::AbstractDict = Dict{String,Any}(), token::AbstractString = "",
+                   auth_hub = nothing)
     # Stamp the payload SHA the running hub code was loaded from — `_hub_src_stale()` compares the live
     # on-disk SHA to this to flag "Slate src changed since this server started; restart to apply".
     _HUB_START_SHA[] = try; ReportEngine._payload_sha(); catch; ""; end
@@ -2776,11 +2817,17 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
         @warn "KaimonSlate: history migration failed" exception = (e, catch_backtrace())
     end
     tok = strip(String(token))
-    loopback = String(host) in ("127.0.0.1", "localhost", "::1")
-    !loopback && isempty(tok) && (tok = _random_token())
+    # When a KaimonSlateHub control plane is attached, multi-user auth owns the
+    # gate; the legacy single bootstrap token is left empty.
+    if auth_hub !== nothing
+        tok = ""
+    else
+        loopback = String(host) in ("127.0.0.1", "localhost", "::1")
+        !loopback && isempty(tok) && (tok = _random_token())
+    end
     session = isempty(tok) ? "" : _random_token()
     h = Hub(Dict{String,LiveNotebook}(), nothing, String(host), port, ReentrantLock(),
-            app, Dict{String,Any}(String(k) => v for (k, v) in appdefaults), tok, session)
+            app, Dict{String,Any}(String(k) => v for (k, v) in appdefaults), tok, session, auth_hub)
     # Surface a remote worker's live bring-up output (streamed instantiate/precompile) in the browser
     # hydrating banner, not just remote.log — the provisioner narrates each line through this sink hook.
     try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
@@ -2792,7 +2839,10 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
             HTTP.setstatus(stream, 403); HTTP.startwrite(stream); return
         end
         _redeem_query_token!(stream, h) && return
-        if !_authorized(h, stream.message)
+        # Multi-user login is its own public endpoint; it must bypass the session gate.
+        _login_public = h.auth_hub !== nothing && stream.message.method == "POST" &&
+                        startswith(stream.message.target, "/api/login")
+        if !_login_public && !_authorized(h, stream.message)
             HTTP.setstatus(stream, 401)
             HTTP.setheader(stream, "WWW-Authenticate" => "Bearer realm=\"KaimonSlate\"")
             HTTP.setheader(stream, "Cache-Control" => "no-store")
