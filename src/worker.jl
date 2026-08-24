@@ -425,6 +425,23 @@ function __slate_replay_chain(; sweeps = Any[])
     return out
 end
 
+# The wire an entry already holds, or `nothing` if there is none this process can read. Read-only:
+# unlike `_memo_restore` it assigns no globals and does not touch the LRU.
+function _memo_stored_wire(fullkey::AbstractString)
+    _MEMO_OK || return nothing
+    root = _memo_dir()
+    mf = try; MemoStore.read_manifest(root, fullkey); catch; nothing; end
+    mf === nothing && return nothing
+    w = get(mf, "wire", nothing)
+    w isa AbstractDict || return nothing
+    ok, wire = try
+        MemoStore.with_blob(io -> Serialization.deserialize(io), root, String(get(w, "blob", "")))
+    catch
+        (false, nothing)
+    end
+    return (ok && wire !== nothing && hasproperty(wire, :mime)) ? wire : nothing
+end
+
 function __slate_memo_snapshot(; cells::Dict = Dict{String,Any}())
     out = Dict{String,Any}()
     _MEMO_OK || return out
@@ -449,13 +466,28 @@ function __slate_memo_snapshot(; cells::Dict = Dict{String,Any}())
         unread = _strs(_g(spec, "unread", Any[])); safe = _strs(_g(spec, "safe", Any[]))
         ms = try; Float64(_g(spec, "ms", 0.0)); catch; 0.0; end
         vrepr = String(_g(spec, "value_repr", ""))
-        # A VALID wire in the same shape a real run produces (empty display + the cell's value repr).
-        # The per-binding VALUE blobs are what a restore injects; the rich display (charts/figures)
-        # comes from the embedded preview. A minimal `(; duration_ms)` wire crashes the restore path,
-        # which accesses `wire.mime` — that must never happen (see _memo_restore's shape guard).
-        wire = (stdout = "", mime = Tuple{String,Vector{UInt8}}[], echarts = Any[], tables = Any[],
-                binds = NamedTuple[], value_repr = vrepr, exception = nothing, backtrace = nothing,
-                duration_ms = ms, trace = Any[], stderr = "", overflow = NamedTuple[], animations = Any[])
+        # A VALID wire in the same shape a real run produces. A minimal `(; duration_ms)` wire crashes
+        # the restore path, which accesses `wire.mime` — that must never happen (see _memo_restore's
+        # shape guard).
+        #
+        # What this cannot do is INVENT the rendered halves. The `isempty(names)` branch above protects
+        # a pure-display cell, but a cell that defines globals AND renders is the ordinary case, not an
+        # exotic one — a figure built from the very globals being snapshotted. Storing a blank display
+        # over it ERASES what the cell produced: it then restores clean, reports no value, and its
+        # chart is simply absent from the page, with nothing anywhere saying so. The same erasure hits
+        # `binds`, which is how a cell that mixes a `@bind` with real compute loses its control.
+        #
+        # So carry those halves across from the entry already on disk. It is keyed by source AND
+        # upstream digest, so an existing entry was produced by exactly these inputs — only the value
+        # blobs are being refreshed here.
+        prev = _memo_stored_wire(fk)
+        keep(f, dflt) = (prev !== nothing && hasproperty(prev, f)) ? getproperty(prev, f) : dflt
+        wire = (stdout = "", mime = keep(:mime, Tuple{String,Vector{UInt8}}[]),
+                echarts = keep(:echarts, Any[]), tables = keep(:tables, Any[]),
+                binds = keep(:binds, NamedTuple[]), value_repr = vrepr,
+                exception = nothing, backtrace = nothing, duration_ms = ms,
+                trace = Any[], stderr = "", overflow = NamedTuple[],
+                animations = keep(:animations, Any[]))
         ok = try
             _memo_store(key, names, wire; unread = unread, safe = safe)
         catch
