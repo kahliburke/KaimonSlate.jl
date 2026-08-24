@@ -2350,10 +2350,10 @@ end
 function _request_allowed(h::Hub, msg)::Bool
     host = _hostonly(HTTP.header(msg, "Host", ""))
     origin = strip(HTTP.header(msg, "Origin", ""))
-    # A token-protected network listener may legitimately be reached through any LAN IP/DNS name.
-    # Still require browser subrequests to be same-origin; tokenless listeners retain the strict
-    # allowlist below as their DNS-rebinding defence.
-    if !isempty(h.auth_token)
+    # A token-protected OR KaimonSlateHub-authenticated network listener may legitimately be
+    # reached through any LAN IP/DNS name. Still require browser subrequests to be same-origin;
+    # tokenless listeners retain the strict allowlist below as their DNS-rebinding defence.
+    if !isempty(h.auth_token) || h.auth_hub !== nothing
         (isempty(origin) || origin == "null") && return true
         ohost = try; _hostonly(HTTP.URI(origin).host); catch; ""; end
         return !isempty(host) && ohost == host
