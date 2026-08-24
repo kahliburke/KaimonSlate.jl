@@ -1,7 +1,7 @@
 name = "SlateAFM"
 uuid = "48bdd467-e615-4c42-bca2-e391cca8438c"
 authors = ["Kahli Burke <kahli@kahliburke.com>"]
-version = "0.1.0"
+version = "0.1.1"
 
 # A Slate extension that hosts Anywidget Front-end Modules (AFM). Depends ONLY on SlateExtensionsBase —
 # it dogfoods provide_frontend! (the host shim), provide_assets! (served modules) and the widget interface to
