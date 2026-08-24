@@ -1,0 +1,12 @@
+# Catalog listing for Slate's Extensions gallery. Every key is optional.
+
+tagline = "Anywidget front-end modules, hosted in a Slate notebook"
+icon    = "🧩"
+categories = ["widgets", "interop"]
+
+example = "notebooks/afm_demo.jl"
+
+# Hosted on the monorepo's `media-slateafm` release rather than committed: screenshots are
+# regenerated whenever the demo notebook changes, and the catalog mirrors the URL into its own
+# artifact, so this only has to be reachable at build time.
+screenshots = ["https://github.com/kahliburke/KaimonSlate.jl/releases/download/media-slateafm/SlateAFM-notebook.png"]
