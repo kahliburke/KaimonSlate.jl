@@ -2028,6 +2028,18 @@ function __slate_pkg(op, name)
     end
 end
 
+"""
+    _same_registry(reg, url) -> Bool
+
+Does an installed registry point at `url`? Compared on `repo` (the only field that carries it),
+ignoring a trailing `.git` and case, so the http/ssh spelling a user pastes still matches.
+"""
+function _same_registry(reg, url::AbstractString)
+    repo = try; something(reg.repo, ""); catch; ""; end
+    norm(s) = lowercase(rstrip(replace(String(s), r"\.git$" => ""), '/'))
+    return !isempty(repo) && norm(repo) == norm(url)
+end
+
 "Install a package registry into THIS worker's depot — the depot the notebook actually resolves
 against, which for a remote region is not the hub's. Idempotent: an already-installed registry
 (matched by url or by name) reports success without touching anything. Returns `{ok, message}`."
@@ -2037,7 +2049,10 @@ function __slate_registry_add(url)
     want = basename(rstrip(replace(u, r"\.git$" => ""), '/'))
     try
         for r in Pkg.Registry.reachable_registries()
-            (r.url == u || r.name == want) &&
+            # `repo`, not `url`: a `RegistryInstance` has no `url` field, and reading one throws a
+            # FieldError that surfaces as "could not add the registry" — the failure only appears on
+            # a machine that does NOT already have it, which is exactly the machine this runs for.
+            (_same_registry(r, u) || r.name == want) &&
                 return Dict{String,Any}("ok" => true, "message" => "registry $(r.name) already installed")
         end
         Pkg.Registry.add(Pkg.RegistrySpec(; url = u))

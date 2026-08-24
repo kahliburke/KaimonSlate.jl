@@ -214,6 +214,27 @@ end
     end
 end
 
+@testset "catalog: registry identity uses fields Pkg actually has" begin
+    # `RegistryInstance` has `repo`, not `url`. Reading `r.url` throws a FieldError, which surfaced
+    # as "could not add the SlateRegistry registry" — and ONLY on a machine that doesn't already
+    # have it, i.e. the only machine the add path ever runs on. A test that mocks the registry type
+    # would not have caught it, so this asserts against the real Pkg API.
+    import Pkg
+    r = first(Pkg.Registry.reachable_registries())
+    @test hasfield(typeof(r), :repo)
+    @test !hasfield(typeof(r), :url)
+
+    # The comparison tolerates the spellings a user actually pastes.
+    same = C._same_registry
+    fake = (name = "X", repo = "https://github.com/o/R.git")
+    @test same(fake, "https://github.com/o/R")
+    @test same(fake, "https://github.com/o/R.git")
+    @test same(fake, "https://github.com/o/R/")
+    @test !same(fake, "https://github.com/o/Other")
+    # A registry with no repo recorded must not match everything.
+    @test !same((name = "Y", repo = ""), "https://github.com/o/R")
+end
+
 @testset "catalog: install and update refuse an empty name" begin
     @test C.catalog_install!(nothing, "  ")["ok"] == false
     @test C.catalog_update!(nothing, "")["ok"] == false

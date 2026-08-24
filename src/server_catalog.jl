@@ -200,12 +200,32 @@ function local_registry_entries()
     return out
 end
 
-"The extension registry among the reachable registries, or `nothing` if it isn't installed."
+"""
+    _same_registry(reg, url) -> Bool
+
+Does an installed registry point at `url`? Compared on `repo`, which is the only field carrying it:
+a `RegistryInstance` has NO `url` field, and reading one throws a `FieldError` that surfaces to the
+user as "could not add the registry". That failure appears only on a machine which does not already
+have the registry — precisely the machine the add path exists for.
+
+Trailing `.git`, a trailing slash and case are all ignored, so the spelling a user pastes matches.
+
+`worker.jl` carries a mirror of this: it runs in the worker process and cannot import from here.
+"""
+function _same_registry(reg, url::AbstractString)
+    repo = try; something(reg.repo, ""); catch; ""; end
+    norm(s) = lowercase(rstrip(replace(String(s), r"\.git$" => ""), '/'))
+    return !isempty(repo) && norm(repo) == norm(url)
+end
+
+"The extension registry among the reachable registries, or `nothing` if it isn't installed.
+Matched on NAME or on repo url — a registry cloned under a different name is still the same one."
 function _installed_extension_registry()
     want = catalog_registry_name()
+    wanturl = catalog_registry_url()
     try
         for reg in Pkg.Registry.reachable_registries()
-            reg.name == want && return reg
+            (reg.name == want || _same_registry(reg, wanturl)) && return reg
         end
     catch e
         @debug "catalog: could not read registries" exception = e

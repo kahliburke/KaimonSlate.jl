@@ -631,9 +631,14 @@ Adding a registry that's already present is a no-op, not an error. Returns `{ok,
 """
 function registry_add(::InProcessKernel, ::Report, url::AbstractString)
     try
-        any(r -> r.url == url || r.name == basename(rstrip(String(url), '/')),
-            Pkg.Registry.reachable_registries()) &&
-            return Dict{String,Any}("ok" => true, "message" => "registry already installed")
+        # `repo`, not `url` — a `RegistryInstance` has no `url` field and reading one throws.
+        want = basename(rstrip(replace(String(url), r"\.git$" => ""), '/'))
+        norm(s) = lowercase(rstrip(replace(String(s), r"\.git$" => ""), '/'))
+        already = any(Pkg.Registry.reachable_registries()) do r
+            repo = try; something(r.repo, ""); catch; ""; end
+            (!isempty(repo) && norm(repo) == norm(url)) || r.name == want
+        end
+        already && return Dict{String,Any}("ok" => true, "message" => "registry already installed")
         Pkg.Registry.add(Pkg.RegistrySpec(; url = String(url)))
         return Dict{String,Any}("ok" => true, "message" => "registry added")
     catch e
