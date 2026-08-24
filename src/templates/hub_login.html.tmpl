@@ -1,0 +1,20 @@
+{% extends "hub_base.html.tmpl" %}
+{% block content %}
+<div class="card" style="max-width:360px;margin:48px auto">
+  <h2>Sign in</h2>
+  <form id="f">
+    <input type="text" name="username" placeholder="username" autofocus required>
+    <input type="password" name="password" placeholder="password" required>
+    <button class="primary" type="submit">Sign in</button>
+  </form>
+  <p id="e" class="msg err"></p>
+</div>
+<script>{% raw %}
+const f=document.getElementById('f'),e=document.getElementById('e');
+const next=new URLSearchParams(location.search).get('next')||'/';
+f.onsubmit=async(ev)=>{ev.preventDefault();e.textContent='';
+  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username:f.username.value,password:f.password.value})});
+  if(r.ok){location.href=next;}else{e.textContent='Invalid credentials';}};
+{% endraw %}</script>
+{% end %}

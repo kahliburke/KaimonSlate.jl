@@ -1,0 +1,25 @@
+{% extends "hub_base.html.tmpl" %}
+{% block content %}
+<h1>Account</h1>
+<p class="muted">Signed in as <strong>{{ current_user }}</strong>{% if is_admin %} <span class="tag admin">admin</span>{% end %}</p>
+
+<div class="card" style="max-width:420px">
+  <h3>Change password</h3>
+  <form id="f">
+    <input type="password" name="current" placeholder="current password" required>
+    <input type="password" name="password" placeholder="new password" required>
+    <button class="primary">Change</button>
+  </form>
+  <p id="m" class="msg"></p>
+</div>
+
+<script>{% raw %}
+const f=document.getElementById('f'),m=document.getElementById('m');
+f.onsubmit=async(e)=>{ev=e.preventDefault();m.className='msg err';m.textContent='';
+  const r=await fetch('/api/users/{{ current_user }}/password',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({current:f.current.value,password:f.password.value})});
+  if(r.ok){m.className='msg ok';m.textContent='Password changed — you will be signed out.';f.reset();
+    setTimeout(()=>location.href='/login',1500);}
+  else{const d=await r.json().catch(()=>({}));m.textContent=d.error||('failed ('+r.status+')');}};
+{% endraw %}</script>
+{% end %}

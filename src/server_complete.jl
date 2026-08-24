@@ -727,6 +727,26 @@ function _local_kernel_history(h::Hub, port::Int)
     return Any[]
 end
 
+# OteraEngine templates for the hub UI (Slate-styled, dark/light toggle).
+# Templates are built lazily (at first use) because OteraEngine.Template evaluates
+# into the OteraEngine module, which cannot happen during precompilation.
+const _HUB_TMPL_DIR = joinpath(@__DIR__, "templates")
+const _HUB_TMPLS = Dict{String, Any}()
+function _hub_tmpl(name::AbstractString)
+    return get!(_HUB_TMPLS, String(name)) do
+        Template(joinpath(_HUB_TMPL_DIR, String(name)); config = Dict("autoescape" => true))
+    end
+end
+
+# Resolve the current session's user (or nothing) for hub page nav rendering.
+_hub_current_user(h::Hub, req) = begin
+    h.auth_hub === nothing && return nothing
+    cookie = _cookie_value(req, _AUTH_COOKIE)
+    isempty(cookie) && return nothing
+    auth = KaimonSlateHub.authenticate!(h.auth_hub.sessions, cookie)
+    auth === nothing ? nothing : KaimonSlateHub.get_user(h.auth_hub.users, auth.principal_id)
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     # Front page + inlined last-known ledger (see `_index_html`). An APP hub has no front page: the
@@ -876,21 +896,8 @@ function _make_router(h::Hub)
     # Browser login page (only active when a KaimonSlateHub control plane is attached).
     HTTP.register!(router, "GET", "/login", _ -> begin
         h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
-        return HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], body = """
-        <!doctype html><html><head><meta charset="utf-8"><title>KaimonSlate — Sign in</title>
-        <style>body{font:14px system-ui;max-width:320px;margin:80px auto}input,button{display:block;width:100%;margin:6px 0;padding:8px;box-sizing:border-box}button{cursor:pointer}</style>
-        </head><body><h2>Sign in</h2>
-        <form id="f"><input name="username" placeholder="username" autofocus>
-        <input name="password" type="password" placeholder="password">
-        <button type="submit">Sign in</button></form>
-        <p id="e" style="color:#c00"></p>
-        <script>const f=document.getElementById('f'),e=document.getElementById('e');
-        f.onsubmit=async(ev)=>{ev.preventDefault();e.textContent='';
-        const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({username:f.username.value,password:f.password.value})});
-        if(r.ok){const next=new URLSearchParams(location.search).get('next')||'/';location.href=next;}
-        else{e.textContent='Invalid credentials';}};</script>
-        </body></html>""")
+        return _html(_hub_tmpl("hub_login.html.tmpl")(init = Dict(:title => "KaimonSlate — Sign in",
+                                                  :current_user => "", :is_admin => false, :theme => "dark")))
     end)
     # Multi-user login (only active when a KaimonSlateHub control plane is attached).
     HTTP.register!(router, "POST", "/api/login", req -> begin
@@ -998,40 +1005,64 @@ function _make_router(h::Hub)
             return HTTP.Response(404, ["Content-Type" => "application/json"], body = JSON.json(Dict("error" => "not found")))
         return HTTP.Response(200, ["Content-Type" => "application/json"], body = JSON.json(Dict("username" => u, "disabled" => false)))
     end)
+    # Change password: an admin may set any user's password; a user may change their own
+    # (and must confirm the current password). The current session is revoked on success
+    # so the user re-authenticates with the new password.
+    HTTP.register!(router, "POST", "/api/users/{username}/password", req -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        cookie = _cookie_value(req, _AUTH_COOKIE)
+        auth = isempty(cookie) ? nothing : KaimonSlateHub.authenticate!(h.auth_hub.sessions, cookie)
+        auth === nothing && return HTTP.Response(401, ["Content-Type" => "application/json"],
+                                                 body = JSON.json(Dict("error" => "unauthenticated")))
+        target = HTTP.getparam(req, "username")
+        me = KaimonSlateHub.get_user(h.auth_hub.users, auth.principal_id)
+        is_admin = me !== nothing && !me.disabled && me.is_admin
+        is_self = auth.principal_id == target
+        if !is_admin && !is_self
+            return HTTP.Response(403, ["Content-Type" => "application/json"], body = JSON.json(Dict("error" => "not authorized")))
+        end
+        payload = isempty(req.body) ? Dict{String,Any}() : JSON.parse(String(req.body))
+        newpw = String(get(payload, "password", ""))
+        isempty(newpw) && return HTTP.Response(400, ["Content-Type" => "application/json"],
+                                               body = JSON.json(Dict("error" => "password must not be empty")))
+        # A non-admin self-change must confirm the current password.
+        if !is_admin && is_self
+            current = String(get(payload, "current", ""))
+            KaimonSlateHub.authenticate_user(h.auth_hub.users, target, current) === nothing &&
+                return HTTP.Response(401, ["Content-Type" => "application/json"],
+                                     body = JSON.json(Dict("error" => "current password incorrect")))
+        end
+        KaimonSlateHub.set_password!(h.auth_hub.users, target, newpw) ||
+            return HTTP.Response(404, ["Content-Type" => "application/json"], body = JSON.json(Dict("error" => "not found")))
+        # Revoke the changed user's sessions so they re-authenticate.
+        KaimonSlateHub.revoke_principal_sessions!(h.auth_hub.sessions, target)
+        headers = if is_self
+            ["Content-Type" => "application/json", "Set-Cookie" => KaimonSlateHub.expired_session_cookie()]
+        else
+            ["Content-Type" => "application/json"]
+        end
+        return HTTP.Response(200, headers, body = JSON.json(Dict("username" => target, "ok" => true)))
+    end)
+    # Self-service account page: change your own password.
+    HTTP.register!(router, "GET", "/account", req -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        rec = _hub_current_user(h, req)
+        rec === nothing && return HTTP.Response(401, "unauthenticated")
+        return _html(_hub_tmpl("hub_account.html.tmpl")(init = Dict(:title => "KaimonSlate — Account",
+                                                   :current_user => rec.username, :is_admin => rec.is_admin,
+                                                   :theme => "dark")))
+    end)
     # Admin user-management page (admin only; the gate already enforced a valid session).
     HTTP.register!(router, "GET", "/admin/users", req -> begin
         h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
-        _admin_record(req) === nothing && return HTTP.Response(403, "not authorized")
         me = _admin_record(req)
-        return HTTP.Response(200, ["Content-Type" => "text/html; charset=utf-8"], body = """
-        <!doctype html><html><head><meta charset="utf-8"><title>KaimonSlate — Users</title>
-        <style>body{font:14px system-ui;max-width:760px;margin:40px auto;padding:0 16px}
-        table{width:100%;border-collapse:collapse}th,td{padding:6px 8px;border-bottom:1px solid #eee;text-align:left}
-        .row{display:flex;gap:8px;align-items:center}input{padding:6px}button{padding:6px 10px;cursor:pointer}
-        .muted{color:#888}a{color:#06c}</style></head><body>
-        <h2>Users <span class="muted">— admin: $(me.username)</span></h2>
-        <p><a href="/">← notebooks</a> · <a href="/logout">sign out</a></p>
-        <h3>Create user</h3>
-        <form id="create" class="row"><input name="username" placeholder="username" required>
-        <input name="password" type="password" placeholder="password" required>
-        <label><input type="checkbox" name="is_admin"> admin</label>
-        <button>Create</button></form><p id="ce" style="color:#c00"></p>
-        <h3>Users</h3><table id="t"><thead><tr><th>username</th><th>admin</th><th>state</th><th>actions</th></tr></thead><tbody></tbody></table>
-        <script>
-        const ce=document.getElementById('ce');
-        async function refresh(){const r=await fetch('/api/users');const d=await r.json();const tb=document.querySelector('#t tbody');tb.innerHTML='';
-        for(const u of d.users){const tr=document.createElement('tr');
-        tr.innerHTML='<td>'+u.username+'</td><td>'+(u.is_admin?'✓':'')+'</td><td class="muted">'+(u.disabled?'disabled':'active')+'</td>';
-        const a=document.createElement('td');const b=document.createElement('button');
-        b.textContent=u.disabled?'enable':'disable';
-        b.onclick=async()=>{await fetch('/api/users/'+encodeURIComponent(u.username)+'/'+(u.disabled?'enable':'disable'),{method:'POST'});refresh();};
-        a.appendChild(b);tr.appendChild(a);tb.appendChild(tr);}}
-        document.getElementById('create').onsubmit=async(e)=>{e.preventDefault();ce.textContent='';
-        const f=e.target;const r=await fetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({username:f.username.value,password:f.password.value,is_admin:f.is_admin.checked})});
-        if(r.ok){f.reset();refresh();}else{const d=await r.json().catch(()=>({}));ce.textContent=d.error||('failed ('+r.status+')');}};
-        refresh();
-        </script></body></html>""")
+        me === nothing && return HTTP.Response(403, "not authorized")
+        users = [Dict("username" => u, "is_admin" => KaimonSlateHub.get_user(h.auth_hub.users, u).is_admin,
+                      "disabled" => KaimonSlateHub.get_user(h.auth_hub.users, u).disabled)
+                  for u in KaimonSlateHub.list_users(h.auth_hub.users)]
+        return _html(_hub_tmpl("hub_admin_users.html.tmpl")(init = Dict(:title => "KaimonSlate — Users",
+                                                 :current_user => me.username, :is_admin => true,
+                                                 :theme => "dark", :users => users)))
     end)
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors

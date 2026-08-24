@@ -1,0 +1,54 @@
+{% extends "hub_base.html.tmpl" %}
+{% block content %}
+<h1>Users</h1>
+<p class="muted">Administration — create accounts and manage access.</p>
+
+<div class="card">
+  <h3>Create user</h3>
+  <form id="create" class="row">
+    <input type="text" name="username" placeholder="username" required style="flex:1">
+    <input type="password" name="password" placeholder="password" required style="flex:1">
+    <label class="chk"><input type="checkbox" name="is_admin"> admin</label>
+    <button class="primary">Create</button>
+  </form>
+  <p id="ce" class="msg err"></p>
+</div>
+
+<div class="card">
+  <table>
+    <thead><tr><th>username</th><th>role</th><th>state</th><th>actions</th></tr></thead>
+    <tbody>
+    {% for u in users %}
+      <tr>
+        <td>{{ u.username }}</td>
+        <td>{% if u.is_admin %}<span class="tag admin">admin</span>{% else %}<span class="tag">user</span>{% end %}</td>
+        <td>{% if u.disabled %}<span class="tag disabled">disabled</span>{% else %}<span class="tag">active</span>{% end %}</td>
+        <td class="row">
+          <button onclick="toggleUser('{{ u.username }}',{% if u.disabled %}true{% else %}false{% end %})">{% if u.disabled %}enable{% else %}disable{% end %}</button>
+          <button onclick="resetPw('{{ u.username }}')">password</button>
+        </td>
+      </tr>
+    {% end %}
+    </tbody>
+  </table>
+</div>
+
+<script>{% raw %}
+const ce=document.getElementById('ce');
+async function reload(){location.reload();}
+async function toggleUser(u,disabled){
+  await fetch('/api/users/'+encodeURIComponent(u)+'/'+(disabled?'enable':'disable'),{method:'POST'});
+  reload();
+}
+async function resetPw(u){
+  const np=prompt('New password for '+u);if(!np)return;
+  const r=await fetch('/api/users/'+encodeURIComponent(u)+'/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:np})});
+  alert(r.ok?'Password set':'Failed');
+}
+document.getElementById('create').onsubmit=async(e)=>{e.preventDefault();ce.textContent='';
+  const f=e.target;
+  const r=await fetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username:f.username.value,password:f.password.value,is_admin:f.is_admin.checked})});
+  if(r.ok){reload();}else{const d=await r.json().catch(()=>({}));ce.textContent=d.error||('failed ('+r.status+')');}};
+{% endraw %}</script>
+{% end %}
