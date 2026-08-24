@@ -1009,6 +1009,18 @@ function _write_page_assets!(page_dir::AbstractString, nb::LiveNotebook; imports
     return length(files)
 end
 
+# The siblings a finished page asked for that could not be known before it was built — `export_html`'s
+# `asset_sink`. Only `@replay` sweeps land here today, since they are evaluated during the export; a
+# path already written by `_write_page_assets!` is simply rewritten with identical bytes.
+function _write_sibling_assets!(page_dir::AbstractString, sink::AbstractDict)
+    for (rel, bytes) in sink
+        dst = joinpath(page_dir, String(rel))
+        mkpath(dirname(dst))
+        write(dst, bytes)
+    end
+    return length(sink)
+end
+
 # The export chart div's CSS height: honour the spec's Slate `height=` (`__size`) so a geo/tall chart
 # gets its real height instead of the 340px default (a squished world map otherwise). Number → px.
 function _chart_css_height(spec)
@@ -2314,6 +2326,15 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                      # bundle — and without this attribution the only available reaction to a large file
                      # is to shrug at it. Measured from the real blocks, never estimated.
                      stats::Union{Nothing,AbstractDict} = nothing,
+                     # Where a SITE's sibling data files come from. Under `inline_assets = false` the page
+                     # references its data as plain neighbours (`data/…bin`) instead of carrying it, and
+                     # something has to put those files on disk. The site builder cannot: a `@replay`
+                     # sweep is evaluated HERE, inside the export, so it does not exist when the builder
+                     # writes the assets it can see from the notebook. Passing a dict collects
+                     # `path => bytes` for everything this page published as a sibling, for the caller to
+                     # write beside `index.html`. Every `@replay` control on a published site rendered
+                     # disabled without it — the page asked for a file nobody had written.
+                     asset_sink::Union{Nothing,AbstractDict} = nothing,
                      credit::Bool = true, site_home::AbstractString = "", site_home_label::AbstractString = "")
     _t_start = time()
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
@@ -2380,6 +2401,8 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                         e["data"] = Base64.base64encode(b)
                     else
                         e["url"] = spec["path"]
+                        # Hand the bytes back so the caller can write the sibling this URL names.
+                        asset_sink === nothing || (asset_sink[String(spec["path"])] = bytes)
                     end
                     push!(ents, string(JSON.json(spec["path"]), ":", JSON.json(e)))
                 end
@@ -3550,8 +3573,13 @@ function _build_site_dir!(dir::AbstractString, nb::LiveNotebook; bundle::Bool = 
     end
     bundle && _write_runnable_bundle!(dir, nb; base_url = base_url, agent = agent, history = history)
     _write_page_assets!(dir, nb; imports = _site_import_mode(kwargs))   # referenced assets → page-local siblings (this page IS at `dir`)
-    write(joinpath(dir, "index.html"),
-          export_html(nb; og_image = ogpath, runnable = bundle, history = history, inline_assets = false, kwargs...))
+    # …and the ones only the export knows about. A `@replay` sweep is evaluated INSIDE `export_html`, so
+    # it does not exist yet above; the page names it as a sibling and the file has to follow.
+    sink = Dict{String,Vector{UInt8}}()
+    html = export_html(nb; og_image = ogpath, runnable = bundle, history = history,
+                       inline_assets = false, asset_sink = sink, kwargs...)
+    _write_sibling_assets!(dir, sink)
+    write(joinpath(dir, "index.html"), html)
     write(joinpath(dir, ".nojekyll"), "")   # GitHub Pages: serve files verbatim (no Jekyll processing)
     return dir
 end
@@ -3648,9 +3676,12 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
     # Referenced assets → this doc's OWN dir (<site>/<slug>/), so `registerMap` etc. use a plain
     # page-relative path with no "../" — resolves wherever the site is mounted.
     _write_page_assets!(docdir, nb; imports = _site_import_mode(kwargs))
-    write(joinpath(docdir, "index.html"),
-          export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, history = history,
-                      inline_assets = false, site_home = site_home, site_home_label = site_home_label, kwargs...))
+    sink = Dict{String,Vector{UInt8}}()          # …plus the siblings only the export can produce
+    html = export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, history = history,
+                       inline_assets = false, asset_sink = sink,
+                       site_home = site_home, site_home_label = site_home_label, kwargs...)
+    _write_sibling_assets!(docdir, sink)
+    write(joinpath(docdir, "index.html"), html)
     m = _doc_meta(nb)
     cs = nb.report.cells
     md = count(c -> c.kind == MARKDOWN, cs)
@@ -3934,8 +3965,11 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
             hogpath = isempty(su) ? "og-image.png" : su * "og-image.png"       # absolute when hosted
         end
         _write_page_assets!(dir, nb; imports = _site_import_mode(kwargs))   # referenced assets → page-local siblings (home page IS at `dir`)
-        write(htmpl, export_html(nb; runnable = false, og_image = hogpath, inline_assets = false,
-                                 og_url = su, og_type = "website", kwargs...))  # carries `docindex`
+        hsink = Dict{String,Vector{UInt8}}()   # …plus the siblings only the export can produce
+        hhtml = export_html(nb; runnable = false, og_image = hogpath, inline_assets = false,
+                            asset_sink = hsink, og_url = su, og_type = "website", kwargs...)  # carries `docindex`
+        _write_sibling_assets!(dir, hsink)
+        write(htmpl, hhtml)
         manifest["home"] = true
         # Provenance: WHICH notebook is the front page — the manager shows it and links back
         # to the source (before this, the UI could only say "home" with no origin).

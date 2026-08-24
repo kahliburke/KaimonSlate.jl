@@ -1026,6 +1026,38 @@ end
     @test haskey(Base.invokelatest(getproperty, r.mod, :__slate_replay_sweeps), "mine:north")
 end
 
+# ── A published page's data has to exist ─────────────────────────────────────────────────────────
+# A site page references its data as plain sibling files instead of carrying it inline. The site
+# builder writes the assets it can see from the NOTEBOOK before rendering the page — but a `@replay`
+# sweep is evaluated inside `export_html`, so it does not exist yet at that point. Every sweep
+# therefore shipped as a URL with no file behind it, and because `wire` only enables a control once
+# its asset resolves, every replayed control on every published site rendered disabled. The page
+# looked complete, nothing was logged, and it went unnoticed for as long as `@replay` has existed.
+#
+# `asset_sink` closes it. This asserts the wiring rather than the symptom, because reproducing the
+# symptom needs a live worker and a real site build.
+@testset "a site page collects the siblings only its export could produce" begin
+    src = read(joinpath(@__DIR__, "..", "src", "server_export.jl"), String)
+    lines = split(src, '\n')
+    # The CALL sites (not the prose about them): each is a page whose data ships as neighbouring files.
+    calls = [i for (i, l) in enumerate(lines)
+             if occursin("inline_assets = false", l) && !startswith(strip(l), "#")]
+    @test length(calls) == 3            # _build_site_dir! · _build_doc! · _assemble_site!
+    for i in calls
+        window = join(lines[max(1, i - 5):min(length(lines), i + 4)], "\n")
+        # A new site-page builder that forgets this ships a page whose data is missing, silently.
+        @test occursin("asset_sink", window)
+    end
+    # …and whatever lands in the sink is written where the page will look for it.
+    mktempdir() do dir
+        n = NS._write_sibling_assets!(dir, Dict{String,Vector{UInt8}}(
+            "data/x.i16.bin" => UInt8[1, 0, 2, 0], "nested/deep/y.bin" => UInt8[9]))
+        @test n == 2
+        @test read(joinpath(dir, "data", "x.i16.bin")) == UInt8[1, 0, 2, 0]
+        @test read(joinpath(dir, "nested", "deep", "y.bin")) == UInt8[9]   # dirs created on the way
+    end
+end
+
 # Surfacing MOVES a control, it does not copy it. `controls=` on a figure's header puts the knob
 # beside the thing it drives, and the live page then renders NOTHING where that control was declared
 # — which is the whole point, since a lone copy above the definition is the layout the author was
