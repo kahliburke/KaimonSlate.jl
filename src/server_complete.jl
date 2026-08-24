@@ -926,6 +926,23 @@ function _make_router(h::Hub)
                                                    "principal_id" => record.principal_id,
                                                    "is_admin" => record.is_admin)))
     end)
+    # Logout: revoke the server-side session and clear the cookie.
+    HTTP.register!(router, "POST", "/api/logout", req -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        cookie = _cookie_value(req, _AUTH_COOKIE)
+        isempty(cookie) || KaimonSlateHub.revoke_session!(h.auth_hub.sessions, cookie)
+        return HTTP.Response(200, ["Content-Type" => "application/json",
+                                   "Set-Cookie" => KaimonSlateHub.expired_session_cookie()],
+                             body = JSON.json(Dict("ok" => true)))
+    end)
+    HTTP.register!(router, "GET", "/logout", req -> begin
+        h.auth_hub === nothing && return HTTP.Response(404, "login not configured")
+        cookie = _cookie_value(req, _AUTH_COOKIE)
+        isempty(cookie) || KaimonSlateHub.revoke_session!(h.auth_hub.sessions, cookie)
+        return HTTP.Response(302, ["Location" => "/login",
+                                   "Set-Cookie" => KaimonSlateHub.expired_session_cookie(),
+                                   "Cache-Control" => "no-store"])
+    end)
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors
     # `KaimonSlate.create_tools`'s open: creates the file if it doesn't exist.
@@ -2865,7 +2882,9 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
         end
         _login_public = h.auth_hub !== nothing && (
             (stream.message.method == "POST" && _target_path == "/api/login") ||
-            (stream.message.method == "GET" && _target_path == "/login")
+            (stream.message.method == "POST" && _target_path == "/api/logout") ||
+            (stream.message.method == "GET" && _target_path == "/login") ||
+            (stream.message.method == "GET" && _target_path == "/logout")
         )
         if !_login_public && !_authorized(h, stream.message)
             # In multi-user mode, redirect browser navigations to the login page
