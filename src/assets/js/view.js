@@ -132,10 +132,12 @@ function injectFrontendScripts(state) {
       if (fe.kind) {
         const url = URL.createObjectURL(new Blob([fe.js], { type: 'text/javascript' }));  // module import honors the importmap
         s.type = 'module';
+        // The whole namespace, not just the default export: a module's optional `exportFigure` (print
+        // rendering — see registerComponent in slate-widget.js) rides along without a second import.
         s.textContent =
-          'import C from ' + JSON.stringify(url) + ';\n' +
+          'import C, * as M from ' + JSON.stringify(url) + ';\n' +
           'import { registerComponent } from "@slate/widget";\n' +
-          'registerComponent(' + JSON.stringify(fe.kind) + ', C);';
+          'registerComponent(' + JSON.stringify(fe.kind) + ', C, M);';
       } else {
         if (fe.esm) s.type = 'module';
         s.textContent = fe.js;

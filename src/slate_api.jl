@@ -861,13 +861,17 @@ See also `save_asset`, `FileUpload`."""),
     SlateApiEntry("markdown", "Document",
         "Prose cells (`#%% md`) with `{{ expr }}` interpolation of live values; `@md` is their skin.",
         ["md", "text", "prose", "interpolation", "narrative", "template", "standalone"],
-        "#%% md id=…    ·    {{ expr }}    ·    @md\"\"\"…\"\"\"",
+        "#%% md id=…    ·    {{ expr }}    ·    !!! note \"Title\"    ·    @md\"\"\"…\"\"\"",
         """A markdown cell is prose, and `{{ expr }}` splices a LIVE value into it — the expression is
         evaluated in the notebook namespace and its string form substituted, so the prose stays true as
         upstream values change (the reads join the reactive graph, exactly like a `web` cell's).
         ```markdown
         The model converged in {{ n_iters }} iterations ({{ round(elapsed; digits=1) }} s).
         ```
+        Prose is CommonMark with GFM tables, `\$…\$`/`\$\$…\$\$` LaTeX (KaTeX), and Julia-style admonitions —
+        `!!! note "Title"` with the body indented four spaces. The category is free-form, so a notebook
+        can coin its own (`!!! answer`) and style `.admonition.answer`; note/info/tip/hint/answer/
+        warning/danger already carry a colour.
         In the saved `.jl` a markdown cell is wrapped in an `@md\"\"\"…\"\"\"` skin so the notebook is
         ALSO a runnable plain-Julia script: `julia notebook.jl` prints the rendered prose to stdout
         (`KAIMONSLATE_QUIET_MD=1` suppresses it for a code-only run) and `standalone!` supplies the rest

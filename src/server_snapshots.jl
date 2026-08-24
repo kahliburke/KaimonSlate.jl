@@ -214,6 +214,24 @@ request_live_inspect(nb::LiveNotebook, cellid::AbstractString; timeout::Real = 4
 request_live_eval(nb::LiveNotebook, code::AbstractString; timeout::Real = 8.0) =
     request_live(nb, "js", Dict{String,Any}("code" => String(code)); timeout = timeout)
 
+# Ask the open tab for a picture of ONE mounted `slate_render` component, for a PDF export —
+# `slot` indexes the cell's component mounts in document order (a markdown cell can hold several,
+# one per claimed fence). `theme` is the Slate palette name the export is rendering in. Returns
+# `(bytes, ext)` with `ext ∈ ("svg","png")`, or `nothing` when no tab answers or it captured
+# nothing. Deliberately NOT routed through `request_live_eval`: an eval reply is capped at 20 KB
+# and a real SVG is bigger than that. See `_slateComponentFig` (assets/js/inspect.js).
+function request_live_compfig(nb::LiveNotebook, cellid::AbstractString, slot::Integer,
+                              theme::AbstractString; timeout::Real = 10.0)
+    res = request_live(nb, "compfig", Dict{String,Any}("cell" => String(cellid), "slot" => Int(slot),
+                                                       "theme" => String(theme)); timeout = timeout)
+    res isa AbstractDict || return nothing
+    svg = String(get(res, "svg", ""))
+    isempty(svg) || return (Vector{UInt8}(codeunits(svg)), "svg")
+    png = String(get(res, "png", ""))
+    isempty(png) && return nothing
+    return try; (Vector{UInt8}(Base64.base64decode(png)), "png"); catch; nothing; end
+end
+
 # Render a browser capture into the inspect text: cleaned DOM + this tab's console entries. The
 # raster (if any) is routed to the snapshot store by the POST handler, so it shows via `slate.view`.
 function _format_live_capture(cap)

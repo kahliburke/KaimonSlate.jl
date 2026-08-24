@@ -231,7 +231,11 @@ function _md_html(src::AbstractString, interps = CellOutput[])
     s = replace(tmpl, _MATH_DISPLAY => stash)   # $$…$$ first, so $…$ can't split it
     s = replace(s, _MATH_INLINE => stash)
     p = CommonMark.Parser()
+    # Tables (GFM) and `!!! category "Title"` callouts — the latter is the syntax Julia authors
+    # already write in docstrings and Documenter, and the category is free-form, so a notebook can
+    # coin its own (`!!! answer`) and style it. Emits `.admonition.<category>` + `.admonition-title`.
     enable!(p, CommonMark.TableRule())
+    enable!(p, CommonMark.AdmonitionRule())
     html = CommonMark.html(p(s))
     for (i, m) in enumerate(math)
         tex = m

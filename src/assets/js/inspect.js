@@ -111,6 +111,76 @@ async function _slateEvalJs(reqid, code) {
   try { await api('POST', '/api/eval-result', out); } catch (_) {}   // api() → _apipath injects NB_ID
 }
 window._slateEvalJs = _slateEvalJs;
+
+// ── Component figure capture for print (PDF/Typst export) ─────────────────────
+// A `slate_render` component only exists as a mounted DOM subtree, so a server-side export has
+// nothing to embed unless the browser hands it a picture. Answers a `compfig:` SSE request with
+// one figure, keyed by (cell, slot) — `slot` indexes the cell's `.disp.slatecomp` mounts in
+// document order, which is how a markdown cell with several fences addresses each one.
+//
+// Vector wherever possible: an SVG embeds into Typst as real paths and text, a raster does not.
+// Order is therefore: the component's own `exportFigure` (it knows how to render itself for
+// print — see registerComponent, slate-widget.js), then the mount's own lone <svg>, then
+// html2canvas as the format-agnostic floor.
+
+// Serialise a live <svg> as a standalone document. Width/height are dropped in favour of the
+// viewBox: a mount is laid out with `width: 100%`, which means nothing to a file, while the
+// viewBox carries the true aspect and lets the page size it.
+function _standaloneSvg(svg) {
+  const c = svg.cloneNode(true);
+  c.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  c.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+  const vb = c.getAttribute('viewBox');
+  if (vb) { c.removeAttribute('width'); c.removeAttribute('height'); }
+  return c.outerHTML;
+}
+// Is this palette's page colour dark? Passed to `exportFigure` so a component can pick a light or
+// dark rendering for the EXPORT theme, which need not be the one the live page is showing.
+function _paletteIsDark(vars) {
+  const s = ((vars && vars['--bg']) || '').trim();
+  let m, r, g, b;
+  if ((m = s.match(/^#([0-9a-f]{3})$/i))) [r, g, b] = [0, 1, 2].map(i => parseInt(m[1][i] + m[1][i], 16));
+  else if ((m = s.match(/^#([0-9a-f]{6})$/i))) [r, g, b] = [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16));
+  else if ((m = s.match(/^rgba?\(([^)]+)\)$/i))) [r, g, b] = m[1].split(',').map(Number);
+  else return true;                                   // unreadable → dark, which is Slate's default
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128;
+}
+async function _slateComponentFig(reqid, cellId, slot, theme) {
+  const out = { reqid, ok: false, svg: '', png: '', err: '' };
+  try {
+    const cell = document.getElementById('cell-' + cellId);
+    const host = cell ? cell.querySelectorAll('.disp.slatecomp')[slot | 0] : null;
+    if (!host) throw new Error('no component mount at slot ' + slot);
+    const el = host.querySelector('.slatecomponent');
+    const kind = (el && el.dataset.component) || '';
+    let props = {};
+    try { props = (JSON.parse(host.querySelector('script.slatecomponent-desc').textContent) || {}).props || {}; } catch (_) {}
+    const impl = (window.slateWidgets || {})[kind];
+    if (el && impl && typeof impl.exportFigure === 'function') {
+      const vars = (typeof _themeVarsFor === 'function') ? _themeVarsFor(theme) : {};
+      const r = await impl.exportFigure(el, { params: props, kind, theme, vars, dark: _paletteIsDark(vars) });
+      if (r && r.svg) out.svg = String(r.svg);
+      else if (r && r.png) out.png = String(r.png);
+    }
+    if (!out.svg && !out.png && el) {
+      // No hook, or it declined. A mount holding exactly ONE <svg> IS the figure — the common shape
+      // for a diagram/chart component, and vector for free. Several (or none) is an arbitrary layout
+      // that only a rasteriser can flatten.
+      const svgs = el.querySelectorAll('svg');
+      if (svgs.length === 1) out.svg = _standaloneSvg(svgs[0]);
+      else {
+        const h2c = await _loadHtml2Canvas();
+        const bg = (getComputedStyle(document.body).backgroundColor) || '#12141c';
+        const canvas = await h2c(el, { backgroundColor: bg, scale: 2, logging: false, useCORS: true });
+        out.png = (canvas.toDataURL('image/png').split(',')[1]) || '';
+      }
+    }
+    out.ok = !!(out.svg || out.png);
+  } catch (e) { out.err = String((e && e.message) || e); }
+  try { await api('POST', '/api/compfig-result', out); } catch (_) {}   // api() → _apipath injects NB_ID
+}
+window._slateComponentFig = _slateComponentFig;
+
 // Warm html2canvas at idle so the FIRST inspect doesn't blow its server-side timeout on a cold
 // load (CDN fetch + parse). Kept off the boot path — fires ~2s after load, best-effort.
 //

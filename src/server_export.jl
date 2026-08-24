@@ -1365,11 +1365,12 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 else window.__slateMountComponents();</script>""")
     for e in fe
         if !isempty(e.kind)
-            # Component module: import its default export (inlined as a data: module) + register under the kind.
+            # Component module: import its default export (inlined as a data: module) + register under the
+            # kind. The whole namespace goes too, so a module's optional `exportFigure` survives the freeze.
             mod = "data:text/javascript;charset=utf-8;base64," * Base64.base64encode(rw(e.js))
             push!(parts, string("<script type=\"module\" data-slate-fe=\"", _esc(e.id), "\">",
-                "import C from ", JSON.json(mod), ";import { registerComponent } from \"@slate/widget\";",
-                "registerComponent(", JSON.json(e.kind), ", C);</script>"))
+                "import C, * as M from ", JSON.json(mod), ";import { registerComponent } from \"@slate/widget\";",
+                "registerComponent(", JSON.json(e.kind), ", C, M);</script>"))
         else
             ty = e.esm ? " type=\"module\"" : ""
             push!(parts, string("<script", ty, " data-slate-fe=\"", _esc(e.id), "\">", safe(e.js), "</script>"))

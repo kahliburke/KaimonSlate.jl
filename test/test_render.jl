@@ -36,6 +36,27 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         @test occursin("<table>", html)              # table extension enabled
     end
 
+    @testset "admonitions: !!! category \"Title\"" begin
+        h = ReportRender.markdown_html("!!! note \"Heads up\"\n\n    Body text.\n")
+        @test occursin("class=\"admonition note\"", h)
+        @test occursin("<p class=\"admonition-title\">Heads up</p>", h)
+        @test occursin("<p>Body text.</p>", h)
+        # The four-space body indent must be read as admonition content, NOT as a code block —
+        # that misread is exactly what an un-enabled rule produces.
+        @test !occursin("<code>", h)
+        # No title → the category, capitalised (Julia/Documenter behaviour).
+        @test occursin("<p class=\"admonition-title\">Warning</p>",
+                       ReportRender.markdown_html("!!! warning\n\n    Careful.\n"))
+        # The category is free-form, so a notebook can coin one and style it.
+        @test occursin("class=\"admonition answer\"",
+                       ReportRender.markdown_html("!!! answer \"Answer (a)\"\n\n    Because.\n"))
+        # Math inside a callout survives to KaTeX like any other prose.
+        ha = ReportRender.markdown_html(
+            "!!! answer \"A\"\n\n    Rate \$\\pi^{_T}=2\\%\$ holds.\n")
+        @test occursin("class=\"admonition answer\"", ha)
+        @test occursin("\\pi^{_T}=2\\%", ha)
+    end
+
     @testset "error cell is styled and captured" begin
         @test occursin("class=\"cell errored\"", html)
         @test occursin("boom", html)

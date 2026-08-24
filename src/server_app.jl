@@ -56,6 +56,7 @@ const _APP_POST = (
     r"^/api/[^/]+/launch$",          # wake an inactive notebook (the launch pill)
     r"^/api/[^/]+/eval-result$",     # browser→server return path for `request_live_eval`
     r"^/api/[^/]+/inspect-result$",  # ditto, for rendered-DOM inspection
+    r"^/api/[^/]+/compfig-result$",  # ditto, for a component's print figure (a reader exporting a PDF)
     r"^/api/[^/]+/diag$",            # client diagnostics → what `/status` reports
 )
 

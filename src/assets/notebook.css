@@ -858,6 +858,40 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .md h1 { font-size:1.7rem; border-bottom:1px solid var(--border); padding-bottom:.2em; }
 .md table { border-collapse:collapse; } .md td,.md th { border:1px solid var(--border); padding:4px 10px; }
 
+/* ── Admonitions (`!!! category "Title"`) ──────────────────────────────────────────────────────────
+   The category is free-form, so the base rule has to look right for a name nobody anticipated: it
+   reads `--adm` (an accent) and derives the tint, rule and title colour from it against the current
+   theme's own variables, so every theme gets a coherent box for free. Named categories below set
+   only `--adm`. Julia's five (note/info/tip/warning/danger) plus the ones Documenter and course
+   notebooks reach for; anything else lands on the neutral default. */
+.md .admonition { --adm:var(--dim);
+  margin:1em 0; border-radius:7px; overflow:hidden;
+  border:1px solid color-mix(in srgb, var(--adm) 40%, var(--border));
+  border-left:4px solid var(--adm);
+  background:color-mix(in srgb, var(--adm) 7%, var(--bg2)); }
+/* The title leans on `--strong` (the themes' high-emphasis text) with only a HINT of the accent.
+   Tinting it mostly-accent reads well on the dark themes and fails badly on the light ones — the
+   accents are mid-tones, so on a light title bar the text drops under 2.5:1. Measured across all
+   seven themes and every category, 25% is the most colour that keeps the worst case above WCAG AA;
+   the category still reads loudly from the 4px border and the tinted bar. */
+.md .admonition > .admonition-title {
+  margin:0; padding:6px 14px; font-weight:600; letter-spacing:.01em;
+  color:color-mix(in srgb, var(--adm) 25%, var(--strong));
+  background:color-mix(in srgb, var(--adm) 15%, var(--bg3));
+  border-bottom:1px solid color-mix(in srgb, var(--adm) 28%, var(--border)); }
+/* The body: everything after the title. Padding lives here rather than on the box so the title bar
+   spans edge to edge, and the first/last child margins collapse away like `.md` itself. */
+.md .admonition > :not(.admonition-title) { margin-left:14px; margin-right:14px; }
+.md .admonition > .admonition-title + * { margin-top:10px; }
+.md .admonition > :last-child { margin-bottom:10px; }
+.md .admonition code { background:color-mix(in srgb, var(--adm) 10%, var(--bg3)); }
+.md .admonition.note, .md .admonition.info    { --adm:var(--accent); }
+.md .admonition.tip, .md .admonition.hint,
+.md .admonition.answer, .md .admonition.solution { --adm:var(--green); }
+.md .admonition.warning, .md .admonition.caution { --adm:var(--gold); }
+.md .admonition.danger, .md .admonition.error,
+.md .admonition.compat                         { --adm:var(--red); }
+
 /* ── Web cell: 3-pane HTML/CSS/JS editor ── A stack of labelled section editors. Each pane has a small
    language tab; empty panes stay compact so a JS-only widget isn't three tall boxes. */
 .webedit { display:flex; flex-direction:column; gap:6px; margin:2px 0 4px; }

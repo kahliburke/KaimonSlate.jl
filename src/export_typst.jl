@@ -32,6 +32,63 @@ function _live_render_svg(nb::LiveNotebook, cell::AbstractString; theme::Abstrac
     return (s isa AbstractString && !isempty(s)) ? s : nothing
 end
 
+# ── Components in print ───────────────────────────────────────────────────────
+# A `slate_render` component (SlateExtensionsBase) has no server-side bytes at all — it exists only
+# as a mounted DOM subtree — so the browser is asked for a picture of each mount, the same handoff
+# `_warm_chart_svgs!` uses for a client-rendered chart. Both surfaces a component reaches are
+# covered: a cell that RETURNED one, and a markdown fence an extension claimed (```mermaid → that
+# package's value). A component can render itself for print via the module's `exportFigure`
+# (slate-widget.js); without one the mount's own SVG, or an html2canvas raster, is captured.
+const _COMPONENT_MIME = "application/vnd.kaimonslate.component+json"
+const _CompFigs = Dict{Tuple{String,Int},Tuple{Vector{UInt8},String}}
+const _NO_COMPFIGS = _CompFigs()
+
+_has_component(o) = o !== nothing && any(ch -> ch.mime == _COMPONENT_MIME, o.display)
+
+# Which of a cell's component mounts to capture, as `(slot, interp index)`. `slot` indexes the
+# cell's `.disp.slatecomp` elements in document order — what the browser side addresses — and the
+# interp index is 0 for a code cell's own output. A markdown cell renders exactly one mount per
+# component-valued interpolation, in order (`_render_chunks`), so the two enumerations agree by
+# construction rather than by a shared counter.
+function _component_slots(c::Cell)
+    c.kind == MARKDOWN || return _has_component(c.output) ? [(0, 0)] : Tuple{Int,Int}[]
+    return [(s - 1, i) for (s, i) in enumerate(findall(_has_component, c.interp))]
+end
+
+# The notebook's component figures, keyed `(cell id, slot)`. Called BEFORE the caller takes
+# `nb.lock`, like the other warm passes — each round-trip blocks up to its timeout, and holding the
+# notebook lock for that would stall everything else on the notebook for the whole export. Nothing
+# is cached between exports: a component draws from live state, so a stale picture is worse than
+# paying the round-trip again. Best-effort — a mount that fails or times out is simply absent, and
+# the caller says so rather than dropping it silently.
+function _warm_component_figs!(nb::LiveNotebook; theme::AbstractString = "midnight", progress = nothing)
+    targets = lock(nb.lock) do
+        [(c.id, s) for c in nb.report.cells for (s, _) in _component_slots(c)]
+    end
+    figs = _CompFigs()
+    for (cid, slot) in targets
+        progress === nothing || (try; progress(cid); catch; end)
+        got = try; request_live_compfig(nb, cid, slot, theme); catch; nothing; end
+        got === nothing || (figs[(cid, slot)] = got)
+    end
+    return figs
+end
+
+# The width a captured component figure prints at, as a percentage of the text column — `nothing`
+# to take `figureimg`'s default. A component sizes itself in CSS pixels against the notebook's
+# column, so scaling that against a nominal print column keeps the on-screen proportions: a small
+# diagram stays small instead of being blown up to fill the page, a wide one is capped so it can't
+# overflow. A raster has no intrinsic column to reason about, so it takes the default.
+const _COMP_FIG_REF_PX = 640    # the notebook column width a component lays itself out against
+function _comp_fig_width_pct(bytes::Vector{UInt8}, ext::AbstractString)
+    ext == "svg" || return nothing
+    m = match(r"viewBox\s*=\s*[\"']\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+[\d.]+", String(first(bytes, 4000)))
+    m === nothing && return nothing
+    w = tryparse(Float64, String(m.captures[1]))
+    (w === nothing || w <= 0) && return nothing
+    return clamp(round(Int, 100 * w / _COMP_FIG_REF_PX), 25, 100)
+end
+
 # LaTeX macro shims for commands mitex lacks. mitex honors parameterized \newcommand, so
 # these inject cheaply ahead of every equation. Grow as needed.
 const _MITEX_SHIMS = raw"""
@@ -194,7 +251,7 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
     #let outblock(s) = block(width: 100%, inset: 7pt, fill: $(p.outbg), radius: 3pt, text(size: 8.5pt, fill: $(p.outfg), raw(s)))
     #let valblock(s) = block(width: 100%, inset: 7pt, fill: $(p.valbg), radius: 3pt, text(size: 8.5pt, fill: $(p.valfg), raw(s)))
     #let errblock(s) = block(width: 100%, inset: 7pt, fill: $(p.errbg), radius: 3pt, text(size: 8.5pt, fill: $(p.errfg), raw(s)))
-    #let figureimg(p) = align(center, image(p, width: 85%))
+    #let figureimg(p, width: 85%) = align(center, image(p, width: width))
     #let notefig(s) = block(width: 100%, inset: 7pt, text(size: 8.5pt, style: "italic", fill: $(p.parlabel), s))
     #let figcaption(lbl, body) = block(width: 100%, inset: (x: 24pt, y: 4pt), text(size: 8.6pt, fill: $(p.parlabel))[#text(weight: "bold")[#lbl.] #body])
     #let paramblock(items) = block(width: 100%, inset: (x: 8pt, y: 5pt), fill: $(p.parbg), radius: 3pt, stroke: 0.5pt + $(p.parborder),
@@ -255,7 +312,7 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
     #let outblock(s) = block(width: 100%, inset: 7pt, fill: $(p.outbg), radius: 3pt, text(size: 0.7em, fill: $(p.outfg), raw(s)))
     #let valblock(s) = block(width: 100%, inset: 7pt, fill: $(p.valbg), radius: 3pt, text(size: 0.7em, fill: $(p.valfg), raw(s)))
     #let errblock(s) = block(width: 100%, inset: 7pt, fill: $(p.errbg), radius: 3pt, text(size: 0.7em, fill: $(p.errfg), raw(s)))
-    #let figureimg(p) = align(center, image(p, height: 62%))
+    #let figureimg(p, width: none) = align(center, if width == none { image(p, height: 62%) } else { image(p, width: width) })
     #let paramblock(items) = block(width: 100%, inset: (x: 8pt, y: 5pt), fill: $(p.parbg), radius: 3pt, stroke: 0.5pt + $(p.parborder),
       text(size: 0.7em)[#text(fill: $(p.parlabel), weight: "bold")[parameters] #h(6pt) #items.map(it => [#raw(it.at(0)) = #text(weight: "bold", it.at(1))]).join([#h(10pt)])])
     // One slide = one page. Measure the body at full content width; if it's taller than the page,
@@ -388,16 +445,120 @@ function _interp_typst_text(o)
     return ""
 end
 
-# Markdown source with `{{ expr }}` interpolations resolved (scalars, or a text/latex value's TeX)
-# and citations rewritten to sentinels for the preamble's cite rule.
+# What a `{{ expr }}` interpolation becomes in the markdown handed to cmarker. Three cases, in order:
+# a captured component figure is an image block; otherwise the value's own text; and a claimed FENCE
+# that produced neither falls back to the code block CommonMark would have made of it. That last case
+# mirrors `_md_html` and is why a diagram with no capture no longer takes its own source down with it
+# — before this, an unrenderable ```` ```mermaid ```` block vanished from the PDF without a trace,
+# which is strictly worse than the plain-code-block treatment an UNCLAIMED fence gets.
+function _interp_typst_md(expr, o, figfile)
+    figfile === nothing || return string("\n\n![](", figfile, ")\n\n")
+    t = _interp_typst_text(o)
+    isempty(t) || return t
+    fence = ReportEngine._fence_call(expr)
+    fence === nothing && return ""
+    return _md_fence_block(fence.lang, fence.body)
+end
+
+# The `compfig` callback `_md_for_typst` takes: interpolation index → the filename of that
+# component's captured figure, written into the project dir on first ask, or `nothing`. Staging is
+# the caller's job (only it has `dir`), so this closes over it and registers the figure's width in
+# `media.json` — the one place a markdown image can carry a size.
+function _compfig_stager(c::Cell, dir::AbstractString, base::AbstractString, compfigs::_CompFigs, sizes)
+    slotof = Dict(i => s for (s, i) in _component_slots(c))
+    n = Ref(0)
+    return function (i::Integer)
+        slot = get(slotof, Int(i), nothing); slot === nothing && return nothing
+        got = get(compfigs, (c.id, slot), nothing); got === nothing && return nothing
+        bytes, ext = got
+        n[] += 1
+        fname = string(base, "_comp", n[], ".", ext)
+        write(joinpath(dir, fname), bytes)
+        if sizes !== nothing
+            e = Dict{String,Any}("block" => true)
+            pct = _comp_fig_width_pct(bytes, ext)
+            pct === nothing || (e["width"] = (Float64(pct), "%"))
+            sizes[fname] = e
+        end
+        return fname
+    end
+end
+
+# Re-emit a fence as a literal code block, with a backtick run long enough to survive a body that
+# contains one of its own.
+function _md_fence_block(lang::AbstractString, body::AbstractString)
+    b = rstrip(String(body), '\n')
+    ticks = "`"^max(3, maximum((length(m.match) for m in eachmatch(r"`+", b)); init = 2) + 1)
+    return string("\n\n", ticks, lang, "\n", b, "\n", ticks, "\n\n")
+end
+
+# ── Admonitions → blockquotes ─────────────────────────────────────────────────────────────────────
+# The live renderer parses `!!! category "Title"` (CommonMark's `AdmonitionRule`) into a coloured
+# callout. `cmarker` is plain CommonMark and has no such rule, so left alone the marker would print
+# as the literal text "!!! answer" followed by the body as a CODE BLOCK — its four-space indent read
+# as one. Rewriting to a blockquote with a bold title keeps the structure and the visual set-off that
+# matter in print; the colour band is the one thing that doesn't survive.
+const _ADM_OPEN_RE = r"^(\s*)!!!\s+(\w+)(?:\s+\"([^\"]*)\")?\s*$"
+
+function _admonitions_to_quotes(src::AbstractString)
+    lines = split(String(src), '\n'; keepempty = true)
+    # Accumulate LINES and join at the end rather than printing: a source with no admonition in it
+    # must come back byte-identical, and `println`ing the final element of a `split` would invent a
+    # trailing newline that was never there.
+    out = String[]
+    i, n = 1, length(lines)
+    infence = false
+    while i <= n
+        ln = lines[i]
+        if occursin(r"^\s*(```|~~~)", ln)          # never touch fenced code
+            infence = !infence
+            push!(out, ln); i += 1; continue
+        end
+        m = infence ? nothing : match(_ADM_OPEN_RE, ln)
+        if m === nothing
+            push!(out, ln); i += 1; continue
+        end
+        cat  = m.captures[2]
+        title = m.captures[3] === nothing ? uppercasefirst(cat) : m.captures[3]
+        push!(out, "> **" * title * "**")
+        # The body is everything indented past the marker, blank lines included — the same rule
+        # `AdmonitionRule` continues on. One tab counts as the four columns CommonMark expands it to.
+        i += 1
+        body = String[]
+        while i <= n
+            l = lines[i]
+            if isempty(strip(l))
+                push!(body, ""); i += 1; continue
+            end
+            (startswith(l, "    ") || startswith(l, "\t")) || break
+            push!(body, startswith(l, "\t") ? l[nextind(l, 1):end] : l[5:end])
+            i += 1
+        end
+        # The blank line that separates the marker from its body is syntax, not content — as is any
+        # trailing run, so neither should become an empty quoted line.
+        while !isempty(body) && isempty(body[1]); popfirst!(body); end
+        while !isempty(body) && isempty(body[end]); pop!(body); end
+        isempty(body) || push!(out, ">")
+        for b in body; push!(out, isempty(b) ? ">" : "> " * b); end
+        push!(out, "")                              # blank line closes the quote against what follows
+    end
+    return join(out, "\n")
+end
+
+# Markdown source with `{{ expr }}` interpolations resolved (scalars, a text/latex value's TeX, or a
+# component's captured figure), admonitions lowered to blockquotes, and citations rewritten to
+# sentinels for the preamble's cite rule. `compfig(i)` returns the staged filename for the i-th
+# interpolation's component figure, or `nothing` — the caller owns staging because only it has the
+# project dir (see `_build_typst_project`).
 function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{String}(),
-                       figrefs = Dict{String,Tuple{Int,String}}())
+                       figrefs = Dict{String,Tuple{Int,String}}(), compfig = _ -> nothing)
     tmpl, exprs = ReportEngine._md_template(src)
     s = tmpl
     for i in 1:length(exprs)
         o = i <= length(c.interp) ? c.interp[i] : nothing
-        s = replace(s, ReportEngine._interp_token(i) => _interp_typst_text(o))
+        s = replace(s, ReportEngine._interp_token(i) => _interp_typst_md(exprs[i], o, compfig(i)))
     end
+    s = _admonitions_to_quotes(s)
     return _rewrite_citations(s, citekeys; figrefs = figrefs)
 end
 
@@ -471,7 +632,8 @@ end
 # takes `nb.lock` — `_figure_for_export` itself must stay lock-safe, so it only ever READS
 # the cache, never triggers a round-trip), else its PNG. Returns `(bytes, ext)` with
 # `ext ∈ ("pdf","svg","png")`, or `nothing` when the cell has no figure.
-function _figure_for_export(nb::LiveNotebook, c::Cell; theme::AbstractString = "midnight", override::Bool = false)
+function _figure_for_export(nb::LiveNotebook, c::Cell; theme::AbstractString = "midnight", override::Bool = false,
+                            compfigs::_CompFigs = _NO_COMPFIGS)
     # Themed OVERRIDE: a native figure re-rendered under the chosen palette (`_warm_makie_figs!`) wins
     # over the baked-in bytes, which carry the theme the cell was last RUN in — Makie can't be re-themed
     # any other way. Falls through to the baked bytes when the re-render was unavailable.
@@ -487,6 +649,8 @@ function _figure_for_export(nb::LiveNotebook, c::Cell; theme::AbstractString = "
             end
         end
     end
+    comp = get(compfigs, (c.id, 0), nothing)         # a returned `slate_render` component, captured from the open tab
+    comp === nothing || return (copy(comp[1]), comp[2])
     svg = _snapshot_svg(nb.id, c.id, theme)          # theme-matched vector chart, if the browser supplied one (live or pre-warmed)
     svg !== nothing && return (Vector{UInt8}(codeunits(svg)), "svg")
     png = _snapshot(nb.id, c.id)
@@ -558,8 +722,12 @@ function _warm_makie_figs!(nb::LiveNotebook; theme::AbstractString, raster::Bool
     return nothing
 end
 
-# True if the cell's output includes a `text/html` chunk (a custom HTML card Typst can't render).
-_has_html_output(c::Cell) = c.output !== nothing && any(ch -> ch.mime == "text/html", c.output.display)
+# True if the cell's output includes an HTML chunk (a custom card Typst can't render) — either a
+# hand-rolled `text/html` show method or `slate_render`'s `html_fragment` escape hatch. Both are
+# arbitrary DOM with no figure bytes behind them, so both want the same html2canvas rescue; matching
+# only `text/html` left every `html_fragment` output (a WGLMakie figure among them) out of the PDF.
+_has_html_output(c::Cell) = c.output !== nothing &&
+    any(ch -> ch.mime in ("text/html", "application/vnd.kaimonslate.html+html"), c.output.display)
 
 # Emit a code cell's outputs (value / stdout / error / figure / tables) into the doc.
 # Export output-verbosity: `"all"` (everything), `"figures"` (only figures / charts / tables / rendered
@@ -569,7 +737,8 @@ _outputs_any(outputs) = String(outputs) != "none"
 
 function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::LiveNotebook, c::Cell;
                        theme::AbstractString = "light", charttheme::AbstractString = "",
-                       override::Bool = false, outputs::AbstractString = "all")
+                       override::Bool = false, outputs::AbstractString = "all",
+                       compfigs::_CompFigs = _NO_COMPFIGS)
     o = c.output
     (o === nothing || !_outputs_any(outputs)) && return
     texts = _outputs_text_ok(outputs)
@@ -587,7 +756,8 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
         write(joinpath(dir, base * ".val"), o.value_repr)
         print(io, "#valblock(read(\"", base, ".val\"))\n")
     end
-    fig = _figure_for_export(nb, c; theme = _chart_theme(charttheme, theme), override = override)   # vector (pdf/svg) preferred, else raster png
+    fig = _figure_for_export(nb, c; theme = _chart_theme(charttheme, theme), override = override,
+                             compfigs = compfigs)   # vector (pdf/svg) preferred, else raster png
     # An HTML output (a custom `text/html` card, e.g. the grading `check(...)` cells) can't be
     # rendered by Typst and isn't an embeddable figure — so rasterize the rendered card via the open
     # tab (html2canvas, same round-trip slate.inspect uses) and embed that image. Needs a live tab;
@@ -599,11 +769,17 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
     if fig !== nothing
         data, ext = fig
         write(joinpath(dir, base * "." * ext), data)
-        print(io, "#figureimg(\"", base, ".", ext, "\")\n")
+        # A component keeps its on-screen proportions rather than filling the column like a figure
+        # the author sized for print; everything else takes `figureimg`'s default.
+        pct = _has_component(o) ? _comp_fig_width_pct(data, ext) : nothing
+        print(io, "#figureimg(\"", base, ".", ext, "\"",
+              pct === nothing ? "" : ", width: $(pct)%", ")\n")
     elseif !isempty(_echarts_specs(c))
         # A client-rendered chart that no browser tab was open to snapshot (headless export) —
         # don't silently drop it, note the gap (mirrors the HTML export path).
         print(io, "#notefig(\"[chart not captured — open this notebook in a browser, then re-export]\")\n")
+    elseif _has_component(o)
+        print(io, "#notefig(\"[component not captured — open this notebook in a browser, then re-export]\")\n")
     end
     for spec in _table_specs(c)
         print(io, _typst_table(spec; theme = theme))
@@ -1128,6 +1304,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
     # Themed override: re-render native (Makie) figures under the picked palette too (see the export
     # dialog's warning). No-op when not overriding — the baked figure bytes already match the live theme.
     override && _warm_makie_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
+    compfigs = _warm_component_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()
         mediasz = Dict{String,Any}()   # staged image => its `{width=…}` block, written out as media.json
@@ -1172,7 +1349,8 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             inrow && print(io, "[")                   # each row cell is one grid slot
             if c.kind == MARKDOWN
                 src = c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source   # hoisted H1 → not in body
-                md = _md_for_typst(c, src; citekeys = citekeys, figrefs = figidx.labels)
+                md = _md_for_typst(c, src; citekeys = citekeys, figrefs = figidx.labels,
+                                   compfig = _compfig_stager(c, dir, base, compfigs, mediasz))
                 md = _stage_typst_md_media(md, dir, base, _proj_root(nb); sizes = mediasz)   # author-embedded images → staged files
                 if isempty(strip(md))
                     inrow || continue                # empty markdown: standalone → skip; in a row → empty slot
@@ -1194,7 +1372,8 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                     print(io, "#codeblock(read(\"", base, ".jl\"))\n")
                 end
                 include_params && print(io, _emit_controls(c))   # frozen @bind controls — off by default
-                _emit_output!(io, dir, base, nb, c; theme = theme, charttheme = ct, override = override, outputs = outputs)
+                _emit_output!(io, dir, base, nb, c; theme = theme, charttheme = ct, override = override,
+                              outputs = outputs, compfigs = compfigs)
                 print(io, "\n")
             end
             if inrow                                  # close this grid slot; the row's last cell closes the grid
@@ -1213,10 +1392,11 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
 end
 
 # Emit one slide fragment (a whole cell, or a `---`-split markdown chunk) into the doc.
-function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, charttheme = "", override = false, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all", sizes = nothing)
+function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, charttheme = "", override = false, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all", sizes = nothing, compfigs::_CompFigs = _NO_COMPFIGS)
     c, srcoverride = frag                    # frag[2] is a per-frag SOURCE override (String/nothing), NOT the themed-render Bool `override`
     if c.kind == MARKDOWN
-        md = _md_for_typst(c, srcoverride === nothing ? c.source : srcoverride; citekeys = citekeys)
+        md = _md_for_typst(c, srcoverride === nothing ? c.source : srcoverride; citekeys = citekeys,
+                           compfig = _compfig_stager(c, dir, base, compfigs, sizes))
         md = _stage_typst_md_media(md, dir, base, _proj_root(nb); sizes = sizes)   # author-embedded images → staged files
         isempty(strip(md)) && return
         write(joinpath(dir, base * ".md"), md)
@@ -1227,7 +1407,8 @@ function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, chartt
             print(io, "#codeblock(read(\"", base, ".jl\"))\n")
         end
         include_params && print(io, _emit_controls(c))
-        _emit_output!(io, dir, base, nb, c; theme = theme, charttheme = charttheme, override = override, outputs = outputs)
+        _emit_output!(io, dir, base, nb, c; theme = theme, charttheme = charttheme, override = override,
+                      outputs = outputs, compfigs = compfigs)
         print(io, "\n")
     end
     return
@@ -1244,6 +1425,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
     ct = _chart_theme(charttheme, theme)                               # the Slate palette charts render in
     _warm_chart_svgs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
     override && _warm_makie_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
+    compfigs = _warm_component_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()
         mediasz = Dict{String,Any}()   # staged image => its `{width=…}` block, written out as media.json
@@ -1284,7 +1466,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
                     multi && print(io, "[")
                     _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme, charttheme = ct, override = override,
                                       show_source = show_source, include_params = include_params, citekeys = citekeys,
-                                      outputs = outputs, sizes = mediasz)
+                                      outputs = outputs, sizes = mediasz, compfigs = compfigs)
                     multi && print(io, "],\n")
                 end
                 multi && print(io, ")\n\n")

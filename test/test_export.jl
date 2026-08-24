@@ -1101,3 +1101,93 @@ end
     surf2 = NS._surfaced_names(r.cells)
     @test isempty(NS._export_controls_html(byid["ctl"], idx, surf2))
 end
+
+# ── PDF export: admonitions ───────────────────────────────────────────────────────────────────────
+# `cmarker` (the Typst markdown renderer) is plain CommonMark and has no `!!!` rule, so the marker
+# would print literally and the four-space body would typeset as a CODE BLOCK. `_admonitions_to_quotes`
+# lowers each callout to a titled blockquote before the source reaches it.
+@testset "typst export lowers admonitions to titled blockquotes" begin
+    f = NS._admonitions_to_quotes
+
+    out = f("!!! answer \"Answer (a)\"\n\n    First para.\n\n    Second para.\n\nAfter.\n")
+    @test occursin("> **Answer (a)**", out)
+    @test occursin("> First para.", out)
+    @test occursin("> Second para.", out)
+    @test occursin("\nAfter.", out)                  # prose after the box leaves the quote
+    @test !occursin("!!!", out)
+    @test !occursin("    First para.", out)          # de-indented, so it can't read as a code block
+
+    # No title → the category, capitalised.
+    @test occursin("> **Note**", f("!!! note\n\n    Body.\n"))
+
+    # Pluto writes admonition bodies with a TAB; CommonMark expands it to the same four columns.
+    @test occursin("> Tabbed body.", f("!!! tip \"T\"\n\n\tTabbed body.\n"))
+
+    # A `!!!` inside a fence is code, not a callout.
+    fenced = "```julia\n!!! not a callout\n```\n"
+    @test f(fenced) == fenced
+
+    # Math rides through untouched for mitex.
+    @test occursin("> Rate \$U>U_n\$ holds.", f("!!! answer \"A\"\n\n    Rate \$U>U_n\$ holds.\n"))
+
+    # Nothing to do → the source is unchanged.
+    @test f("Just prose.\n") == "Just prose.\n"
+end
+
+@testset "Typst export — components (`slate_render`) reach the page" begin
+    compchunk() = _RE.MimeChunk(NS._COMPONENT_MIME,
+                                Vector{UInt8}(codeunits("{\"v\":1,\"component\":\"K\",\"props\":{}}")))
+    out(chunks) = _RE.CellOutput("", chunks, Any[], Any[], _RE.BindSpec[], "", nothing, nothing, 1.0)
+
+    # ── which mounts get captured, and under which slot ──
+    # A code cell that returned one is slot 0. A markdown cell addresses its mounts by their order in
+    # the rendered DOM, so the slot is a position among the COMPONENT-valued interpolations, not among
+    # all of them — `_render_chunks` emits a `.disp.slatecomp` only for a component chunk.
+    rep = _RE.parse_report("#%% code id=c\n1\n")
+    cc = rep.cells[end]
+    @test NS._component_slots(cc) == Tuple{Int,Int}[]        # not run yet ⇒ nothing to capture
+    cc.output = out([compchunk()])
+    @test NS._component_slots(cc) == [(0, 0)]
+    cc.output = out([_RE.MimeChunk("image/png", UInt8[0x89])])
+    @test NS._component_slots(cc) == Tuple{Int,Int}[]        # a raster is not a component
+
+    mrep = _RE.parse_report("#%% md id=m\n@md\"\"\"\n{{ 1 }} and {{ 2 }} and {{ 3 }}\n\"\"\"\n")
+    mc = mrep.cells[end]
+    mc.interp = [out(_RE.MimeChunk[]), out([compchunk()]), out([compchunk()])]
+    @test NS._component_slots(mc) == [(0, 2), (1, 3)]        # 2nd and 3rd interp ⇒ mounts 0 and 1
+
+    # ── print width tracks the diagram's own proportions ──
+    svg(w) = Vector{UInt8}(codeunits("<svg viewBox=\"0 0 $w 100\" xmlns=\"…\"></svg>"))
+    @test NS._comp_fig_width_pct(svg(640), "svg") == 100     # the reference column ⇒ full width
+    @test NS._comp_fig_width_pct(svg(320), "svg") == 50      # half as wide on screen ⇒ half in print
+    @test NS._comp_fig_width_pct(svg(4000), "svg") == 100    # capped: it can never overflow the column
+    @test NS._comp_fig_width_pct(svg(16), "svg") == 25       # floored: never vanishingly small
+    @test NS._comp_fig_width_pct(Vector{UInt8}(codeunits("<svg></svg>")), "svg") === nothing
+    @test NS._comp_fig_width_pct(svg(640), "png") === nothing   # a raster has no intrinsic column
+
+    # ── the html2canvas rescue covers BOTH HTML output flavours ──
+    hc = _RE.parse_report("#%% code id=h\n1\n").cells[end]
+    hc.output = out([_RE.MimeChunk("application/vnd.kaimonslate.html+html", Vector{UInt8}("<b>x</b>"))])
+    @test NS._has_html_output(hc)                            # `html_fragment`, not just `text/html`
+end
+
+@testset "Typst export — a claimed fence degrades to its source, never to nothing" begin
+    # A ```mermaid fence is desugared to an interpolation, so with no capture available the token had
+    # nothing to resolve to and the whole block — source included — dropped out of the PDF. That is
+    # strictly worse than an UNCLAIMED fence, which prints as a code block; so print the code block.
+    src = "#%% md id=m\n@md\"\"\"\nBefore.\n\n```mermaid\nflowchart LR\n    A --> B\n```\n\nAfter.\n\"\"\"\n"
+    c = _RE.parse_report(src).cells[end]
+    c.interp = [_RE.CellOutput("", _RE.MimeChunk[], Any[], Any[], _RE.BindSpec[], "", nothing, nothing, 1.0)]
+    md = NS._md_for_typst(c)
+    @test occursin("```mermaid", md)
+    @test occursin("flowchart LR", md) && occursin("A --> B", md)
+    @test occursin("Before.", md) && occursin("After.", md)
+
+    # With a capture, the same slot becomes the figure instead.
+    @test occursin("![](fig.svg)", NS._md_for_typst(c; compfig = _ -> "fig.svg"))
+
+    # A body containing its own backticks gets a longer fence, so the block still closes where it should.
+    inner = "a\n```\nb"
+    blk = NS._md_fence_block("mermaid", inner)
+    @test occursin("````mermaid", blk) && endswith(strip(blk), "````")
+end
