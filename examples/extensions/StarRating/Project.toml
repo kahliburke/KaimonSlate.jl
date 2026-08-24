@@ -1,7 +1,7 @@
 name = "StarRating"
 uuid = "06afbefc-9613-4bb7-bc4a-f7a72d2076db"
 authors = ["Kahli Burke <kahli@kahliburke.com>"]
-version = "0.1.2"
+version = "0.1.3"
 
 # A SAMPLE Slate extension package. It depends ONLY on the lean SlateExtensionsBase SDK — NOT on
 # KaimonSlate — and adds a typed `@bind` star-rating control end to end: a Julia constructor
