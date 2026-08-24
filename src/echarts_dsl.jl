@@ -628,6 +628,13 @@ into a live value) — see the `slate.api` reference.
 const _EC_TOPLEVEL = Set{String}(["xAxis", "yAxis", "grid", "dataZoom", "visualMap", "polar",
     "angleAxis", "radiusAxis", "radar", "geo", "toolbox", "dataset", "brush", "calendar", "timeline",
     "singleAxis", "parallel", "parallelAxis", "graphic", "axisPointer", "textStyle", "color",
+    # The animation keys are valid on a series TOO, so Express mode used to splice them there and
+    # leave the option's own `animationDurationUpdate` untouched — meaning the documented
+    # `animation = false` did not actually stop a reactive chart from morphing on every step of a
+    # slider drag. In Express there is exactly one series, so a bare kwarg can only have meant the
+    # chart. Per-series control is still available where it makes sense: inside `series(…)`.
+    "animation", "animationThreshold", "animationDuration", "animationEasing", "animationDelay",
+    "animationDurationUpdate", "animationEasingUpdate", "animationDelayUpdate",
     # Slate extensions (not ECharts keys): `registerMap=(name="world", url="/assets/maps/world.json")`
     # declares a geo map to fetch + `echarts.registerMap` before render (vector for several); the
     # front-end registers each map once per page and strips the key. `height`/`width` size the chart's

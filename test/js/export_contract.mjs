@@ -59,6 +59,21 @@ for (const c of controls) {
       try { R.mirror(h, key); } catch (e) { note(c, impl, `mirror(${JSON.stringify(key)}) threw: ${e.message}`); break; }
       let got;
       try { got = R.read(h); } catch (e) { note(c, impl, `read() threw after ${JSON.stringify(key)}: ${e.message}`); break; }
+      // The interval a range slider SHOWS has to follow the interval it holds. The thumbs are native
+      // inputs and move themselves; the filled span between them is ours to redraw, and if it isn't
+      // the control displays a range it no longer has — which is worse than showing nothing.
+      if (R.kind(h) === 'rangeslider' && Array.isArray(key)) {
+        R.paint(h);
+        const fill = h.querySelector('.rsfill');
+        const min = Number(h.querySelector('.exp-rs-lo').min);
+        const max = Number(h.querySelector('.exp-rs-lo').max);
+        const want = ((key[0] - min) / ((max - min) || 1) * 100) + '%';
+        checks++;
+        if (!fill) note(c, impl, 'paint: no .rsfill to draw the interval on');
+        else if (fill.style.left !== want)
+          note(c, impl, `paint: fill left is ${fill.style.left}, expected ${want} for ${JSON.stringify(key)}`);
+      }
+
       const at = R.index(c.domain, got);
       checks++;
       if (at !== i) {

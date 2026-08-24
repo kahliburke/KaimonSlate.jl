@@ -290,13 +290,24 @@ function _export_control_html(b)
                    "\" step=\"", _ctl_num(p, "step", "1"), "\" value=\"", _esc(string(val)), "\"", attrs, "/>") :
             string("<span class=\"exp-ctl-frozen\">", _esc(string(val)), "</span>")
     elseif kind == "rangeslider"
+        # The SAME construction and class names the live widget uses (widget-rangeslider.js +
+        # notebook.css `.rsbox`): two native range inputs overlaid on one track, with a filled span
+        # between the thumbs. Two separate stacked sliders would be a different control — the reader
+        # cannot see the interval, and the page stops looking like the notebook it came from.
         lo, hi = val isa AbstractVector && length(val) == 2 ? (val[1], val[2]) :
                  (get(p, "min", 0), get(p, "max", 100))
         mn, mx, st = _ctl_num(p, "min", "0"), _ctl_num(p, "max", "100"), _ctl_num(p, "step", "1")
-        thumb(cls, v) = string("<input type=\"range\" class=\"", cls, "\" min=\"", mn, "\" max=\"", mx,
-                               "\" step=\"", st, "\" value=\"", _esc(string(v)), "\" disabled", inert, "/>")
-        string("<span class=\"exp-rs\"", hostattrs, ">", thumb("exp-rs-lo", lo), thumb("exp-rs-hi", hi),
-               "</span><output class=\"exp-ctl-val\">", _esc(string(lo, " – ", hi)), "</output>")
+        span = (v -> (fl = tryparse(Float64, mn); fh = tryparse(Float64, mx); fv = Float64(v);
+                      (fl === nothing || fh === nothing || fh == fl) ? 0.0 :
+                      100 * (fv - fl) / (fh - fl)))
+        thumb(cls, v) = string("<input type=\"range\" class=\"rsin ", cls, "\" min=\"", mn,
+                               "\" max=\"", mx, "\" step=\"", st, "\" value=\"", _esc(string(v)),
+                               "\" disabled", inert, "/>")
+        string("<span class=\"rsbox\"", hostattrs, ">",
+               "<span class=\"rstrack\"><span class=\"rsfill\" style=\"left:", round(span(lo); digits = 3),
+               "%;right:", round(100 - span(hi); digits = 3), "%\"></span></span>",
+               thumb("exp-rs-lo", lo), thumb("exp-rs-hi", hi),
+               "</span><output class=\"exp-ctl-val rsval\">", _esc(string(lo, " – ", hi)), "</output>")
     elseif kind == "tableselect"
         rows = get(p, "rows", nothing)
         cols = get(p, "columns", nothing)
@@ -342,8 +353,48 @@ function _export_control_html(b)
                   label, "</span>", body, "</label>")
 end
 
-_export_controls_html(c) = isempty(c.binds) ? "" :
-    string("<div class=\"exp-ctls\">", join(_export_control_html(b) for b in c.binds), "</div>")
+# Every `@bind` in the notebook, by variable name — so a cell that SURFACES a control can render it
+# without declaring it.
+_bind_index(cells) = Dict{String,Any}(String(b.name) => b for c in cells for b in c.binds)
+
+# Every name any cell surfaces. Surfacing MOVES a control, it does not copy it: the live page renders
+# nothing where a surfaced control was declared, which is the point — the knob belongs beside the
+# figure it drives, and a second copy sitting alone above the definition is the layout the author
+# was getting rid of.
+_surfaced_names(cells) = Set{String}(nm for c in cells for col in c.controls for nm in col)
+
+# A control is DECLARED in one cell and may be SURFACED beside several figures (`controls=` on the
+# header), which is the layout an author actually reads: the knob sits next to the thing it drives.
+# The export used to render only what each cell declared, so every surfaced strip vanished and the
+# page put one control at the top with its figures scattered below — a different document from the
+# one that was written. `controls` wins where it is set, and its columns are preserved, because the
+# grouping (`[freq,amp],phase`) is part of the layout too.
+function _export_controls_html(c, byname = Dict{String,Any}(), surfaced = Set{String}())
+    cols = if !isempty(c.controls)
+        c.controls
+    elseif !isempty(c.binds)
+        # A declaring cell renders only the controls nobody moved: one column each, and nothing at
+        # all once every one of them is surfaced somewhere else.
+        [[String(b.name)] for b in c.binds if !(String(b.name) in surfaced)]
+    else
+        return ""
+    end
+    isempty(cols) && return ""
+    io = IOBuffer()
+    print(io, "<div class=\"exp-ctls\">")
+    any_rendered = false
+    for col in cols
+        html = join(begin
+                        b = get(byname, nm, nothing)
+                        b === nothing ? "" : _export_control_html(b)
+                    end for nm in col)
+        isempty(html) && continue
+        any_rendered = true
+        print(io, "<div class=\"exp-ctlcol\">", html, "</div>")
+    end
+    print(io, "</div>")
+    return any_rendered ? String(take!(io)) : ""
+end
 
 # ── Author-embedded media (drag/drop / paste into a Markdown or web cell) ────────────────────────────
 # A cell can reference media two ways: an inline `data:<mime>;base64,…` URL (bytes live in the source),
@@ -918,6 +969,15 @@ enable:function(h,on){var R=Slate.replay;h.setAttribute("data-off",on?"0":"1");
 if(on)h.removeAttribute("title");
 Array.prototype.forEach.call(R._inputs(h),function(i){i.disabled=!on;if(on)i.removeAttribute("title");});},
 label:function(key){return Array.isArray(key)?key.join(" – "):String(key);},
+/* A range slider draws its interval as a filled span between the thumbs. The thumbs are native
+   inputs and move themselves; the fill is ours, so without this it stays where the export left it
+   and the control shows an interval it no longer has. */
+paint:function(h){if(Slate.replay.kind(h)!=="rangeslider")return;
+var a=h.querySelector(".exp-rs-lo"),b=h.querySelector(".exp-rs-hi"),fill=h.querySelector(".rsfill");
+if(!a||!b||!fill)return;
+var min=Number(a.min),max=Number(a.max),span=(max-min)||1;
+var lo=Math.min(Number(a.value),Number(b.value)),hi=Math.max(Number(a.value),Number(b.value));
+fill.style.left=((lo-min)/span*100)+"%";fill.style.right=(100-(hi-min)/span*100)+"%";},
 /* Equality across the shapes a key can take. Matched NUMERICALLY where both sides are numbers — a DOM
    control reports "8" as a string and Julia may have written 8.0 — and elementwise for the composite
    keys (a pair, a subset), whose order Julia and the DOM agree on. */
@@ -964,7 +1024,7 @@ var loaded=Slate.asset(sweep.asset);
 var run=function(src){var key=R.read(src);var i=R.index(sweep.domain||[],key);if(i<0)return;
 /* A control surfaced beside several figures renders once per cell. Push the mover's state onto its
    copies, or the reader drags one strip and the others sit there stating something false. */
-hosts.forEach(function(h){if(h!==src)R.mirror(h,key);
+hosts.forEach(function(h){if(h!==src)R.mirror(h,key);R.paint(h);
 var ro=h.parentElement&&h.parentElement.querySelector(".exp-ctl-val");
 if(ro)ro.textContent=R.label(key);});
 loaded.then(function(packed){apply(R.slice(packed,sweep,i),m);})
@@ -1184,11 +1244,47 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-ctl input:disabled,.exp-ctl select:disabled{opacity:.45;cursor:not-allowed;}
 .exp-ctl-val{color:var(--text);font-variant-numeric:tabular-nums;min-width:2.5em;}
 .exp-ctl-frozen{color:var(--text);font-variant-numeric:tabular-nums;}
-/* A range slider is two thumbs on one track. Stacking them keeps the pair reading as ONE control
-   (which is the whole reason it isn't two sliders) without needing an overlay that fights the
-   native inputs for hit-testing. */
-.exp-rs{display:inline-flex;flex-direction:column;gap:2px;}
-.exp-rs input[type=range]{width:210px;height:14px;}
+/* A `<select>` with no rules is browser chrome — white box, black text — which on a dark page is
+   the one element that visibly is not part of the document. Themed to match the live control. */
+.exp-ctl select{-webkit-appearance:none;appearance:none;
+  background:var(--bg2) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%238b949e' stroke-width='1.6' stroke-linecap='round'/></svg>") no-repeat right 8px center;
+  background-size:10px 7px;color:var(--text);border:1px solid var(--border);border-radius:6px;
+  padding:3px 26px 3px 8px;font:inherit;font-size:.86rem;cursor:pointer;}
+.exp-ctl select:focus{outline:none;border-color:var(--accent);}
+.exp-ctl select[multiple]{background-image:none;padding:4px 8px;cursor:default;}
+.exp-ctl input[type=number]{background:var(--bg2);color:var(--text);border:1px solid var(--border);
+  border-radius:6px;padding:3px 8px;font:inherit;font-size:.86rem;width:5.5em;}
+/* A range slider: the SAME construction as the live widget (widget-rangeslider.js) — two native
+   inputs overlaid on one track with a filled span between the thumbs, so the pair reads as the one
+   interval it is. The inputs take no pointer events; only their thumbs do, which is the trick that
+   lets the upper one be grabbed through the lower. */
+.rsbox{position:relative;display:inline-block;width:190px;height:20px;}
+.rstrack{position:absolute;left:0;right:0;top:8px;height:4px;border-radius:2px;
+  background:var(--bg3);border:1px solid var(--border);}
+.rsfill{position:absolute;top:0;bottom:0;background:var(--accent);border-radius:2px;opacity:.85;}
+.rsin{position:absolute;left:0;top:0;width:100%;height:20px;margin:0;
+  -webkit-appearance:none;appearance:none;background:none;pointer-events:none;}
+.rsin:focus{outline:none;}
+.rsin::-webkit-slider-thumb{-webkit-appearance:none;pointer-events:auto;cursor:grab;
+  width:14px;height:14px;border-radius:50%;background:var(--text);border:2px solid var(--accent);
+  box-shadow:0 1px 3px rgba(0,0,0,.5);}
+.rsin::-webkit-slider-thumb:active{cursor:grabbing;}
+.rsin::-moz-range-thumb{pointer-events:auto;cursor:grab;
+  width:14px;height:14px;border-radius:50%;background:var(--text);border:2px solid var(--accent);
+  box-shadow:0 1px 3px rgba(0,0,0,.5);}
+.rsin::-moz-range-track{background:none;border:none;}
+.rsval{color:var(--dim);font-size:.76rem;font-variant-numeric:tabular-nums;white-space:nowrap;}
+/* Surfaced strips keep their authored columns: `controls=[freq,amp],phase` is two columns, the
+   first stacking two knobs. */
+.exp-ctlcol{display:flex;flex-direction:column;gap:6px;}
+/* `download_button` — the one control on a frozen page that still DOES something, so it had better
+   not be the one that looks unstyled. Same rules as the live `.dlbtn` (notebook.css); the export
+   carried the markup and the click handler but none of the appearance. */
+.dlbtn{display:inline-flex;align-items:center;gap:7px;text-decoration:none;cursor:pointer;
+  background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;
+  padding:6px 13px;font-size:.83rem;transition:border-color .12s, background .12s;}
+.dlbtn:hover{border-color:var(--accent);background:var(--bg2);color:var(--text);}
+.dlbtn .dlicon{color:var(--accent);font-size:.95rem;}
 /* A table select's rows ARE its control, so the whole thing renders and a click picks one. Disabled
    until data lands, same as every other control — `data-off` is the flag the wiring toggles. */
 .exp-ts{max-height:230px;overflow:auto;border:1px solid var(--border);border-radius:6px;}
@@ -1976,6 +2072,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               "<style>", _export_css(palette, code, width), "</style></head><body>", _asset_head,
               _frontend_export_head(nb, inline_assets, compress_data), "<article class=\"export\">")
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
+        # Built once for the whole notebook: a surfaced control is DECLARED somewhere else, so the
+        # cell rendering it can't find the spec in its own `binds`.
+        bind_by_name = _bind_index(nb.report.cells)
+        surfaced_names = _surfaced_names(nb.report.cells)
         # Author-embedded video/audio hoisted out of the body (key, mime, base64) → the blob registry
         # emitted with the trailing scripts. Standalone only: a published page keeps its sibling file.
         mediareg = Tuple{String,String,String}[]
@@ -2037,8 +2137,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 # their widget, not a code editor, in the browser, so the export matches what's on screen.
                 (show_source && !(:hidecode in c.flags) && isempty(c.binds) && !_is_web_cell(c) && !isempty(strip(c.source))) &&
                     print(io, "<pre class=\"exp-src\"><code>", _highlight_julia(c.source), "</code></pre>")
-                # A `@bind` cell renders its CONTROL, matching what the live page shows in place of source.
-                print(io, _export_controls_html(c))
+                # A `@bind` cell renders its CONTROL, matching what the live page shows in place of
+                # source — and so does a cell that SURFACES one (`controls=` on its header), which is
+                # where an author put the knob next to the figure it drives.
+                print(io, _export_controls_html(c, bind_by_name, surfaced_names))
                 if _outputs_any(outputs)
                     # `figures`: only rich display (images/html/latex) — drop scalar text / stdout / errors.
                     o = c.output

@@ -36,6 +36,11 @@ export class El {
   get classList() { return new ClassList(this); }
   get textContent() { return this.text; }
   set textContent(v) { this.text = String(v); }
+  // Enough of CSSOM for code that positions something — `paint()` writes left/right percentages on
+  // a range slider's fill. Reads back what was written, so a test can assert the geometry.
+  get style() { return (this._style = this._style || {}); }
+  get min() { return this.getAttribute('min'); }
+  get max() { return this.getAttribute('max'); }
 
   addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); }
   // Dispatch to THIS element only — the replay code never relies on bubbling, and pretending to

@@ -126,6 +126,26 @@ const RE = ReportEngine
         @test o["title"]["text"] == "T" && o["title"]["left"] == "center"
     end
 
+    # Animation is the knob a slider-driven chart actually needs, and it is valid on a series as well
+    # as on the option — so Express mode spliced it into the series and left the option's own
+    # `animationDurationUpdate` at 300. `animation = false` then read as doing nothing: every step of
+    # a drag still started a 300 ms morph, which is what "the chart redraws while I move the slider"
+    # looks like. In Express there is one series, so a bare kwarg can only have meant the chart.
+    @testset "animation kwargs land on the OPTION, not the series" begin
+        for k in (:animation, :animationDuration, :animationDurationUpdate, :animationEasing,
+                  :animationEasingUpdate, :animationDelay, :animationDelayUpdate, :animationThreshold)
+            o = RE.echart(:line, [1, 2], [3, 4]; (k => false,)...).option
+            @test haskey(o, String(k))                      # on the option
+            @test !haskey(o["series"][1], String(k))        # and NOT buried in the series
+        end
+        # `animation = false` must also win over the reactive-transition default it exists to defeat.
+        o = RE.echart(:line, [1, 2], [3, 4]; animation = false).option
+        @test o["animation"] === false
+        # Per-series control is still reachable where it makes sense — inside `series(…)`.
+        o = RE.echart(RE.series(:line, [1, 2], [3, 4]; animation = false)).option
+        @test o["series"][1]["animation"] === false
+    end
+
     # A `@replay`ed value has to be routed as well as shipped: the DSL zips, so a line is `[[x,y],…]`
     # and a calendar `[[date,v],…]`, and the mark records which COMPONENT of each drawn entry the
     # shipped array feeds. A kind that builds zipped data and forgets to mark it looks completely

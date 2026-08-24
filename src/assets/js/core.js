@@ -433,6 +433,20 @@ window.Slate.replay = {
     });
   },
   label: function (key) { return Array.isArray(key) ? key.join(' – ') : String(key); },
+  // A range slider draws the selected interval as a filled span between its two thumbs. The thumbs
+  // are native inputs and move themselves; the fill is ours, so without this it stays wherever the
+  // export left it and the control shows an interval it no longer has.
+  paint: function (h) {
+    if (window.Slate.replay.kind(h) !== 'rangeslider') return;
+    const a = h.querySelector('.exp-rs-lo'), b = h.querySelector('.exp-rs-hi'),
+          fill = h.querySelector('.rsfill');
+    if (!a || !b || !fill) return;
+    const min = Number(a.min), max = Number(a.max), span = (max - min) || 1;
+    const lo = Math.min(Number(a.value), Number(b.value));
+    const hi = Math.max(Number(a.value), Number(b.value));
+    fill.style.left = ((lo - min) / span * 100) + '%';
+    fill.style.right = (100 - (hi - min) / span * 100) + '%';
+  },
   // Equality across the shapes a key can take. Matched NUMERICALLY where both sides are numbers — a
   // DOM control reports "8" as a string and Julia may have written 8.0, so comparing text would miss —
   // and elementwise for the composite keys (a pair, a subset), whose order Julia and the DOM agree on.
@@ -511,6 +525,7 @@ window.Slate.replay = {
         // its copies, or the reader drags one strip and the others sit there stating something false.
         hosts.forEach(function (h) {
           if (h !== src) R.mirror(h, key);
+          R.paint(h);
           const ro = h.parentElement && h.parentElement.querySelector('.exp-ctl-val');
           if (ro) ro.textContent = R.label(key);
         });

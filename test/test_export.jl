@@ -705,3 +705,47 @@ end
         end
     end
 end
+
+# Surfacing MOVES a control, it does not copy it. `controls=` on a figure's header puts the knob
+# beside the thing it drives, and the live page then renders NOTHING where that control was declared
+# — which is the whole point, since a lone copy above the definition is the layout the author was
+# getting rid of. The export used to render only what each cell declared (so every surfaced strip
+# vanished); rendering both places instead would be the opposite error.
+@testset "@bind controls render where they are surfaced, not where declared" begin
+    RE = ReportEngine
+    r = RE.parse_report("""
+    #%% code id=ctl
+    @bind w Slider(1:10)
+    @bind k Select(["a", "b"])
+
+    #%% code id=fig controls=w
+    1 + 1
+
+    #%% code id=other
+    2 + 2
+    """)
+    RE.build_dependencies!(r)
+    byid = Dict(c.id => c for c in r.cells)
+    # Stand in for a run: the specs a `@bind` cell would have registered.
+    byid["ctl"].binds = [RE.BindSpec(:w, "slider", Dict{String,Any}("min" => 1, "max" => 10, "step" => 1), 1),
+                         RE.BindSpec(:k, "select", Dict{String,Any}("options" => Any["a", "b"]), "a")]
+
+    idx = NS._bind_index(r.cells)
+    surf = NS._surfaced_names(r.cells)
+    @test surf == Set(["w"])                       # only `w` was moved
+
+    decl = NS._export_controls_html(byid["ctl"], idx, surf)
+    fig  = NS._export_controls_html(byid["fig"], idx, surf)
+    other = NS._export_controls_html(byid["other"], idx, surf)
+
+    @test occursin("data-name=\"w\"", fig)         # the surfaced one renders beside its figure…
+    @test !occursin("data-name=\"w\"", decl)       # …and NOT where it was declared
+    @test occursin("data-name=\"k\"", decl)        # the un-surfaced one stays put
+    @test isempty(other)                            # a cell with neither declares nor surfaces
+
+    # And when every declared control is surfaced, the declaring cell emits nothing at all rather
+    # than an empty strip that still takes vertical space.
+    byid["fig"].controls = [["w"], ["k"]]
+    surf2 = NS._surfaced_names(r.cells)
+    @test isempty(NS._export_controls_html(byid["ctl"], idx, surf2))
+end
