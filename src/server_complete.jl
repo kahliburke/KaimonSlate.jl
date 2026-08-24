@@ -2859,9 +2859,13 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
         end
         _redeem_query_token!(stream, h) && return
         # Multi-user login is its own public endpoint; it must bypass the session gate.
+        # Match the path without the query string (/login?next=... must still bypass).
+        _target_path = let t = stream.message.target
+            q = findfirst('?', t); q === nothing ? t : t[1:q-1]
+        end
         _login_public = h.auth_hub !== nothing && (
-            (stream.message.method == "POST" && startswith(stream.message.target, "/api/login")) ||
-            (stream.message.method == "GET" && stream.message.target == "/login")
+            (stream.message.method == "POST" && _target_path == "/api/login") ||
+            (stream.message.method == "GET" && _target_path == "/login")
         )
         if !_login_public && !_authorized(h, stream.message)
             # In multi-user mode, redirect browser navigations to the login page
