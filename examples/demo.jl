@@ -1,4 +1,7 @@
+try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+
 #%% md id=title
+@md"""
 # 📊 Kaimon Reactive Notebook — Feature Tour
 
 A warm-session, **reactive** notebook. Edit a cell or drag a widget and only the
@@ -14,6 +17,7 @@ A warm-session, **reactive** notebook. Edit a cell or drag a widget and only the
 | Markdown editing | **double-click this text** to edit its source, ⇧⏎ to commit |
 
 > Every code cell shows its eval time (ms) in the header.
+"""
 
 #%% code id=setup
 using CairoMakie, Statistics
@@ -22,7 +26,9 @@ set_theme!(theme_dark())              # dark plots to match the UI
 "environment ready"
 
 #%% md id=controls-h
+@md"""
 ## Controls — drag / toggle these
+"""
 
 #%% code id=freq
 @bind freq Slider(1:0.5:12)
@@ -46,7 +52,9 @@ set_theme!(theme_dark())              # dark plots to match the UI
 @bind label TextField("amp · f(freq·x + phase)")
 
 #%% md id=signal-h
+@md"""
 ## Reactive signal — depends on every widget above
+"""
 
 #%% code id=signal
 x = range(0, 2π; length = Int(round(npts)))
@@ -56,7 +64,9 @@ y = amp .* (shape == "square-ish" ? sign.(b) .* abs.(b) .^ 0.3 :
 (; points = length(x), peak = round(maximum(y); digits = 3))
 
 #%% md id=plot-h
+@md"""
 ## Makie figure (dark theme) — recomputes in place on any change
+"""
 
 #%% code id=plot
 fig = Figure(size = (760, 320))
@@ -68,7 +78,9 @@ lines!(ax, x, y; color = :cyan, linewidth = 2)
 fig
 
 #%% md id=chart-h
+@md"""
 ## Interactive ECharts — value distribution (hover a bar, drag to zoom)
+"""
 
 #%% code id=chart
 edges = range(-amp, amp; length = 13)
@@ -84,7 +96,9 @@ echart(Dict(
 ))
 
 #%% md id=stats-h
+@md"""
 ## A plain value cell — return-value repr + cross-cell state
+"""
 
 #%% code id=stats
 (; mean = round(mean(y); digits = 4),
@@ -93,6 +107,7 @@ echart(Dict(
    n = length(y))
 
 #%% md id=outro
+@md"""
 ## Try it
 
 - **Drag** `freq` / `amp` / `phase` → the plot, histogram, and stats recompute;
@@ -100,3 +115,8 @@ echart(Dict(
 - **Switch** `shape` or toggle `grid`; type a new `label`.
 - **Edit** any code cell and press ⇧⏎. **Double-click** markdown to edit its source.
 - **Drag** the ⠿ handle to reorder; **⌘Z / ⌘⇧Z** to undo / redo; **Tab** completes.
+"""
+
+# ╔═╡ Slate.config · per-notebook settings (Settings panel)
+#   docid = d122069c-24c9-4cb1-b873-cc984a069d44
+# ╚═╡

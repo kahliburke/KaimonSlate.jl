@@ -2,7 +2,7 @@
 # subprocess over Kaimon's ZMQ gate, so capture happens where the live value lives
 # and each notebook gets its own project env + crash isolation.
 #
-# Used only when `Main.Kaimon` is present (the extension context); it references
+# Used when Kaimon is available (normally the extension context); it references
 # Kaimon *dynamically* so `ReportEngine` keeps no Kaimon/KaimonGate dependency.
 # Included into `module ReportEngine` (after eval.jl — needs `Kernel`/`CellOutput`).
 
@@ -227,7 +227,30 @@ function _next_ports(; floor::Int = 0, reserve::Int = 2)
     end
 end
 
-_kaimon() = getfield(Main, :Kaimon)
+const _KAIMON_PKGID = Base.PkgId(
+    Base.UUID("d3856c55-31fd-4246-b7e8-380411123c01"), "Kaimon")
+
+# `Main.Kaimon` is an implementation detail of `using Kaimon`, not a reliable
+# capability check: an embedding host can load Kaimon through `Base.require`
+# without installing that binding in Main. Resolve by package identity first and
+# load on demand when Kaimon is available on the extension's LOAD_PATH.
+function _find_kaimon(; load::Bool = true)
+    isdefined(Main, :Kaimon) && return getfield(Main, :Kaimon)
+    loaded = get(Base.loaded_modules, _KAIMON_PKGID, nothing)
+    loaded !== nothing && return loaded
+    load || return nothing
+    return try
+        Base.require(_KAIMON_PKGID)
+    catch
+        nothing
+    end
+end
+
+function _kaimon()
+    K = _find_kaimon()
+    K === nothing && error("Kaimon is unavailable — run Slate as a Kaimon extension or install Kaimon in the active LOAD_PATH")
+    return K
+end
 
 # Drop any CURVE server pin for a loopback port we are ABOUT TO TAKE with a freshly spawned worker.
 #
@@ -268,8 +291,10 @@ function _clear_stale_pin!(port::Integer)
     return nothing
 end
 "True when running inside the Kaimon extension (gate client available)."
-gate_available() = isdefined(Main, :Kaimon) &&
-    isdefined(_kaimon(), :ConnectionManager) && isdefined(_kaimon(), :connect_tcp!)
+function gate_available()
+    K = _find_kaimon()
+    return K !== nothing && isdefined(K, :ConnectionManager) && isdefined(K, :connect_tcp!)
+end
 
 # A slate-owned ZMQ connection manager. The extension is its *own* subprocess, so
 # the TUI's `GATE_CONN_MGR` isn't present here — we run our own manager (one,
