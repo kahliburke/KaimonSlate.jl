@@ -411,8 +411,11 @@ function __slate_replay_chain(; sweeps = Any[])
         id = String(_g(s, "id", "")); isempty(id) && continue
         try
             f = Base.invokelatest(Core.eval, m, Meta.parse(String(_g(s, "source", ""))))
+            # `target` says what the closure RETURNS — "" for the array/table shapes the packer can
+            # infer from the value, "prose" for a markdown cell's interpolations, which come back as an
+            # ordinary Vector and would otherwise be packed as numbers.
             push!(entries, (; id = id, name = Symbol(String(_g(s, "control", ""))), f = f,
-                              cell = String(_g(s, "cell", ""))))
+                              cell = String(_g(s, "cell", "")), target = String(_g(s, "target", ""))))
         catch e
             # A synthesized source that will not parse or compile is reported per-sweep, not thrown: the
             # other tables on the page are unaffected and the export says which one it dropped.

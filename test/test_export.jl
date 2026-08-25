@@ -656,10 +656,12 @@ end
 # kind, moved to every position in its own domain, read back, against both copies of `Slate.replay`.
 @testset "@replay export contract: markup ↔ domain ↔ client" begin
     RE = ReportEngine
-    # One entry per replayable control kind. `NumberField` must be bounded to have a domain at all;
-    # `MultiCheckBox` renders as a multi-select listbox in an export (a checkbox column is a live-UI
-    # affordance, and the listbox binds the same set), which is precisely the sort of live/export
-    # divergence this test exists to hold honest.
+    # One entry per replayable control kind. `NumberField` must be bounded to have a domain at all.
+    # `MultiCheckBox` renders as the same checkbox list the live page draws: it used to share the
+    # `MultiSelect` branch and come out a `<select multiple>`, which binds the same set but takes
+    # DIFFERENT GESTURES — a plain click there clears every other choice. That is the class of
+    # live/export divergence this test exists to hold honest, so the kinds are listed separately and
+    # asserted on below.
     widgets = Any[
         ("region",  RE.Select(["All", "APAC", "EMEA"])),
         ("mode",    RE.Radio(["fast", "slow"])),
@@ -688,6 +690,19 @@ end
         RE._replay_strideable(w.kind) && (e["strided"] = dom[1:2:end])
         push!(fixture, e)
     end
+
+    # The two multi-valued kinds must not collapse into one another's markup. A `<select multiple>` and
+    # a checkbox list read back the same set, so the node contract below passes either way — only these
+    # can tell that the export still draws each control the way its live counterpart does.
+    mc = only(e for e in fixture if e["name"] == "flags")["html"]
+    ms = only(e for e in fixture if e["name"] == "picks")["html"]
+    @test occursin("exp-checkgroup", mc) && occursin("type=\"checkbox\"", mc)
+    @test !occursin("<select", mc)
+    @test occursin("<select multiple", ms)
+    # The host is a span, so it cannot carry `disabled`; it holds `data-off` and each box is disabled
+    # individually. Getting this wrong ships a control that looks inert but is fully operable.
+    @test occursin("data-off=\"1\"", mc)
+    @test length(collect(eachmatch(r"<input type=\"checkbox\"[^>]*disabled", mc))) == 2
 
     node = Sys.which("node")
     if node === nothing
@@ -736,19 +751,24 @@ end
     @test r["target"] == "table"                     # the page must drive a table, not a chart series
     @test r["dtype"] == "i16"                        # …and the order packs as one of the native dtypes
     @test r["rows"] == Any[Any["a", 1], Any["b", 2], Any["c", 3]]   # union, in first-seen order
-    @test r["slice"] == [3] && r["shape"] == [3, 3]  # one entry per union row, per position
+    # A position's slice is (union rows + union columns): the row order, then the column mask. Both
+    # axes ride the one packed matrix, so nothing downstream needed a second asset or a second route.
+    @test r["slice"] == [5] && r["shape"] == [5, 3]
 
     # The order itself: 1-based indices into the union, 0 for "no row". Column-major, so a position is
     # a contiguous run — the layout `Slate.replay.slice` reads.
-    A = reshape(reinterpret(Int16, Base64.base64decode(r["b64"])), 3, 3)
-    @test A[:, 1] == Int16[1, 2, 3]                  # All  → every row, as written
-    @test A[:, 2] == Int16[2, 3, 0]                  # APAC → two of them, padded
-    @test A[:, 3] == Int16[3, 1, 0]                  # EMEA → reordered, which a mask could not say
+    A = reshape(reinterpret(Int16, Base64.base64decode(r["b64"])), 5, 3)
+    @test A[1:3, 1] == Int16[1, 2, 3]                # All  → every row, as written
+    @test A[1:3, 2] == Int16[2, 3, 0]                # APAC → two of them, padded
+    @test A[1:3, 3] == Int16[3, 1, 0]                # EMEA → reordered, which a mask could not say
+    # This control touches only the rows, so every position shows both columns.
+    @test all(A[4:5, :] .== Int16(1))
 
     # The live table carries the mark; the export swaps the union in behind it.
     spec = RE._table_wire(RE._mark_table_replay!(mk("All"), "tbl:region", "region", 1))
     @test NS._table_replay_mark(spec)["id"] == "tbl:region"
-    sub = NS._replay_base_spec(spec, Dict{String,Any}("tbl:region" => r["rows"]))
+    swept = Dict{String,Any}("tbl:region" => Dict{String,Any}("rows" => r["rows"], "cols" => r["cols"]))
+    sub = NS._replay_base_spec(spec, swept)
     @test sub["rows"] == r["rows"]
     @test sub["opts"]["nrows"] == 3
     tablehtml = NS._export_table_html(sub)
@@ -760,6 +780,9 @@ end
     @test NS._replay_base_spec(plain, Dict{String,Any}()) === plain
     @test !occursin("data-replay", NS._export_table_html(plain))
     @test NS._replay_base_spec(spec, Dict{String,Any}()) === spec
+    # A sweep that produced no rows leaves the live spec alone rather than writing an empty body.
+    @test NS._replay_base_spec(spec, Dict{String,Any}("tbl:region" =>
+        Dict{String,Any}("rows" => Any[], "cols" => Any[]))) === spec
 
     node = Sys.which("node")
     if node === nothing
@@ -790,6 +813,236 @@ end
             @test ok
         end
     end
+end
+
+# ── A control that changes the table's COLUMNS ────────────────────────────────────────────────────
+# Hiding a column was the one table shape `@replay` refused outright: the packer keyed a row on its
+# whole vector, so a row with a column dropped matched nothing and the union became the product of the
+# positions rather than their union — and rather than ship that, it errored.
+#
+# Now the two axes are packed together: the union of the columns, plus per position a mask over them,
+# in the same slice as the row order. This checks the union, the mask, the refusals, and then hands the
+# real bytes and the real markup to node to drive.
+@testset "@replay table: a control that hides columns" begin
+    RE = ReportEngine
+    # The shape this exists for: the same rows throughout, and the control choosing which column GROUPS
+    # are shown. `n` is always there; the other two come and go.
+    cols_for = Dict("none" => ["product", "n"],
+                    "cost" => ["product", "n", "cost"],
+                    "both" => ["product", "n", "cost", "margin"])
+    vals = Dict("product" => Any["a", "b"], "n" => Any[1, 2],
+                "cost" => Any[10, 20], "margin" => Any[0.5, 0.25])
+    mk = pick -> (cs = cols_for[pick];
+                  RE.slate_table(cs, [Any[vals[c][k] for c in cs] for k in 1:2]))
+
+    w = RE.Select(["none", "cost", "both"])
+    dom = RE.bind_domain(w)
+    sweeps = Dict{String,Any}("t:pick" =>
+        (; name = "pick", f = mk, wrap = identity, domain = Any[dom...], cell = "t", kind = w.kind))
+    r = RE._run_replay_sweeps(sweeps)["t:pick"]
+
+    # The union carries every column any position can show, and every row is written in that space —
+    # so the body is the same two rows it always was, not two per position.
+    @test [NS._col_name(c) for c in r["cols"]] == ["product", "n", "cost", "margin"]
+    @test r["rows"] == Any[Any["a", 1, 10, 0.5], Any["b", 2, 20, 0.25]]
+    @test r["slice"] == [6] && r["shape"] == [6, 3]     # 2 union rows + 4 union columns
+
+    A = reshape(reinterpret(Int16, Base64.base64decode(r["b64"])), 6, 3)
+    @test all(A[1:2, :] .== Int16[1 1 1; 2 2 2])        # rows never move — only the columns do
+    @test A[3:6, 1] == Int16[1, 1, 0, 0]                # "none" → product, n
+    @test A[3:6, 2] == Int16[1, 1, 1, 0]                # "cost" → + cost
+    @test A[3:6, 3] == Int16[1, 1, 1, 1]                # "both" → everything
+
+    # The export writes the UNION header, not the header of whatever position it was left on — the
+    # whole point, since a mask can only hide what the page already carries.
+    spec = RE._table_wire(RE._mark_table_replay!(mk("none"), "t:pick", "pick", 1))
+    sub = NS._replay_base_spec(spec, Dict{String,Any}("t:pick" =>
+        Dict{String,Any}("rows" => r["rows"], "cols" => r["cols"])))
+    tablehtml = NS._export_table_html(sub)
+    @test [NS._col_name(c) for c in sub["columns"]] == ["product", "n", "cost", "margin"]
+    for c in ("product", "n", "cost", "margin")
+        @test occursin(">$c</th>", tablehtml)
+    end
+
+    # ── The union's ORDER, merged rather than first-seen ──────────────────────────────────────────
+    # The shape a control selecting column GROUPS actually produces: an optional group sits BETWEEN
+    # always-present columns, so the first position never shows it and appending on first sight would
+    # put it at the end — after which every position that interleaves it reads as a permutation and the
+    # whole sweep is refused. Nested prefixes never expose this; a real notebook does on its first move.
+    inter = Dict("a" => ["id", "name"],                     # the optional group is absent here …
+                 "b" => ["id", "opt1", "opt2", "name"])     # … and in the MIDDLE here
+    ivals = Dict("id" => Any[1, 2], "name" => Any["x", "y"],
+                 "opt1" => Any[10, 20], "opt2" => Any[30, 40])
+    imk = pick -> (cs = inter[pick];
+                   RE.slate_table(cs, [Any[ivals[c][k] for c in cs] for k in 1:2]))
+    isweep = Dict{String,Any}("t:i" => (; name = "i", f = imk, wrap = identity, cell = "t",
+                                        kind = "select", domain = Any["a", "b"]))
+    ir = RE._run_replay_sweeps(isweep)["t:i"]
+    @test !haskey(ir, "error")
+    @test [NS._col_name(c) for c in ir["cols"]] == ["id", "opt1", "opt2", "name"]
+    @test ir["rows"] == Any[Any[1, 10, 30, "x"], Any[2, 20, 40, "y"]]
+    IA = reshape(reinterpret(Int16, Base64.base64decode(ir["b64"])), 6, 2)
+    @test IA[3:6, 1] == Int16[1, 0, 0, 1]                   # "a" → id, name
+    @test IA[3:6, 2] == Int16[1, 1, 1, 1]                   # "b" → everything
+
+    # ── What is still refused, and why the message has to say which axis ──────────────────────────
+    # Both axes at once: there is no row identity that survives a row losing a field, so this would
+    # write the product of the positions into the page.
+    both = Dict{String,Any}("t:x" => (; name = "x", wrap = identity, cell = "t", kind = "select",
+        domain = Any["a", "b"],
+        f = v -> v == "a" ? RE.slate_table(["p", "q"], [Any[1, 2]]) :
+                            RE.slate_table(["p"], [Any[1], Any[9]])))
+    @test occursin("COLUMNS", RE._run_replay_sweeps(both)["t:x"]["error"])
+
+    # A column whose VALUES also move with the control: one body is written and hidden from, so the
+    # other values would have nowhere to live.
+    moving = Dict{String,Any}("t:y" => (; name = "y", wrap = identity, cell = "t", kind = "select",
+        domain = Any["a", "b"],
+        f = v -> v == "a" ? RE.slate_table(["p", "q"], [Any[1, 2]]) :
+                            RE.slate_table(["p"], [Any[7]])))
+    @test occursin("different values", RE._run_replay_sweeps(moving)["t:y"]["error"])
+
+    # A permutation, which hiding cells cannot express.
+    reorder = Dict{String,Any}("t:z" => (; name = "z", wrap = identity, cell = "t", kind = "select",
+        domain = Any["a", "b"],
+        f = v -> v == "a" ? RE.slate_table(["p", "q"], [Any[1, 2]]) :
+                            RE.slate_table(["q", "p"], [Any[2, 1]])))
+    @test occursin("ORDER", RE._run_replay_sweeps(reorder)["t:z"]["error"])
+
+    node = Sys.which("node")
+    if node === nothing
+        @info "node not found — skipping the column-mask drive (fixture built, not driven)"
+        @test true
+    else
+        fixture = Dict{String,Any}(
+            "control" => Dict{String,Any}(
+                "name" => "pick", "domain" => r["domain"],
+                "html" => NS._export_control_html(RE.BindSpec(:pick, w.kind, w.params, w.default))),
+            "tableHtml" => tablehtml,
+            "sweep" => Dict{String,Any}("id" => "t:pick", "asset" => "data/pick_replay.i16.bin",
+                                        "control" => "pick", "domain" => r["domain"],
+                                        "slice" => r["slice"], "target" => "table"),
+            "packed" => Dict{String,Any}("dtype" => r["dtype"], "shape" => r["shape"], "b64" => r["b64"]),
+            "expectCols" => Any[["product", "n"], ["product", "n", "cost"],
+                                ["product", "n", "cost", "margin"]])
+        mktempdir() do dir
+            path = joinpath(dir, "table_cols.json")
+            open(io -> JSON.print(io, fixture), path, "w")
+            io = IOBuffer()
+            script = joinpath(@__DIR__, "js", "table_replay.mjs")
+            ok = success(pipeline(`$node $script $path`; stdout = io, stderr = io))
+            ok || print(String(take!(io)))
+            @test ok
+        end
+    end
+end
+
+# ── Prose that follows its control ────────────────────────────────────────────────────────────────
+# A markdown cell's `{{ }}` joins the graph the same way a figure's reads do, and live it moves with the
+# control. In a static export it did not — only charts and tables were ever wired — so the sentence
+# beside a replayed figure kept its export-time numbers while the figure moved. The page then states
+# something the chart next to it contradicts, which is worse than a control that does nothing.
+@testset "@replay prose: a markdown cell's {{ }} follows its control" begin
+    RE = ReportEngine
+    src = """
+    #%% code id=pick
+    @bind region Select(["north", "south"])
+
+    #%% code id=agg
+    n = region == "north" ? 2 : 1
+    label = uppercase(region)
+
+    #%% md id=kpi
+    @md\"\"\"
+    **{{ n }}** sites in {{ label }}.
+    \"\"\"
+    """
+    r = RE.parse_report(src; id = "prose")
+    RE.build_dependencies!(r)
+    # Stand in for a run: the control the `@bind` cell would have registered. The plan reads the specs,
+    # not the source, because the DOMAIN comes from the widget and is never restated.
+    Dict(c.id => c for c in r.cells)["pick"].binds =
+        [RE.BindSpec(:region, RE.Select(["north", "south"]).kind,
+                     RE.Select(["north", "south"]).params, RE.Select(["north", "south"]).default)]
+
+    plan = NS._prose_sweep_plan(r.cells)
+    @test length(plan) == 1
+    p = only(plan)
+    @test p.cell == "kpi" && p.control == "region" && p.blocked === nothing
+
+    # The composed closure: the control is the PARAMETER (so the chain's reads resolve to the swept
+    # value), the upstream cell rides inside the `let`, and the interpolations come back as a vector in
+    # the order `_md_template` produced them — which is how the rendered spans are numbered.
+    @test startswith(p.source, "region -> let")
+    @test occursin("n = region ==", p.source)
+    @test occursin("Any[(n),\n(label)]", p.source)
+
+    # Each interpolation must render exactly as the live page renders it. A String's `show` is QUOTED,
+    # and prose wants the bare text — the divergence that would make a swept position restyle the words.
+    @test RE._prose_text("north") == "north"
+    @test RE._prose_text(3) == "3"
+    @test RE._prose_text(nothing) == ""
+
+    # The sweep itself, driven through the real registry: one entry per position, each a vector of
+    # strings, shipped inline rather than as a binary asset.
+    sweeps = Dict{String,Any}("kpi:prose:region" =>
+        (; name = "region", wrap = identity, cell = "kpi", kind = "select", target = "prose",
+           domain = Any["north", "south"],
+           f = v -> Any[v == "north" ? 2 : 1, uppercase(v)]))
+    got = RE._run_replay_sweeps(sweeps)["kpi:prose:region"]
+    @test got["target"] == "prose"
+    @test got["values"] == Any[Any["2", "NORTH"], Any["1", "SOUTH"]]
+    @test !haskey(got, "b64")                        # nothing to fetch: the strings ARE the payload
+
+    # A markdown cell with no interpolations has nothing to follow and must not be swept at all.
+    plain = RE.parse_report("#%% code id=pick\n@bind region Select([\"a\",\"b\"])\n\n#%% md id=t\n@md\"\"\"\nstatic\n\"\"\"\n"; id = "p2")
+    RE.build_dependencies!(plain)
+    w2 = RE.Select(["a", "b"])
+    Dict(c.id => c for c in plain.cells)["pick"].binds =
+        [RE.BindSpec(:region, w2.kind, w2.params, w2.default)]
+    @test isempty(NS._prose_sweep_plan(plain.cells))
+
+    # The rendered span carries the index the strings are written back by. Without it the client has
+    # nothing to aim at and every interpolation on the page looks alike.
+    out = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "7", nothing, nothing, 1.0)
+    html = NS.markdown_html("value: {{ x }}", [out])
+    @test occursin("class=\"ival\" data-i=\"0\"", html)
+
+    # An interpolation inside a TAG is an attribute, not prose. Substituting the scalar's `<span>`
+    # there wrote markup into the attribute value — `![p](pic_<span class="ival">7</span>.png)` — so an
+    # interpolated image URL, the natural way to pick a picture from a control, produced a broken tag.
+    img = NS.markdown_html("![p](/n/x/asset/pic_{{ n }}.png)", [out])
+    @test occursin("src=\"/n/x/asset/pic_7.png\"", img)
+    @test !occursin("ival", img)
+    # Both contexts in one cell: the attribute takes the bare text, the prose keeps its span.
+    two = NS.markdown_html("![p](pic_{{ n }}.png) and {{ n }} again",
+                           [out, RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "7",
+                                               nothing, nothing, 1.0)])
+    @test occursin("src=\"pic_7.png\"", two)
+    @test occursin("class=\"ival\" data-i=\"1\"", two)
+    # A value that RENDERS is not attribute material; leaving the token visible beats writing a
+    # `<div>` into a `src=`.
+    rich = RE.CellOutput("", [RE.MimeChunk("text/html", Vector{UInt8}("<div>x</div>"))],
+                         Any[], Any[], RE.BindSpec[], "", nothing, nothing, 1.0)
+    @test !occursin("<div>x</div>", NS.markdown_html("![p](pic_{{ f }}.png)", [rich]))
+
+    # ── A replayed attribute ──────────────────────────────────────────────────────────────────────
+    # The value sits INSIDE the attribute, so a position cannot assign the swept string — the tag
+    # carries the template it was built from, and the export finishes it per position.
+    @test occursin("data-islot=\"0\"", img)
+    @test occursin("data-itmpl-src=\"/n/x/asset/pic_xslottokx00001x.png\"", img)
+
+    slots = NS._prose_attr_slots(img, Any[Any["3"], Any["7"]], mktempdir(); inline = false, media = nothing)
+    @test length(slots) == 1
+    @test slots[1]["slot"] == 0 && slots[1]["attr"] == "src"
+    # One finished attribute per position — this is what the page assigns, and what makes every
+    # position's asset visible to the export instead of only the one that happened to render. The URL
+    # form is whatever the export's own asset rewriting produces (a page-local sibling here, a `data:`
+    # URI for a standalone page), because it goes through that same code rather than a second copy.
+    @test slots[1]["values"] == ["pic_3.png", "pic_7.png"]
+
+    # A cell with no interpolated attribute contributes no slots, so nothing rides along for it.
+    @test isempty(NS._prose_attr_slots(html, Any[Any["3"]], mktempdir(); inline = false, media = nothing))
 end
 
 # ── The chain sweep: a table a hop or more from its control ────────────────────────────────────────
@@ -1006,9 +1259,11 @@ end
     @test s["target"] == "table" && s["control"] == "north" && s["cell"] == "tbl"
     @test s["domain"] == Any[false, true]
     @test s["rows"] == Any[Any["lima", 3], Any["oslo", 1], Any["bergen", 2]]
-    A = reshape(reinterpret(Int16, Base64.base64decode(s["b64"])), 3, 2)
-    @test A[:, 1] == Int16[1, 0, 0]           # unchecked → the one row with n ≥ 3
-    @test A[:, 2] == Int16[2, 3, 0]           # checked   → the other two, in the chain's own order
+    # 3 union rows + 2 union columns per position: the row order, then the column mask.
+    A = reshape(reinterpret(Int16, Base64.base64decode(s["b64"])), 5, 2)
+    @test A[1:3, 1] == Int16[1, 0, 0]         # unchecked → the one row with n ≥ 3
+    @test A[1:3, 2] == Int16[2, 3, 0]         # checked   → the other two, in the chain's own order
+    @test all(A[4:5, :] .== Int16(1))         # a row filter, so both columns show at every position
 
     # …and the sweep did not leave the notebook holding the last position's value.
     @test length(Base.invokelatest(getproperty, r.mod, :picked)) == 2
@@ -1214,6 +1469,18 @@ end
     # from everything else on the page, most visibly right beside a cell's own box edge.
     @test occursin(".exp-md hr", css)
     @test occursin("border-top:1px solid var(--border)", css)
+
+    # A table wider than the column has to be reachable. `max-width` clamps the box but gives the
+    # overflow nowhere to go, so the far columns were simply unreachable on a wide table — the live
+    # sheet has carried `overflow-x` on its own wrapper (`.st-scroll`) all along. Asserted on the ONE
+    # rule so a later edit can't drop the scroll while keeping the clamp.
+    wrap = only(m.match for m in eachmatch(r"\.exp-tblwrap\{[^}]*\}", css))
+    @test occursin("overflow-x:auto", wrap)
+    @test occursin("max-width:100%", wrap)
+
+    # The multicheck host is a span, so the box styling has to exist in this sheet or the control
+    # renders as an unspaced run of boxes and labels.
+    @test occursin(".exp-checkgroup", css)
 end
 
 @testset "figure cross-refs — a component is a figure, and `[@fig:x]` resolves" begin

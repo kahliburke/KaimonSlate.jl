@@ -113,6 +113,16 @@ for (const c of controls) {
         else {
           inputs[0].dispatch('input');
           if (fired < 1) note(c, impl, 'listen: an input event fired no handler');
+          // A control the page drives itself — no shipped sweep, so `wire` never touches it — still
+          // has to keep its printed value honest. That readout used to move only from inside `wire`,
+          // so a hand-wired slider showed the export-time number for every position the reader chose.
+          const ro = h.parentElement && h.parentElement.querySelector('.exp-ctl-val');
+          if (ro) {
+            checks++;
+            const want = R.label(R.read(h));
+            if (ro.textContent !== want)
+              note(c, impl, `listen: readout is ${JSON.stringify(ro.textContent)}, expected ${JSON.stringify(want)}`);
+          }
         }
       }
     }

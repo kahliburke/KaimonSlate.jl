@@ -172,13 +172,84 @@ const _MATH_INLINE = r"\$(?!\s)([^\$\n]+?)(?<!\s)\$"
 _math_token(i::Int) = "xslatemathx" * string(i; pad = 5) * "x"
 
 # A string value's text/plain repr is quoted (`"c"`), but inside `{{ }}` interpolation — a
-# presentation context, like Julia's `$(…)` — we want the bare content (`c`). Strip one layer of
-# surrounding double-quotes and undo the basic `show` escapes; non-string reprs (numbers, symbols,
-# arrays) have no enclosing quotes and pass through untouched.
-function _interp_scalar(s::AbstractString)
-    (ncodeunits(s) >= 2 && startswith(s, '"') && endswith(s, '"')) || return s
-    inner = s[nextind(s, firstindex(s)):prevind(s, lastindex(s))]
-    return replace(inner, "\\\"" => "\"", "\\\$" => "\$", "\\\\" => "\\", "\\n" => "\n", "\\t" => "\t")
+# presentation context, like Julia's `$(…)` — we want the bare content (`c`). Lives in widgets.jl
+# because a REPLAYED interpolation is rendered in the worker, where this module does not exist, and
+# the two must produce identical text or moving the control would visibly restyle the prose.
+const _interp_scalar = ReportEngine._interp_scalar
+
+# The text an interpolation contributes to an ATTRIBUTE — its scalar value, with no markup around it.
+# `""` for one that renders something (a chart, a table, an image): those are not attribute material,
+# and leaving the token in place is better than writing a `<div>` into a `src=`, since an unresolved
+# token is visibly wrong rather than quietly malformed.
+function _attr_interp_text(o)
+    o === nothing && return ""
+    o.exception === nothing || return ""
+    isempty(o.display) && isempty(o.echarts) && isempty(o.tables) || return ""
+    return _interp_scalar(o.value_repr)
+end
+
+# Add attributes to a tag, before its `>` and any XHTML-style `/`.
+function _tag_add_attrs(tag::AbstractString, extra::AbstractString)
+    body = rstrip(tag[firstindex(tag):prevind(tag, lastindex(tag))])
+    endswith(body, "/") && (body = rstrip(body[firstindex(body):prevind(body, lastindex(body))]))
+    return string(body, extra, ">")
+end
+
+const _ATTR_PAIR = r"([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*\"([^\"]*)\""
+
+# The slot marker a recorded template holds in place of an interpolation. NOT the interpolation token:
+# the substitution below is a blanket string replace over the whole document, and it would rewrite the
+# template we just stored — putting a `<span>` inside the very attribute this exists to keep clean.
+_slot_token(i::Int) = "xslottokx" * string(i; pad = 5) * "x"
+
+# Substitute the interpolations that landed inside a tag, and only those. Scans tag by tag rather than
+# with a regex over the whole document: an attribute value can contain `>` and a `<` can appear in
+# prose, so a pattern for "inside a tag" is exactly the thing that goes wrong on real input.
+#
+# A tag whose attribute was BUILT from an interpolation also gets a slot number and, per attribute, the
+# template it was built from (`data-islot` / `data-itmpl-<attr>`). The value is embedded in the middle
+# of the attribute — `frame_` + `07` + `.png` — so a replayed position cannot simply assign the
+# swept string; the export resolves the template per position and ships the finished attribute. This is
+# where that template is recorded, because this is the only place that still knows which token went
+# where. Kept verbatim from the rendered HTML (already entity-escaped by CommonMark), so re-escaping it
+# here would double it.
+function _sub_attr_interps(html::AbstractString, interps)
+    isempty(interps) && return html
+    ('<' in html) || return html
+    out = IOBuffer(); i = firstindex(html); n = lastindex(html); slot = 0
+    while i <= n
+        if html[i] != '<'
+            print(out, html[i]); i = nextind(html, i); continue
+        end
+        j = findnext('>', html, i)
+        if j === nothing                                   # unterminated `<` — emit the rest verbatim
+            print(out, html[i:n]); break
+        end
+        tag = html[i:j]
+        if occursin("xslateinterpx", tag)
+            tmpl = IOBuffer()
+            for m in eachmatch(_ATTR_PAIR, tag)
+                occursin("xslateinterpx", m.captures[2]) || continue
+                v = String(m.captures[2])
+                for k in eachindex(interps)
+                    v = replace(v, ReportEngine._interp_token(k) => _slot_token(k))
+                end
+                print(tmpl, " data-itmpl-", lowercase(m.captures[1]), "=\"", v, "\"")
+            end
+            for k in eachindex(interps)
+                tok = ReportEngine._interp_token(k)
+                occursin(tok, tag) || continue
+                tag = replace(tag, tok => _esc(_attr_interp_text(interps[k])))
+            end
+            t = String(take!(tmpl))
+            if !isempty(t)
+                tag = _tag_add_attrs(tag, string(" data-islot=\"", slot, "\"", t))
+                slot += 1
+            end
+        end
+        print(out, tag); i = nextind(html, j)
+    end
+    return String(take!(out))
 end
 
 # Nothing to splice: the interpolation produced no output at all. `nothing` reprs as `"nothing"`, which
@@ -220,7 +291,10 @@ function _md_html(src::AbstractString, interps = CellOutput[])
         elseif !isempty(o.tables)
             push!(frags, "<div class=\"itable\" data-i=\"$tc\"></div>"); tc += 1
         elseif !isempty(o.value_repr)
-            push!(frags, "<span class=\"ival\">" * _esc(_interp_scalar(o.value_repr)) * "</span>")
+            # Indexed like the `.ichart`/`.itable` placeholders above, and for the same reason: a
+            # replayed position ships one string per interpolation, and this is what it writes into.
+            push!(frags, "<span class=\"ival\" data-i=\"" * string(i - 1) * "\">" *
+                         _esc(_interp_scalar(o.value_repr)) * "</span>")
         else
             push!(frags, "")
         end
@@ -245,6 +319,12 @@ function _md_html(src::AbstractString, interps = CellOutput[])
         end
         html = replace(html, _math_token(i) => _esc(tex))           # raw TeX, escaped; KaTeX reads the text node
     end
+    # An interpolation that landed inside a TAG is part of an attribute, not prose — `![alt]({{ … }})`
+    # is the ordinary case, and a title= or a width= are others. The fragment for a scalar is a
+    # `<span>`, and writing that into an attribute value breaks the tag, so those positions take the
+    # bare text instead. Done before the substitution below, which is a blanket string replace and
+    # cannot tell the two contexts apart.
+    html = _sub_attr_interps(html, interps)
     for (i, f) in enumerate(frags)
         tok = ReportEngine._interp_token(i)
         # A BLOCK-level fragment (a fence's code block, a rich display, a chart/table host) standing

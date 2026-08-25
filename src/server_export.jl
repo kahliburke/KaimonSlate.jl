@@ -376,6 +376,131 @@ function _chain_sweep_plan(cells)
     return out
 end
 
+# ── Prose that follows its control ────────────────────────────────────────────────────────────────
+# A markdown cell's `{{ }}` reads the graph exactly as a figure does, and live it moves with it. In a
+# static export it did not: only ECharts series and tables were ever wired, so the sentence beside a
+# replayed figure kept the numbers it had at export while the figure moved. That is worse than a
+# control that does nothing — the page states something its own chart contradicts.
+#
+# What ships is one short STRING per interpolation per position, which is the cheapest thing on the
+# page: a KPI line over a 31-stop slider is a couple of kilobytes of text, against the hundreds a
+# single figure's sweep costs. So there is no cost dialog entry and no stride decision to make.
+#
+# Same one-control rule as a table, for the same reason, and the same refusals upstream.
+function _prose_sweep_plan(cells)
+    byid = Dict(c.id => c for c in cells)
+    order = Dict(c.id => i for (i, c) in enumerate(cells))
+    ctls = Dict{Symbol,Tuple{String,Int}}()
+    for c in cells, b in c.binds
+        dom = try
+            ReportEngine.bind_domain(ReportEngine.Widget(b.widget, b.params, b.value))
+        catch
+            nothing
+        end
+        dom === nothing && continue
+        ctls[b.name] = (c.id, length(dom))
+    end
+    isempty(ctls) && return NamedTuple[]
+    cones = Dict(v => _replay_chain_cone(cells, v) for v in keys(ctls))
+
+    out = NamedTuple[]
+    for c in cells
+        c.kind == ReportEngine.MARKDOWN || continue
+        exprs = try; ReportEngine._md_interp_exprs(c.source); catch; String[]; end
+        isempty(exprs) && continue
+        reach = sort!([v for v in keys(ctls) if c.id in cones[v]]; by = v -> (ctls[v][2], String(v)))
+        isempty(reach) && continue
+        surfaced = Set{String}(n for col in c.controls for n in col)
+        pick = isempty(surfaced) ? reach : (let s = [v for v in reach if String(v) in surfaced]
+                                               isempty(s) ? reach : s
+                                           end)
+        v = first(pick)
+        up = _replay_chain_upstream(byid, c.id)
+        chain = sort!(Cell[byid[i] for i in intersect(up, cones[v]) if haskey(byid, i)];
+                      by = x -> order[x.id])
+        blocked = nothing
+        for lk in chain
+            b = _replay_chain_blocker(lk)
+            b === nothing && continue
+            blocked = string("`", lk.id, "` ", b)
+            break
+        end
+        if blocked === nothing && ctls[v][2] > _CHAIN_MAX_POSITIONS
+            blocked = string("`", v, "` has ", ctls[v][2], " positions, past the ",
+                             _CHAIN_MAX_POSITIONS, " a composed sweep will run unasked")
+        end
+        push!(out, (; id = string(c.id, ":prose:", v), control = String(v), cell = c.id,
+                    source = _prose_sweep_source(chain, String(v), exprs),
+                    held = String[String(x) for x in reach if x != v], blocked = blocked))
+    end
+    return out
+end
+
+# The synthesized closure for a markdown cell: the upstream chain, then the cell's interpolations as a
+# vector, in the order `_md_template` produced them — which is the order the rendered `.ival` spans are
+# numbered in, so a position's strings land on the right words with no mapping to carry.
+function _prose_sweep_source(chain, control::AbstractString, exprs)
+    io = IOBuffer()
+    print(io, control, " -> let\n")
+    for c in chain
+        print(io, c.source, "\n")
+    end
+    print(io, "Any[")
+    for (i, e) in enumerate(exprs)
+        i == 1 || print(io, ",\n")
+        # Parenthesised: an interpolation is an expression in text, and `a ? b : c` or a bare `x for x
+        # in y` would otherwise re-associate against the commas of the vector literal around it.
+        print(io, "(", e, ")")
+    end
+    print(io, "]\nend")
+    return String(take!(io))
+end
+
+# The attribute TEMPLATES are the render's working note to the export: which token built which
+# attribute. The page never reads them — a position's finished attribute is precomputed into `slots` —
+# so shipping them would put dead metadata, carrying the shape of a server asset path, into a static
+# file. `data-islot` stays: that is what the page targets.
+_strip_attr_templates(html::AbstractString) =
+    occursin("data-itmpl-", html) ? replace(html, r"\sdata-itmpl-[-a-z0-9_:.]+=\"[^\"]*\"" => "") : html
+
+# An interpolated ATTRIBUTE, resolved for every position of the control.
+#
+# The swept strings are the interpolations' values; the attribute is a template those sit inside
+# (`frame_` + `07` + `.png`), so what the page needs is the finished attribute, not the value. And
+# it has to be finished HERE rather than in the browser, because an asset URL in a static export is a
+# `data:` URI that only the export can produce — which is also what finally collects every position's
+# asset. Scanning for a literal `/n/<id>/asset/…` in the source could only ever find the one the
+# author's export-time position happened to render.
+#
+# Rewritten by round-tripping a synthetic tag through `_export_embed_html`, so an attribute's URL is
+# resolved by exactly the code that resolves a literal one — inline `data:` for a standalone page,
+# a sibling path for a published site — instead of a second implementation that can drift from it.
+function _prose_attr_slots(html::AbstractString, values, root; inline::Bool, media)
+    slots = Any[]
+    (occursin("data-islot=", html) && values isa AbstractVector) || return slots
+    rewrite(url) = begin
+        h = _export_embed_html(string("<img src=\"", url, "\">"), root; inline = inline, media = media)
+        m = match(r"src=\"([^\"]*)\"", h)
+        m === nothing ? String(url) : String(m.captures[1])
+    end
+    for tag in eachmatch(r"<[^>]*\sdata-islot=\"(\d+)\"[^>]*>", html)
+        n = parse(Int, tag.captures[1])
+        for m in eachmatch(r"\sdata-itmpl-([-a-z0-9_:.]+)=\"([^\"]*)\"", tag.match)
+            attr, tmpl = String(m.captures[1]), String(m.captures[2])
+            vals = String[]
+            for pos in values
+                s = tmpl
+                for (k, v) in enumerate(pos isa AbstractVector ? pos : Any[pos])
+                    s = replace(s, ReportRender._slot_token(k) => String(v))
+                end
+                push!(vals, rewrite(s))
+            end
+            push!(slots, Dict{String,Any}("slot" => n, "attr" => attr, "values" => vals))
+        end
+    end
+    return slots
+end
+
 # Register them in the worker, and hand back the marks the writer attaches to each table spec. Called on
 # both export paths that read the sweep registry — the cost dialog and the export itself — so what the
 # dialog priced is what the page ships.
@@ -388,19 +513,32 @@ function _register_chain_sweeps!(nb::LiveNotebook)
         @warn "@replay: could not analyse the cell graph for table chains" exception = (e, catch_backtrace())
         return marks
     end
+    prose = try
+        _prose_sweep_plan(nb.report.cells)
+    catch e
+        @warn "@replay: could not analyse the cell graph for prose" exception = (e, catch_backtrace())
+        NamedTuple[]
+    end
     # A refusal is reported once, here, with the cell and the reason — the whole point of the blocker
     # list is that an author can act on it, which they cannot do if it never leaves this function.
     for p in plan
         p.blocked === nothing && continue
         @info "@replay: `$(p.cell)`'s table cannot follow `$(p.control)` offline — $(p.blocked)"
     end
+    for p in prose
+        p.blocked === nothing && continue
+        @info "@replay: `$(p.cell)`'s prose cannot follow `$(p.control)` offline — $(p.blocked)"
+    end
     ok = [p for p in plan if p.blocked === nothing]
+    okprose = [p for p in prose if p.blocked === nothing]
     # Sent even when EMPTY: the call is also what retires composed sweeps from an earlier shape of the
     # notebook, so returning early here would leave a deleted table's sweep running for the session.
     res = try
         ReportEngine.register_chain_replays(nb.kernel,
-            Any[Dict{String,Any}("id" => p.id, "control" => p.control, "cell" => p.cell,
-                                 "source" => p.source) for p in ok])
+            vcat(Any[Dict{String,Any}("id" => p.id, "control" => p.control, "cell" => p.cell,
+                                      "source" => p.source) for p in ok],
+                 Any[Dict{String,Any}("id" => p.id, "control" => p.control, "cell" => p.cell,
+                                      "source" => p.source, "target" => "prose") for p in okprose]))
     catch e
         @warn "@replay: registering composed table sweeps failed" exception = (e, catch_backtrace())
         nothing
@@ -415,6 +553,13 @@ function _register_chain_sweeps!(nb::LiveNotebook)
         isempty(p.held) ||
             @info "@replay: `$(p.cell)`'s table follows `$(p.control)`; $(join(p.held, ", ")) held at the value this export was taken on"
         marks[p.key] = Dict{String,Any}("id" => p.id, "control" => p.control, "index" => -1)
+    end
+    # Prose marks are keyed by CELL, not by a spec inside it: a markdown cell has one set of
+    # interpolations and the writer stamps the section it renders them into.
+    for p in okprose
+        String(get(res, p.id, "")) == "ok" || continue
+        marks[string("prose:", p.cell)] = Dict{String,Any}("id" => p.id, "control" => p.control,
+                                                           "cell" => p.cell, "target" => "prose")
     end
     return marks
 end
@@ -476,6 +621,17 @@ function _replay_sweep_assets(nb::LiveNotebook; stride::Integer = 1, strides = n
     rows = Dict{String,Any}()
     for (id, r) in got
         r isa AbstractDict || continue
+        # Prose carries its payload INLINE — a handful of short strings — so it has no asset to
+        # register and must be taken before the "no bytes, nothing shipped" skip below.
+        if String(_g(r, "target", "")) == "prose"
+            vals = _g(r, "values", Any[])
+            vals isa AbstractVector && !isempty(vals) || continue
+            table[String(id)] = Dict{String,Any}(
+                "control" => String(_g(r, "control", "")), "domain" => _g(r, "domain", Any[]),
+                "target" => "prose", "values" => vals,
+                "bytes" => Int(_g(r, "bytes", 0)), "seconds" => Float64(_g(r, "seconds", 0.0)))
+            continue
+        end
         b64 = String(_g(r, "b64", "")); isempty(b64) && continue
         bytes = try; Base64.base64decode(b64); catch; continue; end
         dtype = String(_g(r, "dtype", "f64"))
@@ -497,7 +653,10 @@ function _replay_sweep_assets(nb::LiveNotebook; stride::Integer = 1, strides = n
         # that much so it drives a table rather than looking for a chart series.
         if String(_g(r, "target", "")) == "table"
             table[String(id)]["target"] = "table"
-            rows[String(id)] = _g(r, "rows", Any[])
+            # Body AND header: a control that hides columns sweeps the union of the column specs too,
+            # and the position the author left the table on may show only some of them.
+            rows[String(id)] = Dict{String,Any}("rows" => _g(r, "rows", Any[]),
+                                                "cols" => _g(r, "cols", Any[]))
         end
     end
     return (assets, table, rows)
@@ -602,7 +761,31 @@ function _export_control_html(b)
         end
         print(io, "</tbody></table></div>")
         String(take!(io))
-    elseif kind in ("multiselect", "multicheck")
+    elseif kind == "multicheck"
+        # A checkbox list, the same shape the live page draws (`view.js`, `w === 'multicheck'`). Sharing
+        # the `multiselect` branch turned it into a `<select multiple>`, where a plain click clears every
+        # other choice and keeping two needs a modifier — so the exported control was not merely styled
+        # differently from the live one, it took different gestures to operate.
+        #
+        # The host is the wrapping span rather than an input, so it carries `data-off` like the range
+        # slider's pair does; `disabled` means nothing on a span. Each box is disabled individually, and
+        # `Slate.replay.enable` re-enables them through `_inputs`. Nothing else on the client needed
+        # changing: `read` and `mirror` already fell back to `input[type=checkbox]` for this kind.
+        opts = get(p, "options", nothing)
+        opts isa AbstractVector || return ""
+        chosen = val isa AbstractVector ? Set(string.(val)) : Set{String}()
+        io = IOBuffer()
+        print(io, "<span class=\"exp-checkgroup\"", hostattrs, ">")
+        for o in opts
+            v = o isa AbstractDict ? get(o, "value", o) : o
+            l = o isa AbstractDict ? String(get(o, "label", string(v))) : string(v)
+            print(io, "<label><input type=\"checkbox\" value=\"", _esc(string(v)), "\"",
+                  string(v) in chosen ? " checked" : "", " disabled/><span class=\"optlbl\">",
+                  _esc(l), "</span></label>")
+        end
+        print(io, "</span>")
+        String(take!(io))
+    elseif kind == "multiselect"
         opts = get(p, "options", nothing)
         opts isa AbstractVector || return ""
         chosen = val isa AbstractVector ? Set(string.(val)) : Set{String}()
@@ -1245,14 +1428,24 @@ if(s){Array.prototype.forEach.call(s.options,set);return;}
 Array.prototype.forEach.call(h.querySelectorAll('input[type=checkbox]'),function(c){c.checked=want.indexOf(c.value)>=0;});return;}
 var inp=R._inputs(h)[0];if(inp)inp.value=key;},
 /* Inputs fire input/change; a table select has no input at all, so its rows ARE the control. */
+/* The number a slider prints beside itself. Only `wire` used to touch it, so a control driven by the
+   page's own JS instead — the supported way to make an export interactive without a shipped sweep —
+   showed a readout frozen at the export-time value while the control moved. Kept a method rather than
+   inlined so `listen` can drive it for everyone, and so a caller can relabel with its own text. */
+relabel:function(h,key){var ro=h.parentElement&&h.parentElement.querySelector(".exp-ctl-val");
+if(ro)ro.textContent=Slate.replay.label(key);},
+/* The default relabel fires BEFORE `run`, so a caller that writes its own readout (a unit, a name for
+   the position) overwrites it and wins, rather than racing it. */
 listen:function(h,run){var R=Slate.replay;
 if(R.kind(h)==="tableselect"){var rows=h.querySelectorAll("tbody tr");
 Array.prototype.forEach.call(rows,function(tr,i){tr.addEventListener("click",function(){
 if(h.getAttribute("data-off")==="1")return;R.mirror(h,i+1);run();});});return;}
-Array.prototype.forEach.call(R._inputs(h),function(i){i.addEventListener("input",run);i.addEventListener("change",run);});},
+var fire=function(e){R.relabel(h,R.read(h));run(e);};
+Array.prototype.forEach.call(R._inputs(h),function(i){i.addEventListener("input",fire);i.addEventListener("change",fire);});},
 enable:function(h,on){var R=Slate.replay;h.setAttribute("data-off",on?"0":"1");
 if(on)h.removeAttribute("title");
-Array.prototype.forEach.call(R._inputs(h),function(i){i.disabled=!on;if(on)i.removeAttribute("title");});},
+Array.prototype.forEach.call(R._inputs(h),function(i){i.disabled=!on;if(on)i.removeAttribute("title");});
+if(on)R.relabel(h,R.read(h));},
 label:function(key){return Array.isArray(key)?key.join(" – "):String(key);},
 /* A range slider draws its interval as a filled span between the thumbs. The thumbs are native
    inputs and move themselves; the fill is ours, so without this it stays where the export left it
@@ -1305,20 +1498,28 @@ wire:function(marks,apply){if(Slate.isLive())return;
 var R=Slate.replay;
 var sweep=(window.__slateReplays||{})[m.id];if(!sweep)return;
 var hosts=R.hosts(m.control);if(!hosts.length)return;
-var loaded=Slate.asset(sweep.asset);
+/* A sweep whose payload rode INLINE rather than in a binary asset. Prose is the case: a position is a
+   few short strings, and a fetch + decode + narrowing step exists to move megabytes of floats. There is
+   nothing to await, so the control enables immediately. */
+var inline=Array.isArray(sweep.values)?sweep.values:null;
+var loaded=inline?null:Slate.asset(sweep.asset);
 var run=function(src){var key=R.read(src);var i=R.index(sweep.domain||[],key);if(i<0)return;
 /* A control surfaced beside several figures renders once per cell. Push the mover's state onto its
    copies, or the reader drags one strip and the others sit there stating something false. */
-hosts.forEach(function(h){if(h!==src)R.mirror(h,key);R.paint(h);
-var ro=h.parentElement&&h.parentElement.querySelector(".exp-ctl-val");
-if(ro)ro.textContent=R.label(key);});
-loaded.then(function(packed){apply(R.slice(packed,sweep,i),m);})
+hosts.forEach(function(h){if(h!==src)R.mirror(h,key);R.paint(h);R.relabel(h,key);});
+if(inline){apply(inline[i],m,i);return;}
+loaded.then(function(packed){apply(R.slice(packed,sweep,i),m,i);})
 .catch(function(e){console.error("replay failed",e);});};
 hosts.forEach(function(h){R.listen(h,function(){run(h);});});
+/* Apply the export-time position ONCE on load. A figure is already drawn at it, so this repaints the
+   same numbers — but a replayed TABLE is written with the UNION of every position (that is what the
+   order and the mask index into), so until this ran the reader saw every row and every column any
+   position can show, and only touching the control brought it back to what was exported. */
+if(inline){hosts.forEach(function(h){R.enable(h,true);});run(hosts[0]);return;}
 /* Every exported control renders DISABLED, because one that moves without changing anything reads as
    a broken page. Enabling here — and only here — means a control is live exactly when data for it
    actually rode along, with no coordination between the two sides. */
-loaded.then(function(){hosts.forEach(function(h){R.enable(h,true);});}).catch(function(){});});}
+loaded.then(function(){hosts.forEach(function(h){R.enable(h,true);});run(hosts[0]);}).catch(function(){});});}
 };
 Slate.assetUrl=function(path){var a=window.__slateAssets[path];if(!a)return path;
 if(a.data!==undefined)return "data:"+(a.mime||"application/octet-stream")+";base64,"+a.data;return a.url||path;};
@@ -1490,7 +1691,11 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-table td.align-center,.exp-table th.align-center{text-align:center;}
 .exp-table tbody tr:nth-child(even){background:rgba(127,127,127,.06);}
 /* interactive enhancer (hydrated client-side): sortable headers, filter, paging, CSV */
-.exp-tblwrap{width:fit-content;max-width:100%;margin:10px auto;}   /* center the table block on the page */
+/* Centred, and scrollable when the table is wider than the column. `max-width` alone clamps the BOX
+   without giving the overflow anywhere to go, so a wide table just spilled past the page edge with no
+   way to reach the far columns. The live table has carried the other half of this rule all along
+   (`.slatetable .st-scroll`, notebook.css) — the export sheet is separate and only had the clamp. */
+.exp-tblwrap{width:fit-content;max-width:100%;margin:10px auto;overflow-x:auto;}
 .exp-table th{cursor:pointer;user-select:none;} .exp-table th::after{content:attr(data-arr);color:var(--accent);}
 .exp-tbl-bar{display:flex;align-items:center;gap:10px;margin-bottom:4px;}
 .exp-tbl-filter{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:.78rem;min-width:150px;}
@@ -1568,6 +1773,10 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
   background:var(--text);border:2px solid var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.5);}
 .exp-ctl input[type=range]:not(.rsin):focus{outline:none;}
 .exp-ctl input:disabled,.exp-ctl select:disabled{opacity:.45;cursor:not-allowed;}
+/* multicheck — a row of boxes, matching the live control rather than a modifier-click listbox */
+.exp-checkgroup{display:inline-flex;flex-wrap:wrap;align-items:center;gap:4px 12px;}
+.exp-checkgroup label{display:inline-flex;align-items:center;gap:5px;cursor:pointer;}
+.exp-checkgroup label:has(input:disabled){opacity:.45;cursor:not-allowed;}
 .exp-ctl-val{color:var(--text);font-variant-numeric:tabular-nums;min-width:2.5em;}
 .exp-ctl-frozen{color:var(--text);font-variant-numeric:tabular-nums;}
 /* A `<select>` with no rules is browser chrome — white box, black text — which on a dark page is
@@ -1691,7 +1900,7 @@ function enh(table){
   var thead=table.tHead,tb=table.tBodies[0];if(!thead||!tb)return;
   var ths=[].slice.call(thead.rows[0].cells),allRows=[].slice.call(tb.rows);
   var wrap=table.closest('.exp-tblwrap')||table.parentNode;
-  var st={sort:-1,dir:1,filter:'',page:0,order:null,pageSize:allRows.length>25?25:0};
+  var st={sort:-1,dir:1,filter:'',page:0,order:null,cols:null,pageSize:allRows.length>25?25:0};
   var bar=document.createElement('div');bar.className='exp-tbl-bar';
   var fi=document.createElement('input');fi.type='text';fi.placeholder='filter…';fi.className='exp-tbl-filter';
   var info=document.createElement('span');info.className='exp-tbl-info';
@@ -1728,17 +1937,35 @@ function enh(table){
       pg.appendChild(s);pg.appendChild(mk('next ›',st.page+1,st.page>=pages-1));pg.appendChild(mk('»',pages-1,st.page>=pages-1));}}
   ths.forEach(function(th,ci){th.addEventListener('click',function(){if(st.sort===ci)st.dir=-st.dir;else{st.sort=ci;st.dir=1;}st.page=0;render();});});
   fi.addEventListener('input',function(){st.filter=fi.value;st.page=0;render();});
-  csv.addEventListener('click',function(){var lines=[ths.map(function(th){return esc(th.getAttribute('data-label'));}).join(',')];
-    view().forEach(function(tr){lines.push([].map.call(tr.cells,function(td){return esc(td.textContent);}).join(','));});
+  /* Which columns the control's current position shows. Applied to the header and to EVERY row, not
+     just the page on screen, so paging or sorting cannot bring a hidden column back. A CSV taken from
+     a replayed table is the table the reader is looking at, so it drops them too. */
+  function shown(ci){return !st.cols||st.cols[ci];}
+  function applyCols(mask){
+    if(!mask||mask.length!==ths.length)return;
+    st.cols=mask;
+    ths.forEach(function(th,ci){th.hidden=!mask[ci];});
+    allRows.forEach(function(tr){[].forEach.call(tr.cells,function(td,ci){td.hidden=!mask[ci];});});}
+  csv.addEventListener('click',function(){var lines=[ths.filter(function(_,ci){return shown(ci);})
+      .map(function(th){return esc(th.getAttribute('data-label'));}).join(',')];
+    view().forEach(function(tr){lines.push([].filter.call(tr.cells,function(_,ci){return shown(ci);})
+      .map(function(td){return esc(td.textContent);}).join(','));});
     var blob=new Blob([lines.join('\n')],{type:'text/csv'}),u=URL.createObjectURL(blob),a=document.createElement('a');
     a.href=u;a.download='table.csv';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(u);});
-  /* A replayed table publishes the ONE thing its control needs: set the row order and redraw. Keyed by
+  /* A replayed table publishes the ONE thing its control needs: take a position and redraw. Keyed by
      the mark id, which is what `Slate.replay.wire` has in hand. `st` is closed over, so the reader's
      filter, sort and page survive a move of the control — the position changes which rows exist, not
-     what the reader was looking at. Page reset because the new position may be shorter. */
+     what the reader was looking at. Page reset because the new position may be shorter.
+
+     A position's slice is its row ORDER over the rows the page was written with, followed by its
+     column MASK over the headers. Split at the row count, which is what both sides count in: the
+     packer wrote (rows + columns) per position and the body here IS those rows. */
   var rid=table.getAttribute('data-replay');
   if(rid)(window.__slateTableReplay=window.__slateTableReplay||{})[rid]=
-    function(order){st.order=order;st.page=0;render();};
+    function(slice){var n=allRows.length;
+      st.order=[].slice.call(slice,0,n);
+      applyCols([].slice.call(slice,n));
+      st.page=0;render();};
   render();
 }
 [].forEach.call(document.querySelectorAll('table.exp-table'),enh);
@@ -1751,11 +1978,34 @@ function enh(table){
 #
 # Emitted after `_EXPORT_TABLE_JS`, which must have run for the registry to exist; `_slateTableMarks` is
 # written by the export immediately before it.
+# The `@replay` step for PROSE: a position's strings, written into the `.ival` spans of the cell that
+# was swept. Scoped by the mark id on the section, because every cell numbers its interpolations from
+# zero — an unscoped `[data-i]` would rewrite the first matching span anywhere on the page.
+#
+# `textContent`, never `innerHTML`: what ships is the same text the live page showed, already escaped
+# once when the export was written, and a value that happens to contain `<` is a value, not markup.
+const _EXPORT_PROSE_REPLAY_JS = raw"""(function(){
+if(!window.Slate||!Slate.replay||!window._slateProseMarks||!_slateProseMarks.length)return;
+Slate.replay.wire(_slateProseMarks,function(strings,m,i){
+var root=document.querySelector('section.exp-md[data-replay="'+m.id+'"]');
+if(!root)return;
+if(strings)for(var k=0;k<strings.length;k++){
+var el=root.querySelector('.ival[data-i="'+k+'"]');
+if(el)el.textContent=strings[k];}
+/* An interpolation that built an ATTRIBUTE rather than prose — an image URL is the ordinary case.
+   The finished attribute for this position was resolved at export (a `data:` URI in a standalone
+   page), so this only has to assign it. */
+var slots=((window.__slateReplays||{})[m.id]||{}).slots||[];
+slots.forEach(function(s){
+var el=root.querySelector('[data-islot="'+s.slot+'"]');
+if(el&&s.values&&s.values[i]!==undefined)el.setAttribute(s.attr,s.values[i]);});});
+})();"""
+
 const _EXPORT_TABLE_REPLAY_JS = raw"""(function(){
 if(!window.Slate||!Slate.replay||!window._slateTableMarks||!_slateTableMarks.length)return;
-Slate.replay.wire(_slateTableMarks,function(order,m){
+Slate.replay.wire(_slateTableMarks,function(slice,m){
 var set=(window.__slateTableReplay||{})[m.id];
-if(set)set(order);});
+if(set)set(slice);});
 })();"""
 
 # Inline background for an in-cell `:bar`/`:heat` column, scaled over the column's numeric domain
@@ -1820,18 +2070,24 @@ end
 # position the author happened to leave it on — the shipped order indexes that union. Swapped in here,
 # after the sweep has run and before the table is written.
 #
-# The columns stay the LIVE ones: they carry the author's `format=`/`align=`/`viz=` overlays, and every
-# position went through the same `slate_table` call, so they agree. Their `:bar`/`:heat` domains do not —
-# those were fitted to one position, and the bars are drawn server-side against the union — so widen
-# them, or a row from another position draws off the end of its own scale.
+# The columns are the swept UNION, for the same reason the rows are: a control that hides a column
+# leaves the live spec holding only the ones its export-time position showed, and the page has to carry
+# every column any position can show. They keep the author's `format=`/`align=`/`viz=` overlays, since
+# each union column is the spec from a position that showed it. Their `:bar`/`:heat` domains are still
+# refitted — those were fitted to one position, and the bars are drawn server-side against the union,
+# so without widening a row from another position draws off the end of its own scale.
 function _replay_base_spec(spec, rows::AbstractDict)
     mk = _table_replay_mark(spec)
     mk isa AbstractDict || return spec
-    base = get(rows, String(get(mk, "id", "")), nothing)
+    got = get(rows, String(get(mk, "id", "")), nothing)
+    got isa AbstractDict || return spec
+    base = get(got, "rows", nothing)
     (base isa AbstractVector && !isempty(base)) || return spec
+    swept = get(got, "cols", nothing)
+    cols = (swept isa AbstractVector && !isempty(swept)) ? swept : get(spec, "columns", Any[])
     out = copy(spec)
     out["rows"] = base
-    out["columns"] = Any[_widen_viz_domain(c, base, ci) for (ci, c) in enumerate(get(spec, "columns", Any[]))]
+    out["columns"] = Any[_widen_viz_domain(c, base, ci) for (ci, c) in enumerate(cols)]
     # `nrows` drove the "showing N of M" note against the live position's count; the body is the union now.
     o = copy(get(spec, "opts", Dict{String,Any}()))
     o["nrows"] = length(base)
@@ -2455,6 +2711,31 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         chain_marks = _register_chain_sweeps!(nb)
         replay_assets, replay_table, replay_rows = _replay_sweep_assets(nb; stride = replay_stride,
                                                                        strides = replay_strides)
+        # Author-embedded video/audio hoisted out of the body (key, mime, base64) → the blob registry
+        # emitted with the trailing scripts. Standalone only: a published page keeps its sibling file.
+        # Declared here rather than beside the body writer because the attribute pass below resolves
+        # media URLs too, and it has to run before the routing table is written.
+        mediareg = Tuple{String,String,String}[]
+        media = inline_assets ? mediareg : nothing
+        # An interpolated ATTRIBUTE is finished per position here, and not while the body is written:
+        # the routing table below is emitted at the TOP of the body, so anything added to it later is
+        # added after the page has already been told what shipped. The markdown is rendered a second
+        # time for this, which is cheap and only happens for a cell that actually carries a prose mark.
+        for c in nb.report.cells
+            c.kind == MARKDOWN || continue
+            pm = get(chain_marks, string("prose:", c.id), nothing)
+            pm isa AbstractDict || continue
+            sw = get(replay_table, String(get(pm, "id", "")), nothing)
+            sw isa AbstractDict || continue
+            sl = try
+                _prose_attr_slots(markdown_html(c.source, c.interp), get(sw, "values", nothing),
+                                  _proj_root(nb); inline = inline_assets, media = media)
+            catch e
+                @warn "@replay: could not resolve an interpolated attribute" cell = c.id exception = e
+                Any[]
+            end
+            isempty(sl) || (sw["slots"] = sl)
+        end
         # Table marks, collected as the body is written: a replayed table needs its own one-line wiring
         # (see `_EXPORT_TABLE_REPLAY_JS`) and the enhancer that receives it only exists at the end.
         tablemarks = Dict{String,Any}[]
@@ -2522,10 +2803,6 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # cell rendering it can't find the spec in its own `binds`.
         bind_by_name = _bind_index(nb.report.cells)
         surfaced_names = _surfaced_names(nb.report.cells)
-        # Author-embedded video/audio hoisted out of the body (key, mime, base64) → the blob registry
-        # emitted with the trailing scripts. Standalone only: a published page keeps its sibling file.
-        mediareg = Tuple{String,String,String}[]
-        media = inline_assets ? mediareg : nothing
         # Geo-map GeoJSON referenced by the charts. `inline_assets` (standalone) ⇒ inline each map here
         # (name => local file, read into the page). Otherwise (published page) the map rides as a
         # page-local sibling `assets/maps/` file (written by the site builder) and `registerMap` is
@@ -2573,8 +2850,15 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                           figidx.numbers[c.id], ".</b> ",
                           _export_embed_html(markdown_html(mdsrc, c.interp), _proj_root(nb); inline = inline_assets, media = media), "</figcaption>")
                 else
-                    print(io, "<section class=\"exp-md\">",
-                          _export_embed_html(markdown_html(mdsrc, c.interp), _proj_root(nb); inline = inline_assets, media = media), "</section>")
+                    # A prose sweep is scoped to the cell it swept: the mark id goes on the section so
+                    # the client writes a position's strings into THIS cell's `.ival` spans and not
+                    # into another cell's, which are numbered from zero just the same.
+                    pm = get(chain_marks, string("prose:", c.id), nothing)
+                    pattr = pm isa AbstractDict ? string(" data-replay=\"", _esc(String(get(pm, "id", ""))), "\"") : ""
+                    print(io, "<section class=\"exp-md\"", pattr, ">",
+                          _strip_attr_templates(
+                              _export_embed_html(markdown_html(mdsrc, c.interp), _proj_root(nb); inline = inline_assets, media = media)),
+                          "</section>")
                 end
             else
                 print(io, "<section class=\"exp-code\">")
@@ -2708,6 +2992,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # registered. Nothing is emitted for a notebook with no replayed table.
         isempty(tablemarks) || print(io, "var _slateTableMarks=", JSON.json(tablemarks), ";",
                                      _EXPORT_TABLE_REPLAY_JS)
+        # …and the same for prose: a markdown cell's `{{ }}` following the control its numbers read.
+        let pmarks = Any[m for (k, m) in chain_marks if startswith(String(k), "prose:")]
+            isempty(pmarks) || print(io, "var _slateProseMarks=", JSON.json(pmarks), ";",
+                                     _EXPORT_PROSE_REPLAY_JS)
+        end
         # Author-embedded video/audio → blob: URLs (the bytes were hoisted out of the body above).
         isempty(mediareg) || print(io, "window.__slateMedia={",
             join((string(JSON.json(k), ":{\"mime\":", JSON.json(mime), ",\"b64\":", JSON.json(b64), "}")

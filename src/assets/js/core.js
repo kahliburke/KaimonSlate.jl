@@ -403,8 +403,19 @@ window.Slate.replay = {
     const inp = R._inputs(h)[0];
     if (inp) inp.value = key;
   },
+  // The number a slider prints beside itself. Only `wire` used to touch it, so a control driven by
+  // the page's own JS instead — the supported way to make an export interactive with no shipped
+  // sweep — showed a readout frozen at the export-time value while the control moved. A method, so
+  // `listen` can drive it for everyone and a caller can relabel with its own text.
+  relabel: function (h, key) {
+    const ro = h.parentElement && h.parentElement.querySelector('.exp-ctl-val');
+    if (ro) ro.textContent = window.Slate.replay.label(key);
+  },
   // Subscribe to a host's changes. Inputs fire `input`/`change`; a table select has no input at all,
   // so its rows ARE the control and clicking one is the event.
+  //
+  // The default relabel fires BEFORE `run`, so a caller that writes its own readout (a unit, a name
+  // for the position) overwrites it and wins rather than racing it.
   listen: function (h, run) {
     const R = window.Slate.replay;
     if (R.kind(h) === 'tableselect') {
@@ -418,9 +429,10 @@ window.Slate.replay = {
       });
       return;
     }
+    const fire = function (e) { R.relabel(h, R.read(h)); run(e); };
     Array.prototype.forEach.call(R._inputs(h), function (i) {
-      i.addEventListener('input', run);
-      i.addEventListener('change', run);
+      i.addEventListener('input', fire);
+      i.addEventListener('change', fire);
     });
   },
   enable: function (h, on) {
@@ -431,6 +443,7 @@ window.Slate.replay = {
       i.disabled = !on;
       if (on) i.removeAttribute('title');
     });
+    if (on) R.relabel(h, R.read(h));
   },
   label: function (key) { return Array.isArray(key) ? key.join(' – ') : String(key); },
   // A range slider draws the selected interval as a filled span between its two thumbs. The thumbs
@@ -516,7 +529,11 @@ window.Slate.replay = {
       if (!sweep) return;
       const hosts = R.hosts(m.control);
       if (!hosts.length) return;
-      const loaded = window.Slate.asset(sweep.asset);
+      // A sweep whose payload rode INLINE rather than in a binary asset. Prose is the case: a position
+      // is a few short strings, and the fetch/decode/narrow path exists to move megabytes of floats.
+      // Nothing to await, so the control enables immediately.
+      const inline = Array.isArray(sweep.values) ? sweep.values : null;
+      const loaded = inline ? null : window.Slate.asset(sweep.asset);
       const run = function (src) {
         const key = R.read(src);
         const i = R.index(sweep.domain || [], key);
@@ -526,19 +543,24 @@ window.Slate.replay = {
         hosts.forEach(function (h) {
           if (h !== src) R.mirror(h, key);
           R.paint(h);
-          const ro = h.parentElement && h.parentElement.querySelector('.exp-ctl-val');
-          if (ro) ro.textContent = R.label(key);
+          R.relabel(h, key);
         });
-        loaded.then(function (packed) { apply(R.slice(packed, sweep, i), m); })
+        if (inline) { apply(inline[i], m, i); return; }
+        loaded.then(function (packed) { apply(R.slice(packed, sweep, i), m, i); })
               .catch(function (e) { console.error('replay failed', e); });
       };
       // Inputs fire continuously while a thumb is dragged; the data is already in memory, so redrawing
       // per event is cheap and gives the same feel as the live kernel path at its best.
       hosts.forEach(function (h) { R.listen(h, function () { run(h); }); });
+      // Apply the export-time position ONCE on load. A figure is already drawn at it, so this repaints
+      // the same numbers — but a replayed TABLE is written with the UNION of every position (which is
+      // what the order and the mask index into), so until this ran the reader saw every row and every
+      // column any position can show, and only touching the control brought it back.
+      if (inline) { hosts.forEach(function (h) { R.enable(h, true); }); run(hosts[0]); return; }
       // The export renders every control DISABLED, because one that moves without changing anything
       // reads as a broken page. Enabling here — and only here — means a control is live exactly when
       // data for it actually rode along, with no coordination between the two sides.
-      loaded.then(function () { hosts.forEach(function (h) { R.enable(h, true); }); })
+      loaded.then(function () { hosts.forEach(function (h) { R.enable(h, true); }); run(hosts[0]); })
             .catch(function () { /* data missing → the control stays inert, which is the truth */ });
     });
   }

@@ -585,15 +585,19 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         s = got["tbl:region"]
         @test s["target"] == "table"                 # the page drives a table, not a chart series
         @test s["rows"] == Any[Any["oslo", 1], Any["bergen", 2], Any["lima", 3]]   # first-seen order
-        @test s["dtype"] == "i16" && s["shape"] == [3, 2]
-        A = reshape(reinterpret(Int16, Base64.base64decode(s["b64"])), 3, 2)
-        @test A[:, 1] == Int16[1, 2, 0]              # north: its two rows, then padding
-        @test A[:, 2] == Int16[3, 0, 0]              # south: the one row only its position has
+        # (3 union rows + 2 union columns) per position: the row order, then the column mask.
+        @test s["dtype"] == "i16" && s["shape"] == [5, 2]
+        A = reshape(reinterpret(Int16, Base64.base64decode(s["b64"])), 5, 2)
+        @test A[1:3, 1] == Int16[1, 2, 0]            # north: its two rows, then padding
+        @test A[1:3, 2] == Int16[3, 0, 0]            # south: the one row only its position has
+        @test all(A[4:5, :] .== Int16(1))            # this control touches rows only, so no column moves
 
         # An estimate the export dialog can show without sweeping the whole domain: one position's rows
         # at two bytes each. A floor, and labelled a table so the dialog can say what it is.
         p = Base.invokelatest(Base.invokelatest(getproperty, r.mod, :__slate_replay_plan))["tbl:region"]
-        @test p["target"] == "table" && p["bytes_per_value"] == 4 && p["slice"] == [2]
+        # 2 rows + 2 columns at this position, two bytes each — a floor, since the union across the
+        # domain can only be longer on either axis.
+        @test p["target"] == "table" && p["bytes_per_value"] == 8 && p["slice"] == [4]
     end
 
     # One mark's failure used to cost the whole export. `_replay_sweep_assets` catches what escapes the

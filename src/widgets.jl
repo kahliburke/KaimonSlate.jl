@@ -60,6 +60,30 @@ include(joinpath(@__DIR__, "fingerprint.jl"))
 # and the standalone SlateWorker; the `@md` macro built in `_populate_notebook_ns!` needs it in both.
 _interp_token(i::Int) = "xslateinterpx" * string(i; pad = 5) * "x"
 
+# A string value's text/plain repr is quoted (`"c"`), but inside `{{ }}` interpolation — a
+# presentation context, like Julia's `$(…)` — we want the bare content (`c`). Strip one layer of
+# surrounding double-quotes and undo the basic `show` escapes; non-string reprs (numbers, symbols,
+# arrays) have no enclosing quotes and pass through untouched.
+function _interp_scalar(s::AbstractString)
+    (ncodeunits(s) >= 2 && startswith(s, '"') && endswith(s, '"')) || return s
+    inner = s[nextind(s, firstindex(s)):prevind(s, lastindex(s))]
+    return replace(inner, "\\\"" => "\"", "\\\$" => "\$", "\\\\" => "\\", "\\n" => "\n", "\\t" => "\t")
+end
+
+# The text one `{{ }}` renders to, from its VALUE. The live page gets there via the capture's
+# `value_repr`; a replayed position has no capture, so the same two steps are done here — same `show`
+# call, same context, same unquoting — or a swept position would print a number the live page never
+# would (`"3.0"` for `3.0` where the reader saw `3.0`, a quoted string where they saw bare text).
+function _prose_text(v)
+    v === nothing && return ""
+    s = try
+        sprint(show, MIME("text/plain"), v; context = (:limit => true, :displaysize => (40, 160)))
+    catch
+        return ""
+    end
+    return _interp_scalar(s)
+end
+
 # ── Fenced code blocks → interpolations ───────────────────────────────────────────────────────────
 # A fenced block carrying a language (```mermaid) is rewritten into a `{{ slate_render_fence(…) }}`
 # interpolation, so a package that CLAIMED that language (SEB `register_fence_renderer!`) renders the
@@ -881,7 +905,7 @@ end
 # dialog, striding and the sweep itself treat a composed closure exactly like a written one.
 function _register_chain_replay(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
                                 sweeps::Dict{String,Any}, id::AbstractString, name::Symbol, f,
-                                cell::AbstractString)
+                                cell::AbstractString; target::AbstractString = "")
     entry = lock(reglock) do; get(reg, name, nothing); end
     entry === nothing && error("replay: `" * String(name) * "` is not a @bind control in this notebook")
     w, _ = entry
@@ -891,6 +915,7 @@ function _register_chain_replay(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::Re
     lock(reglock) do
         sweeps[String(id)] = (; name = String(name), f = f, wrap = v -> wrap_value(w, v),
                                 domain = Any[d for d in dom], cell = String(cell), kind = String(w.kind),
+                                target = String(target),
                                 # Tagged, so the next pass can retire it — see `_register_chain_replays!`.
                                 chain = true)
     end
@@ -910,7 +935,8 @@ function _register_chain_replays!(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::
     for e in entries
         id = String(e.id)
         out[id] = try
-            _register_chain_replay(reg, reglock, sweeps, id, e.name, e.f, e.cell)
+            _register_chain_replay(reg, reglock, sweeps, id, e.name, e.f, e.cell;
+                                   target = hasproperty(e, :target) ? String(e.target) : "")
             push!(keep, id)
             "ok"
         catch err
@@ -954,18 +980,21 @@ function _mark_table_replay!(t::SlateTable, id::AbstractString, control::Abstrac
     return t
 end
 
-# Returns (union rows, order matrix). The matrix is (union rows × positions) so one position is a
-# contiguous column — the layout `Slate.replay.slice` already reads.
-function _table_replay_pack(slices::AbstractVector)
-    ncol = length(first(slices).columns)
+# Column identity for the union below is the NAME and nothing else. Not the column spec: its `:bar`/
+# `:heat` domain is fitted to the rows of the position it came from, so the same column at two
+# positions is two different specs — keying on that would make every position's columns distinct and
+# the union the product of them.
+_replay_col_name(c) = c isa AbstractDict ? string(get(c, "name", "")) :
+                      c isa ColumnDef ? c.name : string(c)
+
+# The rows a control's positions select, unioned. Row identity is the whole row VECTOR, paired with
+# which occurrence of it this is, so a table holding duplicate rows keeps them distinct.
+function _replay_row_union(slices::AbstractVector)
     base = Vector{Any}[]
     at = Dict{Tuple{Vector{Any},Int},Int}()   # (row, which occurrence of it) → its place in `base`
     seen = Dict{Vector{Any},Int}()            # occurrences of each row SO FAR in the current position
     idxs = Vector{Vector{Int}}(undef, length(slices))
     for (si, t) in enumerate(slices)
-        length(t.columns) == ncol || error("replay: the control's values produce tables with different " *
-            "column counts (" * string(ncol) * " and " * string(length(t.columns)) * "). A replayed " *
-            "table writes ONE header into the page, so every position must agree on its columns.")
         empty!(seen)
         idx = Int[]
         for r in t.rows
@@ -985,11 +1014,135 @@ function _table_replay_pack(slices::AbstractVector)
         end
         idxs[si] = idx
     end
-    A = zeros(Int16, length(base), length(slices))
-    for (si, idx) in enumerate(idxs), (k, j) in enumerate(idx)
-        A[k, si] = Int16(j)
+    return base, idxs
+end
+
+# The other axis: a control that changes WHICH COLUMNS are shown. The page writes one header, so what
+# ships is the union of the column names plus, per position, which of them that position shows — the
+# same shape as the row order, and the client hides the rest.
+#
+# Only one axis at a time. Doing both would need a row identity that survives a row losing a field,
+# and there is no honest one: the same record with a column hidden is a different vector, so every
+# position's rows would land in the union separately and the page would carry the product of the two
+# axes instead of their union. Refused with the reason rather than packed into something misleading.
+## The union's column ORDER, merged from the positions rather than taken in the order columns are first
+# seen. Appending on first sight puts a group that only appears at a later position at the END, and then
+# every position that interleaves it with the always-present columns reads as a permutation — which is
+# the shape a control selecting column GROUPS produces on its very first move.
+#
+# So: `b` follows `a` in the union whenever it follows it in ANY position, and the union is the topological
+# order of that. Positions that genuinely disagree about two columns leave a cycle, which is the real
+# permutation this cannot express and is reported as one.
+function _merge_col_order(colnames::AbstractVector)
+    allc = String[]
+    preds = Dict{String,Set{String}}()
+    for ns in colnames, (i, n) in enumerate(ns)
+        n in allc || push!(allc, n)
+        s = get!(preds, n, Set{String}())
+        for j in 1:(i-1)
+            push!(s, ns[j])
+        end
     end
-    return base, A
+    out = String[]; placed = Set{String}()
+    while length(out) < length(allc)
+        nxt = nothing
+        for n in allc                                   # first-seen order breaks ties deterministically
+            (n in placed) && continue
+            all(p -> p in placed, preds[n]) || continue
+            nxt = n; break
+        end
+        nxt === nothing && error("replay: the control's positions disagree about the ORDER of the " *
+            "table's columns, so there is no single header that shows each position as a subset of " *
+            "it. A replayed table writes one header and hides what a position does not show, which " *
+            "cannot reorder what remains.")
+        push!(out, nxt); push!(placed, nxt)
+    end
+    return out
+end
+
+function _replay_col_union(slices::AbstractVector, colnames::AbstractVector)
+    npos = length(slices)
+    unames = _merge_col_order(colnames)
+    where = Dict(n => j for (j, n) in enumerate(unames))
+    # Each column's SPEC comes from the first position that shows it — the author's `format=`/`align=`/
+    # `viz=` overlay for that column, which every position that has it agrees on.
+    ucols = Any[nothing for _ in unames]
+    for (si, ns) in enumerate(colnames), (ci, n) in enumerate(ns)
+        j = where[n]
+        ucols[j] === nothing && (ucols[j] = slices[si].columns[ci])
+    end
+    nc = length(ucols)
+
+    nr = length(first(slices).rows)
+    all(length(t.rows) == nr for t in slices) || error("replay: the control changes both which " *
+        "COLUMNS the table shows and how many ROWS it has. A replayed table can follow one axis or " *
+        "the other, because a row with a column hidden is not the same row to match against — so " *
+        "the two together would write the product of the positions into the page instead of their " *
+        "union. Drive the columns from one control and the rows from another, or select the columns " *
+        "in the browser instead of in Julia.")
+    nr <= _REPLAY_TABLE_MAX_ROWS || error("replay: the table has more than " *
+        string(_REPLAY_TABLE_MAX_ROWS) * " rows, which is the whole body this would write into the page.")
+
+    # Every position must now be a SUBSEQUENCE of the merged union — which is what the merge produced,
+    # so this holds by construction and a failure means the two disagree. Kept as a check rather than
+    # trusted, because what it protects against is a page whose cells sit under the wrong headers, and
+    # that is silent: the table renders, the numbers are real, and they are in the wrong columns.
+    for (si, ns) in enumerate(colnames)
+        issorted(where[n] for n in ns) || error("replay: at one of the control's positions the " *
+            "table's columns come back in an order the shipped header cannot show as a subset (" *
+            join(ns, ", ") * ").")
+    end
+
+    base = [Vector{Any}(nothing, nc) for _ in 1:nr]
+    filled = falses(nc)
+    for (si, t) in enumerate(slices), (ci, n) in enumerate(colnames[si])
+        j = where[n]
+        if filled[j]
+            for k in 1:nr
+                isequal(base[k][j], t.rows[k][ci]) || error("replay: column `" * n * "` holds " *
+                    "different values at different positions of the control. A replayed table writes " *
+                    "ONE body into the page and hides columns from it, so a column that also CHANGES " *
+                    "with the control has nowhere to put its other values.")
+            end
+        else
+            for k in 1:nr
+                base[k][j] = t.rows[k][ci]
+            end
+            filled[j] = true
+        end
+    end
+    idxs = [collect(1:nr) for _ in 1:npos]
+    masks = [(have = Set(colnames[si]); BitVector([n in have for n in unames])) for si in 1:npos]
+    return base, ucols, idxs, masks
+end
+
+# Returns (union rows, union columns, packed matrix). The matrix is ((rows + columns) × positions) so
+# one position is a contiguous column — the layout `Slate.replay.slice` already reads. A position's
+# slice is its row ORDER over the union rows followed by its column MASK over the union columns; the
+# page splits the two at the number of rows it was written with.
+function _table_replay_pack(slices::AbstractVector)
+    npos = length(slices)
+    colnames = [[_replay_col_name(c) for c in t.columns] for t in slices]
+    if all(==(first(colnames)), colnames)
+        base, idxs = _replay_row_union(slices)
+        ucols = first(slices).columns
+        masks = [trues(length(ucols)) for _ in 1:npos]
+    else
+        base, ucols, idxs, masks = _replay_col_union(slices, colnames)
+    end
+    nr, nc = length(base), length(ucols)
+    A = zeros(Int16, nr + nc, npos)
+    for si in 1:npos
+        for (k, j) in enumerate(idxs[si])
+            A[k, si] = Int16(j)
+        end
+        for j in 1:nc
+            A[nr+j, si] = Int16(masks[si][j])
+        end
+    end
+    # Wired, not the `ColumnDef`s themselves: this crosses the gate as part of the sweep result, and
+    # it is the same shape `_table_wire` hands the writer for an ordinary table.
+    return base, Any[c isa ColumnDef ? _col_wire(c) : c for c in ucols], A
 end
 
 # Run the registered sweeps and pack each into an asset. Called at EXPORT time (never during an ordinary
@@ -1036,13 +1189,13 @@ function _replay_plan(sweeps::Dict{String,Any}, lk::ReentrantLock = ReentrantLoc
             one = s.f(get(s, :wrap, identity)(first(s.domain)))
             rec["seconds_per_value"] = time() - t0
             if one isa SlateTable
-                # A table's per-position cost is its ORDER (two bytes a row). Measured from one real
-                # position, so it is a floor: the union across positions can only be longer, and the
-                # union rows — carried once, not per position — are the size that dominates. Reporting
-                # the union would mean sweeping the whole domain, which is the work this dialog exists
-                # to let someone decline.
-                rec["bytes_per_value"] = 2 * length(one.rows)
-                rec["slice"] = Int[length(one.rows)]
+                # A table's per-position cost is its ORDER plus its column MASK (two bytes each).
+                # Measured from one real position, so it is a floor: the union across positions can only
+                # be longer on both axes, and the union rows — carried once, not per position — are the
+                # size that dominates. Reporting the union would mean sweeping the whole domain, which
+                # is the work this dialog exists to let someone decline.
+                rec["bytes_per_value"] = 2 * (length(one.rows) + length(one.columns))
+                rec["slice"] = Int[length(one.rows) + length(one.columns)]
                 rec["target"] = "table"
             else
                 A = replay_stack([one])
@@ -1084,12 +1237,25 @@ function _run_replay_sweeps(sweeps::Dict{String,Any}, lk::ReentrantLock = Reentr
             slices[i] = s.f(wrap(v))
             progress(id, i, n)
         end
+        # A PROSE sweep is the one shape that is not numbers: what a markdown cell's `{{ }}` render to,
+        # one short string per interpolation per position. Those ride INLINE in the routing table rather
+        # than as a binary asset — a few hundred bytes of text next to a fetch, a decode and a narrowing
+        # step that all exist to move megabytes of floats. So it returns here instead of packing.
+        if String(get(s, :target, "")) == "prose"
+            vals = Any[Any[_prose_text(v) for v in (sl isa AbstractVector ? sl : Any[sl])] for sl in slices]
+            out[id] = Dict{String,Any}(
+                "name" => s.name * "_replay", "control" => s.name, "cell" => s.cell,
+                "domain" => dom, "target" => "prose", "values" => vals,
+                "bytes" => sum(sum(sizeof, v; init = 0) for v in vals; init = 0),
+                "seconds" => time() - t0)
+            continue
+        end
         # A table sweep packs to the same SHAPE as an array sweep — one contiguous slice per position —
         # so everything downstream of here (the asset, the narrowing, the routing table, the page's
         # `slice()`) is shared. What it adds is `rows`: the union the page writes as its table body.
         A, extra = if !isempty(slices) && first(slices) isa SlateTable
-            rows, M = _table_replay_pack(slices)
-            (M, Dict{String,Any}("target" => "table", "rows" => rows))
+            rows, cols, M = _table_replay_pack(slices)
+            (M, Dict{String,Any}("target" => "table", "rows" => rows, "cols" => cols))
         else
             (replay_stack(slices), Dict{String,Any}())
         end

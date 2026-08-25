@@ -83,21 +83,53 @@ for (const impl of ['live', 'stat']) {
     await flush();
   };
 
+  // The header the page was written with, in union order. A position's mask hides some of it.
+  const heads = [...doc.querySelectorAll('thead th')];
+  const visibleCols = () => heads.filter(th => !th.hidden).map(th => th.textContent);
+
+  // The page is WRITTEN with the union of every position — that is what the order and the mask index
+  // into — so `wire` has to apply the export-time position on load. Without that the reader's first
+  // sight of the table is every row and every column any position can show, and only touching the
+  // control brings it back to what was exported.
+  if (fx.expectCols) {
+    checks++;
+    const at0 = visibleCols();
+    if (JSON.stringify(at0) !== JSON.stringify(fx.expectCols[0]))
+      note(`on load (before any input) the table shows columns ${JSON.stringify(at0)}, ` +
+           `expected the export-time position ${JSON.stringify(fx.expectCols[0])}`);
+  }
+
   for (let i = 0; i < fx.control.domain.length; i++) {
     await drive(fx.control.domain[i]);
-    const got = shown();
     checks++;
-    // Compared as a SEQUENCE, not a set: what ships is an order, because a control that sorts its table
-    // is as ordinary as one that filters it and a present/absent flag cannot express the first.
-    if (JSON.stringify(got) !== JSON.stringify(fx.expect[i]))
-      note(`position ${i} (${JSON.stringify(fx.control.domain[i])}) shows ` +
-           `${JSON.stringify(got)}, expected ${JSON.stringify(fx.expect[i])}`);
+    if (fx.expect) {
+      const got = shown();
+      // Compared as a SEQUENCE, not a set: what ships is an order, because a control that sorts its
+      // table is as ordinary as one that filters it and a present/absent flag cannot express the first.
+      if (JSON.stringify(got) !== JSON.stringify(fx.expect[i]))
+        note(`position ${i} (${JSON.stringify(fx.control.domain[i])}) shows ` +
+             `${JSON.stringify(got)}, expected ${JSON.stringify(fx.expect[i])}`);
+    }
+    // The other axis: which COLUMNS this position shows. The body is written once with every column
+    // any position can show, and the mask hides the rest — header and every row's cells alike, or the
+    // table draws a value under someone else's heading.
+    if (fx.expectCols) {
+      checks++;
+      const got = visibleCols();
+      if (JSON.stringify(got) !== JSON.stringify(fx.expectCols[i]))
+        note(`position ${i} (${JSON.stringify(fx.control.domain[i])}) shows columns ` +
+             `${JSON.stringify(got)}, expected ${JSON.stringify(fx.expectCols[i])}`);
+      for (const tr of doc.querySelectorAll('tbody tr')) {
+        const bad = [...tr.children].findIndex((td, ci) => !!td.hidden !== !!heads[ci].hidden);
+        if (bad >= 0) { note(`position ${i}: cell ${bad} does not follow its header's visibility`); break; }
+      }
+    }
   }
 
   // Moving the control changes which rows EXIST, not what the reader was looking at. The filter box and
   // the sort are the reader's state and live in the same closure as the order; dropping either on every
   // move would make a replayed table unusable in exactly the case it is for — a long one.
-  {
+  if (fx.filter) {
     const fi = doc.querySelector('.exp-tbl-filter');
     checks++;
     if (!fi) { note('no filter box — the enhancer did not build its chrome'); }
