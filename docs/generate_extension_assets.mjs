@@ -85,13 +85,44 @@ const log = (...a) => console.log('[ext-assets]', ...a)
 // ── a throwaway project with KaimonSlate + the extension ──────────────────────
 // Built fresh rather than reusing the extension's own env: an extension depends on the SDK, not on
 // KaimonSlate, so its own project can't serve a notebook.
+/**
+ * Every package the demo notebook imports, beyond the ones we already develop.
+ *
+ * A notebook's `using X` needs X as a DIRECT dependency of the environment it runs in. Depending on
+ * X transitively is not enough — GiacSlate depends on Giac, and its notebook still failed with
+ * "Package Giac not found", because a package's own deps aren't visible at top level. So the
+ * notebook's imports are its real dependency list, and this reads them off the source.
+ *
+ * `using Giac.Commands: …` counts as `Giac`; `using A, B` counts as both.
+ */
+function notebookImports() {
+  const src = readFileSync(NOTEBOOK, 'utf8')
+  const names = new Set()
+  for (const m of src.matchAll(/^\s*(?:using|import)\s+([A-Z][\w.,\s]*)/gm)) {
+    for (const part of m[1].split(',')) {
+      const base = part.trim().split(/[.:\s]/)[0]
+      if (/^[A-Z]\w*$/.test(base)) names.add(base)
+    }
+  }
+  // Already developed from source, so adding them from a registry would fight the path entries.
+  for (const own of [PKGNAME, 'KaimonSlate', 'SlateExtensionsBase']) names.delete(own)
+  return [...names]
+}
+
 function buildEnv() {
   const env = mkdtempSync(join(tmpdir(), 'slate-extenv-'))
-  log(`resolving a project for ${PKGNAME} (this precompiles once)`)
+  const extra = notebookImports()
+  log(`resolving a project for ${PKGNAME}${extra.length ? ` (+ ${extra.join(', ')})` : ''} (this precompiles once)`)
+  // Extras are added one at a time and failures swallowed: a notebook may import something
+  // unregistered or unresolvable, and that should cost the run one missing package rather than the
+  // whole screenshot. Anything that fails simply errors in its own cell, visibly.
+  const addExtra = extra.map((n) =>
+    `try; Pkg.add(${JSON.stringify(n)}); catch e; @warn "skipping ${n}" e; end`).join('\n    ')
   const code = `
     using Pkg
     Pkg.activate(raw"${env}")
     Pkg.develop([PackageSpec(path=raw"${REPO}"), PackageSpec(path=raw"${join(REPO, 'lib', 'SlateExtensionsBase')}"), PackageSpec(path=raw"${PKGDIR}")])
+    ${addExtra}
     Pkg.precompile()
   `
   const r = spawnSync('julia', ['--startup-file=no', '--color=no', '-e', code], { stdio: 'inherit' })

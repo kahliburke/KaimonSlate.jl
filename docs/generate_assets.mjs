@@ -322,6 +322,60 @@ function regPreflightSSE(host) {
     `event: done\ndata: ${JSON.stringify({ ok: true, host, transport: 'tunnel' })}\n\n`,
   ].join('')
 }
+// ── extensions gallery (synthetic catalog — no registry, no installs) ─────────────────────────
+// A fixed catalog in the real `/api/catalog` shape. Mocked rather than fetched so the docs show a
+// stable, complete picture: entries at every tier (rich with imagery, described, bare), one already
+// installed, and one with an update pending — states that a live capture could only produce by
+// actually installing packages into the docs run.
+const CAT_ENTRIES = [
+  { name: 'CesiumSlate', title: 'CesiumSlate', version: '0.1.1', tier: 'rich', visibility: 'public',
+    tagline: 'A CesiumJS 3D globe with live satellites, as a notebook output',
+    description: 'An interactive CesiumJS 3D globe with live satellites as a first-class Kaimon Slate output.',
+    categories: ['visualization', 'geospatial'], icon: '🛰', installed: false, inParent: false, updatable: false,
+    repo: 'https://github.com/kahliburke/CesiumSlate.jl',
+    screenshots: ['https://github.com/kahliburke/CesiumSlate.jl/releases/download/media/CesiumSlate-notebook.png'] },
+  { name: 'GiacSlate', title: 'GiacSlate', version: '0.1.1', tier: 'rich', visibility: 'public',
+    tagline: 'The Xcas computer-algebra engine, through live inline math fields',
+    categories: ['math', 'controls'], icon: '∫', installed: false, inParent: false, updatable: false,
+    repo: 'https://github.com/kahliburke/GiacSlate.jl' },
+  { name: 'MermaidSlate', title: 'Mermaid', version: '0.1.0', tier: 'rich', visibility: 'public',
+    tagline: 'Mermaid diagrams as computed values — text in, diagram out',
+    categories: ['visualization', 'documents'], icon: '🧜', installed: false, inParent: false, updatable: false,
+    repo: 'https://github.com/kahliburke/MermaidSlate.jl' },
+  // Installed, and the registry has moved on — this is the card that carries the update affordance.
+  { name: 'StarRating', title: 'Star Rating', version: '0.1.3', tier: 'rich', visibility: 'public',
+    tagline: 'A ★ rating control for @bind — the smallest complete Slate extension',
+    description: 'A sample Slate extension: a typed @bind star-rating control, built entirely against the lean SlateExtensionsBase SDK.',
+    categories: ['controls', 'examples'], icon: '★',
+    provides: ['@bind control: Stars(; max, label) — binds an Int in 0:max',
+               'Cell toolbar action: ★ inserts a Stars() snippet',
+               'Command palette: insert a Stars() control'],
+    snippet: 'using StarRating\n@bind rating Stars(; max = 5, label = "How good?")\n',
+    installed: true, inParent: false, installedVersion: '0.1.2', updatable: true,
+    repo: 'https://github.com/kahliburke/KaimonSlate.jl', subdir: 'examples/extensions/StarRating' },
+  { name: 'SlateAFM', title: 'SlateAFM', version: '0.1.1', tier: 'rich', visibility: 'public',
+    tagline: 'Anywidget front-end modules, hosted in a Slate notebook',
+    categories: ['widgets', 'interop'], icon: '🧩', installed: false, inParent: false, updatable: false,
+    repo: 'https://github.com/kahliburke/KaimonSlate.jl' },
+  { name: 'SlateBench', title: 'SlateBench', version: '0.1.1', tier: 'described', visibility: 'public',
+    description: 'A streaming-transport benchmark widget for Kaimon Slate. Drop it in a cell and it renders a live dashboard.',
+    categories: ['diagnostics'], installed: false, inParent: false, updatable: false,
+    repo: 'https://github.com/kahliburke/SlateBench.jl' },
+]
+const CAT_PAYLOAD = {
+  entries: CAT_ENTRIES,
+  categories: ['controls', 'diagnostics', 'documents', 'examples', 'geospatial', 'interop', 'math', 'visualization', 'widgets'],
+  meta: { source: 'published', url: 'https://kahliburke.github.io/SlateRegistry/catalog.json' },
+  registryInstalled: true, registryName: 'SlateRegistry',
+  registryUrl: 'https://github.com/kahliburke/SlateRegistry',
+  manageable: true,
+  installedCount: 1, updatableCount: 1,
+}
+async function mockCatalog(page) {
+  await page.route('**/api/*/catalog*', (r) =>
+    r.fulfill({ contentType: 'application/json', body: JSON.stringify(CAT_PAYLOAD) }))
+}
+
 // Install every region/remote route interceptor on a page BEFORE navigating.
 async function mockRegions(page) {
   const J = (o) => ({ contentType: 'application/json', body: JSON.stringify(o) })
@@ -598,6 +652,44 @@ async function regionShots(browser) {
   } catch (e) { log('! home region shots skipped:', e.message.split('\n')[0]) }
 }
 
+// The Extensions gallery, in the four states the docs need to explain it: the browse grid, a rich
+// detail card, the Installed/Updates views, and an entry with an update pending. Driven off the
+// mocked catalog, so no package is installed and no registry is touched.
+async function galleryShots(browser) {
+  try {
+    const page = await (await newContext(browser, { viewport: { width: 1280, height: 900 } })).newPage()
+    await mockCatalog(page)
+    await page.goto(`${BASE}/n/demo`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('.cell', { timeout: 30_000 })
+    await page.addStyleTag({ content: '.warn{display:none!important} #doclauncher{display:none!important}' })
+    await sleep(700)
+
+    await page.evaluate(() => window.openExtensions && window.openExtensions())
+    await page.waitForSelector('.extbg.show', { timeout: 8000 })
+    await page.waitForFunction(() => document.querySelectorAll('.extitem').length > 0, { timeout: 8000 })
+    await sleep(700)
+    await elShot(page, '.extmodal', 'extensions-gallery.png')
+
+    // A rich card: imagery, what it provides, the starter snippet — and, because this entry is the
+    // installed-but-outdated one, the Update action.
+    await page.evaluate(() => {
+      const it = [...document.querySelectorAll('.extitem')].find((e) => /Star Rating/.test(e.textContent))
+      if (it) it.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await sleep(900)
+    await elShot(page, '.extmodal', 'extensions-detail.png')
+
+    // The Updates view — the one state a user goes looking for rather than stumbles into.
+    await page.evaluate(() => {
+      const v = [...document.querySelectorAll('.extview')].find((e) => /Updates/.test(e.textContent))
+      if (v) v.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await sleep(700)
+    await elShot(page, '.extmodal', 'extensions-updates.png')
+    await page.context().close()
+  } catch (e) { log('! gallery shots skipped:', e.message.split('\n')[0]) }
+}
+
 async function main() {
   const server = startServer()
   let browser
@@ -612,6 +704,8 @@ async function main() {
     if (process.env.SLATE_REGION_ONLY === '1') { await regionShots(browser); log('done (region-only) — assets in', OUT); return }
     // SLATE_HERO_ONLY=1 captures just the README hero.
     if (process.env.SLATE_HERO_ONLY === '1') { await heroShot(browser); log('done (hero-only) — assets in', OUT); return }
+    // SLATE_GALLERY_ONLY=1 captures just the Extensions gallery (fast iteration on those shots).
+    if (process.env.SLATE_GALLERY_ONLY === '1') { await galleryShots(browser); log('done (gallery-only) — assets in', OUT); return }
     // SLATE_PUBLISH_ONLY=1 captures just the Publish panel (fast iteration on that capture).
     if (process.env.SLATE_PUBLISH_ONLY === '1') {
       const p = await (await newContext(browser)).newPage()
@@ -840,6 +934,7 @@ async function main() {
 
     // ── regions / DAG / mesh (synthetic — no real hosts) ─────────────────────────────────────
     await regionShots(browser)
+    await galleryShots(browser)
 
     // ── webm: drag the slider → the chart re-renders live (reactivity) ───────────────────────
     // Frame the slider AND the chart together (slider is the cell right above the chart) so the

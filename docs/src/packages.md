@@ -45,25 +45,14 @@ Extensions** gallery (⌘K → "Extensions", or ☰ → Extensions): a browsable
 extension packages — custom `@bind` controls, output renderers, domain tooling — from a curated
 registry.
 
-Each entry shows what the package does, what it provides, and a starter snippet. **Install** adds
-it to this notebook's environment through exactly the same path as the Packages panel, then offers
-to drop the starter cell in — installing a package doesn't `using` it, and that offer is what
-closes the gap.
+Each entry shows what the package does, what it provides, and a starter snippet. **Install** adds it
+to this notebook's environment through exactly the same path as the Packages panel, then offers to
+drop the starter cell in — installing a package doesn't `using` it, and that offer is what closes
+the gap. Installed extensions are also tracked for updates.
 
-Extensions come from a package registry that sits alongside General. If it isn't installed yet, the
-first install adds it, and says so first: a registry is **depot-global**, so it affects every
-project on the machine, not just this notebook. On a notebook running in a [region](regions.md),
-the registry is added to the *remote* depot — the one that notebook actually resolves against.
-
-The gallery opens whether or not the catalog can be reached. With no network it falls back to the
-last copy it fetched, and failing that to the registry clone in your depot — which knows every
-package's name and version, just not its description. The footer says which of the three you're
-looking at, so an empty list is never ambiguous.
-
-An installed extension can add its own **⌘K commands**, badged with the package name — so typing
-that name in the palette shows everything it contributed. See
-[Writing an Extension](extensions.md#Command-palette-commands) for the author's side, including how
-to get a package listed (registering it is the only requirement).
+See [the Extensions gallery](extension-gallery.md) for the whole of it: browsing and filtering,
+what the first install does to your Julia depot, updating, and what an extension can add once it's
+loaded.
 
 ## The reproducibility footer
 

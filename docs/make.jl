@@ -70,6 +70,7 @@ makedocs(;
             "Tables" => "tables.md",
             "Animation" => "animation.md",
             "Front-end Extensions" => "frontend-extensions.md",
+            "Extensions Gallery" => "extension-gallery.md",
             "Writing an Extension" => "extensions.md",
             "Documents & Citations" => "documents.md",
             "Slides & Present" => "slides.md",
