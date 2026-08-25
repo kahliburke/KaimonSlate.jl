@@ -1012,12 +1012,16 @@ function _flag_attr(cell::Cell, key::AbstractString)
     return ""
 end
 
-# A code cell counts as a "figure" once it has run and produced an image / chart / table.
+# A code cell counts as a "figure" once it has run and produced an image / chart / table / component.
+# A component belongs here for the same reason a chart does: it draws in the browser rather than on
+# the server, so it has no bytes until an export asks for them — but it is what the reader sees, and
+# a caption that follows it means it. Feeds `figure_index` only; the social-preview picker has its
+# own predicate (`_cell_has_og_figure`, server_export.jl), which still wants real raster bytes.
 function _cell_has_figure(c::Cell)
     c.kind == CODE || return false
     o = c.output
     o === nothing && return false
-    return any(ch -> startswith(ch.mime, "image/"), o.display) ||
+    return any(ch -> startswith(ch.mime, "image/"), o.display) || _has_component(o) ||
            !isempty(_echarts_specs(c)) || !isempty(_table_specs(c))
 end
 
@@ -1027,7 +1031,8 @@ end
 Resolve figure numbering from `caption`-tagged cells (document order):
 - `numbers`  :: caption-cell-id → Figure number (Int)
 - `labels`   :: cross-ref label → (num, anchor)  (label = `label=` attr, else the caption cell id;
-               anchor = the bound figure cell's id when known, else the caption cell id)
+               anchor = the bound figure cell's id when known, else the caption cell id). Each label
+               is also registered under a `fig:` prefix, so both `[@x]` and `[@fig:x]` resolve.
 - `capfor`   :: caption-cell-id → bound figure cell id ("" if none resolved)
 """
 function figure_index(report)
@@ -1040,7 +1045,14 @@ function figure_index(report)
         forid = _flag_attr(c, "for"); forid = isempty(forid) ? lastfig : forid
         capfor[c.id] = forid
         label = _flag_attr(c, "label"); label = isempty(label) ? c.id : label
-        labels[label] = (n, isempty(forid) ? c.id : forid)
+        anchor = isempty(forid) ? c.id : forid
+        labels[label] = (n, anchor)
+        # `[@fig:<label>]` is the documented cross-reference, and the lookup key includes the prefix —
+        # but no input path can produce a label that HAS one: `_parse_tag_symbols` folds punctuation
+        # in a tag value, so `label=fig:x` is stored as `fig_x` whether it was typed in the browser's
+        # tag editor or passed to add_cell. Registering the prefixed alias here makes the documented
+        # form resolve against the label the author was actually able to write.
+        startswith(label, "fig:") || (labels["fig:" * label] = (n, anchor))
     end
     return (; numbers, labels, capfor)
 end
