@@ -1481,6 +1481,28 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-tbl-goto{width:3.6em;background:var(--bg3);color:var(--text);border:1px solid var(--accent);border-radius:5px;padding:1px 5px;font-size:.74rem;font-family:inherit;}
 .exp-tblnote{color:var(--dim);font-size:.74rem;margin-top:3px;font-style:italic;}
 .exp-md code{background:var(--bg3);padding:1px 5px;border-radius:4px;}
+/* Admonitions (`!!! category "Title"`). The live page styles these in notebook.css; the export has its
+   own sheet, so the rules are mirrored here or an exported page carries correct markup with nothing to
+   draw it — the callouts flatten into ordinary prose. Same shape as the live rules: a `--adm` accent the
+   box derives its tint, rule and title bar from, so an unrecognised category still looks deliberate.
+   The title leans on the palette's high-emphasis text (`--titlefg` here, `--strong` live) with only a
+   hint of accent, which is what keeps it legible on the light themes. */
+.exp-md .admonition{--adm:var(--dim);margin:1em 0;border-radius:7px;overflow:hidden;
+  border:1px solid color-mix(in srgb,var(--adm) 40%,var(--border));border-left:4px solid var(--adm);
+  background:color-mix(in srgb,var(--adm) 7%,var(--bg2));}
+.exp-md .admonition>.admonition-title{margin:0;padding:6px 14px;font-weight:600;letter-spacing:.01em;
+  color:color-mix(in srgb,var(--adm) 25%,var(--titlefg));
+  background:color-mix(in srgb,var(--adm) 15%,var(--bg3));
+  border-bottom:1px solid color-mix(in srgb,var(--adm) 28%,var(--border));}
+.exp-md .admonition>:not(.admonition-title){margin-left:14px;margin-right:14px;}
+.exp-md .admonition>.admonition-title+*{margin-top:10px;}
+.exp-md .admonition>:last-child{margin-bottom:10px;}
+.exp-md .admonition code{background:color-mix(in srgb,var(--adm) 10%,var(--bg3));}
+.exp-md .admonition.note,.exp-md .admonition.info{--adm:var(--accent);}
+.exp-md .admonition.tip,.exp-md .admonition.hint,
+.exp-md .admonition.answer,.exp-md .admonition.solution{--adm:var(--green);}
+.exp-md .admonition.warning,.exp-md .admonition.caution{--adm:var(--gold);}
+.exp-md .admonition.danger,.exp-md .admonition.error,.exp-md .admonition.compat{--adm:var(--red);}
 /* An image (or dropped clip) alone in its paragraph is a figure — centred. One inside a run of prose
    stays inline. A `{width=…}`/`{align=…}` block writes an inline style, which outranks this. */
 .exp-md p>img:only-child,.exp-md p>video:only-child,.exp-md p>audio:only-child,

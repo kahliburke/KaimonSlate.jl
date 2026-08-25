@@ -1191,3 +1191,22 @@ end
     blk = NS._md_fence_block("mermaid", inner)
     @test occursin("````mermaid", blk) && endswith(strip(blk), "````")
 end
+
+# The live page and the HTML export have SEPARATE stylesheets. Admonition markup is produced by the
+# shared markdown pipeline, so an export gets the divs either way — but with no rules to draw them the
+# callouts flatten into ordinary prose, which is silent: the page looks fine, just wrong.
+@testset "export CSS styles admonitions" begin
+    css = NS._export_css("dark", "normal", 900)
+    @test occursin(".exp-md .admonition", css)
+    @test occursin("admonition-title", css)
+    # Each named category must set an accent, and the base rule must carry a fallback for one nobody
+    # anticipated — the category is free-form, so `!!! wibble` has to look deliberate too.
+    @test occursin("--adm:var(--dim)", css)
+    for cat in ("note", "tip", "answer", "warning", "danger", "hint", "info")
+        @test occursin(".admonition.$cat", css)
+    end
+    # It must reference only variables the export palette actually defines — `--strong` is the LIVE
+    # sheet's name for high-emphasis text and does not exist here, so using it would silently inherit.
+    @test occursin("var(--titlefg)", css)
+    @test !occursin("--adm) 25%,var(--strong)", css)
+end
