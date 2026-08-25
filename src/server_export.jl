@@ -1481,6 +1481,8 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-tbl-goto{width:3.6em;background:var(--bg3);color:var(--text);border:1px solid var(--accent);border-radius:5px;padding:1px 5px;font-size:.74rem;font-family:inherit;}
 .exp-tblnote{color:var(--dim);font-size:.74rem;margin-top:3px;font-style:italic;}
 .exp-md code{background:var(--bg3);padding:1px 5px;border-radius:4px;}
+/* A `---` in prose — themed, or the browser's `1px inset grey` shows through (mirrors `.md hr`). */
+.exp-md hr{border:none;border-top:1px solid var(--border);margin:1.4em 0;}
 /* Admonitions (`!!! category "Title"`). The live page styles these in notebook.css; the export has its
    own sheet, so the rules are mirrored here or an exported page carries correct markup with nothing to
    draw it — the callouts flatten into ordinary prose. Same shape as the live rules: a `--adm` accent the

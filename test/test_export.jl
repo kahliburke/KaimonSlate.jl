@@ -1209,4 +1209,9 @@ end
     # sheet's name for high-emphasis text and does not exist here, so using it would silently inherit.
     @test occursin("var(--titlefg)", css)
     @test !occursin("--adm) 25%,var(--strong)", css)
+
+    # A `---` in prose. Unstyled it falls back to the browser's `1px inset grey` — a different grey
+    # from everything else on the page, most visibly right beside a cell's own box edge.
+    @test occursin(".exp-md hr", css)
+    @test occursin("border-top:1px solid var(--border)", css)
 end

@@ -857,6 +857,11 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .md > :last-child { margin-bottom:0; }
 .md h1 { font-size:1.7rem; border-bottom:1px solid var(--border); padding-bottom:.2em; }
 .md table { border-collapse:collapse; } .md td,.md th { border:1px solid var(--border); padding:4px 10px; }
+/* A `---` in prose. Unstyled it falls back to the browser's `1px inset grey`, which is a different
+   grey from everything else on the page and reads as a stray line — most visibly right next to a
+   cell's own box edge. Note that a rule BETWEEN cells is usually redundant here: every cell is
+   already drawn as a bordered box, so this mainly earns its keep as a break WITHIN one prose cell. */
+.md hr { border:none; border-top:1px solid var(--border); margin:1.4em 0; }
 
 /* ── Admonitions (`!!! category "Title"`) ──────────────────────────────────────────────────────────
    The category is free-form, so the base rule has to look right for a name nobody anticipated: it
