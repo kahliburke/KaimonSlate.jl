@@ -416,6 +416,17 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         @test RE.bind_domain(RE.NumberField(0; min = 0, max = 4)) == [0, 1, 2, 3, 4]
         @test RE.bind_domain(RE.NumberField(3)) === nothing
 
+        # A fractional step must land on the SAME floats the range literal produced. The domain is
+        # matched against a live value by `isequal` — `@replay` locating the current position, and the
+        # exported page mapping its control's state — so a grid rebuilt by accumulating `lo + i*step`
+        # drifts off the range in the last bits and a slider parked on one of those positions matches
+        # nothing: the control exports with no data for where the reader actually is. For -3.0:0.1:3.0
+        # that was 34 of the 61 positions, i.e. most of the slider.
+        for r in (-3.0:0.1:3.0, -2.0:0.1:2.0, -1.0:0.1:1.0, -0.5:0.25:5.0, 0.0:0.3:3.0)
+            @test RE.bind_domain(RE.Slider(r)) == collect(r)
+        end
+        @test 1.3 in RE.bind_domain(RE.Slider(-3.0:0.1:3.0))      # the position that used to miss
+
         # Genuinely unbounded, and driven-by-something-else, stay refused.
         for w in (RE.TextField("hi"), RE.DateField("2026-01-01"), RE.ColorPicker("#fff"),
                   RE.Button("go"), RE.FileUpload())

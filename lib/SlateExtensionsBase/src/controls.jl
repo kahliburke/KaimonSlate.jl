@@ -320,7 +320,15 @@ function _step_grid(p)
     st = num("step"); st = (st === nothing || st == 0) ? 1.0 : abs(st)
     # The epsilon keeps the endpoint: a span that is an exact multiple of the step (1:2:15) otherwise
     # loses its last value to floating-point drift on the division.
-    vals = Any[lo + i * st for i in 0:floor(Int, (hi - lo) / st + 1e-9)]
+    n = floor(Int, (hi - lo) / st + 1e-9)
+    # `range` and NOT `lo + i*st`: the control was declared from a range (`Slider(-3.0:0.1:3.0)`) and its
+    # value is one of THAT range's floats, but naive accumulation drifts off them — for -3.0:0.1:3.0, 34
+    # of the 61 positions differ in the last bits. The domain is matched against the live value by
+    # `isequal` (`@replay` locating the current position, the exported page mapping its control), so a
+    # drifted grid means a slider parked on one of those positions matches nothing: the mark exports with
+    # no data for where the reader actually is. `range(lo; step, length)` carries the same
+    # TwicePrecision arithmetic the range literal did, so the two agree exactly.
+    vals = Any[v for v in range(lo; step = st, length = n + 1)]
     # An integer control must present integers — the value a reader's control reports is `8`, and `8.0`
     # would not match it.
     return all(isinteger, vals) ? Any[Int(v) for v in vals] : vals
