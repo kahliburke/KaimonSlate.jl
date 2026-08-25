@@ -1215,3 +1215,71 @@ end
     @test occursin(".exp-md hr", css)
     @test occursin("border-top:1px solid var(--border)", css)
 end
+
+@testset "figure cross-refs — a component is a figure, and `[@fig:x]` resolves" begin
+    compout() = _RE.CellOutput("", [_RE.MimeChunk(NS._COMPONENT_MIME, Vector{UInt8}("{}"))],
+                               Any[], Any[], _RE.BindSpec[], "", nothing, nothing, 1.0)
+
+    # A component draws in the browser, so it has no bytes until an export asks — but it IS the
+    # figure the caption below it refers to. Before this it was invisible to the flow binding, and a
+    # caption silently anchored to whatever earlier cell had produced a raster.
+    rep = _RE.parse_report("#%% code id=diagram\n1\n#%% md id=cap caption\n@md\"\"\"A diagram.\"\"\"\n")
+    dia = rep.cells[findfirst(c -> c.id == "diagram", rep.cells)]
+    @test !NS._cell_has_figure(dia)                       # not run yet
+    dia.output = compout()
+    @test NS._cell_has_figure(dia)
+
+    idx = NS.figure_index(rep)
+    @test idx.numbers["cap"] == 1
+    @test idx.capfor["cap"] == "diagram"                  # flow-bound to the component above it
+
+    # `[@fig:<label>]` is the documented form, but a tag value can't hold a colon (`_parse_tag_symbols`
+    # folds it), so the label an author can actually write is bare. Both spellings resolve.
+    @test idx.labels["cap"] == (1, "diagram")
+    @test idx.labels["fig:cap"] == (1, "diagram")
+
+    ref(s) = NS._rewrite_citations(s, Set{String}(); figrefs = idx.labels)
+    @test ref("See [@fig:cap] below.") == "See Figure 1 below."
+    @test ref("See [@cap] below.") == "See Figure 1 below."
+
+    # An explicit `label=` behaves the same way.
+    rep2 = _RE.parse_report("#%% code id=d2\n1\n#%% md id=c2 caption label=schedule\n@md\"\"\"S.\"\"\"\n")
+    rep2.cells[findfirst(c -> c.id == "d2", rep2.cells)].output = compout()
+    l2 = NS.figure_index(rep2).labels
+    @test haskey(l2, "schedule") && haskey(l2, "fig:schedule")
+
+    # An author who somehow already has a `fig:`-prefixed label doesn't get `fig:fig:…`.
+    @test !any(startswith(k, "fig:fig:") for k in keys(l2))
+end
+
+# ── @replay: marks outliving their cell ───────────────────────────────────────────────────────────
+# The sweep registry is keyed by cell id and only grows — a mark is written when its cell RUNS, and
+# nothing retires it when that cell is later renamed or deleted. Renaming through the UI could evict,
+# but a notebook is a file: edit the `.jl` outside Slate and there is no rename event to hook. So the
+# export reconciles against the cells that actually exist. Left alone, a stale mark is swept, packed
+# and shipped for a cell that is not in the document.
+@testset "export drops replay marks whose cell is gone" begin
+    live = ReportEngine.Report("r", "")
+    push!(live.cells, ReportEngine.Cell("keeper", ReportEngine.CODE, "x = 1"))
+
+    plan = Dict{String,Any}(
+        "keeper:w"  => Dict{String,Any}("control" => "w", "cell" => "keeper", "values" => 5),
+        "ghost:w"   => Dict{String,Any}("control" => "w", "cell" => "ghost",  "values" => 5),
+    )
+    ids   = Set{String}(c.id for c in live.cells)
+    cellof(r) = String(haskey(r, "cell") ? r["cell"] : get(r, :cell, ""))
+    stale = [k for (k, r) in plan if !isempty(cellof(r)) && !(cellof(r) in ids)]
+    keep  = [k for k in keys(plan) if !(k in stale)]
+
+    @test stale == ["ghost:w"]
+    @test keep  == ["keeper:w"]
+
+    # A registry that is entirely live must produce NO filter — `only = nothing` means "sweep
+    # everything", so the common case cannot be made to pay for this.
+    allgood = Dict{String,Any}("keeper:w" => plan["keeper:w"])
+    @test isempty([k for (k, r) in allgood if !isempty(cellof(r)) && !(cellof(r) in ids)])
+
+    # A record with no `cell` at all is left alone rather than guessed at.
+    nocell = Dict{String,Any}("x" => Dict{String,Any}("control" => "w"))
+    @test isempty([k for (k, r) in nocell if !isempty(cellof(r)) && !(cellof(r) in ids)])
+end

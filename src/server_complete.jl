@@ -1598,6 +1598,12 @@ function _make_router(h::Hub)
         try; _register_chain_sweeps!(nb); catch; end
         plan = nb.kernel isa ReportEngine.GateKernel ?
                (try; ReportEngine.replay_plan(nb.kernel); catch; nothing; end) : nothing
+        # Hide marks the export itself will drop (`_live_replay_ids`), or the dialog prices — and asks
+        # the reader to choose a resolution for — a cell that is no longer in the document.
+        if plan isa AbstractDict
+            keep = try; _live_replay_ids(nb); catch; nothing; end
+            keep === nothing || (plan = filter(p -> String(first(p)) in Set(keep), plan))
+        end
         _json(Dict{String,Any}("replays" => plan === nothing ? Dict{String,Any}() : plan))
     end))
     # Secret GitHub gist of the HTML export (via the `gh` CLI). Same page options as export.html

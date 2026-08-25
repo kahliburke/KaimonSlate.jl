@@ -434,14 +434,36 @@ end
 # is JSON'd into `window.__slateReplays`, and putting the rows there would carry every one of them twice
 # — once as data, once as the table body the reader actually sees. The writer substitutes them into the
 # table spec instead (`_replay_base_spec`).
+# The sweep ids still backed by a cell that EXISTS, or `nothing` when the whole registry is live (the
+# common case, and `nothing` means "no filter" downstream, so it costs nothing).
+#
+# The registry is keyed by cell id and only grows: a mark is written when its cell RUNS, and nothing
+# retires it when that cell is later renamed or deleted. Renaming through the UI could be made to evict,
+# but the notebook is a file — edit the `.jl` outside Slate and no rename event exists to hook. So the
+# export reconciles instead, which catches every route in. Left alone, a stale mark is swept, packed and
+# shipped for a cell that is not in the document: bytes the reader downloads and nothing can ever use,
+# and a line in the export dialog naming a cell that no longer exists.
+function _live_replay_ids(nb::LiveNotebook)
+    plan = try; ReportEngine.replay_plan(nb.kernel); catch; nothing; end
+    plan isa AbstractDict || return nothing
+    ids = Set{String}(c.id for c in nb.report.cells)
+    _cell_of(rec) = rec isa AbstractDict ?
+        String(haskey(rec, "cell") ? rec["cell"] : get(rec, :cell, "")) : ""
+    stale = [String(id) for (id, rec) in plan if !isempty(_cell_of(rec)) && !(_cell_of(rec) in ids)]
+    isempty(stale) && return nothing
+    @debug "@replay: dropping marks whose cell is gone" stale
+    return [String(id) for id in keys(plan) if !(String(id) in stale)]
+end
+
 function _replay_sweep_assets(nb::LiveNotebook; stride::Integer = 1, strides = nothing)
     nb.kernel isa ReportEngine.GateKernel ||
         return (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}(), Dict{String,Any}())
+    live = _live_replay_ids(nb)   # drop marks whose cell is gone (see below) before paying to sweep them
     # A sweep that fails must not take the whole export down — the page is still worth having with its
     # controls frozen. But it must not vanish either: swallowing this silently produces an export that
     # looks complete and has every control disabled, with nothing anywhere saying why.
     got = try
-        ReportEngine.run_replays(nb.kernel; stride = stride, strides = strides)
+        ReportEngine.run_replays(nb.kernel; stride = stride, strides = strides, only = live)
     catch e
         @warn "@replay sweeps failed — exporting with controls frozen" exception = (e, catch_backtrace())
         nothing
