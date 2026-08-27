@@ -458,7 +458,21 @@ function _linkifyDoc(root, r) {
   const isMod = r && (r.kind === 'module' || (r.exports && r.exports.length));
   const ctxMod = isMod ? (r.module && r.module !== r.name ? r.module + '.' + r.name : r.name) : '';
   const params = _sigParams(root);   // this doc's OWN parameter names — back-ticked in prose but not symbols
+  // Documenter's ``[`name`](@ref)`` is the ecosystem's cross-reference syntax, and Base's own
+  // docstrings are written in it. The href is a MARKER rather than a URL — Documenter resolves it at
+  // build time against its own page set — so it is resolved here into a lookup instead, honouring the
+  // `(@ref target)` form where the link text and the target differ.
+  root.querySelectorAll('.docmd a[href^="@ref"]').forEach(a => {
+    const target = a.getAttribute('href').slice(4).trim() || a.textContent.trim();
+    if (!target) return;
+    const link = document.createElement('a');
+    link.className = 'doclink';
+    link.dataset.name = (ctxMod && target.indexOf('.') < 0) ? ctxMod + '.' + target : target;
+    link.innerHTML = a.innerHTML;                            // keep the `code` styling inside
+    a.replaceWith(link);
+  });
   root.querySelectorAll('.docmd code').forEach(c => {
+    if (c.closest('.doclink')) return;                       // already a cross-reference (an `@ref`)
     if (c.closest('pre')) { _linkifyCode(c); return; }       // signature / fenced block → bare type tokens
     const t = c.textContent.trim();
     if (t.length > 1 && _IDENT_RE.test(t) && !_NOLINK.has(t) && !params.has(t)) {
@@ -504,9 +518,13 @@ async function helpLookup(name) {
   try { hr = await api('GET', '/api/help?name=' + encodeURIComponent(name)); } catch (_) { return; }
   if (!hr || !hr.name) return;
   const v = _view() || { q: '', results: [], sel: 0 };
-  const rec = (!hr.docHtml && !(hr.exports && hr.exports.length))
+  // "No docstring" and "no such binding" are different answers and must read differently. A name the
+  // kernel RESOLVED reports a kind and a module, so it is documented-or-not; only a name that failed
+  // to resolve is a question about the environment.
+  const resolved = hr.kind && hr.kind !== 'unknown';
+  const rec = (!hr.docHtml && !(hr.exports && hr.exports.length) && !resolved)
     ? { name, module: '', kind: 'unknown', exports: [], _enriched: true,
-        docHtml: `<div class="dim">No documentation found for <code>${_escc(name)}</code> — it may not be loaded in this notebook's environment.</div>` }
+        docHtml: `<div class="dim">No binding named <code>${_escc(name)}</code> in this notebook — check the spelling, or whether its package is loaded here.</div>` }
     : { module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml, exports: hr.exports || [], kind: hr.kind, _enriched: true };
   _go({ q: v.q || '', results: v.results || [], sel: v.sel || 0, rec });
 }

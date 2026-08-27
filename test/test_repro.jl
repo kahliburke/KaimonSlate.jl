@@ -174,8 +174,50 @@ end
     @test isempty(f["exports"])
     @test occursin("sum", lowercase(f["doc"]))
 
+    @test f["docsource"] == "docstring"          # …and says whose doc that is
+
     bad = mh(@__MODULE__, "no_such_binding_xyz")
     @test bad["kind"] == "unknown" && isempty(bad["exports"]) && bad["doc"] == ""
+    @test bad["docsource"] == "none"
+
+    # A binding that RESOLVES but carries no docstring is a different answer from one that isn't
+    # there, and a caller has to tell them apart. Reflection supplies what it knows instead.
+    @eval undocumented_fn(x::Int) = x
+    @eval undocumented_fn(x::String; k = 1) = x
+    u = mh(@__MODULE__, "undocumented_fn")
+    @test u["kind"] == "function"                 # resolved, so NOT the unknown path
+    @test u["docsource"] == "reflection"          # …and flagged as ours, not the author's
+    @test occursin("no docstring", u["doc"])
+    @test occursin("2 methods", u["doc"])
+    @test occursin("undocumented_fn(x::Int64)", replace(u["doc"], " " => ""))  ||
+          occursin("undocumented_fn(x::Int64)", u["doc"])
+    # The signature, not a source location: a notebook reader cannot open the package's files.
+    @test !occursin(" @ ", u["doc"])
+
+    @eval struct UndocType; a::Int; b::String; end
+    t = mh(@__MODULE__, "UndocType")
+    @test t["kind"] == "type" && t["docsource"] == "reflection"
+    @test occursin("a::Int64", t["doc"]) && occursin("b::String", t["doc"])
+end
+
+# The renderer says "there is no docstring" in three different wordings, and all three have to be
+# recognised: indexing one as documentation adds an entry that matches nothing anyone would search
+# for while taking a result slot from a symbol that does.
+@testset "placeholder docstrings are not documentation" begin
+    p = ReportEngine._is_placeholder_doc
+    @test p("No documentation found for public binding `Foo.bar`.")   # a binding
+    @test p("No docstring found for public module `Foo`.")            # a module
+    @test p("No docstring defined.\n")                                # a stubbed type
+    @test p("  No docstring defined.")                                # leading whitespace
+    # The placeholder need not come first: a stubbed type renders as its signature line and then the
+    # placeholder, which a check on the string's opening characters would not see.
+    @test p("**`Foo <: Bar`**\n\nNo docstring defined.\n")
+    @test p("```julia\nfoo(x)\n```\n\nNo documentation found for public binding `foo`.")
+    # A real docstring that happens to discuss documentation is not a placeholder.
+    @test !p("Returns the number of documentation entries found.")
+    @test !p("**`Foo <: Bar`**\n\nA 2D axis which can be plotted into.")
+    # A signature with no prose at all is thin, but it is not the renderer saying there is none.
+    @test !p("```julia\nfoo(x)\n```")
 end
 
 # ── Self-contained bundle (export_bundle.jl) ─────────────────────────────────

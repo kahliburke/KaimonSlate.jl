@@ -1340,9 +1340,16 @@ function create_tools(GateTool::Type)
         res = search_docs(query; modules = mods)
         isempty(res) && return "No matches — build the index first with slate.index_docs, or rephrase."
         io = IOBuffer()
+        # Shown RELATIVE to the best hit. The backend's score is a Reciprocal Rank Fusion sum
+        # (`weight / (60 + rank)` per engine), so its absolute value is bounded near 0.05 whatever the
+        # match quality — printed raw it reads like a confidence and says "0.04" for an excellent hit.
+        # A percentage of the top result is the part that carries information: how much weaker than
+        # the best answer this one is.
+        top = maximum(Float64(get(r, "score", 0.0)) for r in res)
         for r in res
-            println(io, "● $(r["module"]).$(r["name"])  (", round(Float64(get(r, "score", 0.0)); digits = 3), ")")
-            snip = join(first(split(rstrip(string(r["doc"])), "\n"), 4), "\n")
+            rel = top > 0 ? round(Int, 100 * Float64(get(r, "score", 0.0)) / top) : 100
+            println(io, "● $(r["module"]).$(r["name"])  ($(rel)% of top)")
+            snip = NotebookServer.doc_summary(string(r["doc"]))
             isempty(strip(snip)) || println(io, snip)
             println(io)
         end

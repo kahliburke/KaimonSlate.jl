@@ -1550,3 +1550,82 @@ end
     nocell = Dict{String,Any}("x" => Dict{String,Any}("control" => "w"))
     @test isempty([k for (k, r) in nocell if !isempty(cellof(r)) && !(cellof(r) in ids)])
 end
+
+# What a search RESULT shows. A Julia docstring opens with its signature, which in a result list is
+# the least useful part: it restates what the reader typed, while the prose says whether this is the
+# symbol they want.
+@testset "doc_summary skips the signature block" begin
+    ds = NS.doc_summary
+    conventional = """
+    ```julia
+    widget(a, b; opt = 1)
+    ```
+
+    Combines two things into a widget.
+
+    The second paragraph goes on a bit.
+    """
+    s = ds(conventional)
+    @test occursin("Combines two things", s)
+    @test !occursin("```", s)                    # the fence is skipped, not shown
+    @test !occursin("widget(a, b", s)            # …and so is the signature inside it
+
+    # A docstring with no signature block is shown as-is.
+    @test occursin("Returns the thing", ds("Returns the thing it was given"))
+    # One that is ONLY a signature still shows something rather than nothing.
+    only_sig = "```julia\nfoo(x)\n```"
+    @test occursin("foo(x)", ds(only_sig))
+    @test ds("") == ""
+end
+
+# The backend fills a page whether or not anything matched, so the tail is cut relative to the best
+# hit: a result more than twice as weak as the top one is noise, not an answer.
+@testset "search drops the irrelevant tail" begin
+    rec(s) = Dict{String,Any}("module" => "M", "name" => "n", "doc" => "d", "score" => s)
+    kept = NS._drop_tail([rec(0.9), rec(0.8), rec(0.5), rec(0.1), rec(0.01)])
+    @test [r["score"] for r in kept] == [0.9, 0.8, 0.5]     # 0.1 and 0.01 are below 45% of 0.9
+    # A flat distribution is all-or-nothing: nothing is dropped when nothing stands out.
+    @test length(NS._drop_tail([rec(0.5), rec(0.5), rec(0.49)])) == 3
+    @test isempty(NS._drop_tail(Dict{String,Any}[]))
+    # Degenerate scores must not divide by zero or drop everything.
+    @test length(NS._drop_tail([rec(0.0), rec(0.0)])) == 2
+end
+
+# A long docstring is embedded in sections rather than whole: one vector has a fixed budget of
+# meaning, and a reference-grade docstring is about several things at once.
+@testset "doc chunking" begin
+    ch = NS._doc_chunks
+    @test length(ch("short and sweet")) == 1                    # below the threshold: one vector
+    @test ch("")[1] == ""
+
+    para(n) = join(["word$i" for i in 1:60], " ") * " p$n"
+    long = join([para(i) for i in 1:6], "\n\n")
+    cs = ch(long)
+    @test length(cs) > 1                                         # split…
+    @test length(cs) <= NS._DOC_CHUNK_MAX                        # …but bounded
+    # Every paragraph survives somewhere: chunking must not drop content.
+    for i in 1:length(cs)
+        @test !isempty(strip(cs[i]))
+    end
+    @test occursin("p1", cs[1])
+
+    # A fenced block is never cut in half — a half-open fence would corrupt every later chunk.
+    fenced = "intro\n\n" * join(["x$i" for i in 1:200], " ") * "\n\n```julia\n" *
+             join(["line$i" for i in 1:40], "\n") * "\n```\n\ntail"
+    fcs = ch(fenced)
+    for c in fcs
+        @test iseven(count(l -> startswith(strip(l), "```"), split(c, '\n')))
+    end
+end
+
+# A symbol matched through several of its sections is ONE answer, not several: without collapsing,
+# a single well-documented symbol could fill the whole page.
+@testset "search collapses chunks to one row per symbol" begin
+    rec(m, nm, s) = Dict{String,Any}("module" => m, "name" => nm, "doc" => "d", "score" => s)
+    got = NS._best_per_symbol([rec("A", "f", 0.2), rec("A", "f", 0.9), rec("A", "g", 0.5),
+                               rec("B", "f", 0.7)])
+    @test length(got) == 3
+    @test [(r["module"], r["name"]) for r in got] == [("A", "f"), ("B", "f"), ("A", "g")]
+    @test got[1]["score"] == 0.9                                 # the best chunk wins, not the first
+    @test isempty(NS._best_per_symbol(Dict{String,Any}[]))
+end
