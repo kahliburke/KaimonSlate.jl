@@ -70,6 +70,19 @@ function slate_theme_attrs(p::NamedTuple = SLATE_PALETTE)
         ),
         Legend = (framecolor = p.border, backgroundcolor = :transparent, labelcolor = p.text, titlecolor = p.dim),
         Colorbar = (tickcolor = p.dim, ticklabelcolor = p.dim, labelcolor = p.text, spinecolor = p.border),
+        # Makie's own in-figure widgets. Without these a figure that carries controls comes out
+        # half-themed — dark axes above light-grey sliders and buttons — because Makie's widget
+        # defaults are light-mode constants rather than anything derived from `textcolor`.
+        # SliderGrid's own label/value are `Label`s and follow the top-level `textcolor` already.
+        Button = (
+            buttoncolor = p.bg2, buttoncolor_hover = p.bg3, buttoncolor_active = p.accent,
+            labelcolor = p.text, labelcolor_hover = p.text, labelcolor_active = p.bg,
+            strokecolor = p.border, strokewidth = 1,
+        ),
+        Slider = (
+            color_active = p.accent, color_active_dimmed = (p.accent, 0.5),
+            color_inactive = p.bg3,
+        ),
     )
 end
 
