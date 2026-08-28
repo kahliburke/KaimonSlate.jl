@@ -387,6 +387,9 @@ function cellHeaderInner(c) {
   return '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
     `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
+    // Mode marker. Always emitted, shown by CSS only while the cell carries `.editing`, so it costs
+    // no plumbing through the header's innerHTML and can never disagree with the ring.
+    '<span class="editchip" title="edit mode — keys go to the editor; Esc returns to command mode">✎ edit</span>' +
     cellRegionChip(c) +
     _lockBadge(c) +
     _effectBadge(c) +
@@ -631,7 +634,10 @@ function editSource(id, mode) {
       onFocus: () => setEditing(id, true), onBlur: () => setEditing(id, false),
       keys: [
         { key: 'Shift-Enter', run: () => commitSource(id) },
-        { key: 'Escape', run: () => cancelSource(id) },
+        // NO Escape binding here: Escape means the same thing in every editor — leave edit mode,
+        // keep the text. (It used to cancelSource, which destroyed the editor and dropped whatever
+        // you had typed.) The overlay stays open in command mode; a second Escape collapses it back
+        // to rendered via toggleSource, which commits a changed source rather than discarding it.
         { key: 'Shift-Mod-Enter', run: () => commitAndAddBelow(id) },
         { key: 'Shift-Ctrl-Enter', run: () => commitAndAddBelow(id) },
         { key: 'Shift-Mod--', run: () => splitCell(id) }, { key: 'Shift-Ctrl--', run: () => splitCell(id) },
@@ -645,6 +651,7 @@ function editSource(id, mode) {
 }
 async function commitSource(id) {
   const src = editors[id] ? edText(id) : srcMap[id];
+  setEditing(id, false);   // destroying a focused editor fires no blur — leave edit mode explicitly
   if (editors[id]) { try { editors[id].destroy(); } catch (_) {} delete editors[id]; }
   srcMap[id] = src;
   // Restore the rendered view ourselves (like cancelSource): Preact now PRESERVES the cell's
@@ -659,6 +666,7 @@ async function commitSource(id) {
   renderAll(await api('POST', '/api/cell/' + id, { source: src }));   // re-render in its new form
 }
 function cancelSource(id) {
+  setEditing(id, false);   // destroying a focused editor fires no blur — leave edit mode explicitly
   const cm = editors[id]; if (cm) { try { cm.destroy(); } catch (_) {} delete editors[id]; }
   const cell = document.getElementById('cell-' + id); if (!cell) return;
   cell.querySelector('.srcedit').style.display = 'none';

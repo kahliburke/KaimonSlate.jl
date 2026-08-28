@@ -1891,11 +1891,35 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .spinner { width:38px; height:38px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .loading .lmsg { color:var(--text); font-size:.9rem; }
-.cell.selected { outline:3px solid var(--purple); outline-offset:-2px;       /* command mode (purple) — distinct from blue state edges + teal bind edges */
-                 box-shadow:0 0 12px rgba(197,134,192,.4); }
+/* ── Cell chrome: two independent channels ────────────────────────────────────────────────────
+   • the LEFT STRIPE is RUN STATE (green settled · gold stale · orange edited · blue running ·
+     red errored · teal @bind) — see `.cell.state-*` above;
+   • the RING is MODE — purple = command (keys go to the NOTEBOOK: j/k/a/b/dd/m/y),
+     teal = edit (keys go to the EDITOR). Reinforced by the ✎ chip in the header and by the
+     focused editor's surface, so the mode never rests on hue alone.
+   The ring is state-driven (<Cell> computes `.editing` from the store's `editing` signal); it
+   used to be a classList poke that the first keystroke wiped, which is why the chrome could
+   claim command mode while the keyboard was still in the editor. */
+.cell.selected { outline:3px solid var(--purple); outline-offset:-2px;       /* command mode */
+                 box-shadow:0 0 12px color-mix(in srgb, var(--purple) 40%, transparent); }
 .cell.multisel { outline:2px solid var(--purple); outline-offset:-2px;       /* also-selected (multi-select), lighter than the active cell */
-                 box-shadow:0 0 7px rgba(197,134,192,.2); }
-.cell.editing  { outline:3px solid var(--green); outline-offset:-2px; }       /* edit mode */
+                 box-shadow:0 0 7px color-mix(in srgb, var(--purple) 20%, transparent); }
+/* Edit mode outranks selection — a cell in edit mode is always the active one. */
+.cell.editing, .cell.editing.selected, .cell.editing.multisel {
+  outline:3px solid var(--teal); outline-offset:-2px;
+  box-shadow:0 0 12px color-mix(in srgb, var(--teal) 40%, transparent); }
+/* The editor you are actually typing in lifts off the cell background. Keyed on CodeMirror's own
+   `.cm-focused` rather than the cell class, so a web cell lights the ONE pane that has the
+   keyboard. Scoped to `.cell` — the Files-tab editor is a different context and keeps its chrome. */
+.cell .cm-editor.cm-focused { background:var(--bg3); }
+/* ✎ chip: names the mode outright, beside the cell id. Emitted on every cell by cellHeaderInner
+   and revealed only in edit mode, so it can never disagree with the ring. */
+.editchip { display:none; }
+.cell.editing > .cellhead > .editchip {
+  display:inline-flex; align-items:center; gap:4px; margin-left:8px; flex:0 0 auto;
+  padding:0 7px; border-radius:999px; font-size:.7rem; letter-spacing:.02em; font-weight:600;
+  color:var(--teal); border:1px solid color-mix(in srgb, var(--teal) 45%, transparent);
+  background:color-mix(in srgb, var(--teal) 12%, transparent); }
 /* Floating selection counter — top-left, out of the way; shown only for a multi-selection. */
 .selcount { position:fixed; top:54px; left:14px; z-index:40; display:none;
             background:var(--purple); color:#160d18; font-size:.76rem; font-weight:600;

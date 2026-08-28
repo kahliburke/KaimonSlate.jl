@@ -10,7 +10,7 @@
 import { html, render } from 'htm/preact';
 import { useRef, useEffect } from 'preact/hooks';
 import { effect, signal } from '@preact/signals';
-import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal, localDirty as dirtySignal, isDirty, srcEq, clearEdited } from './store.js';
+import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal, editing as editingSignal, localDirty as dirtySignal, isDirty, srcEq, clearEdited } from './store.js';
 
 const raw = s => ({ __html: s || '' });
 const _reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -148,6 +148,9 @@ function Editor({ cell }) {
       try { io.disconnect(); } catch (_) {}
       if (window._editorMount) delete window._editorMount[cell.id];
       if (window.editors[cell.id] === view) delete window.editors[cell.id];
+      // Removing a focused element fires no blur, so the editor's own onBlur never runs — leave
+      // edit mode explicitly or the cell keeps claiming the keyboard it no longer has.
+      window.setEditing && window.setEditing(cell.id, false);
       try { view && view.destroy(); } catch (_) {}
     };
   }, []);
@@ -231,6 +234,7 @@ function WebEditor({ cell }) {
     }
     function removePane(lang) {
       const v = panes[lang]; if (!v) return;
+      if (v.hasFocus) window.setEditing && window.setEditing(cell.id, false);   // destroy fires no blur
       try { v.destroy(); } catch (_) {}
       delete panes[lang];
       if (boxes[lang]) { boxes[lang].remove(); delete boxes[lang]; }
@@ -246,6 +250,7 @@ function WebEditor({ cell }) {
     setTimeout(() => { primed = true; }, 0);
     return () => {
       if (window.editors[cell.id] && Object.values(panes).includes(window.editors[cell.id])) delete window.editors[cell.id];
+      window.setEditing && window.setEditing(cell.id, false);   // destroy fires no blur
       Object.values(panes).forEach(v => { try { v.destroy(); } catch (_) {} });
       if (window.webEditors) delete window.webEditors[cell.id];
     };
@@ -326,7 +331,7 @@ function EChartHost({ cell }) {
   }</div>`;
 }
 
-function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
+function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed }) {
   const c = cell;
   const ref = useRef(null);
   const last = useRef({ bindKey: undefined, ctrlKey: undefined, out: undefined, vis: undefined });
@@ -481,6 +486,10 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   // get `.multisel` (lighter), so "the cell ops act on" reads distinctly from "also selected".
   const inSet = selSet ? selSet.has(c.id) : false;
   const selCls = selectedId === c.id ? ' selected' : (inSet ? ' multisel' : '');
+  // MODE. The ring drawn by `.selected` means "this cell is armed for notebook keys"; `.editing`
+  // stands it down and lights the editor instead, so the chrome always says where the keyboard is.
+  // Part of the computed class on purpose — see the `editing` signal in store.js.
+  const edCls = editingId === c.id ? ' editing' : '';
   const isBind = window.hasBinds(c);
   // Document-metadata roles (title / abstract / bibliography) style the cell in place, so what
   // you author flows naturally in the notebook and exports interpret the role for placement.
@@ -491,7 +500,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   const cls = 'cell ' + (c.kind === 'md' ? 'md' : c.kind === 'web' ? 'web'
                         : c.kind === 'tool' ? 'code tool' : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
-    + roleCls + selCls + (focusId === c.id ? ' dep-focus' : '');
+    + roleCls + selCls + edCls + (focusId === c.id ? ' dep-focus' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;
   const srcedit = html`<div class="srcedit" style="display:none" dangerouslySetInnerHTML=${raw(window.srcEditInner())}></div>`;
   // Content hosts are empty/stable — Preact preserves them; the effect above fills them.
@@ -533,7 +542,7 @@ function CellGap({ afterId, firstId }) {
   </div>`;
 }
 
-function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
+function Notebook({ cells, selectedId, selSet, live, focusId, editingId, cone }) {
   useEffect(() => {
     window.renderPalette && window.renderPalette();
     window.syncAgentTop && window.syncAgentTop();
@@ -543,7 +552,7 @@ function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
   const banner = focusId ? html`<div class="focusbar" onClick=${() => window.slateStore.setFocus(focusId)}
       title="click or press Esc to exit focus">🔗 Dependency chain of <b>${focusId}</b> · ${coneCount} cell${coneCount === 1 ? '' : 's'} — click to exit</div>` : null;
   // Render EVERY cell always; cells outside the cone collapse (see <Cell>) instead of unmounting.
-  const renderCell = c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} collapsed=${!!(cone && !cone.has(c.id))} />`;
+  const renderCell = c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} editingId=${editingId} collapsed=${!!(cone && !cone.has(c.id))} />`;
   // Side-by-side columns: a `column=N` tag (N≥2) places a cell in the Nth slot of the row anchored by
   // the preceding un-tagged (column 1, the default) cell — so you only tag the EXTRA columns. A plain
   // cell always starts a fresh row; a lone row renders as a normal full-width cell (no wrapper).
@@ -605,7 +614,7 @@ if (nbHost) {
     const selSet = selectedSetSignal.value;
     _updateSelCount(selSet);
     dirtySignal.value;   // <Cell> derives `edited` from it — read it here so the effect re-runs on a change
-    render(html`<${Notebook} cells=${cellsSignal.value} cone=${cone} selectedId=${selectedSignal.value} selSet=${selSet} live=${liveSignal.value} focusId=${fid} />`, nbHost);
+    render(html`<${Notebook} cells=${cellsSignal.value} cone=${cone} selectedId=${selectedSignal.value} selSet=${selSet} live=${liveSignal.value} focusId=${fid} editingId=${editingSignal.value} />`, nbHost);
 
     if (beforeTop != null) {
       const t0 = performance.now();

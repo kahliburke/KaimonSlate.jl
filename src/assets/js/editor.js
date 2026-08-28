@@ -715,9 +715,15 @@
         // below so an extra's bindings — ⌘F, ⌘G — take precedence over the defaults.
         ...(opts.extra || []),
         keymap.of([
-          ...completionKeymap,                  // popup nav/close (Escape) takes precedence over cell keys
-          ...cellKeys,                          // a cell's own Escape (e.g. cancelSource) wins over the blur below
-          { key: 'Escape', run: (v) => { v.contentDOM.blur(); return true; } },   // exit edit → command mode
+          // Escape: leave edit mode. Ahead of completionKeymap so it can decide whether the
+          // completion gets first refusal — CM6's own closeCompletion answers YES whenever a
+          // completion source is merely PENDING (its query still in flight, nothing rendered), so
+          // an Escape within the activate-on-typing delay was swallowed with no visible effect and
+          // you had to press it twice. Defer only to "active": a list that is actually on screen,
+          // where dismissing it without losing the cursor is the useful thing.
+          { key: 'Escape', run: (v) => completionStatus(v.state) === 'active' ? false : (v.contentDOM.blur(), true) },
+          ...completionKeymap,                  // popup nav/close, once there IS a popup
+          ...cellKeys,
           // ⌘⇧K = help (app shortcut). Bind it here so CM6's defaultKeymap `deleteLine` doesn't eat it.
           { key: 'Mod-Shift-k', run: () => { window.__docsHotkey = Date.now(); window.openDocsAtCursor && window.openDocsAtCursor(); return true; } },
           // ⌘⇧←/→ = back/forward through selected-cell nav history, IN the editor too — so after a

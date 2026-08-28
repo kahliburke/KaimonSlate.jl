@@ -1,8 +1,14 @@
 // ── Command/edit mode + Jupyter-style keyboard shortcuts ──────────────────────
-// Command mode: a cell is "selected" (accent ring) and single keys act on it —
+// Command mode: a cell is "selected" (PURPLE ring) and single keys act on it —
 // j/k or ↑/↓ to move, a/b to insert above/below, dd to delete, m/y to set
-// markdown/code, Enter to edit. Edit mode: focus inside the CodeMirror (green
-// ring); Esc returns to command mode.
+// markdown/code, Enter to edit. Edit mode: focus inside the CodeMirror (TEAL
+// ring + a ✎ chip in the header); Esc returns to command mode.
+//
+// Which mode you are in is STATE, not a class on the element: it lives in the
+// store's `editing` signal and <Cell> folds it into the cell's class. The ring
+// used to be poked onto the DOM here, so the first keystroke — which rewrites
+// that class as the cell goes fresh → edited — silently erased it, and the
+// chrome then showed command mode while the keyboard was still in the editor.
 let selectedId = null, anchorId = null, _dPending = false, _dTimer = null;
 // `selectedId` is a classic-script `let`, so it is NOT a property of `window` and an ES module
 // island can't read it. Islands that need the selection (the Extensions gallery) call this.
@@ -39,9 +45,20 @@ function toggleSelect(id) {
   selectedId = id; anchorId = id;
   window.slateStore && window.slateStore.toggleInSelection(id);
 }
+// Enter/leave EDIT mode for `id`. The mode lives in the store, not in a classList toggle: <Cell>
+// owns the cell's `class` and rewrites it whenever its computed value changes, so a DOM-poked
+// `.editing` disappeared on the first keystroke (fresh → edited) and the chrome then claimed you
+// were in command mode while the keyboard was still in the editor.
 function setEditing(id, on) {
-  const el = document.getElementById('cell-' + id); if (el) el.classList.toggle('editing', on);
+  window.slateStore && window.slateStore.setEditingCell(id, on);
   if (on) selectCell(id);
+}
+// (a global `function` declaration in a classic script IS window.setEditing — notebook.js calls it there)
+// Is this cell showing its raw-source overlay? (md / @bind cells render output by default.)
+function _srcOpen(id) {
+  const cell = document.getElementById('cell-' + id); if (!cell) return false;
+  const sed = cell.querySelector('.srcedit');
+  return !!(sed && sed.style.display !== 'none');
 }
 function enterEdit(id) {
   const c = _cellById(id); if (!c) return;
@@ -72,7 +89,14 @@ document.addEventListener('keydown', e => {
   if (e.shiftKey && (k === 'ArrowUp' || k === 'K')) { e.preventDefault(); if (idx > 0) selectRangeTo(ids[idx - 1], true); }
   else if (e.shiftKey && (k === 'ArrowDown' || k === 'J')) { e.preventDefault(); if (idx < ids.length - 1) selectRangeTo(ids[idx + 1], true); }
   else if (k === 'Enter' && !e.shiftKey) { e.preventDefault(); enterEdit(selectedId); }   // ⇧⏎ is run, handled below
-  else if (k === 'Escape') { if (selectedIds().length > 1) { e.preventDefault(); selectCell(selectedId); } }   // collapse to active
+  // Escape in COMMAND mode, in order: collapse a raw-source overlay left open by the Escape that
+  // brought you here, then collapse a multi-selection to the active cell. Closing the overlay goes
+  // through toggleSource, so a changed source is COMMITTED rather than dropped — Escape never
+  // destroys work.
+  else if (k === 'Escape') {
+    if (_srcOpen(selectedId)) { e.preventDefault(); const c = _cellById(selectedId); toggleSource(selectedId, c && c.kind === 'md' ? 'markdown' : 'julia'); }
+    else if (selectedIds().length > 1) { e.preventDefault(); selectCell(selectedId); }
+  }
   else if (k === 'ArrowDown' || k === 'j') { e.preventDefault(); if (idx < ids.length - 1) selectCell(ids[idx + 1], true); }
   else if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); if (idx > 0) selectCell(ids[idx - 1], true); }
   else if (k === 'a') { e.preventDefault(); addCell(selectedId, 'code', true); }

@@ -14,6 +14,12 @@ export const nbState  = signal(window.__slateState || null); // the whole /api/s
 export const selected = signal(window.selectedId || null);   // ACTIVE/anchor cell id (command mode; the one single-cell ops act on)
 export const selectedSet = signal(new Set(window.selectedId ? [window.selectedId] : [])); // ALL selected ids (multi-select)
 export const focus    = signal(null);                        // dep-focus: show ONLY this cell's dependency chain
+// EDIT MODE: the id of the cell whose editor holds the keyboard, else null. Mode has to be state,
+// not a class poked onto the DOM: <Cell> rewrites the cell's `class` whenever its computed value
+// changes (the first keystroke does exactly that, fresh → edited), so an imperatively-added
+// `.editing` was silently dropped the moment you started typing and the ring lied about where
+// your keys were going.
+export const editing  = signal(null);
 export const liveStates = signal({});                        // transient per-cell state (running/edited) for instant feedback,
                                                              // until the authoritative server state arrives
 export const localDirty = signal({});                        // cells THIS browser has typed into and not yet applied
@@ -31,6 +37,14 @@ export function setSelection(ids, active) { selectedSet.value = new Set(ids); se
 // Toggle one cell in/out of the selection (⌘/ctrl-click); the toggled cell becomes active.
 export function toggleInSelection(id) { const s = new Set(selectedSet.value); s.has(id) ? s.delete(id) : s.add(id); selectedSet.value = s; selected.value = id; }
 export function setFocus(id) { focus.value = (focus.value === id ? null : id); }   // toggle
+// Enter/leave edit mode. Clearing is guarded on the id: focus moving between two cells fires the
+// old editor's blur AFTER the new one's focus, and an unguarded clear would drop the mode we just
+// entered. Callers must also clear on DESTROY — tearing down a focused editor moves focus to the
+// body without firing a blur event, which is how a cell used to keep an edit-mode ring forever.
+export function setEditingCell(id, on) {
+  if (on) { if (editing.value !== id) editing.value = id; }
+  else if (editing.value === id) editing.value = null;
+}
 export function setLiveState(id, s) {
   // `edited` is only ever passed by an editor's own input handler, so it IS the "a human typed
   // here" signal — record it durably, because applyState() wipes liveStates on every server push.
@@ -68,4 +82,4 @@ export function isDirty(id, source) {
 
 // Bridge for the classic (non-module) scripts, which can't `import`. They call these;
 // Preact components import the signals directly above.
-window.slateStore = { nbState, selected, selectedSet, focus, cells, title, worker, liveStates, localDirty, applyState, setSelected, setSelection, toggleInSelection, setFocus, setLiveState, markDirty, clearEdited, isDirty, srcEq };
+window.slateStore = { nbState, selected, selectedSet, focus, editing, cells, title, worker, liveStates, localDirty, applyState, setSelected, setSelection, toggleInSelection, setFocus, setEditingCell, setLiveState, markDirty, clearEdited, isDirty, srcEq };
