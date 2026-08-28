@@ -388,7 +388,11 @@ function _renderView() {
   const r = v && (v.rec || (v.results && v.results[v.sel]));
   if (!r) { dt.innerHTML = ''; rel.innerHTML = ''; return; }
   dt.innerHTML = _helpRecordHtml(r);
-  _linkifyDoc(dt, r); dt.scrollTop = 0;
+  // Docstrings carry `$…$` / `$$…$$` as often as prose cells do (Base and the SciML/plotting
+  // ecosystem write their maths that way). markdown_html leaves the TeX verbatim for KaTeX, so
+  // without this the help pane shows the raw delimiters. After linkify: that rewrites `code`
+  // spans, which KaTeX ignores anyway.
+  _linkifyDoc(dt, r); _typesetDoc(dt); dt.scrollTop = 0;
   _renderRelated(r);                           // the right rail (referenced + related)
   r._enriched || _enrichDetail(r);             // upgrade with live exports/doc on first view
 }
@@ -449,6 +453,8 @@ function _helpRecordHtml(r) {
   return `<div class="dochead"><h4>${title}</h4>${kind}</div>${body}${exports}` +
     '<div class="hint">↵ open · double-click a result to insert its name · click a <code>ref</code> or export to drill in · ‹ › or esc to go back</div>';
 }
+// KaTeX over a rendered docstring. `typeset` is core.js's global (a no-op before KaTeX loads).
+function _typesetDoc(el) { if (window.typeset) try { window.typeset(el); } catch (_) {} }
 // Make identifiers in a docstring clickable (drill-in via the #docdetail delegation):
 //  • an inline `code` span that is itself a single name → the whole span links;
 //  • inside a code block (a signature), each CamelCase type token (Vector, Float64, …) links.

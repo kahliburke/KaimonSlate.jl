@@ -173,6 +173,7 @@
         // anonymous line boxes (huge gaps in the small card). Strip ONLY tag-to-tag newlines
         // (keep real inline spaces, which never contain a newline).
         dom.innerHTML = r.docHtml.replace(/>\s*\n\s*</g, '><');
+        if (window.typeset) try { window.typeset(dom); } catch (_) {}   // `$…$` in the docstring
         return dom;
       } catch (_) { return null; }
     };

@@ -2089,6 +2089,10 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   .docmd pre { background: #0d1120; border: 1px solid var(--bg3); border-radius: 6px; padding: 8px 10px;
                overflow-x: auto; white-space: pre; margin: 8px 0; }
   .docmd pre code { background: none; padding: 0; }
+  /* Math in a docstring. The dock is narrow, so a wide display equation scrolls sideways rather
+     than stretching the pane; inline maths sits a touch above the small body text. */
+  .docmd .katex { font-size: 1.1em; }
+  .docmd .katex-display { overflow-x: auto; overflow-y: hidden; margin: .4em 0; }
   .doclink { color: var(--accent); cursor: pointer; border-bottom: 1px dotted var(--accent);
              font-family: 'Cascadia Code', ui-monospace, monospace; font-size: 11.5px; }
   .doclink:hover { background: rgba(120,160,255,.14); }
