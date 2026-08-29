@@ -2,31 +2,25 @@ try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — runni
 
 #%% md id=intro
 @md"""
-# 🛰 Batch fabric: a sweep that outlives the notebook
+# 🛰 A sweep that runs on a cluster
 
-A **parameter sweep** submitted as batch work, rather than run in this kernel. Shards execute in
-separate processes, write their results into the content-addressed store, and this notebook reads
-them back.
+A parameter sweep submitted to **real SLURM**, from this notebook.
 
-The point of the design is what happens when you *stop*: close the notebook, quit Slate, come back
-tomorrow. Nothing is remembered in memory, so reopening asks the same three questions it always
-asks and gets the same durable answers.
+The problem this exists to solve is not that a sweep is hard to launch. It is that a long run is
+opaque: a pill reading *"running… 4302 seconds elapsed"* tells you nothing about whether it is
+working, how far along it is, how much longer to wait, or whether it quietly stopped. And when
+something does go wrong, the half hour already spent is usually gone with it.
 
-- **is this shard finished?** the store has a manifest for its key
-- **is this chunk in flight?** the launcher has a live job under its name
-- **did it fail?** the shard's manifest says so, with the traceback
+So every unit of work here is content-addressed and stored on its own. That one decision buys:
 
-This demo uses `ExecLauncher`, which runs shards as local subprocesses. The same cells work against
-SLURM by swapping the launcher (see `dev/slurm-harness/`).
+- **progress and an honest ETA**, measured from completions rather than guessed
+- **partial results**, usable while the rest is still running
+- **resumption** — a killed or preempted unit re-runs, a finished one never does
+- **failure isolation** — a bad parameter is recorded, it does not take the run down
 """
 
 #%% code id=load
-# The batch fabric is plain includes for now: no package boundary yet, so this is the same source
-# the compute nodes run.
-#
-# A notebook runs in a FORKED environment, so `Base.active_project()` is the fork and not the
-# worktree that holds these sources. Ask the worker for its parent project first, and say plainly
-# where we looked if none of the candidates has the file.
+# The batch fabric, loaded from the worktree.
 function _find_src()
     cands = String[]
     try; push!(cands, joinpath(Main.SlateWorker.PARENT_PROJECT[], "src")); catch; end
@@ -34,218 +28,188 @@ function _find_src()
     push!(cands, joinpath(homedir(), "devel", "KaimonSlate.jl", ".claude", "worktrees",
                           "feat+batch-fabric", "src"))
     for d in cands
-        isfile(joinpath(d, "batchsweep.jl")) && return d
+        isfile(joinpath(d, "sweep.jl")) && return d
     end
-    error("could not find batchsweep.jl. Looked in:\n  " * join(cands, "\n  "))
+    error("could not find sweep.jl. Looked in:\n  " * join(cands, "\n  "))
 end
 
 SRC = _find_src()
 
-# `Base.include`, not a bare `include`: a notebook's module is built programmatically, so it has no
-# `include` of its own the way a `module ... end` block would.
-Base.include(@__MODULE__, joinpath(SRC, "batchsweep.jl"))
+# Loaded into `Main`, not into this notebook's module. `using` would bind the name `Sweep` here as
+# an IMPORT, and a later re-run of this cell could then not define the module again ("cannot
+# declare Sweep constant; it was already declared as an import"). Owning it in Main and importing
+# from there keeps this cell re-runnable.
+isdefined(Main, :Sweep) || Base.include(Main, joinpath(SRC, "sweep.jl"))
+using Main.Sweep
 
-const BL = BatchLauncher
-const BS = BatchSweep
 SRC
 
-#%% md id=h_store
+#%% md id=h_target
 @md"""
-## The store
+## Where it runs
 
-Everything lives under one content-addressed root. On a cluster this would be `/scratch`, visible
-to every compute node; here it is a directory the subprocesses share.
+A **target** says where units execute and how the two sides see the store. It is the only thing
+that changes between a laptop and a cluster: the sweep cells below are identical either way.
+
+`root` is the store as this notebook sees it; `root_remote` is the same store as a compute node
+sees it. The harness bind-mounts one directory into both.
 """
 
-#%% code id=store
-# The harness bind-mounts its `scratch/` directory as the cluster's /scratch, so the hub and the
-# compute nodes see the SAME bytes at DIFFERENT paths. That is the shared-filesystem case the
-# design assumes. A real remote cluster additionally needs the store adapter, which is not built
-# yet: the hub would have no way to read a CAS it cannot mount.
+#%% code id=target
 HARNESS = joinpath(dirname(SRC), "dev", "slurm-harness")
-ROOT  = joinpath(HARNESS, "scratch", "cas")   # the store, as the HUB sees it
-RROOT = "/scratch/cas"                        # the same store, as a COMPUTE NODE sees it
-mkpath(ROOT)
-mkpath(joinpath(HARNESS, "scratch", "env"))   # an empty project for the task processes
 
-# Ship the fabric sources across so the compute nodes can load them. On a real cluster this is what
-# provisioning does; here the shared directory makes it a copy.
-let dst = joinpath(HARNESS, "scratch", "src")
-    mkpath(dst)
-    for f in ("memostore.jl", "slatetask.jl", "batchlauncher.jl", "batchsweep.jl")
-        cp(joinpath(SRC, f), joinpath(dst, f); force = true)
-    end
+for d in ("cas", "env", "src"); mkpath(joinpath(HARNESS, "scratch", d)); end
+for f in ("memostore.jl", "slatetask.jl", "batchlauncher.jl", "batchsweep.jl")
+    cp(joinpath(SRC, f), joinpath(HARNESS, "scratch", "src", f); force = true)
 end
 
-(; hub = ROOT, node = RROOT)
+# How long each unit takes, and how many there are. Small while iterating on the mechanism; raise
+# them to exercise what a genuinely long run does (queue waits, ETA accuracy, stall detection,
+# walltime kills). Both are CAPTURED by the sweep bodies below, so changing either one re-keys the
+# sweep and starts a new one rather than mixing results across settings.
+COST  = 0.05     # seconds per unit
+NSCAN = 40       # units in the full sweep
 
-#%% md id=h_grid
+hpc = SlurmTarget("slate-slurm";
+    root        = joinpath(HARNESS, "scratch", "cas"),   # as the HUB sees it
+    root_remote = "/scratch/cas",                        # as a COMPUTE NODE sees it
+    project     = "/scratch/env",
+    payload     = "/scratch/src/slatetask.jl",
+    chunk       = 10,
+    resources   = (; cpus = 1, mem = "512M", walltime = "00:10:00", partition = "compute"))
+
+# The same cells run with no cluster at all. Swap this in to compare.
+local_target = LocalTarget(; root = joinpath(homedir(), ".cache", "kaimonslate", "sweepdemo"),
+                           chunk = 10, project = dirname(SRC),
+                           payload = joinpath(SRC, "slatetask.jl"))
+(; hpc, COST, NSCAN)
+
+#%% md id=h_pilot
 @md"""
-## The parameter space
+## Pilot first
 
-Twenty-four points, chunked six at a time. Chunking is not cosmetic: a Julia start plus package
-load can dwarf a short shard, and a scheduler handles a few hundred array elements far better than
-tens of thousands.
-
-One parameter is rigged to throw, because a sweep where everything succeeds is not the interesting
-case.
+Before spending an allocation, run a handful of points and look at the output. Because every unit
+is keyed by content, **these results are kept**: the full sweep below reuses them rather than
+recomputing, and it is the same code path because only the grid changed.
 """
 
-#%% code id=grid
-NSHARDS  = 24
-PER      = 6
-SWEEP    = "demo"
-
-fn_src = """
-p -> begin
-    p == 7 && error("rigged failure: parameter 7 is bad")
-    sleep(0.4)
-    (p = p, y = sqrt(p) * 10)
+#%% code id=pilot
+pilot = @sweep(paramgrid(x = 1:4), hpc) do p
+    sleep(COST)
+    (x = p.x, y = exp(-0.15 * p.x) * cos(3 * p.x))
 end
+
+#%% md id=h_sweep
+@md"""
+## The full sweep
+
+Forty units. Re-run this cell to refresh: it reconciles against the store and the scheduler and
+submits only what is missing. Once everything has landed it returns immediately having submitted
+nothing, which is what makes reopening this notebook safe.
+
+One parameter is rigged to throw, so the failure path is visible rather than theoretical.
 """
 
-chunks = String[]
-for (ci, lo) in enumerate(1:PER:NSHARDS)
-    params = collect(lo:min(lo + PER - 1, NSHARDS))
-    chunk = "$(SWEEP)_c$(ci)"
-    SlateTask.write_chunk!(ROOT, chunk; fn_src, params,
-                           keys = ["$(SWEEP)_s$(p)" for p in params])
-    push!(chunks, chunk)
+#%% code id=scan
+scan = @sweep(paramgrid(x = 1:NSCAN), hpc) do p
+    sleep(COST)
+    p.x == 13 && error("rigged failure: parameter 13 is bad")
+    (x = p.x, y = exp(-0.15 * p.x) * cos(3 * p.x))
 end
-BS.write_sweep!(ROOT, SWEEP, chunks)
-(; shards = NSHARDS, chunks = length(chunks))
 
-#%% md id=h_submit
+#%% md id=h_progress
 @md"""
-## Submit
+## Progress
 
-`reconcile!` works out what is missing and submits exactly that. Run this cell again at any time:
-if everything has landed it submits nothing and returns immediately, which is what makes reopening
-a notebook safe.
+Re-run the sweep cell to watch this move. `:partial` is a **finished** state, not a broken one:
+every unit reached a terminal outcome and some of them errored.
 """
 
-#%% code id=submit
-# Real SLURM. `SlurmLauncher` ssh's to the login node and runs sbatch there; the chunks go out as
-# ONE array job, which is what array jobs are for.
-launcher = BL.SlurmLauncher("slate-slurm")
-
-# Every path inside the batch script is the COMPUTE NODE's view, which is why the spec takes RROOT
-# while `reconcile!` below reads the store through the hub's own path.
-spec = (name, cs) -> BL.JobSpec(name, cs;
-    root      = RROOT,
-    project   = "/scratch/env",
-    payload   = "/scratch/src/slatetask.jl",
-    resources = (; cpus = 1, mem = "512M", walltime = "00:10:00", partition = "compute"))
-
-BS.reconcile!(ROOT, SWEEP, launcher, spec)
-
-#%% md id=h_state
-@md"""
-## Where it stands
-
-Five states, and the distinction between the last three matters. A sweep that finished with some
-shards erroring is **`:partial`**: genuinely done, not still going, and not a total loss. A sweep
-whose jobs keep dying without writing anything is **`:stalled`**, which needs a decision rather
-than another resubmit.
-
-Re-run this cell to watch it progress.
-"""
-
-#%% code id=plan
-p = BS.plan(ROOT, SWEEP; launcher)
-
-#%% code id=summary
-(; state       = p.state,
-   done        = "$(p.shards_done)/$(p.shards_total)",
-   ok          = p.shards_ok,
-   errored     = p.shards_failed,
-   missing     = p.shards_missing,
-   pct         = round(100 * BS.fraction(p); digits = 1),
-   settled     = BS.is_settled(p),
-   clean       = BS.is_complete(p),
-   stuck       = BS.is_stuck(p))
+#%% code id=progress
+(; state      = scan.plan.state,
+   done       = "$(scan.plan.shards_done)/$(scan.plan.shards_total)",
+   ok         = scan.plan.shards_ok,
+   errored    = scan.plan.shards_failed,
+   remaining  = scan.plan.shards_missing,
+   rate_per_s = round(scan.telemetry.rate_per_s; digits = 2),
+   eta_s      = round(eta(scan); digits = 1),
+   idle_s     = round(scan.telemetry.idle_s; digits = 1),
+   stuck_for  = stalled_for(scan),
+   blocked    = blocked(scan))
 
 #%% md id=h_results
 @md"""
-## Results as they land
+## Results, usable while incomplete
 
-`results` returns every shard, finished or not, so a partially complete sweep can still be
-rendered. Shards that have not run carry `status = ""`.
+`finished` returns only the units that succeeded, so a plot can render a partial sweep without
+having to decide what a missing point looks like.
 """
 
-#%% code id=results
-# This cell reads the STORE, not any notebook value, so Slate's dataflow analysis has nothing to
-# invalidate it on when new shards land. Naming `p` makes it depend on the plan, so re-running the
-# plan cell above refreshes this too.
-#
-# The eventual `slate_map` surface removes the awkwardness: the fan-out cell owns the value and
-# downstream cells depend on it the ordinary way.
-p
-
-rs = BS.results(ROOT, SWEEP)
-[(; r.key, r.status, r.ran_on, ms = round(r.ms; digits = 1)) for r in rs]
-
 #%% code id=chart
-p   # depend on the plan so this redraws when shards land (see the note on `results`)
-
-# Only the finished, successful shards have a value to plot.
-pts = [(r.value.p, r.value.y) for r in BS.results(ROOT, SWEEP) if r.status == "ok"]
-sort!(pts; by = first)
+pts = sort([(row.value.x, row.value.y) for row in finished(scan)]; by = first)
 
 echart(Dict(
     "backgroundColor" => "transparent",
-    "title"   => Dict("text" => "sqrt sweep — $(length(pts)) of $NSHARDS shards on SLURM"),
+    "title"   => Dict("text" => "damped oscillation — $(length(pts)) of $(length(scan)) units"),
     "tooltip" => Dict("trigger" => "axis"),
-    "xAxis"   => Dict("type" => "value", "name" => "p"),
+    "xAxis"   => Dict("type" => "value", "name" => "x"),
     "yAxis"   => Dict("type" => "value", "name" => "y"),
     "series"  => [Dict("type" => "line", "showSymbol" => true, "smooth" => true,
                        "data" => [[x, y] for (x, y) in pts])],
 ))
 
+#%% md id=h_where
+@md"""
+## Where each unit ran
+
+Provenance per unit: which node, which job, which array element.
+"""
+
+#%% code id=where
+[(; row.params.x, row.status, row.ran_on, ms = round(row.ms; digits = 1))
+ for row in scan.rows][1:min(12, length(scan))]
+
 #%% md id=h_failures
 @md"""
 ## Which ones broke
 
-The answer to "47 of my 10,000 jobs failed and I do not know which". Each failure carries its
-parameter and its traceback, and the successful shards are untouched.
+The answer to "47 of my 10,000 units failed and I do not know which". Each failure carries its
+parameters and its traceback, and the successful units are untouched.
+
+Errors are **not** retried automatically: a unit that threw will usually throw again, and quietly
+re-running thousands of them spends an allocation on a deterministic bug. `retry_failed!(scan)`
+clears them, then re-run the sweep cell.
 """
 
 #%% code id=failures
-p   # depend on the plan so this refreshes when shards land (see the note on `results`)
+[(; row.params, err = first(String(row.value), 120)) for row in failures(scan)]
 
-BS.failures(ROOT, SWEEP)
-
-#%% md id=h_retry
+#%% md id=h_breaker
 @md"""
-## Retrying
+## The circuit breaker
 
-Errors are **not** retried automatically: a shard that threw will usually throw again, and quietly
-re-running thousands of them wastes an allocation on a deterministic bug. Retrying is a decision.
+The failure worth designing against: submit thousands of units, wait a day, discover the body was
+broken all along. A sweep that is failing early stops itself rather than spending the rest of the
+allocation proving the same point.
 
-Un-comment and run to clear the failed entries, then re-run **Submit** above.
+This one runs locally so it costs nothing to demonstrate.
 """
 
-#%% code id=retry
-# BS.retry_failed!(ROOT, SWEEP)
-"(disabled — un-comment to retry the failures)"
+#%% code id=breaker
+broken = @sweep(paramgrid(x = 1:200), local_target) do p
+    error("typo in the body: no method matching frobnicate")
+end
 
 #%% md id=h_reset
 @md"""
-## Start over
+## Starting over
 
-Drops every manifest for this sweep and its submission history, so the next reconcile runs the
-whole thing again from cold.
+`reset!(r)` drops every unit for a sweep and its submission history, so the next run goes from cold.
 """
 
 #%% code id=reset
-function reset_demo!()
-    for c in BS.sweep_chunks(ROOT, SWEEP), k in BS.chunk_shards(ROOT, c)
-        MemoStore.drop_manifest(ROOT, k)
-    end
-    BS.clear_attempts!(ROOT, SWEEP)
-end
-"(call reset_demo!() to clear)"
+"(call reset!(scan) or reset!(broken) to clear)"
 
 # ╔═╡ Slate.config · per-notebook settings (Settings panel)
-#   docid = 9204132c-0a77-4c07-8135-f06cb33aba84
+#   docid = c9a73fa9-f90e-4907-947b-04344d988ea2
 # ╚═╡

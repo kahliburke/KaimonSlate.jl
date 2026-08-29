@@ -166,6 +166,35 @@ struct Plan
     chunk_attempts::Dict{String,Int}
     to_submit::Vector{String}
     state::Symbol
+    blocked::String            # why nothing more will be submitted ("" = not blocked)
+end
+
+# Early-failure circuit breaker. The failure this exists to prevent is submitting thousands of units
+# of work, waiting a day, and finding out the body was broken all along — so a run that is failing
+# early stops itself rather than spending the rest of the allocation proving the same point.
+#
+# Absolute AND proportional: a handful of bad parameters in a large sweep is normal and must not trip
+# it, while everything failing must trip it whatever the sweep's size.
+#
+# `probe_chunks` is what makes the breaker actually work. Checking the failure rate is useless if
+# every chunk is submitted at once: nothing has finished at submit time, so there is no evidence to
+# judge, and by the time there is, the whole sweep has already run. So a sweep with no completed
+# units yet releases only its first few chunks, and the rest goes out once those have reported.
+# This is the "run a small test before scaling up" habit, made automatic.
+Base.@kwdef struct FailurePolicy
+    min_sample::Int = 8        # decide nothing before this many units have finished
+    max_fraction::Float64 = 0.5
+    max_failures::Int = 0      # 0 = no absolute cap
+    probe_chunks::Int = 1      # chunks to release before ANY unit has finished (0 = no probing)
+end
+
+function _breaker(pol::FailurePolicy, done::Int, failed::Int)
+    pol.max_failures > 0 && failed >= pol.max_failures &&
+        return "$(failed) units failed, at or past the limit of $(pol.max_failures)"
+    done >= pol.min_sample && failed / done > pol.max_fraction &&
+        return "$(failed) of the first $(done) units failed " *
+               "($(round(Int, 100 * failed / done))%, over the $(round(Int, 100 * pol.max_fraction))% limit)"
+    return ""
 end
 
 fraction(p::Plan) = p.shards_total == 0 ? 1.0 : p.shards_done / p.shards_total
@@ -176,14 +205,15 @@ is_settled(p::Plan) = p.shards_done == p.shards_total
 "Finished and clean. Use `is_settled` when a sweep with recorded failures should also count."
 is_complete(p::Plan) = is_settled(p) && p.shards_failed == 0
 
-"Nothing more will happen without a resubmit or a retry."
-is_stuck(p::Plan) = p.state === :stalled
+"Nothing more will happen without a decision: the retry budget is spent, or the breaker tripped."
+is_stuck(p::Plan) = p.state === :stalled || p.state === :blocked
 
 function Base.show(io::IO, p::Plan)
     print(io, "Plan($(p.sweep) $(p.state): $(p.shards_done)/$(p.shards_total) shards")
     p.shards_failed  > 0 && print(io, ", $(p.shards_failed) errored")
     p.shards_missing > 0 && print(io, ", $(p.shards_missing) missing")
     isempty(p.to_submit) || print(io, ", $(length(p.to_submit)) to submit")
+    isempty(p.blocked)   || print(io, " — BLOCKED: ", p.blocked)
     print(io, ")")
 end
 
@@ -198,7 +228,8 @@ A partially finished chunk counts as missing. Resubmitting it is cheap and safe 
 skips shards that are already in the store, so a chunk killed at 90% resumes rather than repeats.
 """
 function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
-              max_attempts::Integer = MAX_ATTEMPTS)
+              max_attempts::Integer = MAX_ATTEMPTS,
+              failure_policy::FailurePolicy = FailurePolicy())
     chunks = sweep_chunks(root, sweep)
     subs = known_submissions(root)
     counts = read_attempts(root)
@@ -236,6 +267,10 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
         end
     end
 
+    # Checked before the submit list is built, so a tripped breaker blocks the work rather than
+    # reporting it after the fact.
+    blocked = _breaker(failure_policy, done, failed)
+
     cstate = Dict{String,Symbol}()
     to_submit = String[]
     for c in chunks
@@ -243,6 +278,8 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
             cstate[c] = :done
         elseif haskey(live, c)
             cstate[c] = live[c]
+        elseif !isempty(blocked)
+            cstate[c] = :blocked
         elseif tries[c] >= max_attempts
             # Attempted its full budget and still not finished. Something is wrong with the work
             # itself (it outruns its walltime, it is killed for memory) and resubmitting on a loop
@@ -263,6 +300,10 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
         # finished with 12 of 4,000 failing is DONE, and saying otherwise would leave it looking
         # forever in progress.
         failed == 0 ? :succeeded : :partial
+    elseif !isempty(blocked)
+        # Distinct from :stalled. Nothing is wrong with the scheduler; the WORK is failing, and
+        # continuing would spend an allocation confirming it.
+        :blocked
     elseif anylive
         :running
     elseif !isempty(to_submit)
@@ -276,7 +317,7 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
     end
 
     return Plan(String(sweep), total, done, ok, failed, missing_shards,
-                cstate, tries, to_submit, sweep_state)
+                cstate, tries, to_submit, sweep_state, blocked)
 end
 
 """
@@ -290,26 +331,38 @@ Julia paths.
 Firing thousands of jobs should take an explicit decision, not happen because a key changed.
 """
 function reconcile!(root::AbstractString, sweep::AbstractString, launcher, specfn;
-                    submit::Bool = true, cap::Integer = 0)
-    p = plan(root, sweep; launcher)
+                    submit::Bool = true, cap::Integer = 0,
+                    failure_policy::FailurePolicy = FailurePolicy())
+    p = plan(root, sweep; launcher, failure_policy)
+    # A tripped breaker produces an empty submit list, so this is belt and braces; being explicit
+    # keeps it true if the plan's ordering ever changes.
+    isempty(p.blocked) || return p
     (isempty(p.to_submit) || !submit) && return p
     cap > 0 && length(p.to_submit) > cap &&
         error("sweep $sweep wants to submit $(length(p.to_submit)) chunks, over the cap of $cap")
 
-    name = submission_name(p.to_submit)
+    # Probe wave: with nothing finished yet there is no evidence the body works, so release only a
+    # few chunks. The next reconcile either trips the breaker or sends the rest.
+    outgoing = p.to_submit
+    if failure_policy.probe_chunks > 0 && p.shards_done == 0 &&
+       length(outgoing) > failure_policy.probe_chunks
+        outgoing = first(outgoing, failure_policy.probe_chunks)
+    end
+
+    name = submission_name(outgoing)
     mkpath(jobs_dir(root))
     # Write the index BEFORE submitting. If the submit succeeds and the hub dies before it could
     # record anything, the index is already on disk and the next reconcile sees the work as live
     # instead of submitting it a second time.
-    write(index_path(root, name), join(p.to_submit, "\n") * "\n")
+    write(index_path(root, name), join(outgoing, "\n") * "\n")
     try
-        BatchLauncher.submit!(launcher, specfn(name, p.to_submit))
-        bump_attempts!(root, p.to_submit)          # only a submission that actually went out counts
+        BatchLauncher.submit!(launcher, specfn(name, outgoing))
+        bump_attempts!(root, outgoing)             # only a submission that actually went out counts
     catch e
         rm(index_path(root, name); force = true)   # nothing is live; let the next pass retry
         rethrow(e)
     end
-    return plan(root, sweep; launcher)
+    return plan(root, sweep; launcher, failure_policy)
 end
 
 # ── Progress ─────────────────────────────────────────────────────────────────────────────────
@@ -345,6 +398,89 @@ function progress(root::AbstractString, sweep::AbstractString)
         end
     end
     return (; total, done, ran, skipped, failed, chunks = seen, ran_on = unique(hosts))
+end
+
+# ── Telemetry ────────────────────────────────────────────────────────────────────────────────
+# The numbers that answer the questions a long run actually raises: is it working, how far along,
+# how much longer, and has it quietly stopped. An elapsed-seconds counter answers none of them.
+
+"""
+    Telemetry
+
+`rate` is measured completions per second, so the ETA self-corrects instead of trusting a per-unit
+estimate. `idle_s` is the age of the most recent completion and is the "has it stopped" signal:
+distinct from `:stalled`, which is structural (retry budget spent), because work can be legitimately
+queued for hours without a single completion.
+"""
+struct Telemetry
+    state::Symbol
+    total::Int
+    done::Int
+    ok::Int
+    failed::Int
+    missing::Int
+    elapsed_s::Float64       # since the first unit finished
+    rate_per_s::Float64      # completions per wall second
+    eta_s::Float64           # -1.0 when not yet estimable
+    idle_s::Float64          # since the most recent completion; -1.0 if nothing has finished
+    mean_unit_s::Float64     # mean COMPUTE time per unit (not wall time)
+    hosts::Vector{String}
+    blocked::String          # why nothing more will be submitted ("" = not blocked)
+end
+
+fraction(t::Telemetry) = t.total == 0 ? 1.0 : t.done / t.total
+
+"""
+    telemetry(root, sweep; launcher = nothing, plan = nothing) -> Telemetry
+
+Progress with an honest ETA. Derived entirely from the store, so it is correct after a restart and
+needs no record of what the hub saw last time.
+"""
+function telemetry(root::AbstractString, sweep::AbstractString;
+                   launcher = nothing, plan = nothing)
+    p = plan === nothing ? BatchSweep.plan(root, sweep; launcher) : plan
+    created = Float64[]; comp_ms = Float64[]; hosts = String[]
+    for c in sweep_chunks(root, sweep), k in chunk_shards(root, c)
+        m = MemoStore.read_manifest(root, k)
+        m === nothing && continue
+        push!(created, Float64(get(m, "created", 0)))
+        push!(comp_ms, Float64(get(m, "ms", 0.0)))
+        h = String(get(m, "ran_on", "")); isempty(h) || push!(hosts, h)
+    end
+
+    now = time()
+    if isempty(created)
+        return Telemetry(p.state, p.shards_total, 0, 0, 0, p.shards_missing,
+                         0.0, 0.0, -1.0, -1.0, 0.0, String[], p.blocked)
+    end
+    first_done = minimum(created); last_done = maximum(created)
+    elapsed = max(now - first_done, 0.0)
+    idle = max(now - last_done, 0.0)
+    # Rate over the span of observed completions, not since submission: queue time is not throughput
+    # and including it would make the ETA pessimistic by however long the job waited.
+    span = max(last_done - first_done, 1.0)
+    rate = length(created) > 1 ? (length(created) - 1) / span : 0.0
+    remaining = max(p.shards_total - p.shards_done, 0)
+    eta = (rate > 0 && remaining > 0) ? remaining / rate : (remaining == 0 ? 0.0 : -1.0)
+
+    return Telemetry(p.state, p.shards_total, p.shards_done, p.shards_ok, p.shards_failed,
+                     p.shards_missing, elapsed, rate, eta, idle,
+                     isempty(comp_ms) ? 0.0 : sum(comp_ms) / length(comp_ms) / 1000,
+                     unique(hosts), p.blocked)
+end
+
+"""
+    stalled_for(t; factor = 6.0, floor_s = 60.0) -> Float64
+
+How long the sweep has looked stopped, or `0.0` if it looks healthy. A run is only suspicious once
+it has been idle for several times its own unit duration, so a sweep of slow units is not
+constantly accused of hanging. Returns 0 when nothing has completed yet, since a queued sweep has
+not started rather than stopped.
+"""
+function stalled_for(t::Telemetry; factor::Real = 6.0, floor_s::Real = 60.0)
+    (t.idle_s < 0 || t.done == 0 || t.done == t.total) && return 0.0
+    threshold = max(factor * max(t.mean_unit_s, 1.0), floor_s)
+    return t.idle_s > threshold ? t.idle_s : 0.0
 end
 
 """

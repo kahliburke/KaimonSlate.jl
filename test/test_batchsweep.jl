@@ -33,15 +33,21 @@ specfn(root, project = tempdir()) =
     (name, chunks) -> BL.JobSpec(name, chunks; root,
                                  project, payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
 
+# For tests about submission bookkeeping rather than about probing: release everything at once so
+# the assertion under test is not entangled with the probe wave.
+const NOPROBE = BS.FailurePolicy(; probe_chunks = 0)
+
 # A sweep of `nchunk` chunks of `per` shards each, over `fn_src`.
+# Chunk and shard keys are namespaced by sweep: two sweeps in one store would otherwise share keys
+# and each would see the other's results as its own.
 function mksweep(root; nchunk = 2, per = 3, fn_src = "p -> p * 2", sweep = "sweep0")
     chunks = String[]
     n = 0
     for c in 1:nchunk
-        chunk = "chunk$(c)"
+        chunk = "$(sweep)_c$(c)"
         params = collect((n + 1):(n + per)); n += per
         SlateTask.write_chunk!(root, chunk; fn_src, params,
-                               keys = ["s$(p)" for p in params])
+                               keys = ["$(sweep)_s$(p)" for p in params])
         push!(chunks, chunk)
     end
     BS.write_sweep!(root, sweep, chunks)
@@ -71,13 +77,13 @@ end
         mktempdir() do root
             sweep, chunks = mksweep(root)
             l = FakeLauncher()
-            p = BS.reconcile!(root, sweep, l, specfn(root))
+            p = BS.reconcile!(root, sweep, l, specfn(root); failure_policy = NOPROBE)
             @test length(l.submitted) == 1
             @test sort(l.submitted[1].chunks) == sort(chunks)
             @test all(s -> s in (:pending, :running), values(p.chunk_state))
             @test isempty(p.to_submit)
             # Second pass: the work is live, so nothing new goes out.
-            BS.reconcile!(root, sweep, l, specfn(root))
+            BS.reconcile!(root, sweep, l, specfn(root); failure_policy = NOPROBE)
             @test length(l.submitted) == 1
         end
     end
@@ -88,7 +94,7 @@ end
         mktempdir() do root
             sweep, _ = mksweep(root)
             l = FakeLauncher()
-            BS.reconcile!(root, sweep, l, specfn(root))
+            BS.reconcile!(root, sweep, l, specfn(root); failure_policy = NOPROBE)
             l2 = FakeLauncher(; live = copy(l.live))       # a brand new hub, same cluster
             p = BS.plan(root, sweep; launcher = l2)
             @test isempty(p.to_submit)
@@ -121,7 +127,7 @@ end
         mktempdir() do root
             sweep, chunks = mksweep(root; nchunk = 1, per = 4)
             SlateTask.run_chunk(root, chunks[1])
-            MemoStore.drop_manifest(root, "s2")             # pretend one shard never landed
+            MemoStore.drop_manifest(root, "$(sweep)_s2")             # pretend one shard never landed
             p = BS.plan(root, sweep)
             @test p.chunk_state[chunks[1]] === :missing     # partial counts as missing
             @test p.shards_done == 3
@@ -244,6 +250,99 @@ end
         end
     end
 
+    @testset "a fresh sweep releases only a probe wave" begin
+        # Without this the breaker is decorative: submitting every chunk at once means nothing has
+        # finished when the failure rate is judged, and by the time it can be judged the whole
+        # sweep has already run.
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 6, per = 2)
+            l = FakeLauncher()
+            BS.reconcile!(root, sweep, l, specfn(root))
+            @test length(l.submitted) == 1
+            @test length(l.submitted[1].chunks) == 1          # one chunk, not six
+            @test l.submitted[1].chunks[1] == chunks[1]
+
+            # Once the probe reports, the rest is released.
+            empty!(l.live)
+            SlateTask.run_chunk(root, chunks[1])
+            BS.reconcile!(root, sweep, l, specfn(root))
+            @test length(l.submitted) == 2
+            @test sort(l.submitted[2].chunks) == sort(chunks[2:end])
+        end
+    end
+
+    @testset "a broken body is caught by the probe, not after the whole sweep" begin
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 10, per = 4, fn_src = "p -> error(\"broken\")")
+            l = FakeLauncher()
+            pol = BS.FailurePolicy(; min_sample = 4, max_fraction = 0.5, probe_chunks = 1)
+            BS.reconcile!(root, sweep, l, specfn(root); failure_policy = pol)
+            @test length(l.submitted[1].chunks) == 1
+            empty!(l.live)
+            SlateTask.run_chunk(root, chunks[1])              # the probe: 4 units, all fail
+            p = BS.reconcile!(root, sweep, l, specfn(root); failure_policy = pol)
+            @test p.state === :blocked
+            @test length(l.submitted) == 1                    # the other 36 units never went out
+        end
+    end
+
+    @testset "the breaker stops a sweep that is failing early" begin
+        # The failure this prevents: submit thousands of units, wait a day, find the body was
+        # broken all along.
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 4, per = 3, fn_src = "p -> error(\"always\")")
+            SlateTask.run_chunk(root, chunks[1])          # a pilot chunk: 3 of 3 fail
+            pol = BS.FailurePolicy(; min_sample = 3, max_fraction = 0.5)
+            p = BS.plan(root, sweep; failure_policy = pol)
+            @test p.state === :blocked
+            @test BS.is_stuck(p)
+            @test occursin("3 of the first 3", p.blocked)
+            @test isempty(p.to_submit)                    # the other 9 units are not queued
+
+            l = FakeLauncher()
+            BS.reconcile!(root, sweep, l, specfn(root); failure_policy = pol)
+            @test isempty(l.submitted)                    # and nothing goes out
+        end
+    end
+
+    @testset "the breaker tolerates a few bad parameters in a large sweep" begin
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 2, per = 10,
+                                    fn_src = "p -> p == 3 ? error(\"one bad\") : p")
+            SlateTask.run_chunk(root, chunks[1])          # 10 units, 1 failure
+            p = BS.plan(root, sweep; failure_policy = BS.FailurePolicy(; min_sample = 5))
+            @test p.blocked == ""
+            @test p.state === :pending
+            @test p.to_submit == [chunks[2]]
+        end
+    end
+
+    @testset "telemetry gives a rate, an ETA, and an idle age" begin
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 2, per = 4)
+            SlateTask.run_chunk(root, chunks[1])          # half the sweep
+            t = BS.telemetry(root, sweep)
+            @test t.total == 8 && t.done == 4 && t.ok == 4
+            @test BS.fraction(t) == 0.5
+            @test t.idle_s >= 0                            # something has completed
+            @test t.mean_unit_s >= 0
+            @test !isempty(t.hosts)
+            # Nothing has finished in a fresh sweep, so an ETA is honestly unknown rather than 0.
+            sweep2, _ = mksweep(root; nchunk = 1, per = 2, sweep = "empty0")
+            t2 = BS.telemetry(root, sweep2)
+            @test t2.done == 0 && t2.eta_s == -1.0 && t2.idle_s == -1.0
+        end
+    end
+
+    @testset "stalled_for stays quiet on a healthy or unstarted run" begin
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 1, per = 3)
+            @test BS.stalled_for(BS.telemetry(root, sweep)) == 0.0   # nothing started yet
+            SlateTask.run_chunk(root, chunks[1])
+            @test BS.stalled_for(BS.telemetry(root, sweep)) == 0.0   # complete, so not stalled
+        end
+    end
+
     @testset "cap refuses an oversized submission" begin
         mktempdir() do root
             sweep, _ = mksweep(root; nchunk = 4, per = 1)
@@ -269,11 +368,12 @@ end
         mktempdir() do root
             sweep, chunks = mksweep(root; nchunk = 2, per = 2)
             l = BL.ExecLauncher()
-            BS.reconcile!(root, sweep, l, specfn(root))
-            # Wait for the subprocesses; they are plain julia starts, so give them room.
+            # Reconcile on a loop, which is what a monitor does: the first pass releases only the
+            # probe wave, and later passes send the rest once it has reported.
             done = false
             for _ in 1:120
-                BS.is_complete(BS.plan(root, sweep)) && (done = true; break)
+                BS.reconcile!(root, sweep, l, specfn(root))
+                BS.is_complete(BS.plan(root, sweep; launcher = l)) && (done = true; break)
                 sleep(1)
             end
             p = BS.plan(root, sweep)

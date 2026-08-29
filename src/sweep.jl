@@ -23,7 +23,8 @@ const BatchLauncher = P.BatchLauncher
 const BatchSweep = P.BatchSweep
 
 export paramgrid, @sweep, SweepTarget, LocalTarget, SlurmTarget,
-       finished, failures, values_of, refresh!, retry_failed!, reset!
+       finished, failures, values_of, refresh!, retry_failed!, reset!,
+       sweep_state, fraction, eta, stalled_for, blocked
 
 # ── Parameter space ──────────────────────────────────────────────────────────────────────────
 
@@ -154,6 +155,7 @@ mutable struct ShardedResult
     keys::Vector{String}
     plan::BatchSweep.Plan
     rows::Vector{NamedTuple}
+    telemetry::BatchSweep.Telemetry
 end
 
 Base.length(r::ShardedResult) = length(r.rows)
@@ -161,8 +163,19 @@ Base.getindex(r::ShardedResult, i) = r.rows[i]
 Base.iterate(r::ShardedResult, s = 1) = s > length(r.rows) ? nothing : (r.rows[s], s + 1)
 Base.eltype(::Type{ShardedResult}) = NamedTuple
 
-state(r::ShardedResult) = r.plan.state
+# `sweep_state`, not `state`: this is exported into a notebook's namespace, where a bare `state`
+# is far too likely to collide with the author's own variable.
+sweep_state(r::ShardedResult) = r.plan.state
 fraction(r::ShardedResult) = BatchSweep.fraction(r.plan)
+
+"Seconds until the sweep finishes at the observed rate, or -1 when nothing has finished yet."
+eta(r::ShardedResult) = r.telemetry.eta_s
+
+"How long the sweep has looked stopped, or 0.0 if it looks healthy."
+stalled_for(r::ShardedResult) = BatchSweep.stalled_for(r.telemetry)
+
+"Why nothing more will be submitted (\"\" = not blocked)."
+blocked(r::ShardedResult) = r.plan.blocked
 
 "Rows whose shard completed successfully."
 finished(r::ShardedResult) = [row for row in r.rows if row.status == "ok"]
@@ -196,8 +209,10 @@ progress display calls on a timer.
 """
 function refresh!(r::ShardedResult)
     root = store_root(r.target)
-    r.plan = BatchSweep.plan(root, r.key; launcher = launcher_for(r.target))
+    l = launcher_for(r.target)
+    r.plan = BatchSweep.plan(root, r.key; launcher = l)
     r.rows = _rows(root, r.params, r.keys)
+    r.telemetry = BatchSweep.telemetry(root, r.key; launcher = l, plan = r.plan)
     return r
 end
 
@@ -213,18 +228,53 @@ function reset!(r::ShardedResult)
     return n
 end
 
+# Duration as something a person reads at a glance. "4302 seconds elapsed" is exactly the
+# unhelpful form this exists to avoid.
+function _dur(s::Real)
+    s < 0 && return "?"
+    s < 1   && return "<1s"
+    s < 60  && return string(round(Int, s), "s")
+    s < 3600 && return string(round(Int, s ÷ 60), "m", lpad(round(Int, s % 60), 2, '0'), "s")
+    s < 86400 && return string(round(Int, s ÷ 3600), "h", lpad(round(Int, (s % 3600) ÷ 60), 2, '0'), "m")
+    return string(round(s / 86400; digits = 1), "d")
+end
+
+_bar(frac, width = 24) =
+    (n = clamp(round(Int, frac * width), 0, width); "▰"^n * "▱"^(width - n))
+
 function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
     p = r.plan
+    t = r.telemetry
     icon = p.state === :succeeded ? "✅" : p.state === :partial ? "⚠️" :
-           p.state === :stalled   ? "⛔" : p.state === :running ? "⏳" : "•"
+           p.state === :stalled   ? "⛔" : p.state === :blocked ? "🛑" :
+           p.state === :running   ? "⏳" : "•"
     pct = round(100 * BatchSweep.fraction(p); digits = 1)
     println(io, "$icon sweep $(r.key) — $(p.state)")
-    println(io, "   $(p.shards_done)/$(p.shards_total) shards ($pct%)   ",
-                "ok $(p.shards_ok)   errored $(p.shards_failed)   missing $(p.shards_missing)")
+    println(io, "   $(_bar(BatchSweep.fraction(p)))  $(p.shards_done)/$(p.shards_total) ($pct%)")
+    println(io, "   ok $(p.shards_ok)   errored $(p.shards_failed)   remaining $(p.shards_missing)")
+
+    # The three numbers a long run is actually asking about. Suppressed once nothing more will
+    # happen: "<1s remaining" on a finished sweep is noise, and an ETA on a blocked or stalled one
+    # is a promise it will not keep.
+    if t.done > 0 && !BatchSweep.is_settled(p) && !BatchSweep.is_stuck(p)
+        parts = String[]
+        t.rate_per_s > 0 && push!(parts, string(round(t.rate_per_s; digits = 2), " units/s"))
+        t.eta_s >= 0     && push!(parts, "~$(_dur(t.eta_s)) remaining")
+        t.mean_unit_s > 0 && push!(parts, "$(_dur(t.mean_unit_s))/unit")
+        isempty(parts) || println(io, "   ", join(parts, " · "))
+    end
+
     hosts = unique([row.ran_on for row in r.rows if !isempty(row.ran_on)])
     isempty(hosts) || println(io, "   ran on: ", join(first(hosts, 6), ", "),
                               length(hosts) > 6 ? " (+$(length(hosts) - 6) more)" : "")
-    if p.state === :partial
+
+    idle = BatchSweep.stalled_for(t)
+    idle > 0 && println(io, "   ⚠ nothing has finished in $(_dur(idle)) — it may be stuck.")
+
+    if p.state === :blocked
+        println(io, "   🛑 $(p.blocked)")
+        println(io, "   Nothing further will be submitted. Fix the body, then `reset!(r)`.")
+    elseif p.state === :partial
         println(io, "   `failures(r)` lists the errors; `retry_failed!(r)` clears them for a retry.")
     elseif p.state === :stalled
         println(io, "   attempted $(BatchSweep.MAX_ATTEMPTS)× without landing. Raise the walltime or",
@@ -269,7 +319,8 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         BatchSweep.reconcile!(root, key, launcher, specfn_for(target); cap)
     end
     pl = BatchSweep.plan(root, key; launcher)
-    return ShardedResult(key, target, collect(params), keys, pl, _rows(root, params, keys))
+    tl = BatchSweep.telemetry(root, key; launcher, plan = pl)
+    return ShardedResult(key, target, collect(params), keys, pl, _rows(root, params, keys), tl)
 end
 
 # Free names in the body that are bound in the calling module and look like DATA. These travel with
