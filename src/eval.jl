@@ -354,7 +354,25 @@ seed the task-local Slate execution context (see `_build_slate_ctx`); `region=\"
 eval_capture(::InProcessKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
              region::AbstractString = "", regions::AbstractVector = String[]) =
     _eval_capture(report_module(report), source, filename;
-                  slate_ctx = _build_slate_ctx(report_module(report), report.id, region, regions))
+                  slate_ctx = _build_slate_ctx(report_module(report), report.id, region, regions,
+                                               _cell_attr_args(report, filename),
+                                               _cluster_attr_args(report)))
+
+_cluster_attr_args(report::Report) = String[
+    string(get(c, "name", ""), ".", k, "=", v)
+    for c in get(report.meta, "clusters", Dict{String,Any}[])
+    for (k, v) in c if k != "name" && !isempty(string(v)) && !isempty(String(get(c, "name", "")))]
+
+# The evaluating cell's `key=value` header attributes, in the same `"k=v"` shape the gate kernel
+# wires to the worker — so a cell reads the same `slate_context().attrs` either side.
+function _cell_attr_args(report::Report, filename::AbstractString)
+    cid = replace(String(filename), r"^cell:" => "")
+    isempty(cid) && return String[]
+    for c in report.cells
+        c.id == cid && return String[string(k, "=", v) for (k, v) in cell_attrs(c)]
+    end
+    return String[]
+end
 
 # Memo-aware entry (5-arg `memo` = (; key, names, threshold)). Default: ignore caching and just
 # evaluate — only the gate kernel (real notebooks) implements durable memoization. Keeps in-process

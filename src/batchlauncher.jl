@@ -281,11 +281,21 @@ function poll(l::SlurmLauncher, root::AbstractString, names)
     return out
 end
 
+# ONE scancel per name. `--name` takes a single job name: `scancel --name=a,b` matches nothing and
+# still EXITS 0, so batching them reported every job cancelled while the work carried on running —
+# a cancel that silently keeps burning the allocation. Verified against SLURM 24.11.
+#
+# Sent as one ssh round trip regardless, and the count comes from what actually left the queue
+# rather than from scancel's exit status, which says nothing about whether a name matched.
 function cancel!(l::SlurmLauncher, root::AbstractString, names)
     ns = String.(collect(names))
     isempty(ns) && return 0
-    ok, _ = _run_capture(_ssh(l, "scancel --name=$(join(ns, ','))"))
-    return ok ? length(ns) : 0
+    before = poll(l, root, ns)
+    live = [n for n in ns if get(before, n, :unknown) in (:pending, :running)]
+    isempty(live) && return 0
+    _run_capture(_ssh(l, join(("scancel --name=$(n)" for n in live), "; ")))
+    after = poll(l, root, live)
+    return count(n -> !(get(after, n, :unknown) in (:pending, :running)), live)
 end
 
 function logs(l::SlurmLauncher, root::AbstractString, name::AbstractString; lines::Int = 200)

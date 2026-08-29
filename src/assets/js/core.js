@@ -1103,9 +1103,13 @@ function fmtCell(value, fmt) {
   return (neg ? '-' : '') + prefix + core + suffix;
 }
 // ── end cell formatter (marker for the Node parity test test/js/format_parity.mjs) ──
+// Returns whether the work actually happened — see `renderAnimation` (animate.js) for why the
+// caller must not memoize a render it could not perform: with specs to draw and no host yet, the
+// tables would be marked rendered and never appear until a page reload.
 function renderTables(c) {
   const specs = c.tables || [];
   const host = document.querySelector('#cell-' + c.id + ' .tables');
+  const done = !!host || !specs.length;
   if (host) {                                   // code-cell tables host
     if (!specs.length) { host.innerHTML = ''; delete tableState[c.id]; }
     else {
@@ -1127,6 +1131,7 @@ function renderTables(c) {
     el._st = el._st || { sort: null, filter: '', page: 0, pageSize: spec.paged ? (spec.pageSize || 50) : 25 };
     drawTable(el, spec, el._st);
   });
+  return done;
 }
 // Build the persistent shell once per column-signature; refresh fills the body.
 // `sel` (optional) turns on ROW SELECTION (TableSelect @bind): {value, onSelect(origIdx1)} — rows

@@ -320,13 +320,25 @@ function _kill_pid(pid::Integer)
     return nothing
 end
 
-# Restart-reaping backstop: kill leftover worker subprocesses from a previous
-# extension instance that exited non-gracefully (crash / hard kill), since that
-# path skips `on_shutdown`. Each worker's boot script carries the `SlateWorker.start`
-# marker in its argv, so a command-line match finds exactly ours. Called once at init,
-# BEFORE this instance spawns any worker, so it never targets our own children.
+# Is this `create_tools` call Kaimon really hosting us, or someone inspecting the surface?
+# `create_tools` already reaches the gate through `parentmodule(GateTool)`, so the module the tool
+# type came from is the honest answer: KaimonGate means Kaimon is serving these tools, anything else
+# (the drift test's stand-in) means the caller only wants the registry.
+_hosted_by_kaimon(GateTool::Type) =
+    (try; nameof(parentmodule(GateTool)); catch; :?; end) === :KaimonGate
+
+# Restart-reaping backstop: kill leftover worker subprocesses from a previous instance of THIS hub
+# that exited non-gracefully (crash / hard kill), since that path skips `on_shutdown`.
+#
+# Scoped by owner, because `pgrep` is machine-wide and a hub is not the only one on the machine: a
+# worktree hub (KAIMONSLATE_HOME/_PORT) runs beside the installed extension by design. Matching the
+# bare `SlateWorker.start` marker killed every Slate worker on the box, so starting one hub
+# SIGKILLed another's live notebook workers — silently, since a signalled process reports
+# `exitcode == 0` in Julia (the signal lands in `termsignal`), which reads as a clean exit.
+# `worker_owner_tag()` is stamped into each worker's argv by `_worker_script`, so the match now
+# selects exactly the workers this hub identity spawned.
 function _reap_orphan_workers!()
-    for pid in _pids_matching("SlateWorker.start")
+    for pid in _pids_matching(ReportEngine.worker_owner_tag())
         _kill_pid(pid)
     end
     return nothing
@@ -2092,15 +2104,22 @@ function create_tools(GateTool::Type)
     # `slate.open` MCP call. Reap any orphaned workers from a prior crashed instance
     # first, and register an atexit backstop so a normal process exit also reaps.
     # Guarded: a failure here must not break tool registration.
-    try
-        _load_slate_config!()            # apply the persisted worker-thread spec before any worker spawns
-        _reap_orphan_workers!()
-        ReportEngine._reap_orphan_ssh!()   # …and any ssh tunnel/master procs a hard-killed prior hub orphaned
-        atexit(on_shutdown)
-        _hub()
-        @info "KaimonSlate hub auto-started" url = _base()
-    catch e
-        @warn "KaimonSlate hub auto-start failed" exception = (e, catch_backtrace())
+    #
+    # ONLY when Kaimon is really hosting us. Building the tool list is otherwise a pure
+    # description of the surface — anyone may ask for it, and a caller passing a stand-in
+    # `GateTool` (the drift test does exactly that) must not thereby bind a port, adopt the
+    # persisted notebook registry, or reap workers belonging to the hub that IS running.
+    if _hosted_by_kaimon(GateTool)
+        try
+            _load_slate_config!()            # apply the persisted worker-thread spec before any worker spawns
+            _reap_orphan_workers!()
+            ReportEngine._reap_orphan_ssh!()   # …and any ssh tunnel/master procs a hard-killed prior hub orphaned
+            atexit(on_shutdown)
+            _hub()
+            @info "KaimonSlate hub auto-started" url = _base()
+        catch e
+            @warn "KaimonSlate hub auto-start failed" exception = (e, catch_backtrace())
+        end
     end
 
     # Declared silence budgets. Kaimon's session-tool deadline is refreshed by every progress

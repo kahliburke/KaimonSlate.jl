@@ -222,7 +222,18 @@ const NS = KaimonSlate.NotebookServer
             @test Symbol("needs=up,db") in NS._parse_tag_symbols(["needs=up,db"])
             @test Symbol("needs=up") in NS._parse_tag_symbols("needs=up cache")     # string form: whitespace-split
             @test :cache in NS._parse_tag_symbols("needs=up cache")
-            @test Symbol("needs=a_b") in NS._parse_tag_symbols(["needs=a-b"])       # values still sanitized
+            # A `needs=`/`mutates=`/`region=` value NAMES a Julia binding or a region, so it still
+            # folds to an identifier. Everything else is configuration and keeps the punctuation
+            # that carries its meaning — a walltime, a size, a path, a hyphenated partition — which
+            # folding to `_` silently corrupted.
+            @test Symbol("needs=a_b") in NS._parse_tag_symbols(["needs=a-b"])
+            @test Symbol("region=a_b") in NS._parse_tag_symbols(["region=a-b"])
+            @test Symbol("walltime=00:10:00") in NS._parse_tag_symbols(["walltime=00:10:00"])
+            @test Symbol("mem=1.5G") in NS._parse_tag_symbols(["mem=1.5G"])
+            @test Symbol("partition=gpu-a100") in NS._parse_tag_symbols(["partition=gpu-a100"])
+            @test Symbol("root=/scratch/cas") in NS._parse_tag_symbols(["root=/scratch/cas"])
+            # Whitespace would break the header token, so it still folds.
+            @test Symbol("note=a_b") in NS._parse_tag_symbols(["note=a b"])
             @test isempty(NS._parse_tag_symbols(["needs="]))                        # empty value → dropped
             # End-to-end: tag a downstream cell via the UI path; the edge lands in deps, the cell
             # restales, and the tag survives the persist round-trip verbatim.

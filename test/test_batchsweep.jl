@@ -264,28 +264,28 @@ end
             r = Sweep.@sweep(g, t; submit = false) do p
                 p.x == 2 ? error("bad") : p.x
             end
-            for c in BS.sweep_chunks(root, r.key); SlateTask.run_chunk(root, c); end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
             @test Sweep.refresh!(r).plan.shards_failed == 1
 
             # retry clears only the failure
-            s = Sweep.handle_action(t, r.key, r.params, r.keys, "retry")
+            s = Sweep.handle_action(t, r.run, r.params, r.keys, "retry")
             @test s["failed"] == 0 && s["ok"] == 3 && s["missing"] == 1
 
             # cancel stops it and is durable, but keeps what finished
-            s = Sweep.handle_action(t, r.key, r.params, r.keys, "cancel")
+            s = Sweep.handle_action(t, r.run, r.params, r.keys, "cancel")
             @test s["state"] == "cancelled" && s["ok"] == 3
-            @test BS.is_cancelled(root, r.key)
+            @test BS.is_cancelled(root, r.run)
 
             # resume lifts the stop without touching results
-            s = Sweep.handle_action(t, r.key, r.params, r.keys, "resume")
+            s = Sweep.handle_action(t, r.run, r.params, r.keys, "resume")
             @test s["state"] != "cancelled" && s["ok"] == 3
             @test !BS.is_cancelled(root, r.key)
 
             # reset throws the results away
-            s = Sweep.handle_action(t, r.key, r.params, r.keys, "reset")
+            s = Sweep.handle_action(t, r.run, r.params, r.keys, "reset")
             @test s["done"] == 0 && s["ok"] == 0
 
-            @test_throws ErrorException Sweep.handle_action(t, r.key, r.params, r.keys, "nonsense")
+            @test_throws ErrorException Sweep.handle_action(t, r.run, r.params, r.keys, "nonsense")
         end
     end
 
@@ -294,8 +294,8 @@ end
             t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
                                   payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
             r = Sweep.@sweep(Sweep.paramgrid(x = 1:5), t; submit = false) do p; p.x; end
-            for c in BS.sweep_chunks(root, r.key); SlateTask.run_chunk(root, c); end
-            s = Sweep.status_payload(t, r.key, r.params, r.keys; advance = false)
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            s = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false)
             @test length(s["tiles"]) == 5           # one tile per unit at this size
             @test s["done"] == 5 && s["settled"] === true
             @test s["label"] isa String && startswith(s["color"], "#")
@@ -320,7 +320,7 @@ end
             r = Sweep.@sweep(Sweep.paramgrid(x = 1:2000), t; submit = false) do p; p.x; end
             html = sprint(show, MIME"text/html"(), r)
             rendered = length(collect(eachmatch(r"<div title=\"units ", html)))
-            payload = length(Sweep.status_payload(t, r.key, r.params, r.keys;
+            payload = length(Sweep.status_payload(t, r.run, r.params, r.keys;
                                                   advance = false)["tiles"])
             @test rendered == payload
             @test payload <= Sweep._TILE_BUDGET      # flat cost regardless of sweep size
@@ -358,6 +358,434 @@ end
             other = Sweep.@sweep(g, t; submit = false) do p; p.x * 4; end
             @test other.key != first_key
         end
+    end
+
+    @testset "a pilot and the full sweep share results but not a schedule" begin
+        # The pattern the fabric exists to encourage: run four points, look at them, then run four
+        # thousand with the same body and pay only for the difference. That makes the two cells the
+        # same SWEEP with different grids — so the results are shared, and everything that describes
+        # "these units" (chunks, plan, card, cancellation) must NOT be.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            pilot = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p; p.x * 7; end
+            full  = Sweep.@sweep(Sweep.paramgrid(x = 1:6), t; submit = false) do p; p.x * 7; end
+
+            @test pilot.key == full.key                    # one sweep: results are reusable
+            @test pilot.run != full.run                    # two requests: schedules are separate
+            @test pilot.keys == full.keys[1:2]             # and the shared units are the same units
+
+            # Chunk descriptors must not collide. Before the run key they did, and whichever cell
+            # ran last silently redefined the other's work.
+            pc, fc = BS.sweep_chunks(root, pilot.run), BS.sweep_chunks(root, full.run)
+            @test isempty(intersect(pc, fc))
+            @test pilot.total == 2 && full.total == 6      # each card counts its OWN units
+
+            # Running the pilot advances the full sweep by exactly the shared units, without the
+            # full sweep having been submitted at all.
+            for c in pc; SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(pilot).done == 2
+            @test Sweep.refresh!(full).done == 2
+            @test full.pending == 4
+
+            # The two cards address different channels, so neither renders the other's progress.
+            @test Sweep.status_channel(pilot.run) != Sweep.status_channel(full.run)
+        end
+    end
+
+    @testset "the result answers questions as properties" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false) do p
+                p.x == 3 && error("rigged")
+                p.x * 10
+            end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            Sweep.refresh!(r)
+
+            @test r.state === :partial
+            @test (r.total, r.done, r.ok, r.failed, r.pending) == (4, 4, 3, 1, 0)
+            @test r.fraction == 1.0 && r.percent == 100.0 && r.settled
+            # `summaries` come from the manifests, so this costs the same at four units and four
+            # million. A unit returning a number summarises to itself by default.
+            @test r.summaries == [10, 20, 40]
+            @test length(r.results) == 3 && length(r.errors) == 1
+            @test only(r.errors).params.x == 3
+            @test r.blocked == "" && r.stalled_for == 0.0
+            # A typo must name itself rather than returning `nothing` from a silent `getfield`.
+            @test_throws ArgumentError r.finishd
+            # Nothing that LOOKS cheap reads a blob: a row's `value` is a handle, and asking for the
+            # data is a separate, explicit act.
+            @test all(row -> row.value isa Sweep.ShardRef, r.results)
+            @test r.results[1].value[] == 10                 # one unit, deliberately
+            @test Sweep.load(r) == [10, 20, 40]              # all of them, deliberately
+            @test Sweep.load(r; limit = 2) == [10, 20]
+            @test r.bytes > 0
+            # …and the bulk path refuses rather than quietly pulling more than it should.
+            e = try; Sweep.load(r; max_bytes = 1); catch x; x; end
+            @test occursin("over the", sprint(showerror, e))
+            @test occursin("r.summaries", sprint(showerror, e))
+            @test :results in propertynames(r) && :plan in propertynames(r)
+        end
+    end
+
+    @testset "editing the science package re-keys the sweep" begin
+        # A task process is fresh and has no Revise, so an edit to the package a body CALLS changes
+        # what every unit computes while leaving the body text identical. Reusing the old results
+        # would silently mix two versions of the code — the one thing content addressing exists to
+        # prevent — and it fails loudly only when a function is newly added.
+        mktempdir() do root
+            mkpath(joinpath(root, "pkg", "src"))
+            pkg = joinpath(root, "pkg")
+            write(joinpath(pkg, "Project.toml"), "name = \"P\"\nuuid = \"00000000-0000-0000-0000-000000000001\"\n")
+            write(joinpath(pkg, "src", "P.jl"), "module P\nf() = 1\nend\n")
+            fp1 = Sweep.env_source_fingerprint(pkg)
+
+            # Project/Manifest are untouched, so the OLD fingerprint cannot see this.
+            @test Sweep.env_parent_fingerprint(pkg) ==
+                  (write(joinpath(pkg, "src", "P.jl"), "module P\nf() = 2\nend\n");
+                   Sweep.env_parent_fingerprint(pkg))
+            fp2 = Sweep.env_source_fingerprint(pkg)
+            @test fp1 != fp2                       # …but the source-inclusive one does
+
+            # A new file counts, and so does a rename — the path goes into the digest, not just the
+            # bytes, so moving code between files is a change.
+            write(joinpath(pkg, "src", "extra.jl"), "g() = 3\n")
+            @test Sweep.env_source_fingerprint(pkg) != fp2
+
+            # And the sweep key moves with the environment, because the provisioner names the env
+            # directory after that fingerprint.
+            t1 = Sweep.LocalTarget(; root, project = joinpath(root, "taskenv", "aaaa"), payload = "p", chunk = 2)
+            t2 = Sweep.LocalTarget(; root, project = joinpath(root, "taskenv", "bbbb"), payload = "p", chunk = 2)
+            @test Sweep.env_key(t1) == "aaaa" && Sweep.env_key(t2) == "bbbb"
+            @test Sweep.sweep_key("body", "", Dict(), Sweep.env_key(t1)) !=
+                  Sweep.sweep_key("body", "", Dict(), Sweep.env_key(t2))
+            # Same env ⇒ same sweep, so a pilot and the full run still share results.
+            @test Sweep.sweep_key("body", "", Dict(), "aaaa") ==
+                  Sweep.sweep_key("body", "", Dict(), "aaaa")
+        end
+    end
+
+    @testset "a sweep submits nothing until it is asked to" begin
+        # Authoring a sweep means running its cell over and over. None of those may spend an
+        # allocation — the cell reads the store and reports the plan, and the work starts when
+        # someone presses Submit.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t) do p; p.x; end   # no `submit =`
+            @test !r.armed && r.state === :ready && r.done == 0
+            @test isempty(BS.known_submissions(root))
+
+            # Re-running the cell is still free.
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t) do p; p.x; end
+            @test isempty(BS.known_submissions(root))
+            # …and so is the card's poll, which reconciles but may not submit.
+            s = Sweep.status_payload(t, r.run, r.params, r.keys)
+            @test s["state"] == "ready" && isempty(BS.known_submissions(root))
+            @test first(s["actions"][1]) == "submit"
+            @test occursin("Submit 4 units", last(s["actions"][1]))
+
+            # Submitting is the explicit act, and it sticks.
+            Sweep.handle_action(t, r.run, r.params, r.keys, "submit")
+            @test BS.is_armed(root, r.run)
+            @test Sweep.refresh!(r).state !== :ready
+
+            # Reset clears the results AND the arming: ready again, not running again.
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            Sweep.handle_action(t, r.run, r.params, r.keys, "reset")
+            @test !BS.is_armed(root, r.run)
+            @test Sweep.refresh!(r).state === :ready && r.done == 0
+        end
+    end
+
+    @testset "the card's controls track the sweep's state" begin
+        # The controls used to be rendered once by the cell and never updated, so cancelling a
+        # running sweep left a button still reading "Cancel" beside a card reading "stopped at your
+        # request" — indistinguishable from a cancel that did nothing.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false) do p
+                p.x == 2 && error("boom")
+                p.x
+            end
+            acts(p) = first.(Sweep.action_list(p))
+            l = BL.ExecLauncher()
+            plan() = BS.plan(root, r.run; launcher = l)
+
+            # Nothing submitted yet: pending, so it can be cancelled.
+            @test "cancel" in acts(plan())
+
+            # Cancelled while in flight ⇒ offer Resume, and NOT Cancel again. This is the transition
+            # the card has to follow: without it the button still reads "Cancel" beside a card that
+            # says "stopped at your request".
+            BS.cancel!(root, r.run, l)
+            @test acts(plan()) == ["resume", "reset"]
+            s = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false)
+            @test first(s["actions"][1]) == "resume"   # the poll carries it, so the row can rebuild
+            BS.resume!(root, r.run)
+            @test "cancel" in acts(plan())
+
+            # Finished with a failure: retry + reset, and no cancel — there is nothing left to stop.
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            p = plan()
+            @test acts(p) == ["retry", "reset"]
+            @test occursin("Retry 1 failed", last(Sweep.action_list(p)[1]))
+            # Cancelling something already finished changes nothing — it is not "stopped", it is done.
+            BS.cancel!(root, r.run, l)
+            @test acts(plan()) == ["retry", "reset"]
+        end
+    end
+
+    @testset "reset is available at any time, including part-way through" begin
+        # The case reset exists for is a long run that is half done and going wrong. Offering it only
+        # once a sweep had settled meant waiting out the very thing you wanted to stop.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:6), t; submit = false) do p
+                p.x
+            end
+            l = BL.ExecLauncher()
+            acts() = first.(Sweep.action_list(BS.plan(root, r.run; launcher = l),
+                                              BS.is_armed(root, r.run)))
+
+            # Nothing asked for and nothing done: reset would be a no-op, so it is not offered.
+            @test acts() == ["submit"]
+
+            # Armed, and part-way: one chunk landed, the rest outstanding.
+            Sweep.handle_action(t, r.run, r.params, r.keys, "submit")
+            SlateTask.run_chunk(root, first(BS.sweep_chunks(root, r.run)))
+            @test Sweep.refresh!(r).done == 2 && !r.settled
+            @test "reset" in acts()
+
+            # …and it really does clear, mid-flight, back to ready rather than stopped.
+            Sweep.handle_action(t, r.run, r.params, r.keys, "reset")
+            @test Sweep.refresh!(r).done == 0
+            @test r.state === :ready && !BS.is_armed(root, r.run)
+            @test !BS.is_cancelled(root, r.run)     # cleared, not stopped — submitting works again
+            @test acts() == ["submit"]
+
+            # A reset sweep submits and completes normally: nothing about the clear is sticky.
+            Sweep.handle_action(t, r.run, r.params, r.keys, "submit")
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(r).state === :succeeded && r.summaries == collect(1:6)
+        end
+    end
+
+    @testset "`using` is written in the body and lifted out" begin
+        # Where you would expect to write it. It is legal to WRITE inside a closure — the parser
+        # accepts it — but not to run, and a module wants loading once per chunk rather than once
+        # per unit, so the macro moves it into the setup.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p
+                using Statistics
+                mean([p.x, p.x])
+            end
+            ch = MemoStore.read_manifest(root, first(BS.sweep_chunks(root, r.run)))
+            setup = SlateTask._get_txt(root, String(ch["setup"]))
+            fn = SlateTask._get_txt(root, String(ch["fn"]))
+            @test occursin("using Statistics", setup)
+            @test !occursin("using", fn)          # …and gone from the body it was written in
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(r).summaries == [1.0, 2.0]   # it actually loaded on the shard
+
+            # An import moves the sweep's identity, like any other change to what a unit runs.
+            r2 = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p
+                mean([p.x, p.x])
+            end
+            @test r2.key != r.key
+        end
+    end
+
+    @testset "three channels: facts, data, artifacts" begin
+        # The shape a real run has. A unit that trains something reports FACTS worth watching, may
+        # produce no returnable value at all, and leaves its heavy output where it ran. None of the
+        # three is required, and only the one you ask for costs anything.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(lr = [0.1, 0.01, 0.001]), t;
+                             submit = false, summary = v -> v.report) do p
+                w = tempname(); write(w, repeat("W", 4096))     # stands in for model weights
+                artifact!(w; name = "weights.bin")
+                (; report = (; loss = p.lr * 10, steps = 100, converged = p.lr < 0.05),
+                   data = nothing)
+            end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            Sweep.refresh!(r)
+            @test r.state === :succeeded && r.done == 3
+
+            # FACTS — grouped, and read back the way they were written.
+            s = r.summaries
+            @test all(x -> x isa NamedTuple, s)
+            @test [x.loss for x in s] ≈ [1.0, 0.1, 0.01]
+            @test s[1].steps == 100 && s[3].converged === true
+
+            # ARTIFACTS — named handles, sizes known, bytes still in the store.
+            a = only(r.results[1].artifacts)
+            @test a isa Sweep.ArtifactRef && a.name == "weights.bin" && a.bytes == 4096
+            @test occursin("weights.bin", sprint(show, a))
+            dest = joinpath(root, "pulled.bin")
+            @test Sweep.fetch(a, dest) == dest && filesize(dest) == 4096   # deliberately, one file
+            @test length(Sweep.bytes(a)) == 4096
+
+            # A grouped summary auto-plots only when ONE field is numeric; `loss` and `steps` both
+            # are, so it declines rather than choosing for the author.
+            @test !haskey(Sweep.status_payload(t, r.run, r.params, r.keys; advance = false), "chart")
+        end
+    end
+
+    @testset "a sweep's plot rides the status poll" begin
+        mktempdir() do root
+            # TWO chunks, so there is a genuine half-landed state to assert on — the whole point of
+            # handing the plot every unit is what it draws while some of them are still missing.
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            # The plot is handed EVERY unit in grid order, landed or not — without the holes it
+            # cannot draw them, and a line through only the landed points invents shape across a
+            # gap and then rewrites itself when the missing chunk arrives.
+            # A plot works from SUMMARIES, never values — so it cannot pull result data on a poll
+            # however large the units are.
+            plot = rows -> Dict("series" => [Dict("data" =>
+                [row.status == "ok" ? row.summary : nothing for row in rows])])
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false, plot = plot) do p; p.x; end
+
+            # Before anything runs: four units, all holes, so the axis is already the full grid.
+            s0 = Sweep.status_payload(t, r.run, r.params, r.keys; plot, advance = false)
+            @test s0["chart"]["series"][1]["data"] == [nothing, nothing, nothing, nothing]
+
+            # Land only the FIRST chunk: the hole is where it actually is, not closed over.
+            SlateTask.run_chunk(root, first(BS.sweep_chunks(root, r.run)))
+            s1 = Sweep.status_payload(t, r.run, r.params, r.keys; plot, advance = false)
+            @test s1["chart"]["series"][1]["data"] == [1, 2, nothing, nothing]
+
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            s = Sweep.status_payload(t, r.run, r.params, r.keys; plot, advance = false)
+            @test s["chart"]["series"][1]["data"] == [1, 2, 3, 4]
+            @test !haskey(s, "charterr")
+
+            # A plot that throws says so on the card. A blank chart during a long run reads as a
+            # stalled sweep, which is the one thing this whole design is trying to rule out.
+            bad = Sweep.status_payload(t, r.run, r.params, r.keys;
+                                       plot = _ -> error("no method matching frobnicate"),
+                                       advance = false)
+            @test !haskey(bad, "chart")
+            @test occursin("frobnicate", bad["charterr"])
+
+            # Wrong return type is a mistake worth naming, not a silent no-chart.
+            wrong = Sweep.status_payload(t, r.run, r.params, r.keys;
+                                         plot = _ -> 42, advance = false)
+            @test occursin("must return", wrong["charterr"])
+
+            # The card carries the option inline too, so it draws before the first round trip.
+            html = sprint(show, MIME"text/html"(), Sweep.refresh!(r))
+            @test occursin("data-sw='chart'", html)
+            @test occursin("\"data\":[1,2,3,4]", html)
+        end
+    end
+
+    @testset "a cell's header configures the sweep without touching its code" begin
+        # Walltime, partition and memory are what you change while a job is queued or after one was
+        # killed. On the cell header they are editable from the UI; in a Julia keyword argument they
+        # would mean editing source to adjust a number that is not part of the computation.
+        mktempdir() do root
+            t = Sweep.SlurmTarget("login";
+                                  root, root_remote = "/scratch", project = tempdir(),
+                                  payload = "/scratch/slatetask.jl", chunk = 4,
+                                  resources = (; cpus = 1, mem = "1G", walltime = "00:10:00",
+                                                 partition = "short"))
+            attrs = Dict("walltime" => "04:00:00", "partition" => "gpu", "cpus" => "8",
+                         "chunk" => "25", "cluster" => "ignored-here")
+            res = Sweep.attr_resources(attrs)
+            @test res.walltime == "04:00:00" && res.partition == "gpu" && res.cpus == 8
+            @test !haskey(res, :mem)                    # unset stays inherited from the target
+            @test Sweep.attr_chunk(attrs) == 25
+
+            t2 = Sweep.with_chunk(Sweep.with_resources(t, res), Sweep.attr_chunk(attrs))
+            @test t2.resources.walltime == "04:00:00" && t2.resources.partition == "gpu"
+            @test t2.resources.mem == "1G"              # merged, not replaced
+            @test t2.chunk == 25
+            @test t2.root == t.root && t2.payload == t.payload
+
+            @test Sweep.attr_resources(Dict{String,String}()) === nothing
+            @test Sweep.attr_chunk(Dict{String,String}()) === nothing
+            # A count that is not a number must say so rather than silently asking for zero CPUs.
+            @test_throws ErrorException Sweep.attr_resources(Dict("cpus" => "lots"))
+            @test_throws ErrorException Sweep.attr_chunk(Dict("chunk" => "0"))
+        end
+    end
+
+    @testset "a sweep cell resolves its cluster by name" begin
+        # Clusters are defined ONCE for the notebook and referenced by name, so several cells share
+        # one definition and moving the work is a single edit.
+        mktempdir() do root
+            defs = Dict("hpc" => Dict("kind" => "slurm", "host" => "login", "root" => root,
+                                      "root_remote" => "/scratch/cas", "project" => tempdir(),
+                                      "payload" => "/scratch/slatetask.jl",
+                                      "partition" => "compute", "walltime" => "02:00:00",
+                                      "cpus" => "2", "mem" => "8G", "chunk" => "16"),
+                        "box" => Dict("kind" => "local", "root" => root, "project" => tempdir()))
+
+            # What the SLURM definition MEANS, checked without building it: constructing a target
+            # provisions an environment over ssh, and validating a definition must not need the
+            # cluster to be reachable.
+            a = Sweep.cluster_args(merge(Dict("name" => "hpc"), defs["hpc"]))
+            @test a.kind == "slurm" && a.host == "login"
+            @test a.root_remote == "/scratch/cas" && a.chunk == 16
+            @test a.resources.partition == "compute" && a.resources.cpus == 2
+            @test a.resources.mem == "8G" && a.resources.walltime == "02:00:00"
+            # `root_remote` defaults to `root`: a cluster sharing one filesystem needs to say it once.
+            @test Sweep.cluster_args(Dict("name" => "s", "root" => root, "payload" => "p")).root_remote == root
+
+            @test Sweep.resolve_target(nothing, Dict("cluster" => "box"), defs) isa Sweep.LocalTarget
+
+            # A target written in the cell wins over the header — the explicit one is the cell's own.
+            explicit = Sweep.LocalTarget(; root, project = tempdir(), payload = "x", chunk = 2)
+            @test Sweep.resolve_target(explicit, Dict("cluster" => "hpc"), defs) === explicit
+
+            # The failure modes name what IS defined: the usual cause is a typo or a rename.
+            # A definition missing what the backend needs must say which field, not fail later at
+            # submission time with a scheduler error.
+            e0 = try; Sweep.cluster_args(Dict("name" => "s", "root" => root)); catch x; x; end
+            @test occursin("no `payload`", sprint(showerror, e0))
+            e1 = try; Sweep.cluster_args(Dict("name" => "s")); catch x; x; end
+            @test occursin("no `root`", sprint(showerror, e1))
+
+            e = try; Sweep.resolve_target(nothing, Dict("cluster" => "hcp"), defs); catch x; x; end
+            @test occursin("no cluster named `hcp`", sprint(showerror, e))
+            @test occursin("box, hpc", sprint(showerror, e))
+            e2 = try; Sweep.resolve_target(nothing, Dict{String,String}(), defs); catch x; x; end
+            @test occursin("cluster=<name>", sprint(showerror, e2))
+            e3 = try; Sweep.resolve_target(nothing, Dict{String,String}(), Dict()); catch x; x; end
+            @test occursin("no target", sprint(showerror, e3))
+
+            # An unsupported scheduler is an error naming what this build does support, not a
+            # silent fall-through to SLURM.
+            e4 = try
+                Sweep.cluster_args(Dict("name" => "k", "kind" => "pbs", "root" => root))
+            catch x; x; end
+            @test occursin("kind `pbs`", sprint(showerror, e4))
+        end
+    end
+
+    @testset "the option JSON writer covers what an ECharts option contains" begin
+        @test Sweep._json(Dict("a" => 1, "b" => "x")) in
+              ("{\"a\":1,\"b\":\"x\"}", "{\"b\":\"x\",\"a\":1}")
+        # `Any[…]`, not `[…]`: an untyped array literal promotes, so `[1, true]` would arrive here
+        # already converted to floats and the test would be checking Julia's parser, not the writer.
+        @test Sweep._json(Any[1, 2.5, true, nothing]) == "[1,2.5,true,null]"
+        @test Sweep._json(Dict("k" => (1, 2))) == "{\"k\":[1,2]}"
+        @test Sweep._json(:sym) == "\"sym\""
+        # NaN/Inf are not JSON; emitting them raw makes the whole card fail to parse.
+        @test Sweep._json([NaN, Inf]) == "[null,null]"
+        # A string that closes the script tag would end the card early.
+        @test !occursin("</script>", Sweep._json("</script><b>"))
+        @test Sweep._json("a\"b\\c\nd") == "\"a\\\"b\\\\c\\nd\""
     end
 
     @testset "ExecLauncher never exceeds its process limit" begin

@@ -16,6 +16,13 @@ module Sweep
 import SHA
 import Serialization
 import Pkg
+import Dates   # the ETA as a wall-clock finish time, not only a remaining duration
+
+# The def extractor + source-tree digest, which `env_source_fingerprint` below is built on: it is
+# how "has the science package changed?" is answered, and it is the same answer the memo layer needs
+# for "has a function this cell calls changed?". Dependency-free by design, and already included
+# this way by the worker and by its own tests.
+Base.include(@__MODULE__, joinpath(@__DIR__, "defname.jl"))
 
 # The env-preparation policy shared by the notebook fork and the remote provisioner. envprep.jl is
 # pure TOML/file operations with no transport of its own, precisely so a new transport can reuse it:
@@ -28,9 +35,11 @@ const SlateTask = P.SlateTask
 const BatchLauncher = P.BatchLauncher
 const BatchSweep = P.BatchSweep
 
-export paramgrid, @sweep, SweepTarget, LocalTarget, SlurmTarget,
-       finished, failures, values_of, refresh!, retry_failed!, reset!,
-       cancel!, resume!, sweep_state, fraction, eta, stalled_for, blocked
+# Deliberately small. These names go into EVERY notebook namespace, where an injected binding
+# shadows whatever the author's own packages export — silently, because a definition beats a
+# `using`. Everything a sweep can be ASKED is a property of the result (`r.state`, `r.results`,
+# `r.eta`), and everything it can be TOLD is a qualified call (`Sweep.cancel!(r)`).
+export paramgrid, @sweep, SweepTarget, LocalTarget, SlurmTarget
 
 # ── Parameter space ──────────────────────────────────────────────────────────────────────────
 
@@ -82,10 +91,16 @@ function task_env!(root::AbstractString, parent::AbstractString, env)
     isempty(parent) && return ""                          # detached notebook: nothing to seed from
 
     extras = env isa AbstractVector ? String.(env) : String[]
-    key = first(string(hash((env_parent_fingerprint(parent), extras)); base = 16), 12)
+    # Keyed by the parent's SOURCE, not only its Project/Manifest: a task process is fresh and has
+    # no Revise, so an edited `src/` that does not move the key means the units keep running the old
+    # code. The env directory changes when the source does, which is also what makes the rebuild
+    # automatic rather than something to remember.
+    fp = env_source_fingerprint(parent)
+    key = first(string(hash((fp, extras)); base = 16), 12)
     envdir = joinpath(root, "taskenv", key)
 
-    if !env_stale(envdir, parent) && isfile(joinpath(envdir, "Manifest.toml"))
+    if isfile(joinpath(envdir, "Manifest.toml")) &&
+       (isfile(_env_stamp_file(envdir)) && strip(read(_env_stamp_file(envdir), String)) == fp)
         return envdir
     end
 
@@ -103,7 +118,7 @@ function task_env!(root::AbstractString, parent::AbstractString, env)
         false
     end
     ok || error("could not prepare the task environment at $envdir from parent $parent")
-    stamp_env!(envdir, parent)
+    write(_env_stamp_file(envdir), fp)
     return envdir
 end
 
@@ -135,7 +150,9 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
                                parent::AbstractString; julia::AbstractString = "julia",
                                prologue::AbstractString = "")
     isempty(parent) && return joinpath(root_remote, "env")
-    fp = env_parent_fingerprint(parent)
+    # Source-inclusive, for the same reason as `task_env!`: the cluster's copy is rsync'd once, so
+    # an edit the fingerprint cannot see is an edit the compute nodes never get.
+    fp = env_source_fingerprint(parent)
     key = first(fp, 12)
     envdir = "$(root_remote)/env/$(key)"
     stamp = "$(envdir)/.slate-parent"
@@ -253,6 +270,123 @@ with_resources(t::SlurmTarget, res) =
     SlurmTarget(t.host, t.root, t.root_remote, t.project, t.payload,
                 merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue)
 
+# The scheduler settings a `#%% sweep` cell may carry on its header (engine.jl `cell_attrs`), e.g.
+#
+#     #%% sweep id=scan walltime=02:00:00 partition=gpu mem=16G
+#
+# These are the numbers you change WHILE a job is queued or after it was killed. Keeping them off
+# the Julia source means adjusting one does not edit code — and because resources are deliberately
+# not part of a sweep's key, raising a walltime RESUMES the sweep instead of discarding the units
+# that already survived.
+const _ATTR_RESOURCES = (:cpus, :mem, :walltime, :partition, :account, :qos, :gpus, :nodes)
+
+# ── Named compute targets ────────────────────────────────────────────────────────────────────
+# A cluster is defined ONCE for the notebook (engine.jl's `Slate.clusters` footer, edited from the
+# ⎈ on a sweep cell) and referenced by name: `#%% sweep cluster=hpc`. Three cells that run on the
+# same partition then say so once, and changing where the work goes is one edit rather than three.
+#
+# `kind` selects the backend. SLURM is the one that is real today; `local` runs the same cells with
+# no scheduler at all. PBS and Kubernetes are the reason this dispatches on a STRING out of
+# configuration rather than on a Julia type written into a cell — adding one is a new branch here
+# and a new `Launcher`, not a change to any notebook.
+"""
+    cluster(spec) -> SweepTarget
+
+Build a target from a notebook cluster definition (a flat `Dict` of strings). Called for you when a
+sweep cell names one with `cluster=`; call it directly only to inspect what a definition resolves to.
+"""
+function cluster(spec::AbstractDict)
+    a = cluster_args(spec)
+    a.kind == "local" && return LocalTarget(; a.root, a.parent, a.chunk)
+    return SlurmTarget(a.host; a.root, a.root_remote, a.parent, a.payload, a.chunk,
+                       a.account, a.qos, a.prologue, a.resources)
+end
+
+"""
+    cluster_args(spec) -> NamedTuple
+
+What a cluster definition MEANS, without building anything. Kept separate from `cluster` because
+constructing a target provisions an environment on the far side — so validating a definition, or
+showing what it resolves to, must not require reaching the cluster.
+"""
+function cluster_args(spec::AbstractDict)
+    get_(k, d = "") = String(get(spec, k, d))
+    kind = lowercase(get_("kind", "slurm"))
+    name = get_("name", "cluster")
+    kind in ("slurm", "local") ||
+        error("cluster `$name` has kind `$kind`; this build supports `slurm` and `local`. " *
+              "PBS and Kubernetes are separate backends, not options here.")
+    root = get_("root")
+    isempty(root) && error("cluster `$name` has no `root` — the store directory as this notebook sees it")
+    parent = get_("project")
+    isempty(parent) && (parent = dirname(Base.active_project()))
+    chunk = something(tryparse(Int, get_("chunk", "8")), 8)
+    payload = get_("payload")
+    (kind == "slurm" && isempty(payload)) &&
+        error("cluster `$name` has no `payload` — the task script's path ON the cluster")
+    res = attr_resources(spec)
+    return (; kind, name, root, parent, chunk, payload,
+              root_remote = isempty(get_("root_remote")) ? root : get_("root_remote"),
+              host = get_("host"), account = get_("account"), qos = get_("qos"),
+              prologue = get_("prologue"),
+              resources = res === nothing ? NamedTuple() : res)
+end
+
+# Resolve the target a sweep cell asked for: an explicit one written in the cell wins, else the
+# `cluster=` named on its header, else nothing to run on — which is worth an error naming the
+# clusters that ARE defined, because the usual cause is a typo or a renamed definition.
+function resolve_target(explicit, attrs::AbstractDict, clusters::AbstractDict)
+    explicit === nothing || return explicit
+    nm = String(get(attrs, "cluster", ""))
+    if isempty(nm)
+        isempty(clusters) &&
+            error("@sweep: no target. Give one — `@sweep(grid, mytarget) do … end` — or define a " *
+                  "cluster (⎈ on a sweep cell) and name it on the header: `#%% sweep cluster=<name>`.")
+        error("@sweep: no target. Name one of this notebook's clusters on the cell header " *
+              "(`#%% sweep cluster=<name>`): " * join(sort!(collect(keys(clusters))), ", "))
+    end
+    spec = get(clusters, nm, nothing)
+    spec === nothing &&
+        error("@sweep: no cluster named `$nm` in this notebook. Defined: " *
+              (isempty(clusters) ? "(none)" : join(sort!(collect(keys(clusters))), ", ")))
+    return cluster(merge(Dict{String,Any}("name" => nm), spec))
+end
+
+# String → the type the JobSpec wants. Counts are integers; everything else is a scheduler string
+# passed through as written (`mem=16G`, `walltime=02:00:00`), because inventing a duration syntax
+# here would only stand between the author and the scheduler's own documentation.
+function attr_resources(attrs::AbstractDict)
+    res = Dict{Symbol,Any}()
+    for k in _ATTR_RESOURCES
+        v = get(attrs, String(k), nothing)
+        v === nothing && continue
+        if k in (:cpus, :gpus, :nodes)
+            n = tryparse(Int, v)
+            n === nothing && error("@sweep: `$k=$v` on the cell header must be an integer")
+            res[k] = n
+        else
+            res[k] = String(v)
+        end
+    end
+    isempty(res) && return nothing
+    return NamedTuple(res)
+end
+
+"A `chunk=` header attribute, or `nothing`. How many units ride one scheduler job."
+function attr_chunk(attrs::AbstractDict)
+    v = get(attrs, "chunk", nothing)
+    v === nothing && return nothing
+    n = tryparse(Int, v)
+    (n === nothing || n < 1) && error("@sweep: `chunk=$v` on the cell header must be a positive integer")
+    return n
+end
+
+with_chunk(t::LocalTarget, n) = n === nothing ? t :
+    LocalTarget(t.root, t.project, t.payload, n)
+with_chunk(t::SlurmTarget, n) = n === nothing ? t :
+    SlurmTarget(t.host, t.root, t.root_remote, t.project, t.payload,
+                t.resources, n, t.account, t.qos, t.prologue)
+
 store_root(t::LocalTarget) = t.root
 store_root(t::SlurmTarget) = t.root
 chunk_size(t::LocalTarget) = t.chunk
@@ -280,20 +414,40 @@ function _digest_of(v)
     io = IOBuffer(); Serialization.serialize(io, v); return _hex(take!(io))
 end
 
-# Drop LineNumberNodes so a body's text depends only on the code, not on where it sits in a file.
-_strip_lines(x) = x
-function _strip_lines(e::Expr)
-    args = Any[_strip_lines(a) for a in e.args if !(a isa LineNumberNode)]
-    return Expr(e.head, args...)
-end
+# `_strip_lines` (defname.jl, included above) drops LineNumberNodes, so a body's text depends only
+# on the code and not on where it sits in a file — the same normalisation the def-body digest needs.
 
-function sweep_key(body_src, setup_src, captures)
+# The environment a unit runs in is part of what computed the result, so it is part of the key.
+#
+# Nothing new has to be digested for this: the provisioner already NAMES the task environment after
+# its parent's fingerprint (`task_env!` / `provision_remote_env!` both key the directory by it), so
+# the env path's last component IS that fingerprint. Editing the science package moves the env, and
+# moving the env re-keys the sweep.
+#
+# Without it, the fabric would silently mix results from two versions of the code — the exact thing
+# it refuses to do for the body text. A task process is fresh and has no Revise, so an edit to the
+# package the body calls into changes what every unit computes while leaving the body identical.
+env_key(target::SweepTarget) = basename(rstrip(String(target.project), '/'))
+
+function sweep_key(body_src, setup_src, captures, envkey = "", summary_src = "")
     caps = join(sort(["$k=$(_digest_of(v))" for (k, v) in captures]), ";")
-    return "sw" * first(_hex(string(body_src, "\0", setup_src, "\0", caps)), 16)
+    return "sw" * first(_hex(string(body_src, "\0", setup_src, "\0", caps, "\0", envkey,
+                                    "\0", summary_src)), 16)
 end
 
 shard_key(sweep, param) = string(sweep, "_s", first(_digest_of(param), 12))
-chunk_key(sweep, i) = string(sweep, "_c", i)
+chunk_key(run, i) = string(run, "_c", i)
+
+# A sweep's identity and a REQUEST's identity are not the same thing, and conflating them breaks
+# the pattern the fabric exists to encourage. A pilot over four points and the full sweep over four
+# thousand deliberately share a body, so they share a sweep key, so the second reuses the first's
+# results. But their chunking, plan, attempt budget, cancellation marker and card describe
+# DIFFERENT sets of units. Key those by the grid too, or the two cells overwrite each other's chunk
+# descriptors and each one renders the other's progress.
+#
+# Shard keys stay derived from the SWEEP key, which is what makes the reuse work: the same
+# parameters under the same body are the same unit however they were requested.
+run_key(sweep, keys) = string(sweep, "_r", first(_hex(join(keys, ",")), 10))
 
 # ── Result ───────────────────────────────────────────────────────────────────────────────────
 
@@ -305,54 +459,193 @@ A sweep's results, usable while incomplete. Indexable and iterable over rows of
 that has not run.
 """
 mutable struct ShardedResult
-    key::String
+    key::String                   # the SWEEP: body + setup + captures. What makes results reusable.
+    run::String                   # this REQUEST: the sweep over THIS grid. What is scheduled.
     target::SweepTarget
     params::Vector{Any}
     keys::Vector{String}
     plan::BatchSweep.Plan
     rows::Vector{NamedTuple}
     telemetry::BatchSweep.Telemetry
+    plot::Any                     # rows -> chart, drawn live on the card (nothing = no chart)
 end
 
-Base.length(r::ShardedResult) = length(r.rows)
-Base.getindex(r::ShardedResult, i) = r.rows[i]
-Base.iterate(r::ShardedResult, s = 1) = s > length(r.rows) ? nothing : (r.rows[s], s + 1)
+Base.length(r::ShardedResult) = length(getfield(r, :rows))
+Base.getindex(r::ShardedResult, i) = getfield(r, :rows)[i]
+Base.iterate(r::ShardedResult, s = 1) =
+    s > length(getfield(r, :rows)) ? nothing : (getfield(r, :rows)[s], s + 1)
 Base.eltype(::Type{ShardedResult}) = NamedTuple
 
-# `sweep_state`, not `state`: this is exported into a notebook's namespace, where a bare `state`
-# is far too likely to collide with the author's own variable.
-sweep_state(r::ShardedResult) = r.plan.state
-fraction(r::ShardedResult) = BatchSweep.fraction(r.plan)
+# A sweep has a large vocabulary — state, six counts, rate, ETA, stall, the successful rows, the
+# failed ones — and a free function for each would put names as generic as `finished`, `failures`,
+# `eta`, `blocked` and `values` into every notebook namespace, where an injected binding SHADOWS
+# whatever the author's own packages export, silently. Properties are namespaced by the object, so
+# there is nothing to collide with and nothing to import.
+#
+# Questions are properties; ACTIONS stay functions (`Sweep.cancel!`, `Sweep.reset!`) because a
+# property that mutates on read is a trap.
+const _DERIVED = (:state, :total, :done, :ok, :failed, :pending, :fraction, :percent,
+                  :eta, :rate, :idle, :stalled_for, :blocked, :settled,
+                  :results, :summaries, :errors, :hosts, :bytes, :armed)
 
-"Seconds until the sweep finishes at the observed rate, or -1 when nothing has finished yet."
-eta(r::ShardedResult) = r.telemetry.eta_s
+function Base.getproperty(r::ShardedResult, s::Symbol)
+    s in fieldnames(ShardedResult) && return getfield(r, s)
+    p, t = getfield(r, :plan), getfield(r, :telemetry)
+    rows = getfield(r, :rows)
+    s === :state      && return display_state(p, BatchSweep.is_armed(store_root(getfield(r, :target)),
+                                                                     getfield(r, :run)))
+    s === :armed      && return BatchSweep.is_armed(store_root(getfield(r, :target)), getfield(r, :run))
+    s === :total      && return p.shards_total
+    s === :done       && return p.shards_done
+    s === :ok         && return p.shards_ok
+    s === :failed     && return p.shards_failed
+    s === :pending    && return p.shards_missing
+    s === :fraction   && return BatchSweep.fraction(p)
+    s === :percent    && return round(100 * BatchSweep.fraction(p); digits = 1)
+    s === :settled    && return BatchSweep.is_settled(p)
+    # Seconds until the sweep finishes at the observed rate; -1 when nothing has finished yet.
+    s === :eta        && return t.eta_s
+    s === :rate       && return t.rate_per_s
+    s === :idle       && return t.idle_s
+    # How long the sweep has LOOKED stopped, or 0.0 if it looks healthy.
+    s === :stalled_for && return BatchSweep.stalled_for(t)
+    # Why nothing more will be submitted ("" = not blocked).
+    s === :blocked    && return p.blocked
+    s === :results    && return [row for row in rows if row.status == "ok"]
+    # The charting values, straight from the manifests. This is the accessor analysis should reach
+    # for: it is the same cost at four units and four million.
+    s === :summaries  && return [row.summary for row in rows if row.status == "ok"]
+    s === :errors     && return [row for row in rows if row.status == "error"]
+    s === :bytes      && return sum(row.bytes for row in rows; init = 0)
+    s === :hosts      && return unique([row.ran_on for row in rows if !isempty(row.ran_on)])
+    throw(ArgumentError("ShardedResult has no property `$s`. Try one of: " *
+                        join(string.(propertynames(r)), ", ")))
+end
 
-"How long the sweep has looked stopped, or 0.0 if it looks healthy."
-stalled_for(r::ShardedResult) = BatchSweep.stalled_for(r.telemetry)
+Base.propertynames(::ShardedResult) = (fieldnames(ShardedResult)..., _DERIVED...)
 
-"Why nothing more will be submitted (\"\" = not blocked)."
-blocked(r::ShardedResult) = r.plan.blocked
+"""
+    ShardRef
 
-"Rows whose shard completed successfully."
-finished(r::ShardedResult) = [row for row in r.rows if row.status == "ok"]
+A handle on one unit's result. Holds no data: its size, element type and byte count come from the
+manifest, and bytes are read only when you index it.
 
-"Just the return values of the successful shards, in grid order."
-values_of(r::ShardedResult) = [row.value for row in r.rows if row.status == "ok"]
+    ref = r.rows[7].value
+    size(ref), eltype(ref)     # metadata — no I/O
+    ref[64, :, :]              # mmapped slice — only the touched pages are read
+    ref[]                      # the whole value
 
-"Rows whose shard threw, with the traceback. The answer to \"which of them broke\"."
-failures(r::ShardedResult) = [row for row in r.rows if row.status == "error"]
+Indexing an isbits array mmaps the blob read-only, so taking a corner of a multi-gigabyte field
+costs the pages it covers rather than the field.
+"""
+struct ShardRef
+    root::String
+    binding::Dict{String,Any}
+    dims::Vector{Int}
+    eltype::String
+    type::String
+    bytes::Int
+end
 
+Base.size(x::ShardRef) = Tuple(x.dims)
+Base.length(x::ShardRef) = isempty(x.dims) ? 1 : prod(x.dims)
+Base.ndims(x::ShardRef) = length(x.dims)
+Base.eltype(x::ShardRef) = x.eltype
+Base.sizeof(x::ShardRef) = x.bytes
+
+"Materialize the whole value. The one call that reads all of it, and it says so."
+Base.getindex(x::ShardRef) = SlateTask.load_binding(x.root, x.binding)
+
+# `zc` mmaps the blob rather than copying it, so a slice faults in only the pages it covers. The
+# mapping is read-only; the slice is copied out of it, so the caller owns ordinary memory.
+Base.getindex(x::ShardRef, i...) =
+    getindex(SlateTask.load_binding(x.root, x.binding; zc = true), i...)
+
+Base.show(io::IO, x::ShardRef) =
+    print(io, "ShardRef(", x.type,
+          isempty(x.dims) ? "" : " " * join(x.dims, "×"), ", ", _bytes(x.bytes), ")")
+
+"""
+    ArtifactRef
+
+A file a unit produced and left where it ran — model weights, a checkpoint, a rendered video. The
+notebook holds its name and size; the bytes stay in the cluster-side store until something asks.
+
+    a = r.rows[3].artifacts[1]
+    a.name, a.bytes             # no I/O
+    Sweep.fetch(a, "local.mp4") # bring this one back, deliberately
+"""
+struct ArtifactRef
+    root::String
+    name::String
+    blob::String
+    bytes::Int
+end
+
+Base.show(io::IO, a::ArtifactRef) = print(io, "ArtifactRef(", a.name, ", ", _bytes(a.bytes), ")")
+
+"Copy one artifact out of the store to `dest`. The only call that moves an artifact's bytes."
+function fetch(a::ArtifactRef, dest::AbstractString)
+    src = MemoStore.blob_path(a.root, a.blob)
+    isfile(src) || error("artifact `$(a.name)` is not in this store — it may live on the cluster only")
+    cp(src, dest; force = true)
+    return dest
+end
+
+"Read one artifact's bytes without writing a file."
+bytes(a::ArtifactRef) = read(MemoStore.blob_path(a.root, a.blob))
+
+_arts(root, m) = ArtifactRef[
+    ArtifactRef(String(root), String(get(a, "name", "")), String(get(a, "blob", "")),
+                Int(get(a, "bytes", 0)))
+    for a in get(m, "artifacts", Any[]) if a isa AbstractDict]
+
+_bytes(n::Integer) = n < 1024 ? "$(n) B" :
+                     n < 1024^2 ? "$(round(n / 1024; digits = 1)) KB" :
+                     n < 1024^3 ? "$(round(n / 1024^2; digits = 1)) MB" :
+                     "$(round(n / 1024^3; digits = 2)) GB"
+
+# A grouped summary comes back as a NamedTuple, so it reads the way it was written: a unit that
+# reported `(; loss, acc)` is asked for `row.summary.loss`.
+function _summary_of(m)
+    s = get(m, "summary", nothing)
+    s isa AbstractDict || return s
+    ks = Tuple(Symbol.(collect(keys(s))))
+    return NamedTuple{ks}(Tuple(collect(values(s))))
+end
+
+function _ref(root, m)
+    bs = get(m, "bindings", Any[])
+    isempty(bs) && return nothing
+    b = bs[1]
+    b isa AbstractDict || return nothing
+    sh = get(m, "shape", Dict{String,Any}())
+    return ShardRef(String(root), Dict{String,Any}(String(k) => v for (k, v) in b),
+                    Vector{Int}(get(sh, "dims", Int[])),
+                    String(get(sh, "eltype", "")), String(get(sh, "type", "")),
+                    Int(get(b, "bytes", 0)))
+end
+
+# Manifest-only. Every field here is answered by a small TOML read, so watching a sweep — the
+# counters, the tiles, the chart — costs the same whether a unit returned a number or a gigabyte.
+# `value` is a handle; `summary` is the small number a unit recorded for charting.
 function _rows(root, params, keys)
     rows = NamedTuple[]
     for (prm, k) in zip(params, keys)
         m = MemoStore.read_manifest(root, k)
         if m === nothing
-            push!(rows, (; params = prm, status = "", value = nothing, ran_on = "", ms = 0.0))
+            push!(rows, (; params = prm, status = "", value = nothing, summary = nothing,
+                           artifacts = ArtifactRef[], ran_on = "", ms = 0.0, bytes = 0))
             continue
         end
-        _, st, v = SlateTask.result(root, k)
-        push!(rows, (; params = prm, status = st, value = v,
-                     ran_on = String(get(m, "ran_on", "")), ms = Float64(get(m, "ms", 0.0))))
+        st = String(get(m, "status", ""))
+        val = st == "ok" ? _ref(root, m) : get(m, "error", nothing)
+        push!(rows, (; params = prm, status = st, value = val,
+                       summary = _summary_of(m),
+                       artifacts = _arts(root, m),
+                       ran_on = String(get(m, "ran_on", "")),
+                       ms = Float64(get(m, "ms", 0.0)),
+                       bytes = st == "ok" ? Int(get(get(m, "shape", Dict()), "bytes", 0)) : 0))
     end
     return rows
 end
@@ -366,14 +659,36 @@ progress display calls on a timer.
 function refresh!(r::ShardedResult)
     root = store_root(r.target)
     l = launcher_for(r.target)
-    r.plan = BatchSweep.plan(root, r.key; launcher = l)
+    r.plan = BatchSweep.plan(root, r.run; launcher = l)
     r.rows = _rows(root, r.params, r.keys)
-    r.telemetry = BatchSweep.telemetry(root, r.key; launcher = l, plan = r.plan)
+    r.telemetry = BatchSweep.telemetry(root, r.run; launcher = l, plan = r.plan)
     return r
 end
 
+"""
+    load(r; max_bytes = 512 * 1024^2, limit = 0) -> Vector
+
+Materialize the successful units' values. This is the only call that reads result data in bulk, and
+it refuses above `max_bytes` rather than doing it quietly — a sweep's whole point is that its output
+can be larger than the machine reading it. `r.bytes` is the total; `limit` takes the first N units.
+
+    r.summaries          # what to reach for: manifest-resident, always cheap
+    r[3][]               # one unit
+    Sweep.load(r; limit = 8)
+"""
+function load(r::ShardedResult; max_bytes::Integer = 512 * 1024^2, limit::Integer = 0)
+    ok = [row for row in getfield(r, :rows) if row.status == "ok"]
+    limit > 0 && (ok = ok[1:min(limit, length(ok))])
+    total = sum(row.bytes for row in ok; init = 0)
+    total > max_bytes && error(
+        "Sweep.load: $(length(ok)) units hold $(_bytes(total)), over the $(_bytes(max_bytes)) " *
+        "limit. Use `r.summaries` for analysis, `r[i][]` for one unit, or pass `limit=` / " *
+        "`max_bytes=` to ask for this deliberately.")
+    return [row.value isa ShardRef ? row.value[] : row.value for row in ok]
+end
+
 "Clear the failed shards so the next run of the sweep cell retries exactly those."
-retry_failed!(r::ShardedResult) = BatchSweep.retry_failed!(store_root(r.target), r.key)
+retry_failed!(r::ShardedResult) = BatchSweep.retry_failed!(store_root(r.target), r.run)
 
 """
     cancel!(r) -> r
@@ -382,7 +697,7 @@ Stop the sweep at your request: kill what is running and record the stop durably
 cell (or reopening the notebook) does not quietly start it again. Finished units are kept.
 """
 function cancel!(r::ShardedResult)
-    BatchSweep.cancel!(store_root(r.target), r.key, launcher_for(r.target))
+    BatchSweep.cancel!(store_root(r.target), r.run, launcher_for(r.target))
     return refresh!(r)
 end
 
@@ -392,7 +707,7 @@ end
 Undo a `cancel!`. The next run submits only what is still missing.
 """
 function resume!(r::ShardedResult)
-    BatchSweep.resume!(store_root(r.target), r.key)
+    BatchSweep.resume!(store_root(r.target), r.run)
     return refresh!(r)
 end
 
@@ -401,8 +716,8 @@ function reset!(r::ShardedResult)
     root = store_root(r.target)
     n = 0
     for k in r.keys; MemoStore.drop_manifest(root, k) && (n += 1); end
-    BatchSweep.clear_attempts!(root, r.key)
-    BatchSweep.resume!(root, r.key)   # a reset sweep is not still cancelled
+    BatchSweep.clear_attempts!(root, r.run)
+    BatchSweep.resume!(root, r.run)   # a reset sweep is not still cancelled
     return n
 end
 
@@ -420,6 +735,19 @@ end
 _bar(frac, width = 24) =
     (n = clamp(round(Int, frac * width), 0, width); "▰"^n * "▱"^(width - n))
 
+# WHEN it finishes, not just how much longer. "~3h12m left" is a number you then have to add to the
+# clock; "done ~17:45" is one you can act on — go to lunch, come back after the meeting, leave it
+# overnight. The date comes along once the answer is not today, because "done ~09:20" on a run that
+# lands tomorrow morning is worse than useless.
+function _eta_clock(eta_s::Real; now = Dates.now())
+    eta_s < 0 && return ""
+    t = now + Dates.Millisecond(round(Int, eta_s * 1000))
+    same_day = Dates.Date(t) == Dates.Date(now)
+    return same_day ? Dates.format(t, "HH:MM") :
+           (Dates.Date(t) - Dates.Date(now)) <= Dates.Day(6) ? Dates.format(t, "e HH:MM") :
+           Dates.format(t, "d u HH:MM")
+end
+
 # ── Live status over the JS channel ──────────────────────────────────────────────────────────
 # A monitor that re-ran the cell to advance would re-run every downstream cell with it, which for a
 # sweep of thousands of units is far more work than the sweep. Instead the rendered card polls a
@@ -429,14 +757,14 @@ _bar(frac, width = 24) =
 # The handler re-reads the store on every call rather than closing over a snapshot, so it stays
 # correct across a worker restart and reports what is actually on disk.
 
-"The channel a sweep's card polls. One per sweep, so two sweeps in a notebook do not collide."
-status_channel(key::AbstractString) = "sweep:" * String(key)
+"The channel a card polls. Keyed by the RUN, so a pilot and the full sweep do not share a card."
+status_channel(run::AbstractString) = "sweep:" * String(run)
 
 "The channel the card's buttons call. Separate from status so a poll can never be a mutation."
-action_channel(key::AbstractString) = "sweep:" * String(key) * ":do"
+action_channel(run::AbstractString) = "sweep:" * String(run) * ":do"
 
 """
-    handle_action(target, key, params, keys, action) -> payload
+    handle_action(target, run, params, keys, action; plot = nothing) -> payload
 
 Apply a control the card offers, then report the resulting state so the button press and the
 refresh are one round trip.
@@ -445,32 +773,50 @@ refresh are one round trip.
 STOPS a sweep and keeps every finished unit, so resuming costs only what is left; reset throws the
 results away.
 """
-function handle_action(target::SweepTarget, key::AbstractString, params, keys,
-                       action::AbstractString)
+function handle_action(target::SweepTarget, run::AbstractString, params, keys,
+                       action::AbstractString; plot = nothing, notify = nothing)
     root = store_root(target)
     l = launcher_for(target)
-    if action == "cancel"
-        BatchSweep.cancel!(root, key, l)
+    # Not a mutation: the card reporting, once, that the work is over. A sweep finishes minutes or
+    # hours after the cell that started it returned, so without this the notebook's own view of the
+    # results stays frozen at "nothing has landed yet" until someone re-runs a cell by hand — which
+    # is exactly the manual bookkeeping this fabric exists to remove.
+    if action == "settled"
+        notify === nothing || notify()
+        return status_payload(target, run, params, keys; plot, advance = false)
+    end
+    if action == "submit"
+        BatchSweep.arm!(root, run)
+    elseif action == "cancel"
+        BatchSweep.cancel!(root, run, l)
+        BatchSweep.disarm!(root, run)
     elseif action == "resume"
-        BatchSweep.resume!(root, key)
+        BatchSweep.resume!(root, run)
+        BatchSweep.arm!(root, run)
     elseif action == "retry"
-        BatchSweep.retry_failed!(root, key)
+        BatchSweep.retry_failed!(root, run)
     elseif action == "reset"
-        BatchSweep.resume!(root, key)
+        # Kill anything live FIRST. `clear_attempts!` forgets the submission records, and with them
+        # the job names needed to reach the scheduler — reversing these two would leave orphaned jobs
+        # writing results into a store that had just been emptied.
+        BatchSweep.cancel!(root, run, l)
+        BatchSweep.clear_attempts!(root, run)
         for k in keys; MemoStore.drop_manifest(root, k); end
-        BatchSweep.clear_attempts!(root, key)
+        # Cleared and READY, not stopped: drop the cancellation `cancel!` just wrote, and leave the
+        # sweep unarmed so submitting it again is a separate decision.
+        BatchSweep.resume!(root, run)
+        BatchSweep.disarm!(root, run)
     else
         error("unknown sweep action: $(action)")
     end
-    # A cancel must not be undone by the reconcile its own refresh would trigger.
-    return status_payload(target, key, params, keys; advance = (action != "cancel"))
+    return status_payload(target, run, params, keys; plot)
 end
 
 # Compact enough to poll on a timer: counts and rates, plus a per-unit status string of one
 # character each. At a few thousand units that string is a few KB, which is cheap next to sending
 # structured rows for every unit.
-function status_payload(target::SweepTarget, key::AbstractString, params, keys;
-                        advance::Bool = true)
+function status_payload(target::SweepTarget, run::AbstractString, params, keys;
+                        plot = nothing, advance::Bool = true)
     root = store_root(target)
     l = launcher_for(target)
     # The poll RECONCILES, it does not merely observe. The probe wave releases one chunk and waits
@@ -478,9 +824,13 @@ function status_payload(target::SweepTarget, key::AbstractString, params, keys;
     # until the author re-ran it by hand, once per wave. Reconciling is idempotent and submits
     # nothing that is already live, so polling it is safe — and the breaker still stops a sweep
     # whose units are failing, which is the case the waves exist for.
-    p = advance ? BatchSweep.reconcile!(root, key, l, specfn_for(target)) :
-                  BatchSweep.plan(root, key; launcher = l)
-    t = BatchSweep.telemetry(root, key; launcher = l, plan = p)
+    # …and it only submits for a sweep that has been ARMED, so a card left open on a sweep nobody
+    # asked to run cannot start it.
+    armed = BatchSweep.is_armed(root, run)
+    p = advance ? BatchSweep.reconcile!(root, run, l, specfn_for(target); submit = armed) :
+                  BatchSweep.plan(root, run; launcher = l)
+    t = BatchSweep.telemetry(root, run; launcher = l, plan = p)
+    _ds = display_state(p, armed)
     # Tile COLOURS, not per-unit statuses: the browser patches tiles by index, and computing the
     # colour here is what keeps the live grid identical to the one the cell rendered. It also keeps
     # the payload flat — a few hundred short strings whatever the sweep's size.
@@ -493,15 +843,119 @@ function status_payload(target::SweepTarget, key::AbstractString, params, keys;
         push!(tiles, _tile_color(ok, err, hi - lo + 1))
     end
 
-    return Dict{String,Any}(
-        "state" => String(p.state), "label" => _state_label(p.state),
+    out = Dict{String,Any}(
+        "state" => String(_ds), "label" => _state_label(_ds),
         "total" => p.shards_total, "done" => p.shards_done,
         "ok" => p.shards_ok, "failed" => p.shards_failed, "missing" => p.shards_missing,
         "frac" => BatchSweep.fraction(p),
         "rate" => t.rate_per_s, "eta" => t.eta_s, "idle" => t.idle_s,
         "stuck" => BatchSweep.stalled_for(t), "blocked" => p.blocked,
         "settled" => BatchSweep.is_settled(p), "tiles" => tiles,
-        "color" => get(_STATE_COLOR, p.state, "#8b949e"))
+        "color" => get(_STATE_COLOR, _ds, "var(--dim,#6a7090)"),
+        # The controls that apply RIGHT NOW, so the card's buttons track its state instead of
+        # freezing at whatever was true when the cell last ran.
+        "actions" => [Any[a, l] for (a, l) in action_list(p, armed)])
+
+    # The chart rides the SAME poll as the counters, so a filling plot costs no extra round trip and
+    # cannot disagree with the numbers beside it.
+    if plot !== false
+        rows = _rows(root, params, keys)
+        opt, err = _plot_option(plot, rows)
+        opt === nothing || (out["chart"] = opt)
+        isempty(err) || (out["charterr"] = err)
+    end
+    return out
+end
+
+# ── The chart you get without asking ─────────────────────────────────────────────────────────
+# A unit that returns a NUMBER over a single varying numeric axis has exactly one sensible plot,
+# and making someone write it out is the ad-hoc wiring this fabric exists to remove.
+#
+# Anything less clear-cut draws nothing rather than guessing. A default chart that picks the wrong
+# axis, or silently collapses one of two, is worse than no chart at all: it looks authoritative.
+# `plot = false` turns it off; `plot = f` replaces it.
+
+# One tile per unit stays flat however large a sweep gets, but a line does not — and neither does
+# the payload carrying it. Past this many units the grid IS the right view.
+const _AUTO_PLOT_MAX = 2000
+
+# The single grid axis that is numeric AND actually varies. Two varying axes mean a line chart would
+# silently project one of them away, so the default declines and the author says what they meant.
+function _auto_axis(rows)
+    isempty(rows) && return nothing
+    p1 = rows[1].params
+    p1 isa NamedTuple || return nothing
+    found = Symbol[]
+    for k in keys(p1)
+        vals = Any[]
+        for r in rows
+            hasproperty(r.params, k) || return nothing
+            push!(vals, getproperty(r.params, k))
+        end
+        all(v -> v isa Real, vals) || continue
+        length(unique(vals)) > 1 && push!(found, k)
+    end
+    return length(found) == 1 ? found[1] : nothing
+end
+
+function _auto_plot(rows)
+    (isempty(rows) || length(rows) > _AUTO_PLOT_MAX) && return nothing
+    ax = _auto_axis(rows)
+    ax === nothing && return nothing
+    landed = [r for r in rows if r.status == "ok"]
+    isempty(landed) && return nothing
+    # A bare number plots as itself. A grouped summary plots only when ONE of its fields is numeric;
+    # with several, which one is the author's business.
+    field = nothing
+    if !all(r -> r.summary isa Real, landed)
+        s1 = landed[1].summary
+        s1 isa NamedTuple || return nothing
+        nums = [k for k in keys(s1) if getproperty(s1, k) isa Real]
+        length(nums) == 1 || return nothing
+        field = nums[1]
+        all(r -> r.summary isa NamedTuple && hasproperty(r.summary, field) &&
+                 getproperty(r.summary, field) isa Real, landed) || return nothing
+    end
+    yof(r) = r.status != "ok" ? nothing :
+             field === nothing ? r.summary : getproperty(r.summary, field)
+    # `nothing` for a unit that has not reported: the axis is then fixed from the first frame and the
+    # line breaks at the real gaps, so the picture only gains detail instead of changing shape.
+    return Dict{String,Any}(
+        "backgroundColor" => "transparent", "animation" => false,
+        "grid"    => Dict("left" => 58, "right" => 22, "top" => 24, "bottom" => 30),
+        "tooltip" => Dict("trigger" => "axis"),
+        "xAxis"   => Dict("type" => "value", "name" => String(ax)),
+        "yAxis"   => Dict("type" => "value", "name" => field === nothing ? "" : String(field)),
+        "series"  => [Dict("type" => "line", "showSymbol" => true, "symbolSize" => 4,
+                           "connectNulls" => false,
+                           "data" => [[getproperty(r.params, ax), yof(r)] for r in rows])])
+end
+
+# The author's plot function, applied to EVERY unit in grid order — landed or not, each row
+# carrying its `status`. Passing only the successful ones would hide where the holes are, and a
+# chart drawn straight through them invents shape the data does not support: a sweep's chunks come
+# back out of order, so a line through "whatever has landed" swings between distant points and then
+# rewrites itself as the gaps fill. With the full grid an author can plot `[x, nothing]` for a unit
+# that has not reported, which keeps the axis fixed from the first frame and breaks the line at the
+# real gaps — so the picture only ever gains detail instead of changing shape.
+#
+# A plot that throws must say so on the card: a silently blank chart during a long run is exactly
+# the "is it working?" ambiguity the fabric exists to remove, and it would be blamed on the sweep.
+function _plot_option(plot, rows)
+    plot === false && return nothing, ""       # explicitly no chart
+    plot === nothing && return _auto_plot(rows), ""
+    try
+        v = Base.invokelatest(plot, rows)
+        v === nothing && return nothing, ""
+        # Duck-typed rather than depending on the host's `EChart`: this module is loaded into the
+        # worker AND the engine, and it should not care which one owns that struct.
+        opt = hasproperty(v, :option) ? getproperty(v, :option) : v
+        opt isa AbstractDict || return nothing,
+            "plot returned a $(typeof(v)); it must return an echart(…) or an option Dict"
+        return opt, ""
+    catch e
+        return nothing, sprint(showerror, e)
+    end
 end
 
 # ── HTML rendering ───────────────────────────────────────────────────────────────────────────
@@ -513,10 +967,51 @@ end
 
 _esc(s) = replace(string(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
 
+# A JSON writer for the chart option, in ~20 lines, rather than a JSON dependency. This module is
+# loaded into the WORKER, whose project is the notebook's and may not have JSON at all — and an
+# ECharts option is only ever numbers, strings, bools, arrays and dicts, which is the whole grammar
+# below. The poll payload is encoded by the host's own transport; this is for the option baked into
+# the card at render time, so a chart is there before the first round trip and survives export.
+_json(io, ::Nothing) = print(io, "null")
+_json(io, x::Bool) = print(io, x ? "true" : "false")
+_json(io, x::Integer) = print(io, x)
+_json(io, x::Real) = print(io, isfinite(x) ? string(Float64(x)) : "null")
+_json(io, x::Symbol) = _json(io, String(x))
+function _json(io, s::AbstractString)
+    print(io, '"')
+    for c in s
+        c == '"'  ? print(io, "\\\"") : c == '\\' ? print(io, "\\\\") :
+        c == '\n' ? print(io, "\\n")  : c == '\r' ? print(io, "\\r")  :
+        c == '\t' ? print(io, "\\t")  :
+        # `</script>` inside a string would close the tag the card is written into.
+        c == '<'  ? print(io, "\\u003c") :
+        c < ' '   ? print(io, "\\u", lpad(string(UInt16(c); base = 16), 4, '0')) : print(io, c)
+    end
+    print(io, '"')
+end
+function _json(io, v::AbstractVector)
+    print(io, '[')
+    for (i, x) in enumerate(v); i > 1 && print(io, ','); _json(io, x); end
+    print(io, ']')
+end
+function _json(io, d::AbstractDict)
+    print(io, '{')
+    for (i, (k, v)) in enumerate(d)
+        i > 1 && print(io, ',')
+        _json(io, string(k)); print(io, ':'); _json(io, v)
+    end
+    print(io, '}')
+end
+_json(io, t::Tuple) = _json(io, collect(t))
+_json(io, x) = _json(io, string(x))     # anything else describes itself; never breaks the card
+_json(x) = sprint(_json, x)
+
+# Slate's own palette (notebook.css `:root`), literal rather than `var(--green)` because these are
+# also written into the poll payload and set from JavaScript, where a CSS variable would not resolve.
 const _STATE_COLOR = Dict(
-    :succeeded => "#3fb950", :partial   => "#d29922", :blocked => "#f85149",
-    :exhausted => "#f85149", :cancelled => "#8b949e", :running => "#58a6ff",
-    :pending   => "#8b949e")
+    :succeeded => "#56d364", :partial   => "#ffd700", :blocked => "#e57575",
+    :exhausted => "#e57575", :cancelled => "#6a7090", :running => "#569cd6",
+    :pending   => "#6a7090", :ready     => "#4ec9b0")
 
 # The three ways of stopping short read differently on purpose: one is the work's fault, one is
 # yours, and one is the resources'.
@@ -525,7 +1020,8 @@ _state_label(s) = s === :succeeded ? "complete" :
                   s === :blocked   ? "stopped — the work is failing" :
                   s === :cancelled ? "stopped at your request" :
                   s === :exhausted ? "gave up — units never landed" :
-                  s === :running   ? "running" : "not started"
+                  s === :running   ? "running" :
+                  s === :ready     ? "ready — nothing submitted" : "not started"
 
 # The unit grid, BINNED to a fixed tile budget. One tile per unit does not survive contact with a
 # real sweep: a hundred thousand units would be a hundred thousand DOM nodes, rebuilt on every
@@ -558,6 +1054,23 @@ function _tile_color(ok::Int, err::Int, total::Int)
     a = round(0.35 + 0.65 * base; digits = 2)        # unfinished buckets sit dimmer
     return "rgba($r,$g,$b,$a)"
 end
+
+# Where this sweep runs and under what limits. Shown on the card because the settings are half of
+# what you need in order to read a stalled or killed run: "3 of 4, gave up" means one thing at a
+# 20-second walltime and another at two hours.
+function _target_line(t::SlurmTarget)
+    bits = String[isempty(t.host) ? "slurm" : t.host]
+    r = t.resources
+    for (k, fmt) in ((:partition, identity), (:cpus, v -> "$(v) cpu"), (:gpus, v -> "$(v) gpu"),
+                     (:mem, identity), (:walltime, identity), (:nodes, v -> "$(v) nodes"))
+        v = get(r, k, nothing)
+        v === nothing || push!(bits, String(fmt(v)))
+    end
+    isempty(t.account) || push!(bits, "acct " * t.account)
+    push!(bits, "$(t.chunk)/job")
+    return join(bits, " · ")
+end
+_target_line(t::LocalTarget) = "local · $(t.chunk)/job"
 
 function _unit_grid(io, r::ShardedResult)
     n = length(r.rows)
@@ -592,21 +1105,26 @@ end
 function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     p, t = r.plan, r.telemetry
     frac = BatchSweep.fraction(p)
-    col = get(_STATE_COLOR, p.state, "#8b949e")
+    armed = BatchSweep.is_armed(store_root(r.target), r.run)
+    st = display_state(p, armed)
+    col = get(_STATE_COLOR, st, "var(--dim,#6a7090)")
 
     # `data-sw` hooks mark every part the live script patches; without them it would have to
     # rebuild the card, and the parts that come from Julia (failures, the blocked reason) cannot be
     # rebuilt in the browser.
-    print(io, "<div data-sweep='sw-", first(r.key, 12), "' ",
-              "style='font-family:var(--font-ui,system-ui);color:var(--fg,#c9d1d9);",
-              "border:1px solid var(--border,#30363d);border-radius:8px;padding:12px 14px;",
-              "background:var(--bg-elev,#0d1117)'>")
+    print(io, "<div data-sweep='", r.run, "' ",
+              # `inherit`, not a font stack: inside the notebook this picks up the page's own UI
+              # font, and in a static export it picks up whatever that page uses. Naming a family
+              # here would make the card the one element that ignores its surroundings.
+              "style='font-family:inherit;color:var(--text,#d4d8e8);",
+              "border:1px solid var(--border,#2a2e40);border-radius:8px;padding:12px 14px;",
+              "background:var(--bg2,#141828)'>")
 
     # Header: what state it is in, and how far.
     print(io, "<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px'>",
               "<span data-sw='dot' style='display:inline-block;width:8px;height:8px;",
               "border-radius:50%;background:", col, "'></span>",
-              "<strong data-sw='label' style='color:", col, "'>", _state_label(p.state), "</strong>",
+              "<strong data-sw='label' style='color:", col, "'>", _state_label(st), "</strong>",
               "<span style='opacity:.5;font-size:12px'>", _esc(r.key), "</span>",
               "<span style='margin-left:auto;font-variant-numeric:tabular-nums'>",
               "<span data-sw='count'>", p.shards_done, " / ", p.shards_total, "</span> ",
@@ -614,66 +1132,89 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
               "%)</span></span></div>")
 
     # Progress bar.
-    print(io, "<div style='height:6px;border-radius:3px;background:var(--border,#30363d);",
+    print(io, "<div style='height:6px;border-radius:3px;background:var(--border,#2a2e40);",
               "overflow:hidden'><div data-sw='bar' style='height:100%;width:",
               round(100 * frac; digits = 2), "%;background:", col, ";transition:width .3s'></div></div>")
 
     # Counts.
     print(io, "<div style='display:flex;gap:14px;margin-top:8px;font-size:12px'>")
-    print(io, "<span data-sw='ok' style='color:#3fb950'>", p.shards_ok, " ok</span>")
-    print(io, "<span data-sw='failed' style='color:#f85149'>",
+    print(io, "<span data-sw='ok' style='color:var(--green,#56d364)'>", p.shards_ok, " ok</span>")
+    print(io, "<span data-sw='failed' style='color:var(--red,#e57575)'>",
               p.shards_failed > 0 ? "$(p.shards_failed) failed" : "", "</span>")
     print(io, "<span data-sw='missing' style='opacity:.6'>",
               p.shards_missing > 0 ? "$(p.shards_missing) remaining" : "", "</span>")
     print(io, "<span data-sw='rate' style='margin-left:auto;opacity:.7'>",
               (t.done > 0 && !BatchSweep.is_settled(p) && !BatchSweep.is_stuck(p) &&
                t.rate_per_s > 0) ? "$(round(t.rate_per_s; digits = 2))/s" : "", "</span>")
-    if t.done > 0 && !BatchSweep.is_settled(p) && !BatchSweep.is_stuck(p) && t.eta_s >= 0
-        print(io, "<span style='opacity:.7'>~", _dur(t.eta_s), " left</span>")
-    end
+    # How much longer, AND when that is. The browser recomputes both on every poll (`data-sw='eta'`),
+    # so a card left open overnight is not still promising a finish time from hours ago.
+    live_eta = t.done > 0 && !BatchSweep.is_settled(p) && !BatchSweep.is_stuck(p) && t.eta_s >= 0
+    print(io, "<span data-sw='eta' style='opacity:.7'>",
+              live_eta ? "~$(_dur(t.eta_s)) left · done ~$(_eta_clock(t.eta_s))" : "", "</span>")
     println(io, "</div>")
     print(io, "<div data-sw='note' style='font-size:11px;opacity:.5;margin-top:4px'></div>")
+    print(io, "<div style='font-size:11px;color:var(--val,#4ec9b0);opacity:.85;margin-top:4px;",
+              "font-family:ui-monospace,monospace'>",
+              _esc(_target_line(r.target)), "</div>")
+
+    # The plot of the units that have landed so far — the author's, or the automatic one. Baked in
+    # at render time AND patched by the poll, so it is populated before the first round trip and
+    # keeps filling after it. The host is emitted only when there is something to draw, so a sweep
+    # with no plottable shape does not leave a hole in the card.
+    if r.plot !== false
+        opt, perr = _plot_option(r.plot, getfield(r, :rows))
+        # The host is always emitted but starts HIDDEN, because the automatic plot cannot know its
+        # own shape until a unit has landed — and a poll that finally has something to draw needs
+        # somewhere to draw it. `drawChart` reveals it on the first option; until then the card
+        # shows no empty 280px hole.
+        print(io, "<div data-sw='chart' style='height:280px;margin-top:10px",
+                  opt === nothing ? ";display:none" : "", "'></div>")
+        print(io, "<div data-sw='charterr' style='font-size:11px;color:var(--red,#e57575);margin-top:4px'>",
+                  _esc(perr), "</div>")
+        opt === nothing ||
+            print(io, "<script type='application/json' data-sw='chartopt'>", _json(opt), "</script>")
+    end
 
     _unit_grid(io, r)
 
-    hosts = unique([row.ran_on for row in r.rows if !isempty(row.ran_on)])
+    hosts = r.hosts
     isempty(hosts) || print(io, "<div style='font-size:11px;opacity:.5;margin-top:8px'>ran on ",
                                 _esc(join(first(hosts, 8), ", ")),
                                 length(hosts) > 8 ? " (+$(length(hosts) - 8))" : "", "</div>")
 
     idle = BatchSweep.stalled_for(t)
-    idle > 0 && print(io, "<div style='margin-top:8px;font-size:12px;color:#d29922'>",
+    idle > 0 && print(io, "<div style='margin-top:8px;font-size:12px;color:var(--gold,#ffd700)'>",
                           "⚠ nothing has finished in ", _dur(idle), " — it may be stuck.</div>")
 
     # Each stopped state says what to do next, because they need different things.
     if p.state === :blocked
         print(io, "<div style='margin-top:8px;padding:8px;border-radius:6px;",
-                  "background:rgba(248,81,73,.12);font-size:12px;color:#f85149'>",
+                  "background:color-mix(in srgb, var(--red,#e57575) 12%, transparent);font-size:12px;color:var(--red,#e57575)'>",
                   _esc(p.blocked), "<br><span style='opacity:.8'>Nothing further will be ",
-                  "submitted. Fix the body, then <code>reset!</code>.</span></div>")
+                  "submitted. Fix the body, then <code>Sweep.reset!</code>.</span></div>")
     elseif p.state === :cancelled
         print(io, "<div style='margin-top:8px;padding:8px;border-radius:6px;",
-                  "background:rgba(139,148,158,.12);font-size:12px;opacity:.85'>",
+                  "background:color-mix(in srgb, var(--dim,#6a7090) 12%, transparent);font-size:12px;opacity:.85'>",
                   "Stopped at your request. ", p.shards_done, " finished units are kept — ",
-                  "<code>resume!</code> continues with the remaining ", p.shards_missing, ".</div>")
+                  "<code>Sweep.resume!</code> continues with the remaining ", p.shards_missing, ".</div>")
     elseif p.state === :exhausted
         print(io, "<div style='margin-top:8px;padding:8px;border-radius:6px;",
-                  "background:rgba(248,81,73,.12);font-size:12px;color:#f85149'>",
+                  "background:color-mix(in srgb, var(--red,#e57575) 12%, transparent);font-size:12px;color:var(--red,#e57575)'>",
                   "Attempted ", BatchSweep.MAX_ATTEMPTS, "× without landing, so these units are ",
                   "outrunning their resources rather than erroring.<br><span style='opacity:.8'>",
-                  "Raise the walltime or memory, then <code>reset!</code>.</span></div>")
+                  "Raise the walltime or memory, then <code>Sweep.reset!</code>.</span></div>")
     end
 
     # Failures, collapsed. The parameters matter more than the traceback at a glance, so they lead.
-    fails = failures(r)
+    fails = r.errors
     if !isempty(fails)
         print(io, "<details style='margin-top:8px'><summary style='cursor:pointer;font-size:12px;",
-                  "color:#f85149'>", length(fails), " failed unit",
+                  "color:var(--red,#e57575)'>", length(fails), " failed unit",
                   length(fails) == 1 ? "" : "s", "</summary>")
         print(io, "<div style='max-height:220px;overflow:auto;margin-top:6px'>")
         for f in first(fails, 50)
             print(io, "<div style='margin-bottom:6px;font-size:11px'>",
-                      "<code style='color:#d29922'>", _esc(string(f.params)), "</code>",
+                      "<code style='color:var(--gold,#ffd700)'>", _esc(string(f.params)), "</code>",
                       "<pre style='margin:2px 0 0;white-space:pre-wrap;opacity:.75'>",
                       _esc(first(String(f.value), 400)), "</pre></div>")
         end
@@ -690,25 +1231,51 @@ end
 
 # Only the controls that apply to the state it is in. A "Cancel" on a finished sweep or a "Resume"
 # on one that was never stopped is a button that either does nothing or does something surprising.
-function _actions(io, r::ShardedResult)
-    p = r.plan
+#
+# Computed here and ALSO sent on every poll, so the browser can rebuild the row as the state moves.
+# It used to be rendered once by the cell and then left alone, which made the controls lie: cancel a
+# running sweep and the button still read "Cancel" while the card beside it said "stopped at your
+# request" — indistinguishable from a cancel that did nothing, and with no way to resume short of
+# re-running the cell.
+# What the card SAYS a sweep is. `Plan.state` describes the store and the scheduler; this adds the
+# one thing only the notebook knows — whether anyone has asked for the work. A sweep with units
+# outstanding that has not been armed is READY, not pending: nothing is queued and nothing will be
+# until it is submitted.
+display_state(p::BatchSweep.Plan, armed::Bool) =
+    (!armed && p.state === :pending) ? :ready : p.state
+
+function action_list(p::BatchSweep.Plan, armed::Bool = true)
+    st = display_state(p, armed)
     acts = Tuple{String,String}[]
-    if p.state === :running || p.state === :pending
+    if st === :ready
+        # The one control that spends anything, and it says how much before you press it.
+        n = p.shards_missing
+        push!(acts, ("submit", "Submit $(n) unit" * (n == 1 ? "" : "s")))
+    elseif st === :running || st === :pending
         push!(acts, ("cancel", "Cancel"))
-    elseif p.state === :cancelled
+    elseif st === :cancelled
         push!(acts, ("resume", "Resume"))
     end
     p.shards_failed > 0 && push!(acts, ("retry", "Retry $(p.shards_failed) failed"))
-    (p.state === :blocked || p.state === :exhausted || BatchSweep.is_settled(p)) &&
+    # Reset is available the moment there is anything to throw away — finished units, submission
+    # history, or work in flight. Offering it only once a sweep had settled stranded the case you
+    # most want out of: a long run that is half done and going wrong. It is confirmed in the browser
+    # rather than rationed here.
+    (p.shards_done > 0 || armed || p.state in (:cancelled, :blocked, :exhausted)) &&
         push!(acts, ("reset", "Reset"))
-    isempty(acts) && return
+    return acts
+end
 
-    print(io, "<div style='display:flex;gap:6px;margin-top:10px'>")
-    for (act, label) in acts
-        print(io, "<button data-sw-do='", act, "' style='font:inherit;font-size:11px;",
-                  "padding:3px 9px;border-radius:5px;cursor:pointer;",
-                  "border:1px solid var(--border,#30363d);background:transparent;",
-                  "color:var(--fg,#c9d1d9)'>", _esc(label), "</button>")
+const _BTN_STYLE = "font:inherit;font-size:11px;padding:3px 9px;border-radius:5px;cursor:pointer;" *
+                   "border:1px solid var(--border,#2a2e40);background:transparent;" *
+                   "color:var(--text,#d4d8e8)"
+
+function _actions(io, r::ShardedResult)
+    # The container is emitted even when empty: the live script repopulates it, and a card that
+    # rendered with nothing to offer must still be able to grow a Retry when a unit fails.
+    print(io, "<div data-sw='acts' style='display:flex;gap:6px;margin-top:10px'>")
+    for (act, label) in action_list(r.plan, BatchSweep.is_armed(store_root(r.target), r.run))
+        print(io, "<button data-sw-do='", act, "' style='", _BTN_STYLE, "'>", _esc(label), "</button>")
     end
     println(io, "</div>")
 end
@@ -718,12 +1285,14 @@ end
 # nothing. The interval backs off as a run gets long, because a sweep of hours does not need
 # second-by-second updates and the poll is a round trip to the scheduler.
 function _live_script(io, r::ShardedResult)
-    ch = status_channel(r.key)
-    doch = action_channel(r.key)
+    ch = status_channel(r.run)
+    doch = action_channel(r.run)
     # The buttons are wired whatever the state; only the POLL is conditional. A finished sweep still
     # offers Retry and Reset, and a card that started no timer must not be inert.
-    poll = !(BatchSweep.is_settled(r.plan) || BatchSweep.is_stuck(r.plan))
-    id = "sw-" * first(r.key, 12)
+    # Nothing to watch on a sweep that is finished, stopped, or not yet submitted.
+    poll = !(BatchSweep.is_settled(r.plan) || BatchSweep.is_stuck(r.plan) ||
+             display_state(r.plan, BatchSweep.is_armed(store_root(r.target), r.run)) === :ready)
+    id = r.run
     print(io, """
     <script>
     (function(){
@@ -731,18 +1300,61 @@ function _live_script(io, r::ShardedResult)
                  document.currentScript.parentElement;
       if (!root || root.dataset.swLive === "1") return;
       root.dataset.swLive = "1";
-      var started = Date.now(), timer = null;
+      var started = Date.now(), timer = null, chart = null;
+      var watching = $(poll ? "true" : "false");   // was there anything left to watch at render?
+      // The last state the card knows about, seeded from the render so the buttons can speak
+      // accurately before the first poll lands.
+      var last = { done: $(r.plan.shards_done), total: $(r.plan.shards_total),
+                   state: "$(display_state(r.plan, BatchSweep.is_armed(store_root(r.target), r.run)))" };
+
+      // "~3h12m left" is a number you then have to add to the clock. "done ~17:22" is one you can
+      // act on. Both, because the first says whether to wait and the second says what to do instead.
+      function dur(s){
+        if (s < 0) return "?";
+        if (s < 60) return "~" + Math.round(s) + "s";
+        if (s < 3600) return "~" + Math.round(s / 60) + "m";
+        if (s < 86400) return "~" + Math.floor(s / 3600) + "h" +
+                       String(Math.round((s % 3600) / 60)).padStart(2, "0") + "m";
+        return "~" + (s / 86400).toFixed(1) + "d";
+      }
+      function clock(s){
+        var t = new Date(Date.now() + s * 1000), now = new Date();
+        var hhmm = String(t.getHours()).padStart(2, "0") + ":" + String(t.getMinutes()).padStart(2, "0");
+        // The date comes along once the answer is not today: "done ~09:20" on a run that lands
+        // tomorrow morning is worse than no answer at all.
+        if (t.toDateString() === now.toDateString()) return hhmm;
+        var days = Math.round((t - now) / 86400000);
+        return (days <= 6 ? t.toLocaleDateString(undefined, { weekday: "short" })
+                          : t.toLocaleDateString(undefined, { day: "numeric", month: "short" })) + " " + hhmm;
+      }
       function interval(){
         var mins = (Date.now() - started) / 60000;
         return mins < 2 ? 2000 : mins < 15 ? 5000 : 15000;
       }
+      // The chart is created lazily and reused: `setOption` on a live instance animates from the
+      // points already drawn, which is what makes a sweep look like it is FILLING rather than
+      // redrawing. Slate's own runtime supplies the themed instance, so it matches every other
+      // chart in the notebook and follows a theme switch.
+      function drawChart(opt){
+        var el = root.querySelector('[data-sw="chart"]');
+        if (!el || !opt || !window.echarts) return;
+        if (!chart) {
+          chart = window.chartRuntime ? window.chartRuntime.init(el) : window.echarts.init(el);
+        }
+        try { chart.setOption(opt, { notMerge: false, lazyUpdate: true }); } catch (e) {}
+      }
       function paint(s){
+        last = s;
         // Feed the notebook-level pill. The card is inside one cell's output; the pill is what
         // answers "what is this notebook doing" when that cell is scrolled away or collapsed.
         if (window.slateSweeps) {
           var cell = root.closest('[data-cid]');
-          window.slateSweeps.report("$(r.key)", cell ? cell.dataset.cid : "", s);
+          window.slateSweeps.report("$(id)", cell ? cell.dataset.cid : "", s);
         }
+        if (s.chart) drawChart(s.chart);
+        var ce = root.querySelector('[data-sw="charterr"]');
+        if (ce) ce.textContent = s.charterr || "";
+        syncActions(s.actions);
         var bar = root.querySelector('[data-sw="bar"]');
         if (bar) bar.style.width = (100 * s.frac).toFixed(2) + "%";
         if (bar) bar.style.background = s.color;
@@ -756,6 +1368,9 @@ function _live_script(io, r::ShardedResult)
         set("failed", s.failed > 0 ? s.failed + " failed" : "");
         set("missing", s.missing > 0 ? s.missing + " remaining" : "");
         set("rate", s.rate > 0 && !s.settled ? s.rate.toFixed(2) + "/s" : "");
+        // How much longer, and WHEN that is. Computed in the browser so the clock time is the
+        // reader's own — a hub in another timezone would otherwise quote a finish time in its.
+        set("eta", (s.eta >= 0 && !s.settled && !s.stuck) ? dur(s.eta) + " left · done ~" + clock(s.eta) : "");
         set("label", s.label);
         var lab = root.querySelector('[data-sw="label"]');
         if (lab) lab.style.color = s.color;
@@ -768,12 +1383,26 @@ function _live_script(io, r::ShardedResult)
               g.children[i].style.background = s.tiles[i];
           }
         }
+        // Submitting turns a card that had nothing to watch into a live one, so the timer starts
+        // here rather than only at render.
+        if (!s.settled && !s.blocked && s.state !== "ready" && !timer) {
+          watching = true;
+          timer = setInterval(tick, interval());
+        }
         if (s.settled || s.blocked){
-          clearInterval(timer);
+          clearInterval(timer); timer = null;
+          // Tell Julia ONCE that the work is over, so the cells that read this sweep recompute.
+          // Only for a settle we actually WATCHED: a card that rendered already-finished has
+          // nothing to announce, and announcing anyway would restale the notebook's downstream
+          // cells on every page load.
+          if (watching && !root.dataset.swSettledSent) {
+            root.dataset.swSettledSent = "1";
+            if (window.slateCall) window.slateCall("$(doch)", { action: "settled" }).catch(function(){});
+          }
           // The card's remaining detail (failures, the blocked reason) comes from Julia, so hand
           // back to the cell rather than trying to rebuild it here.
           var n = root.querySelector('[data-sw="note"]');
-          if (n) n.textContent = s.blocked ? s.blocked : "finished — re-run the cell for detail";
+          if (n) n.textContent = s.blocked ? s.blocked : "finished";
         }
       }
       function tick(){
@@ -783,30 +1412,76 @@ function _live_script(io, r::ShardedResult)
       }
 
       // Buttons. Disabled while the call is in flight so an impatient second click cannot cancel
-      // and resume in the same breath.
-      root.querySelectorAll('[data-sw-do]').forEach(function(b){
-        b.addEventListener('click', function(){
-          var was = b.textContent;
-          b.disabled = true; b.textContent = "…";
-          window.slateCall("$(doch)", { action: b.dataset.swDo }).then(function(s){
-            paint(s);
-            // The set of applicable buttons changes with the state, and only Julia knows which
-            // apply, so hand back to the cell rather than guessing here.
-            var n = root.querySelector('[data-sw="note"]');
-            if (n) n.textContent = "done — re-run the cell to refresh the controls";
-            b.textContent = was;
-          }).catch(function(e){
-            b.disabled = false; b.textContent = was;
+      // and resume in the same breath. The click's reply carries the new state, so the row rebuilds
+      // itself — cancel a sweep and the button becomes Resume, in that same round trip.
+      // Reset is the one control that DESTROYS work — hours of cluster time, in the case it exists
+      // for. It is confirmed, and the confirmation says what goes rather than asking "are you sure":
+      // the count of finished units is the number someone needs to weigh.
+      function confirmReset(){
+        var n = last.done || 0, live = last.state === "running" || last.state === "pending";
+        var msg = n > 0 ? "Discard " + n + " finished unit" + (n === 1 ? "" : "s") + " and start over?"
+                        : "Reset this sweep?";
+        if (live) msg += "\\nAnything still queued or running is cancelled.";
+        return window.confirmDark ? window.confirmDark(msg, "Reset", "danger")
+                                  : Promise.resolve(window.confirm(msg));
+      }
+      function runAction(act, btn){
+        if (btn.disabled) return;
+        var was = btn.textContent;
+        // Disabled for the confirmation too, not just the call: an impatient second click would
+        // otherwise stack a second dialog on the first.
+        btn.disabled = true;
+        (act === "reset" ? confirmReset() : Promise.resolve(true)).then(function(ok){
+          if (!ok) { btn.disabled = false; return; }
+          btn.textContent = "…";
+          window.slateCall("$(doch)", { action: act }).then(paint).catch(function(e){
+            btn.disabled = false; btn.textContent = was;
             var n = root.querySelector('[data-sw="note"]');
             if (n) n.textContent = String(e);
           });
         });
-      });
+      }
+      // Rebuild the control row only when the SET of actions changed, so a click never lands on a
+      // button that a poll replaced underneath it mid-press.
+      function syncActions(list){
+        var host = root.querySelector('[data-sw="acts"]');
+        if (!host || !list) return;
+        var want = list.map(function(a){ return a[0] + "|" + a[1]; }).join(",");
+        if (host.dataset.sig === want) return;
+        host.dataset.sig = want;
+        host.textContent = "";
+        list.forEach(function(a){
+          var b = document.createElement("button");
+          b.dataset.swDo = a[0];
+          b.textContent = a[1];
+          b.setAttribute("style", "$(_BTN_STYLE)");
+          b.addEventListener("click", function(){ runAction(a[0], b); });
+          host.appendChild(b);
+        });
+      }
+
+      // Wire the buttons the CELL rendered, and record what they are — so they work before the
+      // first poll lands, and an unchanged state does not churn the row underneath a click.
+      (function(){
+        var host = root.querySelector('[data-sw="acts"]');
+        if (!host) return;
+        var sig = [];
+        host.querySelectorAll('[data-sw-do]').forEach(function(b){
+          sig.push(b.dataset.swDo + "|" + b.textContent);
+          b.addEventListener('click', function(){ runAction(b.dataset.swDo, b); });
+        });
+        host.dataset.sig = sig.join(",");
+      })();
+
+      // Draw the option baked in at render time before any round trip, so a settled sweep's chart
+      // is there on load and an exported page shows it with no server at all.
+      var seed = root.querySelector('script[data-sw="chartopt"]');
+      if (seed) { try { drawChart(JSON.parse(seed.textContent)); } catch (e) {} }
 
       // One tick ALWAYS, so a finished sweep still reports itself to the topbar pill; the repeating
       // timer only starts when there is something left to watch.
       tick();
-      if ($(poll ? "true" : "false")) timer = setInterval(tick, interval());
+      if (watching) timer = setInterval(tick, interval());
     })();
     </script>""")
 end
@@ -814,11 +1489,13 @@ end
 function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
     p = r.plan
     t = r.telemetry
-    icon = p.state === :succeeded ? "✅" : p.state === :partial   ? "⚠️" :
-           p.state === :exhausted ? "⛔" : p.state === :blocked   ? "🛑" :
-           p.state === :cancelled ? "⏹" : p.state === :running   ? "⏳" : "•"
+    st = display_state(p, BatchSweep.is_armed(store_root(r.target), r.run))
+    icon = st === :succeeded ? "✅" : st === :partial   ? "⚠️" :
+           st === :exhausted ? "⛔" : st === :blocked   ? "🛑" :
+           st === :cancelled ? "⏹" : st === :running   ? "⏳" :
+           st === :ready     ? "○"  : "•"
     pct = round(100 * BatchSweep.fraction(p); digits = 1)
-    println(io, "$icon sweep $(r.key) — $(p.state)")
+    println(io, "$icon sweep $(r.key) — $(st)")
     println(io, "   $(_bar(BatchSweep.fraction(p)))  $(p.shards_done)/$(p.shards_total) ($pct%)")
     println(io, "   ok $(p.shards_ok)   errored $(p.shards_failed)   remaining $(p.shards_missing)")
 
@@ -833,7 +1510,7 @@ function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
         isempty(parts) || println(io, "   ", join(parts, " · "))
     end
 
-    hosts = unique([row.ran_on for row in r.rows if !isempty(row.ran_on)])
+    hosts = r.hosts
     isempty(hosts) || println(io, "   ran on: ", join(first(hosts, 6), ", "),
                               length(hosts) > 6 ? " (+$(length(hosts) - 6) more)" : "")
 
@@ -842,16 +1519,16 @@ function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
 
     if p.state === :blocked
         println(io, "   🛑 $(p.blocked)")
-        println(io, "   Nothing further will be submitted. Fix the body, then `reset!(r)`.")
+        println(io, "   Nothing further will be submitted. Fix the body, then `Sweep.reset!(r)`.")
     elseif p.state === :cancelled
         println(io, "   Stopped at your request. $(p.shards_done) finished units are kept — ",
-                    "`resume!(r)` continues with the remaining $(p.shards_missing).")
+                    "`Sweep.resume!(r)` continues with the remaining $(p.shards_missing).")
     elseif p.state === :partial
-        println(io, "   `failures(r)` lists the errors; `retry_failed!(r)` clears them for a retry.")
+        println(io, "   `r.errors` lists them; `Sweep.retry_failed!(r)` clears them for a retry.")
     elseif p.state === :exhausted
         println(io, "   Attempted $(BatchSweep.MAX_ATTEMPTS)× without landing, so these units are ",
                     "outrunning their resources rather than erroring.")
-        println(io, "   Raise the walltime or memory, then `reset!(r)`.")
+        println(io, "   Raise the walltime or memory, then `Sweep.reset!(r)`.")
     elseif p.state !== :succeeded
         println(io, "   re-run this cell to refresh.")
     end
@@ -864,20 +1541,33 @@ end
 
 The function `@sweep` expands to. Idempotent: it works out what is missing, submits exactly that,
 and returns immediately with whatever has already landed.
+
+It never waits for completion, and there is deliberately no option to. A cell that blocks for the
+length of the work puts the notebook back where it started — one opaque "running" chip, no partial
+results, nothing else runnable — and on a cluster the work can outlive the browser, the worker and
+the machine. "Running" here means submitted, scheduled and being watched; the card and the topbar
+pill carry the rest.
 """
 function run_sweep(target::SweepTarget, params::AbstractVector, body_src::AbstractString;
                    setup_src::AbstractString = "", captures::AbstractDict = Dict{Symbol,Any}(),
-                   submit::Bool = true, cap::Integer = 0, register = nothing,
-                   resources = nothing, wait::Bool = false,
-                   progress = nothing, pause = nothing, poll::Real = 2.0)
+                   submit::Bool = false, cap::Integer = 0, register = nothing,
+                   resources = nothing, plot = nothing, refresh = nothing, cell = "",
+                   summary_src::AbstractString = "",
+                   attrs::AbstractDict = Dict{String,String}())
     # Resource overrides do NOT enter the key. Re-running the same body with a longer walltime is
     # the same sweep resumed, not a different one — otherwise the fix for a walltime kill would
     # throw away every unit that had already survived it.
-    target = with_resources(target, resources)
+    #
+    # The cell HEADER wins over a `resources =` written in the source. Both are explicit, but the
+    # header is the one a person edits from the UI while watching a job, and a control that silently
+    # loses to the source would be a control that appears broken.
+    target = with_resources(with_resources(target, resources), attr_resources(attrs))
+    target = with_chunk(target, attr_chunk(attrs))
     root = store_root(target)
     mkpath(root)
-    key = sweep_key(body_src, setup_src, captures)
+    key = sweep_key(body_src, setup_src, captures, env_key(target), summary_src)
     keys = [shard_key(key, prm) for prm in params]
+    run = run_key(key, keys)
 
     # (Re)write the descriptors. Content-addressed, so doing this every run is nearly free: the
     # blobs already exist and only ~1 KB of manifests is rewritten.
@@ -885,18 +1575,22 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     chunks = String[]
     for (ci, lo) in enumerate(1:per:length(params))
         hi = min(lo + per - 1, length(params))
-        ck = chunk_key(key, ci)
+        ck = chunk_key(run, ci)
         SlateTask.write_chunk!(root, ck; fn_src = body_src, setup_src = setup_src,
                                captures = Dict(String(k) => v for (k, v) in captures),
-                               params = params[lo:hi], keys = keys[lo:hi])
+                               params = params[lo:hi], keys = keys[lo:hi],
+                               summary_src = summary_src)
         push!(chunks, ck)
     end
-    BatchSweep.write_sweep!(root, key, chunks)
+    BatchSweep.write_sweep!(root, run, chunks)
 
     launcher = launcher_for(target)
-    if submit
-        BatchSweep.reconcile!(root, key, launcher, specfn_for(target); cap)
-    end
+    # Running the cell RECONCILES; it does not submit. Authoring a sweep means running the cell
+    # repeatedly, and every one of those must be free — the work starts when someone asks for it,
+    # from the card. `submit = true` is for a standalone script, where there is no card to ask from.
+    submit && BatchSweep.arm!(root, run)
+    BatchSweep.reconcile!(root, run, launcher, specfn_for(target);
+                          cap, submit = BatchSweep.is_armed(root, run))
     # The card's live channel. Registered here rather than by the author, so a sweep cell needs no
     # wiring to be watchable. `register` is the notebook's `slate_on`; outside a notebook (a
     # standalone run, a test) it is simply absent and the card renders static.
@@ -908,41 +1602,22 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         #
         # Deliberately unguarded. A swallowed failure here means the card never updates, which
         # looks like the sweep having stalled — much worse than an error naming the cause.
-        register(status_channel(key), _args -> status_payload(target, key, ps, ks))
-        register(action_channel(key),
-                 a -> handle_action(target, key, ps, ks, String(get(a, :action, ""))))
+        # What "the sweep finished" tells the notebook. `slate_refresh` restales the cells that READ
+        # a name without re-running the one that WRITES it, which is precisely right here: the sweep
+        # cell must not resubmit, and everything downstream of it should recompute. The cell does not
+        # know what the notebook named its result, so it names ITSELF and the hub resolves that to
+        # the names the cell writes.
+        note = (refresh === nothing || isempty(cell)) ? nothing : () -> refresh("cell:" * cell)
+        register(status_channel(run), _args -> status_payload(target, run, ps, ks; plot))
+        register(action_channel(run),
+                 a -> handle_action(target, run, ps, ks, String(get(a, :action, ""));
+                                    plot, notify = note))
     end
 
-    pl = BatchSweep.plan(root, key; launcher)
-    tl = BatchSweep.telemetry(root, key; launcher, plan = pl)
-    res = ShardedResult(key, target, collect(params), keys, pl, _rows(root, params, keys), tl)
-
-    # `wait = true` holds the cell open and drives Slate's OWN progress bar and run chip, which is
-    # where a reader already looks to see what a notebook is doing. The card alone is buried in one
-    # cell's output; this puts the sweep where the rest of the notebook reports itself.
-    #
-    # Interrupting the cell stops WATCHING, not the sweep: the work is on the cluster and the store
-    # remembers it, so the result is returned with whatever has landed rather than raising.
-    if wait && progress !== nothing
-        try
-            while true
-                refresh!(res)
-                p, t = res.plan, res.telemetry
-                bits = ["$(p.shards_done)/$(p.shards_total)"]
-                p.shards_failed > 0 && push!(bits, "$(p.shards_failed) failed")
-                (t.eta_s >= 0 && !BatchSweep.is_settled(p)) && push!(bits, "~$(_dur(t.eta_s)) left")
-                progress(BatchSweep.fraction(p); msg = join(bits, " · "))
-                (BatchSweep.is_settled(p) || BatchSweep.is_stuck(p)) && break
-                pause === nothing ? Base.sleep(poll) : pause(poll)
-            end
-            progress(1.0; msg = _state_label(res.plan.state), done = true)
-        catch e
-            e isa InterruptException || rethrow()
-            progress(BatchSweep.fraction(res.plan);
-                     msg = "stopped watching — the sweep is still running", done = true)
-        end
-    end
-    return res
+    pl = BatchSweep.plan(root, run; launcher)
+    tl = BatchSweep.telemetry(root, run; launcher, plan = pl)
+    return ShardedResult(key, run, target, collect(params), keys, pl,
+                         _rows(root, params, keys), tl, plot)
 end
 
 # Free names in the body that are bound in the calling module and look like DATA. These travel with
@@ -950,6 +1625,33 @@ end
 #
 # Functions, modules, and types are deliberately excluded: a compute node cannot revive a function
 # value, only source. Helpers therefore belong in `setup=`, which travels as text.
+# Lift `using` / `import` out of a body, returning them and what is left. They are legal to WRITE
+# there — the parser accepts them anywhere — but not to run: a closure cannot carry an import, and a
+# module wants loading once per process rather than once per unit.
+function _hoist_imports(ex)
+    ex isa Expr || return (Expr[], ex)
+    found = Expr[]
+    strip_(e) = e
+    function strip_(e::Expr)
+        if e.head in (:block, :toplevel)
+            kept = Any[]
+            for a in e.args
+                if a isa Expr && a.head in (:using, :import)
+                    push!(found, a)
+                else
+                    push!(kept, strip_(a))
+                end
+            end
+            return Expr(e.head, kept...)
+        end
+        return e
+    end
+    body = strip_(ex)
+    # A lone `using` as the whole body leaves nothing behind; keep it valid.
+    (body isa Expr && body.head === :block && isempty(body.args)) && (body = Expr(:block, nothing))
+    return (found, body)
+end
+
 function _capture_names(body, param::Symbol)
     found = Set{Symbol}()
     walk(x) = nothing
@@ -988,9 +1690,15 @@ Run the body once per row of `grid`, as batch work on `target`, and return a [`S
 
 The body travels as SOURCE, so it must be self-contained apart from:
 
-  * plain data from the notebook, which is captured and serialized automatically, and
-  * helper definitions, which go in `setup=` (a string) because a function value cannot be revived
-    on a compute node.
+  * plain data from the notebook, which is captured and serialized automatically;
+  * `using` / `import`, written in the body and lifted out to run once per chunk; and
+  * helper definitions, which go in `setup = begin … end` — a function value cannot be revived on a
+    compute node, so helpers travel as code too.
+
+    @sweep(paramgrid(β = 0:0.1:2), hpc) do p
+        using MyPkg
+        MyPkg.simulate(p)
+    end
 
 Re-running the cell is a reconcile: whatever has landed is kept, only what is missing is submitted.
 Editing the body makes it a different sweep.
@@ -1021,9 +1729,14 @@ macro sweep(args...)
             push!(positional, a)
         end
     end
-    length(positional) >= 2 ||
-        error("@sweep needs a grid and a target: `@sweep(grid, target) do p … end`")
-    grid, target = positional[1], positional[2]
+    # The target is OPTIONAL. `@sweep(grid) do … end` in a `#%% sweep cluster=hpc` cell takes its
+    # target from the notebook's cluster definitions, so where the work runs is configuration rather
+    # than something each cell restates.
+    isempty(positional) &&
+        error("@sweep needs a grid: `@sweep(grid) do p … end`, with `cluster=<name>` on the cell " *
+              "header — or `@sweep(grid, target) do p … end`")
+    grid = positional[1]
+    target = length(positional) >= 2 ? positional[2] : nothing
 
     # The do-block's parameter and body, as written.
     plist = body.args[1]
@@ -1035,18 +1748,45 @@ macro sweep(args...)
     # Line information is stripped before the body is stringified. It is part of the key, so
     # leaving it in would mean a sweep re-keys — orphaning every result it already has — because a
     # cell moved down the notebook or gained a comment above it.
-    body_src = string(param, " -> begin\n", string(_strip_lines(inner)), "\nend")
+    # `using MyPkg` written in the body, where you would expect to write it. It is lifted out into
+    # the chunk's setup: a module has to be loaded once per PROCESS, not once per unit, and a
+    # closure cannot carry an import anyway.
+    imports, inner = _hoist_imports(_strip_lines(inner))
+
+    body_src = string(param, " -> begin\n", string(inner), "\nend")
     names = _capture_names(inner, param)
-    setup  = get(opts, :setup, "")
     cap    = get(opts, :cap, 0)
-    submit = get(opts, :submit, true)
-    res     = get(opts, :resources, nothing)
-    waitfor = get(opts, :wait, false)
+    submit = get(opts, :submit, false)
+    res    = get(opts, :resources, nothing)
+    plot   = get(opts, :plot, nothing)
     # An unknown option is an error rather than a silent no-op: `@sweep(…, wallclock = "2h")` that
     # quietly does nothing is worse than one that says so.
     for k in keys(opts)
-        k in (:setup, :cap, :submit, :resources, :wait) ||
-            error("@sweep: unknown option `$k` (accepted: setup, cap, submit, resources, wait)")
+        k in (:setup, :cap, :submit, :resources, :plot, :summary) ||
+            error("@sweep: unknown option `$k` " *
+                  "(accepted: setup, cap, submit, resources, plot, summary)")
+    end
+
+    # What the shard module needs before the body runs: the imports lifted out of the body, then
+    # anything `setup` adds. `setup` takes Julia — a `begin … end` of helper definitions — rather
+    # than a string, so it is parsed, highlighted and indented like the code it is.
+    setup_lines = [string(im) for im in imports]
+    if haskey(opts, :setup)
+        e = opts[:setup]
+        push!(setup_lines,
+              e isa AbstractString ? String(e) :                          # already source
+              (e isa Expr && e.head in (:block, :quote)) ?
+                  string(_strip_lines(e.head === :quote ? e.args[1] : e)) :
+                  string(_strip_lines(e)))
+    end
+    setup = join(setup_lines, "\n")
+    # `summary` runs on the COMPUTE NODE, so like the body it travels as source. Given a one-argument
+    # function it is stringified whole; given an expression it is wrapped as `v -> …`, so
+    # `summary = sum(abs2, v)` reads the way it should.
+    sumsrc = ""
+    if haskey(opts, :summary)
+        e = _strip_lines(opts[:summary])
+        sumsrc = (e isa Expr && e.head === :(->)) ? string(e) : string("v -> ", string(e))
     end
 
     quote
@@ -1057,18 +1797,25 @@ macro sweep(args...)
         # author registering anything.
         local _reg = isdefined(@__MODULE__, :slate_on) ?
                      getfield(@__MODULE__, :slate_on) : nothing
-        # `slate_progress` drives the cell's bar and the run chip; `pause` is the cancellable sleep,
-        # so a `wait`ing sweep stops promptly when the cell is stopped. Both are notebook-injected
-        # and simply absent in a standalone run, where waiting degrades to a plain sleep.
-        local _prog = isdefined(@__MODULE__, :slate_progress) ?
-                      getfield(@__MODULE__, :slate_progress) : nothing
-        local _pause = isdefined(@__MODULE__, :pause) ?
-                       getfield(@__MODULE__, :pause) : nothing
-        $(Sweep).run_sweep($(esc(target)), collect($(esc(grid))), $body_src;
-                           setup_src = $(esc(setup)), captures = _caps,
+        # `slate_refresh` + the id of the cell being evaluated: together they let a sweep that
+        # finishes long after this cell returned tell the notebook to recompute what reads it.
+        local _refresh = isdefined(@__MODULE__, :slate_refresh) ?
+                         getfield(@__MODULE__, :slate_refresh) : nothing
+        local _cell = get(task_local_storage(), :slate_cell, "")
+        # The cell's own `key=value` header attributes — where a `#%% sweep` cell keeps its
+        # walltime, partition and memory, so they can be changed from the UI without editing code.
+        local _sctx = get(task_local_storage(), :slate_ctx, nothing)
+        local _attrs = (_sctx !== nothing && hasproperty(_sctx, :attrs)) ?
+                       _sctx.attrs : Dict{String,String}()
+        local _clusters = (_sctx !== nothing && hasproperty(_sctx, :clusters)) ?
+                          _sctx.clusters : Dict{String,Dict{String,String}}()
+        $(Sweep).run_sweep($(Sweep).resolve_target($(esc(target)), _attrs, _clusters),
+                           collect($(esc(grid))), $body_src;
+                           setup_src = $setup, captures = _caps,
                            cap = $(esc(cap)), submit = $(esc(submit)), register = _reg,
-                           resources = $(esc(res)), wait = $(esc(waitfor)),
-                           progress = _prog, pause = _pause)
+                           resources = $(esc(res)), plot = $(esc(plot)),
+                           summary_src = $sumsrc,
+                           refresh = _refresh, cell = String(_cell), attrs = _attrs)
     end
 end
 

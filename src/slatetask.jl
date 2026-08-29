@@ -31,6 +31,16 @@ import Dates
 
 const MemoStore = parentmodule(@__MODULE__).MemoStore
 
+# The same value↔bytes codecs the memo layer uses. `raw` writes an isbits array as a
+# self-describing header plus its bytes: the blob mmaps, so a slice reads only the pages it touches,
+# and the header answers "what is in here?" without opening the data at all. Stdlib-only (`Mmap`;
+# Arrow is soft-detected), so it loads in a runner that carries no dependencies.
+Base.include(@__MODULE__, joinpath(@__DIR__, "memocodecs.jl"))
+
+# Everything a task process needs beside it. Declared here, next to the includes it mirrors, so
+# provisioning a cluster cannot silently ship a runner without one of its own parts.
+const PAYLOAD_FILES = ("memostore.jl", "memocodecs.jl", "slatetask.jl")
+
 const KIND_CHUNK = "slate-chunk"
 const KIND_SHARD = "slate-shard"
 
@@ -88,11 +98,14 @@ and the same captured values give the same key on any machine.
 function write_chunk!(root::AbstractString, chunk::AbstractString;
                       fn_src::AbstractString, params::AbstractVector,
                       keys::AbstractVector, setup_src::AbstractString = "",
-                      captures::AbstractDict = Dict{String,Any}())
+                      captures::AbstractDict = Dict{String,Any}(),
+                      summary_src::AbstractString = "")
     length(params) == length(keys) ||
         throw(ArgumentError("params and keys must be the same length"))
     fn_h, _ = _put_txt(root, fn_src)
     setup_h = isempty(setup_src) ? "" : first(_put_txt(root, setup_src))
+    # Travels as SOURCE for the same reason the body does — a fresh process cannot revive a closure.
+    sum_h = isempty(summary_src) ? "" : first(_put_txt(root, summary_src))
     caps = Dict{String,Any}[]
     for (name, v) in captures
         h, n = _put_jls(root, v)
@@ -109,6 +122,7 @@ function write_chunk!(root::AbstractString, chunk::AbstractString;
         "julia" => string(VERSION),
         "fn" => fn_h,
         "setup" => setup_h,
+        "summary" => sum_h,
         "captures" => caps,
         "shards" => shards))
     return chunk
@@ -154,6 +168,43 @@ end
 
 "A shard is done when its manifest is present. The store is the source of truth, not a job record."
 is_done(root::AbstractString, key::AbstractString) = MemoStore.read_manifest(root, key) !== nothing
+
+# What a result IS, recorded beside it so the question can be answered without reading it: the
+# concrete type, the dimensions, and the stored size. This is what lets a notebook describe a sweep's
+# output — and decide whether it wants to fetch any of it — at the cost of a manifest read.
+function _shape_of(v, bytes::Integer)
+    d = Dict{String,Any}("type" => string(typeof(v)), "bytes" => Int(bytes))
+    if v isa AbstractArray
+        d["dims"] = collect(Int, size(v))
+        d["eltype"] = string(eltype(v))
+        d["length"] = length(v)
+    end
+    return d
+end
+
+# A summary rides in every manifest read, so it holds facts rather than results: a number, a bool, a
+# short string, a small vector, or a named group of those (`(; loss, acc, converged)`). Anything
+# larger is dropped rather than truncated — a half-written value is worse than an absent one.
+_toml_scalar(x) = x isa Real || x isa Bool || x isa AbstractString
+_toml_value(x) = _toml_scalar(x) ? (x isa AbstractString ? String(x) : x) :
+                 (x isa AbstractVector && length(x) <= 64 && all(_toml_scalar, x)) ? collect(x) :
+                 nothing
+
+function _summarize(f, value)
+    v = f === nothing ? value : (try; Base.invokelatest(f, value); catch; return nothing; end)
+    flat = _toml_value(v)
+    flat === nothing || return flat
+    # A NamedTuple or Dict of facts — the shape a run naturally reports (loss, accuracy, a flag).
+    pairs = v isa NamedTuple ? zip(string.(keys(v)), values(v)) :
+            v isa AbstractDict ? zip(string.(keys(v)), values(v)) : nothing
+    pairs === nothing && return nothing
+    out = Dict{String,Any}()
+    for (k, x) in pairs
+        y = _toml_value(x)
+        y === nothing || (out[k] = y)
+    end
+    return isempty(out) ? nothing : out
+end
 
 """
     run_chunk(root, chunk; force = false) -> NamedTuple
@@ -202,6 +253,12 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
         Core.eval(mod, Expr(:(=), Symbol(c["name"]), _get_jls(root, String(c["blob"]))))
     end
     fn = Core.eval(mod, Meta.parse(_get_txt(root, String(d["fn"]))))
+    # The per-unit SUMMARY: a small value recorded in the manifest beside `ms` and `status`, so the
+    # notebook's live view can plot progress WITHOUT reading a single result blob. Computed here, on
+    # the compute node, because the whole point is that the big thing never travels — a sweep whose
+    # units return gigabyte fields must still cost only its manifests to watch.
+    sum_h = String(get(d, "summary", ""))
+    summarize = isempty(sum_h) ? nothing : Core.eval(mod, Meta.parse(_get_txt(root, sum_h)))
 
     for s in shards
         s isa AbstractDict || continue
@@ -235,9 +292,15 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
             "chunk" => chunk, "ms" => ms, "ran_on" => _ran_on(),
             "status" => ok ? "ok" : "error", "artifacts" => arts)
         if ok
-            h, n = _put_jls(root, value)
-            m["bindings"] = [Dict{String,Any}("name" => "result", "codec" => "jls",
+            # The summary rides in every manifest read, so it is limited to small TOML-carryable
+            # values; anything else is dropped rather than stringified.
+            sv = _summarize(summarize, value)
+            sv === nothing || (m["summary"] = sv)
+            codec = _codec_pick(value)
+            h, n = MemoStore.put_blob(io -> _codec_encode(io, codec, value), root)
+            m["bindings"] = [Dict{String,Any}("name" => "result", "codec" => codec,
                                               "blob" => h, "bytes" => n)]
+            m["shape"] = _shape_of(value, n)
             ran += 1
         else
             m["bindings"] = Any[]
@@ -264,7 +327,19 @@ function result(root::AbstractString, key::AbstractString)
     st == "ok" || return (true, st, get(d, "error", nothing))
     bs = get(d, "bindings", Any[])
     isempty(bs) && return (true, st, nothing)
-    return (true, st, _get_jls(root, String(bs[1]["blob"])))
+    return (true, st, load_binding(root, bs[1]))
+end
+
+"""
+    load_binding(root, binding; zc = false) -> value
+
+Materialize one stored binding through the codec it was written with. `zc` mmaps the blob read-only
+instead of copying — safe only while nothing mutates the result.
+"""
+function load_binding(root::AbstractString, b::AbstractDict; zc::Bool = false)
+    codec = String(get(b, "codec", "jls"))
+    path = MemoStore.blob_path(root, String(b["blob"]))
+    return _codec_decode(codec, path, zc)
 end
 
 "Every artifact a shard registered, as `(name, blob, bytes)` rows. Blobs stay where they are."

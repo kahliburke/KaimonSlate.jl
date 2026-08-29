@@ -110,4 +110,40 @@ defs(src) = _collect_defs!(Dict{String,UInt64}(), Meta.parseall(src))
         changed = [k for (k, v) in b if get(a, k, nothing) != v]
         @test changed == ["g"]
     end
+
+    @testset "a DOCUMENTED module is not opaque" begin
+        # `"""doc""" module M … end` parses as a `@doc` macrocall, so the plain `:module` branch
+        # never sees it. Most packages document their top module, and the result was that this
+        # returned NOTHING for their main file — the memo layer and the batch fabric's
+        # re-provisioning both watch this, so an edit to any function in it changed nothing.
+        d = defs("\"\"\"\n    M\n\nA documented module.\n\"\"\"\nmodule M\nf(x) = x\ng() = 1\nend")
+        @test sort(collect(keys(d))) == ["f", "g"]
+        # …and the bodies are still what changes, so an edit inside one is visible.
+        e = defs("\"\"\"\n    M\n\nA documented module.\n\"\"\"\nmodule M\nf(x) = x + 1\ng() = 1\nend")
+        @test d["g"] == e["g"] && d["f"] != e["f"]
+        # A documented FUNCTION already worked (`_def_name` unwraps it) — keep it that way.
+        @test haskey(defs("\"doc\"\nf(x) = x"), "f")
+    end
+
+    @testset "src_tree_digest: definitions, not bytes" begin
+        mktempdir() do dir
+            src = joinpath(dir, "src"); mkpath(src)
+            body = "\"\"\"\n    P\n\"\"\"\nmodule P\nf(x) = x\nend\n"
+            write(joinpath(src, "P.jl"), body)
+            base = src_tree_digest([src])
+            @test base != SRC_DIGEST_EMPTY                       # a documented module is not empty
+
+            write(joinpath(src, "P.jl"), body * "\n# just a comment\n")
+            @test src_tree_digest([src]) == base                 # comments/formatting are not code
+
+            write(joinpath(src, "P.jl"), replace(body, "f(x) = x" => "f(x) = x + 1"))
+            @test src_tree_digest([src]) != base                 # an edited body is
+
+            write(joinpath(src, "P.jl"), body)
+            @test src_tree_digest([src]) == base                 # and it is reversible
+            write(joinpath(src, "Q.jl"), "g() = 2\n")
+            @test src_tree_digest([src]) != base                 # a new file counts too
+            @test src_tree_digest([joinpath(dir, "nope")]) == SRC_DIGEST_EMPTY
+        end
+    end
 end

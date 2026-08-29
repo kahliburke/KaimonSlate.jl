@@ -123,6 +123,23 @@ function env_parent_fingerprint(parent::AbstractString)
     return string(hash(take!(io)); base = 16)
 end
 
+# The parent's fingerprint INCLUDING its source. Deliberately separate from
+# `env_parent_fingerprint`, because the two callers have opposite needs.
+#
+# A notebook's forked env is a live process with Revise: editing `src/foo.jl` is picked up there
+# without rebuilding anything, so folding source into that fingerprint would rebuild the env on
+# every keystroke for no benefit.
+#
+# A BATCH task environment is the opposite. Its processes are fresh, there is no Revise, and the
+# source was copied once — so an edit that is invisible to the fingerprint means the cluster keeps
+# running the OLD code. That fails loudly only when a function is newly added; when an existing one
+# changes it fails silently, which is far worse: the results look valid and are cached as if they
+# were computed by the code you are reading.
+env_source_fingerprint(parent::AbstractString) =
+    isempty(parent) ? "" :
+    string(hash((env_parent_fingerprint(parent),
+                 src_tree_digest([joinpath(parent, "src")]))); base = 16)
+
 _env_stamp_file(envdir::AbstractString) = joinpath(envdir, ".slate-parent")
 
 "Record the parent fingerprint `envdir` was seeded from (for later [`env_stale`](@ref) checks)."

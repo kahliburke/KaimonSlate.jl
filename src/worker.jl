@@ -100,7 +100,11 @@ function _new_ns()
                            (ap = Base.active_project(); ap === nothing ? "" : dirname(ap))))
     return m
 end
-const _NS = Ref{Module}(_new_ns())
+# Declared here, POPULATED after the last include that contributes a name to the namespace (the
+# batch fabric, below). `_populate_notebook_ns!` reads this module for what to inject, so building
+# the first namespace eagerly here would silently omit anything loaded later — the failure looks
+# like a helper that simply does not exist, with nothing to point at.
+const _NS = Ref{Module}()
 
 # ── Capture tools (invoked by the server via synchronous :tool_call) ───────────
 # Each returns a serialization-friendly value that rides back binary in the gate
@@ -145,6 +149,24 @@ _MEMO_OK && try
 catch
 end
 _blog("memo layer loaded (ok=$(_MEMO_OK))")   # memostore + codecs + blobchannel compiled
+
+# The batch fabric: `@sweep` and friends, injected into every notebook namespace by
+# `_populate_notebook_ns!`. It goes AFTER the memo block deliberately — its own guards would
+# otherwise pull in a second copy of `memostore.jl`, and the content-addressed store a sweep writes
+# its shards into is the same one memoization uses. Behind `_MEMO_OK` for the same reason: without a
+# store there is nowhere for a shard result to live, and a namespace missing `@sweep` reports itself
+# far more clearly than one whose sweeps silently lose their results.
+const _SWEEP_OK = _MEMO_OK && try
+    include(joinpath(@__DIR__, "sweep.jl"))
+    true
+catch e
+    _blog("batch fabric unavailable: $(sprint(showerror, e))")
+    false
+end
+_blog("batch fabric loaded (ok=$(_SWEEP_OK))")
+
+# Every contributor to the notebook namespace is now loaded, so the first one can be built.
+_NS[] = _new_ns()
 const _MEMO_DIR = Ref{String}("")
 # On-disk ceiling for the durable memo store (LRU-evicted). Configurable — big-data notebooks
 # legitimately cache multi-GB artifacts: `KAIMONSLATE_MEMO_CAP_GB` (forwarded into the worker's env
@@ -211,14 +233,9 @@ function _memo_src_dirs()
     return unique!(dirs)
 end
 
-# The deterministic, sorted `.jl` file set under those dirs.
-function _memo_src_files()
-    files = String[]
-    for dir in _memo_src_dirs(), (root, _, fs) in walkdir(dir), f in fs
-        endswith(f, ".jl") && push!(files, joinpath(root, f))
-    end
-    return sort!(unique!(files))
-end
+# The deterministic, sorted `.jl` file set under those dirs (defname.jl — shared with the digest
+# itself, so the mtime sweep and the hash can never disagree about which files are in scope).
+_memo_src_files() = src_tree_files(_memo_src_dirs())
 
 # Digest of the developed `src/` (def-name → body-hash) so an edit to a function a cell calls
 # invalidates its memo entry. Read deterministically FROM DISK (fixed file set + def-body hashes) —
@@ -233,24 +250,12 @@ const _SRC_DIGEST_CACHE = Ref{Tuple{Float64,UInt}}((-1.0, UInt(0)))
 function _src_digest()
     try; _seed_new_src_defs!(); catch; end          # keep seeding the hot-reload watcher's baseline
     files = _memo_src_files()
-    isempty(files) && return UInt(0x53726300)        # nothing developed → a constant (deterministic)
+    isempty(files) && return SRC_DIGEST_EMPTY        # nothing developed → a constant (deterministic)
     mt = try; maximum(mtime, files; init = 0.0); catch; 0.0; end
     _SRC_DIGEST_CACHE[][1] == mt && return _SRC_DIGEST_CACHE[][2]
-    h = UInt(0x53726300)
-    try
-        entries = Tuple{String,UInt}[]
-        for dir in _memo_src_dirs(), (root, _, fs) in walkdir(dir), f in fs
-            endswith(f, ".jl") || continue
-            p = joinpath(root, f)
-            defs = _file_defs(p)
-            dh = UInt(0)
-            for k in sort!(collect(keys(defs))); dh = hash((k, defs[k]), dh); end
-            push!(entries, (relpath(p, dir), dh))
-        end
-        sort!(entries)
-        for e in entries; h = hash(e, h); end
-    catch
-    end
+    # The walk + def-body digest itself is shared with the batch fabric (defname.jl); what is local
+    # here is WHICH dirs to digest and the mtime cache that keeps it to one stat sweep per eval.
+    h = src_tree_digest(_memo_src_dirs())
     _SRC_DIGEST_CACHE[] = (mt, h)
     return h
 end
@@ -891,14 +896,16 @@ function __slate_eval(source::String; filename::String = "string",
                      memo_always::Bool = false, memo_unread::Vector{String} = String[],
                      memo_safe::Vector{String} = String[],
                      ctx_region::String = "", ctx_notebook::String = "",
-                     ctx_regions::Vector{String} = String[])
+                     ctx_regions::Vector{String} = String[],
+                     ctx_attrs::Vector{String} = String[],
+                     ctx_clusters::Vector{String} = String[])
     # Register this eval's task under its cell id so __slate_cancel can interrupt it (the server runs
     # parallel cells as concurrent __slate_eval calls; a stop throws InterruptException into them).
     cid = replace(filename, r"^cell:" => "")
     lock(_CANCEL_LOCK) do; _RUNNING_TASKS[cid] = current_task(); end
     # Rebuild the Slate execution context from the hub's `ctx_*` args, adding this worker's own
     # `slate_emit` (which PUBs on the gate stream) — cell code reads it via `slate_context()`.
-    ctx = _build_slate_ctx(_NS[], ctx_notebook, ctx_region, ctx_regions)
+    ctx = _build_slate_ctx(_NS[], ctx_notebook, ctx_region, ctx_regions, ctx_attrs, ctx_clusters)
     try
         return _eval_one(source, filename, memo_key, memo_names, memo_threshold, memo_force,
                          memo_always, memo_unread, memo_safe; slate_ctx = ctx)
@@ -2119,14 +2126,9 @@ include(joinpath(@__DIR__, "defname.jl"))
 const _SRC_DEFS = Dict{String,Dict{String,UInt64}}()
 _file_path(pd, rpath) = try; joinpath(pd.info.basedir, String(rpath)); catch; String(rpath); end
 
-# (def-name → body-hash) for one source file, parsed fresh from disk.
-function _file_defs(path::AbstractString)
-    d = Dict{String,UInt64}()
-    isfile(path) || return d
-    src = try; read(path, String); catch; return d; end
-    top = try; Meta.parseall(src); catch; return d; end
-    return _collect_defs!(d, top)
-end
+# (def-name → body-hash) for one source file — `file_defs` in defname.jl, alongside the extractor
+# it is built on and the tree digest that shares it.
+const _file_defs = file_defs
 
 # Baseline the defs of any tracked file we haven't seen yet, WITHOUT reporting — so the first
 # edit diffs against a real snapshot. Idempotent (only fills missing keys), so it's safe to run

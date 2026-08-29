@@ -112,6 +112,19 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         c = Cell("c", CODE, "@someunknownmacro q = 1"); infer_bindings!(c)
         @test :q ∉ c.writes
 
+        # …and neither is an `import`/`using` a macro swallows. `@sweep` lifts one out of its
+        # do-block to run on a compute node, so the cell never binds the module here; claiming it
+        # would collide with the cell that genuinely does `using Foo` and give its readers a false
+        # producer. A TOP-LEVEL using in the same cell is unaffected.
+        c = Cell("c", CODE, "v = @sweep(g) do p\n    using Foo\n    Foo.f(p)\nend")
+        infer_bindings!(c)
+        @test :v in c.writes
+        @test :Foo ∉ c.writes
+        c = Cell("c", CODE, "using Bar\nw = @somemacro begin\n    import Baz: qux\nend")
+        infer_bindings!(c)
+        @test :Baz ∉ c.writes && :qux ∉ c.writes
+        @test :opaque in c.flags        # the top-level `using Bar` is still a barrier
+
         # slate handler macros keep their bespoke semantics: @onclick's control is NOT a read
         c = Cell("c", CODE, "@onclick btn begin\n    counter[] = counter[] + step\nend")
         infer_bindings!(c)

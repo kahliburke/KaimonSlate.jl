@@ -675,6 +675,26 @@ function _ensure_poller!()
     return nothing
 end
 
+"""
+    worker_owner_tag() -> String
+
+Which hub OWNS a worker, stamped into every worker's argv by `_worker_script`.
+
+The restart reaper finds leftover workers with `pgrep`, which is machine-wide — and a hub is not
+alone on the machine: a worktree hub (`KAIMONSLATE_HOME` / `KAIMONSLATE_PORT`) is *designed* to run
+beside the installed extension, and any process that builds the tool list loads this code too.
+Without an owner stamp, one hub starting up SIGKILLs another's live notebook workers.
+
+Identity is the state home plus the hub port: stable across restarts of the same hub, distinct
+between two hubs on one machine. Hashed rather than spelled out to keep the tag short enough for
+`pgrep -f`. A Julia upgrade changes the hash and the reaper simply finds nothing — it UNDER-reaps,
+which is the safe direction.
+"""
+worker_owner_tag() =
+    "slate-owner=" * string(hash(string(get(ENV, "KAIMONSLATE_HOME", ""), '|',
+                                        get(ENV, "KAIMONSLATE_CONFIG_HOME", ""), '|',
+                                        get(ENV, "KAIMONSLATE_PORT", ""))); base = 16)
+
 # Worker boot: put KaimonGate on LOAD_PATH (via the slate-owned env), load the SlateWorker
 # capture payload, and serve its tools over TCP. Pinned to the notebook's project.
 function _worker_script(port::Int, stream_port::Int, parent::AbstractString = "")
@@ -691,6 +711,7 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     # contains the parent's deps (forked mode). `PARENT_PROJECT` is recorded only so the
     # worker can attribute package provenance (which deps are notebook adds vs parent).
     return """
+    # $(worker_owner_tag())
     insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
     insert!(LOAD_PATH, 3, $(repr(infra_dir)))   # slate-owned infra (Revise + ExpressionExplorer + SlateExtensionsBase) — after the notebook project (@), before globals
     import KaimonGate
@@ -1017,6 +1038,10 @@ function prepare!(k::GateKernel, report::Report)
         # Spawn if never started, OR respawn if the worker died (OOM / segfault / user exit()) —
         # otherwise a crashed worker would no-op here forever and every eval would error.
         elseif k.conn === nothing || (k.proc !== nothing && !process_running(k.proc))
+            # Did we HAVE a worker? Then whatever replaces it starts with an empty namespace. The
+            # first-ever spawn has no predecessor, so it must not restale (that would undo the
+            # locked-cell restores the open path just did).
+            replaced = k.proc !== nothing
             _kill_worker!(k)                      # tear down a dead/old proc before replacing (no leak/orphan)
             _spawn_worker!(k)
             _connect!(k)
@@ -1024,6 +1049,15 @@ function prepare!(k::GateKernel, report::Report)
             _ensure_poller!()
             _reconstruct_env!(k)                  # env dir absent but footer has a delta → rebuild it
             _maybe_sync_parent!(k)                # forked + parent drifted → re-resolve once, up front
+            # A worker that DIED (OOM, segfault, an `exit()` in a cell) took every binding with it,
+            # but the cells still record the state they were in when it was alive. Left alone, the
+            # notebook claims to be fresh while nothing is defined, and the next run of a downstream
+            # cell fails with `UndefVarError` on a name the notebook visibly defines two cells up.
+            #
+            # An EXPLICIT restart already does this (`reset!` → `reset_all!`); this is the same
+            # correction for the restart nobody asked for. Cheap: a memo-restorable cell restores
+            # rather than recomputing, and the run goes in dependency order either way.
+            replaced && reset_all!(report)
         end
     end
     return nothing
@@ -1107,7 +1141,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         # must ride as a keyword (Dict key → kwarg) to survive the hop. See worker.jl `__slate_eval`.
         # `ctx_*` seed the worker's task-local Slate execution context (see `_build_slate_ctx`).
         _tool(k, "__slate_eval", Dict{String,Any}("source" => String(source), "filename" => String(filename),
-              _ctx_args(report, region, regions)...); timeout = _eval_timeout())
+              _ctx_args(report, region, regions, filename)...); timeout = _eval_timeout())
     catch e
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
     end
@@ -1120,10 +1154,33 @@ end
 # Build the `ctx_*` tool-args carrying the Slate execution context to the worker: the effective side
 # (`""` = main), the notebook id, and the declared region names — the worker rebuilds the full context
 # (adding its own `slate_emit`) from these. See worker.jl `__slate_eval` / `_build_slate_ctx`.
-_ctx_args(report::Report, region::AbstractString, regions::AbstractVector) = (
+_ctx_args(report::Report, region::AbstractString, regions::AbstractVector,
+          filename::AbstractString = "") = (
     "ctx_region"   => String(region),
     "ctx_notebook" => String(report.id),
-    "ctx_regions"  => String[String(r) for r in regions])
+    "ctx_regions"  => String[String(r) for r in regions],
+    # The evaluating cell's own `key=value` header attributes (see `cell_attrs`) — a batch sweep's
+    # walltime/partition/memory, which belong to the cell rather than to its code. Wired as
+    # `"k=v"` strings because the gate's tool args carry no dict type.
+    "ctx_attrs"    => _attr_args(report, filename),
+    # The notebook's named compute targets (the `Slate.clusters` footer), flattened to
+    # `"<cluster>.<key>=<value>"` so a sweep cell can say `cluster=hpc` and have the definition
+    # resolved where the sweep actually runs.
+    "ctx_clusters" => _cluster_args(report))
+
+_cluster_args(report::Report) = String[
+    string(get(c, "name", ""), ".", k, "=", v)
+    for c in get(report.meta, "clusters", Dict{String,Any}[])
+    for (k, v) in c if k != "name" && !isempty(string(v)) && !isempty(String(get(c, "name", "")))]
+
+function _attr_args(report::Report, filename::AbstractString)
+    cid = replace(String(filename), r"^cell:" => "")
+    isempty(cid) && return String[]
+    for c in report.cells
+        c.id == cid && return String[string(k, "=", v) for (k, v) in cell_attrs(c)]
+    end
+    return String[]
+end
 
 # Ask the worker to re-render a native (Makie) figure cell under a Slate PALETTE, for a themed PDF
 # export that overrides the notebook's live theme (see worker.jl `__slate_rerender_fig`). Returns
@@ -1209,7 +1266,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         prepare!(k, report)
         _tool(k, "__slate_eval", Dict{String,Any}(
             "source" => String(source), "filename" => String(filename),
-            _ctx_args(report, region, regions)...,
+            _ctx_args(report, region, regions, filename)...,
             "memo_key" => String(memo.key), "memo_names" => collect(String, memo.names),
             "memo_threshold" => Float64(memo.threshold),
             # ▶ force: skip the restore (an explicit play must re-evaluate) but still store the fresh

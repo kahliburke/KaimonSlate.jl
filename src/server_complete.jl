@@ -1410,6 +1410,15 @@ function _make_router(h::Hub)
         set_notebook_regions!(nb, strip(String(get(_body(req), "regions", ""))))
         _json(state_json(nb))
     end))
+    # The notebook's named compute targets (the `Slate.clusters` footer), edited from the ⚙ on a
+    # sweep cell. Replaces the whole list, so a rename is a single round trip. Cells reference a
+    # definition by name, so the new spec applies the next time a sweep cell runs — which is safe by
+    # construction: a sweep reconciles, and resources are not part of its key, so raising a walltime
+    # resumes rather than discarding the units that already finished.
+    HTTP.register!(router, "POST", "/api/{id}/clusters", req -> _withnb(h, req, nb -> begin
+        set_notebook_clusters!(nb, get(_body(req), "clusters", Any[]))
+        _json(state_json(nb))
+    end))
     # ── Consent-gated region introduction (PEER_TUNNEL_PLAN §5.1) ──────────────────────────────────
     # GET the pending mesh consent (a fresh tab checks this on load; live tabs also get an SSE
     # `mesh-consent:` push). POST introduce ARMS the whole-group mesh (installs SSH keys/grants — the one

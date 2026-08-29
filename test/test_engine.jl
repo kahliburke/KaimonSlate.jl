@@ -374,6 +374,43 @@ end
     @test rr.meta["env"][1]["name"] == "Foo"
 end
 
+@testset "cluster footer: notebook-level compute targets" begin
+    # A cluster is defined once for the notebook and referenced by name from any number of sweep
+    # cells, so it lives in the file rather than in a code cell: visible in a diff, and one edit
+    # moves every sweep that uses it.
+    r = parse_report("#%% sweep id=scan cluster=hpc walltime=04:00:00\nr = 1")
+    r.meta["clusters"] = [
+        Dict{String,Any}("name" => "hpc", "kind" => "slurm", "host" => "login",
+                         "root" => "/data/cas", "root_remote" => "/scratch/cas",
+                         "partition" => "compute", "walltime" => "02:00:00", "chunk" => "16",
+                         "note" => "shared with the imaging group"),
+        Dict{String,Any}("name" => "box", "kind" => "local", "root" => "/tmp/cas")]
+    r.meta["threads"] = "4,1"
+    r.meta["env"] = [Dict{String,Any}("name" => "Foo", "version" => "1.2.3", "uuid" => "abc")]
+    s = serialize_report(r)
+    @test occursin("Slate.clusters", s)
+
+    # All three footers coexist and none pollutes the others.
+    rr = parse_report(s)
+    @test rr.meta["threads"] == "4,1"
+    @test rr.meta["env"][1]["name"] == "Foo"
+    cs = rr.meta["clusters"]
+    @test [c["name"] for c in cs] == ["hpc", "box"]                  # declaration order survives
+    @test cs[1]["root_remote"] == "/scratch/cas" && cs[1]["chunk"] == "16"
+    @test cs[1]["note"] == "shared with the imaging group"           # values may contain spaces
+    @test cs[2]["kind"] == "local"
+
+    # The cells are untouched by the footer, and a sweep cell's own header attributes come back as
+    # configuration rather than as mangled tags.
+    @test length(rr.cells) == 1 && rr.cells[1].kind == ReportEngine.SWEEP
+    a = cell_attrs(rr.cells[1])
+    @test a["cluster"] == "hpc" && a["walltime"] == "04:00:00"
+    @test occursin("cluster=hpc", s) && occursin("walltime=04:00:00", s)   # header round-trips
+
+    # No clusters → no footer at all.
+    @test !occursin("Slate.clusters", serialize_report(parse_report("#%% code id=a\nx = 1")))
+end
+
 @testset "slate_fingerprint: canonical isequal semantics" begin
     fp = ReportEngine.slate_fingerprint
     # deterministic + 64 hex chars

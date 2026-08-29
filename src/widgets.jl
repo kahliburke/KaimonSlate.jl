@@ -1401,6 +1401,31 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
         # progress here (in-process test invoke has no browser to stream to).
         return $(_invoke_slate_handler)(f, $(_slate_args)(args), (p) -> nothing)
     end))
+    # ── The batch fabric ──────────────────────────────────────────────────────
+    # `@sweep` fans a parameter grid out to a scheduler (SLURM today, local processes without one)
+    # and renders a live card. Injected rather than `using`-ed so a notebook needs no import to run
+    # one, and kept to FOUR names plus the module: an injected binding shadows whatever the author's
+    # own packages export, silently, because a definition beats a `using`. Everything a sweep can be
+    # asked is a property of its result (`r.state`, `r.results`, `r.eta`); everything it can be told
+    # is `Sweep.cancel!(r)` and friends.
+    #
+    # Absent when the fabric failed to load (a worker with no memo store has nowhere to put a
+    # shard). `@sweep` is then simply undefined, which reports itself.
+    if isdefined(@__MODULE__, :Sweep)
+        _sw = getfield(@__MODULE__, :Sweep)
+        Core.eval(m, :(const Sweep = $_sw))
+        for nm in (:paramgrid, :SweepTarget, :LocalTarget, :SlurmTarget)
+            Core.eval(m, :(const $nm = $(getfield(_sw, nm))))
+        end
+        # A forwarding macro, not `using`: `@sweep` reads its caller's module to collect the body's
+        # captures, and forwarding through a `GlobalRef` macrocall keeps that caller `m`. `esc` so
+        # the outer macro's hygiene pass leaves the user's own expression alone — the inner macro
+        # does its own escaping.
+        Core.eval(m, :(macro sweep(args...)
+            esc(Expr(:macrocall, $(GlobalRef(_sw, Symbol("@sweep"))), __source__, args...))
+        end))
+    end
+
     Core.eval(m, :(const slate_fingerprint = $slate_fingerprint))   # canonical value hash (fingerprint.jl)
     Core.eval(m, :(const slate_memo_stats = $slate_memo_stats))     # durable memo store: shape
     Core.eval(m, :(const slate_memo_entries = $slate_memo_entries)) # durable memo store: entry listing

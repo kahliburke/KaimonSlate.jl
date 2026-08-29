@@ -10,9 +10,14 @@
   const players = (window._animPlayers = window._animPlayers || {});   // cellId -> [SlatePlayer]
 
   // ── Reconcile players for a cell against its manifests (mirrors renderCharts) ────────────────
+  // Returns whether it actually mounted. The caller memoizes on the spec array to avoid re-mounting
+  // on every unrelated re-render, and it must NOT record that memo for a render that did not happen:
+  // the host may not be in the DOM yet (the cell's output arrives over two transports, and Preact
+  // may not have committed the `.anim` div when the first one lands). Recording it anyway marked
+  // the animation as rendered forever, and the player only appeared after a full page reload.
   window.renderAnimation = function renderAnimation(c) {
     const host = document.querySelector('#cell-' + c.id + ' .anim');
-    if (!host) return;
+    if (!host) return false;
     const specs = c.animations || [];
     let insts = players[c.id] || (players[c.id] = []);
     while (host.children.length > specs.length) {                 // dispose extras
@@ -26,6 +31,7 @@
       insts.push(new SlatePlayer(box));
     }
     specs.forEach((s, i) => insts[i].setManifest(s));
+    return true;
   };
 
   const VERT = `#version 300 es

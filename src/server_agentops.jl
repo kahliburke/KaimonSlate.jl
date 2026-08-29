@@ -80,12 +80,21 @@ _index_of(cells, id) = findfirst(c -> c.id == id, cells)
 _cellkind(k::AbstractString) = k == "md" ? MARKDOWN : k == "web" ? WEB : k == "tool" ? TOOL :
                                k == "sweep" ? SWEEP : CODE
 
+# A new cell starts empty, except where the KIND itself implies a shape. A sweep cell's whole point
+# is the `@sweep` call — starting it blank would make the reader work out the skeleton from docs
+# before they can do anything, and there is exactly one right skeleton.
+_new_cell_source(k::CellKind) = k === SWEEP ? """
+    # Where this runs: pick a cluster with ⎈ above (or pass a target as the second argument).
+    @sweep(paramgrid(x = 1:10)) do p
+        p.x^2
+    end""" : ""
+
 function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractString; before::Bool = false)
     nid = _gen_id(nb.report)                          # generated up front so the undo label can name it
     _snapshot!(nb; label = "add $nid")
     cells = nb.report.cells
     i = isempty(after_id) ? length(cells) : something(_index_of(cells, after_id), length(cells))
-    cell = Cell(nid, _cellkind(kind), "")
+    cell = Cell(nid, _cellkind(kind), _new_cell_source(_cellkind(kind)))
     ReportEngine.mark_fresh!(cell)                    # empty cell: nothing to run (don't show it stale)
     pos = before ? max(1, i) : i + 1                 # insert above (at `i`) or below the reference
     insert!(cells, pos, cell)
@@ -1091,11 +1100,19 @@ function _parse_tag_symbols(tags)
     items = tags isa AbstractString ? split(tags, r"\s+") : tags
     want = Set{Symbol}()
     clean(s) = replace(s, r"[^A-Za-z0-9_]+" => "_")
+    # How a VALUE is sanitized depends on what its key means. `needs=`/`mutates=`/`region=` name
+    # Julia bindings and regions, so those fold to identifiers as before. Everything else is
+    # configuration — a walltime (`00:10:00`), a size (`1.5G`), a path (`/scratch/cas`), a
+    # hyphenated partition — where folding punctuation to `_` silently corrupts the value. A header
+    # token only has to survive whitespace splitting; the comma stays a separator either way.
+    ident_valued = ("needs", "mutates", "region")
+    cleanval(s) = replace(s, r"[^A-Za-z0-9_.:+/@-]+" => "_")
     for t in items
         s = strip(String(t)); isempty(s) && continue
         m = match(r"^([A-Za-z][A-Za-z0-9_]*)=(.*)$", s)
         if m !== nothing
-            vals = [clean(v) for v in eachsplit(m.captures[2], ',') if !isempty(v)]
+            cv = String(m.captures[1]) in ident_valued ? clean : cleanval
+            vals = [cv(v) for v in eachsplit(m.captures[2], ',') if !isempty(v)]
             isempty(vals) || push!(want, Symbol(string(m.captures[1], "=", join(vals, ","))))
         else
             for p in eachsplit(s, ',')

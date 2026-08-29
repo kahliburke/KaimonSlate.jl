@@ -337,6 +337,37 @@ function _macrocall_arg_refs!(refs::Set{Symbol}, ex)
     return refs
 end
 
+# Names bound by a `using`/`import` nested inside a MACROCALL. ExpressionExplorer attributes these
+# to the enclosing cell, but a macro's arguments are not code this analysis can claim: the macro
+# decides whether they run here, elsewhere, or at all — `@sweep` lifts them out of its do-block to
+# run on a compute node, where the module is loaded once per process. Claiming the module as a cell
+# DEFINITION from that is wrong three ways: the cell advertises a binding it never makes, a cell that
+# really does `using X` collides with it, and downstream readers of `X` take an edge on a sweep.
+# `_macrocall_arg_refs!` already takes reads-but-not-writes from macro arguments for the same reason;
+# this closes the one route by which a write leaks out anyway.
+function _macrocall_import_defs!(defs::Set{Symbol}, ex, inmacro::Bool = false)
+    ex isa Expr || return defs
+    if inmacro && (ex.head === :using || ex.head === :import)
+        for a in ex.args
+            if a isa Expr && a.head === :(:)               # `M: a, b` — the listed names
+                for nm in a.args[2:end]
+                    s = _leaf_name(nm); s === nothing || push!(defs, s)
+                end
+            else                                           # `M` / `A.B` / `M as L`
+                s = _leaf_name(a); s === nothing || push!(defs, s)
+            end
+        end
+        return defs
+    end
+    # `f(x) do p … end` parses as `:do` with the CALL as its first arg, so a macro's do-block is a
+    # sibling of the macrocall rather than one of its arguments — it has to be marked here too.
+    nested = inmacro || ex.head === :macrocall ||
+             (ex.head === :do && !isempty(ex.args) &&
+              ex.args[1] isa Expr && ex.args[1].head === :macrocall)
+    foreach(a -> _macrocall_import_defs!(defs, a, nested), ex.args)
+    return defs
+end
+
 # Does the AST contain a macrocall the static pass can't see through (any macro outside
 # `_MACRO_SCAN_SKIP` — a dotted `Base.@kwdef` name counts too)? Such a cell gets the runtime
 # `:macrocall` flag so the macro-expansion refinement (`resolve_macros!`) knows to round-trip it.
@@ -541,7 +572,8 @@ function _infer_bindings_uncached!(cell::Cell)
             node = EE.compute_reactive_node(blk)
             union!(cell.reads, node.references)
             union!(cell.reads, _macrocall_arg_refs!(Set{Symbol}(), blk))   # see through unknown macros (reads only)
-            union!(cell.writes, _strip_anon(node.definitions))
+            union!(cell.writes, setdiff(_strip_anon(node.definitions),
+                                        _macrocall_import_defs!(Set{Symbol}(), blk)))
             union!(cell.writes, _strip_anon(node.funcdefs_without_signatures))
             _record_global_mutations!(cell, blk, node.references)
             # Top-level reads (backref diagnostic): re-analyze only the NON-deferred statements —

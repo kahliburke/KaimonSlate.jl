@@ -458,8 +458,18 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // is what made one run draw a chart twice. `slateAcceptRev` is the single arbiter of recency;
     // see its definition in view.js.
     const _stale = window.slateRevIsNew ? !window.slateRevIsNew(c) : false;
+    // A cell's payload has FOUR consumers — output, charts, tables, animations — and `rev` is one
+    // stamp covering all of them. `revMark`'s contract (view.js) is that the stamp is spent only
+    // where the payload actually reaches the DOM; spending it in the output branch broke that for
+    // any cell whose real content is not text. An `animate(…)` cell has EMPTY output, so the stamp
+    // was spent on a no-op swap and every later pass skipped the player as stale — it appeared only
+    // after a full page reload. `_landed` tracks whether everything that had work to do did it.
+    let _landed = true;
     const out = el.querySelector('.output');
-    if (!_conflicted && !_stale && out && c.output !== last.current.out) { window.slateRevMark && window.slateRevMark(c); last.current.out = c.output; window._swapOutput(out, c.output, c.live); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
+    if (!_conflicted && !_stale && c.output !== last.current.out) {
+      if (out) { last.current.out = c.output; window._swapOutput(out, c.output, c.live); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
+      else _landed = false;                       // host not committed yet — retry on the next pass
+    }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     window._applyMissingPkg && window._applyMissingPkg(c);   // "Package X not found" → one-click install banner
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
@@ -469,8 +479,21 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // Charts make that judgement themselves now (`_chartsUnchanged`, core.js), so that the imperative
     // patch path gets it too rather than each caller keeping its own copy of the answer.
     if (!_conflicted && !_stale) window.renderCharts(c);
-    if (!_conflicted && !_stale && c.tables !== last.current.tables) { last.current.tables = c.tables; window.renderTables(c); }
-    if (!_conflicted && !_stale && c.animations !== last.current.animations) { last.current.animations = c.animations; window.renderAnimation && window.renderAnimation(c); }
+    // Memoize on the spec array to skip re-mounting on unrelated re-renders — but record it only
+    // when the render actually HAPPENED. The cell's output reaches here over two transports, and the
+    // `.tables`/`.anim` host may not be committed by Preact when the first one lands; marking the
+    // memo regardless left the output permanently un-rendered until a full page reload.
+    if (!_conflicted && !_stale && c.tables !== last.current.tables) {
+      if (window.renderTables(c)) last.current.tables = c.tables; else _landed = false;
+    }
+    if (!_conflicted && !_stale && c.animations !== last.current.animations) {
+      if (window.renderAnimation && window.renderAnimation(c)) last.current.animations = c.animations;
+      else _landed = false;
+    }
+    // Spend the stamp only now, and only if the whole payload landed. A pass that could not mount
+    // something leaves the stamp unspent so the next render retries, instead of marking the cell
+    // applied and leaving it blank until its next change.
+    if (!_conflicted && !_stale && _landed) window.slateRevMark && window.slateRevMark(c);
     if ((c.binds && c.binds.length) || (c.controls && c.controls.length)) window.syncControlValues({ cells: [c] });
 
     // Only a plain code cell has the always-on <Editor> to refresh once it becomes visible.
@@ -497,8 +520,11 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     + (c.roleBib ? ' role-bib' : '') + (c.roleCaption ? ' role-caption' : '');
   // A tool cell keeps the `code` class (its body IS a code editor) and adds `tool`, so the chrome
   // can mark it without re-implementing the editor mounting.
+  // A sweep cell keeps the `code` class for the same reason a tool cell does — its body IS a code
+  // editor — and adds `sweep`, which the chrome uses to mark it as work that runs off this machine.
   const cls = 'cell ' + (c.kind === 'md' ? 'md' : c.kind === 'web' ? 'web'
-                        : c.kind === 'tool' ? 'code tool' : (isBind ? 'bind' : 'code')) + ' state-' + state
+                        : c.kind === 'tool' ? 'code tool' : c.kind === 'sweep' ? 'code sweep'
+                        : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
     + roleCls + selCls + edCls + (focusId === c.id ? ' dep-focus' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;

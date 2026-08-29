@@ -307,6 +307,121 @@ function cellRegionChip(c) {
   return `<span class="cregion" style="color:${hue};border-color:${hue}" onclick="openTagEditor('${c.id}', event)" title="runs on ‘${_esc(loc.name)}’ — click to change">🖧 ${_esc(loc.name)}</span>`;
 }
 
+// ── Cell kinds ────────────────────────────────────────────────────────────────────────────────
+// The ONE description of what a cell can be — read by the kind switcher in every cell header, and
+// by the insert menu in the gaps between cells. Two lists would drift, and a kind whose glyph means
+// one thing in the header and another in the add menu is worse than no glyph at all.
+window.CELL_KINDS = [
+  { k: 'code',  glyph: '{·}',   name: 'Code',
+    desc: 'Julia that runs and produces a value. Reruns when what it reads changes.' },
+  { k: 'md',    glyph: 'M↓',    name: 'Markdown',
+    desc: 'Prose, headings and maths. `{{ … }}` interpolates live values.' },
+  { k: 'web',   glyph: '</>',   name: 'Web',
+    desc: 'HTML, CSS and JS panes. The cell owns its output and can call back into Julia.' },
+  { k: 'tool',  glyph: '⌁',     name: 'Tool call',
+    desc: 'A call OUT of the notebook. Never runs on open — it has effects in the world.' },
+  { k: 'sweep', glyph: '🛰',    name: 'Batch sweep',
+    desc: 'A parameter grid fanned out to a cluster. Resumable, watchable, never blocks.' },
+];
+window.kindOf = k => window.CELL_KINDS.find(x => x.k === k) || window.CELL_KINDS[0];
+
+// The cell's current kind, as a button. Names itself rather than offering the alternatives, so the
+// header answers "what is this?" at rest and only costs a click when you want to change it.
+function kindButton(c) {
+  const cur = window.kindOf(c.kind);
+  return `<button class="kindbtn" onclick="openKindPicker('${c.id}', event)"
+    title="cell type: ${_esc(cur.name)} — click to change">${_esc(cur.glyph)}</button>`;
+}
+
+// One row per kind: a large glyph, the name, and what the kind is FOR. The description is the point
+// — five one-character glyphs are indistinguishable, and the difference between a tool call and a
+// sweep is a sentence, not a picture.
+window.kindRow = (x, current, dataKind) =>
+  `<button class="kindrow${current ? ' on' : ''}"${dataKind ? ` data-kind="${x.k}"` : ''}>
+     <span class="kindrow-glyph">${_esc(x.glyph)}</span>
+     <span class="kindrow-text"><span class="kindrow-name">${_esc(x.name)}${current ? ' <em>· current</em>' : ''}</span>
+       <span class="kindrow-desc">${_esc(x.desc)}</span></span>
+   </button>`;
+
+// Keep a floating panel on screen: anchored under an element, or at a point (the add menu opens at
+// the cursor). Clamped both ways so a picker opened near an edge is never half off it.
+window.placePop = function (pop, anchor, x, y) {
+  const vw = window.innerWidth, vh = window.innerHeight, EDGE = 8, GAP = 6;
+  const r = anchor ? anchor.getBoundingClientRect()
+                   : { left: x, right: x, top: y, bottom: y };
+  const h = pop.offsetHeight, w = pop.offsetWidth;
+  const top = (h <= vh - r.bottom - GAP - EDGE) ? r.bottom + GAP
+            : (h <= r.top - GAP - EDGE)         ? r.top - GAP - h
+            : Math.max(EDGE, vh - EDGE - h);
+  pop.style.top = Math.round(Math.max(EDGE, Math.min(top, vh - EDGE - h))) + 'px';
+  pop.style.left = Math.round(Math.max(EDGE, Math.min(r.left, vw - EDGE - w))) + 'px';
+};
+
+window.openKindPicker = function (id, ev) {
+  ev && ev.stopPropagation();
+  const c = ((window.__slateState || {}).cells || []).find(x => x.id === id);
+  if (!c) return;
+  let pop = document.getElementById('kindpop');
+  if (!pop) {
+    pop = document.createElement('div');
+    pop.id = 'kindpop';
+    pop.className = 'kindpop';
+    document.body.appendChild(pop);
+    document.addEventListener('mousedown', e => {
+      if (!e.target.closest('#kindpop') && !e.target.closest('.kindbtn')) closeKindPicker();
+    });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeKindPicker(); });
+  }
+  if (pop.classList.contains('show') && pop.dataset.cell === id) return closeKindPicker();
+  pop.dataset.cell = id;
+  pop.innerHTML = '<div class="kindpop-head">Cell type</div>' +
+    window.CELL_KINDS.map(x => window.kindRow(x, x.k === c.kind, x.k)).join('');
+  pop.querySelectorAll('[data-kind]').forEach(b => {
+    b.onclick = () => {
+      closeKindPicker();
+      if (b.dataset.kind !== c.kind) window.toggleType(id, b.dataset.kind);
+    };
+  });
+  pop.classList.add('show');
+  window.placePop(pop, ev && ev.target.closest('button'));
+};
+function closeKindPicker() {
+  const p = document.getElementById('kindpop');
+  if (p) p.classList.remove('show');
+}
+
+// A sweep cell's compute target, named in its header — the sibling of `cellRegionChip`, and for the
+// same reason: WHERE a cell's work happens is not a setting you go looking for, it is something you
+// need to see while reading. A chip rather than an icon because the answer is a NAME; an icon would
+// mean clicking every sweep cell to find out where it goes.
+//
+// Unconfigured reads as an invitation, not an error: a sweep cell with no target is the normal state
+// of a cell you just added, and "set a cluster" says what to do about it.
+function cellClusterChip(c) {
+  if (c.kind !== 'sweep') return '';
+  const tags = c.tags || [];
+  const get = k => { const t = tags.find(x => x.startsWith(k + '=')); return t ? t.slice(k.length + 1) : ''; };
+  const name = get('cluster');
+  if (!name) {
+    return `<span class="cregion cluster unset" onclick="openSweepConfig('${c.id}', event)"
+      title="this sweep has no compute target — click to pick one">＋ set cluster</span>`;
+  }
+  const defs = (window.__slateState || {}).clusters || [];
+  const def = defs.find(x => x.name === name);
+  // Overrides are shown, not hidden behind the chip: a cell running at a different walltime or on a
+  // different partition from its cluster is exactly the cell whose header should say so.
+  const over = ['partition', 'walltime', 'cpus', 'mem', 'gpus', 'nodes', 'chunk']
+    .map(k => get(k)).filter(Boolean);
+  const label = _esc(name) + (over.length ? ' · ' + _esc(over.join(' · ')) : '');
+  const missing = !def;
+  const tip = missing
+    ? `no cluster named ‘${name}’ is defined in this notebook — click to fix`
+    : `runs on ‘${name}’` + (over.length ? ` (overridden here: ${over.join(', ')})` : '') +
+      ' — click to change';
+  return `<span class="cregion cluster${missing ? ' missing' : ''}${over.length ? ' over' : ''}"
+    onclick="openSweepConfig('${c.id}', event)" title="${_esc(tip)}">${label}</span>`;
+}
+
 // One compact header line per cell: run + id (left), then duration, hover-revealed
 // actions, and the state badge (right). Replaces the old two-row bar+head.
 // Durable-cache badge for a code cell (mirrors the DAG's cache indicator). `c.memo` is the verdict
@@ -366,7 +481,7 @@ function _effectBadge(c) {
   return `<span class="effectbadge" title="${_esc(tip)}">⚙ ${_esc(label + shown)}</span>`;
 }
 function cellHeaderInner(c) {
-  const isCode = (c.kind === 'code' || c.kind === 'web' || c.kind === 'tool') && !hasBinds(c);   // web + tool cells run too (▶)
+  const isCode = (c.kind === 'code' || c.kind === 'web' || c.kind === 'tool' || c.kind === 'sweep') && !hasBinds(c);   // web/tool/sweep cells run too (▶)
   // ✎ edit source — on EVERY cell. md/@bind hide their source behind a rendered view, so it reveals the
   // source overlay; code/web edit inline, so it just focuses the editor (see editCellSource). NOT </> —
   // that's the "convert to web cell" glyph below, and both show on a @bind cell, so a shared icon would
@@ -391,6 +506,7 @@ function cellHeaderInner(c) {
     // no plumbing through the header's innerHTML and can never disagree with the ring.
     '<span class="editchip" title="edit mode — keys go to the editor; Esc returns to command mode">✎ edit</span>' +
     cellRegionChip(c) +
+    cellClusterChip(c) +
     _lockBadge(c) +
     _effectBadge(c) +
     (c.dupdefs && c.dupdefs.length
@@ -412,14 +528,17 @@ function cellHeaderInner(c) {
       (c.kind === 'code' ? `<button onclick="toggleDeps('${c.id}')" title="focus: show only this cell's dependency chain (Esc to exit)">🔗</button>` : '') + autoctl +
       (isCode ? `<button class="trace${c.trace ? ' on' : ''}" onclick="toggleTrace('${c.id}')" title="${c.trace ? 'open the trace inspector' : 'trace this cell — inspect each value in a popup'}">🔍</button>` : '') +
       (isCode ? `<button class="hidecode${c.codeHidden ? ' on' : ''}" onclick="toggleHideCode('${c.id}')" title="${c.codeHidden ? 'show code' : 'hide code — show only the output'}">${c.codeHidden ? '🙈' : '👁'}</button>` : '') +
+      // A sweep's SPEC — where it runs and under what limits — is configuration, not code. It gets
+      // its own control rather than living in the free-form tag box, because walltime and partition
+      // are what you change while a job is queued or after it was killed.
       `<button class="tagbtn${(c.tags && c.tags.length) ? ' on' : ''}" onclick="openTagEditor('${c.id}', event)" title="cell tags${(c.tags && c.tags.length) ? ': ' + c.tags.join(', ') : ''}">🏷</button>` +
       editSrc +
       `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
       `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
-      // Kind switch: show the TWO kinds this cell ISN'T, each converting on click. Markdown is always
-      // last (code · web · md), so the prose toggle sits in a consistent spot.
-      ['code', 'web', 'tool', 'md'].filter(k => k !== c.kind).map(k =>
-        `<button class="kindbtn" onclick="toggleType('${c.id}','${k}')" title="convert to ${k === 'md' ? 'markdown' : k === 'tool' ? 'tool call' : k} cell">${k === 'code' ? '{·}' : k === 'md' ? 'M↓' : k === 'tool' ? '⌁' : '&lt;/&gt;'}</button>`).join('') +
+      // Kind switch: ONE button naming what this cell IS, opening a picker of what it could be.
+      // It used to emit a glyph button per OTHER kind, which was fine at two kinds and unreadable at
+      // five — four cryptic marks per cell, and no way to tell `⌁` from `🛰` without clicking one.
+      kindButton(c) +
       cellActions +
       `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
     '</span>' +
@@ -778,9 +897,20 @@ function patchCells(cells) {
         else { const out = cell.querySelector('.output'); if (out) { _swapOutput(out, nc.output, nc.live); typeset(out); } }
       }
     }
-    if (!_conflicted) { renderCharts(nc); renderTables(nc); syncControlValues({ cells: [nc] }); }
-    // Spend the stamp only now, and only if the cell was actually on the page — see `revIsNew`.
-    if (cell) revMark(nc);
+    // Every consumer of the payload, not just the ones that existed when this was written:
+    // ANIMATIONS were missing, so an `animate(…)` cell patched through here had its stamp spent
+    // with the player never mounted — and the Preact effect then skipped it as stale forever. The
+    // symptom was an animation that vanished on any edit and came back only on a page reload.
+    let _landed = true;
+    if (!_conflicted) {
+      renderCharts(nc);
+      if (!renderTables(nc)) _landed = false;
+      if (window.renderAnimation && !window.renderAnimation(nc)) _landed = false;
+      syncControlValues({ cells: [nc] });
+    }
+    // Spend the stamp only now, only if the cell was actually on the page, and only if everything
+    // that had work to do managed it — see `revIsNew`.
+    if (cell && _landed) revMark(nc);
   });
   window.onCellsPatched && window.onCellsPatched(cells);       // states/durations moved (DAG panel)
   window.renderRunPill && window.renderRunPill();              // a cell just changed state → refresh the error pill

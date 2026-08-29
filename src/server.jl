@@ -651,6 +651,17 @@ function server_refresh(nb::LiveNotebook, vars)
     syms = Set{Symbol}()
     for v in vars
         s = String(v)
+        # `cell:<id>` — a producer announcing that its own value changed WITHOUT knowing what the
+        # notebook named it. A batch sweep is the case: it returns as soon as the work is submitted
+        # and finishes minutes or hours later, in a browser callback that has no way to know the
+        # binding. The cell knows itself, and the report knows what that cell writes.
+        if startswith(s, "cell:")
+            cid = s[6:end]
+            for c in nb.report.cells
+                c.id == cid && union!(syms, c.writes)
+            end
+            continue
+        end
         i = findfirst(==(':'), s)
         if i === nothing
             push!(syms, Symbol(s))
@@ -1029,6 +1040,49 @@ function set_notebook_regions!(nb::LiveNotebook, csv::AbstractString)
     _mesh_consent_check!(nb)   # a new cross-host pair may need a consented SSH mesh (§5.1)
     return names
 end
+
+# ── Compute targets (the `Slate.clusters` footer) ─────────────────────────────────────────────
+# Named clusters belong to the NOTEBOOK, not to a cell: a notebook whose three sweeps all run on the
+# same partition should say so once, and moving that work to another cluster should be one edit. A
+# cell then references a definition by name (`#%% sweep cluster=hpc`), and `@sweep` resolves it
+# where the sweep actually runs (see sweep.jl `resolve_target`).
+#
+# Stored as-written. Validation belongs to the backend that claims a definition — `kind` says which,
+# and a scheduler this build has never heard of should round-trip through the file rather than be
+# rejected by the editor.
+const _CLUSTER_NAME = r"^[A-Za-z_][A-Za-z0-9_]*$"
+
+function set_notebook_clusters!(nb::LiveNotebook, clusters)
+    out = Dict{String,Any}[]
+    for c in (clusters isa AbstractVector ? clusters : [])
+        c isa AbstractDict || continue
+        nm = strip(String(get(c, "name", "")))
+        # A name with a dot or a space could not be referenced from a cell header, and would be
+        # silently unusable rather than obviously wrong.
+        occursin(_CLUSTER_NAME, nm) ||
+            error("cluster name `$nm` must be a plain identifier — it is referenced from a cell " *
+                  "header as `cluster=$nm`")
+        d = Dict{String,Any}("name" => nm)
+        for (k, v) in c
+            k == "name" && continue
+            s = strip(String(string(v)))
+            isempty(s) || (d[String(k)] = s)
+        end
+        push!(out, d)
+    end
+    names = String[String(c["name"]) for c in out]
+    length(unique(names)) == length(names) || error("two clusters share a name")
+    lock(nb.lock) do
+        isempty(out) ? delete!(nb.report.meta, "clusters") : (nb.report.meta["clusters"] = out)
+        _persist!(nb; label = isempty(out) ? "cleared clusters" : "clusters · " * join(names, ", "))
+    end
+    return out
+end
+
+"The notebook's cluster definitions for the browser, in declaration order."
+_clusters_json(nb::LiveNotebook) =
+    Any[Dict{String,Any}(String(k) => string(v) for (k, v) in c)
+        for c in get(nb.report.meta, "clusters", Dict{String,Any}[])]
 
 # The notebook's regions for the browser (tag editor + DAG zones): each USED name resolved against the
 # global registry — host/transport/warm/root + whether it's actually defined. A name tagged on a cell

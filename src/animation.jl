@@ -38,9 +38,18 @@ const _CMAP_ANCHORS = Dict{Symbol,Vector{NTuple{3,Int}}}(
                   (245,200,170),(222,120,98),(180,4,38)],
     :rdbu     => [(178,24,43),(214,96,77),(244,165,130),(247,247,247),
                   (146,197,222),(67,147,195),(33,102,172)],
+    # Diverging with a DARK centre, for a signed field on a dark page. The white-centred maps above
+    # come from print, where the page is white and zero should disappear into it; on Slate's dark
+    # theme they invert the meaning — the brightest pixels land where there is nothing, and the
+    # structure worth looking at is squeezed into the ends of the ramp. These put black at zero
+    # instead, so a wavefunction's nodal surfaces read as darkness and its lobes glow.
+    :aurora   => [(120,220,255),(40,150,235),(16,60,150),(6,14,40),(0,0,0),
+                  (44,10,26),(140,20,60),(230,80,60),(255,190,90)],
+    :ember    => [(150,230,255),(40,130,220),(10,40,110),(0,0,0),
+                  (110,30,10),(220,90,20),(255,200,80)],
 )
 
-const _DIVERGING_CMAPS = Set([:coolwarm, :balance, :rdbu])
+const _DIVERGING_CMAPS = Set([:coolwarm, :balance, :rdbu, :aurora, :ember])
 
 # Interpolate `anchors` (RGB 0–255) into a 256 × RGBA `UInt8` LUT (opaque).
 function _lut_from_anchors(anchors::AbstractVector{<:NTuple{3,<:Real}})

@@ -23,6 +23,7 @@ const UNDOCUMENTED_BY_DESIGN = Dict(
     "Selection"   => "ditto for multi-selects",
     "indices"     => "helper on a Selection value, documented with the widgets that produce it",
     "Reactive"    => "the type `reactive(…)` returns",
+    "SweepTarget" => "abstract supertype of `SlurmTarget`/`LocalTarget`, documented with them",
     "slate_off"   => "documented inside the `slate_on` entry (its symmetric counterpart)",
     "slate_call"  => "documented inside the `slate_on` entry (the in-process invoke)",
     "slate_everywhere" => "documented inside the `slate_effect` entry",
@@ -208,6 +209,28 @@ end
         api = only(t for t in tools if t.name == "api").handler
         @test occursin("### echart", api(topic = "echart"))
         @test occursin("— index", api())
+    end
+
+    @testset "building the tool list has no side effects" begin
+        # Describing the surface must stay pure. `create_tools` also carries the extension's boot —
+        # bind the hub port, adopt the persisted notebook registry, reap leftover workers — and that
+        # ran for ANY caller, so this very testset used to SIGKILL every Slate worker on the machine
+        # and kill the developer's live notebook mid-run.
+        @test !KaimonSlate._hosted_by_kaimon(StubGate.GateTool)
+        KaimonSlate.create_tools(StubGate.GateTool)
+        @test KaimonSlate._HUB[] === nothing        # no hub bound by asking for the tools
+
+        # Reaping is scoped to the hub that spawned the workers: `pgrep` is machine-wide, and a
+        # worktree hub is meant to run beside the installed one. Different home/port ⇒ different tag.
+        tag = withenv(() -> RE.worker_owner_tag(), "KAIMONSLATE_HOME" => "/tmp/a", "KAIMONSLATE_PORT" => "8901")
+        @test startswith(tag, "slate-owner=")
+        @test tag == withenv(() -> RE.worker_owner_tag(),        # stable across restarts of one hub
+                             "KAIMONSLATE_HOME" => "/tmp/a", "KAIMONSLATE_PORT" => "8901")
+        for (h, p) in (("/tmp/b", "8901"), ("/tmp/a", "8765"), ("", ""))
+            @test tag != withenv(() -> RE.worker_owner_tag(), "KAIMONSLATE_HOME" => h, "KAIMONSLATE_PORT" => p)
+        end
+        # The tag has to survive `pgrep -f`, which takes it as a regex: no metacharacters.
+        @test !occursin(r"[^\w=-]", tag)
     end
 
     @testset "declared timeout budgets" begin

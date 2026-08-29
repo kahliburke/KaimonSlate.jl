@@ -152,6 +152,31 @@ function resume!(root::AbstractString, sweep::AbstractString)
     return true
 end
 
+# ── Arming ───────────────────────────────────────────────────────────────────────────────────
+# Durable state, stored beside the cancellation marker, recording that someone asked for this
+# sweep's work to be submitted. `reconcile!` is the mechanism and stays free of it; the decision to
+# spend an allocation belongs to the caller (see sweep.jl), which reads this to choose whether a
+# given reconcile may submit. Durable so a sweep left running survives a restart and keeps going.
+armed_path(root, sweep) = joinpath(jobs_dir(root), sweep * ".armed")
+
+is_armed(root::AbstractString, sweep::AbstractString) = isfile(armed_path(root, sweep))
+
+"Allow this sweep to submit work. Returns whether it was newly armed."
+function arm!(root::AbstractString, sweep::AbstractString)
+    isfile(armed_path(root, sweep)) && return false
+    mkpath(jobs_dir(root))
+    write(armed_path(root, sweep), string(round(Int, time())))
+    return true
+end
+
+"Put a sweep back to ready-but-not-submitting. Returns whether it was armed."
+function disarm!(root::AbstractString, sweep::AbstractString)
+    p = armed_path(root, sweep)
+    isfile(p) || return false
+    rm(p; force = true)
+    return true
+end
+
 "Every submission with an index file on disk, as `name => chunks`. One directory listing."
 function known_submissions(root::AbstractString)
     dir = jobs_dir(root)

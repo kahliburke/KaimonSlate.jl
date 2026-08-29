@@ -608,7 +608,8 @@ function _run_all_cleanups!(mod::Module)
 end
 
 function _build_slate_ctx(mod::Module, notebook::AbstractString, region::AbstractString,
-                          regions::AbstractVector)
+                          regions::AbstractVector, attrs::AbstractVector = String[],
+                          clusters::AbstractVector = String[])
     emit = _ns_defined(mod, :slate_emit) ? _ns_read(mod, :slate_emit) : (channel, value) -> nothing
     # The notebook's injected `slate_on` (registers a JS→Julia handler into `__slate_handlers`), so package
     # code can wire an interactive widget's handlers via SEB's `slate_on` accessor — mirrors `emit`.
@@ -625,7 +626,43 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
               effect   = _slate_effect,          # code→Slate declaration channel (zero-dep for packages)
               on       = on,
               off      = off,
-              cleanup  = cleanup)
+              cleanup  = cleanup,
+              # This cell's own `key=value` header attributes (engine.jl `cell_attrs`): settings that
+              # belong to the cell rather than to its code, and are therefore editable in the UI
+              # without touching Julia source. A batch sweep reads its walltime/partition/memory
+              # here. Empty for any cell that declares none.
+              attrs    = _attr_dict(attrs),
+              # The notebook's named compute targets (engine.jl's `Slate.clusters` footer). Defined
+              # once for the whole notebook and referenced by name from any number of sweep cells,
+              # so three cells that run on the same partition say so once.
+              clusters = _cluster_dict(clusters))
+end
+
+# `"<cluster>.<key>=<value>"` lines → `name => Dict(key => value)`.
+function _cluster_dict(lines::AbstractVector)
+    out = Dict{String,Dict{String,String}}()
+    for l in lines
+        s = String(l)
+        eq = findfirst(==('='), s)
+        eq === nothing && continue
+        lhs, val = s[firstindex(s):prevind(s, eq)], s[nextind(s, eq):end]
+        dot = findfirst(==('.'), lhs)
+        (dot === nothing || dot == firstindex(lhs)) && continue
+        nm, key = lhs[firstindex(lhs):prevind(lhs, dot)], lhs[nextind(lhs, dot):end]
+        get!(Dict{String,String}, out, nm)[key] = val
+    end
+    return out
+end
+
+function _attr_dict(attrs::AbstractVector)
+    d = Dict{String,String}()
+    for a in attrs
+        s = String(a)
+        i = findfirst(==('='), s)
+        (i === nothing || i == firstindex(s)) && continue
+        d[s[firstindex(s):prevind(s, i)]] = s[nextind(s, i):end]
+    end
+    return d
 end
 
 function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string";

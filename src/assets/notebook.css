@@ -236,6 +236,16 @@ body.hyd-preview #runstale, body.hyd-preview #addcellbtn { opacity:.7; }
                      opacity:.85; white-space:nowrap; }
 .cellhead .cregion:hover { opacity:1; }
 .cellhead .cregion.local { color:var(--dim); border-color:var(--border); }   /* home cells: subordinate to the coloured region chips */
+/* A sweep cell's compute target, on the same chip as the region — the two answer the same question
+   ("where does this run?") for different machinery, so they read as one family. Monospace because
+   the content is a cluster NAME and its overridden values. */
+.cellhead .cregion.cluster { color:var(--val); font-family:'Cascadia Code',ui-monospace,monospace;
+  font-variant-numeric:tabular-nums; }
+.cellhead .cregion.cluster.over { border-style:dashed; }      /* overridden away from its cluster */
+.cellhead .cregion.cluster.unset { color:var(--dim); border-style:dashed; border-color:var(--border);
+  font-family:inherit; }
+.cellhead .cregion.cluster.unset:hover { color:var(--accent); border-color:var(--accent); }
+.cellhead .cregion.cluster.missing { color:var(--red); border-style:dashed; }
 /* Hide-code: editor hidden, output/figure (and any @bind control strip) shown — clean,
    interactive plots without the source. */
 /* `!important` needed: CM6's base theme forces `.cm-editor { display:flex !important }`. */
@@ -765,6 +775,117 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .cell.tool > .srchost { opacity:.62; transition:opacity .12s ease; }
 .cell.tool:hover > .srchost, .cell.tool.selected > .srchost { opacity:1; }
 
+/* Sweep cells (#%% sweep) — work that runs somewhere ELSE and outlives the cell that started it.
+   Marked so it reads as a job rather than a computation: the cell returns in milliseconds while the
+   work it launched may run for a day, and the ordinary "ran in 4ms" chrome would be a lie about
+   what is happening. The rail carries the JOB's state, not the cell's. */
+.cell.sweep { border-left:2px solid color-mix(in srgb, var(--accent) 55%, transparent); }
+.cell.sweep > .cellhead .cid::before { content:"\1F6F0 \FE0F  "; opacity:.85; }
+.cell.sweep > .cellhead .cid { color:color-mix(in srgb, var(--accent) 80%, var(--text)); }
+.cell.sweep[data-sweep-state="running"], .cell.sweep[data-sweep-state="pending"] {
+  border-left-color:var(--accent); }
+.cell.sweep[data-sweep-state="running"] > .cellhead .cid::after,
+.cell.sweep[data-sweep-state="pending"] > .cellhead .cid::after {
+  content:"in flight"; margin-left:8px; padding:1px 7px; border-radius:9px; font-size:.68rem;
+  color:var(--accent); background:color-mix(in srgb, var(--accent) 14%, var(--bg3));
+  border:1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  animation:sweeppulse 2s ease-in-out infinite; }
+.cell.sweep[data-sweep-state="blocked"], .cell.sweep[data-sweep-state="exhausted"] {
+  border-left-color:var(--red); }
+.cell.sweep[data-sweep-state="blocked"] > .cellhead .cid::after,
+.cell.sweep[data-sweep-state="exhausted"] > .cellhead .cid::after {
+  content:"stopped"; margin-left:8px; padding:1px 7px; border-radius:9px; font-size:.68rem;
+  color:var(--red); background:color-mix(in srgb, var(--red) 12%, var(--bg3));
+  border:1px solid color-mix(in srgb, var(--red) 45%, var(--border)); }
+.cell.sweep[data-sweep-state="cancelled"] { border-left-color:var(--dim); }
+.cell.sweep[data-sweep-state="partial"] { border-left-color:var(--gold); }
+.cell.sweep[data-sweep-state="succeeded"] { border-left-color:var(--green); }
+@keyframes sweeppulse { 0%,100% { opacity:1 } 50% { opacity:.45 } }
+
+/* ── The sweep spec popover (the cluster button on a sweep cell) ───────────────────────────────
+   Where the job runs and under what limits. A popover rather than a dialog because it is anchored
+   to one cell and read at a glance; the cluster DEFINITIONS behind it get the full modal below. */
+.swcfgpop { position:fixed; z-index:66; display:none; width:340px; padding:12px 14px 14px;
+  border:1px solid var(--border); border-radius:10px; background:var(--bg2); color:var(--text);
+  box-shadow:0 16px 48px rgba(0,0,0,.55); font-size:.8rem;
+  /* `place()` sets an explicit max-height only when the panel fits neither above nor below. */
+  overflow:auto; overscroll-behavior:contain; }
+.swcfgpop.show { display:block; }
+.swcfgpop .ctlsub { margin:12px 0 6px; color:var(--dim); font-size:.68rem; font-weight:600;
+  text-transform:uppercase; letter-spacing:.06em; }
+.swcfgpop .ctlsub:first-child { margin-top:0; }
+.swcfgpop .swcfg-sub { text-transform:none; letter-spacing:0; font-weight:400; opacity:.75; }
+.swcfg-grid { display:grid; grid-template-columns:1fr 1fr; gap:7px 10px; }
+.swcfg-grid label { display:flex; flex-direction:column; gap:3px; min-width:0; }
+.swcfg-grid label > span { color:var(--dim); font-size:.68rem; }
+.swcfg-inp, .swcfg-grid input, .swcfgpop select, .cludlg input {
+  width:100%; box-sizing:border-box; font-size:.78rem;
+  font-family:'Cascadia Code',ui-monospace,monospace; padding:5px 8px; border-radius:7px;
+  border:1px solid var(--border); background:var(--bg3); color:var(--text); }
+.swcfg-grid input::placeholder, .cludlg input::placeholder { color:var(--dim); opacity:.7; }
+.swcfg-grid input:focus, .swcfgpop select:focus, .cludlg input:focus {
+  outline:none; border-color:var(--accent); }
+.swcfg-summary { margin:6px 0 8px; color:var(--val); font-size:.72rem; line-height:1.5;
+  font-family:'Cascadia Code',ui-monospace,monospace; }
+.swcfg-empty { color:var(--dim); font-size:.76rem; font-style:italic; padding:4px 0; }
+.swcfg-note { margin:14px 0 0; color:var(--dim); font-size:.7rem; line-height:1.55; }
+.swcfg-actions { display:flex; gap:8px; margin-top:14px; }
+.swcfg-actions button, .swcfgpop .swcfg-edit, .cludlg button {
+  background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:7px;
+  padding:5px 12px; cursor:pointer; font-size:.78rem; font-family:inherit; }
+.swcfg-actions button:hover, .swcfgpop .swcfg-edit:hover, .cludlg button:hover {
+  border-color:var(--accent); color:var(--accent); }
+.swcfg-actions .swcfg-apply, .cludlg .cludlg-save {
+  background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }
+.swcfg-actions .swcfg-apply:hover, .cludlg .cludlg-save:hover { color:var(--bg); opacity:.9; }
+.swcfgpop .swcfg-edit { padding:4px 10px; font-size:.72rem; }
+
+/* ── The cluster editor ────────────────────────────────────────────────────────────────────────
+   Notebook-level compute targets. A modal, on Slate's shared `.modal-bg` geometry, because a
+   definition has a dozen fields and is edited rarely — unlike the per-cell overrides above. */
+.cludlg { position:fixed; inset:0; z-index:64; display:none; align-items:center;
+  justify-content:center; background:rgba(5,8,16,.66); }
+.cludlg.show { display:flex; }
+.cludlg-panel { width:min(780px,92vw); max-height:86vh; display:flex; flex-direction:column;
+  border:1px solid var(--border); border-radius:10px; background:var(--bg2); color:var(--text);
+  box-shadow:0 16px 48px rgba(0,0,0,.55); font-size:.8rem; }
+.cludlg-head { display:flex; align-items:baseline; gap:10px; padding:14px 18px;
+  border-bottom:1px solid var(--border); }
+.cludlg-head strong { color:var(--strong); font-size:.95rem; }
+.cludlg-sub { color:var(--dim); font-size:.72rem; }
+.cludlg-sub code { font-size:.72rem; color:var(--val);
+  font-family:'Cascadia Code',ui-monospace,monospace; }
+.cludlg-x { margin-left:auto; font-size:1.1rem; line-height:1; padding:2px 8px;
+  background:transparent; border:0; color:var(--dim); cursor:pointer; }
+.cludlg-x:hover { color:var(--red); }
+.cludlg-body { display:flex; min-height:0; flex:1; }
+.cludlg-list { width:224px; flex:none; padding:12px; border-right:1px solid var(--border);
+  overflow:auto; display:flex; flex-direction:column; gap:5px; }
+.cludlg-item { display:flex; flex-direction:column; gap:3px; align-items:flex-start;
+  text-align:left; font-family:inherit; font-size:.8rem; padding:7px 10px; border-radius:7px;
+  cursor:pointer; border:1px solid var(--border); background:var(--bg3); color:var(--text); }
+.cludlg-item:hover { border-color:var(--accent); color:var(--accent); }
+.cludlg-item.on { border-color:color-mix(in srgb, var(--accent) 60%, var(--border));
+  background:color-mix(in srgb, var(--accent) 12%, var(--bg3)); color:var(--strong); }
+.cludlg-name { font-weight:600; }
+.cludlg-sum { color:var(--dim); font-size:.68rem; line-height:1.45;
+  font-family:'Cascadia Code',ui-monospace,monospace; }
+.cludlg-item.on .cludlg-sum { color:var(--val); }
+.cludlg-add { border-style:dashed !important; color:var(--dim) !important; text-align:center;
+  display:block; width:100%; }
+.cludlg-add:hover { color:var(--accent) !important; }
+.cludlg-form { flex:1; padding:14px 18px; overflow:auto; min-width:0; }
+.cludlg-form .ctlsub { margin:14px 0 6px; color:var(--dim); font-size:.68rem; font-weight:600;
+  text-transform:uppercase; letter-spacing:.06em; }
+.cludlg-form .swcfg-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.cludlg-nm { display:flex; flex-direction:column; gap:3px; }
+.cludlg-nm > span { color:var(--dim); font-size:.68rem; }
+.cludlg-foot { padding:12px 18px; border-top:1px solid var(--border); margin-top:0;
+  align-items:center; }
+.cludlg-foot .cludlg-del { color:var(--red); border-color:#3a2030; }
+.cludlg-foot .cludlg-del:hover { background:rgba(229,117,117,.12); border-color:var(--red);
+  color:var(--red); }
+
 /* Animation player (animate(frames; …) → WebGL2 canvas + transport bar) */
 .anim:not(:empty) { padding:8px 10px; border-top:1px solid var(--border); }
 .animplayer { margin-bottom:10px; }
@@ -952,6 +1073,34 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .addmenu button { display:block; width:100%; text-align:left; padding:5px 16px 5px 10px; border:none; background:none;
                   color:var(--text); cursor:pointer; font-size:.8rem; border-radius:5px; white-space:nowrap; }
 .addmenu button:hover { background:var(--bg3); color:var(--accent); }
+
+/* ── Cell-type picker ─────────────────────────────────────────────────────────────────────────
+   One list of kinds, shown by the switcher in a cell header and by the insert menu in a cell gap.
+   A row is a LARGE glyph plus a name plus what the kind is FOR: at five kinds the one-character
+   marks are indistinguishable from each other, and the difference between a tool call and a batch
+   sweep is a sentence rather than a picture. */
+.kindpop { position:fixed; z-index:57; width:352px; display:none; padding:6px;
+  background:var(--bg2); border:1px solid var(--border); border-radius:9px;
+  box-shadow:0 12px 34px rgba(0,0,0,.55); }
+.kindpop.show { display:block; }
+.addmenu:has(.kindrow) { width:352px; padding:6px; }
+.kindpop-head { padding:5px 9px 7px; color:var(--dim); font-size:.68rem; font-weight:600;
+  text-transform:uppercase; letter-spacing:.06em; }
+.kindrow { display:flex; align-items:flex-start; gap:10px; width:100%; text-align:left;
+  padding:8px 9px; border:1px solid transparent; border-radius:7px; cursor:pointer;
+  background:none; color:var(--text); font-family:inherit; white-space:normal; }
+.kindrow:hover { background:var(--bg3); border-color:var(--border); }
+.kindrow.on { border-color:color-mix(in srgb, var(--accent) 55%, var(--border));
+  background:color-mix(in srgb, var(--accent) 12%, var(--bg3)); }
+.kindrow-glyph { flex:0 0 auto; width:32px; height:32px; display:flex; align-items:center;
+  justify-content:center; border-radius:7px; background:var(--bg); border:1px solid var(--border);
+  font-family:'Cascadia Code',ui-monospace,monospace; font-size:.9rem; color:var(--accent); }
+.kindrow.on .kindrow-glyph { border-color:var(--accent); }
+.kindrow-text { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.kindrow-name { color:var(--strong); font-size:.82rem; font-weight:600; }
+.kindrow-name em { color:var(--dim); font-weight:400; font-style:normal; font-size:.72rem; }
+.kindrow-desc { color:var(--dim); font-size:.72rem; line-height:1.45; }
+
 /* 🎛 control picker: a checkbox list of the @bind controls that affect a cell. */
 .ctlpop { position:fixed; z-index:56; min-width:190px; max-height:60vh; overflow:auto; background:var(--bg2);
           border:1px solid var(--border); border-radius:9px; padding:5px; box-shadow:0 10px 28px rgba(0,0,0,.55); display:none; }
@@ -2342,27 +2491,34 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 /* ── Batch sweeps: topbar pill + drop-down ───────────────────────────────────────────────────
    A sweep outlives the cell that started it and runs away from the notebook, so its status lives
    up here with the other run indicators rather than only inside one cell's output. */
-.sweeppill { display:inline-flex; align-items:center; gap:6px; padding:2px 9px; border-radius:11px;
-  font-size:.7rem; cursor:pointer; border:1px solid var(--bg3); color:var(--muted,#8a91ab);
-  white-space:nowrap; }
-.sweeppill:hover { border-color:var(--fg,#c9d1d9); }
-.sweeppill .swpdot { width:7px; height:7px; border-radius:50%; background:var(--muted,#8a91ab); }
-.sweeppill.busy { color:#58a6ff; border-color:#58a6ff55; }
-.sweeppill.busy .swpdot { background:#58a6ff; animation:swppulse 1.6s ease-in-out infinite; }
-.sweeppill.bad { color:#f85149; border-color:#f8514955; }
-.sweeppill.bad .swpdot { background:#f85149; }
+/* Same shape as `.runpill` beside it — this is run status, and reading as a different kind of
+   control would be a lie about what it is. */
+.sweeppill { display:inline-flex; align-items:center; gap:7px; flex:0 0 auto; cursor:pointer;
+  font-size:.74rem; font-weight:600; padding:3px 10px; border-radius:11px; white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+  border:1px solid var(--border); background:var(--bg3); color:var(--dim); }
+.sweeppill:hover { border-color:var(--accent); color:var(--accent); }
+.sweeppill .swpdot { width:9px; height:9px; border-radius:50%; flex:0 0 auto; background:var(--dim); }
+.sweeppill.busy { color:var(--strong); border-color:color-mix(in srgb, var(--accent) 55%, var(--border));
+  background:color-mix(in srgb, var(--accent) 14%, var(--bg3)); }
+.sweeppill.busy .swpdot { background:var(--accent); animation:swppulse 1.6s ease-in-out infinite; }
+.sweeppill.bad { color:var(--red); border-color:color-mix(in srgb, var(--red) 55%, var(--border));
+  background:color-mix(in srgb, var(--red) 12%, var(--bg3)); }
+.sweeppill.bad .swpdot { background:var(--red); }
 @keyframes swppulse { 0%,100% { opacity:1 } 50% { opacity:.35 } }
 
-.sweeppanel { position:fixed; z-index:70; width:340px; max-height:60vh; overflow:auto;
-  display:none; padding:8px; border-radius:10px; border:1px solid var(--bg3);
-  background:var(--bg1,#0d1117); box-shadow:0 8px 24px #0007; }
+.sweeppanel { position:fixed; z-index:66; width:352px; max-height:60vh; overflow:auto;
+  display:none; padding:8px; border-radius:10px; border:1px solid var(--border);
+  background:var(--bg2); color:var(--text); box-shadow:0 16px 48px rgba(0,0,0,.55); }
 .sweeppanel.open { display:block; }
-.swprow { padding:7px 8px; border-radius:7px; cursor:pointer; }
-.swprow:hover { background:var(--bg2,#161b22); }
-.swprow-top { display:flex; align-items:center; gap:7px; font-size:.72rem; }
-.swprow-dot { width:7px; height:7px; border-radius:50%; flex:none; }
+.swprow { padding:7px 9px; border-radius:7px; cursor:pointer; }
+.swprow:hover { background:var(--ovl); }
+.swprow-top { display:flex; align-items:center; gap:8px; font-size:.76rem; }
+.swprow-dot { width:8px; height:8px; border-radius:50%; flex:none; }
+.swprow-cell { font-family:'Cascadia Code',ui-monospace,monospace; font-size:.7rem; color:var(--dim); }
 .swprow-label { font-weight:600; }
-.swprow-meta { margin-left:auto; color:var(--muted,#8a91ab); font-variant-numeric:tabular-nums; }
-.swprow-bar { height:4px; border-radius:2px; background:var(--bg3); overflow:hidden; margin-top:5px; }
+.swprow-meta { margin-left:auto; color:var(--dim); font-size:.7rem;
+  font-variant-numeric:tabular-nums; }
+.swprow-bar { height:4px; border-radius:2px; background:var(--bg3); overflow:hidden; margin-top:6px; }
 .swprow-bar > span { display:block; height:100%; transition:width .3s; }
-.swprow-note { font-size:.66rem; color:var(--muted,#8a91ab); padding:4px 8px; }
+.swprow-note { font-size:.7rem; color:var(--dim); padding:4px 9px; }

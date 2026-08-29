@@ -645,6 +645,74 @@ See also `save_asset`, `FileUpload`."""),
         run chip. `@progress`/`@withprogress` loops also drive it automatically.
         `for i in 1:n; slate_progress(i/n; msg=\"step \$i\"); end`."""),
 
+    # ── Batch sweeps ─────────────────────────────────────────────────────────────────────────────
+    SlateApiEntry("@sweep", "Batch sweep",
+        "Fan a parameter grid out to a cluster (or local processes) — resumable, watchable, never blocks.",
+        ["slurm", "cluster", "hpc", "parameter sweep", "parallel", "batch", "fan out", "long running",
+         "resume", "sbatch", "grid search"],
+        "@sweep(grid, target; setup=\"\", plot=nothing, resources=nothing, cap=0) do p … end",
+        """Run the body once per point in `grid`, as separate processes on a scheduler. Returns a
+        `ShardedResult` IMMEDIATELY — as soon as the work is submitted, never on completion — and
+        renders a live card: progress, rate, ETA, a unit grid, per-unit failures, and Cancel / Retry /
+        Reset. Re-running the cell RECONCILES: it submits only what is missing, so reopening a
+        notebook whose sweep has been running for a day costs nothing and loses nothing.
+        Every unit is content-addressed on body + setup + captures + its own parameters, so a pilot
+        over four points and the full sweep over four thousand share results; editing the body starts
+        a new sweep rather than mixing two versions of the code.
+        The body travels as SOURCE (a compute node cannot revive a closure) — put helper functions in
+        `setup = "using MyPkg"`, and data in ordinary variables, which are captured and shipped.
+        `plot = rows -> echart(…)` draws the units that have landed, on the card's own poll, so the
+        chart fills as results arrive. See `paramgrid`, `SlurmTarget`, `LocalTarget`, `Sweep`.
+        `r = @sweep(paramgrid(β = 0:0.1:2, seed = 1:50), hpc; setup = "using MyPkg") do p
+             MyPkg.simulate(p)
+         end`"""),
+
+    SlateApiEntry("paramgrid", "Batch sweep",
+        "The cartesian product of named parameter axes — a sweep's grid.",
+        ["grid", "product", "parameters", "sweep", "combinations"],
+        "paramgrid(; kw...)  ·  paramgrid(rows::AbstractVector)",
+        """`paramgrid(β = 0.1:0.1:2.0, seed = 1:100)` → 2000 NamedTuples, first axis varying fastest.
+        Pass a vector of NamedTuples instead for a parameter set that is not a product. Adding a point
+        later changes only that point's key, so the results you already have are untouched."""),
+
+    SlateApiEntry("SlurmTarget", "Batch sweep",
+        "Where a sweep runs: a SLURM cluster (`SlurmTarget`) or this machine (`LocalTarget`).",
+        ["slurm", "cluster", "sbatch", "local", "target", "walltime", "partition", "resources"],
+        "SlurmTarget(host; root, root_remote, parent, payload, chunk, resources)  ·  LocalTarget(; root, parent, chunk)",
+        """A target says where units execute and how the two sides see the shared store; the sweep
+        cell itself is identical either way. `root` is the store as the notebook sees it,
+        `root_remote` the same store from a compute node. `parent` is the project whose code the
+        units need — it is provisioned to a task environment once, over ssh/rsync for a cluster.
+        `chunk` sets how many units ride one scheduler job. `resources = (; cpus, mem, walltime,
+        partition, account, qos)` and can be overridden per sweep with `resources =` on `@sweep`
+        (deliberately NOT part of the sweep's key, so raising a walltime resumes rather than
+        discarding what already survived)."""),
+
+    SlateApiEntry("LocalTarget", "Batch sweep",
+        "Run a sweep's units as processes on THIS machine — same cell, no cluster.",
+        ["local", "no cluster", "laptop", "processes", "target", "test", "small"],
+        "LocalTarget(; root, parent, chunk, maxproc)",
+        """The no-scheduler target: units run as bounded local Julia processes. Everything else about
+        the sweep is identical, which is the point — develop against `LocalTarget`, then swap in a
+        `SlurmTarget` and change nothing else. Process count is capped (each unit is a whole Julia
+        loading a project, so an unbounded process-per-chunk launch is measured in gigabytes)."""),
+
+    SlateApiEntry("Sweep", "Batch sweep",
+        "The sweep module: what a `ShardedResult` can be asked and told.",
+        ["shardedresult", "cancel", "reset", "retry", "state", "results", "errors", "eta", "progress"],
+        "r.state · r.done · r.results · r.errors · Sweep.cancel!(r) · Sweep.reset!(r)",
+        """QUESTIONS are properties of the result, so they cannot collide with your own variables:
+        `r.state` (`:pending :running :succeeded :partial :blocked :cancelled :exhausted`),
+        `r.total r.done r.ok r.failed r.pending r.fraction r.percent r.settled`,
+        `r.rate r.eta r.idle r.stalled_for r.blocked`, `r.results` (rows that succeeded),
+        `r.values` (just their values), `r.errors` (rows that threw, with tracebacks), `r.hosts`.
+        The result also iterates and indexes over ALL rows, `(; params, status, value, ran_on, ms)`.
+        ACTIONS are qualified calls, because `reset!`/`cancel!` are names your own packages may
+        export: `Sweep.refresh!(r)`, `Sweep.retry_failed!(r)`, `Sweep.cancel!(r)`, `Sweep.resume!(r)`,
+        `Sweep.reset!(r)`. The card offers the same as buttons.
+        `:partial` means finished WITH failures; `:blocked` means the work is failing and the sweep
+        stopped itself; `:exhausted` means units never landed, so they outran their resources."""),
+
     # ── Live custom stream ───────────────────────────────────────────────────────────────────────
     SlateApiEntry("slate_emit", "Live stream",
         "PUSH a value to browser JS on a channel — no recompute, no output swap (Julia → JS).",
