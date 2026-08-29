@@ -740,8 +740,8 @@ function _live_script(io, r::ShardedResult)
         // Feed the notebook-level pill. The card is inside one cell's output; the pill is what
         // answers "what is this notebook doing" when that cell is scrolled away or collapsed.
         if (window.slateSweeps) {
-          var cell = root.closest('[data-id]');
-          window.slateSweeps.report("$(r.key)", cell ? cell.dataset.id : "", s);
+          var cell = root.closest('[data-cid]');
+          window.slateSweeps.report("$(r.key)", cell ? cell.dataset.cid : "", s);
         }
         var bar = root.querySelector('[data-sw="bar"]');
         if (bar) bar.style.width = (100 * s.frac).toFixed(2) + "%";

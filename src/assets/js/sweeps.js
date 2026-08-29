@@ -76,7 +76,7 @@
     el.querySelectorAll('.swprow').forEach(r => {
       r.addEventListener('click', () => {
         const id = r.dataset.cell;
-        const node = id && document.querySelector(`[data-id="${id}"], #cell-${id}`);
+        const node = id && document.querySelector(`[data-cid="${id}"]`);
         if (node) { node.scrollIntoView({ behavior: 'smooth', block: 'center' }); close(); }
       });
     });
