@@ -296,10 +296,34 @@ end
             r = Sweep.@sweep(Sweep.paramgrid(x = 1:5), t; submit = false) do p; p.x; end
             for c in BS.sweep_chunks(root, r.key); SlateTask.run_chunk(root, c); end
             s = Sweep.status_payload(t, r.key, r.params, r.keys; advance = false)
-            @test length(s["marks"]) == 5           # one character per unit, for the tile grid
-            @test all(c -> c in ('o', 'x', '.'), s["marks"])
+            @test length(s["tiles"]) == 5           # one tile per unit at this size
             @test s["done"] == 5 && s["settled"] === true
             @test s["label"] isa String && startswith(s["color"], "#")
+        end
+    end
+
+    @testset "the rendered grid and the live payload bin identically" begin
+        # The browser patches tiles BY INDEX, so a renderer and a payload that binned differently
+        # would repaint the wrong cells — and only on large sweeps, which are the ones anyone
+        # actually watches.
+        for n in (1, 7, 600, 601, 4000, 100_000)
+            spans = Sweep._tile_spans(n)
+            @test length(spans) <= Sweep._TILE_BUDGET
+            @test first(spans)[1] == 1 && last(spans)[2] == n     # every unit is covered
+            @test all(i -> spans[i][2] + 1 == spans[i + 1][1], 1:length(spans) - 1)  # no gaps
+        end
+        @test isempty(Sweep._tile_spans(0))
+
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 500,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:2000), t; submit = false) do p; p.x; end
+            html = sprint(show, MIME"text/html"(), r)
+            rendered = length(collect(eachmatch(r"<div title=\"units ", html)))
+            payload = length(Sweep.status_payload(t, r.key, r.params, r.keys;
+                                                  advance = false)["tiles"])
+            @test rendered == payload
+            @test payload <= Sweep._TILE_BUDGET      # flat cost regardless of sweep size
         end
     end
 

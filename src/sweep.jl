@@ -472,12 +472,18 @@ function status_payload(target::SweepTarget, key::AbstractString, params, keys;
     p = advance ? BatchSweep.reconcile!(root, key, l, specfn_for(target)) :
                   BatchSweep.plan(root, key; launcher = l)
     t = BatchSweep.telemetry(root, key; launcher = l, plan = p)
-    marks = IOBuffer()
-    for k in keys
-        m = MemoStore.read_manifest(root, k)
-        print(marks, m === nothing ? '.' :
-                     String(get(m, "status", "")) == "error" ? 'x' : 'o')
+    # Tile COLOURS, not per-unit statuses: the browser patches tiles by index, and computing the
+    # colour here is what keeps the live grid identical to the one the cell rendered. It also keeps
+    # the payload flat — a few hundred short strings whatever the sweep's size.
+    st = [(m = MemoStore.read_manifest(root, k);
+           m === nothing ? "" : String(get(m, "status", ""))) for k in keys]
+    tiles = String[]
+    for (lo, hi) in _tile_spans(length(st))
+        ok = count(==("ok"), @view st[lo:hi])
+        err = count(==("error"), @view st[lo:hi])
+        push!(tiles, _tile_color(ok, err, hi - lo + 1))
     end
+
     return Dict{String,Any}(
         "state" => String(p.state), "label" => _state_label(p.state),
         "total" => p.shards_total, "done" => p.shards_done,
@@ -485,7 +491,7 @@ function status_payload(target::SweepTarget, key::AbstractString, params, keys;
         "frac" => BatchSweep.fraction(p),
         "rate" => t.rate_per_s, "eta" => t.eta_s, "idle" => t.idle_s,
         "stuck" => BatchSweep.stalled_for(t), "blocked" => p.blocked,
-        "settled" => BatchSweep.is_settled(p), "marks" => String(take!(marks)),
+        "settled" => BatchSweep.is_settled(p), "tiles" => tiles,
         "color" => get(_STATE_COLOR, p.state, "#8b949e"))
 end
 
@@ -521,6 +527,15 @@ _state_label(s) = s === :succeeded ? "complete" :
 # show as a red band — while the DOM cost stays flat from ten units to ten million.
 const _TILE_BUDGET = 600
 
+# The one definition of how units map onto tiles. The renderer and the live payload MUST agree: the
+# browser patches tiles by index, so if the two binned differently the grid would either stop
+# updating or repaint the wrong cells — and only on large sweeps, which are the ones worth watching.
+function _tile_spans(n::Integer)
+    n <= 0 && return Tuple{Int,Int}[]
+    per = max(1, cld(n, _TILE_BUDGET))
+    return [((t - 1) * per + 1, min(t * per, n)) for t in 1:cld(n, per)]
+end
+
 # Green for completed, blended toward red by the bucket's failure fraction, so a region that is
 # merely slow and a region that is failing do not look alike. Grey is "nothing here has run".
 function _tile_color(ok::Int, err::Int, total::Int)
@@ -538,14 +553,12 @@ end
 function _unit_grid(io, r::ShardedResult)
     n = length(r.rows)
     n == 0 && return
-    per = max(1, cld(n, _TILE_BUDGET))
-    ntiles = cld(n, per)
-    side = ntiles <= 100 ? 12 : ntiles <= 400 ? 8 : 5
+    spans = _tile_spans(n)
+    per = n == 0 ? 1 : max(1, cld(n, _TILE_BUDGET))
+    side = length(spans) <= 100 ? 12 : length(spans) <= 400 ? 8 : 5
 
     print(io, "<div data-sw='grid' style='display:flex;flex-wrap:wrap;gap:2px;margin-top:8px'>")
-    for t in 1:ntiles
-        lo = (t - 1) * per + 1
-        hi = min(t * per, n)
+    for (lo, hi) in spans
         ok = err = 0
         for i in lo:hi
             s = r.rows[i].status
@@ -734,10 +747,10 @@ function _live_script(io, r::ShardedResult)
         var dot = root.querySelector('[data-sw="dot"]');
         if (dot) dot.style.background = s.color;
         var g = root.querySelector('[data-sw="grid"]');
-        if (g && s.marks && g.children.length === s.marks.length){
-          for (var i = 0; i < s.marks.length; i++){
-            var c = s.marks[i] === "o" ? "#3fb950" : s.marks[i] === "x" ? "#f85149" : "#30363d";
-            if (g.children[i].style.background !== c) g.children[i].style.background = c;
+        if (g && s.tiles && g.children.length === s.tiles.length){
+          for (var i = 0; i < s.tiles.length; i++){
+            if (g.children[i].style.background !== s.tiles[i])
+              g.children[i].style.background = s.tiles[i];
           }
         }
         if (s.settled || s.blocked){
