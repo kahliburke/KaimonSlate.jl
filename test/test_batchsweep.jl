@@ -216,8 +216,8 @@ end
             end
             p = BS.plan(root, sweep; launcher = l)
             @test p.chunk_attempts[chunks[1]] == BS.MAX_ATTEMPTS
-            @test p.chunk_state[chunks[1]] === :stalled
-            @test p.state === :stalled
+            @test p.chunk_state[chunks[1]] === :exhausted
+            @test p.state === :exhausted
             @test BS.is_stuck(p) && !BS.is_settled(p)
             @test isempty(p.to_submit)              # stops on its own
             n = length(l.submitted)
@@ -247,6 +247,31 @@ end
             # automatically.
             r = SlateTask.run_chunk(root, chunks[1]; force = false)
             @test (r.ran, r.skipped, r.failed) == (0, 3, 1)
+        end
+    end
+
+    @testset "ExecLauncher never exceeds its process limit" begin
+        # Each task process is a whole Julia loading a project, so an unbounded process-per-chunk
+        # launch is measured in gigabytes. Locally there is no scheduler to enforce this.
+        @test length(BL._deal(["c$i" for i in 1:20], 4)) == 4
+        @test length(BL._deal(["c$i" for i in 1:20], 1)) == 1
+        @test length(BL._deal(["c1", "c2"], 8)) == 2          # never more slices than chunks
+        @test sort(vcat(BL._deal(["c$i" for i in 1:7], 3)...)) == sort(["c$i" for i in 1:7])
+        @test BL.ExecLauncher().maxproc <= 4
+        # Every chunk lands in exactly one slice, so nothing is dropped or run twice.
+        sl = BL._deal(["c$i" for i in 1:9], 4)
+        @test sum(length, sl) == 9 && length(unique(vcat(sl...))) == 9
+    end
+
+    @testset "one process runs several chunks in sequence" begin
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 6, per = 2)
+            spec = BL.JobSpec("t", chunks; root, project = tempdir(),
+                              payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            cmd = BL.task_command(spec, chunks)
+            for c in chunks
+                @test occursin(c, cmd)                        # all six on one command line
+            end
         end
     end
 
@@ -334,12 +359,97 @@ end
         end
     end
 
-    @testset "stalled_for stays quiet on a healthy or unstarted run" begin
+    @testset "stalled_for stays quiet on a healthy, unstarted, or deliberately stopped run" begin
         mktempdir() do root
             sweep, chunks = mksweep(root; nchunk = 1, per = 3)
             @test BS.stalled_for(BS.telemetry(root, sweep)) == 0.0   # nothing started yet
             SlateTask.run_chunk(root, chunks[1])
             @test BS.stalled_for(BS.telemetry(root, sweep)) == 0.0   # complete, so not stalled
+        end
+        mktempdir() do root
+            # A blocked sweep is not stuck: it stopped on purpose, and saying "it may be stuck"
+            # would send someone looking for a scheduler problem that does not exist.
+            sweep, chunks = mksweep(root; nchunk = 4, per = 3, fn_src = "p -> error(\"always\")")
+            SlateTask.run_chunk(root, chunks[1])
+            pol = BS.FailurePolicy(; min_sample = 3, max_fraction = 0.5)
+            t = BS.telemetry(root, sweep; plan = BS.plan(root, sweep; failure_policy = pol))
+            @test t.state === :blocked
+            @test BS.stalled_for(t) == 0.0
+        end
+    end
+
+    @testset "the three ways of stopping short are distinguishable" begin
+        # Same outward symptom (nothing is progressing), three different causes, three different
+        # things to do about it.
+        mktempdir() do root
+            # 1. The work is failing.
+            s1, c1 = mksweep(root; nchunk = 4, per = 3, sweep = "sw_err",
+                             fn_src = "p -> error(\"always\")")
+            SlateTask.run_chunk(root, c1[1])
+            p1 = BS.plan(root, s1; failure_policy = BS.FailurePolicy(; min_sample = 3))
+            @test p1.state === :blocked
+
+            # 2. Someone stopped it.
+            s2, _ = mksweep(root; nchunk = 3, per = 2, sweep = "sw_cancel")
+            l = FakeLauncher()
+            BS.reconcile!(root, s2, l, specfn(root); failure_policy = NOPROBE)
+            @test BS.plan(root, s2; launcher = l).state === :running
+            BS.cancel!(root, s2, l)
+            @test BS.plan(root, s2; launcher = l).state === :cancelled
+
+            # 3. It outran its resources: attempted the full budget, never landed.
+            s3, c3 = mksweep(root; nchunk = 1, per = 2, sweep = "sw_gone")
+            l3 = FakeLauncher()
+            for _ in 1:BS.MAX_ATTEMPTS
+                BS.reconcile!(root, s3, l3, specfn(root))
+                empty!(l3.live)                      # the job vanished, producing nothing
+            end
+            @test BS.plan(root, s3; launcher = l3).state === :exhausted
+
+            # All three are "stuck", none of them is merely idle.
+            for p in (p1, BS.plan(root, s2; launcher = l), BS.plan(root, s3; launcher = l3))
+                @test BS.is_stuck(p)
+                @test BS.stalled_for(BS.telemetry(root, p.sweep; plan = p)) == 0.0
+            end
+        end
+    end
+
+    @testset "a cancelled sweep is not resurrected by the next reconcile" begin
+        # The marker is on disk, not in the hub, so closing the notebook cannot silently un-cancel.
+        mktempdir() do root
+            sweep, _ = mksweep(root; nchunk = 3, per = 2)
+            l = FakeLauncher()
+            BS.reconcile!(root, sweep, l, specfn(root); failure_policy = NOPROBE)
+            n = length(l.submitted)
+            BS.cancel!(root, sweep, l)
+
+            BS.reconcile!(root, sweep, l, specfn(root))          # same hub
+            @test length(l.submitted) == n
+            l2 = FakeLauncher()                                  # a brand new hub
+            BS.reconcile!(root, sweep, l2, specfn(root))
+            @test isempty(l2.submitted)
+            @test BS.plan(root, sweep; launcher = l2).state === :cancelled
+
+            # Resuming picks up only what is left.
+            @test BS.resume!(root, sweep)
+            p = BS.reconcile!(root, sweep, l2, specfn(root))
+            @test !isempty(l2.submitted)
+            @test p.state !== :cancelled
+        end
+    end
+
+    @testset "cancelling keeps what already finished" begin
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 3, per = 2)
+            SlateTask.run_chunk(root, chunks[1])
+            l = FakeLauncher()
+            BS.cancel!(root, sweep, l)
+            p = BS.plan(root, sweep; launcher = l)
+            @test p.state === :cancelled
+            @test p.shards_done == 2 && p.shards_missing == 4
+            BS.resume!(root, sweep)
+            # Only the unfinished chunks are queued again.
+            @test sort(BS.plan(root, sweep).to_submit) == sort(chunks[2:end])
         end
     end
 

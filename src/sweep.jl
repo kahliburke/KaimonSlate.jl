@@ -24,7 +24,7 @@ const BatchSweep = P.BatchSweep
 
 export paramgrid, @sweep, SweepTarget, LocalTarget, SlurmTarget,
        finished, failures, values_of, refresh!, retry_failed!, reset!,
-       sweep_state, fraction, eta, stalled_for, blocked
+       cancel!, resume!, sweep_state, fraction, eta, stalled_for, blocked
 
 # ── Parameter space ──────────────────────────────────────────────────────────────────────────
 
@@ -219,12 +219,34 @@ end
 "Clear the failed shards so the next run of the sweep cell retries exactly those."
 retry_failed!(r::ShardedResult) = BatchSweep.retry_failed!(store_root(r.target), r.key)
 
+"""
+    cancel!(r) -> r
+
+Stop the sweep at your request: kill what is running and record the stop durably, so re-running the
+cell (or reopening the notebook) does not quietly start it again. Finished units are kept.
+"""
+function cancel!(r::ShardedResult)
+    BatchSweep.cancel!(store_root(r.target), r.key, launcher_for(r.target))
+    return refresh!(r)
+end
+
+"""
+    resume!(r) -> r
+
+Undo a `cancel!`. The next run submits only what is still missing.
+"""
+function resume!(r::ShardedResult)
+    BatchSweep.resume!(store_root(r.target), r.key)
+    return refresh!(r)
+end
+
 "Drop every result for this sweep, so the next run starts cold."
 function reset!(r::ShardedResult)
     root = store_root(r.target)
     n = 0
     for k in r.keys; MemoStore.drop_manifest(root, k) && (n += 1); end
     BatchSweep.clear_attempts!(root, r.key)
+    BatchSweep.resume!(root, r.key)   # a reset sweep is not still cancelled
     return n
 end
 
@@ -242,12 +264,180 @@ end
 _bar(frac, width = 24) =
     (n = clamp(round(Int, frac * width), 0, width); "▰"^n * "▱"^(width - n))
 
+# ── HTML rendering ───────────────────────────────────────────────────────────────────────────
+# The notebook's view of a sweep. The text form below stays as the fallback for a standalone
+# `julia notebook.jl` run, the REPL, and static export, where there is no DOM to write into.
+#
+# Styles are inline and theme variables carry fallbacks, so this renders correctly in an exported
+# page that never loaded the notebook's stylesheet.
+
+_esc(s) = replace(string(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
+
+const _STATE_COLOR = Dict(
+    :succeeded => "#3fb950", :partial   => "#d29922", :blocked => "#f85149",
+    :exhausted => "#f85149", :cancelled => "#8b949e", :running => "#58a6ff",
+    :pending   => "#8b949e")
+
+# The three ways of stopping short read differently on purpose: one is the work's fault, one is
+# yours, and one is the resources'.
+_state_label(s) = s === :succeeded ? "complete" :
+                  s === :partial   ? "finished, with failures" :
+                  s === :blocked   ? "stopped — the work is failing" :
+                  s === :cancelled ? "stopped at your request" :
+                  s === :exhausted ? "gave up — units never landed" :
+                  s === :running   ? "running" : "not started"
+
+# The unit grid, BINNED to a fixed tile budget. One tile per unit does not survive contact with a
+# real sweep: a hundred thousand units would be a hundred thousand DOM nodes, rebuilt on every
+# refresh, exactly when the sweep is large enough to matter.
+#
+# So a tile covers `ceil(n / budget)` consecutive units and is coloured by what is IN it. The
+# spatial story survives binning — failures clustered in one region of the parameter space still
+# show as a red band — while the DOM cost stays flat from ten units to ten million.
+const _TILE_BUDGET = 600
+
+# Green for completed, blended toward red by the bucket's failure fraction, so a region that is
+# merely slow and a region that is failing do not look alike. Grey is "nothing here has run".
+function _tile_color(ok::Int, err::Int, total::Int)
+    done = ok + err
+    done == 0 && return "#30363d"
+    f = err / done                                   # failure share of what has finished
+    base = done / total                              # how much of the bucket has landed
+    r = round(Int, 63 + f * (248 - 63))
+    g = round(Int, 185 - f * (185 - 81))
+    b = round(Int, 80 - f * (80 - 73))
+    a = round(0.35 + 0.65 * base; digits = 2)        # unfinished buckets sit dimmer
+    return "rgba($r,$g,$b,$a)"
+end
+
+function _unit_grid(io, r::ShardedResult)
+    n = length(r.rows)
+    n == 0 && return
+    per = max(1, cld(n, _TILE_BUDGET))
+    ntiles = cld(n, per)
+    side = ntiles <= 100 ? 12 : ntiles <= 400 ? 8 : 5
+
+    print(io, "<div style='display:flex;flex-wrap:wrap;gap:2px;margin-top:8px'>")
+    for t in 1:ntiles
+        lo = (t - 1) * per + 1
+        hi = min(t * per, n)
+        ok = err = 0
+        for i in lo:hi
+            s = r.rows[i].status
+            s == "ok" ? (ok += 1) : s == "error" ? (err += 1) : nothing
+        end
+        tip = if per == 1
+            row = r.rows[lo]
+            _esc(string(row.params)) *
+                (isempty(row.ran_on) ? "" : " · " * _esc(row.ran_on)) *
+                (row.status == "" ? " · not run" : " · " * row.status)
+        else
+            "units $(lo)-$(hi) · $(ok) ok, $(err) failed, $(hi - lo + 1 - ok - err) pending"
+        end
+        print(io, "<div title=\"", tip, "\" style='width:", side, "px;height:", side,
+                  "px;border-radius:2px;background:", _tile_color(ok, err, hi - lo + 1), "'></div>")
+    end
+    println(io, "</div>")
+    per > 1 && println(io, "<div style='font-size:10px;opacity:.45;margin-top:3px'>",
+                           "each tile ≈ ", per, " units</div>")
+end
+
+function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
+    p, t = r.plan, r.telemetry
+    frac = BatchSweep.fraction(p)
+    col = get(_STATE_COLOR, p.state, "#8b949e")
+
+    print(io, "<div style='font-family:var(--font-ui,system-ui);color:var(--fg,#c9d1d9);",
+              "border:1px solid var(--border,#30363d);border-radius:8px;padding:12px 14px;",
+              "background:var(--bg-elev,#0d1117)'>")
+
+    # Header: what state it is in, and how far.
+    print(io, "<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px'>",
+              "<span style='display:inline-block;width:8px;height:8px;border-radius:50%;",
+              "background:", col, "'></span>",
+              "<strong style='color:", col, "'>", _state_label(p.state), "</strong>",
+              "<span style='opacity:.5;font-size:12px'>", _esc(r.key), "</span>",
+              "<span style='margin-left:auto;font-variant-numeric:tabular-nums'>",
+              p.shards_done, " / ", p.shards_total,
+              " <span style='opacity:.6'>(", round(100 * frac; digits = 1), "%)</span></span></div>")
+
+    # Progress bar.
+    print(io, "<div style='height:6px;border-radius:3px;background:var(--border,#30363d);",
+              "overflow:hidden'><div style='height:100%;width:", round(100 * frac; digits = 2),
+              "%;background:", col, ";transition:width .3s'></div></div>")
+
+    # Counts.
+    print(io, "<div style='display:flex;gap:14px;margin-top:8px;font-size:12px'>")
+    print(io, "<span style='color:#3fb950'>", p.shards_ok, " ok</span>")
+    p.shards_failed > 0 && print(io, "<span style='color:#f85149'>", p.shards_failed, " failed</span>")
+    p.shards_missing > 0 && print(io, "<span style='opacity:.6'>", p.shards_missing, " remaining</span>")
+
+    # Rate and ETA, only while they mean something.
+    if t.done > 0 && !BatchSweep.is_settled(p) && !BatchSweep.is_stuck(p)
+        t.rate_per_s > 0 && print(io, "<span style='margin-left:auto;opacity:.7'>",
+                                      round(t.rate_per_s; digits = 2), "/s</span>")
+        t.eta_s >= 0 && print(io, "<span style='opacity:.7'>~", _dur(t.eta_s), " left</span>")
+    end
+    println(io, "</div>")
+
+    _unit_grid(io, r)
+
+    hosts = unique([row.ran_on for row in r.rows if !isempty(row.ran_on)])
+    isempty(hosts) || print(io, "<div style='font-size:11px;opacity:.5;margin-top:8px'>ran on ",
+                                _esc(join(first(hosts, 8), ", ")),
+                                length(hosts) > 8 ? " (+$(length(hosts) - 8))" : "", "</div>")
+
+    idle = BatchSweep.stalled_for(t)
+    idle > 0 && print(io, "<div style='margin-top:8px;font-size:12px;color:#d29922'>",
+                          "⚠ nothing has finished in ", _dur(idle), " — it may be stuck.</div>")
+
+    # Each stopped state says what to do next, because they need different things.
+    if p.state === :blocked
+        print(io, "<div style='margin-top:8px;padding:8px;border-radius:6px;",
+                  "background:rgba(248,81,73,.12);font-size:12px;color:#f85149'>",
+                  _esc(p.blocked), "<br><span style='opacity:.8'>Nothing further will be ",
+                  "submitted. Fix the body, then <code>reset!</code>.</span></div>")
+    elseif p.state === :cancelled
+        print(io, "<div style='margin-top:8px;padding:8px;border-radius:6px;",
+                  "background:rgba(139,148,158,.12);font-size:12px;opacity:.85'>",
+                  "Stopped at your request. ", p.shards_done, " finished units are kept — ",
+                  "<code>resume!</code> continues with the remaining ", p.shards_missing, ".</div>")
+    elseif p.state === :exhausted
+        print(io, "<div style='margin-top:8px;padding:8px;border-radius:6px;",
+                  "background:rgba(248,81,73,.12);font-size:12px;color:#f85149'>",
+                  "Attempted ", BatchSweep.MAX_ATTEMPTS, "× without landing, so these units are ",
+                  "outrunning their resources rather than erroring.<br><span style='opacity:.8'>",
+                  "Raise the walltime or memory, then <code>reset!</code>.</span></div>")
+    end
+
+    # Failures, collapsed. The parameters matter more than the traceback at a glance, so they lead.
+    fails = failures(r)
+    if !isempty(fails)
+        print(io, "<details style='margin-top:8px'><summary style='cursor:pointer;font-size:12px;",
+                  "color:#f85149'>", length(fails), " failed unit",
+                  length(fails) == 1 ? "" : "s", "</summary>")
+        print(io, "<div style='max-height:220px;overflow:auto;margin-top:6px'>")
+        for f in first(fails, 50)
+            print(io, "<div style='margin-bottom:6px;font-size:11px'>",
+                      "<code style='color:#d29922'>", _esc(string(f.params)), "</code>",
+                      "<pre style='margin:2px 0 0;white-space:pre-wrap;opacity:.75'>",
+                      _esc(first(String(f.value), 400)), "</pre></div>")
+        end
+        length(fails) > 50 && print(io, "<div style='opacity:.6;font-size:11px'>… and ",
+                                        length(fails) - 50, " more</div>")
+        println(io, "</div></details>")
+    end
+
+    println(io, "</div>")
+    return nothing
+end
+
 function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
     p = r.plan
     t = r.telemetry
-    icon = p.state === :succeeded ? "✅" : p.state === :partial ? "⚠️" :
-           p.state === :stalled   ? "⛔" : p.state === :blocked ? "🛑" :
-           p.state === :running   ? "⏳" : "•"
+    icon = p.state === :succeeded ? "✅" : p.state === :partial   ? "⚠️" :
+           p.state === :exhausted ? "⛔" : p.state === :blocked   ? "🛑" :
+           p.state === :cancelled ? "⏹" : p.state === :running   ? "⏳" : "•"
     pct = round(100 * BatchSweep.fraction(p); digits = 1)
     println(io, "$icon sweep $(r.key) — $(p.state)")
     println(io, "   $(_bar(BatchSweep.fraction(p)))  $(p.shards_done)/$(p.shards_total) ($pct%)")
@@ -274,11 +464,15 @@ function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
     if p.state === :blocked
         println(io, "   🛑 $(p.blocked)")
         println(io, "   Nothing further will be submitted. Fix the body, then `reset!(r)`.")
+    elseif p.state === :cancelled
+        println(io, "   Stopped at your request. $(p.shards_done) finished units are kept — ",
+                    "`resume!(r)` continues with the remaining $(p.shards_missing).")
     elseif p.state === :partial
         println(io, "   `failures(r)` lists the errors; `retry_failed!(r)` clears them for a retry.")
-    elseif p.state === :stalled
-        println(io, "   attempted $(BatchSweep.MAX_ATTEMPTS)× without landing. Raise the walltime or",
-                    " memory, then `reset!(r)`.")
+    elseif p.state === :exhausted
+        println(io, "   Attempted $(BatchSweep.MAX_ATTEMPTS)× without landing, so these units are ",
+                    "outrunning their resources rather than erroring.")
+        println(io, "   Raise the walltime or memory, then `reset!(r)`.")
     elseif p.state !== :succeeded
         println(io, "   re-run this cell to refresh.")
     end

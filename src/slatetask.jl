@@ -282,9 +282,16 @@ Exits nonzero only when the chunk itself could not run; individual shard failure
 the store and are not an error at this level.
 """
 function main(args = ARGS)
-    length(args) >= 2 || (println(stderr, "usage: slatetask.jl <cas-root> <chunk-key>"); return 2)
-    r = run_chunk(String(args[1]), String(args[2]))
-    println("chunk $(args[2]): $(r.ran) ran, $(r.skipped) skipped, $(r.failed) failed of $(r.total)")
+    length(args) >= 2 ||
+        (println(stderr, "usage: slatetask.jl <cas-root> <chunk-key>..."); return 2)
+    root = String(args[1])
+    # Several chunks per process, run one after another. A process is expensive (a whole Julia
+    # start plus package loads), so the alternative — one process per chunk — is both slow and,
+    # run locally, a fast route to exhausting memory.
+    for chunk in args[2:end]
+        r = run_chunk(root, String(chunk))
+        println("chunk $(chunk): $(r.ran) ran, $(r.skipped) skipped, $(r.failed) failed of $(r.total)")
+    end
     return 0
 end
 

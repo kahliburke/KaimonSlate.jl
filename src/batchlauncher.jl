@@ -76,13 +76,14 @@ function logs end
 # JULIA_PKG_PRECOMPILE_AUTO=0 is not optional: hundreds of tasks starting against an incomplete
 # depot would each try to precompile into it, which is how a shared filesystem gets taken down. A
 # task must load from a ready depot or fail fast.
-function task_command(spec::JobSpec, chunk::AbstractString)
+function task_command(spec::JobSpec, chunks)
     pre = isempty(spec.prologue) ? "" : spec.prologue * "\n"
+    cs = chunks isa AbstractString ? String(chunks) : join(String.(collect(chunks)), " ")
     return string(pre,
         "export JULIA_PKG_PRECOMPILE_AUTO=0\n",
         spec.julia, " --project=", spec.project, " --startup-file=no ",
         "-e 'include(\"", spec.payload, "\"); exit(SlateTask.main(ARGS))' ",
-        spec.root, " ", chunk)
+        spec.root, " ", cs)
 end
 
 # ── Local execution ──────────────────────────────────────────────────────────────────────────
@@ -95,7 +96,9 @@ end
 struct ExecLauncher <: Launcher
     maxproc::Int
 end
-ExecLauncher(; maxproc::Int = max(1, Sys.CPU_THREADS - 1)) = ExecLauncher(maxproc)
+# The binding constraint is MEMORY, not cores: every task process is a separate Julia that loads
+# the project, so this is deliberately far below the core count. Raise it only with an eye on RSS.
+ExecLauncher(; maxproc::Int = clamp(Sys.CPU_THREADS ÷ 3, 1, 4)) = ExecLauncher(maxproc)
 
 _jobdir(root) = joinpath(root, "jobs")
 _jobfile(root, name) = joinpath(_jobdir(root), name)
@@ -106,12 +109,27 @@ catch
     false
 end
 
+# Chunks are dealt round-robin into at most `maxproc` slices, and each slice becomes ONE process
+# that runs its chunks in sequence.
+#
+# The earlier version started a process per chunk with nothing bounding it, which on a sweep of a
+# few hundred units meant dozens of concurrent Julia processes each loading a full project. That is
+# gigabytes, and it can take a machine down. On a cluster the scheduler enforces this; running
+# locally there is nothing but this function.
+function _deal(chunks, n)
+    n = max(1, min(n, length(chunks)))
+    slices = [String[] for _ in 1:n]
+    for (i, c) in enumerate(chunks); push!(slices[mod1(i, n)], String(c)); end
+    return filter(!isempty, slices)
+end
+
 function submit!(l::ExecLauncher, spec::JobSpec)
+    isempty(spec.chunks) && return ""
     mkpath(_jobdir(spec.root)); mkpath(spec.logdir)
     pids = Int[]
-    for (i, chunk) in enumerate(spec.chunks)
+    for (i, slice) in enumerate(_deal(spec.chunks, l.maxproc))
         logf = joinpath(spec.logdir, "$(spec.name).$(i).log")
-        cmd = pipeline(Cmd(`sh -c $(task_command(spec, chunk))`); stdout = logf, stderr = logf)
+        cmd = pipeline(Cmd(`sh -c $(task_command(spec, slice))`); stdout = logf, stderr = logf)
         p = run(cmd; wait = false)
         push!(pids, getpid(p))
     end
