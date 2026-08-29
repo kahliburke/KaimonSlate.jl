@@ -454,7 +454,7 @@ function _infer_bindings_uncached!(cell::Cell)
         union!(cell.reads_now, cell.reads)   # interpolations render immediately → all top-level
         return cell
     end
-    cell.kind == CODE || return cell
+    analyzes_like_code(cell.kind) || return cell
 
     top = try
         Meta.parseall(cell.source)
@@ -847,7 +847,7 @@ function build_dependencies!(report::Report)
             c.kind == MARKDOWN && isempty(c.reads) && c.state == STALE && (c.state = FRESH)
             continue
         end
-        c.kind == CODE || continue
+        analyzes_like_code(c.kind) || continue
         for r in c.reads
             haskey(writer, r) && push!(c.deps, writer[r])
         end

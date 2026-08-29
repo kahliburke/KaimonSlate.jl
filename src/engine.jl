@@ -19,11 +19,11 @@ import Base64
 
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
-export MARKDOWN, CODE, WEB, TOOL, FRESH, STALE, RUNNING, ERRORED
+export MARKDOWN, CODE, WEB, TOOL, SWEEP, FRESH, STALE, RUNNING, ERRORED
 # Kind predicates, exported alongside the kinds themselves: sibling modules (`ReportRender`,
 # `NotebookServer`) reach the enum by `using ..ReportEngine`, so a helper that is not exported is
 # invisible to exactly the code that classifies cells.
-export is_code_kind, runs_automatically
+export is_code_kind, runs_automatically, analyzes_like_code
 export parse_report, serialize_report, serialize_cells, source_text, cell_definitions
 export standalone!
 
@@ -38,7 +38,18 @@ export standalone!
 # interface, so the editor is secondary), and exclusion from automatic runs. A tool call has side
 # effects out in the world — it starts a job, writes a file, spends money — so reopening a notebook must not fire
 # it. It runs when someone, or some agent, asks for it.
-@enum CellKind MARKDOWN CODE WEB TOOL
+#
+# SWEEP is the same shape again: its source is a runnable `@sweep` call, it participates in the
+# dependency graph, and it produces a value. What it buys is a LIFECYCLE that CODE cannot express.
+# A code cell's contract is "runs, produces a value, done"; a sweep's work is decomposed into units
+# that execute elsewhere and over time, so its value arrives progressively and may be permanently
+# partial (some units failed, and that is a finished outcome, not a broken one).
+#
+# Unlike TOOL it is NOT excluded from automatic runs, because evaluating a sweep cell RECONCILES
+# rather than submits: it reads the store and the scheduler and reports what is there. Submitting is
+# a separate, explicit action. That is what makes reopening a notebook safe while still letting it
+# pick the monitor back up on work that is still in flight.
+@enum CellKind MARKDOWN CODE WEB TOOL SWEEP
 @enum CellState FRESH STALE RUNNING ERRORED   # never-run ≡ STALE
 
 "One representation of a cell's output (MIME-generic display bundle, §7)."
@@ -311,6 +322,8 @@ function _parse_header(rest::AbstractString)
             kind = MARKDOWN
         elseif tok == "web"
             kind = WEB
+        elseif tok == "sweep"
+            kind = SWEEP
         elseif tok == "tool"
             kind = TOOL
         elseif tok == "code"
@@ -630,11 +643,22 @@ end
 
 # ── Serialization ────────────────────────────────────────────────────────────
 
-_kind_token(k::CellKind) = k === MARKDOWN ? "md" : k === WEB ? "web" : k === TOOL ? "tool" : "code"
+_kind_token(k::CellKind) = k === MARKDOWN ? "md" : k === WEB ? "web" :
+                           k === TOOL ? "tool" : k === SWEEP ? "sweep" : "code"
 
-"""A cell whose source is Julia the engine evaluates. TOOL joins CODE here: everything about
-evaluation, dependencies and capture is identical, and only presentation and WHEN it runs differ."""
-is_code_kind(k::CellKind) = k === CODE || k === WEB || k === TOOL
+"""A cell whose source is Julia the engine evaluates. TOOL and SWEEP join CODE here: everything
+about evaluation, dependencies and capture is identical, and only presentation, WHEN it runs, and
+(for SWEEP) how long its value takes to arrive differ."""
+is_code_kind(k::CellKind) = k === CODE || k === WEB || k === TOOL || k === SWEEP
+
+"""Whether a cell's source is analyzed for reads/writes and joins the dependency graph.
+
+NOT the same question as `is_code_kind`, which is about EVALUATION. `deps.jl` gates its analysis on
+this: a WEB cell contributes only its `{{ }}` interpolations, and a TOOL cell is deliberately opaque
+(its source is a recorded call, not something whose bindings should drive reactivity). SWEEP joins
+CODE because a sweep cell reads its grid and writes its result like any other cell — being able to
+say "this plot depends on that sweep" is most of the point of it being a cell at all."""
+analyzes_like_code(k::CellKind) = k === CODE || k === SWEEP
 
 """Kinds excluded from automatic runs. A tool call reaches outside the notebook, so opening a
 document, or recomputing a stale neighbour, must never fire one on the reader's behalf."""

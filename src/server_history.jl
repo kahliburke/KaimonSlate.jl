@@ -771,7 +771,8 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         # without this the client can only apply whichever lands last (see `bump_rev!`).
         "rev"     => c.rev,
         "kind"    => c.kind == MARKDOWN ? "md" : c.kind == WEB ? "web" :
-                     c.kind == ReportEngine.TOOL ? "tool" : "code",
+                     c.kind == ReportEngine.TOOL ? "tool" :
+                     c.kind == ReportEngine.SWEEP ? "sweep" : "code",
         "source"  => c.source,
         # Canonical per-cell content hash (the SAME SHA the history uses) — a version token the browser
         # keys reconcile off, instead of a fuzzy string comparison that can drift.
@@ -793,7 +794,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "deps"    => collect(c.deps),
         # Top-level names this cell defines — drives ⌘-click go-to-definition in the editor. A name the
         # cell only MUTATES (`prog[] = …`) isn't defined here, so it's excluded (go-to-def lands on the definer).
-        "defs"    => c.kind == CODE || c.kind == ReportEngine.TOOL ?
+        "defs"    => c.kind == CODE || c.kind == ReportEngine.TOOL || c.kind == ReportEngine.SWEEP ?
                      sort!(String[string(w) for w in cell_definitions(c)]) : String[],
     )
     # A web cell ships its three panes (split from the `@web(...)` source) so the editor can mount a

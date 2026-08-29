@@ -77,7 +77,8 @@ end
 _index_of(cells, id) = findfirst(c -> c.id == id, cells)
 
 # Cell-kind token ("md"/"web"/"code") → CellKind, shared by cell creation and kind-conversion.
-_cellkind(k::AbstractString) = k == "md" ? MARKDOWN : k == "web" ? WEB : k == "tool" ? TOOL : CODE
+_cellkind(k::AbstractString) = k == "md" ? MARKDOWN : k == "web" ? WEB : k == "tool" ? TOOL :
+                               k == "sweep" ? SWEEP : CODE
 
 function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractString; before::Bool = false)
     nid = _gen_id(nb.report)                          # generated up front so the undo label can name it
