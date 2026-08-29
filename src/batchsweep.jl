@@ -114,6 +114,44 @@ function bump_attempts!(root::AbstractString, chunks)
     return a
 end
 
+# ── Cancellation ─────────────────────────────────────────────────────────────────────────────
+# A user-requested stop is DURABLE, like everything else here: a marker on the shared filesystem,
+# not a flag in the hub. Otherwise closing the notebook would silently un-cancel the sweep, and the
+# next reconcile would cheerfully resubmit the work someone just stopped.
+cancel_path(root, sweep) = joinpath(jobs_dir(root), sweep * ".cancelled")
+
+is_cancelled(root::AbstractString, sweep::AbstractString) = isfile(cancel_path(root, sweep))
+
+"""
+    cancel!(root, sweep, launcher) -> Int
+
+Stop a sweep at the user's request: kill anything live and record the stop so it survives a
+restart. Finished units are kept, so resuming later costs only what is left.
+"""
+function cancel!(root::AbstractString, sweep::AbstractString, launcher)
+    n = 0
+    try
+        subs = known_submissions(root)
+        want = Set(sweep_chunks(root, sweep))
+        names = [nm for (nm, cs) in subs if any(in(want), cs)]
+        isempty(names) || (n = BatchLauncher.cancel!(launcher, root, names))
+    catch
+        # Best effort: the marker matters more than reaping every job, and a scheduler that is
+        # briefly unreachable must not leave the sweep looking live.
+    end
+    mkpath(jobs_dir(root))
+    write(cancel_path(root, sweep), string(round(Int, time())))
+    return n
+end
+
+"Clear a user-requested stop so the sweep can be submitted again. Returns whether one was set."
+function resume!(root::AbstractString, sweep::AbstractString)
+    p = cancel_path(root, sweep)
+    isfile(p) || return false
+    rm(p; force = true)
+    return true
+end
+
 "Every submission with an index file on disk, as `name => chunks`. One directory listing."
 function known_submissions(root::AbstractString)
     dir = jobs_dir(root)
@@ -147,13 +185,23 @@ What a sweep looks like right now.
 `chunk_state` is `:done`, `:running`, `:pending`, `:missing`, or `:stalled` (attempted up to the
 budget and still not finished, so nothing more will be submitted without being asked).
 
-`state` is the sweep as a whole, and deliberately separates outcomes that are all "not running":
+`state` is the sweep as a whole. "Not progressing" is not one condition, and the differences decide
+what to do about it:
 
   :pending    work remains and nothing is in flight. A reconcile will submit it
   :running    work is queued or executing on the scheduler
-  :succeeded  every shard finished, all of them ok
-  :partial    every shard finished, some returned an error. A real, common, FINISHED outcome
-  :stalled    shards are missing, nothing is in flight, and the retry budget is spent
+  :succeeded  every unit finished, all of them ok
+  :partial    every unit finished, some returned an error. A real, common, FINISHED outcome
+  :blocked    STOPPED BY ERROR — the breaker tripped because the work itself is failing. Fix the
+              body, then reset
+  :cancelled  STOPPED BY REQUEST — someone asked it to stop. Nothing is wrong; resume when ready
+  :exhausted  units are missing, nothing is in flight, and the retry budget is spent. Something
+              about the work outruns its resources. Raise the walltime or memory, then reset
+
+Note that a sweep which has merely stopped PRODUCING is none of these: it is still `:running`, and
+the suspicion is reported by `stalled_for` instead. Work can sit queued for hours without finishing
+a unit and be perfectly healthy, so "nothing has completed lately" is an observation about a running
+sweep, not a state of its own.
 """
 struct Plan
     sweep::String
@@ -205,8 +253,10 @@ is_settled(p::Plan) = p.shards_done == p.shards_total
 "Finished and clean. Use `is_settled` when a sweep with recorded failures should also count."
 is_complete(p::Plan) = is_settled(p) && p.shards_failed == 0
 
-"Nothing more will happen without a decision: the retry budget is spent, or the breaker tripped."
-is_stuck(p::Plan) = p.state === :stalled || p.state === :blocked
+"""Nothing more will happen without a decision. Covers all three ways a sweep stops short: the work
+is failing (`:blocked`), someone stopped it (`:cancelled`), or it outran its resources
+(`:exhausted`). A merely idle run is NOT stuck — see `stalled_for`."""
+is_stuck(p::Plan) = p.state === :exhausted || p.state === :blocked || p.state === :cancelled
 
 function Base.show(io::IO, p::Plan)
     print(io, "Plan($(p.sweep) $(p.state): $(p.shards_done)/$(p.shards_total) shards")
@@ -270,6 +320,7 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
     # Checked before the submit list is built, so a tripped breaker blocks the work rather than
     # reporting it after the fact.
     blocked = _breaker(failure_policy, done, failed)
+    cancelled = is_cancelled(root, sweep)
 
     cstate = Dict{String,Symbol}()
     to_submit = String[]
@@ -278,13 +329,15 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
             cstate[c] = :done
         elseif haskey(live, c)
             cstate[c] = live[c]
+        elseif cancelled
+            cstate[c] = :cancelled
         elseif !isempty(blocked)
             cstate[c] = :blocked
         elseif tries[c] >= max_attempts
-            # Attempted its full budget and still not finished. Something is wrong with the work
-            # itself (it outruns its walltime, it is killed for memory) and resubmitting on a loop
-            # would just keep burning allocation.
-            cstate[c] = :stalled
+            # Attempted its full budget and still not finished. Something about the work outruns
+            # its resources (walltime, memory), and resubmitting on a loop would keep burning
+            # allocation to prove it.
+            cstate[c] = :exhausted
         else
             cstate[c] = :missing
             push!(to_submit, c)
@@ -300,9 +353,11 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
         # finished with 12 of 4,000 failing is DONE, and saying otherwise would leave it looking
         # forever in progress.
         failed == 0 ? :succeeded : :partial
+    elseif cancelled
+        # Someone asked it to stop. Nothing is wrong, and it is resumable.
+        :cancelled
     elseif !isempty(blocked)
-        # Distinct from :stalled. Nothing is wrong with the scheduler; the WORK is failing, and
-        # continuing would spend an allocation confirming it.
+        # The WORK is failing. Continuing would spend an allocation confirming it.
         :blocked
     elseif anylive
         :running
@@ -311,9 +366,8 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
         # :running, which is what a progress display has to be able to say honestly.
         :pending
     else
-        # Shards are missing, nothing is in flight, and nothing will be submitted. Distinct from
-        # both "in progress" and "finished with failures": it needs a decision.
-        :stalled
+        # Units are missing, nothing is in flight, and the retry budget is gone.
+        :exhausted
     end
 
     return Plan(String(sweep), total, done, ok, failed, missing_shards,
@@ -336,7 +390,9 @@ function reconcile!(root::AbstractString, sweep::AbstractString, launcher, specf
     p = plan(root, sweep; launcher, failure_policy)
     # A tripped breaker produces an empty submit list, so this is belt and braces; being explicit
     # keeps it true if the plan's ordering ever changes.
-    isempty(p.blocked) || return p
+    # A cancelled sweep must not be resurrected by the next reconcile — that is the whole point of
+    # the marker being durable rather than a flag in the hub.
+    (p.state === :cancelled || !isempty(p.blocked)) && return p
     (isempty(p.to_submit) || !submit) && return p
     cap > 0 && length(p.to_submit) > cap &&
         error("sweep $sweep wants to submit $(length(p.to_submit)) chunks, over the cap of $cap")
@@ -478,6 +534,10 @@ constantly accused of hanging. Returns 0 when nothing has completed yet, since a
 not started rather than stopped.
 """
 function stalled_for(t::Telemetry; factor::Real = 6.0, floor_s::Real = 60.0)
+    # A sweep that has stopped on purpose (breaker, cancellation) or given up (:exhausted) is not
+    # "possibly stuck": nothing is running because nothing is supposed to be, and saying otherwise
+    # sends someone looking for a scheduler fault that does not exist.
+    (t.state === :blocked || t.state === :cancelled || t.state === :exhausted) && return 0.0
     (t.idle_s < 0 || t.done == 0 || t.done == t.total) && return 0.0
     threshold = max(factor * max(t.mean_unit_s, 1.0), floor_s)
     return t.idle_s > threshold ? t.idle_s : 0.0
