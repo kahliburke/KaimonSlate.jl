@@ -426,10 +426,17 @@ status_channel(key::AbstractString) = "sweep:" * String(key)
 # Compact enough to poll on a timer: counts and rates, plus a per-unit status string of one
 # character each. At a few thousand units that string is a few KB, which is cheap next to sending
 # structured rows for every unit.
-function status_payload(target::SweepTarget, key::AbstractString, params, keys)
+function status_payload(target::SweepTarget, key::AbstractString, params, keys;
+                        advance::Bool = true)
     root = store_root(target)
     l = launcher_for(target)
-    p = BatchSweep.plan(root, key; launcher = l)
+    # The poll RECONCILES, it does not merely observe. The probe wave releases one chunk and waits
+    # for it to report; if only the cell could reconcile, a sweep would sit at "10 / 60, running"
+    # until the author re-ran it by hand, once per wave. Reconciling is idempotent and submits
+    # nothing that is already live, so polling it is safe — and the breaker still stops a sweep
+    # whose units are failing, which is the case the waves exist for.
+    p = advance ? BatchSweep.reconcile!(root, key, l, specfn_for(target)) :
+                  BatchSweep.plan(root, key; launcher = l)
     t = BatchSweep.telemetry(root, key; launcher = l, plan = p)
     marks = IOBuffer()
     for k in keys
