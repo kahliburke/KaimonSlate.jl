@@ -73,24 +73,23 @@ end
 COST  = 0.05     # seconds per unit
 NSCAN = 40       # units in the full sweep
 
+# Both targets are given the SAME parent project and each provisions a task environment from it —
+# locally through the filesystem, on the cluster through ssh and rsync. Construction does the work,
+# once per parent fingerprint, so it is a visible cost here rather than a surprise on first submit.
 hpc = SlurmTarget("slate-slurm";
-    root        = joinpath(HARNESS, "scratch", "cas"),   # as the HUB sees it
-    root_remote = "/scratch/cas",                        # as a COMPUTE NODE sees it
-    project     = "/scratch/env",
+    root        = joinpath(HARNESS, "scratch", "cas"),   # the store, as the HUB sees it
+    root_remote = "/scratch/cas",                        # the same store, as a COMPUTE NODE sees it
+    parent      = DEMOPKG,
     payload     = "/scratch/src/slatetask.jl",
     chunk       = 10,
     resources   = (; cpus = 1, mem = "512M", walltime = "00:10:00", partition = "compute"))
 
-# The local target PREPARES its task environment from a parent project, seeded by the same policy
-# the notebook fork and the remote provisioner use. Here the parent is the SweepDemo package, so a
-# task process loads the science and nothing else — not this notebook's plotting packages, which a
-# compute node has no use for and which cost startup time and memory on every unit.
 local_target = LocalTarget(;
     root   = joinpath(homedir(), ".cache", "kaimonslate", "sweepdemo"),
     parent = DEMOPKG,
     chunk  = 10)
 
-(; task_env = local_target.project, COST, NSCAN)
+(; cluster_env = hpc.project, local_env = local_target.project, COST, NSCAN)
 
 #%% md id=h_module
 @md"""
@@ -137,10 +136,11 @@ One parameter is rigged to throw, so the failure path is visible rather than the
 """
 
 #%% code id=scan
-scan = @sweep(paramgrid(x = 1:NSCAN), hpc) do p
-    sleep(COST)
-    p.x == 13 && error("rigged failure: parameter 13 is bad")
-    (x = p.x, y = exp(-0.15 * p.x) * cos(3 * p.x))
+scan = @sweep(paramgrid(x = range(0, 8; length = NSCAN)), hpc;
+              setup = "using SweepDemo") do p
+    # One rigged failure, chosen by index so it fires whatever NSCAN is.
+    3.85 < p.x < 3.95 && error("rigged failure near x = 3.9")
+    SweepDemo.work((; x = p.x, ms = round(Int, COST * 1000)))
 end
 
 #%% md id=h_progress

@@ -107,6 +107,71 @@ function task_env!(root::AbstractString, parent::AbstractString, env)
     return envdir
 end
 
+# ── Remote provisioning ──────────────────────────────────────────────────────────────────────
+# The same idea as `task_env!`, over ssh instead of the local filesystem: get the parent project
+# onto the cluster and instantiate an environment from it, once.
+#
+# Precompilation happens HERE and only here. Task jobs run with JULIA_PKG_PRECOMPILE_AUTO=0, so a
+# few hundred array elements starting at once cannot each decide to precompile into the same depot
+# — which is how a shared filesystem gets taken down.
+
+function _ssh_run(host, script; capture::Bool = false)
+    cmd = isempty(host) ? `sh -c $script` :
+          `ssh -o BatchMode=yes -o ConnectTimeout=15 $host $script`
+    buf = IOBuffer()
+    ok = try; run(pipeline(cmd; stdout = buf, stderr = buf)); true; catch; false; end
+    return (ok, String(take!(buf)))
+end
+
+"""
+    provision_remote_env!(host, root_remote, parent; julia = "julia", prologue = "") -> envdir
+
+Ship `parent` to the cluster and instantiate a task environment from it. Idempotent: keyed by the
+parent's fingerprint, so an unchanged parent costs one `test -f` over ssh.
+
+Returns the environment path as a COMPUTE NODE sees it.
+"""
+function provision_remote_env!(host::AbstractString, root_remote::AbstractString,
+                               parent::AbstractString; julia::AbstractString = "julia",
+                               prologue::AbstractString = "")
+    isempty(parent) && return joinpath(root_remote, "env")
+    fp = env_parent_fingerprint(parent)
+    key = first(fp, 12)
+    envdir = "$(root_remote)/env/$(key)"
+    stamp = "$(envdir)/.slate-parent"
+
+    ok, _ = _ssh_run(host, "test -f $(stamp) && grep -qx '$(fp)' $(stamp)")
+    ok && return envdir                              # already provisioned for this parent
+
+    pname = try
+        pt = Pkg.TOML.parsefile(joinpath(parent, "Project.toml"))
+        (haskey(pt, "name") && haskey(pt, "uuid")) ? String(pt["name"]) : ""
+    catch
+        ""
+    end
+    remote_pkg = "$(root_remote)/pkg/$(basename(rstrip(parent, '/')))"
+
+    ok, out = _ssh_run(host, "mkdir -p $(remote_pkg) $(envdir)")
+    ok || error("could not create $(remote_pkg) on $(host): $(strip(out))")
+
+    # rsync the project itself. `--delete` so a removed source file does not linger and get loaded.
+    dest = isempty(host) ? remote_pkg : "$(host):$(remote_pkg)"
+    try
+        run(pipeline(`rsync -az --delete --exclude .git --exclude Manifest.toml
+                      $(rstrip(parent, '/'))/ $(dest)/`; stdout = devnull, stderr = devnull))
+    catch e
+        error("could not copy $(parent) to $(host):$(remote_pkg) ($(sprint(showerror, e)))")
+    end
+
+    pre = isempty(prologue) ? "" : prologue * "\n"
+    dev = isempty(pname) ? "" : "Pkg.develop(Pkg.PackageSpec(path=raw\"$(remote_pkg)\"));"
+    code = "using Pkg; Pkg.activate(raw\"$(envdir)\"); $dev Pkg.instantiate(); Pkg.precompile()"
+    ok, out = _ssh_run(host, "$(pre)$(julia) --startup-file=no -e '$(code)' && " *
+                             "printf '%s' '$(fp)' > $(stamp)")
+    ok || error("could not instantiate the task environment on $(host):\n$(strip(out))")
+    return envdir
+end
+
 # ── Targets ──────────────────────────────────────────────────────────────────────────────────
 # A target says WHERE shards run and HOW the two sides see the store. Everything a notebook needs
 # to switch between a laptop and a cluster lives here, so the sweep cell itself never changes.
@@ -164,10 +229,18 @@ struct SlurmTarget <: SweepTarget
     qos::String
     prologue::String
 end
-function SlurmTarget(host = ""; root, root_remote = root, project, payload,
+#
+# `parent` provisions the task environment on the cluster (see `provision_remote_env!`) and is the
+# normal way to use this. Pass `project` instead to point at an environment the site already
+# manages, in which case nothing is shipped.
+function SlurmTarget(host = ""; root, root_remote = root, payload,
+                     parent = "", project = nothing,
                      resources = (; cpus = 1, mem = "2G", walltime = "01:00:00", partition = ""),
-                     chunk = 16, account = "", qos = "", prologue = "")
-    SlurmTarget(String(host), String(root), String(root_remote), String(project), String(payload),
+                     chunk = 16, account = "", qos = "", prologue = "", julia = "julia")
+    proj = project !== nothing ? String(project) :
+           provision_remote_env!(String(host), String(root_remote), String(parent);
+                                 julia = String(julia), prologue = String(prologue))
+    SlurmTarget(String(host), String(root), String(root_remote), proj, String(payload),
                 resources, Int(chunk), String(account), String(qos), String(prologue))
 end
 
