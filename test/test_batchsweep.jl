@@ -4,7 +4,10 @@
 # One test at the end does drive real subprocesses through ExecLauncher end to end.
 using ReTest
 import Serialization
-include(joinpath(@__DIR__, "..", "src", "batchsweep.jl"))
+# sweep.jl pulls in batchsweep.jl (and slatetask/memostore/batchlauncher) behind its own guards.
+# It has to be included at file top level: a macro used in a testset is resolved when the testset is
+# parsed, which is before anything inside it has run.
+include(joinpath(@__DIR__, "..", "src", "sweep.jl"))
 
 const BL = BatchLauncher
 const BS = BatchSweep
@@ -247,6 +250,39 @@ end
             # automatically.
             r = SlateTask.run_chunk(root, chunks[1]; force = false)
             @test (r.ran, r.skipped, r.failed) == (0, 3, 1)
+        end
+    end
+
+    @testset "@sweep accepts options after a comma or a semicolon" begin
+        # `;` puts the options in a `:parameters` expression that Julia places FIRST among the
+        # macro's arguments, so a parser that assumes positional order sees the target where the
+        # grid should be. Both spellings are idiomatic and both have to work.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            g = Sweep.paramgrid(x = 1:2)
+            a = Sweep.@sweep(g, t, setup = "", submit = false) do p; p.x; end
+            b = Sweep.@sweep(g, t; setup = "", submit = false) do p; p.x; end
+            @test a.key == b.key                     # same body and options, so the same sweep
+            @test length(a) == 2
+            @test_throws LoadError @eval Sweep.@sweep(g, t; nosuchoption = 1) do p; p.x; end
+        end
+    end
+
+    @testset "a sweep's key does not depend on where its body sits in the file" begin
+        # `string(expr)` carries LineNumberNodes, so without stripping them a cell that merely moved
+        # down the notebook would re-key and orphan every result it already had.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            g = Sweep.paramgrid(x = 1:2)
+            first_key = Sweep.@sweep(g, t; submit = false) do p; p.x * 3; end.key
+            # The identical body, several lines later.
+            second_key = Sweep.@sweep(g, t; submit = false) do p; p.x * 3; end.key
+            @test first_key == second_key
+            # A body that genuinely differs must still key differently.
+            other = Sweep.@sweep(g, t; submit = false) do p; p.x * 4; end
+            @test other.key != first_key
         end
     end
 

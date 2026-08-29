@@ -35,10 +35,12 @@ end
 
 SRC = _find_src()
 
-# Loaded into `Main`, not into this notebook's module. `using` would bind the name `Sweep` here as
-# an IMPORT, and a later re-run of this cell could then not define the module again ("cannot
-# declare Sweep constant; it was already declared as an import"). Owning it in Main and importing
-# from there keeps this cell re-runnable.
+# Loaded into `Main`, not into this notebook's module: `using` binds the name here as an IMPORT, and
+# a module cannot then be defined under it.
+#
+# Guarded, and it has to be. Re-including builds a SECOND `Sweep` module, and `using` then sees two
+# modules exporting the same names, so every one of them becomes ambiguous. While developing the
+# fabric itself, picking up a source change means restarting the extension.
 isdefined(Main, :Sweep) || Base.include(Main, joinpath(SRC, "sweep.jl"))
 using Main.Sweep
 
@@ -57,6 +59,7 @@ sees it. The harness bind-mounts one directory into both.
 
 #%% code id=target
 HARNESS = joinpath(dirname(SRC), "dev", "slurm-harness")
+DEMOPKG = joinpath(dirname(SRC), "dev", "sweepdemo")     # the science, as a real package
 
 for d in ("cas", "env", "src"); mkpath(joinpath(HARNESS, "scratch", d)); end
 for f in ("memostore.jl", "slatetask.jl", "batchlauncher.jl", "batchsweep.jl")
@@ -78,11 +81,34 @@ hpc = SlurmTarget("slate-slurm";
     chunk       = 10,
     resources   = (; cpus = 1, mem = "512M", walltime = "00:10:00", partition = "compute"))
 
-# The same cells run with no cluster at all. Swap this in to compare.
-local_target = LocalTarget(; root = joinpath(homedir(), ".cache", "kaimonslate", "sweepdemo"),
-                           chunk = 10, project = dirname(SRC),
-                           payload = joinpath(SRC, "slatetask.jl"))
-(; hpc, COST, NSCAN)
+# The local target PREPARES its task environment from a parent project, seeded by the same policy
+# the notebook fork and the remote provisioner use. Here the parent is the SweepDemo package, so a
+# task process loads the science and nothing else — not this notebook's plotting packages, which a
+# compute node has no use for and which cost startup time and memory on every unit.
+local_target = LocalTarget(;
+    root   = joinpath(homedir(), ".cache", "kaimonslate", "sweepdemo"),
+    parent = DEMOPKG,
+    chunk  = 10)
+
+(; task_env = local_target.project, COST, NSCAN)
+
+#%% md id=h_module
+@md"""
+## Sweeping code from a project, not from the notebook
+
+The realistic shape: the science lives in a **package** (`dev/sweepdemo`), which is provisioned to
+the task environment, and the sweep body is a one-line call into it. Nothing about the body has to
+be serialized or shipped — the package is simply a dependency of the environment the task runs in.
+
+That also keeps the task environment small: it has SweepDemo and its dependencies, and none of the
+plotting or display packages this notebook uses, which a compute node has no use for.
+"""
+
+#%% code id=module_sweep
+by_module = @sweep(paramgrid(x = 0:0.25:8, seed = 1:2), local_target;
+                   setup = "using SweepDemo") do p
+    SweepDemo.work((; x = p.x, seed = p.seed, ms = 20))
+end
 
 #%% md id=h_pilot
 @md"""
@@ -196,8 +222,20 @@ This one runs locally so it costs nothing to demonstrate.
 """
 
 #%% code id=breaker
-broken = @sweep(paramgrid(x = 1:200), local_target) do p
+# 60 units, of which only the first probe chunk will ever run. Local task processes are bounded by
+# `ExecLauncher`'s process limit, so this costs a handful of Julia starts, not sixty.
+broken = @sweep(paramgrid(x = 1:60), local_target) do p
     error("typo in the body: no method matching frobnicate")
+end
+
+#%% code id=scale
+# Scaling: the tile grid BINS units to a fixed budget, so the display costs the same at ten units
+# and at ten million. Failure clustering survives binning — a bad region of the parameter space
+# still shows as a red band rather than dissolving into an average.
+big = @sweep(paramgrid(x = 1:4000), local_target) do p
+    # A whole region of the parameter space is broken, which is what clustering should reveal.
+    2200 <= p.x <= 2600 && error("bad region")
+    p.x
 end
 
 #%% md id=h_reset

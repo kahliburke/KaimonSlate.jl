@@ -15,6 +15,12 @@ module Sweep
 
 import SHA
 import Serialization
+import Pkg
+
+# The env-preparation policy shared by the notebook fork and the remote provisioner. envprep.jl is
+# pure TOML/file operations with no transport of its own, precisely so a new transport can reuse it:
+# batch is the third, after the local filesystem fork and ssh/rsync.
+Base.include(@__MODULE__, joinpath(@__DIR__, "envprep.jl"))
 
 const P = parentmodule(@__MODULE__)
 const MemoStore = P.MemoStore
@@ -51,6 +57,56 @@ end
 "A grid from explicit rows, for a parameter set that is not a product."
 paramgrid(rows::AbstractVector) = collect(rows)
 
+# ── The environment task processes run in ────────────────────────────────────────────────────
+# Seeded from the notebook's PARENT project by the same policy the notebook fork and the remote
+# provisioner use, then instantiated once. Keyed by the parent's fingerprint, so repeated sweeps
+# against an unchanged parent cost nothing.
+#
+# What belongs in it depends on what the body sweeps:
+#
+#   * a call into parent-module code (`MyPkg.simulate(p)`) needs the parent and nothing else;
+#   * notebook code that uses a package the NOTEBOOK added needs that package too.
+#
+# The notebook's own additions are deliberately not replayed wholesale. They are usually plotting
+# and display packages that only the hub needs, and every one of them is startup time and memory on
+# every task process. Name what the body actually needs instead.
+#
+#   env = :parent              seed from the parent project (default)
+#   env = ["DataFrames"]       the parent, plus these packages
+#   env = "/path/to/env"       an environment you manage yourself
+#
+# Precompilation happens HERE, once. Task processes run with JULIA_PKG_PRECOMPILE_AUTO=0 so that
+# hundreds of them cannot each decide to precompile into the same depot at once.
+function task_env!(root::AbstractString, parent::AbstractString, env)
+    env isa AbstractString && return String(env)          # caller manages it
+    isempty(parent) && return ""                          # detached notebook: nothing to seed from
+
+    extras = env isa AbstractVector ? String.(env) : String[]
+    key = first(string(hash((env_parent_fingerprint(parent), extras)); base = 16), 12)
+    envdir = joinpath(root, "taskenv", key)
+
+    if !env_stale(envdir, parent) && isfile(joinpath(envdir, "Manifest.toml"))
+        return envdir
+    end
+
+    pname = seed_env_project!(envdir, parent)
+    add = isempty(extras) ? "" :
+          "Pkg.add([" * join(("\"$e\"" for e in extras), ", ") * "]);"
+    dev = isempty(pname) ? "" : "Pkg.develop(Pkg.PackageSpec(path=raw\"$(parent)\"));"
+    # A subprocess: `Pkg.instantiate`/`precompile` inside a live worker is not safe.
+    code = "using Pkg; Pkg.activate(raw\"$(envdir)\"); $dev $add Pkg.instantiate(); Pkg.precompile()"
+    ok = try
+        run(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $code`;
+                     stdout = devnull, stderr = devnull))
+        true
+    catch
+        false
+    end
+    ok || error("could not prepare the task environment at $envdir from parent $parent")
+    stamp_env!(envdir, parent)
+    return envdir
+end
+
 # ── Targets ──────────────────────────────────────────────────────────────────────────────────
 # A target says WHERE shards run and HOW the two sides see the store. Everything a notebook needs
 # to switch between a laptop and a cluster lives here, so the sweep cell itself never changes.
@@ -69,10 +125,21 @@ struct LocalTarget <: SweepTarget
     payload::String
     chunk::Int
 end
+#
+# The task environment is PREPARED here, at construction: seeded from `parent` and instantiated once
+# (see `task_env!`). That is a visible, one-time cost in the cell that defines the target, rather
+# than a surprise on the first submission.
+#
+# `parent` defaults to the notebook's own parent project, which is what holds the code a sweep body
+# usually calls into. Pass `env = ["Pkg1", …]` for packages the body needs beyond it, or
+# `env = "/path"` to manage the environment yourself.
 function LocalTarget(; root = joinpath(homedir(), ".cache", "kaimonslate", "sweeps"),
-                     project = dirname(Base.active_project()),
+                     parent = dirname(Base.active_project()), env = :parent,
+                     project = nothing,
                      payload = joinpath(@__DIR__, "slatetask.jl"), chunk = 8)
-    LocalTarget(String(root), String(project), String(payload), Int(chunk))
+    mkpath(String(root))
+    proj = project === nothing ? task_env!(String(root), String(parent), env) : String(project)
+    LocalTarget(String(root), proj, String(payload), Int(chunk))
 end
 
 """
@@ -129,6 +196,13 @@ _digest_value(v) = _hex(Serialization.serialize(IOBuffer(), v) === nothing ?
 
 function _digest_of(v)
     io = IOBuffer(); Serialization.serialize(io, v); return _hex(take!(io))
+end
+
+# Drop LineNumberNodes so a body's text depends only on the code, not on where it sits in a file.
+_strip_lines(x) = x
+function _strip_lines(e::Expr)
+    args = Any[_strip_lines(a) for a in e.args if !(a isa LineNumberNode)]
+    return Expr(e.head, args...)
 end
 
 function sweep_key(body_src, setup_src, captures)
@@ -574,15 +648,28 @@ macro sweep(args...)
     bi === nothing &&
         error("@sweep expects a do-block: `@sweep(grid, target) do p … end`")
     body = args[bi]
-    rest = [a for (i, a) in enumerate(args) if i != bi]
-    length(rest) >= 2 || error("@sweep needs a grid and a target: `@sweep(grid, target) do p … end`")
-    grid, target = rest[1], rest[2]
 
+    # Options may arrive either as plain `key = value` arguments or, when written after a `;`, in a
+    # single `:parameters` expression that Julia places FIRST. Both spellings are natural, so
+    # flatten them into one list rather than making the caller remember which is accepted.
     opts = Dict{Symbol,Any}()
-    for a in rest[3:end]
-        (a isa Expr && a.head === :(=)) || error("@sweep: unexpected argument $(a)")
-        opts[a.args[1]] = a.args[2]
+    positional = Any[]
+    for (i, a) in enumerate(args)
+        i == bi && continue
+        if a isa Expr && a.head === :parameters
+            for kw in a.args
+                (kw isa Expr && kw.head === :kw) || error("@sweep: unexpected argument $(kw)")
+                opts[kw.args[1]] = kw.args[2]
+            end
+        elseif a isa Expr && a.head === :(=)
+            opts[a.args[1]] = a.args[2]
+        else
+            push!(positional, a)
+        end
     end
+    length(positional) >= 2 ||
+        error("@sweep needs a grid and a target: `@sweep(grid, target) do p … end`")
+    grid, target = positional[1], positional[2]
 
     # The do-block's parameter and body, as written.
     plist = body.args[1]
@@ -591,16 +678,27 @@ macro sweep(args...)
             error("@sweep's do-block takes exactly one parameter")
     inner = body.args[2]
 
-    body_src = string(param, " -> begin\n", string(inner), "\nend")
+    # Line information is stripped before the body is stringified. It is part of the key, so
+    # leaving it in would mean a sweep re-keys — orphaning every result it already has — because a
+    # cell moved down the notebook or gained a comment above it.
+    body_src = string(param, " -> begin\n", string(_strip_lines(inner)), "\nend")
     names = _capture_names(inner, param)
-    setup = get(opts, :setup, "")
-    cap   = get(opts, :cap, 0)
+    setup  = get(opts, :setup, "")
+    cap    = get(opts, :cap, 0)
+    submit = get(opts, :submit, true)
+    # An unknown option is an error rather than a silent no-op: `@sweep(…, wallclock = "2h")` that
+    # quietly does nothing is worse than one that says so.
+    for k in keys(opts)
+        k in (:setup, :cap, :submit) ||
+            error("@sweep: unknown option `$k` (accepted: setup, cap, submit)")
+    end
 
     quote
         local _names = $(QuoteNode(collect(names)))
         local _caps = $(Sweep)._collect_captures(@__MODULE__, _names, $(QuoteNode(param)))
         $(Sweep).run_sweep($(esc(target)), collect($(esc(grid))), $body_src;
-                           setup_src = $(esc(setup)), captures = _caps, cap = $(esc(cap)))
+                           setup_src = $(esc(setup)), captures = _caps,
+                           cap = $(esc(cap)), submit = $(esc(submit)))
     end
 end
 
