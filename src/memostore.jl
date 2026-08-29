@@ -244,23 +244,42 @@ end
 # descriptor points at (the closure source, its captured values, and each shard's argument). A
 # descriptor is a live entry for as long as its sweep may still be resubmitted, so its inputs have
 # to be reachable from it.
-function _manifest_blobs(d::AbstractDict)
+#
+# `group` selects WHICH references. The distinction matters because the wrong one silently loses
+# data:
+#
+#   :all     everything the entry references. The gc refcount set — miss a reference here and gc
+#            deletes a blob a live manifest still claims to have.
+#   :value   what restoring the entry's VALUE needs (bindings + wire). What a standalone export
+#            carries, and what comes back from a compute node. Deliberately excludes a batch
+#            shard's artifacts: those can be terabytes and must stay where they were produced.
+#   :inputs  what RUNNING a chunk descriptor needs (closure source, captures, per-shard argument).
+#            What travels hub-to-cluster before a submission.
+function _manifest_blobs(d::AbstractDict; group::Symbol = :all)
     hs = String[]
-    for b in get(d, "bindings", Any[])
-        b isa AbstractDict && push!(hs, String(get(b, "blob", "")))
+    if group === :all || group === :value
+        for b in get(d, "bindings", Any[])
+            b isa AbstractDict && push!(hs, String(get(b, "blob", "")))
+        end
+        w = get(d, "wire", nothing)
+        w isa AbstractDict && push!(hs, String(get(w, "blob", "")))
     end
-    w = get(d, "wire", nothing)
-    w isa AbstractDict && push!(hs, String(get(w, "blob", "")))
-    for field in ("artifacts", "captures", "shards")
-        for x in get(d, field, Any[])
-            x isa AbstractDict || continue
-            push!(hs, String(get(x, "blob", "")))
-            push!(hs, String(get(x, "arg", "")))
+    if group === :all || group === :inputs
+        for x in get(d, "captures", Any[])
+            x isa AbstractDict && push!(hs, String(get(x, "blob", "")))
+        end
+        for x in get(d, "shards", Any[])
+            x isa AbstractDict && push!(hs, String(get(x, "arg", "")))
+        end
+        for field in ("fn", "setup")
+            v = get(d, field, nothing)
+            v isa AbstractString && push!(hs, String(v))
         end
     end
-    for field in ("fn", "setup")
-        v = get(d, field, nothing)
-        v isa AbstractString && push!(hs, String(v))
+    if group === :all
+        for x in get(d, "artifacts", Any[])
+            x isa AbstractDict && push!(hs, String(get(x, "blob", "")))
+        end
     end
     return filter(_validhash, hs)
 end

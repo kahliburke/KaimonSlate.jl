@@ -149,7 +149,11 @@ end
             SlateTask.run_chunk(root, chunks[1])
             p = BS.plan(root, sweep)
             @test (p.shards_done, p.shards_ok, p.shards_failed) == (4, 3, 1)
-            @test BS.is_complete(p)                          # done is done, failures included
+            # Finished with failures is its own outcome: settled, but not clean.
+            @test p.state === :partial
+            @test BS.is_settled(p)
+            @test !BS.is_complete(p)
+            @test !BS.is_stuck(p)
             fs = BS.failures(root, sweep)
             @test length(fs) == 1 && occursin("bad param", String(fs[1].error))
         end
@@ -176,6 +180,67 @@ end
             @test (pr.total, pr.done, pr.ran, pr.failed) == (6, 6, 6, 0)
             @test pr.chunks == 2
             @test length(readdir(SlateTask.status_dir(root))) == 2
+        end
+    end
+
+    @testset "sweep state distinguishes the four not-running outcomes" begin
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 2, per = 2)
+            @test BS.plan(root, sweep).state === :pending    # work to do, nothing submitted yet
+
+            l = FakeLauncher()
+            BS.reconcile!(root, sweep, l, specfn(root))
+            @test BS.plan(root, sweep; launcher = l).state === :running
+
+            for c in chunks; SlateTask.run_chunk(root, c); end
+            p = BS.plan(root, sweep; launcher = l)
+            @test p.state === :succeeded && BS.is_complete(p)
+        end
+    end
+
+    @testset "a chunk that never lands stalls instead of resubmitting forever" begin
+        # The walltime-kill / OOM case: the job dies without writing a manifest, so the shard looks
+        # exactly like one that was never attempted. Only the attempt budget tells them apart.
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 1, per = 2)
+            l = FakeLauncher()
+            for _ in 1:BS.MAX_ATTEMPTS
+                BS.reconcile!(root, sweep, l, specfn(root))
+                empty!(l.live)                      # the job vanished, producing nothing
+            end
+            p = BS.plan(root, sweep; launcher = l)
+            @test p.chunk_attempts[chunks[1]] == BS.MAX_ATTEMPTS
+            @test p.chunk_state[chunks[1]] === :stalled
+            @test p.state === :stalled
+            @test BS.is_stuck(p) && !BS.is_settled(p)
+            @test isempty(p.to_submit)              # stops on its own
+            n = length(l.submitted)
+            BS.reconcile!(root, sweep, l, specfn(root))
+            @test length(l.submitted) == n          # and stays stopped
+
+            # After raising the walltime, clearing the history lets it go again.
+            @test BS.clear_attempts!(root, sweep) >= 1
+            p2 = BS.plan(root, sweep; launcher = l)
+            @test p2.state === :pending && p2.to_submit == [chunks[1]]
+        end
+    end
+
+    @testset "retry_failed! clears only the errors" begin
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 1, per = 4,
+                                    fn_src = "p -> p == 2 ? error(\"nope\") : p * 3")
+            SlateTask.run_chunk(root, chunks[1])
+            @test BS.plan(root, sweep).state === :partial
+            @test BS.retry_failed!(root, sweep) == 1
+            p = BS.plan(root, sweep)
+            @test (p.shards_done, p.shards_ok, p.shards_failed) == (3, 3, 0)
+            @test p.shards_missing == 1
+            @test p.state === :pending                # there is work to submit again
+            # The successful shards were not disturbed, so a rerun only redoes the failure. It
+            # throws again (the parameter is genuinely bad), which is why errors are not retried
+            # automatically.
+            r = SlateTask.run_chunk(root, chunks[1]; force = false)
+            @test (r.ran, r.skipped, r.failed) == (0, 3, 1)
         end
     end
 

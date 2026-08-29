@@ -73,7 +73,7 @@ function poll_until_done(root, sweep, launcher; timeout = 300)
         if line != prev
             println(line); prev = line
         end
-        BS.is_complete(p) && return true
+        BS.is_settled(p) && return true
         sleep(3)
     end
     return false
@@ -90,7 +90,10 @@ vals = Dict(r.key => r.value for r in ok)
 expected_ok = [i for i in 1:nshards if i != 7]
 
 errs = String[]
-BS.is_complete(final) || push!(errs, "sweep did not complete: $final")
+BS.is_settled(final) || push!(errs, "sweep did not settle: $final")
+final.state === :partial ||
+    push!(errs, "expected state :partial (every shard terminal, some errored), got $(final.state)")
+# This sweep rigs exactly one shard to throw, so the count is checked separately from the state.
 final.shards_failed == 1 || push!(errs, "expected exactly 1 failed shard, got $(final.shards_failed)")
 for i in expected_ok
     got = get(vals, "$(sweep)_s$(i)", nothing)

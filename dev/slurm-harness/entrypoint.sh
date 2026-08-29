@@ -21,8 +21,11 @@ start_munge() {
 # the image's directories are shadowed by the mounts.
 prepare_shared() {
     mkdir -p /scratch /home/slate
-    chown slate:slate /scratch /home/slate
-    chmod 1777 /scratch
+    # /scratch is a bind mount from the host, where ownership is decided by the Docker VM's file
+    # sharing and chown does not necessarily apply. Best effort, and never fatal.
+    chown slate:slate /home/slate 2>/dev/null || true
+    chown slate:slate /scratch 2>/dev/null || true
+    chmod 1777 /scratch 2>/dev/null || true
 }
 
 wait_for_tcp() {

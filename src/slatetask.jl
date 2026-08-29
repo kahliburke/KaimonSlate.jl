@@ -16,8 +16,11 @@
 # a chunk is free, a requeued or preempted job resumes rather than repeats, and re-submitting a
 # whole sweep costs nothing for the shards that already landed.
 
+# `Base.include(@__MODULE__, …)` rather than a bare `include`: this file is loaded into a notebook's
+# module as well as into Main, and a module built programmatically (as a notebook's is) has no
+# `include` of its own.
 if !isdefined(@__MODULE__, :MemoStore)
-    include(joinpath(@__DIR__, "memostore.jl"))
+    Base.include(@__MODULE__, joinpath(@__DIR__, "memostore.jl"))
 end
 
 module SlateTask

@@ -14,7 +14,10 @@ name: slate-slurm
 x-slurm: &slurm
   image: slate-slurm:latest
   volumes:
-    - scratch:/scratch
+    # A HOST directory, not a named volume: the hub runs on the Mac and has to see the same CAS the
+    # compute nodes write to. That is the shared-filesystem case the design assumes; only the paths
+    # differ between the two sides (./scratch here, /scratch in the container).
+    - ./scratch:/scratch
     - slatehome:/home/slate
   networks: [slurm]
   restart: unless-stopped
@@ -73,7 +76,7 @@ services:
     ports:
       - "2222:22"
     volumes:
-      - scratch:/scratch
+      - ./scratch:/scratch
       - slatehome:/home/slate
       - ./ssh:/ssh:ro
 
@@ -81,6 +84,5 @@ networks:
   slurm:
 
 volumes:
-  scratch:
   slatehome:
   mysql:
