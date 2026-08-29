@@ -244,6 +244,15 @@ function SlurmTarget(host = ""; root, root_remote = root, payload,
                 resources, Int(chunk), String(account), String(qos), String(prologue))
 end
 
+# Resources belong to the TARGET (a site's account, its partitions) but walltime, memory and cores
+# are properties of the WORK, and vary sweep to sweep against the same cluster. So a sweep can
+# override them without defining a second target.
+with_resources(t::LocalTarget, res) = t          # nothing to schedule locally
+with_resources(t::SlurmTarget, res) =
+    res === nothing ? t :
+    SlurmTarget(t.host, t.root, t.root_remote, t.project, t.payload,
+                merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue)
+
 store_root(t::LocalTarget) = t.root
 store_root(t::SlurmTarget) = t.root
 chunk_size(t::LocalTarget) = t.chunk
@@ -728,6 +737,12 @@ function _live_script(io, r::ShardedResult)
         return mins < 2 ? 2000 : mins < 15 ? 5000 : 15000;
       }
       function paint(s){
+        // Feed the notebook-level pill. The card is inside one cell's output; the pill is what
+        // answers "what is this notebook doing" when that cell is scrolled away or collapsed.
+        if (window.slateSweeps) {
+          var cell = root.closest('[data-id]');
+          window.slateSweeps.report("$(r.key)", cell ? cell.dataset.id : "", s);
+        }
         var bar = root.querySelector('[data-sw="bar"]');
         if (bar) bar.style.width = (100 * s.frac).toFixed(2) + "%";
         if (bar) bar.style.background = s.color;
@@ -788,7 +803,10 @@ function _live_script(io, r::ShardedResult)
         });
       });
 
-      if ($(poll ? "true" : "false")) { timer = setInterval(tick, interval()); tick(); }
+      // One tick ALWAYS, so a finished sweep still reports itself to the topbar pill; the repeating
+      // timer only starts when there is something left to watch.
+      tick();
+      if ($(poll ? "true" : "false")) timer = setInterval(tick, interval());
     })();
     </script>""")
 end
@@ -849,7 +867,13 @@ and returns immediately with whatever has already landed.
 """
 function run_sweep(target::SweepTarget, params::AbstractVector, body_src::AbstractString;
                    setup_src::AbstractString = "", captures::AbstractDict = Dict{Symbol,Any}(),
-                   submit::Bool = true, cap::Integer = 0, register = nothing)
+                   submit::Bool = true, cap::Integer = 0, register = nothing,
+                   resources = nothing, wait::Bool = false,
+                   progress = nothing, pause = nothing, poll::Real = 2.0)
+    # Resource overrides do NOT enter the key. Re-running the same body with a longer walltime is
+    # the same sweep resumed, not a different one — otherwise the fix for a walltime kill would
+    # throw away every unit that had already survived it.
+    target = with_resources(target, resources)
     root = store_root(target)
     mkpath(root)
     key = sweep_key(body_src, setup_src, captures)
@@ -891,7 +915,34 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
 
     pl = BatchSweep.plan(root, key; launcher)
     tl = BatchSweep.telemetry(root, key; launcher, plan = pl)
-    return ShardedResult(key, target, collect(params), keys, pl, _rows(root, params, keys), tl)
+    res = ShardedResult(key, target, collect(params), keys, pl, _rows(root, params, keys), tl)
+
+    # `wait = true` holds the cell open and drives Slate's OWN progress bar and run chip, which is
+    # where a reader already looks to see what a notebook is doing. The card alone is buried in one
+    # cell's output; this puts the sweep where the rest of the notebook reports itself.
+    #
+    # Interrupting the cell stops WATCHING, not the sweep: the work is on the cluster and the store
+    # remembers it, so the result is returned with whatever has landed rather than raising.
+    if wait && progress !== nothing
+        try
+            while true
+                refresh!(res)
+                p, t = res.plan, res.telemetry
+                bits = ["$(p.shards_done)/$(p.shards_total)"]
+                p.shards_failed > 0 && push!(bits, "$(p.shards_failed) failed")
+                (t.eta_s >= 0 && !BatchSweep.is_settled(p)) && push!(bits, "~$(_dur(t.eta_s)) left")
+                progress(BatchSweep.fraction(p); msg = join(bits, " · "))
+                (BatchSweep.is_settled(p) || BatchSweep.is_stuck(p)) && break
+                pause === nothing ? Base.sleep(poll) : pause(poll)
+            end
+            progress(1.0; msg = _state_label(res.plan.state), done = true)
+        catch e
+            e isa InterruptException || rethrow()
+            progress(BatchSweep.fraction(res.plan);
+                     msg = "stopped watching — the sweep is still running", done = true)
+        end
+    end
+    return res
 end
 
 # Free names in the body that are bound in the calling module and look like DATA. These travel with
@@ -989,11 +1040,13 @@ macro sweep(args...)
     setup  = get(opts, :setup, "")
     cap    = get(opts, :cap, 0)
     submit = get(opts, :submit, true)
+    res     = get(opts, :resources, nothing)
+    waitfor = get(opts, :wait, false)
     # An unknown option is an error rather than a silent no-op: `@sweep(…, wallclock = "2h")` that
     # quietly does nothing is worse than one that says so.
     for k in keys(opts)
-        k in (:setup, :cap, :submit) ||
-            error("@sweep: unknown option `$k` (accepted: setup, cap, submit)")
+        k in (:setup, :cap, :submit, :resources, :wait) ||
+            error("@sweep: unknown option `$k` (accepted: setup, cap, submit, resources, wait)")
     end
 
     quote
@@ -1004,9 +1057,18 @@ macro sweep(args...)
         # author registering anything.
         local _reg = isdefined(@__MODULE__, :slate_on) ?
                      getfield(@__MODULE__, :slate_on) : nothing
+        # `slate_progress` drives the cell's bar and the run chip; `pause` is the cancellable sleep,
+        # so a `wait`ing sweep stops promptly when the cell is stopped. Both are notebook-injected
+        # and simply absent in a standalone run, where waiting degrades to a plain sleep.
+        local _prog = isdefined(@__MODULE__, :slate_progress) ?
+                      getfield(@__MODULE__, :slate_progress) : nothing
+        local _pause = isdefined(@__MODULE__, :pause) ?
+                       getfield(@__MODULE__, :pause) : nothing
         $(Sweep).run_sweep($(esc(target)), collect($(esc(grid))), $body_src;
                            setup_src = $(esc(setup)), captures = _caps,
-                           cap = $(esc(cap)), submit = $(esc(submit)), register = _reg)
+                           cap = $(esc(cap)), submit = $(esc(submit)), register = _reg,
+                           resources = $(esc(res)), wait = $(esc(waitfor)),
+                           progress = _prog, pause = _pause)
     end
 end
 

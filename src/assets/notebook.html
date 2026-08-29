@@ -59,6 +59,10 @@
   <span id="runloc" class="runloc" style="display:none" onclick="onRunLocClick(event)" title="worker — click for its live log &amp; status">
     <span id="runlocicon">💻</span> <span id="runloclabel">local</span> <span id="runlocsrc" class="runlocsrc" style="display:none"></span> <span id="runlocstat" class="wstat"></span> <span class="runloccaret" onclick="toggleRunLoc(event)" title="change where this notebook runs">▾</span></span><span id="workerpills"></span>
   <span id="healthbadge" class="healthbadge" style="display:none" onclick="window.__healthToggle && window.__healthToggle()" title="watchdog health — stalls &amp; runaway workers; click for details + recovery"></span>
+  <!-- Batch sweeps. Work that runs AWAY from this notebook and outlives a cell, so a per-cell
+       indicator cannot answer "what is this notebook doing" — that belongs up here with the other
+       run status. Populated by js/sweeps.js from the cards' own polling; hidden when none exist. -->
+  <span id="sweeppill" class="sweeppill" style="display:none" onclick="window.slateSweeps &amp;&amp; window.slateSweeps.toggle(event)" title="batch sweeps — click for the list"><span class="swpdot"></span><span id="sweeppilltext">sweeps</span></span>
   <span id="scratchrun" class="scratchrun" style="display:none" onclick="toggleScratch()" title="scratch activity — click to open the Scratchpad"><span class="scrdot"></span>🧪 <span class="scrlabel">scratch</span></span>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
   <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
@@ -286,6 +290,8 @@
 </div>
 <!-- Watchdog health drop-down (populated by js/health.js; toggled from #healthbadge). -->
 <div id="healthpanel" class="healthpanel"></div>
+<!-- Batch-sweep drop-down (populated by js/sweeps.js; toggled from #sweeppill). -->
+<div id="sweeppanel" class="sweeppanel"></div>
 <!-- Zen reading-mode exit (shown only while body.zen is on; the topbar toggle is hidden then). -->
 <div class="zenexit" onclick="window.exitZen && window.exitZen()" title="exit zen mode (Esc)">✕ Exit zen</div>
 <!-- ── App mode chrome (body.app only; built + driven by js/appmode.js) ────────────────────────
@@ -702,6 +708,7 @@
 <script src="/assets/js/runloc.js"></script>
 <script src="/assets/js/workers.js"></script>
 <script src="/assets/js/regions.js"></script>
+<script src="/assets/js/sweeps.js"></script>   <!-- topbar pill + panel for batch sweeps (fed by the cards' own polling) -->
 <script src="/assets/js/inspect.js"></script>
 <script src="/assets/js/dragdrop.js"></script>
 <script src="/assets/js/trace.js"></script>

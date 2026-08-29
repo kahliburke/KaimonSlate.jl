@@ -2338,3 +2338,31 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .exrp-total { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
               font-size: .85rem; color: var(--dim); font-variant-numeric: tabular-nums; }
 .exrp-total b { color: var(--text); }
+
+/* ── Batch sweeps: topbar pill + drop-down ───────────────────────────────────────────────────
+   A sweep outlives the cell that started it and runs away from the notebook, so its status lives
+   up here with the other run indicators rather than only inside one cell's output. */
+.sweeppill { display:inline-flex; align-items:center; gap:6px; padding:2px 9px; border-radius:11px;
+  font-size:.7rem; cursor:pointer; border:1px solid var(--bg3); color:var(--muted,#8a91ab);
+  white-space:nowrap; }
+.sweeppill:hover { border-color:var(--fg,#c9d1d9); }
+.sweeppill .swpdot { width:7px; height:7px; border-radius:50%; background:var(--muted,#8a91ab); }
+.sweeppill.busy { color:#58a6ff; border-color:#58a6ff55; }
+.sweeppill.busy .swpdot { background:#58a6ff; animation:swppulse 1.6s ease-in-out infinite; }
+.sweeppill.bad { color:#f85149; border-color:#f8514955; }
+.sweeppill.bad .swpdot { background:#f85149; }
+@keyframes swppulse { 0%,100% { opacity:1 } 50% { opacity:.35 } }
+
+.sweeppanel { position:fixed; z-index:70; width:340px; max-height:60vh; overflow:auto;
+  display:none; padding:8px; border-radius:10px; border:1px solid var(--bg3);
+  background:var(--bg1,#0d1117); box-shadow:0 8px 24px #0007; }
+.sweeppanel.open { display:block; }
+.swprow { padding:7px 8px; border-radius:7px; cursor:pointer; }
+.swprow:hover { background:var(--bg2,#161b22); }
+.swprow-top { display:flex; align-items:center; gap:7px; font-size:.72rem; }
+.swprow-dot { width:7px; height:7px; border-radius:50%; flex:none; }
+.swprow-label { font-weight:600; }
+.swprow-meta { margin-left:auto; color:var(--muted,#8a91ab); font-variant-numeric:tabular-nums; }
+.swprow-bar { height:4px; border-radius:2px; background:var(--bg3); overflow:hidden; margin-top:5px; }
+.swprow-bar > span { display:block; height:100%; transition:width .3s; }
+.swprow-note { font-size:.66rem; color:var(--muted,#8a91ab); padding:4px 8px; }
