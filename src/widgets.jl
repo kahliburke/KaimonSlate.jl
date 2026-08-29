@@ -1365,7 +1365,19 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # rebuild drops stale closures; a cell re-run just replaces its channel's handler.
     slate_handlers = Dict{String,Any}()   # hoisted: `slate_tool` registers its Invoke channel here
     Core.eval(m, :(const __slate_handlers = $slate_handlers))
-    Core.eval(m, :(const slate_on = (channel, f) -> (__slate_handlers[string(channel)] = f; nothing)))
+    # Accepts BOTH argument orders. The documented spelling is a do-block —
+    #
+    #     slate_on("stats") do args … end
+    #
+    # — which passes the function FIRST, so a strictly `(channel, f)` version registers the pair
+    # reversed: `__slate_handlers[string(f)] = channel`. The channel is then permanently
+    # unreachable and neither side reports anything; the browser simply says "no slate_on handler
+    # registered" for a channel the notebook is certain it registered.
+    Core.eval(m, :(const slate_on = (a, b) -> begin
+        channel, f = a isa Function ? (b, a) : (a, b)
+        __slate_handlers[string(channel)] = f
+        nothing
+    end))
     # Drop a JS→Julia handler — the symmetric counterpart to `slate_on`. A package that wires a
     # TRANSIENT per-cell handler (e.g. a Bonito session's inbox feed, keyed by its session id) removes
     # it here on teardown so a re-run/close doesn't leak dead closures. A no-op for an absent channel.

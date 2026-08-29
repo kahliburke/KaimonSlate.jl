@@ -259,8 +259,8 @@ function __slate_frontend(slate_on)
     # distinct key (`_PYPI_KEY`), so fetched third-party modules never mingle with the package's own assets.
     provide_assets!(_PYPI_KEY, (mkpath(_served_root()); _served_root()))
     # JS→Julia custom messages (a widget's `model.send`): route by channel to a registered handler.
-    # NB: `slate_on` is `(channel, f)` — pass the handler as the 2nd argument, NOT via `do` (a do-block
-    # would bind the closure as the FIRST arg, registering under the closure's name instead of the channel).
+    # `slate_on` now takes either order, so a `do` block works too; this stays positional because a
+    # multi-clause handler reads better as an explicit `function`.
     slate_on("SlateAFM.msg", function (a)
         ch = _afmfield(a, :ch)
         ch === nothing && return nothing

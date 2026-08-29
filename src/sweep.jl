@@ -411,6 +411,43 @@ end
 _bar(frac, width = 24) =
     (n = clamp(round(Int, frac * width), 0, width); "▰"^n * "▱"^(width - n))
 
+# ── Live status over the JS channel ──────────────────────────────────────────────────────────
+# A monitor that re-ran the cell to advance would re-run every downstream cell with it, which for a
+# sweep of thousands of units is far more work than the sweep. Instead the rendered card polls a
+# `slateCall` channel and patches its own DOM: the browser animates, and the notebook's dependency
+# graph is untouched until the VALUE actually changes.
+#
+# The handler re-reads the store on every call rather than closing over a snapshot, so it stays
+# correct across a worker restart and reports what is actually on disk.
+
+"The channel a sweep's card polls. One per sweep, so two sweeps in a notebook do not collide."
+status_channel(key::AbstractString) = "sweep:" * String(key)
+
+# Compact enough to poll on a timer: counts and rates, plus a per-unit status string of one
+# character each. At a few thousand units that string is a few KB, which is cheap next to sending
+# structured rows for every unit.
+function status_payload(target::SweepTarget, key::AbstractString, params, keys)
+    root = store_root(target)
+    l = launcher_for(target)
+    p = BatchSweep.plan(root, key; launcher = l)
+    t = BatchSweep.telemetry(root, key; launcher = l, plan = p)
+    marks = IOBuffer()
+    for k in keys
+        m = MemoStore.read_manifest(root, k)
+        print(marks, m === nothing ? '.' :
+                     String(get(m, "status", "")) == "error" ? 'x' : 'o')
+    end
+    return Dict{String,Any}(
+        "state" => String(p.state), "label" => _state_label(p.state),
+        "total" => p.shards_total, "done" => p.shards_done,
+        "ok" => p.shards_ok, "failed" => p.shards_failed, "missing" => p.shards_missing,
+        "frac" => BatchSweep.fraction(p),
+        "rate" => t.rate_per_s, "eta" => t.eta_s, "idle" => t.idle_s,
+        "stuck" => BatchSweep.stalled_for(t), "blocked" => p.blocked,
+        "settled" => BatchSweep.is_settled(p), "marks" => String(take!(marks)),
+        "color" => get(_STATE_COLOR, p.state, "#8b949e"))
+end
+
 # ── HTML rendering ───────────────────────────────────────────────────────────────────────────
 # The notebook's view of a sweep. The text form below stays as the fallback for a standalone
 # `julia notebook.jl` run, the REPL, and static export, where there is no DOM to write into.
@@ -464,7 +501,7 @@ function _unit_grid(io, r::ShardedResult)
     ntiles = cld(n, per)
     side = ntiles <= 100 ? 12 : ntiles <= 400 ? 8 : 5
 
-    print(io, "<div style='display:flex;flex-wrap:wrap;gap:2px;margin-top:8px'>")
+    print(io, "<div data-sw='grid' style='display:flex;flex-wrap:wrap;gap:2px;margin-top:8px'>")
     for t in 1:ntiles
         lo = (t - 1) * per + 1
         hi = min(t * per, n)
@@ -494,38 +531,45 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     frac = BatchSweep.fraction(p)
     col = get(_STATE_COLOR, p.state, "#8b949e")
 
-    print(io, "<div style='font-family:var(--font-ui,system-ui);color:var(--fg,#c9d1d9);",
+    # `data-sw` hooks mark every part the live script patches; without them it would have to
+    # rebuild the card, and the parts that come from Julia (failures, the blocked reason) cannot be
+    # rebuilt in the browser.
+    print(io, "<div data-sweep='sw-", first(r.key, 12), "' ",
+              "style='font-family:var(--font-ui,system-ui);color:var(--fg,#c9d1d9);",
               "border:1px solid var(--border,#30363d);border-radius:8px;padding:12px 14px;",
               "background:var(--bg-elev,#0d1117)'>")
 
     # Header: what state it is in, and how far.
     print(io, "<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px'>",
-              "<span style='display:inline-block;width:8px;height:8px;border-radius:50%;",
-              "background:", col, "'></span>",
-              "<strong style='color:", col, "'>", _state_label(p.state), "</strong>",
+              "<span data-sw='dot' style='display:inline-block;width:8px;height:8px;",
+              "border-radius:50%;background:", col, "'></span>",
+              "<strong data-sw='label' style='color:", col, "'>", _state_label(p.state), "</strong>",
               "<span style='opacity:.5;font-size:12px'>", _esc(r.key), "</span>",
               "<span style='margin-left:auto;font-variant-numeric:tabular-nums'>",
-              p.shards_done, " / ", p.shards_total,
-              " <span style='opacity:.6'>(", round(100 * frac; digits = 1), "%)</span></span></div>")
+              "<span data-sw='count'>", p.shards_done, " / ", p.shards_total, "</span> ",
+              "<span data-sw='pct' style='opacity:.6'>(", round(100 * frac; digits = 1),
+              "%)</span></span></div>")
 
     # Progress bar.
     print(io, "<div style='height:6px;border-radius:3px;background:var(--border,#30363d);",
-              "overflow:hidden'><div style='height:100%;width:", round(100 * frac; digits = 2),
-              "%;background:", col, ";transition:width .3s'></div></div>")
+              "overflow:hidden'><div data-sw='bar' style='height:100%;width:",
+              round(100 * frac; digits = 2), "%;background:", col, ";transition:width .3s'></div></div>")
 
     # Counts.
     print(io, "<div style='display:flex;gap:14px;margin-top:8px;font-size:12px'>")
-    print(io, "<span style='color:#3fb950'>", p.shards_ok, " ok</span>")
-    p.shards_failed > 0 && print(io, "<span style='color:#f85149'>", p.shards_failed, " failed</span>")
-    p.shards_missing > 0 && print(io, "<span style='opacity:.6'>", p.shards_missing, " remaining</span>")
-
-    # Rate and ETA, only while they mean something.
-    if t.done > 0 && !BatchSweep.is_settled(p) && !BatchSweep.is_stuck(p)
-        t.rate_per_s > 0 && print(io, "<span style='margin-left:auto;opacity:.7'>",
-                                      round(t.rate_per_s; digits = 2), "/s</span>")
-        t.eta_s >= 0 && print(io, "<span style='opacity:.7'>~", _dur(t.eta_s), " left</span>")
+    print(io, "<span data-sw='ok' style='color:#3fb950'>", p.shards_ok, " ok</span>")
+    print(io, "<span data-sw='failed' style='color:#f85149'>",
+              p.shards_failed > 0 ? "$(p.shards_failed) failed" : "", "</span>")
+    print(io, "<span data-sw='missing' style='opacity:.6'>",
+              p.shards_missing > 0 ? "$(p.shards_missing) remaining" : "", "</span>")
+    print(io, "<span data-sw='rate' style='margin-left:auto;opacity:.7'>",
+              (t.done > 0 && !BatchSweep.is_settled(p) && !BatchSweep.is_stuck(p) &&
+               t.rate_per_s > 0) ? "$(round(t.rate_per_s; digits = 2))/s" : "", "</span>")
+    if t.done > 0 && !BatchSweep.is_settled(p) && !BatchSweep.is_stuck(p) && t.eta_s >= 0
+        print(io, "<span style='opacity:.7'>~", _dur(t.eta_s), " left</span>")
     end
     println(io, "</div>")
+    print(io, "<div data-sw='note' style='font-size:11px;opacity:.5;margin-top:4px'></div>")
 
     _unit_grid(io, r)
 
@@ -575,8 +619,75 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
         println(io, "</div></details>")
     end
 
+    _live_script(io, r)
     println(io, "</div>")
     return nothing
+end
+
+# Poll the sweep's channel and patch the card in place. Only while there is something to wait for:
+# a settled sweep renders static and starts no timer, so a notebook full of finished sweeps costs
+# nothing. The interval backs off as a run gets long, because a sweep of hours does not need
+# second-by-second updates and the poll is a round trip to the scheduler.
+function _live_script(io, r::ShardedResult)
+    BatchSweep.is_settled(r.plan) && return
+    BatchSweep.is_stuck(r.plan) && return
+    ch = status_channel(r.key)
+    id = "sw-" * first(r.key, 12)
+    print(io, """
+    <script>
+    (function(){
+      var root = document.currentScript.closest('[data-sweep="$(id)"]') ||
+                 document.currentScript.parentElement;
+      if (!root || root.dataset.swLive === "1") return;
+      root.dataset.swLive = "1";
+      var started = Date.now(), timer = null;
+      function interval(){
+        var mins = (Date.now() - started) / 60000;
+        return mins < 2 ? 2000 : mins < 15 ? 5000 : 15000;
+      }
+      function paint(s){
+        var bar = root.querySelector('[data-sw="bar"]');
+        if (bar) bar.style.width = (100 * s.frac).toFixed(2) + "%";
+        if (bar) bar.style.background = s.color;
+        var set = function(k, v){
+          var el = root.querySelector('[data-sw="' + k + '"]');
+          if (el) el.textContent = v;
+        };
+        set("count", s.done + " / " + s.total);
+        set("pct", "(" + (100 * s.frac).toFixed(1) + "%)");
+        set("ok", s.ok + " ok");
+        set("failed", s.failed > 0 ? s.failed + " failed" : "");
+        set("missing", s.missing > 0 ? s.missing + " remaining" : "");
+        set("rate", s.rate > 0 && !s.settled ? s.rate.toFixed(2) + "/s" : "");
+        set("label", s.label);
+        var lab = root.querySelector('[data-sw="label"]');
+        if (lab) lab.style.color = s.color;
+        var dot = root.querySelector('[data-sw="dot"]');
+        if (dot) dot.style.background = s.color;
+        var g = root.querySelector('[data-sw="grid"]');
+        if (g && s.marks && g.children.length === s.marks.length){
+          for (var i = 0; i < s.marks.length; i++){
+            var c = s.marks[i] === "o" ? "#3fb950" : s.marks[i] === "x" ? "#f85149" : "#30363d";
+            if (g.children[i].style.background !== c) g.children[i].style.background = c;
+          }
+        }
+        if (s.settled || s.blocked){
+          clearInterval(timer);
+          // The card's remaining detail (failures, the blocked reason) comes from Julia, so hand
+          // back to the cell rather than trying to rebuild it here.
+          var n = root.querySelector('[data-sw="note"]');
+          if (n) n.textContent = s.blocked ? s.blocked : "finished — re-run the cell for detail";
+        }
+      }
+      function tick(){
+        if (!document.body.contains(root)) { clearInterval(timer); return; }
+        if (!window.slateCall) return;
+        window.slateCall("$(ch)", {}).then(paint).catch(function(){ clearInterval(timer); });
+      }
+      timer = setInterval(tick, interval());
+      tick();
+    })();
+    </script>""")
 end
 
 function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
@@ -635,7 +746,7 @@ and returns immediately with whatever has already landed.
 """
 function run_sweep(target::SweepTarget, params::AbstractVector, body_src::AbstractString;
                    setup_src::AbstractString = "", captures::AbstractDict = Dict{Symbol,Any}(),
-                   submit::Bool = true, cap::Integer = 0)
+                   submit::Bool = true, cap::Integer = 0, register = nothing)
     root = store_root(target)
     mkpath(root)
     key = sweep_key(body_src, setup_src, captures)
@@ -659,6 +770,20 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     if submit
         BatchSweep.reconcile!(root, key, launcher, specfn_for(target); cap)
     end
+    # The card's live channel. Registered here rather than by the author, so a sweep cell needs no
+    # wiring to be watchable. `register` is the notebook's `slate_on`; outside a notebook (a
+    # standalone run, a test) it is simply absent and the card renders static.
+    if register !== nothing
+        ps, ks = collect(params), keys
+        # Positional, NOT a do-block: `slate_on(channel, f)` takes the channel first, and a
+        # do-block passes the function first, which registers the pair reversed and leaves the
+        # channel silently unreachable.
+        #
+        # Deliberately unguarded. A swallowed failure here means the card never updates, which
+        # looks like the sweep having stalled — much worse than an error naming the cause.
+        register(status_channel(key), _args -> status_payload(target, key, ps, ks))
+    end
+
     pl = BatchSweep.plan(root, key; launcher)
     tl = BatchSweep.telemetry(root, key; launcher, plan = pl)
     return ShardedResult(key, target, collect(params), keys, pl, _rows(root, params, keys), tl)
@@ -769,9 +894,14 @@ macro sweep(args...)
     quote
         local _names = $(QuoteNode(collect(names)))
         local _caps = $(Sweep)._collect_captures(@__MODULE__, _names, $(QuoteNode(param)))
+        # `slate_on` is injected into a notebook's namespace, so it is reachable from here and
+        # nowhere else. Picking it up automatically is what lets a sweep cell be live without the
+        # author registering anything.
+        local _reg = isdefined(@__MODULE__, :slate_on) ?
+                     getfield(@__MODULE__, :slate_on) : nothing
         $(Sweep).run_sweep($(esc(target)), collect($(esc(grid))), $body_src;
                            setup_src = $(esc(setup)), captures = _caps,
-                           cap = $(esc(cap)), submit = $(esc(submit)))
+                           cap = $(esc(cap)), submit = $(esc(submit)), register = _reg)
     end
 end
 

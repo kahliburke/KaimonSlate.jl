@@ -484,6 +484,20 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
             slate_on("compute", a -> a + 1)
         end
         @test haskey(handlers, "compute") && handlers["compute"](1) == 2
+
+        # The do-block spelling, which the docs show and which is what a Julia user reaches for.
+        # It passes the function FIRST, so without a method for that order the pair registers
+        # reversed: the channel becomes permanently unreachable and NOTHING reports it — the
+        # browser just says "no slate_on handler registered" for a channel that was registered.
+        empty!(handlers)
+        task_local_storage(:slate_ctx, (; on = (c, f) -> (handlers[string(c)] = f; nothing))) do
+            slate_on("doblock") do a
+                a * 10
+            end
+        end
+        @test haskey(handlers, "doblock")
+        @test handlers["doblock"](4) == 40
+        @test !any(k -> startswith(k, "#"), keys(handlers))   # not keyed by the closure's name
     end
 
     # `slate_off` — the symmetric handler removal — routed through the context's `:off`.

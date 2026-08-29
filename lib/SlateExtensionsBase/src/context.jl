@@ -109,6 +109,18 @@ function slate_on(channel, f)
     return nothing
 end
 
+# The do-block spelling, which the docs show and which is the natural Julia idiom:
+#
+#     slate_on("stats") do args
+#         …
+#     end
+#
+# A do-block passes the function FIRST, so without this method it lands in `slate_on(channel, f)`
+# with the arguments reversed: the pair is registered the wrong way round and the channel is then
+# permanently unreachable, with no error at either end. The browser just reports "no slate_on
+# handler registered" for a channel the notebook believes it registered.
+slate_on(f::Function, channel::AbstractString) = slate_on(channel, f)
+
 """
     slate_off(channel) -> nothing
 
