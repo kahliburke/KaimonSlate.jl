@@ -236,7 +236,14 @@ function drop_manifest(root::AbstractString, key::AbstractString)
     return try; rm(p; force = true); true; catch; false; end
 end
 
-# Every blob hash a manifest references (bindings + wire) — the gc refcount edge set.
+# Every blob hash a manifest references (bindings + wire + batch extras) — the gc refcount edge
+# set, and the same set `pack` exports and `entry_bytes` prices. Anything that stores a blob and
+# records it on a manifest MUST be listed here or `gc` will collect it as unreferenced.
+#
+# `artifacts` are files a batch shard produced; `captures`/`shards`/`fn`/`setup` are what a chunk
+# descriptor points at (the closure source, its captured values, and each shard's argument). A
+# descriptor is a live entry for as long as its sweep may still be resubmitted, so its inputs have
+# to be reachable from it.
 function _manifest_blobs(d::AbstractDict)
     hs = String[]
     for b in get(d, "bindings", Any[])
@@ -244,6 +251,17 @@ function _manifest_blobs(d::AbstractDict)
     end
     w = get(d, "wire", nothing)
     w isa AbstractDict && push!(hs, String(get(w, "blob", "")))
+    for field in ("artifacts", "captures", "shards")
+        for x in get(d, field, Any[])
+            x isa AbstractDict || continue
+            push!(hs, String(get(x, "blob", "")))
+            push!(hs, String(get(x, "arg", "")))
+        end
+    end
+    for field in ("fn", "setup")
+        v = get(d, field, nothing)
+        v isa AbstractString && push!(hs, String(v))
+    end
     return filter(_validhash, hs)
 end
 
