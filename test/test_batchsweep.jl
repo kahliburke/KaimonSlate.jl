@@ -253,6 +253,56 @@ end
         end
     end
 
+    @testset "card actions do what their labels say" begin
+        # These are the destructive controls, so each one's blast radius is pinned. In particular
+        # cancel must KEEP finished units (resuming should cost only what is left) while reset
+        # throws them away — the difference between the two is the whole reason both exist.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            g = Sweep.paramgrid(x = 1:4)
+            r = Sweep.@sweep(g, t; submit = false) do p
+                p.x == 2 ? error("bad") : p.x
+            end
+            for c in BS.sweep_chunks(root, r.key); SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(r).plan.shards_failed == 1
+
+            # retry clears only the failure
+            s = Sweep.handle_action(t, r.key, r.params, r.keys, "retry")
+            @test s["failed"] == 0 && s["ok"] == 3 && s["missing"] == 1
+
+            # cancel stops it and is durable, but keeps what finished
+            s = Sweep.handle_action(t, r.key, r.params, r.keys, "cancel")
+            @test s["state"] == "cancelled" && s["ok"] == 3
+            @test BS.is_cancelled(root, r.key)
+
+            # resume lifts the stop without touching results
+            s = Sweep.handle_action(t, r.key, r.params, r.keys, "resume")
+            @test s["state"] != "cancelled" && s["ok"] == 3
+            @test !BS.is_cancelled(root, r.key)
+
+            # reset throws the results away
+            s = Sweep.handle_action(t, r.key, r.params, r.keys, "reset")
+            @test s["done"] == 0 && s["ok"] == 0
+
+            @test_throws ErrorException Sweep.handle_action(t, r.key, r.params, r.keys, "nonsense")
+        end
+    end
+
+    @testset "the status payload is JSON-shaped and covers every unit" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:5), t; submit = false) do p; p.x; end
+            for c in BS.sweep_chunks(root, r.key); SlateTask.run_chunk(root, c); end
+            s = Sweep.status_payload(t, r.key, r.params, r.keys; advance = false)
+            @test length(s["marks"]) == 5           # one character per unit, for the tile grid
+            @test all(c -> c in ('o', 'x', '.'), s["marks"])
+            @test s["done"] == 5 && s["settled"] === true
+            @test s["label"] isa String && startswith(s["color"], "#")
+        end
+    end
+
     @testset "@sweep accepts options after a comma or a semicolon" begin
         # `;` puts the options in a `:parameters` expression that Julia places FIRST among the
         # macro's arguments, so a parser that assumes positional order sees the target where the

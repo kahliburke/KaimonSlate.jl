@@ -423,6 +423,40 @@ _bar(frac, width = 24) =
 "The channel a sweep's card polls. One per sweep, so two sweeps in a notebook do not collide."
 status_channel(key::AbstractString) = "sweep:" * String(key)
 
+"The channel the card's buttons call. Separate from status so a poll can never be a mutation."
+action_channel(key::AbstractString) = "sweep:" * String(key) * ":do"
+
+"""
+    handle_action(target, key, params, keys, action) -> payload
+
+Apply a control the card offers, then report the resulting state so the button press and the
+refresh are one round trip.
+
+`cancel` and `reset` are destructive in different degrees and are kept apart deliberately: cancel
+STOPS a sweep and keeps every finished unit, so resuming costs only what is left; reset throws the
+results away.
+"""
+function handle_action(target::SweepTarget, key::AbstractString, params, keys,
+                       action::AbstractString)
+    root = store_root(target)
+    l = launcher_for(target)
+    if action == "cancel"
+        BatchSweep.cancel!(root, key, l)
+    elseif action == "resume"
+        BatchSweep.resume!(root, key)
+    elseif action == "retry"
+        BatchSweep.retry_failed!(root, key)
+    elseif action == "reset"
+        BatchSweep.resume!(root, key)
+        for k in keys; MemoStore.drop_manifest(root, k); end
+        BatchSweep.clear_attempts!(root, key)
+    else
+        error("unknown sweep action: $(action)")
+    end
+    # A cancel must not be undone by the reconcile its own refresh would trigger.
+    return status_payload(target, key, params, keys; advance = (action != "cancel"))
+end
+
 # Compact enough to poll on a timer: counts and rates, plus a per-unit status string of one
 # character each. At a few thousand units that string is a few KB, which is cheap next to sending
 # structured rows for every unit.
@@ -626,9 +660,35 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
         println(io, "</div></details>")
     end
 
+    _actions(io, r)
     _live_script(io, r)
     println(io, "</div>")
     return nothing
+end
+
+# Only the controls that apply to the state it is in. A "Cancel" on a finished sweep or a "Resume"
+# on one that was never stopped is a button that either does nothing or does something surprising.
+function _actions(io, r::ShardedResult)
+    p = r.plan
+    acts = Tuple{String,String}[]
+    if p.state === :running || p.state === :pending
+        push!(acts, ("cancel", "Cancel"))
+    elseif p.state === :cancelled
+        push!(acts, ("resume", "Resume"))
+    end
+    p.shards_failed > 0 && push!(acts, ("retry", "Retry $(p.shards_failed) failed"))
+    (p.state === :blocked || p.state === :exhausted || BatchSweep.is_settled(p)) &&
+        push!(acts, ("reset", "Reset"))
+    isempty(acts) && return
+
+    print(io, "<div style='display:flex;gap:6px;margin-top:10px'>")
+    for (act, label) in acts
+        print(io, "<button data-sw-do='", act, "' style='font:inherit;font-size:11px;",
+                  "padding:3px 9px;border-radius:5px;cursor:pointer;",
+                  "border:1px solid var(--border,#30363d);background:transparent;",
+                  "color:var(--fg,#c9d1d9)'>", _esc(label), "</button>")
+    end
+    println(io, "</div>")
 end
 
 # Poll the sweep's channel and patch the card in place. Only while there is something to wait for:
@@ -636,9 +696,11 @@ end
 # nothing. The interval backs off as a run gets long, because a sweep of hours does not need
 # second-by-second updates and the poll is a round trip to the scheduler.
 function _live_script(io, r::ShardedResult)
-    BatchSweep.is_settled(r.plan) && return
-    BatchSweep.is_stuck(r.plan) && return
     ch = status_channel(r.key)
+    doch = action_channel(r.key)
+    # The buttons are wired whatever the state; only the POLL is conditional. A finished sweep still
+    # offers Retry and Reset, and a card that started no timer must not be inert.
+    poll = !(BatchSweep.is_settled(r.plan) || BatchSweep.is_stuck(r.plan))
     id = "sw-" * first(r.key, 12)
     print(io, """
     <script>
@@ -691,8 +753,29 @@ function _live_script(io, r::ShardedResult)
         if (!window.slateCall) return;
         window.slateCall("$(ch)", {}).then(paint).catch(function(){ clearInterval(timer); });
       }
-      timer = setInterval(tick, interval());
-      tick();
+
+      // Buttons. Disabled while the call is in flight so an impatient second click cannot cancel
+      // and resume in the same breath.
+      root.querySelectorAll('[data-sw-do]').forEach(function(b){
+        b.addEventListener('click', function(){
+          var was = b.textContent;
+          b.disabled = true; b.textContent = "…";
+          window.slateCall("$(doch)", { action: b.dataset.swDo }).then(function(s){
+            paint(s);
+            // The set of applicable buttons changes with the state, and only Julia knows which
+            // apply, so hand back to the cell rather than guessing here.
+            var n = root.querySelector('[data-sw="note"]');
+            if (n) n.textContent = "done — re-run the cell to refresh the controls";
+            b.textContent = was;
+          }).catch(function(e){
+            b.disabled = false; b.textContent = was;
+            var n = root.querySelector('[data-sw="note"]');
+            if (n) n.textContent = String(e);
+          });
+        });
+      });
+
+      if ($(poll ? "true" : "false")) { timer = setInterval(tick, interval()); tick(); }
     })();
     </script>""")
 end
@@ -789,6 +872,8 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         # Deliberately unguarded. A swallowed failure here means the card never updates, which
         # looks like the sweep having stalled — much worse than an error naming the cause.
         register(status_channel(key), _args -> status_payload(target, key, ps, ks))
+        register(action_channel(key),
+                 a -> handle_action(target, key, ps, ks, String(get(a, :action, ""))))
     end
 
     pl = BatchSweep.plan(root, key; launcher)
