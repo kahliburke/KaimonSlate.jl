@@ -1419,6 +1419,27 @@ function _make_router(h::Hub)
         set_notebook_clusters!(nb, get(_body(req), "clusters", Any[]))
         _json(state_json(nb))
     end))
+    # What a named cluster is DOING — its sweeps, what the scheduler says is live, how much output
+    # is sitting in its store and how much has been read back. The hub owns the definition; the
+    # WORKER owns the store view and the transfer ledger (cells read there), so this hands the spec
+    # across and returns what comes back. Read-only, and off `nb.lock` like every kernel round trip.
+    HTTP.register!(router, "GET", "/api/{id}/cluster-status", req -> _withnb(h, req, nb -> begin
+        name = get(HTTP.queryparams(HTTP.URI(req.target)), "name", "")
+        spec = with_report(nb) do report
+            for c in get(report.meta, "clusters", Dict{String,Any}[])
+                String(get(c, "name", "")) == name && return Dict{String,Any}(c)
+            end
+            return nothing
+        end
+        spec === nothing && return _json(Dict("error" => "no cluster `$name` in this notebook"))
+        r = try
+            ReportEngine._tool(nb.kernel, "__slate_cluster_status",
+                               Dict{String,Any}("name" => name, "spec" => spec))
+        catch e
+            return _json(Dict("error" => first(sprint(showerror, e), 200)))
+        end
+        return _json(r isa AbstractDict ? r : Dict("error" => "unexpected reply"))
+    end))
     # ── Consent-gated region introduction (PEER_TUNNEL_PLAN §5.1) ──────────────────────────────────
     # GET the pending mesh consent (a fresh tab checks this on load; live tabs also get an SSE
     # `mesh-consent:` push). POST introduce ARMS the whole-group mesh (installs SSH keys/grants — the one

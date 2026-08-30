@@ -802,18 +802,48 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .cell.sweep[data-sweep-state="succeeded"] { border-left-color:var(--green); }
 @keyframes sweeppulse { 0%,100% { opacity:1 } 50% { opacity:.45 } }
 
-/* ── The sweep spec popover (the cluster button on a sweep cell) ───────────────────────────────
-   Where the job runs and under what limits. A popover rather than a dialog because it is anchored
-   to one cell and read at a glance; the cluster DEFINITIONS behind it get the full modal below. */
-.swcfgpop { position:fixed; z-index:66; display:none; width:340px; padding:12px 14px 14px;
-  border:1px solid var(--border); border-radius:10px; background:var(--bg2); color:var(--text);
-  box-shadow:0 16px 48px rgba(0,0,0,.55); font-size:.8rem;
-  /* `place()` sets an explicit max-height only when the panel fits neither above nor below. */
-  overflow:auto; overscroll-behavior:contain; }
-.swcfgpop.show { display:block; }
+/* ── The sweep target panel (the cluster pill on a sweep cell) ─────────────────────────────────
+   Where the job runs, under what limits, and what that cluster is DOING. It began as a narrow
+   popover anchored to the pill, which suited a handful of override fields and stopped suiting it
+   once the panel also had to carry live status: anchored to a pill near the fold, a tall panel gets
+   clamped and scrolled into a slot a few hundred pixels high. Centred, two columns — settings on
+   the left, the cluster's live state on the right — so both are readable at once. */
+.swcfgpop { position:fixed; inset:0; z-index:66; display:none; align-items:center;
+  justify-content:center; padding:24px; box-sizing:border-box;
+  background:color-mix(in srgb, var(--bg) 60%, transparent); backdrop-filter:blur(2px); }
+.swcfgpop.show { display:flex; }
+.swcfg-panel { width:min(900px,94vw); max-height:88vh; display:flex; flex-direction:column;
+  border:1px solid var(--border); border-radius:12px; background:var(--bg2); color:var(--text);
+  box-shadow:0 20px 60px rgba(0,0,0,.55); font-size:.8rem; overflow:hidden; }
+.swcfg-head { display:flex; align-items:baseline; gap:10px; flex:none;
+  padding:13px 18px; border-bottom:1px solid var(--border); }
+.swcfg-head strong { color:var(--strong); font-size:.95rem; }
+.swcfg-head .swcfg-for { color:var(--dim); font-size:.72rem; }
+.swcfg-x { margin-left:auto; font-size:1.1rem; line-height:1; padding:2px 8px; cursor:pointer;
+  color:var(--dim); background:none; border:none; }
+.swcfg-x:hover { color:var(--red); }
+.swcfg-body { display:flex; min-height:0; flex:1; }
+.swcfg-main { flex:1 1 52%; padding:14px 18px; overflow:auto; min-width:0;
+  overscroll-behavior:contain; }
+.swcfg-side { flex:1 1 48%; padding:14px 18px; overflow:auto; min-width:0;
+  border-left:1px solid var(--border); background:var(--bg3); overscroll-behavior:contain; }
 .swcfgpop .ctlsub { margin:12px 0 6px; color:var(--dim); font-size:.68rem; font-weight:600;
   text-transform:uppercase; letter-spacing:.06em; }
 .swcfgpop .ctlsub:first-child { margin-top:0; }
+/* Live status, right-hand column. Figures line up in a column so a size that has grown since the
+   last look is obvious without reading the labels. */
+.swst-row { display:flex; gap:10px; align-items:baseline; padding:3px 0; }
+.swst-row > span:first-child { color:var(--dim); width:78px; flex:none; font-size:.72rem; }
+.swst-row > span:last-child { font-family:'Cascadia Code',ui-monospace,monospace; font-size:.75rem;
+  min-width:0; overflow-wrap:anywhere; }
+.swst-tbl { width:100%; border-collapse:collapse; margin-top:6px; font-size:.72rem;
+  font-family:'Cascadia Code',ui-monospace,monospace; }
+.swst-tbl th { text-align:left; color:var(--dim); font-weight:600; padding:4px 8px 4px 0;
+  border-bottom:1px solid var(--border); font-size:.68rem; text-transform:uppercase;
+  letter-spacing:.05em; }
+.swst-tbl td { padding:4px 8px 4px 0; border-bottom:1px solid color-mix(in srgb,var(--border) 45%,transparent); }
+.swst-tbl td.num { text-align:right; }
+.swst-none { color:var(--dim); font-size:.75rem; padding:6px 0; }
 .swcfgpop .swcfg-sub { text-transform:none; letter-spacing:0; font-weight:400; opacity:.75; }
 .swcfg-grid { display:grid; grid-template-columns:1fr 1fr; gap:7px 10px; }
 .swcfg-grid label { display:flex; flex-direction:column; gap:3px; min-width:0; }

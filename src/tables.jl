@@ -156,7 +156,14 @@ function _from_columns(names::Vector{String}, cols)
 end
 
 # The loaded `Tables` module, or `nothing` — a soft dependency (no `import Tables`).
+#
+# `_TABLES_AS` forces the answer. Detection reads the whole process, so "how does this behave when
+# Tables is absent?" stops being answerable the moment ANYTHING in the session pulls it in — and a
+# test suite that also exercises Arrow or DataFrames always does. Rather than let that invariant
+# quietly become untestable, it can be pinned: `missing` detects, `nothing` pretends absent.
+const _TABLES_AS = Ref{Any}(missing)
 function _tables_mod()
+    _TABLES_AS[] === missing || return _TABLES_AS[]
     for (id, m) in Base.loaded_modules
         id.name == "Tables" && return m
     end

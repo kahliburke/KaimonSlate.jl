@@ -2470,8 +2470,41 @@ function __slate_drop_blob(hash::String)
     end
 end
 
+# What a named cluster is doing, for the ⎈ panel. Answered HERE rather than in the hub because the
+# transfer ledger belongs to the process that did the reading, and cells read in this one. The hub
+# owns the cluster DEFINITION (the notebook footer) and passes it in, so neither side has to know
+# the other's half.
+function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{String,Any}())
+    try
+        clusters = Dict(String(name) =>
+            Dict{String,String}(String(k) => string(v) for (k, v) in spec))
+        s = Sweep.cluster_status(String(name); clusters)
+        return Dict{String,Any}(
+            "name" => s.name, "root" => s.root,
+            "kind" => get(s.spec, "kind", ""), "host" => get(s.spec, "host", ""),
+            "store" => Dict{String,Any}("bytes" => s.store.bytes, "blobs" => s.store.blobs),
+            "jobs" => Dict{String,Any}(
+                "live" => count(v -> v in (:running, :pending), values(s.live)),
+                "known" => length(s.live)),
+            "xfer" => Dict{String,Any}(
+                "bytes" => s.xfer.bytes, "reads" => s.xfer.reads, "chunks" => s.xfer.chunks,
+                "rate" => s.xfer.rate,
+                "recent" => Dict{String,Any}[Dict{String,Any}(
+                    "kind" => string(r.kind), "bytes" => r.bytes, "chunks" => r.chunks,
+                    "ms" => r.ms, "label" => r.label) for r in s.xfer.recent]),
+            "sweeps" => Dict{String,Any}[Dict{String,Any}(
+                "sweep" => r.sweep, "state" => String(r.state), "total" => r.total,
+                "done" => r.done, "ok" => r.ok, "failed" => r.failed, "armed" => r.armed,
+                "stored" => r.stored, "read" => r.read) for r in s.sweeps],
+            "err" => s.err)
+    catch e
+        return Dict{String,Any}("error" => first(sprint(showerror, e), 200))
+    end
+end
+
 function tools()
     return KaimonGate.GateTool[
+        KaimonGate.GateTool("__slate_cluster_status", __slate_cluster_status),
         KaimonGate.GateTool("__slate_eval", __slate_eval),
         KaimonGate.GateTool("__slate_rerender_fig", __slate_rerender_fig),
         KaimonGate.GateTool("__slate_eval_batch", __slate_eval_batch),

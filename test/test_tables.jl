@@ -138,13 +138,26 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
     end
 
     @testset "no auto-render without Tables.jl" begin
-        # A bare NamedTuple-vector is a Tables.jl table, but with Tables.jl absent
-        # it must fall through to the text repr — never silently become a table.
-        r = parse_report("#%% code id=t\n[(a=1,b=2),(a=3,b=4)]")
-        eval_report!(r)
-        out = r.cells[1].output
-        @test isempty(out.tables)
-        @test !isempty(out.value_repr)
+        # A bare NamedTuple-vector IS a Tables.jl table, but with Tables.jl absent it must fall
+        # through to the text repr — never silently become a table.
+        #
+        # Pinned rather than inferred from the environment: this suite loads Arrow and DataFrames
+        # for the dataset tests, and both pull Tables in, so the absent case is no longer something
+        # the process can be in. Detecting it instead of forcing it would make this pass vacuously.
+        ReportEngine._TABLES_AS[] = nothing
+        try
+            r = parse_report("#%% code id=t\n[(a=1,b=2),(a=3,b=4)]")
+            eval_report!(r)
+            out = r.cells[1].output
+            @test isempty(out.tables)
+            @test !isempty(out.value_repr)
+        finally
+            ReportEngine._TABLES_AS[] = missing
+        end
+        # …and with it present, the same value does auto-render — the other half of the contract.
+        r2 = parse_report("#%% code id=t\n[(a=1,b=2),(a=3,b=4)]")
+        eval_report!(r2)
+        @test length(r2.cells[1].output.tables) == 1
     end
 
     @testset "paged: InMemoryPagedProvider fetch_page" begin

@@ -93,45 +93,17 @@
       pop.id = 'swcfgpop';
       pop.className = 'swcfgpop';
       document.body.appendChild(pop);
-      document.addEventListener('mousedown', e => {
-        if (!e.target.closest('#swcfgpop') && !e.target.closest('.cregion.cluster')) close();
-      });
+      // Backdrop click closes; a click INSIDE the panel does not.
+      pop.addEventListener('mousedown', e => { if (e.target === pop) close(); });
       document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
     }
     if (pop.classList.contains('show') && pop.dataset.cell === id) return close();
     pop.dataset.cell = id;
     render(pop, id);
     pop.classList.add('show');
-    // Anchored to the cluster CHIP in the cell header (a span, not a button).
-    place(pop, ev && ev.target.closest('.cregion.cluster'));
     const first = pop.querySelector('input');
     if (first) first.focus();
   };
-
-  // Anchor the popover to its button, but keep it ON SCREEN: below by default, flipped above when
-  // there is no room, and clamped (with the panel scrolling) when it fits in neither. A ⎈ near the
-  // bottom of a long notebook is the common case, and an unclamped `top` puts the whole panel below
-  // the fold — visible only as a sliver glued to the bottom edge.
-  const GAP = 6, EDGE = 8;
-  function place(pop, anchor) {
-    const vw = window.innerWidth, vh = window.innerHeight;
-    const r = anchor ? anchor.getBoundingClientRect()
-                     : { left: vw / 2, right: vw / 2, top: vh / 2, bottom: vh / 2 };
-    // Measure unconstrained first, so the flip decision uses the panel's natural height.
-    pop.style.maxHeight = '';
-    const h = pop.offsetHeight, w = pop.offsetWidth;
-    const below = vh - r.bottom - GAP - EDGE, above = r.top - GAP - EDGE;
-    let top;
-    if (h <= below)      { top = r.bottom + GAP; }
-    else if (h <= above) { top = r.top - GAP - h; }
-    else {                 // fits neither: take the roomier side and let the panel scroll
-      const room = Math.max(below, above);
-      pop.style.maxHeight = room + 'px';
-      top = below >= above ? r.bottom + GAP : Math.max(EDGE, r.top - GAP - room);
-    }
-    pop.style.top = Math.round(Math.max(EDGE, Math.min(top, vh - EDGE - pop.offsetHeight))) + 'px';
-    pop.style.left = Math.round(Math.max(EDGE, Math.min(r.left - 150, vw - EDGE - w))) + 'px';
-  }
 
   function close() {
     const pop = document.getElementById('swcfgpop');
@@ -157,6 +129,52 @@
     return bits.join(' · ');
   }
 
+  const hum = b => b == null ? '—' :
+    b < 1024 ? b + ' B' :
+    b < 1048576 ? (b / 1024).toFixed(1) + ' KB' :
+    b < 1073741824 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
+
+  // What the cluster is DOING, opposite what it is configured to be. The two belong side by side:
+  // a walltime you are about to raise means something different next to "3 units never landed".
+  async function loadStatus(pop, name) {
+    const host = pop.querySelector('.swst');
+    if (!host) return;
+    if (!name) { host.innerHTML = '<div class="swst-none">No cluster named on this cell.</div>'; return; }
+    let s;
+    try {
+      s = await window.api('GET', '/api/cluster-status?name=' + encodeURIComponent(name));
+    } catch (e) {
+      host.innerHTML = `<div class="swst-none">could not read status — ${esc(String(e))}</div>`;
+      return;
+    }
+    if (!host.isConnected) return;                     // panel closed while the round trip was out
+    if (s.error) { host.innerHTML = `<div class="swst-none">${esc(s.error)}</div>`; return; }
+    const row = (k, v) => `<div class="swst-row"><span>${esc(k)}</span><span>${v}</span></div>`;
+    const sw = s.sweeps || [];
+    const stored = sw.reduce((a, r) => a + (r.stored || 0), 0);
+    host.innerHTML =
+      row('store', esc(s.root || '')) +
+      row('on disk', `${hum((s.store || {}).bytes)} <span style="opacity:.5">in ${(s.store || {}).blobs || 0} blobs</span>`) +
+      row('jobs', `${(s.jobs || {}).live || 0} live <span style="opacity:.5">of ${(s.jobs || {}).known || 0} known</span>`) +
+      row('output', hum(stored)) +
+      row('read back', `${hum((s.xfer || {}).bytes)}` +
+          (stored > 0 && (s.xfer || {}).bytes ? ` <span style="opacity:.5">(${(100 * s.xfer.bytes / stored).toFixed(2)}%)</span>` : '') +
+          ((s.xfer || {}).reads ? ` <span style="opacity:.5">· ${s.xfer.reads} reads · ${esc(s.xfer.rate)}</span>` : '')) +
+      (s.err ? `<div class="swst-none">⚠ ${esc(s.err)}</div>` : '') +
+      (sw.length
+        ? '<table class="swst-tbl"><tr><th>sweep</th><th>state</th><th class="num">units</th>' +
+          '<th class="num">stored</th><th class="num">read</th></tr>' +
+          sw.slice(0, 12).map(r =>
+            `<tr><td title="${esc(r.sweep)}">${esc(r.sweep.slice(0, 14))}</td>` +
+            `<td>${esc(r.state)}</td>` +
+            `<td class="num">${r.done}/${r.total}${r.failed ? ' <span style="color:var(--red)">✗' + r.failed + '</span>' : ''}</td>` +
+            `<td class="num">${hum(r.stored)}</td>` +
+            `<td class="num">${r.read ? hum(r.read) : '—'}</td></tr>`).join('') +
+          '</table>' +
+          (sw.length > 12 ? `<div class="swst-none">… and ${sw.length - 12} more</div>` : '')
+        : '<div class="swst-none">No sweeps in this store yet.</div>');
+  }
+
   function render(pop, id) {
     const spec = specOf(id);
     const defs = clusters();
@@ -174,7 +192,7 @@
       `<div class="swcfg-summary">${esc(clusterSummary(sel)) || (cur ? 'not defined in this notebook' : 'the cell must name a target itself')}</div>` +
       '<button class="swcfg-edit">Edit clusters…</button>';
 
-    pop.innerHTML = picker +
+    const settings = picker +
       FIELDS.map(([group, fs]) =>
         `<div class="ctlsub">${group} <span class="swcfg-sub">— override for this cell</span></div>` +
         '<div class="swcfg-grid">' +
@@ -188,6 +206,25 @@
       '<div class="swcfg-actions"><button class="swcfg-apply">Apply &amp; reconcile</button>' +
       '<button class="swcfg-cancel">Cancel</button></div>';
 
+    pop.innerHTML =
+      '<div class="swcfg-panel">' +
+        '<div class="swcfg-head"><strong>' + (cur ? esc(cur) : 'No cluster') + '</strong>' +
+          `<span class="swcfg-for">${esc(clusterSummary(sel)) || 'where this sweep runs'}` +
+          ` · cell <code>${esc(id)}</code></span>` +
+          '<button class="swcfg-x" title="close">✕</button></div>' +
+        '<div class="swcfg-body">' +
+          `<div class="swcfg-main">${settings}</div>` +
+          '<div class="swcfg-side"><div class="ctlsub">Live</div>' +
+            '<div class="swst"><div class="swst-none">…</div></div></div>' +
+        '</div>' +
+      '</div>';
+
+    // The cluster's live state, fetched once per open. A round trip to the worker (which owns the
+    // store view and the transfer ledger), so it is never on the path of opening the panel: the
+    // settings are usable immediately and this column fills in.
+    loadStatus(pop, cur);
+
+    pop.querySelector('.swcfg-x').onclick = close;
     pop.querySelector('.swcfg-cancel').onclick = close;
     pop.querySelector('.swcfg-apply').onclick = () => apply(pop, id);
     pop.querySelector('.swcfg-edit').onclick = () => { close(); openClusterEditor(cur); };
