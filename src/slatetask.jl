@@ -352,12 +352,14 @@ end
     load_binding(root, binding; zc = false) -> value
 
 Materialize one stored binding through the codec it was written with. `zc` mmaps the blob read-only
-instead of copying — safe only while nothing mutates the result.
+instead of copying — safe only while nothing mutates the result. `path` overrides where the blob is
+read from, which is how a caller reading a store it cannot open supplies a fetched copy.
 """
-function load_binding(root::AbstractString, b::AbstractDict; zc::Bool = false)
+function load_binding(root::AbstractString, b::AbstractDict; zc::Bool = false,
+                      path::AbstractString = "")
     codec = String(get(b, "codec", "jls"))
-    path = MemoStore.blob_path(root, String(b["blob"]))
-    return _codec_decode(codec, path, zc)
+    p = isempty(path) ? MemoStore.blob_path(root, String(b["blob"])) : String(path)
+    return _codec_decode(codec, p, zc)
 end
 
 # ── Reading a dataset back ───────────────────────────────────────────────────────────────────

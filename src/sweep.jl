@@ -623,7 +623,15 @@ struct ShardRef
     eltype::String
     type::String
     bytes::Int
+    src::Any            # where the BYTES are — the mirror holds manifests, never results
 end
+ShardRef(root, binding, dims, eltype, type, bytes) =
+    ShardRef(root, binding, dims, eltype, type, bytes, LocalSource(root))
+
+# A blob's local path, fetching it from the cluster first when the store is not one this hub can
+# open. Whole-value reads are the eager path — the one a sweep that returns an ordinary result uses
+# — and they were reading straight out of the mirror, where blobs deliberately never go.
+_ref_path(x::ShardRef) = blob_file(x.src, String(x.binding["blob"]), x.bytes)
 
 Base.size(x::ShardRef) = Tuple(x.dims)
 Base.length(x::ShardRef) = isempty(x.dims) ? 1 : prod(x.dims)
@@ -632,12 +640,13 @@ Base.eltype(x::ShardRef) = x.eltype
 Base.sizeof(x::ShardRef) = x.bytes
 
 "Materialize the whole value. The one call that reads all of it, and it says so."
-Base.getindex(x::ShardRef) = SlateTask.load_binding(x.root, x.binding)
+Base.getindex(x::ShardRef) =
+    SlateTask.load_binding(x.root, x.binding; path = _ref_path(x))
 
 # `zc` mmaps the blob rather than copying it, so a slice faults in only the pages it covers. The
 # mapping is read-only; the slice is copied out of it, so the caller owns ordinary memory.
 Base.getindex(x::ShardRef, i...) =
-    getindex(SlateTask.load_binding(x.root, x.binding; zc = true), i...)
+    getindex(SlateTask.load_binding(x.root, x.binding; zc = true, path = _ref_path(x)), i...)
 
 Base.show(io::IO, x::ShardRef) =
     print(io, "ShardRef(", x.type,
@@ -1465,7 +1474,7 @@ function _summary_of(m)
     return NamedTuple{ks}(Tuple(collect(values(s))))
 end
 
-function _ref(root, m)
+function _ref(root, m, src = LocalSource(root))
     bs = get(m, "bindings", Any[])
     isempty(bs) && return nothing
     b = bs[1]
@@ -1474,13 +1483,13 @@ function _ref(root, m)
     return ShardRef(String(root), Dict{String,Any}(String(k) => v for (k, v) in b),
                     Vector{Int}(get(sh, "dims", Int[])),
                     String(get(sh, "eltype", "")), String(get(sh, "type", "")),
-                    Int(get(b, "bytes", 0)))
+                    Int(get(b, "bytes", 0)), src)
 end
 
 # Manifest-only. Every field here is answered by a small TOML read, so watching a sweep — the
 # counters, the tiles, the chart — costs the same whether a unit returned a number or a gigabyte.
 # `value` is a handle; `summary` is the small number a unit recorded for charting.
-function _rows(root, params, keys)
+function _rows(root, params, keys, src = LocalSource(root))
     rows = NamedTuple[]
     for (prm, k) in zip(params, keys)
         m = MemoStore.read_manifest(root, k)
@@ -1490,7 +1499,7 @@ function _rows(root, params, keys)
             continue
         end
         st = String(get(m, "status", ""))
-        val = st == "ok" ? _ref(root, m) : get(m, "error", nothing)
+        val = st == "ok" ? _ref(root, m, src) : get(m, "error", nothing)
         push!(rows, (; params = prm, status = st, value = val,
                        summary = _summary_of(m),
                        artifacts = _arts(root, m),
@@ -1514,7 +1523,7 @@ function refresh!(r::ShardedResult)
     root = store_root(r.target)
     l = launcher_for(r.target)
     r.plan = BatchSweep.plan(root, r.run; launcher = l)
-    r.rows = _rows(root, r.params, r.keys)
+    r.rows = _rows(root, r.params, r.keys, source_of(r.target))
     r.telemetry = BatchSweep.telemetry(root, r.run; launcher = l, plan = r.plan)
     return r
 end
@@ -1737,7 +1746,7 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # The failure list rides it too, for the same reason as `why` — and off the same rows the chart
     # already needs, so watching a failing sweep costs no extra manifest reads.
     if plot !== false || p.shards_failed > 0
-        rows = _rows(root, params, keys)
+        rows = _rows(root, params, keys, source_of(target))
         if plot !== false
             opt, err = _plot_option(plot, rows)
             opt === nothing || (out["chart"] = opt)
@@ -2567,7 +2576,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     pl = BatchSweep.plan(root, run; launcher)
     tl = BatchSweep.telemetry(root, run; launcher, plan = pl)
     return ShardedResult(key, run, target, collect(params), keys, pl,
-                         _rows(root, params, keys), tl, plot)
+                         _rows(root, params, keys, source_of(target)), tl, plot)
 end
 
 # Free names in the body that are bound in the calling module and look like DATA. These travel with
