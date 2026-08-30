@@ -304,6 +304,18 @@ end
         pure = parse_report("#%% code id=src\ndata = [1,2,3]\n\n#%% code id=fit\nm = sum(data)")
         build_dependencies!(pure)
         @test !isempty(ReportEngine._memo_key(pure, pure.cells[2]))  # pure upstream stays keyable
+        # …and a SWEEP is impure for the same reason, by KIND rather than by a flag: its value is
+        # whatever has landed in its store, so the same source returns an empty result on the run
+        # that submits and every unit an hour later. Keyed off source alone, a reopened notebook
+        # restored analysis computed while the sweep was still empty — a guard cell reporting
+        # "0 rows" against a finished 1.6M-row dataset, with no error anywhere to show for it.
+        sw = parse_report("#%% sweep id=run\nres = @sweep(paramgrid(i = 1:2)) do p\n    p.i\nend\n" *
+                          "#%% code id=take\nds = res.dataset\n" *
+                          "#%% code id=plot\nn = length(ds)\n")
+        build_dependencies!(sw)
+        @test ReportEngine._memo_key(sw, sw.cells[2]) == ""          # direct reader of the sweep
+        @test ReportEngine._memo_key(sw, sw.cells[3]) == ""          # …and transitively
+        @test ReportEngine._memo_key(sw, sw.cells[1]) == ""          # the sweep itself is not CODE
         # the `cache` tag opts IN regardless of runtime: the cell stays keyable, the flag round-trips,
         # and downstream cells are unaffected (a cache-tagged stage is still pure by declaration)
         ca = parse_report("#%% code id=stage cache\ncleaned = [1,2,3]\n\n#%% code id=use\nsum(cleaned)")

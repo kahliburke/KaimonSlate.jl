@@ -827,13 +827,20 @@ end
 # upstream SOURCES, so it's only total if every upstream value is a function of its source. A
 # `nocache`/`volatile` upstream (re-runs produce fresh values from the same source) or an :opaque
 # barrier (include(): effects from outside the source) breaks that — restoring downstream against a
-# re-run impure producer would silently resurrect the PREVIOUS run's values. EXCEPTION: an :opaque
+# re-run impure producer would silently resurrect the PREVIOUS run's values. A SWEEP upstream is the
+# same thing by KIND (its value is what has landed in its store). EXCEPTION: an :opaque
 # upstream that is PURELY `using`/`import` — its effect is a function of (source, resolved env), both
 # already in the key. `:resource` is DETERMINISTIC-external (key-transparent: its source is still
 # digested, so an edit invalidates dependents). Shared cheap check (no I/O) for `_memo_key` (→
 # unkeyable) and `_memo_status` (→ the badge reason), so the two can't drift.
 function _key_poisoned(byid, closure)
     for id in closure
+        # A SWEEP's value is what has LANDED in its store, not a function of its source. The same
+        # cell returns an empty result on the run that submits and forty units an hour later, so
+        # digesting its source keys a dependent identically across both — and a reopened notebook
+        # restores analysis computed when the sweep was still empty. Same category as `:volatile`,
+        # arrived at by kind rather than by a flag.
+        byid[id].kind == SWEEP && return true
         f = byid[id].flags
         :resource in f && continue
         (:nocache in f || :volatile in f) && return true
