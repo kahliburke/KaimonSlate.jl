@@ -18,6 +18,24 @@
 // through the .jl with no schema, are readable in a diff, and reach `@sweep` through the cell's
 // execution context. Deliberately NOT part of the sweep's key: raising a walltime RESUMES the sweep
 // rather than discarding the units that already survived at the old one.
+// Byte sizes, shared by every surface in this file — the config panel and the topbar pill both
+// report the same figures, and they must not disagree about how to spell one.
+// The wall-clock time a sweep is expected to finish. Carries the date once the answer is not
+// today, because "09:20" on a run that lands tomorrow morning reads as twelve hours early.
+function etaClock(secs) {
+  const t = new Date(Date.now() + secs * 1000), now = new Date();
+  const hhmm = String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0');
+  if (t.toDateString() === now.toDateString()) return hhmm;
+  const days = Math.round((t - now) / 86400000);
+  return (days <= 6 ? t.toLocaleDateString(undefined, { weekday: 'short' })
+                    : t.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })) + ' ' + hhmm;
+}
+
+const humBytes = b => b == null ? '—' :
+  b < 1024 ? b + ' B' :
+  b < 1048576 ? (b / 1024).toFixed(1) + ' KB' :
+  b < 1073741824 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
+
 (function () {
   const FIELDS = [
     ['Scheduler', [
@@ -129,11 +147,6 @@
     return bits.join(' · ');
   }
 
-  const hum = b => b == null ? '—' :
-    b < 1024 ? b + ' B' :
-    b < 1048576 ? (b / 1024).toFixed(1) + ' KB' :
-    b < 1073741824 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
-
   // What the cluster is DOING, opposite what it is configured to be. The two belong side by side:
   // a walltime you are about to raise means something different next to "3 units never landed".
   async function loadStatus(pop, name) {
@@ -149,30 +162,58 @@
     }
     if (!host.isConnected) return;                     // panel closed while the round trip was out
     if (s.error) { host.innerHTML = `<div class="swst-none">${esc(s.error)}</div>`; return; }
-    const row = (k, v) => `<div class="swst-row"><span>${esc(k)}</span><span>${v}</span></div>`;
+
     const sw = s.sweeps || [];
-    const stored = sw.reduce((a, r) => a + (r.stored || 0), 0);
+    const jobs = s.jobs || {}, store = s.store || {}, xf = s.xfer || {};
+    const sum = k => sw.reduce((a, r) => a + (r[k] || 0), 0);
+    const stored = sum('stored'), units = sum('total'), done = sum('done');
+    const failed = sum('failed'), left = sum('missing');
+    const rate = sw.reduce((a, r) => a + (r.rate > 0 ? r.rate : 0), 0);
+    const eta = Math.max(...sw.map(r => (r.eta >= 0 ? r.eta : -1)), -1);
+    const hosts = [...new Set(sw.flatMap(r => r.hosts || []))];
+
+    // Figures, not sentences. Two groups because they answer different questions — whether the
+    // work is moving, and whether the data is.
+    const stat = (k, v, sub) =>
+      `<div class="swst-stat"><span class="swst-k">${esc(k)}</span>` +
+      `<span class="swst-v">${v}</span>` +
+      (sub ? `<span class="swst-sub">${sub}</span>` : '') + '</div>';
+    const pct = (a, b) => b > 0 ? (100 * a / b).toFixed(a / b < 0.01 ? 2 : 1) + '%' : '—';
+
     host.innerHTML =
-      row('store', esc(s.root || '')) +
-      row('on disk', `${hum((s.store || {}).bytes)} <span style="opacity:.5">in ${(s.store || {}).blobs || 0} blobs</span>`) +
-      row('jobs', `${(s.jobs || {}).live || 0} live <span style="opacity:.5">of ${(s.jobs || {}).known || 0} known</span>`) +
-      row('output', hum(stored)) +
-      row('read back', `${hum((s.xfer || {}).bytes)}` +
-          (stored > 0 && (s.xfer || {}).bytes ? ` <span style="opacity:.5">(${(100 * s.xfer.bytes / stored).toFixed(2)}%)</span>` : '') +
-          ((s.xfer || {}).reads ? ` <span style="opacity:.5">· ${s.xfer.reads} reads · ${esc(s.xfer.rate)}</span>` : '')) +
+      '<div class="swst-grp">compute</div><div class="swst-stats">' +
+        stat('jobs', `${jobs.running || 0}<span class="swst-u">run</span>` +
+                     `${jobs.pending || 0}<span class="swst-u">queue</span>`,
+             `${jobs.known || 0} submitted`) +
+        stat('units', `${done}<span class="swst-u">/${units}</span>`, pct(done, units)) +
+        stat('failed', failed ? `<b class="bad">${failed}</b>` : '0', left ? `${left} outstanding` : '') +
+        // Rate and ETA describe work still to come, so they are blank once there is none: a
+        // throughput figure on a finished cluster is a number about the past pretending to be live.
+        stat('rate', (left > 0 && rate > 0) ? rate.toFixed(2) + '<span class="swst-u">/s</span>' : '—',
+             (left > 0 && eta >= 0) ? 'eta ' + etaClock(eta) : '') +
+        stat('nodes', hosts.length || '—', hosts.slice(0, 3).join(' ')) +
+      '</div>' +
+      '<div class="swst-grp">data</div><div class="swst-stats">' +
+        stat('output', humBytes(stored), `${sw.length} sweep${sw.length === 1 ? '' : 's'}`) +
+        stat('on disk', humBytes(store.bytes), `${store.blobs || 0} blobs`) +
+        stat('read', humBytes(xf.bytes || 0), stored > 0 ? pct(xf.bytes || 0, stored) + ' of output' : '') +
+        stat('throughput', xf.reads ? esc(xf.rate) : '—', xf.reads ? `${xf.reads} reads` : '') +
+      '</div>' +
+      `<div class="swst-path" title="${esc(s.root || '')}">${esc(s.root || '')}</div>` +
       (s.err ? `<div class="swst-none">⚠ ${esc(s.err)}</div>` : '') +
       (sw.length
-        ? '<table class="swst-tbl"><tr><th>sweep</th><th>state</th><th class="num">units</th>' +
+        ? '<div class="swst-grp">sweeps</div>' +
+          '<table class="swst-tbl"><tr><th>id</th><th>state</th><th class="num">units</th>' +
           '<th class="num">stored</th><th class="num">read</th></tr>' +
           sw.slice(0, 12).map(r =>
-            `<tr><td title="${esc(r.sweep)}">${esc(r.sweep.slice(0, 14))}</td>` +
+            `<tr><td title="${esc(r.sweep)}">${esc(r.sweep.slice(2, 12))}</td>` +
             `<td>${esc(r.state)}</td>` +
-            `<td class="num">${r.done}/${r.total}${r.failed ? ' <span style="color:var(--red)">✗' + r.failed + '</span>' : ''}</td>` +
-            `<td class="num">${hum(r.stored)}</td>` +
-            `<td class="num">${r.read ? hum(r.read) : '—'}</td></tr>`).join('') +
+            `<td class="num">${r.done}/${r.total}${r.failed ? '<b class="bad"> ✗' + r.failed + '</b>' : ''}</td>` +
+            `<td class="num">${humBytes(r.stored)}</td>` +
+            `<td class="num">${r.read ? humBytes(r.read) : '—'}</td></tr>`).join('') +
           '</table>' +
-          (sw.length > 12 ? `<div class="swst-none">… and ${sw.length - 12} more</div>` : '')
-        : '<div class="swst-none">No sweeps in this store yet.</div>');
+          (sw.length > 12 ? `<div class="swst-none">+${sw.length - 12} more</div>` : '')
+        : '<div class="swst-none">no sweeps in this store</div>');
   }
 
   function render(pop, id) {
@@ -369,17 +410,6 @@
 (function () {
   const sweeps = new Map();     // key -> { key, cellId, status, ts }
 
-  // The wall-clock time a sweep is expected to finish. Carries the date once the answer is not
-  // today, because "done ~09:20" on a run that lands tomorrow morning reads as twelve hours early.
-  function etaClock(secs) {
-    const t = new Date(Date.now() + secs * 1000), now = new Date();
-    const hhmm = String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0');
-    if (t.toDateString() === now.toDateString()) return hhmm;
-    const days = Math.round((t - now) / 86400000);
-    return (days <= 6 ? t.toLocaleDateString(undefined, { weekday: 'short' })
-                      : t.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })) + ' ' + hhmm;
-  }
-
   const pill = () => document.getElementById('sweeppill');
   const text = () => document.getElementById('sweeppilltext');
   const panel = () => document.getElementById('sweeppanel');
@@ -393,17 +423,19 @@
   // rather than the work in hand.
   function summary() {
     let done = 0, total = 0, failed = 0, running = 0, bad = 0, settled = 0;
-    let alldone = 0, alltotal = 0;
+    let alldone = 0, alltotal = 0, dsbytes = 0, dsread = 0;
     for (const e of sweeps.values()) {
       const s = e.status || {};
       alldone += s.done || 0; alltotal += s.total || 0;
       failed += s.failed || 0;
+      dsbytes += s.dsbytes || 0; dsread += s.dsread || 0;
       if (RUNNING(s.state)) {
         running++; done += s.done || 0; total += s.total || 0;
       } else if (BAD(s.state)) bad++;
       else settled++;
     }
-    return { n: sweeps.size, done, total, failed, running, bad, settled, alldone, alltotal };
+    return { n: sweeps.size, done, total, failed, running, bad, settled, alldone, alltotal,
+             dsbytes, dsread };
   }
 
   function render() {
@@ -431,6 +463,12 @@
       label = `${s.n} sweep${s.n > 1 ? 's' : ''} done`;
     }
     if (s.failed > 0) label += ` · ${s.failed} failed`;
+    // Output that is NOT here. A sweep storing addressably leaves its results on the cluster, so
+    // the notebook's own size says nothing about how much there is; `↓` is what has come back.
+    if (s.dsbytes > 0) {
+      label += ` · ${humBytes(s.dsbytes)}`;
+      if (s.dsread > 0) label += ` ↓${humBytes(s.dsread)}`;
+    }
     t.textContent = label;
     if (panel() && panel().classList.contains('open')) paintPanel();
   }
@@ -448,6 +486,16 @@
       if (s.rate > 0 && !s.settled) bits.push(`${Number(s.rate).toFixed(2)}/s`);
       // When it lands, not just how fast it is going — this panel is the "can I go home?" view.
       if (s.eta >= 0 && !s.settled && !s.stuck) bits.push(`done ~${etaClock(s.eta)}`);
+      // What a sweep produced, and how much of it has come back. Progress alone reads identically
+      // for a run returning numbers and one leaving terabytes on a cluster; these are the
+      // difference. Figures, aligned — the panel is an instrument, not a description.
+      if (s.dsbytes > 0) {
+        bits.push(`<span class="swprow-fig">${humBytes(s.dsbytes)}</span>`);
+        bits.push(s.dsread > 0
+          ? `<span class="swprow-fig">↓${humBytes(s.dsread)}</span>` +
+            `<span class="swprow-pct">${(100 * s.dsread / s.dsbytes).toFixed(2)}%</span>`
+          : '<span class="swprow-pct">↓0</span>');
+      }
       return `<div class="swprow" data-cell="${e.cellId || ''}">
           <div class="swprow-top">
             <span class="swprow-dot" style="background:${col}"></span>
@@ -459,6 +507,17 @@
           ${s.blocked ? `<div class="swprow-note">${s.blocked}</div>` : ''}
         </div>`;
     }).join('') || '<div class="swprow-note">no sweeps</div>';
+    // The session total, at the foot: how much output exists against how much of it is here. A
+    // question about the notebook rather than any one sweep, so it is stated once.
+    const tot = summary();
+    if (tot.dsbytes > 0) {
+      el.innerHTML +=
+        '<div class="swprow-foot">' +
+          `<span><i>output</i>${humBytes(tot.dsbytes)}</span>` +
+          `<span><i>read</i>${humBytes(tot.dsread)}</span>` +
+          `<span><i>of it</i>${(100 * tot.dsread / tot.dsbytes).toFixed(2)}%</span>` +
+        '</div>';
+    }
 
     // Clicking a row scrolls to the cell that owns it — the pill's whole job is to get you back to
     // the thing it is telling you about.

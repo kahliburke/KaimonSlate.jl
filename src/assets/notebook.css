@@ -830,12 +830,28 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .swcfgpop .ctlsub { margin:12px 0 6px; color:var(--dim); font-size:.68rem; font-weight:600;
   text-transform:uppercase; letter-spacing:.06em; }
 .swcfgpop .ctlsub:first-child { margin-top:0; }
-/* Live status, right-hand column. Figures line up in a column so a size that has grown since the
-   last look is obvious without reading the labels. */
-.swst-row { display:flex; gap:10px; align-items:baseline; padding:3px 0; }
-.swst-row > span:first-child { color:var(--dim); width:78px; flex:none; font-size:.72rem; }
-.swst-row > span:last-child { font-family:'Cascadia Code',ui-monospace,monospace; font-size:.75rem;
-  min-width:0; overflow-wrap:anywhere; }
+/* Live status, right-hand column — read as instrumentation, not prose. Figures are large and
+   monospaced, units and qualifiers small beside them, so the numbers are what the eye lands on and
+   a value that has moved since the last look is obvious without reading a word. */
+.swst-grp { color:var(--dim); font-size:.62rem; font-weight:700; text-transform:uppercase;
+  letter-spacing:.1em; margin:14px 0 7px; padding-bottom:4px;
+  border-bottom:1px solid var(--border); }
+.swst-grp:first-child { margin-top:0; }
+.swst-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(88px,1fr)); gap:10px 12px; }
+.swst-stat { display:flex; flex-direction:column; gap:1px; min-width:0; }
+.swst-k { color:var(--dim); font-size:.62rem; text-transform:uppercase; letter-spacing:.06em; }
+.swst-v { font-family:'Cascadia Code',ui-monospace,monospace; font-size:1rem; line-height:1.25;
+  color:var(--strong); font-variant-numeric:tabular-nums; }
+.swst-v .swst-u { font-size:.62rem; color:var(--dim); margin-left:2px; margin-right:5px;
+  letter-spacing:.02em; }
+.swst-v .bad { color:var(--red); }
+.swst-sub { color:var(--dim); font-size:.64rem; font-variant-numeric:tabular-nums;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* Wraps rather than truncating. `direction:rtl` would keep the distinguishing tail of a long path
+   visible, but it is a BiDi reorder, not a scroll: the leading `/` of an absolute path is a neutral
+   character and gets pushed to the other end, so the path renders subtly wrong. */
+.swst-path { margin-top:12px; color:var(--dim); font-size:.64rem;
+  font-family:'Cascadia Code',ui-monospace,monospace; overflow-wrap:anywhere; line-height:1.5; }
 .swst-tbl { width:100%; border-collapse:collapse; margin-top:6px; font-size:.72rem;
   font-family:'Cascadia Code',ui-monospace,monospace; }
 .swst-tbl th { text-align:left; color:var(--dim); font-weight:600; padding:4px 8px 4px 0;
@@ -2552,3 +2568,15 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .swprow-bar { height:4px; border-radius:2px; background:var(--bg3); overflow:hidden; margin-top:6px; }
 .swprow-bar > span { display:block; height:100%; transition:width .3s; }
 .swprow-note { font-size:.7rem; color:var(--dim); padding:4px 9px; }
+/* Data figures on a sweep row, and the session total under them — read as gauges, so the numbers
+   are monospaced and tabular and their labels get out of the way. */
+.swprow-fig { font-family:'Cascadia Code',ui-monospace,monospace; font-variant-numeric:tabular-nums;
+  color:var(--val); }
+.swprow-pct { color:var(--dim); font-size:.66rem; font-variant-numeric:tabular-nums; }
+.swprow-foot { display:flex; gap:16px; padding:8px 9px; margin-top:3px;
+  border-top:1px solid var(--border); }
+.swprow-foot > span { display:flex; flex-direction:column; gap:1px;
+  font-family:'Cascadia Code',ui-monospace,monospace; font-size:.8rem; color:var(--strong);
+  font-variant-numeric:tabular-nums; }
+.swprow-foot i { font-style:normal; color:var(--dim); font-size:.6rem; text-transform:uppercase;
+  letter-spacing:.07em; font-family:inherit; }

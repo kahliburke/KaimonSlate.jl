@@ -2483,7 +2483,11 @@ function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{S
             "name" => s.name, "root" => s.root,
             "kind" => get(s.spec, "kind", ""), "host" => get(s.spec, "host", ""),
             "store" => Dict{String,Any}("bytes" => s.store.bytes, "blobs" => s.store.blobs),
+            # Queued and running are counted apart: "8 jobs live" reads the same whether the
+            # scheduler is working or the queue is simply long, and those need different actions.
             "jobs" => Dict{String,Any}(
+                "running" => count(==(:running), values(s.live)),
+                "pending" => count(==(:pending), values(s.live)),
                 "live" => count(v -> v in (:running, :pending), values(s.live)),
                 "known" => length(s.live)),
             "xfer" => Dict{String,Any}(
@@ -2494,8 +2498,11 @@ function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{S
                     "ms" => r.ms, "label" => r.label) for r in s.xfer.recent]),
             "sweeps" => Dict{String,Any}[Dict{String,Any}(
                 "sweep" => r.sweep, "state" => String(r.state), "total" => r.total,
-                "done" => r.done, "ok" => r.ok, "failed" => r.failed, "armed" => r.armed,
-                "stored" => r.stored, "read" => r.read) for r in s.sweeps],
+                "done" => r.done, "ok" => r.ok, "failed" => r.failed,
+                "missing" => r.missing, "armed" => r.armed, "blocked" => r.blocked,
+                "rate" => r.rate, "eta" => r.eta, "idle" => r.idle,
+                "hosts" => r.hosts, "stored" => r.stored, "read" => r.read)
+                for r in s.sweeps],
             "err" => s.err)
     catch e
         return Dict{String,Any}("error" => first(sprint(showerror, e), 200))

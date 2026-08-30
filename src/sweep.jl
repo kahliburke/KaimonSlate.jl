@@ -817,11 +817,17 @@ function cluster_status(name::AbstractString = "";
     try
         for (sw, created) in store_sweeps(root)
             p = BatchSweep.plan(root, sw; launcher = l)
+            t = BatchSweep.telemetry(root, sw; launcher = l, plan = p)
             push!(rows, (; sweep = sw, created,
                            state = display_state(p, BatchSweep.is_armed(root, sw)),
                            total = p.shards_total, done = p.shards_done,
                            ok = p.shards_ok, failed = p.shards_failed,
+                           missing = p.shards_missing, blocked = p.blocked,
                            armed = BatchSweep.is_armed(root, sw),
+                           rate = t.rate_per_s, eta = t.eta_s,
+                           idle = BatchSweep.stalled_for(t),
+                           hosts = unique(String[r.ran_on for r in BatchSweep.results(root, sw)
+                                                 if !isempty(String(r.ran_on))]),
                            stored = sweep_bytes(root, sw),
                            read = transferred(sw)))
         end
@@ -1394,7 +1400,15 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         "why" => _why_html(p))
     # The data line grows as units land, so it rides the poll too. Off the indices, so a sweep
     # writing terabytes still costs manifest reads to watch.
-    out["data"] = _data_html(_dataset_of(root, params, keys, run))
+    ds = _dataset_of(root, params, keys, run)
+    out["data"] = _data_html(ds)
+    # …and the same two figures as NUMBERS, for the notebook-level pill. The card can render HTML;
+    # the topbar panel aggregates across sweeps and needs to add them up.
+    if nparts(ds) > 0
+        out["dsbytes"] = databytes(ds)
+        out["dsread"] = transferred(run)
+        out["dskind"] = String(ds.kind)
+    end
 
     # The chart rides the SAME poll as the counters, so a filling plot costs no extra round trip and
     # cannot disagree with the numbers beside it.
@@ -1886,7 +1900,7 @@ function _live_script(io, r::ShardedResult)
                  document.currentScript.parentElement;
       if (!root || root.dataset.swLive === "1") return;
       root.dataset.swLive = "1";
-      var started = Date.now(), timer = null, chart = null;
+      var started = Date.now(), timer = null, chart = null, settled = false;
       var watching = $(poll ? "true" : "false");   // was there anything left to watch at render?
       // The last state the card knows about, seeded from the render so the buttons can speak
       // accurately before the first poll lands.
@@ -1914,6 +1928,13 @@ function _live_script(io, r::ShardedResult)
                           : t.toLocaleDateString(undefined, { day: "numeric", month: "short" })) + " " + hhmm;
       }
       function interval(){
+        // A sweep that has SETTLED still has a figure that moves: how much of its output has been
+        // read. Reads happen after the work finishes — that is when you read it — so a card that
+        // stopped polling on settle froze its data line at "nothing read" and the topbar total with
+        // it. Slow heartbeat rather than a stop, and only for a sweep that HAS a dataset.
+        // Deliberately slack: a poll costs one manifest read per unit, so a finished sweep of a few
+        // thousand units is not something to ask about every two seconds for the rest of a session.
+        if (settled) return 30000;
         var mins = (Date.now() - started) / 60000;
         return mins < 2 ? 2000 : mins < 15 ? 5000 : 15000;
       }
@@ -1985,6 +2006,10 @@ function _live_script(io, r::ShardedResult)
         }
         if (s.settled || s.blocked){
           clearInterval(timer); timer = null;
+          // …but a sweep holding a DATASET is not finished changing: how much of it has been read
+          // moves every time a cell slices it, which is after the work is over. Keep a slow
+          // heartbeat for that one figure so the card and the topbar total stay true.
+          if (s.dsbytes > 0) { settled = true; timer = setInterval(tick, interval()); }
           // Tell Julia ONCE that the work is over, so the cells that read this sweep recompute.
           // Only for a settle we actually WATCHED: a card that rendered already-finished has
           // nothing to announce, and announcing anyway would restale the notebook's downstream
