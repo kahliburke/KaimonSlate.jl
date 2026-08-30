@@ -360,6 +360,43 @@ end
         end
     end
 
+    @testset "only genuinely free names are captured" begin
+        # Captures enter the sweep key, so a name the body BINDS must never be mistaken for one it
+        # reads. A symbol scrape counted comprehension and loop variables as free: a body written
+        # over `x` then captured whatever the notebook happened to keep under that name, and an
+        # unrelated cell assigning to `x` re-keyed the sweep and orphaned every finished unit.
+        # Call heads (`*`, `:`, `println`) come back as free names and are dropped downstream by
+        # `_collect_captures`, which never ships a function. Filter them here for the same reason:
+        # what is under test is which DATA names travel.
+        cn(src) = Set(n for n in Sweep._capture_names(Meta.parse(src), :p)
+                      if !(isdefined(Base, n) && getfield(Base, n) isa Function))
+        @test cn("[x^2 for x in 1:n]") == Set([:n])                    # generator variable
+        @test cn("[x * y for x in a, y in b]") == Set([:a, :b])        # multi-dimensional
+        @test cn("[x for x in a if x > lo]") == Set([:a, :lo])         # …with a filter
+        @test cn("begin\n  s = 0\n  for i in 1:m; s += i * w; end\n  s\nend") == Set([:m, :w])
+        @test cn("let q = seed; q * 2; end") == Set([:seed])           # let binding
+        @test cn("begin\n  f(z) = z + off\n  f(p.x)\nend") == Set([:off])   # inner def: name + args
+        @test cn("map(v -> v * scale, xs)") == Set([:xs, :scale])      # lambda parameter
+        @test cn("sum(rand(rng, k) for _ in 1:reps)") == Set([:rng, :k, :reps])
+        @test cn("range(-1, 1; length = npts)") == Set([:npts])        # `length` is a keyword NAME
+        @test cn("begin\n  acc = base\n  acc += 1\n  acc\nend") == Set([:base])
+        @test cn("(rows[i] = v; rows)") == Set([:rows, :i, :v])        # assigning THROUGH a variable
+        @test cn("p.field") == Set{Symbol}()                            # field names are not reads
+
+        # …and the effect on the key: an unrelated global sharing a comprehension variable's name
+        # must not move it.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            g = Sweep.paramgrid(i = 1:2)
+            k1 = Sweep.@sweep(g, t; submit = false) do p; sum(x^2 for x in 1:p.i); end.key
+            x = "an unrelated cell now defines x"      # ← what used to re-key the sweep
+            k2 = Sweep.@sweep(g, t; submit = false) do p; sum(x^2 for x in 1:p.i); end.key
+            @test k1 == k2
+            @test x isa String                          # (keep the binding live, not optimised away)
+        end
+    end
+
     @testset "a pilot and the full sweep share results but not a schedule" begin
         # The pattern the fabric exists to encourage: run four points, look at them, then run four
         # thousand with the same body and pay only for the difference. That makes the two cells the

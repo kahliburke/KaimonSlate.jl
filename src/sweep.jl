@@ -2611,21 +2611,105 @@ function _hoist_imports(ex)
     return (found, body)
 end
 
+# Augmented assignment. `x += 1` needs `x` to exist, but inside a function body it makes `x` local
+# all the same, so the target is a binding here like any other.
+const _AUG_ASSIGN = Set{Symbol}([:+=, :-=, :*=, :/=, ://=, :\=, :^=, :%=, :÷=, :|=, :&=, :⊻=,
+                                 :>>>=, :>>=, :<<=])
+
+"""
+    _capture_names(body, param) -> Set{Symbol}
+
+The names the body reads from the notebook — the values that have to travel with it.
+
+Scope matters here, and a plain symbol scrape does not have it. A comprehension variable, a loop
+variable or a local assignment is bound INSIDE the body; counting one as free captures whatever the
+notebook happens to keep under that name. Captures enter the sweep key, so an unrelated cell
+assigning to that name re-keys the sweep and orphans every result it has already computed.
+
+Bound names are collected flat over the whole body, which is also how Julia scopes a plain
+assignment inside a function. Where the two differ — a name used as a loop variable in one place
+and read as a global in another — this errs toward NOT capturing, so the unit fails on the compute
+node with an `UndefVarError` naming the variable rather than running against an unrelated value.
+"""
 function _capture_names(body, param::Symbol)
-    found = Set{Symbol}()
+    bound = _bound_names(body)
+    push!(bound, param)
+    free = Set{Symbol}()
+    read_(x) = nothing
+    read_(s::Symbol) = (s in bound || push!(free, s); nothing)
+    function read_(e::Expr)
+        h = e.head
+        h === :quote && return nothing                          # quoted code holds no variable reads
+        if h === :. && length(e.args) == 2                      # `a.b` — `b` names a field
+            read_(e.args[1]); return nothing
+        elseif h === :kw && length(e.args) == 2                 # `f(; k = v)` — `k` names a keyword
+            read_(e.args[2]); return nothing
+        end
+        for a in e.args; read_(a); end
+        return nothing
+    end
+    read_(body)
+    return free
+end
+
+# Every name the body BINDS: assignment targets, loop and comprehension variables, `let` bindings,
+# the parameters and names of functions defined inside it, `local` declarations. Only binding
+# POSITIONS are collected — a right-hand side is a read, and belongs to `_capture_names`.
+function _bound_names(body)
+    out = Set{Symbol}()
+    # A binding target: `x`, `(a, b)`, `x::T`, `x = default`, `x...`, or a `f(a, b)` signature.
+    # Heads that are absent on purpose: `a[i] = v` and `a.f = v` assign THROUGH a variable rather
+    # than binding one, so they fall through and `a` stays a read.
+    tgt(x) = nothing
+    tgt(s::Symbol) = (push!(out, s); nothing)
+    function tgt(e::Expr)
+        if e.head in (:tuple, :parameters, :call)
+            for a in e.args; tgt(a); end
+        elseif e.head in (:(::), :(=), :kw, :..., :where) && !isempty(e.args)
+            tgt(e.args[1])
+        end
+        return nothing
+    end
+    # `for x in it`, `[… for x in it]` and their multi-variable forms all carry their variables in
+    # `x = it` / `x in it` specs, optionally wrapped in a `:block` (`for i in a, j in b`) or a
+    # `:filter` (`… for x in it if p(x)`).
+    spec(x) = nothing
+    function spec(e::Expr)
+        if e.head === :block || e.head === :filter
+            for a in e.args; spec(a); end
+        elseif e.head in (:(=), :in) && !isempty(e.args)
+            tgt(e.args[1])
+        end
+        return nothing
+    end
     walk(x) = nothing
-    walk(s::Symbol) = (push!(found, s); nothing)
     function walk(e::Expr)
-        # Skip the field name in `a.b` and keyword names in `f(; k = v)`.
-        if e.head === :. && length(e.args) == 2
-            walk(e.args[1]); return nothing
+        h = e.head
+        if h === :(=) || h in _AUG_ASSIGN
+            !isempty(e.args) && tgt(e.args[1])
+        elseif h === :for
+            !isempty(e.args) && spec(e.args[1])
+        elseif h === :generator
+            for a in Iterators.drop(e.args, 1); spec(a); end
+        elseif h === :let
+            !isempty(e.args) && spec(e.args[1])
+            # `let x; … end` declares without assigning, which `spec` does not see as a binding.
+            b = e.args[1]
+            b isa Symbol && tgt(b)
+            b isa Expr && b.head === :block && for a in b.args; a isa Symbol && tgt(a); end
+        elseif h === :function || h === :->
+            # A `f(x) do y … end` is `:do(call, ->)`: the lambda's parameters are on the `->`, which
+            # this branch catches on the way down. Binding the CALL's arguments instead would be
+            # wrong — they are reads.
+            !isempty(e.args) && tgt(e.args[1])
+        elseif h === :local
+            for a in e.args; tgt(a); end
         end
         for a in e.args; walk(a); end
         return nothing
     end
     walk(body)
-    delete!(found, param)
-    return found
+    return out
 end
 
 function _collect_captures(mod::Module, names, param::Symbol)
