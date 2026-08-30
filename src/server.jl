@@ -2662,7 +2662,20 @@ function _preempt_superseded!(nb::LiveNotebook, cells)
     return nothing
 end
 
-# Build the parallel-batch scheduler specs for `code` cells (document order). Plotting cells share
+# The cells a parallel drain will evaluate, in document order — EVERY one of them, which is what
+# makes the batch safe to schedule from. `par_blockers` derives ordering from the batch alone: a dep
+# on a cell outside it is silently dropped, and the read/write backstop can only see writers that are
+# present. Selecting just the CODE kind therefore ran cells BEFORE the WEB or SWEEP cell they read —
+# a plot downstream of a sweep raised `UndefVarError` on every cold open, then worked when re-run by
+# hand, because by then its producer had run in the serial pass.
+#
+# MARKDOWN is excluded because the serial path renders it (static prose first, interpolating prose
+# after its deps); TOOL because it never runs automatically, so deferring its readers would strand
+# them rather than order them.
+_batch_cells(cells) = [c for c in cells if c.state == STALE && c.kind !== MARKDOWN &&
+                       ReportEngine.runs_automatically(c.kind)]
+
+# Build the parallel-batch scheduler specs for the cells about to run (document order). Plotting cells share
 # Makie's non-thread-safe globals (theme / current-figure / display stack), invisible to dataflow
 # analysis — so they get a synthetic shared write (`_GRAPHICS_SENTINEL`), making par_blockers serialise
 # graphics-vs-graphics (else two plots run concurrently → `ConcurrencyViolationError` deep in
@@ -2693,9 +2706,9 @@ function _run_code_batch!(nb::LiveNotebook)
     # dependency-ordered runs — the per-cell path handles both.
     _region_active(nb) && return false
     specs, npending = lock(nb.lock) do
-        code = [c for c in nb.report.cells if c.kind == CODE && c.state == STALE]
-        length(code) < 2 && return (nothing, 0)
-        ss = _batch_specs(code)
+        runnable = _batch_cells(nb.report.cells)
+        length(runnable) < 2 && return (nothing, 0)
+        ss = _batch_specs(runnable)
         (ss, count(c -> c.state in (STALE, RUNNING), nb.report.cells))
     end
     specs === nothing && return false

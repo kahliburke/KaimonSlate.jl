@@ -26,7 +26,11 @@ struct ParCell
     opaque::Bool          # `using`/import barrier or otherwise un-analyzable → serialize conservatively
 end
 
-# `cells` MUST be in document order. Returns id → Set of earlier-cell ids it must wait for.
+# `cells` MUST be in document order, and MUST be every cell the run will evaluate. Both safety nets
+# below are scoped to the batch — an unknown dep id is skipped, and the read/write backstop only sees
+# writers that are present — so a producer left OUT of the batch imposes no ordering at all and its
+# readers run before it. Passing a subset does not merely cost parallelism; it is incorrect.
+# Returns id → Set of earlier-cell ids it must wait for.
 # Indexed build — O(V + E + Σ conflicts) instead of the pairwise O(V²) scan. Blocker set per the
 # rule above: earlier opaques (everything earlier if THIS cell is opaque), earlier batch cells in
 # `deps`, and earlier writers of any name this cell reads or writes.

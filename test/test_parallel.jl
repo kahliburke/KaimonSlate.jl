@@ -53,6 +53,33 @@ cell(src) = RE.Cell("c", RE.CODE, src)
         end
     end
 
+    @testset "the batch holds every cell the drain will run" begin
+        # `par_blockers` scopes both its safety nets to the batch, so a producer left out imposes no
+        # ordering on its readers at all. Selecting only CODE ran a plot BEFORE the sweep it reads —
+        # `UndefVarError` on every cold open, then fine when re-run by hand.
+        src = "#%% code id=grid\nzs = 1:4\n" *
+              "#%% md id=prose\n## a heading\n" *
+              "#%% sweep id=vol\nvolume = @sweep(paramgrid(z = zs)) do p\n    p.z\nend\n" *
+              "#%% code id=plot\nframes = collect(volume)\n" *
+              "#%% tool id=call\n@tool deploy()\n"
+        r = RE.parse_report(src)
+        foreach(RE.infer_bindings!, r.cells)
+        RE.build_dependencies!(r)
+        for c in r.cells; c.state = RE.STALE; end
+
+        ids = [c.id for c in NS._batch_cells(r.cells)]
+        @test ids == ["grid", "vol", "plot"]        # markdown renders serially, a tool never auto-runs
+
+        # …and with the sweep present, the reader is ordered behind it.
+        bl = NS.par_blockers(NS._batch_specs(NS._batch_cells(r.cells)))
+        @test "vol" in bl["plot"]
+        @test !NS.co_runnable(["vol", "plot"], bl)
+
+        # The regression itself: drop the sweep (the old CODE-only filter) and the ordering vanishes.
+        codeonly = [c for c in r.cells if c.kind == RE.CODE && c.state == RE.STALE]
+        @test NS.co_runnable(["grid", "plot"], NS.par_blockers(NS._batch_specs(codeonly)))
+    end
+
     @testset "_preempt_victims: only running pure-compute cells are interruptible" begin
         running(src) = (c = cell(src); c.state = RE.RUNNING; c)
         # a running compute cell is a victim; the guards must hold everything else back
