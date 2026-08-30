@@ -929,8 +929,20 @@ end
 function Base.show(io::IO, ::MIME"text/plain", s::ClusterStatus)
     println(io, "cluster ", s.name, " — ", get(s.spec, "kind", "?"),
             haskey(s.spec, "host") && !isempty(s.spec["host"]) ? " @ " * s.spec["host"] : "")
-    println(io, "   store   ", s.root)
-    println(io, "           ", _bytes(s.store.bytes), " in ", s.store.blobs, " blobs")
+    # Name the STORE, and label the mirror as the shadow it is. Printing the local path against a
+    # figure measured on the cluster invited exactly the wrong reading of both.
+    host = String(get(s.spec, "host", ""))
+    far = String(get(s.spec, "root_remote", ""))
+    println(io, "   store   ", (isempty(host) || isempty(far)) ? s.root : host * ":" * far)
+    # The gap between what the sweeps claim and what the store weighs is blobs nothing references
+    # any more — a reset sweep, a re-keyed one. On a quota'd scratch that is the number worth
+    # seeing. Only mentioned when it clears block-rounding, and never when dedup inverts it.
+    claimed = sum(r.stored for r in s.sweeps; init = 0)
+    loose = s.store.bytes - claimed
+    println(io, "           ", _bytes(s.store.bytes), " in ", s.store.blobs, " blobs",
+            (claimed > 0 && s.store.bytes > claimed * 11 ÷ 10) ?
+                " · " * _bytes(loose) * " unreferenced" : "")
+    (isempty(host) || isempty(far)) || println(io, "   mirror  ", s.root, "  (metadata only)")
     nlive = count(v -> v in (:running, :pending), values(s.live))
     println(io, "   jobs    ", isempty(s.live) ? "none submitted" :
             string(nlive, " live of ", length(s.live), " known"))

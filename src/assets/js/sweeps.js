@@ -195,11 +195,23 @@ const humBytes = b => b == null ? '—' :
       '</div>' +
       '<div class="swst-grp">data</div><div class="swst-stats">' +
         stat('output', humBytes(stored), `${sw.length} sweep${sw.length === 1 ? '' : 's'}`) +
-        stat('on disk', humBytes(store.bytes), `${store.blobs || 0} blobs`) +
+        // `output` is what the sweeps in this store claim; `on disk` is what the store weighs. A
+        // large gap is blobs nothing references any more — a reset sweep, a re-keyed one — and on
+        // a quota'd scratch that is the number worth seeing. Only flagged when it is well clear of
+        // block-rounding, and never when dedup makes the disk figure the smaller of the two.
+        stat('on disk', humBytes(store.bytes),
+             `${store.blobs || 0} blobs` +
+             (store.bytes > stored * 1.1 && stored > 0
+                ? ` · ${humBytes(store.bytes - stored)} unreferenced` : '')) +
         stat('read', humBytes(xf.bytes || 0), stored > 0 ? pct(xf.bytes || 0, stored) + ' of output' : '') +
         stat('throughput', xf.reads ? esc(xf.rate) : '—', xf.reads ? `${xf.reads} reads` : '') +
       '</div>' +
-      `<div class="swst-path" title="${esc(s.root || '')}">${esc(s.root || '')}</div>` +
+      // The store, then the mirror — labelled, because the mirror is a local cache of the metadata
+      // and the size above it was measured on the cluster.
+      (s.host && s.store_path
+        ? `<div class="swst-path" title="${esc(s.host + ':' + s.store_path)}">${esc(s.host + ':' + s.store_path)}</div>` +
+          `<div class="swst-path swst-dim" title="${esc(s.root || '')}">mirror ${esc(s.root || '')}</div>`
+        : `<div class="swst-path" title="${esc(s.root || '')}">${esc(s.root || '')}</div>`) +
       (s.err ? `<div class="swst-none">⚠ ${esc(s.err)}</div>` : '') +
       (sw.length
         ? '<div class="swst-grp">sweeps</div>' +

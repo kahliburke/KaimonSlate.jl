@@ -454,6 +454,27 @@ const MS = RE.MemoStore
             @test far.blobs == RE.Sweep.store_size(root).blobs
             @test RE.Sweep.store_size(RE.Sweep.SshSource("", joinpath(root, "nope"))).bytes == 0
 
+            # The panel names the STORE and labels the mirror. Printing a local cache path against
+            # a size measured on the cluster invited the wrong reading of both.
+            far = RE.Sweep.ClusterStatus(
+                "hpc", Dict("kind" => "slurm", "host" => "login1", "root_remote" => "/scratch/cas"),
+                "/home/me/.cache/mirror", s.sweeps, s.live, s.store, s.xfer, "")
+            txt = sprint(show, MIME"text/plain"(), far)
+            @test occursin("store   login1:/scratch/cas", txt)
+            @test occursin("mirror  /home/me/.cache/mirror", txt)
+            # …and a local cluster has no mirror to distinguish, so it says nothing about one.
+            @test !occursin("mirror", sprint(show, MIME"text/plain"(), s))
+
+            # Blobs nothing references any more are the reclaimable half of a quota, so the gap
+            # between what the sweeps claim and what the store weighs is named when it is real —
+            # and not when dedup or block-rounding accounts for it.
+            big = RE.Sweep.ClusterStatus("hpc", s.spec, root, s.sweeps, s.live,
+                                         (; bytes = 10 * row.stored, blobs = 99), s.xfer, "")
+            @test occursin("unreferenced", sprint(show, MIME"text/plain"(), big))
+            tight = RE.Sweep.ClusterStatus("hpc", s.spec, root, s.sweeps, s.live,
+                                           (; bytes = row.stored, blobs = 4), s.xfer, "")
+            @test !occursin("unreferenced", sprint(show, MIME"text/plain"(), tight))
+
             # Naming a cluster the notebook does not define says which ones it does.
             e = try; RE.Sweep.cluster_status("nope"; clusters); "" catch x; sprint(showerror, x); end
             @test occursin("no cluster `nope`", e) && occursin("here", e)

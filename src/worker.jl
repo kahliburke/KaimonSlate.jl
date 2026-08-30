@@ -2480,7 +2480,11 @@ function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{S
             Dict{String,String}(String(k) => string(v) for (k, v) in spec))
         s = Sweep.cluster_status(String(name); clusters)
         return Dict{String,Any}(
+            # `root` is where the HUB plans — the mirror, for a cluster. `store` is where the data
+            # actually is. The panel shows the second and labels the first, so a local cache path
+            # is never read as the size beside it.
             "name" => s.name, "root" => s.root,
+            "store_path" => String(get(s.spec, "root_remote", "")),
             "kind" => get(s.spec, "kind", ""), "host" => get(s.spec, "host", ""),
             "store" => Dict{String,Any}("bytes" => s.store.bytes, "blobs" => s.store.blobs),
             # Queued and running are counted apart: "8 jobs live" reads the same whether the

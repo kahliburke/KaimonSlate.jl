@@ -852,6 +852,8 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
    character and gets pushed to the other end, so the path renders subtly wrong. */
 .swst-path { margin-top:12px; color:var(--dim); font-size:.64rem;
   font-family:'Cascadia Code',ui-monospace,monospace; overflow-wrap:anywhere; line-height:1.5; }
+/* The mirror sits under the store it shadows: same line, less weight. */
+.swst-path.swst-dim { margin-top:2px; opacity:.6; }
 .swst-tbl { width:100%; border-collapse:collapse; margin-top:6px; font-size:.72rem;
   font-family:'Cascadia Code',ui-monospace,monospace; }
 .swst-tbl th { text-align:left; color:var(--dim); font-weight:600; padding:4px 8px 4px 0;
