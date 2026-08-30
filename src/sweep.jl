@@ -737,15 +737,26 @@ const DATASET_ROW_CAP = 1_000_000
 
 Read a bounded row range. Only the chunks covering `rows` are opened, and only the columns named.
 """
-function Base.getindex(ds::Dataset, rows::AbstractUnitRange, cols = nothing)
+Base.getindex(ds::Dataset, rows::AbstractUnitRange, cols = nothing) = load(ds, rows; select = cols)
+
+"""
+    load(ds, rows; select = nothing, max_rows = DATASET_ROW_CAP) -> NamedTuple of columns
+
+The read behind `ds[rows]`, with the cap exposed. Raising `max_rows` is how you ask for more than a
+look — deliberately, at one call site, with the number written down.
+"""
+function load(ds::Dataset, rows::AbstractUnitRange; select = nothing,
+              max_rows::Integer = DATASET_ROW_CAP)
     ds.kind === :table ||
         error("this dataset holds arrays, not rows — `ds[k]` for part k, then slice that part")
     n = length(ds)
     (first(rows) >= 1 && last(rows) <= n) ||
         throw(BoundsError("rows $(rows) outside 1:$(n)"))
-    length(rows) <= DATASET_ROW_CAP ||
-        error("$(length(rows)) rows is over the $(DATASET_ROW_CAP)-row slice cap — " *
-              "narrow the range, or use `scan(ds; limit = …)` to stream a filtered subset")
+    length(rows) <= max_rows ||
+        error("$(length(rows)) rows is over the $(max_rows)-row slice cap — narrow the range, " *
+              "use `scan(ds; limit = …)` to stream a filtered subset, or raise it deliberately " *
+              "with `Sweep.load(ds, rows; max_rows = …)`")
+    cols = select
     acc = nothing
     for (i, local_rows) in _ds_span(ds, rows)
         p = ds.parts[i]
@@ -2018,12 +2029,13 @@ macro sweep(args...)
     submit = get(opts, :submit, false)
     res    = get(opts, :resources, nothing)
     plot   = get(opts, :plot, nothing)
+    lazy   = get(opts, :lazy, false)
     # An unknown option is an error rather than a silent no-op: `@sweep(…, wallclock = "2h")` that
     # quietly does nothing is worse than one that says so.
     for k in keys(opts)
-        k in (:setup, :cap, :submit, :resources, :plot, :summary) ||
+        k in (:setup, :cap, :submit, :resources, :plot, :summary, :lazy) ||
             error("@sweep: unknown option `$k` " *
-                  "(accepted: setup, cap, submit, resources, plot, summary)")
+                  "(accepted: setup, cap, submit, resources, plot, summary, lazy)")
     end
 
     # What the shard module needs before the body runs: the imports lifted out of the body, then
@@ -2073,7 +2085,7 @@ macro sweep(args...)
                            setup_src = $setup, captures = _caps,
                            cap = $(esc(cap)), submit = $(esc(submit)), register = _reg,
                            resources = $(esc(res)), plot = $(esc(plot)),
-                           summary_src = $sumsrc,
+                           summary_src = $sumsrc, lazy = $(esc(lazy)),
                            refresh = _refresh, cell = String(_cell), attrs = _attrs)
     end
 end

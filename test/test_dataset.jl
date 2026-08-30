@@ -116,6 +116,96 @@ const MS = RE.MemoStore
         @test ST._ds_columns((; a = 1)) === nothing                    # scalars are not columns
     end
 
+    @testset "the notebook sees one dataset across every unit" begin
+        # What the author actually touches. The units are separate jobs writing separate files; the
+        # notebook asks one object for its schema and its rows and never learns that.
+        mktempdir() do root
+            t = RE.Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                     payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = RE.Sweep.@sweep(RE.Sweep.paramgrid(part = 1:4), t; submit = false, lazy = true) do p
+                n = 250
+                (; part = fill(p.part, n), i = collect(1:n), x = float.(1:n) .* p.part)
+            end
+            for c in RE.BatchSweep.sweep_chunks(root, r.run); ST.run_chunk(root, c); end
+            RE.Sweep.refresh!(r)
+            ds = r.dataset
+
+            # Describing it reads no data — schema and totals come from the indices.
+            @test ds.kind === :table
+            @test RE.Sweep.nparts(ds) == 4
+            @test length(ds) == 1000                       # 4 units × 250 rows, one row space
+            @test ds.columns == ["part", "i", "x"]
+            @test occursin("1000 rows", sprint(show, MIME"text/plain"(), ds))
+
+            # A slice spanning a UNIT BOUNDARY: rows 249..252 straddle parts 1 and 2.
+            s = ds[249:252]
+            @test s.part == [1, 1, 2, 2]
+            @test s.i == [249, 250, 1, 2]
+            @test ds[1:1].i == [1] && ds[1000:1000].part == [4]
+            @test ds[1:1000].i == repeat(collect(1:250), 4)
+
+            # Column projection, and the single-column shorthand.
+            @test keys(ds[1:3, (:i,)]) == (:i,)
+            @test ds[1:3, :i] == [1, 2, 3]
+
+            # Out of range is a bounds error, not a silent clamp.
+            @test_throws Exception ds[0:3]
+            @test_throws Exception ds[999:1001]
+
+            # scan: `between` is pushed down to the chunk statistics, `where` filters what survives.
+            got = RE.Sweep.scan(ds; select = (:i, :x), between = (:i, 10, 20), limit = 1000)
+            @test all(10 .<= got.i .<= 20)
+            @test length(got.i) == 4 * 11                  # every unit contributes i ∈ 10:20
+            few = RE.Sweep.scan(ds; between = (:i, 10, 20), limit = 5)
+            @test length(few.i) == 5                       # …and `limit` really stops early
+            odd = RE.Sweep.scan(ds; where = row -> isodd(row.i), select = (:i,), limit = 7)
+            @test all(isodd, odd.i) && length(odd.i) == 7
+        end
+    end
+
+    @testset "no call can quietly ask for everything" begin
+        # The point of the whole design: a slice is a look at the data, and there is no ergonomic
+        # way to spell "all of it" that a terabyte would answer.
+        mktempdir() do root
+            t = RE.Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                     payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = RE.Sweep.@sweep(RE.Sweep.paramgrid(part = 1:2), t; submit = false, lazy = true) do p
+                (; i = collect(1:10))
+            end
+            for c in RE.BatchSweep.sweep_chunks(root, r.run); ST.run_chunk(root, c); end
+            ds = RE.Sweep.refresh!(r).dataset
+            @test length(ds) == 20
+            # The cap refuses at the CALL, before any bytes move, and says what to do instead.
+            err = try; RE.Sweep.load(ds, 1:20; max_rows = 5); "" catch e; sprint(showerror, e); end
+            @test occursin("slice cap", err)
+            @test occursin("scan", err) && occursin("max_rows", err)
+            # …and raising it deliberately is the escape hatch, with the number written down.
+            @test length(RE.Sweep.load(ds, 1:20; max_rows = 100).i) == 20
+            # Asking past the end is a bounds error rather than a cap message — the more specific
+            # complaint wins, so "outside 1:20" is what you see.
+            @test_throws Exception ds[1:21]
+        end
+    end
+
+    @testset "a unit stored whole is reported, not silently dropped" begin
+        # Flipping `data=` does not re-key: a value is the same either way, so finished work is
+        # kept. Those units simply have no index — the dataset says how many rather than pretending
+        # to be complete.
+        mktempdir() do root
+            t = RE.Sweep.LocalTarget(; root, project = tempdir(), chunk = 1,
+                                     payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            body = "p -> (; i = collect(1:10))"
+            grid = [(; part = 1), (; part = 2)]
+            r = RE.Sweep.run_sweep(t, grid, body; lazy = false)
+            for c in RE.BatchSweep.sweep_chunks(root, r.run); ST.run_chunk(root, c); end
+            r2 = RE.Sweep.run_sweep(t, grid, body; lazy = true)
+            @test r2.run == r.run                                  # same sweep, not a re-key
+            ds = RE.Sweep.refresh!(r2).dataset
+            @test RE.Sweep.nparts(ds) == 0 && ds.whole == 2
+            @test occursin("stored whole", sprint(show, MIME"text/plain"(), ds))
+        end
+    end
+
     @testset "a lazy sweep stores an index, not a result blob" begin
         # End to end through the runner: the manifest carries the dataset index and NO binding, so
         # reading the manifest tells the notebook the shape without reading a byte of the data.
