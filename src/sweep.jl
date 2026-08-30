@@ -1594,7 +1594,13 @@ function load(r::ShardedResult; max_bytes::Integer = 512 * 1024^2, limit::Intege
 end
 
 "Clear the failed shards so the next run of the sweep cell retries exactly those."
-retry_failed!(r::ShardedResult) = BatchSweep.retry_failed!(store_root(r.target), r.run)
+function retry_failed!(r::ShardedResult)
+    root = store_root(r.target)
+    failed = [k for k in r.keys
+              if (m = MemoStore.read_manifest(root, k);
+                  m !== nothing && String(get(m, "status", "")) == "error")]
+    return forget_results!(r.target, failed)
+end
 
 """
     cancel!(r) -> r
@@ -1604,6 +1610,9 @@ cell (or reopening the notebook) does not quietly start it again. Finished units
 """
 function cancel!(r::ShardedResult)
     BatchSweep.cancel!(store_root(r.target), r.run, launcher_for(r.target))
+    # The marker is the durable half of "stop": a fresh hub reads it and does not resubmit. It has
+    # to reach the store to do that, and the same goes for `resume!` lifting it.
+    sync_out!(r.target; dirs = ("jobs",))
     return refresh!(r)
 end
 
@@ -1614,16 +1623,17 @@ Undo a `cancel!`. The next run submits only what is still missing.
 """
 function resume!(r::ShardedResult)
     BatchSweep.resume!(store_root(r.target), r.run)
+    sync_out!(r.target; dirs = ("jobs",))
     return refresh!(r)
 end
 
 "Drop every result for this sweep, so the next run starts cold."
 function reset!(r::ShardedResult)
     root = store_root(r.target)
-    n = 0
-    for k in r.keys; MemoStore.drop_manifest(root, k) && (n += 1); end
+    n = forget_results!(r.target, r.keys)
     BatchSweep.clear_attempts!(root, r.run)
     BatchSweep.resume!(root, r.run)   # a reset sweep is not still cancelled
+    sync_out!(r.target; dirs = ("jobs",))
     return n
 end
 

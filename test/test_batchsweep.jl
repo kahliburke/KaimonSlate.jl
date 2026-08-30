@@ -289,6 +289,34 @@ end
         end
     end
 
+    @testset "the callable controls do what the card's buttons do" begin
+        # `reset!`, `retry_failed!`, `cancel!` and `resume!` are documented on the result, so a
+        # script reaches for them instead of the card. They had drifted: the card dropped a result
+        # from the STORE while these dropped it only from the hub's copy, which on a cluster means
+        # the next sync brings it straight back. Same route now, so they cannot disagree again.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false) do p
+                p.x == 3 && error("nope")
+                p.x
+            end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(r).failed == 1 && r.ok == 3
+
+            @test Sweep.retry_failed!(r) == 1               # only the failure is cleared…
+            @test Sweep.refresh!(r).failed == 0 && r.ok == 3 && r.pending == 1
+
+            Sweep.cancel!(r)
+            @test BS.is_cancelled(root, r.run) && r.ok == 3   # …and finished units survive a stop
+            Sweep.resume!(r)
+            @test !BS.is_cancelled(root, r.run)
+
+            @test Sweep.reset!(r) == 3                      # every remaining result goes
+            @test Sweep.refresh!(r).done == 0 && r.state === :ready
+        end
+    end
+
     @testset "the status payload is JSON-shaped and covers every unit" begin
         mktempdir() do root
             t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
