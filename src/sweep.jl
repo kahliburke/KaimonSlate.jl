@@ -948,11 +948,11 @@ function Base.show(io::IO, ::MIME"text/plain", ds::Dataset)
         for (c, t) in zip(ds.columns, ds.types)
             println(io, "   ", rpad(c, 18), t)
         end
-        println(io, "   ds[1:1000] for rows · scan(ds; …) to filter — nothing has been read")
+        println(io, "   ds[1:1000] for rows · scan(ds; …) to filter · query_cost(ds) to price it")
     else
         d = get(ds.parts[1].index, "dims", Int[])
         println(io, "   each part ", join(d, "×"), " ", String(get(ds.parts[1].index, "eltype", "")))
-        println(io, "   ds[k] for part k · part[i…] to slice it — nothing has been read")
+        println(io, "   ds[k] for part k · part[i…] to slice it")
     end
     # Units that finished before the cell asked for addressable storage still hold their results;
     # they just cannot be sliced. Saying so beats a dataset that is quietly missing most of itself.
@@ -962,9 +962,9 @@ function Base.show(io::IO, ::MIME"text/plain", ds::Dataset)
     # number the whole design is for, so it belongs where the dataset describes itself.
     got = transferred(ds.label)
     tot = databytes(ds)
-    got == 0 || println(io, "   read so far: ", _bytes(got),
-                        tot > 0 ? " of " * _bytes(tot) *
-                                  " (" * string(round(100 * got / tot; digits = 2)) * "%)" : "")
+    println(io, "   read so far: ", got == 0 ? "nothing" : _bytes(got),
+            (got > 0 && tot > 0) ? " of " * _bytes(tot) *
+                                   " (" * string(round(100 * got / tot; digits = 2)) * "%)" : "")
     return nothing
 end
 Base.show(io::IO, ds::Dataset) =
