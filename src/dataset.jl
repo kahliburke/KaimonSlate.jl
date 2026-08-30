@@ -27,6 +27,12 @@
 # Target bytes per table chunk. Big enough that per-chunk overhead is noise, small enough that
 # reading one to answer a narrow slice is not itself a bulk transfer.
 const DATASET_CHUNK_BYTES = 64 * 1024 * 1024
+# …but a unit smaller than one chunk would BE a single chunk, and a single chunk cannot be pruned:
+# every predicate would read all of it and so would every row range. Split into at least this many
+# pieces so granularity does not vanish at the small end. It also bounds the other direction on its
+# own — when the byte target is not binding this is exactly the chunk count, so a small unit can
+# never shatter into hundreds of near-empty blobs.
+const DATASET_MIN_CHUNKS = 8
 
 # ── Shape detection ──────────────────────────────────────────────────────────────────────────
 # Deliberately structural, not nominal: a sweep body returns whatever is natural for the science,
@@ -54,15 +60,38 @@ function _ds_columns(v)
     return nothing
 end
 
+# Arrow, loading it if this process has not yet. Everywhere else in the codebase Arrow is SOFT
+# detected — a value that happens to be a DataFrame gets a faster codec if the package is around.
+# Here the situation is different: `data=lazy` is an explicit request for addressable storage, and a
+# unit process has no reason to have imported Arrow on its own. Detecting its absence and silently
+# storing whole would answer that request with the one thing it ruled out.
+const _ARROW_TRIED = Ref(false)
+function _ds_arrow()
+    A = _codec_loaded("Arrow")
+    A === nothing || return A
+    _ARROW_TRIED[] && return nothing        # attempt the import once per process, not per unit
+    _ARROW_TRIED[] = true
+    try
+        @eval Main using Arrow
+    catch
+        return nothing
+    end
+    return _codec_loaded("Arrow")
+end
+
+# Importing a package at RUNTIME puts its methods in a newer world than the function that asked for
+# it, so calling them directly fails with "method too new to be called from this world context"
+# rather than dispatching. Every call into a module `_ds_arrow` may have just loaded goes through
+# here. (Cheap: one dynamic dispatch per CHUNK, not per row.)
+_arrow_call(f, args...; kw...) = Base.invokelatest(f, args...; kw...)
+
 "Can `v` be stored addressably? `:array`, `:table`, or `nothing` (store it whole instead)."
 function dataset_kind(v)
     _ds_arrayable(v) && return :array
-    if _ds_columns(v) !== nothing
-        # Arrow is what makes a table addressable; without it there is nothing to be gained by
-        # pretending, and the ordinary codec path stores a correct (if whole) result.
-        _codec_loaded("Arrow") === nothing && return nothing
-        return :table
-    end
+    # Arrow is what makes a table addressable. If it cannot be loaded at all there is nothing to be
+    # gained by pretending, and the ordinary codec path still stores a correct (if whole) result —
+    # which the notebook reports rather than passing off as a complete dataset.
+    _ds_columns(v) !== nothing && _ds_arrow() !== nothing && return :table
     return nothing
 end
 
@@ -131,17 +160,21 @@ function write_dataset!(root::AbstractString, value; chunk_bytes::Integer = DATA
         return (idx, Int(n))
     end
 
-    A = _codec_loaded("Arrow")
+    A = _ds_arrow()
     names, cols = _ds_columns(value)
     nrows = isempty(cols) ? 0 : length(first(cols))
-    per = max(1, fld(Int(chunk_bytes), _ds_row_bytes(cols)))
+    rb = _ds_row_bytes(cols)
+    # Whichever gives more pieces: the byte target, or splitting this unit into `DATASET_MIN_CHUNKS`.
+    # A big unit chunks by size; a small one still ends up prunable.
+    target = min(Int(chunk_bytes), max(1, cld(nrows * rb, DATASET_MIN_CHUNKS)))
+    per = max(1, fld(target, rb))
     chunks = Dict{String,Any}[]
     total = 0
     lo = 1
     while lo <= nrows
         hi = min(nrows, lo + per - 1)
         part = NamedTuple{Tuple(Symbol.(names))}(Tuple(c[lo:hi] for c in cols))
-        h, n = MemoStore.put_blob(io -> A.write(io, part), root)
+        h, n = MemoStore.put_blob(io -> _arrow_call(A.write, io, part), root)
         push!(chunks, Dict{String,Any}(
             "blob" => h, "bytes" => Int(n), "rows" => hi - lo + 1,
             "stats" => _ds_chunk_stats(names, cols, lo, hi)))

@@ -17,6 +17,7 @@ import SHA
 import Serialization
 import Pkg
 import Dates   # the ETA as a wall-clock finish time, not only a remaining duration
+import TOML    # reading sweep descriptors straight off a store (cluster_status)
 
 # The def extractor + source-tree digest, which `env_source_fingerprint` below is built on: it is
 # how "has the science package changed?" is answered, and it is the same answer the memo layer needs
@@ -531,7 +532,8 @@ function Base.getproperty(r::ShardedResult, s::Symbol)
     # from manifests alone, so asking for it — and asking it for its schema and size — reads none
     # of the data it describes.
     s === :dataset    && return _dataset_of(store_root(getfield(r, :target)),
-                                            getfield(r, :params), getfield(r, :keys))
+                                            getfield(r, :params), getfield(r, :keys),
+                                            getfield(r, :run))
     s === :results    && return [row for row in rows if row.status == "ok"]
     # The charting values, straight from the manifests. This is the accessor analysis should reach
     # for: it is the same cost at four units and four million.
@@ -627,6 +629,247 @@ _arts(root, m) = ArtifactRef[
 # row count, the size — comes from the index, so describing a dataset costs manifest reads no
 # matter what it weighs. Only a slice moves bytes, and only the bytes of that slice.
 
+# ── Transfer accounting ──────────────────────────────────────────────────────────────────────
+# A dataset exists so that reads stay small; the only way to know whether they have is to count
+# them. Every call that moves bytes records what it moved, so the question "how much of this have I
+# actually pulled?" has an answer rather than an assumption.
+#
+# Counted at the READ, not at the transport: the byte figure is what the slice asked for, which is
+# the same whether it came off a local mmap or over the blob channel. That keeps the number
+# meaningful when the backend changes underneath it.
+
+struct Transfer
+    at::Float64          # unix time
+    label::String        # the sweep run this came from
+    root::String         # the store it came OUT of — which is what makes it a cluster's traffic
+    kind::Symbol         # :rows | :elements
+    bytes::Int
+    chunks::Int          # stored pieces opened
+    ms::Float64
+end
+
+const _XFER = Transfer[]
+const _XFER_LOCK = ReentrantLock()
+const _XFER_MAX = 500    # a rolling window; the totals below are kept separately so they never lapse
+const _XFER_TOTALS = Dict{String,Tuple{Int,Int,Float64}}()   # label → (bytes, chunks, ms)
+
+function _record!(label, root, kind, bytes, chunks, ms)
+    lock(_XFER_LOCK) do
+        push!(_XFER, Transfer(time(), String(label), String(root), kind,
+                              Int(bytes), Int(chunks), Float64(ms)))
+        length(_XFER) > _XFER_MAX && deleteat!(_XFER, 1:(length(_XFER) - _XFER_MAX))
+        for k in (String(label), "root:" * String(root))     # totalled per sweep AND per store
+            b, c, t = get(_XFER_TOTALS, k, (0, 0, 0.0))
+            _XFER_TOTALS[k] = (b + Int(bytes), c + Int(chunks), t + Float64(ms))
+        end
+    end
+    return nothing
+end
+
+"Bytes this session has read out of `label`'s dataset (0 if none)."
+transferred(label::AbstractString) = lock(_XFER_LOCK) do
+    get(_XFER_TOTALS, String(label), (0, 0, 0.0))[1]
+end
+
+"""
+    transfers(; label = "") -> NamedTuple
+
+What this session has actually moved: total bytes, the pieces opened to get them, and the observed
+rate. `recent` is the last few reads, newest first — which is where a surprise shows up as one
+oversized row rather than a slow drift.
+"""
+function transfers(; label::AbstractString = "")
+    lock(_XFER_LOCK) do
+        # A label is either a sweep run or a `root:<store>` — the same reads grouped two ways, so
+        # the row filter has to know which it was handed or a per-store view reports no reads at all.
+        rows = if isempty(label)
+            _XFER
+        elseif startswith(String(label), "root:")
+            r = String(label)[6:end]
+            [x for x in _XFER if x.root == r]
+        else
+            [x for x in _XFER if x.label == String(label)]
+        end
+        b, c, ms = if isempty(label)
+            bb = cc = 0; tt = 0.0
+            for (k, (x, y, z)) in _XFER_TOTALS
+                startswith(k, "root:") && continue   # the per-store mirror of the same bytes
+                bb += x; cc += y; tt += z
+            end
+            (bb, cc, tt)
+        else
+            get(_XFER_TOTALS, String(label), (0, 0, 0.0))
+        end
+        return (; bytes = b, pretty = _bytes(b), chunks = c, seconds = round(ms / 1000; digits = 3),
+                  rate = ms > 0 ? _bytes(round(Int, b / (ms / 1000))) * "/s" : "—",
+                  reads = length(rows),
+                  recent = [(; kind = x.kind, bytes = _bytes(x.bytes), chunks = x.chunks,
+                               ms = round(x.ms; digits = 1), label = x.label)
+                            for x in Iterators.reverse(rows)][1:min(8, length(rows))])
+    end
+end
+
+"Forget the accounting — a fresh baseline for measuring one query."
+function reset_transfers!()
+    lock(_XFER_LOCK) do; empty!(_XFER); empty!(_XFER_TOTALS); end
+    return nothing
+end
+
+# ── What a cluster is doing ──────────────────────────────────────────────────────────────────
+# A cluster is defined once for the notebook and referenced by name from any number of cells, so
+# "what is going on with it" is a question about the CLUSTER, not about whichever cell you happen to
+# be looking at. Everything here is derived — from the store's manifests and the scheduler's own
+# answer — so it reports what is true rather than what some cell last recorded.
+
+"Every sweep descriptor in a store, newest first. One directory listing plus a manifest read each."
+function store_sweeps(root::AbstractString)
+    out = Tuple{String,Int}[]
+    d = joinpath(root, "manifests")
+    isdir(d) || return out
+    for f in readdir(d; join = true)
+        endswith(f, ".toml") || continue
+        m = try; TOML.parsefile(f); catch; continue; end
+        String(get(m, "kind", "")) == BatchSweep.KIND_SWEEP || continue
+        push!(out, (basename(f)[1:end-5], Int(get(m, "created", 0))))
+    end
+    sort!(out; by = x -> -x[2])
+    return out
+end
+
+"""
+    sweep_bytes(root, sweep) -> Int
+
+How much output one sweep has PRODUCED, from its manifests — the number that says whether pulling
+it back is reasonable. Counts a unit's stored result whichever form it took, so an addressable
+dataset and a whole value are comparable.
+"""
+function sweep_bytes(root::AbstractString, sweep::AbstractString)
+    total = 0
+    for c in (try; BatchSweep.sweep_chunks(root, sweep); catch; String[]; end)
+        for k in BatchSweep.chunk_shards(root, c)
+            m = MemoStore.read_manifest(root, k)
+            m === nothing && continue
+            d = get(m, "dataset", nothing)
+            if d isa AbstractDict
+                total += Int(get(d, "bytes", 0))
+            else
+                for b in get(m, "bindings", Any[])
+                    b isa AbstractDict && (total += Int(get(b, "bytes", 0)))
+                end
+            end
+            for a in get(m, "artifacts", Any[])
+                a isa AbstractDict && (total += Int(get(a, "bytes", 0)))
+            end
+        end
+    end
+    return total
+end
+
+"Bytes on disk under `root`, and how many blobs hold them."
+function store_size(root::AbstractString)
+    b = 0; n = 0
+    d = joinpath(root, "blobs")
+    isdir(d) || return (; bytes = 0, blobs = 0)
+    for (dir, _, files) in walkdir(d), f in files
+        s = try; filesize(joinpath(dir, f)); catch; 0; end
+        s > 0 && (b += s; n += 1)
+    end
+    return (; bytes = b, blobs = n)
+end
+
+"""
+    cluster_status(name) -> ClusterStatus
+
+What a named cluster is doing right now: the sweeps in its store and how far along they are, what
+the scheduler says is live, how much output is sitting there, and how much of it this session has
+pulled back. Rendered as a panel in a notebook; also a plain value you can read fields off.
+"""
+struct ClusterStatus
+    name::String
+    spec::Dict{String,String}
+    root::String
+    sweeps::Vector{NamedTuple}
+    live::Dict{String,Symbol}
+    store::NamedTuple
+    xfer::NamedTuple
+    err::String
+end
+
+function cluster_status(name::AbstractString = "";
+                        clusters::AbstractDict = _ctx_clusters())
+    nm = String(name)
+    if isempty(nm)
+        length(clusters) == 1 || error("name a cluster: " *
+            (isempty(clusters) ? "this notebook defines none (⎈ on a sweep cell)" :
+             join(sort(collect(keys(clusters))), ", ")))
+        nm = first(keys(clusters))
+    end
+    spec = get(clusters, nm, nothing)
+    spec === nothing && error("no cluster `$nm` in this notebook — defined: " *
+                              (isempty(clusters) ? "(none)" : join(sort(collect(keys(clusters))), ", ")))
+    spec = Dict{String,String}(String(k) => String(v) for (k, v) in spec)
+    t = cluster(spec)
+    root = store_root(t)
+    err = ""
+    rows = NamedTuple[]
+    live = Dict{String,Symbol}()
+    l = launcher_for(t)
+    try
+        for (sw, created) in store_sweeps(root)
+            p = BatchSweep.plan(root, sw; launcher = l)
+            push!(rows, (; sweep = sw, created,
+                           state = display_state(p, BatchSweep.is_armed(root, sw)),
+                           total = p.shards_total, done = p.shards_done,
+                           ok = p.shards_ok, failed = p.shards_failed,
+                           armed = BatchSweep.is_armed(root, sw),
+                           stored = sweep_bytes(root, sw),
+                           read = transferred(sw)))
+        end
+        # What the SCHEDULER says, not what we last wrote down — the difference between the two is
+        # exactly the failure this answers ("the store says running, squeue has never heard of it").
+        subs = BatchSweep.known_submissions(root)
+        isempty(subs) || (live = BatchLauncher.poll(l, root, collect(keys(subs))))
+    catch e
+        err = first(sprint(showerror, e), 200)
+    end
+    return ClusterStatus(nm, spec, root, rows, live, store_size(root),
+                         transfers(; label = "root:" * root), err)
+end
+
+# The notebook's cluster definitions, from the evaluating cell's context. Empty outside a cell.
+function _ctx_clusters()
+    sctx = get(task_local_storage(), :slate_ctx, nothing)
+    (sctx !== nothing && hasproperty(sctx, :clusters)) && return sctx.clusters
+    return Dict{String,Dict{String,String}}()
+end
+
+function Base.show(io::IO, ::MIME"text/plain", s::ClusterStatus)
+    println(io, "cluster ", s.name, " — ", get(s.spec, "kind", "?"),
+            haskey(s.spec, "host") && !isempty(s.spec["host"]) ? " @ " * s.spec["host"] : "")
+    println(io, "   store   ", s.root)
+    println(io, "           ", _bytes(s.store.bytes), " in ", s.store.blobs, " blobs")
+    nlive = count(v -> v in (:running, :pending), values(s.live))
+    println(io, "   jobs    ", isempty(s.live) ? "none submitted" :
+            string(nlive, " live of ", length(s.live), " known"))
+    println(io, "   read    ", s.xfer.pretty, " in ", s.xfer.reads, " reads · ", s.xfer.rate)
+    isempty(s.err) || println(io, "   ⚠ ", s.err)
+    if isempty(s.sweeps)
+        println(io, "   no sweeps in this store yet")
+    else
+        println(io, "   ", rpad("sweep", 20), rpad("state", 12), rpad("units", 13),
+                rpad("stored", 11), "read")
+        for r in first(s.sweeps, 12)
+            println(io, "   ", rpad(first(r.sweep, 18), 20), rpad(String(r.state), 12),
+                    rpad(string(r.done, "/", r.total, r.failed > 0 ? " ($(r.failed)✗)" : ""), 13),
+                    rpad(r.stored == 0 ? "—" : _bytes(r.stored), 11),
+                    r.read == 0 ? "—" : _bytes(r.read) *
+                        (r.stored > 0 ? " ($(round(100 * r.read / r.stored; digits = 1))%)" : ""))
+        end
+        length(s.sweeps) > 12 && println(io, "   … and ", length(s.sweeps) - 12, " more")
+    end
+    return nothing
+end
+
 "One unit's contribution to a dataset: its index, and the parameters that produced it."
 struct DatasetPart
     root::String
@@ -634,7 +877,10 @@ struct DatasetPart
     params::Any
     rows::Int
     bytes::Int
+    label::String
 end
+DatasetPart(root, index, params, rows, bytes) =
+    DatasetPart(root, index, params, rows, bytes, "")
 
 """
     Dataset
@@ -654,20 +900,22 @@ struct Dataset
     types::Vector{String}
     starts::Vector{Int}           # cumulative first global row of each part
     whole::Int                    # landed units stored WHOLE (no index) — not slicable
+    label::String                 # the sweep it came from, for transfer accounting
 end
 
-function Dataset(kind::Symbol, parts::Vector{DatasetPart}, whole::Integer = 0)
+function Dataset(kind::Symbol, parts::Vector{DatasetPart}, whole::Integer = 0,
+                 label::AbstractString = "")
     cols = isempty(parts) ? String[] : String[String(c) for c in get(parts[1].index, "columns", String[])]
     typs = isempty(parts) ? String[] : String[String(t) for t in get(parts[1].index, "types", String[])]
     starts = Int[]; at = 1
     for p in parts; push!(starts, at); at += p.rows; end
-    return Dataset(kind, parts, cols, typs, starts, Int(whole))
+    return Dataset(kind, parts, cols, typs, starts, Int(whole), String(label))
 end
 
 # Assembled from the shard manifests: one part per unit that has landed WITH a dataset index, in
 # grid order. A partial sweep gives a partial dataset rather than an error — the same property that
 # lets the rest of the fabric be watched while it runs.
-function _dataset_of(root, params, keys)
+function _dataset_of(root, params, keys, label = "")
     parts = DatasetPart[]
     kind = :table
     whole = 0
@@ -682,9 +930,10 @@ function _dataset_of(root, params, keys)
         end
         d = Dict{String,Any}(String(kk) => vv for (kk, vv) in idx)
         kind = String(d["kind"]) == "array" ? :array : :table
-        push!(parts, DatasetPart(String(root), d, prm, Int(get(d, "rows", 0)), Int(get(d, "bytes", 0))))
+        push!(parts, DatasetPart(String(root), d, prm, Int(get(d, "rows", 0)),
+                                 Int(get(d, "bytes", 0)), String(label)))
     end
-    return Dataset(kind, parts, whole)
+    return Dataset(kind, parts, whole, label)
 end
 
 Base.length(ds::Dataset) = isempty(ds.parts) ? 0 : ds.starts[end] + ds.parts[end].rows - 1
@@ -709,6 +958,13 @@ function Base.show(io::IO, ::MIME"text/plain", ds::Dataset)
     # they just cannot be sliced. Saying so beats a dataset that is quietly missing most of itself.
     ds.whole == 0 || println(io, "   ⚠ ", ds.whole, " finished unit", ds.whole == 1 ? "" : "s",
                              " stored whole and not in this view — reset the sweep to re-store")
+    # What this session has actually pulled out of it, against what it holds. The ratio is the
+    # number the whole design is for, so it belongs where the dataset describes itself.
+    got = transferred(ds.label)
+    tot = databytes(ds)
+    got == 0 || println(io, "   read so far: ", _bytes(got),
+                        tot > 0 ? " of " * _bytes(tot) *
+                                  " (" * string(round(100 * got / tot; digits = 2)) * "%)" : "")
     return nothing
 end
 Base.show(io::IO, ds::Dataset) =
@@ -758,12 +1014,20 @@ function load(ds::Dataset, rows::AbstractUnitRange; select = nothing,
               "with `Sweep.load(ds, rows; max_rows = …)`")
     cols = select
     acc = nothing
+    bytes = 0; opened = 0; t0 = time()
     for (i, local_rows) in _ds_span(ds, rows)
         p = ds.parts[i]
+        # Charged BEFORE the read, off the index: these are the chunks the slice resolves to, so
+        # the figure is what the query costs whether the bytes come off a mmap or a wire.
+        for (pos, _, _, _) in SlateTask.table_chunks(p.index, local_rows)
+            opened += 1; bytes += Int(p.index["chunks"][pos]["bytes"])
+        end
         part = SlateTask.dataset_rows(p.root, p.index, local_rows; select = cols)
         acc = acc === nothing ? map(collect, part) :
               NamedTuple{keys(acc)}(Tuple(append!(acc[k], part[k]) for k in keys(acc)))
     end
+    _record!(ds.label, isempty(ds.parts) ? "" : ds.parts[1].root, :rows, bytes, opened,
+             (time() - t0) * 1000)
     return acc === nothing ? NamedTuple() : acc
 end
 Base.getindex(ds::Dataset, rows::AbstractUnitRange, col::Symbol) = getindex(ds, rows, (col,))[col]
@@ -785,10 +1049,40 @@ Base.show(io::IO, p::DatasetPart) =
 Reads exactly that range: the mapping starts at the range's first byte, so nothing before or after
 it is touched.
 """
-Base.getindex(p::DatasetPart, i::AbstractUnitRange) =
-    SlateTask.dataset_elements(p.root, p.index, i)
+function Base.getindex(p::DatasetPart, i::AbstractUnitRange)
+    t0 = time()
+    v = SlateTask.dataset_elements(p.root, p.index, i)
+    _record!(p.label, p.root, :elements, length(i) * Int(p.index["elsize"]), 1,
+             (time() - t0) * 1000)
+    return v
+end
 Base.getindex(p::DatasetPart, i::Integer) = SlateTask.dataset_elements(p.root, p.index, i:i)[1]
 Base.length(p::DatasetPart) = p.rows
+
+"""
+    query_cost(ds; between = nothing) -> NamedTuple
+
+What a read WOULD cost, before making it: the stored pieces it must open, the bytes they hold, and
+that as a share of the dataset. Answered from the index alone — the same question, against the same
+numbers, that the reader asks before it opens anything.
+
+`between = (:col, lo, hi)` prices a range predicate; without it, the whole dataset.
+"""
+function query_cost(ds::Dataset; between = nothing)
+    total = 0; kept = 0; bytes = 0
+    for p in ds.parts
+        cs = get(p.index, "chunks", Any[])
+        total += length(cs)
+        keep = between === nothing ? (1:length(cs)) :
+               SlateTask.prune_chunks(p.index, String(between[1]),
+                                      Float64(between[2]), Float64(between[3]))
+        for i in keep; kept += 1; bytes += Int(cs[i]["bytes"]); end
+    end
+    tot = databytes(ds)
+    return (; chunks = kept, of_chunks = total, bytes, pretty = _bytes(bytes),
+              fraction = tot > 0 ? round(bytes / tot; digits = 4) : 0.0,
+              percent = tot > 0 ? round(100 * bytes / tot; digits = 2) : 0.0)
+end
 
 """
     scan(ds; select, between, where, limit) -> NamedTuple of columns
@@ -808,6 +1102,7 @@ function scan(ds::Dataset; select = nothing, between = nothing, where = nothing,
     readcols = where === nothing ? want : ds.columns
     keep = [Any[] for _ in want]
     got = 0
+    bytes = 0; opened = 0; t0 = time()
     for p in ds.parts
         chunks = between === nothing ? nothing :
                  Set(SlateTask.prune_chunks(p.index, String(between[1]),
@@ -816,6 +1111,7 @@ function scan(ds::Dataset; select = nothing, between = nothing, where = nothing,
         for (pos, c) in enumerate(get(p.index, "chunks", Any[]))
             nrows = Int(c["rows"])
             if chunks === nothing || pos in chunks
+                opened += 1; bytes += Int(c["bytes"])
                 blk = SlateTask.dataset_rows(p.root, p.index, at:(at + nrows - 1); select = readcols)
                 syms = keys(blk)
                 for r in 1:nrows
@@ -833,6 +1129,8 @@ function scan(ds::Dataset; select = nothing, between = nothing, where = nothing,
         end
     end
     @label done
+    _record!(ds.label, isempty(ds.parts) ? "" : ds.parts[1].root, :rows, bytes, opened,
+             (time() - t0) * 1000)
     return NamedTuple{Tuple(Symbol.(want))}(Tuple(isempty(k) ? k : identity.(k) for k in keep))
 end
 
@@ -1094,6 +1392,9 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         # Why it stopped. Carried on every poll because a sweep that blocks WHILE being watched
         # must explain itself then, not only if someone happens to re-run the cell afterwards.
         "why" => _why_html(p))
+    # The data line grows as units land, so it rides the poll too. Off the indices, so a sweep
+    # writing terabytes still costs manifest reads to watch.
+    out["data"] = _data_html(_dataset_of(root, params, keys, run))
 
     # The chart rides the SAME poll as the counters, so a filling plot costs no extra round trip and
     # cannot disagree with the numbers beside it.
@@ -1166,10 +1467,17 @@ function _auto_plot(rows)
     # line breaks at the real gaps, so the picture only gains detail instead of changing shape.
     return Dict{String,Any}(
         "backgroundColor" => "transparent", "animation" => false,
-        "grid"    => Dict("left" => 58, "right" => 22, "top" => 24, "bottom" => 30),
+        # `containLabel` rather than fixed margins: this chart is drawn for values nobody has seen
+        # yet, so no hardcoded left inset can be right for both `0.5` and `200,000` — the wide one
+        # gets its first digit clipped. Axis NAMES sit in the middle of their axis for the same
+        # reason: at the end, a name runs off the edge of the plot area it labels.
+        "grid"    => Dict("left" => 10, "right" => 18, "top" => 24, "bottom" => 6,
+                          "containLabel" => true),
         "tooltip" => Dict("trigger" => "axis"),
-        "xAxis"   => Dict("type" => "value", "name" => String(ax)),
-        "yAxis"   => Dict("type" => "value", "name" => field === nothing ? "" : String(field)),
+        "xAxis"   => Dict("type" => "value", "name" => String(ax),
+                          "nameLocation" => "middle", "nameGap" => 26),
+        "yAxis"   => Dict("type" => "value", "name" => field === nothing ? "" : String(field),
+                          "nameLocation" => "middle", "nameGap" => 52),
         "series"  => [Dict("type" => "line", "showSymbol" => true, "symbolSize" => 4,
                            "connectNulls" => false,
                            "data" => [[getproperty(r.params, ax), yof(r)] for r in rows])])
@@ -1346,6 +1654,25 @@ function _unit_grid(io, r::ShardedResult)
                            "each tile ≈ ", per, " units</div>")
 end
 
+# For a `data=lazy` sweep: how much output is sitting out there, and how much of it this session has
+# actually pulled in. "" for an ordinary sweep, where the result came back whole and there is
+# nothing to distinguish. Built from the indices, so showing it reads none of the data.
+function _data_html(ds::Dataset)
+    nparts(ds) == 0 && return ""
+    tot = databytes(ds)
+    got = transferred(ds.label)
+    x = transfers(; label = ds.label)
+    bits = [string(nparts(ds), " part", nparts(ds) == 1 ? "" : "s"),
+            ds.kind === :table ? string(length(ds), " rows") : string(length(ds), " elements"),
+            _bytes(tot) * " stored"]
+    push!(bits, got == 0 ? "nothing read yet" :
+                string(_bytes(got), " read",
+                       tot > 0 ? " (" * string(round(100 * got / tot; digits = 2)) * "%)" : "",
+                       " · ", x.rate))
+    return string("<div style='font-size:11px;color:var(--val,#4ec9b0);opacity:.85;margin-top:4px;",
+                  "font-family:ui-monospace,monospace'>", _esc(join(bits, " · ")), "</div>")
+end
+
 # Why a sweep stopped, and what to do about it. The three ways of stopping short need different
 # things, so they read differently. "" while the sweep is still going.
 function _why_html(p::BatchSweep.Plan)
@@ -1478,6 +1805,7 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     # Both of these are emitted as CONTAINERS even when empty, and their contents ride the poll —
     # a sweep that starts failing while you watch it has to grow its own explanation and error list.
     # Rendered here rather than rebuilt in the browser so there is one renderer and it cannot drift.
+    print(io, "<div data-sw='data'>", _data_html(r.dataset), "</div>")
     println(io, "<div data-sw='why'>", _why_html(p), "</div>")
     println(io, "<div data-sw='fails'>", _fails_html(getfield(r, :rows)), "</div>")
 
@@ -1616,7 +1944,7 @@ function _live_script(io, r::ShardedResult)
         // Why it stopped, and which units failed. Rendered by Julia and swapped in whole, so the
         // browser holds no second copy of this markup to drift from the cell's own render. Only on
         // CHANGE, so an open <details> is not collapsed underneath the reader on every poll.
-        ["why", "fails"].forEach(function(k){
+        ["why", "fails", "data"].forEach(function(k){
           var el = root.querySelector('[data-sw="' + k + '"]');
           if (!el || s[k] === undefined) return;
           if (el.dataset.h !== s[k]) { el.dataset.h = s[k]; el.innerHTML = s[k]; }

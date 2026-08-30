@@ -380,23 +380,33 @@ function dataset_elements(root::AbstractString, index::AbstractDict, i::Abstract
     end
 end
 
+# The Arrow-side half of one chunk read, kept as its own function so the world-age boundary in
+# `dataset_rows` is a single `invokelatest` around everything that touches an Arrow value.
+# `collect` is what makes the result ordinary memory the caller owns.
+_read_chunk(A, path, want, lo, hi) =
+    (t = A.Table(path); [collect(getproperty(t, Symbol(nm))[lo:hi]) for nm in want])
+
 "Rows `rows` of a table dataset, as a NamedTuple of columns. Opens only the chunks they fall in."
 function dataset_rows(root::AbstractString, index::AbstractDict, rows::AbstractUnitRange;
                       select = nothing)
-    A = _codec_loaded("Arrow")
-    A === nothing && error("reading a table dataset needs Arrow loaded in this session (`using Arrow`)")
+    A = _ds_arrow()
+    A === nothing && error("reading a table dataset needs Arrow available in this environment — " *
+                           "add it to the notebook (`slate_pkg(op = \"add\", name = \"Arrow\")`)")
     names = String[String(c) for c in index["columns"]]
     want = select === nothing ? names : String[String(s) for s in select]
     bad = setdiff(want, names)
     isempty(bad) || error("no such column(s) in this dataset: " * join(bad, ", "))
     parts = [Vector{Any}() for _ in want]
     for (_, blob, lo, hi) in table_chunks(index, rows)
-        # The mapped table: `Arrow.Table` mmaps, so only the pages behind the columns and rows
-        # actually touched below are faulted in.
-        t = A.Table(MemoStore.blob_path(root, blob))
-        for (j, nm) in enumerate(want)
-            append!(parts[j], view(getproperty(t, Symbol(nm)), lo:hi))
-        end
+        # ONE world-age boundary per chunk, not per operation. Arrow may have been imported after
+        # this function was compiled (see `_ds_arrow`), which makes every one of its methods — down
+        # to `size` on a column — unreachable from here. Everything that touches an Arrow value
+        # therefore happens inside this closure, which `invokelatest` runs in the current world, and
+        # what comes back out is ordinary `Vector`s.
+        #
+        # `Arrow.Table` mmaps, so only the pages behind the columns and rows named here fault in.
+        cols = _arrow_call(_read_chunk, A, MemoStore.blob_path(root, blob), want, lo, hi)
+        for (j, c) in enumerate(cols); append!(parts[j], c); end
     end
     return NamedTuple{Tuple(Symbol.(want))}(Tuple(
         (isempty(p) ? p : identity.(p)) for p in parts))

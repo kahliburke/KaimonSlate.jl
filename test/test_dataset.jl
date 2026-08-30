@@ -50,6 +50,10 @@ const MS = RE.MemoStore
             @test idx["rows"] == n
             @test idx["columns"] == ["i", "x"]
             @test length(idx["chunks"]) > 1                     # actually chunked
+            # A unit UNDER the byte target still splits, because one chunk can never be pruned:
+            # every predicate would have to read all of it and so would every row range.
+            small, _ = ST.write_dataset!(root, tbl)              # default 64 MB target ≫ this table
+            @test length(small["chunks"]) >= ST.DATASET_MIN_CHUNKS
             @test sum(c -> Int(c["rows"]), idx["chunks"]) == n  # …and the rows all land
 
             # A mid-dataset range resolves to a SUBSET of chunks, not all of them.
@@ -153,6 +157,13 @@ const MS = RE.MemoStore
             @test_throws Exception ds[999:1001]
 
             # scan: `between` is pushed down to the chunk statistics, `where` filters what survives.
+            # …and the cost of that predicate is answerable BEFORE paying it, off the same index.
+            cheap = RE.Sweep.query_cost(ds; between = (:i, 10, 20))
+            all_of = RE.Sweep.query_cost(ds)
+            @test cheap.chunks < all_of.chunks && cheap.bytes < all_of.bytes
+            @test all_of.percent ≈ 100.0 && all_of.chunks == all_of.of_chunks
+            @test 0 < cheap.percent < 100
+
             got = RE.Sweep.scan(ds; select = (:i, :x), between = (:i, 10, 20), limit = 1000)
             @test all(10 .<= got.i .<= 20)
             @test length(got.i) == 4 * 11                  # every unit contributes i ∈ 10:20
@@ -203,6 +214,58 @@ const MS = RE.MemoStore
             ds = RE.Sweep.refresh!(r2).dataset
             @test RE.Sweep.nparts(ds) == 0 && ds.whole == 2
             @test occursin("stored whole", sprint(show, MIME"text/plain"(), ds))
+        end
+    end
+
+    @testset "a cluster reports what is going on with it" begin
+        # A cluster is defined once and referenced from any number of cells, so "what is it doing"
+        # is a question about the CLUSTER. Everything here is derived from the store and the
+        # scheduler, so it reports what is true rather than what a cell last wrote down.
+        mktempdir() do root
+            RE.Sweep.reset_transfers!()
+            spec = Dict("name" => "here", "kind" => "local", "root" => root,
+                        "project" => tempdir(), "chunk" => "2",
+                        "payload" => joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            clusters = Dict("here" => spec)
+
+            # An empty store is a legitimate answer, not an error.
+            s0 = RE.Sweep.cluster_status("here"; clusters)
+            @test s0.name == "here" && s0.root == root
+            @test isempty(s0.sweeps) && s0.store.bytes == 0
+            @test occursin("no sweeps in this store yet", sprint(show, MIME"text/plain"(), s0))
+
+            t = RE.Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                     payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = RE.Sweep.@sweep(RE.Sweep.paramgrid(part = 1:4), t; submit = false, lazy = true) do p
+                (; i = collect(1:100), x = float.(1:100) .* p.part)
+            end
+            for c in RE.BatchSweep.sweep_chunks(root, r.run); ST.run_chunk(root, c); end
+            RE.Sweep.refresh!(r)
+
+            s = RE.Sweep.cluster_status("here"; clusters)
+            @test length(s.sweeps) == 1
+            row = s.sweeps[1]
+            @test row.sweep == r.run && row.done == 4 && row.total == 4
+            @test row.stored > 0                          # output IS sitting in the store…
+            @test row.read == 0                           # …and none of it has been pulled
+            @test s.store.bytes >= row.stored
+            @test isempty(s.err)
+
+            # Read a slice; the cluster's accounting moves, and only by what the slice cost.
+            n = length(r.dataset[1:50, (:i,)].i)
+            @test n == 50
+            s2 = RE.Sweep.cluster_status("here"; clusters)
+            @test s2.xfer.bytes > 0
+            @test s2.xfer.bytes < row.stored               # a slice, not the dataset
+            @test s2.sweeps[1].read == s2.xfer.bytes       # attributed to the sweep that served it
+            # The same reads are grouped per sweep AND per store; the per-store view must not
+            # report the bytes with a read count of zero.
+            @test s2.xfer.reads > 0
+            @test RE.Sweep.transfers().bytes == s2.xfer.bytes   # …and counted once, not twice
+
+            # Naming a cluster the notebook does not define says which ones it does.
+            e = try; RE.Sweep.cluster_status("nope"; clusters); "" catch x; sprint(showerror, x); end
+            @test occursin("no cluster `nope`", e) && occursin("here", e)
         end
     end
 
