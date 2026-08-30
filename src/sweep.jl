@@ -741,13 +741,13 @@ transferred(label::AbstractString) = lock(_XFER_LOCK) do
 end
 
 """
-    transfers(; label = "") -> NamedTuple
+    transfers(; label = "", n = 8) -> NamedTuple
 
 What this session has actually moved: total bytes, the pieces opened to get them, and the observed
-rate. `recent` is the last few reads, newest first — which is where a surprise shows up as one
+rate. `recent` is the last `n` reads, newest first — which is where a surprise shows up as one
 oversized row rather than a slow drift.
 """
-function transfers(; label::AbstractString = "")
+function transfers(; label::AbstractString = "", n::Integer = 8)
     lock(_XFER_LOCK) do
         # A label is either a sweep run or a `root:<store>` — the same reads grouped two ways, so
         # the row filter has to know which it was handed or a per-store view reports no reads at all.
@@ -774,7 +774,7 @@ function transfers(; label::AbstractString = "")
                   reads = length(rows),
                   recent = [(; kind = x.kind, bytes = _bytes(x.bytes), chunks = x.chunks,
                                ms = round(x.ms; digits = 1), label = x.label)
-                            for x in Iterators.reverse(rows)][1:min(8, length(rows))])
+                            for x in Iterators.reverse(rows)][1:min(max(0, Int(n)), length(rows))])
     end
 end
 
