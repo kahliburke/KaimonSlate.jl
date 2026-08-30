@@ -834,7 +834,14 @@ function sweep_bytes(root::AbstractString, sweep::AbstractString)
     return total
 end
 
-"Bytes on disk under `root`, and how many blobs hold them."
+"""
+    store_size(src) -> (; bytes, blobs)
+
+How much result data is sitting in a store, and in how many blobs. Asked of the STORE, which for a
+cluster is not the mirror: the mirror holds the descriptors this hub pushed and none of the output,
+so measuring it reported kilobytes for a store holding tens of gigabytes — directly above the
+per-sweep sizes that said otherwise. (The source-aware methods are with the sources, below.)
+"""
 function store_size(root::AbstractString)
     b = 0; n = 0
     d = joinpath(root, "blobs")
@@ -886,15 +893,16 @@ function cluster_status(name::AbstractString = "";
     try
         for (sw, created) in store_sweeps(root)
             p = BatchSweep.plan(root, sw; launcher = l)
-            t = BatchSweep.telemetry(root, sw; launcher = l, plan = p)
+            # NOT `t`: that is the target, and everything after this loop still needs it.
+            tel = BatchSweep.telemetry(root, sw; launcher = l, plan = p)
             push!(rows, (; sweep = sw, created,
                            state = display_state(p, BatchSweep.is_armed(root, sw)),
                            total = p.shards_total, done = p.shards_done,
                            ok = p.shards_ok, failed = p.shards_failed,
                            missing = p.shards_missing, blocked = p.blocked,
                            armed = BatchSweep.is_armed(root, sw),
-                           rate = t.rate_per_s, eta = t.eta_s,
-                           idle = BatchSweep.stalled_for(t),
+                           rate = tel.rate_per_s, eta = tel.eta_s,
+                           idle = BatchSweep.stalled_for(tel),
                            hosts = unique(String[r.ran_on for r in BatchSweep.results(root, sw)
                                                  if !isempty(String(r.ran_on))]),
                            stored = sweep_bytes(root, sw),
@@ -907,7 +915,7 @@ function cluster_status(name::AbstractString = "";
     catch e
         err = first(sprint(showerror, e), 200)
     end
-    return ClusterStatus(nm, spec, root, rows, live, store_size(root),
+    return ClusterStatus(nm, spec, root, rows, live, store_size(source_of(t)),
                          transfers(; label = "root:" * root), err)
 end
 
@@ -1082,6 +1090,20 @@ end
 # Content-addressed, so the cache can never be stale: a blob's name IS its bytes.
 _blob_cache_dir() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
                              "kaimonslate", "remote-blobs")
+
+# How big the store actually is, asked where the data is. See the docstring above.
+store_size(s::LocalSource) = store_size(s.root)
+function store_size(s::SshSource)
+    d = joinpath(s.root, "blobs")
+    # `du -sk`, not `-sb`: the byte form is GNU-only, and a KiB is finer than this figure is read to.
+    ok, out = run_there(s.host,
+        "d=" * d * "; if [ -d \"\$d\" ]; then find \"\$d\" -type f | wc -l; du -sk \"\$d\" | cut -f1; " *
+        "else echo 0; echo 0; fi")
+    ok || return (; bytes = 0, blobs = 0)
+    ns = [tryparse(Int, strip(l)) for l in split(strip(out), '\n') if !isempty(strip(l))]
+    length(ns) >= 2 && all(!isnothing, ns[1:2]) || return (; bytes = 0, blobs = 0)
+    return (; bytes = ns[2] * 1024, blobs = ns[1])
+end
 
 "A local path holding this blob, fetching it once if the store is remote."
 blob_file(s::LocalSource, blob, _bytes = 0) = MemoStore.blob_path(s.root, String(blob))

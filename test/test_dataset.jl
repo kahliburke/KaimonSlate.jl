@@ -438,6 +438,15 @@ const MS = RE.MemoStore
             @test s2.xfer.reads > 0
             @test RE.Sweep.transfers().bytes == s2.xfer.bytes   # …and counted once, not twice
 
+            # The store's size is measured where the DATA is. For a cluster that is not the mirror,
+            # which holds the descriptors this hub pushed and none of the output — so measuring it
+            # reported kilobytes directly above per-sweep rows totalling tens of megabytes, a panel
+            # contradicting itself. An empty host runs the same command through `sh`.
+            far = RE.Sweep.store_size(RE.Sweep.SshSource("", root))
+            @test far.bytes >= row.stored && far.blobs > 0
+            @test far.blobs == RE.Sweep.store_size(root).blobs
+            @test RE.Sweep.store_size(RE.Sweep.SshSource("", joinpath(root, "nope"))).bytes == 0
+
             # Naming a cluster the notebook does not define says which ones it does.
             e = try; RE.Sweep.cluster_status("nope"; clusters); "" catch x; sprint(showerror, x); end
             @test occursin("no cluster `nope`", e) && occursin("here", e)
