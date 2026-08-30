@@ -781,10 +781,24 @@ end
             # The failure modes name what IS defined: the usual cause is a typo or a rename.
             # A definition missing what the backend needs must say which field, not fail later at
             # submission time with a scheduler error.
-            e0 = try; Sweep.cluster_args(Dict("name" => "s", "root" => root)); catch x; x; end
-            @test occursin("no `payload`", sprint(showerror, e0))
-            e1 = try; Sweep.cluster_args(Dict("name" => "s")); catch x; x; end
-            @test occursin("no `root`", sprint(showerror, e1))
+            # The task runner is Slate's own code and is SHIPPED during provisioning, so a
+            # definition naming no `payload` is complete rather than broken.
+            @test Sweep.cluster_args(Dict("name" => "s", "root" => root)).payload == ""
+            # A cluster reached over ssh has one store and it is the CLUSTER's — saying only where
+            # it is on this machine says nothing about where the jobs will look.
+            e1 = try
+                Sweep.cluster_args(Dict("name" => "s", "host" => "login1", "root" => root))
+                nothing
+            catch x; x; end
+            @test occursin("no `root_remote`", sprint(showerror, e1))
+            @test occursin("scratch", sprint(showerror, e1))     # …and says where to put it
+            # …while a LOCAL one needs a path here, since that is the only side there is.
+            e2 = try; Sweep.cluster_args(Dict("name" => "s")); catch x; x; end
+            @test occursin("no `root`", sprint(showerror, e2))
+            # A host plus a cluster-side store is enough on its own.
+            a = Sweep.cluster_args(Dict("name" => "s", "host" => "login1",
+                                        "root_remote" => "/scratch/slate"))
+            @test a.root_remote == "/scratch/slate" && a.payload == ""
 
             e = try; Sweep.resolve_target(nothing, Dict("cluster" => "hcp"), defs); catch x; x; end
             @test occursin("no cluster named `hcp`", sprint(showerror, e))

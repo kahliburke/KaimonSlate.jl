@@ -151,6 +151,31 @@ function _ssh_run(host, script; capture::Bool = false)
 end
 
 """
+    provision_payload!(host, root_remote) -> path
+
+Put the task runner where a compute node can load it, and return the path it will use.
+
+The runner is Slate's own code, not the user's — a handful of stdlib-only files that every job
+`include`s. It ships the same way the task environment does, over ssh, because that is the only way
+in: a cluster's filesystem is reachable from its nodes, not from here. Idempotent and cheap; rsync
+sends nothing when the files are unchanged.
+"""
+function provision_payload!(host::AbstractString, root_remote::AbstractString)
+    dst = "$(root_remote)/src"
+    ok, out = _ssh_run(host, "mkdir -p $(dst)")
+    ok || error("could not create $(dst) on $(host): $(strip(out))")
+    src = dirname(String(first(methods(paramgrid)).file))
+    files = [joinpath(src, f) for f in SlateTask.PAYLOAD_FILES]
+    dest = isempty(host) ? dst : "$(host):$(dst)"
+    try
+        run(pipeline(`rsync -a $(files) $(dest)/`; stdout = devnull, stderr = devnull))
+    catch e
+        error("could not ship the task runner to $(host):$(dst) ($(sprint(showerror, e)))")
+    end
+    return "$(dst)/slatetask.jl"
+end
+
+"""
     provision_remote_env!(host, root_remote, parent; julia = "julia", prologue = "") -> envdir
 
 Ship `parent` to the cluster and instantiate a task environment from it. Idempotent: keyed by the
@@ -262,14 +287,18 @@ end
 # `parent` provisions the task environment on the cluster (see `provision_remote_env!`) and is the
 # normal way to use this. Pass `project` instead to point at an environment the site already
 # manages, in which case nothing is shipped.
-function SlurmTarget(host = ""; root, root_remote = root, payload,
+function SlurmTarget(host = ""; root = "", root_remote = root, payload = "",
                      parent = "", project = nothing,
                      resources = (; cpus = 1, mem = "2G", walltime = "01:00:00", partition = ""),
                      chunk = 16, account = "", qos = "", prologue = "", julia = "julia")
     proj = project !== nothing ? String(project) :
            provision_remote_env!(String(host), String(root_remote), String(parent);
                                  julia = String(julia), prologue = String(prologue))
-    SlurmTarget(String(host), String(root), String(root_remote), proj, String(payload),
+    # The runner is Slate's own code and its location on the cluster is Slate's business, so it is
+    # shipped rather than configured. Naming one is still allowed, for a site that stages it itself.
+    pay = isempty(String(payload)) ? provision_payload!(String(host), String(root_remote)) :
+          String(payload)
+    SlurmTarget(String(host), String(root), String(root_remote), proj, String(pay),
                 resources, Int(chunk), String(account), String(qos), String(prologue))
 end
 
@@ -329,17 +358,30 @@ function cluster_args(spec::AbstractDict)
         error("cluster `$name` has kind `$kind`; this build supports `slurm` and `local`. " *
               "PBS and Kubernetes are separate backends, not options here.")
     root = get_("root")
-    isempty(root) && error("cluster `$name` has no `root` — the store directory as this notebook sees it")
+    host = get_("host")
+    root_remote = get_("root_remote")
+    # A cluster reached over ssh has ONE store, and it is the cluster's — `root` is for a local run,
+    # or for the unusual case of a store this notebook has mounted. Requiring both was a hangover
+    # from assuming a shared filesystem.
+    if kind == "local" || isempty(host)
+        isempty(root) && isempty(root_remote) &&
+            error("cluster `$name` has no `root` — where its store lives on this machine")
+        isempty(root) && (root = root_remote)
+    else
+        isempty(root_remote) &&
+            error("cluster `$name` has no `root_remote` — its store ON the cluster. Put it on " *
+                  "scratch: \$HOME is small and is not built for parallel writes.")
+    end
     parent = get_("project")
     isempty(parent) && (parent = dirname(Base.active_project()))
     chunk = something(tryparse(Int, get_("chunk", "8")), 8)
+    # The task runner is Slate's own code and is shipped during provisioning, so naming a path is
+    # only for a site that stages it itself.
     payload = get_("payload")
-    (kind == "slurm" && isempty(payload)) &&
-        error("cluster `$name` has no `payload` — the task script's path ON the cluster")
     res = attr_resources(spec)
     return (; kind, name, root, parent, chunk, payload,
-              root_remote = isempty(get_("root_remote")) ? root : get_("root_remote"),
-              host = get_("host"), account = get_("account"), qos = get_("qos"),
+              root_remote = isempty(root_remote) ? root : root_remote,
+              host, account = get_("account"), qos = get_("qos"),
               prologue = get_("prologue"),
               resources = res === nothing ? NamedTuple() : res)
 end
@@ -1450,6 +1492,9 @@ Re-read the store and the scheduler. This is what a sweep cell does when it is r
 progress display calls on a timer.
 """
 function refresh!(r::ShardedResult)
+    # Re-read the STORE, which for a cluster means catching the mirror up first — everything below
+    # reads a local path, and without this it would faithfully re-report what the hub already knew.
+    sync_in!(r.target)
     root = store_root(r.target)
     l = launcher_for(r.target)
     r.plan = BatchSweep.plan(root, r.run; launcher = l)
