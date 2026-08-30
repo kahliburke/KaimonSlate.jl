@@ -266,6 +266,24 @@ const MS = RE.MemoStore
                 @test isempty(filter(f -> occursin(".part.", f), readdir(dirname(p1))))
             end
         end
+
+        # An ARTIFACT off a remote store reads the same way. It used to be looked up in the mirror,
+        # where a file the cluster wrote has never existed — so `fetch` on any real remote sweep
+        # failed with "it may live on the cluster only", which is where it did in fact live.
+        mktempdir() do root
+            payload = repeat("W", 4096)
+            blob, nb = MS.put_blob(io -> write(io, payload), root)
+            far = S.ArtifactRef(root, "weights.bin", blob, nb, S.SshSource("", root))
+            withenv("XDG_CACHE_HOME" => joinpath(root, "cache")) do
+                dest = joinpath(root, "pulled.bin")
+                @test S.fetch(far, dest) == dest && read(dest, String) == payload
+                @test S.bytes(far) == Vector{UInt8}(payload)
+            end
+            # …and the local case keeps reading the store directly, with no cache in the way.
+            near = S.ArtifactRef(root, "weights.bin", blob, nb)
+            @test near.src isa S.LocalSource
+            @test S.bytes(near) == Vector{UInt8}(payload)
+        end
     end
 
     @testset "the hub plans against a mirror it can see" begin

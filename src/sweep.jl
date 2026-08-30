@@ -667,24 +667,29 @@ struct ArtifactRef
     name::String
     blob::String
     bytes::Int
+    src::Any            # LocalSource | SshSource — where the bytes are, which is not the mirror
 end
+ArtifactRef(root, name, blob, bytes) =
+    ArtifactRef(String(root), String(name), String(blob), Int(bytes), LocalSource(String(root)))
 
 Base.show(io::IO, a::ArtifactRef) = print(io, "ArtifactRef(", a.name, ", ", _bytes(a.bytes), ")")
 
+# An artifact is whole-file by nature — weights, a checkpoint, a video — so there is no slice to
+# read, and `blob_file` brings the whole blob across once and caches it by content.
+_art_path(a::ArtifactRef) = blob_file(a.src, a.blob, a.bytes)
+
 "Copy one artifact out of the store to `dest`. The only call that moves an artifact's bytes."
 function fetch(a::ArtifactRef, dest::AbstractString)
-    src = MemoStore.blob_path(a.root, a.blob)
-    isfile(src) || error("artifact `$(a.name)` is not in this store — it may live on the cluster only")
-    cp(src, dest; force = true)
+    cp(_art_path(a), dest; force = true)
     return dest
 end
 
 "Read one artifact's bytes without writing a file."
-bytes(a::ArtifactRef) = read(MemoStore.blob_path(a.root, a.blob))
+bytes(a::ArtifactRef) = read(_art_path(a))
 
-_arts(root, m) = ArtifactRef[
+_arts(root, m, src = LocalSource(String(root))) = ArtifactRef[
     ArtifactRef(String(root), String(get(a, "name", "")), String(get(a, "blob", "")),
-                Int(get(a, "bytes", 0)))
+                Int(get(a, "bytes", 0)), src)
     for a in get(m, "artifacts", Any[]) if a isa AbstractDict]
 
 # ── Datasets ─────────────────────────────────────────────────────────────────────────────────
@@ -1518,7 +1523,7 @@ function _rows(root, params, keys, src = LocalSource(root))
         val = st == "ok" ? _ref(root, m, src) : get(m, "error", nothing)
         push!(rows, (; params = prm, status = st, value = val,
                        summary = _summary_of(m),
-                       artifacts = _arts(root, m),
+                       artifacts = _arts(root, m, src),
                        ran_on = String(get(m, "ran_on", "")),
                        ms = Float64(get(m, "ms", 0.0)),
                        bytes = st == "ok" ? Int(get(get(m, "shape", Dict()), "bytes", 0)) : 0))
