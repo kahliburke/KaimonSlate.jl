@@ -229,6 +229,13 @@ const MS = RE.MemoStore
         @test occursin("tail -c +4097", cmd)               # …and a fallback where dd lacks the flags
         @test !occursin("bs=1 ", cmd)                      # never a byte-at-a-time copy
 
+        # Everything sent to a host is a SCRIPT — ssh joins its arguments and hands the result to
+        # the remote shell — so an untidy store root is several words, or a glob, unless quoted.
+        @test occursin("'/scratch/cas/blobs", cmd)
+        @test S.shq("/a b/c") == "'/a b/c'"
+        @test S.shq("it's") == "'it'\\''s'"                # the standard escape, not a broken quote
+        @test occursin("'/od d/blobs", S.range_command("/od d", "ab" * repeat("c", 62), 0, 8))
+
         # Which source a target implies. A SLURM target with no host runs its tools locally, so its
         # store is local too; with a host it is only reachable through it.
         mktempdir() do root

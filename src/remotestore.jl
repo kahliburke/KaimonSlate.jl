@@ -65,6 +65,17 @@ ssh_opts(host) = String[
 "The `ssh …` prefix as one shell word, for tools that take a remote-shell string (rsync's `-e`)."
 ssh_command(host) = "ssh " * join(ssh_opts(host), " ")
 
+"""
+    shq(s) -> String
+
+One shell word, whatever `s` contains. Everything sent to a host is a SCRIPT — ssh concatenates its
+arguments and hands the result to the remote shell — so a path with a space in it is two words
+unless it is quoted, and cluster paths are not always tidy. Single quotes with the standard
+`'\\''` escape: inside them the shell expands nothing at all, so a store root is a store root and
+never a glob or a variable.
+"""
+shq(s) = "'" * replace(String(s), "'" => "'\\''") * "'"
+
 "Run `script` on the host, returning `(ok, output)`. An empty host runs it here — that is what makes
 this testable, and what makes a `SlurmTarget` with no host behave as documented."
 function run_there(host::AbstractString, script::AbstractString)
@@ -157,7 +168,7 @@ function forget!(s::RemoteStore, relpaths)
     isempty(ps) && return true
     ok = true
     for batch in Iterators.partition(ps, 400)     # keep the command under the shell's arg limit
-        o, _ = run_there(s.host, "rm -f " * join(batch, " "))
+        o, _ = run_there(s.host, "rm -f " * join(shq.(batch), " "))
         ok &= o
     end
     return ok
@@ -166,7 +177,7 @@ end
 "Make sure the store's directories exist on the far side, before anything is pushed into them."
 function ensure_root!(s::RemoteStore)
     isempty(s.host) && return true
-    dirs = join((joinpath(s.root, d) for d in (META_DIRS..., "blobs")), " ")
+    dirs = join((shq(joinpath(s.root, d)) for d in (META_DIRS..., "blobs")), " ")
     ok, _ = run_there(s.host, "mkdir -p " * dirs)
     return ok
 end

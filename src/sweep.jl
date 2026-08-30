@@ -1056,9 +1056,9 @@ function range_command(root::AbstractString, blob::AbstractString, offset::Integ
     # thousands of syscalls. `iflag=skip_bytes,count_bytes` keeps the offset exact while the block
     # size stays sane. GNU and BusyBox both have it; BSD `dd` does not, hence the `tail` fallback.
     return string("if dd --version >/dev/null 2>&1; then ",
-                  "dd if=", p, " bs=1M iflag=skip_bytes,count_bytes skip=", offset,
+                  "dd if=", shq(p), " bs=1M iflag=skip_bytes,count_bytes skip=", offset,
                   " count=", len, " 2>/dev/null; else ",
-                  "tail -c +", offset + 1, " ", p, " | head -c ", len, "; fi")
+                  "tail -c +", offset + 1, " ", shq(p), " | head -c ", len, "; fi")
 end
 
 "Read `len` bytes at `offset` of one blob, wherever the store is."
@@ -1097,7 +1097,7 @@ function store_size(s::SshSource)
     d = joinpath(s.root, "blobs")
     # `du -sk`, not `-sb`: the byte form is GNU-only, and a KiB is finer than this figure is read to.
     ok, out = run_there(s.host,
-        "d=" * d * "; if [ -d \"\$d\" ]; then find \"\$d\" -type f | wc -l; du -sk \"\$d\" | cut -f1; " *
+        "d=" * shq(d) * "; if [ -d \"\$d\" ]; then find \"\$d\" -type f | wc -l; du -sk \"\$d\" | cut -f1; " *
         "else echo 0; echo 0; fi")
     ok || return (; bytes = 0, blobs = 0)
     ns = [tryparse(Int, strip(l)) for l in split(strip(out), '\n') if !isempty(strip(l))]
@@ -1226,7 +1226,7 @@ end
 
 _blob_there(s::LocalSource, b) = MemoStore.has_blob(s.root, String(b))
 function _blob_there(s::SshSource, b)
-    ok, out = run_there(s.host, "test -f " * MemoStore.blob_path(s.root, String(b)) * " && echo y")
+    ok, out = run_there(s.host, "test -f " * shq(MemoStore.blob_path(s.root, String(b))) * " && echo y")
     return ok && occursin("y", out)
 end
 
