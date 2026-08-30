@@ -386,9 +386,19 @@ end
 _read_chunk(A, path, want, lo, hi) =
     (t = A.Table(path); [collect(getproperty(t, Symbol(nm))[lo:hi]) for nm in want])
 
-"Rows `rows` of a table dataset, as a NamedTuple of columns. Opens only the chunks they fall in."
+"""
+    dataset_rows(root, index, rows; select, blobpath) -> NamedTuple of columns
+
+Rows `rows` of a table dataset. Opens only the chunks they fall in, and only the columns named.
+
+`blobpath(hash, bytes) -> path` resolves a chunk to something Arrow can open; the default is the
+blob's place in the local store. A store the hub cannot see supplies its own resolver, which is
+where a remote fetch happens — the chunk is the unit of addressability either way, so what changes
+is how one arrives, not how many.
+"""
 function dataset_rows(root::AbstractString, index::AbstractDict, rows::AbstractUnitRange;
-                      select = nothing)
+                      select = nothing,
+                      blobpath = (h, _) -> MemoStore.blob_path(root, h))
     A = _ds_arrow()
     A === nothing && error("reading a table dataset needs Arrow available in this environment — " *
                            "add it to the notebook (`slate_pkg(op = \"add\", name = \"Arrow\")`)")
@@ -397,6 +407,8 @@ function dataset_rows(root::AbstractString, index::AbstractDict, rows::AbstractU
     bad = setdiff(want, names)
     isempty(bad) || error("no such column(s) in this dataset: " * join(bad, ", "))
     parts = [Vector{Any}() for _ in want]
+    sizes = Dict{String,Int}(String(c["blob"]) => Int(c["bytes"])
+                             for c in get(index, "chunks", Any[]))
     for (_, blob, lo, hi) in table_chunks(index, rows)
         # ONE world-age boundary per chunk, not per operation. Arrow may have been imported after
         # this function was compiled (see `_ds_arrow`), which makes every one of its methods — down
@@ -405,7 +417,7 @@ function dataset_rows(root::AbstractString, index::AbstractDict, rows::AbstractU
         # what comes back out is ordinary `Vector`s.
         #
         # `Arrow.Table` mmaps, so only the pages behind the columns and rows named here fault in.
-        cols = _arrow_call(_read_chunk, A, MemoStore.blob_path(root, blob), want, lo, hi)
+        cols = _arrow_call(_read_chunk, A, blobpath(blob, get(sizes, blob, 0)), want, lo, hi)
         for (j, c) in enumerate(cols); append!(parts[j], c); end
     end
     return NamedTuple{Tuple(Symbol.(want))}(Tuple(

@@ -533,7 +533,7 @@ function Base.getproperty(r::ShardedResult, s::Symbol)
     # of the data it describes.
     s === :dataset    && return _dataset_of(store_root(getfield(r, :target)),
                                             getfield(r, :params), getfield(r, :keys),
-                                            getfield(r, :run))
+                                            getfield(r, :run), source_of(getfield(r, :target)))
     s === :results    && return [row for row in rows if row.status == "ok"]
     # The charting values, straight from the manifests. This is the accessor analysis should reach
     # for: it is the same cost at four units and four million.
@@ -876,6 +876,98 @@ function Base.show(io::IO, ::MIME"text/plain", s::ClusterStatus)
     return nothing
 end
 
+# ── Where a dataset's bytes are read FROM ────────────────────────────────────────────────────
+# Two topologies, one API. Slate on a login node sees the cluster's store as a directory, and a
+# slice is an mmap — the kernel does the ranged fetch and nothing crosses a network at all. Slate on
+# a laptop sees a host name and a path on the far side of it, and the same slice becomes a ranged
+# read over ssh.
+#
+# ssh rather than a daemon on the cluster: a batch fabric already reaches the scheduler that way,
+# compute nodes write to a shared filesystem and there is nothing to run a server on. `dd` with an
+# offset is available on every login node there has ever been, and it needs no port, no key exchange
+# and no process left behind.
+
+"A store the hub can open directly — a shared mount, or the same machine."
+struct LocalSource
+    root::String
+end
+
+"A store reachable only through a login node. Ranges are read over ssh; nothing else is copied."
+struct SshSource
+    host::String
+    root::String       # the path AS THE HOST SEES IT
+end
+
+source_of(t::LocalTarget) = LocalSource(t.root)
+# A SlurmTarget with no host runs its client tools locally, which means the store is local too.
+# With a host, prefer the local view when it actually resolves — a site that mounts the same
+# filesystem on both sides should not pay for ssh.
+source_of(t::SlurmTarget) =
+    (isempty(t.host) || isdir(joinpath(t.root, "manifests"))) ? LocalSource(t.root) :
+    SshSource(t.host, t.root_remote)
+
+Base.show(io::IO, s::LocalSource) = print(io, "local:", s.root)
+Base.show(io::IO, s::SshSource) = print(io, s.host, ":", s.root)
+
+"The shell that reads `len` bytes at `offset` from a blob. Pure, so it is testable without a host."
+function range_command(root::AbstractString, blob::AbstractString, offset::Integer, len::Integer)
+    p = joinpath(root, "blobs", "sha256", String(blob)[1:2], String(blob))
+    # `dd` with a block-sized skip rather than `bs=1`: a byte-at-a-time copy of a megabyte range is
+    # thousands of syscalls. `iflag=skip_bytes,count_bytes` keeps the offset exact while the block
+    # size stays sane. GNU and BusyBox both have it; BSD `dd` does not, hence the `tail` fallback.
+    return string("if dd --version >/dev/null 2>&1; then ",
+                  "dd if=", p, " bs=1M iflag=skip_bytes,count_bytes skip=", offset,
+                  " count=", len, " 2>/dev/null; else ",
+                  "tail -c +", offset + 1, " ", p, " | head -c ", len, "; fi")
+end
+
+"Read `len` bytes at `offset` of one blob, wherever the store is."
+read_range(s::LocalSource, blob, offset::Integer, len::Integer) =
+    open(MemoStore.blob_path(s.root, String(blob)), "r") do io
+        seek(io, offset); read(io, len)
+    end
+
+function read_range(s::SshSource, blob, offset::Integer, len::Integer)
+    script = range_command(s.root, blob, offset, len)
+    # An empty host means "this machine", matching `_ssh_run` — the same command through `sh`, which
+    # is what makes the byte plumbing exercisable without a cluster.
+    cmd = isempty(s.host) ? `sh -c $script` :
+          `ssh -o BatchMode=yes -o ConnectTimeout=15 $(s.host) $script`
+    out = IOBuffer()
+    try
+        run(pipeline(cmd; stdout = out, stderr = devnull))
+    catch e
+        error("reading $(len) bytes of $(blob) from $(s.host) failed: " *
+              first(sprint(showerror, e), 160))
+    end
+    b = take!(out)
+    length(b) == len ||
+        error("short read from $(s.host): asked $(len) bytes at $(offset), got $(length(b))")
+    return b
+end
+
+# A chunk fetched from a store the hub cannot see, kept so a second look at the same rows is free.
+# Content-addressed, so the cache can never be stale: a blob's name IS its bytes.
+_blob_cache_dir() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
+                             "kaimonslate", "remote-blobs")
+
+"A local path holding this blob, fetching it once if the store is remote."
+blob_file(s::LocalSource, blob, _bytes = 0) = MemoStore.blob_path(s.root, String(blob))
+function blob_file(s::SshSource, blob, nbytes::Integer)
+    dir = _blob_cache_dir(); mkpath(dir)
+    p = joinpath(dir, String(blob))
+    isfile(p) && filesize(p) == nbytes && return p
+    nbytes > 0 || error("cannot fetch blob $(blob): its size is not recorded")
+    tmp = p * ".part.$(getpid())"
+    try
+        write(tmp, read_range(s, blob, 0, nbytes))
+        mv(tmp, p; force = true)          # atomic: a partial fetch never lands under the real name
+    catch
+        rm(tmp; force = true); rethrow()
+    end
+    return p
+end
+
 "One unit's contribution to a dataset: its index, and the parameters that produced it."
 struct DatasetPart
     root::String
@@ -884,9 +976,10 @@ struct DatasetPart
     rows::Int
     bytes::Int
     label::String
+    src::Any            # LocalSource | SshSource — where this part's bytes are read from
 end
-DatasetPart(root, index, params, rows, bytes) =
-    DatasetPart(root, index, params, rows, bytes, "")
+DatasetPart(root, index, params, rows, bytes, label = "") =
+    DatasetPart(root, index, params, rows, bytes, label, LocalSource(root))
 
 """
     Dataset
@@ -921,7 +1014,7 @@ end
 # Assembled from the shard manifests: one part per unit that has landed WITH a dataset index, in
 # grid order. A partial sweep gives a partial dataset rather than an error — the same property that
 # lets the rest of the fabric be watched while it runs.
-function _dataset_of(root, params, keys, label = "")
+function _dataset_of(root, params, keys, label = "", src = LocalSource(root))
     parts = DatasetPart[]
     kind = :table
     whole = 0
@@ -937,7 +1030,7 @@ function _dataset_of(root, params, keys, label = "")
         d = Dict{String,Any}(String(kk) => vv for (kk, vv) in idx)
         kind = String(d["kind"]) == "array" ? :array : :table
         push!(parts, DatasetPart(String(root), d, prm, Int(get(d, "rows", 0)),
-                                 Int(get(d, "bytes", 0)), String(label)))
+                                 Int(get(d, "bytes", 0)), String(label), src))
     end
     return Dataset(kind, parts, whole, label)
 end
@@ -1028,7 +1121,8 @@ function load(ds::Dataset, rows::AbstractUnitRange; select = nothing,
         for (pos, _, _, _) in SlateTask.table_chunks(p.index, local_rows)
             opened += 1; bytes += Int(p.index["chunks"][pos]["bytes"])
         end
-        part = SlateTask.dataset_rows(p.root, p.index, local_rows; select = cols)
+        part = SlateTask.dataset_rows(p.root, p.index, local_rows; select = cols,
+                                      blobpath = (h, n) -> blob_file(p.src, h, n))
         acc = acc === nothing ? map(collect, part) :
               NamedTuple{keys(acc)}(Tuple(append!(acc[k], part[k]) for k in keys(acc)))
     end
@@ -1057,7 +1151,16 @@ it is touched.
 """
 function Base.getindex(p::DatasetPart, i::AbstractUnitRange)
     t0 = time()
-    v = SlateTask.dataset_elements(p.root, p.index, i)
+    v = if p.src isa LocalSource
+        # Local: mmap the window, so the pages outside it are never faulted in.
+        SlateTask.dataset_elements(p.root, p.index, i)
+    else
+        # Remote: the same window as an exact byte range, reinterpreted on arrival. An array's
+        # layout is what makes this a single request rather than a search.
+        blob, off, nb, n = SlateTask.array_range(p.index, i)
+        T = Core.eval(Main, Meta.parse(String(p.index["eltype"])))
+        collect(reinterpret(T, read_range(p.src, blob, off, nb)))
+    end
     _record!(p.label, p.root, :elements, length(i) * Int(p.index["elsize"]), 1,
              (time() - t0) * 1000)
     return v
@@ -1118,7 +1221,9 @@ function scan(ds::Dataset; select = nothing, between = nothing, where = nothing,
             nrows = Int(c["rows"])
             if chunks === nothing || pos in chunks
                 opened += 1; bytes += Int(c["bytes"])
-                blk = SlateTask.dataset_rows(p.root, p.index, at:(at + nrows - 1); select = readcols)
+                blk = SlateTask.dataset_rows(p.root, p.index, at:(at + nrows - 1);
+                                             select = readcols,
+                                             blobpath = (h, n) -> blob_file(p.src, h, n))
                 syms = keys(blk)
                 for r in 1:nrows
                     row = NamedTuple{syms}(Tuple(blk[s][r] for s in syms))
@@ -1400,7 +1505,7 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         "why" => _why_html(p))
     # The data line grows as units land, so it rides the poll too. Off the indices, so a sweep
     # writing terabytes still costs manifest reads to watch.
-    ds = _dataset_of(root, params, keys, run)
+    ds = _dataset_of(root, params, keys, run, source_of(target))
     out["data"] = _data_html(ds)
     # …and the same two figures as NUMBERS, for the notebook-level pill. The card can render HTML;
     # the topbar panel aggregates across sweeps and needs to add them up.

@@ -217,6 +217,57 @@ const MS = RE.MemoStore
         end
     end
 
+    @testset "a store the hub cannot see is read by ranges" begin
+        # Slate on a login node sees the store as a directory and a slice is an mmap. Slate on a
+        # laptop sees a host name, and the SAME slice becomes a ranged read. What must hold is that
+        # only the range crosses — not the file, and not the dataset.
+        S = RE.Sweep
+        cmd = S.range_command("/scratch/cas", "ab" * repeat("c", 62), 4096, 1024)
+        @test occursin("/scratch/cas/blobs/sha256/ab/ab", cmd)
+        @test occursin("skip=4096", cmd) && occursin("count=1024", cmd)
+        @test occursin("skip_bytes,count_bytes", cmd)      # exact offset, sane block size
+        @test occursin("tail -c +4097", cmd)               # …and a fallback where dd lacks the flags
+        @test !occursin("bs=1 ", cmd)                      # never a byte-at-a-time copy
+
+        # Which source a target implies. A SLURM target with no host runs its tools locally, so its
+        # store is local too; with a host it is only reachable through it.
+        mktempdir() do root
+            t = S.LocalTarget(; root, project = tempdir(),
+                              payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            @test S.source_of(t) isa S.LocalSource
+            here = S.SlurmTarget(""; root, root_remote = "/scratch/cas", project = tempdir(),
+                                 payload = "/scratch/src/slatetask.jl")
+            @test S.source_of(here) isa S.LocalSource
+            far = S.SlurmTarget("login1"; root = "/not/mounted/here",
+                                root_remote = "/scratch/cas", project = tempdir(),
+                                payload = "/scratch/src/slatetask.jl")
+            @test S.source_of(far) isa S.SshSource
+            @test S.source_of(far).root == "/scratch/cas"   # the path the HOST sees, not ours
+        end
+
+        # The fetch-and-cache path, driven end to end without a cluster: an empty host runs the
+        # same command through `sh`, so this exercises the real byte plumbing.
+        mktempdir() do root
+            v = collect(Float32(1):Float32(4096))
+            idx, _ = ST.write_dataset!(root, v)
+            src = S.SshSource("", root)                     # "" ⇒ sh -c, i.e. this machine
+            blob, off, nb, _ = ST.array_range(idx, 100:109)
+            got = S.read_range(src, blob, off, nb)
+            @test length(got) == nb
+            @test collect(reinterpret(Float32, got)) == v[100:109]
+
+            # …and a whole blob lands in the cache, once, under its own hash.
+            withenv("XDG_CACHE_HOME" => joinpath(root, "cache")) do
+                p1 = S.blob_file(src, blob, idx["bytes"])
+                @test isfile(p1) && filesize(p1) == idx["bytes"]
+                @test basename(p1) == blob                  # content-addressed ⇒ never stale
+                t0 = time(); p2 = S.blob_file(src, blob, idx["bytes"]); el = time() - t0
+                @test p2 == p1 && el < 0.5                  # second look is free
+                @test isempty(filter(f -> occursin(".part.", f), readdir(dirname(p1))))
+            end
+        end
+    end
+
     @testset "a cluster reports what is going on with it" begin
         # A cluster is defined once and referenced from any number of cells, so "what is it doing"
         # is a question about the CLUSTER. Everything here is derived from the store and the
