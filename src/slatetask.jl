@@ -37,9 +37,13 @@ const MemoStore = parentmodule(@__MODULE__).MemoStore
 # Arrow is soft-detected), so it loads in a runner that carries no dependencies.
 Base.include(@__MODULE__, joinpath(@__DIR__, "memocodecs.jl"))
 
+# Storing a result ADDRESSABLY rather than whole — the layouts and the index that lets a notebook
+# slice a dataset without moving it. Uses the codecs above, so it comes after them.
+Base.include(@__MODULE__, joinpath(@__DIR__, "dataset.jl"))
+
 # Everything a task process needs beside it. Declared here, next to the includes it mirrors, so
 # provisioning a cluster cannot silently ship a runner without one of its own parts.
-const PAYLOAD_FILES = ("memostore.jl", "memocodecs.jl", "slatetask.jl")
+const PAYLOAD_FILES = ("memostore.jl", "memocodecs.jl", "dataset.jl", "slatetask.jl")
 
 const KIND_CHUNK = "slate-chunk"
 const KIND_SHARD = "slate-shard"
@@ -99,7 +103,7 @@ function write_chunk!(root::AbstractString, chunk::AbstractString;
                       fn_src::AbstractString, params::AbstractVector,
                       keys::AbstractVector, setup_src::AbstractString = "",
                       captures::AbstractDict = Dict{String,Any}(),
-                      summary_src::AbstractString = "")
+                      summary_src::AbstractString = "", lazy::Bool = false)
     length(params) == length(keys) ||
         throw(ArgumentError("params and keys must be the same length"))
     fn_h, _ = _put_txt(root, fn_src)
@@ -123,6 +127,7 @@ function write_chunk!(root::AbstractString, chunk::AbstractString;
         "fn" => fn_h,
         "setup" => setup_h,
         "summary" => sum_h,
+        "lazy" => lazy,
         "captures" => caps,
         "shards" => shards))
     return chunk
@@ -259,6 +264,7 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
     # units return gigabyte fields must still cost only its manifests to watch.
     sum_h = String(get(d, "summary", ""))
     summarize = isempty(sum_h) ? nothing : Core.eval(mod, Meta.parse(_get_txt(root, sum_h)))
+    lazy = get(d, "lazy", false) === true
 
     for s in shards
         s isa AbstractDict || continue
@@ -296,11 +302,23 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
             # values; anything else is dropped rather than stringified.
             sv = _summarize(summarize, value)
             sv === nothing || (m["summary"] = sv)
-            codec = _codec_pick(value)
-            h, n = MemoStore.put_blob(io -> _codec_encode(io, codec, value), root)
-            m["bindings"] = [Dict{String,Any}("name" => "result", "codec" => codec,
-                                              "blob" => h, "bytes" => n)]
-            m["shape"] = _shape_of(value, n)
+            # A `data=lazy` cell stores the result ADDRESSABLY: chunked and indexed, so the notebook
+            # can slice it without moving it. Falls through to the whole-value path for anything with
+            # no addressable form, which keeps the attribute a performance choice rather than a
+            # constraint on what a unit may return.
+            ds = lazy ? write_dataset!(root, value) : nothing
+            if ds !== nothing
+                idx, n = ds
+                m["dataset"] = idx
+                m["bindings"] = Any[]
+                m["shape"] = _shape_of(value, n)
+            else
+                codec = _codec_pick(value)
+                h, n = MemoStore.put_blob(io -> _codec_encode(io, codec, value), root)
+                m["bindings"] = [Dict{String,Any}("name" => "result", "codec" => codec,
+                                                  "blob" => h, "bytes" => n)]
+                m["shape"] = _shape_of(value, n)
+            end
             ran += 1
         else
             m["bindings"] = Any[]
@@ -340,6 +358,48 @@ function load_binding(root::AbstractString, b::AbstractDict; zc::Bool = false)
     codec = String(get(b, "codec", "jls"))
     path = MemoStore.blob_path(root, String(b["blob"]))
     return _codec_decode(codec, path, zc)
+end
+
+# ── Reading a dataset back ───────────────────────────────────────────────────────────────────
+# Every read here is BOUNDED by the slice it was asked for. The index says which bytes matter; only
+# those are touched. An array slice mmaps the blob and copies out the requested range, so the pages
+# outside it are never faulted in; a table slice opens only the chunks the rows fall in.
+
+"Elements `i` (linear) of an array dataset. Reads exactly that range's bytes."
+function dataset_elements(root::AbstractString, index::AbstractDict, i::AbstractUnitRange)
+    blob, off, _, n = array_range(index, i)
+    T = Core.eval(Main, Meta.parse(String(index["eltype"])))
+    path = MemoStore.blob_path(root, blob)
+    io = open(path, "r")
+    try
+        # An mmap of just this window: `Mmap.mmap` takes a byte offset, so nothing before `off` is
+        # mapped and nothing after `n` elements is read. The copy hands back ordinary memory.
+        return copy(Mmap.mmap(io, Vector{T}, n, off))
+    finally
+        close(io)
+    end
+end
+
+"Rows `rows` of a table dataset, as a NamedTuple of columns. Opens only the chunks they fall in."
+function dataset_rows(root::AbstractString, index::AbstractDict, rows::AbstractUnitRange;
+                      select = nothing)
+    A = _codec_loaded("Arrow")
+    A === nothing && error("reading a table dataset needs Arrow loaded in this session (`using Arrow`)")
+    names = String[String(c) for c in index["columns"]]
+    want = select === nothing ? names : String[String(s) for s in select]
+    bad = setdiff(want, names)
+    isempty(bad) || error("no such column(s) in this dataset: " * join(bad, ", "))
+    parts = [Vector{Any}() for _ in want]
+    for (_, blob, lo, hi) in table_chunks(index, rows)
+        # The mapped table: `Arrow.Table` mmaps, so only the pages behind the columns and rows
+        # actually touched below are faulted in.
+        t = A.Table(MemoStore.blob_path(root, blob))
+        for (j, nm) in enumerate(want)
+            append!(parts[j], view(getproperty(t, Symbol(nm)), lo:hi))
+        end
+    end
+    return NamedTuple{Tuple(Symbol.(want))}(Tuple(
+        (isempty(p) ? p : identity.(p)) for p in parts))
 end
 
 "Every artifact a shard registered, as `(name, blob, bytes)` rows. Blobs stay where they are."
