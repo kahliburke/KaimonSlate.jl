@@ -66,6 +66,7 @@ end
 # unit process has no reason to have imported Arrow on its own. Detecting its absence and silently
 # storing whole would answer that request with the one thing it ruled out.
 const _ARROW_TRIED = Ref(false)
+const _ARROW_UUID = "69666777-d1a9-59fb-9406-91d4454c9d45"
 function _ds_arrow()
     A = _codec_loaded("Arrow")
     A === nothing || return A
@@ -73,10 +74,18 @@ function _ds_arrow()
     _ARROW_TRIED[] = true
     try
         @eval Main using Arrow
+        return _codec_loaded("Arrow")
+    catch
+    end
+    # `using` only reaches a project's DIRECT dependencies, and Arrow is rarely one: a task
+    # environment is provisioned from the user's science package, which may well depend on Arrow
+    # without the environment naming it. Loading by UUID reaches anything the manifest resolves,
+    # which is the honest test of "is it available here?".
+    try
+        return Base.require(Base.PkgId(Base.UUID(_ARROW_UUID), "Arrow"))
     catch
         return nothing
     end
-    return _codec_loaded("Arrow")
 end
 
 # Importing a package at RUNTIME puts its methods in a newer world than the function that asked for

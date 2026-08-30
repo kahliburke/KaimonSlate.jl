@@ -106,11 +106,41 @@ function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
     for d in dirs
         src = joinpath(s.mirror, d)
         isdir(src) || continue
-        # `--ignore-existing` for blobs: they are content-addressed, so a blob the cluster already
-        # has is byte-identical and re-sending it is pure waste.
-        extra = d == "blobs" ? `--ignore-existing` : ``
+        # Who OWNS a directory decides whether a deletion may propagate.
+        #
+        # `jobs/` is the hub's alone — the submission index, the attempt counts, the armed and
+        # cancelled markers. Nothing on the cluster writes there, so the mirror is authoritative and
+        # `--delete` is how disarming or clearing attempts actually takes effect. Without it those
+        # files come straight back on the next pull.
+        #
+        # `manifests/` and `status/` are written by the JOBS. A `--delete` there would race a unit
+        # finishing between our pull and our push, and erase a result nobody has seen. Removing one
+        # deliberately is `forget!`, not a side effect of syncing.
+        #
+        # `blobs/` is content-addressed, so a blob the cluster already has is byte-identical and
+        # re-sending it is waste.
+        extra = d == "blobs" ? `--ignore-existing` : (d == "jobs" ? `--delete` : ``)
         c = `rsync -a $extra -e $(ssh_command(s.host)) $(src * "/") $(s.host * ":" * joinpath(s.root, d) * "/")`
         ok &= try; run(pipeline(c; stdout = devnull, stderr = devnull)); true; catch; false; end
+    end
+    return ok
+end
+
+"""
+    forget!(s, relpaths) -> Bool
+
+Remove files from the store itself. The one deletion that crosses, because it is asked for: reset
+and retry drop results on purpose, and dropping them only in the mirror means the next pull brings
+them back. Batched so a sweep of thousands of units is one round trip, not thousands.
+"""
+function forget!(s::RemoteStore, relpaths)
+    isempty(s.host) && return true
+    ps = [joinpath(s.root, String(p)) for p in relpaths]
+    isempty(ps) && return true
+    ok = true
+    for batch in Iterators.partition(ps, 400)     # keep the command under the shell's arg limit
+        o, _ = run_there(s.host, "rm -f " * join(batch, " "))
+        ok &= o
     end
     return ok
 end

@@ -992,6 +992,22 @@ sync_in!(t::SlurmTarget) = isempty(t.host) ? true : pull_meta!(remote_store(t))
 sync_out!(::LocalTarget) = true
 sync_out!(t::SlurmTarget) = isempty(t.host) ? true : push_meta!(remote_store(t))
 
+"""
+    forget_results!(target, keys)
+
+Drop these units' results for good — from the hub's view AND from the store. Deleting only locally
+would be undone by the next sync, which reads the store as the truth; that is right for everything
+except a deletion someone asked for.
+"""
+function forget_results!(t::SweepTarget, keys)
+    root = store_root(t)
+    n = 0
+    for k in keys; MemoStore.drop_manifest(root, k) && (n += 1); end
+    t isa SlurmTarget && !isempty(t.host) &&
+        forget!(remote_store(t), ["manifests/" * String(k) * ".toml" for k in keys])
+    return n
+end
+
 Base.show(io::IO, s::LocalSource) = print(io, "local:", s.root)
 Base.show(io::IO, s::SshSource) = print(io, s.host, ":", s.root)
 
@@ -1633,14 +1649,19 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
         BatchSweep.resume!(root, run)
         BatchSweep.arm!(root, run)
     elseif action == "retry"
-        BatchSweep.retry_failed!(root, run)
+        # Same reason as reset: dropping a failed unit's manifest only in the mirror leaves it on
+        # the cluster, and the next sync brings the failure straight back.
+        failed = [k for k in keys
+                  if (m = MemoStore.read_manifest(root, k);
+                      m !== nothing && String(get(m, "status", "")) == "error")]
+        forget_results!(target, failed)
     elseif action == "reset"
         # Kill anything live FIRST. `clear_attempts!` forgets the submission records, and with them
         # the job names needed to reach the scheduler — reversing these two would leave orphaned jobs
         # writing results into a store that had just been emptied.
         BatchSweep.cancel!(root, run, l)
         BatchSweep.clear_attempts!(root, run)
-        for k in keys; MemoStore.drop_manifest(root, k); end
+        forget_results!(target, keys)
         # Cleared and READY, not stopped: drop the cancellation `cancel!` just wrote, and leave the
         # sweep unarmed so submitting it again is a separate decision.
         BatchSweep.resume!(root, run)
