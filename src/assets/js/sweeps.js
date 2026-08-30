@@ -62,8 +62,8 @@ const humBytes = b => b == null ? '—' :
     ['Where', [
       ['kind',        'kind',          'slurm | local'],
       ['host',        'ssh host',      'a login node from ~/.ssh/config; blank runs the client tools locally'],
-      ['root',        'store (here)',  'the shared store, as this notebook sees it'],
-      ['root_remote', 'store (there)', 'the SAME directory, as a compute node sees it'],
+      ['root',        'store (local)', 'only used when there is no ssh host — a local run, or a store this notebook has mounted'],
+      ['root_remote', 'store (cluster)', 'the store ON the cluster. Put it on SCRATCH: $HOME is a few tens of GB and is not built for parallel writes'],
       ['project',     'project',       'the package whose code the units call into'],
       ['payload',     'task script',   "the task runner's path ON the cluster"],
     ]],

@@ -25,6 +25,17 @@ import TOML    # reading sweep descriptors straight off a store (cluster_status)
 # this way by the worker and by its own tests.
 Base.include(@__MODULE__, joinpath(@__DIR__, "defname.jl"))
 
+# Reaching a store the hub has no filesystem access to — the mirror, the multiplexed connection, and
+# the rsync that keeps them in step. Separate because it is transport with no opinion about sweeps.
+Base.include(@__MODULE__, joinpath(@__DIR__, "remotestore.jl"))
+
+# Where a dataset index is kept so a scratch purge cannot take it. Included rather than imported
+# because this file is loaded by the WORKER too, which has no `KaimonSlate.SlateHome` — and the two
+# must agree on the path, or a notebook and its worker would remember indexes in different places.
+if !isdefined(@__MODULE__, :SlateHome)
+    Base.include(@__MODULE__, joinpath(@__DIR__, "slate_home.jl"))
+end
+
 # The env-preparation policy shared by the notebook fork and the remote provisioner. envprep.jl is
 # pure TOML/file operations with no transport of its own, precisely so a new transport can reuse it:
 # batch is the third, after the local filesystem fork and ssh/rsync.
@@ -405,7 +416,9 @@ with_chunk(t::SlurmTarget, n) = n === nothing ? t :
                 t.resources, n, t.account, t.qos, t.prologue)
 
 store_root(t::LocalTarget) = t.root
-store_root(t::SlurmTarget) = t.root
+# The hub plans against the MIRROR for a remote cluster — a local directory holding a copy of the
+# store's metadata. `root_remote` stays the job's view and never changes.
+store_root(t::SlurmTarget) = plan_root(t)
 chunk_size(t::LocalTarget) = t.chunk
 chunk_size(t::SlurmTarget) = t.chunk
 
@@ -899,12 +912,43 @@ struct SshSource
 end
 
 source_of(t::LocalTarget) = LocalSource(t.root)
-# A SlurmTarget with no host runs its client tools locally, which means the store is local too.
-# With a host, prefer the local view when it actually resolves — a site that mounts the same
-# filesystem on both sides should not pay for ssh.
+# A SlurmTarget with no host runs its client tools here, so its store is here too. With a host the
+# blobs are THERE, and reading them means byte ranges over ssh — `root_remote`, the path the host
+# uses, not the mirror the hub plans against.
 source_of(t::SlurmTarget) =
-    (isempty(t.host) || isdir(joinpath(t.root, "manifests"))) ? LocalSource(t.root) :
-    SshSource(t.host, t.root_remote)
+    isempty(t.host) ? LocalSource(t.root) : SshSource(t.host, t.root_remote)
+
+# ── The store the hub plans against ──────────────────────────────────────────────────────────
+# For a remote cluster this is the local MIRROR, not the cluster path: `plan`, `telemetry`,
+# `results` and `status_payload` all walk manifests, and they go on doing that against a directory
+# on this machine. What changes is that the directory is a copy, refreshed by one rsync.
+#
+# Cached per (host, root) so the mirror — and the ssh control socket behind it — is shared by every
+# sweep pointed at the same cluster, rather than one per cell.
+const _STORES = Dict{Tuple{String,String},RemoteStore}()
+const _STORES_LOCK = ReentrantLock()
+
+function remote_store(t::SlurmTarget)
+    lock(_STORES_LOCK) do
+        get!(_STORES, (t.host, t.root_remote)) do
+            s = RemoteStore(t.host, t.root_remote)
+            ensure_root!(s)
+            s
+        end
+    end
+end
+
+"Where this hub reads and writes store METADATA. Local for a local target; the mirror for a cluster."
+plan_root(t::LocalTarget) = t.root
+plan_root(t::SlurmTarget) = isempty(t.host) ? t.root : remote_store(t).mirror
+
+"Refresh the hub's view of a store before planning against it. No-op when the store is local."
+sync_in!(::LocalTarget) = true
+sync_in!(t::SlurmTarget) = isempty(t.host) ? true : pull_meta!(remote_store(t))
+
+"Send what the hub has written — descriptors, their blobs, markers — to the store."
+sync_out!(::LocalTarget) = true
+sync_out!(t::SlurmTarget) = isempty(t.host) ? true : push_meta!(remote_store(t))
 
 Base.show(io::IO, s::LocalSource) = print(io, "local:", s.root)
 Base.show(io::IO, s::SshSource) = print(io, s.host, ":", s.root)
@@ -929,10 +973,10 @@ read_range(s::LocalSource, blob, offset::Integer, len::Integer) =
 
 function read_range(s::SshSource, blob, offset::Integer, len::Integer)
     script = range_command(s.root, blob, offset, len)
-    # An empty host means "this machine", matching `_ssh_run` — the same command through `sh`, which
-    # is what makes the byte plumbing exercisable without a cluster.
-    cmd = isempty(s.host) ? `sh -c $script` :
-          `ssh -o BatchMode=yes -o ConnectTimeout=15 $(s.host) $script`
+    # The SAME multiplexed connection the metadata sync uses (`ssh_opts`), so a slice costs a round
+    # trip rather than a round trip plus a handshake and a key exchange. An empty host runs it here,
+    # which is what makes the byte plumbing exercisable without a cluster.
+    cmd = isempty(s.host) ? `sh -c $script` : `ssh $(ssh_opts(s.host)) $(s.host) $script`
     out = IOBuffer()
     try
         run(pipeline(cmd; stdout = out, stderr = devnull))
@@ -1000,15 +1044,80 @@ struct Dataset
     starts::Vector{Int}           # cumulative first global row of each part
     whole::Int                    # landed units stored WHOLE (no index) — not slicable
     label::String                 # the sweep it came from, for transfer accounting
+    purged::Bool                  # the index survived, the bytes did not
 end
 
 function Dataset(kind::Symbol, parts::Vector{DatasetPart}, whole::Integer = 0,
-                 label::AbstractString = "")
+                 label::AbstractString = "", purged::Bool = false)
     cols = isempty(parts) ? String[] : String[String(c) for c in get(parts[1].index, "columns", String[])]
     typs = isempty(parts) ? String[] : String[String(t) for t in get(parts[1].index, "types", String[])]
     starts = Int[]; at = 1
     for p in parts; push!(starts, at); at += p.rows; end
-    return Dataset(kind, parts, cols, typs, starts, Int(whole), String(label))
+    return Dataset(kind, parts, cols, typs, starts, Int(whole), String(label), purged)
+end
+
+# ── Surviving the purge ──────────────────────────────────────────────────────────────────────
+# Cluster scratch is deleted on a policy timer — commonly 30 to 90 days — and is not backed up. That
+# is where the results are written, and it is the right place for them: it is the only tier with the
+# capacity and the bandwidth. What must not die with them is the INDEX, which is kilobytes
+# describing terabytes: the schema, the row counts, the chunk offsets and value ranges, and which
+# sweep produced them.
+#
+# So the index is kept HERE, in Slate's data home, which is durable by construction. When the purge
+# lands you lose the bytes and nothing else — the dataset can still say what it was, and re-running
+# it is one action against a known grid rather than an excavation.
+#
+# Do not assume reads hold the purge off. Some sites age scratch by access time, but Lustre is
+# frequently mounted to skip atime updates precisely to spare its metadata servers, so the window
+# has to be treated as running from the WRITE.
+
+_index_dir() = joinpath(SlateHome.data_home(), "datasets")
+_index_file(run) = joinpath(_index_dir(), String(run) * ".toml")
+
+"Keep a dataset's index where the scratch purge cannot reach it. Best effort: this is a safety net."
+function remember_index!(run::AbstractString, root, parts::Vector{DatasetPart}, kind::Symbol)
+    isempty(parts) && return nothing
+    try
+        mkpath(_index_dir())
+        d = Dict{String,Any}("run" => String(run), "root" => String(root),
+                             "kind" => String(kind), "saved" => round(Int, time()),
+                             "parts" => Any[Dict{String,Any}("index" => p.index,
+                                                             "params" => string(p.params),
+                                                             "rows" => p.rows, "bytes" => p.bytes)
+                                            for p in parts])
+        tmp = _index_file(run) * ".tmp"
+        open(io -> TOML.print(io, d), tmp, "w")
+        mv(tmp, _index_file(run); force = true)
+    catch e
+        @debug "sweep: could not persist dataset index" run exception = e
+    end
+    return nothing
+end
+
+"The remembered index for a run, or `nothing`. What is left after the store is purged."
+function recall_index(run::AbstractString)
+    p = _index_file(run)
+    isfile(p) || return nothing
+    return try; TOML.parsefile(p); catch; nothing; end
+end
+
+"Has this part's data actually survived? A remembered index can outlive the bytes it describes."
+function part_present(p::DatasetPart)
+    blobs = String[]
+    if String(get(p.index, "kind", "")) == "array"
+        push!(blobs, String(p.index["blob"]))
+    else
+        cs = get(p.index, "chunks", Any[])
+        isempty(cs) || push!(blobs, String(first(cs)["blob"]))   # one probe, not thousands
+    end
+    isempty(blobs) && return true
+    return all(b -> _blob_there(p.src, b), blobs)
+end
+
+_blob_there(s::LocalSource, b) = MemoStore.has_blob(s.root, String(b))
+function _blob_there(s::SshSource, b)
+    ok, out = run_there(s.host, "test -f " * MemoStore.blob_path(s.root, String(b)) * " && echo y")
+    return ok && occursin("y", out)
 end
 
 # Assembled from the shard manifests: one part per unit that has landed WITH a dataset index, in
@@ -1032,6 +1141,26 @@ function _dataset_of(root, params, keys, label = "", src = LocalSource(root))
         push!(parts, DatasetPart(String(root), d, prm, Int(get(d, "rows", 0)),
                                  Int(get(d, "bytes", 0)), String(label), src))
     end
+    # The store had nothing to say. Either this sweep never ran, or its scratch has been purged and
+    # the manifests went with it — and the difference matters, because in the second case we still
+    # know exactly what the dataset was.
+    if isempty(parts) && whole == 0 && !isempty(label)
+        remembered = recall_index(label)
+        if remembered !== nothing
+            kind = String(get(remembered, "kind", "table")) == "array" ? :array : :table
+            for pd in get(remembered, "parts", Any[])
+                pd isa AbstractDict || continue
+                idx = Dict{String,Any}(String(k) => v for (k, v) in get(pd, "index", Dict()))
+                push!(parts, DatasetPart(String(root), idx, get(pd, "params", ""),
+                                         Int(get(pd, "rows", 0)), Int(get(pd, "bytes", 0)),
+                                         String(label), src))
+            end
+            # One probe, not one per chunk: if the first blob is gone the store was purged.
+            gone = !isempty(parts) && !part_present(parts[1])
+            return Dataset(kind, parts, whole, label, gone)
+        end
+    end
+    remember_index!(label, root, parts, kind)
     return Dataset(kind, parts, whole, label)
 end
 
@@ -1055,6 +1184,8 @@ function Base.show(io::IO, ::MIME"text/plain", ds::Dataset)
     end
     # Units that finished before the cell asked for addressable storage still hold their results;
     # they just cannot be sliced. Saying so beats a dataset that is quietly missing most of itself.
+    ds.purged && println(io, "   ⚠ the data is gone — this store was purged. The index is kept, so ",
+                         "the schema and counts above are what it HELD; re-run the sweep to rebuild it.")
     ds.whole == 0 || println(io, "   ⚠ ", ds.whole, " finished unit", ds.whole == 1 ? "" : "s",
                              " stored whole and not in this view — reset the sweep to re-store")
     # What this session has actually pulled out of it, against what it holds. The ratio is the
@@ -1102,6 +1233,9 @@ look — deliberately, at one call site, with the number written down.
 """
 function load(ds::Dataset, rows::AbstractUnitRange; select = nothing,
               max_rows::Integer = DATASET_ROW_CAP)
+    ds.purged && error("this dataset's data has been purged from the store — the index survived, " *
+                       "so the schema and counts are still readable, but the bytes are gone. " *
+                       "Re-run the sweep to rebuild it.")
     ds.kind === :table ||
         error("this dataset holds arrays, not rows — `ds[k]` for part k, then slice that part")
     n = length(ds)
@@ -1149,23 +1283,37 @@ Base.show(io::IO, p::DatasetPart) =
 Reads exactly that range: the mapping starts at the range's first byte, so nothing before or after
 it is touched.
 """
+# A read that fails because the bytes are gone should say so. The alternative is a `SystemError` on
+# a path, or a short read from the far side — both of which read as a bug in Slate rather than as
+# the store having been purged out from under it.
+function _explain_missing(p::DatasetPart, e)
+    part_present(p) && rethrow(e)
+    error("this part's data is no longer in the store — scratch is purged on a timer and is not " *
+          "backed up. The index is kept, so the schema and counts are still readable; re-run the " *
+          "sweep to rebuild the data.")
+end
+
 function Base.getindex(p::DatasetPart, i::AbstractUnitRange)
     t0 = time()
-    v = if p.src isa LocalSource
-        # Local: mmap the window, so the pages outside it are never faulted in.
-        SlateTask.dataset_elements(p.root, p.index, i)
-    else
-        # Remote: the same window as an exact byte range, reinterpreted on arrival. An array's
-        # layout is what makes this a single request rather than a search.
-        blob, off, nb, n = SlateTask.array_range(p.index, i)
-        T = Core.eval(Main, Meta.parse(String(p.index["eltype"])))
-        collect(reinterpret(T, read_range(p.src, blob, off, nb)))
+    v = try
+        if p.src isa LocalSource
+            # Local: mmap the window, so the pages outside it are never faulted in.
+            SlateTask.dataset_elements(p.root, p.index, i)
+        else
+            # Remote: the same window as an exact byte range, reinterpreted on arrival. An array's
+            # layout is what makes this a single request rather than a search.
+            blob, off, nb, _ = SlateTask.array_range(p.index, i)
+            T = Core.eval(Main, Meta.parse(String(p.index["eltype"])))
+            collect(reinterpret(T, read_range(p.src, blob, off, nb)))
+        end
+    catch e
+        _explain_missing(p, e)
     end
     _record!(p.label, p.root, :elements, length(i) * Int(p.index["elsize"]), 1,
              (time() - t0) * 1000)
     return v
 end
-Base.getindex(p::DatasetPart, i::Integer) = SlateTask.dataset_elements(p.root, p.index, i:i)[1]
+Base.getindex(p::DatasetPart, i::Integer) = p[i:i][1]
 Base.length(p::DatasetPart) = p.rows
 
 """
@@ -1420,6 +1568,7 @@ results away.
 """
 function handle_action(target::SweepTarget, run::AbstractString, params, keys,
                        action::AbstractString; plot = nothing, notify = nothing)
+    sync_in!(target)
     root = store_root(target)
     l = launcher_for(target)
     # Not a mutation: the card reporting, once, that the work is over. A sweep finishes minutes or
@@ -1454,6 +1603,7 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
     else
         error("unknown sweep action: $(action)")
     end
+    sync_out!(target)   # arming, cancellation and cleared attempts are all markers in the store
     return status_payload(target, run, params, keys; plot)
 end
 
@@ -1462,6 +1612,7 @@ end
 # structured rows for every unit.
 function status_payload(target::SweepTarget, run::AbstractString, params, keys;
                         plot = nothing, advance::Bool = true)
+    sync_in!(target)
     root = store_root(target)
     l = launcher_for(target)
     # The poll RECONCILES, it does not merely observe. The probe wave releases one chunk and waits
@@ -2291,6 +2442,9 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # not re-key and throw away finished work. Units already stored whole simply have no index and
     # cannot be sliced; the dataset says how many, rather than quietly omitting them.
     lazy = lazy || attr_lazy(attrs)
+    # What has landed since last time. For a remote cluster this is the one round trip that makes
+    # every manifest read below local; for a local target it is a no-op.
+    sync_in!(target)
     root = store_root(target)
     mkpath(root)
     key = sweep_key(body_src, setup_src, captures, env_key(target), summary_src)
@@ -2311,6 +2465,8 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         push!(chunks, ck)
     end
     BatchSweep.write_sweep!(root, run, chunks)
+    # The job cannot start without its descriptors, so they go over BEFORE anything is submitted.
+    sync_out!(target)
 
     launcher = launcher_for(target)
     # Running the cell RECONCILES; it does not submit. Authoring a sweep means running the cell

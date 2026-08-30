@@ -268,6 +268,97 @@ const MS = RE.MemoStore
         end
     end
 
+    @testset "the hub plans against a mirror it can see" begin
+        # The deployment: notebook on a laptop, work on a cluster, no filesystem in common. The
+        # planning code goes on reading a local path — the mirror — and one rsync keeps it true.
+        S = RE.Sweep
+        mktempdir() do dir
+            far = joinpath(dir, "far"); mkpath(far)          # stands in for the cluster's scratch
+            withenv("XDG_CACHE_HOME" => joinpath(dir, "cache")) do
+                # An empty host means "this machine", so the whole path is exercisable without one.
+                st = S.RemoteStore("", far)
+                @test st.mirror != far                        # a shadow, not an alias
+                @test all(isdir(joinpath(st.mirror, d)) for d in S.META_DIRS)
+
+                # The connection is MULTIPLEXED: without this every manifest read and every slice
+                # pays a fresh handshake, which is what makes a poll feel broken.
+                o = S.ssh_opts("login1")
+                @test "ControlMaster=auto" in o && any(startswith("ControlPath="), o)
+                @test any(startswith("ControlPersist="), o)
+                @test occursin("ControlMaster=auto", S.ssh_command("login1"))
+
+                # `blobs` is deliberately not mirrored — pulling it would pull the results.
+                @test !("blobs" in S.META_DIRS)
+            end
+        end
+
+        # A target with a host plans against the mirror, but its BLOBS stay on the far side, read by
+        # range at the path the host uses.
+        mktempdir() do root
+            far = S.SlurmTarget("login1"; root, root_remote = "/scratch/cas",
+                                project = tempdir(), payload = "/scratch/src/slatetask.jl")
+            withenv("XDG_CACHE_HOME" => joinpath(root, "cache")) do
+                @test S.plan_root(far) != "/scratch/cas"      # planning is local…
+                @test S.plan_root(far) != root
+                @test S.source_of(far).root == "/scratch/cas" # …reading is not
+            end
+            here = S.SlurmTarget(""; root, root_remote = root, project = tempdir(),
+                                 payload = "x")
+            @test S.plan_root(here) == root                   # no host ⇒ no mirror, no sync
+            @test S.sync_in!(here) && S.sync_out!(here)
+        end
+    end
+
+    @testset "a dataset outlives the scratch it was written to" begin
+        # Cluster scratch is purged on a timer and is not backed up. The bytes are meant to die
+        # there; the INDEX is kilobytes and must not, or a purge costs you the record of what you
+        # had as well as the data.
+        S = RE.Sweep
+        mktempdir() do dir
+            root = joinpath(dir, "store"); mkpath(root)
+            withenv("XDG_DATA_HOME" => joinpath(dir, "data")) do
+                t = S.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+                # `RE.Sweep.@sweep`, not `S.@sweep`: a macro is resolved when the expression is
+                # lowered, so its module has to be a real path and not a local binding.
+                r = RE.Sweep.@sweep(RE.Sweep.paramgrid(part = 1:2), t;
+                                    submit = false, lazy = true) do p
+                    collect(Float32(1):Float32(64))
+                end
+                for c in RE.BatchSweep.sweep_chunks(root, r.run); ST.run_chunk(root, c); end
+                ds = S.refresh!(r).dataset
+                @test S.nparts(ds) == 2 && !ds.purged
+
+                # Building it remembered the index somewhere durable.
+                keep = S.recall_index(r.run)
+                @test keep !== nothing
+                @test length(get(keep, "parts", [])) == 2
+
+                # Now the store is purged — all of it, as a policy timer would take it.
+                rm(root; recursive = true, force = true); mkpath(root)
+                # Reopening the notebook re-runs the cell, which rewrites the descriptors; the
+                # sweep is then simply un-run, and its results are the thing that cannot come back.
+                r2 = RE.Sweep.@sweep(RE.Sweep.paramgrid(part = 1:2), t;
+                                     submit = false, lazy = true) do p
+                    collect(Float32(1):Float32(64))
+                end
+                @test r2.run == r.run && r2.done == 0
+                gone = r2.dataset
+                @test gone.purged
+                @test S.nparts(gone) == 2                      # …but it still knows what it held
+                @test length(gone) == 128
+                out = sprint(show, MIME"text/plain"(), gone)
+                @test occursin("purged", out) && occursin("re-run", lowercase(out))
+
+                # Asking for a part is free — it is a handle, and the index is still here.
+                @test gone[1] isa S.DatasetPart
+                # READING one says what happened, rather than surfacing a SystemError on a path.
+                err = try; gone[1][1:10]; "" catch e; sprint(showerror, e); end
+                @test occursin("purged", err) && occursin("re-run", err)
+            end
+        end
+    end
+
     @testset "a cluster reports what is going on with it" begin
         # A cluster is defined once and referenced from any number of cells, so "what is it doing"
         # is a question about the CLUSTER. Everything here is derived from the store and the
