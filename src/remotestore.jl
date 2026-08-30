@@ -77,28 +77,59 @@ end
 # ── Syncing the metadata ─────────────────────────────────────────────────────────────────────
 # rsync rather than tar or a bespoke protocol: it is on every cluster, it moves only what changed
 # (so a poll after the first costs the new manifests and nothing else), and it already knows how to
-# be interrupted safely. `--delete` on the PULL only: the mirror must forget a chunk the store no
-# longer has, while the store must never lose anything because this laptop hasn't heard of it.
+# be interrupted safely.
+
+"""
+    sync_flags(dir, direction) -> Cmd
+
+The extra rsync flags for one directory, decided by WHO WRITES IT. Pure, so the ownership rule is
+testable without a host — and it is the rule that goes wrong silently.
+
+  `manifests/`, `status/`  written by the JOBS, so the store is authoritative. Delete on the way IN
+                           (the mirror must forget what the store no longer has), never on the way
+                           OUT: that would race a unit finishing between our pull and our push and
+                           erase a result nobody has seen. Removing one deliberately is `forget!`.
+
+  `jobs/`                  written by the HUB — the submission index, the armed and cancelled
+                           markers, the attempt counts. Delete on the way OUT, which is how
+                           disarming and clearing attempts actually take effect; never on the way
+                           IN, or a store copy that is merely OLDER erases state the hub has just
+                           written and not yet pushed. That is what used to happen to the attempt
+                           counts: bumped during a reconcile, after that run's push, so the next
+                           pull removed each one before it could reach the budget — and a sweep
+                           whose units the scheduler kills resubmitted forever, which is the one
+                           thing the budget exists to prevent. The pull exists only so a FRESH hub
+                           can recover a live submission it did not make itself.
+
+  `blobs/`                 content-addressed, so a blob the store already has is byte-identical and
+                           re-sending it is waste.
+"""
+function sync_flags(dir::AbstractString, direction::Symbol)
+    d = String(dir)
+    direction === :in && return d == "jobs" ? `` : `--delete`
+    direction === :out && return d == "blobs" ? `--ignore-existing` : (d == "jobs" ? `--delete` : ``)
+    error("sync_flags: direction is :in or :out, got :$direction")
+end
 
 "Bring the local mirror up to date with the store's metadata. One round trip."
 function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     isempty(s.host) && return true          # same machine: the mirror IS the store
-    specs = String[joinpath(s.root, d) * "/" for d in dirs]
-    for d in dirs; mkpath(joinpath(s.mirror, d)); end
-    ok = true
-    for (d, spec) in zip(dirs, specs)
-        c = `rsync -a --delete -e $(ssh_command(s.host)) $(s.host * ":" * spec) $(joinpath(s.mirror, d) * "/")`
-        ok &= try; run(pipeline(c; stdout = devnull, stderr = devnull)); true; catch; false; end
+    for d in dirs
+        mkpath(joinpath(s.mirror, d))
+        extra = sync_flags(d, :in)
+        spec = joinpath(s.root, d) * "/"
+        c = `rsync -a $extra -e $(ssh_command(s.host)) $(s.host * ":" * spec) $(joinpath(s.mirror, d) * "/")`
+        ok = try; run(pipeline(c; stdout = devnull, stderr = devnull)); true; catch; false; end
+        ok || return false
     end
-    return ok
+    return true
 end
 
 """
     push_meta!(s; dirs) -> Bool
 
 Send what this hub has written — descriptors, the blobs they reference, and the markers — to the
-store. Never `--delete`: the cluster holds results this laptop has never seen, and a sweep is
-reconciled from what is THERE.
+store. What may be DELETED there is `sync_flags`' decision, not this function's.
 """
 function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
     isempty(s.host) && return true
@@ -106,20 +137,7 @@ function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
     for d in dirs
         src = joinpath(s.mirror, d)
         isdir(src) || continue
-        # Who OWNS a directory decides whether a deletion may propagate.
-        #
-        # `jobs/` is the hub's alone — the submission index, the attempt counts, the armed and
-        # cancelled markers. Nothing on the cluster writes there, so the mirror is authoritative and
-        # `--delete` is how disarming or clearing attempts actually takes effect. Without it those
-        # files come straight back on the next pull.
-        #
-        # `manifests/` and `status/` are written by the JOBS. A `--delete` there would race a unit
-        # finishing between our pull and our push, and erase a result nobody has seen. Removing one
-        # deliberately is `forget!`, not a side effect of syncing.
-        #
-        # `blobs/` is content-addressed, so a blob the cluster already has is byte-identical and
-        # re-sending it is waste.
-        extra = d == "blobs" ? `--ignore-existing` : (d == "jobs" ? `--delete` : ``)
+        extra = sync_flags(d, :out)
         c = `rsync -a $extra -e $(ssh_command(s.host)) $(src * "/") $(s.host * ":" * joinpath(s.root, d) * "/")`
         ok &= try; run(pipeline(c; stdout = devnull, stderr = devnull)); true; catch; false; end
     end

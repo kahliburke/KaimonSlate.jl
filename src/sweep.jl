@@ -997,9 +997,25 @@ plan_root(t::SlurmTarget) = isempty(t.host) ? t.root : remote_store(t).mirror
 sync_in!(::LocalTarget) = true
 sync_in!(t::SlurmTarget) = isempty(t.host) ? true : pull_meta!(remote_store(t))
 
-"Send what the hub has written — descriptors, their blobs, markers — to the store."
-sync_out!(::LocalTarget) = true
-sync_out!(t::SlurmTarget) = isempty(t.host) ? true : push_meta!(remote_store(t))
+# Reconcile, and send back what it wrote IF it submitted. `jobs/` is hub-owned — the submission
+# index and the attempt counts — and the store has to end up holding it: a fresh hub reads it to
+# find work this one started, and the counts are supposed to outlive the hub that made them. But a
+# card polls this on a timer, so the round trip is worth paying only when something changed. The
+# attempt counts are the signal, because they move on exactly the submissions that went out.
+function reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher; kw...)
+    root = store_root(target)
+    before = BatchSweep.read_attempts(root)
+    p = BatchSweep.reconcile!(root, run, launcher, specfn_for(target); kw...)
+    BatchSweep.read_attempts(root) == before || sync_out!(target; dirs = ("jobs",))
+    return p
+end
+
+"Send what the hub has written — descriptors, their blobs, markers — to the store. `dirs` narrows
+it to part of that, for the callers that have just touched one thing."
+sync_out!(::LocalTarget; dirs = nothing) = true
+sync_out!(t::SlurmTarget; dirs = nothing) =
+    isempty(t.host) ? true :
+    (dirs === nothing ? push_meta!(remote_store(t)) : push_meta!(remote_store(t); dirs))
 
 """
     forget_results!(target, keys)
@@ -1698,7 +1714,7 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # …and it only submits for a sweep that has been ARMED, so a card left open on a sweep nobody
     # asked to run cannot start it.
     armed = BatchSweep.is_armed(root, run)
-    p = advance ? BatchSweep.reconcile!(root, run, l, specfn_for(target); submit = armed) :
+    p = advance ? reconcile_and_sync!(target, run, l; submit = armed) :
                   BatchSweep.plan(root, run; launcher = l)
     t = BatchSweep.telemetry(root, run; launcher = l, plan = p)
     _ds = display_state(p, armed)
@@ -2548,8 +2564,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # repeatedly, and every one of those must be free — the work starts when someone asks for it,
     # from the card. `submit = true` is for a standalone script, where there is no card to ask from.
     submit && BatchSweep.arm!(root, run)
-    BatchSweep.reconcile!(root, run, launcher, specfn_for(target);
-                          cap, submit = BatchSweep.is_armed(root, run))
+    reconcile_and_sync!(target, run, launcher; cap, submit = BatchSweep.is_armed(root, run))
     # The card's live channel. Registered here rather than by the author, so a sweep cell needs no
     # wiring to be watchable. `register` is the notebook's `slate_on`; outside a notebook (a
     # standalone run, a test) it is simply absent and the card renders static.

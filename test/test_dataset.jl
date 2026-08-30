@@ -292,6 +292,21 @@ const MS = RE.MemoStore
             end
         end
 
+        # WHO WRITES a directory decides which way a deletion may travel, and getting it wrong is
+        # silent. `jobs/` is the hub's: the submission index, the armed markers, the attempt counts.
+        # Those counts are bumped DURING a reconcile — after that run's push — so a pull that
+        # deleted would remove each one before it could ever reach the budget, and a sweep whose
+        # units the scheduler kills would resubmit forever with nothing to show why. (This was the
+        # live behaviour: `read_attempts` came back empty after every submit.)
+        del(d, dir) = "--delete" in collect(S.sync_flags(d, dir))
+        @test !del("jobs", :in)                     # hub state is never erased by a stale store copy
+        @test del("jobs", :out)                     # …and disarming takes effect by deleting there
+        @test del("manifests", :in) && del("status", :in)     # the store is authoritative for these
+        @test !del("manifests", :out) && !del("status", :out) # …so a push must not race a finishing unit
+        @test !del("blobs", :out)
+        @test "--ignore-existing" in collect(S.sync_flags("blobs", :out))   # content-addressed
+        @test_throws ErrorException S.sync_flags("jobs", :sideways)
+
         # A target with a host plans against the mirror, but its BLOBS stay on the far side, read by
         # range at the path the host uses.
         mktempdir() do root
