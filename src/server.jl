@@ -2877,8 +2877,13 @@ function _reestablish_fresh_namespace!(nb::LiveNotebook)
     end
     binds = lock(nb.lock) do
         bs = Tuple{Symbol,Any}[(b.name, b.value) for c in nb.report.cells for b in c.binds]
-        for c in nb.report.cells                       # a blank namespace ⇒ every global is gone: re-run/restore all
-            c.kind == ReportEngine.CODE && ReportEngine.restale!(c)
+        # A blank namespace ⇒ every global is gone: re-run/restore all. EVERY kind that runs, not
+        # just CODE — a WEB cell defines bindings too, and a SWEEP cell registers the channel its
+        # card's buttons call. Leaving a sweep cell `fresh` across a worker restart left a card on
+        # screen whose Submit reached a handler that no longer existed.
+        for c in nb.report.cells
+            (c.kind !== ReportEngine.MARKDOWN && ReportEngine.runs_automatically(c.kind)) &&
+                ReportEngine.restale!(c)
         end
         bs
     end

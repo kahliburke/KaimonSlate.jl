@@ -80,6 +80,26 @@ cell(src) = RE.Cell("c", RE.CODE, src)
         @test NS.co_runnable(["grid", "plot"], NS.par_blockers(NS._batch_specs(codeonly)))
     end
 
+    @testset "a fresh worker restales every kind that runs" begin
+        # A blank namespace loses every global — and, for a sweep cell, the channel its card's
+        # buttons call. Restaling only CODE left a card on screen whose Submit reached a handler
+        # that no longer existed, which looks like a dead button rather than a lost worker.
+        src = "#%% code id=a\nx = 1\n" *
+              "#%% md id=note\n## prose\n" *
+              "#%% web id=w\n@web(html\"<b>hi</b>\")\n" *
+              "#%% sweep id=s\nv = @sweep(paramgrid(i = 1:2)) do p\n    p.i\nend\n" *
+              "#%% tool id=t\n@tool deploy()\n"
+        r = RE.parse_report(src)
+        for c in r.cells; c.state = RE.FRESH; end
+        for c in r.cells
+            (c.kind !== RE.MARKDOWN && RE.runs_automatically(c.kind)) && RE.restale!(c)
+        end
+        st = Dict(c.id => c.state for c in r.cells)
+        @test st["a"] == RE.STALE && st["w"] == RE.STALE && st["s"] == RE.STALE
+        @test st["note"] == RE.FRESH      # prose holds no global
+        @test st["t"] == RE.FRESH         # a tool never runs on its own; restaling would strand it
+    end
+
     @testset "_preempt_victims: only running pure-compute cells are interruptible" begin
         running(src) = (c = cell(src); c.state = RE.RUNNING; c)
         # a running compute cell is a victim; the guards must hold everything else back
