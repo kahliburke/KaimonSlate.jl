@@ -539,6 +539,36 @@ end
         end
     end
 
+    @testset "a sweep that fails while watched grows its own explanation" begin
+        # The card is rendered ONCE, when the cell runs — before anything has failed. Both the
+        # failure list and the why-it-stopped panel used to exist only in that static render, so a
+        # sweep that broke while you watched it showed a red label and nothing to expand; you had to
+        # re-run the cell by hand to see which units died. Both now ride the poll.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false) do p
+                p.x == 2 && error("boom at $(p.x)")
+                p.x
+            end
+            # Nothing has run: no explanation to give and nothing to expand.
+            s0 = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false)
+            @test get(s0, "why", "") == ""
+            @test get(s0, "fails", "") == ""
+
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            s1 = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false)
+            # The poll now carries the list the reader needs, with the failing PARAMS leading —
+            # "which corner of the grid breaks" is the question, not "how".
+            @test occursin("1 failed unit", s1["fails"])
+            @test occursin("boom at 2", s1["fails"])
+            @test occursin("<details", s1["fails"])
+            @test occursin("x = 2", s1["fails"])
+            # A partial finish is not a stopped sweep, so there is still nothing to explain.
+            @test get(s1, "why", "") == ""
+        end
+    end
+
     @testset "reset is available at any time, including part-way through" begin
         # The case reset exists for is a long run that is half done and going wrong. Offering it only
         # once a sweep had settled meant waiting out the very thing you wanted to stop.

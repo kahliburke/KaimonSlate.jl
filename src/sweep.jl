@@ -372,6 +372,22 @@ function attr_resources(attrs::AbstractDict)
     return NamedTuple(res)
 end
 
+"""
+    attr_lazy(attrs) -> Bool
+
+Whether the cell asked for its results to be stored ADDRESSABLY (`data=lazy`) rather than brought
+back whole (`data=eager`, the default). Configuration rather than code: the sweep body is identical
+either way, and the choice is about the size of what comes out, which is a property of the run.
+"""
+function attr_lazy(attrs::AbstractDict)
+    v = get(attrs, "data", nothing)
+    v === nothing && return false
+    s = lowercase(strip(String(v)))
+    s in ("lazy", "eager") ||
+        error("@sweep: `data=$v` on the cell header must be `lazy` or `eager`")
+    return s == "lazy"
+end
+
 "A `chunk=` header attribute, or `nothing`. How many units ride one scheduler job."
 function attr_chunk(attrs::AbstractDict)
     v = get(attrs, "chunk", nothing)
@@ -486,7 +502,7 @@ Base.eltype(::Type{ShardedResult}) = NamedTuple
 # property that mutates on read is a trap.
 const _DERIVED = (:state, :total, :done, :ok, :failed, :pending, :fraction, :percent,
                   :eta, :rate, :idle, :stalled_for, :blocked, :settled,
-                  :results, :summaries, :errors, :hosts, :bytes, :armed)
+                  :results, :summaries, :errors, :hosts, :bytes, :armed, :dataset)
 
 function Base.getproperty(r::ShardedResult, s::Symbol)
     s in fieldnames(ShardedResult) && return getfield(r, s)
@@ -511,6 +527,11 @@ function Base.getproperty(r::ShardedResult, s::Symbol)
     s === :stalled_for && return BatchSweep.stalled_for(t)
     # Why nothing more will be submitted ("" = not blocked).
     s === :blocked    && return p.blocked
+    # The addressable output of a `data=lazy` sweep, spanning every unit that has landed. Built
+    # from manifests alone, so asking for it — and asking it for its schema and size — reads none
+    # of the data it describes.
+    s === :dataset    && return _dataset_of(store_root(getfield(r, :target)),
+                                            getfield(r, :params), getfield(r, :keys))
     s === :results    && return [row for row in rows if row.status == "ok"]
     # The charting values, straight from the manifests. This is the accessor analysis should reach
     # for: it is the same cost at four units and four million.
@@ -599,6 +620,210 @@ _arts(root, m) = ArtifactRef[
     ArtifactRef(String(root), String(get(a, "name", "")), String(get(a, "blob", "")),
                 Int(get(a, "bytes", 0)))
     for a in get(m, "artifacts", Any[]) if a isa AbstractDict]
+
+# ── Datasets ─────────────────────────────────────────────────────────────────────────────────
+# What a `data=lazy` sweep hands the notebook: one logical table (or one set of array parts) over
+# output that stays where it was written. Every field a reader asks about first — the schema, the
+# row count, the size — comes from the index, so describing a dataset costs manifest reads no
+# matter what it weighs. Only a slice moves bytes, and only the bytes of that slice.
+
+"One unit's contribution to a dataset: its index, and the parameters that produced it."
+struct DatasetPart
+    root::String
+    index::Dict{String,Any}
+    params::Any
+    rows::Int
+    bytes::Int
+end
+
+"""
+    Dataset
+
+A sweep's output, addressable and unmoved. Tables concatenate across units into one row space;
+arrays stay separate parts, since output of differing shape has no single meaning stacked.
+
+    ds                      # schema, parts, rows, size — no I/O
+    ds[1:1000]              # a bounded slice
+    ds[1:1000, (:t, :e)]    # …and only these columns
+    scan(ds; between = (:e, 3, Inf), where = r -> r.ok, limit = 10_000)
+"""
+struct Dataset
+    kind::Symbol                  # :table | :array
+    parts::Vector{DatasetPart}
+    columns::Vector{String}
+    types::Vector{String}
+    starts::Vector{Int}           # cumulative first global row of each part
+    whole::Int                    # landed units stored WHOLE (no index) — not slicable
+end
+
+function Dataset(kind::Symbol, parts::Vector{DatasetPart}, whole::Integer = 0)
+    cols = isempty(parts) ? String[] : String[String(c) for c in get(parts[1].index, "columns", String[])]
+    typs = isempty(parts) ? String[] : String[String(t) for t in get(parts[1].index, "types", String[])]
+    starts = Int[]; at = 1
+    for p in parts; push!(starts, at); at += p.rows; end
+    return Dataset(kind, parts, cols, typs, starts, Int(whole))
+end
+
+# Assembled from the shard manifests: one part per unit that has landed WITH a dataset index, in
+# grid order. A partial sweep gives a partial dataset rather than an error — the same property that
+# lets the rest of the fabric be watched while it runs.
+function _dataset_of(root, params, keys)
+    parts = DatasetPart[]
+    kind = :table
+    whole = 0
+    for (prm, k) in zip(params, keys)
+        m = MemoStore.read_manifest(root, k)
+        m === nothing && continue
+        String(get(m, "status", "")) == "ok" || continue
+        idx = get(m, "dataset", nothing)
+        if !(idx isa AbstractDict)
+            whole += 1          # ran before `data=lazy`, or returned something unaddressable
+            continue
+        end
+        d = Dict{String,Any}(String(kk) => vv for (kk, vv) in idx)
+        kind = String(d["kind"]) == "array" ? :array : :table
+        push!(parts, DatasetPart(String(root), d, prm, Int(get(d, "rows", 0)), Int(get(d, "bytes", 0))))
+    end
+    return Dataset(kind, parts, whole)
+end
+
+Base.length(ds::Dataset) = isempty(ds.parts) ? 0 : ds.starts[end] + ds.parts[end].rows - 1
+nparts(ds::Dataset) = length(ds.parts)
+databytes(ds::Dataset) = sum(p -> p.bytes, ds.parts; init = 0)
+
+function Base.show(io::IO, ::MIME"text/plain", ds::Dataset)
+    n = length(ds)
+    println(io, "Dataset — ", nparts(ds), " part", nparts(ds) == 1 ? "" : "s", ", ",
+            ds.kind === :table ? "$(n) rows" : "$(n) elements", ", ", _bytes(databytes(ds)))
+    if ds.kind === :table
+        for (c, t) in zip(ds.columns, ds.types)
+            println(io, "   ", rpad(c, 18), t)
+        end
+        println(io, "   ds[1:1000] for rows · scan(ds; …) to filter — nothing has been read")
+    else
+        d = get(ds.parts[1].index, "dims", Int[])
+        println(io, "   each part ", join(d, "×"), " ", String(get(ds.parts[1].index, "eltype", "")))
+        println(io, "   ds[k] for part k · part[i…] to slice it — nothing has been read")
+    end
+    # Units that finished before the cell asked for addressable storage still hold their results;
+    # they just cannot be sliced. Saying so beats a dataset that is quietly missing most of itself.
+    ds.whole == 0 || println(io, "   ⚠ ", ds.whole, " finished unit", ds.whole == 1 ? "" : "s",
+                             " stored whole and not in this view — reset the sweep to re-store")
+    return nothing
+end
+Base.show(io::IO, ds::Dataset) =
+    print(io, "Dataset(", ds.kind, ", ", nparts(ds), " parts, ", length(ds), ", ",
+          _bytes(databytes(ds)), ")")
+
+# Global rows → the parts that hold them, with each part's LOCAL range. Pure index arithmetic.
+function _ds_span(ds::Dataset, rows::AbstractUnitRange)
+    out = Tuple{Int,UnitRange{Int}}[]
+    for (i, p) in enumerate(ds.parts)
+        lo = ds.starts[i]; hi = lo + p.rows - 1
+        (hi < first(rows) || lo > last(rows)) && continue
+        push!(out, (i, (max(first(rows), lo) - lo + 1):(min(last(rows), hi) - lo + 1)))
+    end
+    return out
+end
+
+# How many rows one call may bring back. A slice is meant to be a look at the data, not a way to
+# spell "all of it" — the cap is what keeps that true for a dataset whose size is unknown at the
+# call site. Raise it deliberately per call.
+const DATASET_ROW_CAP = 1_000_000
+
+"""
+    ds[rows]            -> NamedTuple of columns
+    ds[rows, columns]   -> …only those columns
+
+Read a bounded row range. Only the chunks covering `rows` are opened, and only the columns named.
+"""
+function Base.getindex(ds::Dataset, rows::AbstractUnitRange, cols = nothing)
+    ds.kind === :table ||
+        error("this dataset holds arrays, not rows — `ds[k]` for part k, then slice that part")
+    n = length(ds)
+    (first(rows) >= 1 && last(rows) <= n) ||
+        throw(BoundsError("rows $(rows) outside 1:$(n)"))
+    length(rows) <= DATASET_ROW_CAP ||
+        error("$(length(rows)) rows is over the $(DATASET_ROW_CAP)-row slice cap — " *
+              "narrow the range, or use `scan(ds; limit = …)` to stream a filtered subset")
+    acc = nothing
+    for (i, local_rows) in _ds_span(ds, rows)
+        p = ds.parts[i]
+        part = SlateTask.dataset_rows(p.root, p.index, local_rows; select = cols)
+        acc = acc === nothing ? map(collect, part) :
+              NamedTuple{keys(acc)}(Tuple(append!(acc[k], part[k]) for k in keys(acc)))
+    end
+    return acc === nothing ? NamedTuple() : acc
+end
+Base.getindex(ds::Dataset, rows::AbstractUnitRange, col::Symbol) = getindex(ds, rows, (col,))[col]
+
+"Part `k` of an array dataset — a handle, not its contents."
+function Base.getindex(ds::Dataset, k::Integer)
+    ds.kind === :array ||
+        error("this dataset is a table — `ds[rows]` reads rows; `ds.parts[$k]` is the raw part")
+    return ds.parts[k]
+end
+
+Base.show(io::IO, p::DatasetPart) =
+    print(io, "DatasetPart(", join(get(p.index, "dims", Int[]), "×"), " ",
+          String(get(p.index, "eltype", "")), ", ", _bytes(p.bytes), ")")
+
+"""
+    part[i]      -> elements i of this part, as stored (linear order)
+
+Reads exactly that range: the mapping starts at the range's first byte, so nothing before or after
+it is touched.
+"""
+Base.getindex(p::DatasetPart, i::AbstractUnitRange) =
+    SlateTask.dataset_elements(p.root, p.index, i)
+Base.getindex(p::DatasetPart, i::Integer) = SlateTask.dataset_elements(p.root, p.index, i:i)[1]
+Base.length(p::DatasetPart) = p.rows
+
+"""
+    scan(ds; select, between, where, limit) -> NamedTuple of columns
+
+Stream a dataset and keep the rows that match, stopping at `limit`.
+
+`between = (:col, lo, hi)` is pushed DOWN to the index: chunks whose recorded range for that column
+cannot contain a match are never opened. `where` is an ordinary predicate over a row NamedTuple,
+applied to what survives — it cannot be pushed down, so it costs a read of the chunks that reach it.
+"""
+function scan(ds::Dataset; select = nothing, between = nothing, where = nothing,
+              limit::Integer = 10_000)
+    ds.kind === :table || error("scan works on table datasets")
+    want = select === nothing ? ds.columns : String[String(s) for s in select]
+    # A `where` needs every column it might look at, so a projection is only safe alongside one
+    # when the caller has said which columns matter.
+    readcols = where === nothing ? want : ds.columns
+    keep = [Any[] for _ in want]
+    got = 0
+    for p in ds.parts
+        chunks = between === nothing ? nothing :
+                 Set(SlateTask.prune_chunks(p.index, String(between[1]),
+                                            Float64(between[2]), Float64(between[3])))
+        at = 1
+        for (pos, c) in enumerate(get(p.index, "chunks", Any[]))
+            nrows = Int(c["rows"])
+            if chunks === nothing || pos in chunks
+                blk = SlateTask.dataset_rows(p.root, p.index, at:(at + nrows - 1); select = readcols)
+                syms = keys(blk)
+                for r in 1:nrows
+                    row = NamedTuple{syms}(Tuple(blk[s][r] for s in syms))
+                    between === nothing || let v = row[Symbol(between[1])]
+                        (v >= between[2] && v <= between[3]) || continue
+                    end
+                    where === nothing || Base.invokelatest(where, row) || continue
+                    for (j, nm) in enumerate(want); push!(keep[j], row[Symbol(nm)]); end
+                    got += 1
+                    got >= limit && @goto done
+                end
+            end
+            at += nrows
+        end
+    end
+    @label done
+    return NamedTuple{Tuple(Symbol.(want))}(Tuple(isempty(k) ? k : identity.(k) for k in keep))
+end
 
 _bytes(n::Integer) = n < 1024 ? "$(n) B" :
                      n < 1024^2 ? "$(round(n / 1024; digits = 1)) KB" :
@@ -854,15 +1079,23 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         "color" => get(_STATE_COLOR, _ds, "var(--dim,#6a7090)"),
         # The controls that apply RIGHT NOW, so the card's buttons track its state instead of
         # freezing at whatever was true when the cell last ran.
-        "actions" => [Any[a, l] for (a, l) in action_list(p, armed)])
+        "actions" => [Any[a, l] for (a, l) in action_list(p, armed)],
+        # Why it stopped. Carried on every poll because a sweep that blocks WHILE being watched
+        # must explain itself then, not only if someone happens to re-run the cell afterwards.
+        "why" => _why_html(p))
 
     # The chart rides the SAME poll as the counters, so a filling plot costs no extra round trip and
     # cannot disagree with the numbers beside it.
-    if plot !== false
+    # The failure list rides it too, for the same reason as `why` — and off the same rows the chart
+    # already needs, so watching a failing sweep costs no extra manifest reads.
+    if plot !== false || p.shards_failed > 0
         rows = _rows(root, params, keys)
-        opt, err = _plot_option(plot, rows)
-        opt === nothing || (out["chart"] = opt)
-        isempty(err) || (out["charterr"] = err)
+        if plot !== false
+            opt, err = _plot_option(plot, rows)
+            opt === nothing || (out["chart"] = opt)
+            isempty(err) || (out["charterr"] = err)
+        end
+        out["fails"] = _fails_html(rows)
     end
     return out
 end
@@ -1102,6 +1335,51 @@ function _unit_grid(io, r::ShardedResult)
                            "each tile ≈ ", per, " units</div>")
 end
 
+# Why a sweep stopped, and what to do about it. The three ways of stopping short need different
+# things, so they read differently. "" while the sweep is still going.
+function _why_html(p::BatchSweep.Plan)
+    box(color, body) = string(
+        "<div style='margin-top:8px;padding:8px;border-radius:6px;background:color-mix(in srgb, ",
+        color, " 12%, transparent);font-size:12px;color:", color, "'>", body, "</div>")
+    p.state === :blocked && return box("var(--red,#e57575)",
+        string(_esc(p.blocked), "<br><span style='opacity:.8'>Nothing further will be submitted. ",
+               "Fix the body, then <code>Sweep.reset!</code>.</span>"))
+    p.state === :exhausted && return box("var(--red,#e57575)",
+        string("Attempted ", BatchSweep.MAX_ATTEMPTS, "× without landing, so these units are ",
+               "outrunning their resources rather than erroring.<br><span style='opacity:.8'>",
+               "Raise the walltime or memory, then <code>Sweep.reset!</code>.</span>"))
+    p.state === :cancelled && return string(
+        "<div style='margin-top:8px;padding:8px;border-radius:6px;background:color-mix(in srgb, ",
+        "var(--dim,#6a7090) 12%, transparent);font-size:12px;opacity:.85'>",
+        "Stopped at your request. ", p.shards_done, " finished units are kept — ",
+        "<code>Sweep.resume!</code> continues with the remaining ", p.shards_missing, ".</div>")
+    return ""
+end
+
+# The failed units, collapsed. The parameters matter more than the traceback at a glance, so they
+# lead: the question is almost always "which corner of the grid breaks?" rather than "how?".
+const _FAILS_SHOWN = 50
+function _fails_html(rows)
+    fails = [row for row in rows if row.status == "error"]
+    isempty(fails) && return ""
+    io = IOBuffer()
+    print(io, "<details style='margin-top:8px'><summary style='cursor:pointer;font-size:12px;",
+              "color:var(--red,#e57575)'>", length(fails), " failed unit",
+              length(fails) == 1 ? "" : "s", "</summary>",
+              "<div style='max-height:220px;overflow:auto;margin-top:6px'>")
+    for f in first(fails, _FAILS_SHOWN)
+        print(io, "<div style='margin-bottom:6px;font-size:11px'>",
+                  "<code style='color:var(--gold,#ffd700)'>", _esc(string(f.params)), "</code>",
+                  "<pre style='margin:2px 0 0;white-space:pre-wrap;opacity:.75'>",
+                  _esc(first(String(f.value), 400)), "</pre></div>")
+    end
+    length(fails) > _FAILS_SHOWN &&
+        print(io, "<div style='opacity:.6;font-size:11px'>… and ",
+                  length(fails) - _FAILS_SHOWN, " more</div>")
+    print(io, "</div></details>")
+    return String(take!(io))
+end
+
 function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     p, t = r.plan, r.telemetry
     frac = BatchSweep.fraction(p)
@@ -1186,42 +1464,11 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     idle > 0 && print(io, "<div style='margin-top:8px;font-size:12px;color:var(--gold,#ffd700)'>",
                           "⚠ nothing has finished in ", _dur(idle), " — it may be stuck.</div>")
 
-    # Each stopped state says what to do next, because they need different things.
-    if p.state === :blocked
-        print(io, "<div style='margin-top:8px;padding:8px;border-radius:6px;",
-                  "background:color-mix(in srgb, var(--red,#e57575) 12%, transparent);font-size:12px;color:var(--red,#e57575)'>",
-                  _esc(p.blocked), "<br><span style='opacity:.8'>Nothing further will be ",
-                  "submitted. Fix the body, then <code>Sweep.reset!</code>.</span></div>")
-    elseif p.state === :cancelled
-        print(io, "<div style='margin-top:8px;padding:8px;border-radius:6px;",
-                  "background:color-mix(in srgb, var(--dim,#6a7090) 12%, transparent);font-size:12px;opacity:.85'>",
-                  "Stopped at your request. ", p.shards_done, " finished units are kept — ",
-                  "<code>Sweep.resume!</code> continues with the remaining ", p.shards_missing, ".</div>")
-    elseif p.state === :exhausted
-        print(io, "<div style='margin-top:8px;padding:8px;border-radius:6px;",
-                  "background:color-mix(in srgb, var(--red,#e57575) 12%, transparent);font-size:12px;color:var(--red,#e57575)'>",
-                  "Attempted ", BatchSweep.MAX_ATTEMPTS, "× without landing, so these units are ",
-                  "outrunning their resources rather than erroring.<br><span style='opacity:.8'>",
-                  "Raise the walltime or memory, then <code>Sweep.reset!</code>.</span></div>")
-    end
-
-    # Failures, collapsed. The parameters matter more than the traceback at a glance, so they lead.
-    fails = r.errors
-    if !isempty(fails)
-        print(io, "<details style='margin-top:8px'><summary style='cursor:pointer;font-size:12px;",
-                  "color:var(--red,#e57575)'>", length(fails), " failed unit",
-                  length(fails) == 1 ? "" : "s", "</summary>")
-        print(io, "<div style='max-height:220px;overflow:auto;margin-top:6px'>")
-        for f in first(fails, 50)
-            print(io, "<div style='margin-bottom:6px;font-size:11px'>",
-                      "<code style='color:var(--gold,#ffd700)'>", _esc(string(f.params)), "</code>",
-                      "<pre style='margin:2px 0 0;white-space:pre-wrap;opacity:.75'>",
-                      _esc(first(String(f.value), 400)), "</pre></div>")
-        end
-        length(fails) > 50 && print(io, "<div style='opacity:.6;font-size:11px'>… and ",
-                                        length(fails) - 50, " more</div>")
-        println(io, "</div></details>")
-    end
+    # Both of these are emitted as CONTAINERS even when empty, and their contents ride the poll —
+    # a sweep that starts failing while you watch it has to grow its own explanation and error list.
+    # Rendered here rather than rebuilt in the browser so there is one renderer and it cannot drift.
+    println(io, "<div data-sw='why'>", _why_html(p), "</div>")
+    println(io, "<div data-sw='fails'>", _fails_html(getfield(r, :rows)), "</div>")
 
     _actions(io, r)
     _live_script(io, r)
@@ -1355,6 +1602,14 @@ function _live_script(io, r::ShardedResult)
         var ce = root.querySelector('[data-sw="charterr"]');
         if (ce) ce.textContent = s.charterr || "";
         syncActions(s.actions);
+        // Why it stopped, and which units failed. Rendered by Julia and swapped in whole, so the
+        // browser holds no second copy of this markup to drift from the cell's own render. Only on
+        // CHANGE, so an open <details> is not collapsed underneath the reader on every poll.
+        ["why", "fails"].forEach(function(k){
+          var el = root.querySelector('[data-sw="' + k + '"]');
+          if (!el || s[k] === undefined) return;
+          if (el.dataset.h !== s[k]) { el.dataset.h = s[k]; el.innerHTML = s[k]; }
+        });
         var bar = root.querySelector('[data-sw="bar"]');
         if (bar) bar.style.width = (100 * s.frac).toFixed(2) + "%";
         if (bar) bar.style.background = s.color;
@@ -1552,7 +1807,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
                    setup_src::AbstractString = "", captures::AbstractDict = Dict{Symbol,Any}(),
                    submit::Bool = false, cap::Integer = 0, register = nothing,
                    resources = nothing, plot = nothing, refresh = nothing, cell = "",
-                   summary_src::AbstractString = "",
+                   summary_src::AbstractString = "", lazy::Bool = false,
                    attrs::AbstractDict = Dict{String,String}())
     # Resource overrides do NOT enter the key. Re-running the same body with a longer walltime is
     # the same sweep resumed, not a different one — otherwise the fix for a walltime kill would
@@ -1563,6 +1818,10 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # loses to the source would be a control that appears broken.
     target = with_resources(with_resources(target, resources), attr_resources(attrs))
     target = with_chunk(target, attr_chunk(attrs))
+    # Storage FORM, not identity: a unit's value is the same either way, so flipping `data=` must
+    # not re-key and throw away finished work. Units already stored whole simply have no index and
+    # cannot be sliced; the dataset says how many, rather than quietly omitting them.
+    lazy = lazy || attr_lazy(attrs)
     root = store_root(target)
     mkpath(root)
     key = sweep_key(body_src, setup_src, captures, env_key(target), summary_src)
@@ -1579,7 +1838,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         SlateTask.write_chunk!(root, ck; fn_src = body_src, setup_src = setup_src,
                                captures = Dict(String(k) => v for (k, v) in captures),
                                params = params[lo:hi], keys = keys[lo:hi],
-                               summary_src = summary_src)
+                               summary_src = summary_src, lazy = lazy)
         push!(chunks, ck)
     end
     BatchSweep.write_sweep!(root, run, chunks)
