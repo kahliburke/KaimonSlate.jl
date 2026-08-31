@@ -63,15 +63,23 @@ SlateBinary(data::Array{T,N}; snapshot::Bool = false, kw...) where {T,N} =
     SlateBinary(data, Dict{String,Any}(String(k) => v for (k, v) in kw); snapshot)
 
 # ── The dtype table ───────────────────────────────────────────────────────────────────────────
-# One row per element type Slate can put on a wire as raw bytes, and the only place the set is
-# written down. Everything else is derived from it: the streaming frame's numeric tag
-# (`_bin_dtype`), the asset manifest's string tag (`dtype_tag`, which capture.jl's `_asset_dtype`
-# delegates to), and the browser's decoders (`dtype_js`, injected as `window.__SLATE_DTYPES` and
-# read by core.js and wscall.js). Supporting another element type is a row here and nothing else.
-#
-# `code` is a WIRE CONTRACT: it is the frame's dtype byte, so rows may be APPENDED but never
-# reordered, renumbered or removed. `tag` is the asset manifest's spelling (it crosses as JSON, so
-# it is a string rather than a byte), and `js` names the TypedArray that reads the bytes back.
+"""
+    DTYPES
+
+One row per element type Slate can put on a wire as raw bytes, and the only place the set is
+written down. Everything else is derived from it: the streaming frame's numeric tag
+(`_bin_dtype`), the asset manifest's string tag ([`dtype_tag`](@ref), which capture.jl's
+`_asset_dtype` delegates to), and the browser's decoders ([`dtype_js`](@ref), injected as
+`window.__SLATE_DTYPES` and read by core.js and wscall.js). Supporting another element type is a
+row here and nothing else.
+
+Each row is a `NamedTuple` of `(T, code, tag, js)`:
+
+- `code` is a WIRE CONTRACT: it is the frame's dtype byte, so rows may be APPENDED but never
+  reordered, renumbered or removed.
+- `tag` is the asset manifest's spelling (it crosses as JSON, so it is a string rather than a byte).
+- `js` names the TypedArray that reads the bytes back.
+"""
 const DTYPES = (
     (T = Float32, code = 0x00, tag = "f32", js = "Float32Array"),
     (T = Float64, code = 0x01, tag = "f64", js = "Float64Array"),
