@@ -1103,6 +1103,69 @@ end
 _blob_cache_dir() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
                              "kaimonslate", "remote-blobs")
 
+# ── Bounding the cache ───────────────────────────────────────────────────────────────────────
+# This is a PURE cache, which is what makes it simple: every file is content-addressed, nothing
+# references it, and losing one costs a re-fetch of a few hundred kilobytes. So it wants a plain
+# LRU with a size cap, not the refcounting and pinning `MemoStore.gc` needs for a store whose
+# entries are the only copy of what they hold.
+#
+# It needs a bound at all because `fetch` on an ARTIFACT lands here too, and an artifact is the
+# unbounded case by definition — weights, a checkpoint, a rendered video. A cache that only ever
+# held chunk-sized pieces could be ignored; one that holds whatever a unit chose to leave behind
+# cannot.
+
+"Bytes the remote-blob cache may hold. Free disk / 16, clamped, or `KAIMONSLATE_BLOB_CAP_GB`."
+function _default_blob_cap()::Int
+    free = try; Base.diskstat(dirname(_blob_cache_dir())).available; catch; 0; end
+    gb = 1024^3
+    # A sixteenth rather than the memo store's quarter, and a lower ceiling: re-fetching costs
+    # seconds on the connection that is already open, where recomputing a memo entry can cost hours.
+    return free <= 0 ? 4gb : clamp(round(Int, free ÷ 16), gb, 8gb)
+end
+const _BLOB_CAP = Ref{Int}(0)
+blob_cap() = (_BLOB_CAP[] > 0 ? _BLOB_CAP[] : (_BLOB_CAP[] =
+    (v = tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_CAP_GB", "")); v !== nothing && v > 0 ?
+        round(Int, v * 1024^3) : _default_blob_cap())))
+
+# Sweeping walks the directory, so it must not run per read. Bytes fetched since the last sweep are
+# counted and one is due past an eighth of the cap — the walk is amortised over roughly that much
+# traffic, whatever size the pieces happen to be.
+const _BLOB_FETCHED = Ref{Int}(0)
+
+"""
+    trim_blob_cache!(dir = _blob_cache_dir(); cap, grace = 300.0) -> Int
+
+Evict least-recently-used entries until the cache fits `cap`, returning the bytes freed. `grace`
+(seconds) covers two races at once: a `.part.` file another process is still writing, and an entry
+this process has just returned to a caller that is about to mmap it.
+"""
+function trim_blob_cache!(dir::AbstractString = _blob_cache_dir();
+                          cap::Integer = blob_cap(), grace::Real = 300.0)
+    isdir(dir) || return 0
+    now = time()
+    live = Tuple{String,Float64,Int}[]
+    total = 0
+    for f in readdir(dir; join = true)
+        isfile(f) || continue
+        mt, sz = try; (Float64(mtime(f)), Int(filesize(f))); catch; continue; end
+        if occursin(".part.", basename(f))
+            # Litter from a fetch that died. Past the grace window nothing is still writing it.
+            now - mt > grace && try; rm(f; force = true); catch; end
+            continue
+        end
+        total += sz
+        now - mt > grace && push!(live, (f, mt, sz))     # young entries are counted, never candidates
+    end
+    total <= cap && return 0
+    sort!(live; by = x -> x[2])                          # least recently used first
+    freed = 0
+    for (f, _, sz) in live
+        total - freed <= cap && break
+        try; rm(f; force = true); freed += sz; catch; end
+    end
+    return freed
+end
+
 # How big the store actually is, asked where the data is. See the docstring above.
 store_size(s::LocalSource) = store_size(s.root)
 function store_size(s::SshSource)
@@ -1122,7 +1185,10 @@ blob_file(s::LocalSource, blob, _bytes = 0) = MemoStore.blob_path(s.root, String
 function blob_file(s::SshSource, blob, nbytes::Integer)
     dir = _blob_cache_dir(); mkpath(dir)
     p = joinpath(dir, String(blob))
-    isfile(p) && filesize(p) == nbytes && return p
+    if isfile(p) && filesize(p) == nbytes
+        try; touch(p); catch; end         # mtime is the recency the trim sorts on, so a hit refreshes it
+        return p
+    end
     nbytes > 0 || error("cannot fetch blob $(blob): its size is not recorded")
     tmp = p * ".part.$(getpid())"
     try
@@ -1130,6 +1196,13 @@ function blob_file(s::SshSource, blob, nbytes::Integer)
         mv(tmp, p; force = true)          # atomic: a partial fetch never lands under the real name
     catch
         rm(tmp; force = true); rethrow()
+    end
+    # Trim AFTER the fetch, and never on the hot path more often than the cap's eighth. The entry
+    # just written is inside the grace window, so this cannot delete what it is about to return.
+    _BLOB_FETCHED[] += nbytes
+    if _BLOB_FETCHED[] > blob_cap() ÷ 8
+        _BLOB_FETCHED[] = 0
+        try; trim_blob_cache!(dir); catch; end     # best-effort: a full cache is not a failed read
     end
     return p
 end

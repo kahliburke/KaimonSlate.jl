@@ -274,6 +274,40 @@ const MS = RE.MemoStore
             end
         end
 
+        # The cache is PURE — every file is content-addressed and losing one costs a re-fetch — so
+        # it is bounded by plain LRU rather than the refcounting a real store needs. It needs a
+        # bound at all because `fetch` on an artifact lands here, and an artifact is the unbounded
+        # case by definition: weights, a checkpoint, a rendered video.
+        mktempdir() do dir
+            old, new = joinpath(dir, "old"), joinpath(dir, "new")
+            write(old, repeat("o", 4096)); write(new, repeat("n", 4096))
+            part = joinpath(dir, "abc.part.999"); write(part, "half a fetch")
+            touch(new)                                       # `new` is the more recently used
+            back = time() - 3600                             # backdate, so age is not a race on the clock
+            for p in (old, part)
+                h = Base.Filesystem.open(p, Base.Filesystem.JL_O_RDWR)
+                try; Base.Filesystem.futime(h, back, back); finally; close(h); end
+            end
+
+            @test S.trim_blob_cache!(dir; cap = 10^6, grace = 1.0) == 0   # under cap: nothing goes
+            @test isfile(old) && isfile(new)
+            @test !isfile(part)                              # …but litter from a dead fetch always does
+
+            freed = S.trim_blob_cache!(dir; cap = 5000, grace = 1.0)
+            @test freed == 4096
+            @test !isfile(old) && isfile(new)                # least recently used first
+            # An entry inside the grace window is never a candidate — it may be the one a caller is
+            # about to mmap, and on a fresh fetch that caller is the line below `mv`.
+            @test S.trim_blob_cache!(dir; cap = 0, grace = 3600) == 0 && isfile(new)
+            @test S.trim_blob_cache!(joinpath(dir, "nope")) == 0         # no cache yet is not an error
+        end
+        @test S.blob_cap() > 0                                # adaptive default resolves
+        withenv("KAIMONSLATE_BLOB_CAP_GB" => "2") do
+            S._BLOB_CAP[] = 0                                 # forget the memoised resolution
+            @test S.blob_cap() == 2 * 1024^3
+            S._BLOB_CAP[] = 0
+        end
+
         # An ARTIFACT off a remote store reads the same way. It used to be looked up in the mirror,
         # where a file the cluster wrote has never existed — so `fetch` on any real remote sweep
         # failed with "it may live on the cluster only", which is where it did in fact live.
