@@ -656,9 +656,21 @@ function server_refresh(nb::LiveNotebook, vars)
         # and finishes minutes or hours later, in a browser callback that has no way to know the
         # binding. The cell knows itself, and the report knows what that cell writes.
         if startswith(s, "cell:")
-            cid = s[6:end]
+            # `cell:<id>` or `cell:<id>@<digest>`. The digest is the producer's answer to "what is
+            # my value now" for a value that is NOT a function of its source — a sweep's landed
+            # units. Recorded against every name the cell writes, so a reader's memo key moves with
+            # the results instead of staying put while they arrive. Recorded BEFORE the restale
+            # below, because the cells it wakes recompute their keys on the way through.
+            rest = s[6:end]
+            j = findlast(==('@'), rest)
+            cid = j === nothing ? rest : rest[1:prevind(rest, j)]
+            dig = j === nothing ? "" : rest[nextind(rest, j):end]
             for c in nb.report.cells
-                c.id == cid && union!(syms, c.writes)
+                c.id == cid || continue
+                union!(syms, c.writes)
+                isempty(dig) || for n in c.writes
+                    ReportEngine.note_state_write!(nb.report.id, string(n), dig)
+                end
             end
             continue
         end
@@ -1155,7 +1167,21 @@ function _effect_record(e)
     kind = _effect_field(e, :kind); kind = kind isa AbstractString ? Symbol(kind) : kind
     names = _effect_field(e, :names); names = names === nothing ? Symbol[] : Symbol[Symbol(n) for n in names]
     src = _effect_field(e, :stmt_src); src = src === nothing ? "" : String(src)
-    return (; kind = kind, names = names, stmt_src = src)
+    # `data` is the declaration's payload (`slate_effect(kind; k = v)`). Kept, because a declaration
+    # that carries a VALUE — an identity for a result the source cannot reproduce — has nowhere else
+    # to put it, and dropping it silently made the channel look like it only carried a label.
+    dat = _effect_field(e, :data)
+    return (; kind = kind, names = names, stmt_src = src, data = dat)
+end
+
+# One field out of an effect's `data`, tolerant of the NamedTuple (in-process) and Dict (off the
+# gate) shapes the wire produces.
+function _effect_data(r, f::Symbol)
+    d = r.data
+    d === nothing && return nothing
+    v = d isa AbstractDict ? get(d, f, get(d, String(f), nothing)) :
+        (hasproperty(d, f) ? getproperty(d, f) : nothing)
+    return v === nothing ? nothing : String(v)
 end
 
 function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
@@ -1164,6 +1190,15 @@ function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
     for r in recs
         if r.kind === :everywhere
             :everywhere_declared in c.flags || push!(c.flags, :everywhere_declared)
+        elseif r.kind === :value_identity
+            # This cell's value is not a function of its source — a sweep's is whatever has landed
+            # in its store. Recorded against every name the cell writes, so a reader's memo key
+            # moves with the results. Applied HERE because this runs under `nb.lock` before anything
+            # downstream is dispatched, which is the ordering the key computation depends on.
+            d = _effect_data(r, :digest)
+            d === nothing || for n in c.writes
+                ReportEngine.note_state_write!(nb.report.id, string(n), d)
+            end
         elseif r.kind !== nothing
             ReportEngine._rlog("cell effects: cell $(c.id) declared unhandled effect kind ':$(r.kind)' — ignored")
         end
@@ -1171,7 +1206,13 @@ function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
     # Persist DURABLY, keyed by the cell's own source digest — so the classification + statement-scoped
     # records survive a reload / fresh region worker WITHOUT this cell running on main again (see
     # `_reestablish_effects!`). Best-effort; off the hot path but cheap (one small TOML).
-    try; EffectStore.store!(SlateHome.effects_dir(), string(c.src_hash), recs); catch e
+    #
+    # `:value_identity` is excluded on purpose: the store is keyed by SOURCE, and this record exists
+    # precisely because the value is not a function of the source. Persisting it would hand a later
+    # session an identity for results that have since changed — the stale restore this prevents.
+    durable = [r for r in recs if r.kind !== :value_identity]
+    isempty(durable) && return nothing
+    try; EffectStore.store!(SlateHome.effects_dir(), string(c.src_hash), durable); catch e
         ReportEngine._rlog("cell effects: persist for $(c.id) failed: $(first(sprint(showerror, e), 120))")
     end
     return nothing

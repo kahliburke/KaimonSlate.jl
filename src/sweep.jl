@@ -1623,7 +1623,8 @@ function _rows(root, params, keys, src = LocalSource(root))
         m = MemoStore.read_manifest(root, k)
         if m === nothing
             push!(rows, (; params = prm, status = "", value = nothing, summary = nothing,
-                           artifacts = ArtifactRef[], ran_on = "", ms = 0.0, bytes = 0))
+                           artifacts = ArtifactRef[], ran_on = "", ms = 0.0, bytes = 0,
+                           stamp = ""))
             continue
         end
         st = String(get(m, "status", ""))
@@ -1633,10 +1634,48 @@ function _rows(root, params, keys, src = LocalSource(root))
                        artifacts = _arts(root, m, src),
                        ran_on = String(get(m, "ran_on", "")),
                        ms = Float64(get(m, "ms", 0.0)),
-                       bytes = st == "ok" ? Int(get(get(m, "shape", Dict()), "bytes", 0)) : 0))
+                       bytes = st == "ok" ? Int(get(get(m, "shape", Dict()), "bytes", 0)) : 0,
+                       # What this unit holds, for `landed_digest` — free while the manifest is open.
+                       stamp = _unit_stamp(m)))
     end
     return rows
 end
+
+# What one unit's stored result IS, as a short string: the content hashes of whatever it wrote,
+# whichever form it took. Taken while the manifest is already open, so a sweep's identity costs no
+# reads of its own. Blobs are content-addressed, so naming them names the bytes.
+function _unit_stamp(m)
+    io = IOBuffer()
+    print(io, String(get(m, "status", "")), "|")
+    d = get(m, "dataset", nothing)
+    if d isa AbstractDict
+        for c in get(d, "chunks", Any[])
+            c isa AbstractDict && print(io, get(c, "blob", ""), ",")
+        end
+        print(io, "|", get(d, "rows", 0), "|", get(d, "bytes", 0))
+    end
+    for b in get(m, "bindings", Any[]); b isa AbstractDict && print(io, get(b, "blob", ""), ","); end
+    for a in get(m, "artifacts", Any[]); a isa AbstractDict && print(io, get(a, "blob", ""), ","); end
+    print(io, "|", first(String(get(m, "error", "")), 120))
+    return String(take!(io))
+end
+
+"""
+    landed_digest(rows) -> String
+
+The identity of WHAT HAS LANDED. A sweep's value is not a function of its source — the same cell
+returns nothing on the run that submits and every unit an hour later — so anything downstream needs
+a handle on the results themselves before it can decide whether a cached answer still applies.
+
+Built from ROWS the caller already has, never by re-reading the store. A sweep of a few thousand
+units is a few thousand manifests, and every caller here has just parsed them for its own purposes;
+parsing them again to compute this would double what running a sweep cell costs.
+
+Content, not counts. A retry that turns one failure into a success moves it, and so does one that
+replaces a result with different bytes at the same tally — which counting could not see.
+"""
+landed_digest(rows) = first(_hex(join((r.stamp for r in rows), "\n")), 16)
+landed_digest(r::ShardedResult) = landed_digest(getfield(r, :rows))
 
 """
     refresh!(r) -> r
@@ -2703,7 +2742,13 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         # cell must not resubmit, and everything downstream of it should recompute. The cell does not
         # know what the notebook named its result, so it names ITSELF and the hub resolves that to
         # the names the cell writes.
-        note = (refresh === nothing || isempty(cell)) ? nothing : () -> refresh("cell:" * cell)
+        # …and it carries WHAT the value now is, not just that it moved. The readers this wakes
+        # recompute their memo keys on the way through, so without an identity for the results they
+        # would key identically before and after the units landed and could restore an answer
+        # computed against an empty sweep.
+        note = (refresh === nothing || isempty(cell)) ? nothing :
+               () -> refresh("cell:" * cell * "@" *
+                             landed_digest(_rows(store_root(target), ps, ks, source_of(target))))
         register(status_channel(run), _args -> status_payload(target, run, ps, ks; plot))
         register(action_channel(run),
                  a -> handle_action(target, run, ps, ks, String(get(a, :action, ""));
@@ -2712,8 +2757,24 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
 
     pl = BatchSweep.plan(root, run; launcher)
     tl = BatchSweep.telemetry(root, run; launcher, plan = pl)
-    return ShardedResult(key, run, target, collect(params), keys, pl,
-                         _rows(root, params, keys, source_of(target)), tl, plot)
+    rows = _rows(root, params, keys, source_of(target))
+
+    # The same identity, for THIS run — declared rather than pushed, and computed from the rows just
+    # read rather than a second pass over the store. The cell-effects channel is harvested with the
+    # cell's result and applied by the hub before anything downstream is dispatched, which is the
+    # ordering that matters: a reader computes its memo key on the way through, so the identity has
+    # to be recorded by then or the reader keys against a sweep state that no longer exists. A
+    # stream push would race that; this cannot.
+    #
+    # Read off the task-local execution context rather than imported, so this stays inert outside a
+    # notebook (a standalone script, a test) with no coupling either way.
+    let sctx = get(task_local_storage(), :slate_ctx, nothing)
+        if sctx !== nothing && hasproperty(sctx, :effect)
+            try; sctx.effect(:value_identity; digest = landed_digest(rows)); catch; end
+        end
+    end
+
+    return ShardedResult(key, run, target, collect(params), keys, pl, rows, tl, plot)
 end
 
 # Free names in the body that are bound in the calling module and look like DATA. These travel with

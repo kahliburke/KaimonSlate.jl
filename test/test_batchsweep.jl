@@ -289,6 +289,44 @@ end
         end
     end
 
+    @testset "a sweep has an identity for what has landed" begin
+        # The handle everything downstream needs. A sweep's value is not a function of its source,
+        # so a reader's memo key has nothing to move with as units arrive — and keyed off source
+        # alone it restored analysis computed while the sweep was still empty. This is what the
+        # cell declares instead, so the key tracks the results rather than the code.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false) do p
+                p.x == 4 && error("nope")
+                p.x
+            end
+            # Computed off the rows the caller already holds — never a second pass over the store.
+            # A sweep of a few thousand units is a few thousand manifests, and re-reading them here
+            # would double what running the cell costs.
+            dig() = (Sweep.refresh!(r); Sweep.landed_digest(r))
+            empty = dig()
+            @test !isempty(empty)
+            @test dig() == empty                             # stable while nothing changes
+
+            chunks = BS.sweep_chunks(root, r.run)
+            SlateTask.run_chunk(root, first(chunks))
+            half = dig()
+            @test half != empty                              # units landing moves it
+            for c in chunks; SlateTask.run_chunk(root, c); end
+            full = dig()
+            @test full != half && full != empty
+            @test r.failed == 1
+
+            # Losing a result moves it again, with no count consulted — which is what lets a retry
+            # that replaces one value with another at the same tally re-key its readers.
+            ok = [k for k in r.keys if (mm = MemoStore.read_manifest(root, k);
+                                        mm !== nothing && String(get(mm, "status", "")) == "ok")]
+            MemoStore.drop_manifest(root, first(ok))
+            @test dig() != full
+        end
+    end
+
     @testset "the callable controls do what the card's buttons do" begin
         # `reset!`, `retry_failed!`, `cancel!` and `resume!` are documented on the result, so a
         # script reaches for them instead of the card. They had drifted: the card dropped a result
