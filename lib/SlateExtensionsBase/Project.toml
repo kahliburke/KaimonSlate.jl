@@ -1,6 +1,6 @@
 name = "SlateExtensionsBase"
 uuid = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
-version = "0.10.3"
+version = "0.10.4"
 authors = ["Kahli Burke <kahli@kahliburke.com>"]
 
 [deps]
