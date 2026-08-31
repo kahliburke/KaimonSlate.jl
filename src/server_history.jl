@@ -893,8 +893,10 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # in place; this rides alongside for the modal. Present only when the cell ran traced.
     (c.output === nothing || isempty(c.output.trace)) || (d["traceData"] = c.output.trace)
     # `@bind` variables this cell READS (so the header can one-click surface their controls) —
-    # excluding any it defines itself.
-    if c.kind == CODE && !isempty(c.reads)
+    # excluding any it defines itself. Not code-only: a markdown or web cell reads the free
+    # variables of its `{{ }}` interpolations (see `_infer_bindings_uncached!`), so prose driven by
+    # a control can offer that control too.
+    if !isempty(c.reads)
         own = Set(String(b.name) for b in c.binds)
         uses = sort!(unique!(String[String(s) for s in c.reads if haskey(bindref, String(s)) && !(String(s) in own)]))
         isempty(uses) || (d["binduses"] = uses)

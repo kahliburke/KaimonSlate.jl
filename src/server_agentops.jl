@@ -1022,6 +1022,7 @@ function agent_surface_controls!(nb::LiveNotebook, id::AbstractString, controls:
     end
     set_controls_map!(nb, Dict{String,Any}(String(id) => cols))
     _renew_floor!(nb, caller)
+    _agent_push!(nb)          # the strip is presentation-only, so nothing else would repaint it
     total = sum(length, cols; init = 0)
     return total == 0 ? "cleared the control strip on id=$id" :
         "surfaced $total control(s) on id=$id: " * join((join(col, "+") for col in cols), ", ")

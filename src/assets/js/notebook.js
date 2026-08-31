@@ -414,17 +414,6 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
       }
     }
 
-    if (c.kind === 'md') {
-      const md = el.querySelector('.md'); const h = window.mdHtml(c);
-      if (md && h !== last.current.out) {
-        // Dispose any inline `{{ echart }}` instances before the innerHTML swap orphans their nodes
-        // (their ECharts instance + zrender would otherwise leak on every markdown re-render).
-        md.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} e._inst = null; } });
-        last.current.out = h; window._swapOutput(md, h); window.typesetVisible(md, c.id);
-      }
-      return;
-    }
-
     // The cell's own @bind rows (`.binds`) and its surfaced-control strip (`.controls`) are
     // INDEPENDENT structures — a MIXED cell (e.g. a plot that also declares @bind) has both.
     // (Re)build each ONLY when ITS structure changes — never on a value echo — then sync
@@ -447,6 +436,21 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
       if (host) { window.teardownCustomWidgets(host); host.innerHTML = window.controlStripInner(c); rebuilt = true; }
     }
     if (rebuilt) window.mountControls(c);             // wire the freshly-built controls
+
+    // Markdown renders its prose and nothing else — but the strip above is built first, because
+    // `{{ }}` interpolation puts prose in the reactive graph, so a markdown cell can host a
+    // control that drives what it says.
+    if (c.kind === 'md') {
+      const md = el.querySelector('.md'); const h = window.mdHtml(c);
+      if (md && h !== last.current.out) {
+        // Dispose any inline `{{ echart }}` instances before the innerHTML swap orphans their nodes
+        // (their ECharts instance + zrender would otherwise leak on every markdown re-render).
+        md.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} e._inst = null; } });
+        last.current.out = h; window._swapOutput(md, h); window.typesetVisible(md, c.id);
+      }
+      if ((c.controls || []).length) window.syncControlValues({ cells: [c] });
+      return;
+    }
     // A cell you're actively editing is YOURS until you resolve. When its editor holds unsaved edits
     // that diverge from the incoming server source (a live conflict — the modal above is offering the
     // choice), DON'T let the external run's output/charts replace what you're looking at. Freeze the
@@ -506,7 +510,10 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
   // Content hosts are empty/stable — Preact preserves them; the effect above fills them.
   let body;
   if (c.kind === 'md') {
-    body = html`<div class="md" title="double-click to edit" ondblclick=${() => window.editSource(c.id, 'markdown')}></div>${srcedit}`;
+    // Prose reaches the reactive graph through `{{ }}` interpolation, so a markdown cell can be
+    // driven by a control and is worth hosting one. The strip sits above the prose, matching where
+    // it sits relative to a code cell's output.
+    body = html`<div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="md" title="double-click to edit" ondblclick=${() => window.editSource(c.id, 'markdown')}></div>${srcedit}`;
   } else if (c.kind === 'web') {
     // Web cell: the 3-pane HTML/CSS/JS editor, then the same output/controls hosts a code cell uses
     // (the rendered WebPage swaps into `.output`).
