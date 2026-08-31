@@ -1230,7 +1230,8 @@ input.toggle:checked::after { left:18px; }
 body.modkey .cm-content { cursor: pointer; }
 .apmd { white-space:normal; }
 .apmd p { margin:0 0 .5em; }
-.apmd p:last-child, .apmd ul:last-child, .apmd ol:last-child, .apmd pre:last-child { margin-bottom:0; }
+.apmd p:last-child, .apmd ul:last-child, .apmd ol:last-child, .apmd pre:last-child,
+.apmd table:last-child { margin-bottom:0; }
 .apmd .apmd-h { font-weight:600; margin:.6em 0 .3em; }
 .apmd ul, .apmd ol { margin:.2em 0 .5em; padding-left:1.4em; }
 .apmd li { margin:.1em 0; }
@@ -1241,6 +1242,14 @@ body.modkey .cm-content { cursor: pointer; }
   border-radius:6px; overflow:auto; max-height:320px; }
 .apmd pre.apcode code { background:none; border:none; padding:0; font-size:.78rem; line-height:1.45;
   white-space:pre; }
+/* Agent replies report measurements as pipe tables; scroll sideways rather than squeeze the
+   panel, since a chat column is much narrower than the table an agent tends to emit. */
+.apmd table.apmd-t { display:block; overflow-x:auto; border-collapse:collapse;
+  margin:.45em 0; font-size:.82em; }
+.apmd table.apmd-t th, .apmd table.apmd-t td { border:1px solid var(--bg3); padding:3px 8px;
+  text-align:left; vertical-align:top; }
+.apmd table.apmd-t th { background:var(--bg2); font-weight:600; white-space:nowrap; }
+.apmd table.apmd-t tbody tr:nth-child(even) { background:color-mix(in srgb, var(--bg2) 45%, transparent); }
 .crewbadge { display:inline-block; margin-right:6px; padding:0 6px; border-radius:5px;
   font-size:.66rem; font-weight:600; letter-spacing:.02em; vertical-align:1px;
   color:hsl(var(--ch,210) 70% 82%); background:hsl(var(--ch,210) 55% 22%); }

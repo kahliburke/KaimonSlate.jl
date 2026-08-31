@@ -126,9 +126,13 @@ function _prettyTool(name) {
 // markdown processing so they survive verbatim — math is left escaped-but-raw for KaTeX, which
 // typeset() runs over the pane after render. Everything is HTML-escaped throughout (XSS-safe).
 function mdLite(src) {
-  src = String(src == null ? '' : src);
+  src = String(src == null ? '' : src).replace(/\u0000/g, '');
   const stash = [];
-  const keep = h => { stash.push(h); return '' + (stash.length - 1) + ''; };
+  // A placeholder must not be a bare index: the restore pass at the end scans the whole rendered
+  // string, so plain digits would also match numbers in the prose and swap them for stash[n]:
+  // undefined, or an unrelated stashed span when n happens to be in range. NUL-delimit them; NULs
+  // are stripped from the source above, so text can never forge one.
+  const keep = h => { stash.push(h); return '\u0000' + (stash.length - 1) + '\u0000'; };
   src = src.replace(/```(\w*)\r?\n?([\s\S]*?)```/g, (_, _l, code) =>
     keep('<pre class="apcode"><code>' + _esca(code.replace(/\s+$/, '')) + '</code></pre>'));
   // math spans — kept as escaped raw text (delimiters intact) for KaTeX, NOT markdown-processed
@@ -141,10 +145,29 @@ function mdLite(src) {
   let html = '', para = [], list = null;
   const fp = () => { if (para.length) { html += '<p>' + para.map(inline).join('<br>') + '</p>'; para = []; } };
   const fl = () => { if (list) { html += `<${list.t}>` + list.items.map(i => '<li>' + inline(i) + '</li>').join('') + `</${list.t}>`; list = null; } };
-  for (const ln of src.split('\n')) {
-    const ph = ln.match(/^(\d+)$/), h = ln.match(/^(#{1,6})\s+(.*)$/);
+  // GFM pipe tables. Agents report measurements as tables constantly, and without this they
+  // render as raw pipe soup. Splitting a row on '|' is safe because code spans are already
+  // stashed by this point, so a pipe inside `code` can't be taken for a column separator.
+  const isDelim = t => /^[\s|:-]+$/.test(t) && t.includes('-') && t.includes('|');
+  const cells = row => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(x => x.trim());
+  const lines = src.split('\n');
+  for (let li = 0; li < lines.length; li++) {
+    const ln = lines[li];
+    const ph = ln.match(/^\u0000(\d+)\u0000$/), h = ln.match(/^(#{1,6})\s+(.*)$/);
     const ul = ln.match(/^\s*[-*]\s+(.*)$/), ol = ln.match(/^\s*\d+\.\s+(.*)$/);
-    if (ph) { fp(); fl(); html += stash[+ph[1]]; }
+    if (!ph && !h && ln.includes('|') && isDelim(lines[li + 1] || '')) {
+      fp(); fl();
+      const al = cells(lines[li + 1]).map(d =>
+        d.startsWith(':') && d.endsWith(':') ? 'center' : d.endsWith(':') ? 'right' : '');
+      const cell = (v, i, t) => `<${t}${al[i] ? ` style="text-align:${al[i]}"` : ''}>` + inline(v) + `</${t}>`;
+      const head = cells(ln).map((v, i) => cell(v, i, 'th')).join('');
+      let body = '', j = li + 2;
+      for (; j < lines.length && lines[j].trim() && lines[j].includes('|'); j++)
+        body += '<tr>' + cells(lines[j]).map((v, i) => cell(v, i, 'td')).join('') + '</tr>';
+      html += `<table class="apmd-t"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+      li = j - 1;
+    }
+    else if (ph) { fp(); fl(); html += stash[+ph[1]]; }
     else if (h) { fp(); fl(); html += '<div class="apmd-h">' + inline(h[2]) + '</div>'; }
     else if (ul) { fp(); if (!list || list.t !== 'ul') { fl(); list = { t: 'ul', items: [] }; } list.items.push(ul[1]); }
     else if (ol) { fp(); if (!list || list.t !== 'ol') { fl(); list = { t: 'ol', items: [] }; } list.items.push(ol[1]); }
@@ -152,7 +175,7 @@ function mdLite(src) {
     else { fl(); para.push(ln); }
   }
   fp(); fl();
-  return html.replace(/(\d+)/g, (_, i) => stash[+i]);   // restore spans that landed inline
+  return html.replace(/\u0000(\d+)\u0000/g, (_, i) => stash[+i] ?? '');   // restore spans that landed inline
 }
 let _suppressAgentRender = false;   // set during bulk replay (loadAgentLog) → render once at the end
 // Pretty-print a tool call's args for the expandable detail (capped so a giant source doesn't bloat the pane).
