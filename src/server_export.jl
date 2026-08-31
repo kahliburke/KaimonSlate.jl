@@ -1336,9 +1336,10 @@ const _EXPORT_CHART_RUNTIME_JS = string(
     "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);"
 )
 
-const _EXPORT_ASSET_JS = raw"""
+const _EXPORT_ASSET_JS_BODY = raw"""
 window.Slate=window.Slate||{};window.__slateAssets=window.__slateAssets||{};
-function _slateTyped(d,b){return d==="f32"?new Float32Array(b):d==="f64"?new Float64Array(b):d==="i32"?new Int32Array(b):d==="i16"?new Int16Array(b):new Uint8Array(b);}
+function _slateTyped(d,b){var C=((window.__SLATE_DTYPES||{}).byTag||{})[d];
+if(!C)throw new Error('Slate.asset: this page cannot decode dtype '+d);return new C(b);}
 /* A packed asset is gzipped before base64 when that wins (see `_pack_export_asset`): base64 costs a
    flat 4/3, so compressing first is strictly better than shipping the raw buffer. Inflated with the
    platform's own DecompressionStream — no library rides along for it. That API is the one modern thing
@@ -1531,6 +1532,11 @@ if(g)g.textContent+=line+"\n";try{console.log.apply(console,arguments);}catch(_)
 Promise.resolve().then(function(){return fn(root,echo);}).catch(function(e){console.error(e);
 try{var b=document.createElement("pre");b.className="web-err";b.textContent="⚠ "+((e&&e.stack)||e);(root||document.body).appendChild(b);}catch(_){}});};
 """
+
+# The export's client runtime, preceded by the generated dtype table that its `_slateTyped` reads.
+# A frozen page has no server to fetch `/assets/js/dtypes.js` from, so the rows are inlined — from
+# the same `SlateExtensionsBase.DTYPES` the live page is served.
+_export_asset_js() = string(SlateExtensionsBase.dtype_js(), "\n", _EXPORT_ASSET_JS_BODY)
 
 # Package-declared front-end scripts (SlateExtensionsBase manifest) as a body-top `<script>` block for a
 # static export, or "" when none. CLASSIC scripts are prefixed with tolerant no-op stubs for the
@@ -2772,7 +2778,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                     inline_assets ? (e["data"] = Base64.base64encode(get(wmi, rel, bytes))) : (e["url"] = rel)
                     push!(ents, string(JSON.json(rel), ":", JSON.json(e)))
                 end
-                string("<script>", _EXPORT_ASSET_JS,
+                string("<script>", _export_asset_js(),
                        isempty(ents) ? "" : string("Object.assign(window.__slateAssets,{", join(ents, ","), "});"),
                        # A figure's route names a SWEEP, not an asset — what shipped, and at what
                        # resolution, is this export's decision. Published here so the page can resolve

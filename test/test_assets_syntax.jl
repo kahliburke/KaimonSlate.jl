@@ -74,9 +74,12 @@ end
         NS = KaimonSlate.NotebookServer
         # Each is a complete script the export writes into a <script> tag of its own.
         blobs = [(name, getfield(NS, name)) for name in
-                 (:_EXPORT_ASSET_JS, :_EXPORT_TABLE_JS, :_EXPORT_TABLE_REPLAY_JS, :_EXPORT_MEDIA_JS,
+                 (:_EXPORT_TABLE_JS, :_EXPORT_TABLE_REPLAY_JS, :_EXPORT_MEDIA_JS,
                   :_EXPORT_ECHARTS_THEME_JS, :_EXPORT_CHART_RUNTIME_JS)
                  if isdefined(NS, name)]
+        # The asset runtime is composed (generated dtype table + body), so check what actually ships:
+        # this also proves the emitted `window.__SLATE_DTYPES` is syntactically valid JS.
+        push!(blobs, (:_export_asset_js, NS._export_asset_js()))
         @test length(blobs) == 6          # a renamed constant must fail loudly, not silently skip
         bad = String[]
         dir = mktempdir()

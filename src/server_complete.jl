@@ -788,6 +788,10 @@ function _make_router(h::Hub)
         f = HTTP.getparam(req, "file")
         # path-safety: a bare `name.js` only — no separators, no traversal.
         (occursin('/', f) || occursin('\\', f) || occursin("..", f) || !endswith(f, ".js")) && return HTTP.Response(404)
+        # Generated, not on disk: the dtype table, so the page's decoders are built from the same
+        # rows Julia encodes with.
+        f == "dtypes.js" &&
+            return _asset(SlateExtensionsBase.dtype_js(), "application/javascript; charset=utf-8")
         p = joinpath(_JS_DIR, f)
         isfile(p) ? _asset(read(p, String), "application/javascript; charset=utf-8") : HTTP.Response(404)
     end)

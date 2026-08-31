@@ -672,6 +672,7 @@
 <button id="doclauncher" onclick="openDocs()" title="Help / docs (⌘⇧K)">📖 Docs</button>
 
 <!-- App modules — ordered classic scripts sharing one global scope (load order matters). -->
+<script src="/assets/js/dtypes.js"></script>   <!-- generated from SlateExtensionsBase.DTYPES; must precede its readers -->
 <script src="/assets/js/core.js"></script>
 <script src="/assets/js/wscall.js"></script>   <!-- window.slateCall: JS→Julia calls over the page WebSocket -->
 <script src="/assets/js/editor.js"></script>

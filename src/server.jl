@@ -11,6 +11,7 @@ module NotebookServer
 
 using HTTP, JSON, FileWatching, CodecZlib, CodecZstd
 import Base64
+import SlateExtensionsBase                    # the dtype table the page's decoders are generated from
 import Dates                                  # publish dates for the multi-doc site manifest
 import Logging                                # standalone serve: route hub log detail to a file
 import REPL                                   # standalone serve: raw-mode ^C byte (see _wait_for_ctrl_c)

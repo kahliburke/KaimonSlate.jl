@@ -12,6 +12,13 @@
 #   [u16 metaLen][metaLen bytes: UTF-8 JSON metadata]
 #   [u8 dtype][u8 rank][rank × u32 dims]      # dtype per `_bin_dtype`; dims column-major (Julia order)
 #   [raw element bytes]
+#
+# `version` guards the LAYOUT above, not the contents of any field. Appending a row to `DTYPES`
+# widens what `dtype` may hold but leaves every offset identical, so it does NOT bump the version:
+# a decoder that knows only the older rows still parses the frame correctly and declines the one
+# dtype it lacks (`wscall.js` drops the frame; `core.js` throws). Bumping instead would make those
+# decoders reject every v2 frame — including the types they handle perfectly — to announce a change
+# that cannot affect them. Reserve the bump for a change that moves or reinterprets bytes.
 
 """
     SlateBinary(data, meta = (;))
@@ -55,14 +62,77 @@ SlateBinary(data::Array{T,N}, meta; snapshot::Bool = false) where {T,N} =
 SlateBinary(data::Array{T,N}; snapshot::Bool = false, kw...) where {T,N} =
     SlateBinary(data, Dict{String,Any}(String(k) => v for (k, v) in kw); snapshot)
 
-# dtype tags — keep in sync with `_asset_dtype` (capture.jl) and core.js `_SLATE_TYPED`.
-_bin_dtype(::Type{Float32}) = 0x00
-_bin_dtype(::Type{Float64}) = 0x01
-_bin_dtype(::Type{Int32})   = 0x02
-_bin_dtype(::Type{Int16})   = 0x03
-_bin_dtype(::Type{UInt8})   = 0x04
-_bin_dtype(::Type{T}) where {T} =
-    throw(ArgumentError("SlateBinary: unsupported element type $T (use Float32/Float64/Int32/Int16/UInt8)"))
+# ── The dtype table ───────────────────────────────────────────────────────────────────────────
+# One row per element type Slate can put on a wire as raw bytes, and the only place the set is
+# written down. Everything else is derived from it: the streaming frame's numeric tag
+# (`_bin_dtype`), the asset manifest's string tag (`dtype_tag`, which capture.jl's `_asset_dtype`
+# delegates to), and the browser's decoders (`dtype_js`, injected as `window.__SLATE_DTYPES` and
+# read by core.js and wscall.js). Supporting another element type is a row here and nothing else.
+#
+# `code` is a WIRE CONTRACT: it is the frame's dtype byte, so rows may be APPENDED but never
+# reordered, renumbered or removed. `tag` is the asset manifest's spelling (it crosses as JSON, so
+# it is a string rather than a byte), and `js` names the TypedArray that reads the bytes back.
+const DTYPES = (
+    (T = Float32, code = 0x00, tag = "f32", js = "Float32Array"),
+    (T = Float64, code = 0x01, tag = "f64", js = "Float64Array"),
+    (T = Int32,   code = 0x02, tag = "i32", js = "Int32Array"),
+    (T = Int16,   code = 0x03, tag = "i16", js = "Int16Array"),
+    (T = UInt8,   code = 0x04, tag = "u8",  js = "Uint8Array"),
+    (T = Int8,    code = 0x05, tag = "i8",  js = "Int8Array"),
+    (T = UInt16,  code = 0x06, tag = "u16", js = "Uint16Array"),
+    (T = UInt32,  code = 0x07, tag = "u32", js = "Uint32Array"),
+    # Julia's DEFAULT integer, so `rand(1:10, n, n)` lands here. `BigInt64Array` is the only
+    # lossless landing spot — JS numbers carry 53 bits — at the cost of BigInt elements, which do
+    # not mix with Number in arithmetic. Downcast (`Int32.(A)`, `Float64.(A)`) when the array is
+    # headed for a plot; this row is for when the values matter more than the ergonomics.
+    (T = Int64,   code = 0x08, tag = "i64", js = "BigInt64Array"),
+    (T = UInt64,  code = 0x09, tag = "u64", js = "BigUint64Array"),
+    # `Bool` is one byte per element in Julia, so a mask ships as bytes and reads back as 0/1.
+    (T = Bool,    code = 0x0a, tag = "b8",  js = "Uint8Array"),
+    (T = Float16, code = 0x0b, tag = "f16", js = "Float16Array"),
+)
+
+for row in DTYPES
+    @eval _bin_dtype(::Type{$(row.T)}) = $(row.code)
+    @eval dtype_tag(::Type{$(row.T)}) = $(row.tag)
+end
+
+_bin_dtype(::Type{T}) where {T} = throw(ArgumentError(
+    "SlateBinary: unsupported element type $T (use $(join((string(r.T) for r in DTYPES), "/")))"))
+
+"""
+    dtype_tag(T) -> String | Nothing
+
+The asset manifest's dtype spelling for element type `T` (`"f32"`, `"i32"`, …), or `nothing` when
+`T` is not one Slate packs as raw bytes — the caller then falls back to JSON. Derived from
+[`DTYPES`](@ref).
+"""
+dtype_tag(::Type) = nothing
+
+"""
+    dtype_js() -> String
+
+The dtype table as a JavaScript snippet defining `window.__SLATE_DTYPES`:
+
+- `byCode` — TypedArray constructors indexed by the binary frame's dtype byte (decoding a frame),
+- `byTag` — the same, keyed by the asset manifest's string tag (decoding an asset),
+- `codeByTag` — tag → dtype byte, for the browser's uplink encoder.
+
+Served live at `/assets/js/dtypes.js` and inlined into static exports, so a browser cannot disagree
+with Julia about what a dtype means.
+
+Constructors are looked up by NAME at run time rather than referenced directly: a row whose
+TypedArray the browser doesn't implement (`Float16Array` on an older engine) resolves to `null` and
+that one dtype declines to decode, instead of a `ReferenceError` taking the whole table — and with
+it every other dtype — down with it.
+"""
+dtype_js() = string(
+    "window.__SLATE_DTYPES=(function(){",
+    "var g=function(n){try{return globalThis[n]||null;}catch(e){return null;}};",
+    "var rows=[", join(("[\"$(r.tag)\",\"$(r.js)\",$(Int(r.code))]" for r in DTYPES), ","), "];",
+    "var byCode=[],byTag={},codeByTag={};",
+    "rows.forEach(function(r){var C=g(r[1]);byCode[r[2]]=C;byTag[r[0]]=C;codeByTag[r[0]]=r[2];});",
+    "return {byCode:byCode,byTag:byTag,codeByTag:codeByTag};})();")
 
 """
     encode_binary_frame(channel, x::SlateBinary) -> Vector{UInt8}

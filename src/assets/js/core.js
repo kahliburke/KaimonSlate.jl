@@ -209,7 +209,7 @@ const _ensurePrereqs = spec => Promise.all([_ensureMaps(spec), _ensureScripts(sp
 // Generated assets (`save_asset`): a cell's `assets` specs — {path, url, mime} — populate a page-wide
 // path→asset registry so `Slate.asset(path)` resolves what a widget/chart references. Live, each asset
 // is fetched from its blob `url`; the SAME `Slate.asset` runs in a static export (mirrored there in
-// server_export.jl `_EXPORT_ASSET_JS`), where an inlined asset carries `data` instead — one contract in
+// server_export.jl `_export_asset_js`), where an inlined asset carries `data` instead — one contract in
 // the notebook, a standalone file, and a hosted site.
 window.Slate = window.Slate || {};
 window.__slateAssets = window.__slateAssets || {};
@@ -218,10 +218,15 @@ function _registerAssets(c) {
 }
 // A packed numeric asset (`save_asset` of an array) → an ndarray-lite: the TypedArray plus its shape and
 // COLUMN-MAJOR layout (Julia's), with cheap `.col(k)` (a contiguous column) and `.at(i,j)` accessors —
-// so a widget slices an eigenbasis column without a strided gather. `_slateTyped` mirrors `_asset_dtype`.
+// so a widget slices an eigenbasis column without a strided gather. The dtype→TypedArray table is
+// generated from `SlateExtensionsBase.DTYPES` and injected as `window.__SLATE_DTYPES` (dtypes.js,
+// loaded ahead of this file). A tag this page has no constructor for — an asset written by a newer
+// Slate, or a type this engine lacks — REJECTS. Falling back to raw bytes would hand the caller a
+// plausible-looking array of the wrong type and length, which is the one outcome worse than an error.
 function _slateTyped(dtype, buf) {
-  return dtype === 'f32' ? new Float32Array(buf) : dtype === 'f64' ? new Float64Array(buf) :
-    dtype === 'i32' ? new Int32Array(buf) : dtype === 'i16' ? new Int16Array(buf) : new Uint8Array(buf);
+  const C = ((window.__SLATE_DTYPES || {}).byTag || {})[dtype];
+  if (!C) throw new Error('Slate.asset: this page cannot decode dtype "' + dtype + '"');
+  return new C(buf);
 }
 function _slateNdarray(a, buf) {
   const data = _slateTyped(a.dtype, buf), rows = (a.shape && a.shape[0]) || data.length;

@@ -104,9 +104,9 @@ end
     @test dt_raw === nothing && enc_raw === nothing         # untouched — exactly the bytes given
 
     # The page must be told it has to inflate, and must say so plainly if it cannot.
-    @test occursin("_slateInflate", NS._EXPORT_ASSET_JS)
-    @test occursin("DecompressionStream", NS._EXPORT_ASSET_JS)
-    @test occursin("a.enc===\"gzip\"", NS._EXPORT_ASSET_JS)
+    @test occursin("_slateInflate", NS._export_asset_js())
+    @test occursin("DecompressionStream", NS._export_asset_js())
+    @test occursin("a.enc===\"gzip\"", NS._export_asset_js())
 end
 
 @testset "asset stem keeps non-ASCII names distinct" begin
