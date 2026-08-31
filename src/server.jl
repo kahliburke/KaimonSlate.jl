@@ -407,6 +407,9 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # shown meanwhile; otherwise the cells show un-run until they go live. This is the single
     # path for opening a standalone — "Run (temporary)" is just a normal open.
     if ReportEngine.gate_available() && _has_bundle(src)
+        # Before anything reads a per-notebook store: if this notebook carries a docid but its
+        # data is still filed under the old path-derived key, move it across. One-shot, idempotent.
+        try; _adopt_doc_stores!(path, r.meta); catch; end
         p = _read_preview(src)
         p === nothing || (r.meta["preview"] = p)
         nb = LiveNotebook(nbid, String(path), r, PendingKernel(), 0, String[], String[],
@@ -440,6 +443,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # AT ONCE while the worker boots + the initial run recomputes — the notebook springs to life
     # instead of showing every cell un-run. Marked entries carry a stored/stale badge; live cells
     # supersede them cell-by-cell (state_json's hydrating branch serves meta["preview"]).
+    try; _adopt_doc_stores!(path, r.meta); catch; end   # legacy path key → docid key (see above)
     let p = _load_preview_marked(path, r)
         p === nothing || (r.meta["preview"] = p)
     end

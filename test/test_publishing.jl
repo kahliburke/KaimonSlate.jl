@@ -70,6 +70,51 @@ _env(pairs...) = merge(_clear(), Dict(pairs...))
     end
 end
 
+# One identity keys all three per-notebook stores (history, chat transcript, frozen preview), so a
+# notebook that moves keeps them. See `doc_key` / `_adopt_doc_stores!` in server_history.jl.
+@testset "per-notebook storage identity" begin
+    H = NS.SlateHistory
+    mktempdir() do cache
+        withenv(_env("XDG_CACHE_HOME" => cache)...) do
+            old_root = H._ROOT[]
+            H._ROOT[] = joinpath(cache, "kaimonslate", "history")
+            try
+                nbpath = joinpath(cache, "nb.jl")
+                write(nbpath, "#%% md id=a\n# t\n")
+
+                # No docid yet → the legacy path hash, which is where existing data already sits.
+                @test NS.doc_key(nbpath, Dict{String,Any}()) == H._key(nbpath)
+                # With one → a docid-derived key, and the SAME key from any path. That is the point.
+                meta = Dict{String,Any}("docid" => "11111111-2222-3333-4444-555555555555")
+                k = NS.doc_key(nbpath, meta)
+                @test startswith(k, "doc-")
+                @test NS.doc_key("/somewhere/else/renamed.jl", meta) == k
+                # Distinct docids stay distinct.
+                @test NS.doc_key(nbpath, Dict{String,Any}("docid" => "other")) != k
+
+                # Seed all three stores under the legacy key, as a pre-upgrade notebook has them.
+                legacy = H._key(nbpath)
+                H.record!(H.Doc(legacy, nbpath), "s\n"; cells = [("a", "md", "s\n")])
+                chat_old, prev_old = NS._chat_log_file(legacy), NS._preview_file(legacy)
+                mkpath(dirname(chat_old)); write(chat_old, "{\"kind\":\"x\"}\n")
+                mkpath(dirname(prev_old)); write(prev_old, "[]")
+
+                @test NS._adopt_doc_stores!(nbpath, meta)          # …and they follow the docid
+                @test length(H.entries(H.Doc(k, nbpath))) == 1
+                @test isempty(H.entries(H.Doc(legacy, nbpath)))
+                @test isfile(NS._chat_log_file(k)) && !isfile(chat_old)
+                @test isfile(NS._preview_file(k)) && !isfile(prev_old)
+
+                @test !NS._adopt_doc_stores!(nbpath, meta)         # idempotent: nothing left to move
+                # A notebook with no docid has only the one key, so there is nothing to adopt.
+                @test !NS._adopt_doc_stores!(nbpath, Dict{String,Any}())
+            finally
+                H._ROOT[] = old_root
+            end
+        end
+    end
+end
+
 @testset "PublishLedger — document identity" begin
     # git ids fold trailing .git/slash and separator differences to one canonical value
     a = PL.docid_git("notebooks/wg.jl", "https://github.com/u/Repo.git")

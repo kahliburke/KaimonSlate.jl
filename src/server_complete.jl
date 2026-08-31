@@ -2289,11 +2289,21 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
         ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); _eval!(nb); _json(state_json(nb))
     end))
+    # Split this notebook off from a copy it shares a document (and therefore history, chat and
+    # preview) with. Copies the stores rather than resetting them, so neither side loses anything.
+    HTTP.register!(router, "POST", "/api/{id}/fork-doc", req -> _withnb(h, req, nb -> begin
+        id = fork_doc!(nb)
+        _json(Dict("ok" => true, "docid" => id))
+    end))
+    # Or keep sharing, and stop being told about it. Recorded against THIS path, so the other copy
+    # still gets told — its answer to the same question is its own.
+    HTTP.register!(router, "POST", "/api/{id}/share-quiet", req -> _withnb(h, req, nb ->
+        _json(Dict("ok" => (try; SlateHistory.silence!(nbdoc(nb)); catch; false; end)))))
     # ── Time machine: durable edit history ───────────────────────────────────
     # List checkpoints (newest data is appended last); `current` marks the live state.
     HTTP.register!(router, "GET", "/api/{id}/history", req -> _withnb(h, req, nb ->
-        _json(Dict("entries" => SlateHistory.entries(nb.path),   # the log is a compact delta — cheap to read whole
-                   "current" => SlateHistory.latest_hash(nb.path)))))
+        _json(Dict("entries" => SlateHistory.entries(nbdoc(nb)),   # the log is a compact delta — cheap to read whole
+                   "current" => SlateHistory.latest_hash(nbdoc(nb))))))
     # Per-cell version timeline (newest first) for the editor's undo-through-history: the
     # distinct past SOURCES of one cell, each with its age + diff-label. Sources are pulled
     # from the snapshot objects (parsed once per snapshot, memoized across the list).
@@ -2301,10 +2311,10 @@ function _make_router(h::Hub)
         cid = HTTP.getparam(req, "cid")
         reports = Dict{String,Any}()
         out = Dict{String,Any}[]
-        for v in SlateHistory.cell_versions(nb.path, cid)
+        for v in SlateHistory.cell_versions(nbdoc(nb), cid)
             hash = String(v["hash"])
             rep = get!(reports, hash) do
-                src = SlateHistory.content(nb.path, hash)
+                src = SlateHistory.content(nbdoc(nb), hash)
                 src === nothing ? nothing : (try; parse_report(src); catch; nothing; end)
             end
             rep === nothing && continue
@@ -2318,7 +2328,7 @@ function _make_router(h::Hub)
     # Full serialized source of one recorded state (for preview / diff / replay).
     HTTP.register!(router, "GET", "/api/{id}/history/{hash}", req -> _withnb(h, req, nb -> begin
         hash = HTTP.getparam(req, "hash")
-        src = SlateHistory.content(nb.path, hash)
+        src = SlateHistory.content(nbdoc(nb), hash)
         src === nothing ? HTTP.Response(404, "no such snapshot") :
             _json(Dict("hash" => hash, "source" => src))
     end))

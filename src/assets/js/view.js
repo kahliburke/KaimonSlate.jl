@@ -977,7 +977,62 @@ function updateChrome(state) {
   if (ub) { ub.textContent = '↶ Undo' + (state.undoLabel ? ' ' + state.undoLabel : ''); ub.disabled = !state.undoLabel; }
   const rb = document.getElementById('redobtn');
   if (rb) { rb.textContent = '↷ Redo' + (state.redoLabel ? ' ' + state.redoLabel : ''); rb.disabled = !state.redoLabel; }
+  _sharedDocNotice(state);
 }
+// A notebook copied on this machine keeps the original's `docid`, so the two share one document:
+// the same history, chat transcript and preview. That's the intended meaning of a docid (publish
+// matches on it too), but it should never be a surprise — say so once, and offer the split.
+// The server only reports this for a genuine copy: a notebook you were SENT has no local store to
+// share, and two checkouts of one repo are filtered out, so neither says anything here.
+let _sharedShown = false;
+function _sharedDocNotice(state) {
+  const others = state.sharedWith || [];
+  const btn = document.getElementById('forkdocbtn');
+  if (btn) btn.style.display = others.length ? '' : 'none';   // only offered when there IS a copy
+  if (!others.length || _sharedShown) return;
+  _sharedShown = true;                          // once per page, not once per state push
+  _sharedDocDialog(state);
+}
+// Name the source, then offer the two things worth doing about it. Dismissal is a real answer
+// recorded on the server against this path, not a toast that scrolls away — the other copy is
+// asked the same question independently.
+async function _sharedDocDialog(state) {
+  const others = state.sharedWith || [];
+  const from = state.sharedFrom;
+  const where = from ? `copied from\n\n    ${from}` :
+                       `shared with\n\n    ${others.join('\n    ')}`;
+  const msg = `This notebook is one document in two places — it was ${where}\n\n` +
+    `They share one history, chat transcript and preview, because they carry the same document id. ` +
+    `Editing either writes to the same store.`;
+  const choice = await dlg(msg, [
+    { label: 'Keep sharing', value: 'keep' },
+    { label: "Don't ask again", value: 'quiet' },
+    { label: 'Open the other', value: 'open' },
+    { label: 'Split from copy…', value: 'fork', cls: 'primary' },
+  ]);
+  if (choice === 'quiet') { await api('POST', '/api/share-quiet', {}); toast('Kept shared.', 3000); }
+  else if (choice === 'open') _openOther(from || others[0]);
+  else if (choice === 'fork') forkDoc();
+}
+// Serve the other copy and open it in a tab. `/api/open` is a HUB route, not a notebook-scoped
+// one, so it can't go through api() — that injects this notebook's id into the path.
+async function _openOther(path) {
+  try {
+    const r = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                         body: JSON.stringify({ path }) });
+    const d = await r.json();
+    if (d && d.url) window.open(d.url, '_blank'); else await alertDark('Could not open ' + path);
+  } catch (_) { await alertDark('Could not open ' + path); }
+}
+// Give this notebook a fresh identity, copying the stores across so both sides keep their lineage.
+async function forkDoc() {
+  if (!await confirmDark('Split this notebook into its own document?\n\n' +
+      'It gets a new id, and its history, chat and preview are COPIED — the other copy keeps ' +
+      'everything too. Publishing treats them as separate documents from here on.', 'Split')) return;
+  const r = await api('POST', '/api/fork-doc', {});
+  if (r && r.ok) toast('Split — this notebook now has its own history.', 5000);
+}
+window.forkDoc = forkDoc;
 
 // ── Controls palette ─────────────────────────────────────────────────────────
 // A side drawer listing every @bind declared across the notebook, where each is

@@ -1,6 +1,97 @@
 # Part of the NotebookServer submodule — included by server.jl (which holds the module
 # header: imports/exports, the LiveNotebook struct). Names here resolve in NotebookServer.
 
+# ── Per-notebook storage identity ────────────────────────────────────────────
+# Everything durable and per-notebook — the history store, the chat transcript, the frozen
+# preview — keys off ONE identity, so moving or renaming a notebook keeps all three instead of
+# silently orphaning them.
+#
+# That identity is the `docid` the notebook carries in its own config footer (`_ensure_docid!`),
+# which exists precisely so it survives a change of path, repo or origin. A notebook with no
+# docid yet falls back to hashing its absolute path — which is exactly the key its existing data
+# is already filed under, so nothing has to be migrated until an id appears.
+#
+# Two files sharing a docid share their stores. That is the intended reading: a docid means "the
+# same document", and publish/sync already match on it. A copy therefore inherits the original's
+# history, and `shared_with` surfaces that rather than letting it surprise you.
+const _DOCKEY_PREFIX = "doc-"
+function doc_key(path, meta::AbstractDict)
+    id = strip(String(get(meta, "docid", "")))
+    isempty(id) ? SlateHistory._key(path) : _DOCKEY_PREFIX * SlateHistory._sha(id)[1:16]
+end
+doc_key(nb::LiveNotebook) = doc_key(nb.path, nb.report.meta)
+nbdoc(nb::LiveNotebook) = SlateHistory.Doc(doc_key(nb), abspath(String(nb.path)))
+# The key this notebook's data sat under BEFORE it carried a docid — the migration source.
+legacy_doc(nb::LiveNotebook) = SlateHistory.Doc(SlateHistory._key(nb.path), abspath(String(nb.path)))
+
+# Move a notebook's three stores from the legacy path-derived key onto its docid key. Runs once,
+# the first time a notebook with a docid is opened after the upgrade (and again right after
+# `_ensure_docid!` mints one), so existing history/chat/preview follow the file instead of being
+# stranded under a key nothing looks up any more. Each move is independent and best-effort: a
+# store that is missing, or whose destination already exists, is simply left alone.
+function _adopt_doc_stores!(path, meta::AbstractDict)
+    ap = abspath(String(path))
+    new = SlateHistory.Doc(doc_key(ap, meta), ap)
+    old = SlateHistory.Doc(SlateHistory._key(ap), ap)
+    new.key == old.key && return false      # no docid yet → already on the only key it has
+    moved = false
+    try; moved |= SlateHistory.relocate!(old, new); catch; end
+    for (o, n) in ((_chat_log_file(old.key), _chat_log_file(new.key)),
+                   (_preview_file(old.key), _preview_file(new.key)))
+        try
+            (isfile(o) && !isfile(n)) || continue
+            mkpath(dirname(n)); mv(o, n); moved = true
+        catch; end
+    end
+    return moved
+end
+_adopt_doc_stores!(nb::LiveNotebook) = _adopt_doc_stores!(nb.path, nb.report.meta)
+
+# Other live locations of this same document: paths its store has recorded that are NOT this
+# notebook and STILL EXIST on disk. An empty result is the normal case, including the one that
+# matters most — a notebook someone was sent, opened for the first time, whose docid has no local
+# store at all. A rename leaves no live twin either (the old path is gone), so this only speaks up
+# for a genuine copy.
+#
+# Two checkouts of the same repo are deliberately NOT a copy: same origin, same repo-relative
+# path means the same document in two working trees, which is routine and not worth a word.
+function shared_with(nb::LiveNotebook)
+    d = nbdoc(nb)
+    d.path in SlateHistory.quiet_paths(d) && return String[]   # this copy asked not to be told
+    out = String[]
+    for p in SlateHistory.known_paths(d)
+        (p == d.path || !isfile(p)) && continue
+        _same_checkout(p, d.path) && continue
+        push!(out, p)
+    end
+    return out
+end
+
+# Where this document came from: the FIRST path its store ever recorded, when that isn't us. The
+# question a copy notice raises is "copied from what?", and `known_paths` is oldest-first, so the
+# head of the list answers it. `nothing` when this notebook IS the origin (it was copied FROM here).
+function shared_origin(nb::LiveNotebook)
+    d = nbdoc(nb)
+    ps = SlateHistory.known_paths(d)
+    (isempty(ps) || ps[1] == d.path) && return nothing
+    return ps[1]
+end
+
+# Do two paths name the same file in two working trees of one repo?
+function _same_checkout(a::AbstractString, b::AbstractString)
+    ra = _repo_ident(a); ra === nothing && return false
+    return ra == _repo_ident(b)
+end
+function _repo_ident(p::AbstractString)
+    d = dirname(abspath(String(p)))
+    isdir(d) || return nothing
+    okroot, root = _git_run(d, `git rev-parse --show-toplevel`)
+    okroot || return nothing
+    okorg, origin = _git_run(d, `git config --get remote.origin.url`)
+    okorg && !isempty(strip(origin)) || return nothing
+    return (strip(origin), relpath(abspath(String(p)), strip(root)))
+end
+
 # ── Durable history (the time machine) ───────────────────────────────────────
 # Capture the *current* notebook state into the append-only store. Dedup-by-hash
 # makes a no-op capture free, so this is safe to call liberally (every op, every
@@ -10,7 +101,7 @@ _cells_of(report) = [(c.id, c.kind == MARKDOWN ? "md" : "code", c.source) for c 
 function _history!(nb::LiveNotebook; source::AbstractString = "browser", kind::AbstractString = "checkpoint",
                    label::AbstractString = "")
     try
-        SlateHistory.record!(nb.path, serialize_report(nb.report);
+        SlateHistory.record!(nbdoc(nb), serialize_report(nb.report);
                              source_label = source, kind = kind, cells = _cells_of(nb.report), label = label)
     catch e
         @warn "KaimonSlate: history capture failed" exception = (e, catch_backtrace())
@@ -224,7 +315,7 @@ end
 # restore is itself recorded as a new "restore" checkpoint — you can always come
 # straight back. Returns true on success.
 function restore_history!(nb::LiveNotebook, hash::AbstractString)
-    src = SlateHistory.content(nb.path, hash)
+    src = SlateHistory.content(nbdoc(nb), hash)
     src === nothing && return false
     lock(nb.lock) do
         _snapshot!(nb)
@@ -493,8 +584,9 @@ end
 # manifest is small (blob URLs, not inline rasters). Cache-tier and fully disposable: a missing or
 # corrupt sidecar just means no interim preview, never a correctness issue. Live cells supersede it
 # cell-by-cell as each `celldone:` lands (the browser reconciles by id + content hash).
-_preview_file(path) = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
-    "kaimonslate", "preview", SlateHistory._sha(abspath(String(path)))[1:16] * ".json")
+_preview_file(key::AbstractString) = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
+    "kaimonslate", "preview", String(key) * ".json")
+_preview_file(nb::LiveNotebook) = _preview_file(doc_key(nb))
 
 const _PREVIEW_SAVE_AT = Dict{String,Float64}()   # nbid → last flush time (debounce)
 const _PREVIEW_SAVE_LOCK = ReentrantLock()
@@ -574,7 +666,7 @@ function _save_preview!(nb::LiveNotebook; force::Bool = false)
             _has_rich_display(nb) ? _render_cells(nb; live_placeholder = true) : nothing
         end
         cells === nothing && return nothing   # nothing rich to preview — leave any stale sidecar for now
-        f = _preview_file(nb.path)
+        f = _preview_file(nb)
         mkpath(dirname(f))
         tmp = f * ".tmp"
         open(tmp, "w") do io; JSON.print(io, cells); end
@@ -591,7 +683,7 @@ end
 # the saved source hash no longer matches the freshly-parsed cell (edited since the snapshot, so the
 # figure may be out of date). Returns nothing when there's no usable sidecar.
 function _load_preview_marked(path::AbstractString, report)
-    f = _preview_file(path)
+    f = _preview_file(doc_key(path, report.meta))
     isfile(f) || return nothing
     cells = try; JSON.parse(read(f, String)); catch; nothing; end
     (cells isa AbstractVector && !isempty(cells)) || return nothing
@@ -1132,6 +1224,17 @@ function state_json(nb::LiveNotebook)
     meta["workers"] = _workers_json(nb)                                     # ACTIVE workers (main + each region) → topbar pills + log/status popup
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
+    # Other live copies of this same document (see `shared_with`). Normally empty — notably for a
+    # notebook you were sent and are opening for the first time, which has no local store to share.
+    let sw = (try; shared_with(nb); catch; String[]; end)
+        if !isempty(sw)
+            meta["sharedWith"] = sw
+            # Where it came from, so the notice can name it rather than just say "a copy exists".
+            let orig = (try; shared_origin(nb); catch; nothing; end)
+                orig === nothing || (meta["sharedFrom"] = orig)
+            end
+        end
+    end
     if get(nb.report.meta, "inactive", false) === true
         # INACTIVE (dormant): show the embedded frozen render (or parsed cells un-run) with NO worker
         # running — the grey "click to launch" pill drives the bring-up (`/api/launch`). Distinct from

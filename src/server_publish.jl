@@ -93,7 +93,31 @@ function _ensure_docid!(nb::LiveNotebook)
         id = _uuid4_str()
         nb.report.meta["docid"] = String(id)
         try; _persist!(nb); catch e; @warn "slate: could not persist docid" exception = e; end
+        # A brand-new id means this notebook's stores are still under the legacy path key; move
+        # them onto it now, so the very first capture after the upgrade lands in the right place.
+        try; _adopt_doc_stores!(nb); catch; end
     end
+    return String(id)
+end
+
+# Split this notebook off from a document it shares with a copy elsewhere: give it a fresh identity
+# and COPY the three stores onto the new key, so both sides keep the lineage up to the split and
+# neither loses anything. Deliberately explicit — the server never forks on its own, because a
+# docid also carries publish lineage and two working trees of one repo legitimately share one.
+function fork_doc!(nb::LiveNotebook)
+    from = nbdoc(nb)
+    id = _uuid4_str()
+    nb.report.meta["docid"] = String(id)
+    to = nbdoc(nb)
+    try; SlateHistory.fork!(from, to); catch; end
+    for (o, n) in ((_chat_log_file(from.key), _chat_log_file(to.key)),
+                   (_preview_file(from.key), _preview_file(to.key)))
+        try
+            (isfile(o) && !isfile(n)) || continue
+            mkpath(dirname(n)); cp(o, n)
+        catch; end
+    end
+    try; _persist!(nb); catch e; @warn "slate: could not persist forked docid" exception = e; end
     return String(id)
 end
 

@@ -26,13 +26,15 @@ const _AGENT_LOG = Dict{String,Vector{String}}()
 const _AGENT_LOG_CAP = 4000
 
 # Durable chat transcript: the in-memory `_AGENT_LOG` replays across a browser reload,
-# but is lost on a SERVER restart. Mirror it to a per-notebook JSONL (keyed by abspath,
-# in the cache dir) so the conversation survives a restart too. Loaded on open; appended
-# as each (non-delta) envelope is relayed; compacted to the cap; wiped by "clear chat".
-_chat_log_file(path) = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
-                                "kaimonslate", "chat", SlateHistory._sha(abspath(String(path)))[1:16] * ".jsonl")
+# but is lost on a SERVER restart. Mirror it to a per-notebook JSONL in the cache dir so the
+# conversation survives a restart too. Keyed by the notebook's storage identity (`doc_key`), not
+# its path, so a move or a rename keeps the transcript. Loaded on open; appended as each
+# (non-delta) envelope is relayed; compacted to the cap; wiped by "clear chat".
+_chat_log_file(key::AbstractString) = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
+                                               "kaimonslate", "chat", String(key) * ".jsonl")
+_chat_log_file(nb::LiveNotebook) = _chat_log_file(doc_key(nb))
 function _load_chat_log!(nb::LiveNotebook)
-    f = _chat_log_file(nb.path)
+    f = _chat_log_file(nb)
     isfile(f) || return
     try
         lines = filter(!isempty, readlines(f))
@@ -44,12 +46,12 @@ function _load_chat_log!(nb::LiveNotebook)
     return nothing
 end
 _append_chat_log(nb::LiveNotebook, line::AbstractString) =
-    (f = _chat_log_file(nb.path); try; mkpath(dirname(f)); open(f, "a") do io; println(io, line); end; catch; end; nothing)
+    (f = _chat_log_file(nb); try; mkpath(dirname(f)); open(f, "a") do io; println(io, line); end; catch; end; nothing)
 _rewrite_chat_log(nb::LiveNotebook, lines) =
-    (f = _chat_log_file(nb.path); try; mkpath(dirname(f)); open(f, "w") do io; for l in lines; println(io, l); end; end; catch; end; nothing)
+    (f = _chat_log_file(nb); try; mkpath(dirname(f)); open(f, "w") do io; for l in lines; println(io, l); end; end; catch; end; nothing)
 function _clear_chat_log!(nb::LiveNotebook)
     lock(_AGENT_LOCK) do; delete!(_AGENT_LOG, nb.id); end
-    f = _chat_log_file(nb.path)
+    f = _chat_log_file(nb)
     try; isfile(f) && rm(f); catch; end
     return nothing
 end

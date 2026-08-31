@@ -88,6 +88,8 @@
       <button onclick="window.open('/#publishing','_blank');closeTopMenu()" title="Manage all publishing targets & see what's published where">🗂 Publishing manager…</button>
       <button onclick="openExport();closeTopMenu()">⬆ Export…</button>
       <hr>
+      <button id="forkdocbtn" onclick="forkDoc();closeTopMenu()" style="display:none"
+              title="This notebook is a copy and shares one document — history, chat and preview — with the original. Split it into its own, copying all three so neither side loses anything.">⑂ Split from copy…</button>
       <button onclick="resetAll();closeTopMenu()">↻ Rebuild (fresh namespace)</button>
       <button onclick="restartWorker();closeTopMenu()">⟲ Restart worker</button>
       <button onclick="openSettings();closeTopMenu()">⚙ Settings</button>
