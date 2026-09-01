@@ -297,14 +297,15 @@ end
         SD = Sweep.SchedulerDetect
         canned(out) = _ -> (true, out)
 
-        s = SD.detect(canned("""
+        h = SD.detect(canned("""
             KIND slurm
-            VERSION slurm-wlm 24.11.5
-            PART compute|(null)|infinite|up
-            PART gpu|gpu:a100:4|3-00:00:00|up
-            PART broken|(null)|1:00|down
+            VERSION slurm slurm-wlm 24.11.5
+            PART slurm compute|(null)|infinite|up
+            PART slurm gpu|gpu:a100:4|3-00:00:00|up
+            PART slurm broken|(null)|1:00|down
             """))
-        @test s.kind === :slurm && SD.is_cluster(s)
+        @test SD.is_cluster(h) && SD.suggested(h) === :slurm
+        s = SD.scheduler(h, :slurm)
         @test s.version == "slurm-wlm 24.11.5"
         @test [p.name for p in s.partitions] == ["compute", "gpu", "broken"]
         @test [p.name for p in SD.gpu_partitions(s)] == ["gpu"]     # only where GPUs exist
@@ -313,16 +314,35 @@ end
         @test !s.partitions[3].up
         @test occursin("with GPUs", sprint(show, s))
 
-        # PBS answers in its own words; the shape Slate needs is identical.
-        p = SD.detect(canned("KIND pbs\nVERSION pbs_version = 2022.1\nPART main|gpu:4|24:00:00|up\n"))
-        @test p.kind === :pbs && SD.is_cluster(p)
-        @test SD.has_gpu(only(p.partitions))
+        # BOTH can be present — a site mid-migration, or PBS compatibility wrappers on a SLURM
+        # cluster, where finding `qsub` says nothing about what runs the jobs. Detection reports
+        # what it found and suggests the first; it does not choose.
+        b = SD.detect(canned("""
+            KIND slurm
+            VERSION slurm slurm-wlm 24.11.5
+            PART slurm compute|(null)|infinite|up
+            KIND pbs
+            VERSION pbs pbs_version = 2022.1
+            PART pbs main|gpu:4|24:00:00|up
+            """))
+        @test SD.kinds(b) == [:slurm, :pbs]
+        @test SD.suggested(b) === :slurm                            # a default…
+        @test SD.resolve(b, :pbs) === :pbs                          # …that config can override
+        @test SD.resolve(b, :auto) === :slurm
+        @test SD.resolve(b, :none) === :none                        # or decline a scheduler entirely
+        @test SD.has_gpu(only(SD.scheduler(b, :pbs).partitions))
+        @test SD.scheduler(b, :none) === nothing
+        @test occursin("slurm + pbs", sprint(show, b))
 
-        # An ordinary machine is a legitimate answer, not a failure — and so is being unreachable.
-        @test !SD.is_cluster(SD.detect(canned("KIND none\n")))
+        # An explicit choice is honoured even where detection found nothing: the tools may sit
+        # behind a `module load`, and refusing to configure what the user knows is there is worse.
+        none = SD.detect(canned(""))
+        @test !SD.is_cluster(none) && SD.resolve(none, :auto) === :none
+        @test SD.resolve(none, :slurm) === :slurm
+        # Unreachable is not a cluster either — and must not throw.
         @test !SD.is_cluster(SD.detect(_ -> (false, "")))
         @test !SD.is_cluster(SD.detect(_ -> error("host is down")))
-        @test occursin("not a cluster", sprint(show, SD.SchedulerInfo()))
+        @test occursin("ordinary machine", sprint(show, none))
     end
 
     @testset "an allocation names the node the scheduler picked" begin

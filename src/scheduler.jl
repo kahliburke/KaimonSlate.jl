@@ -42,8 +42,7 @@ Base.show(io::IO, p::Partition) =
 """
     SchedulerInfo
 
-What kind of front door this host is. `kind` is `:slurm`, `:pbs`, or `:none` — and `:none` is a
-perfectly good answer meaning "an ordinary machine", not a failure.
+ONE scheduler this host can talk to: which, what version, and the queues it offers.
 """
 struct SchedulerInfo
     kind::Symbol
@@ -57,7 +56,7 @@ is_cluster(s::SchedulerInfo) = s.kind !== :none
 gpu_partitions(s::SchedulerInfo) = [p for p in s.partitions if has_gpu(p)]
 
 function Base.show(io::IO, s::SchedulerInfo)
-    s.kind === :none && return print(io, "SchedulerInfo(not a cluster login node)")
+    s.kind === :none && return print(io, "SchedulerInfo(none)")
     print(io, "SchedulerInfo(", s.kind, isempty(s.version) ? "" : " " * s.version,
           ", ", length(s.partitions), " partition", length(s.partitions) == 1 ? "" : "s")
     g = gpu_partitions(s)
@@ -65,26 +64,79 @@ function Base.show(io::IO, s::SchedulerInfo)
     print(io, ")")
 end
 
+"""
+    HostSchedulers
+
+EVERY scheduler whose client tools are on a host — because a host can have more than one, and
+detection is not entitled to decide which you meant. A site mid-migration has both; so does a SLURM
+cluster carrying PBS compatibility wrappers, where finding `qsub` says nothing about what actually
+runs the jobs.
+
+So this reports, and configuration chooses. `suggested` is the default to offer, not a verdict.
+"""
+struct HostSchedulers
+    found::Vector{SchedulerInfo}
+end
+
+HostSchedulers() = HostSchedulers(SchedulerInfo[])
+
+is_cluster(h::HostSchedulers) = !isempty(h.found)
+kinds(h::HostSchedulers) = Symbol[s.kind for s in h.found]
+
+"The scheduler to offer by default: the first found, or `:none`."
+suggested(h::HostSchedulers) = isempty(h.found) ? :none : first(h.found).kind
+
+"The detected record for `kind`, or `nothing` when this host has no such scheduler."
+function scheduler(h::HostSchedulers, kind::Symbol)
+    kind === :none && return nothing
+    i = findfirst(s -> s.kind === kind, h.found)
+    return i === nothing ? nothing : h.found[i]
+end
+
+"""
+    resolve(h, setting) -> Symbol
+
+Turn a configured choice into the scheduler to actually use. `setting` is `:auto` (take the
+suggestion), `:none` (do not use one, even here — a perfectly reasonable choice on a cluster whose
+login node you are content to run a small worker on), or an explicit `:slurm`/`:pbs`.
+
+An explicit choice is HONOURED even when detection did not find it: the tools may be behind a
+`module load`, and refusing to configure what the user knows is there would be worse than trying.
+"""
+function resolve(h::HostSchedulers, setting::Symbol)
+    setting === :none && return :none
+    setting === :auto && return suggested(h)
+    return setting
+end
+
+function Base.show(io::IO, h::HostSchedulers)
+    isempty(h.found) && return print(io, "HostSchedulers(none — an ordinary machine)")
+    print(io, "HostSchedulers(", join((string(s.kind) for s in h.found), " + "),
+          length(h.found) > 1 ? "; suggested " * string(suggested(h)) : "", ")")
+end
+
 # One round trip: which client tools exist, the version, and the queue list. Written as a single
 # script because a login node's round trip is the expensive part, not the commands.
+# Both probes run — NOT `elseif`. A host can have both sets of tools, and stopping at the first
+# would silently pick one on the user's behalf. Each line is tagged with the scheduler it came from
+# so two answers cannot be confused for one.
 const _DETECT_SCRIPT = raw"""
 if command -v sinfo >/dev/null 2>&1 && command -v sbatch >/dev/null 2>&1; then
   echo "KIND slurm"
-  echo "VERSION $(sinfo --version 2>/dev/null | head -1)"
-  sinfo -h -o 'PART %R|%G|%l|%a' 2>/dev/null | sort -u
-elif command -v qstat >/dev/null 2>&1 && command -v qsub >/dev/null 2>&1; then
+  echo "VERSION slurm $(sinfo --version 2>/dev/null | head -1)"
+  sinfo -h -o 'PART slurm %R|%G|%l|%a' 2>/dev/null | sort -u
+fi
+if command -v qstat >/dev/null 2>&1 && command -v qsub >/dev/null 2>&1; then
   echo "KIND pbs"
-  echo "VERSION $(qstat --version 2>&1 | head -1)"
+  echo "VERSION pbs $(qstat --version 2>&1 | head -1)"
   # PBS names them queues; the shape Slate needs is the same, so it reports them the same way.
   qstat -Qf 2>/dev/null | awk '
     /^Queue: /        { q=$2; gpu=""; mt=""; en="True" }
     /resources_max.walltime/ { mt=$3 }
     /resources_max.ngpus/    { gpu="gpu:" $3 }
     /enabled = /      { en=$3 }
-    /^$/              { if (q != "") { print "PART " q "|" gpu "|" mt "|" (en=="True" ? "up" : "down"); q="" } }
-    END               { if (q != "") print "PART " q "|" gpu "|" mt "|" (en=="True" ? "up" : "down") }'
-else
-  echo "KIND none"
+    /^$/              { if (q != "") { print "PART pbs " q "|" gpu "|" mt "|" (en=="True" ? "up" : "down"); q="" } }
+    END               { if (q != "") print "PART pbs " q "|" gpu "|" mt "|" (en=="True" ? "up" : "down") }'
 fi
 """
 
@@ -99,26 +151,35 @@ that returns canned scheduler output.
 """
 function detect(runner)
     ok, out = try; runner(_DETECT_SCRIPT); catch; (false, ""); end
-    ok || return SchedulerInfo()
-    kind = :none; version = ""; parts = Partition[]
+    ok || return HostSchedulers()
+    order = Symbol[]                       # detection order, which decides what is suggested
+    version = Dict{Symbol,String}()
+    parts = Dict{Symbol,Vector{Partition}}()
+    tag(w) = w == "slurm" ? :slurm : w == "pbs" ? :pbs : :none
     for line in split(out, '\n')
         line = strip(line)
         if startswith(line, "KIND ")
-            k = strip(line[6:end])
-            kind = k == "slurm" ? :slurm : k == "pbs" ? :pbs : :none
+            k = tag(String(strip(line[6:end])))
+            k === :none || k in order || push!(order, k)
         elseif startswith(line, "VERSION ")
-            version = strip(line[9:end])
+            f = split(strip(line[9:end]), ' '; limit = 2)
+            length(f) == 2 && (version[tag(String(f[1]))] = String(strip(f[2])))
         elseif startswith(line, "PART ")
-            f = split(strip(line[6:end]), '|')
-            length(f) >= 1 && !isempty(strip(f[1])) || continue
-            g = length(f) >= 2 ? String(strip(f[2])) : ""
-            lowercase(g) in ("(null)", "none", "n/a") && (g = "")
-            push!(parts, Partition(String(strip(f[1])), g,
-                                   length(f) >= 3 ? String(strip(f[3])) : "",
-                                   length(f) >= 4 ? lowercase(strip(f[4])) != "down" : true))
+            f = split(strip(line[6:end]), ' '; limit = 2)
+            length(f) == 2 || continue
+            k = tag(String(f[1])); k === :none && continue
+            g = split(strip(f[2]), '|')
+            length(g) >= 1 && !isempty(strip(g[1])) || continue
+            gres = length(g) >= 2 ? String(strip(g[2])) : ""
+            lowercase(gres) in ("(null)", "none", "n/a") && (gres = "")
+            push!(get!(Vector{Partition}, parts, k),
+                  Partition(String(strip(g[1])), gres,
+                            length(g) >= 3 ? String(strip(g[3])) : "",
+                            length(g) >= 4 ? lowercase(strip(g[4])) != "down" : true))
         end
     end
-    return SchedulerInfo(kind, version, parts)
+    return HostSchedulers([SchedulerInfo(k, get(version, k, ""), get(parts, k, Partition[]))
+                           for k in order])
 end
 
 end # module SchedulerDetect

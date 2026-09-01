@@ -1874,17 +1874,26 @@ function preflight_remote(host::AbstractString; transport::Symbol = :tunnel, on_
     # got. Reported here so configuring a remote can ask for a walltime and a partition when those
     # are real questions, and stay quiet when they are not.
     _pfstep!(steps, "Scheduler", on_step) do
-        sch = try; _detect_scheduler(host); catch; nothing; end
-        sch === nothing && return ("warn", "could not ask $host what it runs — treating it as a plain machine")
-        sch.kind === :none && return ("skip", "no scheduler — an ordinary host, so a worker runs here directly")
-        parts = join((p.name for p in sch.partitions), ", ")
-        gpu = [p for p in sch.partitions if !isempty(p.gpus)]
+        h = try; _detect_scheduler(host); catch; nothing; end
+        h === nothing && return ("warn", "could not ask $host what it runs — treating it as a plain machine")
+        SD = SchedulerDetect
+        SD.is_cluster(h) || return ("skip", "no scheduler — an ordinary host, so a worker runs here directly")
+        # Every scheduler found, not just the first: a host CAN have both, and picking one here
+        # would be deciding something that belongs to whoever configures the region. What this
+        # reports is a default to offer.
+        bits = String[]
+        for s in h.found
+            parts = join((p.name for p in s.partitions), ", ")
+            gpu = count(p -> !isempty(p.gpus), s.partitions)
+            push!(bits, string(s.kind, isempty(s.version) ? "" : " (" * s.version * ")",
+                               isempty(parts) ? "" : " — " * parts,
+                               gpu == 0 ? "" : " [" * string(gpu) * " with GPUs]"))
+        end
         # "can reach a scheduler", not "is a login node": compute nodes usually have the client
         # tools too, and what matters here is whether an allocation can be requested from this host.
-        ("ok", string(sch.kind, isempty(sch.version) ? "" : " (" * sch.version * ")",
-                      " reachable — a region here can hold an ALLOCATION and run on the node it grants",
-                      isempty(parts) ? "" : "; partitions: " * parts,
-                      isempty(gpu) ? "" : " (" * string(length(gpu)) * " with GPUs)"))
+        ("ok", string(join(bits, "; "),
+                      length(h.found) > 1 ? "  ⚠ two schedulers present — choose one when configuring" : "",
+                      "  · a region here can hold an ALLOCATION and run on the node it grants"))
     end
 
     s = _pfstep!(steps, "Julia present", on_step) do
