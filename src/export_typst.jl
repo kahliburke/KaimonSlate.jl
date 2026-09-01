@@ -545,11 +545,36 @@ function _admonitions_to_quotes(src::AbstractString)
     return join(out, "\n")
 end
 
+# ── Math delimiters ───────────────────────────────────────────────────────────────────────────────
+# KaTeX is configured (core.js) for FOUR spellings — `$…$`, `$$…$$`, `\(…\)`, `\[…\]` — but cmarker's
+# math hook only fires on the dollar forms, so the LaTeX-bracket ones used to reach the PDF as literal
+# text with the backslashes eaten (`\(a^2\)` printed as "(a^2)"). Prose that looked right on screen
+# quietly came out as garbage in print. Normalize to the spelling cmarker understands.
+#
+# Code is left alone: a fenced block or an inline span may legitimately SHOW `\[…\]` (a LaTeX sample),
+# and rewriting it there would corrupt the listing rather than typeset anything — cmarker's math hook
+# doesn't fire inside code in the first place.
+const _MATH_BRACKET_DISPLAY = r"\\\[(.+?)\\\]"s
+const _MATH_BRACKET_INLINE = r"\\\((.+?)\\\)"s
+const _MD_CODE_SPAN = r"^(?:```|~~~)[^\n]*\n.*?(?:^(?:```|~~~)[^\n]*$|\z)|`[^`\n]+`"ms
+function _normalize_math_delims(src::AbstractString)
+    out = IOBuffer(); last = 1
+    for m in eachmatch(_MD_CODE_SPAN, String(src))
+        print(out, _rewrite_bracket_math(SubString(src, last, prevind(String(src), m.offset))))
+        print(out, m.match)                       # code verbatim
+        last = m.offset + ncodeunits(m.match)
+    end
+    print(out, _rewrite_bracket_math(SubString(String(src), last)))
+    return String(take!(out))
+end
+_rewrite_bracket_math(s) =
+    replace(replace(String(s), _MATH_BRACKET_DISPLAY => s"$$\1$$"), _MATH_BRACKET_INLINE => s"$\1$")
+
 # Markdown source with `{{ expr }}` interpolations resolved (scalars, a text/latex value's TeX, or a
-# component's captured figure), admonitions lowered to blockquotes, and citations rewritten to
-# sentinels for the preamble's cite rule. `compfig(i)` returns the staged filename for the i-th
-# interpolation's component figure, or `nothing` — the caller owns staging because only it has the
-# project dir (see `_build_typst_project`).
+# component's captured figure), math delimiters normalized, admonitions lowered to blockquotes, and
+# citations rewritten to sentinels for the preamble's cite rule. `compfig(i)` returns the staged
+# filename for the i-th interpolation's component figure, or `nothing` — the caller owns staging
+# because only it has the project dir (see `_build_typst_project`).
 function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{String}(),
                        figrefs = Dict{String,Tuple{Int,String}}(), compfig = _ -> nothing)
     tmpl, exprs = ReportEngine._md_template(src)
@@ -558,6 +583,7 @@ function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{S
         o = i <= length(c.interp) ? c.interp[i] : nothing
         s = replace(s, ReportEngine._interp_token(i) => _interp_typst_md(exprs[i], o, compfig(i)))
     end
+    s = _normalize_math_delims(s)
     s = _admonitions_to_quotes(s)
     return _rewrite_citations(s, citekeys; figrefs = figrefs)
 end

@@ -453,13 +453,8 @@ _asset_mime_for(ext::AbstractString) =
     ext == "png" ? "image/png" : "application/octet-stream"
 
 # Numeric eltype → a compact dtype tag the client maps to a TypedArray. `nothing` ⇒ not a packable
-# array element (fall through to JSON). Keep in sync with core.js `_SLATE_TYPED`.
-_asset_dtype(::Type{Float32}) = "f32"
-_asset_dtype(::Type{Float64}) = "f64"
-_asset_dtype(::Type{Int32})   = "i32"
-_asset_dtype(::Type{Int16})   = "i16"
-_asset_dtype(::Type{UInt8})   = "u8"
-_asset_dtype(::Type)          = nothing
+# array element (fall through to JSON). The table is `SlateExtensionsBase.DTYPES`.
+_asset_dtype(::Type{T}) where {T} = SlateExtensionsBase.dtype_tag(T)
 
 # A path-safe stem for an asset name. Julia names are routinely non-ASCII (`σ`, `θ`, `Δt`), and blanket
 # substitution collapses them: `σ_replay` and `θ_replay` both become `__replay`. The content hash in the

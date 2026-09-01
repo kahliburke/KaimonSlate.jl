@@ -95,6 +95,31 @@ end
     @test (@allocated mk()) < 2 * length(frame)
 end
 
+@testset "the generated JS dtype table agrees with the Julia encoders" begin
+    # `SEB.DTYPES` is the only place the supported element types are written down; the frame's dtype
+    # byte, the asset manifest's tag, and the browser's decoders are all derived from it. These
+    # assertions are what makes that derivation load-bearing rather than decorative.
+    js = SEB.dtype_js()
+    for r in SEB.DTYPES
+        @test SEB._bin_dtype(r.T) == r.code                        # frame byte
+        @test SEB.dtype_tag(r.T) == r.tag                          # asset manifest tag
+        @test RE._asset_dtype(r.T) == r.tag                        # capture.jl delegates, not copies
+        @test occursin("[\"$(r.tag)\",\"$(r.js)\",$(Int(r.code))]", js)   # the row the browser builds from
+        # Every supported type must actually survive a frame round-trip, not merely have a tag.
+        A = ones(r.T, 2, 3)
+        frame = SEB.encode_binary_frame("c", SEB.SlateBinary(A))
+        @test frame[length(frame) - sizeof(A) - 9] == r.code       # dtype byte precedes rank + 2 dims
+        @test frame[(end - sizeof(A) + 1):end] == reinterpret(UInt8, vec(A))
+    end
+    # `byCode` is positional — index i is the row whose code is i — so codes must stay contiguous
+    # from zero as rows are appended.
+    @test [Int(r.code) for r in SEB.DTYPES] == collect(0:length(SEB.DTYPES)-1)
+    @test allunique(r.tag for r in SEB.DTYPES)
+
+    @test SEB.dtype_tag(ComplexF64) === nothing                    # unsupported ⇒ JSON fallback
+    @test_throws ArgumentError SEB._bin_dtype(ComplexF64)
+end
+
 @testset "in-process slate_emit routes SlateBinary to the binary frame path" begin
         r = RE.parse_report("#%% code id=a\n1 + 1\n")
         m = RE.report_module(r)

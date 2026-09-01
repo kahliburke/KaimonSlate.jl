@@ -104,9 +104,9 @@ end
     @test dt_raw === nothing && enc_raw === nothing         # untouched — exactly the bytes given
 
     # The page must be told it has to inflate, and must say so plainly if it cannot.
-    @test occursin("_slateInflate", NS._EXPORT_ASSET_JS)
-    @test occursin("DecompressionStream", NS._EXPORT_ASSET_JS)
-    @test occursin("a.enc===\"gzip\"", NS._EXPORT_ASSET_JS)
+    @test occursin("_slateInflate", NS._export_asset_js())
+    @test occursin("DecompressionStream", NS._export_asset_js())
+    @test occursin("a.enc===\"gzip\"", NS._export_asset_js())
 end
 
 @testset "asset stem keeps non-ASCII names distinct" begin
@@ -1355,6 +1355,32 @@ end
     byid["fig"].controls = [["w"], ["k"]]
     surf2 = NS._surfaced_names(r.cells)
     @test isempty(NS._export_controls_html(byid["ctl"], idx, surf2))
+end
+
+# ── PDF export: math delimiters ───────────────────────────────────────────────────────────────────
+# KaTeX is configured for four spellings; cmarker's math hook only fires on the dollar forms, so
+# `\(…\)` / `\[…\]` reached the PDF as literal text with the backslashes eaten — prose that read
+# correctly on screen came out as garbage in print.
+@testset "typst export normalizes LaTeX-bracket math delimiters" begin
+    f = NS._normalize_math_delims
+
+    @test f(raw"inline \(a^2\) here") == raw"inline $a^2$ here"
+    @test f(raw"display \[b^2\] here") == raw"display $$b^2$$ here"
+    @test f("multi \\[\n  \\sum_i x_i\n\\] end") == "multi \$\$\n  \\sum_i x_i\n\$\$ end"
+    # Both forms in one line, and the dollar spellings pass through untouched.
+    @test f(raw"$x$ and $$y$$ and \(z\)") == raw"$x$ and $$y$$ and $z$"
+
+    # Code may legitimately SHOW the bracket spelling — rewriting there would corrupt the listing,
+    # and cmarker's math hook doesn't fire inside code anyway.
+    fenced = "text \\(m\\)\n\n```latex\n\\[ shown, not typeset \\]\n```\n"
+    out = f(fenced)
+    @test occursin(raw"text $m$", out)                    # prose outside the fence still converts
+    @test occursin(raw"\[ shown, not typeset \]", out)    # …the fence keeps its backslashes
+    @test f(raw"an inline `\(literal\)` span") == raw"an inline `\(literal\)` span"
+
+    # Reached through the real entry point, not just the helper.
+    c = _RE.Cell("m", _RE.MARKDOWN, raw"energy \(E = mc^2\) here")
+    @test occursin(raw"$E = mc^2$", NS._md_for_typst(c))
 end
 
 # ── PDF export: admonitions ───────────────────────────────────────────────────────────────────────

@@ -93,6 +93,8 @@
       <button onclick="window.open('/#publishing','_blank');closeTopMenu()" title="Manage all publishing targets & see what's published where">🗂 Publishing manager…</button>
       <button onclick="openExport();closeTopMenu()">⬆ Export…</button>
       <hr>
+      <button id="forkdocbtn" onclick="forkDoc();closeTopMenu()" style="display:none"
+              title="This notebook is a copy and shares one document — history, chat and preview — with the original. Split it into its own, copying all three so neither side loses anything.">⑂ Split from copy…</button>
       <button onclick="resetAll();closeTopMenu()">↻ Rebuild (fresh namespace)</button>
       <button onclick="restartWorker();closeTopMenu()">⟲ Restart worker</button>
       <button onclick="openSettings();closeTopMenu()">⚙ Settings</button>
@@ -679,6 +681,7 @@
 <button id="doclauncher" onclick="openDocs()" title="Help / docs (⌘⇧K)">📖 Docs</button>
 
 <!-- App modules — ordered classic scripts sharing one global scope (load order matters). -->
+<script src="/assets/js/dtypes.js"></script>   <!-- generated from SlateExtensionsBase.DTYPES; must precede its readers -->
 <script src="/assets/js/core.js"></script>
 <script src="/assets/js/wscall.js"></script>   <!-- window.slateCall: JS→Julia calls over the page WebSocket -->
 <script src="/assets/js/editor.js"></script>

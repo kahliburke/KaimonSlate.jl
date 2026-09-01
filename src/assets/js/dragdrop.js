@@ -236,6 +236,14 @@ function dropTargetFor(el, cell, y) {
   if (col) return { newCol: false, colIndex: +col.dataset.colindex, rowIndex: rowInCol(col, y) };
   return { newCol: true, colIndex: columnsOf(cell.dataset.cid).length };
 }
+// The cell under the cursor that can HOST a control, or null. Any cell rendering a control strip
+// qualifies, which today is all of them — asking for the strip rather than naming the kinds means a
+// new cell kind becomes a valid target by rendering one. Scoped to a DIRECT child so a web cell
+// whose own markup happens to use `class="controls"` can't pose as the strip.
+const hostCellAt = el => {
+  const c = el.closest('.cell');
+  return c && c.querySelector(':scope > .controls') ? c : null;
+};
 
 // Drag-to-reorder cells (⠿ handle) AND drag-to-host controls (palette chip / strip
 // grip) share these handlers. `dragId` = a cell being reordered; `ctrlDrag` = a
@@ -298,7 +306,7 @@ nbEl.addEventListener('dragover', e => {
   _dragY = e.clientY; _autoScrollStart();          // edge auto-scroll (cell reorder + control hosting)
   if (ctrlDrag) {                                  // hosting a control
     clearCtrlDrop();
-    const cell = e.target.closest('.cell.code');
+    const cell = hostCellAt(e.target);
     if (!cell) return;
     e.preventDefault();
     // If this cell already hosts the control, dropping just repositions it (no
@@ -332,7 +340,7 @@ nbEl.addEventListener('dragover', e => {
 nbEl.addEventListener('drop', e => {
   e.preventDefault();
   if (ctrlDrag) {
-    const cell = e.target.closest('.cell.code'), { name, fromCell } = ctrlDrag, el = e.target;
+    const cell = hostCellAt(e.target), { name, fromCell } = ctrlDrag, el = e.target;
     ctrlDrag = null; document.body.classList.remove('cdnd'); clearCtrlDrop();
     if (cell) hostControl(name, cell.dataset.cid, dropTargetFor(el, cell, e.clientY), fromCell);
     return;

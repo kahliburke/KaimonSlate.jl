@@ -24,7 +24,10 @@
   // Decode a binary numeric frame (SlateExtensionsBase.encode_binary_frame) and route it to the channel's
   // slateOnStream handler as {…meta, d: TypedArray} — no JSON, no parse of the array (the whole point).
   // Layout: [u8 ver=1][u16 chanLen][chan][u16 metaLen][metaJSON][u8 dtype][u8 rank][rank×u32 dims][raw LE bytes].
-  const _TYPED = [Float32Array, Float64Array, Int32Array, Int16Array, Uint8Array];   // keep in sync with core.js _SLATE_TYPED
+  // dtype byte → TypedArray, generated from `SlateExtensionsBase.DTYPES` and injected as
+  // `window.__SLATE_DTYPES` (dtypes.js). Read at DISPATCH time, not load time, so this file does
+  // not depend on script order.
+  const _typed = code => ((window.__SLATE_DTYPES || {}).byCode || [])[code];
   const _td = new TextDecoder();
   function _dispatchBinary(buf) {
     try {
@@ -37,7 +40,7 @@
       const dtype = dv.getUint8(o); o += 1;
       const rank = dv.getUint8(o); o += 1;
       const dims = []; for (let i = 0; i < rank; i++) { dims.push(dv.getUint32(o, true)); o += 4; }
-      const Ctor = _TYPED[dtype]; if (!Ctor) return;
+      const Ctor = _typed(dtype); if (!Ctor) return;
       meta.d = new Ctor(new Uint8Array(buf, o).slice().buffer);   // copy the payload → element-aligned buffer
       meta.dims = dims;
       window.onCellStream && window.onCellStream(channel, meta);
@@ -114,7 +117,9 @@
     dv.setUint8(o, 1); o += 1;
     dv.setUint16(o, chB.length, true); o += 2; new Uint8Array(buf, o, chB.length).set(chB); o += chB.length;
     dv.setUint16(o, metaB.length, true); o += 2; new Uint8Array(buf, o, metaB.length).set(metaB); o += metaB.length;
-    dv.setUint8(o, 4); o += 1;   // dtype: UInt8 (keep in sync with _TYPED / _bin_dtype)
+    // An uplink payload is OPAQUE bytes, so it always rides the UInt8 row at rank 1 and the hub
+    // ignores the shape. The code comes from the generated table rather than a literal.
+    dv.setUint8(o, ((window.__SLATE_DTYPES || {}).codeByTag || {}).u8); o += 1;
     dv.setUint8(o, 1); o += 1;   // rank 1
     dv.setUint32(o, u8.length, true); o += 4;
     new Uint8Array(buf, o, u8.length).set(u8);

@@ -395,8 +395,8 @@ end
 # changed, newest first (version / age / origin / diff-label). Cheap — the per-entry delta IS
 # the per-cell change index (an entry lists the cell only when it changed), so no full-source
 # retrieval. `[]` if history is unavailable.
-function _cell_history(path::AbstractString, cellid::AbstractString; limit::Int = 12)
-    es = try; SlateHistory.entries(path); catch; return String[]; end
+function _cell_history(doc::SlateHistory.Doc, cellid::AbstractString; limit::Int = 12)
+    es = try; SlateHistory.entries(doc); catch; return String[]; end
     out = String[]; present = false
     for e in es
         touched = any(cd -> string(get(cd, "id", "")) == cellid, get(e, "chg", Any[]))
@@ -441,7 +441,7 @@ function cell_inspect(nb::LiveNotebook, cellid::AbstractString)
         isempty(c.flags) || println(io, "flags:    ", join(sort(string.(collect(c.flags))), ", "))
         println(io, "\n--- source ---\n", rstrip(c.source))
         c.kind == CODE && println(io, "\n--- result ---\n", _cell_result_text(c))
-        h = _cell_history(nb.path, cellid)
+        h = _cell_history(nbdoc(nb), cellid)
         isempty(h) || println(io, "\n--- history (newest first) ---\n", join(h, "\n"))
         return String(take!(io))
     end
@@ -1032,6 +1032,7 @@ function agent_surface_controls!(nb::LiveNotebook, id::AbstractString, controls:
     end
     set_controls_map!(nb, Dict{String,Any}(String(id) => cols))
     _renew_floor!(nb, caller)
+    _agent_push!(nb)          # the strip is presentation-only, so nothing else would repaint it
     total = sum(length, cols; init = 0)
     return total == 0 ? "cleared the control strip on id=$id" :
         "surfaced $total control(s) on id=$id: " * join((join(col, "+") for col in cols), ", ")

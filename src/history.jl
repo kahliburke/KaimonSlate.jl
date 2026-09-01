@@ -7,9 +7,12 @@
 # Snapshots dedup by content hash, so a no-op capture (the periodic draft net while idle)
 # costs nothing.
 #
-# Layout (one dir per notebook, central cache so the user's working dirs stay clean):
+# Layout (one dir per notebook, central cache so the user's working dirs stay clean). `<key>` is
+# supplied by the caller (see `Doc`), NOT derived from the path here, so a notebook that moves or
+# is renamed keeps its history:
 #   <cache>/kaimonslate/history/<key>/
-#     meta.json          {path, created}
+#     meta.json          {path, paths, created} — provenance only; `paths` is every location this
+#                         document has been recorded at, which is how a move is told from a copy
 #     head.json          full current cell digest [{id,kind,hash}] — a keyframe, OVERWRITTEN
 #                         each write so the tail cache primes without folding the whole log
 #     objects/<sha256>   full serialized source, zstd-compressed (deduped, content-addressed)
@@ -37,6 +40,25 @@ end
 _abspath(p) = abspath(expanduser(String(p)))
 _sha(s) = bytes2hex(sha2_256(codeunits(String(s))))
 _key(path) = _sha(_abspath(path))[1:16]
+
+"""
+    Doc(key, path)
+
+A notebook's STORAGE IDENTITY. The store deliberately does not decide what makes two files the
+same document — the caller owns that (see `NotebookServer.doc_key`, which prefers the notebook's
+file-carried `docid` so history survives a move or a rename). `path` is provenance only: it is
+recorded in `meta.json` and nothing keys off it.
+
+`Doc(path)` is the legacy identity, hashing the absolute path, and is what a notebook with no
+`docid` still resolves to — so existing stores keep loading untouched.
+"""
+struct Doc
+    key::String
+    path::String
+end
+Doc(path::AbstractString) = Doc(_key(path), _abspath(path))
+
+_dir(d::Doc) = joinpath(_root(), d.key)
 _dir(path) = joinpath(_root(), _key(path))
 _objdir(d) = joinpath(d, "objects")
 _logpath(d) = joinpath(d, "log.jsonl")
@@ -49,12 +71,89 @@ _headpath(d) = joinpath(d, "head.json")
 const _LOCK = ReentrantLock()
 const _TAIL = Dict{String,Tuple{Int,String,Vector{Any}}}()
 
-function _ensure_dir(path)
-    d = _dir(path)
+function _ensure_dir(doc::Doc)
+    d = _dir(doc)
     mkpath(_objdir(d))
     mp = joinpath(d, "meta.json")
-    isfile(mp) || write(mp, JSON.json(Dict("path" => _abspath(path), "created" => time())))
+    m = isfile(mp) ? (try; JSON.parse(read(mp, String)); catch; nothing; end) : nothing
+    if m === nothing
+        write(mp, JSON.json(Dict("path" => doc.path, "created" => time(), "paths" => [doc.path])))
+        return d
+    end
+    # `paths` accumulates every location this document has been recorded at. A rename adds one
+    # (the old entry stops existing on disk); a copy adds one that still does — which is how the
+    # server tells "moved" from "copied" without guessing. `path` stays the most recent.
+    ps = String[string(p) for p in get(m, "paths", Any[])]
+    isempty(ps) && (ps = String[string(get(m, "path", doc.path))])
+    if !(doc.path in ps) || string(get(m, "path", "")) != doc.path
+        doc.path in ps || push!(ps, doc.path)
+        m["paths"] = ps; m["path"] = doc.path
+        try; write(mp, JSON.json(m)); catch; end
+    end
     return d
+end
+_ensure_dir(path) = _ensure_dir(Doc(path))
+
+"""
+Every path this document has been recorded at, OLDEST FIRST — so the head of the list is where
+the document originated and everything after it is somewhere it was later copied or moved to.
+Empty when it has no store yet.
+"""
+function known_paths(doc::Doc)
+    m = _meta(doc); m === nothing && return String[]
+    ps = String[string(p) for p in get(m, "paths", Any[])]
+    isempty(ps) && (ps = String[string(get(m, "path", ""))])
+    return filter(!isempty, ps)
+end
+
+function _meta(doc::Doc)
+    mp = joinpath(_dir(doc), "meta.json")
+    isfile(mp) || return nothing
+    return try; JSON.parse(read(mp, String)); catch; nothing; end
+end
+
+"""
+Paths that have chosen to stop being told this document is shared. Recorded PER PATH, not per
+document, so one copy going quiet never silences the notice for another.
+"""
+function quiet_paths(doc::Doc)
+    m = _meta(doc); m === nothing && return String[]
+    return String[string(p) for p in get(m, "quiet", Any[])]
+end
+
+"Stop warning `doc.path` that this document is shared."
+function silence!(doc::Doc)
+    m = _meta(doc); m === nothing && return false
+    q = String[string(p) for p in get(m, "quiet", Any[])]
+    doc.path in q && return true
+    push!(q, doc.path); m["quiet"] = q
+    try; write(joinpath(_dir(doc), "meta.json"), JSON.json(m)); catch; return false; end
+    return true
+end
+
+"Move a document's store to a new key (a no-op when the source is absent or the target exists)."
+function relocate!(from::Doc, to::Doc)
+    from.key == to.key && return false
+    s, t = _dir(from), _dir(to)
+    (isdir(s) && !isdir(t)) || return false
+    mkpath(dirname(t))
+    try; mv(s, t); catch; return false; end
+    lock(_LOCK) do; delete!(_TAIL, from.key); delete!(_TAIL, to.key); end
+    return true
+end
+
+"Copy a document's store to a new key, so a fork keeps its lineage up to the split."
+function fork!(from::Doc, to::Doc)
+    from.key == to.key && return false
+    s, t = _dir(from), _dir(to)
+    (isdir(s) && !isdir(t)) || return false
+    try; cp(s, t); catch; return false; end
+    mp = joinpath(t, "meta.json")
+    m = isfile(mp) ? (try; JSON.parse(read(mp, String)); catch; Dict{String,Any}(); end) : Dict{String,Any}()
+    m["path"] = to.path; m["paths"] = Any[to.path]; m["forkedfrom"] = from.path
+    try; write(mp, JSON.json(m)); catch; end
+    lock(_LOCK) do; delete!(_TAIL, to.key); end
+    return true
 end
 
 # ── Object codec ─────────────────────────────────────────────────────────────
@@ -69,8 +168,8 @@ function _zread(p)
 end
 
 # Read entries (chronological order).
-function entries(path)
-    lp = _logpath(_dir(path))
+function entries(doc::Doc)
+    lp = _logpath(_dir(doc))
     isfile(lp) || return Dict{String,Any}[]
     out = Dict{String,Any}[]
     for l in eachline(lp)
@@ -79,14 +178,16 @@ function entries(path)
     end
     return out
 end
+entries(path) = entries(Doc(path))
 
 # Full serialized source for a recorded hash (nothing if unknown). Objects are
 # SHA-256-named, so a hash that isn't 64 hex chars is invalid — reject it outright
 # rather than let `../…` escape the object dir (arbitrary file read / overwrite).
-function content(path, hash::AbstractString)
+function content(doc::Doc, hash::AbstractString)
     occursin(r"^[0-9a-f]{64}$", String(hash)) || return nothing
-    return _zread(joinpath(_objdir(_dir(path)), String(hash)))
+    return _zread(joinpath(_objdir(_dir(doc)), String(hash)))
 end
+content(path, hash::AbstractString) = content(Doc(path), hash)
 
 # ── Digests / deltas ─────────────────────────────────────────────────────────
 # cells :: iterable of (id, kind, source) — hash each cell body for the full digest.
@@ -138,10 +239,11 @@ end
 # Prime the tail cache for `path` from disk (called under _LOCK). Seeds the full last
 # digest from the head.json keyframe (fast); falls back to the last legacy `cells` entry
 # or a full fold when head.json is missing.
-function _prime!(key, path)
+function _prime!(doc::Doc)
+    key = doc.key
     haskey(_TAIL, key) && return
-    d = _dir(path)
-    es = entries(path)
+    d = _dir(doc)
+    es = entries(doc)
     if isempty(es)
         _TAIL[key] = (0, "", Any[])
         return
@@ -212,18 +314,18 @@ nothing) when `source` equals the latest recorded state. Otherwise appends a del
 entry, stores the (zstd) content object, and refreshes the head keyframe. `cells` is an
 iterable of `(id, kind, source)`.
 """
-function record!(path, source::AbstractString;
+function record!(doc::Doc, source::AbstractString;
                  source_label::AbstractString = "browser",
                  kind::AbstractString = "checkpoint",
                  cells = nothing,
                  label::AbstractString = "")   # explicit action label; overrides the source-diff derivation
     h = _sha(source)
-    key = _key(path)
+    key = doc.key
     lock(_LOCK) do
-        _prime!(key, path)
+        _prime!(doc)
         seq, last, prev_cells = _TAIL[key]
         last == h && return nothing                       # unchanged — dedup
-        d = _ensure_dir(path)
+        d = _ensure_dir(doc)
         op = joinpath(_objdir(d), h)
         isfile(op) || write(op, _zcompress(source))
         cur = cells === nothing ? Dict{String,Any}[] : _celldigest(cells)  # full ordered digest
@@ -244,24 +346,25 @@ function record!(path, source::AbstractString;
         return entry
     end
 end
+record!(path, source::AbstractString; kw...) = record!(Doc(path), source; kw...)
 
 # Latest recorded hash for `path` ("" if none) — lets callers cheaply check whether
 # a state is already captured without reading the log.
-function latest_hash(path)
-    key = _key(path)
+function latest_hash(doc::Doc)
     lock(_LOCK) do
-        _prime!(key, path)
-        return _TAIL[key][2]::String
+        _prime!(doc)
+        return _TAIL[doc.key][2]::String
     end
 end
+latest_hash(path) = latest_hash(Doc(path))
 
 # Version timeline for a single cell: the entries where cell `cellid`'s SOURCE changed,
 # NEWEST FIRST, each carrying the STATE hash (to fetch the full snapshot), ts and label.
 # Source extraction is the caller's job (parse the snapshot) — SlateHistory doesn't know
 # the notebook grammar. Powers per-cell recovery and the editor's undo-through-history.
-function cell_versions(path, cellid::AbstractString)
+function cell_versions(doc::Doc, cellid::AbstractString)
     out = Dict{String,Any}[]
-    for e in entries(path)
+    for e in entries(doc)
         any(cd -> string(get(cd, "id", "")) == cellid, get(e, "chg", Any[])) || continue
         push!(out, Dict{String,Any}(
             "seq" => get(e, "seq", 0), "ts" => get(e, "ts", 0.0),
@@ -270,6 +373,7 @@ function cell_versions(path, cellid::AbstractString)
     reverse!(out)
     return out
 end
+cell_versions(path, cellid::AbstractString) = cell_versions(Doc(path), cellid)
 
 # ── One-time migration ───────────────────────────────────────────────────────
 # Convert every notebook history under the cache root from the old full-digest log to the
