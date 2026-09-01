@@ -214,10 +214,28 @@ function _resolved_using_writes(stmt)
     end
 end
 
-# Base name of an assignment/index/field target (`data[i]` → :data, `a.b.c` → :a).
+# Base name of an assignment/index/field target (`data[i]` → :data, `a.b.c` → :a). A dotted CALL
+# (`f.(x)`) shares the `:.` head with field access but names a FUNCTION, not a target, so it has no
+# base symbol — otherwise `sort!(f.(v))` reads as mutating `f`. Field access carries a QuoteNode
+# second argument; a broadcast carries an argument tuple.
 _base_symbol(s::Symbol) = s
-_base_symbol(e::Expr) = (e.head === :ref || e.head === :.) ? _base_symbol(e.args[1]) : nothing
+function _base_symbol(e::Expr)
+    e.head === :ref && return _base_symbol(e.args[1])
+    e.head === :. || return nothing
+    (length(e.args) >= 2 && e.args[2] isa Expr && e.args[2].head === :tuple) && return nothing
+    return _base_symbol(e.args[1])
+end
 _base_symbol(::Any) = nothing
+
+# The `f!(x, …)` mutation convention needs a real function NAME before the bang. `!` and `.!` are
+# the NEGATION operators and also "end with !", but `!x` reads x, it does not mutate it — without
+# this, every cell that negated a value claimed to write it, chaining unrelated cells together and
+# raising phantom "defined in more than one cell" conflicts.
+function _is_bang_name(f::Symbol)
+    s = string(f)
+    (length(s) > 1 && endswith(s, "!")) || return false
+    return Base.isidentifier(rstrip(s, '!'))
+end
 
 const _BROADCAST_ASSIGN = Symbol(".=")
 
@@ -226,7 +244,7 @@ const _BROADCAST_ASSIGN = Symbol(".=")
 function _collect_mutations!(writes::Set{Symbol}, reads::Set{Symbol}, ex)
     if ex isa Expr
         if ex.head === :call && length(ex.args) >= 2 &&
-           ex.args[1] isa Symbol && endswith(string(ex.args[1]), "!")
+           ex.args[1] isa Symbol && _is_bang_name(ex.args[1])
             b = _base_symbol(ex.args[2])
             b === nothing || (push!(writes, b); push!(reads, b))
         elseif (ex.head === :(=) || ex.head === _BROADCAST_ASSIGN) && !isempty(ex.args)

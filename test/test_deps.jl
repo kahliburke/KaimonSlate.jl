@@ -302,6 +302,36 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         end
     end
 
+    # The `f!(x)` convention needs a real function NAME before the bang. `!` and `.!` are the
+    # negation operators and also end in `!`, so the heuristic used to read `!x` as mutating x —
+    # which made every cell that negated a value claim to WRITE it, chaining unrelated cells and
+    # raising phantom multi-def conflicts.
+    @testset "negation is not a mutating call" begin
+        for (src, sym) in (("y = !flag", :flag),                    # plain negation of a name
+                           ("y = sum(.!isnan.(v))", :isnan),        # broadcast negation of a broadcast call
+                           ("y = map(!isnan, v)", :isnan),          # `!` applied to a function name
+                           ("y = !isnan(x)", :isnan))               # `!` applied to a call result
+            c = Cell("c", CODE, src); infer_bindings!(c)
+            @test !(sym in c.writes)
+            @test sym in c.reads                                    # still a read, so the edge is right
+        end
+        # …and cells using the same pattern stay independent rather than forming a chain.
+        r = parse_report("#%% code id=a\na = sum(.!isnan.([1.0, NaN]))\n" *
+                         "#%% code id=b\nb = sum(.!isnan.([2.0, NaN]))")
+        build_dependencies!(r)
+        @test all(isempty(c.deps) for c in r.cells)
+    end
+
+    # A dotted CALL shares the `:.` head with field access, but names a function rather than a
+    # mutation target — `sort!(f.(v))` sorts a temporary, it does not touch `f`.
+    @testset "a broadcast argument is not a mutation target" begin
+        c = Cell("c", CODE, "sort!(f.(v))"); infer_bindings!(c)
+        @test !(:f in c.writes)
+        @test isempty(c.writes)
+        c2 = Cell("c2", CODE, "sort!(obj.field)"); infer_bindings!(c2)
+        @test :obj in c2.writes            # real field access still resolves to its base
+    end
+
     @testset "@reactive sugar: name is a definer, init is read" begin
         c = Cell("c", CODE, "@reactive level = base + 1"); infer_bindings!(c)
         @test :level in c.writes          # `@reactive x = …` DEFINES x (the reactive producer)
