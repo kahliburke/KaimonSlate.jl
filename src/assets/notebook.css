@@ -830,6 +830,43 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .swcfgpop .ctlsub { margin:12px 0 6px; color:var(--dim); font-size:.68rem; font-weight:600;
   text-transform:uppercase; letter-spacing:.06em; }
 .swcfgpop .ctlsub:first-child { margin-top:0; }
+
+/* ── A cluster asking to be let in ──────────────────────────────────────────────────────────
+   Narrow and centred, and it appears without being asked for — so it says WHICH host wants the
+   answer before it says anything else. A prompt typed into the wrong machine is the mistake this
+   is guarding against. */
+.sshauth-back { position:fixed; inset:0; z-index:80; display:flex; align-items:center;
+  justify-content:center; padding:24px; box-sizing:border-box;
+  background:color-mix(in srgb, var(--bg) 66%, transparent); backdrop-filter:blur(3px); }
+.sshauth { width:min(440px,92vw); border:1px solid var(--border); border-radius:12px;
+  background:var(--bg2); color:var(--text); box-shadow:0 20px 60px rgba(0,0,0,.6);
+  font-size:.8rem; overflow:hidden; }
+.sshauth-head { display:flex; align-items:baseline; gap:8px; padding:14px 18px 10px; }
+.sshauth-lock { font-size:.95rem; }
+.sshauth-host { font-family:'Cascadia Code',ui-monospace,monospace; color:var(--strong);
+  font-size:.86rem; }
+.sshauth-sub { color:var(--dim); font-size:.72rem; }
+.sshauth-body { padding:4px 18px 14px; }
+/* The prompt is ssh's own wording, shown verbatim — paraphrasing it would hide which of several
+   factors is being asked for. */
+.sshauth-prompt { display:block; margin:0 0 8px; color:var(--dim); font-size:.74rem;
+  font-family:'Cascadia Code',ui-monospace,monospace; overflow-wrap:anywhere; line-height:1.5; }
+.sshauth-input { width:100%; box-sizing:border-box; padding:8px 10px; border-radius:7px;
+  border:1px solid var(--border); background:var(--bg); color:var(--text);
+  font-family:'Cascadia Code',ui-monospace,monospace; font-size:.82rem; }
+.sshauth-input:focus { outline:none; border-color:var(--accent,#6ea8fe); }
+.sshauth-wait { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:.76rem;
+  padding:6px 0 2px; }
+.sshauth-spin { width:11px; height:11px; border-radius:50%; border:2px solid var(--border);
+  border-top-color:var(--dim); animation:sshauth-spin 0.8s linear infinite; }
+@keyframes sshauth-spin { to { transform:rotate(360deg); } }
+.sshauth-foot { display:flex; align-items:center; gap:8px; padding:11px 18px;
+  border-top:1px solid var(--border); background:color-mix(in srgb, var(--bg) 40%, transparent); }
+.sshauth-note { flex:1; color:var(--dim); font-size:.66rem; }
+.sshauth-foot button { padding:5px 13px; border-radius:7px; border:1px solid var(--border);
+  background:var(--bg); color:var(--text); font-size:.75rem; cursor:pointer; }
+.sshauth-ok { border-color:var(--accent,#6ea8fe) !important; color:var(--strong) !important; }
+.sshauth-foot button:hover { border-color:var(--dim); }
 /* Live status, right-hand column — read as instrumentation, not prose. Figures are large and
    monospaced, units and qualifiers small beside them, so the numbers are what the eye lands on and
    a value that has moved since the last look is obvious without reading a word. */

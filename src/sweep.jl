@@ -25,6 +25,12 @@ import TOML    # reading sweep descriptors straight off a store (cluster_status)
 # this way by the worker and by its own tests.
 Base.include(@__MODULE__, joinpath(@__DIR__, "defname.jl"))
 
+# Answering a cluster that will not take a key. Included BEFORE remotestore.jl, which opens the one
+# interactive connection everything else rides.
+if !isdefined(@__MODULE__, :SshAuth)
+    Base.include(@__MODULE__, joinpath(@__DIR__, "sshauth.jl"))
+end
+
 # Reaching a store the hub has no filesystem access to — the mirror, the multiplexed connection, and
 # the rsync that keeps them in step. Separate because it is transport with no opinion about sweeps.
 Base.include(@__MODULE__, joinpath(@__DIR__, "remotestore.jl"))
@@ -143,8 +149,11 @@ end
 # — which is how a shared filesystem gets taken down.
 
 function _ssh_run(host, script; capture::Bool = false)
-    cmd = isempty(host) ? `sh -c $script` :
-          `ssh -o BatchMode=yes -o ConnectTimeout=15 $host $script`
+    # `ssh_opts`, not a hand-rolled set: it carries the ControlPath every other call shares. Opening
+    # a connection of its own worked wherever a key does and nowhere else — on a cluster that wants
+    # a password it authenticates from scratch, which it cannot do, so provisioning failed on a host
+    # the rest of the fabric was already talking to.
+    cmd = isempty(host) ? `sh -c $script` : `ssh $(ssh_opts(host)) $host $script`
     buf = IOBuffer()
     ok = try; run(pipeline(cmd; stdout = buf, stderr = buf)); true; catch; false; end
     return (ok, String(take!(buf)))
@@ -167,8 +176,11 @@ function provision_payload!(host::AbstractString, root_remote::AbstractString)
     src = dirname(String(first(methods(paramgrid)).file))
     files = [joinpath(src, f) for f in SlateTask.PAYLOAD_FILES]
     dest = isempty(host) ? dst : "$(host):$(dst)"
+    # `-e`, so rsync rides the shared connection rather than opening one it would have to
+    # authenticate itself. Same reason as `_ssh_run`.
+    rsh = isempty(host) ? `` : `-e $(ssh_command(host))`
     try
-        run(pipeline(`rsync -a $(files) $(dest)/`; stdout = devnull, stderr = devnull))
+        run(pipeline(`rsync -a $rsh $(files) $(dest)/`; stdout = devnull, stderr = devnull))
     catch e
         error("could not ship the task runner to $(host):$(dst) ($(sprint(showerror, e)))")
     end
@@ -210,8 +222,9 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
 
     # rsync the project itself. `--delete` so a removed source file does not linger and get loaded.
     dest = isempty(host) ? remote_pkg : "$(host):$(remote_pkg)"
+    rsh = isempty(host) ? `` : `-e $(ssh_command(host))`     # the shared connection, as above
     try
-        run(pipeline(`rsync -az --delete --exclude .git --exclude Manifest.toml
+        run(pipeline(`rsync -az --delete --exclude .git --exclude Manifest.toml $rsh
                       $(rstrip(parent, '/'))/ $(dest)/`; stdout = devnull, stderr = devnull))
     catch e
         error("could not copy $(parent) to $(host):$(remote_pkg) ($(sprint(showerror, e)))")
@@ -465,7 +478,11 @@ chunk_size(t::LocalTarget) = t.chunk
 chunk_size(t::SlurmTarget) = t.chunk
 
 launcher_for(::LocalTarget) = BatchLauncher.ExecLauncher()
-launcher_for(t::SlurmTarget) = BatchLauncher.SlurmLauncher(t.host; account = t.account, qos = t.qos)
+# The launcher gets the SAME ssh options as everything else, so `sbatch`/`squeue`/`scancel` ride the
+# one authenticated connection instead of each opening — and on a 2FA cluster, failing to open — a
+# connection of their own.
+launcher_for(t::SlurmTarget) = BatchLauncher.SlurmLauncher(t.host; account = t.account, qos = t.qos,
+                                                           ssh_opts = ssh_opts(t.host))
 
 specfn_for(t::LocalTarget) = (name, cs) -> BatchLauncher.JobSpec(name, cs;
     root = t.root, project = t.project, payload = t.payload)

@@ -1038,8 +1038,16 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
         since = get(_KERNEL_UNRESPONSIVE_SINCE, k, nothing)   # tracked for local kernels too
         if k.conn === nothing
             d["status"] = k.redial_hold ? "disconnected" : "connecting"
+            # "starting up…" is true and useless: a COLD region installs the notebook's whole
+            # environment on the far side, which is minutes of downloading, and a word that never
+            # changes for minutes reads as a hang. The provisioner already narrates every step —
+            # say the latest one instead, and fall back to the placeholder before it has said
+            # anything.
             d["note"]   = k.redial_hold ?
-                "worker stopped responding — press ▶ or re-run to reconnect" : "starting up…"
+                "worker stopped responding — press ▶ or re-run to reconnect" :
+                let last = ReportEngine.last_bringup_line()
+                    isempty(last) ? "starting up…" : last
+                end
         elseif since !== nothing
             el = round(Int, time() - something(since, time()))
             d["status"] = "degraded"

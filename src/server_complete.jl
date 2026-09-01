@@ -772,6 +772,22 @@ function _make_router(h::Hub)
         _json(_status_log(h, get(q, "doc", ""),
                           clamp(something(tryparse(Int, get(q, "lines", "300")), 300), 1, 5000)))
     end)
+    # ── Answering an ssh prompt ──────────────────────────────────────────────────────────────
+    # Hub-level, not per notebook: a connection belongs to a HOST, and one prompt may be what
+    # several notebooks are waiting on. `id` came from the `sshauth:` push that raised the dialog.
+    HTTP.register!(router, "POST", "/api/sshauth", req -> begin
+        b = try; JSON.parse(String(req.body)); catch; nothing; end
+        b isa AbstractDict || return _json(Dict("ok" => false, "error" => "bad request"))
+        id = String(get(b, "id", ""))
+        isempty(id) && return _json(Dict("ok" => false, "error" => "no prompt id"))
+        if get(b, "cancel", false) === true
+            SshAuth.cancel!(id)          # ssh gives up rather than hanging on a dialog nobody answered
+            return _json(Dict("ok" => true, "cancelled" => true))
+        end
+        ok = SshAuth.answer!(id, String(get(b, "answer", "")))
+        return _json(Dict("ok" => ok))
+    end)
+
     HTTP.register!(router, "GET", "/assets/notebook.css", _ -> _asset(read(_CSS_ASSET, String), "text/css; charset=utf-8"))
     # Vendored third-party assets (offline cache, pinned in vendor.json). Greedy `**` so
     # nested paths work (CodeMirror modes/addons, KaTeX fonts). First hit fetches+caches.
@@ -2676,6 +2692,48 @@ function _install_worker_push!(h)
     return nothing
 end
 
+# ── ssh wants an answer ──────────────────────────────────────────────────────────────────────
+# A cluster that refuses keys asks for a password and a second factor. The ssh client hands each
+# prompt to a helper (`SshAuth`), which parks it in a file and waits; this is what notices and puts
+# it on screen. Polling, because the producer is a `/bin/sh` script with no way to signal us — and
+# a prompt is a human-scale event, so 300 ms is not a compromise.
+#
+# Broadcast to EVERY open notebook rather than one: the connection belongs to a host, and the hub
+# does not know which notebook is waiting on it (the worker asks ssh, ssh asks the helper, and
+# neither carries a notebook id). Answering once clears it for all of them.
+const _SSHAUTH_SEEN = Set{String}()
+
+function _install_sshauth_watch!(h)
+    errormonitor(@async while true
+        try
+            SshAuth.sweep_stale!()
+            live = Set{String}()
+            for p in SshAuth.pending()
+                push!(live, p.id)
+                p.id in _SSHAUTH_SEEN && continue
+                push!(_SSHAUTH_SEEN, p.id)
+                msg = "sshauth:" * JSON.json(Dict("id" => p.id, "host" => p.host,
+                                                  "prompt" => p.prompt,
+                                                  "secret" => _sshauth_secret(p.prompt)))
+                for nb in lock(h.lock) do; collect(values(h.notebooks)); end
+                    try; _broadcast(nb, msg); catch; end
+                end
+            end
+            # An answered (or abandoned) prompt must be forgettable, or its id would suppress a
+            # later prompt that happens to reuse it.
+            setdiff!(_SSHAUTH_SEEN, setdiff(_SSHAUTH_SEEN, live))
+        catch
+        end
+        sleep(0.3)
+    end)
+    return nothing
+end
+
+# Whether the answer should be masked in the dialog. A password and a one-time code both are; a
+# yes/no ("Duo passcode or option (1-3):") is not, and hiding it would make it unanswerable.
+_sshauth_secret(prompt::AbstractString) =
+    occursin(r"(?i)password|passphrase|one-time|passcode|token|OATH|OTP|code"a, prompt)
+
 function _ws_calls(stream, nb::LiveNotebook)
     if !HTTP.WebSockets.isupgrade(stream.message)
         HTTP.setstatus(stream, 426); HTTP.startwrite(stream); return nothing
@@ -2777,7 +2835,10 @@ function _bringup_broadcast(h, line::AbstractString)
     raw = startswith(s, "@@SLATE_PREP") ? nothing : "bringup:" * first(s, 200)
     nbs = try; lock(h.lock) do; collect(values(h.notebooks)); end; catch; return nothing; end
     for nb in nbs
-        get(nb.report.meta, "hydrating", false) === true || continue
+        # Was: hydrating notebooks only. That made a REGION's bring-up silent — and a region cold
+        # start installs the notebook's whole environment on the far side, which is minutes of real
+        # work behind the word "starting". The narration exists; it was being filtered out of the
+        # one place that needed it most. A notebook with no bring-up in flight simply gets nothing.
         raw === nothing || (try; _broadcast(nb, raw); catch; end)
         prepmsg === nothing || (try; _broadcast(nb, prepmsg); catch; end)
     end
@@ -2815,6 +2876,7 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     # hydrating banner, not just remote.log — the provisioner narrates each line through this sink hook.
     try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
     _install_worker_push!(h)   # worker telemetry + log → per-page WebSocket push (no browser polling)
+    _install_sshauth_watch!(h) # a cluster asking for a password / second factor → a dialog in the notebook
     handle = HTTP.streamhandler(_make_router(h))
     server = HTTP.listen!(host, port) do stream::HTTP.Stream
         # Reject cross-origin / rebinding requests before ANY handler (router or SSE) runs.

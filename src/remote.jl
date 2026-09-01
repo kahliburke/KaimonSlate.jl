@@ -38,10 +38,19 @@ import SHA as _SHA
 # remote spawn undebuggable. So EVERY step of the remote path also appends here, verbatim, with a
 # timestamp. This file is the answer to "where is the record of what happened?" — always on disk,
 # never dependent on how the host logger renders. Read it with `slate.diag` / the worker-log tool.
-# Slate's LOCAL cache root — respects XDG_CACHE_HOME (append "kaimonslate" under it rather than
-# using it verbatim; same rationale as Kaimon's cache_dir). The REMOTE layout stays literal
-# ".cache/kaimonslate" ($HOME-relative over ssh) — the remote's XDG env isn't cheaply knowable.
-_slate_cache_dir() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate")
+# Slate's LOCAL cache root. Resolved by `SshAuth.cache_root`, which is the SAME precedence the
+# worker's `_memo_dir` uses: `KAIMONSLATE_CACHE_HOME`, then `KAIMONSLATE_HOME/cache`, then
+# `XDG_CACHE_HOME/kaimonslate`, then `~/.cache/kaimonslate`.
+#
+# This used to consult XDG alone, and got the content store wrong for anyone who had pinned one:
+# the worker WROTE a boundary blob under the pinned home while `push_blob!` looked for it under
+# `~/.cache`, so a region transfer failed with "no local blob <hash>" — for a blob sitting on disk
+# a directory away. Both of those env vars exist precisely to isolate a store, and honouring them in
+# one half of the pair is worse than honouring them in neither.
+#
+# The REMOTE layout stays literal ".cache/kaimonslate" ($HOME-relative over ssh) — the remote's env
+# isn't cheaply knowable.
+_slate_cache_dir() = SshAuth.cache_root()
 
 const _REMOTE_LOG = joinpath(_slate_cache_dir(), "remote.log")
 # Resolved at write time so a test (or a sandboxed run) can redirect the durable log to a throwaway path
@@ -287,9 +296,14 @@ end
 # own dedicated connection, now provided by the shared master. Kill switch: KAIMONSLATE_NO_SSH_MUX=1.
 function _ssh_mux_opts()
     get(ENV, "KAIMONSLATE_NO_SSH_MUX", "") == "1" && return String[]
-    d = joinpath(_slate_cache_dir(), "mux")
-    try; mkpath(d); catch; return String[]; end
-    return ["-o", "ControlMaster=auto", "-o", "ControlPath=$d/%C", "-o", "ControlPersist=$(_ssh_control_persist())",
+    # The SAME socket the batch fabric uses (`SshAuth.control_path`). A host that costs a password
+    # and a second factor must cost them once, not once per subsystem — and a region on a cluster is
+    # the same cluster the sweeps run on.
+    # Empty when no path short enough for a Unix socket exists — then there is no shared master and
+    # each connection stands alone, which is slower but works.
+    p = try; SshAuth.control_path(); catch; ""; end
+    isempty(p) && return String[]
+    return ["-o", "ControlMaster=auto", "-o", "ControlPath=$p", "-o", "ControlPersist=$(_ssh_control_persist())",
             "-o", "ServerAliveInterval=$(_tunnel_alive_interval())", "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"]
 end
 
@@ -301,7 +315,58 @@ function _rsync_ssh_opt()
     return ["-e", "ssh -o BatchMode=yes " * join(opts, " ")]
 end
 
-_ssh(host, argv::Cmd) = `ssh -o BatchMode=yes -o ConnectTimeout=$(_ssh_connect_timeout()) $(_ssh_mux_opts()) $host $argv`
+_ssh(host, argv::Cmd) = (_ssh_connect!(host);
+    `ssh -o BatchMode=yes -o ConnectTimeout=$(_ssh_connect_timeout()) $(_ssh_mux_opts()) $host $argv`)
+
+# ── The one interactive connection ───────────────────────────────────────────────────────────
+# A region on a cluster that refuses public keys hits the same wall as the batch fabric: every call
+# here is `BatchMode=yes`, which cannot answer a password or a second factor. The answer is the same
+# too — get ONE master open, interactively, and let everything ride it. Shared socket, so a host
+# already authenticated for a sweep costs a region nothing.
+#
+# Guarded per host so a burst of parallel region calls raises one dialog rather than one each.
+const _SSH_CONNECTING = Dict{String,Bool}()
+const _SSH_CONNECT_LOCK = ReentrantLock()
+# `ssh -O check` is a process spawn, and `_ssh` builds a command for every remote operation — some
+# of them in loops. Remember a confirmed master briefly so the common path stays free; short enough
+# that a dropped connection is noticed on the next operation rather than the next minute.
+const _SSH_CHECKED = Dict{String,Float64}()
+const _SSH_CHECK_TTL = 5.0
+
+function _ssh_connect!(host::AbstractString)
+    isempty(host) && return true
+    opts = _ssh_mux_opts()
+    isempty(opts) && return true          # multiplexing off ⇒ no shared master to open
+    now = time()
+    lock(_SSH_CONNECT_LOCK) do
+        now - get(_SSH_CHECKED, String(host), 0.0) < _SSH_CHECK_TTL
+    end && return true
+    chk = `ssh -O check $opts $host`
+    if success(pipeline(chk; stdout = devnull, stderr = devnull))
+        lock(_SSH_CONNECT_LOCK) do; _SSH_CHECKED[String(host)] = now; end
+        return true
+    end
+    lock(_SSH_CONNECT_LOCK) do
+        get(_SSH_CONNECTING, String(host), false) && return false   # someone else is at the prompt
+        _SSH_CONNECTING[String(host)] = true
+        return true
+    end || return false
+    try
+        env = copy(ENV)
+        env["SSH_ASKPASS"] = SshAuth.askpass_script()
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        env["DISPLAY"] = get(env, "DISPLAY", ":0")
+        env["SLATE_SSHAUTH_DIR"] = SshAuth.rendezvous_dir()
+        env["SLATE_SSHAUTH_HOST"] = String(host)
+        cmd = `ssh -M -N -f -o BatchMode=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=30 $opts $host`
+        ok = try; run(pipeline(setenv(cmd, env); stdout = devnull, stderr = devnull)); true; catch; false; end
+        ok ? lock(_SSH_CONNECT_LOCK) do; _SSH_CHECKED[String(host)] = time(); end :
+             _rlog("ssh: could not open an interactive master to $host")
+        return ok
+    finally
+        lock(_SSH_CONNECT_LOCK) do; delete!(_SSH_CONNECTING, String(host)); end
+    end
+end
 
 # Run `cmd`, merging stdout+stderr; on failure, @warn the command + captured output. Returns (ok, output).
 function _run_logged(cmd::Cmd, what::AbstractString)
@@ -338,7 +403,32 @@ end
 # banner), so a remote provision narrates itself in the UI, not only in `remote.log`. Best-effort and
 # global — unset (the default) makes `_bringup_note` a no-op, so the log streaming stands on its own.
 const _BRINGUP_SINK = Ref{Any}(nothing)
-_bringup_note(line::AbstractString) = (f = _BRINGUP_SINK[]; f === nothing || (try; f(String(line)); catch; end); nothing)
+
+# The most recent narration line, kept so a status that is POLLED (a worker pill, a region banner)
+# can say what a stream already said. A pushed line reaches whoever is listening at that instant;
+# anything asking "what is happening now?" a second later had nothing to read.
+const _BRINGUP_LAST = Ref{Tuple{String,Float64}}(("", 0.0))
+
+"""
+    last_bringup_line(; fresh = 45.0) -> String
+
+The latest bring-up line, or empty if nothing has been said for `fresh` seconds. The age matters:
+a worker that drops an hour later is also "not connected", and narrating the last thing a FINISHED
+provision said would describe a step that is long over as though it were happening.
+"""
+function last_bringup_line(; fresh::Real = 45.0)
+    s, t = _BRINGUP_LAST[]
+    return (time() - t) <= fresh ? s : ""
+end
+
+function _bringup_note(line::AbstractString)
+    s = String(line)
+    # Control markers drive the structured banner; they are not sentences and must not be shown raw.
+    startswith(strip(s), "@@SLATE_PREP") || (_BRINGUP_LAST[] = (first(strip(s), 120), time()))
+    f = _BRINGUP_SINK[]
+    f === nothing || (try; f(s); catch; end)
+    return nothing
+end
 
 # Emit a coarse bring-up STAGE label to the browser banner (through the same sink) — the structured
 # headline for a boot step: payload sync, worker-runtime build, env build, worker spawn, connect. The

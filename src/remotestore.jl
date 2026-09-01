@@ -54,16 +54,82 @@ end
 # authenticated channel. The path is per host, and short — a control socket lives in the filesystem
 # and long ones hit the sockaddr limit.
 
-_ctl_path(host) = joinpath(tempdir(), "slate-cm-" * string(hash(String(host)); base = 16))
+# The socket is SHARED with the regions and with anything else that reaches a host — see
+# `SshAuth.control_path`. A cluster that costs a 2FA prompt must cost exactly one.
+_ctl_path(host) = SshAuth.control_path()
 
-ssh_opts(host) = String[
-    "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
-    "-o", "ControlMaster=auto", "-o", "ControlPath=" * _ctl_path(host),
-    "-o", "ControlPersist=300",
-]
+function ssh_opts(host)
+    o = String["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
+    p = _ctl_path(host)
+    # No usable socket path ⇒ no multiplexing. Every call then authenticates on its own, which is
+    # slower and, on a cluster that wants a second factor, prompts every time — but it is honest,
+    # where passing ssh a path it cannot bind fails outright.
+    isempty(p) && return o
+    append!(o, ["-o", "ControlMaster=auto", "-o", "ControlPath=" * p,
+                "-o", "ControlPersist=" * _control_persist()])
+    return o
+end
 
 "The `ssh …` prefix as one shell word, for tools that take a remote-shell string (rsync's `-e`)."
 ssh_command(host) = "ssh " * join(ssh_opts(host), " ")
+
+# ── Getting the first connection open ────────────────────────────────────────────────────────
+# Everything above assumes `BatchMode=yes` can connect, which holds only where a key works. On a
+# cluster that wants a password and a second factor it fails before it starts — so ONE connection
+# has to be interactive, and only when there isn't already a master to ride.
+#
+# `ssh -O check` is the question "is there one?", asked of ssh rather than of the filesystem: a
+# control socket can outlive the connection it belonged to, and a stale one is indistinguishable
+# from a live one by looking.
+
+"True if a multiplexed master is already open for `host` — then nothing here needs to prompt."
+function master_open(host::AbstractString)
+    isempty(host) && return true
+    return success(pipeline(`ssh -O check $(ssh_opts(host)) $host`;
+                            stdout = devnull, stderr = devnull))
+end
+
+"""
+    open_master!(host; timeout = 300) -> (ok, message)
+
+Open the one interactive connection, answering prompts through `SshAuth` — which routes them to
+whoever is watching (the notebook, or a terminal helper). `BatchMode=no` is the point: it lets ssh
+attempt the keyboard-interactive methods that a 2FA cluster offers and `BatchMode=yes` refuses.
+
+`NumberOfPasswordPrompts=1` because a wrong answer must FAIL rather than loop: a second attempt
+re-prompts, and on a one-time code it also burns the code that was about to work.
+"""
+function open_master!(host::AbstractString; timeout::Real = 300)
+    isempty(host) && return (true, "local")
+    master_open(host) && return (true, "already open")
+    helper = SshAuth.askpass_script()
+    env = copy(ENV)
+    env["SSH_ASKPASS"] = helper
+    env["SSH_ASKPASS_REQUIRE"] = "force"     # ask the helper even when a TTY is present
+    env["DISPLAY"] = get(env, "DISPLAY", ":0")   # ancient precondition for askpass; content unused
+    env["SLATE_SSHAUTH_DIR"] = SshAuth.rendezvous_dir()
+    env["SLATE_SSHAUTH_HOST"] = String(host)
+    env["SLATE_SSHAUTH_TIMEOUT"] = string(Int(round(timeout)))
+    ctl = _ctl_path(host)
+    isempty(ctl) && return (false, "no usable ssh ControlPath — cannot hold a connection open")
+    cmd = `ssh -M -N -f -o BatchMode=no -o NumberOfPasswordPrompts=1
+               -o ControlMaster=auto -o ControlPath=$ctl
+               -o ControlPersist=$(_control_persist()) -o ConnectTimeout=30 $host`
+    buf = IOBuffer()
+    ok = try
+        run(pipeline(setenv(cmd, env); stdout = buf, stderr = buf))
+        true
+    catch
+        false
+    end
+    out = strip(String(take!(buf)))
+    ok && master_open(host) && return (true, "authenticated")
+    return (false, isempty(out) ? "ssh could not open a master to $host" : out)
+end
+
+# Long enough that a notebook left alone over lunch does not cost another 2FA prompt, and a session
+# is bounded rather than forever.
+_control_persist() = get(ENV, "KAIMONSLATE_SSH_PERSIST", "8h")
 
 """
     shq(s) -> String
@@ -76,9 +142,26 @@ never a glob or a variable.
 """
 shq(s) = "'" * replace(String(s), "'" => "'\\''") * "'"
 
+"""
+    connect!(host) -> Bool
+
+Make sure there is a connection to ride, authenticating if that takes a human. Called from the
+handful of functions that actually touch the network — NOT from the ones that merely work out where
+things live, which are pure and must stay answerable for a host nobody can reach.
+
+Costs one `ssh -O check` when a master is already open, which is the common case by design.
+"""
+function connect!(host::AbstractString)
+    isempty(host) && return true
+    master_open(host) && return true
+    ok, _ = open_master!(host)
+    return ok
+end
+
 "Run `script` on the host, returning `(ok, output)`. An empty host runs it here — that is what makes
 this testable, and what makes a `SlurmTarget` with no host behave as documented."
 function run_there(host::AbstractString, script::AbstractString)
+    connect!(host)
     cmd = isempty(host) ? `sh -c $script` : `ssh $(ssh_opts(host)) $host $script`
     buf = IOBuffer()
     ok = try; run(pipeline(cmd; stdout = buf, stderr = buf)); true; catch; false; end
@@ -125,6 +208,7 @@ end
 "Bring the local mirror up to date with the store's metadata. One round trip."
 function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     isempty(s.host) && return true          # same machine: the mirror IS the store
+    connect!(s.host)
     for d in dirs
         mkpath(joinpath(s.mirror, d))
         extra = sync_flags(d, :in)
@@ -144,6 +228,7 @@ store. What may be DELETED there is `sync_flags`' decision, not this function's.
 """
 function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
     isempty(s.host) && return true
+    connect!(s.host)
     ok = true
     for d in dirs
         src = joinpath(s.mirror, d)

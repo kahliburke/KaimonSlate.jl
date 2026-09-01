@@ -22,6 +22,7 @@ using ..ReportRender
 import ..SlateHome
 import ..EffectStore
 import ..PublishLedger
+import ..SshAuth                              # ssh prompts a cluster asks for, answered in the browser
 
 include("history.jl")   # module SlateHistory — durable content-addressed time machine
 include("parsched.jl")  # ParCell / par_blockers / run_scheduled — the parallel dataflow scheduler
@@ -1880,6 +1881,13 @@ function _reconcile_stale_runner!(nb::LiveNotebook)
         delete!(_RUNNER_STALE_HITS, nb.id)
         return nothing
     end
+    # A cold region is BRINGING UP a worker: nothing is running because the thing that would run it
+    # does not exist yet, and installing a notebook's environment on the far side takes minutes —
+    # comfortably past the wedge threshold. The provisioner narrates every step, so a recent line is
+    # proof of progress. Without this the supervisor tore down a healthy run for taking as long as
+    # the work honestly takes.
+    isempty(ReportEngine.last_bringup_line()) ||
+        (delete!(_RUNNER_STALE_HITS, nb.id); return nothing)
     started = lock(_RUNNER_LOCK) do; get(_RUNNER_STARTED, nb.id, time()); end
     (time() - started > _RUNNER_STALE_AFTER) || return nothing   # a real cell can legitimately run this long — only suspect once implausible
     hits = get(_RUNNER_STALE_HITS, nb.id, 0) + 1

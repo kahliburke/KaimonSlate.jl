@@ -26,6 +26,9 @@ module KaimonSlate
 
 import JSON
 
+# FIRST: ReportEngine's remote transport shares its ssh control socket, so this has to exist
+# before the engine is defined. Depends on nothing itself.
+include("sshauth.jl")   # module SshAuth — ssh prompts (password / second factor) ↔ the notebook
 include("engine.jl")    # module ReportEngine (+ eval / deps / bind / echarts)
 include("render.jl")    # module ReportRender
 include("slate_home.jl") # module SlateHome — KaimonSlate's own XDG config/data/cache homes
