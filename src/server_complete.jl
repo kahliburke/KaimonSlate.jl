@@ -1185,6 +1185,11 @@ function _make_router(h::Hub)
             Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
                  "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
                  "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
+                 # What to ask a scheduler for, when `host` is one's front door. The editor seeds
+                 # its fields from these, so they have to come back out.
+                 "scheduler" => String(r.scheduler), "partition" => r.partition,
+                 "walltime" => r.walltime, "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus,
+                 "account" => r.account, "alloc_name" => r.alloc_name,
                  # Last reconcile outcome — so a silent background spawn failure is visible.
                  "status" => st === nothing ? nothing :
                              Dict("ok" => st.ok, "msg" => st.msg, "age" => round(Int, time() - st.ts)))
@@ -1211,9 +1216,23 @@ function _make_router(h::Hub)
         threads = strip(String(get(b, "threads", "")))
         sysimage = string(get(b, "sysimage", "false")) in ("true", "1", "on", "yes")
         do_reconcile = string(get(b, "reconcile", "true")) != "false"
+        # When the host fronts a scheduler, these say WHAT to ask it for. `:none` (the default, and
+        # what every region written before this existed means) keeps the old behaviour exactly: run
+        # on `host` itself.
+        sched = Symbol(let x = strip(String(get(b, "scheduler", "none"))); isempty(x) ? "none" : x end)
+        sched in (:none, :auto, :slurm, :pbs) ||
+            return _json(Dict("ok" => false, "error" => "scheduler must be none, auto, slurm or pbs"))
+        walltime = strip(String(get(b, "walltime", "")))
         r = ReportEngine.region_set!(name; host = host, transport = tr, base_port = base_port,
                                      preload = isempty(preload) ? "" : abspath(expanduser(preload)),
-                                     data_root = data_root, warm = warm, threads = threads, sysimage = sysimage)
+                                     data_root = data_root, warm = warm, threads = threads, sysimage = sysimage,
+                                     scheduler = sched, partition = strip(String(get(b, "partition", ""))),
+                                     walltime = walltime,
+                                     cpus = something(tryparse(Int, string(get(b, "cpus", "0"))), 0),
+                                     mem = strip(String(get(b, "mem", ""))),
+                                     gpus = strip(String(get(b, "gpus", ""))),
+                                     account = strip(String(get(b, "account", ""))),
+                                     alloc_name = strip(String(get(b, "alloc_name", ""))))
         do_reconcile && Threads.@spawn try
             ReportEngine.region_reconcile!(r.name)   # no-op when warm==0 except draining excess
         catch e
@@ -1222,12 +1241,39 @@ function _make_router(h::Hub)
         _json(Dict("ok" => true, "name" => r.name))
     end)
     # Delete a region: drain its warm workers first (best-effort), then drop the definition.
+    # What scheduler(s) a host has, so the region form knows whether to ask for a walltime and a
+    # partition — and can offer the queues as a MENU rather than a blank box. Cached per host: it is
+    # a round trip, and the answer rarely moves.
+    HTTP.register!(router, "GET", "/api/scheduler", req -> begin
+        host = get(HTTP.queryparams(HTTP.URI(req.target)), "host", "")
+        isempty(host) && return _json(Dict("kinds" => String[]))
+        h = try; ReportEngine._detect_scheduler(host); catch; nothing; end
+        h === nothing && return _json(Dict("kinds" => String[], "error" => "could not ask $host"))
+        SD = ReportEngine.SchedulerDetect
+        _json(Dict(
+            "kinds" => String[String(s.kind) for s in h.found],
+            "suggested" => String(SD.suggested(h)),
+            "versions" => Dict(String(s.kind) => s.version for s in h.found),
+            "partitions" => Dict(String(s.kind) =>
+                [Dict("name" => p.name, "gpus" => p.gpus, "maxtime" => p.maxtime, "up" => p.up)
+                 for p in s.partitions] for s in h.found)))
+    end)
+
     HTTP.register!(router, "POST", "/api/regions/delete", req -> begin
         b = _body(req)
         name = strip(String(get(b, "name", "")))
         isempty(name) && return _json(Dict("ok" => false, "error" => "need a region name"))
-        Threads.@spawn try; ReportEngine.region_remove!(name); catch e
-            @warn "slate: region remove failed" region = name exception = (e, catch_backtrace())
+        # Drop the RECORD before answering, and reap its workers after. Deleting the record is a file
+        # write; reaping is ssh to a host that may be slow or gone — so the whole thing used to be
+        # spawned, and the browser's refresh then read a registry the delete had not reached yet.
+        # The region reappeared until a manual reload, which reads as "delete does not work".
+        rec = try; ReportEngine.region_get(name); catch; nothing; end   # captured: the reap needs its host
+        try; ReportEngine.region_delete!(name); catch e
+            @warn "slate: region delete failed" region = name exception = (e, catch_backtrace())
+            return _json(Dict("ok" => false, "error" => "could not delete `$name`"))
+        end
+        Threads.@spawn try; ReportEngine.region_reap!(rec, name); catch e
+            @warn "slate: region teardown failed" region = name exception = (e, catch_backtrace())
         end
         _json(Dict("ok" => true, "name" => name))
     end)

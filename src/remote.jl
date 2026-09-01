@@ -3146,6 +3146,21 @@ struct Region
     curve::Bool         # CURVE-encrypt this region's data channel (default true; false = plaintext, for the §7 bench)
     uuid::String        # stable per-region id (minted at setup) — every peer-mesh artifact is named slate-<name>-<uuid8> (§5.5)
     peer::String        # peer-reachable address OTHER regions dial to reach this one — its PUBLIC IP when cross-network (§5.6). "" = derive from the hub-facing IP (only valid when the hub shares a network with the peers). A region with no inbound reachability (localhost/NAT, outbound-only) leaves this "" and simply relays inbound transfers.
+    # ── When `host` is a cluster's front door ────────────────────────────────────────────────
+    # Then `host` is NOT where the work runs: it is where you ASK. The worker goes on whichever
+    # node the scheduler grants, which is knowable only after the request. These are what the
+    # request needs, and they are meaningless on an ordinary machine — which is why `scheduler`
+    # exists as a switch rather than being inferred: detection can find both SLURM and PBS tools on
+    # one host, and a login node you are content to run a small worker on directly is a legitimate
+    # choice too.
+    scheduler::Symbol   # :none (run on `host` itself) | :auto (use what was detected) | :slurm | :pbs
+    partition::String   # queue to request in ("" = the site default)
+    walltime::String    # how long to hold it — the single most important field, because an allocation nobody released is one you are still paying for
+    cpus::Int           # tasks/cores to ask for (0 = the site default)
+    mem::String         # e.g. "16G" ("" = default)
+    gpus::String        # e.g. "1" or "a100:2" ("" = none — a CPU node)
+    account::String     # the project to bill ("" = default)
+    alloc_name::String  # the job name an allocation is found by, so a reopened notebook ATTACHES to the one it was already using rather than queueing for a second ("" = derived from the region name)
 end
 
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
@@ -3161,11 +3176,20 @@ _region_from_dict(d::AbstractDict) = Region(
     _asint(get(d, "base_port", 0)), String(get(d, "preload", "")), String(get(d, "data_root", "")),
     String(get(d, "cache_root", "")), _asint(get(d, "warm", 0)), String(get(d, "threads", "")),
     _asbool(get(d, "sysimage", false)), _asbool(get(d, "curve", true)), String(get(d, "uuid", "")),
-    String(get(d, "peer", "")))
+    String(get(d, "peer", "")),
+    # Absent ⇒ :none, so every region written before these fields existed keeps meaning exactly what
+    # it meant: run on `host`.
+    Symbol(let x = String(get(d, "scheduler", "none")); isempty(x) ? "none" : x end),
+    String(get(d, "partition", "")), String(get(d, "walltime", "")), _asint(get(d, "cpus", 0)),
+    String(get(d, "mem", "")), String(get(d, "gpus", "")), String(get(d, "account", "")),
+    String(get(d, "alloc_name", "")))
 _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
     "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
     "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
-    "curve" => r.curve, "uuid" => r.uuid, "peer" => r.peer)
+    "curve" => r.curve, "uuid" => r.uuid, "peer" => r.peer,
+    "scheduler" => String(r.scheduler), "partition" => r.partition, "walltime" => r.walltime,
+    "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus, "account" => r.account,
+    "alloc_name" => r.alloc_name)
 
 # ── Per-region UUID (mesh-artifact naming; PEER_TUNNEL_PLAN §5.5) ──────────────────────────────
 # A stable 128-bit id minted once at region setup and persisted in the region record. Every
@@ -3216,7 +3240,9 @@ end
 # Create or update a region by name (upsert). Returns the stored Region.
 function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "",
                      data_root = "", cache_root = "", warm = 0, threads = "", sysimage = false,
-                     curve = true, uuid = "", peer = "")
+                     curve = true, uuid = "", peer = "",
+                     scheduler = :none, partition = "", walltime = "", cpus = 0, mem = "",
+                     gpus = "", account = "", alloc_name = "")
     n = _fold_region(name)   # tag-safe id — MUST match region_get/region_delete! + a cell's `region=` tag
     isempty(n) && error("region name required")
     return lock(_REGIONS_LOCK) do
@@ -3232,7 +3258,9 @@ function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "
         pe = !isempty(String(peer)) ? String(peer) : (i === nothing ? "" : list[i].peer)
         r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
                    String(data_root), String(cache_root), Int(warm), String(threads),
-                   _asbool(sysimage), _asbool(curve), u, pe)
+                   _asbool(sysimage), _asbool(curve), u, pe,
+                   Symbol(scheduler), String(partition), String(walltime), Int(cpus),
+                   String(mem), String(gpus), String(account), String(alloc_name))
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)
         r
@@ -3249,8 +3277,17 @@ end
 
 # Delete a region AND reap its warm workers (best-effort) so none linger orphaned. Defined here as a
 # thin wrapper; the reap machinery lives further down (forward-referenced, resolved at call time).
-function region_remove!(name)
-    r = region_get(name)
+"""
+    region_reap!(r, name) -> nothing
+
+Clean up after a region: its warm workers, and its peer-mesh artifacts. Takes the RECORD rather
+than looking it up, so it can run AFTER the record is gone.
+
+That split is the point. Dropping the record is a file write; this is ssh to a host that may be
+slow, busy, or no longer there. A caller that has to tell someone the delete happened should wait
+for the first and not the second.
+"""
+function region_reap!(r::Union{Region,Nothing}, name)
     if r !== nothing && !isempty(r.host)
         try
             for w in list_remote_workers(r.host)
@@ -3260,13 +3297,21 @@ function region_remove!(name)
             _rlog("region[$(r.name)]: drain-on-delete failed ($(sprint(showerror, e)))")
         end
     end
-    # Remove this region's peer-mesh artifacts (keypair, authorized_keys grants, host-key pins) BEFORE the
-    # record is dropped — teardown needs the host + uuid to enumerate them by tag (§5.5). Best-effort.
+    # Peer-mesh artifacts (keypair, authorized_keys grants, host-key pins) are enumerated by tag from
+    # the host + uuid (§5.5), which is why the record is passed in. Best-effort.
     try; teardown_region_mesh!(name); catch e
         _rlog("region[$(_fold_region(name))]: mesh teardown failed ($(first(sprint(showerror, e), 120)))")
     end
-    region_delete!(name)
     delete!(_REGION_STATUS, _fold_region(name))   # status is keyed by the folded region name
+    return nothing
+end
+region_reap!(name) = region_reap!(region_get(name), name)
+
+"Delete a region and clean up after it, in that order. Blocks on the whole thing."
+function region_remove!(name)
+    r = region_get(name)
+    region_delete!(name)
+    region_reap!(r, name)
     return nothing
 end
 

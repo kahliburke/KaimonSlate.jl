@@ -14,6 +14,12 @@ const sysd    = signal({});    // region name -> last /api/sysimage payload
 // editor form fields (seeded from editRegion by an effect; read on save)
 const fName = signal(''), fWarm = signal(0), fPre = signal(''), fRoot = signal(''),
       fTr = signal('tunnel'), fPort = signal(''), fSys = signal(false);
+// When the host fronts a scheduler, `host` is where you ASK, not where the work runs — the node is
+// granted, not chosen. These are what the request needs.
+const fSched = signal('none'), fPart = signal(''), fWall = signal(''), fCpus = signal(''),
+      fMem = signal(''), fGpus = signal(''), fAcct = signal('');
+// What the host reports it has: {kinds:[...], suggested, partitions:{slurm:[...],...}}. null until asked.
+const schedInfo = signal({});
 
 const pj = (s) => { try { return JSON.parse(s || '{}'); } catch (_) { return {}; } };
 const fmtB = (b) => (b = +b || 0, b < 1024 ? b + 'B' : b < 1048576 ? Math.round(b / 1024) + 'KB' : b < 1073741824 ? Math.round(b / 1048576) + 'MB' : (b / 1073741824).toFixed(1) + 'GB');
@@ -22,6 +28,15 @@ const regionsOn = (h) => regions.value.filter(r => r.host === h);
 const confirmP = (msg, ok, cls) => (window.confirmDark ? window.confirmDark(msg, ok, cls) : Promise.resolve(window.confirm(msg)));
 
 // ── data ──────────────────────────────────────────────────────────────────────────
+// Ask the host what scheduler(s) it has, so the form can offer the right fields — and a partition
+// MENU rather than a blank box. Cached per host: it is a round trip, and the answer rarely moves.
+function loadScheduler(h) {
+  if (!h || schedInfo.value[h] !== undefined) return;
+  schedInfo.value = { ...schedInfo.value, [h]: null };            // null = asking
+  fetch('/api/scheduler?host=' + encodeURIComponent(h)).then(r => r.json())
+    .then(d => { schedInfo.value = { ...schedInfo.value, [h]: d || { kinds: [] } }; })
+    .catch(() => { schedInfo.value = { ...schedInfo.value, [h]: { kinds: [] } }; });
+}
 function fetchRoster(h) { fetch('/api/remote-workers?host=' + encodeURIComponent(h)).then(r => r.json()).then(d => { roster.value = { ...roster.value, [h]: (d && d.workers) || [] }; }).catch(() => { roster.value = { ...roster.value, [h]: [] }; }); }
 function loadSysimage(name) { fetch('/api/sysimage?region=' + encodeURIComponent(name)).then(r => r.json()).then(d => { sysd.value = { ...sysd.value, [name]: d }; if (d && d.ok && d.building) setTimeout(() => loadSysimage(name), 4000); }).catch(() => {}); }
 function buildSysimage(name) {
@@ -35,8 +50,13 @@ function saveRegion() {
   const warm = Math.max(0, parseInt(fWarm.value, 10) || 0), transport = fTr.value;
   const base_port = transport === 'direct' ? (parseInt(fPort.value, 10) || 0) : 0;
   const preload = (fPre.value || '').trim(), data_root = (fRoot.value || '').trim(), sysimage = !!fSys.value;
+  const scheduler = fSched.value || 'none';
+  const alloc = scheduler === 'none' ? {} : {
+    partition: (fPart.value || '').trim(), walltime: (fWall.value || '').trim(),
+    cpus: Math.max(0, parseInt(fCpus.value, 10) || 0), mem: (fMem.value || '').trim(),
+    gpus: (fGpus.value || '').trim(), account: (fAcct.value || '').trim() };
   rmsg.value = { text: warm > 0 ? 'Saving + warming…' : 'Saving…' };
-  fetch('/api/regions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, host: h, warm, preload, transport, base_port, data_root, sysimage }) })
+  fetch('/api/regions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, host: h, warm, preload, transport, base_port, data_root, sysimage, scheduler, ...alloc }) })
     .then(r => r.json()).then(d => {
       if (!d || !d.ok) { rmsg.value = { text: (d && d.error) || 'failed', err: true }; return; }
       const ports = (base_port && warm > 0) ? (' · ports ' + base_port + '–' + (base_port + 3 * warm - 1)) : '', rootS = data_root ? (' · root ' + data_root) : '';
@@ -100,6 +120,7 @@ function Editor() {
     <div class="rpprow"><label>Warm</label><input class="rppn" type="text" inputmode="numeric" autocomplete="off" value=${fWarm.value} onInput=${ev => fWarm.value = ev.target.value}/><span class="pddim" style="font-size:.76rem">workers kept ready to adopt</span></div>
     <div class="rpprow"><label>Preload</label><input class="rpppre" autocomplete="off" placeholder="/path/to/project  (folder with Project.toml)" value=${fPre.value} onInput=${ev => fPre.value = ev.target.value}/></div>
     <div class="rpprow"><label>Data root</label><input class="rpproot" autocomplete="off" placeholder="/scratch  (a path ON THE HOST)" value=${fRoot.value} onInput=${ev => fRoot.value = ev.target.value}/></div>
+    ${SchedulerRows()}
     <div class="rpprow"><label>Transport</label>
       <select class="rpptr" value=${fTr.value} onChange=${ev => fTr.value = ev.target.value}><option value="tunnel">tunnel</option><option value="direct">direct</option></select>
       ${fTr.value === 'direct' ? html`<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" value=${fPort.value} onInput=${ev => fPort.value = ev.target.value}/>` : null}</div>
@@ -109,6 +130,48 @@ function Editor() {
     </div>
     <div class=${'rppmsg' + (rmsg.value && rmsg.value.err ? ' err' : '')}>${rmsg.value ? rmsg.value.text : ''}</div>`;
 }
+
+// ── Where the work actually runs ──────────────────────────────────────────────────────────────
+// On an ordinary host, `host` IS the machine. On a cluster's front door it is only where you ASK:
+// the scheduler grants a node, and which one is an output of the request. So these rows appear only
+// when the host has a scheduler, and what they collect is what the request needs.
+function SchedulerRows() {
+  const h = focusHost.value, si = schedInfo.value[h];
+  if (si === null) return html`<div class="rpprow"><label>Scheduler</label><span class="pddim"><span class="hydspin"></span> asking ${h}…</span></div>`;
+  const kinds = (si && si.kinds) || [];
+  // Nothing found AND nothing configured: stay quiet. A workstation should not be asked for a
+  // walltime. (An explicit choice already saved still shows, since the tools may be behind a
+  // `module load` that detection cannot see.)
+  if (!kinds.length && fSched.value === 'none') return null;
+  const chosen = fSched.value;
+  const parts = ((si && si.partitions) || {})[chosen] || [];
+  const opts = ['none', ...kinds.filter(k => k !== 'none')];
+  if (chosen !== 'none' && !opts.includes(chosen)) opts.push(chosen);   // honour a saved choice
+  return html`
+    <div class="rpprow"><label>Scheduler</label>
+      <select class="rpptr" value=${chosen} onChange=${ev => { fSched.value = ev.target.value; if (ev.target.value !== 'none' && !fWall.value) fWall.value = '01:00:00'; }}>
+        ${opts.map(k => html`<option value=${k}>${k === 'none' ? 'none — run on ' + h + ' itself' : k}</option>`)}
+      </select>
+      ${kinds.length > 1 ? html`<span class="pddim" style="font-size:.76rem">two found on this host — pick the one that runs the jobs</span>`
+        : kinds.length ? html`<span class="pddim" style="font-size:.76rem">detected</span>` : null}</div>
+    ${chosen === 'none' ? null : html`
+      <div class="rpprow"><label>Partition</label>
+        ${parts.length ? html`<select class="rpptr" value=${fPart.value} onChange=${ev => fPart.value = ev.target.value}>
+            <option value="">(site default)</option>
+            ${parts.map(p => html`<option value=${p.name} disabled=${p.up === false}>${p.name}${p.gpus ? ' · ' + p.gpus : ''}${p.maxtime ? ' · ≤' + p.maxtime : ''}${p.up === false ? ' (down)' : ''}</option>`)}
+          </select>`
+          : html`<input class="rpppre" autocomplete="off" placeholder="queue name (blank = site default)" value=${fPart.value} onInput=${ev => fPart.value = ev.target.value}/>`}</div>
+      <div class="rpprow"><label>Walltime</label>
+        <input class="rppn" autocomplete="off" placeholder="01:00:00" value=${fWall.value} onInput=${ev => fWall.value = ev.target.value}/>
+        <span class="pddim" style="font-size:.76rem">how long to hold it — it bills for the time held, not used</span></div>
+      <div class="rpprow"><label>Resources</label>
+        <input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="cpus" title="tasks/cores to request (blank = site default)" value=${fCpus.value} onInput=${ev => fCpus.value = ev.target.value}/>
+        <input class="rppport" autocomplete="off" placeholder="mem" title="e.g. 16G (blank = site default)" value=${fMem.value} onInput=${ev => fMem.value = ev.target.value}/>
+        <input class="rppport" autocomplete="off" placeholder="gpus" title=${'e.g. 1, or a100:2 — blank means a CPU node' + (parts.some(p => p.gpus) ? '' : '. No partition here reports GPUs.')} value=${fGpus.value} onInput=${ev => fGpus.value = ev.target.value}/>
+        <input class="rppport" autocomplete="off" placeholder="account" title="project to bill (blank = default)" value=${fAcct.value} onInput=${ev => fAcct.value = ev.target.value}/></div>
+      <div class="rpprow rppsysrow"><label></label><div class="rppsysbox">A worker starts on the node this allocation grants, not on <code>${h}</code>. Reopening attaches to the same allocation while it lasts; when it expires the next cell that needs the region asks for another.</div></div>`}`;
+}
+
 function Roster() {
   const h = focusHost.value, rs = roster.value[h], parkedFor = parked.value.filter(p => p.host === h);
   return html`<div>
@@ -144,11 +207,19 @@ export function Focus() {
 }
 
 // ── effects ────────────────────────────────────────────────────────────────────────
-effect(() => { const h = focusHost.value; if (h) { loadRegions(); fetchRoster(h); } });   // focus → load
+effect(() => { const h = focusHost.value; if (h) { loadRegions(); fetchRoster(h); loadScheduler(h); } });   // focus → load
 effect(() => {   // seed the editor form from the selected region (or blank for "new")
   const e = editRegion.value, h = focusHost.value; if (!h) return;
-  if (e && e.name) { fName.value = e.name; fWarm.value = +e.warm || 0; fPre.value = e.preload || ''; fRoot.value = e.data_root || ''; fTr.value = e.transport || 'tunnel'; fPort.value = e.base_port > 0 ? e.base_port : ''; fSys.value = !!e.sysimage; }
-  else { fName.value = ''; fWarm.value = 0; fPre.value = ''; fRoot.value = ''; fTr.value = hostTransport(h); fPort.value = ''; fSys.value = false; }
+  if (e && e.name) { fName.value = e.name; fWarm.value = +e.warm || 0; fPre.value = e.preload || ''; fRoot.value = e.data_root || ''; fTr.value = e.transport || 'tunnel'; fPort.value = e.base_port > 0 ? e.base_port : ''; fSys.value = !!e.sysimage;
+    fSched.value = e.scheduler || 'none'; fPart.value = e.partition || ''; fWall.value = e.walltime || '';
+    fCpus.value = e.cpus > 0 ? e.cpus : ''; fMem.value = e.mem || ''; fGpus.value = e.gpus || ''; fAcct.value = e.account || ''; }
+  else { fName.value = ''; fWarm.value = 0; fPre.value = ''; fRoot.value = ''; fTr.value = hostTransport(h); fPort.value = ''; fSys.value = false;
+    // A NEW region on a host that fronts a scheduler defaults to using it, with a walltime already
+    // filled in: an allocation with no end time is the one people forget they are holding.
+    const si = schedInfo.value[h];
+    fSched.value = (si && si.suggested) ? si.suggested : 'none';
+    fPart.value = ''; fWall.value = fSched.value === 'none' ? '' : '01:00:00';
+    fCpus.value = ''; fMem.value = ''; fGpus.value = ''; fAcct.value = ''; }
   rmsg.value = null;
 });
 effect(() => { const e = editRegion.value; if (e && e.name && focusHost.value) loadSysimage(e.name); });   // editing → fetch build status

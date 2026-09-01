@@ -54,24 +54,40 @@
     return /pushed|sent|approve|check your|waiting/i.test(p) && !/:\s*$/.test(p.replace(/\s+$/, ''));
   }
 
+  // WHAT is being asked for, as a heading. ssh's own wording stays below it, but two prompts that
+  // both read "(you@host) …:" and both mask their input are far too easy to answer with the other
+  // one's answer — and on a one-time code, a wrong answer burns the code that would have worked.
+  function kindOf(p) {
+    if (/one-time|oath|otp|passcode|token|\bcode\b|verification/i.test(p))
+      return { label: 'One-time code', icon: '🔢', hint: 'from your authenticator' };
+    if (/passphrase/i.test(p)) return { label: 'Key passphrase', icon: '🔐', hint: '' };
+    if (/password/i.test(p))   return { label: 'Password', icon: '🔑', hint: 'your account password' };
+    if (/duo|push|approve/i.test(p)) return { label: 'Approve the push', icon: '📲', hint: 'on your phone' };
+    return { label: 'Authentication', icon: '🔒', hint: '' };
+  }
+
   function show(msg) {
     close();
     current = msg;
     const notice = isNotice(msg.prompt);
+    const kind = kindOf(msg.prompt);
     el = document.createElement('div');
     el.className = 'sshauth-back';
     el.innerHTML =
       '<div class="sshauth" role="dialog" aria-modal="true">' +
         '<div class="sshauth-head">' +
-          '<span class="sshauth-lock">🔑</span>' +
-          '<span class="sshauth-host">' + esc(msg.host) + '</span>' +
-          '<span class="sshauth-sub">wants to authenticate</span>' +
+          '<span class="sshauth-lock">' + kind.icon + '</span>' +
+          '<span class="sshauth-kind">' + esc(kind.label) + '</span>' +
+          '<span class="sshauth-sub">' + esc(msg.host) + '</span>' +
         '</div>' +
         '<div class="sshauth-body">' +
-          '<label class="sshauth-prompt">' + esc(msg.prompt.trim()) + '</label>' +
+          (kind.hint ? '<div class="sshauth-hint">' + esc(kind.hint) + '</div>' : '') +
           (notice ? '' :
             '<input class="sshauth-input" type="' + (msg.secret ? 'password' : 'text') + '" ' +
                    'autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />') +
+          // ssh's own words, kept but demoted: the heading says which factor this is, and this says
+          // it is not a paraphrase.
+          '<div class="sshauth-prompt">' + esc(msg.prompt.trim()) + '</div>' +
         '</div>' +
         '<div class="sshauth-foot">' +
           '<span class="sshauth-note">Answered once — every later connection reuses it.</span>' +

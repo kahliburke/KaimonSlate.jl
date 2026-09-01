@@ -841,16 +841,19 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .sshauth { width:min(440px,92vw); border:1px solid var(--border); border-radius:12px;
   background:var(--bg2); color:var(--text); box-shadow:0 20px 60px rgba(0,0,0,.6);
   font-size:.8rem; overflow:hidden; }
-.sshauth-head { display:flex; align-items:baseline; gap:8px; padding:14px 18px 10px; }
-.sshauth-lock { font-size:.95rem; }
-.sshauth-host { font-family:'Cascadia Code',ui-monospace,monospace; color:var(--strong);
-  font-size:.86rem; }
-.sshauth-sub { color:var(--dim); font-size:.72rem; }
+.sshauth-head { display:flex; align-items:baseline; gap:8px; padding:14px 18px 6px; }
+.sshauth-lock { font-size:1.05rem; }
+/* WHICH factor, loudly. Two prompts that both read "(you@host) …:" and both mask their input are
+   too easy to answer with the other one's answer — and a wrong answer burns a one-time code. */
+.sshauth-kind { color:var(--strong); font-size:.95rem; font-weight:600; }
+.sshauth-sub { margin-left:auto; color:var(--dim); font-size:.72rem;
+  font-family:'Cascadia Code',ui-monospace,monospace; }
 .sshauth-body { padding:4px 18px 14px; }
-/* The prompt is ssh's own wording, shown verbatim — paraphrasing it would hide which of several
-   factors is being asked for. */
-.sshauth-prompt { display:block; margin:0 0 8px; color:var(--dim); font-size:.74rem;
-  font-family:'Cascadia Code',ui-monospace,monospace; overflow-wrap:anywhere; line-height:1.5; }
+.sshauth-hint { color:var(--dim); font-size:.74rem; margin:0 0 8px; }
+/* ssh's own wording, kept verbatim but demoted below the field: it proves the heading is not a
+   paraphrase, without competing with it. */
+.sshauth-prompt { display:block; margin:8px 0 0; color:var(--dim); font-size:.68rem; opacity:.75;
+  font-family:'Cascadia Code',ui-monospace,monospace; overflow-wrap:anywhere; line-height:1.45; }
 .sshauth-input { width:100%; box-sizing:border-box; padding:8px 10px; border-radius:7px;
   border:1px solid var(--border); background:var(--bg); color:var(--text);
   font-family:'Cascadia Code',ui-monospace,monospace; font-size:.82rem; }
@@ -2118,6 +2121,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 #modalbg { z-index: 150; }   /* above the Destinations modal (130) + mesh consent (140) it can be raised from; below the 200 connection-critical modals */
 .modal { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:18px 20px; max-width:520px; width:90%;
          box-shadow:0 16px 48px rgba(0,0,0,.55); }
+
 .modal .msg { color:var(--text); font-size:.92rem; line-height:1.5; margin-bottom:16px; white-space:pre-wrap; word-break:break-word; }
 .modal .row { display:flex; justify-content:flex-end; gap:10px; }
 /* Text entry inside the shared modal (promptDark) — the app's `window.prompt` replacement. */
