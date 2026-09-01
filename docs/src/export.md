@@ -40,7 +40,9 @@ Highlights:
 
 - **Vector figures** — CairoMakie figures embed as **PDF** (fonts embedded, crisp at any
   scale); ECharts charts embed as **SVG** in the export's theme. Rasters are the fallback.
-- **Math** through LaTeX (`mitex`), with a shim preamble for commands `mitex` lacks.
+- **Math** through LaTeX (`mitex`), with a shim preamble for commands `mitex` lacks. All four
+  delimiter spellings work — `$…$`, `$$…$$`, `\(…\)`, `\[…\]` — the bracket forms are normalized
+  to the dollar forms on the way in, so a notebook reads the same on screen and in print.
 - **Frozen controls** — `@bind` widgets render as a compact *parameters* strip at their
   current values (a PDF is a snapshot).
 - **Academic front matter** — if the first markdown cell opens with a `---`-fenced block, its
@@ -49,6 +51,27 @@ Highlights:
 
 The route is `GET /api/<id>/export.pdf` with `?theme=`, `?style=`, `?columns=`, `?body=`,
 `?code=`. The bundled `Typst_jll` is used unless a system `typst` is on `PATH`.
+
+### Writing for print only
+
+You author in Markdown and LaTeX, not Typst — the `.typ` document is generated. For the cases
+where print needs something the screen doesn't, a markdown cell can address each surface on its
+own. Both markers are HTML comments, so neither disturbs the other view:
+
+````markdown
+<!--raw-typst #pagebreak() -->
+
+<!--typst-begin-exclude-->
+This paragraph is for readers of the live notebook, and never reaches the PDF.
+<!--typst-end-exclude-->
+````
+
+`raw-typst` passes its body through as **Typst code** — a page break, a `#place`, a `#set text(…)`
+— and the browser sees only an HTML comment, so it shows nothing. `typst-begin-exclude` is the
+mirror: the enclosed markdown renders normally on screen and is dropped from the PDF.
+
+Only these two markers are honoured. Typst syntax written loose in a markdown cell is escaped and
+printed as ordinary text, since the cell is CommonMark first.
 
 ## Print HTML
 
