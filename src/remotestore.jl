@@ -90,6 +90,32 @@ function master_open(host::AbstractString)
 end
 
 """
+    clear_stale_master!(host) -> Bool
+
+Remove a control socket whose connection is gone, returning whether one was removed.
+
+A socket FILE outlives the connection it belonged to — a killed ssh, a reboot, a hub that went away
+mid-session — and ssh will not create a master over one that exists: it says
+`ControlSocket … already exists, disabling multiplexing` and then every later call fails with
+`Connection refused`. Left alone that is unrecoverable without a human deleting a file, on the one
+host where reconnecting costs a 2FA prompt.
+
+The concrete path comes from `ssh -G`, because `%C` is ssh's to expand, not ours.
+"""
+function clear_stale_master!(host::AbstractString)
+    isempty(host) && return false
+    master_open(host) && return false                  # live — leave it alone
+    p = try
+        m = match(r"^controlpath\s+(.+)$"m,
+                  read(pipeline(`ssh -G $(ssh_opts(host)) $host`; stderr = devnull), String))
+        m === nothing ? "" : strip(m.captures[1])
+    catch; ""; end
+    (isempty(p) || p == "none" || !ispath(p)) && return false
+    try; rm(p; force = true); catch; return false; end
+    return true
+end
+
+"""
     open_master!(host; timeout = 300) -> (ok, message)
 
 Open the one interactive connection, answering prompts through `SshAuth` — which routes them to
@@ -112,6 +138,9 @@ function open_master!(host::AbstractString; timeout::Real = 300)
     env["SLATE_SSHAUTH_TIMEOUT"] = string(Int(round(timeout)))
     ctl = _ctl_path(host)
     isempty(ctl) && return (false, "no usable ssh ControlPath — cannot hold a connection open")
+    # A socket left behind by a dead connection would make ssh refuse to open a new master, and the
+    # prompt below is the expensive thing here — do not spend it on a connection that cannot form.
+    clear_stale_master!(host)
     cmd = `ssh -M -N -f -o BatchMode=no -o NumberOfPasswordPrompts=1
                -o ControlMaster=auto -o ControlPath=$ctl
                -o ControlPersist=$(_control_persist()) -o ConnectTimeout=30 $host`
@@ -142,6 +171,15 @@ never a glob or a variable.
 """
 shq(s) = "'" * replace(String(s), "'" => "'\\''") * "'"
 
+# How long to leave a host alone after a failed attempt to reach it. Without this, every poll retried
+# — and a sweep card polls about once a second. Each retry is a fresh TCP connection (multiplexing is
+# exactly what is not working) plus a failed authentication, so an unreachable host does not fail
+# quietly: it fills the ephemeral port range with TIME_WAIT until nothing on the machine can open a
+# socket. Seen: ~15k sockets, both hubs unable to accept, ssh and docker's port mapping down with it.
+const _CONNECT_BACKOFF = 20.0
+const _CONNECT_FAILED = Dict{String,Float64}()
+const _CONNECT_LOCK = ReentrantLock()
+
 """
     connect!(host) -> Bool
 
@@ -149,19 +187,30 @@ Make sure there is a connection to ride, authenticating if that takes a human. C
 handful of functions that actually touch the network — NOT from the ones that merely work out where
 things live, which are pure and must stay answerable for a host nobody can reach.
 
-Costs one `ssh -O check` when a master is already open, which is the common case by design.
+Costs one `ssh -O check` when a master is already open, which is the common case by design. After a
+failure the host is left alone for a while: a poll loop must not be able to turn "cannot reach it"
+into a machine-wide resource problem.
 """
 function connect!(host::AbstractString)
     isempty(host) && return true
     master_open(host) && return true
+    lock(_CONNECT_LOCK) do
+        time() - get(_CONNECT_FAILED, String(host), 0.0) < _CONNECT_BACKOFF
+    end && return false
     ok, _ = open_master!(host)
+    lock(_CONNECT_LOCK) do
+        ok ? delete!(_CONNECT_FAILED, String(host)) : (_CONNECT_FAILED[String(host)] = time())
+    end
     return ok
 end
 
 "Run `script` on the host, returning `(ok, output)`. An empty host runs it here — that is what makes
 this testable, and what makes a `SlurmTarget` with no host behave as documented."
 function run_there(host::AbstractString, script::AbstractString)
-    connect!(host)
+    # No connection ⇒ do not attempt the command. Running it anyway is what turned an unreachable
+    # host into a machine-wide problem: without a master every attempt opens its OWN TCP connection,
+    # and a card that polls once a second exhausts the ephemeral port range in minutes.
+    connect!(host) || return (false, "no connection to $host")
     cmd = isempty(host) ? `sh -c $script` : `ssh $(ssh_opts(host)) $host $script`
     buf = IOBuffer()
     ok = try; run(pipeline(cmd; stdout = buf, stderr = buf)); true; catch; false; end
@@ -208,7 +257,7 @@ end
 "Bring the local mirror up to date with the store's metadata. One round trip."
 function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     isempty(s.host) && return true          # same machine: the mirror IS the store
-    connect!(s.host)
+    connect!(s.host) || return false        # never rsync without a master — see `run_there`
     for d in dirs
         mkpath(joinpath(s.mirror, d))
         extra = sync_flags(d, :in)
@@ -228,7 +277,7 @@ store. What may be DELETED there is `sync_flags`' decision, not this function's.
 """
 function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
     isempty(s.host) && return true
-    connect!(s.host)
+    connect!(s.host) || return false        # never rsync without a master — see `run_there`
     ok = true
     for d in dirs
         src = joinpath(s.mirror, d)

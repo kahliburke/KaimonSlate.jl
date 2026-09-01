@@ -332,6 +332,12 @@ const _SSH_CONNECT_LOCK = ReentrantLock()
 # that a dropped connection is noticed on the next operation rather than the next minute.
 const _SSH_CHECKED = Dict{String,Float64}()
 const _SSH_CHECK_TTL = 5.0
+# …and how long to leave a host alone after failing to reach it. A region has liveness loops and a
+# reconnect supervisor, all of which call through here; without a backoff an unreachable host is
+# retried continuously, and each attempt is a fresh connection because multiplexing is precisely
+# what is not working. That fills the ephemeral port range and takes the machine down with it.
+const _SSH_FAILED = Dict{String,Float64}()
+const _SSH_FAIL_BACKOFF = 20.0
 
 function _ssh_connect!(host::AbstractString)
     isempty(host) && return true
@@ -341,6 +347,9 @@ function _ssh_connect!(host::AbstractString)
     lock(_SSH_CONNECT_LOCK) do
         now - get(_SSH_CHECKED, String(host), 0.0) < _SSH_CHECK_TTL
     end && return true
+    lock(_SSH_CONNECT_LOCK) do
+        now - get(_SSH_FAILED, String(host), 0.0) < _SSH_FAIL_BACKOFF
+    end && return false
     chk = `ssh -O check $opts $host`
     if success(pipeline(chk; stdout = devnull, stderr = devnull))
         lock(_SSH_CONNECT_LOCK) do; _SSH_CHECKED[String(host)] = now; end
@@ -352,6 +361,17 @@ function _ssh_connect!(host::AbstractString)
         return true
     end || return false
     try
+        # A socket from a connection that has since died makes ssh refuse to open a master at all
+        # ("already exists, disabling multiplexing", then "Connection refused" for everything after).
+        # Clear it before paying for a prompt.
+        try
+            g = read(pipeline(`ssh -G $opts $host`; stderr = devnull), String)
+            m = match(r"^controlpath\s+(.+)$"m, g)
+            if m !== nothing
+                p = strip(m.captures[1])
+                (isempty(p) || p == "none" || !ispath(p)) || rm(p; force = true)
+            end
+        catch; end
         env = copy(ENV)
         env["SSH_ASKPASS"] = SshAuth.askpass_script()
         env["SSH_ASKPASS_REQUIRE"] = "force"
@@ -360,8 +380,14 @@ function _ssh_connect!(host::AbstractString)
         env["SLATE_SSHAUTH_HOST"] = String(host)
         cmd = `ssh -M -N -f -o BatchMode=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=30 $opts $host`
         ok = try; run(pipeline(setenv(cmd, env); stdout = devnull, stderr = devnull)); true; catch; false; end
-        ok ? lock(_SSH_CONNECT_LOCK) do; _SSH_CHECKED[String(host)] = time(); end :
-             _rlog("ssh: could not open an interactive master to $host")
+        lock(_SSH_CONNECT_LOCK) do
+            if ok
+                _SSH_CHECKED[String(host)] = time(); delete!(_SSH_FAILED, String(host))
+            else
+                _SSH_FAILED[String(host)] = time()
+            end
+        end
+        ok || _rlog("ssh: could not open an interactive master to $host — backing off $(round(Int, _SSH_FAIL_BACKOFF))s")
         return ok
     finally
         lock(_SSH_CONNECT_LOCK) do; delete!(_SSH_CONNECTING, String(host)); end

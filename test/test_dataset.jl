@@ -366,6 +366,34 @@ const MS = RE.MemoStore
         @test "--ignore-existing" in collect(S.sync_flags("blobs", :out))   # content-addressed
         @test_throws ErrorException S.sync_flags("jobs", :sideways)
 
+        # A host that cannot be reached must FAIL, not retry. Every attempt without a master opens
+        # its own TCP connection — multiplexing is exactly what is not working — and a sweep card
+        # polls about once a second. That filled the ephemeral port range with TIME_WAIT until
+        # nothing on the machine could open a socket: both hubs stopped accepting, ssh reported
+        # "Can't assign requested address" on loopback, and docker's port mapping went with them.
+        # So: one attempt, then a quiet answer until the backoff expires.
+        dead = "slate-test-nonexistent.invalid"
+        t0 = time()
+        oks = [first(S.run_there(dead, "true")) for _ in 1:25]
+        el = time() - t0
+        @test !any(oks)                             # none of them can work…
+        @test el < 10                               # …and 24 of them did not touch the network
+        @test occursin("no connection", last(S.run_there(dead, "true")))
+        @test !S.pull_meta!(S.RemoteStore(dead, "/x"))   # the rsync paths refuse too
+        @test !S.push_meta!(S.RemoteStore(dead, "/x"))
+
+        # A control socket outlives the connection it belonged to, and ssh will not open a master
+        # over one that exists — it disables multiplexing and every later call is refused. Left
+        # alone that needs a human to delete a file, on the one kind of host where reconnecting
+        # costs a 2FA prompt.
+        mktempdir() do d
+            withenv("KAIMONSLATE_CACHE_HOME" => d) do
+                p = S.SshAuth.control_path()
+                @test !isempty(p)                                 # a path short enough to bind
+                @test S.clear_stale_master!("") == false           # no host, nothing to do
+            end
+        end
+
         # A target with a host plans against the mirror, but its BLOBS stay on the far side, read by
         # range at the path the host uses.
         mktempdir() do root
