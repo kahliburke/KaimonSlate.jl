@@ -109,12 +109,25 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .nnhint{color:#6a7090;font-size:.78rem;min-height:1.1em;margin:2px 0 14px;word-break:break-all;}
 .nnhint.err{color:#e57575;}
 .nnhint code{color:#9fd0f5;font-family:Menlo,monospace;}
-/* Remotes manager modal */
-.remotesmodal{max-width:640px;position:relative;}
+/* Remotes manager modal.
+   One long column — host form, preflight checklist, known hosts, transfer settings — and it keeps
+   growing. `.modal` bounds width but not HEIGHT, so on a short window it ran off the screen with
+   nothing to scroll: the last rows were unreachable, and so was the ✕. */
+.remotesmodal{max-width:660px;position:relative;max-height:88vh;overflow-y:auto;overscroll-behavior:contain;
+  scrollbar-width:thin;scrollbar-color:#2a2e40 transparent;}
+.remotesmodal::-webkit-scrollbar{width:10px;}
+.remotesmodal::-webkit-scrollbar-track{background:transparent;}
+.remotesmodal::-webkit-scrollbar-thumb{background:#2a2e40;border-radius:7px;border:2px solid transparent;background-clip:padding-box;}
+.remotesmodal::-webkit-scrollbar-thumb:hover{background:#569cd6;}
+/* The focus view REPLACES the column rather than extending it, so it can have the room back. */
+.remotesmodal.focusmode{max-width:860px;}
 /* Standard top-right modal close (✕) — consistent across modals; Esc also closes. `.modal .modalx`
    specificity (0,2,1) beats the `.modal button` base rule so it stays a bare glyph, no button chrome. */
 .modal .modalx{position:absolute;top:8px;right:10px;background:none;border:none;box-shadow:none;color:#6a7090;font-size:1.15rem;line-height:1;cursor:pointer;padding:4px 8px;z-index:3;}
 .modal .modalx:hover{color:#569cd6;background:none;}
+/* The ✕ is absolutely positioned against the modal, which now scrolls — pin it to the viewport of
+   that box instead, or dismissing means scrolling back to the top first. */
+.remotesmodal .modalx{position:sticky;top:0;float:right;margin:-8px -8px 0 0;}
 /* Reserve right-space in the remotes header rows so the absolute ✕ never overlaps their text. */
 .remotesmodal>.msg{padding-right:30px;}
 .rtfhead{padding-right:30px;}
