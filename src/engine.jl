@@ -501,8 +501,6 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         for (k, v) in _parse_config_footer(@view lines[fi:end])   # Slate.config: per-notebook settings
             report.meta[k] = v
         end
-        clu = _parse_clusters_footer(@view lines[fi:end])          # Slate.clusters: compute targets
-        isempty(clu) || (report.meta["clusters"] = clu)
         lines = lines[1:(fi - 1)]
     end
 
@@ -642,72 +640,8 @@ const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload
                            # carried in the file so it never flips when the path/repo/origin changes.
                            "docid" => :string)
 
-# ── Compute targets ──────────────────────────────────────────────────────────
-#
-# A CLUSTER is defined once for the whole notebook and referenced by name from any number of sweep
-# cells (`#%% sweep cluster=hpc`). It belongs here rather than in a code cell for the same reason
-# the package delta does: it is configuration, not computation. A notebook that runs against three
-# partitions should say so once, and a reader should be able to see where the work goes without
-# reading Julia.
-#
-# Stored as an ordered list of flat string maps — deliberately schema-light, because the fields a
-# scheduler wants are the scheduler's business and PBS or Kubernetes will want different ones.
-# `kind` says which; everything else is passed to the backend that claims it.
-const _CLU_MARK_OPEN = "# ╔═╡ Slate.clusters"
 
-# The fields a name means something for. Unknown keys round-trip untouched, so a backend can add its
-# own without this list moving.
-const _CLUSTER_KEYS = ("kind", "host", "root", "root_remote", "project", "payload", "prologue",
-                       "partition", "walltime", "cpus", "mem", "gpus", "nodes", "account", "qos",
-                       "chunk", "partitions", "max_walltime", "max_nodes", "julia", "note")
 
-function _render_clusters_footer(meta)::String
-    cs = get(meta, "clusters", nothing)
-    (cs isa AbstractVector && !isempty(cs)) || return ""
-    io = IOBuffer()
-    println(io, _CLU_MARK_OPEN, " · compute targets (⎈ on a sweep cell)")
-    for c in cs
-        nm = String(get(c, "name", ""))
-        isempty(nm) && continue
-        println(io, "#   [", nm, "]")
-        # Known keys first, in declaration order, so a diff of two clusters lines up; anything else
-        # after, sorted, so an unrecognised field still survives a round trip.
-        for k in _CLUSTER_KEYS
-            v = get(c, k, nothing)
-            (v === nothing || isempty(string(v))) && continue
-            println(io, "#   ", k, " = ", string(v))
-        end
-        for k in sort!(collect(setdiff(keys(c), Set([_CLUSTER_KEYS..., "name"]))))
-            v = c[k]
-            isempty(string(v)) && continue
-            println(io, "#   ", k, " = ", string(v))
-        end
-    end
-    print(io, _ENV_MARK_CLOSE)
-    return String(take!(io))
-end
-
-function _parse_clusters_footer(lines)::Vector{Dict{String,Any}}
-    out = Dict{String,Any}[]
-    incfg = false
-    cur = nothing
-    for l in lines
-        if startswith(l, _CLU_MARK_OPEN); incfg = true; continue; end
-        incfg || continue
-        startswith(l, _ENV_MARK_CLOSE) && break
-        mh = match(r"^#\s+\[([^\]]+)\]\s*$", l)
-        if mh !== nothing
-            cur = Dict{String,Any}("name" => String(mh.captures[1]))
-            push!(out, cur)
-            continue
-        end
-        cur === nothing && continue
-        m = match(r"^#\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$", l)
-        m === nothing && continue
-        cur[String(m.captures[1])] = String(m.captures[2])
-    end
-    return out
-end
 
 function _render_config_footer(meta)::String
     items = Tuple{String,String}[]
@@ -806,7 +740,6 @@ function serialize_report(report::Report)
     body = serialize_cells(report)
     # env footer FIRST (parse_env_footer breaks at the first close), then the config footer.
     parts = filter(!isempty, [_render_env_footer(get(report.meta, "env", Dict{String,Any}[])),
-                              _render_clusters_footer(report.meta),
                               _render_config_footer(report.meta)])
     isempty(parts) && return body
     return body * "\n" * join(parts, "\n") * "\n"
@@ -843,6 +776,7 @@ include(joinpath(@__DIR__, "defname.jl"))       # def-name extractor + source-tr
 include(joinpath(@__DIR__, "envprep.jl"))       # shared notebook-env prep policy (seed/dev-path/staleness; engine + worker + remote)
 include(joinpath(@__DIR__, "gate_kernel.jl"))   # GateKernel (used when Main.Kaimon present)
 include(joinpath(@__DIR__, "remote.jl"))        # RunTarget + remote worker (provision/sync/CURVE); uses gate_kernel helpers
+include(joinpath(@__DIR__, "clusters.jl"))      # named compute targets, kept with the machines (not per notebook); needs remote.jl's _slate_config_dir
 include(joinpath(@__DIR__, "peer_mesh.jl"))     # friend-group SSH mesh (introduce/teardown/peer_plan) for the :ssh blob bridge
 
 end # module ReportEngine

@@ -358,10 +358,14 @@ eval_capture(::InProcessKernel, report::Report, source::AbstractString, filename
                                                _cell_attr_args(report, filename),
                                                _cluster_attr_args(report)))
 
-_cluster_attr_args(report::Report) = String[
-    string(get(c, "name", ""), ".", k, "=", v)
-    for c in get(report.meta, "clusters", Dict{String,Any}[])
-    for (k, v) in c if k != "name" && !isempty(string(v)) && !isempty(String(get(c, "name", "")))]
+# From the machine's registry: a cluster is a machine, and the same one is referenced by every
+# notebook that names it and by any region on it.
+function _cluster_attr_args(::Report)
+    reg = try; clusters_all(); catch; Dict{String,Any}[]; end
+    return String[string(get(c, "name", ""), ".", k, "=", v)
+                  for c in reg
+                  for (k, v) in c if k != "name" && !isempty(string(v)) && !isempty(String(get(c, "name", "")))]
+end
 
 # The evaluating cell's `key=value` header attributes, in the same `"k=v"` shape the gate kernel
 # wires to the worker — so a cell reads the same `slate_context().attrs` either side.

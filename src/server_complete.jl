@@ -1241,6 +1241,27 @@ function _make_router(h::Hub)
         _json(Dict("ok" => true, "name" => r.name))
     end)
     # Delete a region: drain its warm workers first (best-effort), then drop the definition.
+    # ── Named compute targets ────────────────────────────────────────────────────────────────
+    # Machine-level, like regions: a cluster definition describes a MACHINE, and every notebook that
+    # references it by name reads the same one. (They used to live in each notebook's footer, which
+    # meant two notebooks against one cluster held two copies that drifted.)
+    HTTP.register!(router, "GET", "/api/clusters", _ ->
+        _json(Dict("clusters" => ReportEngine.clusters_all())))
+    HTTP.register!(router, "POST", "/api/clusters", req -> begin
+        b = _body(req)
+        name = strip(String(get(b, "name", "")))
+        isempty(name) && return _json(Dict("ok" => false, "error" => "need a cluster name"))
+        c = try; ReportEngine.cluster_set!(b); catch e
+            return _json(Dict("ok" => false, "error" => first(sprint(showerror, e), 200)))
+        end
+        _json(Dict("ok" => true, "name" => String(get(c, "name", name))))
+    end)
+    HTTP.register!(router, "POST", "/api/clusters/delete", req -> begin
+        name = strip(String(get(_body(req), "name", "")))
+        isempty(name) && return _json(Dict("ok" => false, "error" => "need a cluster name"))
+        _json(Dict("ok" => ReportEngine.cluster_delete!(name), "name" => name))
+    end)
+
     # What scheduler(s) a host has, so the region form knows whether to ask for a walltime and a
     # partition — and can offer the queues as a MENU rather than a blank box. Cached per host: it is
     # a round trip, and the answer rarely moves.
@@ -1476,28 +1497,15 @@ function _make_router(h::Hub)
         set_notebook_regions!(nb, strip(String(get(_body(req), "regions", ""))))
         _json(state_json(nb))
     end))
-    # The notebook's named compute targets (the `Slate.clusters` footer), edited from the ⚙ on a
-    # sweep cell. Replaces the whole list, so a rename is a single round trip. Cells reference a
-    # definition by name, so the new spec applies the next time a sweep cell runs — which is safe by
-    # construction: a sweep reconciles, and resources are not part of its key, so raising a walltime
-    # resumes rather than discarding the units that already finished.
-    HTTP.register!(router, "POST", "/api/{id}/clusters", req -> _withnb(h, req, nb -> begin
-        set_notebook_clusters!(nb, get(_body(req), "clusters", Any[]))
-        _json(state_json(nb))
-    end))
     # What a named cluster is DOING — its sweeps, what the scheduler says is live, how much output
     # is sitting in its store and how much has been read back. The hub owns the definition; the
     # WORKER owns the store view and the transfer ledger (cells read there), so this hands the spec
     # across and returns what comes back. Read-only, and off `nb.lock` like every kernel round trip.
     HTTP.register!(router, "GET", "/api/{id}/cluster-status", req -> _withnb(h, req, nb -> begin
         name = get(HTTP.queryparams(HTTP.URI(req.target)), "name", "")
-        spec = with_report(nb) do report
-            for c in get(report.meta, "clusters", Dict{String,Any}[])
-                String(get(c, "name", "")) == name && return Dict{String,Any}(c)
-            end
-            return nothing
-        end
-        spec === nothing && return _json(Dict("error" => "no cluster `$name` in this notebook"))
+        spec = ReportEngine.cluster_get(name)
+        spec === nothing &&
+            return _json(Dict("error" => "no compute target named `$name` on this machine"))
         r = try
             ReportEngine._tool(nb.kernel, "__slate_cluster_status",
                                Dict{String,Any}("name" => name, "spec" => spec))

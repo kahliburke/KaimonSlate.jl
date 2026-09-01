@@ -374,41 +374,55 @@ end
     @test rr.meta["env"][1]["name"] == "Foo"
 end
 
-@testset "cluster footer: notebook-level compute targets" begin
-    # A cluster is defined once for the notebook and referenced by name from any number of sweep
-    # cells, so it lives in the file rather than in a code cell: visible in a diff, and one edit
-    # moves every sweep that uses it.
+@testset "compute targets live with the machine" begin
+    # A cluster describes a MACHINE — host, scheduler, partition, where its scratch is — and a region
+    # on that cluster needs the same facts. Kept per notebook, two notebooks against one cluster held
+    # two copies that drifted, and a definition could not be reused without opening the file with it.
+    #
+    # The NAME is the contract, not the address: a notebook says `cluster=hpc` and each machine
+    # resolves that against its own registry — which is what lets one notebook run against a laptop's
+    # test cluster and a site's real one with no cell edited.
+    withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir()) do    # never touch the real registry
+        @test isempty(ReportEngine.clusters_all())
+        ReportEngine.cluster_set!(Dict("name" => "hpc", "kind" => "slurm", "host" => "login",
+                                       "root_remote" => "/scratch/cas", "partition" => "compute",
+                                       "note" => "shared with the imaging group"))
+        ReportEngine.cluster_set!(Dict("name" => "box", "kind" => "local", "root" => "/tmp/cas"))
+        got = ReportEngine.clusters_all()
+        @test [String(c["name"]) for c in got] == ["hpc", "box"]     # insertion order survives
+        @test got[1]["note"] == "shared with the imaging group"      # values may contain spaces
+        # Schema-light on purpose: the fields a scheduler wants are the scheduler's business, so an
+        # unknown key round-trips rather than being dropped.
+        ReportEngine.cluster_set!(Dict("name" => "k8s", "kind" => "kube", "namespace" => "research"))
+        @test ReportEngine.cluster_get("k8s")["namespace"] == "research"
+        # Upsert by name, not append.
+        ReportEngine.cluster_set!(Dict("name" => "hpc", "kind" => "slurm", "host" => "login2"))
+        @test length(ReportEngine.clusters_all()) == 3
+        @test ReportEngine.cluster_get("hpc")["host"] == "login2"
+        @test ReportEngine.cluster_get("nope") === nothing
+        @test ReportEngine.cluster_delete!("box") && ReportEngine.cluster_get("box") === nothing
+        @test !ReportEngine.cluster_delete!("box")                   # already gone
+        # A blank field means "the site's default", which is not an empty string forced into a job
+        # script — so it is dropped rather than stored.
+        ReportEngine.cluster_set!(Dict("name" => "hpc", "kind" => "slurm", "host" => "login2",
+                                       "partition" => "", "account" => "  "))
+        @test !haskey(ReportEngine.cluster_get("hpc"), "partition")
+        @test !haskey(ReportEngine.cluster_get("hpc"), "account")
+        # A name is written into a cell header as `cluster=<name>`, so one that could not be
+        # referenced there is rejected here instead of being silently unusable.
+        for bad in ("", "  ", "my cluster", "hpc.login", "2fast")
+            @test_throws ErrorException ReportEngine.cluster_set!(Dict("name" => bad, "kind" => "slurm"))
+        end
+    end
+
+    # A sweep cell names its target in its OWN header, which is notebook business and unchanged.
     r = parse_report("#%% sweep id=scan cluster=hpc walltime=04:00:00\nr = 1")
-    r.meta["clusters"] = [
-        Dict{String,Any}("name" => "hpc", "kind" => "slurm", "host" => "login",
-                         "root" => "/data/cas", "root_remote" => "/scratch/cas",
-                         "partition" => "compute", "walltime" => "02:00:00", "chunk" => "16",
-                         "note" => "shared with the imaging group"),
-        Dict{String,Any}("name" => "box", "kind" => "local", "root" => "/tmp/cas")]
-    r.meta["threads"] = "4,1"
-    r.meta["env"] = [Dict{String,Any}("name" => "Foo", "version" => "1.2.3", "uuid" => "abc")]
-    s = serialize_report(r)
-    @test occursin("Slate.clusters", s)
-
-    # All three footers coexist and none pollutes the others.
-    rr = parse_report(s)
-    @test rr.meta["threads"] == "4,1"
-    @test rr.meta["env"][1]["name"] == "Foo"
-    cs = rr.meta["clusters"]
-    @test [c["name"] for c in cs] == ["hpc", "box"]                  # declaration order survives
-    @test cs[1]["root_remote"] == "/scratch/cas" && cs[1]["chunk"] == "16"
-    @test cs[1]["note"] == "shared with the imaging group"           # values may contain spaces
-    @test cs[2]["kind"] == "local"
-
-    # The cells are untouched by the footer, and a sweep cell's own header attributes come back as
-    # configuration rather than as mangled tags.
-    @test length(rr.cells) == 1 && rr.cells[1].kind == ReportEngine.SWEEP
-    a = cell_attrs(rr.cells[1])
+    @test length(r.cells) == 1 && r.cells[1].kind == ReportEngine.SWEEP
+    a = cell_attrs(r.cells[1])
     @test a["cluster"] == "hpc" && a["walltime"] == "04:00:00"
-    @test occursin("cluster=hpc", s) && occursin("walltime=04:00:00", s)   # header round-trips
-
-    # No clusters → no footer at all.
-    @test !occursin("Slate.clusters", serialize_report(parse_report("#%% code id=a\nx = 1")))
+    s = serialize_report(r)
+    @test occursin("cluster=hpc", s) && occursin("walltime=04:00:00", s)
+    @test !occursin("Slate.clusters", s)                             # no footer is written at all
 end
 
 @testset "slate_fingerprint: canonical isequal semantics" begin

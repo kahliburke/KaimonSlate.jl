@@ -906,73 +906,26 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .swcfg-grid { display:grid; grid-template-columns:1fr 1fr; gap:7px 10px; }
 .swcfg-grid label { display:flex; flex-direction:column; gap:3px; min-width:0; }
 .swcfg-grid label > span { color:var(--dim); font-size:.68rem; }
-.swcfg-inp, .swcfg-grid input, .swcfgpop select, .cludlg input {
+.swcfg-inp, .swcfg-grid input, .swcfgpop select {
   width:100%; box-sizing:border-box; font-size:.78rem;
   font-family:'Cascadia Code',ui-monospace,monospace; padding:5px 8px; border-radius:7px;
   border:1px solid var(--border); background:var(--bg3); color:var(--text); }
-.swcfg-grid input::placeholder, .cludlg input::placeholder { color:var(--dim); opacity:.7; }
-.swcfg-grid input:focus, .swcfgpop select:focus, .cludlg input:focus {
+.swcfg-grid input::placeholder { color:var(--dim); opacity:.7; }
+.swcfg-grid input:focus, .swcfgpop select:focus {
   outline:none; border-color:var(--accent); }
 .swcfg-summary { margin:6px 0 8px; color:var(--val); font-size:.72rem; line-height:1.5;
   font-family:'Cascadia Code',ui-monospace,monospace; }
 .swcfg-empty { color:var(--dim); font-size:.76rem; font-style:italic; padding:4px 0; }
 .swcfg-note { margin:14px 0 0; color:var(--dim); font-size:.7rem; line-height:1.55; }
 .swcfg-actions { display:flex; gap:8px; margin-top:14px; }
-.swcfg-actions button, .swcfgpop .swcfg-edit, .cludlg button {
+.swcfg-actions button {
   background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:7px;
   padding:5px 12px; cursor:pointer; font-size:.78rem; font-family:inherit; }
-.swcfg-actions button:hover, .swcfgpop .swcfg-edit:hover, .cludlg button:hover {
+.swcfg-actions button:hover {
   border-color:var(--accent); color:var(--accent); }
-.swcfg-actions .swcfg-apply, .cludlg .cludlg-save {
+.swcfg-actions .swcfg-apply {
   background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }
-.swcfg-actions .swcfg-apply:hover, .cludlg .cludlg-save:hover { color:var(--bg); opacity:.9; }
-.swcfgpop .swcfg-edit { padding:4px 10px; font-size:.72rem; }
-
-/* ── The cluster editor ────────────────────────────────────────────────────────────────────────
-   Notebook-level compute targets. A modal, on Slate's shared `.modal-bg` geometry, because a
-   definition has a dozen fields and is edited rarely — unlike the per-cell overrides above. */
-.cludlg { position:fixed; inset:0; z-index:64; display:none; align-items:center;
-  justify-content:center; background:rgba(5,8,16,.66); }
-.cludlg.show { display:flex; }
-.cludlg-panel { width:min(780px,92vw); max-height:86vh; display:flex; flex-direction:column;
-  border:1px solid var(--border); border-radius:10px; background:var(--bg2); color:var(--text);
-  box-shadow:0 16px 48px rgba(0,0,0,.55); font-size:.8rem; }
-.cludlg-head { display:flex; align-items:baseline; gap:10px; padding:14px 18px;
-  border-bottom:1px solid var(--border); }
-.cludlg-head strong { color:var(--strong); font-size:.95rem; }
-.cludlg-sub { color:var(--dim); font-size:.72rem; }
-.cludlg-sub code { font-size:.72rem; color:var(--val);
-  font-family:'Cascadia Code',ui-monospace,monospace; }
-.cludlg-x { margin-left:auto; font-size:1.1rem; line-height:1; padding:2px 8px;
-  background:transparent; border:0; color:var(--dim); cursor:pointer; }
-.cludlg-x:hover { color:var(--red); }
-.cludlg-body { display:flex; min-height:0; flex:1; }
-.cludlg-list { width:224px; flex:none; padding:12px; border-right:1px solid var(--border);
-  overflow:auto; display:flex; flex-direction:column; gap:5px; }
-.cludlg-item { display:flex; flex-direction:column; gap:3px; align-items:flex-start;
-  text-align:left; font-family:inherit; font-size:.8rem; padding:7px 10px; border-radius:7px;
-  cursor:pointer; border:1px solid var(--border); background:var(--bg3); color:var(--text); }
-.cludlg-item:hover { border-color:var(--accent); color:var(--accent); }
-.cludlg-item.on { border-color:color-mix(in srgb, var(--accent) 60%, var(--border));
-  background:color-mix(in srgb, var(--accent) 12%, var(--bg3)); color:var(--strong); }
-.cludlg-name { font-weight:600; }
-.cludlg-sum { color:var(--dim); font-size:.68rem; line-height:1.45;
-  font-family:'Cascadia Code',ui-monospace,monospace; }
-.cludlg-item.on .cludlg-sum { color:var(--val); }
-.cludlg-add { border-style:dashed !important; color:var(--dim) !important; text-align:center;
-  display:block; width:100%; }
-.cludlg-add:hover { color:var(--accent) !important; }
-.cludlg-form { flex:1; padding:14px 18px; overflow:auto; min-width:0; }
-.cludlg-form .ctlsub { margin:14px 0 6px; color:var(--dim); font-size:.68rem; font-weight:600;
-  text-transform:uppercase; letter-spacing:.06em; }
-.cludlg-form .swcfg-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
-.cludlg-nm { display:flex; flex-direction:column; gap:3px; }
-.cludlg-nm > span { color:var(--dim); font-size:.68rem; }
-.cludlg-foot { padding:12px 18px; border-top:1px solid var(--border); margin-top:0;
-  align-items:center; }
-.cludlg-foot .cludlg-del { color:var(--red); border-color:#3a2030; }
-.cludlg-foot .cludlg-del:hover { background:rgba(229,117,117,.12); border-color:var(--red);
-  color:var(--red); }
+.swcfg-actions .swcfg-apply:hover { color:var(--bg); opacity:.9; }
 
 /* Animation player (animate(frames; …) → WebGL2 canvas + transport bar) */
 .anim:not(:empty) { padding:8px 10px; border-top:1px solid var(--border); }

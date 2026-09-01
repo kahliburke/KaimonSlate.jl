@@ -52,39 +52,8 @@ const humBytes = b => b == null ? '—' :
       ['chunk', 'units per job', 'how many units ride one scheduler job'],
     ]],
   ];
-  // `cluster` names a notebook-level definition; the rest override it for this cell only.
+  // `cluster` names a target from the machine's registry; the rest override it for this cell only.
   const KEYS = ['cluster', ...FIELDS.flatMap(([, fs]) => fs.map(f => f[0]))];
-
-  // A cluster DEFINITION. `kind` selects the backend — SLURM is what is real today, `local` runs
-  // the same cells with no scheduler, and PBS/Kubernetes are why this is a named string out of
-  // configuration rather than a Julia type written into a cell.
-  const CLUSTER_FIELDS = [
-    ['Where', [
-      ['kind',        'kind',          'slurm | local'],
-      ['host',        'ssh host',      'a login node from ~/.ssh/config; blank runs the client tools locally'],
-      ['root',        'store (local)', 'only used when there is no ssh host — a local run, or a store this notebook has mounted'],
-      ['root_remote', 'store (cluster)', 'the store ON the cluster. Put it on SCRATCH: $HOME is a few tens of GB and is not built for parallel writes'],
-      ['project',     'project',       'the package whose code the units call into'],
-      ['payload',     'task script',   "the task runner's path ON the cluster"],
-    ]],
-    ['Defaults', [
-      ['partition', 'partition', 'default queue'],
-      ['walltime',  'walltime',  'HH:MM:SS'],
-      ['cpus',      'cpus',      'per unit'],
-      ['mem',       'memory',    'per unit, e.g. 4G'],
-      ['gpus',      'gpus',      'per unit'],
-      ['nodes',     'nodes',     'per job'],
-      ['account',   'account',   'allocation to charge'],
-      ['qos',       'qos',       'quality of service'],
-      ['chunk',     'units/job', 'how many units ride one scheduler job'],
-    ]],
-    ['Notes', [
-      ['partitions',   'partitions',   'comma-separated, for reference'],
-      ['max_walltime', 'max walltime', "the site's limit, for reference"],
-      ['note',         'note',         'anything a reader should know'],
-    ]],
-  ];
-  const CLUSTER_KEYS = CLUSTER_FIELDS.flatMap(([, fs]) => fs.map(f => f[0]));
 
   const esc = s => String(s).replace(/[&<>"]/g, ch =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
@@ -128,7 +97,9 @@ const humBytes = b => b == null ? '—' :
     if (pop) pop.classList.remove('show');
   }
 
-  // `meta` is merged into the top level of the state the browser holds (same as `regions`).
+  // The machine's compute targets, mirrored into page state (same as `regions`). They are configured
+  // on the front page under Remotes → Compute targets: a target describes a machine, so it is shared
+  // by every notebook that names it rather than copied into each one.
   const clusters = () => (window.__slateState || window.nbState || {}).clusters || [];
   const clusterByName = n => clusters().find(c => c.name === n);
 
@@ -233,17 +204,18 @@ const humBytes = b => b == null ? '—' :
     const defs = clusters();
     const cur = spec.cluster || '';
     const sel = clusterByName(cur);
-    // The cluster is a NOTEBOOK-level definition referenced by name, so several sweep cells share
-    // one and moving the work is a single edit. The per-cell fields below only override it.
+    // The cell names a target; several sweep cells share one, and moving the work is a single edit.
+    // The per-cell fields below only override it.
     const picker =
       '<div class="ctlsub">Cluster</div>' +
       (defs.length
         ? `<select class="swcfg-cluster"><option value=""${cur ? '' : ' selected'}>— none —</option>` +
           defs.map(c => `<option value="${esc(c.name)}"${c.name === cur ? ' selected' : ''}>${esc(c.name)}</option>`).join('') +
           '</select>'
-        : '<div class="swcfg-empty">No clusters defined for this notebook yet.</div>') +
-      `<div class="swcfg-summary">${esc(clusterSummary(sel)) || (cur ? 'not defined in this notebook' : 'the cell must name a target itself')}</div>` +
-      '<button class="swcfg-edit">Edit clusters…</button>';
+        : '<div class="swcfg-empty">This machine has no compute targets yet.</div>') +
+      `<div class="swcfg-summary">${esc(clusterSummary(sel)) || (cur ? 'no target of that name on this machine' : 'the cell must name a target itself')}</div>` +
+      '<div class="swcfg-note">Targets are defined on the front page, under <strong>🖧 Remotes → Compute targets</strong> — ' +
+      'this notebook carries the name, each machine resolves it against its own.</div>';
 
     const settings = picker +
       FIELDS.map(([group, fs]) =>
@@ -280,7 +252,6 @@ const humBytes = b => b == null ? '—' :
     pop.querySelector('.swcfg-x').onclick = close;
     pop.querySelector('.swcfg-cancel').onclick = close;
     pop.querySelector('.swcfg-apply').onclick = () => apply(pop, id);
-    pop.querySelector('.swcfg-edit').onclick = () => { close(); openClusterEditor(cur); };
     const csel = pop.querySelector('.swcfg-cluster');
     if (csel) csel.onchange = () => {
       const c = clusterByName(csel.value);
@@ -314,108 +285,6 @@ const humBytes = b => b == null ? '—' :
     // Re-run so the new spec takes effect. Safe and cheap by construction: a sweep cell RECONCILES
     // — it submits only what is missing and never recomputes a unit that has already landed.
     if (window.runCell) window.runCell(id, true);
-  }
-
-  // ── The cluster editor ──────────────────────────────────────────────────────────────────────
-  // Definitions live on the NOTEBOOK (the `Slate.clusters` footer), so they are visible in a diff,
-  // travel with the file, and are referenced by name from any number of sweep cells.
-  let draft = null;   // the working copy; committed to the notebook on Save
-
-  window.openClusterEditor = function (select) {
-    draft = clusters().map(c => ({ ...c }));
-    let dlg = document.getElementById('cludlg');
-    if (!dlg) {
-      dlg = document.createElement('div');
-      dlg.id = 'cludlg';
-      dlg.className = 'cludlg';
-      document.body.appendChild(dlg);
-      dlg.addEventListener('mousedown', e => { if (e.target === dlg) closeClusters(); });
-      document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && dlg.classList.contains('show')) closeClusters();
-      });
-    }
-    dlg.dataset.sel = select || (draft[0] && draft[0].name) || '';
-    renderClusters(dlg);
-    dlg.classList.add('show');
-  };
-  function closeClusters() {
-    const d = document.getElementById('cludlg');
-    if (d) d.classList.remove('show');
-    draft = null;
-  }
-
-  function renderClusters(dlg) {
-    const sel = dlg.dataset.sel;
-    const c = draft.find(x => x.name === sel);
-    dlg.innerHTML = `<div class="cludlg-panel">
-      <div class="cludlg-head"><strong>Compute targets</strong>
-        <span class="cludlg-sub">defined once for this notebook · referenced from a sweep cell as <code>cluster=&lt;name&gt;</code></span>
-        <button class="cludlg-x" title="close">×</button></div>
-      <div class="cludlg-body">
-        <div class="cludlg-list">
-          ${draft.map(x => `<button class="cludlg-item${x.name === sel ? ' on' : ''}" data-n="${esc(x.name)}">
-              <span class="cludlg-name">${esc(x.name)}</span>
-              <span class="cludlg-sum">${esc(clusterSummary(x))}</span></button>`).join('')
-            || '<div class="swcfg-empty">none yet</div>'}
-          <button class="cludlg-add">＋ add cluster</button>
-        </div>
-        <div class="cludlg-form">${c ? clusterForm(c) : '<div class="swcfg-empty">Select or add a cluster.</div>'}</div>
-      </div>
-      <div class="swcfg-actions cludlg-foot">
-        ${c ? '<button class="cludlg-del">Delete</button>' : ''}
-        <span style="flex:1"></span>
-        <button class="swcfg-apply cludlg-save">Save to notebook</button>
-        <button class="cludlg-cancel">Cancel</button>
-      </div></div>`;
-
-    dlg.querySelector('.cludlg-x').onclick = closeClusters;
-    dlg.querySelector('.cludlg-cancel').onclick = closeClusters;
-    dlg.querySelectorAll('.cludlg-item').forEach(b => b.onclick = () => {
-      commitForm(dlg); dlg.dataset.sel = b.dataset.n; renderClusters(dlg);
-    });
-    dlg.querySelector('.cludlg-add').onclick = () => {
-      commitForm(dlg);
-      let n = 'cluster', i = 1;
-      while (draft.some(x => x.name === n)) n = 'cluster' + (++i);
-      draft.push({ name: n, kind: 'slurm' });
-      dlg.dataset.sel = n; renderClusters(dlg);
-    };
-    const del = dlg.querySelector('.cludlg-del');
-    if (del) del.onclick = () => {
-      draft = draft.filter(x => x.name !== dlg.dataset.sel);
-      dlg.dataset.sel = (draft[0] && draft[0].name) || '';
-      renderClusters(dlg);
-    };
-    dlg.querySelector('.cludlg-save').onclick = async () => {
-      commitForm(dlg);
-      const d = draft;
-      closeClusters();
-      window.renderAll(await window.api('POST', '/api/clusters', { clusters: d }));
-    };
-  }
-
-  function clusterForm(c) {
-    return `<label class="cludlg-nm"><span>name</span>
-        <input data-c="name" value="${esc(c.name || '')}" spellcheck="false"></label>` +
-      CLUSTER_FIELDS.map(([group, fs]) =>
-        `<div class="ctlsub">${group}</div><div class="swcfg-grid">` +
-        fs.map(([k, label, hint]) =>
-          `<label title="${esc(hint)}"><span>${esc(label)}</span>` +
-          `<input data-c="${k}" value="${esc(c[k] || '')}" placeholder="${esc(k === 'kind' ? 'slurm' : '')}" spellcheck="false"></label>`
-        ).join('') + '</div>').join('');
-  }
-
-  // Read the visible form back into the draft before anything re-renders, so switching clusters or
-  // adding one never silently discards what was just typed.
-  function commitForm(dlg) {
-    const c = draft.find(x => x.name === dlg.dataset.sel);
-    if (!c) return;
-    dlg.querySelectorAll('input[data-c]').forEach(inp => {
-      const k = inp.dataset.c, v = inp.value.trim();
-      if (k === 'name') { if (v) c.name = v; }
-      else if (v) c[k] = v; else delete c[k];
-    });
-    dlg.dataset.sel = c.name;
   }
 })();
 

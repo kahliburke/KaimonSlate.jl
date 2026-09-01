@@ -1163,15 +1163,18 @@ _ctx_args(report::Report, region::AbstractString, regions::AbstractVector,
     # walltime/partition/memory, which belong to the cell rather than to its code. Wired as
     # `"k=v"` strings because the gate's tool args carry no dict type.
     "ctx_attrs"    => _attr_args(report, filename),
-    # The notebook's named compute targets (the `Slate.clusters` footer), flattened to
-    # `"<cluster>.<key>=<value>"` so a sweep cell can say `cluster=hpc` and have the definition
-    # resolved where the sweep actually runs.
+    # This machine's named compute targets, flattened to `"<cluster>.<key>=<value>"` so a sweep cell
+    # can say `cluster=hpc` and have the definition resolved where the sweep actually runs.
     "ctx_clusters" => _cluster_args(report))
 
-_cluster_args(report::Report) = String[
-    string(get(c, "name", ""), ".", k, "=", v)
-    for c in get(report.meta, "clusters", Dict{String,Any}[])
-    for (k, v) in c if k != "name" && !isempty(string(v)) && !isempty(String(get(c, "name", "")))]
+# From the machine's registry: a cluster is a machine, and the same one is referenced by every
+# notebook that names it and by any region on it.
+function _cluster_args(::Report)
+    reg = try; clusters_all(); catch; Dict{String,Any}[]; end
+    return String[string(get(c, "name", ""), ".", k, "=", v)
+                  for c in reg
+                  for (k, v) in c if k != "name" && !isempty(string(v)) && !isempty(String(get(c, "name", "")))]
+end
 
 function _attr_args(report::Report, filename::AbstractString)
     cid = replace(String(filename), r"^cell:" => "")

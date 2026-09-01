@@ -1229,7 +1229,7 @@ function state_json(nb::LiveNotebook)
     meta["runLocationSession"] = get(nb.report.meta, "runon_session", "")    # the runtime session override ("" = none)
     meta["runLocationGlobal"] = RUNON_DEFAULT[]                              # the machine global default ("" = local)
     meta["regions"] = _regions_json(nb)                                     # declared per-cell destinations (regionon footer) → tag editor + DAG zones
-    meta["clusters"] = _clusters_json(nb)                                   # named compute targets (Slate.clusters footer) → the ⎈ on a sweep cell
+    meta["clusters"] = _clusters_json()                                     # this machine's compute targets → a sweep cell's cluster= picker
     meta["health"] = _health_json(nb)                                       # watchdog status + alerts (stall/runaway) → health panel
     meta["workers"] = _workers_json(nb)                                     # ACTIVE workers (main + each region) → topbar pills + log/status popup
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button

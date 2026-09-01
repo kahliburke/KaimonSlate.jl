@@ -627,9 +627,9 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
               # without touching Julia source. A batch sweep reads its walltime/partition/memory
               # here. Empty for any cell that declares none.
               attrs    = _attr_dict(attrs),
-              # The notebook's named compute targets (engine.jl's `Slate.clusters` footer). Defined
-              # once for the whole notebook and referenced by name from any number of sweep cells,
-              # so three cells that run on the same partition say so once.
+              # This machine's named compute targets (clusters.jl's registry), referenced by name
+              # from any number of sweep cells — so three cells on the same partition say so once,
+              # and the notebook carries the name rather than the address.
               clusters = _cluster_dict(clusters))
 end
 
