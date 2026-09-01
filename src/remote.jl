@@ -294,14 +294,54 @@ end
 # measured adopt-latency cost). ServerAlive here so WHOEVER wins master election still notices a dead
 # link and exits (its slaves then reconnect) — the liveness the supervised TUNNEL used to get from its
 # own dedicated connection, now provided by the shared master. Kill switch: KAIMONSLATE_NO_SSH_MUX=1.
-function _ssh_mux_opts()
-    get(ENV, "KAIMONSLATE_NO_SSH_MUX", "") == "1" && return String[]
+# ── Hosts you cannot reach directly ──────────────────────────────────────────────────────────
+# A cluster's compute nodes commonly accept connections only from its login node, and the node an
+# allocation lands on is not known until the scheduler grants it — so the route to it cannot live in
+# `~/.ssh/config`, which would have to name a host that does not exist yet.
+#
+# `-J` is ssh's own answer, and registering it per host means every path here picks it up: the
+# command builder, the tunnel, and rsync all read their options from `_ssh_mux_opts`.
+# What kind of host this is (a plain machine, or a scheduler's front door). Shared logic, this
+# module's transport — see `SchedulerDetect`.
+if !isdefined(@__MODULE__, :SchedulerDetect)
+    Base.include(@__MODULE__, joinpath(@__DIR__, "scheduler.jl"))
+end
+# ONE argv element holding the whole script: ssh concatenates its arguments and hands the result to
+# the remote login shell, so `sh -c <script>` arrives re-split and the shell chokes on the first
+# `then`. The script is already shell — send it as the command.
+_detect_scheduler(host::AbstractString) =
+    SchedulerDetect.detect(script -> _ssh_capture(host, Cmd(String[String(script)])))
+
+const _SSH_ROUTE = Dict{String,Vector{String}}()
+const _SSH_ROUTE_LOCK = ReentrantLock()
+
+"""
+    ssh_route!(host, jump) -> nothing
+
+Record that `host` is reachable only THROUGH `jump`. Set by whoever discovered the route — an
+allocation that just learned which node it got — because a hostname alone does not say how to
+get there. `jump = ""` forgets it.
+"""
+function ssh_route!(host::AbstractString, jump::AbstractString)
+    lock(_SSH_ROUTE_LOCK) do
+        isempty(jump) ? delete!(_SSH_ROUTE, String(host)) :
+                        (_SSH_ROUTE[String(host)] = ["-J", String(jump)])
+    end
+    return nothing
+end
+
+"The route options for `host` — empty when it is reachable directly."
+ssh_route(host::AbstractString) =
+    lock(_SSH_ROUTE_LOCK) do; copy(get(_SSH_ROUTE, String(host), String[])); end
+
+function _ssh_mux_opts(host::AbstractString = "")
+    get(ENV, "KAIMONSLATE_NO_SSH_MUX", "") == "1" && return ssh_route(host)
     # The SAME socket the batch fabric uses (`SshAuth.control_path`). A host that costs a password
     # and a second factor must cost them once, not once per subsystem — and a region on a cluster is
     # the same cluster the sweeps run on.
     # Empty when no path short enough for a Unix socket exists — then there is no shared master and
     # each connection stands alone, which is slower but works.
-    p = try; SshAuth.control_path(); catch; ""; end
+    p = try; SshAuth.control_path(String(host)); catch; ""; end
     isempty(p) && return String[]
     return ["-o", "ControlMaster=auto", "-o", "ControlPath=$p", "-o", "ControlPersist=$(_ssh_control_persist())",
             "-o", "ServerAliveInterval=$(_tunnel_alive_interval())", "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"]
@@ -316,7 +356,7 @@ function _rsync_ssh_opt()
 end
 
 _ssh(host, argv::Cmd) = (_ssh_connect!(host);
-    `ssh -o BatchMode=yes -o ConnectTimeout=$(_ssh_connect_timeout()) $(_ssh_mux_opts()) $host $argv`)
+    `ssh -o BatchMode=yes -o ConnectTimeout=$(_ssh_connect_timeout()) $(_ssh_mux_opts(host)) $host $argv`)
 
 # ── The one interactive connection ───────────────────────────────────────────────────────────
 # A region on a cluster that refuses public keys hits the same wall as the batch fabric: every call
@@ -341,7 +381,7 @@ const _SSH_FAIL_BACKOFF = 20.0
 
 function _ssh_connect!(host::AbstractString)
     isempty(host) && return true
-    opts = _ssh_mux_opts()
+    opts = _ssh_mux_opts(host)
     isempty(opts) && return true          # multiplexing off ⇒ no shared master to open
     now = time()
     lock(_SSH_CONNECT_LOCK) do
@@ -1821,10 +1861,31 @@ function preflight_remote(host::AbstractString; transport::Symbol = :tunnel, on_
     _rlog("═══ PREFLIGHT: $host (transport=$transport) ═══")
 
     s = _pfstep!(steps, "SSH reachable", on_step) do
-        _ssh_test(host, `true`) ? ("ok", "key-based ssh to '$host' works") :
-            ("fail", "cannot ssh to '$host' in BatchMode — check ~/.ssh/config Host + key auth (try `ssh $host` in a terminal)")
+        # Not "key-based": on a cluster that refuses keys this connection is riding a master someone
+        # authenticated with a password and a second factor, and saying otherwise would be wrong on
+        # exactly the hosts where it matters most.
+        _ssh_test(host, `true`) ? ("ok", "ssh to '$host' works") :
+            ("fail", "cannot ssh to '$host' — check ~/.ssh/config Host, and that it is authenticated (try `ssh $host` in a terminal)")
     end
     s.status == "ok" || return _pfresult(host, transport, steps)
+
+    # WHAT KIND of host this is, which decides what a region on it can even mean. A login node is
+    # not somewhere to run work: you ask its scheduler for a node and it tells you which one you
+    # got. Reported here so configuring a remote can ask for a walltime and a partition when those
+    # are real questions, and stay quiet when they are not.
+    _pfstep!(steps, "Scheduler", on_step) do
+        sch = try; _detect_scheduler(host); catch; nothing; end
+        sch === nothing && return ("warn", "could not ask $host what it runs — treating it as a plain machine")
+        sch.kind === :none && return ("skip", "no scheduler — an ordinary host, so a worker runs here directly")
+        parts = join((p.name for p in sch.partitions), ", ")
+        gpu = [p for p in sch.partitions if !isempty(p.gpus)]
+        # "can reach a scheduler", not "is a login node": compute nodes usually have the client
+        # tools too, and what matters here is whether an allocation can be requested from this host.
+        ("ok", string(sch.kind, isempty(sch.version) ? "" : " (" * sch.version * ")",
+                      " reachable — a region here can hold an ALLOCATION and run on the node it grants",
+                      isempty(parts) ? "" : "; partitions: " * parts,
+                      isempty(gpu) ? "" : " (" * string(length(gpu)) * " with GPUs)"))
+    end
 
     s = _pfstep!(steps, "Julia present", on_step) do
         _ensure_julia!(host) ||

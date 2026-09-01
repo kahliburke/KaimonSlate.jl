@@ -289,6 +289,67 @@ end
         end
     end
 
+    @testset "a host says whether it fronts a scheduler" begin
+        # What kind of host this is decides what a region on it MEANS, and so which questions its
+        # configuration should ask. A plain machine: ssh in and run. A scheduler's front door: ask
+        # for an allocation, and the node you get is an output, not a setting — so it needs a
+        # walltime, a partition, CPUs, maybe GPUs, and none of that belongs on a workstation.
+        SD = Sweep.SchedulerDetect
+        canned(out) = _ -> (true, out)
+
+        s = SD.detect(canned("""
+            KIND slurm
+            VERSION slurm-wlm 24.11.5
+            PART compute|(null)|infinite|up
+            PART gpu|gpu:a100:4|3-00:00:00|up
+            PART broken|(null)|1:00|down
+            """))
+        @test s.kind === :slurm && SD.is_cluster(s)
+        @test s.version == "slurm-wlm 24.11.5"
+        @test [p.name for p in s.partitions] == ["compute", "gpu", "broken"]
+        @test [p.name for p in SD.gpu_partitions(s)] == ["gpu"]     # only where GPUs exist
+        @test s.partitions[1].gpus == ""                            # "(null)" is not a GPU spec
+        @test s.partitions[2].maxtime == "3-00:00:00"               # the ceiling a walltime must fit
+        @test !s.partitions[3].up
+        @test occursin("with GPUs", sprint(show, s))
+
+        # PBS answers in its own words; the shape Slate needs is identical.
+        p = SD.detect(canned("KIND pbs\nVERSION pbs_version = 2022.1\nPART main|gpu:4|24:00:00|up\n"))
+        @test p.kind === :pbs && SD.is_cluster(p)
+        @test SD.has_gpu(only(p.partitions))
+
+        # An ordinary machine is a legitimate answer, not a failure — and so is being unreachable.
+        @test !SD.is_cluster(SD.detect(canned("KIND none\n")))
+        @test !SD.is_cluster(SD.detect(_ -> (false, "")))
+        @test !SD.is_cluster(SD.detect(_ -> error("host is down")))
+        @test occursin("not a cluster", sprint(show, SD.SchedulerInfo()))
+    end
+
+    @testset "an allocation names the node the scheduler picked" begin
+        # An interactive session needs a compute node, and which node is an OUTPUT of the
+        # allocation — not something a config file can hold. The scheduler answers with a
+        # compressed node list, so reading the first host out of one is the step between "the
+        # queue granted it" and "ssh there". Pure, hence testable with no cluster.
+        @test Sweep.first_node("c1") == "c1"                    # a bare name
+        @test Sweep.first_node("c[1-4]") == "c1"                # a range
+        @test Sweep.first_node("n[03,07]") == "n03"             # a list — zero padding preserved
+        @test Sweep.first_node("gpu[10-12,20]") == "gpu10"      # both, together
+        @test Sweep.first_node("c[2]") == "c2"                  # a range of one
+        @test Sweep.first_node("c1,c2") == "c1"                 # an uncompressed list
+        @test Sweep.first_node("  c5  ") == "c5"                # scheduler output is padded
+        @test Sweep.first_node("") == ""                        # nothing allocated yet
+
+        # An allocation that does not exist is a state, not an error: the caller decides whether to
+        # ask for one, and `alive` is the single question everything else turns on.
+        none = Sweep.Allocation("nm", "", :none, "", "")
+        @test !Sweep.alive(none)
+        @test !Sweep.alive(Sweep.Allocation("nm", "7", :pending, "", ""))    # queued, no node yet
+        @test !Sweep.alive(Sweep.Allocation("nm", "7", :running, "", ""))    # running but nameless
+        @test Sweep.alive(Sweep.Allocation("nm", "7", :running, "c1", "1:00"))
+        @test occursin("none", sprint(show, none))
+        @test occursin("on c1", sprint(show, Sweep.Allocation("nm", "7", :running, "c1", "1:00")))
+    end
+
     @testset "a sweep has an identity for what has landed" begin
         # The handle everything downstream needs. A sweep's value is not a function of its source,
         # so a reader's memo key has nothing to move with as units arrive — and keyed off source

@@ -538,6 +538,17 @@ chunk_key(run, i) = string(run, "_c", i)
 # parameters under the same body are the same unit however they were requested.
 run_key(sweep, keys) = string(sweep, "_r", first(_hex(join(keys, ",")), 10))
 
+# Whether a host fronts a scheduler at all — which decides what a region on it even means, and so
+# which questions its configuration should ask.
+Base.include(@__MODULE__, joinpath(@__DIR__, "scheduler.jl"))
+# …over the connection a sweep already uses.
+detect_scheduler(host::AbstractString) = SchedulerDetect.detect(s -> run_there(host, s))
+
+# Holding a piece of the machine, rather than submitting work to it — what an INTERACTIVE session on
+# a compute node needs. Included here because it speaks to the scheduler through the same target and
+# the same connection a sweep does.
+Base.include(@__MODULE__, joinpath(@__DIR__, "allocation.jl"))
+
 # ── Result ───────────────────────────────────────────────────────────────────────────────────
 
 """
