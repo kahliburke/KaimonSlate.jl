@@ -1399,17 +1399,33 @@ function _region_route(nb::LiveNotebook, cell::Cell)
     return (_side_kernel!(nb, side), side)
 end
 
+# How long the first cell on a scheduler region waits for a node before saying the queue is busy.
+# Long enough that a test cluster or an idle partition just works; short enough that a busy one
+# reports rather than hangs the run. The allocation is not cancelled either way — the next run
+# attaches to it by name.
+_alloc_wait_s() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_ALLOC_WAIT", "")), 180.0)
+
 # The notebook's kernel for region `name`, created lazily from its footer spec (spawn/adopt
 # happens at its first prepare!, so a warm-pool worker makes this ~1s). Label carries the
 # region so the worker roster + attach records distinguish kernels.
 function _region_kernel!(nb::LiveNotebook, name::String)
     lock(_REGION_LOCK) do
-        k = get(_REGION_KERNELS, (nb.id, name), nothing)
-        k === nothing || return k
         r = ReportEngine.region_get(name)
         r === nothing && error("region '$name' is not defined — create it in the registry: " *
                                "region(\"$name\"; host=…, warm=…) or the home-page Regions manager")
         isempty(r.host) && error("region '$name' has no host — set one in the Regions manager")
+        k = get(_REGION_KERNELS, (nb.id, name), nothing)
+        # A cached kernel names a HOST, and on a scheduler region that host is an allocation that
+        # can expire. When the next one lands on a different node the old kernel points at a machine
+        # we no longer hold, so it is dropped and rebuilt rather than retried forever.
+        if k !== nothing
+            tgt = k.target
+            if !(tgt isa ReportEngine.RemoteTarget) || tgt.ssh_host == ReportEngine.region_host(r)
+                return k
+            end
+            ReportEngine._rlog("region: '$name' moved off $(tgt.ssh_host) — rebuilding its kernel")
+            delete!(_REGION_KERNELS, (nb.id, name))
+        end
         proj = Base.current_project(dirname(abspath(nb.path)))
         parent = proj === nothing ? "" : dirname(proj)   # notebook's own /src synced for hot-reload provenance
         # The region worker replicates the NOTEBOOK's exact env — its own fork env if it has one, else the
@@ -1419,8 +1435,22 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         envdir = ReportEngine.notebook_env_dir(nb.path)
         origin_env = isfile(joinpath(envdir, "Project.toml")) ? envdir :
                      (!isempty(parent) && isfile(joinpath(parent, "Project.toml")) ? parent : "")
-        target = ReportEngine._region_target(r; origin_env = origin_env)   # transport/datadir/region from the def; env = the notebook's
-        ReportEngine._rlog("region: kernel '$name' for $(nb.id) → $(r.host) ($(r.transport))" *
+        # Where the worker goes. On a scheduler region `r.host` is the front door, not the address:
+        # this asks for (or reattaches to) an allocation and comes back with the granted node. It
+        # blocks, deliberately — a cell tagged for this region has nowhere to run until there is a
+        # node, and a queue wait is the honest answer rather than a silent fall back to the login
+        # node, which is shared, small, and usually against the rules to compute on.
+        host = r.host
+        if r.scheduler !== :none
+            host, alloc = ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
+            isempty(host) && error("region '$name': $(r.host) has not granted a node yet " *
+                                   "($(alloc === nothing ? "no allocation" : string(alloc.state)))" *
+                                   ". The request stands — run the cell again when it starts.")
+            ReportEngine._rlog("region: '$name' allocated $(host) via $(r.host) (job $(alloc === nothing ? "?" : alloc.id))")
+        end
+        target = ReportEngine._region_target(r; origin_env = origin_env, host = host)   # transport/datadir/region from the def; env = the notebook's
+        ReportEngine._rlog("region: kernel '$name' for $(nb.id) → $host ($(r.transport))" *
+                           (host == r.host ? "" : " via $(r.host)") *
                            (isempty(r.data_root) ? "" : " root=$(r.data_root)"))
         k = ReportEngine.GateKernel(target.project; parent = parent, target = target,
                                     label = basename(abspath(nb.path)) * "#" * name)

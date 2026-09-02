@@ -84,14 +84,47 @@ function sysNote(name, checked, editing) {
   return html`<div class="rppsysstat"><span class="pddim">will be built in the background on the next worker start</span><button class="rppsysbtn" title="build it now (detached on the host)" onClick=${() => buildSysimage(name)}>Build now</button></div>`;
 }
 
+// ── the allocation a scheduler region is holding ────────────────────────────────────
+// Worth its own row rather than a line in a status message: an allocation bills for the time it is
+// HELD, not the time it is used, so what is being held — and the way to give it back — should be
+// where you are already looking, not something to remember.
+const alloc = signal({});   // region name -> payload | null (asking) | undefined (never asked)
+function loadAlloc(name, force = false) {
+  if (!name || (!force && alloc.value[name] !== undefined)) return;
+  alloc.value = { ...alloc.value, [name]: null };
+  fetch('/api/allocation?region=' + encodeURIComponent(name)).then(r => r.json())
+    .then(d => { alloc.value = { ...alloc.value, [name]: d || { ok: false } }; })
+    .catch(() => { alloc.value = { ...alloc.value, [name]: { ok: false, error: 'unreachable' } }; });
+}
+async function releaseAlloc(name) {
+  if (!await confirmP('Release the allocation held for “' + name + '”?\nWorkers on that node go with it; the next cell asks the scheduler for a new one.', 'Release', 'danger')) return;
+  await fetch('/api/allocation/release', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ region: name }) }).catch(() => {});
+  loadAlloc(name, true); loadRegions();
+}
+function AllocationRow(name) {
+  if (!name || fSched.value === 'none') return null;
+  const a = alloc.value[name];
+  if (a === undefined) return null;   // the seed effect asks; render never triggers a fetch
+  const body =
+    a === null ? html`<span class="pddim"><span class="hydspin"></span> asking ${focusHost.value}…</span>`
+    : !a.ok ? html`<span class="pddim">${a.error || 'unavailable'}</span>`
+    : a.state === 'running' ? html`<span class="rppsysok">✓ node <code>${a.node}</code>${a.timeleft ? ' · ' + a.timeleft + ' left' : ''} · job ${a.id}</span>
+        <button class="rppsysbtn" title="give the node back now — it bills for the time it is held" onClick=${() => releaseAlloc(name)}>Release</button>`
+    : a.state === 'pending' ? html`<span class="pddim"><span class="hydspin"></span> queued as job ${a.id} — a cell on this region waits for it</span>
+        <button class="rppsysbtn" title="withdraw the request" onClick=${() => releaseAlloc(name)}>Cancel</button>`
+    : html`<span class="pddim">nothing held — the first cell on this region asks for a node</span>`;
+  return html`<div class="rpprow"><label>Allocation</label><div class="rppsysbox">${body}
+    <button class="rppsysbtn" title="ask the scheduler again" onClick=${() => loadAlloc(name, true)}>↻</button></div></div>`;
+}
+
 // ── components ──────────────────────────────────────────────────────────────────────
 function RegionList() {
   const h = focusHost.value, regs = regionsOn(h), e = editRegion.value, newSel = !(e && e.name);
   return html`<div>
     <div class="rppreglist">
       ${regs.map(r => html`<div class=${'rppregrow' + (e && e.name === r.name ? ' sel' : '')} onClick=${() => editRegion.value = r}>
-        <span class="rppregname">🖧 ${r.name}</span>
-        <span class="rppregmeta">warm ${+r.warm || 0} · ${r.transport || 'tunnel'}${r.sysimage ? ' · ⚙ sysimage' : ''}${r.data_root ? ' · root ' + r.data_root : ''}</span>
+        <span class="rppregname">${(r.scheduler && r.scheduler !== 'none') ? '⎈' : '🖧'} ${r.name}</span>
+        <span class="rppregmeta">${(r.node && r.node !== r.host) ? 'on ' + r.node + ' · ' : ''}warm ${+r.warm || 0} · ${r.transport || 'tunnel'}${r.sysimage ? ' · ⚙ sysimage' : ''}${r.data_root ? ' · root ' + r.data_root : ''}</span>
         ${(r.status && !r.status.ok) ? html`<span class="rppregst err">⚠ ${r.status.msg}</span>` : null}
         <button class="rppregdel" title="delete this region (reaps its warm workers)" onClick=${ev => { ev.stopPropagation(); deleteRegion(h, r.name); }}>✕</button></div>`)}
       <div class=${'rppregrow rppregnew' + (newSel ? ' sel' : '')} title="create a new region on this host" onClick=${() => editRegion.value = null}>
@@ -110,6 +143,7 @@ function Editor() {
     <div class="rpprow"><label>Preload</label><input class="rpppre" autocomplete="off" placeholder="/path/to/project  (folder with Project.toml)" value=${fPre.value} onInput=${ev => fPre.value = ev.target.value}/></div>
     <div class="rpprow"><label>Data root</label><input class="rpproot" autocomplete="off" placeholder="/scratch  (a path ON THE HOST)" value=${fRoot.value} onInput=${ev => fRoot.value = ev.target.value}/></div>
     ${SchedulerRows()}
+    ${AllocationRow(editing ? e.name : '')}
     <div class="rpprow"><label>Transport</label>
       <select class="rpptr" value=${fTr.value} onChange=${ev => fTr.value = ev.target.value}><option value="tunnel">tunnel</option><option value="direct">direct</option></select>
       ${fTr.value === 'direct' ? html`<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" value=${fPort.value} onInput=${ev => fPort.value = ev.target.value}/>` : null}</div>
@@ -212,6 +246,8 @@ effect(() => {   // seed the editor form from the selected region (or blank for 
   rmsg.value = null;
 });
 effect(() => { const e = editRegion.value; if (e && e.name && focusHost.value) loadSysimage(e.name); });   // editing → fetch build status
+// editing a scheduler region → ask the login node what it is holding for us
+effect(() => { const e = editRegion.value; if (e && e.name && e.scheduler && e.scheduler !== 'none') loadAlloc(e.name); });
 // Resolve a pending region-by-name (set by openRegionConfig) once this host's regions have loaded.
 effect(() => {
   const name = pendingRegion.value, h = focusHost.value; if (!name || !h) return;

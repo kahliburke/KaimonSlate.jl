@@ -3289,12 +3289,20 @@ for the first and not the second.
 """
 function region_reap!(r::Union{Region,Nothing}, name)
     if r !== nothing && !isempty(r.host)
+        # Where its workers actually are — the allocated node for a scheduler region. Read-only, so
+        # deleting a region that never got a node does not queue for one on the way out.
+        h = region_host(r)
         try
-            for w in list_remote_workers(r.host)
-                _region_warm_worker(w, r.name) && reap_remote_worker(r.host, w["port"])
+            for w in list_remote_workers(h)
+                _region_warm_worker(w, r.name) && reap_remote_worker(h, w["port"])
             end
         catch e
             _rlog("region[$(r.name)]: drain-on-delete failed ($(sprint(showerror, e)))")
+        end
+        # The allocation outlives the workers on it and bills the whole time, so this is the step
+        # that must not be skipped — and it goes through the LOGIN node, which is still reachable.
+        try; region_release!(r); catch e
+            _rlog("region[$(r.name)]: release-on-delete failed ($(first(sprint(showerror, e), 120)))")
         end
     end
     # Peer-mesh artifacts (keypair, authorized_keys grants, host-key pins) are enumerated by tag from
@@ -3374,12 +3382,122 @@ _remote_env_key(origin_env, parent) = _proj_key(isempty(String(origin_env)) ? pa
 # region reclaims it on adoption. For a :direct region, `port` carries base_port as the range HINT —
 # fresh_spawn allocates a free slot from it (see _direct_port_slots) so the kernel lands in the
 # firewall-opened range, not the growing auto counter.
-_region_target(r::Region; origin_env::AbstractString = r.preload) =
-    RemoteTarget(r.host; transport = r.transport,
+_region_target(r::Region; origin_env::AbstractString = r.preload, host::AbstractString = region_host(r)) =
+    RemoteTarget(host; transport = r.transport,
         project = "~/.cache/kaimonslate/remote/" * _proj_key(origin_env),
         port = (r.transport === :direct ? r.base_port : 0),
         origin_env = origin_env, datadir = r.data_root, cache_root = r.cache_root, region = r.name,
         sysimage = r.sysimage, curve = r.curve)
+
+# ── Where a region's workers actually go ─────────────────────────────────────────────────────
+# For an ordinary machine that is `r.host` and there is nothing to decide. For a region whose host
+# is a cluster's front door it is not: `r.host` is where you ASK, and the answer — which compute
+# node you were given — exists only after asking. So placement is a step, not a field.
+#
+# The node is cached hub-side because everything downstream (the roster, the launch, the tunnel,
+# rsync) needs the same answer many times over, and asking the scheduler is a round trip. It is
+# cached against the allocation's job id, so an allocation that expired and was re-granted on a
+# different node invalidates it rather than pointing workers at a node we no longer hold.
+const _REGION_PLACE = Dict{String,NamedTuple{(:host, :job, :ts),Tuple{String,String,Float64}}}()
+const _REGION_PLACE_LOCK = ReentrantLock()
+const _PLACE_TTL = 20.0        # how long a placement is trusted without re-asking the scheduler
+
+"The job name an allocation for this region is found by — the same one on every reopen, which is what lets a notebook ATTACH to the allocation it was already using instead of queueing for a second."
+region_alloc_name(r::Region) = isempty(r.alloc_name) ? "slate-" * r.name : r.alloc_name
+
+"""
+    region_scheduler(r) -> Symbol
+
+Which scheduler this region actually uses: `:none`, or `:slurm`/`:pbs`. `:auto` asks the host what
+it has — a stored `:slurm` is honoured even when detection finds nothing, because the client tools
+may sit behind a `module load` that a probe cannot see.
+"""
+function region_scheduler(r::Region)
+    r.scheduler === :auto || return r.scheduler
+    h = try; _detect_scheduler(r.host); catch; nothing; end
+    return h === nothing ? :none : SchedulerDetect.resolve(h, :auto)
+end
+
+"""
+    region_host(r) -> String
+
+Where this region's workers live RIGHT NOW, without asking for anything. `r.host` for an ordinary
+region; the cached allocated node for a scheduler one, or `r.host` when no allocation is held —
+which is deliberate: a read-only caller (the roster, the UI) must never cause a queue submission.
+"""
+function region_host(r::Region)
+    r.scheduler === :none && return r.host
+    p = lock(_REGION_PLACE_LOCK) do; get(_REGION_PLACE, r.name, nothing); end
+    return p === nothing ? r.host : p.host
+end
+
+"""
+    region_place!(r; wait_s = 120) -> (host, allocation)
+
+Resolve where this region's workers go, ASKING the scheduler if it must. Returns the host to use
+and the `Allocation` behind it (`nothing` when the region needs none).
+
+A `:pending` allocation returns `("", alloc)`: the queue has not granted a node, which is a cluster
+being busy rather than a failure — the caller reports it and reconciles again later.
+"""
+function region_place!(r::Region; wait_s::Real = 120)
+    kind = region_scheduler(r)
+    kind === :none && return (r.host, nothing)
+    kind === :slurm || Sweep._unsupported_scheduler(kind)
+    isempty(r.host) && error("region '$(r.name)' has a scheduler but no host to ask")
+    name = region_alloc_name(r)
+    cached = lock(_REGION_PLACE_LOCK) do; get(_REGION_PLACE, r.name, nothing); end
+    if cached !== nothing && time() - cached.ts < _PLACE_TTL
+        return (cached.host, nothing)
+    end
+    a = Sweep.allocation_node!(r.host, name; wait_s = wait_s, walltime = _alloc_walltime(r),
+                               partition = r.partition, cpus = r.cpus, mem = r.mem,
+                               gpus = r.gpus, account = r.account)
+    if !Sweep.alive(a)
+        lock(_REGION_PLACE_LOCK) do; delete!(_REGION_PLACE, r.name); end
+        return ("", a)
+    end
+    # A compute node is normally not reachable from here at all — only through the login node. Record
+    # that before anything tries to ssh to it, because a hostname alone does not say how to get there.
+    ssh_route!(a.node, r.host)
+    lock(_REGION_PLACE_LOCK) do
+        _REGION_PLACE[r.name] = (host = a.node, job = a.id, ts = time())
+    end
+    return (a.node, a)
+end
+
+# An allocation with no walltime is one the site's default decides the cost of. An hour is the
+# conventional interactive default and is what the region form seeds; this is only the backstop for
+# a record written before the field existed.
+_alloc_walltime(r::Region) = isempty(r.walltime) ? "01:00:00" : r.walltime
+
+"""
+    region_release!(r) -> Bool
+
+Give the region's allocation back. An allocation bills for the time it is HELD, not the time it is
+used, so this runs whenever a region stops needing a node — draining to zero warm workers, or being
+deleted — and not only when someone remembers.
+"""
+function region_release!(r::Region)
+    r.scheduler === :none && return false
+    held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
+    held === nothing || ssh_route!(held.host, "")
+    return try
+        Sweep.release_allocation!(r.host, region_alloc_name(r))
+    catch e
+        _rlog("region[$(r.name)]: releasing the allocation failed ($(first(sprint(showerror, e), 120)))")
+        false
+    end
+end
+
+"Whether this hub has a node placed for the region — purely local, no round trip."
+_region_holds_node(r::Region) =
+    lock(_REGION_PLACE_LOCK) do; haskey(_REGION_PLACE, r.name); end
+
+"The allocation this region is holding, for the UI. Read-only — it never asks for one."
+region_allocation(r::Region) =
+    r.scheduler === :none ? nothing :
+    try; Sweep.find_allocation(r.host, region_alloc_name(r)); catch; nothing; end
 
 # In-flight adoption claims (hub-local). Without a claim two notebooks opening at once could both scan
 # the roster, see the same idle worker, and both adopt it.
@@ -3452,17 +3570,49 @@ function region_reconcile!(name)
     end
 end
 
-# Reconcile every region that keeps warm workers — the hub's desired-state driver.
+# Reconcile every region that keeps warm workers — the hub's desired-state driver. A region holding
+# a scheduler allocation is included whatever its warm count, because for those "nothing to do" is
+# not the same as "nothing to pay for": a node with no workers left on it should be given back, and
+# this sweep is the only thing that would ever notice.
 reconcile_all_regions!() = for r in regions()
-    r.warm > 0 && (try; region_reconcile!(r.name); catch; end)
+    (r.warm > 0 || _region_holds_node(r)) && (try; region_reconcile!(r.name); catch; end)
+end
+
+# Anything of ours still running where this region is currently placed. Consulted before letting an
+# allocation go: `warm = 0` means "keep none READY", not "kill the one a notebook is attached to".
+# Read-only — it uses the cached placement, so it never asks the scheduler for a node in order to
+# decide whether to give one back.
+function _region_has_live_workers(r::Region)
+    h = region_host(r)
+    isempty(h) && return false
+    return any(list_remote_workers(h)) do w
+        w["alive"] === true && _manifest_get(w["manifest"], "region") == r.name &&
+            _manifest_get(w["manifest"], "hub") == gethostname()
+    end
 end
 
 # Reap this region's dead workers + idlers of an old preload env/transport, launch the deficit (one
 # provision pass covers them all), trim excess idlers. Never touches an attached worker, a claimed
 # worker, or another region's workers. Wrapped by `region_reconcile!`, which records the outcome.
 function _region_reconcile_impl!(r::Region)
+    # Where the workers go. On a scheduler region this ASKS — and may come back with nothing, because
+    # a queue that has not granted a node yet is a cluster being busy, not an error. Draining to zero
+    # is the one case that must not ask: "keep no workers here" is also "stop holding a node".
     host = r.host
-    t = _region_target(r)
+    if r.scheduler !== :none
+        # Draining to zero is the one case that must not ask for a node: "keep no workers here" is
+        # also "stop holding one". Only when we know we are holding something — a region that never
+        # got a node has nothing to give back, and a `scancel` per tick to say so is a round trip
+        # spent on nothing.
+        if r.warm <= 0 && _region_holds_node(r) && !_region_has_live_workers(r)
+            region_release!(r)
+            return "region[$(r.name)]: nothing left to keep here — allocation released"
+        end
+        host, alloc = region_place!(r)
+        isempty(host) && return "region[$(r.name)]: waiting on $(r.host) for a node" *
+                                (alloc === nothing ? "" : " ($(alloc.state))")
+    end
+    t = _region_target(r; host = host)
     roster = list_remote_workers(host)
     mine = [w for w in roster
             if _manifest_get(w["manifest"], "region") == r.name &&

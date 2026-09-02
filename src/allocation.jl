@@ -40,13 +40,14 @@ Base.show(io::IO, a::Allocation) =
 alive(a::Allocation) = a.state === :running && !isempty(a.node)
 
 """
-    find_allocation(target, name) -> Allocation
+    find_allocation(host, name) -> Allocation
 
-What the scheduler is holding under this job name. One `squeue` call, so it is cheap enough to ask
-before every use — which is the point, because an allocation can expire between two cells.
+What the scheduler is holding under this job name. `host` is where the scheduler's client tools are
+— a login node, or `""` for this machine. One `squeue` call, so it is cheap enough to ask before
+every use, which is the point: an allocation can expire between two cells.
 """
-function find_allocation(t::SweepTarget, name::AbstractString)
-    ok, out = run_there(sched_host(t), "squeue -h -n " * shq(name) * " -o '%i|%T|%N|%L' 2>/dev/null")
+function find_allocation(host::AbstractString, name::AbstractString)
+    ok, out = run_there(host, "squeue -h -n " * shq(name) * " -o '%i|%T|%N|%L' 2>/dev/null")
     ok || return Allocation(String(name), "", :none, "", "")
     for line in split(strip(out), '\n')
         f = split(strip(line), '|')
@@ -80,7 +81,7 @@ function first_node(s::AbstractString)
 end
 
 """
-    request_allocation!(target, name; resources...) -> Allocation
+    request_allocation!(host, name; resources...) -> Allocation
 
 Ask for an allocation and return once the scheduler has decided, or `:pending` if it has not yet.
 `--no-shell` because Slate wants the RESERVATION, not a login session on it: the worker gets there
@@ -88,38 +89,41 @@ over ssh, and a shell nobody is attached to would just be something else to clea
 
 Idempotent by name: an allocation that already exists is returned rather than duplicated.
 """
-function request_allocation!(t::SweepTarget, name::AbstractString;
+function request_allocation!(host::AbstractString, name::AbstractString;
                              walltime::AbstractString = "01:00:00",
                              partition::AbstractString = "",
                              cpus::Integer = 1, mem::AbstractString = "",
-                             gpus::AbstractString = "", extra::AbstractString = "")
-    cur = find_allocation(t, name)
+                             gpus::AbstractString = "", account::AbstractString = "",
+                             extra::AbstractString = "")
+    cur = find_allocation(host, name)
     cur.state === :none || return cur
-    args = String["--no-shell", "-J", shq(name), "-t", shq(walltime), "-n", string(cpus)]
+    args = String["--no-shell", "-J", shq(name), "-t", shq(walltime)]
+    cpus > 0 && append!(args, ["-n", string(cpus)])
     isempty(partition) || append!(args, ["-p", shq(partition)])
     isempty(mem)       || append!(args, ["--mem", shq(mem)])
     isempty(gpus)      || append!(args, ["--gpus", shq(gpus)])
+    isempty(account)   || append!(args, ["-A", shq(account)])
     isempty(extra)     || push!(args, extra)
-    ok, out = run_there(sched_host(t), "salloc " * join(args, " ") * " 2>&1")
+    ok, out = run_there(host, "salloc " * join(args, " ") * " 2>&1")
     ok || @debug "salloc failed" out
-    return find_allocation(t, name)
+    return find_allocation(host, name)
 end
 
 """
-    release_allocation!(target, name) -> Bool
+    release_allocation!(host, name) -> Bool
 
 Give it back. Worth doing the moment the interactive work is done: an allocation bills for the time
 it is held, not the time it is used, and the commonest way to waste a cluster is to forget one.
 """
-function release_allocation!(t::SweepTarget, name::AbstractString)
-    a = find_allocation(t, name)
+function release_allocation!(host::AbstractString, name::AbstractString)
+    a = find_allocation(host, name)
     a.state === :none && return false
-    ok, _ = run_there(sched_host(t), "scancel -n " * shq(name) * " 2>&1")
+    ok, _ = run_there(host, "scancel -n " * shq(name) * " 2>&1")
     return ok
 end
 
 """
-    allocation_node!(target, name; wait_s = 120, resources...) -> Allocation
+    allocation_node!(host, name; wait_s = 120, resources...) -> Allocation
 
 The whole flow: attach to an allocation under this name, or ask for one, then wait for it to be
 running so its node is known. This is what a region on a compute node has to call before it can
@@ -128,20 +132,24 @@ say where the worker goes.
 Returns a `:pending` allocation if the queue has not granted it within `wait_s` — which is not a
 failure, just a cluster that is busy; the caller polls again later rather than giving up.
 """
-function allocation_node!(t::SweepTarget, name::AbstractString; wait_s::Real = 120, kw...)
-    a = request_allocation!(t, name; kw...)
+function allocation_node!(host::AbstractString, name::AbstractString; wait_s::Real = 120, kw...)
+    a = request_allocation!(host, name; kw...)
     alive(a) && return a
     deadline = time() + wait_s
     while time() < deadline
         sleep(2)
-        a = find_allocation(t, name)
+        a = find_allocation(host, name)
         alive(a) && return a
         a.state === :none && return a          # it went away — do not spin on nothing
     end
     return a
 end
 
-# Where the scheduler's client tools live. For a SLURM target that is the login node; a local target
-# runs them here.
-sched_host(t::SlurmTarget) = t.host
-sched_host(::LocalTarget) = ""
+# PBS holds a node the same way in principle and with entirely different commands (`qsub`/`qstat`/
+# `qdel`, and no `--no-shell` equivalent — the usual trick is a job that just sleeps out its
+# walltime). Detection already reports PBS, so a region can be CONFIGURED for it; erroring here is
+# how it stays honest about the half that does not exist rather than issuing SLURM commands to a
+# scheduler that has never heard of them.
+_unsupported_scheduler(kind) =
+    error("this build allocates on SLURM only; `$kind` is detected and configurable, but its " *
+          "allocation commands are not implemented")

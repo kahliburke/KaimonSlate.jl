@@ -1190,12 +1190,36 @@ function _make_router(h::Hub)
                  "scheduler" => String(r.scheduler), "partition" => r.partition,
                  "walltime" => r.walltime, "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus,
                  "account" => r.account, "alloc_name" => r.alloc_name,
+                 # Where the workers actually ARE. For a scheduler region that is the granted node,
+                 # and it is the thing worth showing — `host` is only where the asking happens.
+                 # Read from the hub's cached placement: listing regions must never queue for a node.
+                 "node" => ReportEngine.region_host(r),
                  # Last reconcile outcome — so a silent background spawn failure is visible.
                  "status" => st === nothing ? nothing :
                              Dict("ok" => st.ok, "msg" => st.msg, "age" => round(Int, time() - st.ts)))
         end for r in ReportEngine.regions()],
         "parked" => [Dict("host" => p.host, "label" => p.label, "port" => p.port,
                           "idle_s" => p.idle_s) for p in ReportEngine.parked_wires()])))
+    # What a scheduler region is HOLDING, and the button that gives it back. Separate from
+    # /api/regions because it costs a round trip to the login node, and because an allocation bills
+    # for the time it is held — so it wants to be visible on its own and lettable-go on demand.
+    HTTP.register!(router, "GET", "/api/allocation", req -> begin
+        name = get(HTTP.queryparams(HTTP.URI(req.target)), "region", "")
+        r = ReportEngine.region_get(name)
+        r === nothing && return _json(Dict("ok" => false, "error" => "no region `$name`"))
+        r.scheduler === :none && return _json(Dict("ok" => true, "scheduler" => "none"))
+        a = ReportEngine.region_allocation(r)
+        a === nothing && return _json(Dict("ok" => false, "error" => "could not reach $(r.host)"))
+        _json(Dict("ok" => true, "scheduler" => String(r.scheduler), "job_name" => a.name,
+                   "id" => a.id, "state" => String(a.state), "node" => a.node,
+                   "timeleft" => a.timeleft, "via" => r.host))
+    end)
+    HTTP.register!(router, "POST", "/api/allocation/release", req -> begin
+        name = strip(String(get(_body(req), "region", "")))
+        r = ReportEngine.region_get(name)
+        r === nothing && return _json(Dict("ok" => false, "error" => "no region `$name`"))
+        _json(Dict("ok" => ReportEngine.region_release!(r), "region" => r.name))
+    end)
     # Create/update a named region (full-record upsert) and reconcile toward its warm count. The def is
     # persisted synchronously (fast, durable); the reconcile — which may provision a cold host for minutes —
     # runs in the background so the request returns at once. Re-runnable: it reconciles toward `warm`.

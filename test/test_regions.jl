@@ -68,4 +68,39 @@ const RE = KaimonSlate.ReportEngine
         end
     end
 
+    @testset "a region on a cluster is placed, not addressed" begin
+        # For an ordinary machine `host` IS where the worker goes. For a cluster's front door it is
+        # only where you ASK — the node is an output of the allocation — so placement is a step, and
+        # the read-only view must never take that step (listing regions cannot queue for a node).
+        withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir()) do
+            plain = RE.region_set!("plain"; host = "workstation")
+            @test RE.region_scheduler(plain) === :none
+            @test RE.region_host(plain) == "workstation"
+            @test RE.region_place!(plain) == ("workstation", nothing)
+            @test !RE.region_release!(plain)              # nothing was ever held
+
+            # A scheduler region with no allocation yet reads as its login node and holds nothing —
+            # the honest answer for a UI, and the reason `region_host` is separate from `region_place!`.
+            gpu = RE.region_set!("gpu"; host = "login", scheduler = :slurm, walltime = "00:30:00",
+                                 partition = "gpus", gpus = "1")
+            @test RE.region_scheduler(gpu) === :slurm
+            @test RE.region_host(gpu) == "login"
+            # The job name is stable across reopens — that is what lets a notebook ATTACH to the
+            # allocation it was already using instead of queueing for a second one.
+            @test RE.region_alloc_name(gpu) == "slate-gpu"
+            @test RE.region_alloc_name(RE.region_set!("named"; host = "login", scheduler = :slurm,
+                                                      alloc_name = "mine")) == "mine"
+            # A record written before the walltime field existed still gets an end time: an
+            # allocation with none is the one nobody notices they are still paying for.
+            @test RE._alloc_walltime(RE.region_set!("nowall"; host = "login", scheduler = :slurm)) == "01:00:00"
+            @test RE._alloc_walltime(gpu) == "00:30:00"
+            # Nothing is held until a node is granted, so the idle sweep has nothing to give back —
+            # and must not spend a `scancel` per tick saying so.
+            @test !RE._region_holds_node(gpu)
+            # Configurable for PBS, and honest that it cannot allocate there.
+            pbs = RE.region_set!("pbs"; host = "login", scheduler = :pbs)
+            @test_throws ErrorException RE.region_place!(pbs)
+        end
+    end
+
 end
