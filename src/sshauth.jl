@@ -48,7 +48,31 @@ own connection would be the wrong answer twice over.
 
 `%C` rather than a hash of our own: ssh expands it, and it already distinguishes the things that
 make connections different (user, host, port) which a hash of the host string alone does not.
+
+    control_path(host) -> String
+
+The socket to use for `host`, preferring one the USER has already configured.
+
+If `~/.ssh/config` sets a `ControlPath` for this host, that is the answer: overriding it would give
+Slate a private socket beside the user's, so a host would be authenticated twice — and, worse, a
+`ProxyJump` through it would authenticate a THIRD time. A jump is a separate ssh process that reads
+the config and knows nothing about flags we passed, so the only way it can ride an existing master
+is if the config names it. That is exactly the case on a cluster whose compute nodes are reachable
+only through a login node.
+
+Falls back to Slate's own path when the user has configured none.
 """
+function control_path(host::AbstractString)
+    isempty(host) && return control_path()
+    p = try
+        g = read(pipeline(`ssh -G $host`; stderr = devnull), String)
+        m = match(r"^controlpath\s+(.+)$"m, g)
+        m === nothing ? "" : strip(m.captures[1])
+    catch; ""; end
+    (isempty(p) || lowercase(p) == "none") && return control_path()
+    return p
+end
+
 function control_path()
     # A control socket is a Unix domain socket, so the WHOLE path has to fit in `sockaddr_un`: 104
     # bytes on macOS, 108 on Linux. `%C` expands to 40 hex characters and ssh appends a ~17-char

@@ -56,10 +56,16 @@ end
 
 # The socket is SHARED with the regions and with anything else that reaches a host — see
 # `SshAuth.control_path`. A cluster that costs a 2FA prompt must cost exactly one.
-_ctl_path(host) = SshAuth.control_path()
+_ctl_path(host) = SshAuth.control_path(String(host))
 
 function ssh_opts(host)
-    o = String["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
+    # `ConnectTimeout` bounds only the TCP handshake, which is not where this hangs. The way a
+    # cluster call actually stops coming back is a session that connected and then went silent —
+    # the host rebooted, a container stopped, the laptop changed networks — and with multiplexing
+    # the socket keeps answering, so the call has something to ride and waits on it forever. The
+    # keepalives are what put a ceiling on that: ~60s, then the call fails and can be retried.
+    o = String["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+               "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4"]
     p = _ctl_path(host)
     # No usable socket path ⇒ no multiplexing. Every call then authenticates on its own, which is
     # slower and, on a cluster that wants a second factor, prompts every time — but it is honest,
@@ -141,8 +147,14 @@ function open_master!(host::AbstractString; timeout::Real = 300)
     # A socket left behind by a dead connection would make ssh refuse to open a new master, and the
     # prompt below is the expensive thing here — do not spend it on a connection that cannot form.
     clear_stale_master!(host)
+    # Keepalives are not an optimisation here. A master whose far end goes away — the cluster
+    # rebooted, a container stopped, a laptop changed networks — leaves a socket that still ANSWERS
+    # `ssh -O check`, so every later call looks like it has a connection to ride and then blocks
+    # forever on a TCP session nobody is on the other end of. With these, ssh notices and the master
+    # exits, and the next call opens a fresh one (a 2FA prompt, but a prompt beats a hang).
     cmd = `ssh -M -N -f -o BatchMode=no -o NumberOfPasswordPrompts=1
                -o ControlMaster=auto -o ControlPath=$ctl
+               -o ServerAliveInterval=15 -o ServerAliveCountMax=4
                -o ControlPersist=$(_control_persist()) -o ConnectTimeout=30 $host`
     buf = IOBuffer()
     ok = try
@@ -215,6 +227,25 @@ function run_there(host::AbstractString, script::AbstractString)
     buf = IOBuffer()
     ok = try; run(pipeline(cmd; stdout = buf, stderr = buf)); true; catch; false; end
     return (ok, String(take!(buf)))
+end
+
+"""
+    drop_master!(host) -> Bool
+
+Tear down the multiplexed master for `host`, so the next call opens a fresh one.
+
+The way back from the state where a socket answers `ssh -O check` but the session behind it is gone:
+ssh's keepalives normally end that on their own, but a master opened by an older build (or by hand)
+has none, and every call that rides it waits on a connection nobody is on the other end of. Also
+what "log out" means — the master IS the authenticated session.
+"""
+function drop_master!(host::AbstractString)
+    isempty(host) && return false
+    return try
+        success(pipeline(`ssh -O exit $(ssh_opts(host)) $host`; stdout = devnull, stderr = devnull))
+    catch
+        false
+    end
 end
 
 # ── Syncing the metadata ─────────────────────────────────────────────────────────────────────
