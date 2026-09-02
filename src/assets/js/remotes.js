@@ -14,6 +14,7 @@ import { useEffect } from 'preact/hooks';
 import { modalOpen, focusHost, editRegion, regions, loadRegions } from './stores.js';
 import { RunOnPicker, loadRunon, rememberRemote, forgetHost, setDefaultHost, allHosts, sshHosts, sshGlobal } from './hoststore.js';
 import { Focus } from './remotes-focus.js';
+import { Clusters, loadClusters, clusters } from './clusters.js';
 
 // ── host-setup form state ──────────────────────────────────────────────────────────────
 const host = signal('');           // #rthost value
@@ -80,14 +81,15 @@ function TestSteps() {
 }
 
 function KnownHosts() {
-  const all = allHosts.value, glob = sshGlobal.value, ssh = sshHosts.value, regs = regions.value;
+  const all = allHosts.value, glob = sshGlobal.value, ssh = sshHosts.value, regs = regions.value, cls = clusters.value;
   if (!all.length) return html`<div class="rthosts"><div class="pddim" style="margin-top:6px">No remotes yet — test one above to add it.</div></div>`;
   const nreg = h => regs.filter(r => r.host === h).length;
+  const ncl = h => cls.filter(c => c.host === h).length;   // batch targets submitting through this host
   return html`<div class="rthosts"><div class="rthhead">Known remotes</div>
     ${all.map(h => {
-      const isDef = h === glob, isCustom = ssh.indexOf(h) < 0, n = nreg(h);
+      const isDef = h === glob, isCustom = ssh.indexOf(h) < 0, n = nreg(h), nc = ncl(h);
       return html`<div class=${'rthrow' + (isDef ? ' isdef' : '')}>
-        <span class="rthname" role="button" title="use this remote" onClick=${() => host.value = h}>${isDef ? '★' : '🖧'} ${h}${isDef ? html` <em>(default)</em>` : null}${isCustom ? html` <em>(custom)</em>` : null}${n ? html` <em>(${n} region${n > 1 ? 's' : ''})</em>` : null}</span>
+        <span class="rthname" role="button" title="use this remote" onClick=${() => host.value = h}>${isDef ? '★' : '🖧'} ${h}${isDef ? html` <em>(default)</em>` : null}${isCustom ? html` <em>(custom)</em>` : null}${n ? html` <em>(${n} region${n > 1 ? 's' : ''})</em>` : null}${nc ? html` <em>(${nc} ⎈)</em>` : null}</span>
         <span class="rthbtns">
           <button class="rthexp" title="regions & live workers on this host" onClick=${() => { editRegion.value = null; focusHost.value = h; }}>Regions ›</button>
           ${isDef
@@ -108,7 +110,7 @@ function Modal() {
     if (!bg) return;
     bg.classList.toggle('show', open);
     if (!open) { closeES(); return; }
-    loadRegions(); loadXfer(); loadRunon();
+    loadRegions(); loadXfer(); loadRunon(); loadClusters();
     if (!focusHost.value) { const hi = document.getElementById('rthost'); hi && hi.focus(); }
     const onKey = e => {
       if (e.key !== 'Escape') return;   // the worker-detail popup (activity.js) handles its own Esc first (capture-phase)
@@ -138,7 +140,8 @@ function Modal() {
     <div class="rtactions"><button class="primary" onClick=${runTest}>🩺 Test & prime</button></div>
     <div class="rtsteps"><${TestSteps}/></div>
     <${KnownHosts}/>
-    <div class="rthhead" style="margin-top:14px">Data transfer (all notebooks)</div>
+    <${Clusters}/>
+    <div class="rthhead" style="margin-top:16px">Data transfer (all notebooks)</div>
     <div class="imrow"><label title="MB sent per round-trip when cached results move to a remote worker. Transfers ride their own channel, so this never delays cell results — it sets the round-trip granularity: smaller chunks bound per-chunk timeouts and let an abort land sooner on a slow uplink; bigger ones move data faster on a good link. Blank = default.">Transfer chunk size</label>
       <span class="rttr"><input id="rtxchunk" class="rtportin" type="number" min="0.1" step="0.5" placeholder=${x.effective_chunk_mb} value=${x.chunk_mb > 0 ? x.chunk_mb : ''} onChange=${commitXfer}/> <span class="pddim">MB / round-trip</span></span></div>
     <div class="imrow"><label title="When a notebook attaches to a remote worker, cached results are carried over only when moving them beats recomputing them — and never if one entry would take longer than this to transfer (the cell just recomputes remotely). The sync_memo tool always pushes everything. Blank = default.">Carry time budget</label>
@@ -160,5 +163,14 @@ const im = document.getElementById('imrunon-mount'); if (im) render(html`<${RunO
 loadRunon();   // populate the pickers on page load (independent of the modal being opened)
 
 // Open on the topbar button (data loads in Modal's open-effect). Resets the setup form to a clean list view.
+function openRemotes() {
+  focusHost.value = ''; editRegion.value = null; steps.value = null;
+  port.value = ''; stream.value = ''; host.value = '';
+  modalOpen.value = true;
+}
 const btn = document.getElementById('remotesbtn');
-if (btn) btn.onclick = () => { focusHost.value = ''; editRegion.value = null; steps.value = null; port.value = ''; stream.value = ''; host.value = ''; modalOpen.value = true; };
+if (btn) btn.onclick = openRemotes;
+
+// `/#remotes` opens straight into the manager, so a notebook's ☰ menu can send you here for the
+// compute target a sweep cell names — it is configured with the machines, not in the notebook.
+if (location.hash === '#remotes') openRemotes();

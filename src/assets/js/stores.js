@@ -26,6 +26,19 @@ export function loadRegions() {
     .then(d => { regions.value = (d && d.regions) || []; parked.value = (d && d.parked) || []; }).catch(() => {});
 }
 
+// What scheduler(s) a host has, keyed by host: `undefined` = never asked, `null` = asking,
+// `{kinds, suggested, partitions}` = answered. Shared because a region on a cluster and a batch
+// target on the same cluster ask the identical question, and it is a round trip — the region form
+// and the compute-target form should not each pay for it.
+export const schedInfo = signal({});
+export function loadScheduler(h) {
+  if (!h || schedInfo.value[h] !== undefined) return;
+  schedInfo.value = { ...schedInfo.value, [h]: null };
+  fetch('/api/scheduler?host=' + encodeURIComponent(h)).then(r => r.json())
+    .then(d => { schedInfo.value = { ...schedInfo.value, [h]: d || { kinds: [] } }; })
+    .catch(() => { schedInfo.value = { ...schedInfo.value, [h]: { kinds: [] } }; });
+}
+
 // Open the Remotes modal focused on a host with a specific region selected in its editor. Called by the
 // activity monitor (a region group / worker-detail row) and the known-hosts list. The focus island's
 // effects resolve pendingRegion → editRegion once that host's regions have loaded.

@@ -4,7 +4,7 @@
 // worker-row click sets the shared `detail` so the activity.js popup shows it. Reuses the .rtf*/.rpp* CSS.
 import { html } from 'htm/preact';
 import { signal, effect } from '@preact/signals';
-import { detail, focusHost, editRegion, pendingRegion, regions, parked, loadRegions } from './stores.js';
+import { detail, focusHost, editRegion, pendingRegion, regions, parked, loadRegions, schedInfo, loadScheduler } from './stores.js';
 import { hostTransport } from './hoststore.js';
 
 const roster  = signal({});    // host -> workers[] | undefined (loading)
@@ -18,8 +18,6 @@ const fName = signal(''), fWarm = signal(0), fPre = signal(''), fRoot = signal('
 // granted, not chosen. These are what the request needs.
 const fSched = signal('none'), fPart = signal(''), fWall = signal(''), fCpus = signal(''),
       fMem = signal(''), fGpus = signal(''), fAcct = signal('');
-// What the host reports it has: {kinds:[...], suggested, partitions:{slurm:[...],...}}. null until asked.
-const schedInfo = signal({});
 
 const pj = (s) => { try { return JSON.parse(s || '{}'); } catch (_) { return {}; } };
 const fmtB = (b) => (b = +b || 0, b < 1024 ? b + 'B' : b < 1048576 ? Math.round(b / 1024) + 'KB' : b < 1073741824 ? Math.round(b / 1048576) + 'MB' : (b / 1073741824).toFixed(1) + 'GB');
@@ -28,15 +26,6 @@ const regionsOn = (h) => regions.value.filter(r => r.host === h);
 const confirmP = (msg, ok, cls) => (window.confirmDark ? window.confirmDark(msg, ok, cls) : Promise.resolve(window.confirm(msg)));
 
 // ── data ──────────────────────────────────────────────────────────────────────────
-// Ask the host what scheduler(s) it has, so the form can offer the right fields — and a partition
-// MENU rather than a blank box. Cached per host: it is a round trip, and the answer rarely moves.
-function loadScheduler(h) {
-  if (!h || schedInfo.value[h] !== undefined) return;
-  schedInfo.value = { ...schedInfo.value, [h]: null };            // null = asking
-  fetch('/api/scheduler?host=' + encodeURIComponent(h)).then(r => r.json())
-    .then(d => { schedInfo.value = { ...schedInfo.value, [h]: d || { kinds: [] } }; })
-    .catch(() => { schedInfo.value = { ...schedInfo.value, [h]: { kinds: [] } }; });
-}
 function fetchRoster(h) { fetch('/api/remote-workers?host=' + encodeURIComponent(h)).then(r => r.json()).then(d => { roster.value = { ...roster.value, [h]: (d && d.workers) || [] }; }).catch(() => { roster.value = { ...roster.value, [h]: [] }; }); }
 function loadSysimage(name) { fetch('/api/sysimage?region=' + encodeURIComponent(name)).then(r => r.json()).then(d => { sysd.value = { ...sysd.value, [name]: d }; if (d && d.ok && d.building) setTimeout(() => loadSysimage(name), 4000); }).catch(() => {}); }
 function buildSysimage(name) {
