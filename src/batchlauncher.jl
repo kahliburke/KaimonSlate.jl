@@ -186,21 +186,29 @@ end
 # never needs that mapping back: per-chunk progress comes from the status directory, and per-shard
 # completion comes from the store.
 struct SlurmLauncher <: Launcher
-    host::String                 # ssh target for the login node; "" runs the client tools locally
+    host::String                 # the login node; "" runs the client tools locally
     account::String
     qos::String
-    ssh_opts::Vector{String}
+    runner::Any                  # (host, script) -> (ok, output); the caller's authenticated session
 end
+# The default runner is a plain local shell, which is what the tests use and what running ON a login
+# node needs. Anything reaching a remote cluster passes its own.
 SlurmLauncher(host = ""; account = "", qos = "",
-              ssh_opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]) =
-    SlurmLauncher(String(host), String(account), String(qos), String.(ssh_opts))
+              runner = (h, sc) -> _local_run(sc)) =
+    SlurmLauncher(String(host), String(account), String(qos), runner)
+
+function _local_run(script::AbstractString)
+    buf = IOBuffer()
+    ok = try; run(pipeline(`sh -c $script`; stdout = buf, stderr = buf)); true; catch; false; end
+    return (ok, String(take!(buf)))
+end
 
 # An empty host means the SLURM client tools are on THIS machine, which is the case when Slate runs
 # on a login node (a common enough deployment that it should not need a loopback ssh) and when the
 # reconciler itself runs inside the cluster. Everything else about the backend is identical, so the
 # two cases differ only in how a command is wrapped.
-_ssh(l::SlurmLauncher, script::AbstractString) =
-    isempty(l.host) ? `sh -c $script` : `ssh $(l.ssh_opts) $(l.host) $script`
+# Returns `(ok, output)` — the runner is the caller's authenticated session, not a Cmd.
+_ssh(l::SlurmLauncher, script::AbstractString) = l.runner(l.host, String(script))
 
 function _run_capture(cmd::Cmd)
     buf = IOBuffer()
@@ -251,7 +259,7 @@ function submit!(l::SlurmLauncher, spec::JobSpec)
     $(script)SLATE_SBATCH_EOF
     sbatch --parsable $(indexfile).sbatch
     """
-    ok, out = _run_capture(_ssh(l, payload))
+    ok, out = (_ssh(l, payload))
     ok || error("sbatch failed on $(l.host): $(strip(out))")
     return strip(split(strip(out), '\n')[end])
 end
@@ -262,7 +270,7 @@ function poll(l::SlurmLauncher, root::AbstractString, names)
     out = Dict{String,Symbol}(n => :unknown for n in ns)
     # One call for every name. squeue lists only live jobs, so anything absent stays :unknown and
     # the store decides whether that means finished or lost.
-    ok, txt = _run_capture(_ssh(l, "squeue -h -o '%j %T' --name=$(join(ns, ','))"))
+    ok, txt = (_ssh(l, "squeue -h -o '%j %T' --name=$(join(ns, ','))"))
     ok || return out
     for line in split(txt, '\n'; keepempty = false)
         parts = split(strip(line))
@@ -293,13 +301,13 @@ function cancel!(l::SlurmLauncher, root::AbstractString, names)
     before = poll(l, root, ns)
     live = [n for n in ns if get(before, n, :unknown) in (:pending, :running)]
     isempty(live) && return 0
-    _run_capture(_ssh(l, join(("scancel --name=$(n)" for n in live), "; ")))
+    (_ssh(l, join(("scancel --name=$(n)" for n in live), "; ")))
     after = poll(l, root, live)
     return count(n -> !(get(after, n, :unknown) in (:pending, :running)), live)
 end
 
 function logs(l::SlurmLauncher, root::AbstractString, name::AbstractString; lines::Int = 200)
-    ok, txt = _run_capture(_ssh(l,
+    ok, txt = (_ssh(l,
         "tail -n $(lines) $(joinpath(root, "logs"))/$(name).*.out 2>/dev/null"))
     return ok ? txt : ""
 end
@@ -312,7 +320,7 @@ whether a shard is done is a question for the store, since `sacct` needs site-co
 and may return nothing at all.
 """
 function explain_failure(l::SlurmLauncher, name::AbstractString)
-    ok, txt = _run_capture(_ssh(l,
+    ok, txt = (_ssh(l,
         "sacct -n -X --name=$(name) -o JobID,State,ExitCode,Elapsed,MaxRSS 2>/dev/null"))
     return ok ? txt : ""
 end

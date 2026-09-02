@@ -162,6 +162,19 @@ function put_dir(host::AbstractString, localdir::AbstractString, dest::AbstractS
     return first(run_io(host, script, take!(out)))
 end
 
+"""
+    forward!(host, localport, target, targetport) -> (ok, message)
+
+Carry `localport` here to `target:targetport` over the session already open to `host`. No new
+connection, so no second prompt.
+"""
+forward!(host::AbstractString, localport::Integer, target::AbstractString, targetport::Integer) =
+    connect!(host) ? SshTransport.forward!(String(host), localport, String(target), targetport; ask = _noask) :
+                     (false, "not connected to $host")
+
+"Stop carrying `localport`."
+unforward!(host::AbstractString, localport::Integer) = SshTransport.unforward!(String(host), localport)
+
 "End the session for `host`. The next call authenticates again — this is what logging out means."
 function disconnect!(host::AbstractString)
     isempty(host) && return false

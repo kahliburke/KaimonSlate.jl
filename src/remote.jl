@@ -208,63 +208,42 @@ function _probe_tcp(host::AbstractString, port::Integer; timeout::Float64 = 4.0)
 end
 
 """
-    Tunnel — a supervised `ssh -L` forward set. Respawns the SSH process if it drops
-    (autossh-lite), so the ZMQ client's reconnect survives a network blip.
+    Tunnel — a set of local ports carried over the host's session by `direct_tcpip`. No process of
+    its own, and no connection of its own, so it costs no second authentication.
 """
 mutable struct Tunnel
     host::String
-    forwards::Vector{Tuple{Int,Int}}   # (local_port, remote_port) — remote side is 127.0.0.1
-    proc::Union{Base.Process,Nothing}
+    forwards::Vector{Tuple{Int,Int}}   # (local_port, remote_port)
+    proc::Union{Base.Process,Nothing}  # unused since the forwards moved onto the session
     running::Bool
     task::Union{Task,Nothing}
+    remote::String                     # the target host AS THE FAR SIDE SEES IT
 end
 
+# The forwards ride the session (`direct_tcpip`), so a tunnel costs no connection of its own and no
+# second authentication. `remote` is the target as the FAR SIDE sees it: "127.0.0.1" for a worker on
+# the host itself, or a compute node's name when the session is on the login node that can reach it.
 function _run_tunnel!(t::Tunnel)
-    while t.running
-        lflags = String[]
-        for (lp, rp) in t.forwards
-            push!(lflags, "-L", "$(lp):127.0.0.1:$(rp)")
-        end
-        # STILL an ssh subprocess: the port forward has no equivalent in the session until
-        # `direct_tcpip` lands, so this authenticates on its own and a gated host prompts for it.
-        # ServerAlive so a dead link ends the process — we respawn on the SAME local ports and the
-        # ZMQ client reconnects. stdin=devnull so background `ssh -N` doesn't exit on inherited EOF.
-        alive = ["-o", "ServerAliveInterval=$(_tunnel_alive_interval())",
-                 "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"]
-        cmd = `ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes $alive $lflags $(t.host)`
-        try
-            t.proc = Base.run(pipeline(cmd; stdin = devnull, stdout = devnull, stderr = devnull); wait = false)
-            wait(t.proc)
-        catch
-        end
-        t.proc = nothing
-        t.running || break
-        sleep(_tunnel_respawn_backoff())
+    ok = true
+    for (lp, rp) in t.forwards
+        good, why = Sweep.forward!(t.host, lp, t.remote, rp)
+        good || (ok = false; _rlog("tunnel: $(t.host) $lp→$(t.remote):$rp failed — $why"))
     end
+    t.running = ok
     return nothing
 end
 
-function open_tunnel(host::AbstractString, forwards)
-    t = Tunnel(String(host), collect(Tuple{Int,Int}, forwards), nothing, true, nothing)
-    t.task = Threads.@spawn _run_tunnel!(t)
+function open_tunnel(host::AbstractString, forwards; remote::AbstractString = "127.0.0.1")
+    t = Tunnel(String(host), collect(Tuple{Int,Int}, forwards), nothing, true, nothing, String(remote))
+    _run_tunnel!(t)
     return t
 end
 
 function close_tunnel(t::Tunnel)
     t.running = false
-    p = t.proc
-    p === nothing || (try; kill(p); catch; end)
-    return nothing
-end
-
-# Kill orphaned slate ssh procs (the `ssh -N -L` tunnel forwards + whichever won ControlMaster election)
-# left by a PRIOR hub instance that exited without cleanup — an extension restart SIGKILLs the hub, orphaning
-# its child `ssh -N`, which then accumulate across restarts. They all carry the slate mux ControlPath, so
-# match on it. Called ONCE at hub startup BEFORE this instance opens any tunnel, so every match is a stale
-# orphan. Best-effort (needs `pkill`; a leftover forward is harmless, just untidy).
-function _reap_orphan_ssh!()
-    d = joinpath(_slate_cache_dir(), "mux")
-    try; run(pipeline(`pkill -9 -f $("ControlPath=" * d)`; stdout = devnull, stderr = devnull)); catch; end
+    for (lp, _) in t.forwards
+        try; Sweep.unforward!(t.host, lp); catch; end
+    end
     return nothing
 end
 
@@ -272,55 +251,28 @@ end
 # Every remote op captures its output and LOGS on failure — provisioning must NEVER fail silently
 # (that opacity is exactly what makes a remote spawn undebuggable).
 
-# SSH connection multiplexing: every remote op here is a separate ssh/scp/rsync exec, each paying
-# a full connection setup (key exchange + auth — hundreds of ms on a LAN, seconds on a WAN)
-# before doing any work. ControlMaster makes the first connection per host the master and every
-# later exec/forward a ~10ms slave through its socket — compounding across the many round-trips of
-# provision/spawn/probe/detach AND the gate/stream/data FORWARDS. `auto` self-heals (a dead socket
-# falls back to a fresh connection); ControlPersist keeps the master warm past the last session so a
-# detach→reattach or a warm-worker ADOPT rides it instantly instead of a fresh ~5s WAN handshake (the
-# measured adopt-latency cost). ServerAlive here so WHOEVER wins master election still notices a dead
-# link and exits (its slaves then reconnect) — the liveness the supervised TUNNEL used to get from its
-# own dedicated connection, now provided by the shared master. Kill switch: KAIMONSLATE_NO_SSH_MUX=1.
-# ── Hosts you cannot reach directly ──────────────────────────────────────────────────────────
-# A cluster's compute nodes commonly accept connections only from its login node, and the node an
-# allocation lands on is not known until the scheduler grants it — so the route to it cannot live in
-# `~/.ssh/config`, which would have to name a host that does not exist yet.
-#
-# `-J` is ssh's own answer, and registering it per host means every path here picks it up: the
-# command builder, the tunnel, and rsync all read their options from `_ssh_mux_opts`.
-# What kind of host this is (a plain machine, or a scheduler's front door). Shared logic, this
-# module's transport — see `SchedulerDetect`.
-if !isdefined(@__MODULE__, :SchedulerDetect)
-    Base.include(@__MODULE__, joinpath(@__DIR__, "scheduler.jl"))
-end
-# ONE argv element holding the whole script: ssh concatenates its arguments and hands the result to
-# the remote login shell, so `sh -c <script>` arrives re-split and the shell chokes on the first
-# `then`. The script is already shell — send it as the command.
-_detect_scheduler(host::AbstractString) =
-    SchedulerDetect.detect(script -> _ssh_capture(host, Cmd(String[String(script)])))
+# Every remote op runs as a channel on the host's one authenticated session (`SshTransport`), so it
+# costs a channel open rather than a connection setup.
 
-const _SSH_ROUTE = Dict{String,Vector{String}}()
-const _SSH_ROUTE_LOCK = ReentrantLock()
+# ── Reaching a compute node ──────────────────────────────────────────────────────────────────
+# A scheduler grants a node that is reachable only THROUGH the login node, and opening a session to
+# it would be a second authentication — the thing this whole transport exists to avoid. So work for
+# the node runs on the LOGIN node's session: commands with `srun` inside the allocation, and the
+# data path as a direct-tcpip forward, which the login node opens on our behalf.
+const _VIA = Dict{String,NamedTuple{(:host, :job),Tuple{String,String}}}()
+const _VIA_LOCK = ReentrantLock()
 
-"""
-    ssh_route!(host, jump) -> nothing
-
-Record that `host` is reachable only THROUGH `jump`. Set by whoever discovered the route — an
-allocation that just learned which node it got — because a hostname alone does not say how to
-get there. `jump = ""` forgets it.
-"""
-function ssh_route!(host::AbstractString, jump::AbstractString)
-    lock(_SSH_ROUTE_LOCK) do
-        isempty(jump) ? delete!(_SSH_ROUTE, String(host)) :
-                        (_SSH_ROUTE[String(host)] = ["-J", String(jump)])
+"Record that `node` is worked through `login`, inside scheduler job `job`. `login = \"\"` forgets it."
+function route!(node::AbstractString, login::AbstractString, job::AbstractString = "")
+    lock(_VIA_LOCK) do
+        isempty(login) ? delete!(_VIA, String(node)) :
+                         (_VIA[String(node)] = (host = String(login), job = String(job)))
     end
     return nothing
 end
 
-"The route options for `host` — empty when it is reachable directly."
-ssh_route(host::AbstractString) =
-    lock(_SSH_ROUTE_LOCK) do; copy(get(_SSH_ROUTE, String(host), String[])); end
+"How `host` is reached, or `nothing` when it is reachable on its own."
+via(host::AbstractString) = lock(_VIA_LOCK) do; get(_VIA, String(host), nothing); end
 
 # ── Reaching a host ──────────────────────────────────────────────────────────────────────────
 # Every command goes over the shared `SshTransport` session (see remotestore.jl), so a host that
@@ -412,7 +364,7 @@ _ssh_ok(host, argv::Cmd) = first(_ssh_capture(host, argv))
 
 # Existence/predicate check over ssh — a nonzero exit is a normal FALSE (e.g. `test -f` on a missing
 # file), NOT a failure, so it is deliberately NOT logged (unlike _ssh_ok, which treats nonzero as an error).
-_ssh_test(host, argv::Cmd) = first(Sweep.run_there(String(host), _cmdstr(argv)))
+_ssh_test(host, argv::Cmd) = first(_run_on(String(host), _cmdstr(argv)))
 
 # Run Julia CODE on the remote by shipping it as a FILE — NEVER `julia -e "…"` over ssh. ssh flattens its
 # argv and the remote shell re-splits + glob-expands the result, so `;`, `[...]`, `(...)` and any newline
@@ -425,13 +377,13 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::B
     tmp = tempname()
     write(tmp, code)
     remote = "$_REMOTE_ROOT/$(basename(tmp)).jl"
-    up_ok = Sweep.put_file(String(host), Vector{UInt8}(codeunits(code)), remote)
+    up_ok = _put_file(host, Vector{UInt8}(codeunits(code)), remote)
     rm(tmp; force = true)
     up_ok || (_rlog("FAILED: sending provisioning script → $host ($what)"); return (false, ""))
     script = _cmdstr(`$(_julia_sh("julia --startup-file=no $remote"))`)
-    ok, out = Sweep.run_there(String(host), script)
+    ok, out = _run_on(String(host), script)
     ok || _rlog("FAILED: $what\n    out: $(first(strip(out), 1200))")
-    Sweep.run_there(String(host), "rm -f " * remote)
+    _run_on(String(host), "rm -f " * remote)
     return (ok, out)
 end
 
@@ -491,9 +443,24 @@ function ssh_config_hosts()
     return hosts
 end
 
-# Value-fetch over a host: `(ok, output)`, with stdout and stderr interleaved.
+# Value-fetch over a host: `(ok, output)`, with stdout and stderr interleaved. A routed node runs
+# its command inside the allocation, from the login node's session — `srun` rather than a second ssh.
+function _run_on(host::AbstractString, script::AbstractString)
+    v = via(host)
+    v === nothing && return Sweep.run_there(host, script)
+    isempty(v.job) && return Sweep.run_there(v.host, script)   # routed but not a scheduler job
+    return Sweep.run_there(v.host, "srun --jobid=" * v.job * " --overlap bash -c " * Sweep.shq(script))
+end
+
+# A cluster's login and compute nodes share a filesystem, so a file for a routed node is written
+# through the login session at the same path — no need to run anything on the node to place it.
+_host_for_files(host::AbstractString) = (v = via(host); v === nothing ? String(host) : v.host)
+
+_put_file(host, data, path) = Sweep.put_file(_host_for_files(String(host)), data, path)
+_put_dir(host, localdir, dest; kw...) = Sweep.put_dir(_host_for_files(String(host)), localdir, dest; kw...)
+
 function _ssh_capture(host, argv::Cmd)
-    ok, out = Sweep.run_there(String(host), _cmdstr(argv))
+    ok, out = _run_on(String(host), _cmdstr(argv))
     ok || _rlog("ssh $host FAILED\n    cmd: $(_cmdstr(argv))\n    out: $(first(strip(out), 800))")
     return (ok, out)
 end
@@ -501,7 +468,7 @@ end
 # Send a local dir to the host, as a tar over the shared session.
 function _rsync!(host, localdir::AbstractString, remotedir::AbstractString; delete::Bool = false,
                  excludes::Vector{String} = String[])
-    ok = Sweep.put_dir(String(host), String(localdir), String(remotedir);
+    ok = _put_dir(host, String(localdir), String(remotedir);
                        delete = delete, excludes = excludes)
     ok || _rlog("FAILED: sending $localdir → $host:$remotedir")
     return ok
@@ -806,7 +773,7 @@ function _kickoff_sysimage_build!(t::RemoteTarget, projrel::AbstractString; forc
     remote = "$sysreldir/build.jl"
     logf = "$sysreldir/build.log"
     body = _sysimage_build_script(projrel, sysreldir, _sysimage_minfree_gb())
-    Sweep.put_file(String(host), Vector{UInt8}(codeunits(body)), remote) ||
+    _put_file(host, Vector{UInt8}(codeunits(body)), remote) ||
         (_rlog("sysimg: sending build script → $host failed (skip)"); return nothing)
     launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && if command -v setsid >/dev/null 2>&1; then setsid nohup julia --startup-file=no $remote > $logf 2>&1 & else nohup julia --startup-file=no $remote > $logf 2>&1 & fi"
     _rlog("sysimg: launching detached build on $host  (log: $host:$logf)")
@@ -1228,7 +1195,7 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     # log file — also survives the ssh channel closing. Paths are $HOME-relative (ssh login cwd).
     remote_script = "$_REMOTE_WORKER/worker-$port.jl"
     logf = "$_REMOTE_WORKER/worker-$port.log"
-    Sweep.put_file(String(host), Vector{UInt8}(codeunits(script)), remote_script)
+    _put_file(host, Vector{UInt8}(codeunits(script)), remote_script)
     nthreads = effective_worker_threads(threads)
     proj = startswith(t.project, "~/") ? "\$HOME/" * t.project[3:end] : t.project   # --project=~ won't expand
     # Self-identifying process tag: which region/notebook/port this worker serves, so `ps` isn't a wall of
@@ -1361,7 +1328,9 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         else
             ip = ""
             lport, lstream = _free_local_port(), _free_local_port()
-            tunnel = open_tunnel(host, [(lport, port), (lstream, stream_port)])
+            v = via(host)
+            tunnel = v === nothing ? open_tunnel(host, [(lport, port), (lstream, stream_port)]) :
+                     open_tunnel(v.host, [(lport, port), (lstream, stream_port)]; remote = host)
             connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
         end
         _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
@@ -1856,7 +1825,7 @@ function _write_worker_manifest!(host, port::Int, fields)
     body = _flat_json(fields)
     path = "$_REMOTE_WORKER/worker-$port.json"
     try
-        Sweep.put_file(String(host), Vector{UInt8}(codeunits(body)), path)
+        _put_file(host, Vector{UInt8}(codeunits(body)), path)
     catch e
         _rlog("manifest: could not write $host:$path ($(sprint(showerror, e)))")
     end
@@ -1871,7 +1840,7 @@ function _write_worker_state!(host, port::Int, state::AbstractString)
     body = string(state, " ", round(Int, time()))
     path = "$_REMOTE_WORKER/worker-$port.state"
     try
-        Sweep.put_file(String(host), Vector{UInt8}(codeunits(body)), path)
+        _put_file(host, Vector{UInt8}(codeunits(body)), path)
     catch e
         _rlog("state: could not write $host:$path ($(sprint(showerror, e)))")
     end
@@ -3343,7 +3312,7 @@ function region_place!(r::Region; wait_s::Real = 120)
     end
     # A compute node is normally not reachable from here at all — only through the login node. Record
     # that before anything tries to ssh to it, because a hostname alone does not say how to get there.
-    ssh_route!(a.node, r.host)
+    route!(a.node, r.host, a.id)
     lock(_REGION_PLACE_LOCK) do
         _REGION_PLACE[r.name] = (host = a.node, job = a.id, ts = time())
     end
@@ -3365,7 +3334,7 @@ deleted — and not only when someone remembers.
 function region_release!(r::Region)
     r.scheduler === :none && return false
     held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
-    held === nothing || ssh_route!(held.host, "")
+    held === nothing || route!(held.host, "")
     return try
         Sweep.release_allocation!(r.host, region_alloc_name(r))
     catch e

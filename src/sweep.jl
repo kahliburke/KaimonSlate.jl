@@ -149,16 +149,8 @@ end
 # few hundred array elements starting at once cannot each decide to precompile into the same depot
 # — which is how a shared filesystem gets taken down.
 
-function _ssh_run(host, script; capture::Bool = false)
-    # `ssh_opts`, not a hand-rolled set: it carries the ControlPath every other call shares. Opening
-    # a connection of its own worked wherever a key does and nowhere else — on a cluster that wants
-    # a password it authenticates from scratch, which it cannot do, so provisioning failed on a host
-    # the rest of the fabric was already talking to.
-    cmd = isempty(host) ? `sh -c $script` : `ssh $(ssh_opts(host)) $host $script`
-    buf = IOBuffer()
-    ok = try; run(pipeline(cmd; stdout = buf, stderr = buf)); true; catch; false; end
-    return (ok, String(take!(buf)))
-end
+# Provisioning runs on the host's one authenticated session, like everything else here.
+_ssh_run(host, script; capture::Bool = false) = run_there(String(host), String(script))
 
 """
     provision_payload!(host, root_remote) -> path
@@ -486,11 +478,10 @@ chunk_size(t::LocalTarget) = t.chunk
 chunk_size(t::SlurmTarget) = t.chunk
 
 launcher_for(::LocalTarget) = BatchLauncher.ExecLauncher()
-# The launcher gets the SAME ssh options as everything else, so `sbatch`/`squeue`/`scancel` ride the
-# one authenticated connection instead of each opening — and on a 2FA cluster, failing to open — a
-# connection of their own.
+# `sbatch`/`squeue`/`scancel` run through the host's session, like everything else — the launcher is
+# handed the runner rather than building its own ssh command.
 launcher_for(t::SlurmTarget) = BatchLauncher.SlurmLauncher(t.host; account = t.account, qos = t.qos,
-                                                           ssh_opts = ssh_opts(t.host))
+                                                           runner = (h, sc) -> run_there(h, sc))
 
 specfn_for(t::LocalTarget) = (name, cs) -> BatchLauncher.JobSpec(name, cs;
     root = t.root, project = t.project, payload = t.payload)
@@ -1117,17 +1108,12 @@ read_range(s::LocalSource, blob, offset::Integer, len::Integer) =
 
 function read_range(s::SshSource, blob, offset::Integer, len::Integer)
     script = range_command(s.root, blob, offset, len)
-    # The SAME multiplexed connection the metadata sync uses (`ssh_opts`), so a slice costs a round
-    # trip rather than a round trip plus a handshake and a key exchange. An empty host runs it here,
-    # which is what makes the byte plumbing exercisable without a cluster.
-    cmd = isempty(s.host) ? `sh -c $script` : `ssh $(ssh_opts(s.host)) $(s.host) $script`
-    out = IOBuffer()
-    try
-        run(pipeline(cmd; stdout = out, stderr = devnull))
-    catch e
-        error("reading $(len) bytes of $(blob) from $(s.host) failed: " *
-              first(sprint(showerror, e), 160))
-    end
+    # The SAME session as everything else, so a slice costs a round trip rather than a round trip
+    # plus a handshake, a key exchange and — on a gated cluster — a prompt. An empty host runs it
+    # here, which is what makes the byte plumbing exercisable without a cluster.
+    ok, data = run_io(String(s.host), script, nothing)
+    ok || error("reading $(len) bytes of $(blob) from $(s.host) failed")
+    out = IOBuffer(); write(out, data)
     b = take!(out)
     length(b) == len ||
         error("short read from $(s.host): asked $(len) bytes at $(offset), got $(length(b))")

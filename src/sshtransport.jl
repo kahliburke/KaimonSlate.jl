@@ -20,6 +20,7 @@ module SshTransport
 
 import LibSSH2_jll
 import FileWatching
+import Sockets
 using Sockets: getaddrinfo, IPv4
 
 const LIB = LibSSH2_jll.libssh2
@@ -130,6 +131,26 @@ function _kbd_callback(_n::Ptr{UInt8}, _nl::Cint, _i::Ptr{UInt8}, _il::Cint,
 end
 
 # ── session ──────────────────────────────────────────────────────────────────────────────────
+# One accepted local connection, carried to the far side by a direct-tcpip channel. The local
+# socket is ordinary Julia I/O read by its own task; only the channel touches libssh2, and only from
+# the session's owner.
+mutable struct Conn
+    sock::Any
+    ch::Ptr{Cvoid}
+    inbox::Channel{Vector{UInt8}}
+    closed::Bool
+end
+
+# A local port carried to `host:port` as seen from the far side. `host` is resolved THERE, which is
+# what lets a login node reach a compute node with no second authentication.
+mutable struct Fwd
+    localport::Int
+    host::String
+    port::Int
+    listener::Any
+    conns::Vector{Conn}
+end
+
 mutable struct Session
     ep::Endpoint
     fd::Cint
@@ -139,6 +160,7 @@ mutable struct Session
     prompter::Prompter
     alive::Bool
     err::String
+    fwds::Vector{Fwd}
 end
 
 const _SESSIONS = Dict{String,Session}()
@@ -155,6 +177,7 @@ _errno(s::Session) = ccall((:libssh2_session_last_errno, LIB), Cint, (Ptr{Cvoid}
 # Wait for the socket in the direction libssh2 says it needs, yielding the task. This is the whole
 # point of non-blocking mode: the thread goes back to the pool while we wait.
 function _ready(s::Session, timeout::Real)
+    _pump_forwards!(s)      # every wait is a chance to move tunnel bytes; nothing else gets a turn
     dir = ccall((:libssh2_session_block_directions, LIB), Cint, (Ptr{Cvoid},), s.ptr)
     r = (dir & DIR_INBOUND) != 0
     w = (dir & DIR_OUTBOUND) != 0
@@ -342,6 +365,120 @@ function _exec_io(s::Session, cmd::AbstractString, input::Union{Vector{UInt8},No
     return (status == 0, take!(out), String(take!(err)))
 end
 
+# ── port forwarding ──────────────────────────────────────────────────────────────────────────
+# `direct_tcpip` replaces `ssh -N -L`. The forward rides the session that is already authenticated,
+# so it costs no second prompt — and because the far side resolves the target host, a login node
+# can carry a connection to a compute node without one either.
+
+_open_tcpip(s::Session, host::AbstractString, port::Integer) =
+    _again_ptr(s, () -> ccall((:libssh2_channel_direct_tcpip_ex, LIB), Ptr{Cvoid},
+                              (Ptr{Cvoid}, Cstring, Cint, Cstring, Cint),
+                              s.ptr, host, Cint(port), "127.0.0.1", Cint(22)); timeout = 15.0)
+
+function _close_conn!(c::Conn)
+    c.closed = true
+    try; close(c.sock); catch; end
+    c.ch == C_NULL || ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), c.ch)
+    c.ch = C_NULL
+    return nothing
+end
+
+# Move whatever is ready, in both directions, without blocking on either. Called from every point
+# where the session would otherwise sit waiting, so tunnel traffic keeps flowing during a command.
+function _pump_forwards!(s::Session)
+    isempty(s.fwds) && return nothing
+    buf = Vector{UInt8}(undef, 32768)
+    for f in s.fwds, c in f.conns
+        c.closed && continue
+        # local → remote
+        while isready(c.inbox)
+            data = take!(c.inbox)
+            if isempty(data); _close_conn!(c); break; end
+            off = 0
+            while off < length(data)
+                n = ccall((:libssh2_channel_write_ex, LIB), Cssize_t,
+                          (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t),
+                          c.ch, 0, pointer(data, off + 1), length(data) - off)
+                n == Cssize_t(EAGAIN) && (sleep(0.001); continue)
+                n < 0 && (_close_conn!(c); break)
+                off += Int(n)
+            end
+        end
+        c.closed && continue
+        # remote → local
+        while true
+            n = ccall((:libssh2_channel_read_ex, LIB), Cssize_t,
+                      (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t), c.ch, 0, buf, length(buf))
+            n == Cssize_t(EAGAIN) && break
+            if n <= 0; _close_conn!(c); break; end
+            try; write(c.sock, view(buf, 1:Int(n))); catch; _close_conn!(c); break; end
+        end
+    end
+    for f in s.fwds
+        filter!(c -> !c.closed, f.conns)
+    end
+    return nothing
+end
+
+# Accept on the local port. The channel is opened by the OWNER (libssh2 is not thread-safe), so the
+# listener only hands over the socket.
+function _add_forward!(s::Session, localport::Integer, host::AbstractString, port::Integer, pending)
+    l = try
+        Sockets.listen(Sockets.localhost, Int(localport))
+    catch e
+        return (false, "cannot listen on $localport: $(sprint(showerror, e))")
+    end
+    f = Fwd(Int(localport), String(host), Int(port), l, Conn[])
+    push!(s.fwds, f)
+    Threads.@spawn begin
+        while isopen(l)
+            sock = try; Sockets.accept(l); catch; break; end
+            put!(pending, (f, sock))
+        end
+    end
+    return (true, "")
+end
+
+# Give an accepted socket its channel and its reader task.
+function _attach_conn!(s::Session, f::Fwd, sock)
+    ch = _open_tcpip(s, f.host, f.port)
+    if ch == C_NULL
+        try; close(sock); catch; end
+        return nothing
+    end
+    c = Conn(sock, ch, Channel{Vector{UInt8}}(64), false)
+    push!(f.conns, c)
+    Threads.@spawn begin
+        try
+            while !eof(sock) && !c.closed
+                put!(c.inbox, readavailable(sock))
+            end
+        catch
+        end
+        try; put!(c.inbox, UInt8[]); catch; end     # empty frame = the local side hung up
+    end
+    return nothing
+end
+
+function _drop_forward!(s::Session, localport::Integer)
+    for f in s.fwds
+        f.localport == Int(localport) || continue
+        try; close(f.listener); catch; end
+        for c in f.conns; _close_conn!(c); end
+    end
+    filter!(f -> f.localport != Int(localport), s.fwds)
+    return nothing
+end
+
+function _close_forwards!(s::Session)
+    for f in s.fwds
+        try; close(f.listener); catch; end
+        for c in f.conns; _close_conn!(c); end
+    end
+    empty!(s.fwds)
+    return nothing
+end
+
 function _open!(s::Session, ask)
     ccall((:libssh2_init, LIB), Cint, (Cint,), 0)
     s.fd = _tcp_connect(s.ep.hostname, s.ep.port)
@@ -413,12 +550,34 @@ function _serve(s::Session, ask)
     catch e
         s.err = sprint(showerror, e); s.alive = false
     end
-    for (kind, arg, reply) in s.req
+    pending = Channel{Any}(32)          # sockets accepted by a listener, waiting for a channel
+    while true
+        # A forward is a live stream, so the loop cannot simply block on the next request. Take one
+        # if there is one, otherwise move tunnel bytes and come back.
+        item = nothing
+        if isready(s.req) || isempty(s.fwds)
+            item = try; take!(s.req); catch; break; end
+        else
+            while isready(pending)
+                f, sock = take!(pending)
+                s.alive ? _attach_conn!(s, f, sock) : (try; close(sock); catch; end)
+            end
+            _pump_forwards!(s)
+            sleep(0.002)
+            continue
+        end
+        while isready(pending)
+            f, sock = take!(pending)
+            s.alive ? _attach_conn!(s, f, sock) : (try; close(sock); catch; end)
+        end
+        kind, arg, reply = item
         result = try
             !s.alive ? (kind === :io ? (false, UInt8[], s.err) : (false, s.err)) :
             kind === :exec ? _exec(s, arg) :
             kind === :io ? _exec_io(s, arg[1], arg[2]) :
-            kind === :close ? (_close!(s); (true, "")) :
+            kind === :forward ? _add_forward!(s, arg[1], arg[2], arg[3], pending) :
+            kind === :unforward ? (_drop_forward!(s, arg); (true, "")) :
+            kind === :close ? (_close_forwards!(s); _close!(s); (true, "")) :
             (false, "unknown request $kind")
         catch e
             kind === :io ? (false, UInt8[], sprint(showerror, e)) : (false, sprint(showerror, e))
@@ -426,6 +585,7 @@ function _serve(s::Session, ask)
         put!(reply, result)
         kind === :close && break
     end
+    _close_forwards!(s)
     s.alive && _close!(s)
     return nothing
 end
@@ -443,7 +603,7 @@ function session(host::AbstractString; ask)
         s !== nothing && s.alive && return s
         s !== nothing && delete!(_SESSIONS, key)
         ep = resolve(key)
-        s = Session(ep, Cint(-1), C_NULL, Channel{Any}(32), nothing, Prompter(key), false, "")
+        s = Session(ep, Cint(-1), C_NULL, Channel{Any}(32), nothing, Prompter(key), false, "", Fwd[])
         s.owner = Threads.@spawn _serve(s, ask)
         _SESSIONS[key] = s
         return s
@@ -474,6 +634,22 @@ carries a tar archive in either direction without a second authenticated transpo
 exec_io(host::AbstractString, cmd::AbstractString, input::Union{Vector{UInt8},Nothing}; ask) =
     _request(String(host), :io, (String(cmd), input),
              (false, UInt8[], "session for $host is gone"); ask = ask)
+
+"""
+    forward!(host, localport, target, targetport; ask) -> (ok, message)
+
+Carry `localport` on this machine to `target:targetport` as the far side sees it, over the session
+that is already authenticated. `target` is resolved THERE, so a login node can reach a compute node
+without a second connection to authenticate.
+"""
+forward!(host::AbstractString, localport::Integer, target::AbstractString, targetport::Integer; ask) =
+    _request(String(host), :forward, (Int(localport), String(target), Int(targetport)),
+             (false, "session for $host is gone"); ask = ask)
+
+"Stop carrying `localport`; its live connections are closed."
+unforward!(host::AbstractString, localport::Integer) =
+    connected(host) ? first(_request(String(host), :unforward, Int(localport), (false, "no session");
+                                     ask = (_...) -> nothing)) : false
 
 "Drop the session for `host` — the next call authenticates again."
 function disconnect!(host::AbstractString)

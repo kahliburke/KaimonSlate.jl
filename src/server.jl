@@ -1487,6 +1487,11 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         if r.scheduler !== :none
             host = ReportEngine.region_host(r)
             if host == r.host                      # nothing placed yet
+                # Asking for a node needs the cluster, and reaching the cluster may need a password
+                # that only a person can supply — which background work is not allowed to ask for.
+                # So say which of the two is missing, because they need different things from you.
+                ReportEngine.Sweep.connected(r.host) ||
+                    error("region '$name': not connected to $(r.host) yet — log in to it, then run this again")
                 _place_in_background!(name)
                 error("region '$name': asking $(r.host) for a node. Run the cell again once it has one.")
             end

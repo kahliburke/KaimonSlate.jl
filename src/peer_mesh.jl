@@ -18,15 +18,9 @@
 # `_ssh_capture` (remote.jl) runs a command and captures stdout; this variant also FEEDS stdin — how we
 # hand a host public key material to append to a file without ever putting it on the command line.
 function _ssh_feed(host, argv::Cmd, input::AbstractString)
-    out = IOBuffer(); err = IOBuffer()
-    ok = try
-        run(pipeline(_ssh(host, argv); stdin = IOBuffer(String(input)), stdout = out, stderr = err))
-        true
-    catch
-        false
-    end
-    ok || _rlog("mesh: ssh $host FAILED — $(first(strip(String(take!(err))), 300))")
-    return (ok, String(take!(out)))
+    ok, data = Sweep.run_io(String(host), _cmdstr(argv), Vector{UInt8}(codeunits(String(input))))
+    ok || _rlog("mesh: $host FAILED — $(_cmdstr(argv))")
+    return (ok, String(data))
 end
 
 # Run a full shell SCRIPT on `host` by feeding it over STDIN to `sh -s`. NOT `ssh host sh -c '<script>'`:

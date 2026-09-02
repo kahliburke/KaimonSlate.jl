@@ -97,6 +97,22 @@ const RE = KaimonSlate.ReportEngine
             # Nothing is held until a node is granted, so the idle sweep has nothing to give back —
             # and must not spend a `scancel` per tick saying so.
             @test !RE._region_holds_node(gpu)
+
+            # A granted node is reached THROUGH its login node: a session to the node itself would
+            # be a second authentication, which is the thing the whole transport exists to avoid.
+            # Commands run inside the allocation; files go to the shared filesystem via the login
+            # session; the data path is a forward the login node opens.
+            @test RE.via("c1") === nothing                      # unrouted: reached on its own
+            RE.route!("c1", "login", "4242")
+            try
+                v = RE.via("c1")
+                @test v !== nothing && v.host == "login" && v.job == "4242"
+                @test RE._host_for_files("c1") == "login"        # shared filesystem, login session
+                @test RE._host_for_files("elsewhere") == "elsewhere"
+            finally
+                RE.route!("c1", "")
+            end
+            @test RE.via("c1") === nothing                      # released with the allocation
             # Configurable for PBS, and honest that it cannot allocate there.
             pbs = RE.region_set!("pbs"; host = "login", scheduler = :pbs)
             @test_throws ErrorException RE.region_place!(pbs)
