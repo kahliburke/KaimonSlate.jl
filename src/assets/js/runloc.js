@@ -82,7 +82,12 @@ function _rlKnownHosts() {
   const hosts = ((_rlHosts && _rlHosts.hosts) || []).slice();
   try { JSON.parse(localStorage.getItem('slateRemotes') || '[]').forEach(spec => {
     const h = String(spec).split(',')[0]; if (h && !hosts.includes(h)) hosts.push(h); }); } catch (_) {}
-  return hosts;
+  // Hidden on the front page means hidden here too — a config alias you told Slate you never compute
+  // on should not keep turning up in the one picker you use most. The current host is exempt: a
+  // notebook already running somewhere must always show where that is.
+  const cur = ((nbState && nbState.runLocation) || '').split(',')[0];
+  let hidden = []; try { hidden = JSON.parse(localStorage.getItem('slateHiddenRemotes') || '[]'); } catch (_) {}
+  return hosts.filter(h => h === cur || !hidden.includes(h));
 }
 async function rlBuild() {
   if (!_rlHosts) { try { _rlHosts = await gapi('GET', '/api/ssh-hosts'); } catch (_) { _rlHosts = { hosts: [], global: '' }; } }

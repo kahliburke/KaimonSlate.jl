@@ -12,7 +12,8 @@ import { html, render } from 'htm/preact';
 import { signal } from '@preact/signals';
 import { useEffect } from 'preact/hooks';
 import { modalOpen, focusHost, editRegion, regions, loadRegions } from './stores.js';
-import { RunOnPicker, loadRunon, rememberRemote, forgetHost, setDefaultHost, allHosts, sshHosts, sshGlobal } from './hoststore.js';
+import { RunOnPicker, loadRunon, rememberRemote, forgetHost, setDefaultHost, allHosts, visibleHosts,
+         hiddenHosts, hideHost, unhideHost, sshHosts, sshGlobal } from './hoststore.js';
 import { Focus } from './remotes-focus.js';
 import { Clusters, loadClusters, clusters } from './clusters.js';
 
@@ -24,6 +25,7 @@ const stream = signal('');         // :direct stream port
 // Preflight stream state: { note, rows:[{name,status,ms,detail}], verdict:{ok,text}|null, err }.
 const steps = signal(null);
 const tab = signal('hosts');        // which pane the modal is showing (see TABS)
+const showHidden = signal(false);   // reveal hidden hosts so one can be put back
 let _es = null;                     // live preflight EventSource (closed on retest / modal close)
 
 // ── data-transfer settings ──────────────────────────────────────────────────────────────
@@ -81,24 +83,45 @@ function TestSteps() {
     ${s.err ? html`<div class="rtnote err">${s.err}</div>` : null}`;
 }
 
+// The list has TWO sources, and which one a row came from decides whether you can delete it here:
+// an `~/.ssh/config` alias is the file's to remove, a host you typed into the box above is Slate's.
+// Saying so on the row is the difference between "why is there no ✕ on this one" and an answer.
 function KnownHosts() {
   const all = allHosts.value, glob = sshGlobal.value, ssh = sshHosts.value, regs = regions.value, cls = clusters.value;
   if (!all.length) return html`<div class="rthosts"><div class="pddim" style="margin-top:6px">No remotes yet — test one above to add it.</div></div>`;
   const nreg = h => regs.filter(r => r.host === h).length;
   const ncl = h => cls.filter(c => c.host === h).length;   // batch targets submitting through this host
+  const hid = hiddenHosts.value, shown = showHidden.value ? all : visibleHosts.value;
+  const nhid = all.length - visibleHosts.value.length;
   return html`<div class="rthosts"><div class="rthhead">Known remotes</div>
-    ${all.map(h => {
-      const isDef = h === glob, isCustom = ssh.indexOf(h) < 0, n = nreg(h), nc = ncl(h);
-      return html`<div class=${'rthrow' + (isDef ? ' isdef' : '')}>
-        <span class="rthname" role="button" title="use this remote" onClick=${() => host.value = h}>${isDef ? '★' : '🖧'} ${h}${isDef ? html` <em>(default)</em>` : null}${isCustom ? html` <em>(custom)</em>` : null}${n ? html` <em>(${n} region${n > 1 ? 's' : ''})</em>` : null}${nc ? html` <em>(${nc} ⎈)</em>` : null}</span>
+    ${shown.map(h => {
+      const isDef = h === glob, remembered = ssh.indexOf(h) < 0, n = nreg(h), nc = ncl(h);
+      const isHidden = hid.indexOf(h) >= 0;
+      return html`<div class=${'rthrow' + (isDef ? ' isdef' : '') + (isHidden ? ' ishidden' : '')}>
+        <span class="rthname" role="button" title="use this remote" onClick=${() => host.value = h}>${isDef ? '★' : '🖧'} ${h}${isDef ? html` <em>(default)</em>` : null}${n ? html` <em>· ${n} region${n > 1 ? 's' : ''}</em>` : null}${nc ? html` <em>· ${nc} ⎈</em>` : null}</span>
+        <span class=${'rthsrc' + (remembered ? ' mem' : '')} title=${remembered
+          ? 'remembered by Slate because you tested it here — not in ~/.ssh/config'
+          : 'a Host alias in ~/.ssh/config, which Slate reads'}>${remembered ? 'remembered' : '~/.ssh/config'}</span>
         <span class="rthbtns">
           <button class="rthexp" title="regions & live workers on this host" onClick=${() => { editRegion.value = null; focusHost.value = h; }}>Regions ›</button>
           ${isDef
             ? html`<button class="rthdef" title="stop using this as the default → new notebooks run local" onClick=${() => setDefaultHost('')}>★ Unset</button>`
             : html`<button class="rthdef" title="make this the default for new notebooks" onClick=${() => setDefaultHost(h)}>★ Default</button>`}
-          ${isCustom ? html`<button class="rthforget" title="forget this custom host" onClick=${() => forgetHost(h)}>✕</button>` : null}
+          ${isHidden
+            ? html`<button class="rthexp" title=${'put ' + h + ' back in the list'} onClick=${() => unhideHost(h)}>↩ Unhide</button>`
+            : isDef ? null
+            : html`<button class="rthforget" title=${remembered
+                ? 'forget ' + h + ' — Slate only remembered it because you tested it here; nothing on the host is touched'
+                : 'hide ' + h + ' from these lists. It stays in ~/.ssh/config and stays reachable — Slate just stops offering it.'}
+                onClick=${() => remembered ? forgetHost(h) : hideHost(h)}>✕</button>`}
         </span></div>`;
-    })}</div>`;
+    })}</div>
+    <div class="pddim" style="margin-top:7px;font-size:.75rem">
+      Hosts come from <code>~/.ssh/config</code> and from ones you tested here. ✕ forgets a
+      <b>remembered</b> one and hides a config one — <code>~/.ssh/config</code> is yours to edit, so
+      Slate hides rather than pretends to delete.
+      ${nhid ? html` <button class="rthlink" onClick=${() => showHidden.value = !showHidden.value}>${showHidden.value ? 'done' : nhid + ' hidden — show'}</button>` : null}
+    </div></div>`;
 }
 
 function Modal() {

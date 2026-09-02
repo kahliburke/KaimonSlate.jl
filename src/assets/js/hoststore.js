@@ -19,9 +19,19 @@ export const knownRemotes = signal(_readKnown()); // locally-remembered specs (a
 function _readKnown() { try { return JSON.parse(localStorage.getItem('slateRemotes') || '[]'); } catch (_) { return []; } }
 function _writeKnown(a) { try { localStorage.setItem('slateRemotes', JSON.stringify(a)); } catch (_) {} knownRemotes.value = a; }
 
-export function rememberRemote(spec) { if (!spec || spec === 'local') return; const a = knownRemotes.value.slice(); if (a.indexOf(spec) < 0) { a.push(spec); _writeKnown(a); } }
+export function rememberRemote(spec) { if (!spec || spec === 'local') return; const a = knownRemotes.value.slice(); if (a.indexOf(spec) < 0) { a.push(spec); _writeKnown(a); } unhideHost(spec.split(',')[0]); }
 export function forgetRemote(spec) { _writeKnown(knownRemotes.value.filter(x => x !== spec)); }
 export function forgetHost(h) { _writeKnown(knownRemotes.value.filter(s => s.split(',')[0] !== h)); }
+
+// `~/.ssh/config` is not a list of machines you compute on — it is every host you ssh to, git servers
+// and routers included. Those cannot be dropped by editing the file (you still need them), so Slate
+// keeps its own hidden set: a DISPLAY preference, browser-local like the remembered list, and never a
+// change to your ssh config. Hiding one does not stop `run_on` from reaching it if a notebook names it.
+export const hiddenHosts = signal(_readHidden());
+function _readHidden() { try { return JSON.parse(localStorage.getItem('slateHiddenRemotes') || '[]'); } catch (_) { return []; } }
+function _writeHidden(a) { try { localStorage.setItem('slateHiddenRemotes', JSON.stringify(a)); } catch (_) {} hiddenHosts.value = a; }
+export function hideHost(h) { const a = hiddenHosts.value.slice(); if (a.indexOf(h) < 0) { a.push(h); _writeHidden(a); } }
+export function unhideHost(h) { if (hiddenHosts.value.indexOf(h) >= 0) _writeHidden(hiddenHosts.value.filter(x => x !== h)); }
 
 // ssh-config hosts ∪ the host-part of each remembered spec (sorted by first-seen, ssh first).
 export const allHosts = computed(() => {
@@ -29,6 +39,10 @@ export const allHosts = computed(() => {
   knownRemotes.value.forEach(spec => { const h = spec.split(',')[0]; if (s.indexOf(h) < 0) s.push(h); });
   return s;
 });
+// What the pickers and lists show: everything, less what you have hidden. The global default is
+// never hidden — a host new notebooks run on has to stay visible, or the setting is unexplainable.
+export const visibleHosts = computed(() =>
+  allHosts.value.filter(h => h === sshGlobal.value || hiddenHosts.value.indexOf(h) < 0));
 
 // Default transport for a NEW region on a host: inferred from a remembered `,direct` spec (else tunnel).
 export function hostTransport(h) { const s = knownRemotes.value.filter(x => x.split(',')[0] === h)[0] || ''; return s.indexOf('direct') >= 0 ? 'direct' : 'tunnel'; }
@@ -57,7 +71,7 @@ export function RunOnPicker({ id }) {
   const opts = [];
   opts.push(html`<option value="">${sshGlobal.value ? 'Default — ' + sshGlobal.value + ' (global)' : 'Local (this machine)'}</option>`);
   if (sshGlobal.value) opts.push(html`<option value="local">Local (this machine)</option>`);
-  allHosts.value.forEach(h => { if (h !== sshGlobal.value) opts.push(html`<option value=${h}>🖧 ${h}</option>`); });
+  visibleHosts.value.forEach(h => { if (h !== sshGlobal.value) opts.push(html`<option value=${h}>🖧 ${h}</option>`); });
   opts.push(html`<option value="__custom__">✎ Custom host…</option>`);
   const onChange = (e) => {
     setVal(e.target.value);
