@@ -103,4 +103,25 @@ const RE = KaimonSlate.ReportEngine
         end
     end
 
+    @testset "every cache path resolves through SlateHome" begin
+        # These live in different modules, and a nested one inherits no imports — so a path that
+        # compiles can still throw at the first call. Several are reached only from a code path
+        # that catches and warns, which is how a broken one stays invisible. Call them all.
+        withenv("KAIMONSLATE_CACHE_HOME" => mktempdir()) do
+            root = KaimonSlate.SlateHome.cache_home()
+            under(p) = startswith(String(p), root)
+            @test under(RE._slate_cache_dir())
+            @test under(RE._overflow_dir())
+            @test under(NS._memo_root())
+            @test under(RE.Sweep._blob_cache_dir())
+            @test under(RE.Sweep.RemoteStore("", "/x").mirror)
+            @test under(NS._chat_log_file("k"))
+            @test under(NS._doc_cache_file())
+            @test under(NS._dblob_dir())
+            @test under(NS._preview_file("k"))
+            NS.SlateHistory._ROOT[] = ""                      # recompute rather than reuse
+            @test under(NS.SlateHistory._root())
+        end
+    end
+
 end

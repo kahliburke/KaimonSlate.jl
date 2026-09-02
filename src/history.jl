@@ -28,6 +28,7 @@
 module SlateHistory
 
 using SHA, JSON, CodecZstd
+import ..SlateHome        # where the history root lives; a nested module inherits no imports
 
 const _ROOT = Ref{String}("")
 function _root()
