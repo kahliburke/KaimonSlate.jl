@@ -52,8 +52,12 @@ end
 # multiplexes channels itself, so a burst of polls and slices shares one authenticated connection
 # with no socket file, and a cluster that costs a second factor costs it once.
 
-# What a server prompt costs: a dialog in the notebook. Returning `nothing` cancels the connection.
+# A server prompt costs a dialog in the notebook, so only a DELIBERATE action may raise one. Polls,
+# reconciles and background placement run with `_noask`: they use a session that already exists and
+# fail quietly otherwise. Without that split the first dialog you see comes from whichever poller
+# got there first, with nothing on screen to answer it.
 _ask(host, prompt, echo) = SshAuth.ask(host, prompt, echo)
+_noask(_host, _prompt, _echo) = nothing
 
 "True if there is an authenticated session for `host`."
 connected(host::AbstractString) = isempty(host) || SshTransport.connected(String(host))
@@ -63,20 +67,23 @@ const _CONNECT_FAILED = Dict{String,Float64}()
 const _CONNECT_LOCK = ReentrantLock()
 
 """
-    connect!(host) -> Bool
+    connect!(host; interactive = false) -> Bool
 
-Ensure a session exists, authenticating through the notebook if the server asks. A host is left
-alone for a while after a failure: the pollers here would otherwise retry continuously, and on a
-gated host every retry is a failed authentication.
+Ensure a session exists. `interactive` decides whether a server prompt may raise a dialog — pass it
+only from something the user just did. A host is left alone for a while after a failure: the pollers
+here would otherwise retry continuously, and on a gated host every retry is a failed authentication.
 """
-function connect!(host::AbstractString)
+function connect!(host::AbstractString; interactive::Bool = false)
     isempty(host) && return true
     SshTransport.connected(String(host)) && return true
-    lock(_CONNECT_LOCK) do
+    # The backoff exists to stop pollers hammering a host; someone who just pressed a button is not
+    # a poller, and making them wait it out is the wrong answer.
+    interactive || lock(_CONNECT_LOCK) do
         time() - get(_CONNECT_FAILED, String(host), 0.0) < _CONNECT_BACKOFF
     end && return false
+    interactive && SshTransport.disconnect!(String(host))   # clear a half-open session first
     ok = try
-        SshTransport.session(String(host); ask = _ask)
+        SshTransport.session(String(host); ask = interactive ? _ask : _noask)
         SshTransport.connected(String(host))
     catch
         false
