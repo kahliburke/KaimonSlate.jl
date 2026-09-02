@@ -1427,6 +1427,27 @@ end
 # attaches to it by name.
 _alloc_wait_s() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_ALLOC_WAIT", "")), 180.0)
 
+# Ask for a node without holding anything. One request per region at a time — a run loop that
+# retries every second must not queue a hundred allocations, or raise a hundred password dialogs.
+const _PLACING = Set{String}()
+const _PLACING_LOCK = ReentrantLock()
+
+function _place_in_background!(name::AbstractString)
+    lock(_PLACING_LOCK) do
+        String(name) in _PLACING && return false
+        push!(_PLACING, String(name)); true
+    end || return nothing
+    Threads.@spawn try
+        r = ReportEngine.region_get(name)
+        r === nothing || ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
+    catch e
+        ReportEngine._rlog("region[$name]: placement failed — $(first(sprint(showerror, e), 160))")
+    finally
+        lock(_PLACING_LOCK) do; delete!(_PLACING, String(name)); end
+    end
+    return nothing
+end
+
 # The notebook's kernel for region `name`, created lazily from its footer spec (spawn/adopt
 # happens at its first prepare!, so a warm-pool worker makes this ~1s). Label carries the
 # region so the worker roster + attach records distinguish kernels.
@@ -1457,27 +1478,18 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         envdir = ReportEngine.notebook_env_dir(nb.path)
         origin_env = isfile(joinpath(envdir, "Project.toml")) ? envdir :
                      (!isempty(parent) && isfile(joinpath(parent, "Project.toml")) ? parent : "")
-        # Where the worker goes. On a scheduler region `r.host` is the front door, not the address:
-        # this asks for (or reattaches to) an allocation and comes back with the granted node. It
-        # blocks, deliberately — a cell tagged for this region has nowhere to run until there is a
-        # node, and a queue wait is the honest answer rather than a silent fall back to the login
-        # node, which is shared, small, and usually against the rules to compute on.
+        # Where the worker goes. On a scheduler region `r.host` is the front door, not the address —
+        # the node is granted, not configured. Getting one can mean queueing, and on a gated cluster
+        # it can mean waiting for a person to read a code off a phone. THIS RUNS UNDER `nb.lock`, so
+        # it must never wait for either: it reads the placement already held, and otherwise starts
+        # one in the background and says so. The cell is run again when there is somewhere to run it.
         host = r.host
         if r.scheduler !== :none
-            host, alloc = ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
-            # Why there is no node decides what to say, and they are not the same problem: a queue
-            # that has not got to us yet is a wait, and a login node that will not answer is a
-            # cluster that is down or an ssh setup that is wrong. Reporting the second as the first
-            # sends you reading scheduler documentation about a connection.
-            if isempty(host)
-                st = alloc === nothing ? :none : alloc.state
-                error(st === :unreachable ?
-                    "region '$name': cannot reach $(r.host) to ask for a node — the cluster or the ssh route to it is down" :
-                    st === :pending ?
-                    "region '$name': $(r.host) has queued the request but not started it yet. It stands — run the cell again once it does." :
-                    "region '$name': $(r.host) is holding no node and would not grant one")
+            host = ReportEngine.region_host(r)
+            if host == r.host                      # nothing placed yet
+                _place_in_background!(name)
+                error("region '$name': asking $(r.host) for a node. Run the cell again once it has one.")
             end
-            ReportEngine._rlog("region: '$name' allocated $(host) via $(r.host) (job $(alloc === nothing ? "?" : alloc.id))")
         end
         target = ReportEngine._region_target(r; origin_env = origin_env, host = host)   # transport/datadir/region from the def; env = the notebook's
         ReportEngine._rlog("region: kernel '$name' for $(nb.id) → $host ($(r.transport))" *

@@ -4,19 +4,29 @@
 # multiplexes channels natively, which is what `ControlMaster` was approximating — and it needs no
 # Unix domain socket, so it works the same on every platform.
 #
-# It also puts authentication in the hub. A cluster wanting a password and a one-time code offers
-# `keyboard-interactive`; libssh2 hands us the server's own prompts and takes our answers back, so
-# nothing scripts a prompt or guesses how many there will be. Answers come from `ask`, which the
-# caller wires to the browser dialog.
+# NON-BLOCKING throughout. libssh2's blocking mode parks an OS thread inside `_libssh2_wait_socket`
+# for every network wait — a handshake, a read, an auth — and a hub with a handful of threads runs
+# out of them and stops answering. In non-blocking mode a call answers `EAGAIN` and `_ready` waits
+# on the socket through Julia's event loop, which parks the TASK and hands the thread back.
+#
+# Authentication is the one thing that cannot work that way: libssh2 calls our prompt callback from
+# inside a C stack frame and needs a return value, and Julia cannot park a task with C frames on its
+# stack. So answers are collected BEFORE the call (see `_try_kbdint`) and the callback finds them
+# already queued.
 #
 # WINDOWS: only `_tcp_connect` is platform-bound. Winsock wants `WSAStartup` and a `SOCKET` handle
 # instead of an fd; that is the piece to add.
 module SshTransport
 
 import LibSSH2_jll
+import FileWatching
 using Sockets: getaddrinfo, IPv4
 
 const LIB = LibSSH2_jll.libssh2
+
+const EAGAIN = Cint(-37)          # LIBSSH2_ERROR_EAGAIN
+const DIR_INBOUND = Cint(1)       # LIBSSH2_SESSION_BLOCK_INBOUND
+const DIR_OUTBOUND = Cint(2)
 
 # ── resolved connection settings ─────────────────────────────────────────────────────────────
 # `ssh -G` prints a host's effective config with Match/Include/wildcards already applied. Running
@@ -44,6 +54,8 @@ end
 # ── socket ───────────────────────────────────────────────────────────────────────────────────
 const AF_INET = Cint(2)
 const SOCK_STREAM = Cint(1)
+const F_SETFL = Cint(4)
+const O_NONBLOCK = Cint(4)
 
 function _tcp_connect(hostname::AbstractString, port::Integer)
     Sys.iswindows() && error("SshTransport: Windows needs a Winsock socket here (WSAStartup + SOCKET)")
@@ -61,6 +73,7 @@ function _tcp_connect(hostname::AbstractString, port::Integer)
         ccall(:close, Cint, (Cint,), fd)
         error("connect to $hostname:$port refused")
     end
+    ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_SETFL, O_NONBLOCK)
     return fd
 end
 
@@ -68,40 +81,40 @@ end
 struct KbdPrompt;   text::Ptr{UInt8}; length::Cuint; echo::Cuchar; end
 struct KbdResponse; text::Ptr{UInt8}; length::Cuint; end
 
-# The callback runs inside a libssh2 C call, so it must not touch Julia's scheduler: it publishes
-# the prompt in plain fields and spins on a raw sleep. A normal task does the browser round-trip
-# and drops the answer in. That split is the whole trick.
+# Reached through libssh2's per-session `abstract` pointer, so two hosts can authenticate at once
+# with no lock between them.
 mutable struct Prompter
     host::String
     answers::Vector{String}
-    seen::Vector{String}
+    seen::Vector{Tuple{String,Bool}}
     idx::Int              # prompts the callback has consumed
     want::Int             # index it is waiting on (0 = idle)
-    text::String          # the prompt it is waiting on
+    text::String
     echo::Bool            # false ⇒ a secret; the dialog masks it
     cancelled::Bool
 end
-Prompter(host) = Prompter(String(host), String[], String[], 0, 0, "", false, false)
+Prompter(host) = Prompter(String(host), String[], Tuple{String,Bool}[], 0, 0, "", false, false)
 
 # Matches SshAuth.TIMEOUT; the callback cannot see that module, so the two are stated together here.
 const PROMPT_TIMEOUT = 120.0
 
-const _ACTIVE = Ref{Union{Prompter,Nothing}}(nothing)   # libssh2 gives the callback no user pointer we own
-const _AUTH_LOCK = ReentrantLock()                      # …so one keyboard-interactive at a time
-
 function _kbd_callback(_n::Ptr{UInt8}, _nl::Cint, _i::Ptr{UInt8}, _il::Cint,
                        n::Cint, prompts::Ptr{KbdPrompt},
-                       responses::Ptr{KbdResponse}, _a::Ptr{Ptr{Cvoid}})::Cvoid
-    pr = _ACTIVE[]
-    pr === nothing && return nothing
+                       responses::Ptr{KbdResponse}, abstract::Ptr{Ptr{Cvoid}})::Cvoid
+    abstract == C_NULL && return nothing
+    handle = unsafe_load(abstract)
+    handle == C_NULL && return nothing
+    pr = unsafe_pointer_to_objref(handle)::Prompter
     for k in 1:n
         p = unsafe_load(prompts, k)
         pr.idx += 1
         pr.text = p.length > 0 ? unsafe_string(p.text, p.length) : ""
         pr.echo = p.echo != 0
-        push!(pr.seen, pr.text)
+        push!(pr.seen, (pr.text, pr.echo))
         pr.want = pr.idx
         ans = ""
+        # Normally already queued (see `_try_kbdint`), so this does not loop at all. It can only
+        # wait on first contact with a host whose prompts are not yet known.
         deadline = time() + PROMPT_TIMEOUT
         while time() < deadline
             if pr.idx <= length(pr.answers); ans = pr.answers[pr.idx]; break; end
@@ -131,18 +144,59 @@ end
 const _SESSIONS = Dict{String,Session}()
 const _REG_LOCK = ReentrantLock()
 
-_rc(s::Session) = ccall((:libssh2_session_last_errno, LIB), Cint, (Ptr{Cvoid},), s.ptr)
 function _lasterr(s::Session)
     msg = Ref{Ptr{UInt8}}(C_NULL); len = Ref{Cint}(0)
     rc = ccall((:libssh2_session_last_error, LIB), Cint,
                (Ptr{Cvoid}, Ptr{Ptr{UInt8}}, Ptr{Cint}, Cint), s.ptr, msg, len, 0)
     msg[] == C_NULL ? "libssh2 error $rc" : unsafe_string(msg[], len[])
 end
+_errno(s::Session) = ccall((:libssh2_session_last_errno, LIB), Cint, (Ptr{Cvoid},), s.ptr)
+
+# Wait for the socket in the direction libssh2 says it needs, yielding the task. This is the whole
+# point of non-blocking mode: the thread goes back to the pool while we wait.
+function _ready(s::Session, timeout::Real)
+    dir = ccall((:libssh2_session_block_directions, LIB), Cint, (Ptr{Cvoid},), s.ptr)
+    r = (dir & DIR_INBOUND) != 0
+    w = (dir & DIR_OUTBOUND) != 0
+    (r || w) || (r = true)                 # nothing stated: wait for something to read
+    try
+        FileWatching.poll_fd(RawFD(s.fd), timeout; readable = r, writable = w)
+    catch
+    end
+    return nothing
+end
+
+"Run a libssh2 call that may answer EAGAIN, waiting on the socket between attempts."
+function _again(s::Session, f; timeout::Real = 60.0)
+    deadline = time() + timeout
+    while true
+        rc = f()
+        rc != EAGAIN && return rc
+        time() > deadline && return rc
+        _ready(s, 5.0)
+    end
+end
+
+"The pointer form: NULL with EAGAIN means try again, anything else is final."
+function _again_ptr(s::Session, f; timeout::Real = 60.0)
+    deadline = time() + timeout
+    while true
+        p = f()
+        p == C_NULL || return p
+        _errno(s) != EAGAIN && return C_NULL
+        time() > deadline && return C_NULL
+        _ready(s, 5.0)
+    end
+end
 
 "Authentication methods the server offers, as it names them."
 function auth_methods(s::Session)
-    p = ccall((:libssh2_userauth_list, LIB), Cstring, (Ptr{Cvoid}, Cstring, Cuint),
-              s.ptr, s.ep.user, length(s.ep.user))
+    p = Ptr{UInt8}(C_NULL)
+    _again(s, () -> begin
+        p = ccall((:libssh2_userauth_list, LIB), Ptr{UInt8}, (Ptr{Cvoid}, Cstring, Cuint),
+                  s.ptr, s.ep.user, length(s.ep.user))
+        p == C_NULL ? _errno(s) : Cint(0)
+    end)
     p == C_NULL ? String[] : String.(split(unsafe_string(p), ','))
 end
 
@@ -152,122 +206,166 @@ function _try_pubkey(s::Session)
     for priv in s.ep.identities
         isfile(priv) || continue
         pub = priv * ".pub"
-        rc = ccall((:libssh2_userauth_publickey_fromfile_ex, LIB), Cint,
-                   (Ptr{Cvoid}, Cstring, Cuint, Cstring, Cstring, Cstring),
-                   s.ptr, s.ep.user, length(s.ep.user), isfile(pub) ? pub : C_NULL, priv, "")
+        rc = _again(s, () -> ccall((:libssh2_userauth_publickey_fromfile_ex, LIB), Cint,
+                                   (Ptr{Cvoid}, Cstring, Cuint, Cstring, Cstring, Cstring),
+                                   s.ptr, s.ep.user, length(s.ep.user),
+                                   isfile(pub) ? pub : C_NULL, priv, ""))
         rc == 0 && return true
     end
     return false
 end
 
-function _try_kbdint(s::Session, ask)
+# What a host asked last time, so the next connection can collect the answers BEFORE calling
+# libssh2. Servers do not change their prompts between logins, and this is not secret.
+const _PROMPTS = Dict{String,Vector{Tuple{String,Bool}}}()
+const _PROMPTS_LOCK = ReentrantLock()
+
+remembered_prompts(host) = lock(_PROMPTS_LOCK) do; get(_PROMPTS, String(host), Tuple{String,Bool}[]); end
+
+# Learn what a host asks WITHOUT answering: run keyboard-interactive with the callback pre-cancelled
+# so it returns empty immediately. Authentication fails by design — no secret is sent and no
+# one-time code is spent — and `pr.seen` now holds the prompts, with the server's own echo flags.
+function _discover_prompts!(s::Session)
     cb = @cfunction(_kbd_callback, Cvoid,
         (Ptr{UInt8}, Cint, Ptr{UInt8}, Cint, Cint, Ptr{KbdPrompt}, Ptr{KbdResponse}, Ptr{Ptr{Cvoid}}))
-    return lock(_AUTH_LOCK) do
-        pr = s.prompter
-        _ACTIVE[] = pr
-        # Feed the callback while it runs: it publishes a prompt, this answers it.
-        pump = Threads.@spawn begin
-            served = 0
-            while served < 64 && !pr.cancelled
-                if pr.want > served
-                    a = try; ask(pr.host, pr.text, pr.echo); catch; nothing; end
-                    a === nothing && (pr.cancelled = true; break)
-                    push!(pr.answers, String(a)); served += 1
-                else
-                    sleep(0.05)
-                end
-            end
+    pr = s.prompter
+    empty!(pr.answers); empty!(pr.seen); pr.idx = 0; pr.want = 0
+    pr.cancelled = true                       # every prompt answered instantly, with nothing
+    _again(s, () -> ccall((:libssh2_userauth_keyboard_interactive_ex, LIB), Cint,
+                          (Ptr{Cvoid}, Cstring, Cuint, Ptr{Cvoid}),
+                          s.ptr, s.ep.user, length(s.ep.user), cb); timeout = 30.0)
+    isempty(pr.seen) && return false
+    lock(_PROMPTS_LOCK) do; _PROMPTS[s.ep.alias] = copy(pr.seen); end
+    return true
+end
+
+# Authenticate with every answer already in hand. The callback runs inside a C stack frame, and a
+# task cannot be parked with C frames on its stack — so anything it has to wait for pins a thread.
+# It waits for nothing: the answers are queued before the call.
+function _try_kbdint(s::Session, ask)
+    isempty(remembered_prompts(s.ep.alias)) && return false      # caller discovers first
+    cb = @cfunction(_kbd_callback, Cvoid,
+        (Ptr{UInt8}, Cint, Ptr{UInt8}, Cint, Cint, Ptr{KbdPrompt}, Ptr{KbdResponse}, Ptr{Ptr{Cvoid}}))
+    pr = s.prompter
+    empty!(pr.answers); empty!(pr.seen); pr.idx = 0; pr.want = 0; pr.cancelled = false
+    for (text, echo) in remembered_prompts(s.ep.alias)
+        a = try; ask(s.ep.alias, text, echo); catch; nothing; end
+        a === nothing && return false
+        push!(pr.answers, String(a))
+    end
+    pr.cancelled = true                       # anything unexpected returns empty rather than waiting
+    rc = _again(s, () -> ccall((:libssh2_userauth_keyboard_interactive_ex, LIB), Cint,
+                               (Ptr{Cvoid}, Cstring, Cuint, Ptr{Cvoid}),
+                               s.ptr, s.ep.user, length(s.ep.user), cb); timeout = 60.0)
+    rc == 0 && !isempty(pr.seen) &&
+        lock(_PROMPTS_LOCK) do; _PROMPTS[s.ep.alias] = copy(pr.seen); end
+    return rc == 0
+end
+
+# ── running things ───────────────────────────────────────────────────────────────────────────
+_open_channel(s::Session) =
+    _again_ptr(s, () -> ccall((:libssh2_channel_open_ex, LIB), Ptr{Cvoid},
+                              (Ptr{Cvoid}, Cstring, Cuint, Cuint, Cuint, Cstring, Cuint),
+                              s.ptr, "session", 7, 2 * 1024 * 1024, 32768, C_NULL, 0))
+
+function _drain(s::Session, ch, stream::Cint, sink::IO, deadline::Float64)
+    buf = Vector{UInt8}(undef, 65536)
+    while true
+        n = ccall((:libssh2_channel_read_ex, LIB), Cssize_t,
+                  (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t), ch, stream, buf, length(buf))
+        if n == Cssize_t(EAGAIN)
+            time() > deadline && return false
+            _ready(s, 5.0); continue
         end
-        rc = ccall((:libssh2_userauth_keyboard_interactive_ex, LIB), Cint,
-                   (Ptr{Cvoid}, Cstring, Cuint, Ptr{Cvoid}), s.ptr, s.ep.user, length(s.ep.user), cb)
-        pr.cancelled = true          # release the pump whatever happened
-        _ACTIVE[] = nothing
-        rc == 0
+        n <= 0 && return true                  # 0 = EOF, negative = a real error
+        write(sink, view(buf, 1:Int(n)))
     end
 end
 
-"Run `cmd` on the session's host. Returns `(ok, output)` with stdout and stderr interleaved."
-function _exec(s::Session, cmd::AbstractString)
-    ch = ccall((:libssh2_channel_open_ex, LIB), Ptr{Cvoid},
-               (Ptr{Cvoid}, Cstring, Cuint, Cuint, Cuint, Cstring, Cuint),
-               s.ptr, "session", 7, 2 * 1024 * 1024, 32768, C_NULL, 0)
+function _finish(s::Session, ch, out::IO, err::IO, timeout::Real)
+    deadline = time() + timeout
+    _drain(s, ch, Cint(0), out, deadline)
+    _drain(s, ch, Cint(1), err, deadline)
+    _again(s, () -> ccall((:libssh2_channel_close, LIB), Cint, (Ptr{Cvoid},), ch); timeout = 10.0)
+    status = ccall((:libssh2_channel_get_exit_status, LIB), Cint, (Ptr{Cvoid},), ch)
+    ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), ch)
+    return status
+end
+
+function _start(s::Session, ch, cmd::AbstractString)
+    _again(s, () -> ccall((:libssh2_channel_process_startup, LIB), Cint,
+                          (Ptr{Cvoid}, Cstring, Cuint, Cstring, Cuint),
+                          ch, "exec", 4, cmd, length(cmd)))
+end
+
+"Run `cmd` on the session's host. `(ok, output)` with stdout and stderr interleaved."
+function _exec(s::Session, cmd::AbstractString; timeout::Real = 120.0)
+    ch = _open_channel(s)
     ch == C_NULL && return (false, "channel_open: " * _lasterr(s))
-    try
-        rc = ccall((:libssh2_channel_process_startup, LIB), Cint,
-                   (Ptr{Cvoid}, Cstring, Cuint, Cstring, Cuint), ch, "exec", 4, cmd, length(cmd))
-        rc != 0 && return (false, "exec: " * _lasterr(s))
-        out = IOBuffer(); buf = Vector{UInt8}(undef, 32768)
-        for stream in (0, 1)                    # 0 = stdout, 1 = stderr
-            while true
-                n = ccall((:libssh2_channel_read_ex, LIB), Cssize_t,
-                          (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t), ch, stream, buf, length(buf))
-                n <= 0 && break
-                write(out, view(buf, 1:Int(n)))
-            end
-        end
-        ccall((:libssh2_channel_close, LIB), Cint, (Ptr{Cvoid},), ch)
-        status = ccall((:libssh2_channel_get_exit_status, LIB), Cint, (Ptr{Cvoid},), ch)
-        return (status == 0, String(take!(out)))
-    finally
+    if _start(s, ch, cmd) != 0
         ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), ch)
+        return (false, "exec: " * _lasterr(s))
     end
+    out = IOBuffer()
+    status = _finish(s, ch, out, out, timeout)
+    return (status == 0, String(take!(out)))
 end
 
-# Run `cmd`, streaming `input` to its stdin, and collect stdout. This is what replaces rsync: the
-# metadata directories are small text files, so `tar` over the channel moves them in one round trip
-# without needing a second authenticated transport.
-function _exec_io(s::Session, cmd::AbstractString, input::Union{Vector{UInt8},Nothing})
-    ch = ccall((:libssh2_channel_open_ex, LIB), Ptr{Cvoid},
-               (Ptr{Cvoid}, Cstring, Cuint, Cuint, Cuint, Cstring, Cuint),
-               s.ptr, "session", 7, 2 * 1024 * 1024, 32768, C_NULL, 0)
+# Run `cmd`, streaming `input` to its stdin and collecting stdout. This is what replaces rsync: the
+# metadata directories are small text files, so `tar` over the channel moves them in one round trip.
+function _exec_io(s::Session, cmd::AbstractString, input::Union{Vector{UInt8},Nothing};
+                  timeout::Real = 300.0)
+    ch = _open_channel(s)
     ch == C_NULL && return (false, UInt8[], "channel_open: " * _lasterr(s))
-    try
-        rc = ccall((:libssh2_channel_process_startup, LIB), Cint,
-                   (Ptr{Cvoid}, Cstring, Cuint, Cstring, Cuint), ch, "exec", 4, cmd, length(cmd))
-        rc != 0 && return (false, UInt8[], "exec: " * _lasterr(s))
-        if input !== nothing
-            off = 0
-            while off < length(input)
-                n = ccall((:libssh2_channel_write_ex, LIB), Cssize_t,
-                          (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t),
-                          ch, 0, pointer(input, off + 1), length(input) - off)
-                n < 0 && return (false, UInt8[], "write: " * _lasterr(s))
-                off += Int(n)
-            end
-            ccall((:libssh2_channel_send_eof, LIB), Cint, (Ptr{Cvoid},), ch)
-        end
-        out = IOBuffer(); err = IOBuffer(); buf = Vector{UInt8}(undef, 65536)
-        for (stream, sink) in ((0, out), (1, err))
-            while true
-                n = ccall((:libssh2_channel_read_ex, LIB), Cssize_t,
-                          (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t), ch, stream, buf, length(buf))
-                n <= 0 && break
-                write(sink, view(buf, 1:Int(n)))
-            end
-        end
-        ccall((:libssh2_channel_close, LIB), Cint, (Ptr{Cvoid},), ch)
-        status = ccall((:libssh2_channel_get_exit_status, LIB), Cint, (Ptr{Cvoid},), ch)
-        return (status == 0, take!(out), String(take!(err)))
-    finally
+    if _start(s, ch, cmd) != 0
         ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), ch)
+        return (false, UInt8[], "exec: " * _lasterr(s))
     end
+    if input !== nothing
+        off = 0
+        deadline = time() + timeout
+        while off < length(input)
+            n = ccall((:libssh2_channel_write_ex, LIB), Cssize_t,
+                      (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t),
+                      ch, 0, pointer(input, off + 1), length(input) - off)
+            if n == Cssize_t(EAGAIN)
+                time() > deadline && break
+                _ready(s, 5.0); continue
+            end
+            n < 0 && break
+            off += Int(n)
+        end
+        _again(s, () -> ccall((:libssh2_channel_send_eof, LIB), Cint, (Ptr{Cvoid},), ch); timeout = 10.0)
+    end
+    out = IOBuffer(); err = IOBuffer()
+    status = _finish(s, ch, out, err, timeout)
+    return (status == 0, take!(out), String(take!(err)))
 end
 
 function _open!(s::Session, ask)
     ccall((:libssh2_init, LIB), Cint, (Cint,), 0)
     s.fd = _tcp_connect(s.ep.hostname, s.ep.port)
+    # The session's `abstract` is this session's Prompter; the keyboard-interactive callback reads
+    # it back. Rooted by `Session.prompter`, so it outlives every call that can see it.
     s.ptr = ccall((:libssh2_session_init_ex, LIB), Ptr{Cvoid},
-                  (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), C_NULL, C_NULL, C_NULL, C_NULL)
+                  (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
+                  C_NULL, C_NULL, C_NULL, pointer_from_objref(s.prompter))
     s.ptr == C_NULL && error("libssh2 session_init failed")
-    ccall((:libssh2_session_set_blocking, LIB), Cvoid, (Ptr{Cvoid}, Cint), s.ptr, 1)
-    rc = ccall((:libssh2_session_handshake, LIB), Cint, (Ptr{Cvoid}, Cint), s.ptr, s.fd)
+    ccall((:libssh2_session_set_blocking, LIB), Cvoid, (Ptr{Cvoid}, Cint), s.ptr, 0)
+    rc = _again(s, () -> ccall((:libssh2_session_handshake, LIB), Cint,
+                               (Ptr{Cvoid}, Cint), s.ptr, s.fd); timeout = 30.0)
     rc != 0 && error("ssh handshake with $(s.ep.hostname) failed ($rc)")
     ms = auth_methods(s)
     if "publickey" in ms && _try_pubkey(s)
         # nothing more to do
-    elseif "keyboard-interactive" in ms && _try_kbdint(s, ask)
-        # answered in the browser
+    elseif "keyboard-interactive" in ms
+        # A host we have not met yet: find out what it asks, then start again with the answers.
+        # Discovery burns an authentication attempt and nothing else — it sends no secret.
+        if isempty(remembered_prompts(s.ep.alias))
+            _discover_prompts!(s) || error("$(s.ep.alias): the server asked nothing we could answer")
+            _reconnect!(s)
+        end
+        _try_kbdint(s, ask) || error("$(s.ep.alias): authentication was declined or cancelled")
     else
         error(isempty(ms) ? "$(s.ep.alias): no authentication method succeeded" :
               "$(s.ep.alias): could not authenticate (server offers " * join(ms, ", ") * ")")
@@ -277,18 +375,38 @@ function _open!(s::Session, ask)
     return s
 end
 
+# Start the connection over: a failed authentication leaves the session unusable, and discovery
+# fails on purpose.
+function _reconnect!(s::Session)
+    s.ptr == C_NULL || ccall((:libssh2_session_free, LIB), Cint, (Ptr{Cvoid},), s.ptr)
+    s.fd >= 0 && ccall(:close, Cint, (Cint,), s.fd)
+    s.fd = _tcp_connect(s.ep.hostname, s.ep.port)
+    s.ptr = ccall((:libssh2_session_init_ex, LIB), Ptr{Cvoid},
+                  (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
+                  C_NULL, C_NULL, C_NULL, pointer_from_objref(s.prompter))
+    s.ptr == C_NULL && error("libssh2 session_init failed")
+    ccall((:libssh2_session_set_blocking, LIB), Cvoid, (Ptr{Cvoid}, Cint), s.ptr, 0)
+    rc = _again(s, () -> ccall((:libssh2_session_handshake, LIB), Cint,
+                               (Ptr{Cvoid}, Cint), s.ptr, s.fd); timeout = 30.0)
+    rc != 0 && error("ssh handshake with $(s.ep.hostname) failed ($rc)")
+    return nothing
+end
+
 function _close!(s::Session)
     s.alive = false
-    s.ptr == C_NULL || ccall((:libssh2_session_disconnect_ex, LIB), Cint,
-                             (Ptr{Cvoid}, Cint, Cstring, Cstring), s.ptr, 11, "closing", "")
-    s.ptr == C_NULL || ccall((:libssh2_session_free, LIB), Cint, (Ptr{Cvoid},), s.ptr)
+    if s.ptr != C_NULL
+        _again(s, () -> ccall((:libssh2_session_disconnect_ex, LIB), Cint,
+                              (Ptr{Cvoid}, Cint, Cstring, Cstring), s.ptr, 11, "closing", "");
+               timeout = 5.0)
+        ccall((:libssh2_session_free, LIB), Cint, (Ptr{Cvoid},), s.ptr)
+    end
     s.fd >= 0 && ccall(:close, Cint, (Cint,), s.fd)
     s.ptr = C_NULL; s.fd = Cint(-1)
     return nothing
 end
 
-# One owner task per session: libssh2 sessions are not thread-safe, and the blocking API parks a
-# thread. Callers post a request and wait for the reply, so nothing else in the hub is held up.
+# One owner task per session: libssh2 sessions are not thread-safe, so every call on a session is
+# serialized here. It yields at each network wait, so it holds no thread while waiting.
 function _serve(s::Session, ask)
     try
         _open!(s, ask)
@@ -297,13 +415,13 @@ function _serve(s::Session, ask)
     end
     for (kind, arg, reply) in s.req
         result = try
-            !s.alive ? (false, s.err) :
+            !s.alive ? (kind === :io ? (false, UInt8[], s.err) : (false, s.err)) :
             kind === :exec ? _exec(s, arg) :
             kind === :io ? _exec_io(s, arg[1], arg[2]) :
             kind === :close ? (_close!(s); (true, "")) :
             (false, "unknown request $kind")
         catch e
-            (false, sprint(showerror, e))
+            kind === :io ? (false, UInt8[], sprint(showerror, e)) : (false, sprint(showerror, e))
         end
         put!(reply, result)
         kind === :close && break
@@ -332,17 +450,20 @@ function session(host::AbstractString; ask)
     end
 end
 
-"Run `cmd` on `host` over the shared session. `(ok, output)`."
-function exec(host::AbstractString, cmd::AbstractString; ask)
+function _request(host::AbstractString, kind::Symbol, arg, fail; ask)
     s = session(host; ask = ask)
     reply = Channel{Any}(1)
     try
-        put!(s.req, (:exec, String(cmd), reply))
+        put!(s.req, (kind, arg, reply))
     catch
-        return (false, "session for $host is gone")
+        return fail
     end
     return take!(reply)
 end
+
+"Run `cmd` on `host` over the shared session. `(ok, output)`."
+exec(host::AbstractString, cmd::AbstractString; ask) =
+    _request(String(host), :exec, String(cmd), (false, "session for $host is gone"); ask = ask)
 
 """
     exec_io(host, cmd, input) -> (ok, stdout::Vector{UInt8}, stderr::String)
@@ -350,16 +471,9 @@ end
 Like `exec`, but streams `input` to the command's stdin and returns stdout as bytes. This is what
 carries a tar archive in either direction without a second authenticated transport.
 """
-function exec_io(host::AbstractString, cmd::AbstractString, input::Union{Vector{UInt8},Nothing}; ask)
-    s = session(host; ask = ask)
-    reply = Channel{Any}(1)
-    try
-        put!(s.req, (:io, (String(cmd), input), reply))
-    catch
-        return (false, UInt8[], "session for $host is gone")
-    end
-    return take!(reply)
-end
+exec_io(host::AbstractString, cmd::AbstractString, input::Union{Vector{UInt8},Nothing}; ask) =
+    _request(String(host), :io, (String(cmd), input),
+             (false, UInt8[], "session for $host is gone"); ask = ask)
 
 "Drop the session for `host` — the next call authenticates again."
 function disconnect!(host::AbstractString)
