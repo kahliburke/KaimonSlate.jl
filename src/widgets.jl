@@ -1604,6 +1604,10 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # the `@md` skin and the markdown pipeline handles the cell. Returns a `Markdown.MD` (renders in a
     # display context; the value is discarded — hence inert — in a plain `julia file.jl` script run).
     Core.eval(m, :(macro md(str)
+        # A cell whose prose carries LaTeX is saved as `@md raw"…"` so the file stays valid Julia
+        # (see `_md_needs_raw`); that arrives as an unexpanded `@raw_str` call, not a String.
+        str isa Expr && str.head === :macrocall && str.args[1] === Symbol("@raw_str") &&
+            (str = str.args[end])
         str isa AbstractString ||
             error("@md expects a string literal (e.g. @md\"\"\"# Title\"\"\")")
         tmpl, exprs = $(_md_template)(String(str))

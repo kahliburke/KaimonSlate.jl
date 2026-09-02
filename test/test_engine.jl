@@ -306,6 +306,35 @@ end
         @test !occursin("@md", sq)                             # can't wrap safely → bare
         @test parse_report(serialize_report(rq)).cells[1].source == "a \"\"\" b"   # still round-trips
     end
+
+    # Julia validates escapes inside a `"…"` literal even where it does not process them, so prose
+    # carrying LaTeX could make the saved file unparseable as a script — `\frac` is fine (`\f` is an
+    # escape letter) while `\sum` is a syntax error. Those cells take a raw literal instead.
+    @testset "LaTeX prose takes the raw skin, ordinary prose does not" begin
+        cellsrc(md) = (rq = ReportEngine.Report("r", "");
+                       push!(rq.cells, ReportEngine.Cell("m", MARKDOWN, md));
+                       ReportEngine._cell_source(rq.cells[1]))
+
+        # Nothing changes for a cell that doesn't need it — existing notebooks keep their bytes.
+        @test occursin("@md\"\"\"", cellsrc("plain prose"))
+        @test !occursin("@md raw", cellsrc("plain prose"))
+        @test !occursin("@md raw", cellsrc(raw"maths $\frac{a}{b}$ and $\alpha$"))   # valid escapes
+        # …and the raw literal appears exactly where Julia would otherwise refuse the file.
+        for md in (raw"$$\sum_i x_i$$", raw"\(E=mc^2\)", raw"\[y^2\]", raw"a \cdot b")
+            @test occursin("@md raw\"\"\"", cellsrc(md))
+        end
+
+        # Both skins unwrap to the same bare markdown, and a full file round-trips.
+        for md in (raw"$$\sum_i x_i$$ and \(E=mc^2\)", "plain prose", raw"$\frac{a}{b}$")
+            rq = ReportEngine.Report("r", "")
+            push!(rq.cells, ReportEngine.Cell("m", MARKDOWN, md))
+            s = serialize_report(rq)
+            @test parse_report(s).cells[1].source == md
+            @test serialize_report(parse_report(s)) == s     # fixed point
+        end
+        # Legacy files written with the plain skin still read, whatever they contain.
+        @test parse_report("#%% md id=m\n@md\"\"\"\nlegacy\n\"\"\"\n").cells[1].source == "legacy"
+    end
 end
 
 @testset "standalone! injects the runnable contract" begin

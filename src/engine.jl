@@ -243,13 +243,26 @@ _is_preamble_line(l::AbstractString) = occursin("KaimonSlate", l) && occursin(r"
 # The engine stores the INNER markdown as `cell.source` and drives its own `{{ }}`/CommonMark pipeline;
 # the wrapper is purely the on-disk runnable skin. Old bare-prose markdown cells still read (unwrap is
 # a no-op on them). Non-greedy, `.`-matches-newline, tolerant of one wrapper newline on each side.
-const _MD_WRAP_RE = r"^@md\"\"\"\n?(.*?)\n?\"\"\"$"s
+# The `raw` variant is the same skin over a raw literal — see `_md_needs_raw`.
+const _MD_WRAP_RE = r"^@md(?: raw)?\"\"\"\n?(.*?)\n?\"\"\"$"s
 
-# Unwrap `@md\"\"\"…\"\"\"` back to bare markdown; any other body is returned unchanged.
+# Unwrap `@md\"\"\"…\"\"\"` (or its `raw` variant) back to bare markdown; any other body is returned
+# unchanged. Both forms carry the markdown VERBATIM, so unwrapping is the same either way.
 function _unwrap_md(src::AbstractString)
     m = match(_MD_WRAP_RE, String(src))
     return m === nothing ? String(src) : String(m.captures[1])
 end
+
+# Julia validates escape sequences inside a `"…"` literal even where it does not process them, so
+# prose carrying LaTeX can make the saved `.jl` unparseable as a script: `\frac` is accepted (`\f`
+# is an escape letter) while `\sum` is a syntax error. Which commands trip it is pure accident.
+# A body with such a sequence gets a `raw` literal instead, which accepts any backslash.
+#
+# Only that body — the ordinary cell keeps the plain skin byte-for-byte, so existing notebooks and
+# their diffs are untouched, and `_unwrap_md` reads both.
+const _JULIA_ESCAPE_CHARS = Set{Char}("\\\"'nrtbfvae0123456789xuUN\n")
+_md_needs_raw(body::AbstractString) =
+    any(m -> !(m.captures[1][1] in _JULIA_ESCAPE_CHARS), eachmatch(r"\\(.)"s, String(body)))
 
 # Parse a `controls=` value into columns of names, respecting `[ ]` groups.
 function _parse_controls(s::AbstractString)
@@ -657,7 +670,13 @@ function _cell_source(cell::Cell)
     # Markdown gets the runnable `@md\"\"\"…\"\"\"` skin, EXCEPT when the body itself contains `\"\"\"`
     # (which would break the triple-quoted literal) — that rare cell falls back to the bare form,
     # which still parses in the engine (just not standalone-runnable). `_unwrap_md` reads both.
-    cell.kind === MARKDOWN && !occursin("\"\"\"", body) && (body = "@md\"\"\"\n" * body * "\n\"\"\"")
+    # Prose carrying LaTeX takes the `raw` variant so the file stays valid Julia (`_md_needs_raw`).
+    if cell.kind === MARKDOWN && !occursin("\"\"\"", body)
+        # A raw literal cannot END with a backslash — the trailing newline we add keeps it off the
+        # closing quotes, so only a body that is entirely a backslash could still bite. Guard it.
+        kw = (_md_needs_raw(body) && !endswith(body, '\\')) ? " raw" : ""
+        body = "@md$(kw)\"\"\"\n" * body * "\n\"\"\""
+    end
     return "$header\n$body"
 end
 
