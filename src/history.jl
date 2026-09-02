@@ -32,8 +32,7 @@ using SHA, JSON, CodecZstd
 const _ROOT = Ref{String}("")
 function _root()
     isempty(_ROOT[]) || return _ROOT[]
-    cache = get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache"))
-    _ROOT[] = joinpath(cache, "kaimonslate", "history")
+    _ROOT[] = joinpath(SlateHome.cache_home(), "history")
     return _ROOT[]
 end
 

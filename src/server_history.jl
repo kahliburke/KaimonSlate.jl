@@ -523,7 +523,7 @@ end
 const _DBLOB_DIR = Ref{String}("")
 function _dblob_dir()
     if _DBLOB_DIR[] == ""
-        d = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(get(ENV, "HOME", tempdir()), ".cache")), "kaimonslate", "blobs")
+        d = joinpath(SlateHome.cache_home(), "blobs")
         try; mkpath(d); catch; d = joinpath(tempdir(), "kaimonslate-blobs"); mkpath(d); end
         _DBLOB_DIR[] = d
     end
@@ -584,8 +584,7 @@ end
 # manifest is small (blob URLs, not inline rasters). Cache-tier and fully disposable: a missing or
 # corrupt sidecar just means no interim preview, never a correctness issue. Live cells supersede it
 # cell-by-cell as each `celldone:` lands (the browser reconciles by id + content hash).
-_preview_file(key::AbstractString) = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
-    "kaimonslate", "preview", String(key) * ".json")
+_preview_file(key::AbstractString) = joinpath(SlateHome.cache_home(), "preview", String(key) * ".json")
 _preview_file(nb::LiveNotebook) = _preview_file(doc_key(nb))
 
 const _PREVIEW_SAVE_AT = Dict{String,Float64}()   # nbid → last flush time (debounce)

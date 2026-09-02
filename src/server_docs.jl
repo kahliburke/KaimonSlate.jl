@@ -266,8 +266,7 @@ const _DOC_SCHEMA = "5"   # bump when the indexed payload shape changes → forc
                           #  schema 4 excludes "no docstring" placeholders;
                           #  schema 5 embeds a long docstring per section rather than whole, so an
                           #  existing collection needs the extra per-chunk vectors written)
-_doc_cache_file() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
-                             "kaimonslate", "docindex.json")
+_doc_cache_file() = joinpath(SlateHome.cache_home(), "docindex.json")
 function _doc_cache_load()
     lock(_DOC_CACHE_LOCK) do
         isempty(_DOC_CACHE) || return

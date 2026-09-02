@@ -26,12 +26,12 @@ module KaimonSlate
 
 import JSON
 
-# FIRST: ReportEngine's remote transport shares its ssh control socket, so this has to exist
-# before the engine is defined. Depends on nothing itself.
+# In dependency order; each depends on nothing but what precedes it. SlateHome is first because
+# every other module resolves its paths through it.
+include("slate_home.jl") # module SlateHome — KaimonSlate's own XDG config/data/cache homes
 include("sshauth.jl")   # module SshAuth — ssh prompts (password / second factor) ↔ the notebook
 include("engine.jl")    # module ReportEngine (+ eval / deps / bind / echarts)
 include("render.jl")    # module ReportRender
-include("slate_home.jl") # module SlateHome — KaimonSlate's own XDG config/data/cache homes
 include("effectstore.jl") # module EffectStore — durable per-cell declared-effect records (sibling of MemoStore)
 include("ledger.jl")    # module PublishLedger — the publish ledger + LedgerStore backends
 include("server.jl")    # module NotebookServer (uses ..ReportEngine, ..ReportRender, ..SlateHome)

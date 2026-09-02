@@ -136,7 +136,7 @@ end
 
 # Slate's local memo store root — matches the worker's `_memo_dir()` and remote.jl's
 # `_slate_cache_dir()` literally (self-contained: those live in other module scopes).
-_memo_root() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "memo")
+_memo_root() = joinpath(SlateHome.cache_home(), "memo")
 
 # Copy a directory's contents into `dest`, skipping `.git` (history travels via the git
 # bundle, not as loose objects) — keeps the tarball lean and avoids nested-repo confusion.

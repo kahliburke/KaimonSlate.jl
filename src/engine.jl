@@ -16,13 +16,15 @@ import JSON   # durable `using`-export cache file (deps.jl)
 import Pkg    # in-process package add/remove (eval.jl)
 import Serialization   # decode base64'd slate_emit values off the gate stream (gate_kernel.jl)
 import Base64
-# The ssh control socket a region shares with the batch fabric, and the cache-root resolver both
-# halves must agree on (remote.jl). Provided by the parent when loaded as part of KaimonSlate;
-# included directly when this file is loaded on its own, as the tests do. It depends on nothing.
-if isdefined(parentmodule(@__MODULE__), :SshAuth)
-    import ..SshAuth
-else
-    Base.include(@__MODULE__, joinpath(@__DIR__, "sshauth.jl"))
+# Path homes and the ssh prompt bridge. Provided by the parent when loaded as part of KaimonSlate;
+# included directly when this file is loaded on its own, as the tests do. Neither depends on
+# anything else.
+for (name, file) in ((:SlateHome, "slate_home.jl"), (:SshAuth, "sshauth.jl"))
+    if isdefined(parentmodule(@__MODULE__), name)
+        Core.eval(@__MODULE__, :(import ..$name))
+    else
+        Base.include(@__MODULE__, joinpath(@__DIR__, file))
+    end
 end
 
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState

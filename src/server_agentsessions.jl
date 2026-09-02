@@ -30,8 +30,7 @@ const _AGENT_LOG_CAP = 4000
 # conversation survives a restart too. Keyed by the notebook's storage identity (`doc_key`), not
 # its path, so a move or a rename keeps the transcript. Loaded on open; appended as each
 # (non-delta) envelope is relayed; compacted to the cap; wiped by "clear chat".
-_chat_log_file(key::AbstractString) = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
-                                               "kaimonslate", "chat", String(key) * ".jsonl")
+_chat_log_file(key::AbstractString) = joinpath(SlateHome.cache_home(), "chat", String(key) * ".jsonl")
 _chat_log_file(nb::LiveNotebook) = _chat_log_file(doc_key(nb))
 function _load_chat_log!(nb::LiveNotebook)
     f = _chat_log_file(nb)
