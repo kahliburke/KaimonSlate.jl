@@ -774,15 +774,35 @@ function create_tools(GateTool::Type)
         return String(take!(io))
     end
 
-    """
-        remote_workers(host::String) -> String
+    # This hub's own roster, so `list` means the same thing with or without a host — one notebook per
+    # row with the worker serving it. A notebook running remotely says so and names the host, so the
+    # local view is a complete picture rather than half of one.
+    function _worker_list_local()::String
+        nbs = try; lock(_HUB[].lock) do; collect(values(_HUB[].notebooks)); end; catch; nothing; end
+        nbs === nothing && return "No hub is running."
+        isempty(nbs) && return "No notebooks are open."
+        io = IOBuffer(); println(io, "Workers on this hub:")
+        for nb in sort(nbs; by = n -> n.id)
+            k = nb.kernel
+            if !(k isa ReportEngine.GateKernel)
+                println(io, "  • $(nb.id)  ⚙ in-process (no worker)")
+            elseif k.target isa ReportEngine.RemoteTarget
+                println(io, "  • $(nb.id)  🌐 remote on '$(k.target.ssh_host)' port $(k.port)",
+                        "  — worker(action=\"list\", host=\"$(k.target.ssh_host)\") for its telemetry")
+            else
+                alive = k.proc !== nothing && (try; Base.process_running(k.proc); catch; false; end)
+                println(io, "  • $(nb.id)  ", alive ? "🟢 running" : "⚪ not started",
+                        "  port $(k.port)", alive ? "  pid $(getpid(k.proc))" : " (spawns on next run)")
+            end
+        end
+        println(io, "\nRestart one with worker(action=\"restart\", notebook=…); remove it with action=\"reap\".")
+        return String(take!(io))
+    end
 
-    List the Slate workers on `host`: which notebook each serves, whether it's still running, its last
-    computation time, and whether it looks abandoned — so you can decide what to clean up. Reap a
-    specific one with `reap_worker`. Never kills anything.
-    """
-    function remote_workers(host::String)::String
-        h = strip(host); isempty(h) && return "Give an ssh host."
+    # `worker(action="list", host=…)` — the roster on another machine. Read-only.
+    function _worker_list(host::String)::String
+        h = strip(host)
+        isempty(h) && return _worker_list_local()
         ws = ReportEngine.list_remote_workers(h)
         isempty(ws) && return "No Slate workers found on '$h' (or host unreachable)."
         io = IOBuffer(); println(io, "Workers on '$h':")
@@ -820,21 +840,80 @@ function create_tools(GateTool::Type)
                 isempty(parts) || println(io, "      stats: ", join(parts, " · "))
             end
         end
-        println(io, "\nReap one with reap_worker(host, port).")
+        println(io, "\nReap one with worker(action=\"reap\", host=…, port=…); restart a notebook's own worker with worker(action=\"restart\", notebook=…).")
         return String(take!(io))
     end
 
     """
-        reap_worker(host::String, port::Int) -> String
+        worker(; notebook="", host="", port=0, action="status") -> String
 
-    Explicitly kill the worker on `host:port` and remove its files. Manual only — nothing is auto-reaped,
-    so a worker holding useful results is safe until you choose to remove it. Use `remote_workers` first.
+    Inspect and control the worker PROCESS a notebook runs on — local or remote. One tool for the
+    whole lifecycle so the right verb is always in reach:
+
+    - `status` (default) — where `notebook` runs right now, its ports, env and connection state.
+      Read-only.
+    - `list` — the worker roster: this hub's own workers with no `host`, or that machine's with one.
+      Which notebook each serves, whether it still runs, telemetry, whether it looks abandoned.
+      Read-only.
+    - `restart` — give `notebook` a fresh worker and re-run it. Clears a wedged process or a
+      polluted namespace; the notebook stays open. The usual repair.
+    - `reap` — kill a worker and remove its files, leaving nothing behind. Identify it by
+      `notebook`, or by `host`+`port` from `list`. Its notebook is left worker-less until the next
+      run, so prefer `restart` unless you actually want it gone.
+
+    Where a worker runs is not your problem: every action takes the same arguments and does the
+    right thing for a local or a remote one. Nothing is ever auto-reaped — a worker may hold
+    results worth keeping, so removal is always explicit.
     """
-    function reap_worker(host::String, port::Int)::String
-        h = strip(host); isempty(h) && return "Give an ssh host."
+    function worker(; notebook::String = "", host::String = "", port::Int = 0,
+                    action::String = "status")::String
+        act = lowercase(strip(action))
+        act in ("status", "list", "restart", "reap") ||
+            return "Unknown action '$action'. Use status | list | restart | reap."
+        act == "status" && return _worker_status(notebook)
+        act == "list" && return _worker_list(host)
+        act == "restart" && return _worker_restart(notebook)
+        return _worker_reap(notebook, host, port)
+    end
+
+    # Restart the worker under `notebook`: same process for a local or a remote one, since
+    # `restart_kernel!` owns the teardown either way and the re-run streams back asynchronously.
+    function _worker_restart(notebook::String)::String
+        isempty(strip(notebook)) && return "Give a notebook (id or .jl path) to restart."
+        nb, err = _nb(notebook); nb === nothing && return err
+        NotebookServer.restart_kernel!(nb)
+        return "🔄 restarting '$(nb.id)' — fresh worker, namespace cleared, cells re-running now. " *
+               "Poll with read() or worker(notebook=\"$(nb.id)\")."
+    end
+
+    # Reap by notebook, or by explicit host+port. The two kinds of worker are killed by different
+    # machinery — a local one is a process this hub owns, a remote one is only reachable over ssh
+    # and identified by its `worker-<port>.jl` script — but that is an implementation detail, and
+    # the caller is told the same thing either way.
+    function _worker_reap(notebook::String, host::String, port::Int)::String
+        if !isempty(strip(notebook))
+            nb, err = _nb(notebook); nb === nothing && return err
+            k = nb.kernel
+            k isa ReportEngine.GateKernel ||
+                return "'$(nb.id)' has no worker process (in-process kernel) — nothing to reap."
+            if !(k.target isa ReportEngine.RemoteTarget)
+                ReportEngine.shutdown!(k)
+                for ext in ("log", "json", "state", "stats")
+                    try; rm(joinpath(tempdir(), "kaimonslate", "worker-$(k.port).$ext"); force = true); catch; end
+                end
+                return "✅ reaped worker-$(k.port) for '$(nb.id)' (process killed, files removed). " *
+                       "It has no worker until the next run — action=restart brings one straight back."
+            end
+            host = k.target.ssh_host; port = k.port
+        end
+        h = strip(host)
+        isempty(h) && return "Give a notebook, or a host and port. `worker(action=\"list\")` shows what is there."
+        port > 0 || return "Give the worker's port (see `worker(action=\"list\", host=\"$h\")`)."
         try; NotebookServer._drop_kernels_for_worker!(_HUB[], h, port); catch; end   # wake any eval bound to this worker before it dies
-        ReportEngine.reap_remote_worker(h, port)
-        return "✅ reaped worker-$port on '$h' (process killed, files removed)."
+        ok = ReportEngine.reap_remote_worker(h, port)
+        return ok ? "✅ reaped worker-$port on '$h' (process killed, files removed)." :
+                    "❌ could not reap worker-$port on '$h' — no such worker, or the host is unreachable. " *
+                    "`worker(action=\"list\", host=\"$h\")` shows what is actually there."
     end
 
     """
@@ -1019,8 +1098,8 @@ function create_tools(GateTool::Type)
     The compute registry at a glance, no ssh: every configured region (name, host, transport, warm
     count, preload env, data root, and the last reconcile outcome) and every parked wire (a live
     connection kept across a notebook close for instant reattach). For the LIVE per-host roster —
-    which workers actually run, their state and telemetry — use `remote_workers(host)`; for one
-    notebook's placement use `whereis(notebook)`.
+    which workers actually run, their state and telemetry — use `worker(action="list", host=…)`;
+    for one notebook's placement use `worker(notebook=…)`.
     """
     function regions()::String
         rs = ReportEngine.regions()
@@ -1029,7 +1108,7 @@ function create_tools(GateTool::Type)
             return "No regions configured and no parked wires. Define one with region(name; host, warm, …)."
         io = IOBuffer()
         if !isempty(rs)
-            println(io, "Regions (desired state; live roster → remote_workers(host)):")
+            println(io, "Regions (desired state; live roster → worker(action=\"list\", host=…)):")
             for r in rs
                 ports = (r.transport === :direct && r.base_port > 0 && r.warm > 0) ?
                         "  ports=$(r.base_port)–$(r.base_port + 3r.warm - 1)" : ""
@@ -1051,15 +1130,16 @@ function create_tools(GateTool::Type)
     end
 
     """
-        whereis(notebook) -> String
+        worker(notebook) -> String
 
     Where this notebook's cells execute RIGHT NOW: local worker (pid/port) or remote host —
     with transport, ports (main/stream/data), connection state, and for a remote worker its
     lifecycle state, pool provenance (adopted from a warm pool?), and latest telemetry
-    (cpu/rss/memo). The placement queries: `pools()` for the hub view, `remote_workers(host)`
+    (cpu/rss/memo). The placement queries: `pools()` for the hub view, `worker(action="list", host=…)`
     for a host's full roster.
     """
-    function whereis(notebook::String)::String
+    function _worker_status(notebook::String)::String
+        isempty(strip(notebook)) && return "Give a notebook (id or .jl path), or use action=list with a host."
         nb, err = _nb(notebook); nb === nothing && return err
         k = nb.kernel
         k isa ReportEngine.GateKernel || return "'$notebook' runs IN-PROCESS (no worker — standalone/fallback kernel $(typeof(k)))."
@@ -2126,15 +2206,13 @@ function create_tools(GateTool::Type)
         GateTool("region_on", region_on),
         GateTool("sync_memo", sync_memo),
         GateTool("check_remote", check_remote),
-        GateTool("remote_workers", remote_workers),
-        GateTool("reap_worker", reap_worker),
+        GateTool("worker", worker),
         GateTool("region", region),
         GateTool("regions", regions),
         GateTool("peer_introduce", peer_introduce),
         GateTool("peer_teardown", peer_teardown),
         GateTool("peer_plan", peer_plan_tool),
         GateTool("transfers", transfers),
-        GateTool("whereis", whereis),
         GateTool("memo_trace", memo_trace),
         GateTool("read", read_cells),
         GateTool("add_cell", add_cell; timeout_ms = CELL_RUN_MS),

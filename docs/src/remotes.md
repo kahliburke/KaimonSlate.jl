@@ -104,12 +104,13 @@ happening and where.
 
 **Where a notebook runs** (agent tools; also usable from any REPL):
 
-- **`whereis(notebook)`** — this notebook's live placement: local (pid/port) or remote host, the
+- **`worker(notebook)`** — this notebook's live placement: local (pid/port) or remote host, the
   transport, ports (main / stream / data), connection state, and, for a remote, whether it **adopted
-  a warm worker** — plus its latest telemetry.
-- **`remote_workers(host)`** — a host's full roster: each worker's lifecycle badge (⚪ stopped ·
-  🔵 warm·region · 🟡 idle · 🟢 attached/running), the notebook it serves, last-activity age, and
-  telemetry (cpu %, RSS, cache size, running count) alongside host-wide cpu / load / memory.
+  a warm worker** — plus its latest telemetry. (`action="status"` is the default.)
+- **`worker(action="list", host=…)`** — a host's full roster: each worker's lifecycle badge
+  (⚪ stopped · 🔵 warm·region · 🟡 idle · 🟢 attached/running), the notebook it serves,
+  last-activity age, and telemetry (cpu %, RSS, cache size, running count) alongside host-wide
+  cpu / load / memory.
 - **`regions()`** — the compute registry: every configured region (host, warm count, preload, data
   root, last reconcile) and parked wires. (See [Regions](regions.md).)
 
@@ -142,7 +143,7 @@ telemetry). It refreshes every few seconds and hides itself when you have no reg
 !!! note "`slate_diag` is browser diagnostics, not worker state"
     Despite the name, `slate_diag` reports the **browser tab's console** (JS errors, failed asset
     loads) — useful for a broken widget or a 404, not for where a notebook runs. For execution and
-    worker state use `whereis` / `remote_workers` / `regions` and the 🪵 worker log.
+    worker state use `worker` / `regions` and the 🪵 worker log.
 
 ## From the agent
 
@@ -153,9 +154,10 @@ has the full parameters (`slate_api("remote")` lists them):
 | --- | --- |
 | `slate_run_on(notebook, host, scope)` | Place a **whole** notebook's worker (local / SSH host; transport; scope). |
 | `slate_check_remote(host, transport)` | Preflight + prime a host (the **Test & prime** dry-run). |
-| `slate_remote_workers(host)` | A host's live worker roster + telemetry. |
-| `slate_reap_worker(host, port)` | Kill and remove one remote worker. |
-| `slate_whereis(notebook)` | Where a notebook runs right now. |
+| `slate_worker(notebook)` | Where a notebook runs right now (`action="status"`). |
+| `slate_worker(action="list", host)` | A host's live worker roster + telemetry. |
+| `slate_worker(action="restart", notebook)` | Fresh worker for a notebook, then re-run. Local or remote. |
+| `slate_worker(action="reap", host, port)` | Kill and remove one worker, leaving nothing behind. |
 | `slate_sync_memo(notebook)` | Push the notebook's full cache to its remote worker. |
 
 Defining named regions and assigning them to a notebook has its own tools — `slate_region`,

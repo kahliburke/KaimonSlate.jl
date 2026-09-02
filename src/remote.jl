@@ -3506,10 +3506,18 @@ end
     reap_remote_worker(host, port) -> Bool
 
 Explicitly kill the worker on `host:port` and remove its script/log/manifest. Manual only — Slate
-never auto-reaps (a worker may hold results worth keeping). Returns true if the kill+cleanup ran.
+never auto-reaps (a worker may hold results worth keeping).
+
+REMOTE only: it reaches the worker over ssh and matches its `worker-<port>.jl` script, neither of
+which exists for a local worker (spawned inline with `-e` and owned by the hub as a process).
+Returns whether the kill reached something, so the caller can report the outcome rather than
+assume it.
 """
 function reap_remote_worker(host, port::Int)
     _rlog("reap: killing worker-$port on $host (manual)")
+    # Did the host have this worker at all? Answered BEFORE the kill, so "nothing to reap" and "the
+    # host is unreachable" are distinguishable from a kill that landed.
+    existed = try; _ssh_test(host, `test -f $("$_REMOTE_WORKER/worker-$port.jl")`); catch; false; end
     try; _evict_parked!(host; port = port); catch; end        # a parked wire to it must die too
     try; _evict_worker_conn!(host, port); catch; end          # …and any non-parked hub wire (warm/reconnect) — else a respawn on this port hits "Already connected"
     try; _peer_route_forget!(host); catch; end                # …and any cached peer-route verdict touching this host (topology changed)
@@ -3529,5 +3537,6 @@ function reap_remote_worker(host, port::Int)
         try; _ssh_test(host, `sh -c $("pkill -TERM -f '$pat'; sleep 1; pkill -KILL -f '$pat'; true")`); catch; end
     end
     try; _ssh_ok(host, `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json") $("$_REMOTE_WORKER/worker-$port.state") $("$_REMOTE_WORKER/worker-$port.stats")`); catch; end
-    return true
+    existed || _rlog("reap: no worker-$port script on $host — nothing was killed")
+    return existed
 end

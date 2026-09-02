@@ -210,6 +210,31 @@ end
         @test occursin("— index", api())
     end
 
+    # The worker PROCESS lifecycle is one tool with an action, not one tool per verb: an agent that
+    # wants a fresh worker should find `restart` next to `reap` rather than reaching for whichever
+    # name sounds closest. Where the worker runs is not part of the interface.
+    @testset "worker lifecycle is one tool with four actions" begin
+        tools = KaimonSlate.create_tools(StubGate.GateTool)
+        names = [t.name for t in tools]
+        @test "worker" in names
+        # The verbs it replaced are gone — a stale name must fail loudly, not linger as a second way.
+        @test isempty(intersect(names, ["reap_worker", "remote_workers", "whereis"]))
+
+        w = only(t for t in tools if t.name == "worker").handler
+        @test occursin("Unknown action", w(action = "bounce"))
+        # Every action names what it needs instead of failing silently or guessing.
+        @test occursin("Give a notebook", w(action = "restart"))
+        @test occursin("Give a notebook", w(action = "status"))
+        @test occursin("host and port", w(action = "reap"))
+        @test occursin("port", w(action = "reap", host = "somehost"))
+        # `status` is the default, so a bare notebook argument is the common read.
+        @test w(notebook = "") == w(notebook = "", action = "status")
+
+        # Every action takes the same arguments — the caller never selects a local or remote form.
+        kw = Base.kwarg_decl(only(methods(w)))
+        @test Set(kw) == Set([:notebook, :host, :port, :action])
+    end
+
     @testset "declared timeout budgets" begin
         tools = KaimonSlate.create_tools(StubGate.GateTool)
         byname = Dict(t.name => t for t in tools)

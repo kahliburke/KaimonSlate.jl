@@ -741,19 +741,36 @@ See also `save_asset`, `FileUpload`."""),
     # Discoverability SIGNPOSTS for the `slate.*` AGENT tools (not cell helpers), so `slate_api("remote")`
     # / `slate_search_docs("region")` surface them; each tool's own schema (in `create_tools`) has the
     # full per-parameter reference.
+    SlateApiEntry("worker", "Remote & regions",
+        "AGENT TOOL — the worker PROCESS behind a notebook: where it runs, restart it, remove it.",
+        ["restart", "worker", "kernel", "process", "hung", "wedged", "stuck", "frozen", "kill",
+         "respawn", "reset", "namespace", "reap", "roster", "pid"],
+        "slate.worker(notebook) · action=status|list|restart|reap",
+        """The worker PROCESS a notebook runs on. One tool, four actions, and the same arguments
+        whatever the worker is — where it runs is not something the caller has to know:
+          • `slate.worker(notebook)` — where it runs right now, ports, env, connection state
+            (`action="status"`, the default). Read-only.
+          • `slate.worker(action="list")` — this hub's roster; pass `host` for another machine's.
+            Read-only.
+          • `slate.worker(action="restart", notebook)` — **a fresh worker, then re-run**. This is
+            the repair for a wedged process or a namespace polluted by earlier state, and it keeps
+            the notebook open. Reach for this before closing and reopening the notebook.
+          • `slate.worker(action="reap", notebook)` — kill the worker and remove its files. Its
+            notebook is left worker-less until the next run, so `restart` is usually what you want.
+            Identify by `notebook`, or by `host`+`port` from `list`.
+        Nothing is auto-reaped: a worker may hold results worth keeping, so removal is explicit."""),
     SlateApiEntry("remote", "Remote & regions",
         "AGENT TOOLS — run a WHOLE notebook's worker on another machine (SSH), transparently.",
         ["ssh", "host", "offload", "gpu", "cluster", "move", "elsewhere"],
-        "slate.run_on · slate.check_remote · slate.whereis · slate.remote_workers · slate.reap_worker · slate.sync_memo",
+        "slate.run_on · slate.check_remote · slate.worker · slate.sync_memo",
         """Run a WHOLE notebook's worker on another machine. These are `slate.*` AGENT TOOLS — call the
         tool (they act on a notebook/host from OUTSIDE a cell; cell code never calls them):
           • `slate.run_on(notebook, host, scope)` — place THIS notebook's worker locally or on an SSH
             host (transport `tunnel`|`direct`; `scope` `session`|`notebook`|`clear`). Reactivity,
             hot-reload and streaming stay transparent. `slate.check_remote(host)` dry-runs + primes a
             host first.
-          • `slate.remote_workers(host)` — a host's live roster (state + telemetry);
-            `slate.reap_worker(host, port)` kills one; `slate.whereis(notebook)` shows where a notebook
-            runs right now.
+          • `slate.worker(...)` — the worker PROCESS lifecycle: status, roster, restart, reap. See
+            the `worker` entry.
           • `slate.sync_memo(notebook)` — push local durable-cache blobs to the remote (either transport)
             so it RESTORES cached results instead of recomputing (companion to `slate_memo_stats` /
             `slate_memo_entries` / `slate_memo_trace`).
