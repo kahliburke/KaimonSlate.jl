@@ -1443,9 +1443,18 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         host = r.host
         if r.scheduler !== :none
             host, alloc = ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
-            isempty(host) && error("region '$name': $(r.host) has not granted a node yet " *
-                                   "($(alloc === nothing ? "no allocation" : string(alloc.state)))" *
-                                   ". The request stands — run the cell again when it starts.")
+            # Why there is no node decides what to say, and they are not the same problem: a queue
+            # that has not got to us yet is a wait, and a login node that will not answer is a
+            # cluster that is down or an ssh setup that is wrong. Reporting the second as the first
+            # sends you reading scheduler documentation about a connection.
+            if isempty(host)
+                st = alloc === nothing ? :none : alloc.state
+                error(st === :unreachable ?
+                    "region '$name': cannot reach $(r.host) to ask for a node — the cluster or the ssh route to it is down" :
+                    st === :pending ?
+                    "region '$name': $(r.host) has queued the request but not started it yet. It stands — run the cell again once it does." :
+                    "region '$name': $(r.host) is holding no node and would not grant one")
+            end
             ReportEngine._rlog("region: '$name' allocated $(host) via $(r.host) (job $(alloc === nothing ? "?" : alloc.id))")
         end
         target = ReportEngine._region_target(r; origin_env = origin_env, host = host)   # transport/datadir/region from the def; env = the notebook's

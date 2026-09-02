@@ -115,11 +115,9 @@ function KnownHosts() {
                 : 'hide ' + h + ' from these lists. It stays in ~/.ssh/config and stays reachable — Slate just stops offering it.'}
                 onClick=${() => remembered ? forgetHost(h) : hideHost(h)}>✕</button>`}
         </span></div>`;
-    })}</div>
+    })}
     <div class="pddim" style="margin-top:7px;font-size:.75rem">
-      Hosts come from <code>~/.ssh/config</code> and from ones you tested here. ✕ forgets a
-      <b>remembered</b> one and hides a config one — <code>~/.ssh/config</code> is yours to edit, so
-      Slate hides rather than pretends to delete.
+      ✕ forgets a remembered host; a <code>~/.ssh/config</code> host is hidden, not deleted.
       ${nhid ? html` <button class="rthlink" onClick=${() => showHidden.value = !showHidden.value}>${showHidden.value ? 'done' : nhid + ' hidden — show'}</button>` : null}
     </div></div>`;
 }
@@ -170,7 +168,7 @@ const TABS = [
 
 function HostsTab() {
   return html`<div>
-    <div class="msg"><strong>Remote hosts</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Run notebooks on another machine. A remote is any SSH host you already reach with key auth (a <code>Host</code> in ~/.ssh/config) — or one that wants a password and a second factor, which Slate asks you for once.</span></div>
+    <div class="msg"><strong>Remote hosts</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Machines to run notebooks on. Any SSH host you can reach; password and 2FA are asked for once.</span></div>
     <div class="imrow"><label>Host</label><input id="rthost" spellcheck="false" autocomplete="off" placeholder="ssh_host (or user@host)"
       value=${host.value} onInput=${e => host.value = e.target.value} onKeyDown=${e => { if (e.key === 'Enter') { e.preventDefault(); runTest(); } }}/></div>
     <div class="imrow"><label>Transport</label>
@@ -190,7 +188,7 @@ function HostsTab() {
 function TransferTab() {
   const x = xfer.value || {};
   return html`<div>
-    <div class="msg"><strong>Data transfer</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">How values move between this machine and a worker. These apply to every notebook.</span></div>
+    <div class="msg"><strong>Data transfer</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">How values move between this machine and a worker. Applies to every notebook.</span></div>
     <div class="imrow"><label title="MB sent per round-trip when cached results move to a remote worker. Transfers ride their own channel, so this never delays cell results — it sets the round-trip granularity: smaller chunks bound per-chunk timeouts and let an abort land sooner on a slow uplink; bigger ones move data faster on a good link. Blank = default.">Transfer chunk size</label>
       <span class="rttr"><input id="rtxchunk" class="rtportin" type="number" min="0.1" step="0.5" placeholder=${x.effective_chunk_mb} value=${x.chunk_mb > 0 ? x.chunk_mb : ''} onChange=${commitXfer}/> <span class="pddim">MB / round-trip</span></span></div>
     <div class="imrow"><label title="When a notebook attaches to a remote worker, cached results are carried over only when moving them beats recomputing them — and never if one entry would take longer than this to transfer (the cell just recomputes remotely). The sync_memo tool always pushes everything. Blank = default.">Carry time budget</label>

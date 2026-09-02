@@ -66,7 +66,7 @@ export function clusterSummary(c) {
 
 function save() {
   const name = (kName.value || '').trim();
-  if (!name) { cmsg.value = { text: 'give the target a name — it is what a sweep cell references', err: true }; return; }
+  if (!name) { cmsg.value = { text: 'needs a name', err: true }; return; }
   const e = editing.value;
   const body = { name, kind: kKind.value };
   for (const k of Object.keys(e || {})) if (!FORM_KEYS.includes(k)) body[k] = e[k];
@@ -84,13 +84,13 @@ function save() {
       if (!d || !d.ok) { cmsg.value = { text: (d && d.error) || 'failed', err: true }; return; }
       return loadClusters().then(() => {
         seed(clusters.value.find(x => x.name === name) || null);
-        cmsg.value = { text: 'Saved — a sweep cell reaches it with ' + 'cluster=' + name };
+        cmsg.value = { text: 'Saved' };
       });
     }).catch(() => { cmsg.value = { text: 'request failed', err: true }; });
 }
 
 async function del(name) {
-  if (!await confirmP('Delete compute target “' + name + '”?\nSweep cells naming it will no longer resolve — work already in its store is untouched.', 'Delete', 'danger')) return;
+  if (!await confirmP('Delete compute target “' + name + '”?\nSweep cells using it will stop resolving. Work already in its store is untouched.', 'Delete', 'danger')) return;
   await fetch('/api/clusters/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).catch(() => {});
   if (editing.value && editing.value.name === name) seed(null);
   loadClusters();
@@ -104,7 +104,7 @@ function HostSays() {
   if (!h || si === undefined) return null;
   if (si === null) return html`<div class="rpprow"><label></label><span class="pddim"><span class="hydspin"></span> asking ${h}…</span></div>`;
   const kinds = (si.kinds || []).filter(k => k !== 'none');
-  const note = !kinds.length ? html`<span class="pddim">no scheduler found on ${h} — a plain host runs batch work only as <code>kind: local</code></span>`
+  const note = !kinds.length ? html`<span class="pddim">no scheduler on ${h}</span>`
     : kinds.includes(kKind.value) ? html`<span class="pddim">✓ ${kKind.value} found on ${h}${kinds.length > 1 ? ' (also ' + kinds.filter(k => k !== kKind.value).join(', ') + ')' : ''}</span>`
     : html`<span class="pddim" style="color:#d9a441">⚠ ${h} reports ${kinds.join(' and ')}, not ${kKind.value}</span>`;
   return html`<div class="rpprow"><label></label>${note}</div>`;
@@ -129,45 +129,45 @@ function Partitions() {
 export function Clusters() {
   const cs = clusters.value, e = editing.value, isLocal = kKind.value === 'local';
   return html`<div>
-    <div class="msg"><strong>Compute targets</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Where a <code>${'#%% sweep cluster=<name>'}</code> cell submits its work. A notebook carries the name; this machine decides what it means — so the same notebook runs against a toy cluster here and a real one at a site, with no cell edited.</span></div>
+    <div class="msg"><strong>Compute targets</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Where sweep cells send their jobs.</span></div>
     <div class="rppreglist">
       ${cs.map(c => html`<div class=${'rppregrow' + (e && e.name === c.name ? ' sel' : '')} onClick=${() => seed(c)}>
         <span class="rppregname">⎈ ${c.name}</span>
         <span class="rppregmeta" title=${c.note || ''}>${clusterSummary(c)}${c.note ? ' · ' + c.note : ''}</span>
         <button class="rppregdel" title="forget this compute target" onClick=${ev => { ev.stopPropagation(); del(c.name); }}>✕</button></div>`)}
       <div class=${'rppregrow rppregnew' + (e ? '' : ' sel')} onClick=${() => seed(null)}>
-        <span class="rppregname">＋ New target</span><span class="rppregmeta">a scheduler queue, or a local runner</span></div>
+        <span class="rppregname">＋ New target</span><span class="rppregmeta">cluster or local</span></div>
     </div>
     <div class="rppcfg">
       <div class="rppformhead">${e ? ('Edit target “' + e.name + '”') : 'New compute target'}</div>
       <div class="rpprow"><label>Name</label>
         <input class="rppname" autocomplete="off" spellcheck="false" placeholder="e.g. hpc, gpu, here" value=${kName.value} onInput=${ev => kName.value = ev.target.value}/>
-        <span class="pddim" style="flex:0 0 auto">what a cell writes as <code>cluster=…</code></span></div>
+        <span class="pddim" style="flex:0 0 auto">how sweep cells refer to it</span></div>
       <div class="rpprow"><label>Kind</label>
         <select class="rpptr" value=${kKind.value} onChange=${ev => kKind.value = ev.target.value}>
           <option value="slurm">slurm</option>
-          <option value="pbs">pbs — regions only, no batch launcher yet</option>
+          <option value="pbs">pbs — regions only</option>
           <option value="local">local — no scheduler</option>
         </select>
-        ${isLocal ? html`<span class="pddim">runs the units on this machine, one job per chunk</span>` : null}
-        ${kKind.value === 'pbs' ? html`<span class="pddim" style="color:#d9a441">a sweep cell will refuse this until the PBS launcher lands</span>` : null}</div>
+        ${isLocal ? html`<span class="pddim">runs here, no scheduler</span>` : null}
+        ${kKind.value === 'pbs' ? html`<span class="pddim" style="color:#d9a441">no PBS batch launcher yet</span>` : null}</div>
       ${isLocal ? html`
         <div class="rpprow"><label>Store</label>
           <input class="rpproot" autocomplete="off" spellcheck="false" placeholder="/path/to/store  (on THIS machine)" value=${kRoot.value} onInput=${ev => kRoot.value = ev.target.value}/></div>`
       : html`
         <div class="rpprow"><label>Login host</label>
-          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="the ssh host you submit from"
+          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="ssh host you submit from"
             value=${kHost.value} onInput=${ev => kHost.value = ev.target.value} onBlur=${ev => loadScheduler(ev.target.value.trim())}/></div>
         ${HostSays()}
         <div class="rpprow"><label>Store</label>
           <input class="rpproot" autocomplete="off" spellcheck="false" placeholder="/scratch/…  (a path ON the cluster)" value=${kRootRemote.value} onInput=${ev => kRootRemote.value = ev.target.value}/></div>
-        <div class="rpprow"><label></label><span class="pddim">Put the store on scratch — $HOME is a few tens of GB and is not built for parallel writes.</span></div>
+        <div class="rpprow"><label></label><span class="pddim">Use scratch, not $HOME.</span></div>
         <div class="rpprow"><label>Partition</label>${Partitions()}</div>
         <div class="rpprow"><label>Per job</label>
           <input class="rppport" autocomplete="off" spellcheck="false" placeholder="walltime" title="e.g. 01:00:00" value=${kWalltime.value} onInput=${ev => kWalltime.value = ev.target.value}/>
           <input class="rppn" type="text" inputmode="numeric" autocomplete="off" placeholder="cpus" value=${kCpus.value} onInput=${ev => kCpus.value = ev.target.value}/>
           <input class="rppn" autocomplete="off" spellcheck="false" placeholder="mem" title="e.g. 8G" value=${kMem.value} onInput=${ev => kMem.value = ev.target.value}/>
-          <span class="pddim">a cell may override any of these</span></div>
+          <span class="pddim">a cell can override these</span></div>
         <div class="rpprow"><label>Project</label>
           <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="/path/to/project  (folder with Project.toml, on the cluster)" value=${kProject.value} onInput=${ev => kProject.value = ev.target.value}/></div>`}
       ${isLocal ? html`
@@ -180,17 +180,17 @@ export function Clusters() {
       ${!more.value ? null : html`
         <div class="rpprow"><label>Chunk</label>
           <input class="rppn" type="text" inputmode="numeric" autocomplete="off" placeholder="units" value=${kChunk.value} onInput=${ev => kChunk.value = ev.target.value}/>
-          <span class="pddim">how many sweep units one scheduler job runs — blank lets the sweep decide</span></div>
+          <span class="pddim">sweep units per job; blank = auto</span></div>
         ${isLocal ? null : html`
           <div class="rpprow"><label>Account</label>
             <input class="rppport" autocomplete="off" spellcheck="false" placeholder="charge code" value=${kAccount.value} onInput=${ev => kAccount.value = ev.target.value}/>
-            <span class="pddim">only where the site bills against a project</span></div>
+            <span class="pddim">if the site bills one</span></div>
           <div class="rpprow"><label>Prologue</label>
-            <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="module load julia   (shell run before every job)" value=${kPrologue.value} onInput=${ev => kPrologue.value = ev.target.value}/></div>
+            <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="module load julia   (runs before each job)" value=${kPrologue.value} onInput=${ev => kPrologue.value = ev.target.value}/></div>
           <div class="rpprow"><label>Task script</label>
-            <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="the task runner's path ON the cluster (blank = shipped by the sweep)" value=${kPayload.value} onInput=${ev => kPayload.value = ev.target.value}/></div>`}
+            <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="task runner path on the cluster; blank = shipped" value=${kPayload.value} onInput=${ev => kPayload.value = ev.target.value}/></div>`}
         <div class="rpprow"><label>Note</label>
-          <input class="rppname" autocomplete="off" placeholder="anything a reader should know about this machine" value=${kNote.value} onInput=${ev => kNote.value = ev.target.value}/></div>`}
+          <input class="rppname" autocomplete="off" placeholder="note" value=${kNote.value} onInput=${ev => kNote.value = ev.target.value}/></div>`}
       <div class="rppact"><button class="rppsavereg" onClick=${save}>${e ? 'Save' : 'Create'}</button></div>
     </div>
     <div class=${'rppmsg' + (cmsg.value && cmsg.value.err ? ' err' : '')}>${cmsg.value ? cmsg.value.text : ''}</div>

@@ -21,16 +21,22 @@
 
 What the scheduler is holding for us, if anything. `node` is empty until it is `:running` — that is
 the whole point: the host is not knowable in advance.
+
+`:unreachable` is a separate state from `:none` and the distinction matters more than it looks: one
+means the scheduler answered and is holding nothing, the other means nobody answered. Collapsing
+them reports a cluster that is switched off as a queue that is merely busy, which sends you reading
+`squeue` documentation about a problem that is really `ssh`.
 """
 struct Allocation
     name::String        # the job name we look it up by
     id::String          # scheduler job id ("" when there is none)
-    state::Symbol       # :running | :pending | :none
+    state::Symbol       # :running | :pending | :none | :unreachable
     node::String        # the compute host, once it exists
     timeleft::String    # what the scheduler says is left, for display
 end
 
 Base.show(io::IO, a::Allocation) =
+    a.state === :unreachable ? print(io, "Allocation(", a.name, ": host unreachable)") :
     a.state === :none ? print(io, "Allocation(", a.name, ": none)") :
     print(io, "Allocation(", a.name, " #", a.id, " ", a.state,
           isempty(a.node) ? "" : " on " * a.node,
@@ -38,6 +44,9 @@ Base.show(io::IO, a::Allocation) =
 
 "Is this allocation usable right now — a node exists and the scheduler says it is ours?"
 alive(a::Allocation) = a.state === :running && !isempty(a.node)
+
+"Is there nothing more to wait for — the scheduler holds nothing, or could not be asked?"
+settled(a::Allocation) = a.state === :none || a.state === :unreachable
 
 """
     find_allocation(host, name) -> Allocation
@@ -48,7 +57,8 @@ every use, which is the point: an allocation can expire between two cells.
 """
 function find_allocation(host::AbstractString, name::AbstractString)
     ok, out = run_there(host, "squeue -h -n " * shq(name) * " -o '%i|%T|%N|%L' 2>/dev/null")
-    ok || return Allocation(String(name), "", :none, "", "")
+    # Nobody answered. NOT the same as "the scheduler holds nothing for you" — see `Allocation`.
+    ok || return Allocation(String(name), "", :unreachable, "", "")
     for line in split(strip(out), '\n')
         f = split(strip(line), '|')
         length(f) >= 3 && !isempty(strip(f[1])) || continue
@@ -96,7 +106,7 @@ function request_allocation!(host::AbstractString, name::AbstractString;
                              gpus::AbstractString = "", account::AbstractString = "",
                              extra::AbstractString = "")
     cur = find_allocation(host, name)
-    cur.state === :none || return cur
+    cur.state === :none || return cur   # already held, or unreachable — either way, do not submit
     args = String["--no-shell", "-J", shq(name), "-t", shq(walltime)]
     cpus > 0 && append!(args, ["-n", string(cpus)])
     isempty(partition) || append!(args, ["-p", shq(partition)])
@@ -117,7 +127,7 @@ it is held, not the time it is used, and the commonest way to waste a cluster is
 """
 function release_allocation!(host::AbstractString, name::AbstractString)
     a = find_allocation(host, name)
-    a.state === :none && return false
+    settled(a) && return false          # nothing held, or nobody to tell
     ok, _ = run_there(host, "scancel -n " * shq(name) * " 2>&1")
     return ok
 end
@@ -135,12 +145,13 @@ failure, just a cluster that is busy; the caller polls again later rather than g
 function allocation_node!(host::AbstractString, name::AbstractString; wait_s::Real = 120, kw...)
     a = request_allocation!(host, name; kw...)
     alive(a) && return a
+    settled(a) && return a                     # nothing to wait for — do not spin on nothing
     deadline = time() + wait_s
     while time() < deadline
         sleep(2)
         a = find_allocation(host, name)
         alive(a) && return a
-        a.state === :none && return a          # it went away — do not spin on nothing
+        settled(a) && return a                 # it went away, or the host did
     end
     return a
 end

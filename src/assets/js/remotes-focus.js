@@ -109,7 +109,7 @@ function AllocationRow(name) {
     a === null ? html`<span class="pddim"><span class="hydspin"></span> asking ${focusHost.value}…</span>`
     : !a.ok ? html`<span class="pddim">${a.error || 'unavailable'}</span>`
     : a.state === 'running' ? html`<span class="rppsysok">✓ node <code>${a.node}</code>${a.timeleft ? ' · ' + a.timeleft + ' left' : ''} · job ${a.id}</span>
-        <button class="rppsysbtn" title="give the node back now — it bills for the time it is held" onClick=${() => releaseAlloc(name)}>Release</button>`
+        <button class="rppsysbtn" title="release the node now; it bills while held" onClick=${() => releaseAlloc(name)}>Release</button>`
     : a.state === 'pending' ? html`<span class="pddim"><span class="hydspin"></span> queued as job ${a.id} — a cell on this region waits for it</span>
         <button class="rppsysbtn" title="withdraw the request" onClick=${() => releaseAlloc(name)}>Cancel</button>`
     : html`<span class="pddim">nothing held — the first cell on this region asks for a node</span>`;

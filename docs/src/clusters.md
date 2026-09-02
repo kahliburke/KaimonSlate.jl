@@ -79,6 +79,10 @@ reported rather than hidden — the request stands, and running the cell again a
 found by job name, so reopening the notebook lands on the node you were already using instead of
 queueing for a second one.
 
+A cluster you cannot reach at all says so in those words, rather than as a queue that is taking its
+time: the two look identical from here — no node either way — and only one of them is about the
+scheduler.
+
 A compute node is normally not reachable from your laptop at all, only through the login node. Slate
 registers that route the moment it learns which node it got, so everything after — the worker, the
 tunnel, file sync — goes the two hops without being told.

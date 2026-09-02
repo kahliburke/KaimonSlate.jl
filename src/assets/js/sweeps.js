@@ -213,9 +213,8 @@ const humBytes = b => b == null ? '—' :
           defs.map(c => `<option value="${esc(c.name)}"${c.name === cur ? ' selected' : ''}>${esc(c.name)}</option>`).join('') +
           '</select>'
         : '<div class="swcfg-empty">This machine has no compute targets yet.</div>') +
-      `<div class="swcfg-summary">${esc(clusterSummary(sel)) || (cur ? 'no target of that name on this machine' : 'the cell must name a target itself')}</div>` +
-      '<div class="swcfg-note">Targets are defined on the front page, under <strong>🖧 Remotes → Compute targets</strong> — ' +
-      'this notebook carries the name, each machine resolves it against its own.</div>';
+      `<div class="swcfg-summary">${esc(clusterSummary(sel)) || (cur ? 'not defined on this machine' : 'the cell must name a target itself')}</div>` +
+      '<div class="swcfg-note">Set up on the front page: <strong>🖧 Remotes → Clusters</strong>.</div>';
 
     const settings = picker +
       FIELDS.map(([group, fs]) =>

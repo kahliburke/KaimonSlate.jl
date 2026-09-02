@@ -369,6 +369,17 @@ end
         @test occursin("none", sprint(show, none))
         @test occursin("on c1", sprint(show, Sweep.Allocation("nm", "7", :running, "c1", "1:00")))
 
+        # "the scheduler holds nothing" and "nobody answered" are DIFFERENT, and were the same state
+        # once: a cluster that was switched off reported as a queue that was merely busy, so the
+        # message sent you reading squeue documentation about what was really an ssh failure. Both
+        # are settled — there is nothing to wait for — but only one of them is about the queue.
+        un = Sweep.Allocation("nm", "", :unreachable, "", "")
+        @test !Sweep.alive(un)
+        @test Sweep.settled(un) && Sweep.settled(none)
+        @test !Sweep.settled(Sweep.Allocation("nm", "7", :pending, "", ""))
+        @test !Sweep.settled(Sweep.Allocation("nm", "7", :running, "c1", "1:00"))
+        @test occursin("unreachable", sprint(show, un))
+
         # PBS is detectable and configurable but cannot be allocated on by this build. Saying so is
         # the point: issuing SLURM commands to a scheduler that has never heard of them would fail
         # further from the cause, and silently running on the login node would be worse than either.
@@ -990,13 +1001,16 @@ end
                                         "root_remote" => "/scratch/slate"))
             @test a.root_remote == "/scratch/slate" && a.payload == ""
 
+            # A typo is the usual cause, so the error names what this machine DOES have. It points at
+            # the UI rather than at header syntax: the cluster is picked from the cell's ⚙, and
+            # telling someone to type `#%% sweep cluster=…` describes a path nobody takes.
             e = try; Sweep.resolve_target(nothing, Dict("cluster" => "hcp"), defs); catch x; x; end
             @test occursin("no compute target named `hcp`", sprint(showerror, e))
             @test occursin("box, hpc", sprint(showerror, e))
             e2 = try; Sweep.resolve_target(nothing, Dict{String,String}(), defs); catch x; x; end
-            @test occursin("cluster=<name>", sprint(showerror, e2))
+            @test occursin("box, hpc", sprint(showerror, e2))          # names the choices, not the syntax
             e3 = try; Sweep.resolve_target(nothing, Dict{String,String}(), Dict()); catch x; x; end
-            @test occursin("no target", sprint(showerror, e3))
+            @test occursin("Compute targets", sprint(showerror, e3))     # nothing defined ⇒ say where to
 
             # An unsupported scheduler is an error naming what this build does support, not a
             # silent fall-through to SLURM.
