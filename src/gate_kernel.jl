@@ -1499,9 +1499,14 @@ end
 
 # Hash of the parent's Manifest (its content) — the baseline a forked env was seeded from.
 # Stored in the env as a marker so we can detect parent drift and auto re-resolve on open.
-_parent_manifest_hash(parent::AbstractString) =
-    (isempty(parent) || !isfile(joinpath(parent, "Manifest.toml"))) ? "" :
-    string(hash(read(joinpath(parent, "Manifest.toml"), String)); base = 16)
+# `parent_manifest` resolves it the way the loader does, so a workspace member reads the shared
+# manifest at the workspace root rather than a `Manifest.toml` it does not have.
+function _parent_manifest_hash(parent::AbstractString)
+    isempty(parent) && return ""
+    mf = parent_manifest(parent)
+    isempty(mf) && return ""
+    return string(hash(read(mf, String)); base = 16)
+end
 _parent_marker_path(k::GateKernel) = joinpath(k.envdir, ".slate_parent_manifest")
 function _write_parent_marker!(k::GateKernel)
     try; isempty(k.envdir) || write(_parent_marker_path(k), _parent_manifest_hash(k.parent)); catch; end

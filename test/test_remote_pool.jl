@@ -4,6 +4,7 @@
 # workers; roster entries are hand-built Dicts shaped like `list_remote_workers` output.
 using ReTest
 import Sockets   # squat on a port to prove the allocator probes before handing one out
+import Pkg       # Pkg.TOML — read back the Project.toml the devpath script rewrites
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl"))
 using .ReportEngine
@@ -234,6 +235,57 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         s0 = RE._env_instantiate_script("x", Tuple{String,String}[], false)
         @test !occursin("sources", s0) && !occursin("parsefile", s0)
         @test occursin("Pkg.instantiate()", s0)
+    end
+
+    @testset "_rewrite_devpaths_script: adds a [sources] entry the project never declared" begin
+        # A workspace member declares no `[sources]` of its own — it inherits the workspace root's,
+        # and only the member dir is shipped. So there is nothing to REWRITE and the dev dep dangles
+        # on the remote unless the entry is added outright. Run the generated script for real, with
+        # HOME pointed at a fixture, rather than grepping the source it produces.
+        home = mktempdir()
+        mkpath(joinpath(home, "proj"))
+        write(joinpath(home, "proj", "Project.toml"), """
+        [deps]
+        NeuroDSL = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        Registered = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+        """)
+        s = RE._rewrite_devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL"),
+                                                 ("NotDeclared", "devsrc/NotDeclared")])
+        jl = Base.julia_cmd()[1]
+        io = IOBuffer()
+        run(pipeline(ignorestatus(addenv(`$jl --startup-file=no -e $s`, "HOME" => home)),
+                     stdout = io, stderr = io))
+        p = Pkg.TOML.parsefile(joinpath(home, "proj", "Project.toml"))
+        @test get(get(p, "sources", Dict()), "NeuroDSL", Dict())["path"] ==
+              joinpath(home, "devsrc", "NeuroDSL")
+        # Pkg REJECTS a source naming a package the project doesn't list, which an indirect
+        # (manifest-only) path dep would be — so an undeclared name must not be inserted.
+        @test !haskey(get(p, "sources", Dict()), "NotDeclared")
+        # Declared deps are left alone otherwise.
+        @test p["deps"]["Registered"] == "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+    end
+
+    @testset "_rewrite_devpaths_script: an existing git source is left intact" begin
+        # An entry without a `path` is a git source; its url/rev still resolve on the remote, and
+        # bolting a path onto it would fight that.
+        home = mktempdir()
+        mkpath(joinpath(home, "proj"))
+        write(joinpath(home, "proj", "Project.toml"), """
+        [deps]
+        NeuroDSL = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+        [sources.NeuroDSL]
+        url = "https://example.invalid/NeuroDSL.jl"
+        rev = "main"
+        """)
+        s = RE._rewrite_devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL")])
+        jl = Base.julia_cmd()[1]
+        io = IOBuffer()
+        run(pipeline(ignorestatus(addenv(`$jl --startup-file=no -e $s`, "HOME" => home)),
+                     stdout = io, stderr = io))
+        src = Pkg.TOML.parsefile(joinpath(home, "proj", "Project.toml"))["sources"]["NeuroDSL"]
+        @test src["url"] == "https://example.invalid/NeuroDSL.jl"
+        @test !haskey(src, "path")
     end
 
     @testset "remote timing config: default → env → slate.json precedence" begin

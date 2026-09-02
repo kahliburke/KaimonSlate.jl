@@ -876,7 +876,11 @@ const _REMOTE_DEVSRC = "$_REMOTE_ROOT/devsrc"   # rsync'd sources for dev'd deps
 function _rsync_dev_deps!(t::RemoteTarget, local_env::AbstractString)
     host = t.ssh_host
     rewrites = Tuple{String,String}[]
-    for (name, lpath) in _dev_deps(joinpath(local_env, "Manifest.toml"), local_env)
+    # `parent_manifest` resolves the manifest the way the loader does — for a workspace member that is
+    # the shared one at the workspace root, and its relative `path=`s are anchored on ITS dir, not the
+    # project's. A fork env is an ordinary env, so this is just `local_env/Manifest.toml` there.
+    mf = parent_manifest(local_env)
+    for (name, lpath) in _dev_deps(mf, isempty(mf) ? local_env : dirname(abspath(mf)))
         # Normalize + strip the trailing slash the `path="."` form leaves (abspath("x/.") → "x/") so the
         # project-itself entry compares equal to the env dir and is left as the active project.
         if rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(local_env)), '/')
@@ -919,15 +923,24 @@ function _rewrite_devpaths_script(projrel::AbstractString, rewrites::Vector{Tupl
     println(io, "pf = joinpath(proj, \"Project.toml\")")
     println(io, "if isfile(pf)")
     println(io, "  pdata = TOML.parsefile(pf)")
-    println(io, "  src = get(pdata, \"sources\", nothing)")
-    println(io, "  if src isa AbstractDict")
+    println(io, "  src = get!(() -> Dict{String,Any}(), pdata, \"sources\")")
+    # A workspace member declares no `[sources]` of its own — it inherits the workspace root's, and
+    # only the member dir is shipped. So ADD an entry for a dev dep that has none, not just rewrite.
+    # Guarded on the dep being declared: Pkg rejects a source naming a package the project doesn't
+    # list, which an indirect (manifest-only) path dep would be.
+    println(io, "  decl = union(keys(get(pdata, \"deps\", Dict{String,Any}())), keys(get(pdata, \"extras\", Dict{String,Any}())))")
     for (name, rp) in rewrites
-        println(io, "    if get(src, raw\"$name\", nothing) isa AbstractDict && haskey(src[raw\"$name\"], \"path\")")
-        println(io, "      src[raw\"$name\"][\"path\"] = joinpath(homedir(), raw\"$rp\")")
+        println(io, "  let e = get(src, raw\"$name\", nothing)")
+        println(io, "    if e isa AbstractDict && haskey(e, \"path\")")
+        println(io, "      e[\"path\"] = joinpath(homedir(), raw\"$rp\")")
+        # An existing entry without a `path` is a git source — leave it, its url/rev still resolve.
+        println(io, "    elseif e === nothing && raw\"$name\" in decl")
+        println(io, "      src[raw\"$name\"] = Dict{String,Any}(\"path\" => joinpath(homedir(), raw\"$rp\"))")
         println(io, "    end")
+        println(io, "  end")
     end
-    println(io, "    open(pf, \"w\") do _io; TOML.print(_io, pdata); end")
-    println(io, "  end")
+    println(io, "  isempty(src) && delete!(pdata, \"sources\")")
+    println(io, "  open(pf, \"w\") do _io; TOML.print(_io, pdata); end")
     println(io, "end")
     return String(take!(io))
 end

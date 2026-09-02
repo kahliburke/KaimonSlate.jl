@@ -1800,21 +1800,22 @@ function __slate_project_deps()
     return out
 end
 
-"Read a project's direct deps as `[{name, version, uuid}]`. Versions come from the project's
-own `Manifest.toml` when present (best-effort), so this works for a project that isn't the
+"Read a project's direct deps as `[{name, version, uuid}]`. Versions come from whichever manifest
+resolves that project when present (best-effort), so this works for a project that isn't the
 active one (e.g. the parent). Returns `[]` on any failure."
 function _project_deps_at(projdir::AbstractString)
     out = Dict{String,Any}[]
     try
-        pf = joinpath(projdir, "Project.toml")
-        isfile(pf) || return out
+        pf = project_file_in(projdir)
+        isempty(pf) && return out
         proj = Pkg.TOML.parsefile(pf)
         deps = get(proj, "deps", Dict{String,Any}())
-        # versions: parse the sibling Manifest if present (format differs across Julia, but
-        # each dep entry is a 1-elt array of tables carrying `version`).
+        # versions: parse the Manifest that RESOLVES this project if present (format differs across
+        # Julia, but each dep entry is a 1-elt array of tables carrying `version`). For a workspace
+        # member that manifest is the shared one at the workspace root, not a sibling file.
         vers = Dict{String,String}()
-        mf = joinpath(projdir, "Manifest.toml")
-        if isfile(mf)
+        mf = parent_manifest(projdir)
+        if !isempty(mf)
             man = Pkg.TOML.parsefile(mf)
             mdeps = get(man, "deps", man)               # Julia ≥1.7 nests under "deps"
             for (nm, entries) in mdeps
