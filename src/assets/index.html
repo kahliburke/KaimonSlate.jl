@@ -129,8 +129,19 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
    that box instead, or dismissing means scrolling back to the top first. */
 .remotesmodal .modalx{position:sticky;top:0;float:right;margin:-8px -8px 0 0;}
 /* Reserve right-space in the remotes header rows so the absolute ✕ never overlaps their text. */
-.remotesmodal>.msg{padding-right:30px;}
+.remotesmodal .msg{padding-right:30px;}
 .rtfhead{padding-right:30px;}
+/* Tabs. Hosts, clusters and transfer settings share a modal but not a train of thought — one
+   scrolling column put a host you were setting up, a queue's defaults and a global transfer knob in
+   the same field of view. Each pane is a direct child, so focusmode's "hide my siblings" still holds. */
+.rttabs{display:flex;gap:4px;margin:-2px 34px 12px 0;border-bottom:1px solid #21253a;}
+.modal .rttab{background:none;border:none;box-shadow:none;border-radius:0;border-bottom:2px solid transparent;
+  color:#7a82a4;font-size:.84rem;padding:7px 12px;margin-bottom:-1px;cursor:pointer;white-space:nowrap;}
+.modal .rttab:hover{color:#c8cde0;background:rgba(86,156,214,.06);}
+.modal .rttab.on{color:#e6ebf7;border-bottom-color:#569cd6;background:none;}
+.rttabn{display:inline-block;min-width:16px;padding:0 4px;margin-left:5px;border-radius:8px;
+  background:#21253a;color:#9aa3c0;font-size:.7rem;line-height:16px;text-align:center;vertical-align:1px;}
+.modal .rttab.on .rttabn{background:rgba(86,156,214,.22);color:#a9d4ff;}
 .remotesmodal .imrow{flex-direction:row;align-items:center;gap:10px;}
 .remotesmodal .imrow>label{flex:0 0 70px;color:#8a90a8;font-size:.82rem;}
 .remotesmodal #rthost{flex:1 1 auto;min-width:0;background:#0d1120;color:#d4d8e8;border:1px solid #2a2e40;border-radius:7px;padding:7px 10px;font-family:Menlo,monospace;font-size:.82rem;}
@@ -199,6 +210,11 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .modal .rppregdel:hover{color:#e57575;border-color:#3a2030;background:rgba(229,117,117,.08);}
 /* region editor form */
 .rppformhead{color:#c8cde0;font-size:.9rem;font-weight:600;margin:2px 0 13px;}
+/* Disclosure for the fields a site sets once. A form you scroll is one where the field that matters
+   stops being the one you look at — but a collapsed section must still say what it is holding. */
+.rppmorerow{margin-bottom:6px;}
+.modal .rppmore{background:none;border:none;box-shadow:none;color:#7a82a4;font-size:.78rem;padding:2px 0;cursor:pointer;}
+.modal .rppmore:hover{color:#a9d4ff;background:none;}
 .rppchk{display:flex;align-items:baseline;gap:8px;color:#b8bed4;font-size:.8rem;cursor:pointer;flex:1 1 auto;min-width:0;line-height:1.45;}
 .rppchk>input{flex:0 0 auto;width:15px;height:15px;cursor:pointer;accent-color:#569cd6;position:relative;top:2px;}
 .rppchk>span{flex:1 1 auto;min-width:0;}

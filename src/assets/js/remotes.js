@@ -23,6 +23,7 @@ const port = signal('');           // :direct main port (blank = auto)
 const stream = signal('');         // :direct stream port
 // Preflight stream state: { note, rows:[{name,status,ms,detail}], verdict:{ok,text}|null, err }.
 const steps = signal(null);
+const tab = signal('hosts');        // which pane the modal is showing (see TABS)
 let _es = null;                     // live preflight EventSource (closed on retest / modal close)
 
 // ── data-transfer settings ──────────────────────────────────────────────────────────────
@@ -111,7 +112,7 @@ function Modal() {
     bg.classList.toggle('show', open);
     if (!open) { closeES(); return; }
     loadRegions(); loadXfer(); loadRunon(); loadClusters();
-    if (!focusHost.value) { const hi = document.getElementById('rthost'); hi && hi.focus(); }
+    if (!focusHost.value && tab.value === 'hosts') { const hi = document.getElementById('rthost'); hi && hi.focus(); }
     const onKey = e => {
       if (e.key !== 'Escape') return;   // the worker-detail popup (activity.js) handles its own Esc first (capture-phase)
       if (focusHost.value) { e.stopPropagation(); focusHost.value = ''; editRegion.value = null; }
@@ -123,10 +124,30 @@ function Modal() {
     return () => { document.removeEventListener('keydown', onKey); bg.removeEventListener('mousedown', onDown); };
   }, [open]);
 
-  const x = xfer.value || {};
+  const t = tab.value;
   return html`<div class=${'modal remotesmodal' + (focused ? ' focusmode' : '')}>
     <button class="modalx" title="Close (Esc)" onClick=${close}>✕</button>
-    <div class="msg"><strong>Remote hosts</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Run notebooks on another machine. A remote is any SSH host you already reach with key auth (a <code>Host</code> in ~/.ssh/config).</span></div>
+    <div class="rttabs">
+      ${TABS.map(([k, label, title]) => html`<button class=${'rttab' + (t === k ? ' on' : '')} title=${title}
+        onClick=${() => tab.value = k}>${label}${k === 'clusters' && clusters.value.length ? html` <span class="rttabn">${clusters.value.length}</span>` : null}</button>`)}
+    </div>
+    ${t === 'hosts' ? html`<${HostsTab}/>` : t === 'clusters' ? html`<${Clusters}/>` : html`<${TransferTab}/>`}
+    <div class="rtfocus"><${Focus}/></div>
+  </div>`;
+}
+
+// The three things this modal is actually for. They were one scrolling column, which put a host
+// you are setting up, a cluster's queue defaults, and a global transfer knob in one field of view —
+// none of which have anything to do with each other.
+const TABS = [
+  ['hosts',    '🖧 Hosts',    'machines you can run a notebook or a region on'],
+  ['clusters', '⎈ Clusters',  'named compute targets a sweep cell submits to'],
+  ['transfer', '⇄ Transfer',  'how data moves between this machine and a worker'],
+];
+
+function HostsTab() {
+  return html`<div>
+    <div class="msg"><strong>Remote hosts</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Run notebooks on another machine. A remote is any SSH host you already reach with key auth (a <code>Host</code> in ~/.ssh/config) — or one that wants a password and a second factor, which Slate asks you for once.</span></div>
     <div class="imrow"><label>Host</label><input id="rthost" spellcheck="false" autocomplete="off" placeholder="ssh_host (or user@host)"
       value=${host.value} onInput=${e => host.value = e.target.value} onKeyDown=${e => { if (e.key === 'Enter') { e.preventDefault(); runTest(); } }}/></div>
     <div class="imrow"><label>Transport</label>
@@ -140,15 +161,19 @@ function Modal() {
     <div class="rtactions"><button class="primary" onClick=${runTest}>🩺 Test & prime</button></div>
     <div class="rtsteps"><${TestSteps}/></div>
     <${KnownHosts}/>
-    <${Clusters}/>
-    <div class="rthhead" style="margin-top:16px">Data transfer (all notebooks)</div>
+  </div>`;
+}
+
+function TransferTab() {
+  const x = xfer.value || {};
+  return html`<div>
+    <div class="msg"><strong>Data transfer</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">How values move between this machine and a worker. These apply to every notebook.</span></div>
     <div class="imrow"><label title="MB sent per round-trip when cached results move to a remote worker. Transfers ride their own channel, so this never delays cell results — it sets the round-trip granularity: smaller chunks bound per-chunk timeouts and let an abort land sooner on a slow uplink; bigger ones move data faster on a good link. Blank = default.">Transfer chunk size</label>
       <span class="rttr"><input id="rtxchunk" class="rtportin" type="number" min="0.1" step="0.5" placeholder=${x.effective_chunk_mb} value=${x.chunk_mb > 0 ? x.chunk_mb : ''} onChange=${commitXfer}/> <span class="pddim">MB / round-trip</span></span></div>
     <div class="imrow"><label title="When a notebook attaches to a remote worker, cached results are carried over only when moving them beats recomputing them — and never if one entry would take longer than this to transfer (the cell just recomputes remotely). The sync_memo tool always pushes everything. Blank = default.">Carry time budget</label>
       <span class="rttr"><input id="rtxcarry" class="rtportin" type="number" min="1" step="5" placeholder=${x.effective_carry_max_s} value=${x.carry_max_s > 0 ? x.carry_max_s : ''} onChange=${commitXfer}/> <span class="pddim">s / entry on attach</span></span></div>
     <div class="imrow"><label title="A cell needing a value from the other side of a region boundary pauses with a preview (exact size + estimated time) when the transfer would take longer than this; running the cell again proceeds. 0 disables previews. Blank = default.">Confirm transfers over</label>
       <span class="rttr"><input id="rtxconfirm" class="rtportin" type="number" min="0" step="5" placeholder=${x.effective_confirm_s} value=${x.confirm_s >= 0 ? x.confirm_s : ''} onChange=${commitXfer}/> <span class="pddim">s (0 = never ask)</span></span></div>
-    <div class="rtfocus"><${Focus}/></div>
   </div>`;
 }
 
@@ -163,14 +188,17 @@ const im = document.getElementById('imrunon-mount'); if (im) render(html`<${RunO
 loadRunon();   // populate the pickers on page load (independent of the modal being opened)
 
 // Open on the topbar button (data loads in Modal's open-effect). Resets the setup form to a clean list view.
-function openRemotes() {
+function openRemotes(which = 'hosts') {
   focusHost.value = ''; editRegion.value = null; steps.value = null;
   port.value = ''; stream.value = ''; host.value = '';
+  tab.value = which;
   modalOpen.value = true;
 }
 const btn = document.getElementById('remotesbtn');
-if (btn) btn.onclick = openRemotes;
+if (btn) btn.onclick = () => openRemotes();
 
-// `/#remotes` opens straight into the manager, so a notebook's ☰ menu can send you here for the
-// compute target a sweep cell names — it is configured with the machines, not in the notebook.
+// `/#remotes` (and `/#clusters`) open straight into the manager on that tab, so a notebook's ☰ menu
+// can send you to the compute target a sweep cell names — configured with the machines, not in the
+// notebook — and land on it rather than on a page to hunt through.
 if (location.hash === '#remotes') openRemotes();
+else if (location.hash === '#clusters') openRemotes('clusters');

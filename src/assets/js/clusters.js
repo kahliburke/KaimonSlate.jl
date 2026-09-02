@@ -14,6 +14,7 @@ import { schedInfo, loadScheduler } from './stores.js';
 export const clusters = signal([]);
 const editing = signal(null);        // the target being edited (null = the "new" form)
 const cmsg = signal(null);           // {text, err}
+const more = signal(false);          // show the set-once fields (chunk, account, prologue, …)
 
 const confirmP = (msg, ok, cls) => (window.confirmDark ? window.confirmDark(msg, ok, cls) : Promise.resolve(window.confirm(msg)));
 
@@ -45,6 +46,11 @@ function seed(c) {
   kPrologue.value = g('prologue'); kNote.value = g('note');
   if (kHost.value && kKind.value !== 'local') loadScheduler(kHost.value);
 }
+
+// How many of the folded-away fields this target actually uses. Shown on the disclosure so a
+// collapsed section never hides a setting you would not have guessed was there.
+const filledExtras = () =>
+  [kChunk, kAccount, kPrologue, kPayload, kNote].filter(s => (s.value || '').trim()).length;
 
 // One line saying where the work goes, for the list and for the sweep cell's summary.
 export function clusterSummary(c) {
@@ -122,9 +128,8 @@ function Partitions() {
 
 export function Clusters() {
   const cs = clusters.value, e = editing.value, isLocal = kKind.value === 'local';
-  return html`<div class="rthosts" style="margin-top:16px">
-    <div class="rthhead">Compute targets</div>
-    <div class="pddim" style="margin:2px 0 6px">Where a <code>${'#%% sweep cluster=<name>'}</code> cell submits its work. Regions on the same machine are configured above.</div>
+  return html`<div>
+    <div class="msg"><strong>Compute targets</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Where a <code>${'#%% sweep cluster=<name>'}</code> cell submits its work. A notebook carries the name; this machine decides what it means — so the same notebook runs against a toy cluster here and a real one at a site, with no cell edited.</span></div>
     <div class="rppreglist">
       ${cs.map(c => html`<div class=${'rppregrow' + (e && e.name === c.name ? ' sel' : '')} onClick=${() => seed(c)}>
         <span class="rppregname">⎈ ${c.name}</span>
@@ -163,21 +168,29 @@ export function Clusters() {
           <input class="rppn" type="text" inputmode="numeric" autocomplete="off" placeholder="cpus" value=${kCpus.value} onInput=${ev => kCpus.value = ev.target.value}/>
           <input class="rppn" autocomplete="off" spellcheck="false" placeholder="mem" title="e.g. 8G" value=${kMem.value} onInput=${ev => kMem.value = ev.target.value}/>
           <span class="pddim">a cell may override any of these</span></div>
-        <div class="rpprow"><label>Account</label>
-          <input class="rppport" autocomplete="off" spellcheck="false" placeholder="charge code" value=${kAccount.value} onInput=${ev => kAccount.value = ev.target.value}/>
-          <span class="pddim">only where the site bills against a project</span></div>`}
-      <div class="rpprow"><label>Project</label>
-        <input class="rpppre" autocomplete="off" spellcheck="false" placeholder=${'/path/to/project  (folder with Project.toml, ' + (isLocal ? 'here' : 'on the cluster') + ')'} value=${kProject.value} onInput=${ev => kProject.value = ev.target.value}/></div>
-      <div class="rpprow"><label>Chunk</label>
-        <input class="rppn" type="text" inputmode="numeric" autocomplete="off" placeholder="units" value=${kChunk.value} onInput=${ev => kChunk.value = ev.target.value}/>
-        <span class="pddim">how many sweep units one scheduler job runs — blank lets the sweep decide</span></div>
-      ${isLocal ? null : html`
-        <div class="rpprow"><label>Prologue</label>
-          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="module load julia   (shell run before every job)" value=${kPrologue.value} onInput=${ev => kPrologue.value = ev.target.value}/></div>
-        <div class="rpprow"><label>Task script</label>
-          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="the task runner's path ON the cluster (blank = shipped by the sweep)" value=${kPayload.value} onInput=${ev => kPayload.value = ev.target.value}/></div>`}
-      <div class="rpprow"><label>Note</label>
-        <input class="rppname" autocomplete="off" placeholder="anything a reader should know about this machine" value=${kNote.value} onInput=${ev => kNote.value = ev.target.value}/></div>
+        <div class="rpprow"><label>Project</label>
+          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="/path/to/project  (folder with Project.toml, on the cluster)" value=${kProject.value} onInput=${ev => kProject.value = ev.target.value}/></div>`}
+      ${isLocal ? html`
+        <div class="rpprow"><label>Project</label>
+          <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="/path/to/project  (folder with Project.toml)" value=${kProject.value} onInput=${ev => kProject.value = ev.target.value}/></div>` : null}
+      ${/* Everything a site sets once and then forgets. Folded away because a form you scroll is a
+            form where the field that matters — the walltime — stops being the one you look at. */ null}
+      <div class="rpprow rppmorerow"><label></label>
+        <button class="rppmore" onClick=${() => more.value = !more.value}>${more.value ? '▾' : '▸'} ${more.value ? 'Fewer' : 'More'} settings${more.value || !filledExtras() ? '' : ' · ' + filledExtras() + ' set'}</button></div>
+      ${!more.value ? null : html`
+        <div class="rpprow"><label>Chunk</label>
+          <input class="rppn" type="text" inputmode="numeric" autocomplete="off" placeholder="units" value=${kChunk.value} onInput=${ev => kChunk.value = ev.target.value}/>
+          <span class="pddim">how many sweep units one scheduler job runs — blank lets the sweep decide</span></div>
+        ${isLocal ? null : html`
+          <div class="rpprow"><label>Account</label>
+            <input class="rppport" autocomplete="off" spellcheck="false" placeholder="charge code" value=${kAccount.value} onInput=${ev => kAccount.value = ev.target.value}/>
+            <span class="pddim">only where the site bills against a project</span></div>
+          <div class="rpprow"><label>Prologue</label>
+            <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="module load julia   (shell run before every job)" value=${kPrologue.value} onInput=${ev => kPrologue.value = ev.target.value}/></div>
+          <div class="rpprow"><label>Task script</label>
+            <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="the task runner's path ON the cluster (blank = shipped by the sweep)" value=${kPayload.value} onInput=${ev => kPayload.value = ev.target.value}/></div>`}
+        <div class="rpprow"><label>Note</label>
+          <input class="rppname" autocomplete="off" placeholder="anything a reader should know about this machine" value=${kNote.value} onInput=${ev => kNote.value = ev.target.value}/></div>`}
       <div class="rppact"><button class="rppsavereg" onClick=${save}>${e ? 'Save' : 'Create'}</button></div>
     </div>
     <div class=${'rppmsg' + (cmsg.value && cmsg.value.err ? ' err' : '')}>${cmsg.value ? cmsg.value.text : ''}</div>
