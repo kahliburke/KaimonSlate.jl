@@ -25,22 +25,23 @@ import TOML    # reading sweep descriptors straight off a store (cluster_status)
 # this way by the worker and by its own tests.
 Base.include(@__MODULE__, joinpath(@__DIR__, "defname.jl"))
 
-# Answering a cluster that will not take a key. Included BEFORE remotestore.jl, which opens the one
-# interactive connection everything else rides.
-if !isdefined(@__MODULE__, :SshAuth)
-    Base.include(@__MODULE__, joinpath(@__DIR__, "sshauth.jl"))
+# Path homes, the ssh session everything below rides, and the prompts it raises when a cluster will
+# not take a key. IMPORTED from the parent when there is one: each holds process-wide state — the
+# pending prompts, the open sessions — and a second copy would be a second set of them, so an answer
+# would never reach the prompt waiting for it. Included only when this file is loaded standalone, as
+# the worker loads it.
+for (name, file) in ((:SlateHome, "slate_home.jl"), (:SshAuth, "sshauth.jl"),
+                     (:SshTransport, "sshtransport.jl"))
+    if isdefined(parentmodule(@__MODULE__), name)
+        Core.eval(@__MODULE__, :(import ..$name))
+    else
+        Base.include(@__MODULE__, joinpath(@__DIR__, file))
+    end
 end
 
-# Reaching a store the hub has no filesystem access to — the mirror, the multiplexed connection, and
-# the rsync that keeps them in step. Separate because it is transport with no opinion about sweeps.
+# Reaching a store the hub has no filesystem access to — the mirror and the transport that keeps it
+# in step. Separate because it is transport with no opinion about sweeps.
 Base.include(@__MODULE__, joinpath(@__DIR__, "remotestore.jl"))
-
-# Where a dataset index is kept so a scratch purge cannot take it. Included rather than imported
-# because this file is loaded by the WORKER too, which has no `KaimonSlate.SlateHome` — and the two
-# must agree on the path, or a notebook and its worker would remember indexes in different places.
-if !isdefined(@__MODULE__, :SlateHome)
-    Base.include(@__MODULE__, joinpath(@__DIR__, "slate_home.jl"))
-end
 
 # The env-preparation policy shared by the notebook fork and the remote provisioner. envprep.jl is
 # pure TOML/file operations with no transport of its own, precisely so a new transport can reuse it:
@@ -404,7 +405,7 @@ end
 # targets that ARE defined, because the usual cause is a typo, a rename, or opening a notebook on a
 # machine that has never been told what `hpc` means. The name is the notebook's; what it resolves to
 # belongs to the machine, so the error points at where the machine is configured.
-const _WHERE_TARGETS = "front page → 🖧 Remotes → Compute targets"
+const _WHERE_TARGETS = "the front page, under Remotes → Clusters"
 
 function resolve_target(explicit, attrs::AbstractDict, clusters::AbstractDict)
     explicit === nothing || return explicit
@@ -412,18 +413,17 @@ function resolve_target(explicit, attrs::AbstractDict, clusters::AbstractDict)
     nm = String(get(attrs, "cluster", ""))
     if isempty(nm)
         isempty(clusters) &&
-            error("@sweep: no target. Give one — `@sweep(grid, mytarget) do … end` — or define a " *
-                  "compute target ($_WHERE_TARGETS) and name it on the header: " *
-                  "`#%% sweep cluster=<name>`.")
-        error("@sweep: no target. Name one on the cell header (`#%% sweep cluster=<name>`). " *
+            error("@sweep: this cell has no cluster. Pick one from the ⚙ on the cell — or set one " *
+                  "up first, on $_WHERE_TARGETS.")
+        error("@sweep: this cell has no cluster. Pick one from the ⚙ on the cell. " *
               "This machine has: " * known())
     end
     spec = get(clusters, nm, nothing)
     spec === nothing &&
-        error("@sweep: this machine has no compute target named `$nm`. " *
-              (isempty(clusters) ? "It has none at all — define one under $_WHERE_TARGETS." :
-                                   "It has: " * known() * ". Add or rename one under $_WHERE_TARGETS.") *
-              " (A notebook carries the NAME; each machine resolves it against its own registry.)")
+        error("@sweep: this machine has no cluster named `$nm`. " *
+              (isempty(clusters) ? "It has none — set one up on $_WHERE_TARGETS." :
+                                   "It has: " * known() * ". Add or rename one on $_WHERE_TARGETS.") *
+              " (The notebook stores the name; each machine decides what it points at.)")
     return cluster(merge(Dict{String,Any}("name" => nm), spec))
 end
 
@@ -1136,8 +1136,7 @@ end
 
 # A chunk fetched from a store the hub cannot see, kept so a second look at the same rows is free.
 # Content-addressed, so the cache can never be stale: a blob's name IS its bytes.
-_blob_cache_dir() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
-                             "kaimonslate", "remote-blobs")
+_blob_cache_dir() = joinpath(SlateHome.cache_home(), "remote-blobs")
 
 # ── Bounding the cache ───────────────────────────────────────────────────────────────────────
 # This is a PURE cache, which is what makes it simple: every file is content-addressed, nothing

@@ -30,6 +30,7 @@ import JSON
 # every other module resolves its paths through it.
 include("slate_home.jl") # module SlateHome — KaimonSlate's own XDG config/data/cache homes
 include("sshauth.jl")   # module SshAuth — ssh prompts (password / second factor) ↔ the notebook
+include("sshtransport.jl") # module SshTransport — the libssh2 session every remote command rides
 include("engine.jl")    # module ReportEngine (+ eval / deps / bind / echarts)
 include("render.jl")    # module ReportRender
 include("effectstore.jl") # module EffectStore — durable per-cell declared-effect records (sibling of MemoStore)

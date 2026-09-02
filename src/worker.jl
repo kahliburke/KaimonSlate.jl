@@ -2513,6 +2513,30 @@ function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{S
     end
 end
 
+# ── ssh prompts from a worker ────────────────────────────────────────────────────────────────
+# A cell reading a cluster store authenticates from HERE, and there is no browser attached to this
+# process. So the prompt goes out on the emit stream the hub already reads, and the answer comes
+# back as a tool call — the two directions that exist between these processes anyway.
+function __slate_sshauth_answer(id::String, text::String; cancel::Bool = false)
+    cancel ? Sweep.SshAuth.cancel!(id) : Sweep.SshAuth.answer!(id, text)
+    return (; ok = true)
+end
+
+function _install_sshauth_relay!()
+    Sweep.SshAuth.set_answerer!() do host, prompt, echo
+        id = string("w", rand(UInt32); base = 16)
+        try
+            KaimonGate._publish_stream("slate_emit", Sweep.SshAuth.RELAY_CHANNEL * "\x1f" *
+                Base64.base64encode(Serialization.serialize,
+                    (id = id, host = String(host), prompt = String(prompt), echo = echo)))
+        catch
+            return nothing            # no hub listening ⇒ nobody can answer
+        end
+        return Sweep.SshAuth.await(id)
+    end
+    return nothing
+end
+
 function tools()
     return KaimonGate.GateTool[
         KaimonGate.GateTool("__slate_cluster_status", __slate_cluster_status),
@@ -2524,6 +2548,7 @@ function tools()
         KaimonGate.GateTool("__slate_cancel_cells", __slate_cancel_cells),
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
         KaimonGate.GateTool("__slate_call", __slate_call),
+        KaimonGate.GateTool("__slate_sshauth_answer", __slate_sshauth_answer),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_cleanup_cells", __slate_cleanup_cells),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
@@ -2913,6 +2938,8 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # `curve`/`allowed_clients` are set for a REMOTE worker (host="0.0.0.0", :direct transport): the
     # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
     # key — proper mutual auth. Local + :ssh_tunnel workers leave them off (loopback / SSH-encrypted).
+    # A cluster prompt raised in here has to reach the hub's dialog; nothing in this process has one.
+    try; _install_sshauth_relay!(); catch e; @warn "slate: ssh prompt relay install failed" exception = e; end
     _blog("start(): entering KaimonGate.serve")
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,

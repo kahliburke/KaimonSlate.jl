@@ -162,7 +162,29 @@ function _wire_callbacks!(nb::LiveNotebook)
         try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end
     end)
     register_prepare!(nb.report.id, json -> (try; _broadcast(nb, "prepare:" * json); catch; end))   # env precompile progress → "Preparing packages" banner
-    register_emit!(nb.report.id, (channel, payload) -> (try; _ws_emit!(nb, channel, payload); catch; end))   # slate_emit → push over the page WebSocket (NOT the coalescing SSE); payload is a Julia value, JSON-encoded in _ws_emit!
+    register_emit!(nb.report.id, (channel, payload) -> (try
+        # A worker asking for a password has no browser of its own; this process does. Its prompt
+        # becomes an ordinary pending one here, so the dialog, /api/sshauth and the watcher are
+        # unchanged, and the answer goes back to the worker that is waiting for it.
+        channel == SshAuth.RELAY_CHANNEL ? _relay_sshauth(nb, payload) : _ws_emit!(nb, channel, payload)
+    catch; end))   # slate_emit → push over the page WebSocket (NOT the coalescing SSE); payload is a Julia value, JSON-encoded in _ws_emit!
+# A prompt raised in the notebook's worker: hold it here until someone answers, then hand the answer
+# back over the gate.
+function _relay_sshauth(nb::LiveNotebook, p)
+    id, host = String(p.id), String(p.host)
+    Threads.@spawn begin
+        ans = try; SshAuth.ask(host, String(p.prompt), p.echo === true); catch; nothing; end
+        try
+            ReportEngine._tool(nb.kernel, "__slate_sshauth_answer",
+                               Dict{String,Any}("id" => id, "text" => ans === nothing ? "" : ans,
+                                                "cancel" => ans === nothing))
+        catch e
+            ReportEngine._rlog("sshauth: could not return an answer to the worker ($(first(sprint(showerror, e), 120)))")
+        end
+    end
+    return nothing
+end
+
     register_bin_emit!(nb.report.id, frame -> (try; _ws_broadcast_bin!(nb, frame); catch; end))   # slate_emit_bin → forward the raw binary frame over the page WebSocket as-is
     register_celldone!(nb.report.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
     register_cleanup_cells!(nb.report.id, ids -> (try; _cleanup_deleted_cells(nb, ids); catch; end))   # deleted-cell slate_on_cleanup teardown

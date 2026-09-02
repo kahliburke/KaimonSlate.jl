@@ -339,12 +339,12 @@ const MS = RE.MemoStore
                 @test st.mirror != far                        # a shadow, not an alias
                 @test all(isdir(joinpath(st.mirror, d)) for d in S.META_DIRS)
 
-                # The connection is MULTIPLEXED: without this every manifest read and every slice
-                # pays a fresh handshake, which is what makes a poll feel broken.
-                o = S.ssh_opts("login1")
-                @test "ControlMaster=auto" in o && any(startswith("ControlPath="), o)
-                @test any(startswith("ControlPersist="), o)
-                @test occursin("ControlMaster=auto", S.ssh_command("login1"))
+                # The connection is shared: one authenticated session per host, a channel per
+                # command. Without it every manifest read and every slice pays a fresh handshake —
+                # and on a gated cluster, a fresh authentication.
+                @test !S.connected("login1")                  # asking never opens one
+                ep = S.SshTransport.resolve("login1")
+                @test ep.alias == "login1" && ep.port > 0     # settings resolved without connecting
 
                 # `blobs` is deliberately not mirrored — pulling it would pull the results.
                 @test !("blobs" in S.META_DIRS)
@@ -357,13 +357,12 @@ const MS = RE.MemoStore
         # deleted would remove each one before it could ever reach the budget, and a sweep whose
         # units the scheduler kills would resubmit forever with nothing to show why. (This was the
         # live behaviour: `read_attempts` came back empty after every submit.)
-        del(d, dir) = "--delete" in collect(S.sync_flags(d, dir))
+        del(d, dir) = S.sync_flags(d, dir)
         @test !del("jobs", :in)                     # hub state is never erased by a stale store copy
         @test del("jobs", :out)                     # …and disarming takes effect by deleting there
         @test del("manifests", :in) && del("status", :in)     # the store is authoritative for these
         @test !del("manifests", :out) && !del("status", :out) # …so a push must not race a finishing unit
-        @test !del("blobs", :out)
-        @test "--ignore-existing" in collect(S.sync_flags("blobs", :out))   # content-addressed
+        @test !del("blobs", :out)                   # content-addressed: what is there is identical
         @test_throws ErrorException S.sync_flags("jobs", :sideways)
 
         # A host that cannot be reached must FAIL, not retry. Every attempt without a master opens
@@ -382,15 +381,16 @@ const MS = RE.MemoStore
         @test !S.pull_meta!(S.RemoteStore(dead, "/x"))   # the rsync paths refuse too
         @test !S.push_meta!(S.RemoteStore(dead, "/x"))
 
-        # A control socket outlives the connection it belonged to, and ssh will not open a master
-        # over one that exists — it disables multiplexing and every later call is refused. Left
-        # alone that needs a human to delete a file, on the one kind of host where reconnecting
-        # costs a 2FA prompt.
-        mktempdir() do d
-            withenv("KAIMONSLATE_CACHE_HOME" => d) do
-                p = S.SshAuth.control_path()
-                @test !isempty(p)                                 # a path short enough to bind
-                @test S.clear_stale_master!("") == false           # no host, nothing to do
+        # A prompt is answerable from somewhere other than a browser — a terminal front end, a
+        # test, or the hub answering for a worker. With one set, no dialog is raised.
+        let asked = Ref(0)
+            S.SshAuth.set_answerer!((h, p, echo) -> (asked[] += 1; nothing))
+            try
+                @test S.SshAuth.ask("h", "Password: ", false) === nothing
+                @test asked[] == 1
+                @test isempty(S.SshAuth.pending())                # answered inline, never queued
+            finally
+                S.SshAuth.set_answerer!(nothing)
             end
         end
 

@@ -38,19 +38,10 @@ import SHA as _SHA
 # remote spawn undebuggable. So EVERY step of the remote path also appends here, verbatim, with a
 # timestamp. This file is the answer to "where is the record of what happened?" — always on disk,
 # never dependent on how the host logger renders. Read it with `slate.diag` / the worker-log tool.
-# Slate's LOCAL cache root. Resolved by `SshAuth.cache_root`, which is the SAME precedence the
-# worker's `_memo_dir` uses: `KAIMONSLATE_CACHE_HOME`, then `KAIMONSLATE_HOME/cache`, then
-# `XDG_CACHE_HOME/kaimonslate`, then `~/.cache/kaimonslate`.
-#
-# This used to consult XDG alone, and got the content store wrong for anyone who had pinned one:
-# the worker WROTE a boundary blob under the pinned home while `push_blob!` looked for it under
-# `~/.cache`, so a region transfer failed with "no local blob <hash>" — for a blob sitting on disk
-# a directory away. Both of those env vars exist precisely to isolate a store, and honouring them in
-# one half of the pair is worse than honouring them in neither.
-#
-# The REMOTE layout stays literal ".cache/kaimonslate" ($HOME-relative over ssh) — the remote's env
-# isn't cheaply knowable.
-_slate_cache_dir() = SshAuth.cache_root()
+# Slate's LOCAL cache root. Every reader and writer of the content store must resolve it the same
+# way, or a pinned store is half-honoured. The REMOTE layout stays literal ".cache/kaimonslate"
+# ($HOME-relative over ssh) — the remote's env isn't cheaply knowable.
+_slate_cache_dir() = SlateHome.cache_home()
 
 const _REMOTE_LOG = joinpath(_slate_cache_dir(), "remote.log")
 # Resolved at write time so a test (or a sandboxed run) can redirect the durable log to a throwaway path
@@ -234,16 +225,13 @@ function _run_tunnel!(t::Tunnel)
         for (lp, rp) in t.forwards
             push!(lflags, "-L", "$(lp):127.0.0.1:$(rp)")
         end
-        # Multiplex the forward over the shared per-host ControlMaster: a warm master makes this a fast
-        # slave instead of a fresh TCP+SSH handshake+auth. The mux opts carry ServerAlive so the master
-        # (whoever it is) notices a dead link and exits, dropping this slave → we respawn on the SAME local
-        # ports and the ZMQ client reconnects. When mux is OFF (kill switch), fall back to a dedicated
-        # connection with its own ServerAlive (prior behaviour). stdin=devnull so background `ssh -N` doesn't
-        # exit on inherited-stdin EOF.
-        mux = _ssh_mux_opts()
-        alive = isempty(mux) ? ["-o", "ServerAliveInterval=$(_tunnel_alive_interval())",
-                                "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"] : String[]
-        cmd = `ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes $mux $alive $lflags $(t.host)`
+        # STILL an ssh subprocess: the port forward has no equivalent in the session until
+        # `direct_tcpip` lands, so this authenticates on its own and a gated host prompts for it.
+        # ServerAlive so a dead link ends the process — we respawn on the SAME local ports and the
+        # ZMQ client reconnects. stdin=devnull so background `ssh -N` doesn't exit on inherited EOF.
+        alive = ["-o", "ServerAliveInterval=$(_tunnel_alive_interval())",
+                 "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"]
+        cmd = `ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes $alive $lflags $(t.host)`
         try
             t.proc = Base.run(pipeline(cmd; stdin = devnull, stdout = devnull, stderr = devnull); wait = false)
             wait(t.proc)
@@ -334,105 +322,17 @@ end
 ssh_route(host::AbstractString) =
     lock(_SSH_ROUTE_LOCK) do; copy(get(_SSH_ROUTE, String(host), String[])); end
 
-function _ssh_mux_opts(host::AbstractString = "")
-    get(ENV, "KAIMONSLATE_NO_SSH_MUX", "") == "1" && return ssh_route(host)
-    # The SAME socket the batch fabric uses (`SshAuth.control_path`). A host that costs a password
-    # and a second factor must cost them once, not once per subsystem — and a region on a cluster is
-    # the same cluster the sweeps run on.
-    # Empty when no path short enough for a Unix socket exists — then there is no shared master and
-    # each connection stands alone, which is slower but works.
-    p = try; SshAuth.control_path(String(host)); catch; ""; end
-    isempty(p) && return String[]
-    return ["-o", "ControlMaster=auto", "-o", "ControlPath=$p", "-o", "ControlPersist=$(_ssh_control_persist())",
-            "-o", "ServerAliveInterval=$(_tunnel_alive_interval())", "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"]
-end
+# ── Reaching a host ──────────────────────────────────────────────────────────────────────────
+# Every command goes over the shared `SshTransport` session (see remotestore.jl), so a host that
+# costs a password and a second factor costs them once for the whole hub — regions and sweeps
+# included — and there is no socket file to go stale.
 
-# rsync's `-e` value is whitespace-tokenized by rsync itself, so a mux path containing a space
-# (an exotic $HOME) would mangle it — in that case rsync just runs unmuxed.
-function _rsync_ssh_opt()
-    opts = _ssh_mux_opts()
-    (isempty(opts) || any(o -> occursin(' ', o), opts)) && return String[]
-    return ["-e", "ssh -o BatchMode=yes " * join(opts, " ")]
-end
+# ssh joins its argv with spaces and hands the result to the remote shell. Some callers rely on
+# that, passing a whole script as one element, so this must not quote.
+_cmdstr(argv::Cmd) = join(argv.exec, " ")
 
-_ssh(host, argv::Cmd) = (_ssh_connect!(host);
-    `ssh -o BatchMode=yes -o ConnectTimeout=$(_ssh_connect_timeout()) $(_ssh_mux_opts(host)) $host $argv`)
-
-# ── The one interactive connection ───────────────────────────────────────────────────────────
-# A region on a cluster that refuses public keys hits the same wall as the batch fabric: every call
-# here is `BatchMode=yes`, which cannot answer a password or a second factor. The answer is the same
-# too — get ONE master open, interactively, and let everything ride it. Shared socket, so a host
-# already authenticated for a sweep costs a region nothing.
-#
-# Guarded per host so a burst of parallel region calls raises one dialog rather than one each.
-const _SSH_CONNECTING = Dict{String,Bool}()
-const _SSH_CONNECT_LOCK = ReentrantLock()
-# `ssh -O check` is a process spawn, and `_ssh` builds a command for every remote operation — some
-# of them in loops. Remember a confirmed master briefly so the common path stays free; short enough
-# that a dropped connection is noticed on the next operation rather than the next minute.
-const _SSH_CHECKED = Dict{String,Float64}()
-const _SSH_CHECK_TTL = 5.0
-# …and how long to leave a host alone after failing to reach it. A region has liveness loops and a
-# reconnect supervisor, all of which call through here; without a backoff an unreachable host is
-# retried continuously, and each attempt is a fresh connection because multiplexing is precisely
-# what is not working. That fills the ephemeral port range and takes the machine down with it.
-const _SSH_FAILED = Dict{String,Float64}()
-const _SSH_FAIL_BACKOFF = 20.0
-
-function _ssh_connect!(host::AbstractString)
-    isempty(host) && return true
-    opts = _ssh_mux_opts(host)
-    isempty(opts) && return true          # multiplexing off ⇒ no shared master to open
-    now = time()
-    lock(_SSH_CONNECT_LOCK) do
-        now - get(_SSH_CHECKED, String(host), 0.0) < _SSH_CHECK_TTL
-    end && return true
-    lock(_SSH_CONNECT_LOCK) do
-        now - get(_SSH_FAILED, String(host), 0.0) < _SSH_FAIL_BACKOFF
-    end && return false
-    chk = `ssh -O check $opts $host`
-    if success(pipeline(chk; stdout = devnull, stderr = devnull))
-        lock(_SSH_CONNECT_LOCK) do; _SSH_CHECKED[String(host)] = now; end
-        return true
-    end
-    lock(_SSH_CONNECT_LOCK) do
-        get(_SSH_CONNECTING, String(host), false) && return false   # someone else is at the prompt
-        _SSH_CONNECTING[String(host)] = true
-        return true
-    end || return false
-    try
-        # A socket from a connection that has since died makes ssh refuse to open a master at all
-        # ("already exists, disabling multiplexing", then "Connection refused" for everything after).
-        # Clear it before paying for a prompt.
-        try
-            g = read(pipeline(`ssh -G $opts $host`; stderr = devnull), String)
-            m = match(r"^controlpath\s+(.+)$"m, g)
-            if m !== nothing
-                p = strip(m.captures[1])
-                (isempty(p) || p == "none" || !ispath(p)) || rm(p; force = true)
-            end
-        catch; end
-        env = copy(ENV)
-        env["SSH_ASKPASS"] = SshAuth.askpass_script()
-        env["SSH_ASKPASS_REQUIRE"] = "force"
-        env["DISPLAY"] = get(env, "DISPLAY", ":0")
-        env["SLATE_SSHAUTH_DIR"] = SshAuth.rendezvous_dir()
-        env["SLATE_SSHAUTH_HOST"] = String(host)
-        cmd = `ssh -M -N -f -o BatchMode=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=30 $opts $host`
-        ok = try; run(pipeline(setenv(cmd, env); stdout = devnull, stderr = devnull)); true; catch; false; end
-        lock(_SSH_CONNECT_LOCK) do
-            if ok
-                _SSH_CHECKED[String(host)] = time(); delete!(_SSH_FAILED, String(host))
-            else
-                _SSH_FAILED[String(host)] = time()
-            end
-        end
-        ok || _rlog("ssh: could not open an interactive master to $host — backing off $(round(Int, _SSH_FAIL_BACKOFF))s")
-        return ok
-    finally
-        lock(_SSH_CONNECT_LOCK) do; delete!(_SSH_CONNECTING, String(host)); end
-    end
-end
+"Is there an authenticated session for `host`? Never opens one."
+_ssh_reachable(host) = isempty(String(host)) || Sweep.connected(String(host))
 
 # Run `cmd`, merging stdout+stderr; on failure, @warn the command + captured output. Returns (ok, output).
 function _run_logged(cmd::Cmd, what::AbstractString)
@@ -508,12 +408,11 @@ _prep_stage(label::AbstractString) = _bringup_note("@@SLATE_PREP stage=" * Strin
 # Distinct from `_bringup_note` (browser bring-up banner) and `_rlog` (durable disk log).
 _gate_progress(msg::AbstractString) = (try; getfield(_kaimon(), :KaimonGate).progress(String(msg)); catch; end; nothing)
 
-_ssh_ok(host, argv::Cmd) = first(_run_logged(_ssh(host, argv), "ssh $host"))
+_ssh_ok(host, argv::Cmd) = first(_ssh_capture(host, argv))
 
 # Existence/predicate check over ssh — a nonzero exit is a normal FALSE (e.g. `test -f` on a missing
 # file), NOT a failure, so it is deliberately NOT logged (unlike _ssh_ok, which treats nonzero as an error).
-_ssh_test(host, argv::Cmd) =
-    try; run(pipeline(_ssh(host, argv); stdout = devnull, stderr = devnull)); true; catch; false; end
+_ssh_test(host, argv::Cmd) = first(Sweep.run_there(String(host), _cmdstr(argv)))
 
 # Run Julia CODE on the remote by shipping it as a FILE — NEVER `julia -e "…"` over ssh. ssh flattens its
 # argv and the remote shell re-splits + glob-expands the result, so `;`, `[...]`, `(...)` and any newline
@@ -526,14 +425,13 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::B
     tmp = tempname()
     write(tmp, code)
     remote = "$_REMOTE_ROOT/$(basename(tmp)).jl"
-    scp_ok = try
-        run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote))`; stdout = devnull, stderr = devnull)); true
-    catch; false; end
+    up_ok = Sweep.put_file(String(host), Vector{UInt8}(codeunits(code)), remote)
     rm(tmp; force = true)
-    scp_ok || (_rlog("FAILED: scp provisioning script → $host ($what)"); return (false, ""))
-    jcmd = _ssh(host, `$(_julia_sh("julia --startup-file=no $remote"))`)
-    ok, out = stream ? _run_streamed(jcmd, what; online = online) : _run_logged(jcmd, what)
-    try; run(pipeline(_ssh(host, `rm -f $remote`); stdout = devnull, stderr = devnull)); catch; end
+    up_ok || (_rlog("FAILED: sending provisioning script → $host ($what)"); return (false, ""))
+    script = _cmdstr(`$(_julia_sh("julia --startup-file=no $remote"))`)
+    ok, out = Sweep.run_there(String(host), script)
+    ok || _rlog("FAILED: $what\n    out: $(first(strip(out), 1200))")
+    Sweep.run_there(String(host), "rm -f " * remote)
     return (ok, out)
 end
 
@@ -566,8 +464,8 @@ function _ensure_julia!(host)
     # Serialization + Manifest stay compatible. NB: `sh -s` reads the installer SCRIPT from stdin (the
     # curl pipe), so do NOT redirect stdin (a `< /dev/null` starves it → curl broken pipe). `--yes` is unattended.
     _rlog("provision: `julia` missing on $host ($(strip(uname))) — installing juliaup + Julia $ver unattended (a couple of minutes)…")
-    _run_streamed(_ssh(host, `$("curl -fsSL https://install.julialang.org | sh -s -- --yes --default-channel $ver")`),
-                  "install juliaup ($ver) on $host"; online = _bringup_note)
+    _bringup_note("install juliaup ($ver) on $host")
+    _ssh_capture(host, `$("curl -fsSL https://install.julialang.org | sh -s -- --yes --default-channel $ver")`)
     ok, _ = _ssh_capture(host, `$(_julia_sh("command -v julia"))`)
     ok || _rlog("provision: juliaup install on $host did not yield a working `julia` (see remote.log)")
     return ok
@@ -593,24 +491,20 @@ function ssh_config_hosts()
     return hosts
 end
 
-# Value-fetch over ssh (curve key, SSH_CONNECTION): keep stdout CLEAN (stderr separate) but log it on failure.
+# Value-fetch over a host: `(ok, output)`, with stdout and stderr interleaved.
 function _ssh_capture(host, argv::Cmd)
-    out = IOBuffer(); err = IOBuffer()
-    ok = try; run(pipeline(_ssh(host, argv); stdout = out, stderr = err)); true; catch; false; end
-    ok || @warn "slate remote: ssh $host FAILED" cmd = string(argv) stderr = first(strip(String(take!(err))), 800)
-    return (ok, String(take!(out)))
+    ok, out = Sweep.run_there(String(host), _cmdstr(argv))
+    ok || _rlog("ssh $host FAILED\n    cmd: $(_cmdstr(argv))\n    out: $(first(strip(out), 800))")
+    return (ok, out)
 end
 
-# rsync a local dir → the host, over ssh. Trailing slash on src copies CONTENTS.
+# Send a local dir to the host, as a tar over the shared session.
 function _rsync!(host, localdir::AbstractString, remotedir::AbstractString; delete::Bool = false,
                  excludes::Vector{String} = String[])
-    _ssh_ok(host, `mkdir -p $remotedir`)   # openrsync (macOS) has no --mkpath; ensure the dest exists
-    args = String["-az"]
-    append!(args, _rsync_ssh_opt())
-    delete && push!(args, "--delete")
-    for e in excludes; push!(args, "--exclude", e); end
-    push!(args, string(rstrip(localdir, '/'), "/"), string(host, ":", remotedir))
-    return first(_run_logged(`rsync $args`, "rsync → $host:$remotedir"))
+    ok = Sweep.put_dir(String(host), String(localdir), String(remotedir);
+                       delete = delete, excludes = excludes)
+    ok || _rlog("FAILED: sending $localdir → $host:$remotedir")
+    return ok
 end
 
 # ── provisioning ──────────────────────────────────────────────────────────────
@@ -911,13 +805,9 @@ function _kickoff_sysimage_build!(t::RemoteTarget, projrel::AbstractString; forc
     _ssh_ok(host, `mkdir -p $sysreldir`) || return nothing
     remote = "$sysreldir/build.jl"
     logf = "$sysreldir/build.log"
-    tmp = tempname()
-    write(tmp, _sysimage_build_script(projrel, sysreldir, _sysimage_minfree_gb()))
-    ok = try
-        run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote))`; stdout = devnull, stderr = devnull)); true
-    catch; false; end
-    rm(tmp; force = true)
-    ok || (_rlog("sysimg: scp build script → $host failed (skip)"); return nothing)
+    body = _sysimage_build_script(projrel, sysreldir, _sysimage_minfree_gb())
+    Sweep.put_file(String(host), Vector{UInt8}(codeunits(body)), remote) ||
+        (_rlog("sysimg: sending build script → $host failed (skip)"); return nothing)
     launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && if command -v setsid >/dev/null 2>&1; then setsid nohup julia --startup-file=no $remote > $logf 2>&1 & else nohup julia --startup-file=no $remote > $logf 2>&1 & fi"
     _rlog("sysimg: launching detached build on $host  (log: $host:$logf)")
     _ssh_ok(host, `$launch`) || _rlog("sysimg: build launch returned nonzero on $host (it may still be starting)")
@@ -1338,13 +1228,7 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     # log file — also survives the ssh channel closing. Paths are $HOME-relative (ssh login cwd).
     remote_script = "$_REMOTE_WORKER/worker-$port.jl"
     logf = "$_REMOTE_WORKER/worker-$port.log"
-    tmp = tempname()
-    write(tmp, script)
-    try
-        run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote_script))`; stdout = devnull, stderr = devnull))
-    finally
-        rm(tmp; force = true)
-    end
+    Sweep.put_file(String(host), Vector{UInt8}(codeunits(script)), remote_script)
     nthreads = effective_worker_threads(threads)
     proj = startswith(t.project, "~/") ? "\$HOME/" * t.project[3:end] : t.project   # --project=~ won't expand
     # Self-identifying process tag: which region/notebook/port this worker serves, so `ps` isn't a wall of
@@ -1972,7 +1856,7 @@ function _write_worker_manifest!(host, port::Int, fields)
     body = _flat_json(fields)
     path = "$_REMOTE_WORKER/worker-$port.json"
     try
-        run(pipeline(_ssh(host, `$("cat > " * path)`); stdin = IOBuffer(body), stdout = devnull, stderr = devnull))
+        Sweep.put_file(String(host), Vector{UInt8}(codeunits(body)), path)
     catch e
         _rlog("manifest: could not write $host:$path ($(sprint(showerror, e)))")
     end
@@ -1987,7 +1871,7 @@ function _write_worker_state!(host, port::Int, state::AbstractString)
     body = string(state, " ", round(Int, time()))
     path = "$_REMOTE_WORKER/worker-$port.state"
     try
-        run(pipeline(_ssh(host, `$("cat > " * path)`); stdin = IOBuffer(body), stdout = devnull, stderr = devnull))
+        Sweep.put_file(String(host), Vector{UInt8}(codeunits(body)), path)
     catch e
         _rlog("state: could not write $host:$path ($(sprint(showerror, e)))")
     end
@@ -3609,8 +3493,12 @@ function _region_reconcile_impl!(r::Region)
             return "region[$(r.name)]: nothing left to keep here — allocation released"
         end
         host, alloc = region_place!(r)
-        isempty(host) && return "region[$(r.name)]: waiting on $(r.host) for a node" *
-                                (alloc === nothing ? "" : " ($(alloc.state))")
+        if isempty(host)
+            st = alloc === nothing ? :none : alloc.state
+            return st === :unreachable ? "region[$(r.name)]: cannot reach $(r.host) to ask for a node" :
+                   st === :pending ? "region[$(r.name)]: queued on $(r.host), waiting for a node" :
+                   "region[$(r.name)]: $(r.host) granted no node"
+        end
     end
     t = _region_target(r; host = host)
     roster = list_remote_workers(host)

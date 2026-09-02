@@ -19,7 +19,8 @@ import Base64
 # Path homes and the ssh prompt bridge. Provided by the parent when loaded as part of KaimonSlate;
 # included directly when this file is loaded on its own, as the tests do. Neither depends on
 # anything else.
-for (name, file) in ((:SlateHome, "slate_home.jl"), (:SshAuth, "sshauth.jl"))
+for (name, file) in ((:SlateHome, "slate_home.jl"), (:SshAuth, "sshauth.jl"),
+                     (:SshTransport, "sshtransport.jl"))
     if isdefined(parentmodule(@__MODULE__), name)
         Core.eval(@__MODULE__, :(import ..$name))
     else

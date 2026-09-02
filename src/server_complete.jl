@@ -417,8 +417,15 @@ end
 # after the async /api/publish/ledger fetch. `null` on a fresh machine → the client falls back to fetch.
 function _index_html()
     html = read(_INDEX_ASSET, String)
-    v = try; publish_ledger_view_cached(); catch; nothing; end
-    js = v === nothing ? "null" : replace(JSON.json(v), "</" => "<\\/")   # </script>-in-string guard
+    # The ledger enriches the front page; it is not a precondition for serving it. Build AND
+    # serialise inside the guard, so a bad entry costs the ledger rather than the page.
+    js = try
+        v = publish_ledger_view_cached()
+        v === nothing ? "null" : replace(JSON.json(v), "</" => "<\\/")   # </script>-in-string guard
+    catch e
+        @warn "Kaimon Slate: front page served without the publish ledger" exception = (e, catch_backtrace())
+        "null"
+    end
     html = replace(html, "window.__SLATE_LEDGER__=null;" => "window.__SLATE_LEDGER__=" * js * ";"; count = 1)
     # The running version, read from the loaded package rather than written down anywhere — a string
     # baked into an asset goes stale the release after someone forgets it. Injected the same way as
@@ -761,7 +768,13 @@ function _make_router(h::Hub)
             return t === nothing ? HTTP.Response(503, "No notebook is open yet.") :
                                    HTTP.Response(302, ["Location" => t, "Cache-Control" => "no-store"])
         end
-        _html(_index_html())
+        # HTTP.jl turns a throw here into a 500 without logging it. Record the cause, then re-throw.
+        try
+            _html(_index_html())
+        catch e
+            @error "Kaimon Slate: front page failed" exception = (e, catch_backtrace())
+            rethrow()
+        end
     end)
     # Operator status — vitals for the hub process and its worker(s), plus the worker log. Served in
     # BOTH postures: it's just as useful when developing the app as when running it.
@@ -1209,7 +1222,8 @@ function _make_router(h::Hub)
         r === nothing && return _json(Dict("ok" => false, "error" => "no region `$name`"))
         r.scheduler === :none && return _json(Dict("ok" => true, "scheduler" => "none"))
         a = ReportEngine.region_allocation(r)
-        a === nothing && return _json(Dict("ok" => false, "error" => "could not reach $(r.host)"))
+        (a === nothing || a.state === :unreachable) &&
+            return _json(Dict("ok" => false, "error" => "cannot reach $(r.host)"))
         _json(Dict("ok" => true, "scheduler" => String(r.scheduler), "job_name" => a.name,
                    "id" => a.id, "state" => String(a.state), "node" => a.node,
                    "timeleft" => a.timeleft, "via" => r.host))
@@ -2790,15 +2804,13 @@ end
 # it on screen. Polling, because the producer is a `/bin/sh` script with no way to signal us — and
 # a prompt is a human-scale event, so 300 ms is not a compromise.
 #
-# Broadcast to EVERY open notebook rather than one: the connection belongs to a host, and the hub
-# does not know which notebook is waiting on it (the worker asks ssh, ssh asks the helper, and
-# neither carries a notebook id). Answering once clears it for all of them.
+# Broadcast to EVERY open notebook rather than one: the connection belongs to a host, not to a
+# notebook, and answering once clears it for all of them.
 const _SSHAUTH_SEEN = Set{String}()
 
 function _install_sshauth_watch!(h)
     errormonitor(@async while true
         try
-            SshAuth.sweep_stale!()
             live = Set{String}()
             for p in SshAuth.pending()
                 push!(live, p.id)
@@ -2806,25 +2818,25 @@ function _install_sshauth_watch!(h)
                 push!(_SSHAUTH_SEEN, p.id)
                 msg = "sshauth:" * JSON.json(Dict("id" => p.id, "host" => p.host,
                                                   "prompt" => p.prompt,
-                                                  "secret" => _sshauth_secret(p.prompt)))
+                                                  "secret" => !p.echo))
                 for nb in lock(h.lock) do; collect(values(h.notebooks)); end
                     try; _broadcast(nb, msg); catch; end
                 end
             end
-            # An answered (or abandoned) prompt must be forgettable, or its id would suppress a
-            # later prompt that happens to reuse it.
-            setdiff!(_SSHAUTH_SEEN, setdiff(_SSHAUTH_SEEN, live))
+            # A prompt that is gone — answered here, cancelled, or timed out — takes its dialog with
+            # it. Without this the page keeps showing one nothing is waiting on.
+            for id in setdiff(_SSHAUTH_SEEN, live)
+                for nb in lock(h.lock) do; collect(values(h.notebooks)); end
+                    try; _broadcast(nb, "sshauth-done:" * id); catch; end
+                end
+            end
+            intersect!(_SSHAUTH_SEEN, live)
         catch
         end
         sleep(0.3)
     end)
     return nothing
 end
-
-# Whether the answer should be masked in the dialog. A password and a one-time code both are; a
-# yes/no ("Duo passcode or option (1-3):") is not, and hiding it would make it unanswerable.
-_sshauth_secret(prompt::AbstractString) =
-    occursin(r"(?i)password|passphrase|one-time|passcode|token|OATH|OTP|code"a, prompt)
 
 function _ws_calls(stream, nb::LiveNotebook)
     if !HTTP.WebSockets.isupgrade(stream.message)
@@ -3007,7 +3019,23 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
             _sse_site_sync(stream, h)
         else
             t0 = time()
-            handle(stream)
+            # HTTP.jl answers a throwing handler with a bare 500 and logs nothing, so a broken route
+            # is invisible from both ends. Log the exception with its stack, and tell the browser
+            # which route it was.
+            try
+                handle(stream)
+            catch e
+                # Only OUR failures are worth a stack trace. If the stream is no longer writable the
+                # client went away mid-response — there is nothing to report and nowhere to send it.
+                if iswritable(stream)
+                    @error "Kaimon Slate: request handler failed" method = stream.message.method target exception = (e, catch_backtrace())
+                    HTTP.setstatus(stream, 500)
+                    HTTP.setheader(stream, "Content-Type" => "text/plain; charset=utf-8")
+                    HTTP.startwrite(stream)
+                    write(stream, "Kaimon Slate: $(stream.message.method) $target failed — " *
+                                  first(sprint(showerror, e), 400) * "\nThe hub log has the stack trace.")
+                end
+            end
             dt = time() - t0      # includes the body WRITE — surfaces slow transfers, not just slow compute
             dt > 1.0 && @warn "Kaimon Slate: slow request" target round_ms = round(Int, dt * 1000)
         end

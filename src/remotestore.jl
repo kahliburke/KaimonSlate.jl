@@ -42,152 +42,22 @@ function RemoteStore(host::AbstractString, root::AbstractString)
     # Keyed by host AND path: one laptop may drive several clusters, and two of them may well use
     # the same conventional path (`/scratch/$USER/slate`) for entirely different stores.
     tag = string(hash((String(host), String(root))); base = 16)
-    m = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
-                 "kaimonslate", "stores", tag)
+    m = joinpath(SlateHome.cache_home(), "stores", tag)
     for d in META_DIRS; mkpath(joinpath(m, d)); end
     return RemoteStore(String(host), String(root), m)
 end
 
 # ── One connection, reused ───────────────────────────────────────────────────────────────────
-# `ControlMaster=auto` makes the first call open a master and every later one ride it; the socket
-# outlives the call by `ControlPersist`, so a burst of polls and slices shares a single
-# authenticated channel. The path is per host, and short — a control socket lives in the filesystem
-# and long ones hit the sockaddr limit.
+# `SshTransport` holds one authenticated session per host and opens a channel per command. SSH
+# multiplexes channels itself, so a burst of polls and slices shares one authenticated connection
+# with no socket file, and a cluster that costs a second factor costs it once.
 
-# The socket is SHARED with the regions and with anything else that reaches a host — see
-# `SshAuth.control_path`. A cluster that costs a 2FA prompt must cost exactly one.
-_ctl_path(host) = SshAuth.control_path(String(host))
+# What a server prompt costs: a dialog in the notebook. Returning `nothing` cancels the connection.
+_ask(host, prompt, echo) = SshAuth.ask(host, prompt, echo)
 
-function ssh_opts(host)
-    # `ConnectTimeout` bounds only the TCP handshake, which is not where this hangs. The way a
-    # cluster call actually stops coming back is a session that connected and then went silent —
-    # the host rebooted, a container stopped, the laptop changed networks — and with multiplexing
-    # the socket keeps answering, so the call has something to ride and waits on it forever. The
-    # keepalives are what put a ceiling on that: ~60s, then the call fails and can be retried.
-    o = String["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
-               "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4"]
-    p = _ctl_path(host)
-    # No usable socket path ⇒ no multiplexing. Every call then authenticates on its own, which is
-    # slower and, on a cluster that wants a second factor, prompts every time — but it is honest,
-    # where passing ssh a path it cannot bind fails outright.
-    isempty(p) && return o
-    append!(o, ["-o", "ControlMaster=auto", "-o", "ControlPath=" * p,
-                "-o", "ControlPersist=" * _control_persist()])
-    return o
-end
+"True if there is an authenticated session for `host`."
+connected(host::AbstractString) = isempty(host) || SshTransport.connected(String(host))
 
-"The `ssh …` prefix as one shell word, for tools that take a remote-shell string (rsync's `-e`)."
-ssh_command(host) = "ssh " * join(ssh_opts(host), " ")
-
-# ── Getting the first connection open ────────────────────────────────────────────────────────
-# Everything above assumes `BatchMode=yes` can connect, which holds only where a key works. On a
-# cluster that wants a password and a second factor it fails before it starts — so ONE connection
-# has to be interactive, and only when there isn't already a master to ride.
-#
-# `ssh -O check` is the question "is there one?", asked of ssh rather than of the filesystem: a
-# control socket can outlive the connection it belonged to, and a stale one is indistinguishable
-# from a live one by looking.
-
-"True if a multiplexed master is already open for `host` — then nothing here needs to prompt."
-function master_open(host::AbstractString)
-    isempty(host) && return true
-    return success(pipeline(`ssh -O check $(ssh_opts(host)) $host`;
-                            stdout = devnull, stderr = devnull))
-end
-
-"""
-    clear_stale_master!(host) -> Bool
-
-Remove a control socket whose connection is gone, returning whether one was removed.
-
-A socket FILE outlives the connection it belonged to — a killed ssh, a reboot, a hub that went away
-mid-session — and ssh will not create a master over one that exists: it says
-`ControlSocket … already exists, disabling multiplexing` and then every later call fails with
-`Connection refused`. Left alone that is unrecoverable without a human deleting a file, on the one
-host where reconnecting costs a 2FA prompt.
-
-The concrete path comes from `ssh -G`, because `%C` is ssh's to expand, not ours.
-"""
-function clear_stale_master!(host::AbstractString)
-    isempty(host) && return false
-    master_open(host) && return false                  # live — leave it alone
-    p = try
-        m = match(r"^controlpath\s+(.+)$"m,
-                  read(pipeline(`ssh -G $(ssh_opts(host)) $host`; stderr = devnull), String))
-        m === nothing ? "" : strip(m.captures[1])
-    catch; ""; end
-    (isempty(p) || p == "none" || !ispath(p)) && return false
-    try; rm(p; force = true); catch; return false; end
-    return true
-end
-
-"""
-    open_master!(host; timeout = 300) -> (ok, message)
-
-Open the one interactive connection, answering prompts through `SshAuth` — which routes them to
-whoever is watching (the notebook, or a terminal helper). `BatchMode=no` is the point: it lets ssh
-attempt the keyboard-interactive methods that a 2FA cluster offers and `BatchMode=yes` refuses.
-
-`NumberOfPasswordPrompts=1` because a wrong answer must FAIL rather than loop: a second attempt
-re-prompts, and on a one-time code it also burns the code that was about to work.
-"""
-function open_master!(host::AbstractString; timeout::Real = 300)
-    isempty(host) && return (true, "local")
-    master_open(host) && return (true, "already open")
-    helper = SshAuth.askpass_script()
-    env = copy(ENV)
-    env["SSH_ASKPASS"] = helper
-    env["SSH_ASKPASS_REQUIRE"] = "force"     # ask the helper even when a TTY is present
-    env["DISPLAY"] = get(env, "DISPLAY", ":0")   # ancient precondition for askpass; content unused
-    env["SLATE_SSHAUTH_DIR"] = SshAuth.rendezvous_dir()
-    env["SLATE_SSHAUTH_HOST"] = String(host)
-    env["SLATE_SSHAUTH_TIMEOUT"] = string(Int(round(timeout)))
-    ctl = _ctl_path(host)
-    isempty(ctl) && return (false, "no usable ssh ControlPath — cannot hold a connection open")
-    # A socket left behind by a dead connection would make ssh refuse to open a new master, and the
-    # prompt below is the expensive thing here — do not spend it on a connection that cannot form.
-    clear_stale_master!(host)
-    # Keepalives are not an optimisation here. A master whose far end goes away — the cluster
-    # rebooted, a container stopped, a laptop changed networks — leaves a socket that still ANSWERS
-    # `ssh -O check`, so every later call looks like it has a connection to ride and then blocks
-    # forever on a TCP session nobody is on the other end of. With these, ssh notices and the master
-    # exits, and the next call opens a fresh one (a 2FA prompt, but a prompt beats a hang).
-    cmd = `ssh -M -N -f -o BatchMode=no -o NumberOfPasswordPrompts=1
-               -o ControlMaster=auto -o ControlPath=$ctl
-               -o ServerAliveInterval=15 -o ServerAliveCountMax=4
-               -o ControlPersist=$(_control_persist()) -o ConnectTimeout=30 $host`
-    buf = IOBuffer()
-    ok = try
-        run(pipeline(setenv(cmd, env); stdout = buf, stderr = buf))
-        true
-    catch
-        false
-    end
-    out = strip(String(take!(buf)))
-    ok && master_open(host) && return (true, "authenticated")
-    return (false, isempty(out) ? "ssh could not open a master to $host" : out)
-end
-
-# Long enough that a notebook left alone over lunch does not cost another 2FA prompt, and a session
-# is bounded rather than forever.
-_control_persist() = get(ENV, "KAIMONSLATE_SSH_PERSIST", "8h")
-
-"""
-    shq(s) -> String
-
-One shell word, whatever `s` contains. Everything sent to a host is a SCRIPT — ssh concatenates its
-arguments and hands the result to the remote shell — so a path with a space in it is two words
-unless it is quoted, and cluster paths are not always tidy. Single quotes with the standard
-`'\\''` escape: inside them the shell expands nothing at all, so a store root is a store root and
-never a glob or a variable.
-"""
-shq(s) = "'" * replace(String(s), "'" => "'\\''") * "'"
-
-# How long to leave a host alone after a failed attempt to reach it. Without this, every poll retried
-# — and a sweep card polls about once a second. Each retry is a fresh TCP connection (multiplexing is
-# exactly what is not working) plus a failed authentication, so an unreachable host does not fail
-# quietly: it fills the ephemeral port range with TIME_WAIT until nothing on the machine can open a
-# socket. Seen: ~15k sockets, both hubs unable to accept, ssh and docker's port mapping down with it.
 const _CONNECT_BACKOFF = 20.0
 const _CONNECT_FAILED = Dict{String,Float64}()
 const _CONNECT_LOCK = ReentrantLock()
@@ -195,109 +65,150 @@ const _CONNECT_LOCK = ReentrantLock()
 """
     connect!(host) -> Bool
 
-Make sure there is a connection to ride, authenticating if that takes a human. Called from the
-handful of functions that actually touch the network — NOT from the ones that merely work out where
-things live, which are pure and must stay answerable for a host nobody can reach.
-
-Costs one `ssh -O check` when a master is already open, which is the common case by design. After a
-failure the host is left alone for a while: a poll loop must not be able to turn "cannot reach it"
-into a machine-wide resource problem.
+Ensure a session exists, authenticating through the notebook if the server asks. A host is left
+alone for a while after a failure: the pollers here would otherwise retry continuously, and on a
+gated host every retry is a failed authentication.
 """
 function connect!(host::AbstractString)
     isempty(host) && return true
-    master_open(host) && return true
+    SshTransport.connected(String(host)) && return true
     lock(_CONNECT_LOCK) do
         time() - get(_CONNECT_FAILED, String(host), 0.0) < _CONNECT_BACKOFF
     end && return false
-    ok, _ = open_master!(host)
+    ok = try
+        SshTransport.session(String(host); ask = _ask)
+        SshTransport.connected(String(host))
+    catch
+        false
+    end
     lock(_CONNECT_LOCK) do
         ok ? delete!(_CONNECT_FAILED, String(host)) : (_CONNECT_FAILED[String(host)] = time())
     end
     return ok
 end
 
-"Run `script` on the host, returning `(ok, output)`. An empty host runs it here — that is what makes
-this testable, and what makes a `SlurmTarget` with no host behave as documented."
+"""
+    run_there(host, script) -> (ok, output)
+
+Run `script` on the host. An empty host runs it here — that is what makes this testable, and what
+makes a `SlurmTarget` with no host behave as documented.
+"""
 function run_there(host::AbstractString, script::AbstractString)
-    # No connection ⇒ do not attempt the command. Running it anyway is what turned an unreachable
-    # host into a machine-wide problem: without a master every attempt opens its OWN TCP connection,
-    # and a card that polls once a second exhausts the ephemeral port range in minutes.
+    if isempty(host)
+        buf = IOBuffer()
+        ok = try; run(pipeline(`sh -c $script`; stdout = buf, stderr = buf)); true; catch; false; end
+        return (ok, String(take!(buf)))
+    end
     connect!(host) || return (false, "no connection to $host")
-    cmd = isempty(host) ? `sh -c $script` : `ssh $(ssh_opts(host)) $host $script`
-    buf = IOBuffer()
-    ok = try; run(pipeline(cmd; stdout = buf, stderr = buf)); true; catch; false; end
-    return (ok, String(take!(buf)))
+    return SshTransport.exec(String(host), String(script); ask = _ask)
 end
 
 """
-    drop_master!(host) -> Bool
+    shq(s) -> String
 
-Tear down the multiplexed master for `host`, so the next call opens a fresh one.
-
-The way back from the state where a socket answers `ssh -O check` but the session behind it is gone:
-ssh's keepalives normally end that on their own, but a master opened by an older build (or by hand)
-has none, and every call that rides it waits on a connection nobody is on the other end of. Also
-what "log out" means — the master IS the authenticated session.
+One shell word, whatever `s` contains. Everything sent to a host is a SCRIPT — the remote shell
+splits it — so a path with a space in it is two words unless it is quoted, and cluster paths are not
+always tidy. Single quotes with the standard `'\\''` escape: inside them the shell expands nothing,
+so a store root is a store root and never a glob or a variable.
 """
-function drop_master!(host::AbstractString)
-    isempty(host) && return false
-    return try
-        success(pipeline(`ssh -O exit $(ssh_opts(host)) $host`; stdout = devnull, stderr = devnull))
-    catch
-        false
+shq(s) = "'" * replace(String(s), "'" => "'\\''") * "'"
+
+"""
+    run_io(host, script, input) -> (ok, stdout::Vector{UInt8})
+
+`run_there` with bytes on stdin and bytes back — how files and archives cross without a second
+authenticated transport.
+"""
+function run_io(host::AbstractString, script::AbstractString, input::Union{Vector{UInt8},Nothing})
+    if isempty(host)
+        out = IOBuffer()
+        ok = try
+            open(pipeline(`sh -c $script`; stderr = devnull), "r+") do io
+                input === nothing || write(io, input)
+                close(io.in); write(out, read(io))
+            end
+            true
+        catch; false; end
+        return (ok, take!(out))
     end
+    connect!(host) || return (false, UInt8[])
+    ok, data, _ = SshTransport.exec_io(String(host), String(script), input; ask = _ask)
+    return (ok, data)
+end
+
+"Write `data` to `path` on the host, creating its directory."
+function put_file(host::AbstractString, data::Vector{UInt8}, path::AbstractString)
+    script = "mkdir -p " * shq(dirname(String(path))) * " && cat > " * shq(String(path))
+    return first(run_io(host, script, data))
+end
+
+"Copy a local directory's contents to `dest` on the host."
+function put_dir(host::AbstractString, localdir::AbstractString, dest::AbstractString;
+                 delete::Bool = false, excludes::Vector{String} = String[])
+    isdir(localdir) || return false
+    args = String["cf", "-", "-C", String(localdir)]
+    for e in excludes; insert!(args, 1, "--exclude=" * e); end
+    out = IOBuffer()
+    try; run(pipeline(`tar $args .`; stdout = out, stderr = devnull)); catch; return false; end
+    script = (delete ? "rm -rf " * shq(String(dest)) * "; " : "") *
+             "mkdir -p " * shq(String(dest)) * " && cd " * shq(String(dest)) * " && tar xf -"
+    return first(run_io(host, script, take!(out)))
+end
+
+"End the session for `host`. The next call authenticates again — this is what logging out means."
+function disconnect!(host::AbstractString)
+    isempty(host) && return false
+    SshAuth.cancel_host!(String(host))
+    lock(_CONNECT_LOCK) do; delete!(_CONNECT_FAILED, String(host)); end
+    return SshTransport.disconnect!(String(host))
 end
 
 # ── Syncing the metadata ─────────────────────────────────────────────────────────────────────
-# rsync rather than tar or a bespoke protocol: it is on every cluster, it moves only what changed
-# (so a poll after the first costs the new manifests and nothing else), and it already knows how to
-# be interrupted safely.
+# `tar` over the session rather than rsync: rsync execs its own `ssh`, which on a gated host means
+# authenticating a second time. Metadata is kilobytes of text, so moving all of it costs less than
+# the round trips rsync would spend deciding what changed.
 
 """
-    sync_flags(dir, direction) -> Cmd
+    sync_flags(dir, direction) -> Bool
 
-The extra rsync flags for one directory, decided by WHO WRITES IT. Pure, so the ownership rule is
-testable without a host — and it is the rule that goes wrong silently.
+Whether a sync of `dir` in `direction` may DELETE what the far side no longer has. Decided by who
+writes the directory, and it is the rule that goes wrong silently.
 
-  `manifests/`, `status/`  written by the JOBS, so the store is authoritative. Delete on the way IN
-                           (the mirror must forget what the store no longer has), never on the way
-                           OUT: that would race a unit finishing between our pull and our push and
-                           erase a result nobody has seen. Removing one deliberately is `forget!`.
+  `manifests/`, `status/`  written by the JOBS, so the store is authoritative. Delete on the way IN;
+                           never on the way OUT, which would race a unit finishing between a pull
+                           and a push and erase a result nobody has seen. Removing one deliberately
+                           is `forget!`.
 
   `jobs/`                  written by the HUB — the submission index, the armed and cancelled
                            markers, the attempt counts. Delete on the way OUT, which is how
-                           disarming and clearing attempts actually take effect; never on the way
-                           IN, or a store copy that is merely OLDER erases state the hub has just
-                           written and not yet pushed. That is what used to happen to the attempt
-                           counts: bumped during a reconcile, after that run's push, so the next
-                           pull removed each one before it could reach the budget — and a sweep
-                           whose units the scheduler kills resubmitted forever, which is the one
-                           thing the budget exists to prevent. The pull exists only so a FRESH hub
-                           can recover a live submission it did not make itself.
+                           disarming and clearing attempts take effect; never on the way IN, or a
+                           store copy that is merely older erases what the hub just wrote. The pull
+                           exists only so a FRESH hub can recover a submission it did not make.
 
-  `blobs/`                 content-addressed, so a blob the store already has is byte-identical and
-                           re-sending it is waste.
+  `blobs/`                 content-addressed, so a blob the store already has is byte-identical.
 """
 function sync_flags(dir::AbstractString, direction::Symbol)
     d = String(dir)
-    direction === :in && return d == "jobs" ? `` : `--delete`
-    direction === :out && return d == "blobs" ? `--ignore-existing` : (d == "jobs" ? `--delete` : ``)
+    direction === :in && return d != "jobs"
+    direction === :out && return d == "jobs"
     error("sync_flags: direction is :in or :out, got :$direction")
 end
+
+_dirlist(dirs) = join((shq(String(d)) for d in dirs), " ")
 
 "Bring the local mirror up to date with the store's metadata. One round trip."
 function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     isempty(s.host) && return true          # same machine: the mirror IS the store
-    connect!(s.host) || return false        # never rsync without a master — see `run_there`
+    connect!(s.host) || return false
+    names = _dirlist(dirs)
+    script = "cd " * shq(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; tar cf - " * names
+    ok, data, _ = SshTransport.exec_io(String(s.host), script, nothing; ask = _ask)
+    ok || return false
     for d in dirs
-        mkpath(joinpath(s.mirror, d))
-        extra = sync_flags(d, :in)
-        spec = joinpath(s.root, d) * "/"
-        c = `rsync -a $extra -e $(ssh_command(s.host)) $(s.host * ":" * spec) $(joinpath(s.mirror, d) * "/")`
-        ok = try; run(pipeline(c; stdout = devnull, stderr = devnull)); true; catch; false; end
-        ok || return false
+        sync_flags(d, :in) && rm(joinpath(s.mirror, String(d)); force = true, recursive = true)
+        mkpath(joinpath(s.mirror, String(d)))
     end
-    return true
+    return _untar(data, s.mirror)
 end
 
 """
@@ -308,16 +219,35 @@ store. What may be DELETED there is `sync_flags`' decision, not this function's.
 """
 function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
     isempty(s.host) && return true
-    connect!(s.host) || return false        # never rsync without a master — see `run_there`
-    ok = true
-    for d in dirs
-        src = joinpath(s.mirror, d)
-        isdir(src) || continue
-        extra = sync_flags(d, :out)
-        c = `rsync -a $extra -e $(ssh_command(s.host)) $(src * "/") $(s.host * ":" * joinpath(s.root, d) * "/")`
-        ok &= try; run(pipeline(c; stdout = devnull, stderr = devnull)); true; catch; false; end
-    end
+    connect!(s.host) || return false
+    present = String[String(d) for d in dirs if isdir(joinpath(s.mirror, String(d)))]
+    isempty(present) && return true
+    data = _tar(s.mirror, present)
+    wipe = String[shq(joinpath(s.root, d)) for d in present if sync_flags(d, :out)]
+    script = "mkdir -p " * shq(s.root) *
+             (isempty(wipe) ? "" : "; rm -rf " * join(wipe, " ")) *
+             "; cd " * shq(s.root) * " && tar xf -"
+    ok, _, _ = SshTransport.exec_io(String(s.host), script, data; ask = _ask)
     return ok
+end
+
+# The system `tar`: on every cluster and every developer machine, and the archive here is a handful
+# of kilobytes of text.
+function _tar(root::AbstractString, dirs::Vector{String})
+    out = IOBuffer()
+    run(pipeline(`tar cf - -C $root $dirs`; stdout = out, stderr = devnull))
+    return take!(out)
+end
+
+function _untar(data::Vector{UInt8}, dest::AbstractString)
+    isempty(data) && return true
+    mkpath(dest)
+    return try
+        open(pipeline(`tar xf - -C $dest`; stderr = devnull), "w") do io; write(io, data); end
+        true
+    catch
+        false
+    end
 end
 
 """

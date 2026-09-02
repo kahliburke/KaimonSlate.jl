@@ -1005,12 +1005,12 @@ end
             # the UI rather than at header syntax: the cluster is picked from the cell's ⚙, and
             # telling someone to type `#%% sweep cluster=…` describes a path nobody takes.
             e = try; Sweep.resolve_target(nothing, Dict("cluster" => "hcp"), defs); catch x; x; end
-            @test occursin("no compute target named `hcp`", sprint(showerror, e))
+            @test occursin("no cluster named `hcp`", sprint(showerror, e))
             @test occursin("box, hpc", sprint(showerror, e))
             e2 = try; Sweep.resolve_target(nothing, Dict{String,String}(), defs); catch x; x; end
             @test occursin("box, hpc", sprint(showerror, e2))          # names the choices, not the syntax
             e3 = try; Sweep.resolve_target(nothing, Dict{String,String}(), Dict()); catch x; x; end
-            @test occursin("Compute targets", sprint(showerror, e3))     # nothing defined ⇒ say where to
+            @test occursin("Remotes → Clusters", sprint(showerror, e3))  # nothing defined ⇒ say where to
 
             # An unsupported scheduler is an error naming what this build does support, not a
             # silent fall-through to SLURM.

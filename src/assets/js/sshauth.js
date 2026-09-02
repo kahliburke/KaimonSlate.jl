@@ -85,12 +85,11 @@
           (notice ? '' :
             '<input class="sshauth-input" type="' + (msg.secret ? 'password' : 'text') + '" ' +
                    'autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />') +
-          // ssh's own words, kept but demoted: the heading says which factor this is, and this says
-          // it is not a paraphrase.
+          // ssh's own words, below the heading — not a paraphrase.
           '<div class="sshauth-prompt">' + esc(msg.prompt.trim()) + '</div>' +
         '</div>' +
         '<div class="sshauth-foot">' +
-          '<span class="sshauth-note">Answered once — every later connection reuses it.</span>' +
+          '<span class="sshauth-note">Asked once per host.</span>' +
           '<button class="sshauth-cancel">Cancel</button>' +
           '<button class="sshauth-ok">' + (notice ? 'Continue' : 'Send') + '</button>' +
         '</div>' +
@@ -108,4 +107,7 @@
   }
 
   window.onSshAuth = show;
+  // The prompt is gone — answered elsewhere, cancelled, or timed out. Close the dialog rather than
+  // leaving one on screen that nothing is waiting on.
+  window.onSshAuthDone = function (id) { if (current && current.id === id) close(); };
 })();

@@ -461,6 +461,7 @@ function connectLive() {
     if (e.data.startsWith('inspect:')) { try { const r = JSON.parse(e.data.slice(8)); window._slateInspect && window._slateInspect(r.reqid, r.cell); } catch (_) {} return; }   // slate.inspect: capture this cell for the agent
     if (e.data.startsWith('js:')) { try { const r = JSON.parse(e.data.slice(3)); window._slateEvalJs && window._slateEvalJs(r.reqid, r.code); } catch (_) {} return; }   // slate.eval_js: run agent JS in this tab
     if (e.data.startsWith('sshauth:')) { try { const r = JSON.parse(e.data.slice(8)); window.onSshAuth && window.onSshAuth(r); } catch (_) {} return; }   // a cluster wants a password / second factor
+    if (e.data.startsWith('sshauth-done:')) { window.onSshAuthDone && window.onSshAuthDone(e.data.slice(13)); return; }   // …and is no longer waiting
     if (e.data.startsWith('compfig:')) { try { const r = JSON.parse(e.data.slice(8)); window._slateComponentFig && window._slateComponentFig(r.reqid, r.cell, r.slot, r.theme); } catch (_) {} return; }   // PDF export: capture a mounted component as a figure
     if (e.data.startsWith('exportprog:')) { try { window.onExportProgress && window.onExportProgress(JSON.parse(e.data.slice(11)).cell); } catch (_) {} return; }   // a chart is being rendered live for PDF/Typst export
     if (e.data.startsWith('mesh-consent:')) { try { window.onMeshConsent && window.onMeshConsent(JSON.parse(e.data.slice(13))); } catch (_) {} return; }   // §5.1: a new cross-host pair needs a consented SSH mesh
