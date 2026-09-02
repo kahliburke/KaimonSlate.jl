@@ -368,6 +368,12 @@ end
         @test Sweep.alive(Sweep.Allocation("nm", "7", :running, "c1", "1:00"))
         @test occursin("none", sprint(show, none))
         @test occursin("on c1", sprint(show, Sweep.Allocation("nm", "7", :running, "c1", "1:00")))
+
+        # PBS is detectable and configurable but cannot be allocated on by this build. Saying so is
+        # the point: issuing SLURM commands to a scheduler that has never heard of them would fail
+        # further from the cause, and silently running on the login node would be worse than either.
+        @test_throws ErrorException Sweep._unsupported_scheduler(:pbs)
+        @test occursin("SLURM only", try; Sweep._unsupported_scheduler(:pbs); catch e; e.msg; end)
     end
 
     @testset "a sweep has an identity for what has landed" begin
@@ -985,7 +991,7 @@ end
             @test a.root_remote == "/scratch/slate" && a.payload == ""
 
             e = try; Sweep.resolve_target(nothing, Dict("cluster" => "hcp"), defs); catch x; x; end
-            @test occursin("no cluster named `hcp`", sprint(showerror, e))
+            @test occursin("no compute target named `hcp`", sprint(showerror, e))
             @test occursin("box, hpc", sprint(showerror, e))
             e2 = try; Sweep.resolve_target(nothing, Dict{String,String}(), defs); catch x; x; end
             @test occursin("cluster=<name>", sprint(showerror, e2))

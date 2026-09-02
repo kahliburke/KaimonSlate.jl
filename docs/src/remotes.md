@@ -21,6 +21,10 @@ A remote is any **SSH host you already reach with key auth** — a `Host` entry 
 (or a `user@host` you can `ssh` to without a password prompt). KaimonSlate provisions the rest:
 it checks the host, ensures a Julia + environment is present, and starts the worker for you.
 
+A host that refuses keys and wants a password plus a second factor — which is most production
+clusters — works too, by authenticating **once** through a dialog in the page; see
+[Clusters](clusters.md#authenticating-once).
+
 ## Set up a host
 
 On the hub's [front page](getting-started.md#the-front-page), click **🖧 Remotes** to add and test a

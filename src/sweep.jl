@@ -401,21 +401,29 @@ end
 
 # Resolve the target a sweep cell asked for: an explicit one written in the cell wins, else the
 # `cluster=` named on its header, else nothing to run on — which is worth an error naming the
-# clusters that ARE defined, because the usual cause is a typo or a renamed definition.
+# targets that ARE defined, because the usual cause is a typo, a rename, or opening a notebook on a
+# machine that has never been told what `hpc` means. The name is the notebook's; what it resolves to
+# belongs to the machine, so the error points at where the machine is configured.
+const _WHERE_TARGETS = "front page → 🖧 Remotes → Compute targets"
+
 function resolve_target(explicit, attrs::AbstractDict, clusters::AbstractDict)
     explicit === nothing || return explicit
+    known() = join(sort!(collect(keys(clusters))), ", ")
     nm = String(get(attrs, "cluster", ""))
     if isempty(nm)
         isempty(clusters) &&
             error("@sweep: no target. Give one — `@sweep(grid, mytarget) do … end` — or define a " *
-                  "cluster (⎈ on a sweep cell) and name it on the header: `#%% sweep cluster=<name>`.")
-        error("@sweep: no target. Name one of this notebook's clusters on the cell header " *
-              "(`#%% sweep cluster=<name>`): " * join(sort!(collect(keys(clusters))), ", "))
+                  "compute target ($_WHERE_TARGETS) and name it on the header: " *
+                  "`#%% sweep cluster=<name>`.")
+        error("@sweep: no target. Name one on the cell header (`#%% sweep cluster=<name>`). " *
+              "This machine has: " * known())
     end
     spec = get(clusters, nm, nothing)
     spec === nothing &&
-        error("@sweep: no cluster named `$nm` in this notebook. Defined: " *
-              (isempty(clusters) ? "(none)" : join(sort!(collect(keys(clusters))), ", ")))
+        error("@sweep: this machine has no compute target named `$nm`. " *
+              (isempty(clusters) ? "It has none at all — define one under $_WHERE_TARGETS." :
+                                   "It has: " * known() * ". Add or rename one under $_WHERE_TARGETS.") *
+              " (A notebook carries the NAME; each machine resolves it against its own registry.)")
     return cluster(merge(Dict{String,Any}("name" => nm), spec))
 end
 

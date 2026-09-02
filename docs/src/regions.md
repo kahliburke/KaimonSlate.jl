@@ -10,6 +10,11 @@ Regions are **named compute definitions** managed globally — a host, a transpo
 many workers to keep warm. Host setup and transports live in [Remotes & Pools](remotes.md); this page is
 about defining a region, assigning cells to it, and how data crosses the boundary.
 
+!!! tip "On a cluster, the host is not the address"
+    A region whose host is a scheduler's login node does not run there — it asks for a compute node
+    and the worker goes on whichever one it is given. That, and submitting batch sweeps to the same
+    machine, are in [Clusters](clusters.md).
+
 !!! note "New and evolving (v1)"
     Regions are a recent addition and still stabilizing. The single-worker path — running a *whole*
     notebook [on one host](remotes.md#run-a-notebook-on-a-remote) — is the settled option; per-cell

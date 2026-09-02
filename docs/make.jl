@@ -83,6 +83,7 @@ makedocs(;
             "Configuration" => "configuration.md",
             "Remotes" => "remotes.md",
             "Regions" => "regions.md",
+            "Clusters" => "clusters.md",
         ],
         "API Reference" => "api.md",
     ],
