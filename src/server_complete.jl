@@ -2921,10 +2921,20 @@ function _install_sshauth_watch!(h)
         # asking to be run again — the same recovery a granted node gets. A sweep needs nothing:
         # its card polls, and submission is gated on the session it just got.
         ok || return nothing
+        # A wire dropped because this host was signed out is HELD, so that a reactive cascade cannot
+        # silently re-dial a worker somebody may have deliberately walked away from. Signing in is
+        # not a cascade — it is the explicit act the hold was waiting for — so release the kernels
+        # that ride this host's session, or the re-arm below just re-errors on the hold it set.
+        for nb in nbs, k in _nb_kernels(nb)
+            k isa ReportEngine.GateKernel || continue
+            ReportEngine.session_host(k) == String(host) || continue
+            try; k.redial_hold = false; catch; end
+        end
         for nb in nbs, r in (try; ReportEngine.regions(); catch; (); end)
             String(r.host) == String(host) || continue
             try; _restale_region_cells!(nb, r.name) > 0 && _ensure_runner!(nb); catch; end
         end
+        for nb in nbs; try; _workers_push!(nb); catch; end; end   # pills leave "disconnected" at once
         return nothing
     end
     errormonitor(@async while true
@@ -3099,6 +3109,7 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
     _install_worker_push!(h)   # worker telemetry + log → per-page WebSocket push (no browser polling)
     _install_sshauth_watch!(h) # a cluster asking for a password / second factor → a dialog in the notebook
+    _install_session_drop!(h)  # a session going away drops the worker wires it was carrying, at once
     handle = HTTP.streamhandler(_make_router(h))
     server = HTTP.listen!(host, port) do stream::HTTP.Stream
         # Reject cross-origin / rebinding requests before ANY handler (router or SSE) runs.

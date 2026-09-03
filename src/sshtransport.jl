@@ -620,7 +620,8 @@ answer for each server prompt; returning `nothing` cancels.
 """
 function session(host::AbstractString; ask)
     key = String(host)
-    lock(_REG_LOCK) do
+    replaced = Ref(false)
+    s = lock(_REG_LOCK) do
         s = get(_SESSIONS, key, nothing)
         # Alive, or still opening. `alive` is only set once authentication has finished, and on a
         # host that asks for a second factor that takes as long as a person takes to answer — so a
@@ -629,7 +630,7 @@ function session(host::AbstractString; ask)
         # to answer a fresh set of prompts for a connection they just made.
         if s !== nothing
             (s.alive || (s.owner !== nothing && !istaskdone(s.owner))) && return s
-            delete!(_SESSIONS, key)
+            delete!(_SESSIONS, key); replaced[] = true
         end
         ep = resolve(key)
         s = Session(ep, Cint(-1), C_NULL, Channel{Any}(32), nothing, Prompter(key), false, "", Fwd[])
@@ -637,6 +638,8 @@ function session(host::AbstractString; ask)
         _SESSIONS[key] = s
         return s
     end
+    replaced[] && _announce_drop(key)   # outside the lock: the listener reaches back into transport
+    return s
 end
 
 function _request(host::AbstractString, kind::Symbol, arg, fail; ask)
@@ -688,7 +691,27 @@ function disconnect!(host::AbstractString)
     reply = Channel{Any}(1)
     try; put!(s.req, (:close, "", reply)); take!(reply); catch; end
     close(s.req)
+    _announce_drop(String(host))
     return true
+end
+
+# ── Announcing that a session went away ──────────────────────────────────────────────────────
+# Every forward dies with the session that carried it, and what USES those forwards lives a layer up
+# (the data channel caches a local port per worker). Nothing up there can DETECT this: a dead forward
+# is indistinguishable from a healthy one until something sits on it for a full receive timeout and
+# then reports a transfer failure that is really "the session was replaced". So the drop is told,
+# not discovered — and it happens on the ordinary path, since signing in interactively clears a
+# half-open session first.
+const _ON_DROP = Ref{Any}(nothing)
+
+"Call `f(host)` whenever a session for `host` is dropped or replaced, so callers can discard what rode it."
+on_drop!(f) = (_ON_DROP[] = f; nothing)
+
+function _announce_drop(host::AbstractString)
+    f = _ON_DROP[]
+    f === nothing && return nothing
+    try; f(String(host)); catch; end     # a listener's failure must never break disconnecting
+    return nothing
 end
 
 "Is there an authenticated session for `host` right now?"

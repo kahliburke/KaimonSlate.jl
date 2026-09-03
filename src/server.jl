@@ -1819,6 +1819,44 @@ function _kernel_proc_dead(k)
     return try; !process_running(p); catch; false; end
 end
 
+# A wire severed by a sign-out is not an unresponsive worker, and must not be reported as one: the
+# worker on the far side is very likely fine, nothing is wrong with it, and the fix is a sign-in
+# rather than a restart. So it is dropped WITHOUT the unresponsive clock — no countdown, no "stopped
+# responding" — and held, so it reconnects on an explicit run once there is a session again.
+function _drop_signed_out_wire!(nb::LiveNotebook, k, host::AbstractString)
+    delete!(_KERNEL_UNRESPONSIVE_SINCE, k)     # never a health story; don't leave a phantom countdown
+    delete!(_LIVENESS_LOG_LAST, k)
+    dropped = try; ReportEngine._drop_kernel_conn!(k)
+    catch e
+        ReportEngine._rlog("liveness: dropping the signed-out wire on $(nb.id)/$(_kernel_side_label(nb, k)) failed: " *
+                           first(sprint(showerror, e), 120)); false
+    end
+    dropped || return false
+    try; k.redial_hold = true; catch; end
+    ReportEngine._rlog("liveness: $(nb.id)/$(_kernel_side_label(nb, k)) rides the session for $host, " *
+                       "which is signed out — dropped its wire (reconnects on an explicit run after a sign-in)")
+    try; _workers_push!(nb); catch; end
+    return true
+end
+
+# Every wire an ssh session was carrying, dropped the moment that session goes. Signing out is a
+# DECISION, not a symptom — the answer is known immediately, so nothing should have to time out to
+# reach it. Installed on the transport's drop announcement (see `ReportEngine._session_dropped!`).
+function _install_session_drop!(h)
+    ReportEngine._SESSION_DROP_SINK[] = function (host, hosts)
+        nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+        n = 0
+        for nb in nbs, k in _nb_kernels(nb)
+            (k isa ReportEngine.GateKernel && k.conn !== nothing) || continue
+            ReportEngine.rides_session(k, hosts) || continue
+            _drop_signed_out_wire!(nb, k, String(host)) && (n += 1)
+        end
+        n == 0 || ReportEngine._rlog("session drop on $host: dropped $n worker wire(s) it was carrying")
+        return nothing
+    end
+    return nothing
+end
+
 function _heal_dead_wire!(nb::LiveNotebook, k, unresp_s::Real = 0.0)
     side = _kernel_side_label(nb, k)
     auto = _region_autoretry()
@@ -1838,6 +1876,15 @@ function _liveness_sweep!(nb::LiveNotebook)
     ids = Set{String}(); anyok = false
     for k in _nb_kernels(nb)
         (k isa ReportEngine.GateKernel && k.conn !== nothing) || continue
+        # Don't ping down a wire we KNOW is severed. A `:tunnel` worker's connection is a forward on
+        # its host's ssh session, so once nobody is signed in to that host the wire cannot answer —
+        # and pinging it anyway spends 8s per sweep to rediscover, over 45s of countdown, a fact that
+        # signing out established instantly. Say so and drop it; the `_SESSION_DROP_SINK` normally
+        # gets there first, and this covers a session that died without being dropped through us.
+        if (h = ReportEngine.session_host(k)) != "" && !ReportEngine.Sweep.connected(h)
+            _drop_signed_out_wire!(nb, k, h)
+            continue
+        end
         ok = false; err = nothing
         try
             r = ReportEngine._tool(k, "__slate_running", Dict{String,Any}(); timeout = _LIVENESS_PING_TIMEOUT)
@@ -2503,9 +2550,15 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
     if forced
         _clear_region_holds!(nb)
     elseif _kernel_held(kernel)
+        # Held for two different reasons (see `_drop_signed_out_wire!`): a worker that went silent, or
+        # a session that was signed out from under a perfectly healthy one. Only the first is the
+        # worker's fault, and only the second is fixed with the padlock.
+        sh = ReportEngine.session_host(kernel)
         lock(nb.lock) do
             ReportEngine.mark_errored!(cell,
-                "region '$side' is disconnected — a previous worker went unresponsive; press ▶ (or re-run) to reconnect")
+                (!isempty(sh) && !ReportEngine.Sweep.connected(sh)) ?
+                    "region '$side' needs $sh, which is signed out — use the padlock at the top of the page" :
+                    "region '$side' is disconnected — a previous worker went unresponsive; press ▶ (or re-run) to reconnect")
             _broadcast_progress(nb, cell)
         end
         return false

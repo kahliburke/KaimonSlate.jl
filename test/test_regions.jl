@@ -165,6 +165,74 @@ const RE = KaimonSlate.ReportEngine
         end
     end
 
+    # Signing in interactively REPLACES the session (a half-open one is cleared first), and every
+    # forward on it dies. Nothing a layer up can detect that — a dead forward looks healthy until a
+    # transfer sits on it for the whole receive timeout — so the drop has to be announced and the
+    # cached data forwards discarded, or the next boundary transfer fails with a ZMQ timeout that
+    # reads as a broken region rather than as "you signed in again".
+    @testset "a dropped session takes its forwards with it" begin
+        ST = RE.Sweep.SshTransport
+        saw = String[]
+        prev = ST._ON_DROP[]
+        try
+            ST.on_drop!(h -> push!(saw, h))
+            ST._announce_drop("login")
+            @test saw == ["login"]
+            # A listener that throws must not break disconnecting — that would strand the session.
+            ST.on_drop!(_ -> error("boom"))
+            @test ST._announce_drop("login") === nothing
+        finally
+            ST._ON_DROP[] = prev
+        end
+
+        # The eviction reaches the NODES routed through the dropped host, not just the host itself:
+        # a compute node's forward is opened on its login node's session, so the key names the node
+        # while the session names the way in.
+        # No forwards, so closing one touches no session — the cache bookkeeping is what's under test.
+        tun(h) = (RE.Tunnel(h, Tuple{Int,Int}[], nothing, true, nothing, "127.0.0.1"), 0)
+        RE.route!("c8", "login2", "5")
+        try
+            lock(RE._DATA_TUNNEL_LOCK) do
+                RE._DATA_TUNNELS[("login2", 7001)] = tun("login2")
+                RE._DATA_TUNNELS[("c8", 7002)] = tun("login2")
+                RE._DATA_TUNNELS[("unrelated", 7003)] = tun("unrelated")
+            end
+            RE._session_dropped!("login2")
+            left = lock(RE._DATA_TUNNEL_LOCK) do; sort(collect(keys(RE._DATA_TUNNELS))); end
+            @test left == [("unrelated", 7003)]
+        finally
+            RE.route!("c8", "")
+            lock(RE._DATA_TUNNEL_LOCK) do; delete!(RE._DATA_TUNNELS, ("unrelated", 7003)); end
+        end
+    end
+
+    # Signing out is a DECISION, so what it implies is known at once. A `:tunnel` worker's wire is a
+    # forward on its host's session and cannot outlive it; a `:direct` worker dials the node itself
+    # and can — which is the whole reason to choose it, so it must not be dropped alongside.
+    @testset "a signed-out session severs only the wires it carried" begin
+        kern(t) = (; target = t)
+        tun  = kern(RE.RemoteTarget("login"; transport = :tunnel))
+        node = kern(RE.RemoteTarget("c7"; transport = :tunnel))
+        dir  = kern(RE.RemoteTarget("c7"; transport = :direct))
+        RE.route!("c7", "login", "9")
+        try
+            @test RE.rides_session(tun, ["login"]) && RE.rides_session(node, ["c7"])
+            @test !RE.rides_session(dir, ["c7"])            # dials the node — outlives the session
+            @test !RE.rides_session(tun, ["other"])
+            @test !RE.rides_session(kern(nothing), ["login"])   # local/in-process: no wire to sever
+
+            # The host to NAME when saying why: the session that carries the wire, which for a
+            # compute node is its login node, not the node itself.
+            @test RE.session_host(node) == "login"
+            @test RE.session_host(tun) == "login"
+            @test RE.session_host(dir) == ""                # nothing rides a session here
+            @test RE.session_host(kern(nothing)) == ""
+        finally
+            RE.route!("c7", "")
+        end
+        @test RE.session_host(node) == "c7"                 # unrouted: its own host holds the session
+    end
+
     # The home page and a notebook carry different stylesheets, so a class used by a component on
     # both has to live in the one sheet they share. Pure JS, asserted from node; skips without it.
     @testset "shared styles reach both pages (node, if available)" begin

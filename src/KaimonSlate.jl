@@ -192,6 +192,9 @@ function __init__()
     # RUNTIME, in every process that loads KaimonSlate — is the fix. Idempotent.
     ReportEngine._register_builtin_kinds!()
     ReportEngine._snapshot_inprocess_base_deps!()   # this process's own deps, before any notebook `pkg_op`
+    # What rode an ssh session has to be discarded when that session goes. Wired at RUNTIME for the
+    # same reason as the widget kinds: it mutates a Ref that a precompiled image would not carry.
+    ReportEngine.install_session_hooks!()
     # Read the hub port at RUNTIME (skipped during precompilation), so a launcher/config UI can pin
     # it reliably — a top-level `const` would bake in whatever env produced the `.ji`. Precedence:
     # the `KAIMONSLATE_PORT` env var (a one-off / launcher override) > the persisted config value

@@ -1136,8 +1136,16 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
             # changes for minutes reads as a hang. The provisioner already narrates every step —
             # say the latest one instead, and fall back to the placeholder before it has said
             # anything.
+            # A held kernel has two very different causes, and they need different things from you.
+            # A wire severed by signing out says nothing about the worker — which is very likely
+            # still sitting there warm — so naming it "stopped responding" sends you to restart
+            # something that is fine. Ask which it is at read time rather than recording a reason:
+            # signing back in then flips the note on its own.
+            sh = ReportEngine.session_host(k)
             d["note"]   = k.redial_hold ?
-                "worker stopped responding — press ▶ or re-run to reconnect" :
+                ((!isempty(sh) && !ReportEngine.Sweep.connected(sh)) ?
+                    "not signed in to $sh — use the padlock at the top of the page" :
+                    "worker stopped responding — press ▶ or re-run to reconnect") :
                 let last = ReportEngine.last_bringup_line()
                     isempty(last) ? "starting up…" : last
                 end

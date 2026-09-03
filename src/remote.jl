@@ -2454,6 +2454,70 @@ function _data_endpoint!(t::RemoteTarget, k)
     return (ip = "127.0.0.1", port = lport, server_key = key)
 end
 
+# A session went away, so every forward it carried went with it. The data channel caches a local
+# port per worker and only re-checks the TUNNEL object's own `running` flag, which stays true over a
+# session that is already gone — so the next transfer dials a port carrying nothing and fails on its
+# receive timeout. That is the "region boundary transfer failed: ZMQ.TimeoutError" a re-sign-in
+# produced: signing in interactively REPLACES the session on purpose (a half-open one is cleared
+# first), and the control channel then reattaches while the data channel keeps its corpse.
+#
+# A compute node's forward is opened on its LOGIN node's session, so dropping the login host must
+# also evict tunnels keyed by every node routed through it: the key names the node, the session names
+# the way in. Eviction only forgets — the next `_data_endpoint!` opens a fresh forward.
+#
+# A worker's CONTROL wire rides a forward too, and that is hub state rather than transport state —
+# hence the sink: the layer that owns kernels drops the ones this session was carrying. Without it
+# the liveness supervisor rediscovers by timeout what signing out already told us, and the pill spends
+# 45s counting down to a conclusion available the instant the session went.
+const _SESSION_DROP_SINK = Ref{Any}(nothing)
+
+function _session_dropped!(host::AbstractString)
+    h = String(host)
+    hosts = String[h]
+    lock(_VIA_LOCK) do
+        for (node, v) in _VIA
+            v.host == h && push!(hosts, node)
+        end
+    end
+    for x in hosts
+        try; _evict_data_tunnels!(x); catch; end
+    end
+    _rlog("session dropped on $h — discarded the data forwards it carried" *
+          (length(hosts) > 1 ? " (and those of $(join(hosts[2:end], ", ")))" : ""))
+    f = _SESSION_DROP_SINK[]
+    f === nothing || (try; f(h, hosts); catch e
+        _rlog("session drop sink failed for $h: " * first(sprint(showerror, e), 160))
+    end)
+    return nothing
+end
+
+"""
+    rides_session(k, hosts) -> Bool
+
+Whether kernel `k`'s wire is carried by an ssh session to one of `hosts`. True only for a `:tunnel`
+worker: its ZMQ connection is a forward on the host's session, so losing that session severs it. A
+`:direct` worker dials the node itself and outlives a sign-out, which is the whole point of choosing
+it — so it must not be dropped alongside.
+"""
+function rides_session(k, hosts)
+    t = try; k.target; catch; nothing; end
+    t isa RemoteTarget || return false
+    t.transport === :tunnel || return false
+    return String(t.ssh_host) in hosts
+end
+
+"The host whose SESSION carries this kernel's wire — its route's login node, or its own host. `\"\"` = local."
+function session_host(k)
+    t = try; k.target; catch; nothing; end
+    t isa RemoteTarget || return ""
+    t.transport === :tunnel || return ""
+    v = via(t.ssh_host)
+    return v === nothing ? String(t.ssh_host) : String(v.host)
+end
+
+"Wire the transport's session-drop announcement to the caches that ride a session. Idempotent."
+install_session_hooks!() = Sweep.SshTransport.on_drop!(_session_dropped!)
+
 # Close the cached data forward for `host` (a specific worker's data port, or all when port=0).
 function _evict_data_tunnels!(host; port::Int = 0)
     lock(_DATA_TUNNEL_LOCK) do
