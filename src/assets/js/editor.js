@@ -39,16 +39,15 @@
   // Live-apply the autocomplete typing-delay across every open editor (Settings → Editing).
   window.setCompleteDelay = ms => {
     localStorage.setItem('slateCompleteDelay', String(parseInt(ms, 10) || 0));
-    for (const v of Object.values(window.editors || {})) {
-      if (v._noAcomp) continue;                      // plain-text editor — no completion source to retune
-      try { v.dispatch({ effects: acompComp.reconfigure(_acompExt(!!v._wrapMd)) }); } catch (_) {}
+    for (const v of _allViews()) {
+      try { v.dispatch({ effects: acompComp.reconfigure(v._mkAcomp()) }); } catch (_) {}
     }
   };
   const _wrapExt = isMd => (isMd || _wrapCodePref()) ? EditorView.lineWrapping : [];
   // Live-toggle code-editor wrapping across every open editor (markdown stays wrapped regardless).
   window.setEditorWrap = on => {
     localStorage.setItem('slateWrapEditor', on ? '1' : '0');
-    for (const v of Object.values(window.editors || {}))
+    for (const v of _allViews())
       v.dispatch({ effects: wrapComp.reconfigure((v._wrapMd || on) ? EditorView.lineWrapping : []) });
   };
   const THEMES = slateThemes || { 'dark-plus': { style: juliaHighlightStyle, chrome: [] } };
@@ -64,12 +63,22 @@
   window.setSyntaxTheme = (name) => {
     if (!THEMES[name]) return;
     localStorage.setItem('slateSyntaxTheme', name);
-    for (const v of Object.values(window.editors || {})) {
+    for (const v of _allViews()) {
       try { v.dispatch({ effects: [themeComp.reconfigure(styleFor(name)), chromeComp.reconfigure(chromeFor(name))] }); } catch (_) {}
     }
   };
 
   window.editors = window.editors || {};
+
+  // Every live editor view, a web cell's CSS and JS panes included. `window.editors` holds one view
+  // per cell, and a web cell registers only its FIRST pane there, so a live-apply loop over that map
+  // alone leaves two thirds of a web cell unreconfigured.
+  const _allViews = () => {
+    const out = Object.values(window.editors || {});
+    for (const w of Object.values(window.webEditors || {}))
+      for (const v of Object.values((w && w.panes) || {})) if (!out.includes(v)) out.push(v);
+    return out;
+  };
 
   // ── Editor-extension registry (extension point) ──────────────────────────────
   // A package can teach EVERY cell editor a new behaviour (e.g. render giac"…" as an
@@ -678,11 +687,15 @@
     const plainLang = !opts.markdown && opts.lang === 'plain';
     const webLang = !opts.markdown && !plainLang && ({ html: htmlLang, css: cssLang, js: jsEmbed }[opts.lang]);
     const lang = (opts.markdown || plainLang) ? themed : webLang ? [webLang(), ...themed] : [julia(), ...themed];
-    const acompExt = plainLang ? [] : !webLang ? _acompExt(!!opts.markdown)
+    // Kept as a BUILDER, not a built extension: the Settings delay slider reconfigures this
+    // compartment later, and it has to rebuild the source this editor actually wants. Rebuilding
+    // them all from `_acompExt` instead handed an HTML or CSS pane the Julia source and silently
+    // replaced its tag and property completion.
+    const mkAcomp = plainLang ? () => [] : !webLang ? () => _acompExt(!!opts.markdown)
       : opts.lang === 'js'
-        ? autocompletion({ icons: true, activateOnTypingDelay: _completeDelay(),
+        ? () => autocompletion({ icons: true, activateOnTypingDelay: _completeDelay(),
             override: [localCompletionSource, scopeCompletionSource(globalThis)] })
-        : autocompletion({ icons: true, activateOnTypingDelay: _completeDelay() });
+        : () => autocompletion({ icons: true, activateOnTypingDelay: _completeDelay() });
     const cellKeys = (opts.keys || []).map(k => ({ key: k.key, run: () => { k.run(); return true; } }));
     const _edctx = { markdown: !!opts.markdown, cellId: opts.cellId };   // for registered editor extensions
     // Web-cell panes (HTML/CSS/JS) indent 2 spaces — the web convention — vs Julia's 4. Drives
@@ -706,7 +719,7 @@
         // flickering on/off mid-word (and Tab-to-indent can't accidentally land on a just-opened
         // popup). Manual triggers (Tab / Ctrl-Space / Alt-Space) are immediate regardless. Tunable
         // via window.slateCompleteDelay (a settings hook); default 500ms.
-        acompComp.of(acompExt),
+        acompComp.of(mkAcomp()),
         // Registered editor extensions (e.g. inline-math rendering), in a compartment so a
         // later registration can reconfigure this open editor. Before the keymap below so a
         // returned keymap out-precedences the defaults.
@@ -804,7 +817,7 @@
       ],
     });
     view._wrapMd = !!opts.markdown;   // markdown views stay wrapped when the code-wrap toggle flips
-    view._noAcomp = !!plainLang;      // plain-text views never get a completion source back
+    view._mkAcomp = mkAcomp;          // rebuilds THIS editor's completion source on a settings change
     view._edctx = _edctx;             // ctx for reconfiguring registered editor extensions
     if (opts.cellId) window.editors[opts.cellId] = view;
     return view;
