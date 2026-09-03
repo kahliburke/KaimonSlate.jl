@@ -119,6 +119,52 @@ const RE = KaimonSlate.ReportEngine
         end
     end
 
+    # An allocation is held for a bounded time. A placement that outlives it points every cell at a
+    # machine the hub no longer holds — and because the read-only view must not ask the scheduler
+    # anything, the expiry has to be a clock, not a round trip.
+    @testset "a placement expires with its allocation" begin
+        # SLURM's own time spellings (`squeue %L`), which is where the lease comes from.
+        s = RE._sched_seconds
+        @test [s("00:00:30"), s("00:05:00"), s("01:00:00"), s("2-00:00:00"), s("30"), s("2:30")] ==
+              [30.0, 300.0, 3600.0, 172800.0, 1800.0, 150.0]
+        @test s("UNLIMITED") == Inf
+        @test s("") == 3600.0 && s("garbage") == 3600.0        # unparseable → an hour, not zero
+
+        withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir()) do
+            r = RE.region_set!("leased"; host = "login", scheduler = :slurm, walltime = "00:30:00")
+            try
+                RE.route!("c9", "login", "77")
+                lock(RE._REGION_PLACE_LOCK) do
+                    RE._REGION_PLACE["leased"] =
+                        (host = "c9", job = "77", ts = time(), until = time() + 60)
+                end
+                @test RE.region_host(r) == "c9"                # inside the lease: the node we hold
+                @test RE._region_holds_node(r)
+                # A routed node is never dialled directly, so its unreachable message must never
+                # send anyone to ~/.ssh/config or tell them to use a key — on a cluster that refuses
+                # keys that is advice for a machine they cannot ssh to. With no session to the login
+                # node, THAT is the thing that has gone.
+                msg = RE._unreachable("c9")
+                @test occursin("through login", msg) && occursin("padlock", msg)
+                @test !occursin("ssh/config", msg) && !occursin("key-based", msg)
+
+                lock(RE._REGION_PLACE_LOCK) do
+                    RE._REGION_PLACE["leased"] =
+                        (host = "c9", job = "77", ts = time(), until = time() - 1)
+                end
+                @test RE.region_host(r) == "login"             # past it: nothing placed, ask again
+                @test !RE._region_holds_node(r)
+                @test RE.via("c9") === nothing                 # the route goes with the allocation
+                @test !haskey(RE._REGION_PLACE, "leased")
+                # An unrouted host keeps the plain advice — that one really is an ssh/config problem.
+                @test occursin("~/.ssh/config", RE._unreachable("workstation"))
+            finally
+                RE.route!("c9", "")
+                lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "leased"); end
+            end
+        end
+    end
+
     # The home page and a notebook carry different stylesheets, so a class used by a component on
     # both has to live in the one sheet they share. Pure JS, asserted from node; skips without it.
     @testset "shared styles reach both pages (node, if available)" begin

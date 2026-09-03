@@ -366,6 +366,23 @@ _ssh_ok(host, argv::Cmd) = first(_ssh_capture(host, argv))
 # file), NOT a failure, so it is deliberately NOT logged (unlike _ssh_ok, which treats nonzero as an error).
 _ssh_test(host, argv::Cmd) = first(_run_on(String(host), _cmdstr(argv)))
 
+# Why a host we cannot reach is unreachable, in the terms that host is actually addressed by. A
+# ROUTED node is never dialled directly — it is reached with `srun` inside an allocation, over the
+# login node's session — so telling someone to fix `~/.ssh/config` and use a key sends them to a
+# machine they cannot ssh to on a cluster that refuses keys, which is the whole reason the route
+# exists. Failing there means one of the two things the route is made of has gone.
+function _unreachable(host::AbstractString)
+    v = via(host)
+    v === nothing &&
+        return "Cannot reach '$host' over SSH — check the hostname and your ~/.ssh/config " *
+               "(key-based auth is required; try `ssh $host` in a terminal)."
+    Sweep.connected(v.host) ||
+        return "Cannot reach '$host': it is worked through $(v.host), which nobody is signed in to " *
+               "— use the padlock at the top of the page."
+    return "Cannot reach '$host': its allocation on $(v.host)" *
+           (isempty(v.job) ? "" : " (job $(v.job))") * " is no longer running — it will be asked for again."
+end
+
 # Run Julia CODE on the remote by shipping it as a FILE — NEVER `julia -e "…"` over ssh. ssh flattens its
 # argv and the remote shell re-splits + glob-expands the result, so `;`, `[...]`, `(...)` and any newline
 # mangle the program (verified: `-e 'using Pkg; …'` arrived as bare `using` → "premature end of input",
@@ -518,8 +535,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     _rlog("provision START host=$host transport=$(t.transport) project=$(t.project) parent=$parent_project")
     # Reachability precheck FIRST — a clear message beats a cryptic transfer failure ten steps in when the
     # host is a typo or your ssh config/key isn't set up.
-    _ssh_test(host, `true`) ||
-        error("Cannot reach '$host' over SSH — check the hostname and your ~/.ssh/config (key-based auth is required; try `ssh $host` in a terminal).")
+    _ssh_test(host, `true`) || error(_unreachable(host))
     # 0. Julia — a fresh box may have none; install juliaup unattended (Linux/macOS). Everything below
     #    needs `julia`, so this gates the rest.
     _ensure_julia!(host) ||
@@ -1741,8 +1757,7 @@ function preflight_remote(host::AbstractString; transport::Symbol = :tunnel, on_
         # Not "key-based": on a cluster that refuses keys this connection is riding a master someone
         # authenticated with a password and a second factor, and saying otherwise would be wrong on
         # exactly the hosts where it matters most.
-        _ssh_test(host, `true`) ? ("ok", "ssh to '$host' works") :
-            ("fail", "cannot ssh to '$host' — check ~/.ssh/config Host, and that it is authenticated (try `ssh $host` in a terminal)")
+        _ssh_test(host, `true`) ? ("ok", "ssh to '$host' works") : ("fail", _unreachable(host))
     end
     s.status == "ok" || return _pfresult(host, transport, steps)
 
@@ -3282,7 +3297,8 @@ _region_target(r::Region; origin_env::AbstractString = r.preload, host::Abstract
 # a file transfer) needs the same answer many times over, and asking the scheduler is a round trip. It is
 # cached against the allocation's job id, so an allocation that expired and was re-granted on a
 # different node invalidates it rather than pointing workers at a node we no longer hold.
-const _REGION_PLACE = Dict{String,NamedTuple{(:host, :job, :ts),Tuple{String,String,Float64}}}()
+const _REGION_PLACE = Dict{String,NamedTuple{(:host, :job, :ts, :until),
+                                             Tuple{String,String,Float64,Float64}}}()
 const _REGION_PLACE_LOCK = ReentrantLock()
 const _PLACE_TTL = 20.0        # how long a placement is trusted without re-asking the scheduler
 
@@ -3311,8 +3327,50 @@ which is deliberate: a read-only caller (the roster, the UI) must never cause a 
 """
 function region_host(r::Region)
     r.scheduler === :none && return r.host
-    p = lock(_REGION_PLACE_LOCK) do; get(_REGION_PLACE, r.name, nothing); end
+    p = _placement(r)
     return p === nothing ? r.host : p.host
+end
+
+# A scheduler time — "HH:MM:SS", "D-HH:MM:SS", "MM:SS", a bare "MM", or UNLIMITED — in seconds.
+# Anything unrecognised reads as an hour, which at worst costs one extra `squeue`.
+function _sched_seconds(s::AbstractString)
+    t = strip(String(s))
+    isempty(t) && return 3600.0
+    uppercase(t) in ("UNLIMITED", "INFINITE", "NOT_SET") && return Inf
+    days = 0.0
+    i = findfirst('-', t)
+    if i !== nothing
+        days = something(tryparse(Float64, t[1:prevind(t, i)]), 0.0)
+        t = t[nextind(t, i):end]
+    end
+    f = [tryparse(Float64, p) for p in split(t, ':')]
+    any(isnothing, f) && return 3600.0
+    secs = length(f) == 3 ? f[1] * 3600 + f[2] * 60 + f[3] :
+           length(f) == 2 ? f[1] * 60 + f[2] :
+           length(f) == 1 ? f[1] * 60 : 0.0
+    return days * 86400 + secs
+end
+
+# The placement, or `nothing` once it has certainly expired. An allocation is held for a bounded
+# time — the scheduler kills the job at its walltime — so a node we placed on is ours until then and
+# not one second longer. Expiring it HERE, on a clock, is what keeps a read-only caller honest
+# without a round trip: `region_host` used to hand back a node forever, so once an allocation ended
+# every cell kept targeting a machine we no longer held, and provisioning failed against a dead job
+# id rather than simply asking for another node.
+#
+# Dropping the route with it matters as much: a compute node is reachable only THROUGH the login
+# node's session, and a route naming a finished job is worse than no route at all.
+function _placement(r::Region)
+    p = lock(_REGION_PLACE_LOCK) do; get(_REGION_PLACE, r.name, nothing); end
+    (p === nothing || time() < p.until) && return p
+    dropped = lock(_REGION_PLACE_LOCK) do
+        cur = get(_REGION_PLACE, r.name, nothing)
+        (cur !== nothing && cur.until == p.until) && (delete!(_REGION_PLACE, r.name); true)
+    end
+    dropped === true || return nothing            # re-placed while we looked; that entry stands
+    route!(p.host, "")
+    _rlog("region[$(r.name)]: allocation $(p.job) on $(p.host) has run out its time — asking for another node")
+    return nothing
 end
 
 """
@@ -3330,7 +3388,7 @@ function region_place!(r::Region; wait_s::Real = 120)
     kind === :slurm || Sweep._unsupported_scheduler(kind)
     isempty(r.host) && error("region '$(r.name)' has a scheduler but no host to ask")
     name = region_alloc_name(r)
-    cached = lock(_REGION_PLACE_LOCK) do; get(_REGION_PLACE, r.name, nothing); end
+    cached = _placement(r)
     if cached !== nothing && time() - cached.ts < _PLACE_TTL
         return (cached.host, nothing)
     end
@@ -3338,14 +3396,19 @@ function region_place!(r::Region; wait_s::Real = 120)
                                partition = r.partition, cpus = r.cpus, mem = r.mem,
                                gpus = r.gpus, account = r.account)
     if !Sweep.alive(a)
-        lock(_REGION_PLACE_LOCK) do; delete!(_REGION_PLACE, r.name); end
+        held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
+        held === nothing || route!(held.host, "")   # nothing is holding it now; the route is a lie
         return ("", a)
     end
     # A compute node is normally not reachable from here at all — only through the login node. Record
     # that before anything tries to ssh to it, because a hostname alone does not say how to get there.
     route!(a.node, r.host, a.id)
+    # How long this is good for comes from the SCHEDULER (`squeue %L`), not from what we asked for:
+    # an allocation we adopted rather than requested is already part-spent, and trusting it for a
+    # fresh full walltime is how a placement outlives its job.
+    lease = _sched_seconds(isempty(a.timeleft) ? _alloc_walltime(r) : a.timeleft)
     lock(_REGION_PLACE_LOCK) do
-        _REGION_PLACE[r.name] = (host = a.node, job = a.id, ts = time())
+        _REGION_PLACE[r.name] = (host = a.node, job = a.id, ts = time(), until = time() + lease)
     end
     return (a.node, a)
 end
@@ -3375,8 +3438,7 @@ function region_release!(r::Region)
 end
 
 "Whether this hub has a node placed for the region — purely local, no round trip."
-_region_holds_node(r::Region) =
-    lock(_REGION_PLACE_LOCK) do; haskey(_REGION_PLACE, r.name); end
+_region_holds_node(r::Region) = _placement(r) !== nothing
 
 "The allocation this region is holding, for the UI. Read-only — it never asks for one."
 region_allocation(r::Region) =
