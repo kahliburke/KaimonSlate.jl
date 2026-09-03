@@ -112,7 +112,7 @@ the machine — its sweeps *and* its regions. A worker that needs a cluster asks
 opening its own connection.
 
 **Signing in is something you do, never something that happens to you.** Only a deliberate act starts
-it — the **🔑 Sign in** panel (topbar, or ⌘K → *"Sign in to a host"*), or `Sweep.connect!(host;
+it — the padlock at the top of the page (or ⌘K → *"Sign in to a host"*), or `Sweep.connect!(host;
 interactive = true)` from a cell. Opening a notebook, reconciling a sweep and polling a roster all run
 against a session that already exists and say "not signed in" otherwise. Without that split, the first
 dialog you saw would come from whichever background poller got there first, on a page with nothing on

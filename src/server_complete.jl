@@ -2913,8 +2913,17 @@ function _install_sshauth_watch!(h)
     # learn. Reaches here from this process directly, or from a worker over the prompt relay.
     SshAuth.set_reporter!() do host, ok, err
         msg = "sshauth-result:" * JSON.json(Dict("host" => host, "ok" => ok, "error" => err))
-        for nb in lock(h.lock) do; collect(values(h.notebooks)); end
+        nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+        for nb in nbs
             try; _broadcast(nb, msg); catch; end
+        end
+        # Signing in is the event a waiting cell was blocked on, so it resumes here rather than
+        # asking to be run again — the same recovery a granted node gets. A sweep needs nothing:
+        # its card polls, and submission is gated on the session it just got.
+        ok || return nothing
+        for nb in nbs, r in (try; ReportEngine.regions(); catch; (); end)
+            String(r.host) == String(host) || continue
+            try; _restale_region_cells!(nb, r.name) > 0 && _ensure_runner!(nb); catch; end
         end
         return nothing
     end

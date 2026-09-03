@@ -476,8 +476,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   </svg>
   <div><h1>Kaimon Slate <a class="ver" id="slatever" target="_blank" rel="noopener"></a></h1><div class="tag">reactive Julia notebooks · live · agent-assisted</div></div>
   <div class="heroactions">
-    <button id="remotesbtn" class="herobtn" title="Set up &amp; test remote hosts for running notebooks">🖧 Remotes</button>
+    <!-- FIRST: this row is right-anchored (margin-left:auto), so it grows leftward — an item here
+         takes new space instead of pushing the buttons beside it. -->
     <span id="sessions-btn-mount"></span>
+    <button id="remotesbtn" class="herobtn" title="Set up &amp; test remote hosts for running notebooks">🖧 Remotes</button>
     <button id="pubdashbtn" class="herobtn" title="Manage publishing — targets, secrets, history">☁ Publishing</button>
   </div>
 </div>

@@ -17,6 +17,7 @@ export const sessions = signal([]);   // [{host, used_by, connected, auth, asks}
 const busy = signal('');          // the host an action is in flight for
 const note = signal(null);        // {text, err}
 const probing = signal('');
+const loaded = signal(false);   // an empty list otherwise reads the same as "not asked yet"
 
 // On a NOTEBOOK page, only the hosts that notebook names — a notebook that sweeps on one cluster
 // has no business showing a control for another. The home page passes no doc and gets all of them.
@@ -31,7 +32,9 @@ const docId = () => {
 export function loadSessions() {
   const d = docId();
   return fetch('/api/sessions' + (d ? '?doc=' + encodeURIComponent(d) : '')).then(r => r.json())
-    .then(j => { sessions.value = (j && j.sessions) || []; }).catch(() => {});
+    .then(j => { sessions.value = (j && j.sessions) || []; })
+    .catch(() => {})
+    .then(() => { loaded.value = true; });
 }
 
 // What the row says about getting in. `unknown` is honest: nothing has asked this host yet, and
@@ -117,7 +120,7 @@ function Panel() {
   return html`<div class="ssback" onClick=${e => { if (e.target.classList.contains('ssback')) open.value = false; }}>
     <div class="sspanel" role="dialog" aria-modal="true">
       <div class="sshead">
-        <span class="sstitle">🔑 Sign in to a host</span>
+        <span class="sstitle">Sign in to a host</span>
         <button class="ssclose" onClick=${() => open.value = false}>✕</button>
       </div>
       ${!rs.length ? html`<div class="ssempty">No hosts. One appears when a compute target or a
@@ -137,32 +140,37 @@ const Padlock = ({ open }) => html`<svg viewBox="0 0 16 16" width="13" height="1
          : html`<path d="M5.6 7V4.6a2.4 2.4 0 0 1 4.8 0V7"/>`}
 </svg>`;
 
-// The topbar control. ABSENT when no host is involved — a notebook with no cluster and no region has
-// nothing to sign in to, and a button for that is clutter. Otherwise the padlock carries the state
-// and the tooltip carries the detail, so the common case needs no click at all.
+// The topbar control. Always present, so the row never reflows when its state arrives — grey until
+// the answer is known, then coloured. The padlock carries the state and the tooltip carries the
+// detail, so the common case needs no click at all.
 function SignInButton() {
   // Only hosts there is something to sign INTO. One confirmed to take a key needs no session, so it
-  // earns no control. `unknown` still counts: not having asked is not the same as not needing.
+  // is not counted. `unknown` still counts: not having asked is not the same as not needing.
   const rs = sessions.value.filter(r => r.connected || r.auth !== 'key');
-  if (!rs.length) return null;
   const bad  = rs.filter(r => !r.connected && r.auth === 'unreachable');
   const need = rs.filter(r => !r.connected && r.auth === 'interactive');
   const inn  = rs.filter(r => r.connected);
-  // Red is a host that cannot be reached, amber one that is waiting for you, green nothing to do —
-  // either signed in or takes a key. Green is the only one that shows an OPEN padlock.
-  const tone = bad.length ? 'ssbad' : need.length ? 'ssneed' : 'ssin';
+  // Grey while unknown or when there is nothing to do; red a host that cannot be reached, amber one
+  // waiting for you, green signed in. Green is the only one that shows an OPEN padlock.
+  const tone = !loaded.value ? 'ssidle'
+             : bad.length ? 'ssbad'
+             : need.length ? 'ssneed'
+             : inn.length ? 'ssin' : 'ssidle';
   const word = r => r.connected ? 'signed in'
              : r.auth === 'unreachable' ? 'unreachable'
              : r.auth === 'interactive' ? 'needs a sign-in'
              : r.auth === 'key' ? 'takes a key' : 'not checked';
-  const title = (bad.length ? `${bad.length} unreachable\n` :
-                 need.length ? `${need.length} waiting for a sign-in\n` :
-                 inn.length ? `signed in to ${inn.length} of ${rs.length}\n` : '') +
-                rs.map(r => `${r.host} — ${word(r)}`).join('\n') +
-                '\n\nClick to sign in or out.';
+  const head = !loaded.value ? 'checking…'
+             : !rs.length ? 'no hosts to sign in to'
+             : bad.length ? `${bad.length} unreachable`
+             : need.length ? `${need.length} waiting for a sign-in`
+             : inn.length ? `signed in to ${inn.length} of ${rs.length}`
+             : `${rs.length} host${rs.length > 1 ? 's' : ''} — none signed in`;
+  const title = [head, ...rs.map(r => `${r.host} — ${word(r)}`), '', 'Click to sign in or out.']
+                .join('\n');
   return html`<button class=${'ssbtn ssbar ' + tone} title=${title}
     aria-label="ssh sign-in" onClick=${() => openSessions()}>
-    <${Padlock} open=${tone === 'ssin' && inn.length > 0}/>
+    <${Padlock} open=${tone === 'ssin'}/>
   </button>`;
 }
 

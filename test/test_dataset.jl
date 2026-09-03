@@ -380,7 +380,7 @@ const MS = RE.MemoStore
         # The message has to name the host and say what to DO about it: "not connected" alone leaves
         # the reader with a red cell and no idea that logging in is a thing they do.
         let msg = last(S.run_there(dead, "true"))
-            @test occursin("not signed in", msg) && occursin(dead, msg) && occursin("Sign in", msg)
+            @test occursin("not signed in", msg) && occursin(dead, msg) && occursin("padlock", msg)
         end
         @test !S.pull_meta!(S.RemoteStore(dead, "/x"))   # the metadata paths refuse too
         @test !S.push_meta!(S.RemoteStore(dead, "/x"))

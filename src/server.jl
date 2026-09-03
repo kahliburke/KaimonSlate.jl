@@ -1555,7 +1555,7 @@ function _region_kernel!(nb::LiveNotebook, name::String)
                 # that only a person can supply — which background work is not allowed to ask for.
                 # So say which of the two is missing, because they need different things from you.
                 ReportEngine.Sweep.connected(r.host) ||
-                    error("region '$name': not signed in to $(r.host) — press 🔑 Sign in, then run this again")
+                    error("region '$name': not signed in to $(r.host) — use the padlock at the top of the page")
                 _place_in_background!(name, nb)
                 # A queue wait is minutes on a busy cluster, so this is not a "try again" — the
                 # placement task re-runs this cell itself when the scheduler grants a node.

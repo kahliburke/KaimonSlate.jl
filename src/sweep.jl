@@ -2265,7 +2265,7 @@ function _signin_html(target::SweepTarget)
     return string("<div style='margin-top:8px;padding:8px;border-radius:6px;",
                   "background:color-mix(in srgb, var(--amber,#d9a441) 12%, transparent);",
                   "font-size:12px;color:var(--amber,#d9a441)'>🔒 ", _esc(h),
-                  ": not signed in — press 🔑 Sign in</div>")
+                  ": not signed in — use the padlock at the top of the page</div>")
 end
 
 function _why_html(p::BatchSweep.Plan)

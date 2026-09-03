@@ -187,7 +187,7 @@ end
 
 # What to say when work needs a host nobody has signed in to. Naming the control matters: the bare
 # fact leaves the reader with a red cell and no idea that signing in is a thing they do.
-_offline(host) = "$host: not signed in — press 🔑 Sign in"
+_offline(host) = "$host: not signed in — use the padlock at the top of the page"
 
 """
     shq(s) -> String

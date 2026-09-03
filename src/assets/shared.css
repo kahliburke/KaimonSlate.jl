@@ -47,6 +47,7 @@
 .ssbtn.ssbar.ssin   { color:#7fd18f; border-color:#7fd18f55; }   /* nothing to do */
 .ssbtn.ssbar.ssneed { color:#d9a441; border-color:#d9a44166; }   /* waiting for you */
 .ssbtn.ssbar.ssbad  { color:#e88;    border-color:#e8888866; }   /* cannot be reached */
+.ssbtn.ssbar.ssidle { color:#6a7090; }                          /* unknown, or nothing to do */
 
 /* ── A cluster asking to be let in ──────────────────────────────────────────────────────────
    Narrow and centred, and it appears without being asked for — so it says WHICH host wants the
