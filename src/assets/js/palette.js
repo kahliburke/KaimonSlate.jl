@@ -184,6 +184,7 @@ function paletteCommands() {
     ...RECIPES.map(([name, code]) => ({ tag: 'recipe', label: 'Recipe: ' + name, run: () => insertRecipe(code) })),
     { label: 'Open notebook in VS Code', run: () => { const p = nbState && nbState.path; if (p) location.href = 'vscode://file' + p; } },
     { label: 'Open project in VS Code', run: () => { const d = nbState && (nbState.project || window.PLATFORM.dirOf(nbState.path || '').replace(/[\/\\]$/, '')); if (d) location.href = 'vscode://file' + d; } },
+    { label: 'Sign in to a host… (cluster / region authentication)', tag: 'panel', run: () => window.openSessions && window.openSessions() },
     { label: 'Extensions… (browse the Slate extension catalog)', tag: 'panel', run: () => window.openExtensions && window.openExtensions() },
     { label: 'Settings…', run: openSettings },
     { label: 'All notebooks', run: () => { location.href = '/'; } },

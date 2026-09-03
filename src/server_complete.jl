@@ -788,6 +788,12 @@ function _make_router(h::Hub)
     # ── Answering an ssh prompt ──────────────────────────────────────────────────────────────
     # Hub-level, not per notebook: a connection belongs to a HOST, and one prompt may be what
     # several notebooks are waiting on. `id` came from the `sshauth:` push that raised the dialog.
+    # What is waiting to be answered. Notebook pages are PUSHED their prompts over the page socket;
+    # the home page has no such socket, so the sign-in panel there watches this while its request
+    # is in flight.
+    HTTP.register!(router, "GET", "/api/sshauth", _ -> _json(Dict("pending" =>
+        [Dict("id" => p.id, "host" => p.host, "prompt" => p.prompt, "secret" => !p.echo)
+         for p in SshAuth.pending()])))
     HTTP.register!(router, "POST", "/api/sshauth", req -> begin
         b = try; JSON.parse(String(req.body)); catch; nothing; end
         b isa AbstractDict || return _json(Dict("ok" => false, "error" => "bad request"))
@@ -802,6 +808,7 @@ function _make_router(h::Hub)
     end)
 
     HTTP.register!(router, "GET", "/assets/notebook.css", _ -> _asset(read(_CSS_ASSET, String), "text/css; charset=utf-8"))
+    HTTP.register!(router, "GET", "/assets/sessions.css", _ -> _asset(read(_SESSIONS_CSS, String), "text/css; charset=utf-8"))
     # Vendored third-party assets (offline cache, pinned in vendor.json). Greedy `**` so
     # nested paths work (CodeMirror modes/addons, KaTeX fonts). First hit fetches+caches.
     HTTP.register!(router, "GET", "/assets/vendor/**", req -> begin
@@ -1298,6 +1305,99 @@ function _make_router(h::Hub)
         name = strip(String(get(_body(req), "name", "")))
         isempty(name) && return _json(Dict("ok" => false, "error" => "need a cluster name"))
         _json(Dict("ok" => ReportEngine.cluster_delete!(name), "name" => name))
+    end)
+
+    # ── Signing in to the hosts this machine actually uses ───────────────────────────────────
+    # One list, keyed by HOST rather than by cluster or region. Whether a host wants a password and
+    # a second factor is a property of its sshd, not of what you use it for: a cluster can take keys
+    # and a plain remote can demand 2FA. So the panel lists hosts and shows what each one is FOR.
+    #
+    # Sessions live in this process (see remotestore.jl), so this is machine-wide — one sign-in
+    # covers every notebook, its sweeps and its regions.
+    # `nb === nothing` is the machine-wide view (the home page). Given a notebook, only the hosts IT
+    # names — a notebook that sweeps on one cluster has no business showing a control for another.
+    function _session_hosts(nb::Union{LiveNotebook,Nothing} = nothing)
+        wanted = nb === nothing ? nothing : begin
+            cl, rg = Set{String}(), Set{String}()
+            lock(nb.lock) do
+                for c in nb.report.cells
+                    n = get(ReportEngine.cell_attrs(c), "cluster", ""); isempty(n) || push!(cl, n)
+                    r = _cell_region(c); isempty(r) || push!(rg, r)
+                end
+            end
+            (cl, rg)
+        end
+        seen = Dict{String,Vector{String}}()
+        add!(h, use) = isempty(strip(String(h))) ||
+            push!(get!(seen, strip(String(h)), String[]), use)
+        for c in ReportEngine.clusters_all()
+            String(get(c, "kind", "")) == "local" && continue   # nothing to sign in to
+            name = String(get(c, "name", "?"))
+            (wanted === nothing || name in wanted[1]) || continue
+            add!(get(c, "host", ""), "cluster " * name)
+        end
+        for r in ReportEngine.regions()
+            (wanted === nothing || r.name in wanted[2]) || continue
+            add!(r.host, "region " * r.name)
+        end
+        return seen
+    end
+
+    HTTP.register!(router, "GET", "/api/sessions", req -> begin
+        doc = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "doc", "")))
+        nb = isempty(doc) ? nothing : lock(h.lock) do; get(h.notebooks, doc, nothing); end
+        _json(Dict("sessions" =>
+            [begin
+                # `remembered_prompts` is what this host ASKED last time — better evidence than any
+                # probe, and free. Absent that, the panel says "unknown" until someone probes.
+                asked = try; ReportEngine.Sweep.SshTransport.remembered_prompts(hh); catch; []; end
+                Dict("host" => hh, "used_by" => sort(uses),
+                     "connected" => ReportEngine.Sweep.connected(hh),
+                     "auth" => isempty(asked) ? "unknown" : "interactive",
+                     "asks" => [first(p) for p in asked])
+             end for (hh, uses) in sort(collect(_session_hosts(nb)); by = first)]))
+    end)
+
+    # What a host will ask for, WITHOUT authenticating — the server names its methods right after
+    # the handshake. On demand, never on page load: this is a TCP connect and a key exchange per
+    # host, and on a gated host every connection is a line in someone's auth log.
+    HTTP.register!(router, "POST", "/api/sessions/probe", req -> begin
+        host = strip(String(get(_body(req), "host", "")))
+        isempty(host) && return _json(Dict("ok" => false, "error" => "need a host"))
+        p = try; ReportEngine.Sweep.SshTransport.probe(host)
+        catch e; return _json(Dict("ok" => false, "error" => first(sprint(showerror, e), 200))); end
+        ms = String[String(m) for m in p.methods]
+        _json(Dict("ok" => p.reachable, "host" => host, "methods" => ms, "error" => p.error,
+                   "auth" => !p.reachable ? "unreachable" :
+                             ("already-authenticated" in ms) ? "connected" :
+                             ("publickey" in ms) ? "key" :
+                             ("keyboard-interactive" in ms) ? "interactive" : "unknown"))
+    end)
+
+    # ── Logging in to a host ─────────────────────────────────────────────────────────────────
+    # On a cluster that refuses keys, authenticating is a thing a PERSON does — so nothing else
+    # may start it. Opening a notebook, reconciling a sweep and polling a roster all run against a
+    # session that already exists and report "not signed in" otherwise; this route is the one place
+    # that may prompt, because a button was pressed to reach it.
+    HTTP.register!(router, "GET", "/api/host-session", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        host = strip(String(get(q, "host", "")))
+        _json(Dict("host" => host, "connected" => !isempty(host) && ReportEngine.Sweep.connected(host)))
+    end)
+    HTTP.register!(router, "POST", "/api/host-session", req -> begin
+        b = _body(req)
+        host = strip(String(get(b, "host", "")))
+        isempty(host) && return _json(Dict("ok" => false, "error" => "need a host"))
+        if get(b, "logout", false) === true
+            ReportEngine.Sweep.disconnect!(host)
+            return _json(Dict("ok" => true, "connected" => ReportEngine.Sweep.connected(host)))
+        end
+        # The prompts land in the browser that asked, so this call is as long as the person takes to
+        # answer them. Off the request task would mean answering a dialog whose result nothing reads.
+        ok = try; ReportEngine.Sweep.connect!(host; interactive = true)
+        catch e; return _json(Dict("ok" => false, "error" => first(sprint(showerror, e), 200))); end
+        _json(Dict("ok" => ok, "connected" => ReportEngine.Sweep.connected(host),
+                   "error" => ok ? "" : "could not authenticate to $host"))
     end)
 
     # What scheduler(s) a host has, so the region form knows whether to ask for a walltime and a
@@ -2809,6 +2909,15 @@ end
 const _SSHAUTH_SEEN = Set{String}()
 
 function _install_sshauth_watch!(h)
+    # How a login ended, to every page — the dialog is showing "working…" and has no other way to
+    # learn. Reaches here from this process directly, or from a worker over the prompt relay.
+    SshAuth.set_reporter!() do host, ok, err
+        msg = "sshauth-result:" * JSON.json(Dict("host" => host, "ok" => ok, "error" => err))
+        for nb in lock(h.lock) do; collect(values(h.notebooks)); end
+            try; _broadcast(nb, msg); catch; end
+        end
+        return nothing
+    end
     errormonitor(@async while true
         try
             live = Set{String}()

@@ -93,28 +93,56 @@ always does. The commonest way to waste a cluster is an allocation nobody rememb
 
 ## Authenticating once
 
-Plenty of production clusters refuse public keys. You get a password and a second factor, and every
-ssh call Slate makes uses `BatchMode=yes` — which disables interactive authentication precisely so a
-hub never hangs on a prompt nobody can see.
+Plenty of production clusters refuse public keys. You get a password and a second factor, and that is
+the only way in.
 
-The way through is that **only one connection has to be interactive**. Slate opens a multiplexed
-master with you: a dialog appears in the page for each thing ssh asks, showing ssh's own wording, so
-the same path handles a password, a numeric code, a Duo menu, or a push that takes a while. Nothing
-about it is scripted, and Slate never sees your second factor before you type it.
+Slate speaks SSH itself rather than driving the `ssh` command, so the server's `keyboard-interactive`
+prompts arrive as values it can hand to you: a dialog appears in the page for each thing the server
+asks, in the server's own wording. The same path handles a password, a numeric code, a Duo menu, or a
+push that takes a while. Nothing about it is scripted, and Slate never sees your second factor before
+you type it.
 
-Everything after rides that master — sweeps, regions, rsync, byte-range reads — so a cluster that
-costs a 2FA prompt costs exactly one, not one per subsystem. The master persists across idleness
-(`KAIMONSLATE_SSH_PERSIST`, 8h by default), so a notebook left alone over lunch does not cost another
-prompt.
+**One session per host, and everything rides it.** Sweeps, regions, provisioning, file transfer,
+byte-range reads and port forwards are all channels on that one connection, so a cluster that costs a
+2FA prompt costs exactly one — not one per subsystem. A compute node is reached *through* its login
+node for the same reason: a session to the node itself would be a second authentication.
+
+The sessions live in the **hub**, not in a notebook's worker, so one sign-in covers every notebook on
+the machine — its sweeps *and* its regions. A worker that needs a cluster asks the hub rather than
+opening its own connection.
+
+**Signing in is something you do, never something that happens to you.** Only a deliberate act starts
+it — the **🔑 Sign in** panel (topbar, or ⌘K → *"Sign in to a host"*), or `Sweep.connect!(host;
+interactive = true)` from a cell. Opening a notebook, reconciling a sweep and polling a roster all run
+against a session that already exists and say "not signed in" otherwise. Without that split, the first
+dialog you saw would come from whichever background poller got there first, on a page with nothing on
+it to explain the question.
+
+The panel lists **hosts**, not clusters, because wanting a password is a property of the host's sshd —
+a cluster can take keys and a plain remote can demand 2FA. Each row shows what uses it (which compute
+targets, which regions) and whether it is signed in. **Check** asks the host which authentication
+methods it offers *without* authenticating, so it costs no failed login on a server that penalises
+those.
+
+## Waiting for a node
+
+A region on a scheduler does not have an address until the scheduler grants one, and on a busy cluster
+that wait is minutes. Running a region cell asks for a node and says so; the cell then **runs itself**
+when the node lands, along with anything downstream of it. The region's pill reports `queued` for the
+duration, and the bring-up narrates into the banner — a cold region installs the notebook's whole
+environment on the far side, which is real work that should not look like nothing happening.
+
+The allocation is found by job name, so reopening the notebook attaches to the node it was already
+using instead of queueing for a second one.
 
 ## Reading results back
 
 Slate does not assume it can see the cluster's filesystem — the normal deployment is a laptop driving
 a cluster it has no mount on. So:
 
-* **Metadata is mirrored.** Manifests and status are rsynced into a local shadow, so asking what a
-  sweep is doing costs the new manifests and nothing else.
-* **Data stays put.** A unit's results are read by byte range over the same multiplexed connection.
+* **Metadata is mirrored.** Manifests and status are copied into a local shadow in one round trip, so
+  asking what a sweep is doing costs the new manifests and nothing else.
+* **Data stays put.** A unit's results are read by byte range over the same session.
   With `data=lazy` a slice costs the bytes it names rather than the whole result.
 
 Which is why the last step is unremarkable: a batch result and a value from an interactive worker are

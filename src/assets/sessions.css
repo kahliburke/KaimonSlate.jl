@@ -1,0 +1,37 @@
+/* Sign-in panel + topbar padlock (js/sessions.js).
+   Its own file because the panel is mounted on BOTH the home page and a notebook, and those two do
+   not share a stylesheet — the home page carries its own inline one. */
+.ssback { position:fixed; inset:0; z-index:78; display:flex; align-items:center;
+  justify-content:center; background:rgba(0,0,0,.5); backdrop-filter:blur(2px); }
+.sspanel { width:min(620px,94vw); max-height:80vh; overflow:auto; border:1px solid var(--border, #2a2e40);
+  border-radius:12px; background:var(--panel, var(--bg, #141828)); box-shadow:0 18px 60px rgba(0,0,0,.5); }
+.sshead { display:flex; align-items:center; gap:8px; padding:14px 18px 4px; }
+.sstitle { flex:1; font-weight:600; font-size:.92rem; color:var(--strong, #d4d8e8); }
+.ssclose { border:none; background:none; color:var(--dim, #7a82a4); font-size:.9rem; cursor:pointer; }
+.ssempty { padding:14px 18px 18px; color:var(--dim, #7a82a4); font-size:.78rem; }
+.sslist { padding:0 12px 6px; }
+.ssrow { display:flex; align-items:center; gap:9px; padding:8px 6px;
+  border-top:1px solid color-mix(in srgb, var(--border, #2a2e40) 60%, transparent); }
+.sshost { font-family:'Cascadia Code',ui-monospace,monospace; font-size:.8rem; color:var(--strong, #d4d8e8);
+  flex:0 0 auto; }
+.ssuse { flex:1; color:var(--dim, #7a82a4); font-size:.68rem; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; }
+.sstag { flex:0 0 auto; font-size:.62rem; padding:2px 7px; border-radius:999px;
+  border:1px solid var(--border, #2a2e40); }
+.sstag.ssok { color:#7fd18f; border-color:#7fd18f55; }
+.sstag.sswarn { color:#d9a441; border-color:#d9a44155; }
+.sstag.sserr { color:#e88; border-color:#e8888855; }
+.sstag.ssdim { color:var(--dim, #7a82a4); }
+.ssbtn { padding:4px 11px; border-radius:7px; border:1px solid var(--border, #2a2e40); background:var(--bg, #0d1120);
+  color:var(--text, #c8cce0); font-size:.72rem; cursor:pointer; }
+.ssbtn:hover { border-color:var(--dim, #7a82a4); }
+.ssbtn.ssgo { border-color:var(--accent,#6ea8fe); color:var(--strong, #d4d8e8); }
+.ssmsg { padding:8px 18px 14px; color:var(--dim, #7a82a4); font-size:.72rem; min-height:1em; }
+.ssmsg.err { color:#e88; }
+/* The topbar control: a padlock that carries its state as colour. Open shackle = signed in. */
+.ssbtn.ssbar { padding:3px 7px; display:inline-flex; align-items:center; line-height:1; }
+.ssbtn.ssbar svg { display:block; }
+.ssbtn.ssbar.ssin   { color:#7fd18f; border-color:#7fd18f55; }   /* nothing to do */
+.ssbtn.ssbar.ssneed { color:#d9a441; border-color:#d9a44166; }   /* waiting for you */
+.ssbtn.ssbar.ssbad  { color:#e88;    border-color:#e8888866; }   /* cannot be reached */
+

@@ -870,6 +870,10 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   background:var(--bg); color:var(--text); font-size:.75rem; cursor:pointer; }
 .sshauth-ok { border-color:var(--accent,#6ea8fe) !important; color:var(--strong) !important; }
 .sshauth-foot button:hover { border-color:var(--dim); }
+/* How the login ended. A failure is something to read, so it keeps the server's own words. */
+.sshauth-good { color:#7fd18f; font-size:.78rem; padding:6px 0 2px; }
+.sshauth-bad { color:#e88; font-size:.78rem; padding:6px 0 2px; line-height:1.45;
+  word-break:break-word; }
 /* Live status, right-hand column — read as instrumentation, not prose. Figures are large and
    monospaced, units and qualifiers small beside them, so the numbers are what the eye lands on and
    a value that has moved since the last look is obvious without reading a word. */

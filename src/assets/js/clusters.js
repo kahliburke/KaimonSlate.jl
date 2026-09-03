@@ -10,6 +10,7 @@
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
 import { schedInfo, loadScheduler } from './stores.js';
+import { sessions, loadSessions, openSessions } from './sessions.js';
 
 export const clusters = signal([]);
 const editing = signal(null);        // the target being edited (null = the "new" form)
@@ -44,7 +45,7 @@ function seed(c) {
   kPartition.value = g('partition'); kWalltime.value = g('walltime'); kCpus.value = g('cpus');
   kMem.value = g('mem'); kChunk.value = g('chunk'); kAccount.value = g('account');
   kPrologue.value = g('prologue'); kNote.value = g('note');
-  if (kHost.value && kKind.value !== 'local') loadScheduler(kHost.value);
+  if (kHost.value && kKind.value !== 'local') { loadScheduler(kHost.value); loadSessions(); }
 }
 
 // How many of the folded-away fields this target actually uses. Shown on the disclosure so a
@@ -94,6 +95,20 @@ async function del(name) {
   await fetch('/api/clusters/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).catch(() => {});
   if (editing.value && editing.value.name === name) seed(null);
   loadClusters();
+}
+
+// ── Is this host signed in? ─────────────────────────────────────────────────────────────────
+// Status only, read from the sign-in panel's list. A session belongs to a HOST and is shared by
+// every notebook, sweep and region on this machine, so there is one list of them and one way to
+// start one — this form just shows where the host it names stands.
+function Session() {
+  const h = (kHost.value || '').trim();
+  if (!h) return null;
+  const st = sessions.value.find(s => s.host === h);
+  return html`<div class="rpprow"><label></label>
+    ${st && st.connected ? html`<span class="pddim">✓ signed in to ${h}</span>`
+                         : html`<span class="pddim">not signed in — only needed where keys are refused</span>`}
+    <button class="rppmore" onClick=${() => openSessions()}>Sign in…</button></div>`;
 }
 
 // What the named host actually reports, once it has been asked. Detection is a suggestion, not the
@@ -157,8 +172,9 @@ export function Clusters() {
       : html`
         <div class="rpprow"><label>Login host</label>
           <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="ssh host you submit from"
-            value=${kHost.value} onInput=${ev => kHost.value = ev.target.value} onBlur=${ev => loadScheduler(ev.target.value.trim())}/></div>
+            value=${kHost.value} onInput=${ev => kHost.value = ev.target.value} onBlur=${ev => { loadScheduler(ev.target.value.trim()); loadSessions(); }}/></div>
         ${HostSays()}
+        ${Session()}
         <div class="rpprow"><label>Store</label>
           <input class="rpproot" autocomplete="off" spellcheck="false" placeholder="/scratch/…  (a path ON the cluster)" value=${kRootRemote.value} onInput=${ev => kRootRemote.value = ev.target.value}/></div>
         <div class="rpprow"><label></label><span class="pddim">Use scratch, not $HOME.</span></div>

@@ -10,11 +10,12 @@
 (function () {
   'use strict';
 
-  let el = null, current = null;
+  let el = null, current = null, waitingFor = null, waitTimer = null;
 
   function close() {
     if (el) { el.remove(); el = null; }
-    current = null;
+    if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
+    current = null; waitingFor = null;
   }
 
   function send(body) {
@@ -29,13 +30,41 @@
     if (!current) return;
     const input = el.querySelector('.sshauth-input');
     const val = input ? input.value : '';
-    const id = current.id;
+    const id = current.id, host = current.host;
     // Say what is happening rather than vanishing: on a 2FA cluster the NEXT prompt can take a few
     // seconds to arrive, and a dialog that disappears reads as "nothing happened".
     el.querySelector('.sshauth-body').innerHTML =
-      '<div class="sshauth-wait"><span class="sshauth-spin"></span>working…</div>';
+      '<div class="sshauth-wait"><span class="sshauth-spin"></span>signing in…</div>';
+    const foot = el.querySelector('.sshauth-foot');
+    if (foot) foot.innerHTML = '<span class="sshauth-note">waiting for ' + esc(host) + '</span>';
     current = null;
-    send({ id: id, answer: val }).then(() => { setTimeout(() => { if (!current) close(); }, 400); });
+    // Stay up until the server has its say. Either another prompt arrives (show it) or the login
+    // lands (show whether it worked) — the one thing not to do is close and leave them guessing.
+    waitingFor = host;
+    if (waitTimer) clearTimeout(waitTimer);
+    waitTimer = setTimeout(() => { if (!current && waitingFor === host) close(); }, 150000);
+    send({ id: id, answer: val });
+  }
+
+  // The login is over, one way or the other.
+  function result(r) {
+    if (!r || !el || current) return;                 // a live prompt outranks a stale result
+    if (waitingFor && r.host && waitingFor !== r.host) return;
+    if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
+    waitingFor = null;
+    const head = el.querySelector('.sshauth-head');
+    const body = el.querySelector('.sshauth-body');
+    const foot = el.querySelector('.sshauth-foot');
+    if (head) head.querySelector('.sshauth-lock').textContent = r.ok ? '✅' : '⛔';
+    if (head) head.querySelector('.sshauth-kind').textContent = r.ok ? 'Signed in' : 'Not signed in';
+    if (body) body.innerHTML = r.ok
+      ? '<div class="sshauth-good">Logged in to ' + esc(r.host) + '.</div>'
+      : '<div class="sshauth-bad">' + esc(r.error || 'the server refused the login') + '</div>';
+    if (foot) foot.innerHTML = '<span class="sshauth-note"></span><button class="sshauth-ok-btn">Close</button>';
+    const btn = el.querySelector('.sshauth-ok-btn');
+    if (btn) { btn.onclick = close; btn.focus(); }
+    // Success needs no acknowledgement; a failure is something to read.
+    if (r.ok) setTimeout(() => { if (!current) close(); }, 1600);
   }
 
   function cancel() {
@@ -107,7 +136,9 @@
   }
 
   window.onSshAuth = show;
+  window.onSshAuthResult = result;
   // The prompt is gone — answered elsewhere, cancelled, or timed out. Close the dialog rather than
-  // leaving one on screen that nothing is waiting on.
+  // leaving one on screen that nothing is waiting on. A dialog waiting on an OUTCOME stays: that is
+  // the answer being processed, not a prompt nobody is holding.
   window.onSshAuthDone = function (id) { if (current && current.id === id) close(); };
 })();

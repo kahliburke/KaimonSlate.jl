@@ -185,10 +185,9 @@ function run_there(host::AbstractString, script::AbstractString)
     return SshTransport.exec(String(host), String(script); ask = _ask)
 end
 
-# What to say when work needs a host nobody has signed in to. The bare fact is not enough: the
-# reader has to know that signing in is a thing they do, and both ways to do it.
-_offline(host) = "not signed in to $host — press 🔑 Sign in (⌘K: \"Sign in to a host\"), " *
-                 "or run `Sweep.connect!(\"$host\"; interactive = true)` in a cell"
+# What to say when work needs a host nobody has signed in to. Naming the control matters: the bare
+# fact leaves the reader with a red cell and no idea that signing in is a thing they do.
+_offline(host) = "$host: not signed in — press 🔑 Sign in"
 
 """
     shq(s) -> String
