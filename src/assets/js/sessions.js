@@ -99,7 +99,7 @@ function Row({ r }) {
     <span class="sshost">${r.host}</span>
     <span class=${'sstag ' + lab.cls}>${lab.text}</span>
     <span class="ssuse">${(r.used_by || []).join(' · ')}</span>
-    ${working ? html`<span class="pddim"><span class="hydspin"></span> waiting…</span>`
+    ${working ? html`<span class="sswait"><span class="hydspin"></span> waiting…</span>`
      : r.connected
        ? html`<button class="ssbtn" onClick=${() => signIn(r.host, true)}>Sign out</button>`
        : html`<${Fragment}>

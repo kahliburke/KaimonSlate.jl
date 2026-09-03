@@ -1,8 +1,17 @@
-/* Signing in to a host: the panel and topbar padlock (js/sessions.js) and the prompt dialog
-   (js/sshauth.js).
-   Its own file because both are used on the home page AND in a notebook, and those two do not share
-   a stylesheet — the home page carries its own inline one, and defines none of the theme variables,
-   so every var() here names a fallback. */
+/* What the home page and a notebook BOTH need.
+   Those two carry different stylesheets — the home page has its own inline one and does not load
+   notebook.css — so anything used on both belongs here or it renders unstyled on one of them. The
+   home page also defines none of the theme variables, hence a fallback on every var(). */
+
+/* The small inline spinner. Only ever existed as `.hydbanner .hydspin` / `.rlstep .hydspin`, so the
+   half-dozen places that write a bare one (sign-in, host probes, region status, remote tests) drew
+   nothing at all. The scoped rules are more specific and still win where they apply. */
+@keyframes spin { to { transform:rotate(360deg); } }
+.hydspin { display:inline-block; width:11px; height:11px; flex:0 0 auto; vertical-align:-1px;
+  border:2px solid var(--border, #2a2e40); border-top-color:var(--accent, #6ea8fe);
+  border-radius:50%; animation:spin .8s linear infinite; }
+
+/* ── Signing in to a host: the panel + topbar padlock (js/sessions.js) ──────────────────── */
 .ssback { position:fixed; inset:0; z-index:78; display:flex; align-items:center;
   justify-content:center; background:rgba(0,0,0,.5); backdrop-filter:blur(2px); }
 .sspanel { width:min(620px,94vw); max-height:80vh; overflow:auto; border:1px solid var(--border, #2a2e40);
@@ -28,6 +37,8 @@
   color:var(--text, #c8cce0); font-size:.72rem; cursor:pointer; }
 .ssbtn:hover { border-color:var(--dim, #7a82a4); }
 .ssbtn.ssgo { border-color:var(--accent,#6ea8fe); color:var(--strong, #d4d8e8); }
+.sswait { display:inline-flex; align-items:center; gap:6px; color:var(--dim, #7a82a4);
+  font-size:.72rem; }
 .ssmsg { padding:8px 18px 14px; color:var(--dim, #7a82a4); font-size:.72rem; min-height:1em; }
 .ssmsg.err { color:#e88; }
 /* The topbar control: a padlock that carries its state as colour. Open shackle = signed in. */

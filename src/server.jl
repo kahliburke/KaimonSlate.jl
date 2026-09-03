@@ -38,9 +38,8 @@ export cell_image, set_snapshot!
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")
 const _INDEX_ASSET = joinpath(@__DIR__, "assets", "index.html")
 const _CSS_ASSET = joinpath(@__DIR__, "assets", "notebook.css")   # extracted from notebook.html
-# The sign-in panel is mounted on the home page AND on a notebook, and those two carry different
-# stylesheets — so its own, linked by both.
-const _SESSIONS_CSS = joinpath(@__DIR__, "assets", "sessions.css")
+# What both pages need. They carry different stylesheets, so anything shared lives here.
+const _SHARED_CSS = joinpath(@__DIR__, "assets", "shared.css")
 const _JS_DIR = joinpath(@__DIR__, "assets", "js")                # notebook UI, split into modules
 
 mutable struct LiveNotebook
