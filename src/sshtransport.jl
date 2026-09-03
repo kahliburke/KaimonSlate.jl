@@ -272,7 +272,15 @@ function _try_kbdint(s::Session, ask)
     pr = s.prompter
     empty!(pr.answers); empty!(pr.seen); pr.idx = 0; pr.want = 0; pr.cancelled = false
     for (text, echo) in remembered_prompts(s.ep.alias)
-        a = try; ask(s.ep.alias, text, echo); catch; nothing; end
+        # `nothing` is a real answer: the person dismissed the dialog. An asker that THROWS is a
+        # fault in the path that shows it, so it is raised — a fault reported as a dismissal names
+        # the failure as the user's and says nothing about the code that broke.
+        a = try
+            ask(s.ep.alias, text, echo)
+        catch e
+            error("$(s.ep.alias): could not ask for \"$(strip(text))\" — " *
+                  first(sprint(showerror, e), 200))
+        end
         a === nothing && return false
         push!(pr.answers, String(a))
     end
@@ -479,6 +487,16 @@ function _close_forwards!(s::Session)
     return nothing
 end
 
+# A handshake that dies before any prompt means the server hung up. The commonest reason is its own
+# brute-force protection — OpenSSH refuses a source for a while after repeated failed logins
+# (`PerSourcePenalties`) and drops new connections past `MaxStartups` — so say that: the bare
+# libssh2 code reads as a network fault and sends you looking at the wrong layer.
+function _handshake_msg(s::Session, rc)
+    return "$(s.ep.alias): the server closed the connection during the ssh handshake (libssh2 $rc). " *
+           "If earlier logins were refused, it may be blocking this machine for a few minutes — " *
+           "wait, then try again."
+end
+
 function _open!(s::Session, ask)
     ccall((:libssh2_init, LIB), Cint, (Cint,), 0)
     s.fd = _tcp_connect(s.ep.hostname, s.ep.port)
@@ -491,7 +509,7 @@ function _open!(s::Session, ask)
     ccall((:libssh2_session_set_blocking, LIB), Cvoid, (Ptr{Cvoid}, Cint), s.ptr, 0)
     rc = _again(s, () -> ccall((:libssh2_session_handshake, LIB), Cint,
                                (Ptr{Cvoid}, Cint), s.ptr, s.fd); timeout = 30.0)
-    rc != 0 && error("ssh handshake with $(s.ep.hostname) failed ($rc)")
+    rc != 0 && error(_handshake_msg(s, rc))
     ms = auth_methods(s)
     if "publickey" in ms && _try_pubkey(s)
         # nothing more to do
@@ -525,7 +543,7 @@ function _reconnect!(s::Session)
     ccall((:libssh2_session_set_blocking, LIB), Cvoid, (Ptr{Cvoid}, Cint), s.ptr, 0)
     rc = _again(s, () -> ccall((:libssh2_session_handshake, LIB), Cint,
                                (Ptr{Cvoid}, Cint), s.ptr, s.fd); timeout = 30.0)
-    rc != 0 && error("ssh handshake with $(s.ep.hostname) failed ($rc)")
+    rc != 0 && error(_handshake_msg(s, rc))
     return nothing
 end
 
@@ -549,6 +567,10 @@ function _serve(s::Session, ask)
         _open!(s, ask)
     catch e
         s.err = sprint(showerror, e); s.alive = false
+        # Hand the socket back. A connection left open is one the server holds until its login
+        # grace expires, and a handful of those reaches MaxStartups — past which it drops new
+        # connections before they can ask for a password at all.
+        try; _close!(s); catch; end
     end
     pending = Channel{Any}(32)          # sockets accepted by a listener, waiting for a channel
     while true
@@ -586,7 +608,7 @@ function _serve(s::Session, ask)
         kind === :close && break
     end
     _close_forwards!(s)
-    s.alive && _close!(s)
+    _close!(s)          # unconditional: a session that never came up still holds a socket
     return nothing
 end
 
@@ -600,8 +622,15 @@ function session(host::AbstractString; ask)
     key = String(host)
     lock(_REG_LOCK) do
         s = get(_SESSIONS, key, nothing)
-        s !== nothing && s.alive && return s
-        s !== nothing && delete!(_SESSIONS, key)
+        # Alive, or still opening. `alive` is only set once authentication has finished, and on a
+        # host that asks for a second factor that takes as long as a person takes to answer — so a
+        # request arriving in that window must QUEUE on the session being opened, not start a second
+        # one. Replacing it orphans a login the far side has already accepted, and asks the person
+        # to answer a fresh set of prompts for a connection they just made.
+        if s !== nothing
+            (s.alive || (s.owner !== nothing && !istaskdone(s.owner))) && return s
+            delete!(_SESSIONS, key)
+        end
         ep = resolve(key)
         s = Session(ep, Cint(-1), C_NULL, Channel{Any}(32), nothing, Prompter(key), false, "", Fwd[])
         s.owner = Threads.@spawn _serve(s, ask)
@@ -665,6 +694,47 @@ end
 "Is there an authenticated session for `host` right now?"
 connected(host::AbstractString) =
     lock(_REG_LOCK) do; (s = get(_SESSIONS, String(host), nothing)) !== nothing && s.alive; end
+
+"""
+    probe(host) -> (; reachable, methods, error)
+
+What `host` will ask for, WITHOUT authenticating. The server names its methods right after the
+handshake (`libssh2_userauth_list`), so this is the honest way to tell a host that lets you in on a
+key from one that is going to want a password and a second factor — and it costs no authentication
+attempt, which matters on a server that penalises failures.
+
+Runs on its own throwaway session so it cannot disturb one that is open.
+"""
+function probe(host::AbstractString)
+    key = String(host)
+    connected(key) && return (; reachable = true, methods = ["already-authenticated"], error = "")
+    ep = try; resolve(key); catch e; return (; reachable = false, methods = String[],
+                                                error = first(sprint(showerror, e), 200)); end
+    s = Session(ep, Cint(-1), C_NULL, Channel{Any}(1), nothing, Prompter(key), false, "", Fwd[])
+    try
+        ccall((:libssh2_init, LIB), Cint, (Cint,), 0)
+        s.fd = _tcp_connect(ep.hostname, ep.port)
+        s.ptr = ccall((:libssh2_session_init_ex, LIB), Ptr{Cvoid},
+                      (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
+                      C_NULL, C_NULL, C_NULL, pointer_from_objref(s.prompter))
+        s.ptr == C_NULL && error("libssh2 session_init failed")
+        ccall((:libssh2_session_set_blocking, LIB), Cvoid, (Ptr{Cvoid}, Cint), s.ptr, 0)
+        rc = _again(s, () -> ccall((:libssh2_session_handshake, LIB), Cint,
+                                   (Ptr{Cvoid}, Cint), s.ptr, s.fd); timeout = 15.0)
+        rc != 0 && error(_handshake_msg(s, rc))
+        return (; reachable = true, methods = auth_methods(s), error = "")
+    catch e
+        return (; reachable = false, methods = String[], error = first(sprint(showerror, e), 200))
+    finally
+        try; _close!(s); catch; end
+    end
+end
+
+"Is a login to `host` in flight — waiting on a handshake, or on someone answering a prompt?"
+opening(host::AbstractString) = lock(_REG_LOCK) do
+    s = get(_SESSIONS, String(host), nothing)
+    s !== nothing && !s.alive && s.owner !== nothing && !istaskdone(s.owner)
+end
 
 "Every host with a live session."
 hosts() = lock(_REG_LOCK) do; String[k for (k, s) in _SESSIONS if s.alive]; end

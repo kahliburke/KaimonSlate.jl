@@ -10,7 +10,7 @@
 #
 #   metadata  manifests, chunk status, job markers. Kilobytes each, read CONSTANTLY — every
 #             reconcile and every card poll wants one per unit. Mirrored WHOLESALE into a local
-#             shadow with one rsync, so the hub's planning code goes on reading a local path and
+#             shadow in one round trip, so the hub's planning code goes on reading a local path and
 #             a poll costs one round trip instead of one per unit.
 #   data      the results. Terabytes, read RARELY and in slices. Never mirrored; read by byte
 #             range against the real store (see `SshSource`).
@@ -20,6 +20,8 @@
 # Everything rides ONE multiplexed ssh connection. Without that, each of these is a fresh TCP
 # handshake and key exchange, which on a normal link is 200-500 ms before a single useful byte
 # moves — enough to make a poll feel broken and a slice feel worse.
+
+import Tar          # archiving is ours, not a shell's — see "Packing bytes for the wire" below
 
 # The directories that hold METADATA, relative to a store root. `blobs/` is deliberately absent:
 # pulling it would mean pulling the results, which is the one thing this design exists to avoid.
@@ -59,8 +61,66 @@ end
 _ask(host, prompt, echo) = SshAuth.ask(host, prompt, echo)
 _noask(_host, _prompt, _echo) = nothing
 
+# ── Who holds the session ────────────────────────────────────────────────────────────────────
+# The HUB does. A worker asks it rather than opening its own, so a cluster costs ONE login per
+# machine — shared by every notebook on it — instead of one per process. The two halves of cluster
+# work run in different processes (a sweep in a worker, a region placed by the hub) and both must
+# reach the same session: answering a second factor twice for one cluster is the wrong answer twice
+# over.
+#
+# `nothing` means this process owns its sessions: that is the hub, and every test.
+const _DELEGATE = Ref{Any}(nothing)
+
+"Send cluster operations to the process that owns the sessions — `f(op::Symbol, args::NamedTuple)`."
+set_delegate!(f) = (_DELEGATE[] = f; nothing)
+has_delegate() = _DELEGATE[] !== nothing
+
+"The channel a worker sends cluster operations on, and the tool the hub answers them with."
+const OP_CHANNEL = "__slate_sshop"
+
+# A delegated call is a round trip to another process, so the asking task parks here until the
+# answer comes back. Generic in the value: a command returns text, a transfer returns bytes.
+const _OPS = Dict{String,Channel{Any}}()
+const _OPS_LOCK = ReentrantLock()
+
+"""
+    await_op(id; timeout) -> value
+
+Park until `deliver!(id, value)`. `nothing` on timeout — the owner never answered, which for a
+caller is the same as the operation failing.
+"""
+function await_op(id::AbstractString; timeout::Real = 180.0)
+    ch = Channel{Any}(1)
+    lock(_OPS_LOCK) do; _OPS[String(id)] = ch; end
+    t = Timer(_ -> (isopen(ch) && put!(ch, nothing)), timeout)
+    try
+        return take!(ch)
+    catch
+        return nothing
+    finally
+        close(t)
+        lock(_OPS_LOCK) do; delete!(_OPS, String(id)); end
+    end
+end
+
+"Hand a delegated operation its result. False if nothing is waiting for it any more."
+function deliver!(id::AbstractString, value)
+    ch = lock(_OPS_LOCK) do; get(_OPS, String(id), nothing); end
+    ch === nothing && return false
+    try; put!(ch, value); catch; return false; end
+    return true
+end
+
+# Ask the owner, or do it here when this process IS the owner.
+function _via(here, op::Symbol, args::NamedTuple)
+    f = _DELEGATE[]
+    f === nothing && return here()
+    return f(op, args)
+end
+
 "True if there is an authenticated session for `host`."
-connected(host::AbstractString) = isempty(host) || SshTransport.connected(String(host))
+connected(host::AbstractString) = isempty(host) ||
+    _via(() -> SshTransport.connected(String(host)), :connected, (; host = String(host))) === true
 
 const _CONNECT_BACKOFF = 20.0
 const _CONNECT_FAILED = Dict{String,Float64}()
@@ -69,28 +129,41 @@ const _CONNECT_LOCK = ReentrantLock()
 """
     connect!(host; interactive = false) -> Bool
 
-Ensure a session exists. `interactive` decides whether a server prompt may raise a dialog — pass it
-only from something the user just did. A host is left alone for a while after a failure: the pollers
-here would otherwise retry continuously, and on a gated host every retry is a failed authentication.
+Ensure a session exists. Only an `interactive` call may raise a dialog — logging in is something a
+person chooses to do, so opening a notebook, reconciling a sweep or polling a roster must not stop to
+ask. A host is left alone for a while after a failure: the pollers here would otherwise retry
+continuously, and on a gated host every retry is a failed authentication.
 """
 function connect!(host::AbstractString; interactive::Bool = false)
     isempty(host) && return true
+    has_delegate() && return _via(() -> false, :connect,
+                                  (; host = String(host), interactive = interactive)) === true
     SshTransport.connected(String(host)) && return true
+    # A login already in flight belongs to whoever started it, and it lasts as long as a person takes
+    # to find their phone. Requests queue behind it, which is right for a cell someone ran and wrong
+    # for a poller — so a poller reports "not connected" and comes back once it has landed.
+    !interactive && SshTransport.opening(String(host)) && return false
     # The backoff exists to stop pollers hammering a host; someone who just pressed a button is not
     # a poller, and making them wait it out is the wrong answer.
     interactive || lock(_CONNECT_LOCK) do
         time() - get(_CONNECT_FAILED, String(host), 0.0) < _CONNECT_BACKOFF
     end && return false
     interactive && SshTransport.disconnect!(String(host))   # clear a half-open session first
-    ok = try
-        SshTransport.session(String(host); ask = interactive ? _ask : _noask)
-        SshTransport.connected(String(host))
-    catch
-        false
+    # `session` only STARTS the connection — the handshake and any prompt happen on its owner task.
+    # Asking whether it is connected right after would always say no, so send a trivial command:
+    # it queues behind the opening and comes back when there is a session, or when there cannot be.
+    ok, why = try
+        r = SshTransport.exec(String(host), "true"; ask = interactive ? _ask : _noask)
+        (first(r) && SshTransport.connected(String(host)), String(last(r)))
+    catch e
+        (false, first(sprint(showerror, e), 200))
     end
     lock(_CONNECT_LOCK) do
         ok ? delete!(_CONNECT_FAILED, String(host)) : (_CONNECT_FAILED[String(host)] = time())
     end
+    # Only for a login someone asked for: they are the one waiting on an answer, and a poller's
+    # silent failure is not news.
+    interactive && SshAuth.report!(String(host), ok, ok ? "" : why)
     return ok
 end
 
@@ -106,9 +179,16 @@ function run_there(host::AbstractString, script::AbstractString)
         ok = try; run(pipeline(`sh -c $script`; stdout = buf, stderr = buf)); true; catch; false; end
         return (ok, String(take!(buf)))
     end
-    connect!(host) || return (false, "no connection to $host")
+    has_delegate() && return _via(() -> (false, _offline(host)), :exec,
+                                  (; host = String(host), script = String(script)))
+    connect!(host) || return (false, _offline(host))
     return SshTransport.exec(String(host), String(script); ask = _ask)
 end
+
+# What to say when work needs a host nobody has signed in to. The bare fact is not enough: the
+# reader has to know that signing in is a thing they do, and both ways to do it.
+_offline(host) = "not signed in to $host — press 🔑 Sign in (⌘K: \"Sign in to a host\"), " *
+                 "or run `Sweep.connect!(\"$host\"; interactive = true)` in a cell"
 
 """
     shq(s) -> String
@@ -138,6 +218,8 @@ function run_io(host::AbstractString, script::AbstractString, input::Union{Vecto
         catch; false; end
         return (ok, take!(out))
     end
+    has_delegate() && return _via(() -> (false, UInt8[]), :io,
+                                  (; host = String(host), script = String(script), input = input))
     connect!(host) || return (false, UInt8[])
     ok, data, _ = SshTransport.exec_io(String(host), String(script), input; ask = _ask)
     return (ok, data)
@@ -149,17 +231,94 @@ function put_file(host::AbstractString, data::Vector{UInt8}, path::AbstractStrin
     return first(run_io(host, script, data))
 end
 
+# ── Packing bytes for the wire ───────────────────────────────────────────────────────────────
+# Archiving is ours to do, not a shell's. `tar` is not one program: bsdtar rejects an option placed
+# before the bundled mode that GNU tar accepts, and Windows guarantees neither. `Tar` behaves
+# identically everywhere, so the only `tar` left is the one on the FAR side — a cluster login node,
+# which is POSIX by definition.
+#
+# UNCOMPRESSED, and it has to stay that way while this file runs in a worker: a worker loads in the
+# NOTEBOOK's project, where the only packages guaranteed present are stdlibs. `Tar` is one;
+# `CodecZlib` is not. Compressing wants either a stdlib codec or the far side told which format to
+# expect.
+
+# `tar --exclude` semantics for the patterns actually used — a bare name (`.git`, `Manifest.toml`)
+# or a suffix glob (`*.cov`) — matched against every component of the path.
+function _excluded(rel::AbstractString, pats)
+    isempty(pats) && return false
+    for c in split(String(rel), '/'; keepempty = false), p in pats
+        ps = String(p)
+        ps == c && return true
+        startswith(ps, "*") && endswith(c, SubString(ps, 2)) && return true
+    end
+    return false
+end
+
+"A tar of `dir`, keeping the relative paths `keep` accepts."
+function _archive(dir::AbstractString, keep = _ -> true)
+    root = abspath(String(dir))
+    io = IOBuffer()
+    # `Tar.create` hands its predicate an ABSOLUTE path. Callers reason in paths relative to `dir` —
+    # which is also what lands in the archive — so convert before asking, and use `/` regardless of
+    # what the local platform separates with.
+    Tar.create(p -> keep(replace(relpath(String(p), root), '\\' => '/')), root, io)
+    return take!(io)
+end
+
+"Unpack a tar into `dest`, MERGING with what is there — a mirror is updated, not replaced."
+function _unarchive(data::Vector{UInt8}, dest::AbstractString)
+    isempty(data) && return true
+    tmp = ""
+    try
+        tmp = Tar.extract(IOBuffer(data))
+        mkpath(String(dest))
+        for e in readdir(tmp)
+            cp(joinpath(tmp, e), joinpath(String(dest), e); force = true, follow_symlinks = false)
+        end
+        return true
+    catch e
+        @warn "slate: could not unpack a transfer" dest exception = e
+        return false
+    finally
+        isempty(tmp) || rm(tmp; recursive = true, force = true)
+    end
+end
+
 "Copy a local directory's contents to `dest` on the host."
 function put_dir(host::AbstractString, localdir::AbstractString, dest::AbstractString;
                  delete::Bool = false, excludes::Vector{String} = String[])
     isdir(localdir) || return false
-    args = String["cf", "-", "-C", String(localdir)]
-    for e in excludes; insert!(args, 1, "--exclude=" * e); end
-    out = IOBuffer()
-    try; run(pipeline(`tar $args .`; stdout = out, stderr = devnull)); catch; return false; end
+    data = try
+        _archive(localdir, p -> !_excluded(p, excludes))
+    catch e
+        # A bare `false` here reads as the far side refusing the transfer, so name this side.
+        @warn "slate: could not archive $localdir for transfer" exception = e
+        return false
+    end
+    if isempty(host)                    # same machine: no shell, so this works on Windows too
+        delete && rm(String(dest); force = true, recursive = true)
+        return _unarchive(data, dest)
+    end
     script = (delete ? "rm -rf " * shq(String(dest)) * "; " : "") *
              "mkdir -p " * shq(String(dest)) * " && cd " * shq(String(dest)) * " && tar xf -"
-    return first(run_io(host, script, take!(out)))
+    return first(run_io(host, script, data))
+end
+
+"Copy named local files into `dest` on the host, flattened. All must share a directory."
+function put_files(host::AbstractString, files, dest::AbstractString)
+    files = String[String(f) for f in files]
+    isempty(files) && return true
+    dir = dirname(first(files))
+    names = Set(String[basename(f) for f in files])
+    data = try
+        _archive(dir, p -> String(p) in names)
+    catch e
+        @warn "slate: could not archive $(length(files)) files for transfer" dir exception = e
+        return false
+    end
+    isempty(host) && return _unarchive(data, dest)
+    script = "mkdir -p " * shq(String(dest)) * " && cd " * shq(String(dest)) * " && tar xf -"
+    return first(run_io(host, script, data))
 end
 
 """
@@ -167,17 +326,27 @@ end
 
 Carry `localport` here to `target:targetport` over the session already open to `host`. No new
 connection, so no second prompt.
+
+"Here" is wherever the session is, which is the hub — a region's tunnel is the hub dialling a worker
+it is about to spawn, so that is the machine the port belongs on.
 """
 forward!(host::AbstractString, localport::Integer, target::AbstractString, targetport::Integer) =
-    connect!(host) ? SshTransport.forward!(String(host), localport, String(target), targetport; ask = _noask) :
-                     (false, "not connected to $host")
+    _via(:forward, (; host = String(host), localport = Int(localport),
+                      target = String(target), targetport = Int(targetport))) do
+        connect!(host) ?
+            SshTransport.forward!(String(host), localport, String(target), targetport; ask = _noask) :
+            (false, _offline(host))
+    end
 
 "Stop carrying `localport`."
-unforward!(host::AbstractString, localport::Integer) = SshTransport.unforward!(String(host), localport)
+unforward!(host::AbstractString, localport::Integer) =
+    _via(() -> SshTransport.unforward!(String(host), localport), :unforward,
+         (; host = String(host), localport = Int(localport)))
 
 "End the session for `host`. The next call authenticates again — this is what logging out means."
 function disconnect!(host::AbstractString)
     isempty(host) && return false
+    has_delegate() && return _via(() -> false, :disconnect, (; host = String(host))) === true
     SshAuth.cancel_host!(String(host))
     lock(_CONNECT_LOCK) do; delete!(_CONNECT_FAILED, String(host)); end
     return SshTransport.disconnect!(String(host))
@@ -219,16 +388,16 @@ _dirlist(dirs) = join((shq(String(d)) for d in dirs), " ")
 "Bring the local mirror up to date with the store's metadata. One round trip."
 function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     isempty(s.host) && return true          # same machine: the mirror IS the store
-    connect!(s.host) || return false
+    connected(s.host) || return false
     names = _dirlist(dirs)
     script = "cd " * shq(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; tar cf - " * names
-    ok, data, _ = SshTransport.exec_io(String(s.host), script, nothing; ask = _ask)
+    ok, data = run_io(String(s.host), script, nothing)
     ok || return false
     for d in dirs
         sync_flags(d, :in) && rm(joinpath(s.mirror, String(d)); force = true, recursive = true)
         mkpath(joinpath(s.mirror, String(d)))
     end
-    return _untar(data, s.mirror)
+    return _unarchive(data, s.mirror)
 end
 
 """
@@ -239,35 +408,16 @@ store. What may be DELETED there is `sync_flags`' decision, not this function's.
 """
 function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
     isempty(s.host) && return true
-    connect!(s.host) || return false
+    connected(s.host) || return false
     present = String[String(d) for d in dirs if isdir(joinpath(s.mirror, String(d)))]
     isempty(present) && return true
-    data = _tar(s.mirror, present)
+    keep = Set(present)
+    data = _archive(s.mirror, p -> first(split(String(p), '/'; keepempty = false)) in keep)
     wipe = String[shq(joinpath(s.root, d)) for d in present if sync_flags(d, :out)]
     script = "mkdir -p " * shq(s.root) *
              (isempty(wipe) ? "" : "; rm -rf " * join(wipe, " ")) *
              "; cd " * shq(s.root) * " && tar xf -"
-    ok, _, _ = SshTransport.exec_io(String(s.host), script, data; ask = _ask)
-    return ok
-end
-
-# The system `tar`: on every cluster and every developer machine, and the archive here is a handful
-# of kilobytes of text.
-function _tar(root::AbstractString, dirs::Vector{String})
-    out = IOBuffer()
-    run(pipeline(`tar cf - -C $root $dirs`; stdout = out, stderr = devnull))
-    return take!(out)
-end
-
-function _untar(data::Vector{UInt8}, dest::AbstractString)
-    isempty(data) && return true
-    mkpath(dest)
-    return try
-        open(pipeline(`tar xf - -C $dest`; stderr = devnull), "w") do io; write(io, data); end
-        true
-    catch
-        false
-    end
+    return first(run_io(String(s.host), script, data))
 end
 
 """

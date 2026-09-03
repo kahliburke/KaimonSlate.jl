@@ -45,7 +45,7 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "remotestore.jl"))
 
 # The env-preparation policy shared by the notebook fork and the remote provisioner. envprep.jl is
 # pure TOML/file operations with no transport of its own, precisely so a new transport can reuse it:
-# batch is the third, after the local filesystem fork and ssh/rsync.
+# batch is the third, after the local filesystem fork and a remote store over ssh.
 Base.include(@__MODULE__, joinpath(@__DIR__, "envprep.jl"))
 
 const P = parentmodule(@__MODULE__)
@@ -158,9 +158,9 @@ _ssh_run(host, script; capture::Bool = false) = run_there(String(host), String(s
 Put the task runner where a compute node can load it, and return the path it will use.
 
 The runner is Slate's own code, not the user's — a handful of stdlib-only files that every job
-`include`s. It ships the same way the task environment does, over ssh, because that is the only way
-in: a cluster's filesystem is reachable from its nodes, not from here. Idempotent and cheap; rsync
-sends nothing when the files are unchanged.
+`include`s. It goes over the host's one authenticated session, because that is the only way in: a
+cluster's filesystem is reachable from its nodes, not from here. A few KB, so it is sent each time
+rather than compared first.
 """
 function provision_payload!(host::AbstractString, root_remote::AbstractString)
     dst = "$(root_remote)/src"
@@ -168,15 +168,8 @@ function provision_payload!(host::AbstractString, root_remote::AbstractString)
     ok || error("could not create $(dst) on $(host): $(strip(out))")
     src = dirname(String(first(methods(paramgrid)).file))
     files = [joinpath(src, f) for f in SlateTask.PAYLOAD_FILES]
-    dest = isempty(host) ? dst : "$(host):$(dst)"
-    # `-e`, so rsync rides the shared connection rather than opening one it would have to
-    # authenticate itself. Same reason as `_ssh_run`.
-    rsh = isempty(host) ? `` : `-e $(ssh_command(host))`
-    try
-        run(pipeline(`rsync -a $rsh $(files) $(dest)/`; stdout = devnull, stderr = devnull))
-    catch e
-        error("could not ship the task runner to $(host):$(dst) ($(sprint(showerror, e)))")
-    end
+    put_files(host, files, dst) ||
+        error("could not ship the task runner to $(host):$(dst)")
     return "$(dst)/slatetask.jl"
 end
 
@@ -192,8 +185,8 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
                                parent::AbstractString; julia::AbstractString = "julia",
                                prologue::AbstractString = "")
     isempty(parent) && return joinpath(root_remote, "env")
-    # Source-inclusive, for the same reason as `task_env!`: the cluster's copy is rsync'd once, so
-    # an edit the fingerprint cannot see is an edit the compute nodes never get.
+    # Source-inclusive, for the same reason as `task_env!`: the cluster's copy is made once, so an
+    # edit the fingerprint cannot see is an edit the compute nodes never get.
     fp = env_source_fingerprint(parent)
     key = first(fp, 12)
     envdir = "$(root_remote)/env/$(key)"
@@ -213,15 +206,11 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
     ok, out = _ssh_run(host, "mkdir -p $(remote_pkg) $(envdir)")
     ok || error("could not create $(remote_pkg) on $(host): $(strip(out))")
 
-    # rsync the project itself. `--delete` so a removed source file does not linger and get loaded.
-    dest = isempty(host) ? remote_pkg : "$(host):$(remote_pkg)"
-    rsh = isempty(host) ? `` : `-e $(ssh_command(host))`     # the shared connection, as above
-    try
-        run(pipeline(`rsync -az --delete --exclude .git --exclude Manifest.toml $rsh
-                      $(rstrip(parent, '/'))/ $(dest)/`; stdout = devnull, stderr = devnull))
-    catch e
-        error("could not copy $(parent) to $(host):$(remote_pkg) ($(sprint(showerror, e)))")
-    end
+    # The project itself. Replaced rather than merged, so a source file deleted here does not linger
+    # over there and get loaded. Manifest.toml is excluded: the cluster resolves its own.
+    put_dir(host, rstrip(parent, '/'), remote_pkg;
+            delete = true, excludes = [".git", "Manifest.toml"]) ||
+        error("could not copy $(parent) to $(host):$(remote_pkg)")
 
     pre = isempty(prologue) ? "" : prologue * "\n"
     dev = isempty(pname) ? "" : "Pkg.develop(Pkg.PackageSpec(path=raw\"$(remote_pkg)\"));"
@@ -288,24 +277,43 @@ struct SlurmTarget <: SweepTarget
     account::String
     qos::String
     prologue::String
+    parent::String      # what the task environment is built from; `project` overrides it
+    julia::String       # the julia to build that environment with, as the login node names it
 end
 #
-# `parent` provisions the task environment on the cluster (see `provision_remote_env!`) and is the
-# normal way to use this. Pass `project` instead to point at an environment the site already
-# manages, in which case nothing is shipped.
+# A target DESCRIBES a cluster; it does not reach one. `parent` and an empty `project`/`payload` mean
+# "build the environment and ship the runner when there is a job to submit" — see `provision!`. Pass
+# `project` to point at an environment the site already manages, in which case nothing is shipped.
 function SlurmTarget(host = ""; root = "", root_remote = root, payload = "",
                      parent = "", project = nothing,
                      resources = (; cpus = 1, mem = "2G", walltime = "01:00:00", partition = ""),
                      chunk = 16, account = "", qos = "", prologue = "", julia = "julia")
-    proj = project !== nothing ? String(project) :
-           provision_remote_env!(String(host), String(root_remote), String(parent);
-                                 julia = String(julia), prologue = String(prologue))
+    SlurmTarget(String(host), String(root), String(root_remote),
+                project === nothing ? "" : String(project), String(payload),
+                resources, Int(chunk), String(account), String(qos), String(prologue),
+                String(parent), String(julia))
+end
+
+"""
+    provision!(t) -> t
+
+Put what a job needs on the far side and return a target naming it: the task environment built from
+`parent`, and Slate's own runner.
+
+Submit-time work, deliberately. It ships a project, instantiates an environment and precompiles it —
+minutes on a cold cluster, and an authenticated connection either way. Reconciling a sweep, drawing
+its card and opening the notebook it lives in all have to work without any of that.
+"""
+provision!(t::LocalTarget) = t
+function provision!(t::SlurmTarget)
+    proj = isempty(t.project) ?
+        provision_remote_env!(t.host, t.root_remote, t.parent;
+                              julia = t.julia, prologue = t.prologue) : t.project
     # The runner is Slate's own code and its location on the cluster is Slate's business, so it is
     # shipped rather than configured. Naming one is still allowed, for a site that stages it itself.
-    pay = isempty(String(payload)) ? provision_payload!(String(host), String(root_remote)) :
-          String(payload)
-    SlurmTarget(String(host), String(root), String(root_remote), proj, String(pay),
-                resources, Int(chunk), String(account), String(qos), String(prologue))
+    pay = isempty(t.payload) ? provision_payload!(t.host, t.root_remote) : t.payload
+    return SlurmTarget(t.host, t.root, t.root_remote, proj, pay, t.resources, t.chunk,
+                       t.account, t.qos, t.prologue, t.parent, t.julia)
 end
 
 # Resources belong to the TARGET (a site's account, its partitions) but walltime, memory and cores
@@ -315,7 +323,7 @@ with_resources(t::LocalTarget, res) = t          # nothing to schedule locally
 with_resources(t::SlurmTarget, res) =
     res === nothing ? t :
     SlurmTarget(t.host, t.root, t.root_remote, t.project, t.payload,
-                merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue)
+                merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue, t.parent, t.julia)
 
 # The scheduler settings a `#%% sweep` cell may carry on its header (engine.jl `cell_attrs`), e.g.
 #
@@ -352,9 +360,8 @@ end
 """
     cluster_args(spec) -> NamedTuple
 
-What a cluster definition MEANS, without building anything. Kept separate from `cluster` because
-constructing a target provisions an environment on the far side — so validating a definition, or
-showing what it resolves to, must not require reaching the cluster.
+What a cluster definition MEANS, without building anything — for validating a definition or showing
+what it resolves to.
 """
 function cluster_args(spec::AbstractDict)
     get_(k, d = "") = String(get(spec, k, d))
@@ -468,7 +475,7 @@ with_chunk(t::LocalTarget, n) = n === nothing ? t :
     LocalTarget(t.root, t.project, t.payload, n)
 with_chunk(t::SlurmTarget, n) = n === nothing ? t :
     SlurmTarget(t.host, t.root, t.root_remote, t.project, t.payload,
-                t.resources, n, t.account, t.qos, t.prologue)
+                t.resources, n, t.account, t.qos, t.prologue, t.parent, t.julia)
 
 store_root(t::LocalTarget) = t.root
 # The hub plans against the MIRROR for a remote cluster — a local directory holding a copy of the
@@ -485,9 +492,16 @@ launcher_for(t::SlurmTarget) = BatchLauncher.SlurmLauncher(t.host; account = t.a
 
 specfn_for(t::LocalTarget) = (name, cs) -> BatchLauncher.JobSpec(name, cs;
     root = t.root, project = t.project, payload = t.payload)
-specfn_for(t::SlurmTarget) = (name, cs) -> BatchLauncher.JobSpec(name, cs;
-    root = t.root_remote, project = t.project, payload = t.payload,
-    resources = t.resources, prologue = t.prologue)
+# `reconcile!` calls this only when it has a job to submit, so provisioning here is what keeps it off
+# the path that merely reads the store. Once per reconcile, not once per job.
+function specfn_for(t::SlurmTarget)
+    ready = Ref{Union{Nothing,SlurmTarget}}(nothing)
+    return (name, cs) -> begin
+        p = ready[] === nothing ? (ready[] = provision!(t)) : ready[]
+        BatchLauncher.JobSpec(name, cs; root = p.root_remote, project = p.project,
+                              payload = p.payload, resources = p.resources, prologue = p.prologue)
+    end
+end
 
 # ── Keys ─────────────────────────────────────────────────────────────────────────────────────
 # Everything is content-derived, which is what gives the sweep its useful properties: editing the
@@ -516,6 +530,13 @@ end
 # it refuses to do for the body text. A task process is fresh and has no Revise, so an edit to the
 # package the body calls into changes what every unit computes while leaving the body identical.
 env_key(target::SweepTarget) = basename(rstrip(String(target.project), '/'))
+# For a cluster the environment has usually not been built yet — and must not be, to answer this. So
+# compute the name `provision_remote_env!` WILL give it, from the parent's fingerprint, here.
+function env_key(t::SlurmTarget)
+    isempty(t.project) || return basename(rstrip(t.project, '/'))
+    isempty(t.parent) && return "env"
+    return first(env_source_fingerprint(t.parent), 12)
+end
 
 function sweep_key(body_src, setup_src, captures, envkey = "", summary_src = "")
     caps = join(sort(["$k=$(_digest_of(v))" for (k, v) in captures]), ";")
@@ -1024,7 +1045,7 @@ source_of(t::SlurmTarget) =
 # ── The store the hub plans against ──────────────────────────────────────────────────────────
 # For a remote cluster this is the local MIRROR, not the cluster path: `plan`, `telemetry`,
 # `results` and `status_payload` all walk manifests, and they go on doing that against a directory
-# on this machine. What changes is that the directory is a copy, refreshed by one rsync.
+# on this machine. What changes is that the directory is a copy, refreshed in one round trip.
 #
 # Cached per (host, root) so the mirror — and the ssh control socket behind it — is shared by every
 # sweep pointed at the same cluster, rather than one per cell.

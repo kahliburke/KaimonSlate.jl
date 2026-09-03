@@ -11,6 +11,7 @@ module NotebookServer
 
 using HTTP, JSON, FileWatching, CodecZlib, CodecZstd
 import Base64
+import Serialization                          # a worker's cluster-operation results, back over the gate
 import SlateExtensionsBase                    # the dtype table the page's decoders are generated from
 import Dates                                  # publish dates for the multi-doc site manifest
 import Logging                                # standalone serve: route hub log detail to a file
@@ -37,6 +38,9 @@ export cell_image, set_snapshot!
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")
 const _INDEX_ASSET = joinpath(@__DIR__, "assets", "index.html")
 const _CSS_ASSET = joinpath(@__DIR__, "assets", "notebook.css")   # extracted from notebook.html
+# The sign-in panel is mounted on the home page AND on a notebook, and those two carry different
+# stylesheets — so its own, linked by both.
+const _SESSIONS_CSS = joinpath(@__DIR__, "assets", "sessions.css")
 const _JS_DIR = joinpath(@__DIR__, "assets", "js")                # notebook UI, split into modules
 
 mutable struct LiveNotebook
@@ -146,6 +150,42 @@ end
 # between the dependency-light engine and the HTTP/SSE layer. Both `load_notebook` paths (fresh
 # `.jl` bundle vs. ordinary notebook) wire the identical set; close/restart paths unwire it. Kept
 # as ONE place so the two never drift out of sync with each other.
+# A cluster operation a notebook's worker asked for. THIS process holds the ssh sessions, so it runs
+# it here and hands the result back over the gate — one login per cluster, shared by every notebook,
+# and the dialog is raised where the browser already is.
+function _run_sshop(op::Symbol, a)
+    S = ReportEngine.Sweep
+    op === :connected  && return S.connected(a.host)
+    op === :connect    && return S.connect!(a.host; interactive = a.interactive === true)
+    op === :disconnect && return S.disconnect!(a.host)
+    op === :exec       && return S.run_there(a.host, a.script)
+    op === :io         && return S.run_io(a.host, a.script, a.input)
+    op === :forward    && return S.forward!(a.host, a.localport, a.target, a.targetport)
+    op === :unforward  && return S.unforward!(a.host, a.localport)
+    error("unknown cluster operation :$op")
+end
+
+function _relay_sshop(nb::LiveNotebook, p)
+    id = String(p.id)
+    # Off the poller task: a connect waits for someone to answer a dialog, and everything else waits
+    # for a cluster. Blocking here would stall every other notebook's worker events behind it.
+    Threads.@spawn begin
+        res = try
+            _run_sshop(Symbol(p.op), p.args)
+        catch e
+            (; error = first(sprint(showerror, e), 300))
+        end
+        try
+            ReportEngine._tool(nb.kernel, "__slate_sshop_reply",
+                Dict{String,Any}("id" => id,
+                                 "b64" => Base64.base64encode(Serialization.serialize, res)))
+        catch e
+            ReportEngine._rlog("cluster: could not return a result to the worker ($(first(sprint(showerror, e), 120)))")
+        end
+    end
+    return nothing
+end
+
 function _wire_callbacks!(nb::LiveNotebook)
     register_refresh!(nb.report.id, vars -> server_refresh(nb, vars))                      # async slate_refresh → recompute readers
     register_srcchange!(nb.report.id, (names, err) -> server_src_changed(nb, names, err))  # parent /src reloaded (Revise)
@@ -163,28 +203,11 @@ function _wire_callbacks!(nb::LiveNotebook)
     end)
     register_prepare!(nb.report.id, json -> (try; _broadcast(nb, "prepare:" * json); catch; end))   # env precompile progress → "Preparing packages" banner
     register_emit!(nb.report.id, (channel, payload) -> (try
-        # A worker asking for a password has no browser of its own; this process does. Its prompt
-        # becomes an ordinary pending one here, so the dialog, /api/sshauth and the watcher are
-        # unchanged, and the answer goes back to the worker that is waiting for it.
-        channel == SshAuth.RELAY_CHANNEL ? _relay_sshauth(nb, payload) : _ws_emit!(nb, channel, payload)
+        # A worker reaching a cluster does it through here, because the sessions live in this
+        # process. Everything else on this channel is an ordinary `slate_emit` bound for the page.
+        channel == ReportEngine.Sweep.OP_CHANNEL ? _relay_sshop(nb, payload) :
+                                                   _ws_emit!(nb, channel, payload)
     catch; end))   # slate_emit → push over the page WebSocket (NOT the coalescing SSE); payload is a Julia value, JSON-encoded in _ws_emit!
-# A prompt raised in the notebook's worker: hold it here until someone answers, then hand the answer
-# back over the gate.
-function _relay_sshauth(nb::LiveNotebook, p)
-    id, host = String(p.id), String(p.host)
-    Threads.@spawn begin
-        ans = try; SshAuth.ask(host, String(p.prompt), p.echo === true); catch; nothing; end
-        try
-            ReportEngine._tool(nb.kernel, "__slate_sshauth_answer",
-                               Dict{String,Any}("id" => id, "text" => ans === nothing ? "" : ans,
-                                                "cancel" => ans === nothing))
-        catch e
-            ReportEngine._rlog("sshauth: could not return an answer to the worker ($(first(sprint(showerror, e), 120)))")
-        end
-    end
-    return nothing
-end
-
     register_bin_emit!(nb.report.id, frame -> (try; _ws_broadcast_bin!(nb, frame); catch; end))   # slate_emit_bin → forward the raw binary frame over the page WebSocket as-is
     register_celldone!(nb.report.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
     register_cleanup_cells!(nb.report.id, ids -> (try; _cleanup_deleted_cells(nb, ids); catch; end))   # deleted-cell slate_on_cleanup teardown
@@ -613,6 +636,7 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
         _drain!(nb)                                  # run everything + WAIT, so `hydrating` stays up for it
         lock(nb.lock) do
             delete!(nb.report.meta, "hydrating")
+            delete!(nb.report.meta, "hydratingKind")
             nb.version += 1
         end
         _save_preview!(nb; force = true)             # freshly-run state → next reopen's interim preview
@@ -622,6 +646,7 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
         lock(nb.lock) do
             nb.report.meta["hydrate_error"] = sprint(showerror, e)
             delete!(nb.report.meta, "hydrating")
+            delete!(nb.report.meta, "hydratingKind")
             nb.version += 1
         end
         pending isa PendingKernel && pending.real === nothing && pending.err === nothing &&
@@ -1432,18 +1457,58 @@ _alloc_wait_s() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_ALLOC_WAIT",
 const _PLACING = Set{String}()
 const _PLACING_LOCK = ReentrantLock()
 
-function _place_in_background!(name::AbstractString)
+# The cells that were waiting on this region: mark them stale so the next drain picks them up.
+# Every ERRORED cell pinned to it, not just the ones whose message mentions the queue — a cell that
+# failed for its own reasons simply fails again, which is cheaper than matching on error text that
+# is free to be reworded.
+function _restale_region_cells!(nb::LiveNotebook, name::AbstractString)
+    n = 0
+    lock(nb.lock) do
+        waiting = String[c.id for c in nb.report.cells
+                         if _cell_region(c) == name && c.state == ERRORED]
+        isempty(waiting) && return
+        # …and everything downstream of them that ALSO failed. A cell reading a value from this
+        # region failed for the same missing node, and recovering only the pinned cell would leave
+        # the notebook half-resolved — the reader still red, needing a hand it should not need.
+        blast = ReportEngine.dependents_of(nb.report, waiting)
+        for c in nb.report.cells
+            (c.id in blast && c.state == ERRORED) || continue
+            ReportEngine.restale!(c) && (n += 1)
+        end
+        n > 0 && (nb.version += 1)
+    end
+    n > 0 && (try; _broadcast(nb, string(nb.version)); catch; end)
+    return n
+end
+
+function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Nothing} = nothing)
     lock(_PLACING_LOCK) do
         String(name) in _PLACING && return false
         push!(_PLACING, String(name)); true
     end || return nothing
     Threads.@spawn try
         r = ReportEngine.region_get(name)
-        r === nothing || ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
+        if r !== nothing
+            if nb !== nothing
+                try; _broadcast(nb, "bringup:region '$name': queued for a node on $(r.host)…"); catch; end
+                try; _workers_push!(nb); catch; end   # the pill says "queued" NOW, not once it lands
+            end
+            ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
+            # Queue waits are measured in minutes on a real cluster, so the cell that asked must not
+            # be left saying "run me again" — nobody should have to poll a notebook by hand. The
+            # node landing is the event; re-arm the runner and the waiting cells run themselves.
+            if nb !== nothing && ReportEngine.region_host(r) != r.host
+                ReportEngine._rlog("region[$name]: node granted ($(ReportEngine.region_host(r))) — re-running the cells that were waiting")
+                _restale_region_cells!(nb, String(name))
+                _ensure_runner!(nb)
+            end
+        end
     catch e
         ReportEngine._rlog("region[$name]: placement failed — $(first(sprint(showerror, e), 160))")
+        nb === nothing || (try; _broadcast(nb, "bringup:region '$name': could not get a node — $(first(sprint(showerror, e), 120))"); catch; end)
     finally
         lock(_PLACING_LOCK) do; delete!(_PLACING, String(name)); end
+        nb === nothing || (try; _workers_push!(nb); catch; end)   # …and stops saying it afterwards
     end
     return nothing
 end
@@ -1491,9 +1556,12 @@ function _region_kernel!(nb::LiveNotebook, name::String)
                 # that only a person can supply — which background work is not allowed to ask for.
                 # So say which of the two is missing, because they need different things from you.
                 ReportEngine.Sweep.connected(r.host) ||
-                    error("region '$name': not connected to $(r.host) yet — log in to it, then run this again")
-                _place_in_background!(name)
-                error("region '$name': asking $(r.host) for a node. Run the cell again once it has one.")
+                    error("region '$name': not signed in to $(r.host) — press 🔑 Sign in, then run this again")
+                _place_in_background!(name, nb)
+                # A queue wait is minutes on a busy cluster, so this is not a "try again" — the
+                # placement task re-runs this cell itself when the scheduler grants a node.
+                error("region '$name': queued for a node on $(r.host) — this cell runs itself when " *
+                      "the scheduler grants one.")
             end
         end
         target = ReportEngine._region_target(r; origin_env = origin_env, host = host)   # transport/datadir/region from the def; env = the notebook's
@@ -2446,12 +2514,29 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
         _broadcast_progress(nb, cell)
     end
     try; _workers_push!(nb); catch; end   # pill appears NOW as "starting", not after the run completes
+    # Narrate it. A cold region installs the notebook's whole environment on the far side and
+    # precompiles it — minutes during which a spinning cell is the only sign of life. The bring-up
+    # lines go out through `_bringup_broadcast`; the banner that renders them keys off `hydrating`,
+    # so set it here for the duration. `remote` is the kind that says where the work is.
+    narrating = lock(nb.lock) do
+        already = get(nb.report.meta, "hydrating", false) === true
+        already || (nb.report.meta["hydrating"] = true;
+                    nb.report.meta["hydratingKind"] = "remote")
+        !already
+    end
+    try; _broadcast(nb, "bringup:starting a worker for region '$side' on $host"); catch; end
+    stop_narrating = () -> narrating && lock(nb.lock) do
+        delete!(nb.report.meta, "hydrating"); delete!(nb.report.meta, "hydratingKind")
+        try; _broadcast(nb, string(nb.version)); catch; end
+    end
     try
         ReportEngine.prepare!(kernel, nb.report)
         _prime_namespace!(nb, kernel, side)
+        stop_narrating()
         try; _workers_push!(nb); catch; end   # connected → pill flips out of "starting"; telemetry takes over
         return true
     catch e
+        stop_narrating()
         ReportEngine._rlog("region: prime before $(cell.id) on $host failed: " *
                            first(sprint(showerror, e), 160))
         # The region worker couldn't come up — surface it AS the cell's error and STOP. Running on the
@@ -2469,7 +2554,20 @@ end
 function _eval_one!(nb::LiveNotebook, cell::Cell)
     # Region dispatch: the `region=` tag decides the kernel; a mutation auto-follows its data (see
     # _region_route). Markdown honors its tag too — its `$(…)` interpolation runs on that region's worker.
-    kernel, side = _region_route(nb, cell)
+    #
+    # Having nowhere to run is THIS CELL's error, not the pass's. Thrown, it fails the whole drain —
+    # the cell stays stale, the runner re-arms until it gives up, and anything waiting on the drain
+    # (the open-time banner) waits for a run that never finishes. A region on a cluster nobody has
+    # signed in to is the ordinary way to reach this, and it reads as one red cell saying so.
+    kernel, side = try
+        _region_route(nb, cell)
+    catch e
+        lock(nb.lock) do
+            ReportEngine.mark_errored!(cell, first(sprint(showerror, e), 300))
+            _broadcast_progress(nb, cell)
+        end
+        return nothing
+    end
     if cell.kind == MARKDOWN
         # Tagged markdown interpolates on its region (bring the kernel up first, like a code cell); an
         # untagged md (side=="") stays on main. Presync pulls any cross-boundary names it interpolates.

@@ -2513,26 +2513,61 @@ function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{S
     end
 end
 
-# ── ssh prompts from a worker ────────────────────────────────────────────────────────────────
-# A cell reading a cluster store authenticates from HERE, and there is no browser attached to this
-# process. So the prompt goes out on the emit stream the hub already reads, and the answer comes
-# back as a tool call — the two directions that exist between these processes anyway.
-function __slate_sshauth_answer(id::String, text::String; cancel::Bool = false)
-    cancel ? Sweep.SshAuth.cancel!(id) : Sweep.SshAuth.answer!(id, text)
+# ── reaching a cluster from a worker ─────────────────────────────────────────────────────────
+# The hub holds the ssh sessions, so a cell that touches a cluster asks the hub to do it. The
+# request goes out on the emit stream the hub already reads and the result comes back as a tool
+# call — the two directions that exist between these processes anyway.
+#
+# The point is one login per cluster per MACHINE. A worker with its own session would mean a second
+# second-factor for the same cluster, and a sweep and a region on the same host authenticated
+# separately — which is how logging in from a notebook used to leave regions locked out.
+function __slate_sshop_reply(id::String, b64::String)
+    val = try
+        Serialization.deserialize(IOBuffer(Base64.base64decode(b64)))
+    catch e
+        (; error = "could not read the hub's reply: " * first(sprint(showerror, e), 120))
+    end
+    Sweep.deliver!(id, val)
     return (; ok = true)
 end
 
-function _install_sshauth_relay!()
-    Sweep.SshAuth.set_answerer!() do host, prompt, echo
-        id = string("w", rand(UInt32); base = 16)
-        try
-            KaimonGate._publish_stream("slate_emit", Sweep.SshAuth.RELAY_CHANNEL * "\x1f" *
-                Base64.base64encode(Serialization.serialize,
-                    (id = id, host = String(host), prompt = String(prompt), echo = echo)))
-        catch
-            return nothing            # no hub listening ⇒ nobody can answer
+# How long to wait on the hub, by operation. A login is bounded by a person finding their phone;
+# everything else is bounded by the cluster. Both are generous, because the alternative to waiting
+# is failing a cell that would have worked.
+_sshop_timeout(op::Symbol) = op === :connect ? 300.0 : 180.0
+
+# "Is this host connected?" is asked on every sweep reconcile and every card poll, and the answer
+# changes only when someone logs in or out. Caching it briefly keeps a polling notebook from
+# spending a round trip per tick; anything that CHANGES a session clears it, so the staleness only
+# ever lasts a beat and never outlives an action.
+const _CONN_CACHE = Dict{String,Tuple{Float64,Bool}}()
+const _CONN_LOCK = ReentrantLock()
+const _CONN_TTL = 2.0
+
+function _install_sshop_delegate!()
+    Sweep.set_delegate!() do op, args
+        if op === :connected
+            hit = lock(_CONN_LOCK) do; get(_CONN_CACHE, args.host, nothing); end
+            hit !== nothing && time() - hit[1] < _CONN_TTL && return hit[2]
+        elseif op === :connect || op === :disconnect
+            lock(_CONN_LOCK) do; delete!(_CONN_CACHE, args.host); end
         end
-        return Sweep.SshAuth.await(id)
+        id = "o" * string(rand(UInt64); base = 16)
+        try
+            KaimonGate._publish_stream("slate_emit", Sweep.OP_CHANNEL * "\x1f" *
+                Base64.base64encode(Serialization.serialize,
+                    (id = id, op = String(op), args = args)))
+        catch e
+            @warn "slate: could not reach the hub to run a cluster operation" op exception = e
+            return nothing
+        end
+        r = Sweep.await_op(id; timeout = _sshop_timeout(op))
+        # The hub reports a failure as a value rather than by throwing across the gate, so raise it
+        # here — a cell asking for a cluster should fail with the reason, not with `nothing`.
+        (r isa NamedTuple && haskey(r, :error)) && error(String(r.error))
+        op === :connected && r isa Bool &&
+            lock(_CONN_LOCK) do; _CONN_CACHE[args.host] = (time(), r); end
+        return r
     end
     return nothing
 end
@@ -2548,7 +2583,7 @@ function tools()
         KaimonGate.GateTool("__slate_cancel_cells", __slate_cancel_cells),
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
         KaimonGate.GateTool("__slate_call", __slate_call),
-        KaimonGate.GateTool("__slate_sshauth_answer", __slate_sshauth_answer),
+        KaimonGate.GateTool("__slate_sshop_reply", __slate_sshop_reply),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_cleanup_cells", __slate_cleanup_cells),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
@@ -2939,7 +2974,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
     # key — proper mutual auth. Local + :ssh_tunnel workers leave them off (loopback / SSH-encrypted).
     # A cluster prompt raised in here has to reach the hub's dialog; nothing in this process has one.
-    try; _install_sshauth_relay!(); catch e; @warn "slate: ssh prompt relay install failed" exception = e; end
+    try; _install_sshop_delegate!(); catch e; @warn "slate: cluster delegate install failed" exception = e; end
     _blog("start(): entering KaimonGate.serve")
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,

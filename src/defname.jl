@@ -83,7 +83,7 @@ end
 #
 # By DEFINITION BODY, not file bytes: reformatting or a comment must not invalidate anything. That
 # is merely nice for the memo cache and important for a cluster, where a spurious change costs an
-# rsync, an instantiate and a precompile across the whole allocation.
+# copy, an instantiate and a precompile across the whole allocation.
 #
 # HOST-PORTABLE: a file is keyed by its path RELATIVE to the src root it was found under, never the
 # absolute path — the same tree lives at /Users/… locally and elsewhere on a compute node, and an

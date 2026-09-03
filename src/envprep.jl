@@ -3,7 +3,7 @@
 # used by BOTH the local path (worker.jl `_seed_notebook_env!`; the hub's staleness/rebuild in
 # NotebookServer) and the remote provisioner (remote.jl). Pure TOML/file ops — no Pkg resolve, no
 # transport — so it `include`s into ReportEngine AND the standalone SlateWorker alike. The transports
-# differ (local filesystem vs ssh/rsync); THIS is the policy they share:
+# differ (local filesystem vs an authenticated ssh session); THIS is the policy they share:
 #   • seed a fork from its parent (deps/compat/sources + the Manifest as the resolution baseline),
 #   • rewrite dev/path deps to ABSOLUTE paths (a fork lives in a scratch dir, so a parent's
 #     `path="../lib/X"` would otherwise dangle — the class of bug that crashed extension notebooks

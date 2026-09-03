@@ -31,9 +31,9 @@ const _PENDING = Dict{String,Prompt}()
 const _LOCK = ReentrantLock()
 const _SEQ = Ref(0)
 
-# Somewhere other than a browser to answer from: a terminal front end, a test, or — in a worker —
-# the hub, which is the process with a browser attached. Set, it takes every prompt and no dialog is
-# raised here.
+# Somewhere other than a browser to answer from: a terminal front end, or a test. Set, it takes
+# every prompt and no dialog is raised here. Prompts only ever arise in the HUB — the process with a
+# browser attached — because that is where the sessions live.
 const _ANSWERER = Ref{Any}(nothing)
 
 "How long a prompt waits for an answer. Long enough to reach for a phone, short enough that an
@@ -43,30 +43,23 @@ const TIMEOUT = 120.0
 "Route prompts to `f(host, prompt, echo) -> String | nothing` instead of a notebook dialog."
 set_answerer!(f) = (_ANSWERER[] = f; nothing)
 
-"The channel a worker publishes a prompt on, and the tool the hub answers it with."
-const RELAY_CHANNEL = "__slate_sshauth"
+"Whether something in this process can answer a prompt without a dialog of its own."
+has_answerer() = _ANSWERER[] !== nothing
 
-"""
-    await(id; timeout = TIMEOUT) -> String | nothing
+# Answering the last prompt is not the end of the story: the server still has to accept it, and on a
+# second factor that is exactly the part that can go wrong. Without this the dialog closes on the
+# last keystroke and you find out whether you are signed in by trying something.
+const _REPORTER = Ref{Any}(nothing)
 
-Wait for `answer!(id, …)` on a prompt raised somewhere else — a worker publishing to the hub, which
-owns the dialog. `nothing` on cancel or timeout.
-"""
-function await(id::AbstractString; timeout::Real = TIMEOUT)
-    p = lock(_LOCK) do
-        p = Prompt(String(id), "", "", false, time(), Channel{Union{String,Nothing}}(1))
-        _PENDING[p.id] = p
-        p
-    end
-    timer = Timer(_ -> (isopen(p.reply) && put!(p.reply, nothing)), timeout)
-    try
-        return take!(p.reply)
-    catch
-        return nothing
-    finally
-        close(timer)
-        lock(_LOCK) do; delete!(_PENDING, p.id); end
-    end
+"Route login outcomes to `f(host, ok::Bool, error::String)` — a worker relays them, a hub shows them."
+set_reporter!(f) = (_REPORTER[] = f; nothing)
+
+"Say how a login ended. Best-effort: nobody watching is not an error."
+function report!(host::AbstractString, ok::Bool, err::AbstractString = "")
+    f = _REPORTER[]
+    f === nothing && return nothing
+    try; f(String(host), ok, String(err)); catch; end
+    return nothing
 end
 
 """

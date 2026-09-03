@@ -119,6 +119,55 @@ const RE = KaimonSlate.ReportEngine
         end
     end
 
+    @testset "the worker payload imports only stdlibs" begin
+        # A worker loads these files in the NOTEBOOK's project, where the only packages guaranteed
+        # present are stdlibs. An `import` of a KaimonSlate dependency here takes EVERY worker down
+        # at boot — and the rest of this suite cannot see it, because tests run in KaimonSlate's own
+        # project, where that package resolves perfectly well. So check it by reading the source.
+        src = dirname(pathof(KaimonSlate))
+        # Stdlibs, plus the two packages the boot script provisions into the worker's own
+        # `worker_infra` env — those are Slate's to guarantee, unlike a dependency of the hub.
+        allowed = Set(readdir(Sys.STDLIB)) ∪ Set(["Base", "Core", "Main",
+                                                  "KaimonGate", "SlateExtensionsBase"])
+        # PARSE rather than grep: `using CairoMakie` in a docstring and `using MyPkg` in a `@sweep`
+        # example are not imports, and an import inside a `try` is guarded on purpose.
+        function toplevel_imports(ex, out = String[])
+            ex isa Expr || return out
+            if ex.head in (:import, :using)
+                for a in ex.args
+                    a isa Expr || continue
+                    # `import A`, `using A: x`, `import ..A` — the first symbol is the package.
+                    parts = a.head === :(:) ? a.args[1].args : a.args
+                    isempty(parts) && continue
+                    parts[1] isa Symbol && push!(out, String(parts[1]))
+                end
+            elseif ex.head in (:toplevel, :block, :module)
+                for a in ex.args; toplevel_imports(a, out); end
+            end
+            return out
+        end
+        seen, queue, offenders = Set{String}(), ["worker.jl"], String[]
+        while !isempty(queue)
+            f = popfirst!(queue)
+            (f in seen || !isfile(joinpath(src, f))) && continue
+            push!(seen, f)
+            text = read(joinpath(src, f), String)
+            for m in eachmatch(r"include\(\s*(?:@__MODULE__\s*,\s*)?joinpath\(@__DIR__,\s*\"([^\"]+\.jl)\"", text)
+                push!(queue, String(m.captures[1]))
+            end
+            parsed = try; Meta.parseall(text); catch; nothing; end
+            parsed === nothing && continue
+            for pkg in toplevel_imports(parsed)
+                pkg in allowed && continue
+                push!(offenders, "$f imports $pkg")
+            end
+        end
+        @test length(seen) > 10                          # the walk actually found the payload
+        @test "remotestore.jl" in seen                   # …including the transport layer
+        isempty(offenders) || @info "worker payload non-stdlib imports" offenders
+        @test isempty(offenders)
+    end
+
     @testset "every cache path resolves through SlateHome" begin
         # These live in different modules, and a nested one inherits no imports — so a path that
         # compiles can still throw at the first call. Several are reached only from a code path

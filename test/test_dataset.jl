@@ -377,9 +377,107 @@ const MS = RE.MemoStore
         el = time() - t0
         @test !any(oks)                             # none of them can work…
         @test el < 10                               # …and 24 of them did not touch the network
-        @test occursin("no connection", last(S.run_there(dead, "true")))
-        @test !S.pull_meta!(S.RemoteStore(dead, "/x"))   # the rsync paths refuse too
+        # The message has to name the host and say what to DO about it: "not connected" alone leaves
+        # the reader with a red cell and no idea that logging in is a thing they do.
+        let msg = last(S.run_there(dead, "true"))
+            @test occursin("not signed in", msg) && occursin(dead, msg) && occursin("Sign in", msg)
+        end
+        @test !S.pull_meta!(S.RemoteStore(dead, "/x"))   # the metadata paths refuse too
         @test !S.push_meta!(S.RemoteStore(dead, "/x"))
+
+        # An ANSWERER is the whole dialog path for a process with no browser. If it throws, the
+        # prompt never leaves and the login just fails — so pin both halves of the contract: an id
+        # it can actually mint, and a throw surfaced as a fault rather than as a cancellation.
+        @test S.SshAuth.has_answerer() == false
+        let ids = Set(("w" * string(rand(UInt32); base = 16) for _ in 1:50))
+            @test length(ids) == 50 && all(startswith("w"), ids)
+        end
+        try
+            S.SshAuth.set_answerer!((h, p, e) -> error("the dialog path is broken"))
+            @test S.SshAuth.has_answerer()
+            # `ask` propagates rather than swallowing — a fault reported as a cancellation is a
+            # dialog that silently never appears.
+            @test_throws ErrorException S.SshAuth.ask("h", "Password:", false; timeout = 1.0)
+            S.SshAuth.set_answerer!((h, p, e) -> "answered-by-relay")
+            @test S.SshAuth.ask("h", "Password:", false; timeout = 1.0) == "answered-by-relay"
+        finally
+            S.SshAuth.set_answerer!(nothing)
+        end
+        @test S.SshAuth.has_answerer() == false
+
+        # Answering the last prompt is not the same as being logged in — the server still has to
+        # accept it. Only a login someone ASKED for reports, because only then is anyone waiting.
+        let seen = Tuple{String,Bool,String}[]
+            try
+                S.SshAuth.set_reporter!((h, ok, err) -> push!(seen, (h, ok, err)))
+                @test !S.connect!(dead; interactive = true)
+                @test length(seen) == 1 && seen[1][1] == dead && seen[1][2] == false
+                @test !isempty(seen[1][3])            # a failure carries the server's own words
+                empty!(seen)
+                S.connect!(dead)                      # a poller failing is not news
+                @test isempty(seen)
+                @test S.connect!("")                  # a local target has nothing to report either
+                @test isempty(seen)
+                # A reporter that throws must not take the login down with it.
+                S.SshAuth.set_reporter!((h, ok, err) -> error("the browser went away"))
+                @test !S.connect!(dead; interactive = true)
+            finally
+                S.SshAuth.set_reporter!(nothing)
+            end
+        end
+
+        # An empty host means "here", which makes the archive half of a transfer testable without a
+        # cluster. `excludes` is the part worth pinning: shelling out to `tar` made this
+        # platform-dependent (bsdtar rejects an option before the bundled mode that GNU tar
+        # accepts), and every region and every provision filters something.
+        let src = mktempdir(), dst = mktempdir()
+            write(joinpath(src, "keep.txt"), "keep")
+            write(joinpath(src, "drop.cov"), "drop")
+            mkpath(joinpath(src, ".git")); write(joinpath(src, ".git", "cfg"), "x")
+            @test S.put_dir("", src, dst; excludes = ["*.cov", ".git"])
+            @test isfile(joinpath(dst, "keep.txt"))
+            @test !ispath(joinpath(dst, "drop.cov")) && !ispath(joinpath(dst, ".git"))
+            @test S.put_files("", [joinpath(src, "keep.txt")], joinpath(dst, "flat"))
+            @test isfile(joinpath(dst, "flat", "keep.txt"))
+        end
+
+        # The HUB owns the ssh sessions and a worker asks it, so a cluster costs one login per
+        # machine rather than one per process. Assert that every way of reaching a cluster goes
+        # through that one door — a sweep running in a worker and a region placed by the hub must
+        # land on the SAME session.
+        let calls = Tuple{Symbol,String}[]
+            try
+                S.set_delegate!() do op, a
+                    push!(calls, (op, String(a.host)))
+                    op === :connected  ? true :
+                    op === :connect    ? true :
+                    op === :disconnect ? true :
+                    op === :exec       ? (true, "ran on the hub") :
+                    op === :io         ? (true, Vector{UInt8}("bytes from the hub")) :
+                    op === :forward    ? (true, "") :
+                    op === :unforward  ? true : error("unexpected op :$op")
+                end
+                @test S.has_delegate()
+                @test S.connected("h") && S.connect!("h") && S.disconnect!("h")
+                @test S.run_there("h", "hostname") == (true, "ran on the hub")
+                @test last(S.run_io("h", "cat", nothing)) == Vector{UInt8}("bytes from the hub")
+                @test first(S.forward!("h", 1234, "node7", 9100))
+                S.unforward!("h", 1234)
+                @test Set(first.(calls)) ==
+                      Set([:connected, :connect, :disconnect, :exec, :io, :forward, :unforward])
+                @test all(c -> c[2] == "h", calls)
+                # A local target is still local: delegating "run it here" to another process would
+                # run it on the wrong machine.
+                empty!(calls)
+                @test first(S.run_there("", "true")) && isempty(calls)
+                # A delegate that fails must not be swallowed into a quiet "not connected".
+                S.set_delegate!((op, a) -> error("the hub could not reach it"))
+                @test_throws ErrorException S.run_there("h", "hostname")
+            finally
+                S.set_delegate!(nothing)
+            end
+            @test !S.has_delegate()
+        end
 
         # A prompt is answerable from somewhere other than a browser — a terminal front end, a
         # test, or the hub answering for a worker. With one set, no dialog is raised.
