@@ -41,7 +41,17 @@ import SHA as _SHA
 # Slate's LOCAL cache root — respects XDG_CACHE_HOME (append "kaimonslate" under it rather than
 # using it verbatim; same rationale as Kaimon's cache_dir). The REMOTE layout stays literal
 # ".cache/kaimonslate" ($HOME-relative over ssh) — the remote's XDG env isn't cheaply knowable.
-_slate_cache_dir() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate")
+# Cache-home resolution mirrors SlateHome.cache_home() — and the worker's own `_memo_dir`, which is
+# the one that matters: the hub reads the local CAS that its WORKER wrote (see `push_blob!`), so the
+# two resolving differently means the hub looks for a blob in a store nothing put it in. Honouring
+# only XDG_CACHE_HOME is invisible while everything lands on `~/.cache/kaimonslate`, and splits the
+# moment a home is pinned — which a standalone/app run does by design. KEEP IN SYNC with
+# slate_home.jl and worker.jl's `_memo_dir`.
+function _slate_cache_dir()
+    c = get(ENV, "KAIMONSLATE_CACHE_HOME", "");  isempty(c) || return abspath(expanduser(c))
+    kh = get(ENV, "KAIMONSLATE_HOME", "");       isempty(kh) || return joinpath(abspath(expanduser(kh)), "cache")
+    joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate")
+end
 
 const _REMOTE_LOG = joinpath(_slate_cache_dir(), "remote.log")
 # Resolved at write time so a test (or a sandboxed run) can redirect the durable log to a throwaway path
@@ -285,10 +295,33 @@ end
 # measured adopt-latency cost). ServerAlive here so WHOEVER wins master election still notices a dead
 # link and exits (its slaves then reconnect) — the liveness the supervised TUNNEL used to get from its
 # own dedicated connection, now provided by the shared master. Kill switch: KAIMONSLATE_NO_SSH_MUX=1.
+#
+# A ControlPath is a UNIX SOCKET, so it must fit `sun_path` — 104 bytes on macOS/BSD, 108 on Linux —
+# and ssh appends a `.<random>` suffix while creating it, so the budget for the directory is smaller
+# still. `~/.cache` clears that comfortably, but a RELOCATED cache need not: an exported app puts its
+# cache beside itself, and a deep folder pushes the socket over the limit. ssh then refuses the
+# connection outright ("ControlPath too long"), which surfaces as the host being unreachable even
+# though plain ssh to it works. So the path is measured, and a directory that cannot hold a socket is
+# not used: a short private one instead, and unmuxed as the floor (slower, always correct — the same
+# state `KAIMONSLATE_NO_SSH_MUX=1` selects).
+const _SUN_PATH_MAX = Sys.islinux() ? 108 : 104
+_mux_fits(dir) = length(joinpath(dir, "0"^40)) + 20 <= _SUN_PATH_MAX   # 20 ≈ ssh's temp suffix
+function _ssh_mux_dir()
+    # `tempdir()` is NOT a short path on macOS (`/var/folders/…` is ~50 bytes before anything is
+    # added), so the fallback is `/tmp` by name — the one place on a unix box that is reliably short.
+    for d in (joinpath(_slate_cache_dir(), "mux"),
+              Sys.isunix() ? joinpath("/tmp", "ks-mux-$(_uid_tag())") : joinpath(tempdir(), "ks-mux"))
+        _mux_fits(d) || continue
+        try; mkpath(d); chmod(d, 0o700); catch; continue; end   # 0700: a shared socket dir is per-user
+        return d
+    end
+    return ""
+end
+_uid_tag() = string(try; parse(Int, readchomp(`id -u`)); catch; hash(homedir()) % 100000; end)
 function _ssh_mux_opts()
     get(ENV, "KAIMONSLATE_NO_SSH_MUX", "") == "1" && return String[]
-    d = joinpath(_slate_cache_dir(), "mux")
-    try; mkpath(d); catch; return String[]; end
+    d = _ssh_mux_dir()
+    isempty(d) && return String[]
     return ["-o", "ControlMaster=auto", "-o", "ControlPath=$d/%C", "-o", "ControlPersist=$(_ssh_control_persist())",
             "-o", "ServerAliveInterval=$(_tunnel_alive_interval())", "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"]
 end

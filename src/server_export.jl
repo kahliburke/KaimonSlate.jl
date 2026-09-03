@@ -3397,6 +3397,19 @@ $(app ? _run_app_help(apptitle, port > 0 ? port : _APP_DEFAULT_PORT) : "")
                                                joinpath(@__DIR__, ".cache")
             end
         end
+        # A notebook can place cells on a REGION — a named compute target. The name travels in the
+        # notebook, the host does not, and the isolated home above has no registry, so seed it from
+        # the definitions carried beside this launcher. Only when the home has none of its own, so an
+        # operator who configures a region there (pointing the app at their own machine) always wins.
+        let src = joinpath(@__DIR__, "regions.json")
+            cfg = get(ENV, "KAIMONSLATE_CONFIG_HOME", "")
+            isempty(cfg) && (h = get(ENV, "KAIMONSLATE_HOME", ""); cfg = isempty(h) ? "" : joinpath(h, "config"))
+            if isfile(src) && !isempty(cfg) && !isfile(joinpath(cfg, "regions.json"))
+                try; mkpath(cfg); cp(src, joinpath(cfg, "regions.json")); catch e
+                    println("! could not seed region definitions: ", e)
+                end
+            end
+        end
     end
     $(app ? _run_app_bind(port) :
             "port = something(tryparse(Int, get(ENV, \"SLATE_PORT\", \"\")), free_port())\n    host = \"127.0.0.1\"")
@@ -3833,7 +3846,36 @@ function export_app(nb::LiveNotebook, dir::AbstractString; appdefaults::Abstract
     # exist — the whole point is that the folder runs without knowing what's inside it.
     Sys.isunix() && (try; chmod(sh, 0o755); catch; end)
     write(joinpath(d, "README.md"), _app_readme(nb, bname, Int(port)))
+    _write_app_regions(nb, d)
     return d
+end
+
+# The region definitions this notebook's cells actually reference, written beside the launcher for
+# `run.jl` to seed into the app's own config home. Without them a `region=` cell has a name and no
+# host: the app can't place it and the cell never runs.
+#
+# Only the regions the notebook USES, and only ones that resolve here — an app carries what it needs
+# and nothing else. Note this puts the host in the folder: an app that runs cells elsewhere names
+# where, so `export_app` says so rather than embedding it silently.
+function _write_app_regions(nb::LiveNotebook, dir::AbstractString)
+    names = String[]
+    for d in (try; _regions_json(nb); catch; Any[]; end)
+        get(d, "defined", false) === true && push!(names, String(get(d, "name", "")))
+    end
+    used = unique!(filter(!isempty, names))
+    isempty(used) && return nothing
+    defs = Any[]
+    for n in used
+        r = ReportEngine.region_get(n)
+        r === nothing && continue
+        push!(defs, ReportEngine._region_to_dict(r))
+    end
+    isempty(defs) && return nothing
+    write(joinpath(dir, "regions.json"), JSON.json(defs, 2))
+    hosts = unique!(String[String(get(d, "host", "")) for d in defs])
+    @info "slate: the app carries $(length(defs)) region definition(s) so its region cells can run — \
+           this names the host(s) in the exported folder" regions = used hosts = filter(!isempty, hosts)
+    return nothing
 end
 
 # A bundle ships the project's git-TRACKED files, so a project with no commits has NOTHING to

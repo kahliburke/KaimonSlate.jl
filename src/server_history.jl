@@ -1226,12 +1226,18 @@ function state_json(nb::LiveNotebook)
     meta["redoLabel"] = redo_label(nb)
     # Other live copies of this same document (see `shared_with`). Normally empty — notably for a
     # notebook you were sent and are opening for the first time, which has no local store to share.
-    let sw = (try; shared_with(nb); catch; String[]; end)
-        if !isempty(sw)
-            meta["sharedWith"] = sw
-            # Where it came from, so the notice can name it rather than just say "a copy exists".
-            let orig = (try; shared_origin(nb); catch; nothing; end)
-                orig === nothing || (meta["sharedFrom"] = orig)
+    #
+    # Never in app mode. `export_app` copies the notebook into the bundle, so an app is ALWAYS a copy
+    # of its source and would always report one — and its reader is not the author, has nothing to
+    # decide, and should not be shown a path from the machine the app was built on.
+    if !app_process()
+        let sw = (try; shared_with(nb); catch; String[]; end)
+            if !isempty(sw)
+                meta["sharedWith"] = sw
+                # Where it came from, so the notice can name it rather than just say "a copy exists".
+                let orig = (try; shared_origin(nb); catch; nothing; end)
+                    orig === nothing || (meta["sharedFrom"] = orig)
+                end
             end
         end
     end

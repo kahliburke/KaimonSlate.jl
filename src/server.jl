@@ -2327,7 +2327,22 @@ end
 function _eval_one!(nb::LiveNotebook, cell::Cell)
     # Region dispatch: the `region=` tag decides the kernel; a mutation auto-follows its data (see
     # _region_route). Markdown honors its tag too — its `$(…)` interpolation runs on that region's worker.
-    kernel, side = _region_route(nb, cell)
+    #
+    # Routing itself can fail — a `region=` tag naming something the registry doesn't define has no
+    # host to reach. That has to land ON the cell: raising here aborts the run before the cell is
+    # even marked, so it (and everything downstream) is left STALE with the reason nowhere the
+    # reader can see it.
+    kernel, side = try
+        _region_route(nb, cell)
+    catch e
+        msg = first(sprint(showerror, e), 300)
+        ReportEngine._rlog("region: cannot route $(cell.id): " * msg)
+        lock(nb.lock) do
+            ReportEngine.mark_errored!(cell, msg)
+            _broadcast_progress(nb, cell)
+        end
+        return nothing
+    end
     if cell.kind == MARKDOWN
         # Tagged markdown interpolates on its region (bring the kernel up first, like a code cell); an
         # untagged md (side=="") stays on main. Presync pulls any cross-boundary names it interpolates.

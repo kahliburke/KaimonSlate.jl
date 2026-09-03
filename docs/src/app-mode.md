@@ -70,6 +70,25 @@ export_app(nb, dir; include = ["assets/spectra"])
 A project with **no commits** has no tracked files at all, so the bundle falls back to a partial copy.
 `export_app` warns when it sees that, because the result looks fine until it is deployed.
 
+### Cells that run on a region
+
+A cell tagged `region=<name>` runs on a named compute target. The tag travels in the notebook, but
+the *definition* — host, transport — lives in your region registry, and an app keeps its own state
+home rather than reading yours. So `export_app` writes the definitions the notebook actually uses
+into a `regions.json` beside the launcher, and `run.jl` seeds them into the app's home on first
+start. Nothing else from your registry travels.
+
+Two things follow, and `export_app` logs the hosts it embedded so neither is a surprise:
+
+- **The host name is in the exported folder.** No keys or credentials travel, but if you hand the
+  app to someone they can read where its region cells run. Untag the cells if that matters.
+- **The app needs to reach that host itself**, over SSH, as whoever runs it. On your own machine
+  that already works. Elsewhere it will not, and the cell reports that it could not be placed
+  rather than appearing to hang.
+
+An operator can point the app somewhere else: define the same region name in the app's own home and
+it is used as-is — seeding only fills a home that has no registry of its own.
+
 ## Presentation defaults
 
 [`app_defaults`](@ref) sets what a visitor sees *before* expressing a preference of their own:

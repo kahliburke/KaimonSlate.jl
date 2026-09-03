@@ -329,6 +329,11 @@ end
 # the worker is the thing that's wedged.
 
 const _HUB_STARTED = Ref(0.0)   # stamped by `start_hub`; 0 until then
+# App mode as a PROCESS fact (`h.app` is the same flag on the hub). For the paths that answer
+# without a hub in hand — `state_json`, which only ever has a notebook — and so that anything
+# addressed at the author is suppressed for an app's visitors.
+const _APP_PROCESS = Ref(false)
+app_process() = _APP_PROCESS[]
 
 _uptime_str(secs::Real) = secs <= 0 ? "—" : begin
     s = round(Int, secs); d, s = divrem(s, 86400); h, s = divrem(s, 3600); m, s = divrem(s, 60)

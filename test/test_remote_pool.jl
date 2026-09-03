@@ -337,3 +337,67 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         end
     end
 end
+
+# A ControlPath is a unix socket, so it has to fit `sun_path` — and ssh appends a temp suffix while
+# creating it. A relocated cache home (an exported app puts its cache beside itself) can push the
+# path past that, and ssh then refuses the connection outright, which reads as the host being
+# unreachable. So the directory is measured before it is offered.
+@testset "ssh mux ControlPath stays inside sun_path" begin
+    limit = Sys.islinux() ? 108 : 104
+    @test RE._SUN_PATH_MAX == limit
+    @test RE._mux_fits("/tmp/ks")                       # short: fine
+    @test !RE._mux_fits("/" * repeat("d", limit))       # obviously over
+
+    # Whatever it picks must fit — including under a cache home deep enough to break the default.
+    deep = joinpath("/Users/someone/devel/Project.jl/dist/an_app_name/.cache")
+    for home in ("", deep)
+        d = isempty(home) ? RE._ssh_mux_dir() : withenv("XDG_CACHE_HOME" => home) do; RE._ssh_mux_dir(); end
+        # "" is the honest answer when nothing fits (unmuxed — slower, still correct).
+        @test isempty(d) || RE._mux_fits(d)
+    end
+    # A deep cache must NOT yield the cache-dir path, and the opts either carry a fitting path or
+    # none at all — never a path ssh will reject.
+    withenv("XDG_CACHE_HOME" => deep) do
+        d = RE._ssh_mux_dir()
+        @test !occursin(deep, d)
+        opts = RE._ssh_mux_opts()
+        cp = findfirst(o -> startswith(String(o), "ControlPath="), opts)
+        cp === nothing || @test length(replace(String(opts[cp]), "ControlPath=" => "")) + 40 + 20 <= limit
+    end
+    # The documented kill switch still wins outright.
+    withenv("KAIMONSLATE_NO_SSH_MUX" => "1") do; @test isempty(RE._ssh_mux_opts()); end
+end
+
+# The hub reads the local CAS that its WORKER wrote (`push_blob!`), so the two must resolve the same
+# cache home. They agree on `~/.cache/kaimonslate` by default, which hides a divergence until a home
+# is pinned — a standalone/app run pins one, and then a boundary transfer looks for a blob in a store
+# nothing wrote to. This pins the precedence against the worker's own copy of it (worker.jl
+# `_memo_dir`), which cannot import this one.
+@testset "hub and worker resolve the same memo store" begin
+    # Verbatim from worker.jl's `_memo_dir`, which inlines the resolver because SlateHome isn't
+    # loaded there. If these drift, a region boundary transfer breaks.
+    function worker_memo()
+        cache = get(ENV, "KAIMONSLATE_CACHE_HOME", ""); home = get(ENV, "KAIMONSLATE_HOME", "")
+        base = !isempty(cache) ? abspath(expanduser(cache)) :
+               !isempty(home)  ? joinpath(abspath(expanduser(home)), "cache") :
+               joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(get(ENV, "HOME", tempdir()), ".cache")), "kaimonslate")
+        joinpath(base, "memo")
+    end
+    hub_memo() = joinpath(RE._slate_cache_dir(), "memo")
+
+    for env in (Dict("KAIMONSLATE_CACHE_HOME" => nothing, "KAIMONSLATE_HOME" => nothing, "XDG_CACHE_HOME" => nothing),
+                Dict("KAIMONSLATE_HOME" => "/tmp/ks-home", "XDG_CACHE_HOME" => "/tmp/other-cache"),  # an app pins both
+                Dict("KAIMONSLATE_CACHE_HOME" => "/tmp/ks-cache", "KAIMONSLATE_HOME" => "/tmp/ks-home"),
+                Dict("XDG_CACHE_HOME" => "/tmp/xdg-only", "KAIMONSLATE_HOME" => nothing))
+        withenv(collect(env)...) do
+            @test hub_memo() == worker_memo()
+        end
+    end
+    # …and the specific precedence, so a future edit to either side has to state its intent.
+    withenv("KAIMONSLATE_CACHE_HOME" => "/tmp/a", "KAIMONSLATE_HOME" => "/tmp/b", "XDG_CACHE_HOME" => "/tmp/c") do
+        @test hub_memo() == "/tmp/a/memo"          # dedicated cache home wins
+    end
+    withenv("KAIMONSLATE_CACHE_HOME" => nothing, "KAIMONSLATE_HOME" => "/tmp/b", "XDG_CACHE_HOME" => "/tmp/c") do
+        @test hub_memo() == "/tmp/b/cache/memo"    # then the HOME shortcut — NOT XDG
+    end
+end
