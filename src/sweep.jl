@@ -163,6 +163,9 @@ cluster's filesystem is reachable from its nodes, not from here. A few KB, so it
 rather than compared first.
 """
 function provision_payload!(host::AbstractString, root_remote::AbstractString)
+    # Say the one thing that is wrong. Wrapped in "could not create <path> on <host>", a missing
+    # sign-in reads as a permissions or filesystem problem on the cluster.
+    connected(host) || error(_offline(host))
     dst = "$(root_remote)/src"
     ok, out = _ssh_run(host, "mkdir -p $(dst)")
     ok || error("could not create $(dst) on $(host): $(strip(out))")
@@ -184,6 +187,7 @@ Returns the environment path as a COMPUTE NODE sees it.
 function provision_remote_env!(host::AbstractString, root_remote::AbstractString,
                                parent::AbstractString; julia::AbstractString = "julia",
                                prologue::AbstractString = "")
+    connected(host) || error(_offline(host))
     isempty(parent) && return joinpath(root_remote, "env")
     # Source-inclusive, for the same reason as `task_env!`: the cluster's copy is made once, so an
     # edit the fingerprint cannot see is an edit the compute nodes never get.
@@ -476,6 +480,10 @@ with_chunk(t::LocalTarget, n) = n === nothing ? t :
 with_chunk(t::SlurmTarget, n) = n === nothing ? t :
     SlurmTarget(t.host, t.root, t.root_remote, t.project, t.payload,
                 t.resources, n, t.account, t.qos, t.prologue, t.parent, t.julia)
+
+"The host a target authenticates to; empty for one that runs here."
+target_host(::LocalTarget) = ""
+target_host(t::SlurmTarget) = t.host
 
 store_root(t::LocalTarget) = t.root
 # The hub plans against the MIRROR for a remote cluster — a local directory holding a copy of the
@@ -1075,6 +1083,11 @@ sync_in!(t::SlurmTarget) = isempty(t.host) ? true : pull_meta!(remote_store(t))
 # find work this one started, and the counts are supposed to outlive the hub that made them. But a
 # card polls this on a timer, so the round trip is worth paying only when something changed. The
 # attempt counts are the signal, because they move on exactly the submissions that went out.
+# Whether this target can be reached at all. A sweep armed against a cluster nobody has signed in to
+# WAITS rather than failing: submitting is the only thing a sign-in gates, and the card already says
+# what is missing. It goes out on the next poll after someone signs in.
+_reachable(t::SweepTarget) = (h = target_host(t); isempty(h) || connected(h))
+
 function reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher; kw...)
     root = store_root(target)
     before = BatchSweep.read_attempts(root)
@@ -1917,7 +1930,7 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # …and it only submits for a sweep that has been ARMED, so a card left open on a sweep nobody
     # asked to run cannot start it.
     armed = BatchSweep.is_armed(root, run)
-    p = advance ? reconcile_and_sync!(target, run, l; submit = armed) :
+    p = advance ? reconcile_and_sync!(target, run, l; submit = armed && _reachable(target)) :
                   BatchSweep.plan(root, run; launcher = l)
     t = BatchSweep.telemetry(root, run; launcher = l, plan = p)
     _ds = display_state(p, armed)
@@ -1947,7 +1960,12 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         "actions" => [Any[a, l] for (a, l) in action_list(p, armed)],
         # Why it stopped. Carried on every poll because a sweep that blocks WHILE being watched
         # must explain itself then, not only if someone happens to re-run the cell afterwards.
-        "why" => _why_html(p))
+        "why" => _signin_html(target) * _why_html(p),
+        # The cluster's host and whether there is a session to it. Without a sign-in the card can
+        # read nothing and submit nothing, and that is worth saying on the card rather than leaving
+        # it to be discovered as a provisioning failure on the next Submit.
+        "host" => target_host(target),
+        "signed_in" => connected(target_host(target)))
     # The data line grows as units land, so it rides the poll too. Off the indices, so a sweep
     # writing terabytes still costs manifest reads to watch.
     ds = _dataset_of(root, params, keys, run, source_of(target))
@@ -2239,6 +2257,17 @@ end
 
 # Why a sweep stopped, and what to do about it. The three ways of stopping short need different
 # things, so they read differently. "" while the sweep is still going.
+# A cluster nobody has signed in to. The card can read nothing and submit nothing until then, so it
+# says so up front rather than letting it surface as a provisioning failure on the next Submit.
+function _signin_html(target::SweepTarget)
+    h = target_host(target)
+    (isempty(h) || connected(h)) && return ""
+    return string("<div style='margin-top:8px;padding:8px;border-radius:6px;",
+                  "background:color-mix(in srgb, var(--amber,#d9a441) 12%, transparent);",
+                  "font-size:12px;color:var(--amber,#d9a441)'>🔒 ", _esc(h),
+                  ": not signed in — press 🔑 Sign in</div>")
+end
+
 function _why_html(p::BatchSweep.Plan)
     box(color, body) = string(
         "<div style='margin-top:8px;padding:8px;border-radius:6px;background:color-mix(in srgb, ",
@@ -2767,7 +2796,8 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # repeatedly, and every one of those must be free — the work starts when someone asks for it,
     # from the card. `submit = true` is for a standalone script, where there is no card to ask from.
     submit && BatchSweep.arm!(root, run)
-    reconcile_and_sync!(target, run, launcher; cap, submit = BatchSweep.is_armed(root, run))
+    reconcile_and_sync!(target, run, launcher; cap,
+                        submit = BatchSweep.is_armed(root, run) && _reachable(target))
     # The card's live channel. Registered here rather than by the author, so a sweep cell needs no
     # wiring to be watchable. `register` is the notebook's `slate_on`; outside a notebook (a
     # standalone run, a test) it is simply absent and the card renders static.
