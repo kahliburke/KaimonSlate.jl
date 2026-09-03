@@ -119,6 +119,22 @@ const RE = KaimonSlate.ReportEngine
         end
     end
 
+    # The home page and a notebook carry different stylesheets, so a class used by a component on
+    # both has to live in the one sheet they share. Pure JS, asserted from node; skips without it.
+    @testset "shared styles reach both pages (node, if available)" begin
+        node = Sys.which("node")
+        if node === nothing
+            @info "node not found — skipping the shared-style assertions"
+            @test true
+        else
+            io = IOBuffer()
+            ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", "shared_styles.mjs"))`;
+                                  stdout = io, stderr = io))
+            ok || print(String(take!(io)))
+            @test ok
+        end
+    end
+
     @testset "the worker payload imports only stdlibs" begin
         # A worker loads these files in the NOTEBOOK's project, where the only packages guaranteed
         # present are stdlibs. An `import` of a KaimonSlate dependency here takes EVERY worker down
