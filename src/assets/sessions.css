@@ -1,6 +1,8 @@
-/* Sign-in panel + topbar padlock (js/sessions.js).
-   Its own file because the panel is mounted on BOTH the home page and a notebook, and those two do
-   not share a stylesheet — the home page carries its own inline one. */
+/* Signing in to a host: the panel and topbar padlock (js/sessions.js) and the prompt dialog
+   (js/sshauth.js).
+   Its own file because both are used on the home page AND in a notebook, and those two do not share
+   a stylesheet — the home page carries its own inline one, and defines none of the theme variables,
+   so every var() here names a fallback. */
 .ssback { position:fixed; inset:0; z-index:78; display:flex; align-items:center;
   justify-content:center; background:rgba(0,0,0,.5); backdrop-filter:blur(2px); }
 .sspanel { width:min(620px,94vw); max-height:80vh; overflow:auto; border:1px solid var(--border, #2a2e40);
@@ -35,3 +37,46 @@
 .ssbtn.ssbar.ssneed { color:#d9a441; border-color:#d9a44166; }   /* waiting for you */
 .ssbtn.ssbar.ssbad  { color:#e88;    border-color:#e8888866; }   /* cannot be reached */
 
+/* ── A cluster asking to be let in ──────────────────────────────────────────────────────────
+   Narrow and centred, and it appears without being asked for — so it says WHICH host wants the
+   answer before it says anything else. A prompt typed into the wrong machine is the mistake this
+   is guarding against. */
+.sshauth-back { position:fixed; inset:0; z-index:80; display:flex; align-items:center;
+  justify-content:center; padding:24px; box-sizing:border-box;
+  background:color-mix(in srgb, var(--bg, #0d1120) 66%, transparent); backdrop-filter:blur(3px); }
+.sshauth { width:min(440px,92vw); border:1px solid var(--border, #2a2e40); border-radius:12px;
+  background:var(--bg2); color:var(--text, #c8cce0); box-shadow:0 20px 60px rgba(0,0,0,.6);
+  font-size:.8rem; overflow:hidden; }
+.sshauth-head { display:flex; align-items:baseline; gap:8px; padding:14px 18px 6px; }
+.sshauth-lock { font-size:1.05rem; }
+/* WHICH factor, loudly. Two prompts that both read "(you@host) …:" and both mask their input are
+   too easy to answer with the other one's answer — and a wrong answer burns a one-time code. */
+.sshauth-kind { color:var(--strong, #d4d8e8); font-size:.95rem; font-weight:600; }
+.sshauth-sub { margin-left:auto; color:var(--dim, #7a82a4); font-size:.72rem;
+  font-family:'Cascadia Code',ui-monospace,monospace; }
+.sshauth-body { padding:4px 18px 14px; }
+.sshauth-hint { color:var(--dim, #7a82a4); font-size:.74rem; margin:0 0 8px; }
+/* ssh's own wording, kept verbatim but demoted below the field: it proves the heading is not a
+   paraphrase, without competing with it. */
+.sshauth-prompt { display:block; margin:8px 0 0; color:var(--dim, #7a82a4); font-size:.68rem; opacity:.75;
+  font-family:'Cascadia Code',ui-monospace,monospace; overflow-wrap:anywhere; line-height:1.45; }
+.sshauth-input { width:100%; box-sizing:border-box; padding:8px 10px; border-radius:7px;
+  border:1px solid var(--border, #2a2e40); background:var(--bg, #0d1120); color:var(--text, #c8cce0);
+  font-family:'Cascadia Code',ui-monospace,monospace; font-size:.82rem; }
+.sshauth-input:focus { outline:none; border-color:var(--accent,#6ea8fe); }
+.sshauth-wait { display:flex; align-items:center; gap:8px; color:var(--dim, #7a82a4); font-size:.76rem;
+  padding:6px 0 2px; }
+.sshauth-spin { width:11px; height:11px; border-radius:50%; border:2px solid var(--border, #2a2e40);
+  border-top-color:var(--dim, #7a82a4); animation:sshauth-spin 0.8s linear infinite; }
+@keyframes sshauth-spin { to { transform:rotate(360deg); } }
+.sshauth-foot { display:flex; align-items:center; gap:8px; padding:11px 18px;
+  border-top:1px solid var(--border, #2a2e40); background:color-mix(in srgb, var(--bg, #0d1120) 40%, transparent); }
+.sshauth-note { flex:1; color:var(--dim, #7a82a4); font-size:.66rem; }
+.sshauth-foot button { padding:5px 13px; border-radius:7px; border:1px solid var(--border, #2a2e40);
+  background:var(--bg, #0d1120); color:var(--text, #c8cce0); font-size:.75rem; cursor:pointer; }
+.sshauth-ok { border-color:var(--accent,#6ea8fe) !important; color:var(--strong, #d4d8e8) !important; }
+.sshauth-foot button:hover { border-color:var(--dim, #7a82a4); }
+/* How the login ended. A failure is something to read, so it keeps the server's own words. */
+.sshauth-good { color:#7fd18f; font-size:.78rem; padding:6px 0 2px; }
+.sshauth-bad { color:#e88; font-size:.78rem; padding:6px 0 2px; line-height:1.45;
+  word-break:break-word; }
