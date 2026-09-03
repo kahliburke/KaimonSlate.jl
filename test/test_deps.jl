@@ -60,6 +60,25 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test ce(tag) == E.EVERYWHERE
         dec = Cell("dc", CODE, "register_op!(:foo)"); push!(dec.flags, :everywhere_declared)
         @test ce(dec) == E.EVERYWHERE
+        # A cell PINNED to a region runs in exactly one place — the opposite of everywhere. `using
+        # Pkg` inside it earns `:import_scaffold` from harvesting that package's exports, and
+        # inferring EVERYWHERE from that stops the cell's DATA ever crossing the boundary: a
+        # downstream local cell then fails with an UndefVarError for a value that computed fine on
+        # the far side. Pinning beats the inferred shape.
+        pin = Cell("pn", CODE, "using Statistics\nrefined = f(landed)")
+        push!(pin.flags, Symbol("region=gpu")); push!(pin.flags, :import_scaffold)
+        @test ce(pin) == E.PURE
+        pinu = Cell("pu2", CODE, "using LinearAlgebra"); infer_bindings!(pinu)
+        push!(pinu.flags, Symbol("region=gpu"))
+        @test ce(pinu) == E.PURE                                           # …a bare `using` too
+        # …but an EXPLICIT everywhere tag still wins: the author wrote that one on purpose.
+        pine = Cell("pe", CODE, "register_op!(:foo)")
+        push!(pine.flags, Symbol("region=gpu")); push!(pine.flags, :everywhere)
+        @test ce(pine) == E.EVERYWHERE
+        # …and pinning does not disturb the handle/non-determinism categories.
+        pinr = Cell("pr", CODE, "db = DuckDB.DB(p)")
+        push!(pinr.flags, Symbol("region=gpu")); push!(pinr.flags, :resource)
+        @test ce(pinr) == E.RESOURCE
     end
 
     @testset "everywhere: author tag round-trips, runtime declaration never does" begin

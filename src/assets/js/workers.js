@@ -159,6 +159,9 @@ function _wpSeverity(w) {
 // The pill/row FACE — the compact status or stat, shared by the top pill and the dropdown rows.
 function _wpFace(w) {
   const st = w.status || (w.connected ? 'ok' : 'connecting');
+  // A server-named state wins: "connecting" is a poor description of a region sitting in a
+  // scheduler queue, and only the server knows which it is.
+  if (w.face && st !== 'ok') return w.face;
   if (st === 'degraded') return '⚠ ' + _wpUnwellShort(w.note);
   if (st === 'disconnected') return 'disconnected';
   const stat = _wpPillStat(_wpLive[w.side || ''] || w.stats);

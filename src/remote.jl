@@ -18,10 +18,10 @@
 #
 # Provisioning is seamless: the remote gets `julia` (assumed on PATH), a KaimonGate worker
 # env (added from the registry — KaimonGate is registered), Slate's worker payload, and the
-# notebook's parent project (Project.toml + /src), all rsync'd and kept in sync so the remote
+# notebook's parent project (Project.toml + /src), all copied over and kept in sync so the remote
 # worker's Revise hot-reloads exactly like local. Package *adds* execute on the remote worker.
 #
-# `import Sockets`, `FileWatching` — stdlib. SSH/rsync are shelled `Cmd` argv (no shell string,
+# `import Sockets`, `FileWatching` — stdlib. SSH rides the session in `SshTransport` (no subprocess,
 # so hostnames/paths can't inject). KaimonGate CURVE bits are reached through the client the
 # hub already uses (`connect_tcp!(…; server_key=…)` does the client-side CURVE itself).
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -145,7 +145,7 @@ const _SEB_DEVELOP = "try; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), 
 # WITHOUT a rebuild, via the `"remote"` object in slate.json (installed at init) → the KAIMONSLATE_<ENV>
 # env var → the default. See `_rcfg` in gate_kernel.jl for the precedence + install mechanism. Values
 # are SECONDS unless noted. slate.json key / env var / default / what it governs:
-#   ssh_connect_timeout     KAIMONSLATE_SSH_CONNECT_TIMEOUT     15    ConnectTimeout for every ssh/scp/rsync op
+#   ssh_connect_timeout     KAIMONSLATE_SSH_CONNECT_TIMEOUT     15    ConnectTimeout for every ssh op
 #   ssh_control_persist     KAIMONSLATE_SSH_CONTROL_PERSIST     600   mux master warm-hold past the last op
 #   tunnel_alive_interval   KAIMONSLATE_TUNNEL_ALIVE_INTERVAL   5     supervised tunnel ServerAliveInterval
 #   tunnel_alive_count      KAIMONSLATE_TUNNEL_ALIVE_COUNT      3     supervised tunnel ServerAliveCountMax
@@ -465,8 +465,9 @@ function _ssh_capture(host, argv::Cmd)
     return (ok, out)
 end
 
-# Send a local dir to the host, as a tar over the shared session.
-function _rsync!(host, localdir::AbstractString, remotedir::AbstractString; delete::Bool = false,
+# Send a local dir to the host as a tar over the shared session. Replaced rather than merged
+# when `delete`; `excludes` are matched per path component (see `Sweep.put_dir`).
+function _send_dir!(host, localdir::AbstractString, remotedir::AbstractString; delete::Bool = false,
                  excludes::Vector{String} = String[])
     ok = _put_dir(host, String(localdir), String(remotedir);
                        delete = delete, excludes = excludes)
@@ -507,15 +508,15 @@ end
 """
     provision_remote!(t::RemoteTarget, parent_project) -> nothing
 
-Idempotent. Ensure the host can run a SlateWorker: (1) rsync Slate's worker payload,
+Idempotent. Ensure the host can run a SlateWorker: (1) send Slate's worker payload,
 (2) materialise a KaimonGate worker env (added from the registry) + Revise, instantiate,
-(3) rsync the notebook's parent project (Project.toml + /src) and instantiate it. Cheap on
-reruns (rsync only ships deltas; the env instantiate is skipped once `.ready` exists).
+(3) send the notebook's parent project (Project.toml + /src) and instantiate it. Cheap on
+reruns (the env instantiate is skipped once `.ready` exists).
 """
 function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     host = t.ssh_host
     _rlog("provision START host=$host transport=$(t.transport) project=$(t.project) parent=$parent_project")
-    # Reachability precheck FIRST — a clear message beats a cryptic "rsync … failed" ten steps in when the
+    # Reachability precheck FIRST — a clear message beats a cryptic transfer failure ten steps in when the
     # host is a typo or your ssh config/key isn't set up.
     _ssh_test(host, `true`) ||
         error("Cannot reach '$host' over SSH — check the hostname and your ~/.ssh/config (key-based auth is required; try `ssh $host` in a terminal).")
@@ -530,17 +531,17 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
         for f in readdir(srcdir)
             (endswith(f, ".jl") && isfile(joinpath(srcdir, f))) && cp(joinpath(srcdir, f), joinpath(tmp, f))
         end
-        _rlog("provision [1/3] rsync worker payload → $host:$_REMOTE_WORKER")
+        _rlog("provision [1/3] send worker payload → $host:$_REMOTE_WORKER")
         _prep_stage("Syncing worker files → $host")
-        _rsync!(host, tmp, _REMOTE_WORKER) || error("provision: rsync worker payload → $host failed")
+        _send_dir!(host, tmp, _REMOTE_WORKER) || error("provision: could not send the worker payload → $host")
     finally
         rm(tmp; recursive = true, force = true)
     end
     # 1b. Ship the unregistered extension SDK's source (a registry add can't find it); the env build
     #     below `Pkg.develop`s it into the worker env so `worker.jl`'s `using SlateExtensionsBase` resolves.
     if isdir(_LOCAL_SEB)
-        _rsync!(host, _LOCAL_SEB, _REMOTE_SEB; excludes = [".git", "*.cov"]) ||
-            _rlog("provision: rsync SlateExtensionsBase → $host failed (worker will miss the extension SDK)")
+        _send_dir!(host, _LOCAL_SEB, _REMOTE_SEB; excludes = [".git", "*.cov"]) ||
+            _rlog("provision: could not send SlateExtensionsBase → $host (worker will miss the extension SDK)")
     else
         _rlog("provision: local SlateExtensionsBase source not found at $_LOCAL_SEB — remote worker may miss it")
     end
@@ -562,7 +563,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     end
     # 3. Environment — reproduce the notebook's LOCAL env on the remote so packages match EXACTLY:
     #    ship the origin project's Project.toml + Manifest.toml (the Manifest pins registry versions and
-    #    records git deps by url+tree-hash → they clone), rsync any dev'd deps' local sources + rewrite
+    #    records git deps by url+tree-hash → they clone), send any dev'd deps' local sources + rewrite
     #    their Manifest paths to the remote copies, then instantiate. Covers registry, GitHub, and dev'd
     #    packages + the project's own /src. (Data files are out of scope for now.)
     # In every case the worker's env (t.project) ends up with KaimonGate + ExpressionExplorer (macro-aware
@@ -578,15 +579,15 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
         if !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml"))
             _replicate_env!(t)                                # notebook env + worker infra
         elseif !isempty(parent_project) && isdir(parent_project)
-            _rlog("provision [3/3] rsync parent project → $host:$(t.project) + instantiate (no resolved origin env)")
-            _rsync!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"]) ||
-                error("provision: rsync parent project → $host failed")
+            _rlog("provision [3/3] send parent project → $host:$(t.project) + instantiate (no resolved origin env)")
+            _send_dir!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"]) ||
+                error("provision: could not send the parent project → $host")
             # Replicate the parent's dev'd path deps (e.g. a `[sources]` local package) into devsrc/ and
             # rewrite Project.toml's `[sources]` paths to point there — else the resolve below dangles on a
             # `path="../dep"` that doesn't exist on the host. The Manifest is intentionally NOT shipped here
-            # (fresh resolve), so only the `[sources]` rewrite bites; `_rsync_dev_deps!` reads the LOCAL
+            # (fresh resolve), so only the `[sources]` rewrite bites; `_send_dev_deps!` reads the LOCAL
             # Manifest to discover which deps are dev'd. Same dev-dep handling as `_replicate_env!`.
-            rewrites = _rsync_dev_deps!(t, parent_project)
+            rewrites = _send_dev_deps!(t, parent_project)
             # Streamed so the (fresh-resolve) instantiate narrates into the bring-up banner. No Manifest is
             # shipped here → no reliable pre-count, so the precompile bar is indeterminate ("k done"), but it
             # still shows live progress + the current package instead of going dark.
@@ -686,7 +687,7 @@ function _sysimage_build_script(projrel::AbstractString, sysreldir::AbstractStri
     P("payload = joinpath(home, raw\"$_REMOTE_WORKER\")")
     # Hash the payload SOURCE only — exclude the transient per-port boot scripts (`worker-<port>.jl`) that
     # `_launch_worker!` writes into this same dir, or the key would drift on every single spawn (new port →
-    # new boot script) and rebuild endlessly. The rsync'd src payload (worker.jl + its includes) is stable.
+    # new boot script) and rebuild endlessly. The shipped src payload (worker.jl + its includes) is stable.
     P("files = sort!(filter(f -> endswith(f, \".jl\") && !occursin(r\"^worker-\\d+\\.jl\$\", basename(f)), readdir(payload; join = true)))")
     P("ctx = SHA.SHA1_CTX()")
     P("for f in files; SHA.update!(ctx, codeunits(basename(f))); SHA.update!(ctx, read(f)); end")
@@ -876,7 +877,7 @@ function _dev_deps(manifest::AbstractString, envdir::AbstractString)
     return out
 end
 
-const _REMOTE_DEVSRC = "$_REMOTE_ROOT/devsrc"   # rsync'd sources for dev'd deps (Pkg.develop targets)
+const _REMOTE_DEVSRC = "$_REMOTE_ROOT/devsrc"   # shipped sources for dev'd deps (Pkg.develop targets)
 
 # Rsync each dev'd (path) dependency of the project at `local_env` into `devsrc/<name>` on the remote and
 # return the (name → $HOME-relative remote path) rewrites — the local checkouts (`Pkg.develop` targets)
@@ -886,7 +887,7 @@ const _REMOTE_DEVSRC = "$_REMOTE_ROOT/devsrc"   # rsync'd sources for dev'd deps
 # dev sources instead of leaving a `[sources]` `path="../dep"` dangling on the remote. `_dev_deps` reads
 # the LOCAL Manifest to discover which deps are dev'd — so this works even when the remote Manifest isn't
 # shipped (a fresh-resolve provision).
-function _rsync_dev_deps!(t::RemoteTarget, local_env::AbstractString)
+function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString)
     host = t.ssh_host
     rewrites = Tuple{String,String}[]
     for (name, lpath) in _dev_deps(joinpath(local_env, "Manifest.toml"), local_env)
@@ -901,8 +902,8 @@ function _rsync_dev_deps!(t::RemoteTarget, local_env::AbstractString)
             continue
         end
         rp = "$_REMOTE_DEVSRC/$name"
-        _rsync!(host, lpath, rp; excludes = [".git", "*.cov"]) ||
-            (_rlog("env: rsync dev dep '$name' → $host failed"); continue)
+        _send_dir!(host, lpath, rp; excludes = [".git", "*.cov"]) ||
+            (_rlog("env: could not send dev dep '$name' → $host"); continue)
         push!(rewrites, (name, rp))
         _rlog("env: dev dep '$name' → $host:$rp")
     end
@@ -910,7 +911,7 @@ function _rsync_dev_deps!(t::RemoteTarget, local_env::AbstractString)
 end
 
 # Remote Julia code that rewrites each dev dep's path — in the Manifest (if present) AND in Project.toml's
-# `[sources]` — to its rsync'd `devsrc` location. Julia ≥1.11's resolver reads the `[sources]` path, so a
+# `[sources]` — to its shipped `devsrc` location. Julia ≥1.11's resolver reads the `[sources]` path, so a
 # dev dep dangles unless BOTH are redirected. Returns "" when there's nothing to rewrite. Shared so the
 # origin-env replication and the parent-project provision rewrite paths identically.
 function _rewrite_devpaths_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}})
@@ -948,22 +949,22 @@ end
 """
     _replicate_env!(t::RemoteTarget) -> nothing
 
-Reproduce `t.origin_env` (the notebook's local project) on the remote at `t.project`: rsync it wholesale
-(Project.toml + Manifest.toml + any /src), rsync each dev'd dep's source into `devsrc/<name>` and rewrite
+Reproduce `t.origin_env` (the notebook's local project) on the remote at `t.project`: send it wholesale
+(Project.toml + Manifest.toml + any /src), send each dev'd dep's source into `devsrc/<name>` and rewrite
 BOTH the Manifest `path` and Project.toml's `[sources]` path (Julia ≥1.11 resolves dev deps from the
 latter) to point there, then instantiate. The Manifest makes registry versions exact and clones git deps
-from their recorded urls; the dev-source rsync makes local checkouts resolve on the host.
+from their recorded urls; sending the dev sources makes local checkouts resolve on the host.
 """
 function _replicate_env!(t::RemoteTarget)
     host = t.ssh_host
     origin = t.origin_env
     _rlog("env: replicating origin env → $host:$(t.project)  (from $origin)")
     # 1. the origin project WHOLESALE, INCLUDING the Manifest (exact versions) + its own /src.
-    _rsync!(host, origin, t.project; excludes = [".git", "*.cov", ".ready"]) ||
-        error("env: rsync origin project → $host failed")
-    # 2. dev'd deps: rsync each local source into devsrc/<name>; collect (name → $HOME-relative remote path).
-    rewrites = _rsync_dev_deps!(t, origin)
-    # 3. rewrite the remote Manifest's dev paths to the rsync'd locations, then instantiate.
+    _send_dir!(host, origin, t.project; excludes = [".git", "*.cov", ".ready"]) ||
+        error("env: could not send the origin project → $host")
+    # 2. dev'd deps: send each local source into devsrc/<name>; collect (name → $HOME-relative remote path).
+    rewrites = _send_dev_deps!(t, origin)
+    # 3. rewrite the remote Manifest's dev paths to the shipped locations, then instantiate.
     projrel = startswith(t.project, "~/") ? t.project[3:end] : t.project
     # STREAM the instantiate/precompile — the long, otherwise-silent step — into the remote log live, so a
     # multi-minute bring-up narrates its progress (resolve, install, Precompiling …) instead of going dark.
@@ -1007,14 +1008,14 @@ end
 """
 const _PREP_DONE_SNIPPET = "try; println(stderr, \"@@SLATE_PREP done\"); flush(stderr); catch; end"
 
-# The remote script: rewrite each dev dep's Manifest `path` to its rsync'd remote source, then instantiate
+# The remote script: rewrite each dev dep's Manifest `path` to its shipped remote source, then instantiate
 # the project. Uses the TOML stdlib on the remote (always available); homedir() resolves the absolute paths.
 function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}}, add_revise::Bool)
     infra = add_revise ?
         "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"Revise\")]" :
         "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\")]"
     io = IOBuffer()
-    # Redirect dev deps' Manifest + [sources] paths to their rsync'd devsrc locations (no-op when empty).
+    # Redirect dev deps' Manifest + [sources] paths to their shipped devsrc locations (no-op when empty).
     rw = _rewrite_devpaths_script(projrel, rewrites)
     isempty(rw) || print(io, rw)
     println(io, "import Pkg")
@@ -1039,9 +1040,9 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
 end
 
 # ── continuous sync ────────────────────────────────────────────────────────────
-# Watch the local parent project (/src + Project.toml) and rsync deltas to the remote on
+# Watch the local parent project (/src + Project.toml) and send changes to the remote on
 # change, so the remote worker's Revise hot-reloads exactly like local. One task per target;
-# coalesced (a burst of saves → one rsync). Package adds happen on the remote worker itself.
+# coalesced (a burst of saves → one transfer). Package adds happen on the remote worker itself.
 mutable struct SyncWatcher
     task::Task
     running::Bool
@@ -1084,7 +1085,7 @@ function _start_syncer!(key::AbstractString, host::AbstractString, localdir::Abs
     return nothing
 end
 
-# One sync task: watch `watchdir`, and on any change rsync `localdir` → `remotedir` (delta-only),
+# One sync task: watch `watchdir`, and on any change send `localdir` → `remotedir`,
 # coalescing bursts. Generic over what's synced so BOTH the parent project (/src hot-reload) and each
 # dev'd path dep (devsrc/<name>, so a local package's edits Revise-reload on the remote) share it.
 function _sync_task(host::AbstractString, localdir::AbstractString, watchdir::AbstractString,
@@ -1093,7 +1094,7 @@ function _sync_task(host::AbstractString, localdir::AbstractString, watchdir::Ab
         try
             FileWatching.watch_folder(watchdir, 2.0)          # block until a change (or 2s tick)
             sleep(0.15)                                        # coalesce a burst of saves
-            _rsync!(host, localdir, remotedir; excludes = excludes)
+            _send_dir!(host, localdir, remotedir; excludes = excludes)
         catch e
             @warn "slate remote: sync loop error" host = host dir = localdir exception = (e,) maxlog = 3
             sleep(1.0)
@@ -1104,7 +1105,7 @@ function _sync_task(host::AbstractString, localdir::AbstractString, watchdir::Ab
 end
 
 # Stop every syncer for this target — the parent-project watcher AND each dev-dep watcher (keyed
-# `<base>:dev:<name>`), so a teardown leaves no orphaned rsync loops.
+# `<base>:dev:<name>`), so a teardown leaves no orphaned sync loops.
 function stop_sync!(t::RemoteTarget)
     base = string(t.ssh_host, ":", t.project)
     lock(_SYNC_LOCK) do
@@ -1124,8 +1125,14 @@ end
 # serves CURVE and allow-lists ONLY the hub's client pubkey (mutual auth: hub pins the server key).
 function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, parent::String,
                                client_pub::String; warm_deps::Bool = false)
-    bind = t.transport === :direct ? "0.0.0.0" : "127.0.0.1"
-    curve = t.transport === :direct                       # tunnel = SSH-encrypted, CURVE redundant
+    # Loopback is right when the forward TERMINATES on this machine. It does not for a worker on an
+    # allocated compute node: the session is on the LOGIN node and its `direct_tcpip` dials
+    # `node:port` from there, so a loopback-only listener answers nobody. A routed worker therefore
+    # binds every interface — and because that puts the port on the cluster's internal network for
+    # the life of the allocation, CURVE comes with it rather than plaintext ZMQ.
+    routed = via(t.ssh_host) !== nothing
+    bind = (t.transport === :direct || routed) ? "0.0.0.0" : "127.0.0.1"
+    curve = t.transport === :direct || routed             # a forward that ends here IS the encryption
     allow = curve ? "String[raw\"$client_pub\"]" : "String[]"
     # ONE environment: the worker runs with --project=<rproj>, which provisioning has populated with the
     # notebook's own packages PLUS KaimonGate + Revise — all resolved together. We deliberately do NOT
@@ -1332,6 +1339,23 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             tunnel = v === nothing ? open_tunnel(host, [(lport, port), (lstream, stream_port)]) :
                      open_tunnel(v.host, [(lport, port), (lstream, stream_port)]; remote = host)
             connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
+            # An UNROUTED forward ends on the machine the worker is on, so its loopback listener is
+            # only reachable through the ssh session and SSH is the encryption. A ROUTED one ends on
+            # the LOGIN node and crosses the cluster's own network to the compute node, where the
+            # worker has to listen beyond loopback for anyone to reach it — so that hop carries
+            # CURVE instead of plaintext. The key is pinned against the local end of the forward,
+            # which is the address this hub actually dials.
+            if v !== nothing && isempty(server_key)
+                for attempt in 1:12                 # the worker writes its key early in boot
+                    server_key = try
+                        _fetch_and_pin_curve!(t, connect_host, connect_port)
+                    catch
+                        attempt == 12 && _rlog("connect: no CURVE key from $host yet — dialing without one")
+                        sleep(1.0); ""
+                    end
+                    isempty(server_key) || break
+                end
+            end
         end
         _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
         _prep_stage("Connecting to worker on $host — remote Julia boot + handshake…")
@@ -1399,7 +1423,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
 
     t0 = time()
     # After a successful (re)attach, everything that isn't the dial moves OFF the hot path: the
-    # state-sidecar write is an ssh exec and catch-up provisioning is ~10s of rsync — neither
+    # state-sidecar write is an ssh exec and catch-up provisioning is ~10s of transfer — neither
     # changes anything about the live session (a running worker never re-includes its payload),
     # so they run in the background while the notebook is already usable. The attachment record
     # gets the dial's resolved key/ip so the NEXT reattach needs zero ssh before its dial.
@@ -1503,7 +1527,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     # 2. Probe (reattach-first, provision-second): a LIVE worker for this notebook — detached-
     #    warm, or left by an extension restart / network blip before the record existed — is by
     #    definition already provisioned, so ask the host BEFORE paying the provision pass (~12s
-    #    of rsync + env replication even warm, measured). A dead-but-listed worker fails the
+    #    of transfer + env replication even warm, measured). A dead-but-listed worker fails the
     #    dial and falls through to a fresh spawn on new ports (the stale one stays visible in
     #    the roster for manual reap).
     reattach = nothing
@@ -1860,7 +1884,7 @@ end
 # single-frame copy-chunk 'P'. `server_key` (Z85, the gate's pinned CURVE key — the data socket
 # serves with the SAME key) encrypts the channel on :direct; tunnel passes "" (SSH encrypts).
 # ── Transfer tuning (Settings panel / slate.json / env) ─────────────────────────────────────
-# Bytes per REQ/REP round-trip. NOTE the blob channel is its own socket (own ssh proc under
+# Bytes per REQ/REP round-trip. NOTE the blob channel is its own socket (its own forward under
 # :tunnel), so chunk size does NOT protect cell results — that isolation is structural — and
 # TCP interleaves competing flows per-packet either way. What it actually governs is the
 # round-trip granularity: the per-chunk recv timeout (a huge chunk on a slow link can outlive
@@ -2400,9 +2424,16 @@ function _data_endpoint!(t::RemoteTarget, k)
         cached = get(_DATA_TUNNELS, (t.ssh_host, dport), nothing)
         cached !== nothing && cached[1].running && return cached[2]
         lp = _free_local_port()
-        tun = open_tunnel(t.ssh_host, [(lp, dport)])
+        # Through the login node when the worker is on an allocated compute node — same route the
+        # control channel takes. Opened straight at the node it would need a session to the NODE,
+        # which is the second authentication this whole path exists to avoid; the forward then
+        # carries nothing and the first transfer dies on a receive timeout rather than a refusal.
+        v = via(t.ssh_host)
+        tun = v === nothing ? open_tunnel(t.ssh_host, [(lp, dport)]) :
+                              open_tunnel(v.host, [(lp, dport)]; remote = t.ssh_host)
         _DATA_TUNNELS[(t.ssh_host, dport)] = (tun, lp)
-        _rlog("data channel: opened dedicated tunnel $(t.ssh_host):$dport ← 127.0.0.1:$lp (own ssh proc, CURVE)")
+        _rlog("data channel: opened dedicated tunnel $(t.ssh_host):$dport ← 127.0.0.1:$lp" *
+              (v === nothing ? "" : " via $(v.host)") * " (CURVE)")
         return lp
     end
     return (ip = "127.0.0.1", port = lport, server_key = key)
@@ -3248,7 +3279,7 @@ _region_target(r::Region; origin_env::AbstractString = r.preload, host::Abstract
 # node you were given — exists only after asking. So placement is a step, not a field.
 #
 # The node is cached hub-side because everything downstream (the roster, the launch, the tunnel,
-# rsync) needs the same answer many times over, and asking the scheduler is a round trip. It is
+# a file transfer) needs the same answer many times over, and asking the scheduler is a round trip. It is
 # cached against the allocation's job id, so an allocation that expired and was re-granted on a
 # different node invalidates it rather than pointing workers at a node we no longer hold.
 const _REGION_PLACE = Dict{String,NamedTuple{(:host, :job, :ts),Tuple{String,String,Float64}}}()

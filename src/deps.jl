@@ -832,8 +832,18 @@ function _cell_effect(cell)::CellEffect
     #    belongs on every side and which neither of the above can recognise. It replays WHOLE
     #    (`_everywhere_replay_source`), because tagging it is a statement that the whole cell is safe.
     # All three are the notebook/region analogue of `Distributed.@everywhere` (run this on every worker).
-    (_is_pure_using(cell.source) || :import_scaffold in cell.flags || :everywhere in cell.flags ||
-        :everywhere_declared in cell.flags || _THEME_SENTINEL in cell.writes) && return EVERYWHERE
+    #
+    # …except that a cell PINNED to a region runs in exactly one place, which is the opposite claim.
+    # A region cell that also does `using Pkg` gets `:import_scaffold` from harvesting that package's
+    # exports, and inferring EVERYWHERE from it means the cell's DATA never crosses the boundary —
+    # a downstream local cell then fails with an UndefVarError for a value that computed fine on the
+    # far side. Pinning is the stronger, explicit statement, so it wins over the inferred shape.
+    # An EXPLICIT `:everywhere` tag still wins over pinning: that one the author wrote on purpose.
+    pinned = any(f -> startswith(String(f), "region="), cell.flags)
+    (:everywhere in cell.flags || :everywhere_declared in cell.flags) && return EVERYWHERE
+    pinned && return PURE
+    (_is_pure_using(cell.source) || :import_scaffold in cell.flags ||
+        _THEME_SENTINEL in cell.writes) && return EVERYWHERE
     return PURE
 end
 

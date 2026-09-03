@@ -1165,8 +1165,29 @@ function _workers_json(nb::LiveNotebook)
     regs = lock(_REGION_LOCK) do
         [(String(side), k) for ((id, side), k) in _REGION_KERNELS if id == nb.id]
     end
+    have = Set(first(p) for p in regs)
     for (side, k) in sort(regs; by = first)
         push!(out, _worker_entry(nb, side, k))
+    end
+    # A region the notebook USES but has no worker for yet still deserves a pill. On a scheduler that
+    # gap IS the queue wait — minutes on a busy cluster — and a wait with no indicator reads as
+    # nothing happening. There is no kernel to ask, so the state is the placement's.
+    for side in sort(unique(String[_cell_region(c) for c in nb.report.cells]))
+        (isempty(side) || side in have) && continue
+        r = try; ReportEngine.region_get(side); catch; nothing; end
+        placing = lock(_PLACING_LOCK) do; side in _PLACING; end
+        host = r === nothing ? "" : String(r.host)
+        sched = r !== nothing && r.scheduler !== :none
+        push!(out, Dict{String,Any}(
+            "side" => side, "host" => host, "kind" => "gate", "port" => 0, "connected" => false,
+            "status" => placing ? "connecting" : "disconnected",
+            # What the pill SAYS. "connecting" describes a dial; a scheduler queue is a wait of a
+            # different kind and length, and the difference is the whole reason to look at the pill.
+            "face" => placing ? (sched ? "queued" : "starting…") : "no worker",
+            "note" => placing ? (sched ? "queued for a node on $host — starts by itself when the scheduler grants one"
+                                       : "starting a worker on $host") :
+                      r === nothing ? "no region '$side' in the registry" :
+                      "no worker yet — a cell tagged region=$side will start one"))
     end
     return out
 end
