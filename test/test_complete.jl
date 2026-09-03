@@ -76,6 +76,43 @@ end
     end
 end
 
+# Every route handler in `_make_router` is a closure over the same `h::Hub`. Julia boxes a
+# captured variable that is assigned ANYWHERE in the defining scope, and all the closures then
+# share that one box — so a handler that uses `h` as a scratch local silently replaces the hub
+# for every other route, and the whole server starts answering with `Nothing has no field lock`.
+# The rule is that a handler may read the enclosing scope but never assign to it.
+@testset "no route handler shadows the hub" begin
+    src = read(joinpath(@__DIR__, "..", "src", "server_complete.jl"), String)
+    fn = nothing
+    for ex in Meta.parseall(src).args
+        ex isa Expr && ex.head === :function && ex.args[1] isa Expr &&
+            ex.args[1].args[1] === :_make_router && (fn = ex)
+    end
+    @test fn !== nothing
+
+    body = fn.args[2]
+    bound = Set{Symbol}()                                  # names owned by _make_router's own scope
+    for a in fn.args[1].args[2:end]
+        a isa Symbol && push!(bound, a)
+        a isa Expr && a.head === :(::) && a.args[1] isa Symbol && push!(bound, a.args[1])
+    end
+    for st in body.args
+        st isa Expr && st.head === :(=) && st.args[1] isa Symbol && push!(bound, st.args[1])
+    end
+    @test :h in bound && :router in bound                  # the guard is looking at the right names
+
+    clobbers, line = Tuple{Symbol,Int}[], Ref(0)
+    walk(x, depth) = begin
+        x isa LineNumberNode && (line[] = x.line)
+        x isa Expr || return
+        depth > 0 && x.head in (:(=), :(+=), :(-=)) && x.args[1] isa Symbol &&
+            x.args[1] in bound && push!(clobbers, (x.args[1], line[]))
+        for a in x.args; walk(a, depth + 1); end
+    end
+    for st in body.args; walk(st, 0); end
+    @test isempty(clobbers)
+end
+
 @testset "output image externalization" begin
     import Base64
     # A real PNG header (8-byte sig + IHDR with width=640, height=480) so _png_dims reads dimensions.
