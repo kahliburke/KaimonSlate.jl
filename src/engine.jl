@@ -310,7 +310,7 @@ end
 # DIFFERENT symbol from the `everywhere` author tag below: sharing one would round-trip a runtime
 # classification back out as a tag the author never wrote.
 const _INTERNAL_FLAGS = Set{Symbol}([:opaque, :macrocall, :using_redundant, :import_scaffold,
-                                     :everywhere_declared])
+                                     :everywhere_declared, :volatile_declared])
 # Header tags Slate gives behaviour to (rendered as checkboxes in the UI tag editor). Any OTHER
 # token is kept verbatim as a free-form tag — inert metadata that still round-trips.
 const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache, :cache, :resource, :slide, :notes,

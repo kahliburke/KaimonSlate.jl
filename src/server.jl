@@ -1203,6 +1203,11 @@ function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
     for r in recs
         if r.kind === :everywhere
             :everywhere_declared in c.flags || push!(c.flags, :everywhere_declared)
+        elseif r.kind === :volatile
+            # This cell read live state that its source does not determine (a host session, a command
+            # run somewhere). Marking it here is enough to stop the NEXT key being computed — the
+            # entry this run stores is keyed and then never asked for again.
+            :volatile_declared in c.flags || push!(c.flags, :volatile_declared)
         elseif r.kind === :value_identity
             # This cell's value is not a function of its source — a sweep's is whatever has landed
             # in its store. Recorded against every name the cell writes, so a reader's memo key
@@ -1243,6 +1248,10 @@ function _reestablish_effects!(report)
         recs === nothing && continue
         any(r -> r.kind === :everywhere, recs) &&
             (:everywhere_declared in c.flags || push!(c.flags, :everywhere_declared))
+        # The half that matters most on a RELOAD: a cell that asked a host something last session is
+        # uncacheable from t=0 this one, so a run-all asks again instead of restoring the old answer.
+        any(r -> r.kind === :volatile, recs) &&
+            (:volatile_declared in c.flags || push!(c.flags, :volatile_declared))
     end
     return nothing
 end

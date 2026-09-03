@@ -998,6 +998,11 @@ function _memo_status(report::Report, cell::Cell)
     :nocache in cell.flags && return ("uncacheable", "opted out with the `nocache` tag")
     :opaque in cell.flags && return ("uncacheable", "an unresolved `using`/macro barrier — its effects can't be tracked")
     eff = _cell_effect(cell)
+    # A DECLARED volatile names the reason it can't be cached, which is a different one from `rand`:
+    # the value belongs to live state (a host session), so the badge should say so rather than imply
+    # the cell is random.
+    :volatile_declared in cell.flags &&
+        return ("uncacheable", "reads live state (e.g. whether a host is signed in) — a cached answer would be stale")
     eff == VOLATILE && return ("uncacheable", "non-deterministic (e.g. `rand`/`time`) — a cached value would be stale")
     eff == RESOURCE && return ("uncacheable", "opens a live handle (DB/socket/file) — tag it `resource`; it re-opens each run")
     return ("uncacheable", "not a pure function of its source and inputs")

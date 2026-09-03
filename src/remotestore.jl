@@ -118,9 +118,34 @@ function _via(here, op::Symbol, args::NamedTuple)
     return f(op, args)
 end
 
+# ── "This answer belongs to the session, not to the source" ──────────────────────────────────
+# A cell that ASKS a host something is not a function of its source: the answer changes the moment
+# someone signs in or out, and the notebook never edits to say so. Cached, it comes back on the next
+# load reporting a connection that isn't there — and a run-all then RESTORES that instead of asking,
+# so the notebook contradicts the padlock above it.
+#
+# Declared at the CALL rather than left to a cell tag, because the author of a cell that says
+# `Sweep.connected(host)` has no reason to know a memo layer exists. `_slate_effect` is a task-local
+# push that no-ops outside a cell eval, so the pollers that call this constantly pay nothing, and the
+# classification is persisted per-cell (`EffectStore`) so it holds from t=0 on the next load — which
+# is the case that actually bit.
+const _EFFECT_FN = Ref{Any}(missing)          # resolved once; `nothing` = no channel in this process
+
+function _declare_volatile()
+    f = _EFFECT_FN[]
+    if f === missing
+        f = isdefined(P, :_slate_effect) ?
+            (try; Base.invokelatest(getfield, P, :_slate_effect); catch; nothing; end) : nothing
+        _EFFECT_FN[] = f
+    end
+    f === nothing && return nothing            # Sweep loaded without the capture channel
+    try; f(:volatile); catch; end
+    return nothing
+end
+
 "True if there is an authenticated session for `host`."
-connected(host::AbstractString) = isempty(host) ||
-    _via(() -> SshTransport.connected(String(host)), :connected, (; host = String(host))) === true
+connected(host::AbstractString) = (_declare_volatile(); isempty(host) ||
+    _via(() -> SshTransport.connected(String(host)), :connected, (; host = String(host))) === true)
 
 const _CONNECT_BACKOFF = 20.0
 const _CONNECT_FAILED = Dict{String,Float64}()
@@ -174,6 +199,7 @@ Run `script` on the host. An empty host runs it here — that is what makes this
 makes a `SlurmTarget` with no host behave as documented.
 """
 function run_there(host::AbstractString, script::AbstractString)
+    _declare_volatile()          # running a command somewhere is never a function of the cell's source
     if isempty(host)
         buf = IOBuffer()
         ok = try; run(pipeline(`sh -c $script`; stdout = buf, stderr = buf)); true; catch; false; end

@@ -60,6 +60,23 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test ce(tag) == E.EVERYWHERE
         dec = Cell("dc", CODE, "register_op!(:foo)"); push!(dec.flags, :everywhere_declared)
         @test ce(dec) == E.EVERYWHERE
+        # Same two-flag shape for VOLATILE. The runtime one is what a cell asking a host whether it
+        # is signed in earns: its answer belongs to the session, so a cached one contradicts the
+        # padlock the moment anyone signs in or out.
+        vdec = Cell("vd", CODE, "ok = Sweep.connected(host)"); push!(vdec.flags, :volatile_declared)
+        @test ce(vdec) == E.VOLATILE
+        @test !ReportEngine._memoizable(vdec)
+        vrep = ReportEngine.Report("vr", "vr"); push!(vrep.cells, vdec); build_dependencies!(vrep)
+        @test ReportEngine._memo_status(vrep, vdec) ==
+              ("uncacheable", "reads live state (e.g. whether a host is signed in) — a cached answer would be stale")
+        @test ReportEngine._memo_key(vrep, vdec) == ""      # no key ⇒ nothing to store, nothing to restore
+        # …and it survives a pin, for the same reason the tag does.
+        vpin = Cell("vp", CODE, "ok = Sweep.connected(host)")
+        push!(vpin.flags, Symbol("region=gpu")); push!(vpin.flags, :volatile_declared)
+        @test ce(vpin) == E.VOLATILE
+        # It is Slate's own bookkeeping, never an author tag — so it must not round-trip out to the
+        # header as though someone had written it.
+        @test :volatile_declared in ReportEngine._INTERNAL_FLAGS
         # A cell PINNED to a region runs in exactly one place — the opposite of everywhere. `using
         # Pkg` inside it earns `:import_scaffold` from harvesting that package's exports, and
         # inferring EVERYWHERE from that stops the cell's DATA ever crossing the boundary: a

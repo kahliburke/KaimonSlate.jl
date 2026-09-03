@@ -821,7 +821,10 @@ end
 function _cell_effect(cell)::CellEffect
     cell.kind == CODE || return PURE
     :resource in cell.flags && return RESOURCE
-    :volatile in cell.flags && return VOLATILE
+    # The author's tag, and its runtime twin: `:volatile_declared` is set by a library that read live
+    # state during the run (`slate_effect(:volatile)` — e.g. asking a host whether it is signed in) and
+    # re-established from the durable EffectStore on load, so the cell is uncacheable before it runs.
+    (:volatile in cell.flags || :volatile_declared in cell.flags) && return VOLATILE
     # Three routes to EVERYWHERE, in increasing explicitness:
     #  • INFERRED — pure `using`, an import scaffold, a theme setter. The cell's shape says so.
     #  • DECLARED (`:everywhere_declared`) — a RUNTIME declaration (`slate_effect(:everywhere)` harvested
