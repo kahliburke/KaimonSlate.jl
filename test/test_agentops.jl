@@ -560,17 +560,19 @@ end
     @test NS._toolcall_slot(RE.Cell[], "start_job") == 1
 end
 
-# The chat panel's markdown renderer is pure front-end logic the Julia side can't see, so it is
-# asserted from node. Skips cleanly when node isn't installed.
-@testset "agent.js mdLite (node, if available)" begin
+# Front-end logic the Julia side can't see, asserted from node: the chat pane's markdown renderer,
+# and the predicate deciding which mousedowns land on empty page. Skips cleanly without node.
+@testset "front-end logic (node, if available)" begin
     node = Sys.which("node")
     if node === nothing
-        @info "node not found — skipping the agent.js JS assertions"
+        @info "node not found — skipping the JS assertions"
         @test true
     else
-        io = IOBuffer()
-        ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", "agent_md.mjs"))`; stdout = io, stderr = io))
-        ok || print(String(take!(io)))
-        @test ok
+        for script in ("agent_md.mjs", "click_background.mjs")
+            io = IOBuffer()
+            ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", script))`; stdout = io, stderr = io))
+            ok || print(String(take!(io)))
+            @test ok
+        end
     end
 end

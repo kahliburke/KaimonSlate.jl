@@ -45,6 +45,26 @@ function toggleSelect(id) {
   selectedId = id; anchorId = id;
   window.slateStore && window.slateStore.toggleInSelection(id);
 }
+// Clicking the empty page AROUND the cells clears the selection, and must NOT start editing.
+//
+// The `preventDefault` is what buys the second half: clicking a block that contains a
+// `contenteditable` makes WebKit and Blink place the caret in the nearest editable text, which
+// level with a line of code is that cell's editor — focusing it. Only the mousedown default does
+// that, so this can't move to the click.
+//
+// Deliberately narrow: the target must BE a layout container, not something drawn on one, so a
+// click on output text, a button or the editor is left alone.
+function _isPageBackground(t) {
+  return t === document.body ||
+         (t instanceof Element && (t.id === 'nb' || t.classList.contains('page')));
+}
+document.addEventListener('mousedown', e => {
+  if (e.button !== 0 || !_isPageBackground(e.target)) return;
+  e.preventDefault();                       // the caret never goes looking for an editor
+  const a = document.activeElement;          // leaving edit mode is the point, so give up focus
+  if (a && a.closest && a.closest('.cm-editor')) a.blur();
+  selectCell(null);
+});
 // Enter/leave EDIT mode for `id`. The mode lives in the store, not in a classList toggle: <Cell>
 // owns the cell's `class` and rewrites it whenever its computed value changes, so a DOM-poked
 // `.editing` disappeared on the first keystroke (fresh → edited) and the chrome then claimed you
