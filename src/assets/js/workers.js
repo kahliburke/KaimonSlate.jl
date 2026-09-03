@@ -8,6 +8,10 @@ let _wpSide = null;
 // side → freshest telemetry JSON string, PUSHED over the page WebSocket (window.onWorkerTelemetry). Fresher
 // than state.workers[].stats (which only refreshes on a notebook version-bump), so the pills read it first.
 const _wpLive = {};
+// side → the freshest status NOTE ("why this worker is unwell"). Kept separately from the telemetry
+// because the two arrive on different pushes: a stats sample says nothing about health, so the note
+// has to survive one rather than be re-derived from it.
+const _wpNote = {};
 let _wpRaw = [];                  // chronological raw log lines for the OPEN popup (snapshot + streamed), re-parsed on each change
 const _WP_LOG_MAX = 2000;        // cap the client-side buffer so a chatty worker can't grow it unbounded
 const _wpEsc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -98,9 +102,11 @@ function _wpFmtRecord(rec) {
     '<span class="wlog-msg">' + _wpEsc(msg) + '</span>' + badge + cont + '</div>';
 }
 // Re-render the open popup's log from `_wpRaw` (chronological): parse → records → newest-first.
-function _wpRenderLog(note) {
+function _wpRenderLog() {
   const box = document.getElementById('workerpop-log'); if (!box) return;
-  if (!_wpRaw.length) { box.textContent = note ? '(' + note + ')' : '(no log yet)'; return; }
+  // Only ever says something about the LOG. The `note` used to be repeated here as the placeholder,
+  // from before the warn chip existed — printing the same sentence twice, a few pixels apart.
+  if (!_wpRaw.length) { box.textContent = '(no log yet)'; return; }
   const atTop = box.scrollTop < 30;
   box.innerHTML = _wpCollapse(_wpParseRecords(_wpRaw)).reverse().map(_wpFmtRecord).join('');
   if (atTop) box.scrollTop = 0;                                 // stay pinned to the newest unless scrolled down
@@ -213,7 +219,10 @@ function onWorkersUpdate(ws) {
     renderWorkers({ workers: ws });
     if (_wpSide !== null) {
       const w = ws.find(x => (x.side || '') === _wpSide);
-      if (w) { const el = document.getElementById('workerpop-stats'); if (el) el.innerHTML = _wpStatsChips(_wpLive[_wpSide] || w.stats, w.note); }
+      if (w) {
+        _wpNote[_wpSide] = w.note || '';
+        const el = document.getElementById('workerpop-stats'); if (el) el.innerHTML = _wpStatsChips(_wpLive[_wpSide] || w.stats, w.note);
+      }
     }
     // Live aliveness for the DAG region containers: hand the freshest list to the pane so its
     // header status dots (and any open region card) track liveness drops/recoveries at once.
@@ -237,7 +246,10 @@ function onWorkerTelemetry(side, statsJson) {
     if (el) el.textContent = txt;
   }
   if (_wpSide === side) {                                        // popup for this side is open — refresh its stat chips
-    const el = document.getElementById('workerpop-stats'); if (el) el.innerHTML = _wpStatsChips(statsJson);
+    // Carry the note through: a telemetry tick is not news about the worker's HEALTH, and rendering
+    // the chips without it made the reason the popup was opened for vanish on the next sample.
+    const el = document.getElementById('workerpop-stats');
+    if (el) el.innerHTML = _wpStatsChips(statsJson, _wpNote[side] || '');
   }
 }
 
@@ -285,11 +297,12 @@ async function _wpRefresh() {
       '</b> <button class="wrl-change" onclick="closeWorkerPop(); toggleRunLoc(event)">change ▾</button>'; }
     else { rl.style.display = 'none'; rl.innerHTML = ''; }
   }
+  _wpNote[side] = r.note || '';
   document.getElementById('workerpop-stats').innerHTML = _wpStatsChips(r.stats, r.note);
   // Seed the chronological buffer from the snapshot; live lines then append via onWorkerLog. Parsed + rendered
   // newest-record-first so multi-line records stay right-way-up. Trailing blank line from the file is dropped.
   _wpRaw = r.log ? r.log.split('\n').filter((l, i, a) => l.length || i < a.length - 1) : [];
-  _wpRenderLog(r.note);
+  _wpRenderLog();
 }
 
 window.renderWorkers = renderWorkers;

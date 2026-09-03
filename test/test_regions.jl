@@ -233,6 +233,22 @@ const RE = KaimonSlate.ReportEngine
         @test RE.session_host(node) == "c7"                 # unrouted: its own host holds the session
     end
 
+    # The worker popup mixes two kinds of chip in one row: fixed-width METRIC chips, which must not
+    # wrap (a number that reflows on every tick makes the row jitter), and one NOTE chip carrying a
+    # whole sentence, which must. They are two single-class rules in one sheet, so which wins is
+    # decided by the cascade — and `.wchip` is declared after `.wchip-warn`, so the note silently
+    # inherited `nowrap` and a full sentence was clipped at the popup's edge with no ellipsis.
+    @testset "the worker note chip out-ranks the metric chip's nowrap" begin
+        css = read(joinpath(@__DIR__, "..", "src", "assets", "notebook.css"), String)
+        base = findfirst(r"(?<![\w.-])\.wchip\s*\{[^}]*white-space\s*:\s*nowrap"s, css)
+        warn = findfirst(r"\.wchip[\w.-]*\.wchip-warn[^}]*white-space\s*:\s*normal"s, css)
+        @test base !== nothing && warn !== nothing     # both rules still exist and still disagree
+        # Specificity (two classes) settles it whatever the order; bare `.wchip-warn` would need to
+        # come after `.wchip`, and does not.
+        @test occursin(".wchip.wchip-warn", css)
+        @test occursin(r"\.wchip\.wchip-warn[^}]*overflow-wrap\s*:\s*anywhere"s, css)
+    end
+
     # The home page and a notebook carry different stylesheets, so a class used by a component on
     # both has to live in the one sheet they share. Pure JS, asserted from node; skips without it.
     @testset "shared styles reach both pages (node, if available)" begin
