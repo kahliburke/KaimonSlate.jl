@@ -14,10 +14,15 @@
 // for outrunning its walltime — so they must not live in Julia source, where adjusting a number
 // means editing code.
 //
-// They are stored as `key=value` cell-header tags (`#%% sweep walltime=02:00:00`), which round-trip
-// through the .jl with no schema, are readable in a diff, and reach `@sweep` through the cell's
-// execution context. Deliberately NOT part of the sweep's key: raising a walltime RESUMES the sweep
-// rather than discarding the units that already survived at the old one.
+// Slate's own settings (`cluster=`, `chunk=`) ride the cell header, where they are short and
+// readable in a diff. The SCHEDULER options live in the notebook's `Slate.sweep` footer instead: a
+// header value loses anything outside [A-Za-z0-9_.:+/@-] to the tag sanitiser, which rules out half
+// of what sbatch accepts (`--licenses=ansys@srv`, a constraint expression, anything with a space) —
+// and an option a cell cannot express is a batch script a notebook cannot replace. Both reach
+// `@sweep` through the cell's execution context, footer over header.
+//
+// Deliberately NOT part of the sweep's key either way: raising a walltime RESUMES the sweep rather
+// than discarding the units that already survived at the old one.
 // Byte sizes, shared by every surface in this file — the config panel and the topbar pill both
 // report the same figures, and they must not disagree about how to spell one.
 // The wall-clock time a sweep is expected to finish. Carries the date once the answer is not
@@ -37,23 +42,42 @@ const humBytes = b => b == null ? '—' :
   b < 1073741824 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
 
 (function () {
+  // Slate's OWN cell settings — these mean something to the notebook, not to the scheduler, and so
+  // are edited as named controls rather than as scheduler options. Mirrors `Sweep._ATTR_OTHER`.
+  const OWN = ['cluster', 'data', 'chunk', 'region', 'needs', 'mutates', 'script'];
   const FIELDS = [
-    ['Scheduler', [
-      ['partition', 'partition', 'queue / partition name'],
-      ['walltime',  'walltime',  'HH:MM:SS — the limit a unit is killed at'],
-      ['cpus',      'cpus',      'CPUs per unit'],
-      ['mem',       'memory',    'per unit, e.g. 4G'],
-      ['gpus',      'gpus',      'GPUs per unit'],
-      ['nodes',     'nodes',     'nodes per job'],
-      ['account',   'account',   'charge to this allocation'],
-      ['qos',       'qos',       'quality of service'],
-    ]],
     ['Batching', [
       ['chunk', 'units per job', 'how many units ride one scheduler job'],
     ]],
   ];
-  // `cluster` names a target from the machine's registry; the rest override it for this cell only.
-  const KEYS = ['cluster', ...FIELDS.flatMap(([, fs]) => fs.map(f => f[0]))];
+
+  // The scheduler options the name box suggests — fetched from the server (`/api/sched-options`)
+  // rather than listed here, so what the editor offers is the same list Slate types and validates.
+  // A CATALOGUE, not a permitted set: an unrecognised name warns and is still sent. A scheduler has
+  // far more options than are worth naming and sites add their own, so refusing what we have not
+  // heard of would be the same mistake as silently dropping it.
+  let CATALOGUE = [];
+  const catBy = k => CATALOGUE.find(o => o.key === k || o.flag === k);
+  async function loadCatalogue() {
+    if (CATALOGUE.length) return;
+    // Raw fetch: this list belongs to the MACHINE, not to a notebook, and `api()` would rewrite the
+    // path into the per-notebook namespace.
+    try {
+      CATALOGUE = (await (await fetch('/api/sched-options')).json()).options || [];
+    } catch (_) {}
+  }
+
+  // What the user typed → the key it is STORED under. Three of Slate's names differ from sbatch's
+  // (`cpus`/`cpus-per-task`, `walltime`/`time`, …), so a catalogue lookup comes first: typing the
+  // sbatch spelling must land on the same key as picking it from the list, or the two become
+  // separate settings that both emit the same flag. Otherwise `-` → `_`, since a stored key has to
+  // match [A-Za-z][A-Za-z0-9_]* and no sbatch long option contains `_`.
+  const toKey = s => {
+    const t = String(s).trim().replace(/^-+/, '');
+    const o = catBy(t) || catBy(t.replace(/-/g, '_'));
+    return o ? o.key : t.replace(/-/g, '_');
+  };
+  const toFlag = k => { const o = catBy(k); return o ? o.flag : String(k).replace(/_/g, '-'); };
 
   const esc = s => String(s).replace(/[&<>"]/g, ch =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
@@ -63,17 +87,46 @@ const humBytes = b => b == null ? '—' :
     const c = (st.cells || []).find(x => x.id === id);
     return (c && c.tags) ? c.tags.slice() : [];
   };
-  const specOf = id => {
-    const out = {};
+  // Slate's own settings still ride the cell header (`cluster=hpc`, `chunk=25`). The split between
+  // those and the scheduler options is exactly the one the Julia side makes (`is_sched_attr`), so
+  // an option a site added shows up here as itself rather than being invisible to the editor that
+  // is supposed to manage it.
+  const ownOf = id => {
+    const own = {};
     for (const t of cellTags(id)) {
       const i = t.indexOf('=');
-      if (i > 0 && KEYS.includes(t.slice(0, i))) out[t.slice(0, i)] = t.slice(i + 1);
+      if (i > 0 && OWN.includes(t.slice(0, i))) own[t.slice(0, i)] = t.slice(i + 1);
     }
-    return out;
+    return own;
   };
 
-  window.openSweepConfig = function (id, ev) {
+  // The SCHEDULER options come from the notebook footer instead (`Slate.sweep`), because a header
+  // value loses anything outside [A-Za-z0-9_.:+/@-] to the tag sanitiser — which rules out
+  // `--licenses=ansys@srv`, a constraint expression, or anything with a space. Legacy header
+  // options are still read (and still work) so an existing notebook keeps behaving; the editor
+  // writes only to the footer, and a saved option supersedes the header of the same name.
+  let SCHED = {};                       // cell id → { key: value }, refreshed when the panel opens
+  async function loadSched(id) {
+    try {
+      const r = await window.api('GET', '/api/sweep-options?cell=' + encodeURIComponent(id));
+      SCHED = r.options || {};
+    } catch (_) { SCHED = {}; }
+  }
+  const specOf = id => {
+    const legacy = [];
+    for (const t of cellTags(id)) {
+      const i = t.indexOf('=');
+      if (i <= 0) continue;
+      const k = t.slice(0, i);
+      if (!OWN.includes(k) && !(k in SCHED)) legacy.push([k, t.slice(i + 1)]);
+    }
+    return { own: ownOf(id), sched: [...legacy, ...Object.entries(SCHED)] };
+  };
+
+  window.openSweepConfig = async function (id, ev) {
     ev && ev.stopPropagation();
+    await loadCatalogue();      // once per page; the panel is useless without its suggestions
+    await loadSched(id);        // and this cell's saved options, which live in the footer
     let pop = document.getElementById('swcfgpop');
     if (!pop) {
       pop = document.createElement('div');
@@ -199,8 +252,92 @@ const humBytes = b => b == null ? '—' :
         : '<div class="swst-none">no sweeps in this store</div>');
   }
 
+  // One `name  value  ✕` row. The name box autocompletes over the catalogue and is checked on every
+  // keystroke: an unknown name is a WARNING, never a block — it still submits, and the scheduler is
+  // the one that gets to reject it (loudly, at submit) rather than Slate dropping it quietly.
+  function optRow(k = '', v = '', inherited = '') {
+    const o = k ? catBy(k) : null;
+    const shown = k ? toFlag(k) : '';
+    const unknown = k && !o;
+    return '<div class="swopt' + (unknown ? ' unknown' : '') + '">' +
+      `<input class="swopt-k" autocomplete="off" spellcheck="false" placeholder="option" ` +
+        `value="${esc(shown)}" title="${esc(o ? o.hint : (unknown ? 'unknown option' : ''))}">` +
+      `<input class="swopt-v" spellcheck="false" value="${esc(v)}" ` +
+        `placeholder="${esc(inherited || 'value')}">` +
+      '<button class="swopt-x" title="remove" tabindex="-1">✕</button>' +
+      '<div class="swopt-menu" hidden></div>' +
+      `<span class="swopt-hint">${esc(o ? o.hint : (unknown ? 'unknown option' : ''))}</span>` +
+      '</div>';
+  }
+
+  // Suggestions, as our own menu rather than a `<datalist>`. A datalist shows the WHOLE list the
+  // moment the box is focused — eighteen options is a wall that buries the two fields underneath it,
+  // and it cannot be capped from CSS because the browser draws it. This filters as you type, shows
+  // nothing until you do, and scrolls past a handful.
+  const OPT_MENU_MAX = 6;
+  function optMatches(typed) {
+    const t = String(typed).trim().replace(/^-+/, '').replace(/_/g, '-').toLowerCase();
+    if (!t) return [];
+    // Prefix first, then anywhere — so typing `mem` offers `mem` before `mem-per-cpu`, and `cpu`
+    // still finds `cpus-per-task`.
+    const pre = [], mid = [];
+    for (const o of CATALOGUE) {
+      const f = o.flag.toLowerCase();
+      if (f === t) continue;                       // already exact: nothing to suggest
+      if (f.startsWith(t)) pre.push(o); else if (f.includes(t)) mid.push(o);
+    }
+    return [...pre, ...mid];
+  }
+
+  function showOptMenu(row, inp) {
+    const menu = row.querySelector('.swopt-menu');
+    const ms = optMatches(inp.value);
+    if (!ms.length) { menu.hidden = true; return; }
+    menu.innerHTML = ms.map((o, i) =>
+      `<div class="swopt-mi${i === 0 ? ' on' : ''}" data-flag="${esc(o.flag)}">` +
+      `<span class="swopt-mn">${esc(o.flag)}</span>` +
+      `<span class="swopt-mh">${esc(o.hint)}</span></div>`).join('');
+    menu.hidden = false;
+    menu.querySelectorAll('.swopt-mi').forEach(mi => {
+      // `mousedown`, not `click`: the input's blur would hide the menu before a click landed.
+      mi.onmousedown = e => {
+        e.preventDefault();
+        inp.value = mi.dataset.flag;
+        menu.hidden = true;
+        inp.dispatchEvent(new Event('input'));
+        row.querySelector('.swopt-v').focus();
+      };
+    });
+  }
+
+  // ↑/↓ to move, Enter/Tab to take the highlighted one, Escape to dismiss. Returns true when the
+  // key was the menu's, so the caller leaves it alone.
+  function optMenuKey(row, inp, e) {
+    const menu = row.querySelector('.swopt-menu');
+    if (menu.hidden) return false;
+    const items = [...menu.querySelectorAll('.swopt-mi')];
+    if (!items.length) return false;
+    let i = items.findIndex(x => x.classList.contains('on'));
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      items[Math.max(i, 0)].classList.remove('on');
+      i = e.key === 'ArrowDown' ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
+      items[i].classList.add('on');
+      items[i].scrollIntoView({ block: 'nearest' });
+      return true;
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      inp.value = items[Math.max(i, 0)].dataset.flag;
+      menu.hidden = true;
+      inp.dispatchEvent(new Event('input'));
+      return true;
+    }
+    if (e.key === 'Escape') { menu.hidden = true; return true; }
+    return false;
+  }
+
   function render(pop, id) {
-    const spec = specOf(id);
+    const { own, sched } = specOf(id);
+    const spec = own;
     const defs = clusters();
     const cur = spec.cluster || '';
     const sel = clusterByName(cur);
@@ -216,7 +353,13 @@ const humBytes = b => b == null ? '—' :
       `<div class="swcfg-summary">${esc(clusterSummary(sel)) || (cur ? 'not defined on this machine' : 'the cell must name a target itself')}</div>` +
       '<div class="swcfg-note">Set up on the front page: <strong>🖧 Remotes → Clusters</strong>.</div>';
 
+    // The scheduler options, as a list of pairs. One empty row is always kept at the end so adding
+    // the next one is just typing — no button to find first.
+    const rows = sched.map(([k, v]) => optRow(k, v, sel && sel[k] ? sel[k] : ''))
+                      .join('') + optRow();
     const settings = picker +
+      '<div class="ctlsub">Scheduler options <span class="swcfg-sub">— override for this cell</span></div>' +
+      `<div class="swopts">${rows}</div>` +
       FIELDS.map(([group, fs]) =>
         `<div class="ctlsub">${group} <span class="swcfg-sub">— override for this cell</span></div>` +
         '<div class="swcfg-grid">' +
@@ -224,9 +367,7 @@ const humBytes = b => b == null ? '—' :
           `<label title="${esc(hint)}"><span>${esc(label)}</span>` +
           `<input data-k="${k}" value="${esc(spec[k] || '')}" placeholder="${esc(sel && sel[k] ? sel[k] : 'inherit')}" spellcheck="false"></label>`
         ).join('') + '</div>').join('') +
-      '<div class="swcfg-note">Blank inherits from the cluster. Overrides are not part of the ' +
-      'sweep\'s key — raising a walltime RESUMES the sweep instead of discarding the units that ' +
-      'already finished.</div>' +
+      '<div class="swcfg-note">Blank inherits from the cluster.</div>' +
       '<div class="swcfg-actions"><button class="swcfg-apply">Apply &amp; reconcile</button>' +
       '<button class="swcfg-cancel">Cancel</button></div>';
 
@@ -259,8 +400,56 @@ const humBytes = b => b == null ? '—' :
         inp.placeholder = (c && c[inp.dataset.k]) ? c[inp.dataset.k] : 'inherit';
       });
     };
+    wireOptRows(pop, id, sel);
     pop.querySelectorAll('input').forEach(inp => {
       inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); apply(pop, id); } };
+    });
+  }
+
+  // Live behaviour of the pair list: recognise-or-warn as you type, show the cluster's inherited
+  // value as the placeholder so you can see what you are overriding, grow a fresh row when the last
+  // one is used, and remove a row on ✕.
+  function wireOptRows(pop, id, sel) {
+    const box = pop.querySelector('.swopts');
+    if (!box) return;
+    const refresh = row => {
+      const kf = row.querySelector('.swopt-k'), vf = row.querySelector('.swopt-v');
+      const k = toKey(kf.value), o = k ? catBy(k) : null;
+      row.classList.toggle('unknown', !!k && !o);
+      const hint = row.querySelector('.swopt-hint');
+      hint.textContent = o ? o.hint : (k ? 'unknown option' : '');
+      kf.title = hint.textContent;
+      vf.placeholder = (sel && sel[k]) ? sel[k] : 'value';
+      // A count that is not a number is rejected by Julia at run time; say so here instead, where
+      // it can still be fixed without a failed submission.
+      const bad = o && o.count && vf.value.trim() && !/^\d+$/.test(vf.value.trim());
+      row.classList.toggle('badval', !!bad);
+      if (bad) hint.textContent = 'must be a whole number';
+    };
+    const grow = () => {
+      const rows = [...box.querySelectorAll('.swopt')];
+      const last = rows[rows.length - 1];
+      if (last && last.querySelector('.swopt-k').value.trim()) {
+        box.insertAdjacentHTML('beforeend', optRow());
+        wireOptRows(pop, id, sel);
+      }
+    };
+    box.querySelectorAll('.swopt').forEach(row => {
+      const kf = row.querySelector('.swopt-k'), menu = row.querySelector('.swopt-menu');
+      kf.oninput = () => { refresh(row); showOptMenu(row, kf); grow(); };
+      kf.onblur = () => setTimeout(() => { menu.hidden = true; }, 0);
+      kf.onkeydown = e => {
+        if (optMenuKey(row, kf, e)) { e.preventDefault(); return; }
+        if (e.key === 'Enter') { e.preventDefault(); apply(pop, id); }
+      };
+      const vf = row.querySelector('.swopt-v');
+      vf.oninput = () => { refresh(row); grow(); };
+      vf.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); apply(pop, id); } };
+      row.querySelector('.swopt-x').onclick = () => {
+        row.remove();
+        if (!box.querySelector('.swopt')) { box.insertAdjacentHTML('beforeend', optRow()); wireOptRows(pop, id, sel); }
+      };
+      refresh(row);
     });
   }
 
@@ -272,14 +461,37 @@ const humBytes = b => b == null ? '—' :
       const v = inp.value.trim();
       if (v) set[inp.dataset.k] = v;
     });
-    // Preserve every tag that is NOT one of ours, so editing a walltime cannot drop `collapsed`,
-    // a `region=`, or a free-form note.
+    // The pair list → the FOOTER, keyed under the header spelling (`mem_per_cpu`) whatever was
+    // typed, so the same option written `--mem-per-cpu` or `mem-per-cpu` lands in one place.
+    const sched = {};
+    pop.querySelectorAll('.swopt').forEach(row => {
+      const k = toKey(row.querySelector('.swopt-k').value);
+      const v = row.querySelector('.swopt-v').value.trim();
+      if (k && v && !OWN.includes(k)) sched[k] = v;
+    });
+    // Preserve every tag this panel does not edit, so changing an option cannot drop `collapsed`,
+    // a `region=`, a `needs=`, or a free-form note. The panel owns `cluster` and `chunk` on the
+    // header; scheduler options are no longer written there at all. A LEGACY header option the
+    // editor now manages is dropped from the header as it moves into the footer — one home each,
+    // rather than the same setting in two places disagreeing.
+    const MANAGED = ['cluster', ...FIELDS.flatMap(([, fs]) => fs.map(f => f[0]))];
     const kept = cellTags(id).filter(t => {
       const i = t.indexOf('=');
-      return !(i > 0 && KEYS.includes(t.slice(0, i)));
+      if (i <= 0) return true;                                  // a plain flag: never ours
+      const k = t.slice(0, i);
+      if (!OWN.includes(k)) return !(k in sched);               // a scheduler option: moved, or left alone
+      return !MANAGED.includes(k);                              // ours to keep, not ours to write
     });
     const tags = [...new Set([...kept, ...Object.entries(set).map(([k, v]) => `${k}=${v}`)])];
     close();
+    // Footer first: the tag write re-serialises the notebook, so saving the options afterwards
+    // would race it and could be the version that loses.
+    try {
+      await window.api('POST', '/api/sweep-options', { cell: id, options: sched });
+    } catch (e) {
+      if (window.toast) window.toast('could not save the scheduler options — ' + e);
+      return;
+    }
     if (window.setTags) await window.setTags(id, tags);
     // Re-run so the new spec takes effect. Safe and cheap by construction: a sweep cell RECONCILES
     // — it submits only what is missing and never recomputes a unit that has already landed.

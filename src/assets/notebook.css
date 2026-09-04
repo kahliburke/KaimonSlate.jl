@@ -874,6 +874,45 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .swcfg-grid input::placeholder { color:var(--dim); opacity:.7; }
 .swcfg-grid input:focus, .swcfgpop select:focus {
   outline:none; border-color:var(--accent); }
+/* Scheduler options as name/value PAIRS rather than a fixed set of fields: a scheduler has far more
+   options than are worth naming, and a site can add its own. The name box suggests the catalogue
+   (`/api/sweep-options`) and warns outside it — a warning, never a block, because refusing an option
+   Slate has not heard of is the same mistake as silently dropping one. */
+.swopts { display:flex; flex-direction:column; gap:5px; }
+.swopt { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr) auto; gap:6px;
+  align-items:center; }
+.swopt input { width:100%; box-sizing:border-box; font-size:.78rem;
+  font-family:'Cascadia Code',ui-monospace,monospace; padding:5px 8px; border-radius:7px;
+  border:1px solid var(--border); background:var(--bg3); color:var(--text); }
+.swopt input::placeholder { color:var(--dim); opacity:.7; }
+.swopt input:focus { outline:none; border-color:var(--accent); }
+/* The hint spans the full row under its pair, so a long one wraps instead of squeezing the inputs. */
+.swopt-hint { grid-column:1 / -1; color:var(--dim); font-size:.66rem; line-height:1.4;
+  margin:-2px 0 2px; min-height:0; }
+.swopt-hint:empty { display:none; }
+/* Unknown: still sent, so this is an amber heads-up rather than an error colour. */
+.swopt.unknown .swopt-k { border-color:color-mix(in srgb, #c2b158 55%, var(--border)); }
+.swopt.unknown .swopt-hint { color:#c2b158; }
+/* A count that is not a number WILL be rejected when the cell runs — say so while it can still be
+   fixed, rather than after a failed submission. */
+.swopt.badval .swopt-v { border-color:color-mix(in srgb, var(--err, #e06c75) 55%, var(--border)); }
+.swopt.badval .swopt-hint { color:var(--err, #e06c75); }
+.swopt-x { background:none; border:none; color:var(--dim); cursor:pointer; font-size:.8rem;
+  line-height:1; padding:4px 5px; border-radius:6px; }
+.swopt-x:hover { color:var(--text); background:var(--bg3); }
+/* Suggestions. A `<datalist>` dumps the whole catalogue the moment the box is focused and cannot be
+   capped from CSS (the browser draws it), which buried the fields underneath — so this is our own:
+   nothing until you type, and a bounded height once you do. */
+.swopt { position:relative; }
+.swopt-menu { position:absolute; z-index:5; top:calc(100% + 2px); left:0; width:min(420px, 100%);
+  max-height:9.6rem; overflow-y:auto; background:var(--bg2); border:1px solid var(--border);
+  border-radius:8px; box-shadow:0 8px 22px rgba(0,0,0,.35); padding:3px; }
+.swopt-mi { display:flex; gap:8px; align-items:baseline; padding:4px 7px; border-radius:6px;
+  cursor:pointer; font-size:.74rem; }
+.swopt-mi.on, .swopt-mi:hover { background:var(--bg3); }
+.swopt-mn { font-family:'Cascadia Code',ui-monospace,monospace; color:var(--text); flex:0 0 auto; }
+.swopt-mh { color:var(--dim); font-size:.68rem; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; }
 .swcfg-summary { margin:6px 0 8px; color:var(--val); font-size:.72rem; line-height:1.5;
   font-family:'Cascadia Code',ui-monospace,monospace; }
 .swcfg-empty { color:var(--dim); font-size:.76rem; font-style:italic; padding:4px 0; }

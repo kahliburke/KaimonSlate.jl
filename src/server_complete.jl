@@ -1301,6 +1301,14 @@ function _make_router(h::Hub)
         end
         _json(Dict("ok" => true, "name" => String(get(c, "name", name))))
     end)
+    # The scheduler options a sweep cell's editor suggests. A catalogue, not a permitted set — the
+    # editor warns outside it and forwards the name anyway. Served rather than duplicated in JS so
+    # what the UI offers and what Slate types cannot drift.
+    # Machine-wide, so deliberately NOT `/api/sweep-options`: the page's `api()` helper rewrites any
+    # `/api/…` into `/api/<notebook>/…`, and the two would collide on the per-cell route below.
+    HTTP.register!(router, "GET", "/api/sched-options", _ -> _json(Dict("options" =>
+        [Dict("key" => o.key, "flag" => o.flag, "hint" => o.hint, "count" => o.count)
+         for o in ReportEngine.Sweep.sched_options()])))
     HTTP.register!(router, "POST", "/api/clusters/delete", req -> begin
         name = strip(String(get(_body(req), "name", "")))
         isempty(name) && return _json(Dict("ok" => false, "error" => "need a cluster name"))
