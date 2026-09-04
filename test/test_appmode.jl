@@ -247,6 +247,54 @@ end
     @test occursin("!isfile(joinpath(cfg", rj)          # only when the home has none
 end
 
+# An export ships the repo's TRACKED files. A package whose source `include`s a file nobody
+# `git add`ed therefore cannot LOAD on the target machine: the app dies in `Pkg.instantiate` with a
+# SystemError naming a path inside the install, minutes after an export that reported success, and
+# nothing about the exported folder looks wrong. Catch it while the author is still here.
+@testset "an export notices source it cannot carry" begin
+    f = NS._unshipped_includes
+    d = mktempdir(); mkpath(joinpath(d, "src"))
+    write(joinpath(d, "src", "P.jl"), """
+    module P
+    include("shipped.jl")
+    include("untracked.jl")
+    include(joinpath(@__DIR__, "computed.jl"))
+    end
+    """)
+    write(joinpath(d, "src", "shipped.jl"), "1")
+    write(joinpath(d, "src", "untracked.jl"), "2")
+
+    @test isempty(f(d, Set(["src/P.jl", "src/shipped.jl", "src/untracked.jl"])))   # all carried → quiet
+    @test f(d, Set(["src/P.jl", "src/shipped.jl"])) == ["src/untracked.jl"]        # the real gap
+    # A computed include can't be resolved here, and guessing would cry wolf over a file that is fine.
+    @test !any(m -> occursin("computed", m), f(d, Set(["src/P.jl", "src/shipped.jl"])))
+    # A source file that isn't shipped ITSELF says nothing about its includes.
+    @test isempty(f(d, Set(["src/shipped.jl"])))
+    # An include naming a file that doesn't exist is already broken in the source, not an export fault.
+    write(joinpath(d, "src", "Q.jl"), "include(\"never-existed.jl\")\n")
+    @test isempty(f(d, Set(["src/Q.jl"])))
+end
+
+# `/status` judged every worker by a LOCAL process handle. A remote worker has none, so it reported
+# "not running" on a card that was, at the same moment, showing its live CPU and memory — a page an
+# operator consults precisely when they distrust the system, contradicting itself.
+@testset "a remote worker is judged by its wire, not a local pid" begin
+    a = NS._status_alive
+    # The reported case: remote, wire up, no local process.
+    @test a(true, true, false, 1.0)
+    # No wire, but a sample too recent to have come from a dead process.
+    @test a(true, false, false, 3.0)
+    # Silent long enough that the sample proves nothing.
+    @test !a(true, false, false, 10 * NS._STATUS_SAMPLE_FRESH)
+    @test NS._STATUS_SAMPLE_FRESH > 2   # must outlast several 2s publish intervals, or it flickers
+
+    # A LOCAL worker is a process we own, so the OS is the authority: recent chatter does not make an
+    # exited process alive, and a live one needs no telemetry to count.
+    @test a(false, true, true, 1.0)
+    @test !a(false, true, false, 1.0)
+    @test a(false, false, true, Inf)
+end
+
 @testset "presentation defaults" begin
     # Names in, localStorage keys out — the page applies them with the setters it already has.
     d = NS.app_defaults(theme = "nord", fullwidth = true, pagewidth = 1400, scrollzoom = 0)

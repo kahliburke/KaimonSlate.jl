@@ -342,6 +342,24 @@ end
 
 _mb(bytes::Real) = bytes <= 0 ? 0.0 : round(bytes / 1024^2; digits = 1)
 
+# How recent a telemetry sample has to be to count as evidence a worker is alive. The worker PUBs
+# every 2s, so this is several missed samples — long enough not to flicker on a slow link, short
+# enough that a dead worker stops claiming to be running.
+const _STATUS_SAMPLE_FRESH = 30.0
+
+"""
+Is this worker running? The evidence differs by KIND, and asking the wrong question is worse than
+not asking: `proc_up` reads a LOCAL process handle, which a remote worker does not have, so a remote
+worker judged that way reports "not running" on a card that is simultaneously showing its live CPU
+and memory. An operator page that contradicts itself is worse than one that says less.
+
+A remote worker's evidence is its wire, or failing that a sample recent enough to have come from a
+live process. A local one is a process we own, so ask the OS — a process that has exited is not
+running however recently it spoke.
+"""
+_status_alive(remote::Bool, connected::Bool, proc_up::Bool, sample_age::Real) =
+    remote ? (connected || sample_age < _STATUS_SAMPLE_FRESH) : proc_up
+
 # One worker's vitals, from the telemetry ring the hub already keeps (the worker PUBs a sample every
 # 2s). Everything is guarded: `/status` exists to be readable when things are broken, so a missing
 # or malformed sample degrades to "unknown" rather than taking the page down with it.
@@ -355,18 +373,36 @@ function _status_kernels(nb::LiveNotebook)
     return ks
 end
 
+# Which REGION each of those kernels serves ("" = the main kernel), so the page can name a worker and
+# ask for its log. The notebook UI's own worker panel can't answer this in an app — `worker-log` is
+# not a route an app serves — which is exactly why the operator page has to.
+function _status_side(nb::LiveNotebook, k)
+    k === nb.kernel && return ""
+    return lock(_REGION_LOCK) do
+        for ((id, side), rk) in _REGION_KERNELS
+            (id == nb.id && rk === k) && return String(side)
+        end
+        return ""
+    end
+end
+
 function _status_worker(nb::LiveNotebook, k)
     # No subprocess: cells evaluate in the HUB process, so its vitals ARE this notebook's. Say so
     # rather than showing an empty card — "where does my code run" is the first question /status
     # should answer, and the answer here is "right here".
     k isa ReportEngine.GateKernel || return Dict{String,Any}(
         "kind" => "in-process (runs inside the server)", "connected" => true, "alive" => true,
-        "port" => 0, "pid" => getpid())
+        "side" => "", "host" => "", "port" => 0, "pid" => getpid())
     cn = try; k.conn === nothing ? "" : String(k.conn.name); catch; ""; end
     st = isempty(cn) ? nothing : (try; ReportEngine.kernel_stats(cn); catch; nothing; end)
-    alive = try; Base.process_running(k.proc); catch; false; end
+    remote = try; k.target isa ReportEngine.RemoteTarget || k.remote; catch; false; end
+    sample_age = st === nothing ? Inf : (try; time() - st.latest.rcv; catch; Inf; end)
+    proc_up = try; Base.process_running(k.proc); catch; false; end
+    alive = _status_alive(remote, k.conn !== nothing, proc_up, sample_age)
     d = Dict{String,Any}(
-        "kind" => "worker process",
+        "kind" => remote ? "worker process (remote)" : "worker process",
+        "side" => _status_side(nb, k),
+        "host" => (try; k.target isa ReportEngine.RemoteTarget ? String(k.target.ssh_host) : ""; catch; ""; end),
         "port" => k.port,
         "connected" => k.conn !== nothing,
         "alive" => alive,
@@ -446,14 +482,22 @@ end
 
 # The worker log tail, for the page's log pane. `?doc=` selects the notebook when more than one is
 # served; `?lines=` bounds it.
-function _status_log(h::Hub, docid::AbstractString, lines::Int)
+function _status_log(h::Hub, docid::AbstractString, lines::Int; side::AbstractString = "")
     nbs = lock(h.lock) do; collect(values(h.notebooks)); end
     nb = isempty(docid) ? (isempty(nbs) ? nothing : first(nbs)) :
          findfirst(x -> x.id == docid, nbs) |> i -> i === nothing ? nothing : nbs[i]
     nb === nothing && return Dict{String,Any}("ok" => false, "error" => "no such notebook", "log" => "")
-    k = nb.kernel
+    # `side` names a REGION worker; "" is the main kernel. A notebook that places cells elsewhere has
+    # more than one log, and the one that failed is usually not the main one — reporting only the main
+    # kernel's makes the page look healthy while the interesting log goes unread.
+    k = isempty(side) ? nb.kernel : nothing
+    if k === nothing
+        k = lock(_REGION_LOCK) do; get(_REGION_KERNELS, (nb.id, String(side)), nothing); end
+        k === nothing && return Dict{String,Any}("ok" => false, "doc" => nb.id, "side" => String(side),
+                                                 "error" => "no active worker for region '$(side)'", "log" => "")
+    end
     txt = try; ReportEngine.worker_log_tail(k; lines = lines); catch e; "…could not read the worker log: $e"; end
-    return Dict{String,Any}("ok" => true, "doc" => nb.id, "log" => txt)
+    return Dict{String,Any}("ok" => true, "doc" => nb.id, "side" => String(side), "log" => txt)
 end
 
 # The status page. Deliberately self-contained — its own markup, styles and script, no shared
@@ -500,6 +544,10 @@ function _status_html()
   .spark { display:block; width:100%; height:34px; margin-top:6px; }
   .foot { color:var(--dim); font-size:.75rem; margin-top:28px; }
   label.auto { color:var(--dim); font-size:.78rem; margin-left:auto; cursor:pointer; }
+.logpick { display:flex; gap:6px; flex-wrap:wrap; }
+.logpick button { font: inherit; font-size:.74rem; padding:2px 9px; border-radius:6px; cursor:pointer;
+  background:transparent; color:var(--dim); border:1px solid var(--border); }
+.logpick button.on { color:var(--fg); background:var(--bg2); border-color:var(--dim); }
 </style>
 </head>
 <body>
@@ -508,7 +556,7 @@ function _status_html()
     <label class="auto"><input type="checkbox" id="auto" checked/> auto-refresh</label></div>
   <div class="sub" id="hubline">loading…</div>
   <div id="body"></div>
-  <h2>Worker log</h2>
+  <div class="row"><h2>Worker log</h2><span id="logpick" class="logpick"></span></div>
   <pre class="log" id="log">loading…</pre>
   <div class="foot" id="foot"></div>
 </div>
@@ -596,12 +644,38 @@ function render(d) {
   \$('#foot').textContent = 'Updated ' + new Date().toLocaleTimeString();
 }
 
+// A notebook that places cells on a region has MORE THAN ONE log, and the one that failed is
+// usually not the main worker's. The picker names each; the choice sticks across refreshes.
+let logSide = '', logDoc = '';
+function paintLogPick(docs) {
+  const d = (docs || []).find(x => !logDoc || x.id === logDoc) || (docs || [])[0];
+  if (!d) { \$('#logpick').innerHTML = ''; return; }
+  logDoc = d.id;
+  const ws = d.workers || [];
+  if (ws.length < 2) { \$('#logpick').innerHTML = ''; logSide = ''; return; }
+  if (!ws.some(w => (w.side || '') === logSide)) logSide = '';
+  \$('#logpick').innerHTML = ws.map(w => {
+    const side = w.side || '';
+    const name = side ? esc(side + (w.host ? ' · ' + w.host : '')) : 'main';
+    return `<button data-side="\${esc(side)}" class="\${side === logSide ? 'on' : ''}">\${name}</button>`;
+  }).join('');
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('#logpick button[data-side]');
+  if (!b) return;
+  logSide = b.getAttribute('data-side');
+  \$('#log').textContent = 'loading…';
+  tick();
+});
+
 async function tick() {
-  try { render(await (await fetch('/api/status')).json()); }
+  try { const st = await (await fetch('/api/status')).json(); render(st); paintLogPick(st.docs); }
   catch (e) { \$('#body').innerHTML = '<div class="card">Could not reach the server: ' + esc(e) + '</div>'; }
-  try { const r = await (await fetch('/api/status/log?lines=300')).json();
+  try { const q = '/api/status/log?lines=300&doc=' + encodeURIComponent(logDoc) +
+                  '&side=' + encodeURIComponent(logSide);
+        const r = await (await fetch(q)).json();
         const el = \$('#log'); const bottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
-        el.textContent = r.log || '(no worker log yet)';
+        el.textContent = r.log || r.error || '(no worker log yet)';
         if (bottom) el.scrollTop = el.scrollHeight;
   } catch (e) {}
 }

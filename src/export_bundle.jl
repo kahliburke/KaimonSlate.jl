@@ -907,6 +907,15 @@ project: a git checkout for a full-history bundle). Does not instantiate (the ca
 download/precompile can be streamed). Cache extraction is staged in a sibling `.partial` dir and
 swapped in, so a crash mid-extract can't leave a half-populated cache.
 """
+# Entries in a would-be install dir that are NOT ours. The refusal below exists to protect someone's
+# folder from being extracted over, and it reads emptiness to decide — but a launcher puts this run's
+# own state home INSIDE the install dir (`<install>/.kaimonslate`), and anything that touches it
+# before the bundle lands makes the directory "non-empty" with no stamp yet to vouch for it. The
+# result is a refusal naming a path the user did choose, for files they did not put there. Our own
+# state is not someone else's folder, so it does not count.
+const _INSTALL_OWN_STATE = (".kaimonslate", ".cache", ".DS_Store")
+_foreign_entries(dir) = filter(e -> !(e in _INSTALL_OWN_STATE), readdir(dir))
+
 function _reconstruct_bundle!(jl_path::AbstractString)
     b64 = _read_bundle_b64(read(jl_path, String))
     # A durable install dir (run.jl's "where to set this up?" prompt) → reconstruct THERE, not the cache.
@@ -923,7 +932,7 @@ function _reconstruct_bundle!(jl_path::AbstractString)
             return (; _read_coords(dir)...,
                     fresh = _refresh_install!(b64, dir, sha), install = true)
         end
-        (isdir(dir) && !isempty(readdir(dir))) &&
+        (isdir(dir) && !isempty(_foreign_entries(dir))) &&
             error("SLATE_INSTALL_DIR is a non-empty directory that isn't a Slate install: $dir\n" *
                   "Choose an empty/new path, or remove it, and re-run.")
         _extract_bundle!(b64, dir)

@@ -3232,13 +3232,21 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     # Re-runnable (idempotent). Prerequisite: Julia 1.10+ (juliaup / https://julialang.org/downloads).
     #
     # Steps are separate functions so this is easy to extend or audit.
+
+    # A dedicated project env keeps this off your default environment.
+    const ENVDIR = joinpath(first(DEPOT_PATH), "environments", "kaimonslate-run")
+
+    # Make it active BEFORE the first `using`, so every package this script loads resolves in the
+    # one environment. Activating after `using Pkg` instead means Pkg and Downloads are already
+    # loaded at the DEFAULT environment's versions, and installing here resolves those same packages
+    # differently — Julia then reports dozens of "precompiled but different versions are currently
+    # loaded", which it can no longer fix, because loading has happened. `set_active_project` is
+    # Base, so this costs no package load, and ENVDIR is only path arithmetic.
+    mkpath(ENVDIR); Base.set_active_project(ENVDIR)
     using Pkg, Sockets, Downloads
 $(app ? _run_app_help(apptitle, port > 0 ? port : _APP_DEFAULT_PORT) : "")
     # Don't auto-register into the user's Kaimon config — this is a self-contained standalone run.
     ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"
-
-    # A dedicated project env keeps this off your default environment.
-    const ENVDIR = joinpath(first(DEPOT_PATH), "environments", "kaimonslate-run")
 
     # The reproducible bundle: its filename (shipped beside this script), and — for the published-page
     # one-liner, which runs this script from a temp dir with no sibling — a URL to fetch it from.
@@ -3300,7 +3308,7 @@ $(app ? _run_app_help(apptitle, port > 0 ? port : _APP_DEFAULT_PORT) : "")
 
     function install_packages()
         @info "Installing Kaimon + KaimonSlate into \$ENVDIR (first run compiles — this can take several minutes)…"
-        mkpath(ENVDIR); Pkg.activate(ENVDIR)
+        Pkg.activate(ENVDIR)   # already the active project (set before the first `using`); this re-asserts it
         # Kaimon FIRST: it provides the compute gate the notebook's env reconstructs through (and the
         # agent). KaimonSlate second — both want HTTP 2, so they co-resolve into one env.
         _add_pkg("Kaimon", "d3856c55-31fd-4246-b7e8-380411123c01", "$KAIMON", "SLATE_KAIMON_PATH")
@@ -3898,6 +3906,55 @@ function _warn_untracked_project(nb::LiveNotebook)
         This project has no committed files, so the app bundle carries only a partial copy of it \
         (an export ships the repo's TRACKED files). Commit the project, or name what else the app \
         needs with `include=[…]` — otherwise the app will start and then fail on missing files.""" project = root
+    _warn_unshipped_includes(nb)
+    return nothing
+end
+
+# A source file the package `include`s but the bundle does not carry. `_untracked_project` catches
+# the whole-repo case (nothing committed at all); this catches the far likelier one — a repo with
+# commits where ONE source file was never `git add`ed. The package then cannot load on the target
+# machine, so the app dies in `Pkg.instantiate` with a SystemError naming a path inside the install,
+# minutes after an export that reported success. Nothing about the exported folder looks wrong.
+#
+# Only `include("literal")` is resolved: a computed include can't be known here, and guessing would
+# produce false alarms about files that are fine.
+const _INCLUDE_LITERAL = r"""\binclude\(\s*"([^"]+)"\s*\)"""
+function _unshipped_includes(root::AbstractString, shipped::AbstractSet{String})
+    missing_files = String[]
+    srcdir = joinpath(root, "src")
+    isdir(srcdir) || return missing_files
+    for f in readdir(srcdir; join = true)
+        (isfile(f) && endswith(f, ".jl")) || continue
+        # Only inspect files that ship — an unshipped file's own includes are moot.
+        rel = relpath(f, root)
+        rel in shipped || continue
+        body = try; read(f, String); catch; continue; end
+        for m in eachmatch(_INCLUDE_LITERAL, body)
+            inc = String(m.captures[1])
+            endswith(inc, ".jl") || (inc *= ".jl")
+            target = relpath(normpath(joinpath(dirname(f), inc)), root)
+            (target in shipped || isabspath(inc)) && continue
+            isfile(joinpath(root, target)) || continue      # already broken in the source; not ours to report
+            push!(missing_files, target)
+        end
+    end
+    return unique!(missing_files)
+end
+
+function _warn_unshipped_includes(nb::LiveNotebook)
+    root = _proj_root(nb)
+    (isempty(root) || !isdir(joinpath(root, ".git")) || Sys.which("git") === nothing) && return nothing
+    shipped = try
+        Set(String[s for s in split(read(pipeline(`git -C $root ls-files -z`; stderr = devnull), String), '\0';
+                                    keepempty = false)])
+    catch; return nothing; end
+    isempty(shipped) && return nothing              # the no-commits case already warned above
+    miss = _unshipped_includes(root, shipped)
+    isempty(miss) && return nothing
+    @warn """
+        The app will not start: this project's source `include`s files the bundle does not carry, so \
+        its package cannot load on the target machine (`Pkg.instantiate` fails with a missing file). \
+        An export ships the repo's TRACKED files — `git add` these, or name them with `include=[…]`.""" project = root unshipped = miss
     return nothing
 end
 

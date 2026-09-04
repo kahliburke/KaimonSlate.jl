@@ -1113,6 +1113,26 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
                 String(k.target.ssh_host) : ""; catch; ""; end
     d = Dict{String,Any}("side" => String(side), "host" => host,
                          "kind" => st["kind"], "port" => st["port"], "connected" => st["connected"])
+    # WHERE and WHAT this worker is, not just how it's doing. Telemetry says a worker is busy; none of
+    # it says which host, over which transport, on which ports, in which environment, or whether it
+    # was adopted warm — and those are the facts you need when a region cell won't run at all.
+    if k isa ReportEngine.GateKernel
+        try
+            d["streamPort"] = k.stream_port
+            d["env"] = String(k.project)
+            t = k.target
+            if t isa ReportEngine.RemoteTarget
+                d["transport"] = String(t.transport)
+                d["dataPort"] = k.port + 2                 # the blob channel rides gate+2
+                isempty(String(t.datadir)) || (d["dataRoot"] = String(t.datadir))
+            else
+                d["transport"] = k.remote ? "attached" : "local"
+                p = k.proc
+                d["pid"] = (p === nothing) ? 0 : (try; getpid(p); catch; 0; end)
+            end
+        catch
+        end
+    end
     # Latest telemetry (cpu/rss/host cpu/mem) → a JSON string the pill popup parses. Fully guarded: a
     # telemetry hiccup must NEVER throw here, or it takes the whole `state_json` (the notebook) down.
     if k isa ReportEngine.GateKernel
@@ -1174,7 +1194,33 @@ function _worker_log(nb::LiveNotebook, side::AbstractString, lines::Int)
                                              "note" => "no active worker for this region")
     log = try; ReportEngine.worker_log_tail(k; lines = lines)
           catch e; "log unavailable: " * first(sprint(showerror, e), 160); end
-    return merge(_worker_entry(nb, side, k), Dict{String,Any}("log" => log))
+    return merge(_worker_entry(nb, side, k), _worker_provenance(k), Dict{String,Any}("log" => log))
+end
+
+# Provenance + age from a remote worker's own manifest: ADOPTED from the warm pool behaves
+# differently from spawned-for-this-notebook, and "spawned three days ago" is the tell for a stale
+# one. Deliberately NOT part of `_worker_entry` — reading the roster is an ssh round-trip, and that
+# runs on every state push. Here it is paid once, when the panel opens on a worker.
+function _worker_provenance(k)
+    d = Dict{String,Any}()
+    (k isa ReportEngine.GateKernel && k.target isa ReportEngine.RemoteTarget) || return d
+    host = try; String(k.target.ssh_host); catch; ""; end
+    isempty(host) && return d
+    try
+        for w in ReportEngine.list_remote_workers(host)
+            get(w, "port", -1) == k.port || continue
+            mf = get(w, "manifest", "")
+            d["state"] = String(get(w, "state", ""))
+            d["origin"] = ReportEngine._manifest_get(mf, "adopted") == "1" ? "adopted from the warm pool" :
+                          ReportEngine._manifest_get(mf, "pool") == "1" ? "warm-pool member" :
+                          "spawned for this notebook"
+            sp = ReportEngine._manifest_get(mf, "spawned")
+            isempty(sp) || (d["spawned"] = sp)
+            break
+        end
+    catch
+    end
+    return d
 end
 
 # The cells payload for a NON-live state (inactive/hydrating): the embedded frozen render if present

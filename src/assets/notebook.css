@@ -1747,6 +1747,28 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 #workerpop-title { font-weight:600; color:var(--text); flex:1 1 auto; min-width:0; }
 /* Full telemetry breakdown as wrapping chips (no ellipsis truncation — every metric stays visible). */
 .workerpop-stats { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; }
+/* One tab per worker, so comparing them is a click rather than a re-navigation. Severity-ranked with
+   a `+N ▾` overflow (same bounding as the topbar pill), so an unwell worker always holds a tab. */
+.workerpop-tabs { display:flex; align-items:stretch; gap:3px; flex-wrap:nowrap; min-width:0; }
+.wptab { font-size:.74rem; padding:3px 9px; border-radius:6px 6px 0 0; cursor:pointer; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; max-width:14ch;
+  background:transparent; color:var(--dim); border:1px solid transparent; border-bottom:none; }
+.wptab:hover { color:var(--text); background:var(--bg3); }
+.wptab.on { color:var(--text); background:var(--bg); border-color:var(--border);
+  box-shadow:inset 0 2px 0 var(--accent); }   /* the accent edge reads as "this one" without a heavy frame */
+.wptab-more { position:relative; display:inline-flex; }
+.wptab-menu { position:absolute; top:100%; right:0; z-index:30; min-width:170px; padding:4px;
+  background:var(--bg2); border:1px solid var(--border); border-radius:0 6px 6px 6px;
+  box-shadow:0 8px 22px rgba(0,0,0,.4); }
+.wptab-menuitem { font-size:.76rem; padding:4px 8px; border-radius:5px; cursor:pointer; white-space:nowrap; color:var(--dim); }
+.wptab-menuitem:hover { background:var(--bg3); color:var(--text); }
+/* Identity, not health: which host, over what transport, on which ports, adopted or spawned. Muted
+   against the telemetry chips below — you read it once to orient, then watch the numbers. */
+.workerpop-ident { display:flex; flex-wrap:wrap; gap:4px 5px; align-items:center; }
+.widchip { font-family:var(--mono,ui-monospace,monospace); font-size:.68rem; color:var(--dim);
+  background:transparent; border:1px dashed var(--border); border-radius:5px; padding:1px 6px; white-space:nowrap; }
+.widchip-k { color:color-mix(in srgb, var(--dim) 70%, transparent); margin-right:5px; }
+.widchip-v { color:var(--text); }
 /* Run-location picker row (main worker only) — moved here from the old #runloc caret. */
 .workerpop-runloc { font-size:.82rem; color:var(--dim); display:flex; align-items:center; gap:8px; }
 .workerpop-runloc b { color:var(--text); font-weight:600; }
@@ -2347,3 +2369,6 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .exrp-total { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
               font-size: .85rem; color: var(--dim); font-variant-numeric: tabular-nums; }
 .exrp-total b { color: var(--text); }
+/* The panel with no log to show (an app refuses that route) — identity + telemetry still stand. */
+.wplog-none { padding:12px 14px; font-size:.78rem; color:var(--dim); line-height:1.5; }
+.wplog-none a { color:var(--accent); }

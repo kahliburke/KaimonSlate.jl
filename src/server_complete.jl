@@ -770,7 +770,8 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/status/log", req -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
         _json(_status_log(h, get(q, "doc", ""),
-                          clamp(something(tryparse(Int, get(q, "lines", "300")), 300), 1, 5000)))
+                          clamp(something(tryparse(Int, get(q, "lines", "300")), 300), 1, 5000);
+                          side = get(q, "side", "")))
     end)
     HTTP.register!(router, "GET", "/assets/notebook.css", _ -> _asset(read(_CSS_ASSET, String), "text/css; charset=utf-8"))
     # Vendored third-party assets (offline cache, pinned in vendor.json). Greedy `**` so

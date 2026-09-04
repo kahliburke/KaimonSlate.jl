@@ -300,6 +300,18 @@ x = 1
         @test occursin(".kaimonslate", rj) && occursin("mktempdir", rj)   # install → under the notebook folder; throwaway → temp
         @test occursin("free_port()", rj)                            # pick a free port (8765 may be taken)
         @test occursin("using KaimonSlate\n", rj)                    # load at top level (world-age safe)
+        # The run env must be ACTIVE before the first `using`. Activating after `using Pkg` leaves
+        # Pkg and Downloads loaded at the DEFAULT environment's versions, and installing into the run
+        # env then resolves those same packages differently — which Julia can only report, dozens of
+        # lines of "precompiled but different versions are currently loaded", as an app's first
+        # impression. Order, not a subprocess, is what avoids it.
+        let ls = split(rj, "\n"), iscode = l -> !startswith(strip(l), "#")
+            ienv = findfirst(l -> iscode(l) && occursin("const ENVDIR", l), ls)
+            iset = findfirst(l -> iscode(l) && occursin("set_active_project", l), ls)
+            iuse = findfirst(l -> iscode(l) && occursin(r"^\s*using Pkg", l), ls)
+            @test !any(isnothing, (ienv, iset, iuse))
+            @test ienv < iset < iuse                                 # define it, activate it, THEN load
+        end
         # No-URL run.jl (extracted site / embed): reads the sibling bundle; the per-notebook name is threaded in
         rjl = NS._run_script(""; bundle_name = "demo.standalone.jl")
         @test occursin("@__DIR__", rjl) && occursin("demo.standalone.jl", rjl)

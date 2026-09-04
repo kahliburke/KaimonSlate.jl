@@ -9,6 +9,7 @@ let _wpSide = null;
 // than state.workers[].stats (which only refreshes on a notebook version-bump), so the pills read it first.
 const _wpLive = {};
 let _wpRaw = [];                  // chronological raw log lines for the OPEN popup (snapshot + streamed), re-parsed on each change
+let _wpWorkers = [];              // latest worker list — the popup's tab strip, kept in step with the pills
 const _WP_LOG_MAX = 2000;        // cap the client-side buffer so a chatty worker can't grow it unbounded
 const _wpEsc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const _wpMB = v => (v == null || v < 0) ? '' : (v / 2 ** 20 >= 1024 ? (v / 2 ** 30).toFixed(1) + 'GB' : Math.round(v / 2 ** 20) + 'MB');
@@ -141,8 +142,12 @@ function renderWorkers(state) {
   for (const k of Object.keys(_wpLive)) if (!keep.has(k)) delete _wpLive[k];
   // The strip (main worker + regions) is debounced — one paint per burst, from the LATEST list.
   _wpPendingWs = ws;
+  _wpWorkers = ws;                 // the popup's tab strip reads the same list
   if (_wpPaintTimer) return;
-  _wpPaintTimer = setTimeout(() => { _wpPaintTimer = null; _wpPaintStrip(_wpPendingWs); }, 160);
+  _wpPaintTimer = setTimeout(() => {
+    _wpPaintTimer = null; _wpPaintStrip(_wpPendingWs);
+    _wpSide === null || _wpPaintTabs();   // a worker appearing/leaving changes the open popup's tabs
+  }, 160);
 }
 
 // Severity rank — the most attention-worthy worker surfaces first; everything calmer folds away. The main is
@@ -248,6 +253,72 @@ function onWorkerLog(side, line) {
   _wpRenderLog();
 }
 
+// ── Tabs: one worker per tab, so reading logs across them is a click, not a re-navigation ─────────
+// The dropdown that opens this panel is NAVIGATION; the tabs are COMPARISON — the question is almost
+// always "main is fine, so which region is stalling?". They also buy peripheral awareness the
+// dropdown can't: a red dot on a tab you are NOT reading.
+//
+// Ranked by severity and bounded the same way the topbar pill is: unwell workers always hold a
+// visible tab, calm ones fold into `+N ▾`. Live dots come from `_wpLive`, which already streams for
+// every worker, so only the LOG is per-tab work — fetched on switch, one buffer, so the line cap
+// stays meaningful however many workers there are.
+const _WP_TABS_MAX = 4;
+function _wpPaintTabs() {
+  const box = document.getElementById('workerpop-tabs'); if (!box) return;
+  const ws = _wpWorkers || [];
+  if (ws.length < 2) { box.innerHTML = ''; box.style.display = 'none'; return; }   // one worker → no tabs to pick
+  box.style.display = '';
+  const ranked = ws.slice().sort((a, b) => _wpSeverity(b) - _wpSeverity(a));
+  // The open worker always holds a visible tab, whatever its severity — you are reading it.
+  const shown = ranked.slice(0, _WP_TABS_MAX);
+  if (!shown.some(w => (w.side || '') === _wpSide)) {
+    const cur = ranked.find(w => (w.side || '') === _wpSide);
+    cur && (shown[shown.length - 1] = cur);
+  }
+  const rest = ranked.filter(w => !shown.includes(w));
+  const tab = w => {
+    const side = w.side || '';
+    return '<button class="wptab' + (side === _wpSide ? ' on' : '') + '" data-wptab="' + _wpEsc(side) + '">' +
+      _wpOverflowDot(w) + ' ' + _wpEsc(_wpLabel(side, w.host)) + '</button>';
+  };
+  const more = rest.length ? '<span class="wptab-more"><button class="wptab wptab-morebtn">+' + rest.length +
+    ' ▾</button><div class="wptab-menu" hidden>' +
+    rest.map(w => '<div class="wptab-menuitem" data-wptab="' + _wpEsc(w.side || '') + '">' +
+                  _wpOverflowDot(w) + ' ' + _wpEsc(_wpLabel(w.side || '', w.host)) + '</div>').join('') +
+    '</div></span>' : '';
+  box.innerHTML = shown.map(tab).join('') + more;
+}
+
+// WHERE and WHAT this worker is. Telemetry says how it is DOING; none of it answers "which host,
+// over what, in which environment, and was it adopted warm" — the questions a worker that won't run
+// at all raises. Only fields the server actually sent are shown, so a local worker stays short.
+function _wpIdentChips(r) {
+  const p = [];
+  const row = (k, v) => p.push('<span class="widchip"><span class="widchip-k">' + k + '</span>' +
+                               '<span class="widchip-v">' + _wpEsc(v) + '</span></span>');
+  r.host && row('host', r.host);
+  r.transport && row('via', r.transport);
+  r.port && row('ports', [r.port, r.streamPort, r.dataPort].filter(Boolean).join(' · '));
+  r.pid && row('pid', r.pid);
+  r.origin && row('origin', r.origin);
+  r.spawned && row('spawned', r.spawned);
+  r.dataRoot && row('data', r.dataRoot);
+  r.env && row('env', String(r.env).replace(/^.*\/(?=[^/]+\/[^/]+$)/, '…/'));
+  return p.join('');
+}
+
+// Switch the panel to another worker: same panel, new subject. The log buffer is dropped (one buffer,
+// re-fetched) while the tabs repaint at once so the click feels immediate.
+function _wpSwitchTab(side) {
+  if (side === _wpSide) return;
+  _wpSide = side; _wpRaw = [];
+  const log = document.getElementById('workerpop-log'); if (log) log.textContent = 'loading…';
+  const st = document.getElementById('workerpop-stats'); if (st) st.textContent = '';
+  const id = document.getElementById('workerpop-ident'); if (id) id.innerHTML = '';
+  _wpPaintTabs();
+  _wpRefresh();
+}
+
 function openWorkerPop(side, ev, pin) {
   ev && ev.stopPropagation();   // opened from a click → don't let it bubble to the document close-on-outside-click handler
   _wpSide = side;
@@ -256,8 +327,10 @@ function openWorkerPop(side, ev, pin) {
   _wpRaw = [];
   document.getElementById('workerpop-log').textContent = 'loading…';
   document.getElementById('workerpop-stats').textContent = '';
+  const idb = document.getElementById('workerpop-ident'); if (idb) idb.innerHTML = '';
   bg.classList.add('show');
   _wpUpdatePin();
+  _wpPaintTabs();   // opens on the worker you clicked, with its siblings alongside
   _wpRefresh();   // ONE snapshot for history + title/status; live stats & new log lines then arrive via the WS push
 }
 function closeWorkerPop() {
@@ -269,8 +342,15 @@ async function _wpRefresh() {
   const side = _wpSide;                                          // capture: the popup can switch while we await
   if (side === null) return;
   let r; try { r = await api('GET', '/api/worker-log?side=' + encodeURIComponent(side) + '&lines=500'); }
-  catch (_) { return; }
+  catch (_) { r = null; }
   if (_wpSide !== side) return;                                  // switched to another region (or closed) mid-fetch → stale response, drop it
+  // An app REFUSES the worker-log route (a log can carry notebook data, and an app's visitor is not
+  // its operator), so the panel has to stand on what /state already gave us: identity and telemetry
+  // are there, and only the log is missing. Saying where it lives beats a pane stuck on "loading…".
+  if (!r || typeof r !== 'object' || r.log === undefined) {
+    const w = (_wpWorkers || []).find(x => (x.side || '') === side);
+    r = Object.assign({ side: side }, w || {}, { log: "" , _noLog: true });
+  }
   const dot = !r.connected ? '🟠' : (r.status === 'degraded' ? '🟡' : '🟢');
   document.getElementById('workerpop-title').innerHTML = dot + ' ' + (r.side ? 'region' : 'main worker') +
     ' · ' + _wpEsc(_wpLabel(r.side, r.host)) + (r.port ? ' :' + r.port : '');
@@ -282,11 +362,21 @@ async function _wpRefresh() {
       '</b> <button class="wrl-change" onclick="closeWorkerPop(); toggleRunLoc(event)">change ▾</button>'; }
     else { rl.style.display = 'none'; rl.innerHTML = ''; }
   }
+  const idb = document.getElementById('workerpop-ident');
+  if (idb) idb.innerHTML = _wpIdentChips(r);
   document.getElementById('workerpop-stats').innerHTML = _wpStatsChips(r.stats, r.note);
   // Seed the chronological buffer from the snapshot; live lines then append via onWorkerLog. Parsed + rendered
   // newest-record-first so multi-line records stay right-way-up. Trailing blank line from the file is dropped.
   _wpRaw = r.log ? r.log.split('\n').filter((l, i, a) => l.length || i < a.length - 1) : [];
-  _wpRenderLog(r.note);
+  if (r._noLog) {
+    const box = document.getElementById('workerpop-log');
+    if (box) box.innerHTML = '<div class="wplog-none">Worker logs are an operator view, not a reader ' +
+      'one — a log can carry the notebook\'s own data, so an app does not serve them here.<br>' +
+      '<a href="/status" target="_blank" rel="noopener">/status</a> has them, one worker at a time.' +
+      '</div>';
+  } else {
+    _wpRenderLog(r.note);
+  }
 }
 
 window.renderWorkers = renderWorkers;
@@ -325,9 +415,24 @@ function _wpScheduleHide() {                      // left the whole area → hid
 }
 function wpTogglePin() { _wpPinned = !_wpPinned; _wpUpdatePin(); if (!_wpPinned) _wpScheduleHide(); }
 window.wpTogglePin = wpTogglePin;
+function _wpCloseTabMenu() { const m = document.querySelector('#workerpop-tabs .wptab-menu:not([hidden])'); if (m) m.hidden = true; }
 
 document.addEventListener('click', e => {
   if (!e.target || !e.target.closest) return;
+  // A tab (or an overflow row) switches the panel's subject. Handled before the panel-is-clicked
+  // guard below, and it PINS: you came here to read, not to have it vanish on the next mouseout.
+  const tab = e.target.closest('#workerpop-tabs [data-wptab]');
+  if (tab) {
+    _wpCloseTabMenu(); _wpPinned = true; _wpUpdatePin();
+    _wpSwitchTab(tab.getAttribute('data-wptab')); e.stopPropagation(); return;
+  }
+  const tmore = e.target.closest('#workerpop-tabs .wptab-morebtn');
+  if (tmore) {
+    const m = tmore.parentElement.querySelector('.wptab-menu');
+    if (m) m.hidden ? (m.hidden = false) : (m.hidden = true);
+    e.stopPropagation(); return;
+  }
+  _wpCloseTabMenu();
   const row = e.target.closest('#workerpills .wpill-menuitem[data-side]');
   if (row) { _wpCloseMenu(); _wpShowPanel(row.getAttribute('data-side'), true); return; }   // click a row → PIN it
   const top = e.target.closest('#workerpills .wpill-top');
