@@ -352,8 +352,16 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
         end
         opt["legend"] = leg
     end
+    # A kwarg DECORATES what the layout built, rather than discarding it. `:heatmap` generates its
+    # category axes from the labels it was given, so `echart(:heatmap, xs, ys, z; yAxis = (name="b",))`
+    # has to keep that axis and add a name — replacing it dropped `type` and `data`, and the labels
+    # silently vanished while the axis fell back to values. The caller's keys still win, one by one;
+    # only the ones they did not mention survive. Anything that is not two dicts (an axis PAIR, a
+    # series vector) replaces as before, since there is no sensible merge.
     for (k, v) in kwargs
-        opt[String(k)] = _ec(v)
+        key, nv = String(k), _ec(v)
+        cur = get(opt, key, nothing)
+        opt[key] = (cur isa AbstractDict && nv isa AbstractDict) ? merge(cur, nv) : nv
     end
     # Consistent typography: default ALL chart text to inherit the surrounding document font (the
     # notebook's sans in the browser; the serif body in a PDF/Typst export). Without an explicit

@@ -38,6 +38,29 @@ const RE = ReportEngine
         @test !haskey(o2["series"][1], "grid")
     end
 
+    # A kind that GENERATES a component (`:heatmap` builds its category axes from the labels) and a
+    # caller who wants to decorate one. Replacing it dropped `type` and `data`: the labels silently
+    # vanished and the axis fell back to values, which is why naming a heatmap's axis was not
+    # something you could just do.
+    @testset "a component kwarg decorates what the kind generated, not replaces it" begin
+        z = [1.0 2.0; 3.0 4.0]
+        o = RE.echart(:heatmap, ["a1", "a2"], ["b1", "b2"], z;
+                      yAxis = (name = "b", nameLocation = :middle, nameGap = 40)).option
+        @test o["yAxis"]["name"] == "b"                       # what the caller asked for…
+        @test o["yAxis"]["nameLocation"] == "middle"
+        @test o["yAxis"]["type"] == "category"                # …without losing what the kind built
+        @test o["yAxis"]["data"] == ["b1", "b2"]
+        @test o["xAxis"]["data"] == ["a1", "a2"]              # the axis nobody mentioned is untouched
+        # The caller still wins per key — this is a merge, not a floor.
+        @test RE.echart(:heatmap, ["a1", "a2"], ["b1", "b2"], z;
+                        yAxis = (type = :value,)).option["yAxis"]["type"] == "value"
+        # Nothing to merge INTO is unchanged, and a non-dict (an axis pair, a series list) replaces:
+        # there is no sensible key-wise merge of a Dict into a Vector.
+        @test RE.echart(:line, [1, 2], [3, 4]; grid = (left = 60,)).option["grid"] == Dict("left" => 60)
+        @test RE.echart(:line, [1, 2], [3, 4];
+                        dataZoom = [(type = :slider,)]).option["dataZoom"][1]["type"] == "slider"
+    end
+
     @testset "consistent typography: text inherits the document font unless overridden" begin
         # Default: all chart text uses one family (inherit), so a superscript in a title can't fall
         # back to a different font than the rest of the chart.
