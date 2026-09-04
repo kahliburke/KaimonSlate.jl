@@ -410,19 +410,36 @@ end
 
 _dirlist(dirs) = join((shq(String(d)) for d in dirs), " ")
 
+# One sync at a time per mirror. A pull REPLACES the mirror's metadata dirs — remove, then extract —
+# so two of them on the same store interleave: one walks a directory while the other is writing into
+# it, and the `rm` fails with ENOTEMPTY on a directory that was empty when it started. That is not
+# hypothetical bookkeeping: a sweep cell running while its own card polls is two syncs on one store,
+# and a notebook with several sweep cells against one cluster is more.
+#
+# The lock is held across the round trip, which also collapses a burst of concurrent syncs into one
+# useful fetch instead of several redundant ones.
+const _SYNC_LOCKS = Dict{String,ReentrantLock}()
+const _SYNC_LOCKS_LOCK = ReentrantLock()
+
+_sync_lock(mirror::AbstractString) = lock(_SYNC_LOCKS_LOCK) do
+    get!(ReentrantLock, _SYNC_LOCKS, String(mirror))
+end
+
 "Bring the local mirror up to date with the store's metadata. One round trip."
 function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     isempty(s.host) && return true          # same machine: the mirror IS the store
     connected(s.host) || return false
     names = _dirlist(dirs)
     script = "cd " * shq(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; tar cf - " * names
-    ok, data = run_io(String(s.host), script, nothing)
-    ok || return false
-    for d in dirs
-        sync_flags(d, :in) && rm(joinpath(s.mirror, String(d)); force = true, recursive = true)
-        mkpath(joinpath(s.mirror, String(d)))
+    lock(_sync_lock(s.mirror)) do
+        ok, data = run_io(String(s.host), script, nothing)
+        ok || return false
+        for d in dirs
+            sync_flags(d, :in) && rm(joinpath(s.mirror, String(d)); force = true, recursive = true)
+            mkpath(joinpath(s.mirror, String(d)))
+        end
+        return _unarchive(data, s.mirror)
     end
-    return _unarchive(data, s.mirror)
 end
 
 """
@@ -434,10 +451,15 @@ store. What may be DELETED there is `sync_flags`' decision, not this function's.
 function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
     isempty(s.host) && return true
     connected(s.host) || return false
-    present = String[String(d) for d in dirs if isdir(joinpath(s.mirror, String(d)))]
+    # Under the same lock as `pull_meta!`: this READS the mirror to build the archive, and a pull
+    # rewriting those directories underneath it would ship a half-replaced tree.
+    present, data = lock(_sync_lock(s.mirror)) do
+        pres = String[String(d) for d in dirs if isdir(joinpath(s.mirror, String(d)))]
+        isempty(pres) && return (pres, nothing)
+        keep = Set(pres)
+        (pres, _archive(s.mirror, p -> first(split(String(p), '/'; keepempty = false)) in keep))
+    end
     isempty(present) && return true
-    keep = Set(present)
-    data = _archive(s.mirror, p -> first(split(String(p), '/'; keepempty = false)) in keep)
     wipe = String[shq(joinpath(s.root, d)) for d in present if sync_flags(d, :out)]
     script = "mkdir -p " * shq(s.root) *
              (isempty(wipe) ? "" : "; rm -rf " * join(wipe, " ")) *
