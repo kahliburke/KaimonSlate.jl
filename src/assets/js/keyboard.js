@@ -84,7 +84,12 @@ function enterEdit(id) {
   const c = _cellById(id); if (!c) return;
   // A web cell has an inline editor too (its first pane, registered in editors[id]), so Enter focuses it
   // like a code cell — not the markdown/source overlay.
-  if ((c.kind === 'code' || c.kind === 'web' || c.kind === 'tool') && !hasBinds(c)) { const ed = window.ensureEditor ? window.ensureEditor(id) : editors[id]; if (ed) ed.focus(); }
+  if ((c.kind === 'code' || c.kind === 'web' || c.kind === 'tool') && !hasBinds(c)) {
+    const ed = window.ensureEditor ? window.ensureEditor(id) : editors[id];
+    if (ed) ed.focus();
+    // Enter means "edit this", so vim starts in insert (no-op when vim is off).
+    window.slateVimEnterInsert && window.slateVimEnterInsert(id);
+  }
   else editSource(id, c.kind === 'md' ? 'markdown' : 'julia');
 }
 document.addEventListener('keydown', e => {

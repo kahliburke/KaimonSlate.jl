@@ -568,7 +568,7 @@ end
         @info "node not found — skipping the JS assertions"
         @test true
     else
-        for script in ("agent_md.mjs", "click_background.mjs", "worker_tabs.mjs")
+        for script in ("agent_md.mjs", "click_background.mjs", "worker_tabs.mjs", "vim_escape.mjs")
             io = IOBuffer()
             ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", script))`; stdout = io, stderr = io))
             ok || print(String(take!(io)))

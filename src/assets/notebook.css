@@ -734,6 +734,35 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   100% { background:rgba(255,110,70,0); }
 }
 .cm-editor .cm-line.cm-errorline-flash { animation:cm-errorflash 1.2s ease-out; }
+/* Vim normal-mode block cursor. @replit/codemirror-vim draws it in a hard salmon (#ff9696) that
+   reads as an error next to the real error highlights right above — and leaves it behind as an
+   empty outlined box in every editor that ISN'T focused, so a notebook full of cells looked like it
+   had a cursor in each. So: follow the theme accent, translucent enough that the character under it
+   stays readable in light and dark themes alike, and show it only where the caret actually is. The
+   selectors match cm6's own specificity and win on order — CodeMirror injects its styles at the top
+   of <head>, ahead of this sheet. */
+.cm-editor .cm-fat-cursor { background:color-mix(in srgb, var(--accent) 60%, transparent);
+  border-radius:1px; outline:none; }
+.cm-editor:not(.cm-focused) .cm-fat-cursor { display:none; }
+/* CodeMirror panels — the vim ex line (`:w`, `/search`) and the Files-tab find/replace, neither of
+   which was ever themed. CM6's base theme paints the panel from its own light/dark pair but leaves
+   the <input> with no colour at all, so the prompt came out in that theme's white while the text you
+   typed stayed on the browser's default black. Repaint both from the Slate palette. `!important`
+   here because these override a vendor base theme — and, for messages, an inline style — rather than
+   ordinary cascade neighbours. */
+.cm-editor .cm-panels { background:var(--bg3) !important; color:var(--text) !important;
+  border-color:var(--border) !important; font-size:.86rem; }
+.cm-editor .cm-panels-top { border-bottom:1px solid var(--border) !important; }
+.cm-editor .cm-panels-bottom { border-top:1px solid var(--border) !important; }
+/* The `:` / `/` prompt is a bare text node, so it takes the panel's colour; the input needs its own. */
+.cm-editor .cm-vim-panel { color:var(--accent) !important; }
+.cm-editor .cm-panels input, .cm-editor .cm-panels .cm-textfield {
+  color:var(--text) !important; background:transparent; caret-color:var(--accent); font:inherit; }
+.cm-editor .cm-panels button, .cm-editor .cm-panels .cm-button {
+  color:var(--text) !important; background:var(--bg2) !important; background-image:none !important;
+  border:1px solid var(--border) !important; border-radius:4px; }
+/* Vim's messages (`E486: Pattern not found`) are inline-styled red — keep the meaning, take the palette. */
+.cm-editor .cm-vim-message { color:var(--red) !important; }
 /* Collapsed inline data-URI (an inlined base64 image) — a compact atomic chip in the editor so the
    huge blob doesn't make the cell uneditable. See `dataUriChit` in editor.js. */
 .data-uri-chit { display:inline-flex; align-items:center; gap:.35em; margin:0 .1em; padding:0 .5em;

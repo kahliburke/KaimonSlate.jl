@@ -6,7 +6,8 @@
   const CM = window.CM6;
   if (!CM) { console.error('CM6 bundle missing'); return; }
   const { EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, Decoration, Transaction,
-          ViewPlugin, WidgetType,
+          ViewPlugin, WidgetType, Prec,
+          vimMode, vimApi, vimGetCM,
           keymap, defaultKeymap, history, historyKeymap, undoDepth, redoDepth, indentWithTab, toggleComment,
           indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection,
           syntaxHighlighting, julia, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
@@ -51,6 +52,102 @@
     for (const v of Object.values(window.editors || {}))
       v.dispatch({ effects: wrapComp.reconfigure((v._wrapMd || on) ? EditorView.lineWrapping : []) });
   };
+  // ── Modal editing (Settings → Editing → Editor keymap) ──────────────────────────
+  // `vim` layers @replit/codemirror-vim over every cell editor. In a Compartment so the setting
+  // applies live to editors that are already open. Deliberately built WITHOUT vim's status panel:
+  // that panel is per-editor and would put a permanent mode bar under all forty cells. The ex line
+  // (`:`) still gets a panel when you open one, because vim falls back to a dialog-only panel, and
+  // the block-vs-bar cursor is the mode indicator.
+  const keymapModeComp = new Compartment();
+  const _keymapMode = () => (localStorage.getItem('slateEditorKeymap') === 'vim' && vimMode) ? 'vim' : 'default';
+  const _keymapExt = mode => (mode === 'vim' && vimMode) ? vimMode() : [];
+  window.editorKeymapMode = _keymapMode;
+  window.setEditorKeymap = mode => {
+    const m = (mode === 'vim') ? 'vim' : 'default';
+    localStorage.setItem('slateEditorKeymap', m);
+    for (const v of Object.values(window.editors || {})) {
+      try { v.dispatch({ effects: keymapModeComp.reconfigure(_keymapExt(m)) }); } catch (_) {}
+    }
+  };
+  // An editor's vim adapter / state, or null when vim is off or not yet attached. The state carries
+  // `{insertMode, visualMode, inputState:{keyBuffer}}`.
+  const _vimCM = v => { try { return (vimGetCM && v && vimGetCM(v)) || null; } catch (_) { return null; } };
+  const _vimState = v => { const cm = _vimCM(v); return (cm && cm.state && cm.state.vim) || null; };
+  window.slateVimState = _vimState;
+  // Enter on a selected cell means "edit this", so land in INSERT rather than making you press `i`
+  // first. Called by enterEdit (keyboard.js); no-op unless vim is on and the editor is in normal
+  // mode. Deliberately NOT hooked into focus itself — a ⌘-click go-to-definition focuses an editor
+  // to SHOW you something, and dropping that into insert would be wrong.
+  window.slateVimEnterInsert = id => {
+    const v = (window.editors || {})[id];
+    const vs = _vimState(v);
+    if (!vs || vs.insertMode) return;
+    try { vimApi.handleKey(vimGetCM(v), 'i', 'mapping'); } catch (_) {}
+  };
+
+  // Escape, as one handler rather than a keymap binding. It has to out-rank both the keymap facet
+  // and vim's own key interception, and both of those sit at Prec.default — so this is the only
+  // placement that reliably sees Escape first. The ladder dismisses the innermost live layer:
+  //   completion popup → vim insert/visual → a half-typed vim operator → the cell itself.
+  // Ctrl is excluded so vim's own `<C-[>` insert-exit can never fall through to leaving the cell —
+  // that's the key to reach for when you want to assert normal mode without risking the cell.
+  const _escapeLadder = Prec.highest(EditorView.domEventHandlers({
+    keydown(e, view) {
+      if (e.key !== 'Escape' || e.ctrlKey || e.metaKey || e.altKey) return false;
+      // A list that is actually ON SCREEN is the innermost thing, and CM6's own binding closes it.
+      // Only "active" counts, never "pending" — see below for why that distinction is the whole game.
+      if (completionStatus(view.state) === 'active') return false;
+      const cm = _vimCM(view), vs = (cm && cm.state && cm.state.vim) || null;
+      if (vs) {
+        // Change the mode HERE rather than handing the key down to vim. `closeCompletion` claims
+        // Escape whenever a completion source is merely PENDING — query in flight, nothing rendered
+        // — and it runs between this handler and vim's, so deferring dropped the keypress entirely
+        // for as long as the worker took to answer. Which reads as Escape doing nothing at all, and
+        // then working once you pause. Doing the transition here leaves nothing in between.
+        if (vs.insertMode) { vimApi.exitInsertMode(cm); return true; }
+        if (vs.visualMode) { vimApi.exitVisualMode(cm); return true; }
+        // A half-typed operator (`d`, `2f`) is the innermost thing left — cancel it, keep the cell.
+        const buf = vs.inputState && vs.inputState.keyBuffer;
+        if (buf && buf.length) { try { vimApi.handleKey(cm, '<Esc>', 'user'); } catch (_) {} return true; }
+      }
+      view.contentDOM.blur();
+      return true;
+    },
+  }));
+
+  // Ex commands that mean something for a notebook cell. Registered once — vim's command registry is
+  // global, not per-editor. Slate has no save step separate from execution: the editor buffer is the
+  // working copy and RUNNING is what applies it (store.js `isDirty`), so `:w` runs the cell.
+  if (vimApi) {
+    const _view = cm => (cm && cm.cm6) || null;
+    const _cellOf = cm => { const v = _view(cm); return (v && v._edctx && v._edctx.cellId) || null; };
+    const _leave = cm => { const v = _view(cm); try { if (v) v.contentDOM.blur(); } catch (_) {} };
+    // A md / @bind cell edits its source in the `.srcedit` OVERLAY, where there is no run — the
+    // apply action is commitSource (what Shift-Enter does there), which writes the source back and
+    // collapses to the rendered view. Same intent as running a code cell, different verb.
+    const _overlay = v => !!(v && v.dom && v.dom.closest && v.dom.closest('.srcedit'));
+    const _run = cm => {
+      const v = _view(cm), id = _cellOf(cm);
+      if (!id) return;
+      if (_overlay(v)) { window.commitSource && window.commitSource(id); return; }
+      if (window.runCell) window.runCell(id);
+    };
+    // `:q!` — throw the buffer away: put the saved source back, which drops the `edited` mark by
+    // itself (the editor's own input handler re-checks the text). The only way to abandon an edit
+    // in one action; plain `:q` keeps it, exactly as clicking away does.
+    const _discard = cm => {
+      const id = _cellOf(cm);
+      if (id && window.edSetText) window.edSetText(id, (window.srcMap || {})[id] || '');
+    };
+    vimApi.defineEx('write', 'w', _run);
+    vimApi.defineEx('wq', 'wq', cm => { _run(cm); _leave(cm); });
+    vimApi.defineEx('xit', 'x', cm => { _run(cm); _leave(cm); });
+    vimApi.defineEx('quit', 'q', (cm, params) => {
+      if (String((params && params.argString) || '').trim() === '!') _discard(cm);
+      _leave(cm);
+    });
+  }
+
   const THEMES = slateThemes || { 'dark-plus': { style: juliaHighlightStyle, chrome: [] } };
   // Exposed for settings.js to build the dropdown — [{name,label}] in declared order.
   window._syntaxThemes = slateThemeMeta || Object.keys(THEMES).map(name => ({ name, label: name }));
@@ -711,17 +808,19 @@
         // later registration can reconfigure this open editor. Before the keymap below so a
         // returned keymap out-precedences the defaults.
         _editorExtComp.of(_buildEditorExts(_edctx)),
+        // Modal editing + the Escape ladder that arbitrates between vim's modes and the cell's.
+        // Both are inert when the keymap setting is `default`.
+        _escapeLadder,
+        keymapModeComp.of(_keymapExt(_keymapMode())),
         // Per-editor extras (the Files-tab editor's gutters + find/replace). Ahead of the keymap
         // below so an extra's bindings — ⌘F, ⌘G — take precedence over the defaults.
         ...(opts.extra || []),
         keymap.of([
-          // Escape: leave edit mode. Ahead of completionKeymap so it can decide whether the
-          // completion gets first refusal — CM6's own closeCompletion answers YES whenever a
-          // completion source is merely PENDING (its query still in flight, nothing rendered), so
-          // an Escape within the activate-on-typing delay was swallowed with no visible effect and
-          // you had to press it twice. Defer only to "active": a list that is actually on screen,
-          // where dismissing it without losing the cursor is the useful thing.
-          { key: 'Escape', run: (v) => completionStatus(v.state) === 'active' ? false : (v.contentDOM.blur(), true) },
+          // Escape is handled by `_escapeLadder` above, not here: it has to out-rank vim's key
+          // interception as well as this keymap, and only a Prec.highest handler does. It defers to
+          // an ACTIVE completion (a list actually on screen) but not to a merely PENDING one —
+          // CM6's own closeCompletion answers yes to pending, which swallowed an Escape typed
+          // inside the activate-on-typing delay and made you press it twice.
           ...completionKeymap,                  // popup nav/close, once there IS a popup
           ...cellKeys,
           // ⌘⇧K = help (app shortcut). Bind it here so CM6's defaultKeymap `deleteLine` doesn't eat it.
