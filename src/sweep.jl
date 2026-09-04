@@ -2733,6 +2733,13 @@ function _live_script(io, r::ShardedResult)
         (act === "reset" ? confirmReset() : Promise.resolve(true)).then(function(ok){
           if (!ok) { btn.disabled = false; return; }
           btn.textContent = "…";
+          // Asking this card to start work IS watching it. Without this, a sweep submitted from a
+          // card that rendered `ready` never announces its settle: `watching` was seeded false at
+          // render (nothing to watch yet) and is otherwise only set when a poll timer starts — which
+          // never happens if the work finishes before the submit's own reply lands. A handful of
+          // fast units on a nearby cluster do exactly that, and the cells reading the sweep then sit
+          // stale until someone re-runs them by hand.
+          if (act === "submit" || act === "resume" || act === "retry") watching = true;
           window.slateCall("$(doch)", { action: act }).then(paint).catch(function(e){
             btn.disabled = false; btn.textContent = was;
             var n = root.querySelector('[data-sw="note"]');
