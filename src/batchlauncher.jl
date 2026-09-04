@@ -30,16 +30,46 @@ struct JobSpec
     project::String              # Julia project the task runs under
     payload::String              # path to slatetask.jl on the compute node
     julia::String                # julia binary (or a module-load prologue can supply it)
-    resources::NamedTuple        # (; cpus, mem, walltime, partition)
+    resources::NamedTuple        # (; cpus, mem, walltime, partition, ...)
     logdir::String
     prologue::String             # shell run before julia: `module load`, depot exports, ...
+    directives::String           # scheduler flags verbatim, one per line — see `directive_lines`
 end
 
 JobSpec(name, chunks; root, project, payload, julia = "julia",
         resources = (; cpus = 1, mem = "1G", walltime = "00:30:00", partition = ""),
-        logdir = joinpath(root, "logs"), prologue = "") =
+        logdir = joinpath(root, "logs"), prologue = "", directives = "") =
     JobSpec(String(name), String.(collect(chunks)), String(root), String(project),
-            String(payload), String(julia), resources, String(logdir), String(prologue))
+            String(payload), String(julia), resources, String(logdir), String(prologue),
+            String(directives))
+
+"""
+    directive_lines(text) -> Vector{String}
+
+Free-form scheduler directives → `#SBATCH` lines. One per line; blank lines and `#` comments are
+dropped, and a line may be written either way (`--exclusive` or `#SBATCH --exclusive`) because both
+are what people have in front of them when they are copying from a working batch script.
+
+This is the escape hatch for a flag whose value contains characters a cell header cannot carry, and
+for the site-specific ones there is no point naming (`--licenses`, `--switches`, `--wckey`). It is
+emitted verbatim: Slate does not know what a site's flags mean and should not pretend to.
+"""
+function directive_lines(text::AbstractString)
+    out = String[]
+    for raw in eachsplit(String(text), '\n')
+        s = strip(raw)
+        (isempty(s) || startswith(s, "# ") || s == "#") && continue
+        s = startswith(s, "#SBATCH") ? strip(s[8:end]) : s
+        isempty(s) && continue
+        # A directive is one flag. Anything else would be a shell line in a place that only accepts
+        # scheduler options, where it is silently ignored rather than run — so say so instead.
+        startswith(s, "-") ||
+            error("scheduler directive `$s` does not start with `-`. These are sbatch flags " *
+                  "(`--constraint=avx512`), one per line; shell setup belongs in the cluster's prologue.")
+        push!(out, "#SBATCH " * s)
+    end
+    return out
+end
 
 abstract type Launcher end
 
@@ -219,23 +249,74 @@ end
 # The batch script. `$SLURM_ARRAY_TASK_ID` picks this element's chunk out of the index file, so one
 # script serves every element and the mapping lives on the shared filesystem rather than in the
 # submission.
+# The three settings whose Slate name differs from sbatch's, because they predate the rest. Every
+# other key becomes its own flag with `_` → `-` — which is what lets an option Slate has never heard
+# of work anyway (`--licenses`, `--switches`, a scheduler patch a site added last week).
+const _SBATCH_RENAME = Dict(:cpus => "cpus-per-task", :walltime => "time", :gpus => "gpus")
+
+sbatch_flag(k::Symbol) = get(_SBATCH_RENAME, k, replace(String(k), '_' => '-'))
+
+# `--exclusive` is the one flag whose VALUE is optional (`--exclusive`, or `=user`/`=mcs`/`=topo`),
+# so it cannot be emitted as a plain `--key=value`.
+function _exclusive_line(v)
+    s = strip(String(v))
+    (isempty(s) || lowercase(s) in ("no", "false", "0")) && return nothing
+    return lowercase(s) in ("yes", "true", "1") ? "#SBATCH --exclusive" : "#SBATCH --exclusive=$s"
+end
+
+# The three Slate always emits, because a job with no cores, memory or time limit is at the mercy of
+# whatever the site's defaults happen to be — and those are the numbers a sweep most needs to state.
+const _SBATCH_ALWAYS = (cpus = 1, mem = "1G", walltime = "00:30:00")
+
 function _sbatch_script(l::SlurmLauncher, spec::JobSpec, indexfile::AbstractString)
     r = spec.resources
-    part = get(r, :partition, "")
     lines = ["#!/bin/bash",
              "#SBATCH --job-name=$(spec.name)",
              "#SBATCH --array=1-$(length(spec.chunks))",
              "#SBATCH --output=$(spec.logdir)/$(spec.name).%A_%a.out",
-             "#SBATCH --cpus-per-task=$(get(r, :cpus, 1))",
-             "#SBATCH --mem=$(get(r, :mem, "1G"))",
-             "#SBATCH --time=$(get(r, :walltime, "00:30:00"))",
+             "#SBATCH --cpus-per-task=$(get(r, :cpus, _SBATCH_ALWAYS.cpus))",
+             "#SBATCH --mem=$(get(r, :mem, _SBATCH_ALWAYS.mem))",
+             "#SBATCH --time=$(get(r, :walltime, _SBATCH_ALWAYS.walltime))",
              # Duplicate submission across a hub restart is prevented by the cluster itself: only
              # one job of this name per user can run, and the name is content-derived.
              "#SBATCH --dependency=singleton"]
-    # Account and QoS are properties of the SITE, not of one sweep, so they live on the launcher.
-    isempty(part)      || push!(lines, "#SBATCH --partition=$(part)")
-    isempty(l.account) || push!(lines, "#SBATCH --account=$(l.account)")
-    isempty(l.qos)     || push!(lines, "#SBATCH --qos=$(l.qos)")
+    # Everything else the spec carries, sorted so two identical sweeps produce identical scripts.
+    # A key absent from the spec emits no line at all: writing `--nodes=1` where the author asked
+    # for nothing would override the partition's own configuration with a guess.
+    #
+    # Deduplicated by the FLAG, not the key: three options have a Slate name that differs from
+    # sbatch's, so `cpus` and `cpus_per_task` are the same setting reached two ways. A spec holding
+    # both (an older notebook, a hand-edited footer) would emit `--cpus-per-task` twice — which
+    # sbatch tolerates by taking the last, and a reader does not. The explicit key wins over the one
+    # already emitted above.
+    seen = Set{String}(["job-name", "array", "output", "cpus-per-task", "mem", "time",
+                        "dependency", "account", "qos"])
+    for k in sort!(collect(keys(r)))
+        k in (:cpus, :mem, :walltime, :account, :qos, :exclusive) && continue
+        v = getfield(r, k)
+        (v === nothing || isempty(string(v))) && continue
+        f = sbatch_flag(k)
+        if f in seen
+            # An alias of something already written: replace that line rather than adding a second.
+            i = findfirst(l -> startswith(l, "#SBATCH --$f="), lines)
+            i === nothing || (lines[i] = "#SBATCH --$f=$(v)")
+            continue
+        end
+        push!(seen, f)
+        push!(lines, "#SBATCH --$f=$(v)")
+    end
+    # Account and QoS default to the SITE's (they are a property of the launcher), but a cell may
+    # override them — someone with two allocations bills one sweep to each.
+    for (k, site) in ((:account, l.account), (:qos, l.qos))
+        v = string(get(r, k, site))
+        isempty(v) || push!(lines, "#SBATCH --$(sbatch_flag(k))=$(v)")
+    end
+    exc = _exclusive_line(get(r, :exclusive, ""))
+    exc === nothing || push!(lines, exc)
+    # Site directives, verbatim and LAST so they win over everything above (sbatch takes the last
+    # occurrence of a repeated option). This is what a flag whose value a cell header cannot carry
+    # uses, and what makes a definition able to say everything a hand-written `#SBATCH` block said.
+    append!(lines, directive_lines(spec.directives))
     append!(lines, ["set -euo pipefail",
                     "CHUNK=\$(sed -n \"\${SLURM_ARRAY_TASK_ID}p\" $(indexfile))",
                     "test -n \"\$CHUNK\"",

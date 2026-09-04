@@ -948,7 +948,95 @@ end
             # A count that is not a number must say so rather than silently asking for zero CPUs.
             @test_throws ErrorException Sweep.attr_resources(Dict("cpus" => "lots"))
             @test_throws ErrorException Sweep.attr_chunk(Dict("chunk" => "0"))
+            # Slate's OWN cell settings are never forwarded to the scheduler as job options.
+            slate_only = Dict("cluster" => "hpc", "data" => "lazy", "chunk" => "4",
+                              "region" => "gpu", "needs" => "prep")
+            @test Sweep.attr_resources(slate_only) === nothing
+            # …and anything else is a scheduler option, whether or not Slate has heard of it. A
+            # fixed list is a losing game: sbatch has ~40 options and sites add their own.
+            @test Sweep.attr_resources(Dict("licenses" => "ansys@srv")).licenses == "ansys@srv"
         end
+    end
+
+    # The script is the whole product of every setting above, and nothing asserted its CONTENT — so
+    # `gpus=` and `nodes=` were accepted on a header, parsed into the spec, and then never emitted.
+    # A cell asking for a GPU ran without one and returned plausible numbers from the wrong hardware.
+    @testset "every setting reaches the batch script" begin
+        l = BL.SlurmLauncher("login"; account = "site-acct", qos = "site-qos")
+        spec(res; directives = "") =
+            BL.JobSpec("sw1", ["c1", "c2"]; root = "/scratch/cas", project = "/proj",
+                       payload = "/proj/slatetask.jl", resources = res, directives = directives)
+        script(res; kw...) = BL._sbatch_script(l, spec(res; kw...), "/scratch/cas/jobs/sw1.index")
+
+        s = script((; cpus = 8, mem = "16G", walltime = "04:00:00", partition = "gpu",
+                      gpus = 2, nodes = 1, ntasks = 4, ntasks_per_node = 2, mem_per_cpu = "2G",
+                      constraint = "avx512", reservation = "maint", gres = "gpu:v100:2",
+                      nodelist = "c[1-4]", exclude = "c7", tmp = "100G"))
+        for want in ["--cpus-per-task=8", "--mem=16G", "--time=04:00:00", "--partition=gpu",
+                     "--gpus=2", "--nodes=1", "--ntasks=4", "--ntasks-per-node=2",
+                     "--mem-per-cpu=2G", "--constraint=avx512", "--reservation=maint",
+                     "--gres=gpu:v100:2", "--nodelist=c[1-4]", "--exclude=c7", "--tmp=100G"]
+            @test occursin("#SBATCH " * want * "\n", s)
+        end
+        # `_` → `-`, so an option Slate has never heard of works the day the site invents it.
+        @test occursin("#SBATCH --switches=1@00:30:00\n",
+                       script((; switches = "1@00:30:00")))
+        # Absent means ABSENT: emitting `--nodes=1` for a cell that asked for nothing would
+        # override the partition's own configuration with a guess.
+        bare = script((; cpus = 2))
+        @test !occursin("--nodes", bare) && !occursin("--gpus", bare) && !occursin("--constraint", bare)
+        # Cores, memory and time are always stated — a job at the mercy of a site's defaults is the
+        # one whose walltime kills it.
+        @test occursin("--cpus-per-task=2", bare) && occursin("--mem=1G", bare) &&
+              occursin("--time=00:30:00", bare)
+
+        # Account and QoS come from the SITE unless the cell overrides them (two allocations, one
+        # sweep billed to each).
+        @test occursin("--account=site-acct", bare) && occursin("--qos=site-qos", bare)
+        mine = script((; account = "my-grant"))
+        @test occursin("--account=my-grant", mine) && !occursin("--account=site-acct", mine)
+
+        # `--exclusive` is the one flag whose value is optional.
+        @test occursin("#SBATCH --exclusive\n", script((; exclusive = "yes")))
+        @test occursin("#SBATCH --exclusive=user\n", script((; exclusive = "user")))
+        @test !occursin("--exclusive", script((; exclusive = "no")))
+
+        # Three options have a Slate name that differs from sbatch's, so the same setting is
+        # reachable two ways (`cpus` / `cpus_per_task`). A spec holding both — an older notebook, a
+        # hand-edited footer, the editor before it resolved aliases — must emit ONE flag, with the
+        # explicit spelling winning. Two `--cpus-per-task` lines is something sbatch tolerates and a
+        # reader does not.
+        dup = script((; cpus = 1, cpus_per_task = 4))
+        @test count(l -> occursin("--cpus-per-task=", l), split(dup, "\n")) == 1
+        @test occursin("#SBATCH --cpus-per-task=4\n", dup)
+        @test BL.sbatch_flag(:cpus) == BL.sbatch_flag(:cpus_per_task)   # …the alias this guards
+
+        # Two identical sweeps must produce identical scripts, or the content-derived job name
+        # stops matching what was submitted.
+        r = (; cpus = 4, gpus = 1, partition = "gpu", constraint = "avx2")
+        @test script(r) == script(r)
+    end
+
+    @testset "free-form directives are emitted verbatim, and last" begin
+        # The escape hatch for a flag whose value a cell header cannot carry (`=` in the value is
+        # folded by the tag sanitiser) and for site options there is no point naming.
+        @test BL.directive_lines("--licenses=ansys@srv\n\n  --switches=1  \n# a comment\n") ==
+              ["#SBATCH --licenses=ansys@srv", "#SBATCH --switches=1"]
+        # Written either way, because both are what is in front of you in a working batch script.
+        @test BL.directive_lines("#SBATCH --exclusive") == ["#SBATCH --exclusive"]
+        @test BL.directive_lines("") == [] && BL.directive_lines("\n \n") == []
+        # A shell line here would be silently ignored rather than run, so it is an error instead.
+        @test_throws ErrorException BL.directive_lines("module load julia")
+
+        l = BL.SlurmLauncher("login")
+        s = BL._sbatch_script(l, BL.JobSpec("sw1", ["c1"]; root = "/r", project = "/p",
+                                            payload = "/p/t.jl", resources = (; partition = "short"),
+                                            directives = "--partition=bigmem"),
+                              "/r/jobs/sw1.index")
+        # sbatch takes the LAST occurrence, so a directive must come after the named settings for
+        # the override to mean anything.
+        @test findlast("--partition=bigmem", s)[1] > findlast("--partition=short", s)[1]
+        @test findlast("--partition=bigmem", s)[1] < findfirst("set -euo pipefail", s)[1]
     end
 
     @testset "a sweep cell resolves its cluster by name" begin

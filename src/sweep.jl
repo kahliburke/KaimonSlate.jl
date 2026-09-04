@@ -281,6 +281,9 @@ struct SlurmTarget <: SweepTarget
     account::String
     qos::String
     prologue::String
+    # Scheduler options with no field of their own, verbatim, one per line. A site's own flags
+    # (`--licenses`, `--switches`) and anything whose value a cell header cannot carry.
+    directives::String
     parent::String      # what the task environment is built from; `project` overrides it
     julia::String       # the julia to build that environment with, as the login node names it
 end
@@ -291,11 +294,12 @@ end
 function SlurmTarget(host = ""; root = "", root_remote = root, payload = "",
                      parent = "", project = nothing,
                      resources = (; cpus = 1, mem = "2G", walltime = "01:00:00", partition = ""),
-                     chunk = 16, account = "", qos = "", prologue = "", julia = "julia")
+                     chunk = 16, account = "", qos = "", prologue = "", directives = "",
+                     julia = "julia")
     SlurmTarget(String(host), String(root), String(root_remote),
                 project === nothing ? "" : String(project), String(payload),
                 resources, Int(chunk), String(account), String(qos), String(prologue),
-                String(parent), String(julia))
+                String(directives), String(parent), String(julia))
 end
 
 """
@@ -317,7 +321,7 @@ function provision!(t::SlurmTarget)
     # shipped rather than configured. Naming one is still allowed, for a site that stages it itself.
     pay = isempty(t.payload) ? provision_payload!(t.host, t.root_remote) : t.payload
     return SlurmTarget(t.host, t.root, t.root_remote, proj, pay, t.resources, t.chunk,
-                       t.account, t.qos, t.prologue, t.parent, t.julia)
+                       t.account, t.qos, t.prologue, t.directives, t.parent, t.julia)
 end
 
 # Resources belong to the TARGET (a site's account, its partitions) but walltime, memory and cores
@@ -327,7 +331,8 @@ with_resources(t::LocalTarget, res) = t          # nothing to schedule locally
 with_resources(t::SlurmTarget, res) =
     res === nothing ? t :
     SlurmTarget(t.host, t.root, t.root_remote, t.project, t.payload,
-                merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue, t.parent, t.julia)
+                merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue, t.directives,
+                t.parent, t.julia)
 
 # The scheduler settings a `#%% sweep` cell may carry on its header (engine.jl `cell_attrs`), e.g.
 #
@@ -337,7 +342,75 @@ with_resources(t::SlurmTarget, res) =
 # the Julia source means adjusting one does not edit code — and because resources are deliberately
 # not part of a sweep's key, raising a walltime RESUMES the sweep instead of discarding the units
 # that already survived.
-const _ATTR_RESOURCES = (:cpus, :mem, :walltime, :partition, :account, :qos, :gpus, :nodes)
+#
+# A scheduler has ~40 options and every site adds requirements of its own, so a fixed list is a
+# losing game: the previous one accepted `gpus=` and `nodes=`, parsed them, and then never emitted
+# them — a cell asking for a GPU ran without one and returned plausible numbers computed on the
+# wrong hardware. Silently dropping a setting is worse than not offering it.
+#
+# So the rule is PASS-THROUGH: any header `key=value` that is not one of Slate's own cell settings
+# is a scheduler option, and becomes `--key=value` verbatim. `_` → `-`, since header keys must match
+# `[A-Za-z][A-Za-z0-9_]*` (the tag editor's sanitiser) and no sbatch long option contains `_`. An
+# option Slate has never heard of therefore works the day the site invents it, and a typo reaches
+# the scheduler, which rejects the job loudly instead of running the wrong thing quietly.
+#
+# `_ATTR_RESOURCES` is what Slate KNOWS about, not what it permits: it types the counts, and it is
+# the catalogue the cell's editor autocompletes against and warns outside of.
+const _ATTR_RESOURCES = (:cpus, :mem, :mem_per_cpu, :walltime, :partition, :account, :qos,
+                         :gpus, :gres, :nodes, :ntasks, :ntasks_per_node,
+                         :constraint, :exclusive, :reservation, :nodelist, :exclude, :tmp)
+
+# Which of those are counts rather than scheduler strings. Everything else passes through as
+# WRITTEN: inventing a duration or size syntax here would only stand between the author and the
+# scheduler's own documentation.
+const _ATTR_COUNTS = (:cpus, :gpus, :nodes, :ntasks, :ntasks_per_node)
+
+# Slate's OWN cell settings — the `key=value` tokens that mean something to the notebook rather than
+# to the scheduler, and so must never be forwarded as a job option.
+const _ATTR_OTHER = ("cluster", "data", "chunk", "id", "controls", "needs", "mutates", "region",
+                     "script")
+
+"Is this header key a scheduler option (rather than one of Slate's own cell settings)?"
+is_sched_attr(k::AbstractString) = !(String(k) in _ATTR_OTHER)
+
+# One line per catalogued option, for the cell's editor: what it does, in the terms the person
+# setting it is thinking in. Lives here rather than in the front end so the list the UI suggests and
+# the list Slate types cannot drift apart (`test_sweepcell.jl` asserts every key has one).
+const _ATTR_HELP = Dict(
+    :cpus            => "CPUs per unit",
+    :mem             => "memory per unit, e.g. 4G",
+    :mem_per_cpu     => "memory per CPU instead of per unit",
+    :walltime        => "HH:MM:SS — the limit a unit is killed at",
+    :partition       => "queue / partition name",
+    :account         => "charge the work to this allocation",
+    :qos             => "quality of service",
+    :gpus            => "GPUs per unit",
+    :gres            => "generic resource, e.g. gpu:v100:2",
+    :nodes           => "nodes per job",
+    :ntasks          => "tasks per job",
+    :ntasks_per_node => "tasks on each node",
+    :constraint      => "node features required, e.g. avx512",
+    :exclusive       => "do not share the node — yes, or user/mcs/topo",
+    :reservation     => "run inside a named reservation",
+    :nodelist        => "run only on these nodes",
+    :exclude         => "never run on these nodes",
+    :tmp             => "local scratch required per node",
+)
+
+"""
+    sched_options() -> Vector{NamedTuple}
+
+The scheduler options Slate knows about: `(; key, flag, hint, count)` — the header spelling, the
+sbatch spelling, what it does, and whether it must be a number.
+
+A CATALOGUE, not a permitted set. The cell editor suggests these and warns outside them, but any
+name is accepted and forwarded (`is_sched_attr`): a scheduler has far more options than are worth
+naming, sites add their own, and a setting that is quietly dropped is worse than one nobody
+suggested. Served to the front end so the two lists cannot drift.
+"""
+sched_options() = [(; key = String(k), flag = BatchLauncher.sbatch_flag(k),
+                      hint = get(_ATTR_HELP, k, ""), count = k in _ATTR_COUNTS)
+                   for k in _ATTR_RESOURCES]
 
 # ── Named compute targets ────────────────────────────────────────────────────────────────────
 # A cluster is defined ONCE for the notebook (engine.jl's `Slate.clusters` footer, edited from the
@@ -358,7 +431,7 @@ function cluster(spec::AbstractDict)
     a = cluster_args(spec)
     a.kind == "local" && return LocalTarget(; a.root, a.parent, a.chunk)
     return SlurmTarget(a.host; a.root, a.root_remote, a.parent, a.payload, a.chunk,
-                       a.account, a.qos, a.prologue, a.resources)
+                       a.account, a.qos, a.prologue, a.directives, a.resources)
 end
 
 """
@@ -395,11 +468,11 @@ function cluster_args(spec::AbstractDict)
     # The task runner is Slate's own code and is shipped during provisioning, so naming a path is
     # only for a site that stages it itself.
     payload = get_("payload")
-    res = attr_resources(spec)
+    res = cluster_resources(spec)
     return (; kind, name, root, parent, chunk, payload,
               root_remote = isempty(root_remote) ? root : root_remote,
               host, account = get_("account"), qos = get_("qos"),
-              prologue = get_("prologue"),
+              prologue = get_("prologue"), directives = get_("directives"),
               resources = res === nothing ? NamedTuple() : res)
 end
 
@@ -435,12 +508,39 @@ end
 # here would only stand between the author and the scheduler's own documentation.
 function attr_resources(attrs::AbstractDict)
     res = Dict{Symbol,Any}()
-    for k in _ATTR_RESOURCES
-        v = get(attrs, String(k), nothing)
-        v === nothing && continue
-        if k in (:cpus, :gpus, :nodes)
+    for (k, v) in attrs
+        is_sched_attr(k) || continue
+        s = Symbol(k)
+        if s in _ATTR_COUNTS
             n = tryparse(Int, v)
-            n === nothing && error("@sweep: `$k=$v` on the cell header must be an integer")
+            (n === nothing || n < 1) &&
+                error("@sweep: `$k=$v` must be a positive integer")
+            res[s] = n
+        else
+            res[s] = String(v)
+        end
+    end
+    isempty(res) && return nothing
+    return NamedTuple(res)
+end
+
+"""
+    cluster_resources(spec) -> NamedTuple | nothing
+
+The scheduler defaults a CLUSTER definition carries. Unlike a cell header this is a structured form
+with known fields (`kind`, `root`, `payload`, …), so it reads a whitelist rather than passing
+everything through — forwarding `root=/scratch/cas` to sbatch as an option would be nonsense. A site
+option with no field of its own goes in the definition's `directives`.
+"""
+function cluster_resources(spec::AbstractDict)
+    res = Dict{Symbol,Any}()
+    for k in _ATTR_RESOURCES
+        v = get(spec, String(k), nothing)
+        (v === nothing || isempty(strip(String(v)))) && continue
+        if k in _ATTR_COUNTS
+            n = tryparse(Int, String(v))
+            (n === nothing || n < 1) &&
+                error("cluster: `$k=$v` must be a positive integer")
             res[k] = n
         else
             res[k] = String(v)
@@ -479,7 +579,7 @@ with_chunk(t::LocalTarget, n) = n === nothing ? t :
     LocalTarget(t.root, t.project, t.payload, n)
 with_chunk(t::SlurmTarget, n) = n === nothing ? t :
     SlurmTarget(t.host, t.root, t.root_remote, t.project, t.payload,
-                t.resources, n, t.account, t.qos, t.prologue, t.parent, t.julia)
+                t.resources, n, t.account, t.qos, t.prologue, t.directives, t.parent, t.julia)
 
 "The host a target authenticates to; empty for one that runs here."
 target_host(::LocalTarget) = ""
@@ -507,7 +607,8 @@ function specfn_for(t::SlurmTarget)
     return (name, cs) -> begin
         p = ready[] === nothing ? (ready[] = provision!(t)) : ready[]
         BatchLauncher.JobSpec(name, cs; root = p.root_remote, project = p.project,
-                              payload = p.payload, resources = p.resources, prologue = p.prologue)
+                              payload = p.payload, resources = p.resources,
+                              prologue = p.prologue, directives = p.directives)
     end
 end
 

@@ -90,4 +90,33 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test :results in findcell(r, "plot").reads
         @test "scan" in findcell(r, "plot").deps
     end
+
+    # The scheduler options the cell editor suggests. A CATALOGUE, not a permitted set: the editor
+    # warns outside it and forwards the name anyway, because a scheduler has far more options than
+    # are worth naming and a site can add its own. What must not happen is the previous failure —
+    # a name Slate accepts, parses, and then never emits.
+    @testset "the option catalogue cannot drift from what Slate emits" begin
+        S = RE.Sweep
+        opts = S.sched_options()
+        @test length(opts) == length(S._ATTR_RESOURCES)
+        # Every catalogued option carries a hint; the editor shows it, so a missing one is a blank
+        # row in the UI rather than a test failure nobody sees.
+        @test all(o -> !isempty(o.hint), opts)
+        # …and the header spelling maps to sbatch's, `_` → `-`.
+        by = Dict(o.key => o for o in opts)
+        @test by["mem_per_cpu"].flag == "mem-per-cpu"
+        @test by["ntasks_per_node"].flag == "ntasks-per-node"
+        @test by["cpus"].flag == "cpus-per-task"     # the three whose names predate the rest
+        @test by["walltime"].flag == "time"
+        @test by["constraint"].flag == "constraint"
+        @test by["cpus"].count && by["gpus"].count && !by["mem"].count
+
+        # The split the editor makes must be the split Julia makes, or a Slate setting is forwarded
+        # to sbatch as a job option (or a scheduler option is silently treated as one of ours).
+        @test !S.is_sched_attr("cluster") && !S.is_sched_attr("chunk") && !S.is_sched_attr("region")
+        @test S.is_sched_attr("licenses") && S.is_sched_attr("walltime")
+        # An option nobody has catalogued still becomes a real flag.
+        @test S.BatchLauncher.sbatch_flag(:switches) == "switches"
+        @test S.BatchLauncher.sbatch_flag(:mem_bind) == "mem-bind"
+    end
 end
