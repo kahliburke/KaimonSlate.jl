@@ -1497,6 +1497,37 @@ function _make_router(h::Hub)
         # would flash every control app mode exists to hide).
         _html(_inject_app(_inject_imports(read(_ASSET, String), _effective_imports(nb)), h, nb))
     end)
+    # A sweep cell's scheduler options, read and written as a MAP rather than as header tags: half of
+    # what a scheduler accepts cannot survive a header (`--licenses=ansys@srv` loses its `=` to the
+    # tag sanitiser), and an option a cell cannot express is a batch script a notebook cannot
+    # replace. Stored in the `Slate.sweep` footer, merged over the header attrs when the cell runs.
+    # Body {cell, options: {k: v}}; a key with an empty value is removed.
+    HTTP.register!(router, "POST", "/api/{id}/sweep-options", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        cid = strip(String(get(b, "cell", "")))
+        isempty(cid) && return _json(Dict("ok" => false, "error" => "need a cell"))
+        opts = get(b, "options", Dict{String,Any}())
+        clean = Dict{String,String}()
+        for (k, v) in (opts isa AbstractDict ? opts : Dict{String,Any}())
+            ks, vs = strip(String(k)), strip(String(v))
+            # The footer is JSON, so escaping is the format's problem and a value may contain
+            # anything. Only an empty key or value is dropped — that is how a row is REMOVED.
+            (isempty(ks) || isempty(vs)) && continue
+            clean[ks] = vs
+        end
+        lock(nb.lock) do
+            all = Dict{String,Dict{String,String}}(get(nb.report.meta, "sweepopts", Dict{String,Dict{String,String}}()))
+            isempty(clean) ? delete!(all, cid) : (all[cid] = clean)
+            isempty(all) ? delete!(nb.report.meta, "sweepopts") : (nb.report.meta["sweepopts"] = all)
+        end
+        _persist!(nb; label = "sweep options · $cid")
+        _json(Dict("ok" => true, "cell" => cid, "options" => clean))
+    end))
+    HTTP.register!(router, "GET", "/api/{id}/sweep-options", req -> _withnb(h, req, nb -> begin
+        cid = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "cell", "")))
+        all = lock(nb.lock) do; get(nb.report.meta, "sweepopts", Dict{String,Dict{String,String}}()); end
+        _json(Dict("ok" => true, "options" => isempty(cid) ? all : get(all, cid, Dict{String,String}())))
+    end))
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
     # A worker's log tail + status for the topbar worker/region status popup. `?side=` selects the
     # worker (""=main, else a region); local reads the log file, remote ssh-tails it. Polled while open.

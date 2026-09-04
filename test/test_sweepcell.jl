@@ -119,4 +119,63 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test S.BatchLauncher.sbatch_flag(:switches) == "switches"
         @test S.BatchLauncher.sbatch_flag(:mem_bind) == "mem-bind"
     end
+
+    # A scheduler option that a cell HEADER cannot carry — an `=` or a space in the value — is why
+    # these live in the footer instead. The whole point is that a notebook can say everything a
+    # hand-written batch script said, so the round trip has to survive the characters that forced
+    # the move in the first place.
+    @testset "per-cell scheduler options round-trip through the footer" begin
+        src = """
+        #%% sweep id=scan cluster=hpc
+        @sweep(grid) do p
+            p.x
+        end
+        """
+        r = RE.parse_report(src)
+        r.meta["sweepopts"] = Dict("scan" => Dict(
+            "licenses"   => "ansys@srv:2",        # `@` and `:`
+            "constraint" => "(avx512|avx2)&!gpu", # parentheses, pipe, ampersand, bang
+            "comment"    => "run for the paper",  # spaces
+            "walltime"   => "04:00:00"))
+        out = RE.serialize_report(r)
+        @test occursin("# ╔═╡ Slate.sweep", out)
+        back = RE.parse_report(out)
+        @test back.meta["sweepopts"]["scan"] == r.meta["sweepopts"]["scan"]
+        # …and the cells are untouched by a footer that now sits below them.
+        @test [c.id for c in back.cells] == [c.id for c in r.cells]
+        @test findcell(back, "scan").kind === RE.SWEEP
+
+        # Stable across a re-serialise, or every save churns the file.
+        @test RE.serialize_report(back) == out
+
+        # Nothing to say ⇒ no block at all, rather than an empty one accreting in every notebook.
+        r2 = RE.parse_report(src)
+        @test !occursin("Slate.sweep", RE.serialize_report(r2))
+        r2.meta["sweepopts"] = Dict("scan" => Dict{String,String}())
+        @test !occursin("Slate.sweep", RE.serialize_report(r2))
+
+        # JSON escapes, so even a newline survives — the format's problem, not ours. This is the
+        # whole reason for moving off header tags, so it is worth asserting rather than assuming.
+        r3 = RE.parse_report(src)
+        r3.meta["sweepopts"] = Dict("scan" => Dict("script" => "one\ntwo", "ok" => "1"))
+        b3 = RE.parse_report(RE.serialize_report(r3))
+        @test b3.meta["sweepopts"]["scan"]["script"] == "one\ntwo"
+        # …and the block stays ONE line per cell: the newline is escaped, not emitted, so it cannot
+        # split the record across lines and orphan the rest of the footer.
+        blk = split(RE.serialize_report(r3), "Slate.sweep")[2]
+        @test count(l -> startswith(l, "#   {"), split(blk, '\n')) == 1
+        # …and a hand-edited line that is not valid JSON is skipped, not thrown: a malformed option
+        # must never stop a notebook opening.
+        broken = replace(RE.serialize_report(r3), "{\"cell\"" => "{oops\"cell\"")
+        @test (RE.parse_report(broken); true)
+
+        # The footer coexists with the config footer — both are parsed from the first Slate mark and
+        # each stops at its own close, so neither eats the other.
+        r4 = RE.parse_report(src)
+        r4.meta["threads"] = "4"
+        r4.meta["sweepopts"] = Dict("scan" => Dict("licenses" => "x@y"))
+        b4 = RE.parse_report(RE.serialize_report(r4))
+        @test b4.meta["threads"] == "4"
+        @test b4.meta["sweepopts"]["scan"]["licenses"] == "x@y"
+    end
 end

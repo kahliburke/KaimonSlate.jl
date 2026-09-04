@@ -504,6 +504,8 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         for (k, v) in _parse_config_footer(@view lines[fi:end])   # Slate.config: per-notebook settings
             report.meta[k] = v
         end
+        sw = _parse_sweep_footer(@view lines[fi:end])             # Slate.sweep: per-cell scheduler options
+        isempty(sw) || (report.meta["sweepopts"] = sw)
         lines = lines[1:(fi - 1)]
     end
 
@@ -683,6 +685,77 @@ function _parse_config_footer(lines)::Dict{String,Any}
     return out
 end
 
+# ── Per-cell scheduler options (Slate.sweep) ─────────────────────────────────────────────────────
+# A sweep cell's scheduler options used to ride its header as `key=value` tags. That is a good place
+# for a walltime — readable in a diff, editable in the UI — and an impossible one for half of what a
+# scheduler accepts: header keys must be `[A-Za-z][A-Za-z0-9_]*` and values lose anything outside
+# `[A-Za-z0-9_.:+/@-]` (the tag sanitiser), so `--licenses=ansys@srv` or a constraint expression
+# cannot survive the round trip. Options a cell cannot express are options a notebook cannot replace
+# a batch script with.
+#
+# So they live here instead, as JSON — one object per cell, one line each:
+#
+#     # ╔═╡ Slate.sweep
+#     #   {"cell":"scan","options":{"constraint":"(avx512|avx2)&!gpu","licenses":"ansys@srv"}}
+#     # ╚═╡
+#
+# JSON rather than a whitespace-delimited shorthand because the shorthand could not say where a key
+# ended and a value began without a rule the reader had to know — and the values that forced this
+# block into existence are exactly the awkward ones. Escaping is the format's problem, not ours, so
+# a value may contain anything at all, newline included. Keys are emitted sorted so an unchanged
+# notebook re-serialises byte-identically instead of churning on every save.
+#
+# One line per CELL: a cell's options are edited together, and this keeps a diff to the cell that
+# changed. Header attrs still work — the footer is merged OVER them (`_attr_args`), so an existing
+# notebook keeps behaving while the editor writes only here.
+const _SWEEP_MARK_OPEN = "# ╔═╡ Slate.sweep"
+
+# Sorted keys, so the bytes are a function of the content rather than of Dict iteration order.
+_json_obj(d) = "{" * join([JSON.json(String(k)) * ":" * JSON.json(String(d[k]))
+                           for k in sort!(collect(keys(d)))], ",") * "}"
+
+function _render_sweep_footer(opts)::String
+    (opts === nothing || isempty(opts)) && return ""
+    lines = String[]
+    for cid in sort!(collect(keys(opts)))
+        o = Dict(String(k) => String(v) for (k, v) in opts[cid] if !isempty(String(v)))
+        (isempty(strip(String(cid))) || isempty(o)) && continue
+        push!(lines, string("#   {\"cell\":", JSON.json(String(cid)), ",\"options\":", _json_obj(o), "}"))
+    end
+    isempty(lines) && return ""
+    io = IOBuffer()
+    println(io, _SWEEP_MARK_OPEN, " · per-cell scheduler options (the ⎈ on a sweep cell)")
+    for l in lines; println(io, l); end
+    print(io, _ENV_MARK_CLOSE)
+    return String(take!(io))
+end
+
+function _parse_sweep_footer(lines)::Dict{String,Dict{String,String}}
+    out = Dict{String,Dict{String,String}}()
+    insw = false
+    for l in lines
+        startswith(l, _SWEEP_MARK_OPEN) && (insw = true; continue)
+        insw || continue
+        startswith(l, _ENV_MARK_CLOSE) && break
+        m = match(r"^#\s+(\{.*\})\s*$", l)
+        m === nothing && continue
+        # A hand-edited line that is not valid JSON is skipped rather than thrown: a malformed
+        # option must not stop the notebook opening.
+        rec = try; JSON.parse(String(m.captures[1])); catch; nothing; end
+        rec isa AbstractDict || continue
+        cid = String(get(rec, "cell", "")); isempty(cid) && continue
+        o = get(rec, "options", nothing)
+        o isa AbstractDict || continue
+        d = get!(Dict{String,String}, out, cid)
+        for (k, v) in o
+            (v === nothing || isempty(String(v))) && continue
+            d[String(k)] = String(v)
+        end
+        isempty(d) && delete!(out, cid)
+    end
+    return out
+end
+
 # ── Serialization ────────────────────────────────────────────────────────────
 
 _kind_token(k::CellKind) = k === MARKDOWN ? "md" : k === WEB ? "web" :
@@ -741,9 +814,12 @@ serialize_cells(report::Report) =
 
 function serialize_report(report::Report)
     body = serialize_cells(report)
-    # env footer FIRST (parse_env_footer breaks at the first close), then the config footer.
+    # env footer FIRST (parse_env_footer breaks at the first close), then config, then the per-cell
+    # scheduler options. Each parser scans from the first `Slate.` mark and stops at its own close,
+    # so the order here only has to be stable — not any particular one.
     parts = filter(!isempty, [_render_env_footer(get(report.meta, "env", Dict{String,Any}[])),
-                              _render_config_footer(report.meta)])
+                              _render_config_footer(report.meta),
+                              _render_sweep_footer(get(report.meta, "sweepopts", nothing))])
     isempty(parts) && return body
     return body * "\n" * join(parts, "\n") * "\n"
 end

@@ -1179,10 +1179,20 @@ end
 function _attr_args(report::Report, filename::AbstractString)
     cid = replace(String(filename), r"^cell:" => "")
     isempty(cid) && return String[]
+    d = Dict{String,String}()
     for c in report.cells
-        c.id == cid && return String[string(k, "=", v) for (k, v) in cell_attrs(c)]
+        c.id == cid && (d = Dict{String,String}(cell_attrs(c)); break)
     end
-    return String[]
+    # The cell's footer-stored scheduler options (`Slate.sweep`) go OVER its header attrs. The two
+    # say the same kind of thing, but only the footer can hold a value with an `=` or a space in it,
+    # so it is where the editor writes and where the answer must come from when both name a setting.
+    # Merged here rather than downstream so everything reading `ctx.attrs` sees one resolved view.
+    sw = get(report.meta, "sweepopts", nothing)
+    if sw !== nothing
+        for (k, v) in get(sw, cid, Dict{String,String}()); d[String(k)] = String(v); end
+    end
+    isempty(d) && return String[]
+    return String[string(k, "=", v) for (k, v) in d]
 end
 
 # Ask the worker to re-render a native (Makie) figure cell under a Slate PALETTE, for a themed PDF
