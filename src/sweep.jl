@@ -3096,6 +3096,32 @@ function _collect_captures(mod::Module, names, param::Symbol)
 end
 
 """
+    _script_src(mod, path) -> String
+
+The source of a sweep's `script =` file, resolved the way `@asset` resolves a sibling (against the
+notebook's asset base, so it works on a remote worker whose base is under `~/.cache`).
+
+Returned as SOURCE rather than `include`d, because the source is what makes the file real to a
+sweep: it travels to the compute node in the chunk descriptor, and it is digested into the sweep
+key. An `include("model.jl")` in the body would do neither — the file would not be there, and
+editing it would not invalidate anything, so the sweep would quietly serve results computed from a
+version of the code that no longer exists.
+"""
+function _script_src(mod::Module, path)
+    p = String(path)
+    isempty(strip(p)) && return ""
+    isdefined(mod, :__slate_readfile) ||
+        error("@sweep: `script = \"$p\"` needs Slate's file resolver, which only exists inside a " *
+              "notebook namespace. Pass the definitions with `setup = begin … end` instead.")
+    return try
+        String(Base.invokelatest(Base.invokelatest(getfield, mod, :__slate_readfile), p))
+    catch e
+        error("@sweep: could not read `script = \"$p\"` — " * first(sprint(showerror, e), 200) *
+              ".\nThe path is resolved next to the notebook, like `@asset`.")
+    end
+end
+
+"""
     @sweep grid target [setup=…] [chunk=…] do p
         …
     end
@@ -3176,10 +3202,11 @@ macro sweep(args...)
     lazy   = get(opts, :lazy, false)
     # An unknown option is an error rather than a silent no-op: `@sweep(…, wallclock = "2h")` that
     # quietly does nothing is worse than one that says so.
+    script = get(opts, :script, nothing)
     for k in keys(opts)
-        k in (:setup, :cap, :submit, :resources, :plot, :summary, :lazy) ||
+        k in (:setup, :cap, :submit, :resources, :plot, :summary, :lazy, :script) ||
             error("@sweep: unknown option `$k` " *
-                  "(accepted: setup, cap, submit, resources, plot, summary, lazy)")
+                  "(accepted: setup, cap, submit, resources, plot, summary, lazy, script)")
     end
 
     # What the shard module needs before the body runs: the imports lifted out of the body, then
@@ -3224,9 +3251,18 @@ macro sweep(args...)
                        _sctx.attrs : Dict{String,String}()
         local _clusters = (_sctx !== nothing && hasproperty(_sctx, :clusters)) ?
                           _sctx.clusters : Dict{String,Dict{String,String}}()
+        # `script = "model.jl"` — the definitions the body calls, kept in a file instead of pasted
+        # into the cell. Read HERE, at run time, so it resolves the way `@asset` does on whichever
+        # side the cell is running; its SOURCE then rides `setup_src`, which both ships it to the
+        # compute node and folds it into the sweep key. That last part is the whole point: a bare
+        # `include` would leave the file unshipped and the key unchanged, so editing the script
+        # would silently reuse results computed from the previous version.
+        local _sscript = $(script === nothing ? "" :
+                           :($(Sweep)._script_src(@__MODULE__, $(esc(script)))))
         $(Sweep).run_sweep($(Sweep).resolve_target($(esc(target)), _attrs, _clusters),
                            collect($(esc(grid))), $body_src;
-                           setup_src = $setup, captures = _caps,
+                           setup_src = isempty(_sscript) ? $setup :
+                                       string($setup, "\n", _sscript), captures = _caps,
                            cap = $(esc(cap)), submit = $(esc(submit)), register = _reg,
                            resources = $(esc(res)), plot = $(esc(plot)),
                            summary_src = $sumsrc, lazy = $(esc(lazy)),

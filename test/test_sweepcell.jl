@@ -178,4 +178,37 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test b4.meta["threads"] == "4"
         @test b4.meta["sweepopts"]["scan"]["licenses"] == "x@y"
     end
+
+    # `script = "model.jl"` — the definitions the body calls, kept in a file rather than pasted into
+    # the cell. It must ride `setup_src`, because that is simultaneously what SHIPS to the compute
+    # node and what is DIGESTED into the sweep key. A bare `include` would do neither: the file
+    # would be absent on the far side, and editing it would not invalidate anything, so the sweep
+    # would serve results computed from a version of the code that no longer exists.
+    @testset "a sweep's script file ships and is keyed" begin
+        S = RE.Sweep
+        mktempdir() do dir
+            f = joinpath(dir, "model.jl")
+            write(f, "step(x) = 2x\n")
+            # A stand-in for the notebook namespace: `_script_src` only needs the file resolver that
+            # `@asset` uses, which is what makes the path resolve the same way on a remote worker.
+            mod = Module(:FakeNb)
+            Core.eval(mod, :(__slate_readfile(p; bytes = false) = read(joinpath($dir, p), String)))
+            @test S._script_src(mod, "model.jl") == "step(x) = 2x\n"
+            @test S._script_src(mod, "") == ""                  # no script named ⇒ nothing added
+
+            # The key MOVES when the script does — that is the property a bare `include` cannot have.
+            k1 = S.sweep_key("p -> step(p.x)", S._script_src(mod, "model.jl"), Dict())
+            write(f, "step(x) = 3x\n")
+            k2 = S.sweep_key("p -> step(p.x)", S._script_src(mod, "model.jl"), Dict())
+            @test k1 != k2
+            # …and does not move when nothing changed, or a resumed sweep would discard its results.
+            @test k2 == S.sweep_key("p -> step(p.x)", S._script_src(mod, "model.jl"), Dict())
+
+            # A missing file says so, naming how the path is resolved — the commonest mistake here
+            # is a path relative to the wrong thing.
+            @test_throws ErrorException S._script_src(mod, "absent.jl")
+            # …and a namespace with no resolver points at the option that does work there.
+            @test_throws ErrorException S._script_src(Module(:Bare), "model.jl")
+        end
+    end
 end
