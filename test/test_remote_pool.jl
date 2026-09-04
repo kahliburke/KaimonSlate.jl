@@ -4,6 +4,7 @@
 # workers; roster entries are hand-built Dicts shaped like `list_remote_workers` output.
 using ReTest
 import Sockets   # squat on a port to prove the allocator probes before handing one out
+import Pkg       # Pkg.TOML — read back the Project.toml the devpath script rewrites
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl"))
 using .ReportEngine
@@ -236,6 +237,57 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         @test occursin("Pkg.instantiate()", s0)
     end
 
+    @testset "_rewrite_devpaths_script: adds a [sources] entry the project never declared" begin
+        # A workspace member declares no `[sources]` of its own — it inherits the workspace root's,
+        # and only the member dir is shipped. So there is nothing to REWRITE and the dev dep dangles
+        # on the remote unless the entry is added outright. Run the generated script for real, with
+        # HOME pointed at a fixture, rather than grepping the source it produces.
+        home = mktempdir()
+        mkpath(joinpath(home, "proj"))
+        write(joinpath(home, "proj", "Project.toml"), """
+        [deps]
+        NeuroDSL = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        Registered = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+        """)
+        s = RE._rewrite_devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL"),
+                                                 ("NotDeclared", "devsrc/NotDeclared")])
+        jl = Base.julia_cmd()[1]
+        io = IOBuffer()
+        run(pipeline(ignorestatus(addenv(`$jl --startup-file=no -e $s`, "HOME" => home)),
+                     stdout = io, stderr = io))
+        p = Pkg.TOML.parsefile(joinpath(home, "proj", "Project.toml"))
+        @test get(get(p, "sources", Dict()), "NeuroDSL", Dict())["path"] ==
+              joinpath(home, "devsrc", "NeuroDSL")
+        # Pkg REJECTS a source naming a package the project doesn't list, which an indirect
+        # (manifest-only) path dep would be — so an undeclared name must not be inserted.
+        @test !haskey(get(p, "sources", Dict()), "NotDeclared")
+        # Declared deps are left alone otherwise.
+        @test p["deps"]["Registered"] == "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+    end
+
+    @testset "_rewrite_devpaths_script: an existing git source is left intact" begin
+        # An entry without a `path` is a git source; its url/rev still resolve on the remote, and
+        # bolting a path onto it would fight that.
+        home = mktempdir()
+        mkpath(joinpath(home, "proj"))
+        write(joinpath(home, "proj", "Project.toml"), """
+        [deps]
+        NeuroDSL = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+        [sources.NeuroDSL]
+        url = "https://example.invalid/NeuroDSL.jl"
+        rev = "main"
+        """)
+        s = RE._rewrite_devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL")])
+        jl = Base.julia_cmd()[1]
+        io = IOBuffer()
+        run(pipeline(ignorestatus(addenv(`$jl --startup-file=no -e $s`, "HOME" => home)),
+                     stdout = io, stderr = io))
+        src = Pkg.TOML.parsefile(joinpath(home, "proj", "Project.toml"))["sources"]["NeuroDSL"]
+        @test src["url"] == "https://example.invalid/NeuroDSL.jl"
+        @test !haskey(src, "path")
+    end
+
     @testset "remote timing config: default → env → slate.json precedence" begin
         saved = copy(RE._REMOTE_CFG[])
         try
@@ -283,5 +335,39 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         finally
             RE._REMOTE_CFG[] = saved
         end
+    end
+end
+
+# The hub reads the local CAS that its WORKER wrote (`push_blob!`), so the two must resolve the same
+# cache home. They agree on `~/.cache/kaimonslate` by default, which hides a divergence until a home
+# is pinned — a standalone/app run pins one, and then a boundary transfer looks for a blob in a store
+# nothing wrote to. This pins the precedence against the worker's own copy of it (worker.jl
+# `_memo_dir`), which cannot import this one.
+@testset "hub and worker resolve the same memo store" begin
+    # Verbatim from worker.jl's `_memo_dir`, which inlines the resolver because SlateHome isn't
+    # loaded there. If these drift, a region boundary transfer breaks.
+    function worker_memo()
+        cache = get(ENV, "KAIMONSLATE_CACHE_HOME", ""); home = get(ENV, "KAIMONSLATE_HOME", "")
+        base = !isempty(cache) ? abspath(expanduser(cache)) :
+               !isempty(home)  ? joinpath(abspath(expanduser(home)), "cache") :
+               joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(get(ENV, "HOME", tempdir()), ".cache")), "kaimonslate")
+        joinpath(base, "memo")
+    end
+    hub_memo() = joinpath(RE._slate_cache_dir(), "memo")
+
+    for env in (Dict("KAIMONSLATE_CACHE_HOME" => nothing, "KAIMONSLATE_HOME" => nothing, "XDG_CACHE_HOME" => nothing),
+                Dict("KAIMONSLATE_HOME" => "/tmp/ks-home", "XDG_CACHE_HOME" => "/tmp/other-cache"),  # an app pins both
+                Dict("KAIMONSLATE_CACHE_HOME" => "/tmp/ks-cache", "KAIMONSLATE_HOME" => "/tmp/ks-home"),
+                Dict("XDG_CACHE_HOME" => "/tmp/xdg-only", "KAIMONSLATE_HOME" => nothing))
+        withenv(collect(env)...) do
+            @test hub_memo() == worker_memo()
+        end
+    end
+    # …and the specific precedence, so a future edit to either side has to state its intent.
+    withenv("KAIMONSLATE_CACHE_HOME" => "/tmp/a", "KAIMONSLATE_HOME" => "/tmp/b", "XDG_CACHE_HOME" => "/tmp/c") do
+        @test hub_memo() == "/tmp/a/memo"          # dedicated cache home wins
+    end
+    withenv("KAIMONSLATE_CACHE_HOME" => nothing, "KAIMONSLATE_HOME" => "/tmp/b", "XDG_CACHE_HOME" => "/tmp/c") do
+        @test hub_memo() == "/tmp/b/cache/memo"    # then the HOME shortcut — NOT XDG
     end
 end

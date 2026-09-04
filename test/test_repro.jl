@@ -354,6 +354,29 @@ end
         b1 = _make_bundle_b64(proj, [(name = "Foo", source = localpkg)], "demo.jl", cells1)
         sj = joinpath(mktempdir(), "demo.standalone.jl")
         write(sj, cells1 * "\n" * _bundle_footer(b1) * "\n")
+        # A launcher puts the run's own state home INSIDE the install dir, and it can exist before the
+        # bundle lands. That must not read as "someone's folder" — the refusal is there to protect a
+        # directory the user filled, not one Slate did, and it names a path the user did choose, so
+        # tripping on our own files sends them looking in the wrong place entirely.
+        let pre = joinpath(mktempdir(), "app")
+            mkpath(joinpath(pre, ".kaimonslate", "config"))
+            write(joinpath(pre, ".kaimonslate", "config", "regions.json"), "[]")
+            withenv("SLATE_INSTALL_DIR" => pre) do
+                r = _reconstruct_bundle!(sj)
+                @test r.fresh && r.install                       # installs anyway
+                @test isfile(joinpath(pre, "demo.jl"))
+                @test isfile(joinpath(pre, ".kaimonslate", "config", "regions.json"))   # …and keeps it
+            end
+        end
+        # Someone else's directory is still refused — that is the point of the check.
+        let occupied = joinpath(mktempdir(), "mine")
+            mkpath(occupied); write(joinpath(occupied, "thesis.tex"), "\\documentclass{article}")
+            withenv("SLATE_INSTALL_DIR" => occupied) do
+                @test_throws ErrorException _reconstruct_bundle!(sj)
+                @test !isfile(joinpath(occupied, "demo.jl"))      # nothing was written over it
+            end
+        end
+
         inst = joinpath(mktempdir(), "app")
         withenv("SLATE_INSTALL_DIR" => inst) do
             r1 = _reconstruct_bundle!(sj)

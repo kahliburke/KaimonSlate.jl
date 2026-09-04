@@ -1383,6 +1383,18 @@ end
     @test occursin(raw"$E = mc^2$", NS._md_for_typst(c))
 end
 
+# The SCREEN half of the same story. KaTeX is configured for the bracket spellings, but CommonMark
+# reads `\(` / `\[` as escaped punctuation and drops the backslash, so by the time KaTeX ran there
+# was no delimiter left and the maths rendered as literal text. They have to be stashed like `$…$`.
+@testset "bracket math survives markdown rendering for KaTeX" begin
+    h = KaimonSlate.ReportRender._md_html(
+        "- a: \$E=mc^2\$\n- b: \\(E=mc^2\\)\n- c: \\[ \\frac{a}{b} \\]\n\nlit: `\\(no\\)`\n")
+    @test occursin(raw"\(E=mc^2\)", h)          # backslashes intact → KaTeX can match
+    @test occursin(raw"\[ \frac{a}{b} \]", h)
+    @test occursin(raw"$E=mc^2$", h)            # the dollar form is unchanged
+    @test occursin(raw"<code>\(no\)</code>", h) # inline code keeps its text (KaTeX skips <code>)
+end
+
 # ── PDF export: admonitions ───────────────────────────────────────────────────────────────────────
 # `cmarker` (the Typst markdown renderer) is plain CommonMark and has no `!!!` rule, so the marker
 # would print literally and the four-space body would typeset as a CODE BLOCK. `_admonitions_to_quotes`

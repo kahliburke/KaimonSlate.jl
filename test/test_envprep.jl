@@ -93,3 +93,171 @@ end
     end
 
 end
+
+# ── workspaces ────────────────────────────────────────────────────────────────
+# A notebook in a workspace member (`[workspace] projects = ["papers"]` in an ancestor) has no
+# manifest beside its Project.toml — the workspace shares ONE at the root, under a possibly
+# versioned name — and inherits the root's `[sources]`. Seeding a fork from the member's own
+# Project.toml alone produced an env that could not resolve an unregistered dep the member could:
+# "expected package `X` to be registered".
+
+const WIDGET_UUID = "11111111-2222-3333-4444-555555555555"
+_manifest_vname() = "Manifest-v$(VERSION.major).$(VERSION.minor).toml"
+
+"A workspace: root (deps/sources/compat for an unregistered `Widget`) + a `papers` member."
+function workspace_fixture(; manifest_name = _manifest_vname(), member_extra = "")
+    root = mktempdir()
+    mkpath(joinpath(root, "papers"))
+    mkpath(joinpath(root, "lib", "Widget"))
+    write(joinpath(root, "Project.toml"), """
+    [workspace]
+    projects = ["papers"]
+
+    [deps]
+    Widget = "$WIDGET_UUID"
+
+    [sources]
+    Widget = {path = "lib/Widget"}
+
+    [compat]
+    Widget = "0.1"
+    julia = "1.10"
+    """)
+    write(joinpath(root, "papers", "Project.toml"), """
+    [deps]
+    Widget = "$WIDGET_UUID"
+
+    $member_extra
+    """)
+    # Path deps in a shared manifest are relative to the MANIFEST's dir (the workspace root).
+    write(joinpath(root, manifest_name), """
+    julia_version = "$(VERSION)"
+    manifest_format = "2.0"
+    project_hash = "deadbeef"
+
+    [[deps.Widget]]
+    path = "lib/Widget"
+    uuid = "$WIDGET_UUID"
+    version = "0.1.0"
+    """)
+    return root
+end
+
+@testset "workspace members" begin
+
+    @testset "the resolving manifest is the workspace root's, under any name" begin
+        root = workspace_fixture()
+        member = joinpath(root, "papers")
+        # The member has no manifest of its own; looking beside its Project.toml finds nothing.
+        @test !isfile(joinpath(member, "Manifest.toml"))
+        @test ReportEngine.parent_manifest(member) == joinpath(root, _manifest_vname())
+        @test ReportEngine.workspace_chain(joinpath(member, "Project.toml")) ==
+              [joinpath(root, "Project.toml")]
+        # Plain `Manifest.toml` at the root is found too.
+        root2 = workspace_fixture(manifest_name = "Manifest.toml")
+        @test ReportEngine.parent_manifest(joinpath(root2, "papers")) ==
+              joinpath(root2, "Manifest.toml")
+        # A project that is NOT a member keeps the sibling-manifest behaviour.
+        plain = mktempdir()
+        write(joinpath(plain, "Project.toml"), "[deps]\n")
+        write(joinpath(plain, "Manifest.toml"), "manifest_format = \"2.0\"\n")
+        @test ReportEngine.parent_manifest(plain) == joinpath(plain, "Manifest.toml")
+        @test isempty(ReportEngine.workspace_chain(joinpath(plain, "Project.toml")))
+    end
+
+    @testset "a fork inherits the workspace root's sources and compat" begin
+        root = workspace_fixture()
+        envdir = mktempdir()
+        ReportEngine.seed_env_project!(envdir, joinpath(root, "papers"))
+        seeded = Pkg.TOML.parsefile(joinpath(envdir, "Project.toml"))
+        # Without this the fork declares an unregistered UUID with no source and cannot resolve it.
+        @test haskey(seeded, "sources") && haskey(seeded["sources"], "Widget")
+        # Root `[sources]` paths are relative to the ROOT, not the member.
+        @test seeded["sources"]["Widget"]["path"] == abspath(joinpath(root, "lib", "Widget"))
+        @test seeded["compat"]["Widget"] == "0.1"
+        @test seeded["compat"]["julia"] == "1.10"
+    end
+
+    @testset "the member's own entries win over the root's" begin
+        root = workspace_fixture(member_extra = """
+        [sources]
+        Widget = {path = "../vendored/Widget"}
+
+        [compat]
+        Widget = "0.2"
+        """)
+        envdir = mktempdir()
+        ReportEngine.seed_env_project!(envdir, joinpath(root, "papers"))
+        seeded = Pkg.TOML.parsefile(joinpath(envdir, "Project.toml"))
+        @test seeded["sources"]["Widget"]["path"] == abspath(joinpath(root, "vendored", "Widget"))
+        @test seeded["compat"]["Widget"] == "0.2"
+    end
+
+    @testset "inherited entries naming an undeclared package are dropped" begin
+        # Pkg REJECTS a sources/compat entry naming nothing the project declares, and the error
+        # names the fork rather than the workspace it came from. The root legitimately carries
+        # entries for its OTHER members, so this filter is what keeps the fork loadable.
+        root = mktempdir()
+        mkpath(joinpath(root, "papers"))
+        write(joinpath(root, "Project.toml"), """
+        [workspace]
+        projects = ["papers"]
+
+        [deps]
+        Elsewhere = "99999999-9999-9999-9999-999999999999"
+
+        [sources]
+        Elsewhere = {path = "lib/Elsewhere"}
+
+        [compat]
+        Elsewhere = "1"
+        """)
+        write(joinpath(root, "papers", "Project.toml"), "[deps]\nWidget = \"$WIDGET_UUID\"\n")
+        envdir = mktempdir()
+        ReportEngine.seed_env_project!(envdir, joinpath(root, "papers"))
+        seeded = Pkg.TOML.parsefile(joinpath(envdir, "Project.toml"))
+        declared = keys(get(seeded, "deps", Dict()))
+        @test !("Elsewhere" in declared)
+        @test all(n -> n in declared, keys(get(seeded, "sources", Dict())))
+        @test all(n -> n == "julia" || n in declared, keys(get(seeded, "compat", Dict())))
+    end
+
+    @testset "the copied manifest is adapted to the fork" begin
+        root = workspace_fixture()
+        envdir = mktempdir()
+        ReportEngine.seed_env_project!(envdir, joinpath(root, "papers"))
+        man = joinpath(envdir, "Manifest.toml")
+        @test isfile(man)
+        m = Pkg.TOML.parsefile(man)
+        # Anchored on the MANIFEST's dir (the workspace root) — anchoring on the member would
+        # point at papers/lib/Widget, which does not exist.
+        @test m["deps"]["Widget"][1]["path"] == abspath(joinpath(root, "lib", "Widget"))
+        # A workspace `project_hash` covers the whole workspace and never matches a single-project
+        # fork; left in, Pkg calls the fork unresolved forever and re-resolves on every later add.
+        @test !haskey(m, "project_hash")
+    end
+
+    @testset "the fingerprint covers the workspace, and is unchanged for a plain project" begin
+        root = workspace_fixture()
+        member = joinpath(root, "papers")
+        f0 = ReportEngine.env_parent_fingerprint(member)
+        # An edit to the workspace ROOT changes what the fork was seeded from, so it must stale it.
+        write(joinpath(root, "Project.toml"),
+              read(joinpath(root, "Project.toml"), String) * "\n[extras]\nTest = \"8dfed614-e22c-5e08-85e1-65c5234f0b40\"\n")
+        @test ReportEngine.env_parent_fingerprint(member) != f0
+        # …as does a re-resolve of the shared manifest.
+        f1 = ReportEngine.env_parent_fingerprint(member)
+        write(joinpath(root, _manifest_vname()),
+              read(joinpath(root, _manifest_vname()), String) * "\n[[deps.Other]]\n")
+        @test ReportEngine.env_parent_fingerprint(member) != f1
+        # For an ordinary project the hash is over the same bytes in the same order as before the
+        # workspace support, so upgrading doesn't stale every existing fork.
+        plain = mktempdir()
+        write(joinpath(plain, "Project.toml"), "[deps]\nStatistics = \"10745b16-79ce-11e8-11f9-7d13ad32a3b2\"\n")
+        write(joinpath(plain, "Manifest.toml"), "manifest_format = \"2.0\"\n")
+        io = IOBuffer()
+        for f in ("Project.toml", "Manifest.toml"); write(io, read(joinpath(plain, f))); end
+        @test ReportEngine.env_parent_fingerprint(plain) == string(hash(take!(io)); base = 16)
+    end
+
+end

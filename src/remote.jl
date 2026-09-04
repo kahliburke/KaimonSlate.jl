@@ -39,8 +39,10 @@ import SHA as _SHA
 # timestamp. This file is the answer to "where is the record of what happened?" — always on disk,
 # never dependent on how the host logger renders. Read it with `slate.diag` / the worker-log tool.
 # Slate's LOCAL cache root. Every reader and writer of the content store must resolve it the same
-# way, or a pinned store is half-honoured. The REMOTE layout stays literal ".cache/kaimonslate"
-# ($HOME-relative over ssh) — the remote's env isn't cheaply knowable.
+# way, or a pinned store is half-honoured — the hub reads the local CAS its WORKER wrote, so the two
+# resolving differently means looking for a blob in a store nothing put it in. One implementation,
+# in SlateHome, rather than a copy here kept in sync by hand. The REMOTE layout stays literal
+# ".cache/kaimonslate" ($HOME-relative over ssh) — the remote's env isn't cheaply knowable.
 _slate_cache_dir() = SlateHome.cache_home()
 
 const _REMOTE_LOG = joinpath(_slate_cache_dir(), "remote.log")
@@ -906,7 +908,11 @@ const _REMOTE_DEVSRC = "$_REMOTE_ROOT/devsrc"   # shipped sources for dev'd deps
 function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString)
     host = t.ssh_host
     rewrites = Tuple{String,String}[]
-    for (name, lpath) in _dev_deps(joinpath(local_env, "Manifest.toml"), local_env)
+    # `parent_manifest` resolves the manifest the way the loader does — for a workspace member that is
+    # the shared one at the workspace root, and its relative `path=`s are anchored on ITS dir, not the
+    # project's. A fork env is an ordinary env, so this is just `local_env/Manifest.toml` there.
+    mf = parent_manifest(local_env)
+    for (name, lpath) in _dev_deps(mf, isempty(mf) ? local_env : dirname(abspath(mf)))
         # Normalize + strip the trailing slash the `path="."` form leaves (abspath("x/.") → "x/") so the
         # project-itself entry compares equal to the env dir and is left as the active project.
         if rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(local_env)), '/')
@@ -949,15 +955,24 @@ function _rewrite_devpaths_script(projrel::AbstractString, rewrites::Vector{Tupl
     println(io, "pf = joinpath(proj, \"Project.toml\")")
     println(io, "if isfile(pf)")
     println(io, "  pdata = TOML.parsefile(pf)")
-    println(io, "  src = get(pdata, \"sources\", nothing)")
-    println(io, "  if src isa AbstractDict")
+    println(io, "  src = get!(() -> Dict{String,Any}(), pdata, \"sources\")")
+    # A workspace member declares no `[sources]` of its own — it inherits the workspace root's, and
+    # only the member dir is shipped. So ADD an entry for a dev dep that has none, not just rewrite.
+    # Guarded on the dep being declared: Pkg rejects a source naming a package the project doesn't
+    # list, which an indirect (manifest-only) path dep would be.
+    println(io, "  decl = union(keys(get(pdata, \"deps\", Dict{String,Any}())), keys(get(pdata, \"extras\", Dict{String,Any}())))")
     for (name, rp) in rewrites
-        println(io, "    if get(src, raw\"$name\", nothing) isa AbstractDict && haskey(src[raw\"$name\"], \"path\")")
-        println(io, "      src[raw\"$name\"][\"path\"] = joinpath(homedir(), raw\"$rp\")")
+        println(io, "  let e = get(src, raw\"$name\", nothing)")
+        println(io, "    if e isa AbstractDict && haskey(e, \"path\")")
+        println(io, "      e[\"path\"] = joinpath(homedir(), raw\"$rp\")")
+        # An existing entry without a `path` is a git source — leave it, its url/rev still resolve.
+        println(io, "    elseif e === nothing && raw\"$name\" in decl")
+        println(io, "      src[raw\"$name\"] = Dict{String,Any}(\"path\" => joinpath(homedir(), raw\"$rp\"))")
         println(io, "    end")
+        println(io, "  end")
     end
-    println(io, "    open(pf, \"w\") do _io; TOML.print(_io, pdata); end")
-    println(io, "  end")
+    println(io, "  isempty(src) && delete!(pdata, \"sources\")")
+    println(io, "  open(pf, \"w\") do _io; TOML.print(_io, pdata); end")
     println(io, "end")
     return String(take!(io))
 end
@@ -3888,10 +3903,18 @@ end
     reap_remote_worker(host, port) -> Bool
 
 Explicitly kill the worker on `host:port` and remove its script/log/manifest. Manual only — Slate
-never auto-reaps (a worker may hold results worth keeping). Returns true if the kill+cleanup ran.
+never auto-reaps (a worker may hold results worth keeping).
+
+REMOTE only: it reaches the worker over ssh and matches its `worker-<port>.jl` script, neither of
+which exists for a local worker (spawned inline with `-e` and owned by the hub as a process).
+Returns whether the kill reached something, so the caller can report the outcome rather than
+assume it.
 """
 function reap_remote_worker(host, port::Int)
     _rlog("reap: killing worker-$port on $host (manual)")
+    # Did the host have this worker at all? Answered BEFORE the kill, so "nothing to reap" and "the
+    # host is unreachable" are distinguishable from a kill that landed.
+    existed = try; _ssh_test(host, `test -f $("$_REMOTE_WORKER/worker-$port.jl")`); catch; false; end
     try; _evict_parked!(host; port = port); catch; end        # a parked wire to it must die too
     try; _evict_worker_conn!(host, port); catch; end          # …and any non-parked hub wire (warm/reconnect) — else a respawn on this port hits "Already connected"
     try; _peer_route_forget!(host); catch; end                # …and any cached peer-route verdict touching this host (topology changed)
@@ -3911,5 +3934,6 @@ function reap_remote_worker(host, port::Int)
         try; _ssh_test(host, `sh -c $("pkill -TERM -f '$pat'; sleep 1; pkill -KILL -f '$pat'; true")`); catch; end
     end
     try; _ssh_ok(host, `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json") $("$_REMOTE_WORKER/worker-$port.state") $("$_REMOTE_WORKER/worker-$port.stats")`); catch; end
-    return true
+    existed || _rlog("reap: no worker-$port script on $host — nothing was killed")
+    return existed
 end

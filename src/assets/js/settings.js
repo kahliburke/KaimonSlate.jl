@@ -222,6 +222,13 @@ function openSettings() {
     // Live across every open editor via setCompleteDelay (reconfigures the autocompletion compartment).
     cd.oninput = () => { cdv.textContent = cd.value; window.setCompleteDelay ? window.setCompleteDelay(cd.value) : localStorage.setItem('slateCompleteDelay', cd.value); };
   }
+  // Editor keymap (default / vim). Live across every open editor — the vim extension sits in its
+  // own compartment, so switching reconfigures the views in place instead of rebuilding them.
+  const vm = document.getElementById('setvimmode');
+  if (vm) {
+    vm.value = window.editorKeymapMode ? window.editorKeymapMode() : 'default';
+    vm.onchange = () => { window.setEditorKeymap && window.setEditorKeymap(vm.value); };
+  }
   const ct = document.getElementById('setcomptab');
   if (ct) {
     ct.value = localStorage.getItem('slateCompleteTab') || 'accept';

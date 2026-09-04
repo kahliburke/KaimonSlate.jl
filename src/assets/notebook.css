@@ -744,6 +744,35 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   100% { background:rgba(255,110,70,0); }
 }
 .cm-editor .cm-line.cm-errorline-flash { animation:cm-errorflash 1.2s ease-out; }
+/* Vim normal-mode block cursor. @replit/codemirror-vim draws it in a hard salmon (#ff9696) that
+   reads as an error next to the real error highlights right above — and leaves it behind as an
+   empty outlined box in every editor that ISN'T focused, so a notebook full of cells looked like it
+   had a cursor in each. So: follow the theme accent, translucent enough that the character under it
+   stays readable in light and dark themes alike, and show it only where the caret actually is. The
+   selectors match cm6's own specificity and win on order — CodeMirror injects its styles at the top
+   of <head>, ahead of this sheet. */
+.cm-editor .cm-fat-cursor { background:color-mix(in srgb, var(--accent) 60%, transparent);
+  border-radius:1px; outline:none; }
+.cm-editor:not(.cm-focused) .cm-fat-cursor { display:none; }
+/* CodeMirror panels — the vim ex line (`:w`, `/search`) and the Files-tab find/replace, neither of
+   which was ever themed. CM6's base theme paints the panel from its own light/dark pair but leaves
+   the <input> with no colour at all, so the prompt came out in that theme's white while the text you
+   typed stayed on the browser's default black. Repaint both from the Slate palette. `!important`
+   here because these override a vendor base theme — and, for messages, an inline style — rather than
+   ordinary cascade neighbours. */
+.cm-editor .cm-panels { background:var(--bg3) !important; color:var(--text) !important;
+  border-color:var(--border) !important; font-size:.86rem; }
+.cm-editor .cm-panels-top { border-bottom:1px solid var(--border) !important; }
+.cm-editor .cm-panels-bottom { border-top:1px solid var(--border) !important; }
+/* The `:` / `/` prompt is a bare text node, so it takes the panel's colour; the input needs its own. */
+.cm-editor .cm-vim-panel { color:var(--accent) !important; }
+.cm-editor .cm-panels input, .cm-editor .cm-panels .cm-textfield {
+  color:var(--text) !important; background:transparent; caret-color:var(--accent); font:inherit; }
+.cm-editor .cm-panels button, .cm-editor .cm-panels .cm-button {
+  color:var(--text) !important; background:var(--bg2) !important; background-image:none !important;
+  border:1px solid var(--border) !important; border-radius:4px; }
+/* Vim's messages (`E486: Pattern not found`) are inline-styled red — keep the meaning, take the palette. */
+.cm-editor .cm-vim-message { color:var(--red) !important; }
 /* Collapsed inline data-URI (an inlined base64 image) — a compact atomic chip in the editor so the
    huge blob doesn't make the cell uneditable. See `dataUriChit` in editor.js. */
 .data-uri-chit { display:inline-flex; align-items:center; gap:.35em; margin:0 .1em; padding:0 .5em;
@@ -1940,6 +1969,28 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 #workerpop-title { font-weight:600; color:var(--text); flex:1 1 auto; min-width:0; }
 /* Full telemetry breakdown as wrapping chips (no ellipsis truncation — every metric stays visible). */
 .workerpop-stats { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; }
+/* One tab per worker, so comparing them is a click rather than a re-navigation. Severity-ranked with
+   a `+N ▾` overflow (same bounding as the topbar pill), so an unwell worker always holds a tab. */
+.workerpop-tabs { display:flex; align-items:stretch; gap:3px; flex-wrap:nowrap; min-width:0; }
+.wptab { font-size:.74rem; padding:3px 9px; border-radius:6px 6px 0 0; cursor:pointer; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; max-width:14ch;
+  background:transparent; color:var(--dim); border:1px solid transparent; border-bottom:none; }
+.wptab:hover { color:var(--text); background:var(--bg3); }
+.wptab.on { color:var(--text); background:var(--bg); border-color:var(--border);
+  box-shadow:inset 0 2px 0 var(--accent); }   /* the accent edge reads as "this one" without a heavy frame */
+.wptab-more { position:relative; display:inline-flex; }
+.wptab-menu { position:absolute; top:100%; right:0; z-index:30; min-width:170px; padding:4px;
+  background:var(--bg2); border:1px solid var(--border); border-radius:0 6px 6px 6px;
+  box-shadow:0 8px 22px rgba(0,0,0,.4); }
+.wptab-menuitem { font-size:.76rem; padding:4px 8px; border-radius:5px; cursor:pointer; white-space:nowrap; color:var(--dim); }
+.wptab-menuitem:hover { background:var(--bg3); color:var(--text); }
+/* Identity, not health: which host, over what transport, on which ports, adopted or spawned. Muted
+   against the telemetry chips below — you read it once to orient, then watch the numbers. */
+.workerpop-ident { display:flex; flex-wrap:wrap; gap:4px 5px; align-items:center; }
+.widchip { font-family:var(--mono,ui-monospace,monospace); font-size:.68rem; color:var(--dim);
+  background:transparent; border:1px dashed var(--border); border-radius:5px; padding:1px 6px; white-space:nowrap; }
+.widchip-k { color:color-mix(in srgb, var(--dim) 70%, transparent); margin-right:5px; }
+.widchip-v { color:var(--text); }
 /* Run-location picker row (main worker only) — moved here from the old #runloc caret. */
 .workerpop-runloc { font-size:.82rem; color:var(--dim); display:flex; align-items:center; gap:8px; }
 .workerpop-runloc b { color:var(--text); font-weight:600; }
@@ -2588,3 +2639,6 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
   font-variant-numeric:tabular-nums; }
 .swprow-foot i { font-style:normal; color:var(--dim); font-size:.6rem; text-transform:uppercase;
   letter-spacing:.07em; font-family:inherit; }
+/* The panel with no log to show (an app refuses that route) — identity + telemetry still stand. */
+.wplog-none { padding:12px 14px; font-size:.78rem; color:var(--dim); line-height:1.5; }
+.wplog-none a { color:var(--accent); }

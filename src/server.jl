@@ -2616,15 +2616,18 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     # Region dispatch: the `region=` tag decides the kernel; a mutation auto-follows its data (see
     # _region_route). Markdown honors its tag too — its `$(…)` interpolation runs on that region's worker.
     #
-    # Having nowhere to run is THIS CELL's error, not the pass's. Thrown, it fails the whole drain —
-    # the cell stays stale, the runner re-arms until it gives up, and anything waiting on the drain
-    # (the open-time banner) waits for a run that never finishes. A region on a cluster nobody has
-    # signed in to is the ordinary way to reach this, and it reads as one red cell saying so.
+    # Having nowhere to run is THIS CELL's error, not the pass's. Raised, it aborts the drain before
+    # the cell is even marked: the cell (and everything downstream) is left STALE with the reason
+    # nowhere a reader can see it, the runner re-arms until it gives up, and anything waiting on the
+    # drain — the open-time banner — waits for a run that never finishes. A region on a cluster
+    # nobody has signed in to is the ordinary way to reach this, and it reads as one red cell.
     kernel, side = try
         _region_route(nb, cell)
     catch e
+        msg = first(sprint(showerror, e), 300)
+        ReportEngine._rlog("region: cannot route $(cell.id): " * msg)
         lock(nb.lock) do
-            ReportEngine.mark_errored!(cell, first(sprint(showerror, e), 300))
+            ReportEngine.mark_errored!(cell, msg)
             _broadcast_progress(nb, cell)
         end
         return nothing

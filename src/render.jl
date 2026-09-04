@@ -169,6 +169,10 @@ const _MATH_DISPLAY = r"\$\$(.+?)\$\$"s
 # amounts ("it cost $5 and $10") don't get swallowed as a math span (the candidate "5 and "
 # would have to end right before the second $, but it ends in a space — rejected).
 const _MATH_INLINE = r"\$(?!\s)([^\$\n]+?)(?<!\s)\$"
+# `\[…\]` / `\(…\)`. No whitespace heuristic is needed: unlike a bare `$`, these spellings do not
+# occur by accident in prose.
+const _MATH_BRACKET_DISPLAY = r"\\\[.+?\\\]"s
+const _MATH_BRACKET_INLINE = r"\\\(.+?\\\)"s
 _math_token(i::Int) = "xslatemathx" * string(i; pad = 5) * "x"
 
 # A string value's text/plain repr is quoted (`"c"`), but inside `{{ }}` interpolation — a
@@ -302,7 +306,12 @@ function _md_html(src::AbstractString, interps = CellOutput[])
     # math → placeholders (kept byte-for-byte for KaTeX).
     math = String[]
     stash(m) = (push!(math, String(m)); _math_token(length(math)))
-    s = replace(tmpl, _MATH_DISPLAY => stash)   # $$…$$ first, so $…$ can't split it
+    # The LaTeX-bracket spellings MUST be stashed too, even though KaTeX is configured for them:
+    # CommonMark reads `\(` / `\[` as escaped punctuation and drops the backslash, so by the time
+    # KaTeX ran there was no delimiter left to match and the maths rendered as literal text.
+    s = replace(tmpl, _MATH_BRACKET_DISPLAY => stash)   # \[…\] before \(…\), same reason as $$ first
+    s = replace(s, _MATH_BRACKET_INLINE => stash)
+    s = replace(s, _MATH_DISPLAY => stash)   # $$…$$ first, so $…$ can't split it
     s = replace(s, _MATH_INLINE => stash)
     p = CommonMark.Parser()
     # Tables (GFM) and `!!! category "Title"` callouts — the latter is the syntax Julia authors

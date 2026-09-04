@@ -5,6 +5,7 @@
 # server's posture and the text of what the exporter generates.
 using ReTest
 using KaimonSlate
+import JSON
 const NS = KaimonSlate.NotebookServer
 
 @testset "app route allowlist" begin
@@ -147,6 +148,151 @@ end
     @test pop!(s, "status", nothing) !== nothing     # first completion re-runs it…
     @test pop!(s, "status", nothing) === nothing     # …the second doesn't
     empty!(NS._DIRTY_WHILE_RUNNING)
+end
+
+# An app is BUILT by copying the notebook into the bundle, so it is always a copy of its source and
+# the shared-document notice would always fire — telling a reader who is not the author about a file
+# on the machine the app was built on, absolute path included. It is suppressed by process, not by
+# hiding it client-side, so the path never reaches the wire.
+@testset "an app never reports its source document" begin
+    RE = KaimonSlate.ReportEngine
+    H = NS.SlateHistory
+    mktempdir() do dir
+        withenv("XDG_CACHE_HOME" => dir) do
+            old_root = H._ROOT[]; old_app = NS._APP_PROCESS[]
+            H._ROOT[] = joinpath(dir, "kaimonslate", "history")
+            try
+                src = joinpath(dir, "source.jl"); copy = joinpath(dir, "app-copy.jl")
+                write(src, "#%% code id=a\nx = 1\n"); write(copy, "#%% code id=a\nx = 1\n")
+                meta = Dict{String,Any}("docid" => "11111111-2222-3333-4444-555555555555")
+                # One document recorded at both paths, both still present: a genuine copy.
+                d(p) = H.Doc(NS.doc_key(p, meta), abspath(p))
+                H.record!(d(src), "x\n"; cells = [("a", "code", "x\n")])
+                H.record!(d(copy), "x\n2\n"; cells = [("a", "code", "x\n"), ("b", "code", "2\n")])
+
+                nb = RE.parse_report("#%% code id=a\nx = 1\n")
+                nb.meta["docid"] = meta["docid"]
+                live = NS.LiveNotebook("app", copy, nb, RE.PendingKernel(), 0, String[], String[],
+                                       ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                                       Dict{String,String}())
+                NS._APP_PROCESS[] = false
+                @test !isempty(NS.shared_with(live))            # authoring: the copy IS detected
+                @test haskey(NS.state_json(live), "sharedWith")
+
+                NS._APP_PROCESS[] = true                        # app mode: never on the wire
+                s = NS.state_json(live)
+                @test !haskey(s, "sharedWith")
+                @test !haskey(s, "sharedFrom")
+                @test !occursin(abspath(src), string(s))        # …and the source path leaks nowhere else
+            finally
+                H._ROOT[] = old_root; NS._APP_PROCESS[] = old_app
+            end
+        end
+    end
+end
+
+# A `region=` cell names its compute target; the host lives in the registry, which an app's isolated
+# state home does not have. So the definitions the notebook uses travel beside the launcher and
+# `run.jl` seeds them in — otherwise a region cell has a name, no host, and never runs.
+@testset "an app carries the regions its cells use" begin
+    RE = KaimonSlate.ReportEngine
+    mktempdir() do cfg
+        withenv("KAIMONSLATE_CONFIG_HOME" => cfg) do
+            # No hyphen: `region_set!` sanitises a name (`-` → `_`), so a hyphen here would compare
+            # the name we asked for against the one the registry actually stored.
+            name = "__apregtest_$(getpid())__"
+            RE.region_set!(name; host = "somehost", transport = :tunnel)
+            src = joinpath(cfg, "nb.jl")
+            write(src, "#%% code id=a\nx = 1\n\n#%% code id=b region=$name\ny = x + 1\n")
+            rep = RE.parse_report(read(src, String))
+            live = NS.LiveNotebook("nb", src, rep, RE.PendingKernel(), 0, String[], String[],
+                                   ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                                   Dict{String,String}())
+            out = mktempdir()
+            NS._write_app_regions(live, out)
+            f = joinpath(out, "regions.json")
+            @test isfile(f)
+            defs = JSON.parse(read(f, String))
+            @test [String(d["name"]) for d in defs] == [name]   # only what the notebook uses
+            @test String(defs[1]["host"]) == "somehost"          # …with the host, or it can't be reached
+
+            # Seeding an empty home from that file is what makes the name resolve in the app.
+            fresh = mktempdir()
+            withenv("KAIMONSLATE_CONFIG_HOME" => fresh) do
+                @test RE.region_get(name) === nothing
+                cp(f, joinpath(fresh, "regions.json"))
+                r = RE.region_get(name)
+                @test r !== nothing && r.host == "somehost"
+            end
+
+            # A notebook that places nothing on a region carries no file at all.
+            plain = RE.parse_report("#%% code id=a\nx = 1\n")
+            pl = NS.LiveNotebook("p", src, plain, RE.PendingKernel(), 0, String[], String[],
+                                 ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                                 Dict{String,String}())
+            out2 = mktempdir()
+            NS._write_app_regions(pl, out2)
+            @test !isfile(joinpath(out2, "regions.json"))
+        end
+    end
+end
+
+# `run.jl` must only seed a home that has no registry of its own, so an operator who configures the
+# region there (pointing the app at a machine they control) is not overwritten on every start.
+@testset "the launcher seeds regions without overwriting" begin
+    rj = NS._run_script(""; agent = false, bundle_name = "x.jl", app = true,
+                        appdefaults = Dict{String,Any}(), port = 0, apptitle = "T")
+    @test occursin("regions.json", rj)
+    @test occursin("KAIMONSLATE_CONFIG_HOME", rj)
+    @test occursin("!isfile(joinpath(cfg", rj)          # only when the home has none
+end
+
+# An export ships the repo's TRACKED files. A package whose source `include`s a file nobody
+# `git add`ed therefore cannot LOAD on the target machine: the app dies in `Pkg.instantiate` with a
+# SystemError naming a path inside the install, minutes after an export that reported success, and
+# nothing about the exported folder looks wrong. Catch it while the author is still here.
+@testset "an export notices source it cannot carry" begin
+    f = NS._unshipped_includes
+    d = mktempdir(); mkpath(joinpath(d, "src"))
+    write(joinpath(d, "src", "P.jl"), """
+    module P
+    include("shipped.jl")
+    include("untracked.jl")
+    include(joinpath(@__DIR__, "computed.jl"))
+    end
+    """)
+    write(joinpath(d, "src", "shipped.jl"), "1")
+    write(joinpath(d, "src", "untracked.jl"), "2")
+
+    @test isempty(f(d, Set(["src/P.jl", "src/shipped.jl", "src/untracked.jl"])))   # all carried → quiet
+    @test f(d, Set(["src/P.jl", "src/shipped.jl"])) == ["src/untracked.jl"]        # the real gap
+    # A computed include can't be resolved here, and guessing would cry wolf over a file that is fine.
+    @test !any(m -> occursin("computed", m), f(d, Set(["src/P.jl", "src/shipped.jl"])))
+    # A source file that isn't shipped ITSELF says nothing about its includes.
+    @test isempty(f(d, Set(["src/shipped.jl"])))
+    # An include naming a file that doesn't exist is already broken in the source, not an export fault.
+    write(joinpath(d, "src", "Q.jl"), "include(\"never-existed.jl\")\n")
+    @test isempty(f(d, Set(["src/Q.jl"])))
+end
+
+# `/status` judged every worker by a LOCAL process handle. A remote worker has none, so it reported
+# "not running" on a card that was, at the same moment, showing its live CPU and memory — a page an
+# operator consults precisely when they distrust the system, contradicting itself.
+@testset "a remote worker is judged by its wire, not a local pid" begin
+    a = NS._status_alive
+    # The reported case: remote, wire up, no local process.
+    @test a(true, true, false, 1.0)
+    # No wire, but a sample too recent to have come from a dead process.
+    @test a(true, false, false, 3.0)
+    # Silent long enough that the sample proves nothing.
+    @test !a(true, false, false, 10 * NS._STATUS_SAMPLE_FRESH)
+    @test NS._STATUS_SAMPLE_FRESH > 2   # must outlast several 2s publish intervals, or it flickers
+
+    # A LOCAL worker is a process we own, so the OS is the authority: recent chatter does not make an
+    # exited process alive, and a live one needs no telemetry to count.
+    @test a(false, true, true, 1.0)
+    @test !a(false, true, false, 1.0)
+    @test a(false, false, true, Inf)
 end
 
 @testset "presentation defaults" begin

@@ -3,7 +3,12 @@
 // LanguageSupport whose highlighting comes from @plutojl/lezer-julia's parser + a styleTags map.
 import { EditorView, keymap, drawSelection, highlightActiveLine, highlightSpecialChars,
          crosshairCursor, Decoration, ViewPlugin, WidgetType } from "@codemirror/view";
-import { EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder, Transaction } from "@codemirror/state";
+import { EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder, Transaction, Prec } from "@codemirror/state";
+// Modal editing (Settings → Editing → Editor keymap). `vimApi` is the global command registry —
+// Slate registers the ex commands that mean something for a notebook cell (:w runs it, :q leaves
+// it) in editor.js; `vimGetCM` reads an editor's current mode, which is what lets Escape ladder
+// out of insert before it leaves the cell.
+import { vim as vimMode, Vim as vimApi, getCM as vimGetCM } from "@replit/codemirror-vim";
 import { defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess,
          toggleComment, undoDepth, redoDepth } from "@codemirror/commands";
 import { LRLanguage, LanguageSupport, syntaxHighlighting, HighlightStyle, indentNodeProp,
@@ -249,7 +254,7 @@ const juliaThemes = Object.fromEntries(Object.entries(slateThemes).map(([k, v]) 
 const juliaHighlightStyle = juliaThemes["dark-plus"];   // default / back-compat export
 
 export {
-  EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder, Transaction,
+  EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder, Transaction, Prec,
   keymap, drawSelection, highlightActiveLine, highlightSpecialChars, crosshairCursor, Decoration, ViewPlugin, WidgetType,
   defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess, toggleComment,
   undoDepth, redoDepth,
@@ -260,6 +265,7 @@ export {
   syntaxErrorLinter, lintGutter,        // inline syntax-error diagnostics for the web panes
   autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, completionStatus, snippet,
   startCompletion, acceptCompletion,
+  vimMode, vimApi, vimGetCM,            // modal editing, off unless the keymap setting selects it
   // Full module namespaces for editor extensions (see the import note above).
   cmView, cmState, cmCommands, cmLanguage, cmAutocomplete, cmSearch, cmHighlight,
 };

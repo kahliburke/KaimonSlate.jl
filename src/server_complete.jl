@@ -783,7 +783,8 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/status/log", req -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
         _json(_status_log(h, get(q, "doc", ""),
-                          clamp(something(tryparse(Int, get(q, "lines", "300")), 300), 1, 5000)))
+                          clamp(something(tryparse(Int, get(q, "lines", "300")), 300), 1, 5000);
+                          side = get(q, "side", "")))
     end)
     # ── Answering an ssh prompt ──────────────────────────────────────────────────────────────
     # Hub-level, not per notebook: a connection belongs to a HOST, and one prompt may be what
@@ -3138,6 +3139,7 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     # on-disk SHA to this to flag "Slate src changed since this server started; restart to apply".
     _HUB_START_SHA[] = try; ReportEngine._payload_sha(); catch; ""; end
     _HUB_STARTED[] = time()                  # `/status` reports uptime from here
+    _APP_PROCESS[] = app                     # process-wide app flag, for the paths with no hub in hand
     try; SlateHistory.migrate_once!(); catch e   # one-time: compact legacy history logs + compress objects
         @warn "KaimonSlate: history migration failed" exception = (e, catch_backtrace())
     end
