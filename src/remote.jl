@@ -3284,20 +3284,24 @@ for the first and not the second.
 """
 function region_reap!(r::Union{Region,Nothing}, name)
     if r !== nothing && !isempty(r.host)
-        # Where its workers actually are — the allocated node for a scheduler region. Read-only, so
-        # deleting a region that never got a node does not queue for one on the way out.
-        h = region_host(r)
-        try
-            for w in list_remote_workers(h)
-                _region_warm_worker(w, r.name) && reap_remote_worker(h, w["port"])
+        # A scheduler region reaps its workers as part of releasing (they die with the node either
+        # way, and a released node must not be left with one squatting on it). A region with no
+        # scheduler has no allocation to give back, so its workers are drained here instead.
+        if region_scheduler(r) === :none
+            h = region_host(r)
+            try
+                for w in list_remote_workers(h)
+                    _region_warm_worker(w, r.name) && reap_remote_worker(h, w["port"])
+                end
+            catch e
+                _rlog("region[$(r.name)]: drain-on-delete failed ($(sprint(showerror, e)))")
             end
-        catch e
-            _rlog("region[$(r.name)]: drain-on-delete failed ($(sprint(showerror, e)))")
-        end
-        # The allocation outlives the workers on it and bills the whole time, so this is the step
-        # that must not be skipped — and it goes through the LOGIN node, which is still reachable.
-        try; region_release!(r); catch e
-            _rlog("region[$(r.name)]: release-on-delete failed ($(first(sprint(showerror, e), 120)))")
+        else
+            # The allocation outlives the workers on it and bills the whole time, so this is the
+            # step that must not be skipped — and it goes through the LOGIN node, still reachable.
+            try; region_release!(r); catch e
+                _rlog("region[$(r.name)]: release-on-delete failed ($(first(sprint(showerror, e), 120)))")
+            end
         end
     end
     # Peer-mesh artifacts (keypair, authorized_keys grants, host-key pins) are enumerated by tag from
@@ -3504,9 +3508,36 @@ Give the region's allocation back. An allocation bills for the time it is HELD, 
 used, so this runs whenever a region stops needing a node — draining to zero warm workers, or being
 deleted — and not only when someone remembers.
 """
+# Every worker of this region on the node it currently holds — attached ones included, unlike
+# `_region_warm_worker`, which is the adoption predicate and deliberately only sees idle ones.
+#
+# Reaped BEFORE the allocation goes back, and that ordering is the point: a region's worker is
+# started by an ssh to the node, so it is NOT in the scheduler job's process tree and giving the job
+# back does not kill it. Measured on PBS: a worker outlived three releases and 14 minutes, with the
+# notebook still running cells on a node the scheduler had already reassigned. A site epilogue or
+# cgroup usually catches this; where it does not, the worker is squatting.
+function _reap_region_workers!(r::Region)
+    h = region_host(r)
+    (isempty(h) || h == r.host) && return 0      # nothing placed — no node, so nothing on it
+    n = 0
+    try
+        for w in list_remote_workers(h)
+            w["alive"] === true || continue
+            _manifest_get(w["manifest"], "region") == r.name || continue
+            _manifest_get(w["manifest"], "hub") == gethostname() || continue
+            try; reap_remote_worker(h, w["port"]); n += 1; catch; end
+        end
+    catch e
+        _rlog("region[$(r.name)]: could not reap workers on $h ($(first(sprint(showerror, e), 120)))")
+    end
+    n > 0 && _rlog("region[$(r.name)]: reaped $n worker(s) on $h before releasing the node")
+    return n
+end
+
 function region_release!(r::Region)
     kind = region_scheduler(r)
     kind === :none && return false
+    _reap_region_workers!(r)                     # before the node goes — see above
     held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
     held === nothing || route!(held.host, "")
     return try
