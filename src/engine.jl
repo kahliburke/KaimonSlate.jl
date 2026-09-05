@@ -168,6 +168,9 @@ mutable struct Cell
     blocked::String               # why a BLOCKED cell cannot run yet, in one line. NOT an error message:
                                   # it belongs in the header beside the state, and it is cleared the
                                   # moment the cell runs. "" whenever `state != BLOCKED`.
+    blocked_at::Float64           # when the wait started (unix). Kept across a re-block for the same
+                                  # reason, so "waiting 6m" counts from the first attempt rather than
+                                  # restarting each time the runner looks. 0.0 when not blocked.
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -175,7 +178,7 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
-                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0, "")
+                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0, "", 0.0)
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation

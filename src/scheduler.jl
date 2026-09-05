@@ -140,6 +140,93 @@ if command -v qstat >/dev/null 2>&1 && command -v qsub >/dev/null 2>&1; then
 fi
 """
 
+# ── What the cluster is doing right now ──────────────────────────────────────────────────────
+#
+# `detect` reports what a host OFFERS, which does not change; this reports what is FREE, which is
+# the only thing that explains a wait. A cell queued for a node says nothing about whether the
+# answer is thirty seconds or tomorrow — "0 of 8 cpus free, 12 jobs queued" does.
+#
+# Deliberately a separate round trip from detection: this one is asked while somebody is looking at
+# a queued cell, and detection is asked once when a form opens.
+
+"Free capacity in one queue, as the scheduler reports it now."
+struct QueueLoad
+    name::String
+    nodes_free::Int      # nodes with nothing on them; 0 when the scheduler did not say
+    nodes_total::Int     # 0 means "no node count available", not "no nodes" — see `show`
+    cpus_free::Int
+    cpus_total::Int
+    queued::Int          # jobs waiting, across the whole scheduler — a queue of one is not a wait
+end
+
+Base.show(io::IO, q::QueueLoad) =
+    print(io, q.name, ": ", q.cpus_free, "/", q.cpus_total, " cpus free",
+          q.nodes_total > 0 ? ", $(q.nodes_free)/$(q.nodes_total) nodes" : "",
+          q.queued > 0 ? ", $(q.queued) queued" : "")
+
+# SLURM counts cpus per partition with `%C` = allocated/idle/other/total. PBS has no per-queue view
+# of the same thing, so its nodes are counted once and reported against every queue — a small lie,
+# and the honest alternative (a per-queue node map) costs a round trip per queue to say the same
+# thing on a cluster where the queues share nodes, which is the normal shape.
+const _LOAD_SCRIPT = raw"""
+if command -v sinfo >/dev/null 2>&1; then
+  sinfo -h -o 'LOAD slurm %R|%C|%D|%A' 2>/dev/null | sort -u
+  echo "PEND slurm $(squeue -h -t PENDING -o '%i' 2>/dev/null | wc -l | tr -d ' ')"
+fi
+if command -v pbsnodes >/dev/null 2>&1; then
+  pbsnodes -a 2>/dev/null | awk '
+    /^[^ ]/            { n++ }
+    /state = free/     { free++ }
+    /resources_available.ncpus/ { tot += $3 }
+    /resources_assigned.ncpus/  { used += $3 }
+    END { print "LOADPBS " (free+0) "|" (n+0) "|" (tot-used) "|" (tot+0) }'
+  echo "PEND pbs $(qselect -s Q 2>/dev/null | wc -l | tr -d ' ')"
+fi
+"""
+
+"""
+    load(runner, kind, queues) -> Vector{QueueLoad}
+
+What is free right now, per queue. One round trip. Empty when the host cannot be reached or the
+scheduler says nothing — a wait with no explanation is better than an invented one.
+"""
+function load(runner, kind::Symbol, queues::Vector{String} = String[])
+    ok, out = try; runner(_LOAD_SCRIPT); catch; (false, ""); end
+    ok || return QueueLoad[]
+    pend = 0
+    rows = QueueLoad[]
+    pbs = (free = -1, nodes = 0, cfree = 0, ctot = 0)
+    for line in split(out, '\n')
+        line = strip(line)
+        if startswith(line, "PEND ")
+            f = split(line); length(f) >= 3 && (pend = max(pend, something(tryparse(Int, f[3]), 0)))
+        elseif startswith(line, "LOAD slurm ")
+            g = split(strip(line[12:end]), '|')
+            length(g) >= 4 || continue
+            # `%C` is "allocated/idle/other/total"; `%A` is "allocated/idle" NODES.
+            c = split(g[2], '/'); a = split(g[4], '/')
+            length(c) >= 4 || continue
+            push!(rows, QueueLoad(String(strip(g[1])),
+                                  length(a) >= 2 ? something(tryparse(Int, a[2]), 0) : 0,
+                                  something(tryparse(Int, g[3]), 0),
+                                  something(tryparse(Int, c[2]), 0),
+                                  something(tryparse(Int, c[4]), 0), 0))
+        elseif startswith(line, "LOADPBS ")
+            g = split(strip(line[9:end]), '|')
+            length(g) >= 4 && (pbs = (free = something(tryparse(Int, g[1]), 0),
+                                      nodes = something(tryparse(Int, g[2]), 0),
+                                      cfree = something(tryparse(Int, g[3]), 0),
+                                      ctot = something(tryparse(Int, g[4]), 0)))
+        end
+    end
+    if kind === :pbs && pbs.nodes > 0
+        qs = isempty(queues) ? ["(cluster)"] : queues
+        rows = QueueLoad[QueueLoad(q, pbs.free, pbs.nodes, pbs.cfree, pbs.ctot, 0) for q in qs]
+    end
+    return QueueLoad[QueueLoad(r.name, r.nodes_free, r.nodes_total, r.cpus_free, r.cpus_total, pend)
+                     for r in rows]
+end
+
 """
     detect(runner) -> SchedulerInfo
 

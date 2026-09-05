@@ -98,15 +98,26 @@ end
 
     j = NS.cell_json(c)
     @test j["state"] == "blocked" && j["blocked"] == "queued for a node on login"
+    @test j["blockedAt"] > 0
+
+    # The clock starts at the FIRST attempt. The runner re-enters this path each time it retries a
+    # blocked cell, and re-stamping would show "waiting 0s" against a queue wait of an hour.
+    t0 = c.blocked_at
+    sleep(0.01); RE.mark_blocked!(c, "queued for a node on login")
+    @test c.blocked_at == t0
+    # A CHANGED reason is a different wait, so that one does restart.
+    RE.mark_blocked!(c, "not signed in to login")
+    @test c.blocked_at > t0
 
     # Every other transition clears the reason, so it can never outlive the wait it describes —
     # including `restale!`, which is how the placement task re-arms the cell once a node lands.
     for step in (RE.restale!, RE.mark_running!, RE.mark_fresh!,
                  x -> RE.mark_result!(x, nothing), x -> RE.mark_errored!(x, "boom"))
         RE.mark_blocked!(c, "still waiting")
-        @test c.blocked == "still waiting"
+        @test c.blocked == "still waiting" && c.blocked_at > 0
         step(c)
-        @test c.blocked == "" && c.state != RE.BLOCKED
+        # The clock goes with the reason, so a stale "waiting 40m" cannot sit on a cell that ran.
+        @test c.blocked == "" && c.blocked_at == 0.0 && c.state != RE.BLOCKED
     end
     # …and a cell that never blocked reports no reason at all.
     @test NS.cell_json(RE.Cell("p", RE.CODE, "2+2"))["blocked"] == ""

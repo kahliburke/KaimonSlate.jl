@@ -345,6 +345,45 @@ end
         @test occursin("ordinary machine", sprint(show, none))
     end
 
+    @testset "a queued cell can say what the cluster is busy with" begin
+        # Detection reports what a host OFFERS and never changes; this reports what is FREE, which
+        # is the only thing that explains a wait. "Queued" alone does not distinguish thirty
+        # seconds from tomorrow.
+        SD = Sweep.SchedulerDetect
+        canned(out) = _ -> (true, out)
+
+        # SLURM: `%C` is allocated/idle/other/total CPUS, `%A` allocated/idle NODES.
+        s = SD.load(canned("""
+            LOAD slurm compute|12/20/0/32|4|1/3
+            LOAD slurm gpu|8/0/0/8|1|1/0
+            PEND slurm 7
+            """), :slurm)
+        @test [q.name for q in s] == ["compute", "gpu"]
+        @test (s[1].cpus_free, s[1].cpus_total) == (20, 32)
+        @test (s[1].nodes_free, s[1].nodes_total) == (3, 4)
+        @test s[2].cpus_free == 0                      # full, and that is the answer to "why wait"
+        @test all(q -> q.queued == 7, s)               # scheduler-wide, so every row carries it
+        @test occursin("20/32 cpus free", sprint(show, s[1]))
+        @test occursin("7 queued", sprint(show, s[1]))
+
+        # PBS counts nodes once — it has no per-queue view of free CPUs — so the same figures are
+        # reported against each queue asked about. Verified against a live cluster: two 4-cpu nodes
+        # idle reads as 8/8.
+        p = SD.load(canned("LOADPBS 2|2|8|8\nPEND pbs 0\n"), :pbs, ["workq", "gpuq"])
+        @test [q.name for q in p] == ["workq", "gpuq"]
+        @test all(q -> (q.cpus_free, q.cpus_total, q.nodes_free) == (8, 8, 2), p)
+        @test !occursin("queued", sprint(show, p[1]))  # a queue of nothing is not news
+
+        # Named queues are optional; without them PBS still has one honest thing to say.
+        @test only(SD.load(canned("LOADPBS 1|2|4|8"), :pbs)).name == "(cluster)"
+
+        # A wait with no explanation beats an invented one: an unreachable or silent host says
+        # nothing rather than reporting a cluster that is empty.
+        @test isempty(SD.load(_ -> (false, ""), :slurm))
+        @test isempty(SD.load(_ -> error("host is down"), :pbs, ["workq"]))
+        @test isempty(SD.load(canned("LOAD slurm mangled|not/a/count"), :slurm))
+    end
+
     @testset "an allocation names the node the scheduler picked" begin
         # An interactive session needs a compute node, and which node is an OUTPUT of the
         # allocation — not something a config file can hold. The scheduler answers with a

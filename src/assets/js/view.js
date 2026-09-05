@@ -553,10 +553,31 @@ function cellHeaderInner(c) {
 // A cell that cannot run YET says so in its header, not in its output. The output area keeps
 // whatever the last run produced — a cell waiting on a cluster node has not lost the value it had,
 // and painting it red says it has.
+//
+// The elapsed time is rendered from `blockedAt` by a ticker (below) rather than pushed: a queue wait
+// is minutes to hours, and streaming a per-second update for every waiting cell would be traffic
+// spent on a clock the page can read itself.
+function _blockedWaited(c) {
+  const at = +(c && c.blockedAt) || 0;
+  if (!at) return '';
+  const s = Math.max(0, Math.round(Date.now() / 1000 - at));
+  return s < 60 ? s + 's' : s < 3600 ? Math.round(s / 60) + 'm' : (s / 3600).toFixed(1) + 'h';
+}
 function _blockedPill(c) {
   if (!c || c.state !== 'blocked' || !c.blocked) return '';
-  return `<span class="blockpill" title="${_esc(c.blocked)}">⏳ ${_esc(c.blocked)}</span>`;
+  const w = _blockedWaited(c);
+  return `<span class="blockpill" data-at="${+(c.blockedAt) || 0}" title="${_esc(c.blocked)}">` +
+         `⏳ ${_esc(c.blocked)}${w ? ` · <span class="blockwait">${w}</span>` : ''}</span>`;
 }
+// One timer for the page, not one per cell: it only rewrites the elapsed text, and stops costing
+// anything when nothing is waiting.
+setInterval(() => {
+  document.querySelectorAll('.blockpill[data-at]').forEach(el => {
+    const w = _blockedWaited({ blockedAt: +el.dataset.at });
+    const slot = el.querySelector('.blockwait');
+    if (slot && w && slot.textContent !== w) slot.textContent = w;
+  });
+}, 5000);
 function cellHeader(c) { return '<div class="cellhead">' + cellHeaderInner(c) + '</div>'; }
 
 // (cellEl + mountEditor removed — the Preact <Notebook>/<Cell>/<Editor> in notebook.js now

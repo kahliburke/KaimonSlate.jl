@@ -407,7 +407,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
       // Why the cell can't run yet. Arrives and clears on its own schedule — a node is granted
       // minutes after the run that asked for it — so it patches in place rather than waiting for a
       // header re-render.
-      const bkey = (c.state === 'blocked' ? c.blocked : '') || '';
+      const bkey = (c.state === 'blocked' ? c.blocked + '\x1f' + (c.blockedAt || 0) : '') || '';
       if (head.dataset.blockkey !== bkey) {
         head.dataset.blockkey = bkey;
         const bslot = head.querySelector('.blockslot');

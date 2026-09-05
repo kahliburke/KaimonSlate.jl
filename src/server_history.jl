@@ -870,8 +870,10 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "hash"    => SlateHistory._sha(c.source),
         "state"   => lowercase(string(c.state)),
         # Why a BLOCKED cell cannot run yet — for the header, NOT the output area. "" otherwise, so
-        # the browser can key on the string alone.
+        # the browser can key on the string alone. `blocked_at` is when the wait started, so the
+        # page can count up without the server pushing a tick.
         "blocked" => c.blocked,
+        "blockedAt" => c.blocked_at,
         "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(_mdsrc, c.interp) :
                         (live_placeholder && _is_live(c) ? _live_output_placeholder() : output_html(c))),
         # How the browser should treat this output's session-boundness (see `_live_output_placeholder`):
