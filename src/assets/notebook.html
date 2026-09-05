@@ -405,10 +405,11 @@
   <div class="setrow"><label title="Theme for code syntax highlighting in the editor — token colours and editor chrome">Editor syntax</label>
     <select id="setsyntax"><!-- options populated from the cm6 theme registry (settings.js) --></select></div>
   <div class="setsec">Editing</div>
-  <div class="setrow"><label title="Modal (vim) editing in every cell editor. Escape steps out one level at a time: completion popup, then insert mode, then the cell. Ctrl-[ only ever leaves insert. Shift-Enter still runs the cell; :w runs it, :q leaves it, :q! discards your edit.">Editor keymap</label>
-    <select id="setvimmode">
+  <div class="setrow"><label title="Alternative keybindings in every cell editor. Vim: Escape steps out one level at a time — completion popup, then insert mode, then the cell (Ctrl-[ only ever leaves insert); :w runs the cell, :q leaves it, :q! discards your edit. Emacs: modeless, Meta is Alt, C-g cancels, M-; toggles comments; Escape still leaves the cell. Shift-Enter runs the cell in every mode.">Editor keymap</label>
+    <select id="seteditorkeymap">
       <option value="default">Default</option>
       <option value="vim">Vim</option>
+      <option value="emacs">Emacs</option>
     </select></div>
   <div class="setrow"><label>Live-update debounce</label>
     <span class="rt"><input type="range" id="setdeb" min="0" max="1000" step="25"/><span id="setdebv"></span> ms</span></div>

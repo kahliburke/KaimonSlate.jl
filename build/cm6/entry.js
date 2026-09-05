@@ -9,6 +9,9 @@ import { EditorState, EditorSelection, Compartment, StateField, StateEffect, Ran
 // it) in editor.js; `vimGetCM` reads an editor's current mode, which is what lets Escape ladder
 // out of insert before it leaves the cell.
 import { vim as vimMode, Vim as vimApi, getCM as vimGetCM } from "@replit/codemirror-vim";
+// Emacs needs none of vim's Escape arbitration: it is modeless, uses M- (Alt) for Meta rather than
+// the ESC-prefix convention, and cancels with C-g — it binds no Escape at all.
+import { emacs as emacsMode } from "@replit/codemirror-emacs";
 import { defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess,
          toggleComment, undoDepth, redoDepth } from "@codemirror/commands";
 import { LRLanguage, LanguageSupport, syntaxHighlighting, HighlightStyle, indentNodeProp,
@@ -265,7 +268,7 @@ export {
   syntaxErrorLinter, lintGutter,        // inline syntax-error diagnostics for the web panes
   autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, completionStatus, snippet,
   startCompletion, acceptCompletion,
-  vimMode, vimApi, vimGetCM,            // modal editing, off unless the keymap setting selects it
+  vimMode, vimApi, vimGetCM, emacsMode,  // alternative keymaps, off unless the setting selects one
   // Full module namespaces for editor extensions (see the import note above).
   cmView, cmState, cmCommands, cmLanguage, cmAutocomplete, cmSearch, cmHighlight,
 };

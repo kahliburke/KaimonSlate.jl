@@ -39,9 +39,10 @@ const vimApi = {
   exitVisualMode: () => { acted = 'visual'; },
   handleKey: (_cm, key) => { acted = 'key:' + key; },
 };
-const keydown = new Function('completionStatus', '_vimCM', 'vimApi', 'return function keydown(e, view) ' + body.slice(body.indexOf('{')) + ';')(
+const keydown = new Function('completionStatus', '_vimCM', '_vimState', 'vimApi', 'return function keydown(e, view) ' + body.slice(body.indexOf('{')) + ';')(
   () => completion,
   () => (vimState ? { state: { vim: vimState } } : null),
+  () => vimState,
   vimApi,
 );
 const view = { state: {}, contentDOM: { blur: () => { blurred++; } } };
@@ -121,6 +122,20 @@ if ((src.match(/_discard\(cm\)/g) || []).length !== 1) {
 // instead, or it silently does nothing on exactly the cells whose source you opened deliberately.
 if (!/_overlay\(v\)[\s\S]{0,60}commitSource/.test(src)) {
   console.error('vim_escape: :w does not commit in the source overlay'); bad++;
+}
+
+// The keymap setting is a registry, not a vim flag — so a mode can't be half-added (bundled but
+// unofferable, or offered but unbundled). `_KEYMAP_MODES` is the single list the extension builder,
+// the current-mode reader and the Settings menu all read.
+if (!/_KEYMAP_MODES\s*=\s*\{[^}]*\bvim\b[^}]*\bemacs\b[^}]*\}/.test(src)) {
+  console.error('vim_escape: the keymap registry does not carry both vim and emacs'); bad++;
+}
+// Emacs rides the SAME Escape handler and must never trip its vim rungs: it is modeless, binds no
+// Escape, and `_vimCM` returns null for it — so Escape leaves the cell, which is the `OFF` case
+// asserted above. Anything that reads a mode off the editor has to go through `_vimCM` for that to
+// hold; a direct `state.vim` peek elsewhere would quietly treat an emacs editor as a vim one.
+if (/\.state\s*\.\s*vim\b/.test(src.replace(/const _vimState[^\n]*\n/, ''))) {
+  console.error('vim_escape: vim state is read outside _vimCM/_vimState'); bad++;
 }
 
 if (bad) { console.error(`vim_escape: ${bad} check(s) failed`); process.exit(1); }
