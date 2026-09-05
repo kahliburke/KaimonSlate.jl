@@ -97,6 +97,19 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
         @test !haskey(ReportEngine._col_wire(cb), "viz")
     end
 
+    @testset "title travels with the table" begin
+        # A caption belongs to the TABLE, not to a markdown cell beside it: it has to survive being
+        # exported, replayed or moved, which a heading in the neighbouring cell does not.
+        t = slate_table((a = [1, 2], b = ["x", "y"]); title = "Units per node")
+        @test t.opts["title"] == "Units per node"
+        # Blank is the same as absent — an empty caption would render as a stripe of padding.
+        @test !haskey(slate_table((a = [1],); title = "   ").opts, "title")
+        @test !haskey(slate_table((a = [1],)).opts, "title")
+        # Riding `opts` is what carries it to the browser and to each fixed exporter by the path
+        # they already read; `test_export.jl` asserts the three exports.
+        @test slate_table(["a"], [[1]]; title = "Two-arg form").opts["title"] == "Two-arg form"
+    end
+
     @testset "cells are reduced to JSON-safe scalars" begin
         cv = ReportEngine._cellval
         @test cv(nothing) === nothing

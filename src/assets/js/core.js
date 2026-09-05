@@ -1150,12 +1150,21 @@ function drawTable(wrap, spec, st, sel) {
   // (e.g. 1 → 15) without a shell rebuild, and a stale closure would sort/filter the original tiny spec.
   wrap._spec = spec;
   const cols = spec.columns || [];
-  const sig = (spec.paged ? 'p:' : 'e:') + cols.map(_colName).join('');
+  const sig = (spec.paged ? 'p:' : 'e:') + _titleOf(spec) + '\u0002' + cols.map(_colName).join('');
   if (wrap._sig !== sig) { _buildShell(wrap, cols, spec, st); wrap._sig = sig; }
   _refreshTable(wrap, spec, st);
 }
+// A table's optional caption. Part of the shell's signature (above), since the shell is built once
+// and a changed caption must rebuild it.
+function _titleOf(spec) { return (spec && spec.opts && spec.opts.title) || ''; }
+
 function _buildShell(wrap, cols, spec, st) {
   wrap.innerHTML = '';
+  const title = _titleOf(spec);
+  if (title) {
+    const h = document.createElement('div'); h.className = 'st-title'; h.textContent = title;
+    wrap.appendChild(h);
+  }
   const bar = document.createElement('div'); bar.className = 'st-bar';
   const fi = document.createElement('input');
   fi.type = 'text'; fi.className = 'st-filter';

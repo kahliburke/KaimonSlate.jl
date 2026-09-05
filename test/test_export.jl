@@ -243,6 +243,36 @@ end
     @test occursin("table.cell(fill: rgb(\"#58a6ff\").transparentize", typ)        # :heat per-cell fill
 end
 
+@testset "table export — a title travels into every fixed export" begin
+    # `slate_table(…; title=…)` rides `opts`, so all three exporters read it through one shared
+    # accessor. A caption written in a neighbouring markdown cell would not survive being exported,
+    # replayed or moved; one that belongs to the table does.
+    base = Dict{String,Any}(
+        "columns" => Any[Dict{String,Any}("name" => "a", "type" => "int", "align" => "right",
+                                          "format" => nothing)],
+        "rows" => Any[Any[1], Any[2]])
+    titled = merge(base, Dict{String,Any}("opts" => Dict{String,Any}("nrows" => 2, "ncols" => 1,
+                                                                     "title" => "Units | per node")))
+    plain = merge(base, Dict{String,Any}("opts" => Dict{String,Any}("nrows" => 2, "ncols" => 1)))
+
+    html = NS._export_table_html(titled)
+    @test occursin("exp-tbltitle", html) && occursin("Units | per node", html)
+    # Above the table, so the enhancer's toolbar (inserted before the table) lands under it.
+    @test findfirst("exp-tbltitle", html)[1] < findfirst("<table", html)[1]
+    @test !occursin("exp-tbltitle", NS._export_table_html(plain))
+
+    typ = NS._typst_table(titled; theme = "light")
+    @test occursin("Units | per node", typ)
+    @test findfirst("Units | per node", typ)[1] < findfirst("#table(", typ)[1]
+
+    md = NS._md_table(titled)
+    # GFM has no caption, so it becomes bold text above — and `|` must be escaped there too, or it
+    # reads as a column break.
+    @test occursin("**Units \\| per node**", md)
+    @test findfirst("**Units", md)[1] < findfirst("| a |", md)[1]
+    @test !occursin("**", NS._md_table(plain))
+end
+
 # Interim-render preview travelling with an EXPORT: externalized blob URLs must re-inline to
 # self-contained data URIs (the blob-serving server isn't there when the .jl is reopened elsewhere),
 # subject to the size caps; heavy animation manifests are dropped.

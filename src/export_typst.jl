@@ -630,6 +630,10 @@ function _typst_table(spec; theme::AbstractString = "light")::String
     io = IOBuffer()
     # per-column alignment (numbers right, bools center) + a themed grid stroke
     print(io, "#align(center)[\n")   # center the table block on the page
+    # A caption above the table, matching the browser and the HTML export.
+    ttl = _table_title(opts)
+    ttl === nothing || print(io, "#block(above: 6pt, below: 5pt)[#text(size: 10.5pt, weight: \"bold\", \"",
+                             _typ_str(ttl), "\")]\n")
     print(io, "#table(columns: ", ncol, ", inset: 5pt, align: (", join((_typalign(_col_align(c)) for c in cols), ", "), "), stroke: 0.4pt + $(p.tablestroke),\n")
     # zebra: header shaded (row 0), odd body rows a subtle stripe
     print(io, "  fill: (_, row) => if row == 0 { $(p.tableheadbg) } else if calc.odd(row) { $(p.tablestripe) },\n")

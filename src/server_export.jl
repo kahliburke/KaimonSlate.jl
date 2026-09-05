@@ -1703,6 +1703,7 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
    (`.slatetable .st-scroll`, notebook.css) — the export sheet is separate and only had the clamp. */
 .exp-tblwrap{width:fit-content;max-width:100%;margin:10px auto;overflow-x:auto;}
 .exp-table th{cursor:pointer;user-select:none;} .exp-table th::after{content:attr(data-arr);color:var(--accent);}
+.exp-tbltitle{font-weight:600;font-size:1.02rem;text-align:center;margin:0 0 8px;color:var(--strong);letter-spacing:.01em;line-height:1.35;}
 .exp-tbl-bar{display:flex;align-items:center;gap:10px;margin-bottom:4px;}
 .exp-tbl-filter{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:.78rem;min-width:150px;}
 .exp-tbl-filter:focus{outline:none;border-color:var(--accent);}
@@ -2043,6 +2044,10 @@ _col_numeric(c) = c isa AbstractDict && (t = string(get(c, "type", "")); t == "i
 _capped_rows(rows, opts) =
     (cap = get(opts, "export_rows", nothing); (cap !== nothing && length(rows) > cap) ? view(rows, 1:cap) : rows)
 
+"A table's caption (`slate_table(…; title=…)`), or `nothing`. Shared by every fixed exporter."
+_table_title(opts) =
+    (t = get(opts, "title", nothing); (t === nothing || isempty(strip(string(t)))) ? nothing : String(strip(string(t))))
+
 # The `@replay` mark a table carries (`_mark_table_replay!` put it in `opts`), or `nothing`.
 _table_replay_mark(spec) =
     (o = get(spec, "opts", nothing); o isa AbstractDict ? get(o, "__replay", nothing) : nothing)
@@ -2127,7 +2132,10 @@ function _export_table_html(spec)
     # The id the page registers this table's row-order setter under, so `Slate.replay.wire` can find it.
     rattr = mk isa AbstractDict ? string(" data-replay=\"", _esc(String(get(mk, "id", ""))), "\"") : ""
     io = IOBuffer()
-    print(io, "<div class=\"exp-tblwrap\"><table class=\"exp-table\"", rattr, "><thead><tr>")
+    print(io, "<div class=\"exp-tblwrap\">")
+    ttl = _table_title(opts)
+    ttl === nothing || print(io, "<div class=\"exp-tbltitle\">", _esc(ttl), "</div>")
+    print(io, "<table class=\"exp-table\"", rattr, "><thead><tr>")
     for c in cols
         print(io, "<th class=\"", _col_numeric(c) ? "num " : "", "align-", _col_align(c), "\">", _esc(_col_name(c)), "</th>")
     end
@@ -5098,6 +5106,10 @@ function _md_table(spec)
     isempty(names) && return ""
     _gfmsep(a) = a == "right" ? "---:" : (a == "center" ? ":--:" : ":---")   # GFM alignment row
     io = IOBuffer()
+    # Markdown has no table caption, so the title goes above as bold text — the convention a reader
+    # already recognises, and it survives being pasted anywhere GFM renders.
+    ttl = _table_title(opts)
+    ttl === nothing || println(io, "**", replace(ttl, "|" => "\\|"), "**\n")
     println(io, "| ", join(names, " | "), " |")
     println(io, "| ", join((_gfmsep(_col_align(c)) for c in cols), " | "), " |")
     shown = _capped_rows(rows, opts)

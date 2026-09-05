@@ -298,8 +298,8 @@ end
 # ── Public helper (injected into the cell namespace as `slate_table`) ─────────
 
 """
-    slate_table(data; format, align, coltype, viz, default_format, paged, page_size, export_rows) -> SlateTable
-    slate_table(columns, rows; format, align, coltype, viz, default_format, export_rows)          -> SlateTable
+    slate_table(data; format, align, coltype, viz, default_format, title, paged, page_size, export_rows) -> SlateTable
+    slate_table(columns, rows; format, align, coltype, viz, default_format, title, export_rows)          -> SlateTable
 
 Build an interactive, sortable, filterable, paged table. RETURN it from a cell to render it — a bare
 DataFrame / Tables.jl source already auto-renders, so you only call `slate_table` explicitly to pass
@@ -323,6 +323,9 @@ NamedTuple needs its trailing comma: `(Revenue = :currency,)`:
   • `default_format` — one format spec (same DSL as a `format` value) applied to EVERY numeric
     column that doesn't have an explicit entry in `format`. Handy for a blanket
     `default_format = :integer` (round-to-nearest-int) instead of listing every column.
+  • `title` — a caption above the table. Travels with it into every fixed export (PDF, HTML,
+    markdown), which is what makes it worth setting over a markdown heading beside the cell: a
+    table that gets moved, replayed or exported keeps the words that say what it is.
 
 Example combining several:
 
@@ -338,7 +341,7 @@ note); the live table stays fully paginated.
 """
 function slate_table(x; paged::Bool = false, page_size::Int = 50, export_rows = nothing,
                      format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple(), viz = NamedTuple(),
-                     default_format = nothing)
+                     default_format = nothing, title = nothing)
     # `paged=true` → a server-paged provider (paged.jl), one page fetched at a time; otherwise the
     # eager form below materializes all rows (capped). `page_size` sets the paged page length.
     if paged
@@ -348,6 +351,7 @@ function slate_table(x; paged::Bool = false, page_size::Int = 50, export_rows = 
             "source, a Vector of NamedTuples, or a Dict/NamedTuple of column vectors."))
         pt = _make_paged(prov; page_size = page_size)
         _apply_col_opts!(pt.columns; format, align, coltype, viz, default_format)
+        _set_title!(pt, title)
         return pt   # paged tables are already page-limited in fixed exports (only page 1 ships)
     end
     t = _as_slate_table(x)
@@ -357,12 +361,23 @@ function slate_table(x; paged::Bool = false, page_size::Int = 50, export_rows = 
         "a Vector of NamedTuples, a Dict/NamedTuple of column vectors, or `columns, rows`."))
     _apply_col_opts!(t.columns; format, align, coltype, viz, default_format)
     export_rows === nothing || (t.opts["export_rows"] = Int(export_rows))   # cap rows in fixed exports (PDF/md/HTML)
+    _set_title!(t, title)
+    return t
+end
+
+# A caption above the table, carried in `opts` like every other display setting so it reaches the
+# browser and each fixed exporter by the one path they already read. Blank is the same as none — an
+# empty caption would otherwise render as a stripe of padding above the header.
+function _set_title!(t, title)
+    title === nothing && return t
+    s = strip(string(title))
+    isempty(s) || (t.opts["title"] = String(s))
     return t
 end
 
 function slate_table(columns, rows; export_rows = nothing,
                      format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple(), viz = NamedTuple(),
-                     default_format = nothing)
+                     default_format = nothing, title = nothing)
     names = String[string(c) for c in columns]
     ncol = length(names)
     rawrows = rows isa AbstractMatrix ?
@@ -374,6 +389,7 @@ function slate_table(columns, rows; export_rows = nothing,
     _apply_col_opts!(cols; format, align, coltype, viz, default_format)
     t = _finish(cols, rws)
     export_rows === nothing || (t.opts["export_rows"] = Int(export_rows))
+    _set_title!(t, title)
     return t
 end
 

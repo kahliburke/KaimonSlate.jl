@@ -980,6 +980,11 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 /* Interactive data table (slate_table / DataFrame auto-render) */
 .tables:not(:empty) { padding:8px 10px; border-top:1px solid var(--border); }
 .slatetable { margin:4px 0 8px; }
+/* Table caption. Centered over the table — `.st-table` is min-width:100%, so the wrapper's width IS
+   the table's. Sits above the filter bar, which is chrome rather than content. */
+/* Clearly a step above the table body (.8rem) without competing with a markdown heading. */
+.slatetable .st-title { color:var(--strong); font-size:.98rem; font-weight:600; text-align:center;
+  margin:0 0 8px; letter-spacing:.01em; line-height:1.35; }
 .slatetable .st-bar { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
 .slatetable .st-filter { background:var(--bg3); color:var(--text); border:1px solid var(--border);
   border-radius:6px; padding:3px 8px; font-size:.8rem; min-width:160px; }
