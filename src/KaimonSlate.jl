@@ -710,10 +710,11 @@ function create_tools(GateTool::Type)
     `"notebook"` = durable, saved in the .jl so it reopens there; `"clear"` = drop both overrides and
     fall back to the global default / local. Use `check_remote` first to validate + prime a new host.
     """
-    # `scope` MUST be a keyword arg: the gate silently strips optional POSITIONALS
-    # (see _reflect_tool/_dispatch_tool_call notes) — as a positional this defaulted to
-    # "session" no matter what the caller passed. Same fix on check_remote/publish_history.
-    function run_on(notebook::String, host::String; scope::String = "session")::String
+    function run_on(notebook::String, host::String;
+                    # `scope` MUST be a keyword arg: the gate silently strips optional POSITIONALS
+                    # (see _reflect_tool/_dispatch_tool_call notes) — as a positional this defaulted
+                    # to "session" whatever the caller passed. Same on check_remote/publish_history.
+                    scope::String = "session")::String
         nb, err = _nb(notebook); nb === nothing && return err
         sc = Symbol(strip(scope)); sc in (:session, :notebook, :clear) || (sc = :session)
         set_run_on!(nb, host; scope = sc)
@@ -1192,6 +1193,16 @@ function create_tools(GateTool::Type)
         return notebook_digest(nb; cells = cells, delta_since = delta_since)
     end
 
+    # NOTHING may sit between a docstring and its definition — not even a comment. KaimonGate recovers
+    # a closure's docstring by scanning UP from the definition line and stops at the first non-blank
+    # line that isn't part of the string, so an interposed comment leaves the tool with NO description
+    # at all, silently. Explanatory notes go here, above the docstring, or inside the body.
+    #
+    # `topic` is a kwarg because optional GateTool params always are: a positional can only be omitted
+    # from the END, so the moment a second one is added the caller loses the ability to pass just the
+    # later one. (It was an optional POSITIONAL, which the gate's dispatcher then dropped silently —
+    # every call returned the index. Fixed in KaimonGate's `_dispatch_tool_call`, but the convention
+    # stands on its own.)
     """
         api() -> String
 
@@ -1209,22 +1220,22 @@ function create_tools(GateTool::Type)
 
     These helpers are also indexed for `search_docs` under module "Slate".
     """
-    # `topic` is a kwarg because optional GateTool params always are: a positional can only be
-    # omitted from the END, so the moment a second one is added the caller loses the ability to
-    # pass just the later one. (It was an optional POSITIONAL, which the gate's dispatcher then
-    # dropped silently — every call returned the index. Fixed in KaimonGate's `_dispatch_tool_call`,
-    # but the convention stands on its own.)
     api(; topic::String = "")::String = NotebookServer.slate_api_reference(topic)   # SSOT (also feeds the prompt)
 
     """
-        add_cell(notebook, source, after, kind) -> String
+        add_cell(notebook, source; after="", kind="code", id="", tags="", run=true, background=false) -> String
 
     Append a cell containing `source`, RUN it, and return its result (value/output,
-    or the error to fix). A cell that outruns a short grace window is PROMOTED to a background
-    job: you get the cell id plus a job id immediately and poll `check_eval(notebook, job)` for
-    the result, while the run continues on the worker. So a slow cell costs you a poll, never a
-    lost result — and `background=true` skips the wait entirely when you already know the cell is
-    expensive. `after` = the id to insert after ("" = end of notebook).
+    or the error to fix). A cell that outruns a ~30s grace window is PROMOTED to a background job
+    automatically: you get the cell id plus a job id, and collect the result with
+    `check_eval(notebook, job)` while the run continues on the worker. So a slow cell costs you one
+    extra call, never a lost result, and you needn't predict which cells are slow.
+
+    `background=true` sets that grace window to ZERO and hands back a job id at once — for when you
+    know the cell is expensive and have other work to get on with meanwhile. It is not the cautious
+    setting for a cell that might be slow (auto-promotion covers that), and pairing it with a sleep
+    defeats its whole purpose: if you have nothing to do during the run, you wanted the default. See
+    `run` for the full rule. `after` = the id to insert after ("" = end of notebook).
     `kind` = "code" or "md". `id` = an optional explicit cell id (a meaningful label like
     "ground_state"); must be UNIQUE — errors if already in use — and is folded to header-safe
     characters (letters/digits/underscore). Omit it to auto-generate. `tags` = optional cell tags
@@ -1264,7 +1275,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        edit_cell(notebook, cell, source, tags) -> String
+        edit_cell(notebook, cell, source; tags=nothing, run=true, background=false) -> String
 
     Replace cell `cell`'s source, run it, and return its result. Use to fix a cell
     that errored, or to revise one in place. `tags` (optional, comma/space-separated) REPLACES the
@@ -1273,9 +1284,12 @@ function create_tools(GateTool::Type)
     CLEAR every tag on the cell. Those are deliberately different: an ordinary source edit must
     never silently wipe tags, but removing a tag has to be possible.
 
-    A cell that outruns a short grace window is PROMOTED to a background job: you get a job id
-    immediately and poll `check_eval(notebook, job)`, while the run continues on the worker. Pass
-    `background=true` to skip the wait when you already know the cell is expensive.
+    A cell that outruns a ~30s grace window is PROMOTED to a background job automatically: you get a
+    job id and collect the result with `check_eval(notebook, job)`, while the run continues on the
+    worker. `background=true` sets that grace to ZERO and returns a job id at once — for when you know
+    the cell is expensive and have other work to get on with. It isn't the cautious setting for a cell
+    that might be slow (auto-promotion covers that), and following it with a sleep defeats its purpose:
+    if you have nothing to do meanwhile, you wanted the default. See `run` for the full rule.
 
     `run=false` writes the source and leaves the cell (and its dependents) STALE without running it.
     It is not a faster edit — it is an UNVERIFIED one: you get no result back, so you don't know the
@@ -1286,10 +1300,11 @@ function create_tools(GateTool::Type)
     read the result. Every `run=false` result tells you how many cells are stale — that count is
     work you still owe; don't finish a task with it outstanding.
     """
-    # `tags` is deliberately UNTYPED: it is tri-state (absent / "" / a tag list), and the gate's
-    # arg coercion would have to convert an incoming "" into a `Union{Nothing,String}`. Taking it
-    # as Any and normalizing here keeps that off the dispatch boundary.
     function edit_cell(notebook::String, cell::String, source::String;
+                       # `tags` is deliberately UNTYPED: it is tri-state (absent / "" / a tag list),
+                       # and the gate's arg coercion would have to turn an incoming "" into a
+                       # `Union{Nothing,String}`. Taking it as Any and normalizing in the body keeps
+                       # that off the dispatch boundary.
                        tags = nothing, run::Bool = true, background::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
         t = tags === nothing ? nothing : String(tags)
@@ -1301,14 +1316,33 @@ function create_tools(GateTool::Type)
     end
 
     """
-        run(notebook, cell, token, expected_version) -> String
+        run(notebook, cell; background=false) -> String
 
     Run cell `cell` and return its result; `cell` = "" recomputes all stale cells.
 
-    A run that outruns a short grace window is PROMOTED to a background job: you get a job id
-    immediately and poll `check_eval(notebook, job)`, while it continues on the worker. Pass
-    `background=true` to skip the wait outright — worth doing for `cell=""`, which recomputes
-    every stale cell and is the likeliest call here to be long.
+    SLOW RUNS HANDLE THEMSELVES. A run that outruns a ~30s grace window is promoted to a background
+    job automatically: you get a job id, collect the result with `check_eval(notebook, job)`, and it
+    keeps computing on the worker meanwhile. This needs nothing from you — you do not have to predict
+    which runs are slow, the call never blocks past ~30s, and no result is ever lost.
+
+    `background=true` sets that grace window to ZERO, so the call hands back a job id at once instead
+    of waiting for the answer. Use it when you don't want the result right away: you know the work is
+    expensive and you have something else to get on with during the ~30s the default would otherwise
+    spend waiting. `cell=""` (recompute every stale cell) is the usual candidate.
+
+    What it is NOT is the cautious setting for work that MIGHT be slow — auto-promotion already covers
+    that, and on anything that would have finished inside the window you've turned one call into two
+    for nothing. Pick it because you have other work queued up, not to be safe.
+
+    THEN ACTUALLY DO THE OTHER WORK. Passing `background=true` and immediately sleeping or idling to
+    wait for the job is self-defeating: you asked not to wait, then waited anyway, and now owe a poll
+    on top. If you have nothing to do during the run, you wanted the default — let the call block and
+    hand you the result. Never sleep on a clock either way: the worker computes at the same rate and
+    holds your result until you ask, so waiting spends only your time.
+
+    Further cell RUNS queue behind the job, but reads (`read`, `inspect`, `api`, `search_docs`) and
+    `run=false` edits go through immediately. Collect with `check_eval` once you've genuinely run out
+    of other work.
     """
     function run_cell(notebook::String, cell::String; background::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
@@ -1534,8 +1568,11 @@ function create_tools(GateTool::Type)
 
     LONG EVALS DON'T TIME OUT: if the eval outruns a ~30s grace window it's promoted to a background
     job (like the gate `ex`) and the call returns a job id immediately — the eval keeps computing on
-    the worker; poll for its result with `check_eval(notebook, job)`. So use `eval` freely for slow
-    computations; you'll just get a job id to poll instead of blocking.
+    the worker; collect its result with `check_eval(notebook, job)`. So use `eval` freely for slow
+    computations; you'll just get a job id to collect instead of blocking. There is no `background`
+    flag here and you don't need one — promotion is automatic. While a job runs, keep working or
+    poll: never sleep or idle to pass the time, since the worker computes at the same rate either
+    way and holds your result until you ask.
     """
     function scratch_eval(notebook::String, source::String; ephemeral::String = "0",
                           memo_key::String = "", memo_threshold::String = "0")::String
@@ -1548,10 +1585,17 @@ function create_tools(GateTool::Type)
     """
         check_eval(notebook, job) -> String
 
-    Poll a background scratch-eval job — the id `eval` hands back when a slow eval outran its ~30s
-    grace window. Returns the eval's captured result once it finishes (and forgets the job), else a
-    still-running note to poll again. Mirrors the gate `check_eval` for `ex`. The job id is global;
-    `notebook` just routes/validates the caller.
+    Collect a background job — the id `eval`, `run`, `add_cell` and `edit_cell` hand back when work
+    outran its ~30s grace window. Returns the captured result once it finishes (and forgets the job),
+    else a still-running note with elapsed time and any progress the cell reported.
+
+    This is a COLLECTION call, not a wait: it returns at once either way and never blocks. So poll it
+    when you have run out of other work, not on a timer, and never sleep between polls — the job runs
+    on the worker at its own rate and keeps your result until you ask for it, so time spent waiting is
+    only your time. If a poll says still running, do something else useful and come back.
+
+    Mirrors the gate `check_eval` for `ex`. The job id is global; `notebook` just routes/validates
+    the caller.
     """
     function check_scratch_eval(notebook::String, job::String)::String
         nb, err = _nb(notebook); nb === nothing && return err

@@ -210,6 +210,35 @@ end
         @test occursin("— index", api())
     end
 
+    # A tool's docstring IS its MCP description. KaimonGate recovers a closure's docstring by scanning
+    # UP from the definition line (`_source_docstring`) and stops at the first non-blank line that
+    # isn't part of the string — so a comment between the two drops the description ENTIRELY. The tool
+    # still registers, still lists, still works, and tells the agent nothing about what it does or when
+    # to reach for it. Nothing about the Julia source looks wrong (the docstring is right there), and
+    # `@doc` still resolves it, so this is only visible by asking the running gate. Hence a test.
+    # It has already cost three tools their descriptions, `edit_cell` among them.
+    @testset "no tool docstring is orphaned by an interposed comment" begin
+        src = readlines(joinpath(pkgdir(KaimonSlate), "src", "KaimonSlate.jl"))
+        orphaned = String[]
+        open_block = false           # track parity so only CLOSING delimiters are considered
+        for i in eachindex(src)
+            if strip(src[i]) == "\"\"\""
+                open_block = !open_block
+                open_block && continue          # this one opened a docstring
+            else
+                continue
+            end
+            j = i + 1
+            while j <= length(src) && isempty(strip(src[j])); j += 1; end
+            (j <= length(src) && startswith(strip(src[j]), "#")) || continue
+            # Name the definition that went dark, so the failure says which tool lost its description.
+            k = j
+            while k <= length(src) && !occursin(r"^\s*(function\s+)?\w+\(", src[k]); k += 1; end
+            push!(orphaned, "src/KaimonSlate.jl:$i → " * (k <= length(src) ? strip(src[k]) : "?"))
+        end
+        @test orphaned == String[]
+    end
+
     # The worker PROCESS lifecycle is one tool with an action, not one tool per verb: an agent that
     # wants a fresh worker should find `restart` next to `reap` rather than reaching for whichever
     # name sounds closest. Where the worker runs is not part of the interface.

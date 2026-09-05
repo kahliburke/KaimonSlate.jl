@@ -557,9 +557,10 @@ function agent_scratch_eval_bg!(nb::LiveNotebook, source::AbstractString;
         lock(_SCRATCH_LOCK) do; delete!(_SCRATCH_JOBS, jid); end
         return (; done = true, jobid = "", text = something(resultref[], "(no result)"))
     end
-    hint = "⏳ Still running after $(round(Int, grace))s — promoted to background job $jid. Poll it with " *
-           "slate.check_eval(job=\"$jid\"). The eval keeps computing on the worker; the notebook's cell " *
-           "runs stay paused until it finishes."
+    hint = "⏳ Still running after $(round(Int, grace))s — promoted to background job $jid. The eval keeps " *
+           "computing on the worker and its result is kept for you; collect it with " *
+           "slate.check_eval(job=\"$jid\"). Do NOT sleep or stall to pass the time — waiting changes " *
+           "nothing about when it finishes. The notebook's cell runs stay paused until it does."
     return (; done = false, jobid = jid, text = hint)
 end
 
@@ -603,8 +604,10 @@ function _run_bg(work::Function, nb::LiveNotebook, label::AbstractString; grace:
         return (; done = true, jobid = "", text = something(resultref[], "(no result)"))
     end
     hint = "⏳ still running$(grace > 0 ? " after $(round(Int, grace))s" : "") — promoted to " *
-           "background job $jid. Poll it with slate.check_eval(job=\"$jid\"). The run continues " *
-           "on the worker; you can keep editing with run=false meanwhile."
+           "background job $jid. The run continues on the worker and its result is kept for you; " *
+           "collect it with slate.check_eval(job=\"$jid\"). Do NOT sleep or stall to pass the time — " *
+           "waiting changes nothing about when it finishes. Cell RUNS queue behind this one, but " *
+           "reads (read/inspect/api/search_docs) and run=false edits work right now."
     return (; done = false, jobid = jid, text = hint)
 end
 
@@ -635,7 +638,8 @@ function scratch_check(jobid::AbstractString)
         return something(job.result[], "(no result)")
     end
     return "⏳ Scratch job $jobid still running ($(round(Int, time() - job.started))s elapsed)" *
-           _userprog_note(job.nb) * ". Poll again with slate.check_eval."
+           _userprog_note(job.nb) * ". Poll again with slate.check_eval once you've run out of other " *
+           "work — sleeping between polls only spends your time, not the job's."
 end
 
 """What a `run=false` write left behind, for its return string.
