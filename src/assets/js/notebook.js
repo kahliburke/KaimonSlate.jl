@@ -414,6 +414,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
       const chip = head.querySelector('.cregion');
       const bkey = window._blockedKey(c);
       if ((chip ? chip.dataset.bkey || '' : '') !== bkey) {
+        // The hover panel is anchored to the chip about to be replaced, and a removed node never
+        // fires `mouseleave` — so close it here or it stays on screen with nothing to dismiss it.
+        window.blockInfoDrop(c.id);
         const markup = window.cellRegionChip(c);
         if (chip && markup) chip.outerHTML = markup;
         else if (chip) chip.remove();

@@ -63,9 +63,24 @@ async function reapWorker(host, w, bound) {
 // the notebook's own Restart uses (`side` targets a region kernel, empty the main one), so the open tab
 // follows along over its own feed. It re-runs the notebook, which is not what a home-page click implies
 // on its own — hence the confirm.
-async function restartWorker(w, bound) {
+async function restartWorker(w, bound, host) {
   const mf = mergeManifest(w, bound), port = +w.port, side = mf.side === 'local' ? '' : (mf.side || '');
-  if (!mf.nbid) return;
+  // A worker whose manifest does not name an open notebook still deserves the repair — an abandoned
+  // region worker on a compute node is the usual one. `/api/restart-worker` identifies it the way
+  // the roster does, by host and port, and works out for itself what was using it.
+  if (!mf.nbid) {
+    if (!host || !port) return;
+    if (!await confirmP('Restart worker :' + port + ' on ' + host +
+        '?\nIts process is killed and whatever was using it re-runs.', 'Restart')) return;
+    reaping.value = { port };
+    try {
+      const res = await fetch('/api/restart-worker', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host, port }) });
+      if (!res.ok) { reaping.value = { port, err: 'restart failed (' + res.status + ')' }; return; }
+      reaping.value = null; detail.value = null;
+      tick();
+    } catch (_) { reaping.value = { port, err: 'request failed' }; }
+    return;
+  }
   if (!await confirmP('Restart the ' + (side ? 'region “' + side + '” worker' : 'worker') + ' for “' + (mf.notebook || mf.nbid) +
       '”?\nIts process is killed and the notebook re-runs from a fresh namespace.', 'Restart')) return;
   reaping.value = { port };
@@ -281,9 +296,9 @@ function Acts({ host, w, bound, isLocal }) {
               : 'An already-running worker this hub attached to — it outlives the notebook and the hub does not manage it.';
   return html`<div class="wdacts">
     <span class="wdactnote">${note}</span>
-    ${mf.nbid ? html`<button class="rppsysbtn" disabled=${busy} title="restart this worker and re-run the notebook"
-      onClick=${() => restartWorker(w, bound)}>${busy ? 'Restarting…' : 'Restart worker'}</button>
-    <button class="rppsysbtn" title="open this notebook"
+    ${(mf.nbid || canReap) ? html`<button class="rppsysbtn" disabled=${busy} title="restart this worker and re-run what was using it"
+      onClick=${() => restartWorker(w, bound, host)}>${busy ? 'Restarting…' : 'Restart worker'}</button>` : null}
+    ${mf.nbid ? html`<button class="rppsysbtn" title="open this notebook"
       onClick=${() => { window.location.href = '/n/' + encodeURIComponent(mf.nbid); }}>Open notebook</button>` : null}
     ${canReap ? html`<button class="rppreap" disabled=${busy} title="kill this worker + remove its files"
       onClick=${() => reapWorker(host, w, bound)}>${busy ? 'Reaping…' : 'Reap worker'}</button>` : null}</div>`;

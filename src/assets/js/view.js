@@ -317,12 +317,15 @@ function cellRegionChip(c) {
     return `<span class="cregion blocked" data-bkey="${_esc(_blockedKey(c))}"` +
       ` data-at="${+(c.blockedAt) || 0}" data-reg="${_esc(loc.name || '')}"` +
       ` onmouseenter="window.blockInfo(this,'${c.id}')" onmouseleave="window.blockInfoHide()"` +
-      ` onclick="openTagEditor('${c.id}', event)">${loc.local ? '💻' : '🖧'} ${_esc(loc.name || 'local')}` +
+      ` onmousedown="window.openRegionPanel('${c.id}', event)">${loc.local ? '💻' : '🖧'} ${_esc(loc.name || 'local')}` +
       ` <span class="cregst">${_esc(c.blocked)}${w ? ` <span class="blockwait">${w}</span>` : ''}</span></span>`;
   }
-  if (loc.local) return `<span class="cregion local" onclick="openTagEditor('${c.id}', event)" title="runs on the main kernel (this notebook’s home) — click to change">💻 local</span>`;
+  // `onmousedown`, not `onclick`: clicking a header selects the cell, which re-renders it and
+  // replaces this node before mouseup — so the click event is never delivered here and the first
+  // click appears to do nothing. Opening on mousedown runs before the node can be taken away.
+  if (loc.local) return `<span class="cregion local" onmousedown="window.openRegionPanel('${c.id}', event)" title="runs on the main kernel (this notebook’s home) — click to change">💻 local</span>`;
   const hue = (typeof _dagRegionHue === 'function' && _dagRegionHue(loc.name)) || '#8a90a8';
-  return `<span class="cregion" style="color:${hue};border-color:${hue}" onclick="openTagEditor('${c.id}', event)" title="runs on ‘${_esc(loc.name)}’ — click to change">🖧 ${_esc(loc.name)}</span>`;
+  return `<span class="cregion" style="color:${hue};border-color:${hue}" onmousedown="window.openRegionPanel('${c.id}', event)" title="runs on ‘${_esc(loc.name)}’ — click for the region">🖧 ${_esc(loc.name)}</span>`;
 }
 
 // ── Cell kinds ────────────────────────────────────────────────────────────────────────────────
@@ -664,8 +667,133 @@ window.blockInfo = function (el, id) {
 // A short grace period, so moving the pointer across the chip's own border doesn't flicker it.
 window.blockInfoHide = function () {
   clearTimeout(_blkTimer);
-  _blkTimer = setTimeout(() => { if (_blkPanel) _blkPanel.classList.remove('on'); _blkFor = ''; }, 180);
+  _blkTimer = setTimeout(_blkOff, 180);
 };
+function _blkOff() {
+  clearTimeout(_blkTimer);
+  if (_blkPanel) _blkPanel.classList.remove('on');
+  _blkFor = '';
+}
+// Close it NOW, with no grace period, when the thing it describes stops existing. A chip that is
+// removed or replaced never fires `mouseleave`, so the ordinary hide never runs and the panel is
+// left on screen with no way to dismiss it. That happens on the most ordinary transition there is:
+// the node is granted, the cell stops waiting, and the chip is rebuilt underneath the pointer.
+window.blockInfoDrop = function (id) { if (!id || _blkFor === id) _blkOff(); };
+// The panel is position:fixed and anchored to where the chip was, so a scroll would slide it away
+// from its chip and leave it floating over unrelated cells.
+addEventListener('scroll', () => { if (_blkFor) _blkOff(); }, { passive: true, capture: true });
+// Last line of defence: whatever else happens, a panel whose cell is no longer waiting goes away.
+setInterval(() => {
+  if (!_blkFor) return;
+  const c = ((window.__slateState || {}).cells || []).find(x => x.id === _blkFor);
+  if (!c || c.state !== 'blocked') _blkOff();
+}, 2000);
+// ── The region panel (click on a cell's region chip) ──────────────────────────────────────────
+// Clicking the chip used to open the generic tag editor, which answers "what tags does this cell
+// carry" when the question the chip raises is "what is this region and what is it doing". This
+// panel answers that one: the host behind the region name, what it asks the scheduler for, the
+// allocation it holds, and how busy the cluster is. Plus the one control that belongs on a cell,
+// which is where the cell runs. Worker actions stay in Remotes, where the roster is.
+let _regPanel = null, _regFor = '';
+function _regRow(label, value) {
+  return value ? `<div class="blkrow"><span>${_esc(label)}</span><div>${_esc(value)}</div></div>` : '';
+}
+function _regAlloc(a) {
+  if (a === undefined) return '<div class="blkrow blkdim"><span>Allocation</span><div>asking…</div></div>';
+  if (!a || !a.ok) return '<div class="blkrow blkdim"><span>Allocation</span><div>none held</div></div>';
+  const bits = [a.state || '', a.node || '', a.id ? '#' + a.id : '', a.timeleft ? a.timeleft + ' left' : ''];
+  return _regRow('Allocation', bits.filter(Boolean).join(' · '));
+}
+// Where this cell runs, changeable here. The rest of the tag surface stays on the 🏷 button; a
+// region is the one tag with a reason to be edited from the header.
+function _regPicker(c, reg) {
+  const regs = (typeof nbState !== 'undefined' && nbState && nbState.regions) || [];
+  const opts = ['', ...regs.map(r => r.name)];
+  const sel = opts.map(n =>
+    `<option value="${_esc(n)}"${n === reg ? ' selected' : ''}>${n ? _esc(n) : 'local (main kernel)'}</option>`).join('');
+  return `<div class="blkrow"><span>Runs on</span><div>` +
+         `<select class="regpick" onchange="window.setCellRegion('${c.id}', this.value)">${sel}</select></div></div>`;
+}
+// The region's definition as the notebook knows it, or null for the main kernel.
+function _regDef(reg) {
+  const regs = (typeof nbState !== 'undefined' && nbState && nbState.regions) || [];
+  return regs.find(x => x.name === reg) || null;
+}
+const _regIsCluster = reg => { const r = _regDef(reg); return !!(r && r.scheduler && r.scheduler !== 'none'); };
+// ONE panel for every kind of run location. The rows a cluster needs (what it asks the scheduler
+// for, the allocation it holds, how busy the queue is) are meaningless on an ordinary host and
+// absent there; everything else is the same panel.
+function _regRender(c, reg, load, alloc) {
+  const r = _regDef(reg);
+  let h = `<div class="regphead">${reg ? '🖧 ' + _esc(reg) : '💻 local'}</div>`;
+  if (!reg) {
+    h += _regRow('Kernel', 'this notebook’s own worker, on this machine');
+  } else {
+    h += _regRow('Host', _blkRegHost(reg));
+    h += _regRow('Transport', r && r.transport);
+    h += _regRow('Data root', r && r.root);
+    h += _regRow('Preload', r && r.preload);
+    if (!r || !r.defined) h += _regRow('Note', 'this cell names a region that is not defined');
+    else if (_regIsCluster(reg)) {
+      h += _regRow('Scheduler', r.scheduler);
+      h += _regRow('Asked for', (load && load.ask) || '');
+      h += _regAlloc(alloc);
+      const qs = load && load.rows;
+      if (load === undefined) h += '<div class="blkrow blkdim"><span>Cluster</span><div>asking…</div></div>';
+      else if (!qs || !qs.length) h += '<div class="blkrow blkdim"><span>Cluster</span><div>nothing reported</div></div>';
+      else h += '<div class="blkrow blkq1"><span>Cluster</span><div>' + qs.map(_blkFmtQ).join('') + '</div></div>';
+    } else {
+      h += _regRow('Warm workers', String((r.warm | 0) || 0));
+    }
+  }
+  h += _regPicker(c, reg);
+  h += `<div class="regpfoot"><a href="/#remotes">Manage regions and workers in Remotes</a></div>`;
+  return h;
+}
+window.setCellRegion = function (id, name) {
+  const keep = (typeof _curTags === 'function' ? _curTags(id) : []).filter(t => !t.startsWith('region='));
+  if (typeof setTags === 'function') setTags(id, name ? [...keep, 'region=' + name] : keep);
+  _regClose();
+};
+function _regClose() { if (_regPanel) _regPanel.classList.remove('on'); _regFor = ''; }
+window.openRegionPanel = function (id, ev) {
+  // Stopping here also keeps the click from selecting the cell, which is what was re-rendering the
+  // header out from under the pointer.
+  if (ev) ev.stopPropagation();
+  if (_regFor === id) { _regClose(); return; }        // clicking the same chip again puts it away
+  const c = ((window.__slateState || {}).cells || []).find(x => x.id === id);
+  if (!c) return;
+  const loc = _cellRunLoc(c);
+  if (!loc) return;                       // untagged markdown executes nowhere
+  const reg = loc.local ? '' : loc.name;  // '' is the main kernel, which the panel describes too
+  if (!_regPanel) { _regPanel = document.createElement('div'); _regPanel.className = 'regpanel'; document.body.appendChild(_regPanel); }
+  _regFor = id;
+  const cached = reg ? _blkLoad.get(reg) : null, fresh = cached && (Date.now() - cached.at < 15000);
+  _regPanel.innerHTML = _regRender(c, reg, fresh ? cached.data : undefined, undefined);
+  const anchor = (ev && ev.currentTarget) || document.querySelector(`#cell-${id} .cregion`);
+  const r = anchor.getBoundingClientRect();
+  _regPanel.classList.add('on');
+  const w = _regPanel.offsetWidth, hh = _regPanel.offsetHeight;
+  _regPanel.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
+  _regPanel.style.top = Math.min(r.bottom + 6, window.innerHeight - hh - 8) + 'px';
+  // Only a scheduler region has an allocation or a queue to report, and each answer costs a command
+  // on its login node — so an ordinary host and the main kernel ask for nothing.
+  if (!_regIsCluster(reg)) return;
+  const paint = (l, a) => { if (_regFor === id) _regPanel.innerHTML = _regRender(c, reg, l, a); };
+  let L = fresh ? cached.data : undefined, A;
+  if (!fresh) fetch('/api/region-load?region=' + encodeURIComponent(reg)).then(r => r.json())
+    .then(j => { L = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [] };
+                 _blkLoad.set(reg, { at: Date.now(), data: L }); paint(L, A); })
+    .catch(() => paint(null, A));
+  fetch('/api/allocation?region=' + encodeURIComponent(reg)).then(r => r.json())
+    .then(j => { A = j; paint(L, A); }).catch(() => { A = null; paint(L, A); });
+};
+addEventListener('mousedown', e => {
+  if (!_regFor) return;
+  if (!e.target.closest('.regpanel') && !e.target.closest('.cregion')) _regClose();
+});
+addEventListener('keydown', e => { if (e.key === 'Escape' && _regFor) _regClose(); });
+
 function cellHeader(c) { return '<div class="cellhead">' + cellHeaderInner(c) + '</div>'; }
 
 // (cellEl + mountEditor removed — the Preact <Notebook>/<Cell>/<Editor> in notebook.js now

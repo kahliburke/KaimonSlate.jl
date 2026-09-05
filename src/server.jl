@@ -1149,11 +1149,16 @@ function _regions_json(nb::LiveNotebook)
         r = ReportEngine.region_get(name)
         push!(out, r === nothing ?
             Dict{String,Any}("name" => name, "defined" => false, "host" => "",
-                             "transport" => "tunnel", "root" => "", "warm" => 0) :
+                             "transport" => "tunnel", "root" => "", "warm" => 0,
+                             "scheduler" => "none") :
+            # `scheduler` rides along because the region panel decides what to SHOW from it — an
+            # allocation and a queue mean nothing on an ordinary host — and asking the server per
+            # region just to find that out would render the panel a round trip late.
             Dict{String,Any}("name" => r.name, "defined" => true, "host" => r.host,
                              "transport" => String(r.transport), "base_port" => r.base_port,
                              "root" => r.data_root, "cache_root" => r.cache_root,
-                             "warm" => r.warm, "preload" => r.preload))
+                             "warm" => r.warm, "preload" => r.preload,
+                             "scheduler" => String(r.scheduler)))
     end
     return out
 end

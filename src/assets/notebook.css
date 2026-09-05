@@ -539,6 +539,21 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
    names does not shove them out of the panel. */
 .blkq + .blkq { margin-top:3px; }
 .blkqn { display:block; opacity:.8; }
+
+/* The region panel, opened by clicking the chip. Same rows as the hover panel, but interactive, so
+   unlike that one it takes pointer events and stays until dismissed. */
+.regpanel { position:fixed; z-index:61; min-width:280px; max-width:360px; padding:10px 12px;
+  background:var(--panel, #171a21); border:1px solid var(--line, #2a2f3a); border-radius:8px;
+  box-shadow:0 10px 28px rgba(0,0,0,.5); font-size:.78rem; line-height:1.55; color:var(--fg, #d7dae1);
+  display:none; }
+.regpanel.on { display:block; }
+.regphead { font-weight:600; margin-bottom:6px; color:var(--strong, #e6e9f2); }
+.regpanel .blkrow > span:first-child { flex:0 0 74px; }
+.regpick { width:100%; background:var(--bg, #10131a); color:inherit; font-size:.78rem;
+  border:1px solid var(--line, #2a2f3a); border-radius:5px; padding:2px 6px; }
+.regpfoot { margin-top:8px; padding-top:7px; border-top:1px solid var(--line, #2a2f3a); font-size:.74rem; }
+.regpfoot a { color:var(--accent, #6ea8fe); text-decoration:none; }
+.regpfoot a:hover { text-decoration:underline; }
 /* Durable-cache badge — sits with the run time (`.cdur`), before the action buttons. `.ok` =
    persisted/restored (a stage that caches), `.warn` = won't cache (hover for why). Muted so it reads
    as metadata, not an alert. Negative left margin snugs it to the time (tightening the header's 8px
