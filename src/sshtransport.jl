@@ -139,6 +139,8 @@ mutable struct Conn
     ch::Ptr{Cvoid}
     inbox::Channel{Vector{UInt8}}
     closed::Bool
+    outbox::Vector{UInt8}   # read from the local socket, not yet accepted by the far side
+    stalled::Float64        # when the far side stopped accepting bytes; 0 while it keeps up
 end
 
 # A local port carried to `host:port` as seen from the far side. `host` is resolved THERE, which is
@@ -391,26 +393,38 @@ function _close_conn!(c::Conn)
     return nothing
 end
 
+# How long a forwarded connection may fail to accept a single byte before it counts as dead. A
+# compute node reclaimed at its walltime leaves a tunnel whose far end no longer exists and whose
+# window never reopens; without a bound the pump waits on it for as long as the hub runs.
+const FWD_STALL_S = 20.0
+
 # Move whatever is ready, in both directions, without blocking on either. Called from every point
-# where the session would otherwise sit waiting, so tunnel traffic keeps flowing during a command.
+# where the session would otherwise sit waiting, so tunnel traffic keeps flowing during a command —
+# which also means anything that blocks in here blocks every command to the host, including the
+# read-only ones the UI polls with. Nothing below may wait.
 function _pump_forwards!(s::Session)
     isempty(s.fwds) && return nothing
     buf = Vector{UInt8}(undef, 32768)
     for f in s.fwds, c in f.conns
         c.closed && continue
-        # local → remote
-        while isready(c.inbox)
-            data = take!(c.inbox)
-            if isempty(data); _close_conn!(c); break; end
-            off = 0
-            while off < length(data)
-                n = ccall((:libssh2_channel_write_ex, LIB), Cssize_t,
-                          (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t),
-                          c.ch, 0, pointer(data, off + 1), length(data) - off)
-                n == Cssize_t(EAGAIN) && (sleep(0.001); continue)
-                n < 0 && (_close_conn!(c); break)
-                off += Int(n)
+        # local → remote. Never waits: whatever the far side will not take now stays in `outbox`
+        # for the next sweep, and a window shut for longer than `FWD_STALL_S` ends the connection.
+        while !c.closed && (!isempty(c.outbox) || isready(c.inbox))
+            if isempty(c.outbox)
+                data = take!(c.inbox)
+                if isempty(data); _close_conn!(c); break; end
+                append!(c.outbox, data)
             end
+            n = ccall((:libssh2_channel_write_ex, LIB), Cssize_t,
+                      (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t),
+                      c.ch, 0, pointer(c.outbox), length(c.outbox))
+            n < 0 && n != Cssize_t(EAGAIN) && (_close_conn!(c); break)
+            if n <= 0                                    # EAGAIN, or accepted nothing
+                c.stalled == 0.0 && (c.stalled = time())
+                time() - c.stalled > FWD_STALL_S && _close_conn!(c)
+                break
+            end
+            deleteat!(c.outbox, 1:Int(n)); c.stalled = 0.0
         end
         c.closed && continue
         # remote → local
@@ -454,7 +468,7 @@ function _attach_conn!(s::Session, f::Fwd, sock)
         try; close(sock); catch; end
         return nothing
     end
-    c = Conn(sock, ch, Channel{Vector{UInt8}}(64), false)
+    c = Conn(sock, ch, Channel{Vector{UInt8}}(64), false, UInt8[], 0.0)
     push!(f.conns, c)
     Threads.@spawn begin
         try
