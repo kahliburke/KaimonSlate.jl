@@ -74,6 +74,11 @@ So a cluster region stores what to ask for rather than an address:
 | **Walltime** | how long to hold it. The most important field on the form: an allocation bills for the time it is **held**, not the time it is used. |
 | **cpus / mem / gpus / account** | the rest of the request. |
 
+**Warm workers are not offered on a scheduler region.** They exist to skip the boot by keeping a
+worker on the host between notebooks, and a scheduler region has no such host — its node is an
+allocation, and the next one may be a different machine. Keeping workers alive is also what stops an
+idle node being released, so a region with them holds and bills for one until its walltime expires.
+
 The first cell tagged for the region asks the scheduler and waits for a node. A busy queue is
 reported rather than hidden — the request stands, and running the cell again attaches to it. It is
 found by job name, so reopening the notebook lands on the node you were already using instead of

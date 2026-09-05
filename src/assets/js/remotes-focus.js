@@ -36,10 +36,12 @@ function buildSysimage(name) {
 function saveRegion() {
   const h = focusHost.value, name = (fName.value || '').trim();
   if (!name) { rmsg.value = { text: 'give the region a name', err: true }; return; }
-  const warm = Math.max(0, parseInt(fWarm.value, 10) || 0), transport = fTr.value;
+  const scheduler = fSched.value || 'none';
+  // Zero on a scheduler region: the field is not offered there, and the server coerces it anyway.
+  const warm = scheduler === 'none' ? Math.max(0, parseInt(fWarm.value, 10) || 0) : 0;
+  const transport = fTr.value;
   const base_port = transport === 'direct' ? (parseInt(fPort.value, 10) || 0) : 0;
   const preload = (fPre.value || '').trim(), data_root = (fRoot.value || '').trim(), sysimage = !!fSys.value;
-  const scheduler = fSched.value || 'none';
   const alloc = scheduler === 'none' ? {} : {
     partition: (fPart.value || '').trim(), walltime: (fWall.value || '').trim(),
     cpus: Math.max(0, parseInt(fCpus.value, 10) || 0), mem: (fMem.value || '').trim(),
@@ -55,7 +57,7 @@ function saveRegion() {
     }).catch(() => { rmsg.value = { text: 'request failed', err: true }; });
 }
 function deleteRegion(h, name) {
-  confirmP('Delete region “' + name + '”?\nIts warm workers are reaped (attached ones keep running).', 'Delete', 'danger').then(ok => {
+  confirmP('Delete region “' + name + '”?\nIts workers are reaped. On a scheduler region the allocation is released too.', 'Delete', 'danger').then(ok => {
     if (!ok) return;
     fetch('/api/regions/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).then(r => r.json())
       .then(() => { if (editRegion.value && editRegion.value.name === name) editRegion.value = null; loadRegions(); fetchRoster(h); }).catch(() => {});
@@ -139,7 +141,12 @@ function Editor() {
     <div class="rpprow"><label>Name</label>${editing
       ? html`<input class="rppname" readonly value=${e.name}/>`
       : html`<input class="rppname" autocomplete="off" placeholder="e.g. gpu, bigmem" value=${fName.value} onInput=${ev => fName.value = ev.target.value}/>`}</div>
-    <div class="rpprow"><label>Warm</label><input class="rppn" type="text" inputmode="numeric" autocomplete="off" value=${fWarm.value} onInput=${ev => fWarm.value = ev.target.value}/><span class="pddim" style="font-size:.76rem">workers kept ready to adopt</span></div>
+    ${fSched.value === 'none'
+      ? html`<div class="rpprow"><label>Warm</label><input class="rppn" type="text" inputmode="numeric" autocomplete="off" value=${fWarm.value} onInput=${ev => fWarm.value = ev.target.value}/><span class="pddim" style="font-size:.76rem">workers kept ready to adopt</span></div>`
+      /* A warm worker skips the boot by living on the host between notebooks. A scheduler region has
+         no host to keep one on: the node is an allocation, the next one may be a different machine,
+         and keeping workers alive is also what stops an idle node being released. */
+      : html`<div class="rpprow"><label>Warm</label><span class="pddim" style="font-size:.76rem">not available on a scheduler region — its node is granted per allocation, and holding workers would hold the node</span></div>`}
     <div class="rpprow"><label>Preload</label><input class="rpppre" autocomplete="off" placeholder="/path/to/project  (folder with Project.toml)" value=${fPre.value} onInput=${ev => fPre.value = ev.target.value}/></div>
     <div class="rpprow"><label>Data root</label><input class="rpproot" autocomplete="off" placeholder="/scratch  (a path ON THE HOST)" value=${fRoot.value} onInput=${ev => fRoot.value = ev.target.value}/></div>
     ${SchedulerRows()}

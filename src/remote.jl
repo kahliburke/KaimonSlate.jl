@@ -3165,16 +3165,32 @@ _asbool(x) = x === true || x == 1 || (x isa AbstractString && lowercase(strip(x)
 # `_`, so region_set!/region_get/region_delete! MUST fold identically or a stored region can never be
 # looked up again ("slate-remote" stored as "slate_remote"; a get on "slate-remote" would miss).
 _fold_region(name) = replace(strip(String(name)), r"[^A-Za-z0-9_]+" => "_")
+# A warm worker exists so opening a notebook adopts one instead of paying the boot. That needs a host
+# you can keep workers on, which a scheduler region does not have: its node is an allocation, the
+# next one may be a different machine, and the workers on the old one are gone with it.
+#
+# `warm > 0` is also what stops `_region_reconcile_impl!` releasing an idle node, so a scheduler
+# region with warm workers holds and bills for one indefinitely, re-requesting as each walltime
+# expires. Applied when a region is stored AND when one is read, so a record already on disk with a
+# count stops holding without anyone editing it.
+_warm_for(warm::Integer, scheduler::Symbol) = scheduler === :none ? Int(warm) : 0
+
+_region_warm_for(d, scheduler::Symbol) = _warm_for(_asint(get(d, "warm", 0)), scheduler)
+
+_region_scheduler_of(d) =
+    Symbol(let x = String(get(d, "scheduler", "none")); isempty(x) ? "none" : x end)
+
 _region_from_dict(d::AbstractDict) = Region(
     String(get(d, "name", "")), String(get(d, "host", "")),
     Symbol(let t = String(get(d, "transport", "tunnel")); isempty(t) ? "tunnel" : t end),
     _asint(get(d, "base_port", 0)), String(get(d, "preload", "")), String(get(d, "data_root", "")),
-    String(get(d, "cache_root", "")), _asint(get(d, "warm", 0)), String(get(d, "threads", "")),
+    String(get(d, "cache_root", "")), _region_warm_for(d, _region_scheduler_of(d)),
+    String(get(d, "threads", "")),
     _asbool(get(d, "sysimage", false)), _asbool(get(d, "curve", true)), String(get(d, "uuid", "")),
     String(get(d, "peer", "")),
     # Absent ⇒ :none, so every region written before these fields existed keeps meaning exactly what
     # it meant: run on `host`.
-    Symbol(let x = String(get(d, "scheduler", "none")); isempty(x) ? "none" : x end),
+    _region_scheduler_of(d),
     String(get(d, "partition", "")), String(get(d, "walltime", "")), _asint(get(d, "cpus", 0)),
     String(get(d, "mem", "")), String(get(d, "gpus", "")), String(get(d, "account", "")),
     String(get(d, "alloc_name", "")))
@@ -3251,10 +3267,11 @@ function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "
         # `peer` (§5.6 advertise addr) is likewise sticky across upserts: explicit arg wins, else keep
         # the existing value, else "" (derive from the hub-facing IP).
         pe = !isempty(String(peer)) ? String(peer) : (i === nothing ? "" : list[i].peer)
+        sched = Symbol(scheduler)
         r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
-                   String(data_root), String(cache_root), Int(warm), String(threads),
+                   String(data_root), String(cache_root), _warm_for(Int(warm), sched), String(threads),
                    _asbool(sysimage), _asbool(curve), u, pe,
-                   Symbol(scheduler), String(partition), String(walltime), Int(cpus),
+                   sched, String(partition), String(walltime), Int(cpus),
                    String(mem), String(gpus), String(account), String(alloc_name))
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)

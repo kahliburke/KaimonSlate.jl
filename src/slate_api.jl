@@ -857,7 +857,9 @@ See also `save_asset`, `FileUpload`."""),
           • `slate.region(name; host, transport, warm, preload, data_root, …)` — define/update a global
             named region: a host over `tunnel`|`direct`, `warm` workers kept booted for instant adoption
             (a region with warm>0 IS a warm pool), an optional `preload` project replicated on the host,
-            and a remote `data_root`. Many regions may point at one host.
+            and a remote `data_root`. Many regions may point at one host. `warm` is ignored on a
+            SCHEDULER region (`scheduler=:slurm`/`:pbs`): its node is an allocation rather than a
+            host to keep workers on, and holding workers there holds the node.
           • `slate.region_on(notebook, "name1,name2")` — choose which regions a notebook uses (durable in
             its footer). `slate.regions()` lists the registry + parked wires.
           • Tag a cell `region=<name>` (the 🏷 tag editor's "Run on") to run it there. Keep the main kernel

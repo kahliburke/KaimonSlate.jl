@@ -949,8 +949,11 @@ function create_tools(GateTool::Type)
     content-addressed store per region, so co-located region workers don't share `~/.cache/kaimonslate/memo`
     (they otherwise dedup a cross-region blob to 0 bytes instead of moving it over the peer channel).
 
-    Pass `delete=true` to REMOVE the named region from the registry (all other args ignored): its warm
-    workers are reaped, but any worker currently attached to a notebook keeps running.
+    Pass `delete=true` to REMOVE the named region from the registry (all other args ignored): its
+    workers are reaped, attached ones included, and a scheduler region's allocation is released.
+
+    `warm` is ignored on a SCHEDULER region: its node is an allocation rather than a host to keep
+    workers on, and holding workers there holds the node.
     """
     function region(name::String; host::String = "", transport::String = "tunnel", base_port::Int = 0,
                     preload::String = "", data_root::String = "", cache_root::String = "", warm::Int = 0,
@@ -959,8 +962,8 @@ function create_tools(GateTool::Type)
         nm = strip(name); isempty(nm) && return "Give a region name."
         if delete
             ReportEngine.region_get(nm) === nothing && return "No region '$nm' to delete."
-            ReportEngine.region_remove!(nm)   # reaps this region's warm workers, then drops the record
-            return "🗑️ region '$nm' deleted (warm workers reaped; attached workers keep running)."
+            ReportEngine.region_remove!(nm)   # reaps this region's workers, then drops the record
+            return "🗑️ region '$nm' deleted (workers reaped; a scheduler region's node released too)."
         end
         tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
         pl = strip(preload); (isempty(pl) || isdir(expanduser(pl))) || return "preload project dir not found: $pl"

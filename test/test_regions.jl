@@ -98,6 +98,17 @@ const RE = KaimonSlate.ReportEngine
             # and must not spend a `scancel` per tick saying so.
             @test !RE._region_holds_node(gpu)
 
+            # Warm workers are for a host you keep them on. A scheduler region's node is an
+            # allocation, so a worker kept between notebooks is on a machine that may already be
+            # gone — and `warm > 0` is what stops the reconciler releasing an idle node, which turns
+            # a forgotten region into an allocation held indefinitely.
+            @test RE.region_set!("warmish"; host = "workstation", warm = 3).warm == 3
+            @test RE.region_set!("warmsched"; host = "login", scheduler = :slurm, warm = 3).warm == 0
+            # …including a record already on disk with a count, so an existing one stops holding.
+            @test RE._region_from_dict(Dict("name" => "old", "host" => "login",
+                                            "scheduler" => "pbs", "warm" => 4)).warm == 0
+            @test RE._region_from_dict(Dict("name" => "old", "host" => "box", "warm" => 4)).warm == 4
+
             # A granted node is reached THROUGH its login node: a session to the node itself would
             # be a second authentication, which is the thing the whole transport exists to avoid.
             # Commands run inside the allocation; files go to the shared filesystem via the login
