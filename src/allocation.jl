@@ -273,28 +273,65 @@ function release_allocation!(kind::Symbol, host::AbstractString, name::AbstractS
 end
 
 """
+How long to leave between asking the scheduler whether it has granted our node yet.
+
+Every one of these is a command on a shared login node, and a queue wait is minutes to hours — so a
+fixed short interval spends thousands of them to learn nothing, and is the kind of thing sites
+notice. But the COMMON case is a cluster with room, which answers in the first few seconds, and
+making that case wait would be felt on every run.
+
+So: fast while the answer is plausibly imminent, then back off toward a cadence that costs nothing
+to keep up for an hour. A wait long enough to reach the ceiling is one where fifteen seconds of
+pickup latency is not the thing you are waiting for.
+"""
+const _POLL_BACKOFF = (first = 2.0, ceiling = 15.0, growth = 1.6, fast_for = 20.0)
+
+# The gap before the next ask, given how long this allocation has been waited on ALTOGETHER.
+function _poll_gap(waited::Real)
+    waited <= _POLL_BACKOFF.fast_for && return _POLL_BACKOFF.first
+    grown = _POLL_BACKOFF.first *
+            _POLL_BACKOFF.growth^((waited - _POLL_BACKOFF.fast_for) / _POLL_BACKOFF.fast_for)
+    return min(grown, _POLL_BACKOFF.ceiling)
+end
+
+# Altogether, and not just for this attempt. `allocation_node!` returns after `wait_s` and its caller
+# starts it again, so a backoff measured from the top of the function would restart on every attempt
+# — an hour-long queue wait would keep re-paying the fast phase and never reach the ceiling, which is
+# the opposite of what a backoff is for. Keyed by the allocation, cleared when it stops pending.
+const _WAIT_SINCE = Dict{Tuple{Symbol,String,String},Float64}()
+const _WAIT_LOCK = ReentrantLock()
+_waiting_since(key) = lock(_WAIT_LOCK) do; get!(_WAIT_SINCE, key, time()); end
+_waited_enough!(key) = (lock(_WAIT_LOCK) do; delete!(_WAIT_SINCE, key); end; nothing)
+
+"""
     allocation_node!(kind, host, name; wait_s = 120, resources...) -> Allocation
 
 The whole flow: attach to an allocation under this name, or ask for one, then wait for it to be
 running so its node is known. This is what a region on a compute node has to call before it can
 say where the worker goes.
 
+Polls on a backoff (`_POLL_BACKOFF`) rather than a fixed interval — see there for why.
+
 Returns a `:pending` allocation if the queue has not granted it within `wait_s` — which is not a
 failure, just a cluster that is busy; the caller polls again later rather than giving up.
 """
 function allocation_node!(kind::Symbol, host::AbstractString, name::AbstractString;
                           wait_s::Real = 120, kw...)
+    key = (kind, String(host), String(name))
     a = request_allocation!(kind, host, name; kw...)
-    alive(a) && return a
-    settled(a) && return a                     # nothing to wait for — do not spin on nothing
+    (alive(a) || settled(a)) && (_waited_enough!(key); return a)   # granted, gone, or unreachable
+    since = _waiting_since(key)                # stamped on the first attempt, inherited by the rest
     deadline = time() + wait_s
-    while time() < deadline
-        sleep(2)
+    while true
+        left = deadline - time()
+        left > 0 || break
+        # Never sleep past the deadline: the caller gave a budget, and overrunning it by most of a
+        # backed-off gap would make a short `wait_s` mean something other than what it says.
+        sleep(min(_poll_gap(time() - since), left))
         a = find_allocation(kind, host, name)
-        alive(a) && return a
-        settled(a) && return a                 # it went away, or the host did
+        (alive(a) || settled(a)) && (_waited_enough!(key); return a)
     end
-    return a
+    return a                                   # still pending — the caller asks again later
 end
 
 # Kubernetes and the rest answer all three of these differently again, and detection only ever

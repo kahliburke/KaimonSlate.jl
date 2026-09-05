@@ -758,7 +758,7 @@ bump_rev!(c::Cell) = (c.rev = Threads.atomic_add!(_REV, 1) + 1; c)
 
 # Drop the wait: the reason AND the clock behind it. Called by every transition out of BLOCKED, so
 # a stale "waiting 40m" can never sit on a cell that has since run.
-_unblock!(c::Cell) = (c.blocked = ""; c.blocked_at = 0.0; c)
+_unblock!(c::Cell) = (c.blocked = ""; c.blocked_note = ""; c.blocked_at = 0.0; c)
 
 mark_running!(c::Cell) = (_unblock!(c); c.state = RUNNING; bump_rev!(c))
 
@@ -796,23 +796,28 @@ mark_errored!(c::Cell, msg::AbstractString) = (
     c.state = ERRORED; bump_rev!(c))
 
 """
-    mark_blocked!(c, why) -> c
+    mark_blocked!(c, why, note = "") -> c
 
 The cell cannot run YET, for a reason that is not its own — a queue that has not granted a node, a
 host nobody has signed in to. Deliberately NOT `mark_errored!`: a wait rendered as a failure reads
 as broken code, and it sends people to fix a cell that is fine.
 
+`why` is the status in two or three words; `note` is the detail behind it. They are separate because
+the header shows one and the detail panel shows both, and a status long enough to explain itself is
+too long to sit beside the region name.
+
 The reason goes on the cell rather than into an output, so the header can show it and the output
 area keeps whatever the last successful run produced — a cell waiting for a node has not lost the
 value it had. Cleared by every other transition, so it can never outlive the wait.
 """
-function mark_blocked!(c::Cell, why::AbstractString)
+function mark_blocked!(c::Cell, why::AbstractString, note::AbstractString = "")
     w = String(why)
     # The clock starts at the FIRST attempt. The runner re-enters this path whenever it retries a
     # blocked cell, and re-stamping each time would show "waiting 0s" against a queue wait of an
     # hour. A CHANGED reason is a new wait and does restart it.
     (c.state == BLOCKED && c.blocked == w) || (c.blocked_at = time())
     c.blocked = w
+    c.blocked_note = String(note)
     c.state = BLOCKED
     bump_rev!(c)
 end

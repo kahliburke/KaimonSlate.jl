@@ -88,39 +88,129 @@ end
     ran = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 1.0)
     RE.mark_result!(c, ran)                      # it ran once and produced something
     @test c.state == RE.FRESH
-    RE.mark_blocked!(c, "queued for a node on login")
+    RE.mark_blocked!(c, "queued", "waiting for login to grant a node")
     @test c.state == RE.BLOCKED
     @test c.state != RE.ERRORED                  # the whole point
-    @test c.blocked == "queued for a node on login"
+    # The status is short enough to sit beside a region name in the header. The sentence explaining
+    # it is a separate field that stays server-side, for the log.
+    @test c.blocked == "queued" && c.blocked_note == "waiting for login to grant a node"
     # The OUTPUT is untouched: a cell waiting for a node has not lost what it last produced, and
     # blanking it would throw away a result the wait has nothing to do with.
     @test c.output !== nothing
 
     j = NS.cell_json(c)
-    @test j["state"] == "blocked" && j["blocked"] == "queued for a node on login"
+    @test j["state"] == "blocked" && j["blocked"] == "queued"
     @test j["blockedAt"] > 0
+    # The note is NOT on the wire: the panel shows facts (host, when, what the cluster has free),
+    # and a sentence restating the status is not one of them.
+    @test !haskey(j, "blockedNote")
 
     # The clock starts at the FIRST attempt. The runner re-enters this path each time it retries a
-    # blocked cell, and re-stamping would show "waiting 0s" against a queue wait of an hour.
+    # blocked cell, and re-stamping would show "waiting 0s" against a queue wait of an hour. The
+    # NOTE may be refreshed meanwhile without disturbing it.
     t0 = c.blocked_at
-    sleep(0.01); RE.mark_blocked!(c, "queued for a node on login")
-    @test c.blocked_at == t0
-    # A CHANGED reason is a different wait, so that one does restart.
-    RE.mark_blocked!(c, "not signed in to login")
-    @test c.blocked_at > t0
+    sleep(0.01); RE.mark_blocked!(c, "queued", "waiting for login to grant a node (still)")
+    @test c.blocked_at == t0 && endswith(c.blocked_note, "(still)")
+    # A CHANGED status is a different wait, so that one does restart.
+    RE.mark_blocked!(c, "not signed in")
+    @test c.blocked_at > t0 && c.blocked_note == ""
 
     # Every other transition clears the reason, so it can never outlive the wait it describes —
     # including `restale!`, which is how the placement task re-arms the cell once a node lands.
     for step in (RE.restale!, RE.mark_running!, RE.mark_fresh!,
                  x -> RE.mark_result!(x, nothing), x -> RE.mark_errored!(x, "boom"))
-        RE.mark_blocked!(c, "still waiting")
-        @test c.blocked == "still waiting" && c.blocked_at > 0
+        RE.mark_blocked!(c, "waiting", "on something")
+        @test c.blocked == "waiting" && c.blocked_at > 0
         step(c)
-        # The clock goes with the reason, so a stale "waiting 40m" cannot sit on a cell that ran.
-        @test c.blocked == "" && c.blocked_at == 0.0 && c.state != RE.BLOCKED
+        # The clock and the note go with the status, so a stale "waiting 40m" cannot sit on a cell
+        # that has since run.
+        @test c.blocked == "" && c.blocked_note == "" && c.blocked_at == 0.0 && c.state != RE.BLOCKED
     end
     # …and a cell that never blocked reports no reason at all.
     @test NS.cell_json(RE.Cell("p", RE.CODE, "2+2"))["blocked"] == ""
+end
+
+@testset "a granted node re-arms cells nobody is watching" begin
+    # The task that queued the allocation re-runs the waiting cells when the node lands — but only
+    # while it is still watching. It gives up after KAIMONSLATE_ALLOC_WAIT, and a hub restart takes
+    # it with it. Either way the queue then grants a node with nobody left to notice, and the cell
+    # sits on "queued" against an allocation it already holds. The supervisor is the backstop.
+    NS.SlateHistory._ROOT[] = mktempdir()
+    hub = NS.start_hub(; port = 8874)      # unique across the suite — a shared port collides in a full run
+    # Drive the sweep BY HAND. Left running, the hub's own 5 s supervisor races every assertion
+    # below — it would re-arm the cell before the test could observe it not being re-armed.
+    let t = NS._RUN_SUPERVISOR[]; t === nothing || close(t); NS._RUN_SUPERVISOR[] = nothing; end
+    nb_id = Ref("")
+    try
+        p = tempname() * ".jl"
+        write(p, "#%% md id=t\n# T\n")
+        nb = hub.notebooks[NS.open_notebook!(hub, p)]
+        nb_id[] = nb.id
+        cid = match(r"id=(\w+)", NS.agent_add_cell!(nb, "1 + 1"))[1]
+        cell() = nb.report.cells[NS._index_of(nb.report.cells, cid)]
+        NS.set_cell_tags!(nb, cid, ["region=ghost"])
+
+        # No such region: the sweep must not touch the cell, and must not throw looking for one.
+        RE.mark_blocked!(cell(), "queued", "waiting")
+        NS._reconcile_blocked_regions!(nb)
+        @test cell().state == RE.BLOCKED
+
+        # A region with no scheduler is not a queue wait either — nothing to re-arm toward.
+        RE.region_set!("ghost"; host = "nowhere.invalid", transport = :tunnel)
+        NS._reconcile_blocked_regions!(nb)
+        @test cell().state == RE.BLOCKED
+
+        # A cell blocked on something OTHER than the queue is waiting on a person, not the
+        # scheduler. Asking the cluster about it on a timer answers a question nobody asked.
+        RE.region_set!("ghost"; host = "nowhere.invalid", transport = :tunnel, scheduler = :pbs)
+        empty!(NS._REPLACE_AT)
+        RE.mark_blocked!(cell(), "not signed in", "use the padlock")
+        NS._reconcile_blocked_regions!(nb)
+        @test isempty(NS._REPLACE_AT)
+
+        # A QUEUE wait with no node placed: nobody is asking the cluster any more, so the sweep
+        # restarts the placement task. That is the only branch here that costs a round trip.
+        RE.mark_blocked!(cell(), "queued", "waiting")
+        NS._reconcile_blocked_regions!(nb)
+        @test haskey(NS._REPLACE_AT, (nb.id, "ghost"))
+        stamp0 = NS._REPLACE_AT[(nb.id, "ghost")]
+        NS._reconcile_blocked_regions!(nb)
+        @test NS._REPLACE_AT[(nb.id, "ghost")] == stamp0   # throttled — not once per 5s sweep
+
+        # With a node HELD, the waiting cell is re-armed so the runner picks it up. `region_host`
+        # returning something other than the login host is exactly what "we hold a node" means.
+        RE.route!("ghost-node-1", "nowhere.invalid", "42", :pbs)
+        lock(RE._REGION_PLACE_LOCK) do
+            RE._REGION_PLACE["ghost"] = (host = "ghost-node-1", job = "42",
+                                         ts = time(), until = time() + 600)
+        end
+        @test RE.region_host(RE.region_get("ghost")) == "ghost-node-1"
+        empty!(NS._REARM_AT)
+        NS._reconcile_blocked_regions!(nb)
+        # Re-arming hands the cell to the runner, which is free to get there first — and on a host
+        # this fake it will block again on the way in ("not signed in"). So the assertion is the
+        # narrow thing the bug was about: the cell is no longer sitting on the QUEUE wait it could
+        # never leave. Either it hasn't run yet (STALE) or it ran and stopped for a new reason.
+        @test cell().state != RE.BLOCKED || cell().blocked != "queued"
+        @test haskey(NS._REARM_AT, (nb.id, "ghost"))
+
+        # Throttled: a cell that re-blocks keeps its original `blocked_at`, so nothing on the cell
+        # distinguishes a first re-arm from a fifth — without this a cell that cannot start for some
+        # OTHER reason would be re-armed on every 5 s sweep forever.
+        stamp = NS._REARM_AT[(nb.id, "ghost")]
+        RE.mark_blocked!(cell(), "queued", "waiting")
+        NS._reconcile_blocked_regions!(nb)
+        @test NS._REARM_AT[(nb.id, "ghost")] == stamp     # the sweep declined to act again
+    finally
+        try; close(hub); catch; end
+        # The region registry is REAL config, not test scratch: `region_set!` persists to
+        # ~/.config/kaimonslate/regions.json, so a region invented here outlives the run and shows
+        # up in the user's Remotes list. Take it back out, along with the placement and route.
+        try; RE.region_delete!("ghost"); catch; end
+        try; RE.route!("ghost-node-1", ""); catch; end
+        lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "ghost"); end
+        delete!(NS._REARM_AT, (nb_id[], "ghost")); delete!(NS._REPLACE_AT, (nb_id[], "ghost"))
+    end
 end
 
 @testset "a reactive write moves the memo key" begin

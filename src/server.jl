@@ -1015,8 +1015,11 @@ const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, kernel obje
 const _REGION_PRIMING = Set{Tuple{String,UInt}}()
 const _REGION_LOCK = ReentrantLock()
 
+"The status a cell carries while the scheduler holds its request and has not granted a node yet."
+const WAIT_QUEUED = "queued"
+
 """
-    RegionWaiting(why)
+    RegionWaiting(why, note = "")
 
 A region cell cannot run YET, and nothing is wrong. Thrown where the wait is discovered (under
 `nb.lock`, which must never block), caught where the cell's state is set, and turned into `BLOCKED`
@@ -1025,11 +1028,18 @@ rather than `ERRORED`.
 A distinct TYPE rather than a message match: the same call path also raises genuine failures — a
 region that is not defined, a worker that could not start — and telling them apart by reading the
 text would go wrong the first time someone rewords one.
+
+The wait comes in two pieces because it is read in two places. `why` is the status, two or three
+words, sized for the cell header beside the region name. `note` is what a reader wants only once
+they ask: which host, and what happens next.
 """
 struct RegionWaiting <: Exception
     why::String
+    note::String
 end
-Base.showerror(io::IO, e::RegionWaiting) = print(io, e.why)
+RegionWaiting(why::AbstractString) = RegionWaiting(String(why), "")
+Base.showerror(io::IO, e::RegionWaiting) =
+    print(io, e.why, isempty(e.note) ? "" : " — " * e.note)
 
 # ── Consent-gated region introduction (PEER_TUNNEL_PLAN §5.1) ─────────────────────────────────────
 # When a notebook's region set changes (via `region_on` OR a cell `region=` tag, UI or MCP alike), a new
@@ -1582,12 +1592,14 @@ function _region_kernel!(nb::LiveNotebook, name::String)
                 # that only a person can supply — which background work is not allowed to ask for.
                 # So say which of the two is missing, because they need different things from you.
                 ReportEngine.Sweep.connected(r.host) ||
-                    throw(RegionWaiting("$(r.host) is not signed in — use the padlock at the top of the page"))
+                    throw(RegionWaiting("not signed in",
+                                        "$(r.host) needs a sign-in — use the padlock at the top of the page"))
                 _place_in_background!(name, nb)
                 # A queue wait is minutes on a busy cluster, so this is not a "try again" — the
                 # placement task re-runs this cell itself when the scheduler grants a node.
-                throw(RegionWaiting("queued for a node on $(r.host) — starts by itself when the " *
-                                    "scheduler grants one"))
+                throw(RegionWaiting(WAIT_QUEUED,
+                                    "waiting for $(r.host) to grant a node; the cell starts by " *
+                                    "itself when the scheduler does"))
             end
         end
         target = ReportEngine._region_target(r; origin_env = origin_env, host = host)   # transport/datadir/region from the def; env = the notebook's
@@ -2015,6 +2027,65 @@ function _drop_kernels_for_worker!(h, host::AbstractString, port::Integer)
     return n
 end
 
+# Restart ONE worker, named the way the roster names it: a host and a port. Reap answers "make it go
+# away"; this answers the far commoner "make it work again" — a wedged process, a namespace someone
+# polluted, a region worker on a node that has gone strange — without touching the other workers a
+# notebook is using, which is what the whole-notebook restart would do.
+#
+# The main kernel and a region kernel need different handling and it is not cosmetic: restarting the
+# main kernel re-runs the notebook from the top, while a region kernel owns only the cells tagged for
+# it. Re-running everything to recover one region worker would discard results that were never in
+# doubt, so a region restart re-arms exactly that region's cells and leaves the rest alone.
+#
+# A worker on a compute node answers to TWO host names and they must not be confused. The roster
+# lists it under the LOGIN host — the manifests live on the cluster's shared filesystem, so that is
+# where the probe reads them — while its kernel records the NODE, which is where the process
+# actually is. Matching on the login name alone finds no kernel, and reaping by the login name kills
+# nothing, because the process is not on that machine. So: match either name, and do the killing
+# against the node when a kernel tells us there is one.
+function restart_worker!(h, host::AbstractString, port::Integer)
+    h === nothing && return (0, "no hub")
+    hostname = String(host)
+    # `host` may be the login node this worker is REACHED through rather than the one it runs on.
+    _same_worker(k) = k.port == Int(port) &&
+        (k.target.ssh_host == hostname ||
+         (v = ReportEngine.via(k.target.ssh_host); v !== nothing && v.host == hostname))
+    nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+    hits = Tuple{LiveNotebook,String}[]
+    node = hostname
+    for nb in nbs, k in _nb_kernels(nb)
+        k isa ReportEngine.GateKernel || continue
+        k.target isa ReportEngine.RemoteTarget || continue
+        _same_worker(k) || continue
+        node = k.target.ssh_host                  # the machine the process is actually on
+        push!(hits, (nb, _kernel_side_label(nb, k)))
+    end
+    try; _drop_kernels_for_worker!(h, node, port); catch; end
+    ReportEngine.reap_remote_worker(node, Int(port))
+    # Nothing was bound to it: the worker is gone and there is nothing to re-run. That is a complete
+    # answer for an idle or abandoned worker, which is most of what a roster lists.
+    isempty(hits) && return (0, "reaped worker-$port on $node (nothing was using it)")
+    for (nb, side) in hits
+        if side == "local"
+            try; restart_kernel!(nb); catch; end
+        else
+            lock(_REGION_LOCK) do; delete!(_REGION_KERNELS, (nb.id, side)); end
+            n = lock(nb.lock) do
+                m = 0
+                for c in nb.report.cells
+                    _cell_region(c) == side || continue
+                    ReportEngine.restale!(c) && (m += 1)
+                end
+                m > 0 && (nb.version += 1)
+                m
+            end
+            n > 0 && (try; _broadcast(nb, string(nb.version)); catch; end)
+            try; _ensure_runner!(nb); catch; end   # the re-armed cells run themselves from here
+        end
+    end
+    return (length(hits), "restarted " * join(("$(nb.id)/$side" for (nb, side) in hits), ", "))
+end
+
 function _reconcile_nb_runs!(nb::LiveNotebook)
     nb.kernel isa ReportEngine.GateKernel || return nothing
     now = time()
@@ -2090,6 +2161,75 @@ function _reconcile_stale_runner!(nb::LiveNotebook)
     return nothing
 end
 
+# Keep a queued cell moving when the thing that was watching for it has gone.
+#
+# `_place_in_background!` asks the cluster until the node lands and then re-runs the waiting cells —
+# but only while it is still running. It gives up after `_alloc_wait_s()`, and a hub restart takes
+# it with it. Past that point the job is still queued, nobody is asking, and nobody would re-run the
+# cell even if they were: a queue wait longer than the watch window used to end with the cell parked
+# on "queued" forever, which is every wait that mattered.
+#
+# Two different failures, so two branches: no placement means resume ASKING, a placement with cells
+# still on it means re-ARM them.
+#
+# The sweep runs every 5 s, so what each branch COSTS decides what it may do.
+#
+# Deciding is free: it returns immediately unless a cell is BLOCKED, and `region_host` reads the
+# cached placement rather than asking the scheduler. Keeping it free means reading `r.scheduler` and
+# NOT `region_scheduler(r)` (which ssh's to the host for an `:auto` region), and never reaching for
+# `region_place!` here (which queues a job).
+#
+# Re-arming is free too, and throttled only to stop it repeating: a cell that re-blocks for the same
+# reason keeps its original `blocked_at`, so there is nothing on the cell to tell a first re-arm from
+# a fifth, and a cell stuck for some OTHER reason would otherwise be re-armed on every sweep.
+const _REARM_AT = Dict{Tuple{String,String},Float64}()
+const _REARM_EVERY = 30.0
+
+# Asking the cluster is the one that costs, and it is unavoidable: schedulers do not call back, so a
+# granted job is discovered only by asking, and the task that submitted it stops asking after
+# `_alloc_wait_s()`. Past that the job is still queued with nobody looking.
+#
+# Re-kicking the placement task resumes the asking, and is safe to repeat: `request_allocation!`
+# resolves the job BY NAME and returns the existing one rather than submitting a second, and
+# `_PLACING` makes a re-kick a no-op while one is already running. The throttle here bounds how often
+# a NEW attempt may start; the cadence within an attempt is `_POLL_BACKOFF` (allocation.jl).
+const _REPLACE_AT = Dict{Tuple{String,String},Float64}()
+const _REPLACE_EVERY = 30.0
+
+function _reconcile_blocked_regions!(nb::LiveNotebook)
+    # Only a QUEUE wait. A cell blocked because nobody has signed in to the cluster is waiting on a
+    # person, and asking the scheduler about it every half minute answers a question nobody asked.
+    names = Set{String}()
+    lock(nb.lock) do
+        for c in nb.report.cells
+            (c.state == BLOCKED && c.blocked == WAIT_QUEUED) || continue
+            r = _cell_region(c)
+            isempty(r) || push!(names, r)
+        end
+    end
+    for name in names
+        r = ReportEngine.region_get(name)
+        (r === nothing || r.scheduler === :none) && continue
+        key = (nb.id, name)
+        if ReportEngine.region_host(r) == r.host
+            # Nothing placed. Resume asking the cluster — this is the only branch here that costs a
+            # round trip, so it runs on a cadence sized for a shared login node, not for the sweep.
+            time() - get(_REPLACE_AT, key, 0.0) < _REPLACE_EVERY && continue
+            _REPLACE_AT[key] = time()
+            _place_in_background!(name, nb)
+            continue
+        end
+        time() - get(_REARM_AT, key, 0.0) < _REARM_EVERY && continue
+        _REARM_AT[key] = time()
+        n = _restale_region_cells!(nb, name)
+        n > 0 || continue
+        ReportEngine._rlog("region[$name]: node is held ($(ReportEngine.region_host(r))) but " *
+                           "$n cell(s) were still waiting — re-armed by the supervisor")
+        _ensure_runner!(nb)
+    end
+    return nothing
+end
+
 function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, included at ~1510) — untyped so this loads
     try; ReportEngine.reap_pending_kills!()   # hub-wide, not per-notebook — see gate_kernel.jl
     catch e; ReportEngine._rlog("supervisor: pending-kill reap error: " * first(sprint(showerror, e), 120))
@@ -2104,6 +2244,9 @@ function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, in
         end
         try; _reconcile_stale_runner!(nb)
         catch e; ReportEngine._rlog("supervisor: stale-runner reconcile error on $(nb.id): " * first(sprint(showerror, e), 120))
+        end
+        try; _reconcile_blocked_regions!(nb)
+        catch e; ReportEngine._rlog("supervisor: blocked-region reconcile error on $(nb.id): " * first(sprint(showerror, e), 120))
         end
         try; _watchdog_scan!(nb)
         catch e; ReportEngine._rlog("watchdog: scan error on $(nb.id): " * first(sprint(showerror, e), 120))
@@ -2649,7 +2792,8 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         wait = e isa RegionWaiting
         ReportEngine._rlog("region: " * (wait ? "holding " : "cannot route ") * cell.id * ": " * msg)
         lock(nb.lock) do
-            wait ? ReportEngine.mark_blocked!(cell, msg) : ReportEngine.mark_errored!(cell, msg)
+            wait ? ReportEngine.mark_blocked!(cell, e.why, e.note) :
+                   ReportEngine.mark_errored!(cell, msg)
             _broadcast_progress(nb, cell)
         end
         return nothing
