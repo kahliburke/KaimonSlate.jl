@@ -157,49 +157,79 @@ struct QueueLoad
     cpus_free::Int
     cpus_total::Int
     queued::Int          # jobs waiting, across the whole scheduler — a queue of one is not a wait
+    down::Int            # nodes the scheduler will not use (down/offline/drained)
+    eta::String          # when it expects to start OUR job, verbatim from the scheduler; "" if silent
 end
 
 Base.show(io::IO, q::QueueLoad) =
     print(io, q.name, ": ", q.cpus_free, "/", q.cpus_total, " cpus free",
           q.nodes_total > 0 ? ", $(q.nodes_free)/$(q.nodes_total) nodes" : "",
-          q.queued > 0 ? ", $(q.queued) queued" : "")
+          q.down > 0 ? ", $(q.down) down" : "",
+          q.queued > 0 ? ", $(q.queued) queued" : "",
+          isempty(q.eta) ? "" : ", starts ~$(q.eta)")
 
 # SLURM counts cpus per partition with `%C` = allocated/idle/other/total. PBS has no per-queue view
 # of the same thing, so its nodes are counted once and reported against every queue — a small lie,
 # and the honest alternative (a per-queue node map) costs a round trip per queue to say the same
 # thing on a cluster where the queues share nodes, which is the normal shape.
+# Also asked for, because they change the answer rather than decorate it:
+#   ETA   — when the scheduler expects to start OUR job. Both backfill schedulers publish an
+#           estimate, and it is the only thing here that answers "how long" directly.
+#   DOWN  — nodes the scheduler will not schedule onto (down/offline/drained). A queue that looks
+#           merely busy reads very differently when half the cluster is out.
+# `JOBNAME` is substituted with the allocation's name; with none, those lines are simply absent.
 const _LOAD_SCRIPT = raw"""
 if command -v sinfo >/dev/null 2>&1; then
   sinfo -h -o 'LOAD slurm %R|%C|%D|%A' 2>/dev/null | sort -u
   echo "PEND slurm $(squeue -h -t PENDING -o '%i' 2>/dev/null | wc -l | tr -d ' ')"
+  echo "DOWN slurm $(sinfo -h -o '%D %T' 2>/dev/null | awk '$2 ~ /down|drain|fail|maint|unk/ { d += $1 } END { print d+0 }')"
+  [ -n "JOBNAME" ] && echo "ETA slurm $(squeue -h -n JOBNAME -u "$USER" --start -o '%S' 2>/dev/null | head -1)"
 fi
 if command -v pbsnodes >/dev/null 2>&1; then
   pbsnodes -a 2>/dev/null | awk '
     /^[^ ]/            { n++ }
     /state = free/     { free++ }
+    /state = /         { if ($0 ~ /down|offline/) dn++ }
     /resources_available.ncpus/ { tot += $3 }
     /resources_assigned.ncpus/  { used += $3 }
-    END { print "LOADPBS " (free+0) "|" (n+0) "|" (tot-used) "|" (tot+0) }'
+    END { print "LOADPBS " (free+0) "|" (n+0) "|" (tot-used) "|" (tot+0); print "DOWN pbs " (dn+0) }'
   echo "PEND pbs $(qselect -s Q 2>/dev/null | wc -l | tr -d ' ')"
+  if [ -n "JOBNAME" ]; then
+    ids=$(qselect -N JOBNAME -u "$USER" 2>/dev/null)
+    [ -n "$ids" ] && qstat -f $ids 2>/dev/null |
+      awk '/estimated.start_time/ { sub(/^[^=]*= /, ""); print "ETA pbs " $0; exit }'
+  fi
 fi
 """
 
 """
-    load(runner, kind, queues) -> Vector{QueueLoad}
+    load(runner, kind, queues; job = "") -> Vector{QueueLoad}
 
 What is free right now, per queue. One round trip. Empty when the host cannot be reached or the
 scheduler says nothing — a wait with no explanation is better than an invented one.
+
+`job` is the allocation's name: given one, the scheduler is also asked when it expects to start it.
 """
-function load(runner, kind::Symbol, queues::Vector{String} = String[])
-    ok, out = try; runner(_LOAD_SCRIPT); catch; (false, ""); end
+function load(runner, kind::Symbol, queues::Vector{String} = String[]; job::AbstractString = "")
+    # The name is ours (`slate-<region>`), never user text, but it is still pasted into a script —
+    # so anything that is not a plain job-name character does not go in.
+    jn = replace(String(job), r"[^A-Za-z0-9_.-]" => "")
+    ok, out = try; runner(replace(_LOAD_SCRIPT, "JOBNAME" => jn)); catch; (false, ""); end
     ok || return QueueLoad[]
-    pend = 0
+    pend = 0; down = 0; eta = ""
     rows = QueueLoad[]
     pbs = (free = -1, nodes = 0, cfree = 0, ctot = 0)
     for line in split(out, '\n')
         line = strip(line)
         if startswith(line, "PEND ")
             f = split(line); length(f) >= 3 && (pend = max(pend, something(tryparse(Int, f[3]), 0)))
+        elseif startswith(line, "DOWN ")
+            f = split(line); length(f) >= 3 && (down = max(down, something(tryparse(Int, f[3]), 0)))
+        elseif startswith(line, "ETA ")
+            v = strip(line[5:end])
+            i = findfirst(' ', v); v = i === nothing ? "" : strip(v[i+1:end])
+            # SLURM says N/A when backfill has no estimate; PBS just omits the attribute.
+            (isempty(v) || v in ("N/A", "Unknown", "(null)")) || (eta = String(v))
         elseif startswith(line, "LOAD slurm ")
             g = split(strip(line[12:end]), '|')
             length(g) >= 4 || continue
@@ -210,7 +240,7 @@ function load(runner, kind::Symbol, queues::Vector{String} = String[])
                                   length(a) >= 2 ? something(tryparse(Int, a[2]), 0) : 0,
                                   something(tryparse(Int, g[3]), 0),
                                   something(tryparse(Int, c[2]), 0),
-                                  something(tryparse(Int, c[4]), 0), 0))
+                                  something(tryparse(Int, c[4]), 0), 0, 0, ""))
         elseif startswith(line, "LOADPBS ")
             g = split(strip(line[9:end]), '|')
             length(g) >= 4 && (pbs = (free = something(tryparse(Int, g[1]), 0),
@@ -221,10 +251,12 @@ function load(runner, kind::Symbol, queues::Vector{String} = String[])
     end
     if kind === :pbs && pbs.nodes > 0
         qs = isempty(queues) ? ["(cluster)"] : queues
-        rows = QueueLoad[QueueLoad(q, pbs.free, pbs.nodes, pbs.cfree, pbs.ctot, 0) for q in qs]
+        rows = QueueLoad[QueueLoad(q, pbs.free, pbs.nodes, pbs.cfree, pbs.ctot, 0, 0, "") for q in qs]
     end
-    return QueueLoad[QueueLoad(r.name, r.nodes_free, r.nodes_total, r.cpus_free, r.cpus_total, pend)
-                     for r in rows]
+    # The scheduler-wide figures are collected once and stamped onto every row: they describe the
+    # scheduler, not a queue, and a reader looking at one queue still needs them.
+    return QueueLoad[QueueLoad(r.name, r.nodes_free, r.nodes_total, r.cpus_free, r.cpus_total,
+                               pend, down, eta) for r in rows]
 end
 
 """

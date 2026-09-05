@@ -284,24 +284,42 @@ function _cellRunLoc(c) {
   if (c.kind === 'md') return null;
   return _notebookHome();
 }
-// The distinct set of run-locations across the notebook's cells. More than one member ⇒ the notebook
-// SPANS multiple places, so each cell header names where it runs; a single location is just the home
-// (redundant → hidden).
+// The distinct set of run-locations across the notebook's cells.
 function _cellRegionSet() {
   const cs = (window.__slateState || {}).cells || [];
   const s = new Set();
   for (const c of cs) { const l = _cellRunLoc(c); if (l) s.add(l.key); }
   return s;
 }
-// The region chip for a cell header — shown on every cell that HAS a run location, once the notebook
-// spans >1 location: a coloured 🖧 <name> for cells on a region/remote host (colour matches the DAG
-// region overlay), a subdued 💻 local for main-kernel cells. Untagged code cells reflect the notebook's
-// default worker (so a remotely-placed notebook reads the home region, not "local"); untagged markdown
-// shows nothing. Clicking opens the 🏷 Run-on picker.
+// The region chip for a cell header — a coloured 🖧 <name> for cells on a region/remote host (colour
+// matches the DAG region overlay), a subdued 💻 local for main-kernel cells. Untagged code cells
+// reflect the notebook's default worker (so a remotely-placed notebook reads the home region, not
+// "local"); untagged markdown shows nothing. Clicking opens the 🏷 Run-on picker.
+//
+// The chip is hidden only when the notebook runs entirely on the MAIN KERNEL — the one case where it
+// would say the same redundant thing on every cell. A notebook that runs entirely on one region is
+// not that case: where the work happens is then the most surprising thing about it, and suppressing
+// the chip leaves nothing on screen saying it left this machine.
 function cellRegionChip(c) {
-  if (_cellRegionSet().size < 2) return '';
+  const set = _cellRegionSet();
+  const blocked = !!(c && c.state === 'blocked' && c.blocked);
+  if (!blocked && set.size < 2 && set.has('local')) return '';
   const loc = _cellRunLoc(c);
   if (!loc) return '';
+  // A cell WAITING wears the same chip in the same place, recoloured, with the status after the
+  // name. Where it runs and whether it is running are one fact about one cell; splitting them into
+  // two pills at opposite ends of the header made the reader hunt for the half that matters.
+  if (blocked) {
+    const w = _blockedWaited(c);
+    // `data-bkey` is what the header patch compares against, so a chip that is already correct is
+    // left ALONE. Replacing it needlessly destroys the node between mousedown and mouseup, which
+    // swallows the click — the chip is also a button.
+    return `<span class="cregion blocked" data-bkey="${_esc(_blockedKey(c))}"` +
+      ` data-at="${+(c.blockedAt) || 0}" data-reg="${_esc(loc.name || '')}"` +
+      ` onmouseenter="window.blockInfo(this,'${c.id}')" onmouseleave="window.blockInfoHide()"` +
+      ` onclick="openTagEditor('${c.id}', event)">${loc.local ? '💻' : '🖧'} ${_esc(loc.name || 'local')}` +
+      ` <span class="cregst">${_esc(c.blocked)}${w ? ` <span class="blockwait">${w}</span>` : ''}</span></span>`;
+  }
   if (loc.local) return `<span class="cregion local" onclick="openTagEditor('${c.id}', event)" title="runs on the main kernel (this notebook’s home) — click to change">💻 local</span>`;
   const hue = (typeof _dagRegionHue === 'function' && _dagRegionHue(loc.name)) || '#8a90a8';
   return `<span class="cregion" style="color:${hue};border-color:${hue}" onclick="openTagEditor('${c.id}', event)" title="runs on ‘${_esc(loc.name)}’ — click to change">🖧 ${_esc(loc.name)}</span>`;
@@ -545,7 +563,6 @@ function cellHeaderInner(c) {
     // Run-info cluster, right-aligned and contiguous (buttons sit to its left): run time (reserved
     // width) · cache verdict (fixed slot) · state badge (fixed width) — so nothing floats mid-header.
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
-    `<span class="blockslot">${_blockedPill(c)}</span>` +
     `<span class="previewslot">${_previewBadge(c)}</span>` +
     `<span class="memoslot">${_memoBadge(c)}</span>` +
     `<span class="badge">${c.state}</span>`;
@@ -563,21 +580,92 @@ function _blockedWaited(c) {
   const s = Math.max(0, Math.round(Date.now() / 1000 - at));
   return s < 60 ? s + 's' : s < 3600 ? Math.round(s / 60) + 'm' : (s / 3600).toFixed(1) + 'h';
 }
-function _blockedPill(c) {
+// Everything about a chip that is NOT the ticking elapsed time (which the ticker rewrites in place).
+// Two chips with the same key are the same chip, so the header patch can leave one alone.
+function _blockedKey(c) {
   if (!c || c.state !== 'blocked' || !c.blocked) return '';
-  const w = _blockedWaited(c);
-  return `<span class="blockpill" data-at="${+(c.blockedAt) || 0}" title="${_esc(c.blocked)}">` +
-         `⏳ ${_esc(c.blocked)}${w ? ` · <span class="blockwait">${w}</span>` : ''}</span>`;
+  const l = _cellRunLoc(c);
+  return [c.blocked, +(c.blockedAt) || 0, (l && l.key) || ''].join('\x1f');
 }
 // One timer for the page, not one per cell: it only rewrites the elapsed text, and stops costing
 // anything when nothing is waiting.
 setInterval(() => {
-  document.querySelectorAll('.blockpill[data-at]').forEach(el => {
+  document.querySelectorAll('.cregion.blocked[data-at]').forEach(el => {
     const w = _blockedWaited({ blockedAt: +el.dataset.at });
     const slot = el.querySelector('.blockwait');
     if (slot && w && slot.textContent !== w) slot.textContent = w;
   });
 }, 5000);
+
+// ── The detail behind a waiting chip ──────────────────────────────────────────────────────────
+// A panel rather than a `title`: the browser's tooltip cannot be styled, cannot hold a table, takes
+// a second to appear and goes away while you read it. What a person wants here is a small report —
+// when it was asked for, how long it has waited, and whether the cluster has anything free — and
+// none of that fits a tooltip.
+let _blkPanel = null, _blkTimer = 0, _blkFor = '';
+const _blkLoad = new Map();     // region → {at, data} — a hover is a round trip to a login node
+function _blkFmtQ(q) {
+  const bits = [`${q.cpus_free}/${q.cpus_total} cpus free`];
+  if (q.nodes_total > 0) bits.push(`${q.nodes_free}/${q.nodes_total} nodes`);
+  if (q.down > 0) bits.push(`${q.down} down`);
+  if (q.queued > 0) bits.push(`${q.queued} job${q.queued === 1 ? '' : 's'} queued`);
+  return `<div class="blkq"><span class="blkqn">${_esc(q.name)}</span>${_esc(bits.join(' · '))}</div>`;
+}
+// The region's host, which the chip does not show — the chip names the REGION, and on a cluster the
+// two differ (`pbsnode` is asked for on `slate-pbs`).
+function _blkRegHost(reg) {
+  const regs = (typeof nbState !== 'undefined' && nbState && nbState.regions) || [];
+  const r = regs.find(x => x.name === reg);
+  return (r && r.host) || '';
+}
+// Only what the chip has not already said. The chip reads "🖧 pbsnode · queued 2m", so repeating the
+// status and the region name at the top of the panel spends the first line saying nothing.
+function _blkRender(c, reg, load) {
+  const at = +(c.blockedAt) || 0;
+  const when = at ? new Date(at * 1000).toLocaleTimeString() : '';
+  // `ask` and `eta` ride the same round trip as the capacity, so they appear when it does.
+  const rows = [], host = _blkRegHost(reg);
+  const ask = (load && load.ask) || '', eta = (load && load.rows && load.rows.length && load.rows[0].eta) || '';
+  if (host) rows.push(`<div class="blkrow"><span>Host</span><div>${_esc(host)}</div></div>`);
+  if (ask) rows.push(`<div class="blkrow"><span>Asked for</span><div>${_esc(ask)}</div></div>`);
+  if (at) rows.push(`<div class="blkrow"><span>Requested</span><div>${_esc(when)} · ${_esc(_blockedWaited(c))} ago</div></div>`);
+  if (eta) rows.push(`<div class="blkrow"><span>Starts</span><div>~${_esc(eta)}</div></div>`);
+  const qs = load && load.rows;
+  if (load === undefined) rows.push('<div class="blkrow blkdim"><span>Cluster</span><div>asking…</div></div>');
+  else if (load === null) rows.push('<div class="blkrow blkdim"><span>Cluster</span><div>no answer</div></div>');
+  else if (!qs || !qs.length) rows.push('<div class="blkrow blkdim"><span>Cluster</span><div>nothing reported</div></div>');
+  else rows.push('<div class="blkrow blkq1"><span>Cluster</span><div>' + qs.map(_blkFmtQ).join('') + '</div></div>');
+  return rows.join('');
+}
+window.blockInfo = function (el, id) {
+  clearTimeout(_blkTimer);
+  const c = ((window.__slateState || {}).cells || []).find(x => x.id === id);
+  if (!c) return;
+  const reg = el.dataset.reg || '';
+  if (!_blkPanel) { _blkPanel = document.createElement('div'); _blkPanel.className = 'blkpanel'; document.body.appendChild(_blkPanel); }
+  _blkFor = id;
+  const cached = _blkLoad.get(reg);
+  const fresh = cached && (Date.now() - cached.at < 15000);
+  _blkPanel.innerHTML = _blkRender(c, reg, fresh ? cached.data : undefined);
+  const r = el.getBoundingClientRect();
+  _blkPanel.style.left = Math.round(Math.min(r.left, window.innerWidth - 340)) + 'px';
+  _blkPanel.style.top = Math.round(r.bottom + 6) + 'px';
+  _blkPanel.classList.add('on');
+  if (!reg || fresh) return;
+  fetch('/api/region-load?region=' + encodeURIComponent(reg))
+    .then(r => r.json())
+    .then(j => {
+      const data = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [] };
+      _blkLoad.set(reg, { at: Date.now(), data });
+      if (_blkFor === id && _blkPanel && _blkPanel.classList.contains('on')) _blkPanel.innerHTML = _blkRender(c, reg, data);
+    })
+    .catch(() => { if (_blkFor === id && _blkPanel) _blkPanel.innerHTML = _blkRender(c, reg, null); });
+};
+// A short grace period, so moving the pointer across the chip's own border doesn't flicker it.
+window.blockInfoHide = function () {
+  clearTimeout(_blkTimer);
+  _blkTimer = setTimeout(() => { if (_blkPanel) _blkPanel.classList.remove('on'); _blkFor = ''; }, 180);
+};
 function cellHeader(c) { return '<div class="cellhead">' + cellHeaderInner(c) + '</div>'; }
 
 // (cellEl + mountEditor removed — the Preact <Notebook>/<Cell>/<Editor> in notebook.js now

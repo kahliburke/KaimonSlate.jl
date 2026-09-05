@@ -357,19 +357,38 @@ end
             LOAD slurm compute|12/20/0/32|4|1/3
             LOAD slurm gpu|8/0/0/8|1|1/0
             PEND slurm 7
+            DOWN slurm 2
+            ETA slurm 2026-09-05T14:20:00
             """), :slurm)
         @test [q.name for q in s] == ["compute", "gpu"]
         @test (s[1].cpus_free, s[1].cpus_total) == (20, 32)
         @test (s[1].nodes_free, s[1].nodes_total) == (3, 4)
         @test s[2].cpus_free == 0                      # full, and that is the answer to "why wait"
-        @test all(q -> q.queued == 7, s)               # scheduler-wide, so every row carries it
+        # Scheduler-wide facts describe the scheduler, not a queue, so every row carries them.
+        @test all(q -> q.queued == 7 && q.down == 2, s)
+        @test all(q -> q.eta == "2026-09-05T14:20:00", s)
         @test occursin("20/32 cpus free", sprint(show, s[1]))
         @test occursin("7 queued", sprint(show, s[1]))
+        @test occursin("2 down", sprint(show, s[1]))
+
+        # An estimate the scheduler declines to make is not an estimate. SLURM says N/A when backfill
+        # has nothing; reporting that verbatim would put "starts ~N/A" in front of someone waiting.
+        @test only(SD.load(canned("LOADPBS 0|2|0|8\nETA pbs N/A"), :pbs)).eta == ""
+
+        # The job name reaches the script — that is what makes the ETA OURS rather than the queue's —
+        # and nothing but job-name characters survives the trip.
+        seen = Ref("")
+        SD.load(s -> (seen[] = s; (true, "")), :pbs; job = "slate-r1; rm -rf /")
+        # The name reaches the script stripped to job-name characters, so the injected command never
+        # arrives as one. (The script has semicolons of its own — what matters is that none of THESE
+        # survived: no separator, no argument, no path.)
+        @test occursin("slate-r1rm-rf", seen[])
+        @test !occursin("; rm", seen[]) && !occursin("rm -rf", seen[]) && !occursin("-rf /", seen[])
 
         # PBS counts nodes once — it has no per-queue view of free CPUs — so the same figures are
         # reported against each queue asked about. Verified against a live cluster: two 4-cpu nodes
         # idle reads as 8/8.
-        p = SD.load(canned("LOADPBS 2|2|8|8\nPEND pbs 0\n"), :pbs, ["workq", "gpuq"])
+        p = SD.load(canned("LOADPBS 2|2|8|8\nPEND pbs 0\nDOWN pbs 0\n"), :pbs, ["workq", "gpuq"])
         @test [q.name for q in p] == ["workq", "gpuq"]
         @test all(q -> (q.cpus_free, q.cpus_total, q.nodes_free) == (8, 8, 2), p)
         @test !occursin("queued", sprint(show, p[1]))  # a queue of nothing is not news
@@ -382,6 +401,37 @@ end
         @test isempty(SD.load(_ -> (false, ""), :slurm))
         @test isempty(SD.load(_ -> error("host is down"), :pbs, ["workq"]))
         @test isempty(SD.load(canned("LOAD slurm mangled|not/a/count"), :slurm))
+    end
+
+    @testset "waiting on a queue backs off instead of hammering the login node" begin
+        # Every poll is a command on a shared login node. A queue wait is minutes to hours, so a
+        # fixed 2s interval spends thousands of them to learn nothing — the cadence sites complain
+        # about. The common case is still a cluster with room, which answers in seconds, so the
+        # first stretch stays fast and only a genuinely long wait backs off.
+        SW = Sweep
+        @test SW._poll_gap(0) == SW._POLL_BACKOFF.first          # a free cluster is not made to wait
+        @test SW._poll_gap(SW._POLL_BACKOFF.fast_for) == SW._POLL_BACKOFF.first
+        @test SW._poll_gap(60) > SW._POLL_BACKOFF.first          # …a slow one stops being asked so often
+        @test SW._poll_gap(3600) == SW._POLL_BACKOFF.ceiling     # and settles, rather than growing forever
+        @test issorted([SW._poll_gap(t) for t in 0:5:600])       # monotone — never speeds back up
+
+        # The budget: an hour of waiting costs a bounded number of commands, and the first minute
+        # still costs few enough that nobody notices.
+        polls(total) = (t = 0.0; n = 0; while t < total; t += SW._poll_gap(t); n += 1; end; n)
+        @test polls(60) <= 25
+        @test polls(3600) <= 300                                 # vs 1800 at a flat 2s
+
+        # The clock is per ALLOCATION, not per attempt: `allocation_node!` returns after `wait_s`
+        # and is called again, and a backoff restarting each time would never reach the ceiling.
+        k = (:pbs, "h", "slate-x")
+        try
+            t1 = SW._waiting_since(k)
+            @test SW._waiting_since(k) == t1                      # a later attempt inherits it
+            SW._waited_enough!(k)
+            @test SW._waiting_since(k) >= t1                      # …until it stops pending
+        finally
+            SW._waited_enough!(k)
+        end
     end
 
     @testset "an allocation names the node the scheduler picked" begin

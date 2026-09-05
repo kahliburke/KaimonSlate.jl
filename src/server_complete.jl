@@ -1236,6 +1236,34 @@ function _make_router(h::Hub)
                    "id" => a.id, "state" => String(a.state), "node" => a.node,
                    "timeleft" => a.timeleft, "via" => r.host))
     end)
+    # How busy the cluster is, for a cell that is waiting on it. "Queued" says nothing about whether
+    # the answer is a minute or tomorrow; free cpus and the length of the queue do. Asked on hover,
+    # never on a timer — it is a round trip to the login node, and nobody is watching most of the time.
+    HTTP.register!(router, "GET", "/api/region-load", req -> begin
+        name = get(HTTP.queryparams(HTTP.URI(req.target)), "region", "")
+        r = ReportEngine.region_get(name)
+        r === nothing && return _json(Dict("ok" => false, "error" => "no region `$name`"))
+        kind = try; ReportEngine.region_scheduler(r); catch; :none; end
+        kind === :none && return _json(Dict("ok" => true, "scheduler" => "none", "queues" => []))
+        qs = isempty(r.partition) ? String[] : [r.partition]
+        rows = try
+            ReportEngine.Sweep.SchedulerDetect.load(s -> ReportEngine._run_on(r.host, s), kind, qs;
+                                                    job = ReportEngine.region_alloc_name(r))
+        catch
+            ReportEngine.Sweep.SchedulerDetect.QueueLoad[]
+        end
+        # What this region asks for, returned here rather than pushed with the notebook state: the
+        # state goes out on every change and nothing else needs these, while this is asked once, by
+        # someone looking at a cell that is waiting for exactly this request to be satisfiable.
+        ask = join(filter(!isempty, [r.cpus > 0 ? "$(r.cpus) cpu" * (r.cpus == 1 ? "" : "s") : "",
+                                     r.mem, isempty(r.gpus) ? "" : "$(r.gpus) gpu",
+                                     r.walltime, r.partition]), " · ")
+        _json(Dict("ok" => true, "scheduler" => String(kind), "host" => r.host, "ask" => ask,
+                   "queues" => [Dict("name" => q.name, "nodes_free" => q.nodes_free,
+                                     "nodes_total" => q.nodes_total, "cpus_free" => q.cpus_free,
+                                     "cpus_total" => q.cpus_total, "queued" => q.queued,
+                                     "down" => q.down, "eta" => q.eta) for q in rows]))
+    end)
     HTTP.register!(router, "POST", "/api/allocation/release", req -> begin
         name = strip(String(get(_body(req), "region", "")))
         r = ReportEngine.region_get(name)
@@ -1455,6 +1483,17 @@ function _make_router(h::Hub)
         (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
         try; _drop_kernels_for_worker!(h, host, port); catch; end   # wake any eval bound to this worker before it dies
         _json(Dict("ok" => ReportEngine.reap_remote_worker(host, port)))
+    end)
+    # Restart ONE worker, named as the roster names it. Distinct from reap: reap leaves the notebook
+    # worker-less until someone runs it, which is right when you meant to remove it and wrong when you
+    # meant to repair it — the usual case on a cluster node that has gone strange.
+    HTTP.register!(router, "POST", "/api/restart-worker", req -> begin
+        b = _body(req)
+        host = strip(String(get(b, "host", "")))
+        port = tryparse(Int, string(get(b, "port", "")))
+        (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
+        n, msg = restart_worker!(h, host, port)
+        _json(Dict("ok" => true, "restarted" => n, "message" => msg))
     end)
     # Recorded telemetry history for a worker on a host — the hub's ring for its live kernel connection,
     # for the worker-detail popup's CPU/memory history chart. Query {host, port}. Empty `samples` when the

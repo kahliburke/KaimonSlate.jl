@@ -509,12 +509,36 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
    matches, so a notebook waiting on a cluster node does not read as a notebook full of errors. */
 .cell.state-blocked .badge { color:var(--gold); }
 .cell.state-blocked { border-left-color:var(--gold); }
-/* The reason, in the header beside the state. Truncates rather than wrapping — the header is one
-   line and a queue message is long; the full text is on hover. */
-.blockpill { color:var(--gold); background:rgba(210,168,80,.12); border:1px solid rgba(210,168,80,.35);
-  border-radius:9px; padding:1px 8px; font-size:.74rem; white-space:nowrap; overflow:hidden;
-  text-overflow:ellipsis; max-width:34ch; flex:0 1 auto; cursor:default; }
-.blockslot:empty { display:none; }
+/* A waiting cell's region chip: the same pill in the same place, gold, with the status after the
+   region name. Only the status word lives here — the explanation is in the hover panel. */
+.cregion.blocked { color:var(--gold) !important; border-color:rgba(210,168,80,.55) !important;
+  background:rgba(210,168,80,.12); }
+/* The chip is a button; its inner text must not become the click target, or the handler sees a
+   child it did not expect. */
+.cregion.blocked .cregst, .cregion.blocked .blockwait { pointer-events:none; }
+.cregion.blocked .cregst { opacity:.9; }
+.cregion.blocked .cregst::before { content:'· '; opacity:.55; }
+.cregion.blocked .blockwait { opacity:.7; font-variant-numeric:tabular-nums; }
+
+/* The detail behind the chip. A panel and not a `title`, because what belongs here is a small
+   report — when it was asked for, how long it has waited, what the cluster has free — and a
+   tooltip can hold none of that, cannot be styled, and vanishes while you read it. */
+.blkpanel { position:fixed; z-index:60; min-width:250px; max-width:330px; padding:8px 10px;
+  background:var(--panel, #171a21); border:1px solid var(--line, #2a2f3a); border-radius:8px;
+  box-shadow:0 8px 24px rgba(0,0,0,.45); font-size:.76rem; line-height:1.5; color:var(--fg, #d7dae1);
+  opacity:0; visibility:hidden; transition:opacity .12s ease; pointer-events:none; }
+.blkpanel.on { opacity:1; visibility:visible; }
+.blkrow { display:flex; gap:8px; align-items:baseline; }
+/* `min-width:0` on the value side: a flex item defaults to min-width:auto, so a long capacity line
+   pushes past the panel instead of wrapping inside it. */
+.blkrow > span:first-child { flex:0 0 62px; opacity:.55; }
+.blkrow > *:last-child { min-width:0; flex:1 1 auto; overflow-wrap:anywhere; }
+.blkrow.blkq1 { align-items:flex-start; }
+.blkdim { opacity:.6; }
+/* The queue's name on its own line, its figures under it — they wrap, and a site with long queue
+   names does not shove them out of the panel. */
+.blkq + .blkq { margin-top:3px; }
+.blkqn { display:block; opacity:.8; }
 /* Durable-cache badge — sits with the run time (`.cdur`), before the action buttons. `.ok` =
    persisted/restored (a stage that caches), `.warn` = won't cache (hover for why). Muted so it reads
    as metadata, not an alert. Negative left margin snugs it to the time (tightening the header's 8px

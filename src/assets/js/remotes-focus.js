@@ -69,6 +69,19 @@ function reapWorker(h, port) {
     fetch('/api/reap-worker', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host: h, port }) }).then(r => r.json()).then(() => fetchRoster(h)).catch(() => {});
   });
 }
+// Repair rather than remove: the worker goes and whatever was using it gets a fresh one and re-runs.
+// Confirmed like the reap because the namespace goes either way — but not as `danger`, since the
+// point of it is to get back to a working notebook.
+function restartWorker(h, port) {
+  confirmP('Restart worker :' + port + ' on ' + h + '?\nIts namespace is cleared and the cells that were using it re-run.', 'Restart').then(ok => {
+    if (!ok) return;
+    rmsg.value = { text: 'Restarting worker :' + port + '…' };
+    fetch('/api/restart-worker', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host: h, port }) })
+      .then(r => r.json())
+      .then(j => { rmsg.value = { text: (j && j.message) || ('worker :' + port + ' restarted') }; fetchRoster(h); })
+      .catch(() => { rmsg.value = { text: 'could not restart worker :' + port, err: true }; });
+  });
+}
 
 // ── sysimage note (live checkbox + cached server status) ──────────────────────────
 function sysNote(name, checked, editing) {
@@ -120,15 +133,23 @@ function AllocationRow(name) {
 }
 
 // ── components ──────────────────────────────────────────────────────────────────────
+// Warm workers and scheduler allocations are alternatives, not options that combine: a warm worker
+// lives on the host between notebooks, and a scheduler region has no host to keep one on. So every
+// control and every label that talks about warmth is written for one kind of region or the other,
+// never shown to both.
+const isSched = r => !!(r && r.scheduler && r.scheduler !== 'none');
+
 function RegionList() {
   const h = focusHost.value, regs = regionsOn(h), e = editRegion.value, newSel = !(e && e.name);
   return html`<div>
     <div class="rppreglist">
       ${regs.map(r => html`<div class=${'rppregrow' + (e && e.name === r.name ? ' sel' : '')} onClick=${() => editRegion.value = r}>
-        <span class="rppregname">${(r.scheduler && r.scheduler !== 'none') ? '⎈' : '🖧'} ${r.name}</span>
-        <span class="rppregmeta">${(r.node && r.node !== r.host) ? 'on ' + r.node + ' · ' : ''}warm ${+r.warm || 0} · ${r.transport || 'tunnel'}${r.sysimage ? ' · ⚙ sysimage' : ''}${r.data_root ? ' · root ' + r.data_root : ''}</span>
+        <span class="rppregname">${isSched(r) ? '⎈' : '🖧'} ${r.name}</span>
+        <span class="rppregmeta">${(r.node && r.node !== r.host) ? 'on ' + r.node + ' · ' : ''}${isSched(r)
+          ? (r.walltime || '') + (r.partition ? ' · ' + r.partition : '') + (r.walltime || r.partition ? ' · ' : '')
+          : 'warm ' + (+r.warm || 0) + ' · '}${r.transport || 'tunnel'}${r.sysimage ? ' · ⚙ sysimage' : ''}${r.data_root ? ' · root ' + r.data_root : ''}</span>
         ${(r.status && !r.status.ok) ? html`<span class="rppregst err">⚠ ${r.status.msg}</span>` : null}
-        <button class="rppregdel" title="delete this region (reaps its warm workers)" onClick=${ev => { ev.stopPropagation(); deleteRegion(h, r.name); }}>✕</button></div>`)}
+        <button class="rppregdel" title=${isSched(r) ? 'delete this region (releases any allocation it holds)' : 'delete this region (reaps its warm workers)'} onClick=${ev => { ev.stopPropagation(); deleteRegion(h, r.name); }}>✕</button></div>`)}
       <div class=${'rppregrow rppregnew' + (newSel ? ' sel' : '')} title="create a new region on this host" onClick=${() => editRegion.value = null}>
         <span class="rppregname">＋ New region</span><span class="rppregmeta">a new compute def on ${h}</span></div>
     </div>
@@ -143,10 +164,7 @@ function Editor() {
       : html`<input class="rppname" autocomplete="off" placeholder="e.g. gpu, bigmem" value=${fName.value} onInput=${ev => fName.value = ev.target.value}/>`}</div>
     ${fSched.value === 'none'
       ? html`<div class="rpprow"><label>Warm</label><input class="rppn" type="text" inputmode="numeric" autocomplete="off" value=${fWarm.value} onInput=${ev => fWarm.value = ev.target.value}/><span class="pddim" style="font-size:.76rem">workers kept ready to adopt</span></div>`
-      /* A warm worker skips the boot by living on the host between notebooks. A scheduler region has
-         no host to keep one on: the node is an allocation, the next one may be a different machine,
-         and keeping workers alive is also what stops an idle node being released. */
-      : html`<div class="rpprow"><label>Warm</label><span class="pddim" style="font-size:.76rem">not available on a scheduler region — its node is granted per allocation, and holding workers would hold the node</span></div>`}
+      : null}
     <div class="rpprow"><label>Preload</label><input class="rpppre" autocomplete="off" placeholder="/path/to/project  (folder with Project.toml)" value=${fPre.value} onInput=${ev => fPre.value = ev.target.value}/></div>
     <div class="rpprow"><label>Data root</label><input class="rpproot" autocomplete="off" placeholder="/scratch  (a path ON THE HOST)" value=${fRoot.value} onInput=${ev => fRoot.value = ev.target.value}/></div>
     ${SchedulerRows()}
@@ -156,7 +174,7 @@ function Editor() {
       ${fTr.value === 'direct' ? html`<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" value=${fPort.value} onInput=${ev => fPort.value = ev.target.value}/>` : null}</div>
     <div class="rpprow"><label>Sysimage</label><label class="rppchk"><input type="checkbox" checked=${fSys.value} onChange=${ev => fSys.value = ev.target.checked}/><span>Use worker sysimage <span class="pddim">faster worker boot — built & kept fresh in the background; needs a C compiler + free RAM on the host</span></span></label></div>
     <div class="rpprow rppsysrow"><label></label><div class="rppsysbox">${sysNote(editing ? e.name : '', fSys.value, editing)}</div></div>
-    <div class="rppact"><button class="rppsavereg" title="save this region and reconcile toward its warm count" onClick=${saveRegion}>${editing ? 'Save' : 'Create'}</button></div>
+    <div class="rppact"><button class="rppsavereg" title=${fSched.value === 'none' ? 'save this region and reconcile toward its warm count' : 'save this region — its node is requested when a cell needs one'} onClick=${saveRegion}>${editing ? 'Save' : 'Create'}</button></div>
     </div>
     <div class=${'rppmsg' + (rmsg.value && rmsg.value.err ? ' err' : '')}>${rmsg.value ? rmsg.value.text : ''}</div>`;
 }
@@ -214,14 +232,16 @@ function Roster() {
         if (st.rss) tel.push('rss ' + fmtB(st.rss));
         if (st.memo_bytes > 0) tel.push('memo ' + fmtB(st.memo_bytes));
         const warm = st.warm || '', wc = warm.indexOf('ready') === 0 ? '#56d364' : warm.indexOf('warming') === 0 ? '#e8a13f' : '#8a90a8';
-        return html`<div class="rppworker" title="worker details + history" onClick=${ev => { if (ev.target.closest && ev.target.closest('.rppreap')) return; detail.value = { host: h, port: +w.port }; }}>
+        return html`<div class="rppworker" title="worker details + history" onClick=${ev => { if (ev.target.closest && ev.target.closest('.rppwacts')) return; detail.value = { host: h, port: +w.port }; }}>
           <div class="rppw1"><span class="rppwport">${w.alive ? '🟢' : '⚪'} :${w.port}</span>
             ${w.state ? html`<span class=${'rppbadge ' + (w.state === 'attached' ? 'attached' : 'idle')}>${w.state}</span>` : null}
             ${mf.region ? html`<span class="rppbadge pool">${mf.region}</span>` : null}
             ${(w.state === 'attached' && mf.notebook) ? html`<span class="rppwnb">${mf.notebook}</span>` : null}
             ${tel.length ? html`<div class="rppwtel">${tel.join(' · ')}</div>` : null}
             ${warm ? html`<div class="rppwtel" style=${'color:' + wc}>${warm.indexOf('warming') === 0 ? '⏳ ' : warm.indexOf('ready') === 0 ? '✓ ' : ''}${warm}</div>` : null}</div>
-          <button class="rppreap" title="kill this worker + remove its files" onClick=${ev => { ev.stopPropagation(); reapWorker(h, +w.port); }}>✕ Reap</button></div>`;
+          <div class="rppwacts">
+            <button class="rppwrestart" title="give it a fresh process and re-run what was using it" onClick=${ev => { ev.stopPropagation(); restartWorker(h, +w.port); }}>↻ Restart</button>
+            <button class="rppreap" title="kill this worker + remove its files" onClick=${ev => { ev.stopPropagation(); reapWorker(h, +w.port); }}>✕ Reap</button></div></div>`;
       })
     }</div>
     <div class="rtfpark">${parkedFor.map(p => html`<div class="rpppark">⇄ parked: ${p.label} → :${p.port} <span style="opacity:.7">(idle ${p.idle_s}s)</span></div>`)}</div></div>`;

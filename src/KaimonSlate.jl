@@ -874,8 +874,10 @@ function create_tools(GateTool::Type)
     - `list` — the worker roster: this hub's own workers with no `host`, or that machine's with one.
       Which notebook each serves, whether it still runs, telemetry, whether it looks abandoned.
       Read-only.
-    - `restart` — give `notebook` a fresh worker and re-run it. Clears a wedged process or a
-      polluted namespace; the notebook stays open. The usual repair.
+    - `restart` — a fresh worker, and the cells that were using it re-run. Clears a wedged process
+      or a polluted namespace; the notebook stays open. The usual repair. Give `notebook` to restart
+      every worker it uses, or `host`+`port` from `list` for the ONE a roster row names — which is
+      what you want for a single region worker, since the notebook's other cells are not in doubt.
     - `reap` — kill a worker and remove its files, leaving nothing behind. Identify it by
       `notebook`, or by `host`+`port` from `list`. Its notebook is left worker-less until the next
       run, so prefer `restart` unless you actually want it gone.
@@ -891,14 +893,22 @@ function create_tools(GateTool::Type)
             return "Unknown action '$action'. Use status | list | restart | reap."
         act == "status" && return _worker_status(notebook)
         act == "list" && return _worker_list(host)
-        act == "restart" && return _worker_restart(notebook)
+        act == "restart" && return _worker_restart(notebook, host, port)
         return _worker_reap(notebook, host, port)
     end
 
-    # Restart the worker under `notebook`: same process for a local or a remote one, since
-    # `restart_kernel!` owns the teardown either way and the re-run streams back asynchronously.
-    function _worker_restart(notebook::String)::String
-        isempty(strip(notebook)) && return "Give a notebook (id or .jl path) to restart."
+    # Restart by NOTEBOOK — every worker it uses — or by the host+port a roster row names, which is
+    # one worker. The second matters on a cluster: a notebook with a wedged region worker should not
+    # have to re-run the cells that were never in doubt to get that one node back.
+    function _worker_restart(notebook::String, host::String, port::Int)::String
+        if isempty(strip(notebook))
+            h = strip(host)
+            (isempty(h) || port <= 0) &&
+                return "Give a notebook (id or .jl path), or a host and port from " *
+                       "`worker(action=\"list\", host=…)`."
+            n, msg = NotebookServer.restart_worker!(_HUB[], h, port)
+            return (n > 0 ? "🔄 " : "✅ ") * msg
+        end
         nb, err = _nb(notebook); nb === nothing && return err
         NotebookServer.restart_kernel!(nb)
         return "🔄 restarting '$(nb.id)' — fresh worker, namespace cleared, cells re-running now. " *

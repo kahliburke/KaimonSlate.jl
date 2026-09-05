@@ -406,12 +406,18 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
       }
       // Why the cell can't run yet. Arrives and clears on its own schedule — a node is granted
       // minutes after the run that asked for it — so it patches in place rather than waiting for a
-      // header re-render.
-      const bkey = (c.state === 'blocked' ? c.blocked + '\x1f' + (c.blockedAt || 0) : '') || '';
-      if (head.dataset.blockkey !== bkey) {
-        head.dataset.blockkey = bkey;
-        const bslot = head.querySelector('.blockslot');
-        if (bslot) bslot.innerHTML = window._blockedPill(c);
+      // header re-render. The status rides ON the region chip, so patching it swaps that chip; a
+      // notebook with nothing else remote has no chip to swap until the wait creates one.
+      // Keyed off the CHIP, not the header: a header Preact just re-rendered already carries the
+      // right chip, and replacing it anyway would destroy the node under the pointer — the chip is
+      // clickable, and a node swapped between mousedown and mouseup eats the click.
+      const chip = head.querySelector('.cregion');
+      const bkey = window._blockedKey(c);
+      if ((chip ? chip.dataset.bkey || '' : '') !== bkey) {
+        const markup = window.cellRegionChip(c);
+        if (chip && markup) chip.outerHTML = markup;
+        else if (chip) chip.remove();
+        else if (markup) head.querySelector('.editchip').insertAdjacentHTML('afterend', markup);
       }
       // Interim stored-render badge: present during hydration (c.preview), cleared the moment a live
       // celldone (no preview flag) replaces the cell — patch the slot in place like the memo badge.
