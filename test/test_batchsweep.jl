@@ -1148,8 +1148,11 @@ end
         @test occursin("#PBS -l select=3:ncpus=2:mem=1024mb\n",
                        script((; nodes = 3, cpus = 2, mem_per_cpu = "512M")))
         @test !occursin("mem_per_cpu", script((; cpus = 4, mem_per_cpu = "2G")))
-        # A `nodelist` naming ONE host is where a PBS chunk goes; several would need a chunk each.
-        @test occursin("#PBS -l select=1:ncpus=1:mem=1gb:host=c1\n", script((; nodelist = "c1")))
+        # A `nodelist` naming ONE node is where a PBS chunk goes; several would need a chunk each.
+        # `vnode`, NOT `host`: the two differ unless a cluster names its vnodes after its machines,
+        # and `vnode` is the name `pbsnodes`/`exec_host` use — so it is the one the user has, and the
+        # one `find_allocation` reports back. `host=` matches nothing and the job queues forever.
+        @test occursin("#PBS -l select=1:ncpus=1:mem=1gb:vnode=c1\n", script((; nodelist = "c1")))
         for bad in ((; cpus = 4, mem = "8G", mem_per_cpu = "2G"),   # ambiguous, SLURM refuses too
                     (; nodelist = "c1,c2"))
             @test_throws ErrorException script(bad)

@@ -439,8 +439,13 @@ PbsLauncher(host = ""; account = "", qos = "",
 _ssh(l::PbsLauncher, script::AbstractString) = l.runner(l.host, String(script))
 
 # The settings that go INSIDE the chunk statement — what one node of the job must have.
+# `nodelist` is `vnode`, NOT `host`. They are different names and only coincide on a cluster whose
+# vnodes are named after their physical hosts: `host` is what the mom reports for the machine, while
+# `vnode` is the name `pbsnodes` lists and `exec_host` reports — so it is the one a user has, and the
+# one `find_allocation` hands back as the node. `host=` silently matches nothing and the job queues
+# forever with the node sitting idle.
 const _PBS_CHUNK = Dict(:cpus => "ncpus", :gpus => "ngpus", :mem => "mem",
-                        :ntasks_per_node => "mpiprocs", :nodelist => "host")
+                        :ntasks_per_node => "mpiprocs", :nodelist => "vnode")
 
 # Settings whose usual SLURM meaning has no PBS form. ADVISORY, not a block: the editor shows the
 # note, and the option is still forwarded as `-l key=value` like any other.
@@ -453,7 +458,7 @@ const _PBS_CHUNK = Dict(:cpus => "ncpus", :gpus => "ngpus", :mem => "mem",
 const _PBS_HINT = Dict(
     :constraint  => "usually a chunk resource on PBS — see `select=`",
     :gres        => "usually `gpus=` (a count), or `select=…:ngpus=2:gpu_model=v100`",
-    :exclude     => "PBS has no exclude list — pick a queue, or name hosts with `select=`",
+    :exclude     => "PBS has no exclude list — pick a queue, or name nodes with `select=…:vnode=`",
     :reservation => "a PBS reservation IS a queue — usually `partition=`",
     :ntasks      => "PBS counts per chunk — usually `nodes=` and `ntasks_per_node=`",
 )
@@ -543,13 +548,13 @@ function _pbs_chunk_mem(r, ncpus, defaults::Bool)
     return string(parse(Int, m.captures[1]) * Int(ncpus), m.captures[2], "b")
 end
 
-# `nodelist` maps only when it names ONE host: a PBS chunk is placed on a single host, so several
+# `nodelist` maps only when it names ONE node: a PBS chunk is placed on a single one, so several
 # would need one chunk each and there is no honest way to guess how the work should be split.
 function _pbs_host(v)
     s = strip(string(v))
     (occursin(',', s) || occursin('[', s)) &&
-        error("`nodelist=$s` names more than one host; a PBS chunk sits on one. Write the " *
-              "placement out with `select=` (`2:ncpus=4:host=c1+1:ncpus=4:host=c2`).")
+        error("`nodelist=$s` names more than one node; a PBS chunk sits on one. Write the " *
+              "placement out with `select=` (`1:ncpus=4:vnode=c1+1:ncpus=4:vnode=c2`).")
     return s
 end
 

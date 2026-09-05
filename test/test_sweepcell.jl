@@ -120,7 +120,7 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         # catalogue exists to prevent, in the other direction.
         @test by["constraint"].pbs == "" && by["gres"].pbs == "" && by["reservation"].pbs == ""
         # …but only where translation would be a guess. Anything mechanical is spelled, not refused.
-        @test by["mem_per_cpu"].pbs != "" && by["nodelist"].pbs == "select=…:host"
+        @test by["mem_per_cpu"].pbs != "" && by["nodelist"].pbs == "select=…:vnode"
         @test by["select"].pbs == "-l select"
 
         # The split the editor makes must be the split Julia makes, or a Slate setting is forwarded
