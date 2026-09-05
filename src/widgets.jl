@@ -1414,7 +1414,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     if isdefined(@__MODULE__, :Sweep)
         _sw = getfield(@__MODULE__, :Sweep)
         Core.eval(m, :(const Sweep = $_sw))
-        for nm in (:paramgrid, :SweepTarget, :LocalTarget, :SlurmTarget)
+        for nm in (:paramgrid, :SweepTarget, :LocalTarget, :ClusterTarget, :SlurmTarget, :PbsTarget)
             Core.eval(m, :(const $nm = $(getfield(_sw, nm))))
         end
         # A forwarding macro, not `using`: `@sweep` reads its caller's module to collect the body's

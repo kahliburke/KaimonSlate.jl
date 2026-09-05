@@ -58,6 +58,19 @@ const humBytes = b => b == null ? '—' :
   // heard of would be the same mistake as silently dropping it.
   let CATALOGUE = [];
   const catBy = k => CATALOGUE.find(o => o.key === k || o.flag === k);
+
+  // Which scheduler the cell's cluster runs, set when the panel renders. It decides how an option is
+  // SPELLED and whether it can be said at all — `constraint` is a real sbatch flag and nothing on
+  // PBS — but never what is stored: the key is the same either way, so re-pointing a cell at the
+  // other kind of cluster re-labels its options instead of losing them.
+  let KIND = 'slurm';
+  // On SLURM the box shows the sbatch flag, which is the vocabulary a SLURM user has in front of
+  // them. PBS has no equivalent vocabulary of flag names — its settings live inside `-l select=…` —
+  // so there the box shows Slate's own key and the PBS spelling goes in the hint.
+  const spellOf = o => (KIND === 'pbs' ? o.key : o.flag);
+  const availOf = o => (KIND === 'pbs' ? o.pbs !== '' : o.flag !== '');
+  const hintOf = o => !availOf(o) ? `no ${KIND} equivalent — ${o.hint}`
+                    : KIND === 'pbs' && o.pbs ? `${o.pbs} — ${o.hint}` : o.hint;
   async function loadCatalogue() {
     if (CATALOGUE.length) return;
     // Raw fetch: this list belongs to the MACHINE, not to a notebook, and `api()` would rewrite the
@@ -77,7 +90,11 @@ const humBytes = b => b == null ? '—' :
     const o = catBy(t) || catBy(t.replace(/-/g, '_'));
     return o ? o.key : t.replace(/-/g, '_');
   };
-  const toFlag = k => { const o = catBy(k); return o ? o.flag : String(k).replace(/_/g, '-'); };
+  const toFlag = k => {
+    const o = catBy(k);
+    if (!o) return KIND === 'pbs' ? String(k) : String(k).replace(/_/g, '-');
+    return spellOf(o);
+  };
 
   const esc = s => String(s).replace(/[&<>"]/g, ch =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
@@ -258,15 +275,19 @@ const humBytes = b => b == null ? '—' :
   function optRow(k = '', v = '', inherited = '') {
     const o = k ? catBy(k) : null;
     const shown = k ? toFlag(k) : '';
-    const unknown = k && !o;
-    return '<div class="swopt' + (unknown ? ' unknown' : '') + '">' +
+    // Warn on two different things with the same amber: a name nobody has heard of, and a name this
+    // scheduler cannot express. Both still submit — the scheduler rejects what it will not take, and
+    // it says so far better than a guess here would.
+    const bad = k && (!o || !availOf(o));
+    const hint = o ? hintOf(o) : (k ? 'unknown option' : '');
+    return '<div class="swopt' + (bad ? ' unknown' : '') + '">' +
       `<input class="swopt-k" autocomplete="off" spellcheck="false" placeholder="option" ` +
-        `value="${esc(shown)}" title="${esc(o ? o.hint : (unknown ? 'unknown option' : ''))}">` +
+        `value="${esc(shown)}" title="${esc(hint)}">` +
       `<input class="swopt-v" spellcheck="false" value="${esc(v)}" ` +
         `placeholder="${esc(inherited || 'value')}">` +
       '<button class="swopt-x" title="remove" tabindex="-1">✕</button>' +
       '<div class="swopt-menu" hidden></div>' +
-      `<span class="swopt-hint">${esc(o ? o.hint : (unknown ? 'unknown option' : ''))}</span>` +
+      `<span class="swopt-hint">${esc(hint)}</span>` +
       '</div>';
   }
 
@@ -282,7 +303,8 @@ const humBytes = b => b == null ? '—' :
     // still finds `cpus-per-task`.
     const pre = [], mid = [];
     for (const o of CATALOGUE) {
-      const f = o.flag.toLowerCase();
+      if (!availOf(o)) continue;                   // this scheduler cannot say it: do not offer it
+      const f = spellOf(o).toLowerCase().replace(/_/g, '-');
       if (f === t) continue;                       // already exact: nothing to suggest
       if (f.startsWith(t)) pre.push(o); else if (f.includes(t)) mid.push(o);
     }
@@ -294,9 +316,9 @@ const humBytes = b => b == null ? '—' :
     const ms = optMatches(inp.value);
     if (!ms.length) { menu.hidden = true; return; }
     menu.innerHTML = ms.map((o, i) =>
-      `<div class="swopt-mi${i === 0 ? ' on' : ''}" data-flag="${esc(o.flag)}">` +
-      `<span class="swopt-mn">${esc(o.flag)}</span>` +
-      `<span class="swopt-mh">${esc(o.hint)}</span></div>`).join('');
+      `<div class="swopt-mi${i === 0 ? ' on' : ''}" data-flag="${esc(spellOf(o))}">` +
+      `<span class="swopt-mn">${esc(spellOf(o))}</span>` +
+      `<span class="swopt-mh">${esc(hintOf(o))}</span></div>`).join('');
     menu.hidden = false;
     menu.querySelectorAll('.swopt-mi').forEach(mi => {
       // `mousedown`, not `click`: the input's blur would hide the menu before a click landed.
@@ -341,6 +363,7 @@ const humBytes = b => b == null ? '—' :
     const defs = clusters();
     const cur = spec.cluster || '';
     const sel = clusterByName(cur);
+    KIND = ((sel && sel.kind) || 'slurm').toLowerCase();
     // The cell names a target; several sweep cells share one, and moving the work is a single edit.
     // The per-cell fields below only override it.
     const picker =
@@ -399,6 +422,17 @@ const humBytes = b => b == null ? '—' :
       pop.querySelectorAll('input[data-k]').forEach(inp => {
         inp.placeholder = (c && c[inp.dataset.k]) ? c[inp.dataset.k] : 'inherit';
       });
+      // Pointing the cell at a cluster of the other kind RE-LABELS its options. The key never moves,
+      // only its spelling — so the keys are read while the old vocabulary is still in force.
+      const rows = [...pop.querySelectorAll('.swopt')];
+      const keys = rows.map(r => toKey(r.querySelector('.swopt-k').value));
+      KIND = ((c && c.kind) || 'slurm').toLowerCase();
+      rows.forEach((r, i) => {
+        if (!keys[i]) return;
+        const kf = r.querySelector('.swopt-k');
+        kf.value = toFlag(keys[i]);
+        kf.dispatchEvent(new Event('input'));
+      });
     };
     wireOptRows(pop, id, sel);
     pop.querySelectorAll('input').forEach(inp => {
@@ -415,9 +449,9 @@ const humBytes = b => b == null ? '—' :
     const refresh = row => {
       const kf = row.querySelector('.swopt-k'), vf = row.querySelector('.swopt-v');
       const k = toKey(kf.value), o = k ? catBy(k) : null;
-      row.classList.toggle('unknown', !!k && !o);
+      row.classList.toggle('unknown', !!k && (!o || !availOf(o)));
       const hint = row.querySelector('.swopt-hint');
-      hint.textContent = o ? o.hint : (k ? 'unknown option' : '');
+      hint.textContent = o ? hintOf(o) : (k ? 'unknown option' : '');
       kf.title = hint.textContent;
       vf.placeholder = (sel && sel[k]) ? sel[k] : 'value';
       // A count that is not a number is rejected by Julia at run time; say so here instead, where

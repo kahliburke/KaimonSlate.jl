@@ -675,18 +675,22 @@ See also `save_asset`, `FileUpload`."""),
         Pass a vector of NamedTuples instead for a parameter set that is not a product. Adding a point
         later changes only that point's key, so the results you already have are untouched."""),
 
-    SlateApiEntry("SlurmTarget", "Batch sweep",
-        "Where a sweep runs: a SLURM cluster (`SlurmTarget`) or this machine (`LocalTarget`).",
-        ["slurm", "cluster", "sbatch", "local", "target", "walltime", "partition", "resources"],
-        "SlurmTarget(host; root, root_remote, parent, payload, chunk, resources)  ·  LocalTarget(; root, parent, chunk)",
+    SlateApiEntry("ClusterTarget", "Batch sweep",
+        "Where a sweep runs: a cluster (`SlurmTarget`/`PbsTarget`) or this machine (`LocalTarget`).",
+        ["slurm", "pbs", "qsub", "cluster", "sbatch", "local", "target", "walltime", "partition",
+         "resources"],
+        "SlurmTarget(host; root, root_remote, parent, payload, chunk, resources)  ·  PbsTarget(host; …)  ·  LocalTarget(; root, parent, chunk)",
         """A target says where units execute and how the two sides see the shared store; the sweep
-        cell itself is identical either way. `root` is the store as the notebook sees it,
-        `root_remote` the same store from a compute node. `parent` is the project whose code the
-        units need — it is provisioned to a task environment once, over ssh/rsync for a cluster.
+        cell itself is identical either way. `SlurmTarget`/`PbsTarget` are `ClusterTarget` with the
+        scheduler chosen. `root` is the store as the notebook sees it, `root_remote` the same store
+        from a compute node. `parent` is the project whose code the units need — it is provisioned
+        to a task environment once, over ssh/rsync for a cluster.
         `chunk` sets how many units ride one scheduler job. `resources = (; cpus, mem, walltime,
         partition, account, qos)` and can be overridden per sweep with `resources =` on `@sweep`
         (deliberately NOT part of the sweep's key, so raising a walltime resumes rather than
-        discarding what already survived)."""),
+        discarding what already survived). Settings are passed through to the scheduler, so a name
+        Slate has never heard of still works; the few that one scheduler cannot express raise an
+        error naming the way to say it there (PBS's `select=` covers the rest)."""),
 
     SlateApiEntry("LocalTarget", "Batch sweep",
         "Run a sweep's units as processes on THIS machine — same cell, no cluster.",

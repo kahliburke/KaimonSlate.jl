@@ -380,11 +380,36 @@ end
         @test !Sweep.settled(Sweep.Allocation("nm", "7", :running, "c1", "1:00"))
         @test occursin("unreachable", sprint(show, un))
 
-        # PBS is detectable and configurable but cannot be allocated on by this build. Saying so is
-        # the point: issuing SLURM commands to a scheduler that has never heard of them would fail
-        # further from the cause, and silently running on the login node would be worse than either.
-        @test_throws ErrorException Sweep._unsupported_scheduler(:pbs)
-        @test occursin("SLURM only", try; Sweep._unsupported_scheduler(:pbs); catch e; e.msg; end)
+        # PBS names the node a job landed on with a cpu on each host rather than a compressed list,
+        # which is a different syntax and not a variant of SLURM's.
+        @test Sweep.pbs_first_node("c1/0*4") == "c1"            # one node, four cpus
+        @test Sweep.pbs_first_node("c1/0+c2/0") == "c1"         # two nodes
+        @test Sweep.pbs_first_node("c1/0*4+c2/0*4") == "c1"
+        @test Sweep.pbs_first_node("  c5/2  ") == "c5"
+        @test Sweep.pbs_first_node("") == ""                    # queued, no node yet
+
+        # A scheduler that is neither still fails loudly rather than being sent one of their
+        # command sets: issuing `squeue` to something that has never heard of it fails further from
+        # the cause, and silently running on the login node would be worse than either.
+        @test_throws ErrorException Sweep._unsupported_scheduler(:k8s)
+        @test occursin("SLURM and PBS",
+                       try; Sweep._unsupported_scheduler(:k8s); catch e; e.msg; end)
+    end
+
+    @testset "what is LEFT of an allocation" begin
+        # SLURM reports it (`squeue %L`); PBS does not, so it is the walltime asked for minus the
+        # walltime used — and both sides of that subtraction are scheduler times.
+        s = Sweep.sched_seconds
+        @test s("01:00:00") == 3600 && s("00:02:30") == 150
+        @test s("2-00:00:00") == 172800                         # SLURM's days form
+        @test s("10:00") == 600 && s("45") == 2700              # MM:SS, and a bare MM
+        @test s("UNLIMITED") == Inf && s("") == 3600            # unknown reads as an hour
+        @test Sweep.hms(3600) == "01:00:00" && Sweep.hms(90) == "00:01:30"
+        @test Sweep.hms(0) == "00:00:00" && Sweep.hms(Inf) == ""
+        @test Sweep._pbs_timeleft("01:00:00", "00:15:00") == "00:45:00"
+        @test Sweep._pbs_timeleft("01:00:00", "") == "01:00:00" # granted, nothing used yet
+        @test Sweep._pbs_timeleft("00:10:00", "00:20:00") == "00:00:00"   # never negative
+        @test Sweep._pbs_timeleft("", "") == ""                 # the job did not say
     end
 
     @testset "a sweep has an identity for what has landed" begin
@@ -1037,6 +1062,234 @@ end
         # the override to mean anything.
         @test findlast("--partition=bigmem", s)[1] > findlast("--partition=short", s)[1]
         @test findlast("--partition=bigmem", s)[1] < findfirst("set -euo pipefail", s)[1]
+
+        # Either prefix is accepted on INPUT, so moving a definition between a SLURM cluster and a
+        # PBS one does not mean re-typing the block — only the emitted prefix changes.
+        @test BL.directive_lines("#PBS -l scratch_local=10gb"; prefix = "#PBS") ==
+              ["#PBS -l scratch_local=10gb"]
+        @test BL.directive_lines("-A other"; prefix = "#PBS") == ["#PBS -A other"]
+    end
+
+    # PBS is not SLURM with different flag names. Per-node resources live INSIDE a chunk statement,
+    # there is no `--dependency=singleton`, and several settings cannot be said at all — each of
+    # which is a decision the emitter has to make rather than a translation it can perform.
+    @testset "a PBS job asks in PBS's own shape" begin
+        l = BL.PbsLauncher("login"; account = "site-acct")
+        spec(res; chunks = ["c1", "c2"], directives = "") =
+            BL.JobSpec("sw1", chunks; root = "/scratch/cas", project = "/proj",
+                       payload = "/proj/slatetask.jl", resources = res, directives = directives)
+        script(res; kw...) = BL._pbs_script(l, spec(res; kw...), "/scratch/cas/jobs/sw1.index")
+
+        # Sizes: SLURM writes `16G`, and PBS does not accept it. A size already in PBS's form, or in
+        # a site syntax this does not recognise, is passed through rather than corrected.
+        @test BL.pbs_size("16G") == "16gb" && BL.pbs_size("512M") == "512mb"
+        @test BL.pbs_size("16gb") == "16gb" && BL.pbs_size("2TB") == "2tb"
+        @test BL.pbs_size("1024") == "1024b"          # a bare number is bytes in PBS too
+        @test BL.pbs_size("16gw") == "16gw"           # words, which PBS has and SLURM does not
+
+        # Per-node resources go in the chunk; how many nodes is the chunk COUNT.
+        @test BL.pbs_select((; cpus = 8, mem = "16G")) == "1:ncpus=8:mem=16gb"
+        # Cores and memory lead; the rest follow in a fixed order, because two identical sweeps must
+        # produce identical scripts or the content-derived job name stops matching what was sent.
+        @test BL.pbs_select((; nodes = 2, cpus = 4, gpus = 1, ntasks_per_node = 2)) ==
+              "2:ncpus=4:mem=1gb:ngpus=1:mpiprocs=2"
+        # A cell that says nothing still states cores and memory — a job at the mercy of a site's
+        # defaults is the one whose limits kill it.
+        @test BL.pbs_select(NamedTuple()) == "1:ncpus=1:mem=1gb"
+        # …but an interactive ALLOCATION asks only for what was named, exactly as `salloc` does.
+        @test BL.pbs_select((; cpus = 4); defaults = false) == "1:ncpus=4"
+        @test BL.pbs_select(NamedTuple(); defaults = false) == "1"
+        # `select=` written out wins outright: one escape hatch answers every site chunk resource
+        # Slate has no name for, which is what the unmappable settings below point at.
+        @test BL.pbs_select((; cpus = 8, select = "3:ncpus=2:scratch_local=10gb")) ==
+              "3:ncpus=2:scratch_local=10gb"
+
+        s = script((; cpus = 8, mem = "16G", walltime = "04:00:00", partition = "gpu",
+                      gpus = 2, nodes = 1, ntasks_per_node = 2, exclusive = "yes"))
+        for want in ["#PBS -N sw1", "#PBS -j oe", "#PBS -J 1-2",
+                     "#PBS -l select=1:ncpus=8:mem=16gb:ngpus=2:mpiprocs=2",
+                     "#PBS -l walltime=04:00:00", "#PBS -q gpu", "#PBS -A site-acct",
+                     "#PBS -l place=excl"]
+            @test occursin(want * "\n", s)
+        end
+        # `-o` must name the FILE. Given a directory PBS names the output after the JOB ID, which is
+        # the one thing the fabric deliberately never keeps — so `logs`, which is asked for a NAME,
+        # found nothing at all. `^array_index^` is how an element gets its own file.
+        @test occursin("#PBS -o /scratch/cas/logs/sw1.^array_index^.out\n", s)
+        @test occursin("PBS_ARRAY_INDEX", s) && !occursin("SLURM", s)
+        @test occursin("#PBS -l place=exclhost\n", script((; exclusive = "exclhost")))
+        @test !occursin("place=", script((; exclusive = "no")))
+
+        # A one-element array is not an array — PBS rejects the degenerate range — so the index is
+        # read with a default and the same script serves both cases.
+        one = script((; cpus = 1); chunks = ["c1"])
+        @test !occursin("-J ", one) && occursin("\${PBS_ARRAY_INDEX:-1}", one)
+        # …and its log is named as though it were element 1, so one glob finds either.
+        @test occursin("#PBS -o /scratch/cas/logs/sw1.1.out\n", one)
+
+        # Anything Slate has not named becomes a job-wide resource, written AS TYPED: PBS resource
+        # names carry underscores, so sbatch's `_` → `-` would be wrong here.
+        @test occursin("#PBS -l min_walltime=00:10:00\n", script((; min_walltime = "00:10:00")))
+
+        # Two identical sweeps must produce identical scripts, or the content-derived job name stops
+        # matching what was submitted.
+        r = (; cpus = 4, gpus = 1, partition = "gpu", qos = "high", scratch_local = "10gb")
+        @test script(r) == script(r)
+
+        # Directives last, so they win — and they are `#PBS` here without the author re-typing them.
+        d = script((; partition = "short"); directives = "-q bigmem")
+        @test findlast("#PBS -q bigmem", d)[1] > findlast("#PBS -q short", d)[1]
+        @test findlast("#PBS -q bigmem", d)[1] < findfirst("set -euo pipefail", d)[1]
+
+        # Anything MECHANICAL is translated rather than refused, so a cell states what the work
+        # needs once and each scheduler is asked in its own words. PBS has no per-CPU memory, but a
+        # chunk holds exactly `ncpus` cpus, so the multiplication is arithmetic and not a guess.
+        @test occursin("#PBS -l select=1:ncpus=4:mem=8gb\n", script((; cpus = 4, mem_per_cpu = "2G")))
+        @test occursin("#PBS -l select=3:ncpus=2:mem=1024mb\n",
+                       script((; nodes = 3, cpus = 2, mem_per_cpu = "512M")))
+        @test !occursin("mem_per_cpu", script((; cpus = 4, mem_per_cpu = "2G")))
+        # A `nodelist` naming ONE host is where a PBS chunk goes; several would need a chunk each.
+        @test occursin("#PBS -l select=1:ncpus=1:mem=1gb:host=c1\n", script((; nodelist = "c1")))
+        for bad in ((; cpus = 4, mem = "8G", mem_per_cpu = "2G"),   # ambiguous, SLURM refuses too
+                    (; nodelist = "c1,c2"))
+            @test_throws ErrorException script(bad)
+        end
+
+        # A setting whose usual SLURM meaning has no PBS form is FORWARDED, with a warning — not
+        # refused. PBS lets a site define arbitrary resources, so a name that means one thing on
+        # SLURM may be a real resource here, and blocking it because SLURM uses the word would
+        # refuse work that would have run. A site without it gets `Unknown resource` from `qsub`,
+        # which is the loud rejection the pass-through rule asks for.
+        hinted = [(:constraint, "avx512"), (:gres, "gpu:v100:2"), (:exclude, "c7"),
+                  (:reservation, "maint"), (:ntasks, 4)]
+        @test isempty([k for (k, v) in hinted
+                       if !occursin("#PBS -l $(k)=$(v)\n", script(NamedTuple{(k,)}((v,))))])
+        # …and symmetrically, `select=` reaches sbatch, which rejects it.
+        @test occursin("#SBATCH --select=1:ncpus=2\n",
+                       BL._sbatch_script(BL.SlurmLauncher("login"),
+                                         BL.JobSpec("sw1", ["c1"]; root = "/r", project = "/p",
+                                                    payload = "/p/t.jl",
+                                                    resources = (; select = "1:ncpus=2")),
+                                         "/r/jobs/sw1.index"))
+        # The advice lives in the catalogue instead, where the editor shows it before submit.
+        @test BL.pbs_flag(:constraint) == "" && occursin("select=", BL._PBS_HINT[:constraint])
+        @test BL.pbs_flag(:cpus) == "select=…:ncpus" && BL.pbs_flag(:walltime) == "-l walltime"
+    end
+
+    # The half of a launcher a unit test can actually reach: `qstat -f` has no output format of its
+    # own, so what Slate knows about a job comes out of an awk script — and an awk script that is
+    # never run is a guess. `PbsLauncher("")` runs its commands through a local shell, so a fake
+    # scheduler on PATH exercises the parsing for real.
+    @testset "PBS state comes out of qstat -f" begin
+        mktempdir() do bin
+            state = joinpath(bin, "queue")
+            write(state, """
+                Job Id: 12.pbsserver
+                    Job_Name = sw1_c1
+                    Job_Owner = slate@login
+                    job_state = R
+                    queue = compute
+                    Resource_List.select = 1:ncpus=1:mem=1gb
+                    Resource_List.walltime = 00:30:00
+                    resources_used.walltime = 00:00:07
+                    exec_host = c1/0*2
+
+                Job Id: 13.pbsserver
+                    Job_Name = sw1_c2
+                    job_state = Q
+                    queue = compute
+                    Resource_List.walltime = 00:30:00
+
+                Job Id: 14.pbsserver
+                    Job_Name = slate-gpu
+                    job_state = R
+                    queue = gpu
+                    Resource_List.walltime = 02:00:00
+                    resources_used.walltime = 00:20:00
+                    exec_host = c2/0*4+c1/0
+
+                Job Id: 15.pbsserver
+                    Job_Name = sw1_c9
+                    job_state = F
+                    queue = compute
+                """)
+            # The fakes reproduce two behaviours that a permissive stand-in would hide, and both are
+            # things the real scheduler does: `qstat` takes ids rather than a user, and `-u`
+            # SILENTLY OVERRIDES `-f` — printing the short table, which has no Job_Name column at
+            # all. Asking `qstat -f -u $USER` therefore parses as "no jobs anywhere", which reads as
+            # a sweep that never started. Verified against OpenPBS 23.06.
+            for (nm, body) in (
+                "qstat"   => """
+                    full=0; byuser=0; ids=""
+                    for a in "\$@"; do
+                      case "\$a" in
+                        -f) full=1 ;;
+                        -u) byuser=1 ;;
+                        -*) ;;
+                        *)  ids="\$ids \$a" ;;
+                      esac
+                    done
+                    if [ "\$byuser" = 1 ]; then
+                      echo "Job ID  Username Queue    Jobname   SessID NDS TSK Memory Time S Time"
+                      exit 0
+                    fi
+                    [ "\$full" = 1 ] || exit 0
+                    awk -v want="\$ids" '
+                      BEGIN { n = split(want, a, " "); for (i = 1; i <= n; i++) keep[a[i]] = 1 }
+                      /^Job Id:/ { id = substr(\$0, 9); sub(/[ \\t\\r]+\$/, "", id)
+                                   p = (want == "" || (id in keep)) }
+                      p { print }' "$(state)"
+                    exit 0""",
+                # `qselect -N <name>`: the ids of the jobs under that name, which is the step `qdel`
+                # needs and SLURM's `scancel --name` does not. With no `-N`, every id. LIVE jobs
+                # only, which is what makes it usable as the "was there anything to cancel" answer.
+                "qselect" => """
+                    n=""
+                    while [ \$# -gt 0 ]; do
+                      [ "\$1" = "-N" ] && { shift; n="\$1"; }
+                      shift
+                    done
+                    awk -v want="\$n" '
+                      function out() {
+                        if (id != "" && (want == "" || n == want) && s != "F" && s != "X") print id
+                        id = ""; n = ""; s = ""
+                      }
+                      /^Job Id:/      { out(); id = substr(\$0, 9); sub(/[ \\t\\r]+\$/, "", id) }
+                      /Job_Name = /   { n = \$3 }
+                      /job_state = /  { s = \$3 }
+                      END             { out() }' "$(state)"
+                    exit 0""",
+                "qdel"    => ": > \"$(state)\"\nexit 0")
+                p = joinpath(bin, nm)
+                write(p, "#!/bin/sh\n" * body * "\n")
+                chmod(p, 0o755)
+            end
+            withenv("PATH" => bin * ":" * ENV["PATH"]) do
+                l = BL.PbsLauncher()          # no host: the client tools are on THIS machine
+                st = BL.poll(l, "/scratch/cas", ["sw1_c1", "sw1_c2", "sw1_c9", "sw1_nope"])
+                @test st["sw1_c1"] === :running
+                @test st["sw1_c2"] === :pending
+                # `F` is a job the scheduler no longer holds. Deliberately NOT "finished": only the
+                # store can say that, because a job can die without producing anything.
+                @test st["sw1_c9"] === :unknown
+                @test st["sw1_nope"] === :unknown          # never submitted, or long gone
+                @test BL.poll(l, "/scratch/cas", String[]) == Dict{String,Symbol}()
+
+                # An allocation is found by NAME through the same output, and what is LEFT of it is
+                # the walltime asked for minus the walltime used — PBS reports no `%L`.
+                a = Sweep.find_allocation(:pbs, "", "slate-gpu")
+                @test Sweep.alive(a) && a.id == "14.pbsserver" && a.node == "c2"
+                @test a.timeleft == "01:40:00"
+                @test Sweep.find_allocation(:pbs, "", "sw1_c2").state === :pending
+                @test Sweep.find_allocation(:pbs, "", "sw1_c9").state === :none
+                @test Sweep.find_allocation(:pbs, "", "nothing-here").state === :none
+
+                # Cancelling resolves names to ids first, and counts what actually LEFT the queue
+                # rather than trusting an exit status.
+                @test BL.cancel!(l, "/scratch/cas", ["sw1_c1", "sw1_c9"]) == 1
+                @test BL.cancel!(l, "/scratch/cas", ["sw1_c1"]) == 0     # nothing live left to stop
+            end
+        end
     end
 
     @testset "a sweep cell resolves its cluster by name" begin
@@ -1103,9 +1356,21 @@ end
             # An unsupported scheduler is an error naming what this build does support, not a
             # silent fall-through to SLURM.
             e4 = try
-                Sweep.cluster_args(Dict("name" => "k", "kind" => "pbs", "root" => root))
+                Sweep.cluster_args(Dict("name" => "k", "kind" => "k8s", "root" => root))
             catch x; x; end
-            @test occursin("kind `pbs`", sprint(showerror, e4))
+            @test occursin("kind `k8s`", sprint(showerror, e4))
+
+            # A PBS cluster is the same definition with one word changed. Which scheduler is a
+            # property of the cluster, so nothing in the cell moves and only the launcher differs.
+            pbs = Sweep.cluster(Dict("name" => "hpc2", "kind" => "pbs", "host" => "login",
+                                     "root_remote" => "/scratch/cas", "project" => tempdir(),
+                                     "partition" => "compute", "walltime" => "02:00:00"))
+            @test pbs isa Sweep.ClusterTarget && pbs.kind === :pbs
+            @test Sweep.launcher_for(pbs) isa Sweep.BatchLauncher.PbsLauncher
+            @test Sweep.launcher_for(Sweep.SlurmTarget("login"; root_remote = "/s")) isa
+                  Sweep.BatchLauncher.SlurmLauncher
+            @test Sweep.PbsTarget("login"; root_remote = "/s").kind === :pbs
+            @test occursin("pbs", Sweep._target_line(Sweep.PbsTarget(; root = root)))
         end
     end
 

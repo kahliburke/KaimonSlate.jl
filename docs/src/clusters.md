@@ -29,7 +29,7 @@ cell submits to:
 | Field | What it is |
 | --- | --- |
 | **Name** | what a cell writes as `cluster=…`. A plain identifier — it goes in a cell header. |
-| **Kind** | `slurm`, or `local` to run the same units as processes here with no scheduler. |
+| **Kind** | `slurm`, `pbs`, or `local` to run the same units as processes here with no scheduler. |
 | **Login host** | the ssh host you submit from. Slate asks it what scheduler it has and offers the queues it reports. |
 | **Store** | a path **on the cluster**. Put it on scratch: `$HOME` is a few tens of GB and is not built for parallel writes. |
 | **Partition / walltime / cpus / mem** | what each job asks for. A cell may override any of them. |
@@ -148,9 +148,37 @@ a cluster it has no mount on. So:
 Which is why the last step is unremarkable: a batch result and a value from an interactive worker are
 both just values in the notebook's namespace, and combining them is ordinary Julia.
 
+## SLURM and PBS
+
+A target's **Kind** picks the scheduler, and it is the only thing about a cluster that changes:
+sweeping, regions, provisioning, the store and the notebook itself are identical either way.
+
+The settings are not a renaming exercise, though, and Slate does not pretend they are:
+
+* **PBS asks for per-node resources inside a chunk statement.** `cpus`, `mem`, `gpus` and
+  `ntasks_per_node` become `-l select=N:ncpus=…:mem=…:ngpus=…:mpiprocs=…`, and `nodes` is the chunk
+  count. Sizes are rewritten to PBS's spelling on the way (`16G` → `16gb`).
+* **`select=` is the escape hatch.** Write the chunk statement yourself and it wins outright — which
+  is how a site resource Slate has no name for (`scratch_local`, a node feature, a specific host)
+  gets asked for. Job-wide options go in the definition's **directives**, verbatim, as `#PBS` lines.
+* **A setting one scheduler cannot express is an error, never a silent drop.** `constraint`, `gres`,
+  `nodelist`, `exclude`, `reservation`, `mem_per_cpu` and `ntasks` have no PBS equivalent, and
+  `select` has no SLURM one. Each says so and names the way to ask for the same thing there. The
+  cell editor greys them out for the cluster the cell points at, and relabels the rest.
+* **Anything Slate has never heard of still works.** On SLURM a setting becomes `--key=value` with
+  `_` → `-`; on PBS it becomes `-l key=value` as written, because PBS resource names carry
+  underscores.
+
+Two differences are worth knowing about because they are visible:
+
+* **A PBS job's log appears when the job ends.** PBS spools stdout on the execution node and copies
+  it back at exit, where SLURM writes it live. Per-unit progress comes from the store either way, so
+  this only affects reading the raw log of something still running.
+* **A compute node is reached by ssh from the login node.** SLURM has `srun --overlap`, which joins
+  a running allocation without logging in again; PBS has nothing equivalent, so it uses the hop
+  every PBS site already relies on. The hub still authenticates once — that ssh is issued *on* the
+  login node's session — but the site has to permit it, which is the usual configuration.
+
 ## What is not here yet
 
-* **PBS.** Detection works and a region can be configured for it, but neither the batch launcher nor
-  the allocation commands are implemented — Slate says so rather than issuing SLURM commands to a
-  scheduler that has never heard of them.
 * **Kubernetes.** Named as a target the design must not need a rewrite for, not as a thing that runs.

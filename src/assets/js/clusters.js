@@ -161,11 +161,10 @@ export function Clusters() {
       <div class="rpprow"><label>Kind</label>
         <select class="rpptr" value=${kKind.value} onChange=${ev => kKind.value = ev.target.value}>
           <option value="slurm">slurm</option>
-          <option value="pbs">pbs — regions only</option>
+          <option value="pbs">pbs</option>
           <option value="local">local — no scheduler</option>
         </select>
-        ${isLocal ? html`<span class="pddim">runs here, no scheduler</span>` : null}
-        ${kKind.value === 'pbs' ? html`<span class="pddim" style="color:#d9a441">no PBS batch launcher yet</span>` : null}</div>
+        ${isLocal ? html`<span class="pddim">runs here, no scheduler</span>` : null}</div>
       ${isLocal ? html`
         <div class="rpprow"><label>Store</label>
           <input class="rpproot" autocomplete="off" spellcheck="false" placeholder="/path/to/store  (on THIS machine)" value=${kRoot.value} onInput=${ev => kRoot.value = ev.target.value}/></div>`
@@ -182,7 +181,7 @@ export function Clusters() {
         <div class="rpprow"><label>Per job</label>
           <input class="rppport" autocomplete="off" spellcheck="false" placeholder="walltime" title="e.g. 01:00:00" value=${kWalltime.value} onInput=${ev => kWalltime.value = ev.target.value}/>
           <input class="rppn" type="text" inputmode="numeric" autocomplete="off" placeholder="cpus" value=${kCpus.value} onInput=${ev => kCpus.value = ev.target.value}/>
-          <input class="rppn" autocomplete="off" spellcheck="false" placeholder="mem" title="e.g. 8G" value=${kMem.value} onInput=${ev => kMem.value = ev.target.value}/>
+          <input class="rppn" autocomplete="off" spellcheck="false" placeholder="mem" title=${kKind.value === 'pbs' ? 'e.g. 8gb' : 'e.g. 8G'} value=${kMem.value} onInput=${ev => kMem.value = ev.target.value}/>
           <span class="pddim">a cell can override these</span></div>
         <div class="rpprow"><label>Project</label>
           <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="/path/to/project  (folder with Project.toml, on the cluster)" value=${kProject.value} onInput=${ev => kProject.value = ev.target.value}/></div>`}

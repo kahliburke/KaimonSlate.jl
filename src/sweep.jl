@@ -58,7 +58,7 @@ const BatchSweep = P.BatchSweep
 # shadows whatever the author's own packages export — silently, because a definition beats a
 # `using`. Everything a sweep can be ASKED is a property of the result (`r.state`, `r.results`,
 # `r.eta`), and everything it can be TOLD is a qualified call (`Sweep.cancel!(r)`).
-export paramgrid, @sweep, SweepTarget, LocalTarget, SlurmTarget
+export paramgrid, @sweep, SweepTarget, LocalTarget, ClusterTarget, SlurmTarget, PbsTarget
 
 # ── Parameter space ──────────────────────────────────────────────────────────────────────────
 
@@ -261,16 +261,22 @@ function LocalTarget(; root = joinpath(homedir(), ".cache", "kaimonslate", "swee
 end
 
 """
-    SlurmTarget(host; root, root_remote, project, payload, resources, chunk)
+    ClusterTarget(host; kind, root, root_remote, project, payload, resources, chunk)
 
-Submit shards to SLURM through `host` (a login node in `~/.ssh/config`; `""` runs the client tools
-locally, which is the case when Slate itself runs on a login node).
+Submit shards to a batch scheduler through `host` (a login node in `~/.ssh/config`; `""` runs the
+client tools locally, which is the case when Slate itself runs on a login node). `SlurmTarget` and
+`PbsTarget` are this with `kind` already chosen.
 
 `root` is the store as the HUB sees it and `root_remote` as a COMPUTE NODE sees it. They are the
 same store; on a real cluster they are the same path, and they differ only when something is
 mounted differently on the two sides.
+
+Which scheduler is a property of the CLUSTER, not of a second kind of target: everything below —
+the store, provisioning, the environment key, how a sweep is planned — is identical either way, and
+only `launcher_for` differs. A second struct would have duplicated twenty methods to change one.
 """
-struct SlurmTarget <: SweepTarget
+struct ClusterTarget <: SweepTarget
+    kind::Symbol        # :slurm | :pbs — which scheduler's client tools `host` has
     host::String
     root::String
     root_remote::String
@@ -291,16 +297,21 @@ end
 # A target DESCRIBES a cluster; it does not reach one. `parent` and an empty `project`/`payload` mean
 # "build the environment and ship the runner when there is a job to submit" — see `provision!`. Pass
 # `project` to point at an environment the site already manages, in which case nothing is shipped.
-function SlurmTarget(host = ""; root = "", root_remote = root, payload = "",
-                     parent = "", project = nothing,
-                     resources = (; cpus = 1, mem = "2G", walltime = "01:00:00", partition = ""),
-                     chunk = 16, account = "", qos = "", prologue = "", directives = "",
-                     julia = "julia")
-    SlurmTarget(String(host), String(root), String(root_remote),
-                project === nothing ? "" : String(project), String(payload),
-                resources, Int(chunk), String(account), String(qos), String(prologue),
-                String(directives), String(parent), String(julia))
+function ClusterTarget(host = ""; kind = :slurm, root = "", root_remote = root, payload = "",
+                       parent = "", project = nothing,
+                       resources = (; cpus = 1, mem = "2G", walltime = "01:00:00", partition = ""),
+                       chunk = 16, account = "", qos = "", prologue = "", directives = "",
+                       julia = "julia")
+    ClusterTarget(Symbol(kind), String(host), String(root), String(root_remote),
+                  project === nothing ? "" : String(project), String(payload),
+                  resources, Int(chunk), String(account), String(qos), String(prologue),
+                  String(directives), String(parent), String(julia))
 end
+
+"A `ClusterTarget` on SLURM. The spelling notebooks and the docs use."
+SlurmTarget(host = ""; kw...) = ClusterTarget(host; kind = :slurm, kw...)
+"A `ClusterTarget` on PBS."
+PbsTarget(host = ""; kw...) = ClusterTarget(host; kind = :pbs, kw...)
 
 """
     provision!(t) -> t
@@ -313,26 +324,26 @@ minutes on a cold cluster, and an authenticated connection either way. Reconcili
 its card and opening the notebook it lives in all have to work without any of that.
 """
 provision!(t::LocalTarget) = t
-function provision!(t::SlurmTarget)
+function provision!(t::ClusterTarget)
     proj = isempty(t.project) ?
         provision_remote_env!(t.host, t.root_remote, t.parent;
                               julia = t.julia, prologue = t.prologue) : t.project
     # The runner is Slate's own code and its location on the cluster is Slate's business, so it is
     # shipped rather than configured. Naming one is still allowed, for a site that stages it itself.
     pay = isempty(t.payload) ? provision_payload!(t.host, t.root_remote) : t.payload
-    return SlurmTarget(t.host, t.root, t.root_remote, proj, pay, t.resources, t.chunk,
-                       t.account, t.qos, t.prologue, t.directives, t.parent, t.julia)
+    return ClusterTarget(t.kind, t.host, t.root, t.root_remote, proj, pay, t.resources, t.chunk,
+                         t.account, t.qos, t.prologue, t.directives, t.parent, t.julia)
 end
 
 # Resources belong to the TARGET (a site's account, its partitions) but walltime, memory and cores
 # are properties of the WORK, and vary sweep to sweep against the same cluster. So a sweep can
 # override them without defining a second target.
 with_resources(t::LocalTarget, res) = t          # nothing to schedule locally
-with_resources(t::SlurmTarget, res) =
+with_resources(t::ClusterTarget, res) =
     res === nothing ? t :
-    SlurmTarget(t.host, t.root, t.root_remote, t.project, t.payload,
-                merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue, t.directives,
-                t.parent, t.julia)
+    ClusterTarget(t.kind, t.host, t.root, t.root_remote, t.project, t.payload,
+                  merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue, t.directives,
+                  t.parent, t.julia)
 
 # The scheduler settings a `#%% sweep` cell may carry on its header (engine.jl `cell_attrs`), e.g.
 #
@@ -358,7 +369,8 @@ with_resources(t::SlurmTarget, res) =
 # the catalogue the cell's editor autocompletes against and warns outside of.
 const _ATTR_RESOURCES = (:cpus, :mem, :mem_per_cpu, :walltime, :partition, :account, :qos,
                          :gpus, :gres, :nodes, :ntasks, :ntasks_per_node,
-                         :constraint, :exclusive, :reservation, :nodelist, :exclude, :tmp)
+                         :constraint, :exclusive, :reservation, :nodelist, :exclude, :tmp,
+                         :select)
 
 # Which of those are counts rather than scheduler strings. Everything else passes through as
 # WRITTEN: inventing a duration or size syntax here would only stand between the author and the
@@ -395,13 +407,19 @@ const _ATTR_HELP = Dict(
     :nodelist        => "run only on these nodes",
     :exclude         => "never run on these nodes",
     :tmp             => "local scratch required per node",
+    :select          => "PBS only: the chunk statement verbatim, e.g. 2:ncpus=8:mem=16gb",
 )
 
 """
     sched_options() -> Vector{NamedTuple}
 
-The scheduler options Slate knows about: `(; key, flag, hint, count)` — the header spelling, the
-sbatch spelling, what it does, and whether it must be a number.
+The scheduler options Slate knows about: `(; key, flag, pbs, hint, count)` — the header spelling,
+how each scheduler spells it, what it does, and whether it must be a number.
+
+BOTH spellings, in one list, because the editor is opened before it knows which cluster the cell
+names and because typing either spelling has to land on the same stored key — two catalogues would
+be two chances for that to drift. An empty spelling means that scheduler has no way to say it, which
+the editor shows rather than suggesting a setting whose only effect would be a rejected job.
 
 A CATALOGUE, not a permitted set. The cell editor suggests these and warns outside them, but any
 name is accepted and forwarded (`is_sched_attr`): a scheduler has far more options than are worth
@@ -409,6 +427,7 @@ naming, sites add their own, and a setting that is quietly dropped is worse than
 suggested. Served to the front end so the two lists cannot drift.
 """
 sched_options() = [(; key = String(k), flag = BatchLauncher.sbatch_flag(k),
+                      pbs = BatchLauncher.pbs_flag(k),
                       hint = get(_ATTR_HELP, k, ""), count = k in _ATTR_COUNTS)
                    for k in _ATTR_RESOURCES]
 
@@ -430,8 +449,8 @@ sweep cell names one with `cluster=`; call it directly only to inspect what a de
 function cluster(spec::AbstractDict)
     a = cluster_args(spec)
     a.kind == "local" && return LocalTarget(; a.root, a.parent, a.chunk)
-    return SlurmTarget(a.host; a.root, a.root_remote, a.parent, a.payload, a.chunk,
-                       a.account, a.qos, a.prologue, a.directives, a.resources)
+    return ClusterTarget(a.host; kind = Symbol(a.kind), a.root, a.root_remote, a.parent, a.payload,
+                         a.chunk, a.account, a.qos, a.prologue, a.directives, a.resources)
 end
 
 """
@@ -444,9 +463,9 @@ function cluster_args(spec::AbstractDict)
     get_(k, d = "") = String(get(spec, k, d))
     kind = lowercase(get_("kind", "slurm"))
     name = get_("name", "cluster")
-    kind in ("slurm", "local") ||
-        error("cluster `$name` has kind `$kind`; this build supports `slurm` and `local`. " *
-              "PBS and Kubernetes are separate backends, not options here.")
+    kind in ("slurm", "pbs", "local") ||
+        error("cluster `$name` has kind `$kind`; this build supports `slurm`, `pbs` and `local`. " *
+              "Kubernetes is a separate backend, not an option here.")
     root = get_("root")
     host = get_("host")
     root_remote = get_("root_remote")
@@ -577,33 +596,38 @@ end
 
 with_chunk(t::LocalTarget, n) = n === nothing ? t :
     LocalTarget(t.root, t.project, t.payload, n)
-with_chunk(t::SlurmTarget, n) = n === nothing ? t :
-    SlurmTarget(t.host, t.root, t.root_remote, t.project, t.payload,
-                t.resources, n, t.account, t.qos, t.prologue, t.directives, t.parent, t.julia)
+with_chunk(t::ClusterTarget, n) = n === nothing ? t :
+    ClusterTarget(t.kind, t.host, t.root, t.root_remote, t.project, t.payload,
+                  t.resources, n, t.account, t.qos, t.prologue, t.directives, t.parent, t.julia)
 
 "The host a target authenticates to; empty for one that runs here."
 target_host(::LocalTarget) = ""
-target_host(t::SlurmTarget) = t.host
+target_host(t::ClusterTarget) = t.host
 
 store_root(t::LocalTarget) = t.root
 # The hub plans against the MIRROR for a remote cluster — a local directory holding a copy of the
 # store's metadata. `root_remote` stays the job's view and never changes.
-store_root(t::SlurmTarget) = plan_root(t)
+store_root(t::ClusterTarget) = plan_root(t)
 chunk_size(t::LocalTarget) = t.chunk
-chunk_size(t::SlurmTarget) = t.chunk
+chunk_size(t::ClusterTarget) = t.chunk
 
 launcher_for(::LocalTarget) = BatchLauncher.ExecLauncher()
-# `sbatch`/`squeue`/`scancel` run through the host's session, like everything else — the launcher is
-# handed the runner rather than building its own ssh command.
-launcher_for(t::SlurmTarget) = BatchLauncher.SlurmLauncher(t.host; account = t.account, qos = t.qos,
-                                                           runner = (h, sc) -> run_there(h, sc))
+# The client tools run through the host's session, like everything else — the launcher is handed the
+# runner rather than building its own ssh command. This is the ONE place a target's scheduler is
+# consulted, which is what makes a third one a new `Launcher` and nothing else.
+function launcher_for(t::ClusterTarget)
+    ctor = t.kind === :slurm ? BatchLauncher.SlurmLauncher :
+           t.kind === :pbs   ? BatchLauncher.PbsLauncher :
+           error("cluster: no launcher for scheduler `$(t.kind)`")
+    return ctor(t.host; account = t.account, qos = t.qos, runner = (h, sc) -> run_there(h, sc))
+end
 
 specfn_for(t::LocalTarget) = (name, cs) -> BatchLauncher.JobSpec(name, cs;
     root = t.root, project = t.project, payload = t.payload)
 # `reconcile!` calls this only when it has a job to submit, so provisioning here is what keeps it off
 # the path that merely reads the store. Once per reconcile, not once per job.
-function specfn_for(t::SlurmTarget)
-    ready = Ref{Union{Nothing,SlurmTarget}}(nothing)
+function specfn_for(t::ClusterTarget)
+    ready = Ref{Union{Nothing,ClusterTarget}}(nothing)
     return (name, cs) -> begin
         p = ready[] === nothing ? (ready[] = provision!(t)) : ready[]
         BatchLauncher.JobSpec(name, cs; root = p.root_remote, project = p.project,
@@ -641,7 +665,7 @@ end
 env_key(target::SweepTarget) = basename(rstrip(String(target.project), '/'))
 # For a cluster the environment has usually not been built yet — and must not be, to answer this. So
 # compute the name `provision_remote_env!` WILL give it, from the parent's fingerprint, here.
-function env_key(t::SlurmTarget)
+function env_key(t::ClusterTarget)
     isempty(t.project) || return basename(rstrip(t.project, '/'))
     isempty(t.parent) && return "env"
     return first(env_source_fingerprint(t.parent), 12)
@@ -1145,10 +1169,10 @@ struct SshSource
 end
 
 source_of(t::LocalTarget) = LocalSource(t.root)
-# A SlurmTarget with no host runs its client tools here, so its store is here too. With a host the
+# A ClusterTarget with no host runs its client tools here, so its store is here too. With a host the
 # blobs are THERE, and reading them means byte ranges over ssh — `root_remote`, the path the host
 # uses, not the mirror the hub plans against.
-source_of(t::SlurmTarget) =
+source_of(t::ClusterTarget) =
     isempty(t.host) ? LocalSource(t.root) : SshSource(t.host, t.root_remote)
 
 # ── The store the hub plans against ──────────────────────────────────────────────────────────
@@ -1161,7 +1185,7 @@ source_of(t::SlurmTarget) =
 const _STORES = Dict{Tuple{String,String},RemoteStore}()
 const _STORES_LOCK = ReentrantLock()
 
-function remote_store(t::SlurmTarget)
+function remote_store(t::ClusterTarget)
     lock(_STORES_LOCK) do
         get!(_STORES, (t.host, t.root_remote)) do
             s = RemoteStore(t.host, t.root_remote)
@@ -1173,11 +1197,11 @@ end
 
 "Where this hub reads and writes store METADATA. Local for a local target; the mirror for a cluster."
 plan_root(t::LocalTarget) = t.root
-plan_root(t::SlurmTarget) = isempty(t.host) ? t.root : remote_store(t).mirror
+plan_root(t::ClusterTarget) = isempty(t.host) ? t.root : remote_store(t).mirror
 
 "Refresh the hub's view of a store before planning against it. No-op when the store is local."
 sync_in!(::LocalTarget) = true
-sync_in!(t::SlurmTarget) = isempty(t.host) ? true : pull_meta!(remote_store(t))
+sync_in!(t::ClusterTarget) = isempty(t.host) ? true : pull_meta!(remote_store(t))
 
 # Reconcile, and send back what it wrote IF it submitted. `jobs/` is hub-owned — the submission
 # index and the attempt counts — and the store has to end up holding it: a fresh hub reads it to
@@ -1200,7 +1224,7 @@ end
 "Send what the hub has written — descriptors, their blobs, markers — to the store. `dirs` narrows
 it to part of that, for the callers that have just touched one thing."
 sync_out!(::LocalTarget; dirs = nothing) = true
-sync_out!(t::SlurmTarget; dirs = nothing) =
+sync_out!(t::ClusterTarget; dirs = nothing) =
     isempty(t.host) ? true :
     (dirs === nothing ? push_meta!(remote_store(t)) : push_meta!(remote_store(t); dirs))
 
@@ -1215,7 +1239,7 @@ function forget_results!(t::SweepTarget, keys)
     root = store_root(t)
     n = 0
     for k in keys; MemoStore.drop_manifest(root, k) && (n += 1); end
-    t isa SlurmTarget && !isempty(t.host) &&
+    t isa ClusterTarget && !isempty(t.host) &&
         forget!(remote_store(t), ["manifests/" * String(k) * ".toml" for k in keys])
     return n
 end
@@ -2293,8 +2317,11 @@ end
 # Where this sweep runs and under what limits. Shown on the card because the settings are half of
 # what you need in order to read a stalled or killed run: "3 of 4, gave up" means one thing at a
 # 20-second walltime and another at two hours.
-function _target_line(t::SlurmTarget)
-    bits = String[isempty(t.host) ? "slurm" : t.host]
+function _target_line(t::ClusterTarget)
+    # The scheduler leads, then where it is. Which scheduler ran the work is worth reading off the
+    # card: the resources beside it mean different things on each, and the same notebook can point
+    # at either. Matches the cluster summary the cell's ⚙ shows.
+    bits = String[isempty(t.host) ? String(t.kind) : string(t.kind, " · ", t.host)]
     r = t.resources
     for (k, fmt) in ((:partition, identity), (:cpus, v -> "$(v) cpu"), (:gpus, v -> "$(v) gpu"),
                      (:mem, identity), (:walltime, identity), (:nodes, v -> "$(v) nodes"))

@@ -1308,7 +1308,8 @@ function _make_router(h::Hub)
     # Machine-wide, so deliberately NOT `/api/sweep-options`: the page's `api()` helper rewrites any
     # `/api/…` into `/api/<notebook>/…`, and the two would collide on the per-cell route below.
     HTTP.register!(router, "GET", "/api/sched-options", _ -> _json(Dict("options" =>
-        [Dict("key" => o.key, "flag" => o.flag, "hint" => o.hint, "count" => o.count)
+        [Dict("key" => o.key, "flag" => o.flag, "pbs" => o.pbs,
+              "hint" => o.hint, "count" => o.count)
          for o in ReportEngine.Sweep.sched_options()])))
     HTTP.register!(router, "POST", "/api/clusters/delete", req -> begin
         name = strip(String(get(_body(req), "name", "")))

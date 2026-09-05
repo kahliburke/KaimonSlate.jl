@@ -111,6 +111,18 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test by["constraint"].flag == "constraint"
         @test by["cpus"].count && by["gpus"].count && !by["mem"].count
 
+        # BOTH spellings ride in one list: the editor is opened before it knows which cluster the
+        # cell names, and typing either spelling has to land on the same stored key.
+        @test by["cpus"].pbs == "select=…:ncpus" && by["partition"].pbs == "-q"
+        @test by["walltime"].pbs == "-l walltime" && by["account"].pbs == "-A"
+        # An empty spelling means that scheduler cannot say it at all, which the editor SHOWS. The
+        # alternative — offering a setting whose only effect is a rejected job — is the failure this
+        # catalogue exists to prevent, in the other direction.
+        @test by["constraint"].pbs == "" && by["gres"].pbs == "" && by["reservation"].pbs == ""
+        # …but only where translation would be a guess. Anything mechanical is spelled, not refused.
+        @test by["mem_per_cpu"].pbs != "" && by["nodelist"].pbs == "select=…:host"
+        @test by["select"].pbs == "-l select"
+
         # The split the editor makes must be the split Julia makes, or a Slate setting is forwarded
         # to sbatch as a job option (or a scheduler option is silently treated as one of ours).
         @test !S.is_sched_attr("cluster") && !S.is_sched_attr("chunk") && !S.is_sched_attr("region")

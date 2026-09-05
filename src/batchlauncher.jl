@@ -15,7 +15,7 @@ module BatchLauncher
 
 import Dates
 
-export Launcher, ExecLauncher, SlurmLauncher, JobSpec, submit!, poll, cancel!, logs
+export Launcher, ExecLauncher, SlurmLauncher, PbsLauncher, JobSpec, submit!, poll, cancel!, logs
 
 """
     JobSpec
@@ -44,29 +44,34 @@ JobSpec(name, chunks; root, project, payload, julia = "julia",
             String(directives))
 
 """
-    directive_lines(text) -> Vector{String}
+    directive_lines(text; prefix = "#SBATCH", example = "--constraint=avx512") -> Vector{String}
 
-Free-form scheduler directives → `#SBATCH` lines. One per line; blank lines and `#` comments are
-dropped, and a line may be written either way (`--exclusive` or `#SBATCH --exclusive`) because both
-are what people have in front of them when they are copying from a working batch script.
+Free-form scheduler directives → directive lines. One per line; blank lines and `#` comments are
+dropped, and a line may be written with or without the prefix (`--exclusive` or
+`#SBATCH --exclusive`) because both are what people have in front of them when they are copying from
+a working batch script. Either scheduler's prefix is accepted on input, so moving a definition
+between clusters does not mean re-typing the block.
 
 This is the escape hatch for a flag whose value contains characters a cell header cannot carry, and
 for the site-specific ones there is no point naming (`--licenses`, `--switches`, `--wckey`). It is
 emitted verbatim: Slate does not know what a site's flags mean and should not pretend to.
 """
-function directive_lines(text::AbstractString)
+function directive_lines(text::AbstractString; prefix::AbstractString = "#SBATCH",
+                         example::AbstractString = "--constraint=avx512")
     out = String[]
     for raw in eachsplit(String(text), '\n')
         s = strip(raw)
         (isempty(s) || startswith(s, "# ") || s == "#") && continue
-        s = startswith(s, "#SBATCH") ? strip(s[8:end]) : s
+        for p in ("#SBATCH", "#PBS")
+            startswith(s, p) && (s = strip(s[(length(p) + 1):end]); break)
+        end
         isempty(s) && continue
         # A directive is one flag. Anything else would be a shell line in a place that only accepts
         # scheduler options, where it is silently ignored rather than run — so say so instead.
         startswith(s, "-") ||
-            error("scheduler directive `$s` does not start with `-`. These are sbatch flags " *
-                  "(`--constraint=avx512`), one per line; shell setup belongs in the cluster's prologue.")
-        push!(out, "#SBATCH " * s)
+            error("scheduler directive `$s` does not start with `-`. These are scheduler flags " *
+                  "(`$example`), one per line; shell setup belongs in the cluster's prologue.")
+        push!(out, prefix * " " * s)
     end
     return out
 end
@@ -270,6 +275,9 @@ const _SBATCH_ALWAYS = (cpus = 1, mem = "1G", walltime = "00:30:00")
 
 function _sbatch_script(l::SlurmLauncher, spec::JobSpec, indexfile::AbstractString)
     r = spec.resources
+    for k in sort!(collect(keys(r)))
+        haskey(_SBATCH_HINT, k) && _hint_once(:SLURM, k, _SBATCH_HINT[k], "--$(sbatch_flag(k))=…")
+    end
     lines = ["#!/bin/bash",
              "#SBATCH --job-name=$(spec.name)",
              "#SBATCH --array=1-$(length(spec.chunks))",
@@ -403,6 +411,352 @@ and may return nothing at all.
 function explain_failure(l::SlurmLauncher, name::AbstractString)
     ok, txt = (_ssh(l,
         "sacct -n -X --name=$(name) -o JobID,State,ExitCode,Elapsed,MaxRSS 2>/dev/null"))
+    return ok ? txt : ""
+end
+
+# ── PBS ──────────────────────────────────────────────────────────────────────────────────────
+# The other scheduler a site is likely to have, and NOT a renaming of the one above. Three things
+# differ in kind rather than in spelling, and each of them is a decision made below:
+#
+#   * PBS asks for per-node resources INSIDE a chunk statement (`-l select=2:ncpus=8:mem=16gb`) and
+#     for job-wide ones beside it (`-l walltime=…`). SLURM's one-flag-per-setting form has no chunk,
+#     so the pass-through rule needs a shape here, not just a different flag name.
+#   * There is no `--dependency=singleton`, which is what stopped a SLURM sweep double-submitting
+#     across a hub restart. PBS will happily queue two jobs of the same name, so the check the
+#     scheduler used to do is done in the submission itself.
+#   * Names are the interface (see the top of this file), and PBS cannot cancel by name. `qselect`
+#     turns a name into ids and `qdel` takes those, which is two commands and still one round trip.
+struct PbsLauncher <: Launcher
+    host::String                 # the login node; "" runs the client tools locally
+    account::String
+    qos::String
+    runner::Any                  # (host, script) -> (ok, output); the caller's authenticated session
+end
+PbsLauncher(host = ""; account = "", qos = "",
+            runner = (h, sc) -> _local_run(sc)) =
+    PbsLauncher(String(host), String(account), String(qos), runner)
+
+_ssh(l::PbsLauncher, script::AbstractString) = l.runner(l.host, String(script))
+
+# The settings that go INSIDE the chunk statement — what one node of the job must have.
+const _PBS_CHUNK = Dict(:cpus => "ncpus", :gpus => "ngpus", :mem => "mem",
+                        :ntasks_per_node => "mpiprocs", :nodelist => "host")
+
+# Settings whose usual SLURM meaning has no PBS form. ADVISORY, not a block: the editor shows the
+# note, and the option is still forwarded as `-l key=value` like any other.
+#
+# Refusing them outright was tried and is wrong. PBS lets a site define ARBITRARY resources
+# (`qmgr -c "create resource ntasks type=long"`), so a name that means one thing on SLURM may be a
+# real resource here — and blocking it because SLURM uses the word contradicts the rule at the top
+# of this file. A site that has no such resource gets `Unknown resource: constraint` from `qsub`,
+# which is the loud rejection that rule is asking for.
+const _PBS_HINT = Dict(
+    :constraint  => "usually a chunk resource on PBS — see `select=`",
+    :gres        => "usually `gpus=` (a count), or `select=…:ngpus=2:gpu_model=v100`",
+    :exclude     => "PBS has no exclude list — pick a queue, or name hosts with `select=`",
+    :reservation => "a PBS reservation IS a queue — usually `partition=`",
+    :ntasks      => "PBS counts per chunk — usually `nodes=` and `ntasks_per_node=`",
+)
+
+# `select=` is PBS's chunk statement and sbatch has no such option. Same treatment in reverse.
+const _SBATCH_HINT = Dict(
+    :select => "PBS's chunk statement — on SLURM say `nodes=`, `cpus=`, `mem=`, `gpus=`",
+)
+
+# Warned once per setting per process: a sweep emits a script per submission, and the same advice a
+# few hundred times would bury the run's own output.
+const _HINTED = Set{Tuple{Symbol,Symbol}}()
+const _HINT_LOCK = ReentrantLock()
+
+function _hint_once(kind::Symbol, k::Symbol, note::AbstractString, flag::AbstractString)
+    fresh = lock(_HINT_LOCK) do; (kind, k) in _HINTED ? false : (push!(_HINTED, (kind, k)); true); end
+    fresh || return nothing
+    @warn "`$k` has no standard $(kind) equivalent — $(note). Sending it as `$(flag)` anyway; " *
+          "$(kind) will reject it unless this site defines it."
+    return nothing
+end
+
+# The settings that become something other than a job-wide `-l key=value`.
+const _PBS_NAMED = (:cpus, :mem, :mem_per_cpu, :walltime, :partition, :account, :qos, :exclusive,
+                    :nodes, :select)
+
+"""
+    pbs_size(v) -> String
+
+A memory size as PBS writes it. SLURM's `16G` is not a size PBS accepts: its units are two letters
+(`kb`, `mb`, `gb`, `tb`), and a bare number is bytes. Anything already in that form, or in a syntax
+this does not recognise, is passed through — a site's own spelling is not ours to correct.
+"""
+function pbs_size(v)
+    s = strip(string(v))
+    m = match(r"^(\d+)\s*([kmgtKMGT]?)[bB]?$", s)
+    m === nothing && return String(s)
+    return string(m.captures[1], lowercase(m.captures[2]), "b")
+end
+
+const _PBS_ALWAYS = (cpus = 1, mem = "1gb", walltime = "00:30:00")
+
+"""
+    pbs_select(resources; defaults = true) -> String
+
+The chunk statement: how many nodes, and what each must have. `select=` in the resources wins
+outright — a PBS user thinks in chunk statements, and one escape hatch answers every site resource
+Slate has no name for, which is why the unmappable settings above point at it.
+
+`defaults = false` asks for only what was named. A batch job states its limits (a job at the mercy
+of a site's defaults is the one whose limits kill it); an interactive allocation does not, so that
+an unset memory is the queue's own default rather than a number Slate invented.
+"""
+function pbs_select(r; defaults::Bool = true)
+    explicit = strip(string(get(r, :select, "")))
+    isempty(explicit) || return String(explicit)
+    ncpus = get(r, :cpus, defaults ? _PBS_ALWAYS.cpus : nothing)
+    chunk = String[]
+    ncpus === nothing || push!(chunk, "ncpus=$(ncpus)")
+    mem = _pbs_chunk_mem(r, ncpus, defaults)
+    mem === nothing || push!(chunk, "mem=$(mem)")
+    for k in sort!(collect(keys(r)))
+        (k === :cpus || k === :mem || !haskey(_PBS_CHUNK, k)) && continue
+        v = getfield(r, k)
+        (v === nothing || isempty(string(v))) && continue
+        push!(chunk, string(_PBS_CHUNK[k], "=", k === :nodelist ? _pbs_host(v) : v))
+    end
+    n = get(r, :nodes, 1)
+    return isempty(chunk) ? string(n) : string(n, ":", join(chunk, ":"))
+end
+
+# How much memory one chunk gets. `mem_per_cpu` is SLURM's spelling and PBS has no per-CPU memory,
+# but a chunk holds exactly `ncpus` cpus — so the multiplication is arithmetic, not a guess, and it
+# is right for a multi-chunk job too. Naming BOTH is ambiguous and SLURM rejects it as well.
+function _pbs_chunk_mem(r, ncpus, defaults::Bool)
+    per = strip(string(get(r, :mem_per_cpu, "")))
+    flat = strip(string(get(r, :mem, "")))
+    isempty(per) && return isempty(flat) ? (defaults ? _PBS_ALWAYS.mem : nothing) : pbs_size(flat)
+    isempty(flat) ||
+        error("`mem` and `mem_per_cpu` are both set; PBS asks for memory per chunk, so it can " *
+              "honour one of them. Say `mem=` for the whole chunk, or `mem_per_cpu=` alone.")
+    ncpus === nothing &&
+        error("`mem_per_cpu` needs a cpu count to multiply out on PBS — set `cpus=` too.")
+    m = match(r"^(\d+)([kmgt])b$", pbs_size(per))
+    m === nothing &&
+        error("`mem_per_cpu=$per` is not a size that can be multiplied out — say `mem=` instead.")
+    return string(parse(Int, m.captures[1]) * Int(ncpus), m.captures[2], "b")
+end
+
+# `nodelist` maps only when it names ONE host: a PBS chunk is placed on a single host, so several
+# would need one chunk each and there is no honest way to guess how the work should be split.
+function _pbs_host(v)
+    s = strip(string(v))
+    (occursin(',', s) || occursin('[', s)) &&
+        error("`nodelist=$s` names more than one host; a PBS chunk sits on one. Write the " *
+              "placement out with `select=` (`2:ncpus=4:host=c1+1:ncpus=4:host=c2`).")
+    return s
+end
+
+# `-l place=`, PBS's answer to `--exclusive`. Its vocabulary is its own (`excl`, `exclhost`,
+# `shared`), so anything but a yes/no is forwarded for PBS to accept or reject.
+function _pbs_place(v)
+    s = strip(String(v))
+    (isempty(s) || lowercase(s) in ("no", "false", "0")) && return nothing
+    return lowercase(s) in ("yes", "true", "1") ? "excl" : s
+end
+
+"""
+    pbs_flag(k) -> String
+
+How a catalogued setting is spelled for PBS, for the cell editor's benefit. Empty when PBS has no
+way to say it — which the editor shows rather than pretending the setting will be honoured.
+"""
+pbs_flag(k::Symbol) =
+    haskey(_PBS_HINT, k)     ? "" :
+    haskey(_PBS_CHUNK, k)    ? "select=…:" * _PBS_CHUNK[k] :
+    k === :walltime          ? "-l walltime" :
+    k === :partition         ? "-q" :
+    k === :account           ? "-A" :
+    k === :nodes             ? "-l select=N:…" :
+    k === :exclusive         ? "-l place" :
+    # No per-CPU memory on PBS: it becomes the chunk's `mem`, multiplied by its cpu count.
+    k === :mem_per_cpu       ? "select=…:mem (×ncpus)" :
+    "-l " * String(k)
+
+# `$PBS_ARRAY_INDEX` picks this element's chunk out of the index file, the same trick the sbatch
+# script plays with `$SLURM_ARRAY_TASK_ID`.
+function _pbs_script(l::PbsLauncher, spec::JobSpec, indexfile::AbstractString)
+    r = spec.resources
+    for k in sort!(collect(keys(r)))
+        haskey(_PBS_HINT, k) && _hint_once(:PBS, k, _PBS_HINT[k], "-l $(k)=$(get(r, k, ""))")
+    end
+    lines = ["#!/bin/bash",
+             "#PBS -N $(spec.name)",
+             # One file, not two: PBS spools stdout and stderr separately otherwise.
+             "#PBS -j oe"]
+    # Naming the output is three-way, and only one of them is right. Measured on OpenPBS 23.06:
+    #
+    #   -o <dir>/                          PBS names the file after the JOB ID, which is the one
+    #                                      thing the fabric never keeps — `logs` is asked for a
+    #                                      NAME, so it would find nothing, ever.
+    #   -o <dir>/<name>.out                every element of the array writes to that ONE file.
+    #                                      Silently, which makes it the worst of the three.
+    #   -o <dir>/<name>.^array_index^.out  one file per element, where we asked for it.
+    #
+    # `^array_index^` is PBS Pro / OpenPBS (Altair's token for array output paths), not TORQUE. A
+    # TORQUE site would have to fall back on the default naming — no `-o` at all gives
+    # `$HOME/<name>.o<seq>.<index>`, which is findable by name but ignores `logdir`.
+    #
+    # A one-element array is not an array (PBS rejects the degenerate range), so the index is read
+    # with a default and its log is named as though it were element 1 — one glob finds either.
+    if length(spec.chunks) > 1
+        push!(lines, "#PBS -J 1-$(length(spec.chunks))",
+                     "#PBS -o $(spec.logdir)/$(spec.name).^array_index^.out")
+    else
+        push!(lines, "#PBS -o $(spec.logdir)/$(spec.name).1.out")
+    end
+    push!(lines, "#PBS -l select=$(pbs_select(r))")
+    push!(lines, "#PBS -l walltime=$(get(r, :walltime, _PBS_ALWAYS.walltime))")
+    q = strip(string(get(r, :partition, "")))
+    isempty(q) || push!(lines, "#PBS -q $(q)")
+    acct = strip(string(get(r, :account, l.account)))
+    isempty(acct) || push!(lines, "#PBS -A $(acct)")
+    # Job-wide resources: QoS if the site has one, exclusivity, and then everything the spec carries
+    # that is not a chunk resource and not named above. Sorted, so two identical sweeps produce
+    # identical scripts and the content-derived name keeps matching what was submitted.
+    wide = Pair{String,String}[]
+    qos = strip(string(get(r, :qos, l.qos)))
+    isempty(qos) || push!(wide, "qos" => qos)
+    pl = _pbs_place(get(r, :exclusive, ""))
+    pl === nothing || push!(wide, "place" => pl)
+    for k in sort!(collect(keys(r)))
+        (k in _PBS_NAMED || haskey(_PBS_CHUNK, k)) && continue
+        v = getfield(r, k)
+        (v === nothing || isempty(string(v))) && continue
+        # PBS resource names carry underscores (`min_walltime`, `scratch_local`), so unlike sbatch's
+        # long options they pass through exactly as written.
+        push!(wide, String(k) => string(v))
+    end
+    for (k, v) in wide; push!(lines, "#PBS -l $(k)=$(v)"); end
+    # Site directives, verbatim and LAST, for the same reason as the sbatch script.
+    append!(lines, directive_lines(spec.directives; prefix = "#PBS",
+                                   example = "-l scratch_local=10gb"))
+    append!(lines, ["set -euo pipefail",
+                    "CHUNK=\$(sed -n \"\${PBS_ARRAY_INDEX:-1}p\" $(indexfile))",
+                    "test -n \"\$CHUNK\"",
+                    task_command(spec, "\$CHUNK")])
+    return join(lines, "\n") * "\n"
+end
+
+function submit!(l::PbsLauncher, spec::JobSpec)
+    isempty(spec.chunks) && return ""
+    indexfile = joinpath(spec.root, "jobs", spec.name * ".index")
+    script = _pbs_script(l, spec, indexfile)
+    # The `qselect` guard is what `--dependency=singleton` does on SLURM: the hub can restart, or two
+    # notebooks can reconcile the same sweep, and the name is content-derived either way. Without it
+    # the second reconcile queues the work twice and both copies write the same shards.
+    payload = """
+    set -e
+    mkdir -p $(joinpath(spec.root, "jobs")) $(spec.logdir)
+    cat > $(indexfile) <<'SLATE_INDEX_EOF'
+    $(join(spec.chunks, "\n"))
+    SLATE_INDEX_EOF
+    cat > $(indexfile).pbs <<'SLATE_PBS_EOF'
+    $(script)SLATE_PBS_EOF
+    if [ -n "\$(qselect -N $(spec.name) -u \"\$USER\" 2>/dev/null)" ]; then
+      echo SLATE_ALREADY
+      exit 0
+    fi
+    qsub $(indexfile).pbs
+    """
+    ok, out = (_ssh(l, payload))
+    ok || error("qsub failed on $(l.host): $(strip(out))")
+    id = strip(split(strip(out), '\n')[end])
+    return id == "SLATE_ALREADY" ? "" : String(id)
+end
+
+# One `qstat -f` for the user's jobs, parsed by name. PBS has no `--name` filter, and asking per name
+# would be one command per sweep unit — which is exactly the cost `poll` is documented not to have.
+# An array job appears ONCE, under its own name, which is the entry we want; its elements are only
+# visible with `-t` and the store answers for them anyway.
+#
+# `qselect` FIRST, and not `qstat -f -u "$USER"`: `-u` silently overrides `-f` and prints the short
+# table instead, which has no Job_Name column — so every name parses as absent and a running sweep
+# reads as one that never started. Verified against OpenPBS 23.06. `set -f` because an array job's
+# id contains `[]`, which the shell would otherwise try to glob.
+#
+# Attributes are accumulated per JOB BLOCK rather than read in order: `qstat -f` emits them in
+# whatever order the server holds them, and `resources_used` lands before `job_state`.
+const _PBS_POLL = raw"""
+set -f
+ids=$(qselect -u "$USER" 2>/dev/null)
+[ -n "$ids" ] || exit 0
+qstat -f $ids 2>/dev/null | awk '
+  function out() { if (n != "") print n " " s; n = ""; s = "" }
+  /^Job Id:/                    { out() }
+  /^[ \t]*Job_Name = /          { n = substr($0, index($0, "= ") + 2); sub(/[ \t\r]+$/, "", n) }
+  /^[ \t]*job_state = /         { s = substr($0, index($0, "= ") + 2); sub(/[ \t\r]+$/, "", s) }
+  END                           { out() }'
+"""
+
+# PBS's single-letter states. `B` is an array job with elements running, `E` a job on its way out —
+# both are still live, and only a job the scheduler no longer holds leaves a name `:unknown`.
+_pbs_state(s::AbstractString) =
+    s in ("R", "B", "E") ? :running :
+    s in ("Q", "H", "W", "T", "S", "M") ? :pending : :unknown
+
+function poll(l::PbsLauncher, root::AbstractString, names)
+    ns = String.(collect(names))
+    isempty(ns) && return Dict{String,Symbol}()
+    out = Dict{String,Symbol}(n => :unknown for n in ns)
+    ok, txt = (_ssh(l, _PBS_POLL))
+    ok || return out
+    for line in split(txt, '\n'; keepempty = false)
+        parts = split(strip(line))
+        length(parts) >= 2 || continue
+        name = String(parts[1])
+        haskey(out, name) || continue
+        st = _pbs_state(uppercase(String(parts[2])))
+        st === :unknown && continue
+        out[name] === :running || (out[name] = st)
+    end
+    return out
+end
+
+# `qdel` takes ids, so each name is resolved first — and that is also what makes the count honest
+# here without a second poll: `qselect` lists only live jobs, so a name it answers for was live, and
+# `qdel`'s exit status says whether it was acted on.
+#
+# Deliberately NOT the SLURM shape of re-polling to see what left. A cancelled PBS job goes to `E`
+# (exiting) before it disappears, so a poll taken straight after a successful `qdel` still reports it
+# live and every cancel would report zero. SLURM re-polls because `scancel` exits 0 whether or not a
+# name matched anything; PBS hands us ids instead, which is a better answer to the same question.
+function cancel!(l::PbsLauncher, root::AbstractString, names)
+    ns = String.(collect(names))
+    isempty(ns) && return 0
+    ok, out = (_ssh(l, join(("ids=\$(qselect -N $(n) -u \"\$USER\" 2>/dev/null); " *
+                             "[ -n \"\$ids\" ] && qdel \$ids >/dev/null 2>&1 && echo CANCELLED"
+                             for n in ns), "\n")))
+    return count(==("CANCELLED"), strip.(split(out, '\n'; keepempty = false)))
+end
+
+# Only after the job ENDS: PBS spools output on the execution node and copies it back at exit, where
+# SLURM writes it live. Per-unit progress comes from the status directory either way, so this is for
+# reading what a finished job said — which is when it is asked for.
+function logs(l::PbsLauncher, root::AbstractString, name::AbstractString; lines::Int = 200)
+    ok, txt = (_ssh(l,
+        "tail -n $(lines) $(joinpath(root, "logs"))/$(name).*.out 2>/dev/null"))
+    return ok ? txt : ""
+end
+
+"""
+    explain_failure(l::PbsLauncher, name) -> String
+
+Why a submission's elements ended, from job history — PBS's answer to `sacct`, and with the same
+caveat: `qstat -x` needs the server's `job_history_enable` set, so it may return nothing at all.
+Only ever consulted to explain a failure; whether a shard is done is a question for the store.
+"""
+function explain_failure(l::PbsLauncher, name::AbstractString)
+    ok, txt = (_ssh(l,
+        "for j in \$(qselect -x -N $(name) -u \"\$USER\" 2>/dev/null); do " *
+        "qstat -x -f \"\$j\" 2>/dev/null | " *
+        "grep -E 'Job Id|job_state|Exit_status|resources_used'; done"))
     return ok ? txt : ""
 end
 

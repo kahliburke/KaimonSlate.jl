@@ -109,13 +109,27 @@ const RE = KaimonSlate.ReportEngine
                 @test v !== nothing && v.host == "login" && v.job == "4242"
                 @test RE._host_for_files("c1") == "login"        # shared filesystem, login session
                 @test RE._host_for_files("elsewhere") == "elsewhere"
+                # SLURM joins the running job rather than logging in again.
+                @test occursin("srun --jobid=4242 --overlap", RE._in_allocation(v, "c1", "hostname"))
             finally
                 RE.route!("c1", "")
             end
             @test RE.via("c1") === nothing                      # released with the allocation
-            # Configurable for PBS, and honest that it cannot allocate there.
-            pbs = RE.region_set!("pbs"; host = "login", scheduler = :pbs)
-            @test_throws ErrorException RE.region_place!(pbs)
+
+            # PBS has no `srun --overlap` — `pbsdsh` only runs from INSIDE the job — so it reaches
+            # the node the way every PBS site already does, an ssh from the login node. The hub still
+            # authenticates once: that ssh is issued ON the login node's session.
+            RE.route!("c2", "login", "88.pbsserver", :pbs)
+            try
+                v = RE.via("c2")
+                @test v.kind === :pbs
+                cmd = RE._in_allocation(v, "c2", "hostname")
+                @test startswith(cmd, "ssh ") && occursin("'c2'", cmd) && !occursin("srun", cmd)
+                @test occursin("BatchMode=yes", cmd)             # never hang on a prompt
+                @test RE._host_for_files("c2") == "login"        # the filesystem is still shared
+            finally
+                RE.route!("c2", "")
+            end
         end
     end
 

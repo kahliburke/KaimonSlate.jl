@@ -259,16 +259,23 @@ end
 # ── Reaching a compute node ──────────────────────────────────────────────────────────────────
 # A scheduler grants a node that is reachable only THROUGH the login node, and opening a session to
 # it would be a second authentication — the thing this whole transport exists to avoid. So work for
-# the node runs on the LOGIN node's session: commands with `srun` inside the allocation, and the
-# data path as a direct-tcpip forward, which the login node opens on our behalf.
-const _VIA = Dict{String,NamedTuple{(:host, :job),Tuple{String,String}}}()
+# the node runs on the LOGIN node's session, and the data path is a direct-tcpip forward which the
+# login node opens on our behalf.
+#
+# HOW a command gets into the allocation is the scheduler's business, so the route records which one
+# granted it: SLURM has `srun --overlap`, which joins the running job without a second login. PBS has
+# no equivalent — `pbsdsh` only works from inside the job — and its answer is the one every PBS site
+# already relies on, an ssh from the login node to a node you hold.
+const _VIA = Dict{String,NamedTuple{(:host, :job, :kind),Tuple{String,String,Symbol}}}()
 const _VIA_LOCK = ReentrantLock()
 
-"Record that `node` is worked through `login`, inside scheduler job `job`. `login = \"\"` forgets it."
-function route!(node::AbstractString, login::AbstractString, job::AbstractString = "")
+"Record that `node` is worked through `login`, inside `kind` job `job`. `login = \"\"` forgets it."
+function route!(node::AbstractString, login::AbstractString, job::AbstractString = "",
+                kind::Symbol = :slurm)
     lock(_VIA_LOCK) do
         isempty(login) ? delete!(_VIA, String(node)) :
-                         (_VIA[String(node)] = (host = String(login), job = String(job)))
+                         (_VIA[String(node)] = (host = String(login), job = String(job),
+                                                kind = kind))
     end
     return nothing
 end
@@ -462,14 +469,24 @@ function ssh_config_hosts()
     return hosts
 end
 
-# Value-fetch over a host: `(ok, output)`, with stdout and stderr interleaved. A routed node runs
-# its command inside the allocation, from the login node's session — `srun` rather than a second ssh.
+# Value-fetch over a host: `(ok, output)`, with stdout and stderr interleaved. A routed node runs its
+# command from the LOGIN node's session, so the hub never authenticates twice — see `_VIA` for why
+# the two schedulers get there differently.
 function _run_on(host::AbstractString, script::AbstractString)
     v = via(host)
     v === nothing && return Sweep.run_there(host, script)
     isempty(v.job) && return Sweep.run_there(v.host, script)   # routed but not a scheduler job
-    return Sweep.run_there(v.host, "srun --jobid=" * v.job * " --overlap bash -c " * Sweep.shq(script))
+    return Sweep.run_there(v.host, _in_allocation(v, host, script))
 end
+
+# `BatchMode=yes` so a node that will not take us fails immediately instead of hanging on a prompt
+# nobody is there to answer, and no host-key check because a compute node's identity changes with
+# every allocation and there is nothing stable to have trusted.
+_in_allocation(v, node, script) =
+    v.kind === :pbs ?
+        "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null " *
+        Sweep.shq(node) * " " * Sweep.shq(script) :
+        "srun --jobid=" * v.job * " --overlap bash -c " * Sweep.shq(script)
 
 # A cluster's login and compute nodes share a filesystem, so a file for a routed node is written
 # through the login session at the same path — no need to run anything on the node to place it.
@@ -3410,25 +3427,9 @@ function region_host(r::Region)
     return p === nothing ? r.host : p.host
 end
 
-# A scheduler time — "HH:MM:SS", "D-HH:MM:SS", "MM:SS", a bare "MM", or UNLIMITED — in seconds.
-# Anything unrecognised reads as an hour, which at worst costs one extra `squeue`.
-function _sched_seconds(s::AbstractString)
-    t = strip(String(s))
-    isempty(t) && return 3600.0
-    uppercase(t) in ("UNLIMITED", "INFINITE", "NOT_SET") && return Inf
-    days = 0.0
-    i = findfirst('-', t)
-    if i !== nothing
-        days = something(tryparse(Float64, t[1:prevind(t, i)]), 0.0)
-        t = t[nextind(t, i):end]
-    end
-    f = [tryparse(Float64, p) for p in split(t, ':')]
-    any(isnothing, f) && return 3600.0
-    secs = length(f) == 3 ? f[1] * 3600 + f[2] * 60 + f[3] :
-           length(f) == 2 ? f[1] * 60 + f[2] :
-           length(f) == 1 ? f[1] * 60 : 0.0
-    return days * 86400 + secs
-end
+# A scheduler time in seconds. Defined where the allocation layer needs it too — PBS reports what is
+# LEFT as the difference of two of these, so one parser serves both.
+const _sched_seconds = Sweep.sched_seconds
 
 # The placement, or `nothing` once it has certainly expired. An allocation is held for a bounded
 # time — the scheduler kills the job at its walltime — so a node we placed on is ours until then and
@@ -3464,14 +3465,13 @@ being busy rather than a failure — the caller reports it and reconciles again 
 function region_place!(r::Region; wait_s::Real = 120)
     kind = region_scheduler(r)
     kind === :none && return (r.host, nothing)
-    kind === :slurm || Sweep._unsupported_scheduler(kind)
     isempty(r.host) && error("region '$(r.name)' has a scheduler but no host to ask")
     name = region_alloc_name(r)
     cached = _placement(r)
     if cached !== nothing && time() - cached.ts < _PLACE_TTL
         return (cached.host, nothing)
     end
-    a = Sweep.allocation_node!(r.host, name; wait_s = wait_s, walltime = _alloc_walltime(r),
+    a = Sweep.allocation_node!(kind, r.host, name; wait_s = wait_s, walltime = _alloc_walltime(r),
                                partition = r.partition, cpus = r.cpus, mem = r.mem,
                                gpus = r.gpus, account = r.account)
     if !Sweep.alive(a)
@@ -3481,7 +3481,7 @@ function region_place!(r::Region; wait_s::Real = 120)
     end
     # A compute node is normally not reachable from here at all — only through the login node. Record
     # that before anything tries to ssh to it, because a hostname alone does not say how to get there.
-    route!(a.node, r.host, a.id)
+    route!(a.node, r.host, a.id, kind)
     # How long this is good for comes from the SCHEDULER (`squeue %L`), not from what we asked for:
     # an allocation we adopted rather than requested is already part-spent, and trusting it for a
     # fresh full walltime is how a placement outlives its job.
@@ -3505,11 +3505,12 @@ used, so this runs whenever a region stops needing a node — draining to zero w
 deleted — and not only when someone remembers.
 """
 function region_release!(r::Region)
-    r.scheduler === :none && return false
+    kind = region_scheduler(r)
+    kind === :none && return false
     held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
     held === nothing || route!(held.host, "")
     return try
-        Sweep.release_allocation!(r.host, region_alloc_name(r))
+        Sweep.release_allocation!(kind, r.host, region_alloc_name(r))
     catch e
         _rlog("region[$(r.name)]: releasing the allocation failed ($(first(sprint(showerror, e), 120)))")
         false
@@ -3520,9 +3521,15 @@ end
 _region_holds_node(r::Region) = _placement(r) !== nothing
 
 "The allocation this region is holding, for the UI. Read-only — it never asks for one."
-region_allocation(r::Region) =
-    r.scheduler === :none ? nothing :
-    try; Sweep.find_allocation(r.host, region_alloc_name(r)); catch; nothing; end
+function region_allocation(r::Region)
+    r.scheduler === :none && return nothing
+    return try
+        kind = region_scheduler(r)
+        kind === :none ? nothing : Sweep.find_allocation(kind, r.host, region_alloc_name(r))
+    catch
+        nothing
+    end
+end
 
 # In-flight adoption claims (hub-local). Without a claim two notebooks opening at once could both scan
 # the roster, see the same idle worker, and both adopt it.
