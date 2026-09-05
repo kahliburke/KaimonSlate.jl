@@ -30,7 +30,7 @@ end
 
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
-export MARKDOWN, CODE, WEB, TOOL, SWEEP, FRESH, STALE, RUNNING, ERRORED
+export MARKDOWN, CODE, WEB, TOOL, SWEEP, FRESH, STALE, RUNNING, ERRORED, BLOCKED
 # Kind predicates, exported alongside the kinds themselves: sibling modules (`ReportRender`,
 # `NotebookServer`) reach the enum by `using ..ReportEngine`, so a helper that is not exported is
 # invisible to exactly the code that classifies cells.
@@ -61,7 +61,12 @@ export standalone!
 # a separate, explicit action. That is what makes reopening a notebook safe while still letting it
 # pick the monitor back up on work that is still in flight.
 @enum CellKind MARKDOWN CODE WEB TOOL SWEEP
-@enum CellState FRESH STALE RUNNING ERRORED   # never-run ≡ STALE
+# BLOCKED is a WAIT, not a failure: the cell cannot run yet for a reason outside it — a scheduler
+# queue that has not granted a node, a host nobody has signed in to. It is separate from ERRORED
+# because the two need opposite handling. An error is the cell's own, is worth showing in red, and is
+# retried by running it again; a wait is somebody else's, belongs in the header rather than the
+# output, and is cleared by the thing it is waiting for (which re-runs the cell itself).
+@enum CellState FRESH STALE RUNNING ERRORED BLOCKED   # never-run ≡ STALE
 
 "One representation of a cell's output (MIME-generic display bundle, §7)."
 struct MimeChunk
@@ -160,6 +165,9 @@ mutable struct Cell
                                   # push and the full state a mutating request answers with) and, with
                                   # no way to tell new from old, applies whichever lands last. This is
                                   # how it tells.
+    blocked::String               # why a BLOCKED cell cannot run yet, in one line. NOT an error message:
+                                  # it belongs in the header beside the state, and it is cleared the
+                                  # moment the cell runs. "" whenever `state != BLOCKED`.
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -167,7 +175,7 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
-                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0)
+                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}(), 0, "")
 end
 
 # The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation

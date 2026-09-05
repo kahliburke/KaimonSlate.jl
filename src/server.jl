@@ -1015,6 +1015,22 @@ const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, kernel obje
 const _REGION_PRIMING = Set{Tuple{String,UInt}}()
 const _REGION_LOCK = ReentrantLock()
 
+"""
+    RegionWaiting(why)
+
+A region cell cannot run YET, and nothing is wrong. Thrown where the wait is discovered (under
+`nb.lock`, which must never block), caught where the cell's state is set, and turned into `BLOCKED`
+rather than `ERRORED`.
+
+A distinct TYPE rather than a message match: the same call path also raises genuine failures — a
+region that is not defined, a worker that could not start — and telling them apart by reading the
+text would go wrong the first time someone rewords one.
+"""
+struct RegionWaiting <: Exception
+    why::String
+end
+Base.showerror(io::IO, e::RegionWaiting) = print(io, e.why)
+
 # ── Consent-gated region introduction (PEER_TUNNEL_PLAN §5.1) ─────────────────────────────────────
 # When a notebook's region set changes (via `region_on` OR a cell `region=` tag, UI or MCP alike), a new
 # cross-host pair may need an SSH-bridged transfer route that isn't armed yet. Rather than install SSH keys
@@ -1466,21 +1482,23 @@ const _PLACING = Set{String}()
 const _PLACING_LOCK = ReentrantLock()
 
 # The cells that were waiting on this region: mark them stale so the next drain picks them up.
-# Every ERRORED cell pinned to it, not just the ones whose message mentions the queue — a cell that
-# failed for its own reasons simply fails again, which is cheaper than matching on error text that
-# is free to be reworded.
+# BLOCKED is the state a wait leaves behind; ERRORED is included too because a cell that failed for
+# its own reasons simply fails again, which is cheaper than matching on error text that is free to
+# be reworded.
+_region_recoverable(c) = c.state == BLOCKED || c.state == ERRORED
+
 function _restale_region_cells!(nb::LiveNotebook, name::AbstractString)
     n = 0
     lock(nb.lock) do
         waiting = String[c.id for c in nb.report.cells
-                         if _cell_region(c) == name && c.state == ERRORED]
+                         if _cell_region(c) == name && _region_recoverable(c)]
         isempty(waiting) && return
-        # …and everything downstream of them that ALSO failed. A cell reading a value from this
+        # …and everything downstream of them that ALSO stalled. A cell reading a value from this
         # region failed for the same missing node, and recovering only the pinned cell would leave
         # the notebook half-resolved — the reader still red, needing a hand it should not need.
         blast = ReportEngine.dependents_of(nb.report, waiting)
         for c in nb.report.cells
-            (c.id in blast && c.state == ERRORED) || continue
+            (c.id in blast && _region_recoverable(c)) || continue
             ReportEngine.restale!(c) && (n += 1)
         end
         n > 0 && (nb.version += 1)
@@ -1564,12 +1582,12 @@ function _region_kernel!(nb::LiveNotebook, name::String)
                 # that only a person can supply — which background work is not allowed to ask for.
                 # So say which of the two is missing, because they need different things from you.
                 ReportEngine.Sweep.connected(r.host) ||
-                    error("region '$name': not signed in to $(r.host) — use the padlock at the top of the page")
+                    throw(RegionWaiting("$(r.host) is not signed in — use the padlock at the top of the page"))
                 _place_in_background!(name, nb)
                 # A queue wait is minutes on a busy cluster, so this is not a "try again" — the
                 # placement task re-runs this cell itself when the scheduler grants a node.
-                error("region '$name': queued for a node on $(r.host) — this cell runs itself when " *
-                      "the scheduler grants one.")
+                throw(RegionWaiting("queued for a node on $(r.host) — starts by itself when the " *
+                                    "scheduler grants one"))
             end
         end
         target = ReportEngine._region_target(r; origin_env = origin_env, host = host)   # transport/datadir/region from the def; env = the notebook's
@@ -2625,9 +2643,13 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         _region_route(nb, cell)
     catch e
         msg = first(sprint(showerror, e), 300)
-        ReportEngine._rlog("region: cannot route $(cell.id): " * msg)
+        # A WAIT is not a failure. The cell keeps whatever it last produced, says why in its header,
+        # and is re-run by the thing it is waiting for (`_restale_region_cells!`) — so it must not be
+        # left looking like broken code, and must not be retried in a loop by the runner.
+        wait = e isa RegionWaiting
+        ReportEngine._rlog("region: " * (wait ? "holding " : "cannot route ") * cell.id * ": " * msg)
         lock(nb.lock) do
-            ReportEngine.mark_errored!(cell, msg)
+            wait ? ReportEngine.mark_blocked!(cell, msg) : ReportEngine.mark_errored!(cell, msg)
             _broadcast_progress(nb, cell)
         end
         return nothing
@@ -3290,7 +3312,10 @@ function _eval!(nb::LiveNotebook; wait_for::AbstractString = "", wait_all::Bool 
         done = lock(nb.lock) do
             if !isempty(wait_for)
                 i = _index_of(nb.report.cells, wait_for)
-                return i === nothing || nb.report.cells[i].state in (FRESH, ERRORED)
+                # BLOCKED counts as settled: the cell is not going to progress on its own, and the
+                # thing it waits for re-runs it later. Without it, a caller waiting on a cell queued
+                # for a cluster node spins until its own timeout.
+                return i === nothing || nb.report.cells[i].state in (FRESH, ERRORED, BLOCKED)
             end
             return _next_stale_cell(nb.report) === nothing
         end

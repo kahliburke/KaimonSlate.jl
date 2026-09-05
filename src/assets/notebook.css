@@ -505,6 +505,16 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
 .cell.state-edited  .badge { color:var(--orange); }
 .cell.state-running .badge { color:var(--accent); }
 .cell.state-errored .badge { color:var(--red); }
+/* BLOCKED is a WAIT, not a failure — gold like STALE (work still to come), never red. The rail
+   matches, so a notebook waiting on a cluster node does not read as a notebook full of errors. */
+.cell.state-blocked .badge { color:var(--gold); }
+.cell.state-blocked { border-left-color:var(--gold); }
+/* The reason, in the header beside the state. Truncates rather than wrapping — the header is one
+   line and a queue message is long; the full text is on hover. */
+.blockpill { color:var(--gold); background:rgba(210,168,80,.12); border:1px solid rgba(210,168,80,.35);
+  border-radius:9px; padding:1px 8px; font-size:.74rem; white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; max-width:34ch; flex:0 1 auto; cursor:default; }
+.blockslot:empty { display:none; }
 /* Durable-cache badge — sits with the run time (`.cdur`), before the action buttons. `.ok` =
    persisted/restored (a stage that caches), `.warn` = won't cache (hover for why). Muted so it reads
    as metadata, not an alert. Negative left margin snugs it to the time (tightening the header's 8px

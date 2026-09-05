@@ -715,6 +715,7 @@ end
 # Returns whether the cell was actually restaled, so callers can track which cells changed.
 function restale!(c::Cell)
     (:locked in c.flags && c.state == FRESH) && return false
+    c.blocked = ""            # whatever it was waiting for, it is being given another go
     c.state = STALE
     bump_rev!(c)
     return true
@@ -755,16 +756,16 @@ end
 const _REV = Threads.Atomic{Int}(0)
 bump_rev!(c::Cell) = (c.rev = Threads.atomic_add!(_REV, 1) + 1; c)
 
-mark_running!(c::Cell) = (c.state = RUNNING; bump_rev!(c))
+mark_running!(c::Cell) = (c.blocked = ""; c.state = RUNNING; bump_rev!(c))
 
 # A state flip with no output involved (markdown render, `@bind` value change, a fresh empty
 # cell) — nothing to compute, so no exception to check.
-mark_fresh!(c::Cell) = (c.state = FRESH; bump_rev!(c))
+mark_fresh!(c::Cell) = (c.blocked = ""; c.state = FRESH; bump_rev!(c))
 
 # ANY→FRESH/ERRORED from a genuine computed output (possibly `nothing` — a scratch eval that
 # never ran). Callers that also mirror bind specs (`c.binds = out.binds`) do so themselves;
 # whether binds surface differs by site (a scratch eval never does, a real cell always does).
-mark_result!(c::Cell, out) = (c.output = out;
+mark_result!(c::Cell, out) = (c.blocked = ""; c.output = out;
     c.state = (out === nothing || out.exception === nothing) ? FRESH : ERRORED; bump_rev!(c))
 
 # A failure that never reached the worker (region prime/presync) — synthesize the error output.
@@ -786,8 +787,23 @@ function bind_owner(report::Report, name::AbstractString)
 end
 
 mark_errored!(c::Cell, msg::AbstractString) = (
+    c.blocked = "";
     c.output = CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", msg, nothing, 0.0);
     c.state = ERRORED; bump_rev!(c))
+
+"""
+    mark_blocked!(c, why) -> c
+
+The cell cannot run YET, for a reason that is not its own — a queue that has not granted a node, a
+host nobody has signed in to. Deliberately NOT `mark_errored!`: a wait rendered as a failure reads
+as broken code, and it sends people to fix a cell that is fine.
+
+The reason goes on the cell rather than into an output, so the header can show it and the output
+area keeps whatever the last successful run produced — a cell waiting for a node has not lost the
+value it had. Cleared by every other transition, so it can never outlive the wait.
+"""
+mark_blocked!(c::Cell, why::AbstractString) = (
+    c.blocked = String(why); c.state = BLOCKED; bump_rev!(c))
 
 # Which memo key a cell's next run should target: its pinned `lockedkey=` (a locked cell, not
 # forced, already froze on a run) or a freshly computed one (everyone else, or an explicit ▶

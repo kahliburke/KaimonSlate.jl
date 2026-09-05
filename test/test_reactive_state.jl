@@ -80,6 +80,38 @@ end
     @test NS.cell_json(c)["rev"] == c.rev        # …and it reaches the wire
 end
 
+# A cell that cannot run YET is not a cell that failed. Waiting on a scheduler queue, or on a host
+# nobody has signed in to, used to be `mark_errored!` — which paints the cell red, reads as broken
+# code, and sends people to fix something that is fine.
+@testset "BLOCKED is a wait, not a failure" begin
+    c = RE.Cell("b", RE.CODE, "1+1")
+    ran = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 1.0)
+    RE.mark_result!(c, ran)                      # it ran once and produced something
+    @test c.state == RE.FRESH
+    RE.mark_blocked!(c, "queued for a node on login")
+    @test c.state == RE.BLOCKED
+    @test c.state != RE.ERRORED                  # the whole point
+    @test c.blocked == "queued for a node on login"
+    # The OUTPUT is untouched: a cell waiting for a node has not lost what it last produced, and
+    # blanking it would throw away a result the wait has nothing to do with.
+    @test c.output !== nothing
+
+    j = NS.cell_json(c)
+    @test j["state"] == "blocked" && j["blocked"] == "queued for a node on login"
+
+    # Every other transition clears the reason, so it can never outlive the wait it describes —
+    # including `restale!`, which is how the placement task re-arms the cell once a node lands.
+    for step in (RE.restale!, RE.mark_running!, RE.mark_fresh!,
+                 x -> RE.mark_result!(x, nothing), x -> RE.mark_errored!(x, "boom"))
+        RE.mark_blocked!(c, "still waiting")
+        @test c.blocked == "still waiting"
+        step(c)
+        @test c.blocked == "" && c.state != RE.BLOCKED
+    end
+    # …and a cell that never blocked reports no reason at all.
+    @test NS.cell_json(RE.Cell("p", RE.CODE, "2+2"))["blocked"] == ""
+end
+
 @testset "a reactive write moves the memo key" begin
     src = "#%% code id=decl\nbusy = reactive(:busy, false)\nnothing\n" *
           "#%% code id=reads\nstring(busy[])\n" *

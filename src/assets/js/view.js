@@ -545,9 +545,17 @@ function cellHeaderInner(c) {
     // Run-info cluster, right-aligned and contiguous (buttons sit to its left): run time (reserved
     // width) · cache verdict (fixed slot) · state badge (fixed width) — so nothing floats mid-header.
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
+    `<span class="blockslot">${_blockedPill(c)}</span>` +
     `<span class="previewslot">${_previewBadge(c)}</span>` +
     `<span class="memoslot">${_memoBadge(c)}</span>` +
     `<span class="badge">${c.state}</span>`;
+}
+// A cell that cannot run YET says so in its header, not in its output. The output area keeps
+// whatever the last run produced — a cell waiting on a cluster node has not lost the value it had,
+// and painting it red says it has.
+function _blockedPill(c) {
+  if (!c || c.state !== 'blocked' || !c.blocked) return '';
+  return `<span class="blockpill" title="${_esc(c.blocked)}">⏳ ${_esc(c.blocked)}</span>`;
 }
 function cellHeader(c) { return '<div class="cellhead">' + cellHeaderInner(c) + '</div>'; }
 

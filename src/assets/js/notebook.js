@@ -404,6 +404,15 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
         const slot = head.querySelector('.memoslot');   // fixed-width slot rendered in the header; just refill it
         if (slot) slot.innerHTML = window._memoBadge(c);
       }
+      // Why the cell can't run yet. Arrives and clears on its own schedule — a node is granted
+      // minutes after the run that asked for it — so it patches in place rather than waiting for a
+      // header re-render.
+      const bkey = (c.state === 'blocked' ? c.blocked : '') || '';
+      if (head.dataset.blockkey !== bkey) {
+        head.dataset.blockkey = bkey;
+        const bslot = head.querySelector('.blockslot');
+        if (bslot) bslot.innerHTML = window._blockedPill(c);
+      }
       // Interim stored-render badge: present during hydration (c.preview), cleared the moment a live
       // celldone (no preview flag) replaces the cell — patch the slot in place like the memo badge.
       const pkey = c.preview ? (c.previewStale ? 'stale' : 'stored') : '';
