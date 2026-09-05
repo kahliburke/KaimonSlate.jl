@@ -195,6 +195,38 @@ const NS = KaimonSlate.NotebookServer
             @test occursin("{nocache wip}", out) || occursin("{wip nocache}", out)
         end
 
+        @testset "retagging a cell's region ends the wait it was in" begin
+            # A BLOCKED cell is waiting for a node in the region it is TAGGED for. Retag it and that
+            # wait is about somewhere it no longer runs — left standing, the header reads
+            # "local · queued", which is not a state anything can be in.
+            cid = match(r"id=(\w+)", NS.agent_add_cell!(nb, "6 * 7"))[1]
+            cell() = nb.report.cells[NS._index_of(nb.report.cells, cid)]
+            NS.set_cell_tags!(nb, cid, ["region=gpu"])
+            KaimonSlate.ReportEngine.mark_blocked!(cell(), "queued", "waiting for a node")
+            @test cell().state == KaimonSlate.ReportEngine.BLOCKED
+
+            NS.set_cell_tags!(nb, cid, ["region=other"])
+            @test cell().state == KaimonSlate.ReportEngine.STALE
+            @test isempty(cell().blocked) && cell().blocked_at == 0.0
+
+            # Dropping the tag entirely (back to the main kernel) is the same move.
+            KaimonSlate.ReportEngine.mark_blocked!(cell(), "queued", "waiting for a node")
+            NS.set_cell_tags!(nb, cid, String[])
+            @test cell().state == KaimonSlate.ReportEngine.STALE && isempty(cell().blocked)
+
+            # A tag change that does NOT move the cell leaves its state alone — restaling on every
+            # unrelated tag edit would re-run cells for nothing.
+            NS.set_cell_tags!(nb, cid, ["region=gpu"])
+            KaimonSlate.ReportEngine.mark_fresh!(cell())
+            NS.set_cell_tags!(nb, cid, ["region=gpu", "wip"])
+            @test cell().state == KaimonSlate.ReportEngine.FRESH
+
+            # Take the cell away again. Each restale above hands it to the runner, which tries to
+            # reach a region that does not exist — and a run still thrashing at that in the
+            # background outlives this testset and fails whichever later one closes the notebook.
+            NS.delete_cell!(nb, cid)
+        end
+
         @testset "table cells render as text for agents" begin
             r = NS.agent_add_cell!(nb, "slate_table([(sym=\"AAPL\", px=42.0), (sym=\"MSFT\", px=13.5)])")
             @test occursin("sym", r) && occursin("px", r)         # header

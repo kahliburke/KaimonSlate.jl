@@ -1139,6 +1139,7 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
         had_locked = :locked in c.flags
         had_needs = sort!(ReportEngine._manual_needs(c.flags))
         had_mut = sort!(ReportEngine._manual_mutates(c.flags))
+        had_region = _cell_region(c)
         want = _parse_tag_symbols(tags)
         keep = Set(f for f in c.flags if f === :opaque)        # re-derived each eval — keep it
         empty!(c.flags); union!(c.flags, keep); union!(c.flags, want)
@@ -1155,6 +1156,10 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
             build_dependencies!(nb.report)
             c.state = STALE
         end
+        # A `region=` change moves where the cell runs, so its result belongs to the old place and
+        # has to be recomputed in the new one. It also ends any WAIT it was in: that wait was for a
+        # node in the region it just left, and left standing it reads as "local · queued".
+        _cell_region(c) == had_region || ReportEngine.restale!(c)
         now_locked = :locked in c.flags
         if now_locked && !had_locked
             # `locked` just turned ON. A STALE cell just self-captures on its next ordinary run
