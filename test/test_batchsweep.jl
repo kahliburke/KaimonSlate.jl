@@ -469,6 +469,22 @@ end
         @test !Sweep.settled(Sweep.Allocation("nm", "7", :running, "c1", "1:00"))
         @test occursin("unreachable", sprint(show, un))
 
+        # Asking for a node must not WAIT for one. `salloc` does not return until the scheduler
+        # grants the allocation, and asking is one command on the shared login session, so on a busy
+        # queue it owns that session for the whole wait and every other command to the host queues
+        # behind it. Both schedulers submit a job that sleeps and let the poll loop find the grant.
+        slurm_ask = Sweep._slurm_request_script("hold"; walltime = "00:30:00", partition = "gpu",
+                                                cpus = 2, mem = "512M", gpus = "1", account = "",
+                                                extra = "")
+        @test !occursin("salloc", slurm_ask)
+        @test startswith(slurm_ask, "sbatch ")
+        @test occursin("sleep 2147483647", slurm_ask)
+        for want in ["-J hold", "-t 00:30:00", "-n 2", "-p gpu", "--mem 512M", "--gpus 1"]
+            @test occursin(want, slurm_ask)
+        end
+        # An account nobody named must not reach the scheduler as an empty flag.
+        @test !occursin("-A", slurm_ask)
+
         # PBS names the node a job landed on with a cpu on each host rather than a compressed list,
         # which is a different syntax and not a variant of SLURM's.
         @test Sweep.pbs_first_node("c1/0*4") == "c1"            # one node, four cpus

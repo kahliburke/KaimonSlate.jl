@@ -191,23 +191,33 @@ end
 
 # ── Asking for one ───────────────────────────────────────────────────────────────────────────
 
-# `--no-shell` because Slate wants the RESERVATION, not a login session on it: the worker gets there
-# over ssh, and a shell nobody is attached to would just be something else to clean up.
+# A reservation is a job that SLEEPS, on both schedulers.
+#
+# `salloc` is the obvious way to ask SLURM for one and the wrong one: it does not return until the
+# scheduler grants the allocation. Asking is a single command on the shared login session, so on a
+# busy queue that one command owns the session for the whole wait and every other command to the
+# host — a poll, a release, a cell reaching the cluster — is stuck behind it. `sbatch` returns as
+# soon as the job is queued, which is what `allocation_node!`'s poll loop is already there to
+# follow up. The node is reached with `srun --overlap`, which joins the running job either way.
 function _slurm_request_script(name; walltime, partition, cpus, mem, gpus, account, extra)
-    args = String["--no-shell", "-J", shq(name), "-t", shq(walltime)]
+    args = String["-J", shq(name), "-t", shq(walltime), "-o", "/dev/null"]
     cpus > 0 && append!(args, ["-n", string(cpus)])
     isempty(partition) || append!(args, ["-p", shq(partition)])
     isempty(mem)       || append!(args, ["--mem", shq(mem)])
     isempty(gpus)      || append!(args, ["--gpus", shq(gpus)])
     isempty(account)   || append!(args, ["-A", shq(account)])
     isempty(extra)     || push!(args, extra)
-    return "salloc " * join(args, " ") * " 2>&1"
+    return """
+    sbatch $(join(args, " ")) 2>&1 <<'SLATE_HOLD_EOF'
+    #!/bin/sh
+    # Slate holds this node for a notebook. SLURM ends the job at its walltime.
+    sleep 2147483647
+    SLATE_HOLD_EOF
+    """
 end
 
-# PBS has NO `--no-shell`, and that is the one real difference between the two: there is no way to
-# ask it to hold a node without running something on it. So the reservation is a job that sleeps —
-# the node is held for as long as the job lives, and PBS ends the job at its walltime, which is
-# exactly the lease `salloc` would have given. The sleep only has to outlast that.
+# The node is held for as long as the job lives, and the scheduler ends the job at its walltime,
+# which is exactly the lease asked for. The sleep only has to outlast that.
 function _pbs_request_script(name; walltime, partition, cpus, mem, gpus, account, extra)
     res = Dict{Symbol,Any}()
     cpus > 0 && (res[:cpus] = cpus)
