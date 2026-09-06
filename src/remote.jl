@@ -1170,6 +1170,20 @@ function stop_sync!(t::RemoteTarget)
     return nothing
 end
 
+# Every syncer pointed at `host`, whatever project it watches — for when the HOST is what went
+# away rather than one target on it, which is what releasing a scheduler node means.
+function stop_sync_host!(host::AbstractString)
+    pre = string(host, ":")
+    lock(_SYNC_LOCK) do
+        for key in collect(keys(_SYNCERS))
+            startswith(key, pre) || continue
+            _SYNCERS[key].running = false
+            delete!(_SYNCERS, key)
+        end
+    end
+    return nothing
+end
+
 # ── remote worker spawn + CURVE bootstrap ────────────────────────────────────────
 # The remote worker script — run as `julia <file>` (a FILE, NOT `-e`: verified on factorio that
 # `-e` + nested-ssh quoting silently mangles the program). Resolves the provisioned KaimonGate env
@@ -3564,7 +3578,10 @@ function region_release!(r::Region)
     kind === :none && return false
     _reap_region_workers!(r)                     # before the node goes — see above
     held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
-    held === nothing || route!(held.host, "")
+    # The node goes as a unit: its workers are reaped and its route dropped. A file watcher left
+    # pointed at it outlives all of that and pushes the next local edit to a machine the scheduler
+    # has already given to someone else.
+    held === nothing || (route!(held.host, ""); stop_sync_host!(held.host))
     return try
         Sweep.release_allocation!(kind, r.host, region_alloc_name(r))
     catch e
