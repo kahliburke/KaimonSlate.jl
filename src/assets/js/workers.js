@@ -367,6 +367,45 @@ function _wpIdentChips(r) {
   return p.join('');
 }
 
+
+// The controls for THIS worker. Restart always keeps whatever the worker holds: a wedged process
+// should not cost a node that was queued for.
+//
+// The second control is whichever one ENDS this worker, and that differs by what it is. Holding an
+// allocation, that is releasing the node — offering a shutdown that kept the node would be a third
+// button meaning "stop the process but keep paying", which restart already covers better, under a
+// label that reads like the node goes back. With no allocation, stopping the process is the whole
+// of it.
+function _wpActions(r) {
+  const side = r.side || '', held = +r.walltimeLeft >= 0;
+  const b = (label, fn, cls) => '<button class="wpact' + (cls ? ' ' + cls : '') +
+    '" onclick="' + fn + '">' + label + '</button>';
+  const q = "'" + String(side).replace(/'/g, "\\'") + "'";
+  return b('⟲ Restart', 'window.wpRestart(' + q + ')') +
+         (held ? b('⏏ Release node', 'window.wpRelease(' + q + ')', 'danger')
+               : b('■ Shut down', 'window.wpShutdown(' + q + ')', 'danger'));
+}
+
+const _wpConfirm = (msg, ok, cls) => (window.confirmDark ? window.confirmDark(msg, ok, cls)
+                                                         : Promise.resolve(window.confirm(msg)));
+const _wpWhich = side => side ? 'the “' + side + '” worker' : 'the notebook’s worker';
+
+window.wpRestart = async function (side) {
+  if (!await _wpConfirm('Restart ' + _wpWhich(side) + '?\nIts namespace is cleared and the cells that ' +
+                        'used it re-run. Any allocation it holds is kept.', 'Restart')) return;
+  try { await window.api('POST', '/api/restart', { side }); closeWorkerPop(); } catch (_) {}
+};
+window.wpShutdown = async function (side) {
+  if (!await _wpConfirm('Shut down ' + _wpWhich(side) + '?\nThe process is stopped and its results in ' +
+                        'memory are lost. The next run starts a fresh one.', 'Shut down', 'danger')) return;
+  try { await window.api('POST', '/api/worker-action', { side, action: 'shutdown' }); closeWorkerPop(); } catch (_) {}
+};
+window.wpRelease = async function (side) {
+  if (!await _wpConfirm('Release “' + side + '”’s node?\nIts workers are reaped and the node goes back to ' +
+                        'the scheduler. The next run queues for another.', 'Release', 'danger')) return;
+  try { await window.api('POST', '/api/worker-action', { side, action: 'release' }); closeWorkerPop(); } catch (_) {}
+};
+
 // Switch the panel to another worker: same panel, new subject. The log buffer is dropped (one buffer,
 // re-fetched) while the tabs repaint at once so the click feels immediate.
 function _wpSwitchTab(side) {
@@ -427,6 +466,8 @@ async function _wpRefresh() {
   _wpShown = r;
   const idb = document.getElementById('workerpop-ident');
   if (idb) idb.innerHTML = _wpIdentChips(r);
+  const ab = document.getElementById('workerpop-acts');
+  if (ab) ab.innerHTML = _wpActions(r);
   document.getElementById('workerpop-stats').innerHTML = _wpStatsChips(r.stats, _wpNoteText(r));
   // Seed the chronological buffer from the snapshot; live lines then append via onWorkerLog. Parsed + rendered
   // newest-record-first so multi-line records stay right-way-up. Trailing blank line from the file is dropped.

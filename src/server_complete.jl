@@ -1871,6 +1871,42 @@ function _make_router(h::Hub)
         p = _mesh_pending(nb.id)
         _json(p === nothing ? Dict("pending" => false) : merge(Dict("pending" => true), p))
     end))
+    # Shut a worker down without restarting it, and release a scheduler region's node — the two verbs
+    # `/api/{id}/restart` has no answer for. Kept notebook-scoped and addressed by SIDE, like restart,
+    # so the page never has to know a worker's host and port to act on it.
+    #
+    # What "shut down" means depends on what the worker is, and that is the server's business rather
+    # than the page's: an interactive region has no allocation, so stopping its process is the whole
+    # of it, while a scheduler region's node was queued for and is handed back separately.
+    HTTP.register!(router, "POST", "/api/{id}/worker-action", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        side = strip(String(get(b, "side", "")))
+        act  = strip(String(get(b, "action", "")))
+        act in ("shutdown", "release") || return _json(Dict("ok" => false, "error" => "bad_action"))
+        if act == "release"
+            r = isempty(side) ? nothing : ReportEngine.region_get(side)
+            (r === nothing || r.scheduler === :none) &&
+                return _json(Dict("ok" => false, "error" => "no_allocation"))
+            ok = ReportEngine.region_release!(r)     # reaps the workers on it, then gives the node back
+            ok && _push_alloc_event!([nb], r.name, "released"; reason = "manual")
+            return _json(Dict("ok" => ok, "did" => "released"))
+        end
+        k = isempty(side) ? nb.kernel :
+            lock(_REGION_LOCK) do; get(_REGION_KERNELS, (nb.id, String(side)), nothing); end
+        k isa ReportEngine.GateKernel ||
+            return _json(Dict("ok" => false, "error" => "no_worker"))
+        ok = if k.target isa ReportEngine.RemoteTarget
+            host = String(k.target.ssh_host); port = Int(k.port)
+            try; _drop_kernels_for_worker!(h, host, port); catch; end   # wake anything bound to it first
+            isempty(side) || lock(_REGION_LOCK) do; delete!(_REGION_KERNELS, (nb.id, String(side))); end
+            ReportEngine.reap_remote_worker(host, port)
+        else
+            ReportEngine.shutdown!(k)
+            true
+        end
+        try; _workers_push!(nb); catch; end
+        _json(Dict("ok" => ok, "did" => "shut down"))
+    end))
     # A release this notebook has not been shown yet. Asked on load, because the release happened
     # while nothing was listening.
     HTTP.register!(router, "GET", "/api/{id}/alloc-notice", req -> _withnb(h, req, nb -> begin
