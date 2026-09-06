@@ -3136,7 +3136,7 @@ function _region_alloc_facts(side::AbstractString)
         if r.idle_release > 0
             d["idleRelease"] = r.idle_release
             d["idleWarn"] = r.idle_warn
-            d["idleFor"] = round(Int, _region_idle_for(side))
+            d["idleFor"] = round(Int, _region_idle_for(side; reg = r))
         end
     catch
     end

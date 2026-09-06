@@ -2291,7 +2291,7 @@ end
 
 # How long a region has gone unused. One never seen used starts its clock now, so a hub restart
 # cannot release a node the moment it comes back.
-function _region_idle_for(name::AbstractString)
+function _region_idle_for(name::AbstractString; reg = nothing)
     hub = lock(_REGION_USE_LOCK) do
         get!(_REGION_LAST_USED, String(name), time())
     end
@@ -2300,7 +2300,7 @@ function _region_idle_for(name::AbstractString)
     # could be idle — and one that queued longer than its own timeout is released on arrival. Covers
     # adoption too, where a reopened notebook attaches to a job without a grant happening here.
     try
-        r = ReportEngine.region_get(String(name))
+        r = reg === nothing ? ReportEngine.region_get(String(name)) : reg
         if r !== nothing
             p = ReportEngine.region_placement(r)
             p === nothing || (hub = max(hub, p.ts))

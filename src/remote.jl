@@ -3258,8 +3258,23 @@ region_artifact_name(r::Region) = "slate-$(r.name)-$(region_uuid8(r))"
 
 # Every configured region (sorted by name). Lock-free: a concurrent writer swaps the file atomically, so a
 # reader sees either the old or the new complete file, never a torn one.
+# Parsed registry, keyed by the file's mtime+size. `regions()` sits under the worker roster, the
+# telemetry relay and the supervisor sweep, so it is called several times a second per worker; re-
+# reading and re-parsing the JSON each time cost a core. A writer swaps the file atomically, so a
+# changed stamp is the whole invalidation rule.
+const _REGIONS_CACHE = Ref{Tuple{Float64,Int,Vector{Region}}}((-1.0, -1, Region[]))
+const _REGIONS_CACHE_LOCK = ReentrantLock()
+
 function regions()
     p = _regions_path(); isfile(p) || return Region[]
+    st = try; stat(p); catch; nothing; end
+    st === nothing && return Region[]
+    stamp = (Float64(st.mtime), Int(st.size))
+    hit = lock(_REGIONS_CACHE_LOCK) do
+        c = _REGIONS_CACHE[]
+        (c[1] == stamp[1] && c[2] == stamp[2]) ? c[3] : nothing
+    end
+    hit === nothing || return hit
     data = try; JSON.parse(read(p, String)); catch; return Region[]; end
     data isa AbstractVector || return Region[]
     out = Region[]
@@ -3269,6 +3284,7 @@ function regions()
         push!(out, r)
     end
     sort!(out; by = r -> r.name)
+    lock(_REGIONS_CACHE_LOCK) do; _REGIONS_CACHE[] = (stamp[1], stamp[2], out); end
     return out
 end
 region_get(name) = (n = _fold_region(name); for r in regions(); r.name == n && return r; end; nothing)
