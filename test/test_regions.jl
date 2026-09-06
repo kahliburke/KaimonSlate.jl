@@ -141,6 +141,16 @@ const RE = KaimonSlate.ReportEngine
             finally
                 RE.route!("c2", "")
             end
+
+            # Once the allocation ends the route goes with it, and what is left is a bare hostname.
+            # Reaching it must not fall back to dialling the node directly: that fails with advice to
+            # sign in to a compute node, which is not a thing anyone does, and it hides the real
+            # reason. A host that was NEVER routed is untouched — that is an ordinary ssh host.
+            @test RE.via("c1") === nothing
+            ok, out = RE._run_on("c1", "hostname")
+            @test !ok
+            @test occursin("not held any more", out) && occursin("allocation", out)
+            @test !occursin("padlock", out)
         end
     end
 

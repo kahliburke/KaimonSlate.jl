@@ -273,12 +273,21 @@ const _VIA_LOCK = ReentrantLock()
 function route!(node::AbstractString, login::AbstractString, job::AbstractString = "",
                 kind::Symbol = :slurm)
     lock(_VIA_LOCK) do
-        isempty(login) ? delete!(_VIA, String(node)) :
-                         (_VIA[String(node)] = (host = String(login), job = String(job),
-                                                kind = kind))
+        if isempty(login)
+            delete!(_VIA, String(node))
+        else
+            _VIA[String(node)] = (host = String(login), job = String(job), kind = kind)
+            push!(_ROUTED_EVER, String(node))
+        end
     end
     return nothing
 end
+
+# Nodes that have been reached through a login session at some point. The route itself is dropped the
+# moment an allocation ends, and what is left is a hostname that looks like any other — so a failure
+# to reach it reads as "sign in to c1", which is advice about a machine nobody signs in to.
+const _ROUTED_EVER = Set{String}()
+_was_routed(node::AbstractString) = lock(_VIA_LOCK) do; String(node) in _ROUTED_EVER; end
 
 "How `host` is reached, or `nothing` when it is reachable on its own."
 via(host::AbstractString) = lock(_VIA_LOCK) do; get(_VIA, String(host), nothing); end
@@ -474,7 +483,17 @@ end
 # the two schedulers get there differently.
 function _run_on(host::AbstractString, script::AbstractString)
     v = via(host)
-    v === nothing && return Sweep.run_there(host, script)
+    if v === nothing
+        ok, out = Sweep.run_there(host, script)
+        # A node that HAD a route and no longer does is a compute node whose allocation ended. It is
+        # not a host anyone signs in to, so the generic offline message sends the reader to a padlock
+        # that could not help. Only the message changes: a host that is still reachable on its own
+        # answers as it always did.
+        (!ok && _was_routed(host)) &&
+            return (false, "$host is not held any more: its allocation ended, and a compute node is " *
+                           "only reachable while one is. It will be asked for again.")
+        return (ok, out)
+    end
     isempty(v.job) && return Sweep.run_there(v.host, script)   # routed but not a scheduler job
     return Sweep.run_there(v.host, _in_allocation(v, host, script))
 end
