@@ -479,7 +479,8 @@ end
         @test !occursin("salloc", slurm_ask)
         @test startswith(slurm_ask, "sbatch ")
         @test occursin("sleep 2147483647", slurm_ask)
-        for want in ["-J hold", "-t 00:30:00", "-n 2", "-p gpu", "--mem 512M", "--gpus 1"]
+        # Values are shell-quoted, so a walltime or a partition with anything awkward in it survives.
+        for want in ["-J 'hold'", "-t '00:30:00'", "-n 2", "-p 'gpu'", "--mem '512M'", "--gpus '1'"]
             @test occursin(want, slurm_ask)
         end
         # An account nobody named must not reach the scheduler as an empty flag.
