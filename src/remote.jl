@@ -3675,14 +3675,6 @@ function region_reconcile!(name)
     end
 end
 
-# Reconcile every region that keeps warm workers — the hub's desired-state driver. A region holding
-# a scheduler allocation is included whatever its warm count, because for those "nothing to do" is
-# not the same as "nothing to pay for": a node with no workers left on it should be given back, and
-# this sweep is the only thing that would ever notice.
-reconcile_all_regions!() = for r in regions()
-    (r.warm > 0 || _region_holds_node(r)) && (try; region_reconcile!(r.name); catch; end)
-end
-
 # Anything of ours still running where this region is currently placed. Consulted before letting an
 # allocation go: `warm = 0` means "keep none READY", not "kill the one a notebook is attached to".
 # Read-only — it uses the cached placement, so it never asks the scheduler for a node in order to

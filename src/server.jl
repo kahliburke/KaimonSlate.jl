@@ -2235,9 +2235,50 @@ function _reconcile_blocked_regions!(nb::LiveNotebook)
     return nothing
 end
 
+# Give a node back when nothing is left on it. `_region_reconcile_impl!` releases a scheduler region
+# that holds one with no live workers, and an allocation bills for the time it is HELD — but nothing
+# ever called it, so a node outlived its work by whatever its walltime had left.
+#
+# Two regions must be skipped, and neither is visible from the registry alone: one whose placement is
+# still in flight, and one a BLOCKED cell is waiting on. A node is granted BEFORE the worker that
+# will use it exists, so releasing on "no workers yet" would take back the node a queued cell had
+# just been given and send it round the queue again, indefinitely.
+#
+# Deciding is local — `_region_holds_node` reads the cached placement — but confirming costs an ssh
+# round trip per held region, so this runs on its own minute-scale clock rather than the 5s sweep.
+const _REGION_SWEEP_AT = Ref(0.0)
+const _REGION_SWEEP_EVERY = 60.0
+
+function _sweep_idle_regions!(h)
+    time() - _REGION_SWEEP_AT[] < _REGION_SWEEP_EVERY && return nothing
+    _REGION_SWEEP_AT[] = time()
+    busy = lock(_PLACING_LOCK) do; Set{String}(_PLACING); end
+    for nb in lock(h.lock) do; collect(values(h.notebooks)); end
+        lock(nb.lock) do
+            for c in nb.report.cells
+                c.state == BLOCKED || continue
+                r = _cell_region(c)
+                isempty(r) || push!(busy, r)
+            end
+        end
+    end
+    for r in ReportEngine.regions()
+        (r.scheduler === :none || r.name in busy) && continue
+        ReportEngine._region_holds_node(r) || continue
+        try; ReportEngine.region_reconcile!(r.name)
+        catch e; ReportEngine._rlog("supervisor: region sweep on '$(r.name)': " *
+                                    first(sprint(showerror, e), 120))
+        end
+    end
+    return nothing
+end
+
 function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, included at ~1510) — untyped so this loads
     try; ReportEngine.reap_pending_kills!()   # hub-wide, not per-notebook — see gate_kernel.jl
     catch e; ReportEngine._rlog("supervisor: pending-kill reap error: " * first(sprint(showerror, e), 120))
+    end
+    try; _sweep_idle_regions!(h)              # hub-wide too: a region is not a notebook's to release
+    catch e; ReportEngine._rlog("supervisor: region sweep error: " * first(sprint(showerror, e), 120))
     end
     nbs = lock(h.lock) do; collect(values(h.notebooks)); end
     for nb in nbs
