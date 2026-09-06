@@ -20,6 +20,7 @@ import Tar
 import Typst_jll
 import Pkg
 using ..ReportEngine
+using ..SlateDiag                              # switchable instrumentation (off by default)
 using ..ReportRender
 import ..SlateHome
 import ..EffectStore
@@ -2611,6 +2612,11 @@ function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, in
     end
     try; _sweep_idle_regions!(h)              # hub-wide too: a region is not a notebook's to release
     catch e; ReportEngine._rlog("supervisor: region sweep error: " * first(sprint(showerror, e), 120))
+    end
+    try                                       # a leak is only visible as a series, so write one
+        line = SlateDiag.diag_log_line()
+        line === nothing || ReportEngine._rlog(line)
+    catch e; ReportEngine._rlog("supervisor: diag log error: " * first(sprint(showerror, e), 120))
     end
     nbs = lock(h.lock) do; collect(values(h.notebooks)); end
     for nb in nbs

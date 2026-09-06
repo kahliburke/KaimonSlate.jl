@@ -751,6 +751,36 @@ function _local_kernel_history(h::Hub, port::Int)
     return Any[]
 end
 
+# Everything the hub holds between requests, handed to SlateDiag as callbacks so it needs no
+# knowledge of these names and nothing breaks when one is added or renamed.
+function _register_diag_gauges!(h)
+    RE = ReportEngine
+    reg(n, f) = SlateDiag.diag_gauge!(n, f)
+    reg("notebooks",        () -> length(h.notebooks))
+    reg("region_kernels",   () -> length(_REGION_KERNELS))
+    reg("region_last_used", () -> length(_REGION_LAST_USED))
+    reg("walltime_warned",  () -> length(_WALLTIME_WARNED))
+    reg("release_warned",   () -> length(_REGION_RELEASE_WARNED))
+    reg("reader_rearmed",   () -> length(_READER_REARMED))
+    reg("released_notice",  () -> length(_RELEASED_NOTICE))
+    reg("region_preparing", () -> length(_REGION_PREPARING))
+    reg("run_since",        () -> length(_RUN_SINCE))
+    reg("force_run",        () -> length(_FORCE_RUN))
+    reg("placing",          () -> length(_PLACING))
+    reg("kernel_stats",     () -> length(RE._KERNEL_STATS))
+    reg("kernel_samples",   () -> sum(length(v) for v in values(RE._KERNEL_STATS); init = 0))
+    reg("clock_tracks",     () -> length(RE.ClockTrack._TRACKS))
+    reg("syncers",          () -> length(RE._SYNCERS))
+    reg("via_routes",       () -> length(RE._VIA))
+    reg("routed_ever",      () -> length(RE._ROUTED_EVER))
+    reg("data_tunnels",     () -> length(RE._DATA_TUNNELS))
+    reg("region_place",     () -> length(RE._REGION_PLACE))
+    reg("pending_kills",    () -> length(RE._PENDING_KILLS))
+    reg("gate_sessions",    () -> length(RE._GATE_SESSION))
+    reg("revise_pkgs",      () -> (try; length(getfield(getfield(Main, :Revise), :pkgdatas)); catch; 0; end))
+    return nothing
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     # Front page + inlined last-known ledger (see `_index_html`). An APP hub has no front page: the
@@ -1551,6 +1581,16 @@ function _make_router(h::Hub)
             @warn "slate: region teardown failed" region = name exception = (e, catch_backtrace())
         end
         _json(Dict("ok" => true, "name" => name))
+    end)
+    # Instrumentation, off unless asked for. See `SlateDiag`.
+    HTTP.register!(router, "GET", "/api/_diag", _ -> _json(SlateDiag.diag_snapshot()))
+    HTTP.register!(router, "POST", "/api/_diag/on", _ -> _json(Dict("enabled" => SlateDiag.diag_enable!(true))))
+    HTTP.register!(router, "POST", "/api/_diag/off", _ -> _json(Dict("enabled" => SlateDiag.diag_enable!(false))))
+    HTTP.register!(router, "GET", "/api/_diag/allocs", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        _json(SlateDiag.alloc_sites(
+            seconds = something(tryparse(Float64, get(q, "seconds", "5")), 5.0),
+            rate    = something(tryparse(Float64, get(q, "rate", "0.0005")), 0.0005)))
     end)
     # Manually reap a specific remote worker (kill process + remove its manifest). Body {host, port}.
     # Never automatic — the user decides, so a worker with useful results is never killed out from under them.
@@ -3308,10 +3348,29 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     # Surface a remote worker's live bring-up output (streamed instantiate/precompile) in the browser
     # hydrating banner, not just remote.log — the provisioner narrates each line through this sink hook.
     try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
+    _register_diag_gauges!(h)  # what the hub KEEPS — watched for unbounded growth (SlateDiag)
     _install_worker_push!(h)   # worker telemetry + log → per-page WebSocket push (no browser polling)
     _install_sshauth_watch!(h) # a cluster asking for a password / second factor → a dialog in the notebook
     _install_session_drop!(h)  # a session going away drops the worker wires it was carrying, at once
-    handle = HTTP.streamhandler(_make_router(h))
+    routed = _make_router(h)
+    # Instrumentation sits on the request path permanently and costs a `Ref` read when off. Wrapping
+    # the ROUTER rather than the dispatcher below on purpose: the raw-stream handlers (SSE, the
+    # WebSocket) are long-lived, and timing a connection that stays open for an hour would say
+    # nothing useful about a route.
+    handle = HTTP.streamhandler(function (req)
+        SlateDiag.diag_enabled() || return routed(req)
+        t0 = time_ns(); b0 = Base.gc_bytes(); ok = true
+        try
+            r = routed(req)
+            ok = !(r isa HTTP.Response) || r.status < 400
+            return r
+        catch
+            ok = false; rethrow()
+        finally
+            SlateDiag.diag_record!(SlateDiag.diag_key(req.method, req.target),
+                                   time_ns() - t0, Base.gc_bytes() - b0, ok)
+        end
+    end)
     server = HTTP.listen!(host, port) do stream::HTTP.Stream
         # Reject cross-origin / rebinding requests before ANY handler (router or SSE) runs.
         if !_request_allowed(h, stream.message)

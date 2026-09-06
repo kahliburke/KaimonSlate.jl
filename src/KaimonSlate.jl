@@ -28,6 +28,7 @@ import JSON
 
 # In dependency order; each depends on nothing but what precedes it. SlateHome is first because
 # every other module resolves its paths through it.
+include("slatediag.jl") # module SlateDiag — switchable request/alloc/registry instrumentation
 include("slate_home.jl") # module SlateHome — KaimonSlate's own XDG config/data/cache homes
 include("sshauth.jl")   # module SshAuth — ssh prompts (password / second factor) ↔ the notebook
 include("sshtransport.jl") # module SshTransport — the libssh2 session every remote command rides
