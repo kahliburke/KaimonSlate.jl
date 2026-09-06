@@ -2798,7 +2798,7 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
         try; _broadcast(nb, string(nb.version)); catch; end
     end
     try
-        ReportEngine.prepare!(kernel, nb.report)
+        ReportEngine.prepare!(kernel, nb.report; explicit = forced)
         _prime_namespace!(nb, kernel, side)
         stop_narrating()
         try; _workers_push!(nb); catch; end   # connected → pill flips out of "starting"; telemetry takes over

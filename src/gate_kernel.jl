@@ -1005,12 +1005,17 @@ function _drop_kernel_conn!(k::GateKernel)
     end
 end
 
-function prepare!(k::GateKernel, report::Report)
+function prepare!(k::GateKernel, report::Report; explicit::Bool = false)
     lock(k.lock) do                               # serialize: concurrent callers must not double-spawn
         # MANUAL retry policy: the liveness supervisor dropped this remote wire as dead and flagged it to
         # await an explicit run. A reactive cascade must NOT silently re-dial/cold-spawn a replacement
-        # (a flaky worker shouldn't be resurrected behind the user's back) — error clearly instead. An
-        # explicit run clears the flag first (see `_eval_one!`), so this only bites the automatic path.
+        # (a flaky worker shouldn't be resurrected behind the user's back) — error clearly instead.
+        #
+        # An explicit run says so HERE rather than relying on the hold having been cleared before the
+        # call: a session going away announces it at once, so the hold can be re-set between that clear
+        # and this check. The cell then reported that it should be re-run, which is what the caller had
+        # just done, and no number of re-runs would clear it.
+        explicit && (k.redial_hold = false)
         if k.redial_hold && k.conn === nothing && (k.target isa RemoteTarget || k.remote)
             error("region worker is disconnected (a previous worker went unresponsive) — re-run to reconnect")
         end
