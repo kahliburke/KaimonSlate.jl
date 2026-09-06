@@ -18,6 +18,7 @@
     "@codemirror/view": "^6",
     "@lezer/highlight": "^1",
     "@plutojl/lezer-julia": "^1",
+    "@replit/codemirror-emacs": "^6.1.0",
     "@replit/codemirror-vim": "^6.4.0"
   },
   "devDependencies": {

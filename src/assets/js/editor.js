@@ -7,7 +7,7 @@
   if (!CM) { console.error('CM6 bundle missing'); return; }
   const { EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, Decoration, Transaction,
           ViewPlugin, WidgetType, Prec,
-          vimMode, vimApi, vimGetCM,
+          vimMode, vimApi, vimGetCM, emacsMode,
           keymap, defaultKeymap, history, historyKeymap, undoDepth, redoDepth, indentWithTab, toggleComment,
           indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection,
           syntaxHighlighting, julia, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
@@ -52,18 +52,29 @@
     for (const v of Object.values(window.editors || {}))
       v.dispatch({ effects: wrapComp.reconfigure((v._wrapMd || on) ? EditorView.lineWrapping : []) });
   };
-  // ── Modal editing (Settings → Editing → Editor keymap) ──────────────────────────
-  // `vim` layers @replit/codemirror-vim over every cell editor. In a Compartment so the setting
-  // applies live to editors that are already open. Deliberately built WITHOUT vim's status panel:
-  // that panel is per-editor and would put a permanent mode bar under all forty cells. The ex line
-  // (`:`) still gets a panel when you open one, because vim falls back to a dialog-only panel, and
-  // the block-vs-bar cursor is the mode indicator.
+  // ── Editor keymap (Settings → Editing → Editor keymap) ──────────────────────────
+  // `vim` / `emacs` layer an alternative keymap over every cell editor. In a Compartment so the
+  // setting applies live to editors that are already open.
+  //
+  // Vim is deliberately built WITHOUT its status panel: that panel is per-editor and would put a
+  // permanent mode bar under all forty cells. The ex line (`:`) still gets one when you open it,
+  // because vim falls back to a dialog-only panel, and the block-vs-bar cursor is the mode indicator.
+  //
+  // Emacs needs none of the Escape arbitration below — it is modeless, takes M- (Alt) for Meta rather
+  // than the ESC-prefix convention, and cancels with C-g, so Escape keeps meaning "leave the cell".
+  // Its one overlap with Slate's own bindings resolves itself: it claims C-/ for undo (also on C-x u,
+  // C-_ and C-z) and brings M-; for comment-toggle, which is the chord an emacs user reaches for.
+  const _KEYMAP_MODES = { vim: vimMode, emacs: emacsMode };
   const keymapModeComp = new Compartment();
-  const _keymapMode = () => (localStorage.getItem('slateEditorKeymap') === 'vim' && vimMode) ? 'vim' : 'default';
-  const _keymapExt = mode => (mode === 'vim' && vimMode) ? vimMode() : [];
+  const _keymapMode = () => {
+    const m = localStorage.getItem('slateEditorKeymap');
+    return (m && _KEYMAP_MODES[m]) ? m : 'default';
+  };
+  const _keymapExt = mode => (_KEYMAP_MODES[mode] ? _KEYMAP_MODES[mode]() : []);
   window.editorKeymapMode = _keymapMode;
+  window.editorKeymapModes = () => Object.keys(_KEYMAP_MODES).filter(m => _KEYMAP_MODES[m]);
   window.setEditorKeymap = mode => {
-    const m = (mode === 'vim') ? 'vim' : 'default';
+    const m = _KEYMAP_MODES[mode] ? mode : 'default';
     localStorage.setItem('slateEditorKeymap', m);
     for (const v of Object.values(window.editors || {})) {
       try { v.dispatch({ effects: keymapModeComp.reconfigure(_keymapExt(m)) }); } catch (_) {}
@@ -97,7 +108,7 @@
       // A list that is actually ON SCREEN is the innermost thing, and CM6's own binding closes it.
       // Only "active" counts, never "pending" — see below for why that distinction is the whole game.
       if (completionStatus(view.state) === 'active') return false;
-      const cm = _vimCM(view), vs = (cm && cm.state && cm.state.vim) || null;
+      const cm = _vimCM(view), vs = _vimState(view);   // both null under emacs / the default keymap
       if (vs) {
         // Change the mode HERE rather than handing the key down to vim. `closeCompletion` claims
         // Escape whenever a completion source is merely PENDING — query in flight, nothing rendered
