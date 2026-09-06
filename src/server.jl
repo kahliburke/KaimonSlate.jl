@@ -1505,13 +1505,15 @@ _region_recoverable(c) = c.state == BLOCKED || c.state == ERRORED
 function _restale_region_cells!(nb::LiveNotebook, name::AbstractString)
     n = 0
     lock(nb.lock) do
-        waiting = String[c.id for c in nb.report.cells
-                         if _cell_region(c) == name && _region_recoverable(c)]
-        isempty(waiting) && return
-        # …and everything downstream of them that ALSO stalled. A cell reading a value from this
-        # region failed for the same missing node, and recovering only the pinned cell would leave
-        # the notebook half-resolved — the reader still red, needing a hand it should not need.
-        blast = ReportEngine.dependents_of(nb.report, waiting)
+        # Every cell that RUNS on this region, whether or not it is still waiting — then everything
+        # downstream of them that stalled. A cell reading a value from the region is blocked by the
+        # same missing node but carries no region tag of its own, so keying this off a tagged cell
+        # that is STILL blocked strands the reader whenever the tagged cell recovers first: the
+        # region comes back, the cell that named it runs, and its reader stays stuck needing a hand
+        # it should not need. Which cells are then recovered is still decided by their state.
+        tagged = String[c.id for c in nb.report.cells if _cell_region(c) == name]
+        isempty(tagged) && return
+        blast = ReportEngine.dependents_of(nb.report, tagged)
         for c in nb.report.cells
             (c.id in blast && _region_recoverable(c)) || continue
             ReportEngine.restale!(c) && (n += 1)
