@@ -1140,7 +1140,11 @@ function _sync_task(host::AbstractString, localdir::AbstractString, watchdir::Ab
                     remotedir::AbstractString, excludes::Vector{String}, key::String)
     while get(_SYNCERS, key, nothing) !== nothing && _SYNCERS[key].running
         try
-            FileWatching.watch_folder(watchdir, 2.0)          # block until a change (or 2s tick)
+            ev = FileWatching.watch_folder(watchdir, 2.0)      # block until a change, or time out
+            # A TIMEOUT is not a change. Sending on one tars the whole directory and pushes it over
+            # ssh every couple of seconds for as long as the notebook is open, whether or not anyone
+            # edited anything — and once the host is gone, logs a failure at the same rate.
+            (ev.second.timedout) && continue
             sleep(0.15)                                        # coalesce a burst of saves
             _send_dir!(host, localdir, remotedir; excludes = excludes)
         catch e
