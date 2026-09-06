@@ -1174,7 +1174,7 @@ function patchCells(cells) {
       renderCharts(nc);
       if (!renderTables(nc)) _landed = false;
       if (window.renderAnimation && !window.renderAnimation(nc)) _landed = false;
-      syncControlValues({ cells: [nc] });
+      syncControlValuesSoon(nc);
     }
     // Spend the stamp only now, only if the cell was actually on the page, and only if everything
     // that had work to do managed it — see `revIsNew`.
@@ -1464,6 +1464,24 @@ function renderPalette() {
 // Keep every widget bound to a variable in lockstep (a control may be surfaced in
 // multiple cells). Skips the element being actively dragged so we never fight it.
 const _sameList = (a, b) => a.length === b.length && a.every((x, i) => String(x) === String(b[i]));
+
+// Per-cell callers go through this, not `syncControlValues` directly. Each sync walks EVERY control
+// in the notebook — it has to, because a control can be surfaced into a cell other than the one that
+// declared it, so the walk cannot be scoped to the owner's subtree — and calling it once per cell
+// therefore costs cells × controls, which is the dominant render cost on a document with many
+// controls. Coalescing into a single pass per frame keeps the same end state (the last value for
+// each name wins either way) for one walk instead of one per cell.
+let _svcFrame = null, _svcCells = [];
+function syncControlValuesSoon(cell) {
+  _svcCells.push(cell);
+  if (_svcFrame) return;
+  _svcFrame = requestAnimationFrame(() => {
+    _svcFrame = null;
+    const cells = _svcCells; _svcCells = [];
+    syncControlValues({ cells });
+  });
+}
+window.syncControlValuesSoon = syncControlValuesSoon;
 
 function syncControlValues(state) {
   const val = {}, par = {};

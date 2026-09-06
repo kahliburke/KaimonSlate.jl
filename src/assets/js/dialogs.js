@@ -292,10 +292,12 @@ async function exportApp() {
     pagewidth: (document.getElementById('apppagewidth').value || '').trim(),
     port: (document.getElementById('appport').value || '').trim(),
     include: (document.getElementById('appinclude').value || '').trim(),
+    workbook: !!(document.getElementById('appworkbook') || {}).checked,
   };
   // Remembered per notebook-independent preference, like every other format's options.
   ['appdir', 'apptitle', 'appexptheme', 'apppagewidth', 'appport', 'appinclude'].forEach(id =>
     localStorage.setItem('slate_' + id, document.getElementById(id).value || ''));
+  localStorage.setItem('slate_appworkbook', body.workbook ? '1' : '0');
   // `.publog` collapses whitespace — `.publogln` is the line element that doesn't (and carries the
   // ok/err/st colours). Same idiom as the publish log, so the two read alike. Each line scrolls the
   // box to the bottom: the log is short enough to fit at first and then isn't, so without this the
@@ -654,6 +656,8 @@ function openExport(preset) {
   ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => {
     const v = localStorage.getItem('slate_' + id); if (v != null) document.getElementById(id).value = v;
   });
+  { const el = document.getElementById('appworkbook');
+    if (el) el.checked = localStorage.getItem('slate_appworkbook') === '1'; }
   document.getElementById('pdfparams').checked = localStorage.getItem('slate_pdfparams') === '1';
   document.getElementById('pdftypst').checked = localStorage.getItem('slate_pdftypst') === '1';
   document.getElementById('pdfnotes').checked = localStorage.getItem('slate_pdfnotes') === '1';

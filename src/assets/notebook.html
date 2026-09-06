@@ -324,6 +324,11 @@
     <div class="asrow"><label for="appzoom">Chart scroll-zoom</label>
       <input type="range" id="appzoom" min="0" max="100" step="4"/><span class="asv" id="appzoomv"></span></div>
     <div class="asrow"><label for="appwrap">Wrap wide output</label><input type="checkbox" id="appwrap"/></div>
+    <!-- Editor settings. Only a WORKBOOK reader has an editor, so these rows are hidden in a plain
+         app (CSS: body.app:not(.workbook)) rather than being a second popover to maintain. -->
+    <div class="asrow wbonly"><label for="appkeymap">Editor keymap</label><select id="appkeymap"></select></div>
+    <div class="asrow wbonly"><label for="appsyntax">Syntax theme</label><select id="appsyntax"></select></div>
+    <div class="asrow wbonly"><label for="appedwrap">Wrap long lines</label><input type="checkbox" id="appedwrap"/></div>
     <div class="asnote">Saved in this browser.</div>
   </div>
 </div>
@@ -666,6 +671,9 @@
   <div class="setrow exrow fmt-app"><label title="Extra project-relative files/directories to ship beyond the git-tracked ones, comma-separated. The usual case is reference data under datadir(), which is git-ignored by construction.">Also ship</label>
     <input id="appinclude" type="text" placeholder="e.g. assets/spectra, reference" autocomplete="off" spellcheck="false"
       style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>
+  <div class="setrow exrow fmt-app"><label title="Serve the app as a workbook: cells tagged `workbook` stay editable and runnable, so a reader can fill in exercises. Everything else is still refused. Ships a copy of the notebook as you wrote it, so a reader can reset an exercise back to its starting point.">Workbook</label>
+    <label style="display:flex;align-items:center;gap:7px;color:var(--dim);font-size:.8rem">
+      <input id="appworkbook" type="checkbox"/> readers can edit and run the cells tagged <code>workbook</code></label></div>
   <div class="setrow exrow fmt-app sethint"><span></span>Writes a self-contained folder. Running <code>run.sh</code> (macOS/Linux) or <code>run.bat</code> (Windows) inside it installs the Julia packages, reconstructs this notebook's exact environment, and serves it as an <b>app</b>: prose, results and live controls, with the authoring API refused by the server. Copy it to another machine or keep it here — it needs only Julia 1.10+. Ships the project's <b>git-tracked</b> files; add anything else under “Also ship”. <b>No authentication</b> — whoever can reach the port can drive it.</div>
   <div class="setrow exrow fmt-app" id="appoutrow" style="display:none"><span></span><div id="appout" class="publog" style="flex:1;margin:0"></div></div>
   <div class="setrow" id="sitepubrow" style="display:none"><div id="sitepublog" class="publog" style="flex:1;margin:0"></div></div>
@@ -710,6 +718,7 @@
 <script src="/assets/js/keyboard.js"></script>
 <script src="/assets/js/settings.js"></script>
 <script src="/assets/js/appmode.js"></script>   <!-- app mode: reading view, app bar, plain-language failures -->
+<script src="/assets/js/workbook.js"></script>  <!-- workbook mode: run/reset on the cells a reader fills in -->
 
 <script src="/assets/js/publishing.js"></script>
 <script src="/assets/js/palette.js"></script>

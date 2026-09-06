@@ -196,6 +196,30 @@ function bindDisplaySettings(ids) {
       localStorage.setItem('slateWrapOutput', wrap.checked ? '1' : '0');
     };
   }
+  // ── Editor settings ────────────────────────────────────────────────────────────────────────
+  // Optional: only bound when the caller passes the ids, so the authoring Settings modal (which has
+  // its own, richer Editing tab) is unaffected. Every setter here already applies LIVE across open
+  // editors, so a reader changing keymap mid-exercise doesn't lose what they typed.
+  const km = el('keymap');
+  if (km && window.editorKeymapModes) {
+    const modes = ['default', ...window.editorKeymapModes()];
+    const label = m => m === 'default' ? 'Default' : m[0].toUpperCase() + m.slice(1);
+    km.innerHTML = modes.map(m => `<option value="${m}">${label(m)}</option>`).join('');
+    km.value = window.editorKeymapMode ? window.editorKeymapMode() : 'default';
+    km.onchange = () => window.setEditorKeymap && window.setEditorKeymap(km.value);
+  }
+  const syn = el('syntax');
+  if (syn && window.setSyntaxTheme) {
+    const themes = window._syntaxThemes || [{ name: 'dark-plus', label: 'Dark+ (default)' }];
+    syn.innerHTML = themes.map(x => `<option value="${x.name}">${x.label || x.name}</option>`).join('');
+    syn.value = localStorage.getItem('slateSyntaxTheme') || 'dark-plus';
+    syn.onchange = () => window.setSyntaxTheme(syn.value);
+  }
+  const edwrap = el('edwrap');
+  if (edwrap && window.setEditorWrap) {
+    edwrap.checked = localStorage.getItem('slateWrapEditor') === '1';
+    edwrap.onchange = () => window.setEditorWrap(edwrap.checked);
+  }
 }
 window.bindDisplaySettings = bindDisplaySettings;
 

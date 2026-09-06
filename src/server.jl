@@ -2784,12 +2784,113 @@ const _HUB_START_SHA = Ref("")
 _hub_src_stale() = !isempty(_HUB_START_SHA[]) &&
     (try; ReportEngine._payload_sha() != _HUB_START_SHA[]; catch; false; end)
 
+# ── Revise in the hub ────────────────────────────────────────────────────────────────────────────
+#
+# The extension boot script already does `using Revise`, so Revise loads and watches. What was
+# missing is that nothing ever ASKED it to revise: the automatic trigger lives in the REPL backend,
+# and a server process has no REPL — so every source edit meant a restart, and the health panel's
+# "Revise applies function edits live" was aspirational.
+#
+# Same shape as Kaimon's TUI (tui/lifecycle.jl): a task waits on Revise's own `revision_event` and
+# raises a flag (event-driven — no polling, nothing to pay for while idle), and the flag is applied
+# at ONE well-defined point, the top of the request handler. Never from the watcher task itself: a
+# revision landing in the middle of an eval is how you get a half-updated method table.
+#
+# What it does NOT do is make the restart hint obsolete. New routes are registered once when the
+# router is built, `const`s don't change, and a struct redefinition (which Julia 1.12 does allow)
+# leaves every ALREADY-CONSTRUCTED object on the old layout — the running `Hub` included. So the
+# panel keeps saying what changed and when, and leaves the judgement to whoever is editing.
+const _REVISE_MOD = Ref{Any}(nothing)
+const _REVISE_PENDING = Threads.Atomic{Bool}(false)
+const _REVISE_LAST = Ref(0.0)        # when a pass last applied changes
+const _REVISE_ERR = Ref("")          # last failure text ("" when the last pass was clean)
+const _REVISE_ERR_AT = Ref(0.0)
+
+# A depot install is read-only and never edited in place, so watching it is pure overhead.
+_hub_is_dev_checkout() = (p = pkgdir(@__MODULE__);
+    p !== nothing && !occursin(joinpath("julia", "packages"), abspath(p)))
+
+# Newest mtime across the hub's own sources — the same set `_payload_sha` hashes, and the cheap half
+# of it (a stat per file, no reads).
+function _src_mtime()
+    d = dirname(@__FILE__)
+    try
+        maximum((mtime(joinpath(d, f)) for f in readdir(d) if endswith(f, ".jl")); init = 0.0)
+    catch
+        0.0
+    end
+end
+
+# Has Revise already caught up with what's on disk? True when a pass succeeded no earlier than the
+# newest source file. That covers every change Revise CAN apply — function bodies — and says nothing
+# about the ones it can't (new routes, `const`s, live objects of a redefined struct), which is why
+# the panel still names them rather than declaring the hub up to date.
+revise_covers_source() = _REVISE_MOD[] !== nothing && isempty(_REVISE_ERR[]) &&
+    _REVISE_LAST[] > 0 && !_REVISE_PENDING[] && _REVISE_LAST[] >= _src_mtime()
+
+revise_status() = Dict{String,Any}(
+    "active" => _REVISE_MOD[] !== nothing,
+    "last" => _REVISE_LAST[],
+    "error" => _REVISE_ERR[],
+    "errorAt" => _REVISE_ERR_AT[],
+    "covers" => revise_covers_source())
+
+"""Load Revise (if it's reachable) and start the file-change watcher. No-op for an app or a depot
+install. Best-effort throughout: a hub that cannot revise must still serve."""
+function _start_revise!()
+    _REVISE_MOD[] === nothing || return nothing
+    _hub_is_dev_checkout() || return nothing
+    R = try
+        Base.require(Base.PkgId(Base.UUID("295af30f-e4ad-537b-8983-00126c2a3abe"), "Revise"))
+    catch
+        return nothing    # not installed here — the restart hint carries on alone
+    end
+    try
+        Base.invokelatest(R.watch_package, Base.PkgId(@__MODULE__))
+    catch e
+        @debug "Revise: watch_package failed" exception = e
+    end
+    _REVISE_MOD[] = R
+    Threads.@spawn begin
+        while true
+            try
+                wait(R.revision_event)
+                reset(R.revision_event)
+                _REVISE_PENDING[] = true
+            catch e
+                e isa InterruptException && break
+                sleep(0.5)
+            end
+        end
+    end
+    return nothing
+end
+
+"""Apply any pending revision. Called before routing, so it lands between requests rather than
+inside one. Costs an atomic read when nothing changed."""
+function _apply_pending_revise!()
+    _REVISE_PENDING[] || return nothing
+    R = _REVISE_MOD[]; R === nothing && return nothing
+    _REVISE_PENDING[] = false
+    try
+        Base.invokelatest(R.revise)
+        _REVISE_LAST[] = time(); _REVISE_ERR[] = ""
+        @info "Slate: Revise applied source changes"
+    catch e
+        _REVISE_ERR[] = first(sprint(showerror, e), 400); _REVISE_ERR_AT[] = time()
+        @warn "Slate: Revise.revise() failed" exception = e
+    end
+    return nothing
+end
+
 function _health_json(nb::LiveNotebook)
     rec = nb_health(nb.id)
     stale = _hub_src_stale()
-    rec === nothing && return Dict{String,Any}("status" => "ok", "alerts" => Any[], "src_stale" => stale)
+    rev = revise_status()
+    rec === nothing && return Dict{String,Any}("status" => "ok", "alerts" => Any[],
+                                               "src_stale" => stale, "revise" => rev)
     now = time()
-    Dict{String,Any}("status" => rec.status, "ts" => rec.ts, "src_stale" => stale,
+    Dict{String,Any}("status" => rec.status, "ts" => rec.ts, "src_stale" => stale, "revise" => rev,
         "alerts" => Any[Dict{String,Any}("kind" => a.kind, "scope" => a.scope, "target" => a.target,
                                           "since" => a.since, "age" => round(Int, now - a.since),
                                           "detail" => a.detail) for a in rec.alerts])
@@ -4083,8 +4184,9 @@ server-side. Presentation defaults for visitors go in `appdefaults`; build it wi
 [`app_defaults`](@ref). See `server_app.jl` for what app mode does and does not guarantee.
 """
 function start_server(path::AbstractString; host = "127.0.0.1", port = 8765, inactive::Bool = false,
-                      app::Bool = false, appdefaults::AbstractDict = Dict{String,Any}())
-    h = start_hub(; host = host, port = port, app = app, appdefaults = appdefaults)
+                      app::Bool = false, workbook::Bool = false,
+                      appdefaults::AbstractDict = Dict{String,Any}())
+    h = start_hub(; host = host, port = port, app = app, workbook = workbook, appdefaults = appdefaults)
     id = open_notebook!(h, path; inactive = inactive)
     @info "Notebook" url = "$(_hub_url(h))/n/$id" file = abspath(path)
     return h
@@ -4259,7 +4361,7 @@ detail (worker spawns, connects, warnings) goes to a file in the same tmp dir as
 the banner shows the path; only errors still print.
 """
 function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, quiet::Bool = true,
-                        inactive::Bool = false, app::Bool = false,
+                        inactive::Bool = false, app::Bool = false, workbook::Bool = false,
                         appdefaults::AbstractDict = Dict{String,Any}())
     # Swap the logger BEFORE anything spawns so worker-spawn infos land in the file.
     logpath = joinpath(tempdir(), "kaimonslate", "hub-$port.log")
@@ -4279,7 +4381,7 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
         end
     end
     h = start_server(path; host = host, port = port, inactive = inactive,
-                     app = app, appdefaults = appdefaults)
+                     app = app, workbook = workbook, appdefaults = appdefaults)
     id = isempty(h.notebooks) ? "" : first(keys(h.notebooks))
     # An APP advertises the server ROOT. `/` on an app hub redirects to its notebook (see
     # `_app_root_target`), so the two land in the same place — but the root is the address someone

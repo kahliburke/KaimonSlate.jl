@@ -3216,7 +3216,8 @@ end
 # also enables the in-notebook agent. `bundle_url` is where to fetch the bundle when there's no sibling.
 # Discrete step functions so it's easy to extend/audit. Idempotent.
 function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name::AbstractString = _SITE_BUNDLE,
-                     app::Bool = false, appdefaults::AbstractDict = Dict{String,Any}(), port::Int = 0,
+                     app::Bool = false, workbook::Bool = false,
+                     appdefaults::AbstractDict = Dict{String,Any}(), port::Int = 0,
                      apptitle::AbstractString = "")
     SLATE = "https://github.com/kahliburke/KaimonSlate.jl"
     KAIMON = "https://github.com/kahliburke/Kaimon.jl"
@@ -3444,7 +3445,7 @@ $(app ? _run_app_help(apptitle, port > 0 ? port : _APP_DEFAULT_PORT) : "")
     get(ENV, "KAIMONSLATE_NO_OPEN", "") == "" && (ENV["KAIMONSLATE_NO_OPEN"] = "1")
     import Kaimon        # defines Main.Kaimon → the compute gate that spawns the worker + reconstructs the env
     using KaimonSlate
-$(app ? _run_serve_app(appdefaults) : _run_serve_notebook())
+$(app ? _run_serve_app(appdefaults; workbook = workbook) : _run_serve_notebook())
     """
 end
 
@@ -3539,7 +3540,7 @@ function _run_app_bind(port::Int)
     end"""
 end
 
-function _run_serve_app(appdefaults::AbstractDict)
+function _run_serve_app(appdefaults::AbstractDict; workbook::Bool = false)
     defs = join(("\"" * String(k) * "\" => " * JSON.json(v) for (k, v) in appdefaults), ", ")
     return """
     # APP MODE. This process serves the notebook as an application: the reading view (prose, results,
@@ -3561,7 +3562,15 @@ function _run_serve_app(appdefaults::AbstractDict)
     # machine is for, and which also means there is NOTHING between the network and this app: it
     # has no login. Anyone who can reach the port can drive it and read its results. Bind
     # `--host 127.0.0.1` to keep it to this machine.
-    KaimonSlate.serve_notebook(NB; port = port, host = host, app = true,
+$(workbook ? """
+    # The exercises as the author shipped them, for the Reset button. The bundle EXPANDS into
+    # `.app/`, so the copy that travels beside this launcher is nowhere near the notebook the hub
+    # ends up serving — name it explicitly rather than making the server guess at the layout.
+    let orig = filter(f -> endswith(f, ".original"), readdir(@__DIR__; join = true))
+        isempty(orig) || (ENV["SLATE_WORKBOOK_ORIGINAL"] = first(orig))
+    end
+""" : "")
+    KaimonSlate.serve_notebook(NB; port = port, host = host, app = true,$(workbook ? "\n                               workbook = true," : "")
                                appdefaults = Dict{String,Any}($defs))"""
 end
 
@@ -3843,7 +3852,7 @@ results; treat "who can reach this port" as the entire access-control story.
 """
 function export_app(nb::LiveNotebook, dir::AbstractString; appdefaults::AbstractDict = Dict{String,Any}(),
                     port::Integer = 0, agent::Bool = false, history::Bool = false,
-                    include = String[], title::AbstractString = "")
+                    workbook::Bool = false, include = String[], title::AbstractString = "")
     d = abspath(String(dir))
     mkpath(d)
     bname = _app_bundle_filename(nb, title)
@@ -3851,8 +3860,14 @@ function export_app(nb::LiveNotebook, dir::AbstractString; appdefaults::Abstract
     write(joinpath(d, bname), export_standalone(nb; history = history, include = include))
     apptitle = isempty(strip(String(title))) ?
         (try; strip(report_frontmatter(nb.report).title); catch; ""; end) : strip(String(title))
+    # A workbook saves the student's answers over the notebook it ships, so the exercises as the
+    # author wrote them have to survive somewhere else — this copy is what the Reset button reads
+    # (`_workbook_stub_path`). Dotfile-named so it doesn't read as a second notebook to open.
+    workbook && write(joinpath(d, "." * bname * ".original"),
+                      export_standalone(nb; history = false, include = String[]))
     write(joinpath(d, _SITE_RUNJL), _run_script(""; agent = agent, bundle_name = bname,
-                                                app = true, appdefaults = appdefaults, port = Int(port),
+                                                app = true, workbook = workbook,
+                                                appdefaults = appdefaults, port = Int(port),
                                                 apptitle = apptitle))
     write(joinpath(d, _SITE_PS1), _run_ps1())
     write(joinpath(d, _SITE_BAT), _run_bat())

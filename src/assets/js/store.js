@@ -28,8 +28,48 @@ export const cells = computed(() => (nbState.value && nbState.value.cells) || []
 export const title = computed(() => (nbState.value && nbState.value.title) || 'Notebook');
 export const worker = computed(() => (nbState.value && nbState.value.worker) || {});
 
+// Is this incoming cell the same one we already hold? `rev` is the server's own answer — engine.jl
+// documents it as "bumped on every change worth pushing" — so an equal rev means nothing about this
+// cell changed. The primitive sweep is belt-and-braces for anything that mutates a scalar without
+// bumping (a tag toggle, say); structured payloads (output, charts, tables, binds) are left to `rev`,
+// because the server re-serialises them into fresh arrays on every push and comparing them by value
+// would cost more than the render we are trying to avoid.
+function _sameCell(a, b) {
+  if (a === b) return true;
+  if (!a || !b || a.id !== b.id || a.rev !== b.rev || typeof a.rev !== 'number') return false;
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  for (const k of ka) {
+    const va = a[k], vb = b[k];
+    if (va === vb) continue;
+    if (va !== null && typeof va === 'object' && vb !== null && typeof vb === 'object') continue;
+    return false;
+  }
+  return true;
+}
+
+// Carry unchanged cell OBJECTS across a state push. Every push is freshly parsed JSON, so without
+// this every cell in the document arrives with a new identity and the view re-renders all of them,
+// on every push — and a single run produces a push per cell transition. Reusing the old object lets
+// the view skip the cells that did not change (see MemoCell.shouldComponentUpdate).
+function _shareUnchanged(prev, next) {
+  if (!prev || !Array.isArray(prev.cells) || !Array.isArray(next.cells)) return next;
+  const before = new Map(prev.cells.map(c => [c.id, c]));
+  let reused = 0;
+  const cells = next.cells.map(c => {
+    const old = before.get(c.id);
+    if (old && _sameCell(old, c)) { reused++; return old; }
+    return c;
+  });
+  return reused ? { ...next, cells } : next;
+}
+
 // New server state is authoritative — drop the transient live-state overrides.
-export function applyState(state) { if (state) { nbState.value = state; if (Object.keys(liveStates.value).length) liveStates.value = {}; } }
+export function applyState(state) {
+  if (!state) return;
+  nbState.value = _shareUnchanged(nbState.value, state);
+  if (Object.keys(liveStates.value).length) liveStates.value = {};
+}
 // Single-select: the active cell IS the whole selection.
 export function setSelected(id) { selected.value = id; selectedSet.value = new Set(id ? [id] : []); }
 // Multi-select: set the whole selection at once; `active` is the primary/anchor cell.

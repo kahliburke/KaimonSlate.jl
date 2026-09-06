@@ -418,6 +418,63 @@ window.onCellStream = function (channel, data) {
   if (fn) { try { fn(data); } catch (e) { console.error('slateOnStream handler failed:', channel, e); } }
 };
 
+// ── Fragment lifetime, browser side ───────────────────────────────────────────────────────────────
+// Re-running a cell builds a NEW output fragment and drops the old nodes — but nothing tells the old
+// fragment's JAVASCRIPT that it is over. A requestAnimationFrame recursion, a setInterval, an
+// observer or a GL context set up by asset JS keeps running for the life of the PAGE.
+//
+// Usually that is invisible waste. It stops being invisible the moment the orphan talks back to
+// Julia, because channel names are stable across re-runs: a dead fragment's `slateCall` is answered
+// by the LIVE cell's handler, so two fragments drive one view and the visible one jumps between
+// them — while the controls, wired to the new fragment, cannot stop the old. Each re-run adds
+// another. Julia-side cleanup (`slate_on_cleanup`) cannot catch this: the orphan holds no stale
+// session, it is using a live and correctly-registered channel. Only the browser knows its node is
+// gone, so the retirement has to happen here.
+//
+// `node.isConnected` is the signal, with one wrinkle worth encoding once rather than rediscovering:
+// asset JS frequently runs BEFORE its own nodes are in the document (which is why fragments look
+// themselves up by id on a retry), so a bare `!isConnected` test retires the loop at birth and the
+// widget never starts. Alive means "attached, OR not attached YET" — only attached-then-detached is
+// dead.
+window.slateFragmentAlive = function (node) {
+  let seen = false;
+  return () => {
+    if (!node) return false;
+    if (node.isConnected) { seen = true; return true; }
+    return !seen;                      // still booting, not yet abandoned
+  };
+};
+
+// A requestAnimationFrame loop that retires with `node`. Return false from `fn` to stop early.
+// Returns a cancel function. Prefer this to a bare rAF recursion in any fragment-owned JS.
+window.slateRaf = function (node, fn) {
+  const alive = window.slateFragmentAlive(node);
+  let id = 0, stopped = false;
+  const tick = (t) => {
+    if (stopped || !alive()) return;
+    let go = true;
+    try { go = fn(t); } catch (e) { console.error('slateRaf callback failed:', e); return; }
+    if (go === false) return;
+    id = requestAnimationFrame(tick);
+  };
+  id = requestAnimationFrame(tick);
+  return () => { stopped = true; if (id) cancelAnimationFrame(id); };
+};
+
+// Fire `fn` once, after `node` has been attached and then removed — for releasing what a rAF loop
+// cannot release itself (a GL context, a socket, a worker). Polled on a timer rather than rAF
+// deliberately: rAF is suspended in a hidden tab, and teardown should not wait for the user to look
+// at the page. Returns a cancel function.
+window.slateOnFragmentDispose = function (node, fn, periodMs) {
+  const alive = window.slateFragmentAlive(node);
+  const h = setInterval(() => {
+    if (alive()) return;
+    clearInterval(h);
+    try { fn(); } catch (e) { console.error('slateOnFragmentDispose handler failed:', e); }
+  }, periodMs || 1000);
+  return () => clearInterval(h);
+};
+
 // ── Worker-reset notification ────────────────────────────────────────────────
 // The worker underneath this page was replaced (restart / fresh namespace). Anything the page holds ON
 // BEHALF OF that worker is now orphaned — a live renderer's sessions and their stream subscriptions point
@@ -503,25 +560,57 @@ function _scBadge(st) {
   return st === 'running' ? '<span class="scspin"></span>'
        : st === 'errored' ? '<span class="scx">⚠</span>' : '<span class="scok">✓</span>';
 }
+// "just now" / "2m ago" / "3h ago". Relative rather than a clock time because the question a
+// scratchpad answers is "is this the run I just did, or one from before lunch?" — and a wall clock
+// makes the reader do that subtraction themselves.
+function _scAgo(ms) {
+  if (!ms) return '';
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 5) return 'just now';
+  if (s < 60) return Math.floor(s) + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
 function _scCellHtml(c) {
   const st = c.state || 'fresh';
   const dur = c.duration != null ? (c.duration + ' ms') : '';
+  const ago = c.ranAt ? '<span class="scago" data-ranat="' + c.ranAt + '">' + _esc(_scAgo(c.ranAt)) + '</span>' : '';
   const rich = ((c.echarts && c.echarts.length) || (c.tables && c.tables.length))
     ? '<div class="scnote">interactive output — run it in a real cell to see the chart/table</div>' : '';
   return '<div class="sccell sc-' + _esc(st) + '">' +
-    '<div class="schdr">' + _scBadge(st) + '<span class="scdur">' + _esc(dur) + '</span></div>' +
+    '<div class="schdr">' + _scBadge(st) + '<span class="scdur">' + _esc(dur) + '</span>' + ago + '</div>' +
     '<pre class="scsrc">' + _esc(c.source) + '</pre>' +
     '<div class="scout">' + (c.output || '') + '</div>' + rich + '</div>';
 }
 function _scRender() {
   const b = document.getElementById('scratchbody'); if (!b) return;
-  const atBottom = (b.scrollHeight - b.scrollTop - b.clientHeight) < 48;   // were we pinned to newest?
-  b.innerHTML = _scratchCells.length ? _scratchCells.map(_scCellHtml).join('')
+  // NEWEST FIRST. The input sits at the top of the panel, so appending put each result furthest
+  // from the thing that produced it and made every run start with a scroll. Reversing also means a
+  // long-running history costs nothing to ignore: it grows downward, out of the way.
+  const ordered = _scratchCells.slice().reverse();
+  // The empty state has to name whoever is actually looking at it. In a workbook that's a student
+  // with an editor above this panel; telling them about agents and `slate.eval` describes a tool
+  // they don't have and a workflow they're not in.
+  const empty = (typeof SLATE_IS_WORKBOOK !== 'undefined' && SLATE_IS_WORKBOOK)
+    ? '<div class="scempty">Nothing run yet. Type Julia above and press ⇧⏎ — results appear here, and nothing you do in the scratchpad changes the document.</div>'
     : '<div class="scempty">No scratch evals yet. Agents use <code>slate.eval</code> for throwaway diagnostics — they land here, out of the document.</div>';
-  if (atBottom) b.scrollTop = b.scrollHeight;   // sticky: follow new output only if already at the bottom — don't yank a scrolled-up reader down
+  b.innerHTML = ordered.length ? ordered.map(_scCellHtml).join('') : empty;
+  b.scrollTop = 0;   // newest is at the top, and that is what a new result should show
   _scWireImages(b);
   _scUpdateChrome();
 }
+// The labels above go stale by construction: "just now" is only true for five seconds. Re-stamping
+// the spans in place (rather than re-rendering) keeps scroll position and any open lightbox intact.
+// 30s is fine — the shortest bucket a stale label can misreport by is a minute.
+setInterval(() => {
+  const p = document.getElementById('scratchpanel');
+  if (!p || !p.classList.contains('open')) return;   // nothing to keep honest while it's closed
+  p.querySelectorAll('.scago[data-ranat]').forEach(el => {
+    el.textContent = _scAgo(Number(el.dataset.ranat) || 0);
+  });
+}, 30000);
+
 // Topbar "🧪 scratch" pill + menu-item badge — the always-visible signal that a slate.eval is
 // running in the worker (it holds the eval mutex, so cell runs are paused meanwhile).
 function _scUpdateChrome() {

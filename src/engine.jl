@@ -341,7 +341,8 @@ const _INTERNAL_FLAGS = Set{Symbol}([:opaque, :macrocall, :using_redundant, :imp
 # Header tags Slate gives behaviour to (rendered as checkboxes in the UI tag editor). Any OTHER
 # token is kept verbatim as a free-form tag — inert metadata that still round-trips.
 const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache, :cache, :resource, :slide, :notes,
-                     :title, :abstract, :bibliography, :caption, :home, :docindex, :everywhere)
+                     :title, :abstract, :bibliography, :caption, :home, :docindex, :everywhere,
+                     :workbook)
 
 "Parse a header line's trailing tokens into (kind, id, controls, tags::Vector{Symbol}). Every token
 that isn't `id=`/`controls=`/`code`/`md` becomes a tag flag (known ones drive behaviour; the rest are

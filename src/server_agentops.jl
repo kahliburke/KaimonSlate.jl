@@ -478,19 +478,40 @@ options for parity with the low-level worker eval.
 const _SCRATCH_MAX = 24
 const _SCRATCH_CELL_SEQ = Threads.Atomic{Int}(0)
 _scratch_id() = "scratch:" * string(Threads.atomic_add!(_SCRATCH_CELL_SEQ, 1) + 1)
+# When each scratch run started, epoch milliseconds, keyed by scratch cell id. The panel shows it as
+# "2m ago", which needs a real instant rather than the browser's arrival time: a reader who reloads
+# would otherwise see a panel full of evals that all claim to have just happened. Kept beside the ring
+# rather than on `Cell`, which is the DOCUMENT model and has no business carrying panel chrome.
+const _SCRATCH_TS = Dict{String,Float64}()
+scratch_started_at(id::AbstractString) = get(_SCRATCH_TS, String(id), 0.0)
+# `cell_json` + the timestamp, for both paths that put a scratch row on screen (the live stream and
+# the seed in `state_json`), so a reloaded panel reads the same as a live one.
+function scratch_cell_json(cell::Cell)
+    d = cell_json(cell)
+    ts = scratch_started_at(cell.id)
+    ts > 0 && (d["ranAt"] = ts)
+    return d
+end
 _broadcast_scratch(nb::LiveNotebook, cell::Cell) =
-    (try; _broadcast(nb, "scratch:" * JSON.json(cell_json(cell))); catch; end; nothing)
+    (try; _broadcast(nb, "scratch:" * JSON.json(scratch_cell_json(cell))); catch; end; nothing)
 function _push_scratch!(nb::LiveNotebook, cell::Cell)
     lock(nb.lock) do
+        get!(_SCRATCH_TS, cell.id, time() * 1000)   # first push wins: when the run STARTED, not when it finished
         push!(nb.scratch, cell)
-        length(nb.scratch) > _SCRATCH_MAX && deleteat!(nb.scratch, 1:(length(nb.scratch) - _SCRATCH_MAX))
+        if length(nb.scratch) > _SCRATCH_MAX
+            for c in nb.scratch[1:(length(nb.scratch) - _SCRATCH_MAX)]; delete!(_SCRATCH_TS, c.id); end
+            deleteat!(nb.scratch, 1:(length(nb.scratch) - _SCRATCH_MAX))
+        end
     end
     _broadcast_scratch(nb, cell)
     return cell
 end
 "Empty the notebook's scratchpad and tell the browser to clear its panel."
 function clear_scratch!(nb::LiveNotebook)
-    lock(nb.lock) do; empty!(nb.scratch); end
+    lock(nb.lock) do
+        for c in nb.scratch; delete!(_SCRATCH_TS, c.id); end
+        empty!(nb.scratch)
+    end
     try; _broadcast(nb, "scratchclear:"); catch; end
     return nothing
 end
@@ -1056,6 +1077,9 @@ flag_reruns(flag::Symbol) = flag in _EVAL_FLAGS
 function _flag_skips(flag::Symbol, kind::CellKind)
     flag === :collapsed && return false
     flag === :hidecode  && return !ReportEngine.is_code_kind(kind)
+    # `:workbook` marks a cell a reader may rewrite when the hub serves the document as a workbook
+    # (see server_app.jl). It carries no meaning for a markdown cell, which has no code to run.
+    flag === :workbook  && return !ReportEngine.is_code_kind(kind)
     return !(kind == CODE || kind == ReportEngine.TOOL)
 end
 

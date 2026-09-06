@@ -11,6 +11,9 @@ const _apipath = p => p.replace(/^\/api\//, '/api/' + NB_ID + '/');
 // making a working app look broken to anyone who opens dev tools. The fix belongs at the callers:
 // they should not be asking for authoring facilities on a page that has none.
 const SLATE_IS_APP = !!(window.__SLATE_APP__ && window.__SLATE_APP__.on);
+// A workbook is an app whose `workbook`-tagged cells the reader writes (server_app.jl). Anything
+// that switches off FOR an app has to ask whether it meant "no editors" — because here there are.
+const SLATE_IS_WORKBOOK = SLATE_IS_APP && !!window.__SLATE_APP__.workbook;
 
 const editors = {};
 const charts = {};            // cell id -> [echarts instances]

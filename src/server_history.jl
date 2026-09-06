@@ -933,6 +933,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     (:collapsed in c.flags) && (d["collapsed"] = true)   # folded in the UI (persisted in the .jl)
     (:hidecode in c.flags) && (d["codeHidden"] = true)   # code editor hidden, output shown
     (:trace in c.flags) && (d["trace"] = true)           # @trace-wrapped on eval (collects trace rows)
+    (:workbook in c.flags) && (d["workbook"] = true)     # a reader may rewrite this one in a workbook
     (:slide in c.flags) && (d["slide"] = true)           # explicit slide-start (presentation mode)
     (:notes in c.flags) && (d["notes"] = true)           # speaker notes — presenter view only
     (:title in c.flags) && (d["roleTitle"] = true)       # document title block (export metadata)
@@ -1419,7 +1420,7 @@ function state_json(nb::LiveNotebook)
     # worker it never had state in (see `_WORKER_GEN`).
     meta["workerGen"] = worker_generation(nb)
     # In-memory scratchpad cells (slate.eval) — a separate panel, never part of the document flow.
-    isempty(nb.scratch) || (meta["scratch"] = [cell_json(c) for c in nb.scratch])
+    isempty(nb.scratch) || (meta["scratch"] = [scratch_cell_json(c) for c in nb.scratch])
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
     let bk = _bib_keys_meta(bibctx); bk === nothing || (meta["bibKeys"] = bk); end
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])

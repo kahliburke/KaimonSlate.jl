@@ -60,15 +60,101 @@ const _APP_POST = (
     r"^/api/[^/]+/diag$",            # client diagnostics → what `/status` reports
 )
 
+# ── Workbook mode: an app whose exercises the reader fills in ────────────────────────────────────
+#
+# A course notebook is an app in every respect but one: some cells are the student's to write. The
+# capability comes from the PROCESS (`workbook=true` on `start_hub`/`serve_notebook`, which the
+# exported launcher passes) and the DOCUMENT only says which cells, via the `workbook` tag. That
+# ordering keeps app mode's guarantee intact — a notebook dropped on an ordinary app hub gains
+# nothing by tagging itself, because the routes below are not served there at all.
+#
+# What this does NOT try to be: a sandbox. A workbook cell runs the student's code in the notebook's
+# worker, which is the entire point of the exercise, and Slate has no way to make that safe against a
+# hostile author of the code. It is safe in the deployment this exists for — each student running the
+# bundle on their own machine, where they could equally well open a REPL.
+const _WORKBOOK_POST = (
+    r"^/api/[^/]+/cell/[^/]+$",      # rewrite one cell's source — checked per cell by the handler
+    r"^/api/[^/]+/run$",             # evaluate what that edit made stale (the reactive re-run)
+    # Completions come from the WORKER's own namespace, so they work in a bundle with no index and
+    # no agent — and they are how a student discovers that a function exists at all. Not gated per
+    # cell: a completion reads names the reader can already see in the document, and refusing it
+    # outside an exercise would break the editor mid-keystroke for no gain.
+    r"^/api/[^/]+/complete$",
+    r"^/api/[^/]+/scratch-eval$",    # the scratchpad — a throwaway run that adds no cell
+    # Emptying the scratchpad. The client clears its own list optimistically, so without this the
+    # panel would LOOK cleared and refill from the server on the next reload.
+    r"^/api/[^/]+/scratch/clear$",
+)
+
+const _WORKBOOK_GET = (
+    r"^/api/[^/]+/workbook-stub/[^/]+$",   # the exercise as the author wrote it (the Reset button)
+    r"^/api/[^/]+/help$",                  # `?name` docstring lookup — a reader writing Julia needs it
+    r"^/api/[^/]+/docsearch$",             # its search box; returns nothing without the Kaimon index
+)
+
+# Routes a workbook adds on top of `_APP_POST`/`_APP_GET`. Cell-level authority is checked separately
+# by `_workbook_cell_allowed` — reaching the route is necessary, never sufficient.
+_workbook_route(method::AbstractString, path::AbstractString)::Bool =
+    method == "POST" ? any(p -> occursin(p, path), _WORKBOOK_POST) :
+    (method == "GET" || method == "HEAD") ? any(p -> occursin(p, path), _WORKBOOK_GET) : false
+
+# Where a workbook keeps the document as it was SHIPPED. Saving is the ordinary notebook save — the
+# student's answers become the file — so the starting stub has to survive somewhere else or "reset
+# this exercise" is a button that cannot work. `export_app` writes this copy into the bundle; a
+# notebook served from a checkout simply has no stubs to offer, and Reset says so rather than
+# guessing.
+# `SLATE_WORKBOOK_ORIGINAL` first, because an exported bundle EXPANDS: the launcher ships the copy
+# beside itself and the hub ends up serving a notebook two directories down inside `.app/`, so the
+# two are never siblings. The launcher knows both and says so. The sibling path is the fallback, for
+# a workbook served straight out of a folder.
+function _workbook_stub_path(nb::LiveNotebook)
+    named = strip(get(ENV, "SLATE_WORKBOOK_ORIGINAL", ""))
+    isempty(named) || return String(named)
+    return joinpath(dirname(nb.path), "." * basename(nb.path) * ".original")
+end
+
+# The author's source for one cell, read fresh from that copy. Parsed per request rather than cached:
+# it is one small file, read at most once per Reset click, and a cache here would be one more thing
+# to invalidate when a course is updated in place.
+function _workbook_stub_source(nb::LiveNotebook, id::AbstractString)
+    path = _workbook_stub_path(nb)
+    isfile(path) || return nothing
+    orig = try
+        parse_report(read(path, String))
+    catch e
+        @warn "workbook: could not parse the shipped original" path exception = e
+        return nothing
+    end
+    idx = findfirst(c -> c.id == id, orig.cells)
+    return idx === nothing ? nothing : orig.cells[idx].source
+end
+
+# May this reader run THIS cell? Only a code cell the document marks `workbook`. Anything else — an
+# unmarked cell, a markdown cell, an id that isn't in the document — is refused exactly as an
+# unlisted route is, because a UI that merely declines to show an editor is not a control.
+function _workbook_cell_allowed(nb::LiveNotebook, id::AbstractString)::Bool
+    isempty(id) && return false
+    cells = nb.report.cells
+    idx = findfirst(c -> c.id == id, cells)
+    idx === nothing && return false
+    cell = cells[idx]
+    ReportEngine.is_code_kind(cell.kind) || return false
+    return :workbook in cell.flags
+end
+
 _app_mode(h::Hub) = h.app
 
 # Is this request one an app-mode hub serves? Matched on the PATH only (query strings never widen
 # the set), against the method's allowlist. Anything unmatched is refused.
-function _app_route_allowed(method::AbstractString, target::AbstractString)::Bool
+function _app_route_allowed(method::AbstractString, target::AbstractString;
+                            workbook::Bool = false)::Bool
     path = String(first(split(target, '?')))
     pats = method == "GET" || method == "HEAD" ? _APP_GET :
            method == "POST" ? _APP_POST : return false
-    return any(p -> occursin(p, path), pats)
+    any(p -> occursin(p, path), pats) && return true
+    # A workbook widens the POST set by two routes. Reaching them is not authority to use them: the
+    # cell id rides in the path and the handler checks it against the document's `workbook` marks.
+    return workbook && _workbook_route(method, path)
 end
 
 # The refusal. Deliberately explicit rather than a 404: an operator tailing the log while wondering
@@ -182,9 +268,12 @@ const _APP_SKIP_VENDOR = ("dagre/dagre.min.js",)
 # Drop those `<script src=…>` tags from the shell. Substring removal on the exact tag, not a regex
 # over the whole document — the shell is hand-written HTML with comments beside some tags, and a
 # greedy pattern here would be a silent way to delete the wrong line.
-function _strip_app_scripts(html::AbstractString)
+function _strip_app_scripts(html::AbstractString; workbook::Bool = false)
     out = String(html)
-    for name in _APP_SKIP_SCRIPTS
+    # `palette.js` owns the docs dock as well as the command palette, and a workbook reader is
+    # writing Julia. Keep the file; appmode.js re-enables only the docs openers from it.
+    skip = workbook ? filter(!=("palette.js"), collect(_APP_SKIP_SCRIPTS)) : _APP_SKIP_SCRIPTS
+    for name in skip
         out = replace(out, "<script src=\"/assets/js/$name\"></script>" => "")
     end
     for name in _APP_SKIP_VENDOR
@@ -196,11 +285,25 @@ end
 # The bootstrap object the page shell reads before its first paint — app posture plus the defaults.
 # Injected by replacing the `window.__SLATE_APP__=null;` placeholder in notebook.html, the same
 # idiom `_index_html` uses for the publish ledger. `</` is escaped: this lands inside a <script>.
-function _inject_app(html::AbstractString, h::Hub, nb = nothing)
-    payload = Dict{String,Any}("on" => h.app, "defaults" => h.appdefaults)
+# `?app=1` (and `?app=1&workbook=1`) on an ORDINARY hub: the author sees what a reader would, to
+# check a document before exporting it. A VIEW only — the allowlist keys off `h.app`/`h.workbook`,
+# the process facts, so previewing grants no capability and refuses exactly what it refused before.
+# The scripts an app drops are dropped here too; a preview that kept them would be a different page
+# from the one being previewed, which is the whole point of looking.
+function _app_preview(target::AbstractString)
+    q = try; HTTP.queryparams(HTTP.URI(target)); catch; Dict{String,String}(); end
+    on = get(q, "app", "") in ("1", "true", "yes")
+    return (app = on, workbook = on && get(q, "workbook", "") in ("1", "true", "yes"))
+end
+
+function _inject_app(html::AbstractString, h::Hub, nb = nothing; preview = (app = false, workbook = false))
+    app = h.app || preview.app
+    workbook = h.workbook || (app && preview.workbook)
+    payload = Dict{String,Any}("on" => app, "workbook" => workbook,
+                               "defaults" => h.appdefaults)
     js = replace(JSON.json(payload), "</" => "<\\/")
     out = replace(String(html), "window.__SLATE_APP__=null;" => "window.__SLATE_APP__=" * js * ";"; count = 1)
-    h.app && (out = _strip_app_scripts(out))
+    app && (out = _strip_app_scripts(out; workbook = workbook))
     # The browser tab, window list and bookmark all read `<title>`. "Kaimon Slate" is right for an
     # authoring session — it names the tool you're in — and wrong for a deployed app, where the
     # reader has no idea what Kaimon Slate is and every app would be indistinguishable from every

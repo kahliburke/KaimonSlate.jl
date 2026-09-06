@@ -448,8 +448,14 @@
       requestAnimationFrame(() => nb.classList.remove('zen-fading'));   // → fade back up
     }, 180);
   }
+  // …except in an APP, which wears `zen` to reuse the reading view but has no authoring mode to
+  // return to: dropping it there uncovers the topbar, the add-cell affordances and the cell chrome
+  // of a document the server will refuse to change. Same reason `body.app .zenexit` is hidden — this
+  // is the keyboard half of that. Escape still propagates, so dismissing a panel or a completion
+  // popup keeps working.
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && document.body.classList.contains('zen')) toggleZen(false);
+    if (e.key === 'Escape' && document.body.classList.contains('zen')
+        && !document.body.classList.contains('app')) toggleZen(false);
   });
   window.toggleZen = toggleZen;
   window.exitZen = () => toggleZen(false);

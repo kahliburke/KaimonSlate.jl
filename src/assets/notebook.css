@@ -270,7 +270,7 @@ body.zen .topbar, body.zen #runchip, body.zen #runstale, body.zen #scratchrun,
 body.zen .focusbar, body.zen .dagpane, body.zen .agentpanel, body.zen .filespanel, body.zen #healthbadge,
 /* The floating "📖 Docs" launcher and its panel — Julia API help, i.e. for whoever WRITES the
    notebook. Same class of tool panel as the agent/files panes on the line above. */
-body.zen #doclauncher, body.zen #docpanel,
+body.zen:not(.workbook) #doclauncher, body.zen:not(.workbook) #docpanel,
 body.zen .cellhead, body.zen .coldrop, body.zen .cellprog, body.zen .cell .controls.empty,
 /* Add-cell affordances: the hover rule between cells and its ⊕, plus the end-of-notebook button.
    They sit BETWEEN cells rather than inside one, so the per-cell rules above never reached them. */
@@ -281,6 +281,11 @@ body.zen .hostedph { display:none !important; }
    the ONLY signal they get that the thing is alive. Keep the banner for an app, hide it for zen. */
 body.zen:not(.app) .hydbanner { display:none !important; }
 body.zen .cell > textarea, body.zen .cell .cm-editor, body.zen .cell .srcedit { display:none !important; }
+/* The pre-mount placeholder holds the cell's source until CodeMirror replaces it. An app never
+   mounts one (notebook.js), so without this the reading view would show the raw source it is
+   supposed to be hiding. */
+body.zen .cell .cm-placeholder { display:none !important; }
+body.app.workbook .cell.workbook .cm-placeholder { display:revert !important; }
 body.zen .cell { border:none !important; background:none !important; box-shadow:none !important;
   padding:2px 0 !important; margin:0 !important; }
 /* The selection/edit/dependency rings are drawn with `outline`, which the reset above doesn't reach
@@ -359,6 +364,63 @@ body.app .appfoot { display:block; margin:56px auto 34px; max-width:var(--page-m
   color:var(--dim); font-size:.78rem; }
 body.app .appfoot a { color:var(--dim); text-decoration:underline; text-underline-offset:2px; }
 body.app .appfoot a:hover { color:var(--accent); }
+/* ── Workbook cells ──────────────────────────────────────────────────────────
+   The reading view hides every editor (`body.zen` above). A workbook cell is the exception the
+   whole posture exists for, so it takes its editor back — and says so, because an editor that
+   looks like the rest of the page is one a student scrolls past. The frame and the "your turn"
+   label are the only invitation they get; there is no toolbar in an app to discover.
+   Scoped to `body.app.workbook` rather than `body.app`: previewing an app of a marked-up document
+   should look like the app, not like a workbook nobody can type into. */
+body.app.workbook .cell.workbook .cm-editor,
+body.app.workbook .cell.workbook > textarea { display:block !important; }
+body.app.workbook .cell.workbook {
+  border:1px solid var(--accent) !important; border-radius:8px;
+  background:var(--bg2) !important; padding:26px 14px 12px !important; margin:32px 0 !important;
+  position:relative; }
+/* `!important` because the reading view resets `.cell` margins to zero with it (`body.zen .cell`
+   above) — without it a bordered box sits flush against the next one. Exercises come in pairs
+   (write it, then try it), and two boxes whose borders touch read as one control with two halves.
+   A symmetric margin rather than an adjacent-sibling rule: cells are separated in the DOM by a
+   `.cellgap` insert affordance, so `.cell + .cell` never matches. The gap between two boxes is
+   32px, not 64 — `.cellgap` is `display:none` here, so it leaves the flow and the margins
+   collapse. */
+body.app.workbook .cell.workbook::before {
+  content:"your turn"; position:absolute; top:6px; left:14px;
+  font-size:.68rem; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); }
+/* Run and Reset live on the cell, since an app has no run chip and no keyboard affordance to
+   advertise. `wbreset` is deliberately quiet: it throws away work, so it should not read as the
+   primary action next to the button that checks it. */
+body.app.workbook .cell.workbook .wbbar { display:flex; gap:8px; align-items:center; margin-top:8px; }
+body.app.workbook .cell.workbook .wbrun {
+  background:var(--accent); color:var(--bg); border:none; border-radius:6px;
+  padding:4px 14px; font-size:.78rem; cursor:pointer; }
+body.app.workbook .cell.workbook .wbrun:disabled { opacity:.5; cursor:default; }
+body.app.workbook .cell.workbook .wbreset {
+  background:none; border:none; color:var(--dim); font-size:.72rem; cursor:pointer;
+  text-decoration:underline; text-underline-offset:2px; }
+body.app.workbook .cell.workbook .wbreset:hover { color:var(--accent); }
+/* ── Workbook scratchpad ─────────────────────────────────────────────────────
+   The results half is the existing scratch panel (panels.js renders `slate.eval` runs there); this
+   is the input mounted above it, plus a launcher, since an app has no topbar to open it from. Sits
+   above the Docs launcher rather than beside it — two floating buttons on one line read as a
+   toolbar, which is the chrome an app is trying not to have. */
+/* Icon only, and round: a labelled pill was wide enough to sit over the text column on a narrow
+   window, and a floating control that covers what you are reading is worse than one you have to
+   learn. The name lives in the tooltip, the palette entry and the panel's own header. */
+/* The editor rows in the app settings popover belong to a workbook; a plain app's reader has no
+   editor for them to act on. */
+body.app:not(.workbook) .appsetpop .asrow.wbonly { display:none; }
+body.app.workbook #wbscratchlauncher {
+  position:fixed; right:16px; bottom:60px; z-index:60; background:var(--bg2); color:var(--text);
+  border:1px solid var(--border); border-radius:50%; width:38px; height:38px; padding:0;
+  display:flex; align-items:center; justify-content:center; font-size:1rem; cursor:pointer; }
+body.app.workbook #wbscratchlauncher:hover { border-color:var(--accent); color:var(--accent); }
+body.app.workbook .wbscratchin { border-bottom:1px solid var(--border); padding:10px 12px 12px; }
+/* The panel is a fixed-height column, so cap the editor and let it scroll — a long snippet must not
+   push the results it produced off the bottom of the panel. */
+body.app.workbook .wbscratchin .cm-editor { max-height:40vh; }
+body.app.workbook .wbscratchin .wbbar { margin-top:8px; }
+body.app.workbook .wbhint { color:var(--dim); font-size:.72rem; }
 /* With no bar there is nothing to clear — the document starts at the top of the page, which is the
    point. Just enough room that the title cell isn't jammed against the edge, and a right margin on
    the FIRST block so a long heading can't run under the floating gear. */
@@ -1827,6 +1889,9 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 .sccell.sc-errored { border-color:color-mix(in srgb, var(--red) 45%, var(--border)); }
 .schdr { display:flex; align-items:center; gap:8px; padding:5px 9px; background:var(--bg3); font-size:.72rem; color:var(--dim); }
 .scdur { margin-left:auto; font-family:monospace; }
+/* How long it took, then how long ago it was — duration is the fact about the run, elapsed is the
+   fact about the panel, so the quieter one goes last. */
+.scago { margin-left:10px; color:var(--dim); font-size:.72rem; white-space:nowrap; }
 .scok { color:var(--green); } .scx { color:var(--gold); }
 .scsrc { margin:0; padding:8px 10px; font-family:'Cascadia Code',monospace; font-size:.76rem; white-space:pre-wrap;
   word-break:break-word; color:var(--text); border-bottom:1px solid var(--bg3); }

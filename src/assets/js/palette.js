@@ -128,7 +128,30 @@ window.slateRegisterCommand = function (spec) {
 window.slateUnregisterCommand = function (id) { _extCmds.delete(id); };
 
 // ── Command palette (⌘K) ──────────────────────────────────────────────────────
+// A WORKBOOK gets its own list rather than a filter over the authoring one. Same reasoning as the
+// route allowlist in server_app.jl: a filter has to be remembered every time a command is added,
+// and forgetting is silent. This way a new authoring command is absent from a workbook until
+// someone puts it here on purpose. Everything listed either reads the document or runs the
+// reader's own code — the two things a workbook already permits.
+function readerCommands() {
+  const cmds = [
+    { label: 'Search docs…', key: '⌘⇧K', run: openDocs },
+    // The gear is a small floating target in the corner; the palette is how someone who wants
+    // vim bindings or a different syntax theme actually finds them.
+    { label: 'Settings — theme, width, editor keymap…',
+      run: () => window.appSettingsToggle && window.appSettingsToggle() },
+    { label: 'Scratchpad — try something out', key: '⌘⇧S',
+      run: () => window.openWorkbookScratch && window.openWorkbookScratch() },
+    { label: 'Table of contents', key: '⌘⇧L', run: toggleTOC },
+    { label: 'Run stale cells', key: '⌘↵', run: runAll },
+  ];
+  // Jump-to-cell stays: it is navigation, and an app reader has no other way to move by name.
+  cellIds().forEach(id => cmds.push({ tag: 'cell', label: 'Jump to cell: ' + id, run: () => selectCell(id, true) }));
+  return cmds;
+}
+
 function paletteCommands() {
+  if (typeof SLATE_IS_WORKBOOK !== 'undefined' && SLATE_IS_WORKBOOK) return readerCommands();
   // `key` is the shortcut hint shown on the right of each row. Single-letter / ⇧-keys are
   // command-mode (a cell is selected and you're NOT editing it); ⌘-keys are global.
   const sel = selectedId;

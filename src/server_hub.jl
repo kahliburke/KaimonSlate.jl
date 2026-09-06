@@ -16,6 +16,11 @@ mutable struct Hub
     # refuses the authoring API. A property of the PROCESS, so one flag covers every route —
     # including the SSE/WebSocket branches that never reach the router.
     app::Bool
+    # Workbook mode (see server_app.jl): app mode, plus the reader may rewrite and run the cells the
+    # DOCUMENT marks `editable` — a course notebook whose exercises the student fills in. Also a
+    # process property, for the same reason `app` is: the capability comes from how the hub was
+    # started, and the document can only narrow it. Meaningless without `app`.
+    workbook::Bool
     # Presentation defaults for an app's visitors: theme, page/figure width, scroll-zoom feel.
     # Reader preferences live in localStorage, which is per-browser — so an app deployed with a
     # light theme would still open midnight-dark for everyone who hadn't already changed it. These
@@ -23,7 +28,7 @@ mutable struct Hub
     appdefaults::Dict{String,Any}
 end
 Hub(notebooks, server, host, port, lock) =
-    Hub(notebooks, server, host, port, lock, false, Dict{String,Any}())
+    Hub(notebooks, server, host, port, lock, false, false, Dict{String,Any}())
 
 # The URL to SHOW someone, which is not the address we BIND. `0.0.0.0` (and `::`) mean "every
 # interface" to a listener and are not destinations at all: they name no host to connect to. Chrome

@@ -125,9 +125,21 @@
     'addCell', 'deleteCell', 'toggleSource', 'toggleType', 'toggleCollapse', 'toggleHideCode',
     'toggleTrace', 'openControlPicker', 'openTagEditor', 'insertBind', 'insertRecipe',
   ];
+  // A workbook reader is WRITING JULIA, so the docs dock stops being authoring chrome and becomes
+  // the reference they need — `?dot`, clicking a name in a stack trace, the Slate helper registry.
+  // Only the `?name` half works in a bundle: semantic search needs the Kaimon-side index, and
+  // `search_docs` already returns nothing when that's absent (`_agent_available`), so the panel
+  // degrades to lookups rather than erroring.
+  //
+  // The command palette comes back too, because an app has no topbar and this is the only route to
+  // the docs, the contents and the scratchpad. Its LIST is what makes that safe: in a workbook
+  // palette.js offers a curated reader set, not the authoring commands (see `_READER_CMDS` there).
+  const _READER_OPENERS = ['openDocs', 'openDocsFor', 'openDocsAtCursor', 'openPalette'];
   function disableAuthoringOpeners() {
     const noop = function () {};
+    const keep = APP.workbook ? new Set(_READER_OPENERS) : new Set();
     for (const name of AUTHORING_OPENERS) {
+      if (keep.has(name)) continue;
       // Only replace what exists — a name that has moved on shouldn't define a new global, which
       // would turn a rename into a silently-dead stub instead of a visible miss.
       if (typeof window[name] === 'function') { try { window[name] = noop; } catch (_) {} }
@@ -138,11 +150,20 @@
   // CAPTURE listener on `window` runs before all of them. It stops propagation but deliberately does
   // NOT preventDefault: the browser's own combinations — find, print, reload, zoom, copy — are how a
   // reader works with a page and must keep working. Only Slate's handlers are cut out.
+  // A workbook's reader needs a few of Slate's own shortcuts back, because an app has no topbar to
+  // click instead: the command palette, docs, contents, and the scratchpad. Listed as combinations
+  // rather than by unblocking a mode, so everything else stays swallowed.
+  function _workbookKeyAllowed(e) {
+    if (!APP.workbook || !(e.metaKey || e.ctrlKey)) return false;
+    const k = (e.key || '').toLowerCase();
+    return e.shiftKey ? (k === 'k' || k === 'l' || k === 's') : k === 'k';
+  }
   function blockAuthoringKeys(e) {
     // Typing into a control is the one thing a reader DOES do with the keyboard.
     const t = e.target;
     if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ''))) return;
     if (e.key === 'Tab' || e.key === 'Escape') return;   // focus order and dismissal stay intact
+    if (_workbookKeyAllowed(e)) return;
     e.stopImmediatePropagation();
   }
 
@@ -151,6 +172,9 @@
     // `zen` IS the reading view — app mode wears it rather than restating it, so notebook.css has
     // one definition of "hide the code and the chrome" and an app can never fall behind it.
     document.body.classList.add('zen', 'app');
+    // A workbook is an app that hands specific cells back to the reader (see server_app.jl). The
+    // class is what lets notebook.css make an exception to the reading view for those cells only.
+    if (APP.workbook) document.body.classList.add('workbook');
     window.addEventListener('keydown', blockAuthoringKeys, true);
     // The opener stubs must land AFTER every script has evaluated — a `function` declaration assigns
     // its window property when its script runs, so stubbing earlier just gets overwritten. This file
@@ -165,7 +189,9 @@
     applyDisplaySettings();
     bindDisplaySettings({ theme: 'apptheme', wide: 'appwide', page: 'apppage', pagev: 'apppagev',
                           fig: 'appfig', figv: 'appfigv', zoom: 'appzoom', zoomv: 'appzoomv',
-                          wrap: 'appwrap' });
+                          wrap: 'appwrap',
+                          // Editor rows: bound always, shown only for a workbook (notebook.css).
+                          keymap: 'appkeymap', syntax: 'appsyntax', edwrap: 'appedwrap' });
     // No title element to fill: the document's own `role=title` cell IS the page heading, and
     // repeating it in chrome only competed with it. The browser TAB still carries the document
     // title, substituted server-side into `<title>` (see _inject_app).

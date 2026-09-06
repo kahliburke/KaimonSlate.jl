@@ -8,6 +8,7 @@
 // passing them as props — robust regardless of component auto-subscription, and Preact still
 // diffs the keyed <Cell>/<Editor> children so editors are preserved across re-renders.
 import { html, render } from 'htm/preact';
+import { Component } from 'preact';
 import { useRef, useEffect } from 'preact/hooks';
 import { effect, signal } from '@preact/signals';
 import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal, editing as editingSignal, localDirty as dirtySignal, isDirty, srcEq, clearEdited } from './store.js';
@@ -18,14 +19,17 @@ const _reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduce
 // Let extension seams re-render the cell headers after they register post-hydration (e.g.
 // slateRegisterCellAction adding a toolbar button once the bundle + extension scripts have loaded).
 // Nudge the state signal — the render effect reads the `cells` COMPUTED, which dedups on Object.is, so
-// a shallow `{...nbState}` (same `.cells` array) wouldn't notify. Copy the cells array too to force a
-// fresh identity, so the top-level render re-runs cellHeaderInner for every cell (payload unchanged).
+// a shallow `{...nbState}` (same `.cells` array) wouldn't notify.
+//
+// Each CELL is copied too, not just the array: <MemoCell> skips a cell whose object is identical, so
+// a fresh array of the same objects would notify the top-level render and then change nothing. The
+// payload is unchanged — the point is the new identity, which is what makes cellHeaderInner re-run.
 window._slateRefreshCells = () => {
   try {
     const s = window.slateStore;
     if (s && s.nbState && s.nbState.value) {
       const st = s.nbState.value;
-      s.nbState.value = { ...st, cells: Array.isArray(st.cells) ? [...st.cells] : st.cells };
+      s.nbState.value = { ...st, cells: Array.isArray(st.cells) ? st.cells.map(c => ({ ...c })) : st.cells };
     }
   } catch (e) {}
 };
@@ -141,9 +145,30 @@ function Editor({ cell }) {
     };
     // ensureEditor(id) and the IO both call the (idempotent) mount; register so ensureEditor finds it.
     (window._editorMount || (window._editorMount = {}))[cell.id] = mount;
+
+    // An app's reader cannot edit, so mounting an editor for them buys nothing and costs a lot: a CM6
+    // mount is not cheap, and the observer plus idle hydration will build one for every code cell in
+    // the document. Worse in an app than in the authoring UI, where the mounts at least trickle in as
+    // you scroll: the reading view hides the code, so the page is short and a large share of the
+    // document sits inside the observer's margin at once. All for editors `body.zen` keeps hidden and
+    // the server would refuse edits from. A WORKBOOK still mounts the cells the reader may write.
+    // `mount` stays registered either way, so an explicit `ensureEditor` can still force one.
+    // Read the posture off `window`, not the `SLATE_IS_APP` const in core.js: this file is an ES
+    // MODULE, and a classic script's top-level `const` is not a property of the global object.
+    const _app = window.__SLATE_APP__ || {};
+    const readerOwnsIt = !_app.on || (_app.workbook && cell.workbook);
+    if (!readerOwnsIt) return () => { if (window._editorMount) delete window._editorMount[cell.id]; };
+
     const io = new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) mount(); }, { rootMargin: '600px 0px' });
     io.observe(host);
     window.hydrateSoon && window.hydrateSoon('ed:' + cell.id, mount);   // background fallback for off-screen cells
+    // A workbook mounts NOW rather than waiting to be scrolled into view. Lazy mounting is there to
+    // avoid building an editor for every cell of a long document; a workbook has few, and each is a
+    // cell the reader is meant to type in. Waiting costs them a visible gap, because a full
+    // re-render unmounts the editors and the callback that would rebuild this one queues behind
+    // whatever the page is doing (finishing their run), leaving the placeholder on screen until it
+    // drains. Placed after the observer exists: `mount` disconnects it.
+    if (_app.workbook) mount();
     return () => {
       try { io.disconnect(); } catch (_) {}
       if (window._editorMount) delete window._editorMount[cell.id];
@@ -242,9 +267,16 @@ function WebEditor({ cell }) {
     }
 
     // Initial panes: the sections that have content, else JS-only for a fresh web cell.
+    // Skipped entirely for a reader who cannot edit this cell — a web cell mounts a CM6 pane per
+    // section, and in an app all three are invisible chrome behind the rendered fragment, which is
+    // the part a reader came for. Same rule as <Editor>: an app mounts none, a workbook mounts the
+    // cells it marks. (`window.webEditors` is still registered below, holding an empty pane set, so
+    // callers that look it up find the same shape.)
+    const _app = window.__SLATE_APP__ || {};
+    const readerOwnsIt = !_app.on || (_app.workbook && cell.workbook);
     const activeLangs = _WEB_LANGS.map(x => x[0]).filter(l => (secs[l] || '').trim() !== '');
     if (!activeLangs.length) activeLangs.push('js');
-    for (const [l] of _WEB_LANGS) if (activeLangs.includes(l)) addPane(l, secs[l] || '');
+    if (readerOwnsIt) for (const [l] of _WEB_LANGS) if (activeLangs.includes(l)) addPane(l, secs[l] || '');
 
     (window.webEditors || (window.webEditors = {}))[cell.id] = { panes, assemble, addPane };
     setTimeout(() => { primed = true; }, 0);
@@ -466,7 +498,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
         md.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} e._inst = null; } });
         last.current.out = h; window._swapOutput(md, h); window.typesetVisible(md, c.id);
       }
-      if ((c.controls || []).length) window.syncControlValues({ cells: [c] });
+      if ((c.controls || []).length) window.syncControlValuesSoon(c);
       return;
     }
     // A cell you're actively editing is YOURS until you resolve. When its editor holds unsaved edits
@@ -516,7 +548,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // something leaves the stamp unspent so the next render retries, instead of marking the cell
     // applied and leaving it blank until its next change.
     if (!_conflicted && !_stale && _landed) window.slateRevMark && window.slateRevMark(c);
-    if ((c.binds && c.binds.length) || (c.controls && c.controls.length)) window.syncControlValues({ cells: [c] });
+    if ((c.binds && c.binds.length) || (c.controls && c.controls.length)) window.syncControlValuesSoon(c);
 
     // Only a plain code cell has the always-on <Editor> to refresh once it becomes visible.
     const visible = !window.hasBinds(c) && !c.collapsed && !c.codeHidden;
@@ -548,6 +580,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
                         : c.kind === 'tool' ? 'code tool' : c.kind === 'sweep' ? 'code sweep'
                         : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
+    // A workbook cell is the reader's to write. The class is emitted in every posture so the author
+    // can see which cells they've marked; only `body.app` gives it the reading-view treatment.
+    + (c.workbook ? ' workbook' : '')
     + roleCls + selCls + edCls + (focusId === c.id ? ' dep-focus' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;
   const srcedit = html`<div class="srcedit" style="display:none" dangerouslySetInnerHTML=${raw(window.srcEditInner())}></div>`;
@@ -593,6 +628,30 @@ function CellGap({ afterId, firstId }) {
   </div>`;
 }
 
+// Render boundary. <Cell> is a function component with hooks, so it cannot carry
+// shouldComponentUpdate itself and there is no `memo` here (preact/compat is not in the import map,
+// and vendoring it for one helper is not worth it) — this class wraps it and answers the one
+// question that matters: did anything change for THIS cell?
+//
+// It has to be asked per cell, not per prop: `selectedId`, `editingId`, `live` and `selSet` are
+// document-wide values that change constantly (every selection click, every cell that starts
+// running), and comparing them by identity would re-render the whole document each time — the very
+// cost this exists to remove. What matters to a cell is whether IT is the selected one, whether IT is
+// being edited, and whether ITS live state moved. `cell` is compared by identity, which is only
+// meaningful because `applyState` now carries unchanged cell objects across pushes (store.js).
+class MemoCell extends Component {
+  shouldComponentUpdate(next) {
+    const p = this.props, id = p.cell.id;
+    if (p.cell !== next.cell || p.collapsed !== next.collapsed || p.focusId !== next.focusId) return true;
+    if ((p.selectedId === id) !== (next.selectedId === id)) return true;
+    if ((p.editingId === id) !== (next.editingId === id)) return true;
+    if (!!(p.selSet && p.selSet.has(id)) !== !!(next.selSet && next.selSet.has(id))) return true;
+    if ((p.live || {})[id] !== (next.live || {})[id]) return true;
+    return false;
+  }
+  render() { return html`<${Cell} ...${this.props} />`; }
+}
+
 function Notebook({ cells, selectedId, selSet, live, focusId, editingId, cone }) {
   useEffect(() => {
     window.renderPalette && window.renderPalette();
@@ -603,7 +662,7 @@ function Notebook({ cells, selectedId, selSet, live, focusId, editingId, cone })
   const banner = focusId ? html`<div class="focusbar" onClick=${() => window.slateStore.setFocus(focusId)}
       title="click or press Esc to exit focus">🔗 Dependency chain of <b>${focusId}</b> · ${coneCount} cell${coneCount === 1 ? '' : 's'} — click to exit</div>` : null;
   // Render EVERY cell always; cells outside the cone collapse (see <Cell>) instead of unmounting.
-  const renderCell = c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} editingId=${editingId} collapsed=${!!(cone && !cone.has(c.id))} />`;
+  const renderCell = c => html`<${MemoCell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} editingId=${editingId} collapsed=${!!(cone && !cone.has(c.id))} />`;
   // Side-by-side columns: a `column=N` tag (N≥2) places a cell in the Nth slot of the row anchored by
   // the preceding un-tagged (column 1, the default) cell — so you only tag the EXTRA columns. A plain
   // cell always starts a fresh row; a lone row renders as a normal full-width cell (no wrapper).

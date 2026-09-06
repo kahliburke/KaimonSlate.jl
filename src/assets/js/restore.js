@@ -72,9 +72,10 @@ window._backupSoon = _backupSoon;
 // Safety net: a low-frequency sweep of all editors, so capture never depends on a per-editor
 // change hook being wired. Idle-cheap — a single DOM check gates the per-editor getValue() work,
 // so when nothing is dirty (no cell marked `edited`) the sweep costs ~one querySelector.
-// (`_reconcileRan` stays false on an app — reconcileBackup returns before setting it — so this
-// sweep is already inert there; the explicit check just says so rather than relying on it.)
-setInterval(() => { if (!SLATE_IS_APP && _reconcileRan && document.querySelector('.cell.state-edited')) backupEdits(); }, 2000);
+// (`_reconcileRan` stays false on a plain app — reconcileBackup returns before setting it — so this
+// sweep is already inert there; the explicit check just says so rather than relying on it. A
+// workbook DOES reconcile, and wants the sweep: its reader is writing exercise answers.)
+setInterval(() => { if ((!SLATE_IS_APP || SLATE_IS_WORKBOOK) && _reconcileRan && document.querySelector('.cell.state-edited')) backupEdits(); }, 2000);
 // Capture on tab close. `pagehide` covers Safari/iOS, where `beforeunload` is unreliable.
 window.addEventListener('beforeunload', backupEdits);
 window.addEventListener('pagehide', backupEdits);
@@ -119,7 +120,11 @@ function reconcileBackup(state) {
   // offering to restore work they never did, over a document they can't edit anyway.
   // The file still LOADS: notebook.js and view.js index `window._pendingRestore` unguarded, so the
   // globals have to exist. It just does nothing.
-  if (SLATE_IS_APP) { _reconcileDone = true; return; }
+  // A WORKBOOK is the exception: its reader does have editors, the content is their own exercise
+  // answer, and the notebook file is the only other copy. That is exactly the work this exists to
+  // save. The walkthrough only ever offers cells the reader can write — `reconcileOne` filters on
+  // the same `workbook` mark the server enforces.
+  if (SLATE_IS_APP && !SLATE_IS_WORKBOOK) { _reconcileDone = true; return; }
   if (_reconcileDone) return; _reconcileDone = true; _reconcileRan = true;   // capture may now manage the backup
   const b = _readBackup();
   if (!Object.keys(b).length) return;
@@ -129,6 +134,10 @@ function reconcileBackup(state) {
     const { mine, base } = b[id] || {};
     const cell = byId[id];
     if (!cell) continue;                                          // cell deleted — drop the entry
+    // In a workbook, only the cells the reader may write. A backup entry for anything else is a
+    // leftover from authoring the same document in this browser, and restoring it would offer a
+    // student a diff of the author's cell against source the server would refuse to accept.
+    if (SLATE_IS_WORKBOOK && !cell.workbook) continue;
     const server = cell.source != null ? cell.source : '';
     if (_sameEdit(server, mine)) continue;                       // already saved (or never differed) — drop
     if (_isEmpty(server) && !_isEmpty(mine)) { _applyRestore(id, mine); keep[id] = b[id]; autoFilled++; continue; }  // empty cell ← content: silent auto-accept

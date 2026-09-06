@@ -13,7 +13,16 @@ import { html, render } from 'htm/preact';
 import { signal, effect } from '@preact/signals';
 
 const POLL_MS = 4000;
-const health = signal({ status: 'ok', alerts: [], src_stale: false });   // latest /api/health payload
+const health = signal({ status: 'ok', alerts: [], src_stale: false, revise: null });   // latest /api/health payload
+
+// "2m ago" for the Revise timestamps below. Relative, because the useful question is whether a pass
+// happened AFTER the edit you just made, not what o'clock it was.
+function _hAgo(sec) {
+  if (!sec) return '';
+  const s = Math.max(0, Date.now() / 1000 - sec);
+  return s < 5 ? 'just now' : s < 60 ? Math.floor(s) + 's ago'
+       : s < 3600 ? Math.floor(s / 60) + 'm ago' : Math.floor(s / 3600) + 'h ago';
+}
 const panelOpen = signal(false);
 let timer = null, inflight = false;
 
@@ -123,10 +132,28 @@ function Panel() {
   const h = health.value, a = h.alerts || [];
   // "server source changed" is a PASSIVE nudge — no action button, because the fix is a manual restart
   // of the Slate server (hot-reloading it in place is fragile; Revise handles function edits).
-  const stale = h.src_stale ? html`<div class="hprow warn">
-    <span class="hpico">↻</span>
-    <span class="hpmain"><b>server source changed</b> since it started<span class="hpdetail">Revise applies function edits live — RESTART the Slate server to pick up struct / new-tool changes</span></span>
-  </div>` : null;
+  // The SHA says the source CHANGED since this process started; Revise says what became of it.
+  // When Revise has caught up (`covers`), a restart is no longer the default answer — only the
+  // changes it cannot apply need one — so that case drops to an informational row rather than a
+  // warning. Anything else (no Revise, a failed pass, edits not yet applied) keeps the warning,
+  // because then the running server really is behind its source.
+  const rv = h.revise || {};
+  const stale = !h.src_stale ? null
+    : rv.error
+      ? html`<div class="hprow warn"><span class="hpico">↻</span>
+          <span class="hpmain"><b>Revise failed</b> ${_hAgo(rv.errorAt)}
+            <span class="hpdetail">${rv.error}<br/>RESTART the Slate server</span></span></div>`
+    : rv.covers
+      ? html`<div class="hprow"><span class="hpico">✓</span>
+          <span class="hpmain"><b>source changed — Revise applied it</b> ${_hAgo(rv.last)}
+            <span class="hpdetail">Restart only for what Revise can't do: new routes, <code>const</code>s, or a struct whose live objects predate the change</span></span></div>`
+    : rv.active
+      ? html`<div class="hprow warn"><span class="hpico">↻</span>
+          <span class="hpmain"><b>server source changed</b> since it started
+            <span class="hpdetail">Revise is watching but hasn't applied these yet — it revises on the next request</span></span></div>`
+      : html`<div class="hprow warn"><span class="hpico">↻</span>
+          <span class="hpmain"><b>server source changed</b> since it started
+            <span class="hpdetail">Revise is not active here — RESTART the Slate server to apply</span></span></div>`;
   return html`
     <div class="hphdr"><b>Watchdog health</b><span class="hpclose" onClick=${toggle}>✕</span></div>
     ${stale}

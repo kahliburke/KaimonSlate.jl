@@ -1662,7 +1662,8 @@ function _make_router(h::Hub)
         # posture + presentation defaults into the shell, so the page knows which UI to build
         # before its first paint (a page that painted the authoring chrome and then tore it down
         # would flash every control app mode exists to hide).
-        _html(_inject_app(_inject_imports(read(_ASSET, String), _effective_imports(nb)), h, nb))
+        _html(_inject_app(_inject_imports(read(_ASSET, String), _effective_imports(nb)), h, nb;
+                          preview = _app_preview(req.target)))
     end)
     # A sweep cell's scheduler options, read and written as a MAP rather than as header tags: half of
     # what a scheduler accepts cannot survive a header (`--licenses=ansys@srv` loses its `=` to the
@@ -1721,9 +1722,39 @@ function _make_router(h::Hub)
         mime = endswith(path, ".html") ? "text/html; charset=utf-8" : "text/plain; charset=utf-8"
         HTTP.Response(200, ["Content-Type" => mime, "Cache-Control" => "public, max-age=31536000, immutable"], read(path))
     end)
+    # The workbook scratchpad: run a throwaway snippet in the notebook's kernel without adding a
+    # cell. A reader can't add cells, so without this the only place to try something is inside an
+    # exercise they then have to put back. Same machinery the agent's `slate.eval` uses, so the
+    # result lands in the scratch panel that already exists and nothing new renders it.
+    #
+    # No per-cell check here because there is no cell: a workbook reader can already run their own
+    # code in the worker (that IS the exercise), so this grants nothing app mode was withholding.
+    HTTP.register!(router, "POST", "/api/{id}/scratch-eval", req -> _withnb(h, req, nb -> begin
+        h.workbook || return _app_denied(req.target)
+        src = String(get(_body(req), "source", ""))
+        isempty(strip(src)) && return _json(Dict("ok" => false, "error" => "nothing to run"))
+        r = agent_scratch_eval_bg!(nb, src)
+        _json(Dict("ok" => true, "done" => r.done, "job" => r.jobid, "text" => r.text))
+    end))
+    # The exercise as the author shipped it, for the Reset button. Only for a cell the reader is
+    # allowed to edit in the first place: otherwise this would hand out the author's source for
+    # every cell in an app, which is precisely what the reading view is not showing them.
+    HTTP.register!(router, "GET", "/api/{id}/workbook-stub/{cid}", req -> _withnb(h, req, nb -> begin
+        cid = HTTP.getparam(req, "cid")
+        (h.workbook && _workbook_cell_allowed(nb, cid)) || return _app_denied(req.target)
+        src = _workbook_stub_source(nb, cid)
+        src === nothing && return _json(Dict("ok" => false, "error" => "no original on file for this cell"))
+        _json(Dict("ok" => true, "source" => src))
+    end))
     HTTP.register!(router, "POST", "/api/{id}/cell/{cid}", req -> _withnb(h, req, nb -> begin
         b = _body(req)
-        edit_cell!(nb, HTTP.getparam(req, "cid"), get(b, "source", ""); force = get(b, "force", false) === true)
+        cid = HTTP.getparam(req, "cid")
+        # In a workbook the route is served, but only for the cells the document marks `editable`.
+        # The refusal belongs here rather than in the UI: the allowlist can only see the path.
+        if h.workbook && !_workbook_cell_allowed(nb, cid)
+            return _app_denied(req.target)
+        end
+        edit_cell!(nb, cid, get(b, "source", ""); force = get(b, "force", false) === true)
         _json(state_json(nb))
     end))
     HTTP.register!(router, "POST", "/api/{id}/complete", req -> _withnb(h, req, nb -> begin
@@ -2289,6 +2320,7 @@ function _make_router(h::Hub)
             export_app(nb, dest; appdefaults = app_defaults(; kw...),
                        port = something(tryparse(Int, strip(String(get(body, "port", "")))), 0),
                        agent = false, include = extra,
+                       workbook = get(body, "workbook", false) === true,
                        title = strip(String(get(body, "title", ""))))
         catch e
             return _json(Dict("ok" => false, "error" => sprint(showerror, e)))
@@ -3370,17 +3402,25 @@ authoring routes refused server-side rather than merely hidden. `appdefaults` (b
 [`app_defaults`](@ref)) sets what a visitor sees before choosing for themselves.
 """
 function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
+                   workbook::Bool = false,
                    appdefaults::AbstractDict = Dict{String,Any}())
+    # A workbook is an app whose `editable` cells a reader may rewrite, so it can't be served by a
+    # hub that isn't otherwise locked down: without `app` the whole authoring API is already open and
+    # the flag would only be misleading.
+    workbook && !app && throw(ArgumentError("start_hub: workbook=true requires app=true"))
     # Stamp the payload SHA the running hub code was loaded from — `_hub_src_stale()` compares the live
     # on-disk SHA to this to flag "Slate src changed since this server started; restart to apply".
     _HUB_START_SHA[] = try; ReportEngine._payload_sha(); catch; ""; end
+    # Function-body edits land without a restart when Revise is reachable and this is a checkout.
+    # No-op otherwise (an app, a depot install, no Revise) — see `_start_revise!`.
+    app || (try; _start_revise!(); catch e; @debug "Revise setup failed" exception = e; end)
     _HUB_STARTED[] = time()                  # `/status` reports uptime from here
     _APP_PROCESS[] = app                     # process-wide app flag, for the paths with no hub in hand
     try; SlateHistory.migrate_once!(); catch e   # one-time: compact legacy history logs + compress objects
         @warn "KaimonSlate: history migration failed" exception = (e, catch_backtrace())
     end
     h = Hub(Dict{String,LiveNotebook}(), nothing, host, port, ReentrantLock(),
-            app, Dict{String,Any}(String(k) => v for (k, v) in appdefaults))
+            app, workbook, Dict{String,Any}(String(k) => v for (k, v) in appdefaults))
     # Surface a remote worker's live bring-up output (streamed instantiate/precompile) in the browser
     # hydrating banner, not just remote.log — the provisioner narrates each line through this sink hook.
     try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
@@ -3412,12 +3452,15 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
         if !_request_allowed(h, stream.message)
             HTTP.setstatus(stream, 403); HTTP.startwrite(stream); return
         end
+        # Between requests, never inside one: a revision that lands mid-eval leaves a half-updated
+        # method table. Free when nothing changed (one atomic read).
+        _apply_pending_revise!()
         target = stream.message.target
         # App mode's lockdown sits HERE rather than in the router because several endpoints — the SSE
         # streams, the per-page WebSocket, the publish/site-publish handlers — are dispatched below on
         # the raw stream and never reach a route table at all. A gate the router owned would leave
         # exactly those open, and `publish` is not something an app's visitor should be able to reach.
-        if h.app && !_app_route_allowed(stream.message.method, target)
+        if h.app && !_app_route_allowed(stream.message.method, target; workbook = h.workbook)
             r = _app_denied(target)
             HTTP.setstatus(stream, 403)
             for (k, v) in r.headers; HTTP.setheader(stream, k => v); end
