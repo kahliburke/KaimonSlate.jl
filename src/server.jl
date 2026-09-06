@@ -1782,6 +1782,15 @@ end
 # dispatch race can't trip it. An unreachable worker yields no confirmation → left to the session layer.
 const _RUN_SINCE = Dict{Tuple{String,String},Float64}()   # (nb id, cell id) → first time observed RUNNING
 const _RUN_ORPHAN_HITS = Dict{Tuple{String,String},Int}()  # consecutive confirmed-absent sweeps
+# Region cells marked RUNNING but not yet handed to a worker — see `_prepare_region_for_cell!`. Held
+# only for that window, and dropped defensively when the cell stops running, so a preparation that
+# dies without reaching its dispatch cannot make a cell permanently unhealable.
+const _REGION_PREPARING = Set{Tuple{String,String}}()
+const _REGION_PREPARING_LOCK = ReentrantLock()
+_region_preparing(nbid, cid) =
+    lock(_REGION_PREPARING_LOCK) do; (String(nbid), String(cid)) in _REGION_PREPARING; end
+_region_prepared!(nbid, cid) =
+    (lock(_REGION_PREPARING_LOCK) do; delete!(_REGION_PREPARING, (String(nbid), String(cid))); end; nothing)
 const _RECONCILE_GRACE = 8.0                               # s a cell must be RUNNING before it's judged
 const _RUN_SUPERVISOR = Ref{Any}(nothing)
 
@@ -2098,7 +2107,8 @@ function _reconcile_nb_runs!(nb::LiveNotebook)
     ids = Set(c.id for c in running)
     for c in running; get!(_RUN_SINCE, (nb.id, c.id), now); end   # stamp first-seen-running
     for key in collect(keys(_RUN_SINCE))                          # drop records for cells no longer running
-        (key[1] == nb.id && !(key[2] in ids)) && (delete!(_RUN_SINCE, key); delete!(_RUN_ORPHAN_HITS, key))
+        (key[1] == nb.id && !(key[2] in ids)) &&
+            (delete!(_RUN_SINCE, key); delete!(_RUN_ORPHAN_HITS, key); _region_prepared!(key...))
     end
     suspects = [c for c in running if now - get(_RUN_SINCE, (nb.id, c.id), now) > _RECONCILE_GRACE]
     isempty(suspects) && return nothing
@@ -2109,6 +2119,11 @@ function _reconcile_nb_runs!(nb::LiveNotebook)
         if c.id in actual                                        # genuinely running → clear any strike
             delete!(_RUN_ORPHAN_HITS, key); continue
         end
+        # A region cell is marked RUNNING before it reaches a worker: the spawn, the prime and the
+        # input transfer come first, and until the dispatch nothing can report it as running — which
+        # is indistinguishable from an orphan from here. `_prepare_region_for_cell!` says while that
+        # is happening, so this is exact rather than a guess about how long a bring-up takes.
+        _region_preparing(nb.id, c.id) && continue
         hits = get(_RUN_ORPHAN_HITS, key, 0) + 1                 # confirmed absent this sweep
         _RUN_ORPHAN_HITS[key] = hits
         hits < 2 && continue                                     # need TWO consecutive confirmations
@@ -2777,6 +2792,11 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
     # region worker can be SLOW — a COLD remote spawn boots Julia + KaimonGate (~90s) — so mark the cell
     # RUNNING now and push the worker list so the region PILL appears immediately as a pulsing "starting".
     host = _side_label(nb, side)
+    # From here the cell is RUNNING but is NOT yet on a worker: the spawn, the namespace prime and
+    # its input transfer all still have to happen, and only then is it dispatched. Nothing can report
+    # it as running during that window, which is exactly what the orphan reconciler looks for — so
+    # say that it is being prepared and let it skip this cell. Cleared at the dispatch itself.
+    lock(_REGION_PREPARING_LOCK) do; push!(_REGION_PREPARING, (nb.id, cell.id)); end
     lock(nb.lock) do
         ReportEngine.mark_running!(cell)
         _broadcast_progress(nb, cell)
@@ -2884,6 +2904,9 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         end
         return nothing
     end
+    # Everything a region cell had to wait for is done; from here it is on a worker like any other,
+    # and the orphan reconciler should judge it normally again.
+    _region_prepared!(nb.id, cell.id)
     src, srchash, memo, locked = lock(nb.lock) do
         ReportEngine.mark_running!(cell)
         _broadcast_progress(nb, cell)
