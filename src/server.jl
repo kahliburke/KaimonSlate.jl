@@ -2866,11 +2866,20 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         _region_presync!(nb, cell, kernel; dst_side = side)
         nothing
     catch e
-        sprint(showerror, e)
+        e
     end
     if presync_err !== nothing
+        # A wait arrives here too, and by the same route: reading a value that lives on a region
+        # needs that region's kernel, so a node that has not been granted raises `RegionWaiting`
+        # from the transfer rather than from the run. Reported as a failure it puts the spurious
+        # red back on the DOWNSTREAM cell, which is the symptom BLOCKED exists to remove.
+        wait = presync_err isa RegionWaiting
+        wait && ReportEngine._rlog("region: holding " * cell.id * " (input transfer): " *
+                                   sprint(showerror, presync_err))
         lock(nb.lock) do
-            ReportEngine.mark_errored!(cell, "region boundary transfer failed: " * presync_err)
+            wait ? ReportEngine.mark_blocked!(cell, presync_err.why, presync_err.note) :
+                   ReportEngine.mark_errored!(cell, "region boundary transfer failed: " *
+                                                    sprint(showerror, presync_err))
             _broadcast_progress(nb, cell)
         end
         return nothing
