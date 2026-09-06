@@ -3700,16 +3700,17 @@ end
 # provision pass covers them all), trim excess idlers. Never touches an attached worker, a claimed
 # worker, or another region's workers. Wrapped by `region_reconcile!`, which records the outcome.
 function _region_reconcile_impl!(r::Region)
-    # Where the workers go. On a scheduler region this ASKS — and may come back with nothing, because
-    # a queue that has not granted a node yet is a cluster being busy, not an error. Draining to zero
-    # is the one case that must not ask: "keep no workers here" is also "stop holding a node".
+    # Where the workers go. On a scheduler region this may ASK the scheduler, so what reconciling one
+    # is allowed to do is bounded by what it is FOR: `warm` is always 0 there (`_warm_for`), so there
+    # are no workers to keep ready and the only question is the node.
     host = r.host
     if r.scheduler !== :none
-        # Draining to zero is the one case that must not ask for a node: "keep no workers here" is
-        # also "stop holding one". Only when we know we are holding something — a region that never
-        # got a node has nothing to give back, and a `scancel` per tick to say so is a round trip
-        # spent on nothing.
-        if r.warm <= 0 && _region_holds_node(r) && !_region_has_live_workers(r)
+        # Holding nothing means there is nothing to give back and nothing to maintain — and asking
+        # here would ALLOCATE a node for a region with no work on it, which is what saving the region
+        # form used to do. A region cell gets its node from `_place_in_background!` instead.
+        _region_holds_node(r) ||
+            return "region[$(r.name)]: holds no node — nothing to reconcile"
+        if r.warm <= 0 && !_region_has_live_workers(r)
             region_release!(r)
             return "region[$(r.name)]: nothing left to keep here — allocation released"
         end
