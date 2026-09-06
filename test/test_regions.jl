@@ -142,6 +142,19 @@ const RE = KaimonSlate.ReportEngine
                 RE.route!("c2", "")
             end
 
+            # An allocation bills for the time it is HELD, so a region may ask to have its node taken
+            # back once nothing has used it. Opt-in: absent (every region written before the field
+            # existed) and 0 both mean never, because regaining a node costs a queue wait.
+            @test RE._region_from_dict(Dict("name" => "r", "host" => "h")).idle_release == 0
+            @test RE._region_from_dict(Dict("name" => "r", "host" => "h",
+                                            "idle_release" => 15)).idle_release == 15
+            @test RE._region_from_dict(Dict("name" => "r", "host" => "h",
+                                            "idle_release" => -5)).idle_release == 0
+            # It has to survive a write/read round trip, or the form silently forgets it.
+            let r = RE._region_from_dict(Dict("name" => "r", "host" => "h", "idle_release" => 20))
+                @test RE._region_from_dict(RE._region_to_dict(r)).idle_release == 20
+            end
+
             # Once the allocation ends the route goes with it, and what is left is a bare hostname.
             # Reaching it must not fall back to dialling the node directly: that fails with advice to
             # sign in to a compute node, which is not a thing anyone does, and it hides the real

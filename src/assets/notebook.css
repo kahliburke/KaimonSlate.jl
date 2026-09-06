@@ -2696,3 +2696,34 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 /* The panel with no log to show (an app refuses that route) — identity + telemetry still stand. */
 .wplog-none { padding:12px 14px; font-size:.78rem; color:var(--dim); line-height:1.5; }
 .wplog-none a { color:var(--accent); }
+
+/* ── Allocation notice — a compute node about to go, or already gone ──────────────────────────
+   Takes the notebook over: the choice on offer expires, so a banner that can be scrolled past is
+   the wrong shape. Same blur + card as the package-install overlay. */
+.anbg { position:fixed; inset:0; z-index:96; display:flex; align-items:center; justify-content:center;
+  background:rgba(5,8,16,.55); backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px); }
+.ancard { background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:22px 26px;
+  max-width:520px; width:92%; box-shadow:0 18px 52px #000b; }
+.antitle { margin:0 0 10px; font-size:1rem; font-weight:700; color:var(--text); }
+.anwhere { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px; font-size:.8rem; }
+.anreg { color:var(--accent); font-weight:600; }
+.annode, .anvia { color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.76rem; }
+.anlede { color:var(--text); font-size:.86rem; line-height:1.6; margin:0 0 10px; }
+.andim { color:var(--dim); font-size:.79rem; line-height:1.55; margin:0 0 12px; }
+/* The number people are actually deciding against, so it reads at a glance and turns when it bites. */
+.anclock { font-family:'Cascadia Code',monospace; font-weight:700; color:var(--accent); }
+.anclock.urgent { color:var(--gold); }
+.ansaid { margin-top:6px; font-family:'Cascadia Code',monospace; font-size:.74rem; color:var(--dim);
+  background:var(--bg); border:1px solid var(--bg3); border-radius:6px; padding:6px 8px; word-break:break-word; }
+.anextend { display:flex; align-items:center; gap:8px; margin:0 0 12px; font-size:.8rem; color:var(--dim); }
+.anamount { width:72px; background:var(--bg); color:var(--text); border:1px solid var(--border);
+  border-radius:6px; padding:5px 8px; font-size:.8rem; font-family:'Cascadia Code',monospace; }
+.anerr { color:var(--red); font-size:.79rem; line-height:1.5; margin-bottom:10px; word-break:break-word; }
+.anacts { margin-top:16px; display:flex; gap:10px; justify-content:flex-end; }
+.anbtn { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:7px;
+  padding:7px 16px; cursor:pointer; font-size:.85rem; }
+.anbtn:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+.anbtn:disabled { opacity:.55; cursor:default; }
+.anbtn.primary { background:var(--accent); border-color:var(--accent); color:var(--bg); font-weight:600; }
+.anbtn.primary:hover:not(:disabled) { filter:brightness(1.1); color:var(--bg); }
+.anwhere .anwall { margin-left:auto; color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.76rem; }

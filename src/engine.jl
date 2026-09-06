@@ -171,7 +171,7 @@ mutable struct Cell
     blocked_at::Float64           # when the wait started (unix). Kept across a re-block for the same
                                   # reason, so "waiting 6m" counts from the first attempt rather than
                                   # restarting each time the runner looks. 0.0 when not blocked.
-    blocked_note::String          # the longer half of `blocked`: which host, and what happens next.
+    blocked_host::String          # the host `blocked` is about, for the page to name.
                                   # For the LOG (see `showerror` on RegionWaiting) — the UI shows the
                                   # status and the facts behind it, never a sentence.
 end
@@ -886,6 +886,7 @@ include(joinpath(@__DIR__, "deps.jl"))
 include(joinpath(@__DIR__, "bind.jl"))
 include(joinpath(@__DIR__, "defname.jl"))       # def-name extractor + source-tree digest (envprep's `env_source_fingerprint` needs it)
 include(joinpath(@__DIR__, "envprep.jl"))       # shared notebook-env prep policy (seed/dev-path/staleness; engine + worker + remote)
+include(joinpath(@__DIR__, "clocktrack.jl"))    # ClockTrack — worker↔hub clock delta, tracked not synced
 include(joinpath(@__DIR__, "gate_kernel.jl"))   # GateKernel (used when Main.Kaimon present)
 include(joinpath(@__DIR__, "remote.jl"))        # RunTarget + remote worker (provision/sync/CURVE); uses gate_kernel helpers
 include(joinpath(@__DIR__, "clusters.jl"))      # named compute targets, kept with the machines (not per notebook); needs remote.jl's _slate_config_dir

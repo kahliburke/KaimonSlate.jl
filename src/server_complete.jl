@@ -1211,6 +1211,9 @@ function _make_router(h::Hub)
                  "scheduler" => String(r.scheduler), "partition" => r.partition,
                  "walltime" => r.walltime, "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus,
                  "account" => r.account, "alloc_name" => r.alloc_name,
+                 # As the user wrote them, so the form shows "1h" rather than 3600.
+                 "idle_release" => ReportEngine.Sweep.format_duration(r.idle_release),
+                 "idle_warn" => ReportEngine.Sweep.format_duration(r.idle_warn),
                  # Where the workers actually ARE. For a scheduler region that is the granted node,
                  # and it is the thing worth showing — `host` is only where the asking happens.
                  # Read from the hub's cached placement: listing regions must never queue for a node.
@@ -1264,11 +1267,64 @@ function _make_router(h::Hub)
                                      "cpus_total" => q.cpus_total, "queued" => q.queued,
                                      "down" => q.down, "eta" => q.eta) for q in rows]))
     end)
+    # Ask the scheduler for more time on a region's allocation. Reports the outcome as a code plus
+    # whatever the scheduler said; the popup words it.
+    HTTP.register!(router, "POST", "/api/allocation/extend", req -> begin
+        b = _body(req)
+        r = ReportEngine.region_get(strip(String(get(b, "region", ""))))
+        r === nothing && return _json(Dict("ok" => false, "error" => "no_region"))
+        add = ReportEngine.Sweep.parse_duration(get(b, "by", "30m"))
+        add > 0 || return _json(Dict("ok" => false, "error" => "bad_duration"))
+        res = try
+            ReportEngine.Sweep.extend_allocation!(ReportEngine.region_scheduler(r), r.host,
+                                                  ReportEngine.region_alloc_name(r), add)
+        catch e
+            (; ok = false, reason = :unreachable, said = first(sprint(showerror, e), 200), added_s = 0)
+        end
+        # A longer job is a longer lease: the cached placement decides when the hub stops trusting
+        # the node, so it has to learn about the extension or it expires the region early.
+        res.ok && ReportEngine.region_extend_lease!(r, res.added_s)
+        _json(Dict("ok" => res.ok === true, "error" => String(res.reason),
+                   "said" => res.said, "added_s" => res.added_s))
+    end)
+    # "I am still here" — the idle clock restarts and any pending release is dropped.
+    HTTP.register!(router, "POST", "/api/allocation/keep", req -> begin
+        name = strip(String(get(_body(req), "region", "")))
+        isempty(name) && return _json(Dict("ok" => false, "error" => "no_region"))
+        _region_used!(name)
+        # The clock the page is showing just moved, and nothing else would say so until the next
+        # state push — which for an idle notebook is exactly what there isn't.
+        #
+        # Off the request, and with its own loop name: every handler in `_make_router` closes over the
+        # same scope, so a `for nb in …` here would be an assignment to a name they all share (Julia
+        # boxes it), and the request must not sit on `nb.lock` while the page waits.
+        Threads.@spawn try
+            for wnb in lock(h.lock) do; collect(values(h.notebooks)); end
+                uses = lock(wnb.lock) do; any(c -> _cell_region(c) == name, wnb.report.cells); end
+                uses && (try; _workers_push!(wnb); catch; end)
+            end
+        catch e
+            ReportEngine._rlog("keep: worker push failed — " * first(sprint(showerror, e), 120))
+        end
+        _json(Dict("ok" => true, "region" => name))
+    end)
     HTTP.register!(router, "POST", "/api/allocation/release", req -> begin
         name = strip(String(get(_body(req), "region", "")))
         r = ReportEngine.region_get(name)
         r === nothing && return _json(Dict("ok" => false, "error" => "no region `$name`"))
-        _json(Dict("ok" => ReportEngine.region_release!(r), "region" => r.name))
+        ok = ReportEngine.region_release!(r)
+        # Say so. The node is gone the moment this returns, and a panel still showing its walltime
+        # reads as one that is still held. Off the request, and with its own loop name — see the
+        # `keep` route for both reasons.
+        ok && Threads.@spawn try
+            for rnb in lock(h.lock) do; collect(values(h.notebooks)); end
+                uses = lock(rnb.lock) do; any(c -> _cell_region(c) == r.name, rnb.report.cells); end
+                uses && _push_alloc_event!([rnb], r.name, "released"; reason = "manual")
+            end
+        catch e
+            ReportEngine._rlog("release: announcing it failed — " * first(sprint(showerror, e), 120))
+        end
+        _json(Dict("ok" => ok, "region" => r.name))
     end)
     # Create/update a named region (full-record upsert) and reconcile toward its warm count. The def is
     # persisted synchronously (fast, durable); the reconcile — which may provision a cold host for minutes —
@@ -1297,6 +1353,25 @@ function _make_router(h::Hub)
         sched in (:none, :auto, :slurm, :pbs) ||
             return _json(Dict("ok" => false, "error" => "scheduler must be none, auto, slurm or pbs"))
         walltime = strip(String(get(b, "walltime", "")))
+        # Idle release, written as a person says it ("30m", "1h", "1d"). A warning that lands after
+        # the release cannot be answered, so it is refused. An idle timeout longer than the walltime
+        # only means the job ends first, which is the site's business, so it is reported and allowed.
+        #
+        # Both come back as codes with the values that produced them; the form does the wording.
+        SW = ReportEngine.Sweep
+        idle_s = round(Int, SW.parse_duration(get(b, "idle_release", 0)))
+        warn_s = round(Int, SW.parse_duration(get(b, "idle_warn", 0)))
+        (idle_s > 0 && warn_s >= idle_s) &&
+            return _json(Dict("ok" => false, "error" => "warn_not_shorter",
+                              "idle_release" => SW.format_duration(idle_s),
+                              "idle_warn" => SW.format_duration(warn_s)))
+        notes = Any[]
+        if idle_s > 0 && !isempty(walltime)
+            wt = SW.sched_seconds(walltime)
+            isfinite(wt) && wt <= idle_s &&
+                push!(notes, Dict("code" => "idle_outlives_walltime", "walltime" => walltime,
+                                  "idle_release" => SW.format_duration(idle_s)))
+        end
         r = ReportEngine.region_set!(name; host = host, transport = tr, base_port = base_port,
                                      preload = isempty(preload) ? "" : abspath(expanduser(preload)),
                                      data_root = data_root, warm = warm, threads = threads, sysimage = sysimage,
@@ -1306,13 +1381,16 @@ function _make_router(h::Hub)
                                      mem = strip(String(get(b, "mem", ""))),
                                      gpus = strip(String(get(b, "gpus", ""))),
                                      account = strip(String(get(b, "account", ""))),
-                                     alloc_name = strip(String(get(b, "alloc_name", ""))))
+                                     alloc_name = strip(String(get(b, "alloc_name", ""))),
+                                     idle_release = idle_s, idle_warn = warn_s)
         do_reconcile && Threads.@spawn try
             ReportEngine.region_reconcile!(r.name)   # no-op when warm==0 except draining excess
         catch e
             @warn "slate: region reconcile failed" region = r.name exception = (e, catch_backtrace())
         end
-        _json(Dict("ok" => true, "name" => r.name))
+        _json(Dict("ok" => true, "name" => r.name, "notes" => notes,
+                   "idle_release" => SW.format_duration(r.idle_release),
+                   "idle_warn" => SW.format_duration(r.idle_warn)))
     end)
     # Delete a region: drain its warm workers first (best-effort), then drop the definition.
     # ── Named compute targets ────────────────────────────────────────────────────────────────
@@ -1752,6 +1830,16 @@ function _make_router(h::Hub)
         end
         p = _mesh_pending(nb.id)
         _json(p === nothing ? Dict("pending" => false) : merge(Dict("pending" => true), p))
+    end))
+    # A release this notebook has not been shown yet. Asked on load, because the release happened
+    # while nothing was listening.
+    HTTP.register!(router, "GET", "/api/{id}/alloc-notice", req -> _withnb(h, req, nb -> begin
+        p = pending_released_notice(nb.id)
+        _json(p === nothing ? Dict("pending" => false) : merge(Dict("pending" => true), p))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/alloc-notice/ack", req -> _withnb(h, req, nb -> begin
+        clear_released_notice!(nb.id)
+        _json(Dict("ok" => true))
     end))
     HTTP.register!(router, "POST", "/api/{id}/mesh-introduce", req -> _withnb(h, req, nb -> begin
         names = _nb_defined_regions(nb)
@@ -2939,12 +3027,44 @@ end
 function _telemetry_push!(h, conn_name::AbstractString, sample)
     owner = _worker_conn_owner(h, conn_name); owner === nothing && return nothing
     nb, side = owner
+    # The sample says what the WORKER knows. What ends a worker on a scheduler — the allocation's
+    # lease and the region's idle policy — is the hub's to know, so it rides along here rather than
+    # waiting on a separate push that some mutation site has to remember to make.
+    alloc = _region_alloc_facts(String(side))
     frame = try
         string("{\"t\":\"telemetry\",\"side\":", JSON.json(String(side)),
+               ",\"alloc\":", JSON.json(alloc),
                ",\"stats\":", JSON.json(JSON.json(sample)), "}")
     catch; return nothing; end
     _ws_broadcast!(nb, frame)
     return nothing
+end
+
+# What the hub knows about a region's node, for the pill: when the allocation ends, and the idle
+# policy that may end it sooner. Absolute instants, so the page can tick them between samples. Empty
+# for the main kernel and for a region with no scheduler.
+function _region_alloc_facts(side::AbstractString)
+    d = Dict{String,Any}()
+    isempty(side) && return d
+    try
+        r = ReportEngine.region_get(side)
+        (r === nothing || r.scheduler === :none) && return d
+        # Every field here describes a HELD allocation. With none held there is no walltime to run
+        # out and nothing for the idle timer to release, and showing either reads as a node that is
+        # still ours.
+        p = ReportEngine.region_placement(r)
+        p === nothing && return d
+        # DURATIONS, not instants: the page is a third clock again, and only an age survives the
+        # crossing. It anchors these to its own `Date.now()` on receipt and ticks from there.
+        d["walltimeLeft"] = max(0, round(Int, p.until - time()))
+        if r.idle_release > 0
+            d["idleRelease"] = r.idle_release
+            d["idleWarn"] = r.idle_warn
+            d["idleFor"] = round(Int, _region_idle_for(side))
+        end
+    catch
+    end
+    return d
 end
 
 # Worker log line → `{t:"log",side,line}`. The browser appends it only if the popup for that side is open.

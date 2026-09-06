@@ -3193,6 +3193,13 @@ struct Region
     gpus::String        # e.g. "1" or "a100:2" ("" = none — a CPU node)
     account::String     # the project to bill ("" = default)
     alloc_name::String  # the job name an allocation is found by, so a reopened notebook ATTACHES to the one it was already using rather than queueing for a second ("" = derived from the region name)
+    # Give the node back after this long with no cell running on this region. SECONDS; 0 (the
+    # default) never releases, because regaining a node costs a queue wait on the next run. Measured
+    # from the last region CELL, not from worker activity: the hub polls the worker for telemetry.
+    idle_release::Int
+    # How long before that to ask whether anyone is still there. SECONDS, and shorter than
+    # `idle_release`, or the question arrives too late to be answered.
+    idle_warn::Int
 end
 
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
@@ -3230,14 +3237,15 @@ _region_from_dict(d::AbstractDict) = Region(
     _region_scheduler_of(d),
     String(get(d, "partition", "")), String(get(d, "walltime", "")), _asint(get(d, "cpus", 0)),
     String(get(d, "mem", "")), String(get(d, "gpus", "")), String(get(d, "account", "")),
-    String(get(d, "alloc_name", "")))
+    String(get(d, "alloc_name", "")), max(0, _asint(get(d, "idle_release", 0))),
+    max(0, _asint(get(d, "idle_warn", 0))))
 _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
     "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
     "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
     "curve" => r.curve, "uuid" => r.uuid, "peer" => r.peer,
     "scheduler" => String(r.scheduler), "partition" => r.partition, "walltime" => r.walltime,
     "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus, "account" => r.account,
-    "alloc_name" => r.alloc_name)
+    "alloc_name" => r.alloc_name, "idle_release" => r.idle_release, "idle_warn" => r.idle_warn)
 
 # ── Per-region UUID (mesh-artifact naming; PEER_TUNNEL_PLAN §5.5) ──────────────────────────────
 # A stable 128-bit id minted once at region setup and persisted in the region record. Every
@@ -3290,7 +3298,7 @@ function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "
                      data_root = "", cache_root = "", warm = 0, threads = "", sysimage = false,
                      curve = true, uuid = "", peer = "",
                      scheduler = :none, partition = "", walltime = "", cpus = 0, mem = "",
-                     gpus = "", account = "", alloc_name = "")
+                     gpus = "", account = "", alloc_name = "", idle_release = 0, idle_warn = 0)
     n = _fold_region(name)   # tag-safe id — MUST match region_get/region_delete! + a cell's `region=` tag
     isempty(n) && error("region name required")
     return lock(_REGIONS_LOCK) do
@@ -3309,7 +3317,8 @@ function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "
                    String(data_root), String(cache_root), _warm_for(Int(warm), sched), String(threads),
                    _asbool(sysimage), _asbool(curve), u, pe,
                    sched, String(partition), String(walltime), Int(cpus),
-                   String(mem), String(gpus), String(account), String(alloc_name))
+                   String(mem), String(gpus), String(account), String(alloc_name),
+                   max(0, Int(idle_release)), max(0, Int(idle_warn)))
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)
         r
@@ -3606,6 +3615,25 @@ function region_release!(r::Region)
     catch e
         _rlog("region[$(r.name)]: releasing the allocation failed ($(first(sprint(showerror, e), 120)))")
         false
+    end
+end
+
+"The region's cached placement, or `nothing` — the hub's own record of the node and when it ends."
+region_placement(r::Region) = _placement(r)
+
+"""
+    region_extend_lease!(r, add_s) -> Bool
+
+Push the cached placement's expiry out by `add_s`, after the scheduler agreed to the same. The lease
+is what `_placement` expires the node on, so without this the hub drops a node it still holds.
+"""
+function region_extend_lease!(r::Region, add_s::Real)
+    add_s > 0 || return false
+    lock(_REGION_PLACE_LOCK) do
+        p = get(_REGION_PLACE, r.name, nothing)
+        p === nothing && return false
+        _REGION_PLACE[r.name] = (host = p.host, job = p.job, ts = p.ts, until = p.until + add_s)
+        return true
     end
 end
 

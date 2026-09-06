@@ -75,6 +75,46 @@ function sched_seconds(s::AbstractString)
     return days * 86400 + secs
 end
 
+"""
+    parse_duration(s) -> Float64
+
+A duration as a person writes it — `10m`, `90s`, `1h`, `1h30m`, `2d`, `1w` — in seconds. A bare
+number is MINUTES. An empty or unparseable string is 0, which every caller reads as "never".
+
+Not `sched_seconds`: that parses what a scheduler PRINTS (`HH:MM:SS`), where `1:30` means an hour
+and a half rather than the ninety seconds meant here.
+"""
+function parse_duration(s)
+    s isa Real && return max(0.0, Float64(s) * 60)          # a bare number is minutes
+    t = lowercase(strip(String(s)))
+    isempty(t) && return 0.0
+    n = tryparse(Float64, t); n === nothing || return max(0.0, n * 60)
+    unit = Dict('s' => 1.0, 'm' => 60.0, 'h' => 3600.0, 'd' => 86400.0, 'w' => 604800.0)
+    total = 0.0; seen = false
+    for m in eachmatch(r"(\d+(?:\.\d+)?)\s*([smhdw])", t)
+        total += parse(Float64, m.captures[1]) * unit[first(m.captures[2])]
+        seen = true
+    end
+    # Unparseable reads as 0, so a timeout that gives a node away never fires on a guess.
+    return seen ? total : 0.0
+end
+
+"""
+    format_duration(secs) -> String
+
+The inverse of `parse_duration`, for display: the largest whole unit that divides it. `0` is `""`,
+the field's empty state.
+"""
+function format_duration(secs::Real)
+    s = round(Int, secs)
+    s <= 0 && return ""
+    for (u, n) in (("w", 604800), ("d", 86400), ("h", 3600), ("m", 60))
+        s % n == 0 && return string(s ÷ n, u)
+    end
+    s < 60 && return string(s, "s")
+    return string(s ÷ 60, "m")           # not a whole unit — minutes is the field's own resolution
+end
+
 "Seconds as `HH:MM:SS`, the form both schedulers display."
 function hms(secs::Real)
     isfinite(secs) || return ""
@@ -260,6 +300,57 @@ function request_allocation!(kind::Symbol, host::AbstractString, name::AbstractS
     ok || @debug "allocation request failed" kind out
     return find_allocation(kind, host, name)
 end
+
+"""
+    extend_allocation!(kind, host, name, add_s) -> (; ok, reason, said, added_s)
+
+Ask the scheduler for `add_s` more seconds on the allocation held under `name`.
+
+Most sites refuse this. SLURM lets a user only REDUCE a running job's limit unless an operator says
+otherwise, and PBS gates `qalter` by site policy. Neither advertises the permission, so the only way
+to find out is to ask for the smallest extension there is — `can_extend_allocation!`.
+
+SLURM's `TimeLimit` takes a signed increment and is stored in whole MINUTES, so a smaller bump does
+nothing. PBS's `qalter` takes the new TOTAL, so the current limit is read first.
+
+Returns `(; ok, reason, said, added_s)`. `reason` is one of `:ok`, `:unreachable`,
+`:no_allocation`, `:unreadable`, `:refused`, `:unsupported`. `said` carries the scheduler's own
+words when it had any. Callers render both.
+"""
+function extend_allocation!(kind::Symbol, host::AbstractString, name::AbstractString, add_s::Real)
+    a = find_allocation(kind, host, name)
+    alive(a) || return (; ok = false, added_s = 0,
+                        reason = a.state === :unreachable ? :unreachable : :no_allocation, said = "")
+    add = max(60.0, Float64(add_s))          # a minute is SLURM's resolution and PBS's floor here
+    kind in (:slurm, :pbs) ||
+        return (; ok = false, reason = :unsupported, said = "", added_s = 0)
+    if kind === :slurm
+        ok, out = run_there(host, "scontrol update JobId=" * shq(a.id) *
+                                  " TimeLimit=+$(ceil(Int, add / 60)) 2>&1")
+    else
+        # PBS's `qalter` takes the new TOTAL, so read the current limit first.
+        okr, cur_s = run_there(host, "qstat -f " * shq(a.id) *
+                                     " 2>/dev/null | awk '/Resource_List.walltime/ { print \$3; exit }'")
+        cur = okr ? sched_seconds(strip(cur_s)) : NaN
+        isfinite(cur) || return (; ok = false, reason = :unreadable, said = "", added_s = 0)
+        ok, out = run_there(host, "qalter -l walltime=" * shq(hms(cur + add)) * " " *
+                                  shq(a.id) * " 2>&1")
+    end
+    # Both are silent on success and print the refusal otherwise. Some builds exit 0 while printing
+    # one, so the presence of text decides rather than the exit status.
+    said = String(strip(out))
+    (ok && isempty(said)) && return (; ok = true, reason = :ok, said = "", added_s = round(Int, add))
+    return (; ok = false, reason = :refused, said = first(said, 300), added_s = 0)
+end
+
+"""
+    can_extend_allocation!(kind, host, name) -> (ok, message)
+
+Whether this site lets the user lengthen a running allocation. Answered by extending it one minute,
+so a `true` here means the allocation really is a minute longer.
+"""
+can_extend_allocation!(kind::Symbol, host::AbstractString, name::AbstractString) =
+    extend_allocation!(kind, host, name, 60)
 
 _slurm_release_script(name) = "scancel -n " * shq(name) * " 2>&1"
 # `qdel` takes ids, not names, so the name is resolved first — one round trip either way.

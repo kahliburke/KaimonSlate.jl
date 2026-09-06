@@ -88,12 +88,12 @@ end
     ran = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 1.0)
     RE.mark_result!(c, ran)                      # it ran once and produced something
     @test c.state == RE.FRESH
-    RE.mark_blocked!(c, "queued", "waiting for login to grant a node")
+    RE.mark_blocked!(c, "queued", "login")
     @test c.state == RE.BLOCKED
     @test c.state != RE.ERRORED                  # the whole point
     # The status is short enough to sit beside a region name in the header. The sentence explaining
     # it is a separate field that stays server-side, for the log.
-    @test c.blocked == "queued" && c.blocked_note == "waiting for login to grant a node"
+    @test c.blocked == "queued" && c.blocked_host == "login"
     # The OUTPUT is untouched: a cell waiting for a node has not lost what it last produced, and
     # blanking it would throw away a result the wait has nothing to do with.
     @test c.output !== nothing
@@ -107,24 +107,24 @@ end
 
     # The clock starts at the FIRST attempt. The runner re-enters this path each time it retries a
     # blocked cell, and re-stamping would show "waiting 0s" against a queue wait of an hour. The
-    # NOTE may be refreshed meanwhile without disturbing it.
+    # HOST may be refreshed meanwhile without disturbing it.
     t0 = c.blocked_at
-    sleep(0.01); RE.mark_blocked!(c, "queued", "waiting for login to grant a node (still)")
-    @test c.blocked_at == t0 && endswith(c.blocked_note, "(still)")
+    sleep(0.01); RE.mark_blocked!(c, "queued", "login2")
+    @test c.blocked_at == t0 && c.blocked_host == "login2"
     # A CHANGED status is a different wait, so that one does restart.
-    RE.mark_blocked!(c, "not signed in")
-    @test c.blocked_at > t0 && c.blocked_note == ""
+    RE.mark_blocked!(c, "not_signed_in")
+    @test c.blocked_at > t0 && c.blocked_host == ""
 
     # Every other transition clears the reason, so it can never outlive the wait it describes —
     # including `restale!`, which is how the placement task re-arms the cell once a node lands.
     for step in (RE.restale!, RE.mark_running!, RE.mark_fresh!,
                  x -> RE.mark_result!(x, nothing), x -> RE.mark_errored!(x, "boom"))
-        RE.mark_blocked!(c, "waiting", "on something")
+        RE.mark_blocked!(c, "waiting", "somehost")
         @test c.blocked == "waiting" && c.blocked_at > 0
         step(c)
         # The clock and the note go with the status, so a stale "waiting 40m" cannot sit on a cell
         # that has since run.
-        @test c.blocked == "" && c.blocked_note == "" && c.blocked_at == 0.0 && c.state != RE.BLOCKED
+        @test c.blocked == "" && c.blocked_host == "" && c.blocked_at == 0.0 && c.state != RE.BLOCKED
     end
     # …and a cell that never blocked reports no reason at all.
     @test NS.cell_json(RE.Cell("p", RE.CODE, "2+2"))["blocked"] == ""
@@ -151,7 +151,7 @@ end
         NS.set_cell_tags!(nb, cid, ["region=ghost"])
 
         # No such region: the sweep must not touch the cell, and must not throw looking for one.
-        RE.mark_blocked!(cell(), "queued", "waiting")
+        RE.mark_blocked!(cell(), "queued", "login")
         NS._reconcile_blocked_regions!(nb)
         @test cell().state == RE.BLOCKED
 
@@ -164,13 +164,13 @@ end
         # scheduler. Asking the cluster about it on a timer answers a question nobody asked.
         RE.region_set!("ghost"; host = "nowhere.invalid", transport = :tunnel, scheduler = :pbs)
         empty!(NS._REPLACE_AT)
-        RE.mark_blocked!(cell(), "not signed in", "use the padlock")
+        RE.mark_blocked!(cell(), "not_signed_in", "login")
         NS._reconcile_blocked_regions!(nb)
         @test isempty(NS._REPLACE_AT)
 
         # A QUEUE wait with no node placed: nobody is asking the cluster any more, so the sweep
         # restarts the placement task. That is the only branch here that costs a round trip.
-        RE.mark_blocked!(cell(), "queued", "waiting")
+        RE.mark_blocked!(cell(), "queued", "login")
         NS._reconcile_blocked_regions!(nb)
         @test haskey(NS._REPLACE_AT, (nb.id, "ghost"))
         stamp0 = NS._REPLACE_AT[(nb.id, "ghost")]
@@ -198,7 +198,7 @@ end
         # distinguishes a first re-arm from a fifth — without this a cell that cannot start for some
         # OTHER reason would be re-armed on every 5 s sweep forever.
         stamp = NS._REARM_AT[(nb.id, "ghost")]
-        RE.mark_blocked!(cell(), "queued", "waiting")
+        RE.mark_blocked!(cell(), "queued", "login")
         NS._reconcile_blocked_regions!(nb)
         @test NS._REARM_AT[(nb.id, "ghost")] == stamp     # the sweep declined to act again
     finally

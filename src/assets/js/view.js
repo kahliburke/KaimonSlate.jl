@@ -300,6 +300,14 @@ function _cellRegionSet() {
 // would say the same redundant thing on every cell. A notebook that runs entirely on one region is
 // not that case: where the work happens is then the most surprising thing about it, and suppressing
 // the chip leaves nothing on screen saying it left this machine.
+// The server sends a CODE for why a cell is waiting; the words are here. An unknown code shows as
+// itself rather than as nothing, so a new one is visible instead of silently blank.
+const BLOCKED_TEXT = { queued: 'queued', not_signed_in: 'not signed in' };
+function blockedText(c) {
+  const code = (c && c.blocked) || '';
+  return BLOCKED_TEXT[code] || code.replace(/_/g, ' ');
+}
+
 function cellRegionChip(c) {
   const set = _cellRegionSet();
   const blocked = !!(c && c.state === 'blocked' && c.blocked);
@@ -318,7 +326,7 @@ function cellRegionChip(c) {
       ` data-at="${+(c.blockedAt) || 0}" data-reg="${_esc(loc.name || '')}"` +
       ` onmouseenter="window.blockInfo(this,'${c.id}')" onmouseleave="window.blockInfoHide()"` +
       ` onmousedown="window.openRegionPanel('${c.id}', event)">${loc.local ? '💻' : '🖧'} ${_esc(loc.name || 'local')}` +
-      ` <span class="cregst">${_esc(c.blocked)}${w ? ` <span class="blockwait">${w}</span>` : ''}</span></span>`;
+      ` <span class="cregst">${_esc(blockedText(c))}${w ? ` <span class="blockwait">${w}</span>` : ''}</span></span>`;
   }
   // `onmousedown`, not `onclick`: clicking a header selects the cell, which re-renders it and
   // replaces this node before mouseup — so the click event is never delivered here and the first
@@ -698,12 +706,27 @@ let _regPanel = null, _regFor = '';
 function _regRow(label, value) {
   return value ? `<div class="blkrow"><span>${_esc(label)}</span><div>${_esc(value)}</div></div>` : '';
 }
-function _regAlloc(a) {
+function _regAlloc(a, reg) {
   if (a === undefined) return '<div class="blkrow blkdim"><span>Allocation</span><div>asking…</div></div>';
   if (!a || !a.ok) return '<div class="blkrow blkdim"><span>Allocation</span><div>none held</div></div>';
   const bits = [a.state || '', a.node || '', a.id ? '#' + a.id : '', a.timeleft ? a.timeleft + ' left' : ''];
-  return _regRow('Allocation', bits.filter(Boolean).join(' · '));
+  // Releasing belongs next to the allocation it names. It bills for the time it is HELD, so the
+  // control has to be where you read that you are holding one, not one page away in Remotes.
+  return '<div class="blkrow"><span>Allocation</span><div>' + _esc(bits.filter(Boolean).join(' · ')) +
+         ' <button class="regprel" onclick="window.releaseRegionAlloc(\'' + _esc(reg) + '\')">Release</button></div></div>';
 }
+// Give the node back now. Confirmed, because anything running on it dies with it.
+window.releaseRegionAlloc = async function (reg) {
+  const ok = window.confirmDark ? await window.confirmDark(
+    'Release ' + reg + '\u2019s node?\nIts workers are reaped and anything running on them stops.',
+    'Release', 'danger') : window.confirm('Release ' + reg + '\u2019s node?');
+  if (!ok) return;
+  try {
+    await fetch('/api/allocation/release', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                             body: JSON.stringify({ region: reg }) });
+  } catch (_) {}
+  if (typeof closeRegionPanel === 'function') closeRegionPanel();
+};
 // Where this cell runs, changeable here. The rest of the tag surface stays on the 🏷 button; a
 // region is the one tag with a reason to be edited from the header.
 function _regPicker(c, reg) {
@@ -737,7 +760,7 @@ function _regRender(c, reg, load, alloc) {
     else if (_regIsCluster(reg)) {
       h += _regRow('Scheduler', r.scheduler);
       h += _regRow('Asked for', (load && load.ask) || '');
-      h += _regAlloc(alloc);
+      h += _regAlloc(alloc, reg);
       const qs = load && load.rows;
       if (load === undefined) h += '<div class="blkrow blkdim"><span>Cluster</span><div>asking…</div></div>';
       else if (!qs || !qs.length) h += '<div class="blkrow blkdim"><span>Cluster</span><div>nothing reported</div></div>';

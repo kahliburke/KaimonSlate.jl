@@ -5,6 +5,7 @@
 // pill's ▾ caret still opens the run-location picker (change WHERE it runs); the body opens this popup.
 
 let _wpSide = null;
+let _wpShown = null;   // the row the open popup is drawn from, for the clock tick below
 // side → freshest telemetry JSON string, PUSHED over the page WebSocket (window.onWorkerTelemetry). Fresher
 // than state.workers[].stats (which only refreshes on a notebook version-bump), so the pills read it first.
 const _wpLive = {};
@@ -168,12 +169,28 @@ function _wpSeverity(w) {
 }
 
 // The pill/row FACE — the compact status or stat, shared by the top pill and the dropdown rows.
+// The server sends a code for WHY a worker is not connected; the words are here. `note` is still a
+// free-text line for the one case that is commentary rather than state — a bring-up in progress.
+function _wpNoteText(w) {
+  if (!w) return '';
+  switch (w.noteCode) {
+    case 'allocation_ended':
+      return 'the allocation on ' + (w.noteHost || 'the compute node') + ' ended — the next run requests a new node';
+    case 'not_signed_in':
+      return 'not signed in to ' + (w.noteHost || 'the host') + ' — use the padlock at the top of the page';
+    case 'unresponsive':
+      return 'worker stopped responding — press ▶ or re-run to reconnect';
+    default:
+      return w.note || '';
+  }
+}
+
 function _wpFace(w) {
   const st = w.status || (w.connected ? 'ok' : 'connecting');
   // A server-named state wins: "connecting" is a poor description of a region sitting in a
   // scheduler queue, and only the server knows which it is.
   if (w.face && st !== 'ok') return w.face;
-  if (st === 'degraded') return '⚠ ' + _wpUnwellShort(w.note);
+  if (st === 'degraded') return '⚠ ' + _wpUnwellShort(_wpNoteText(w));
   if (st === 'disconnected') return 'disconnected';
   const stat = _wpPillStat(_wpLive[w.side || ''] || w.stats);
   if (st === 'connecting') return stat || 'starting…';
@@ -225,8 +242,8 @@ function onWorkersUpdate(ws) {
     if (_wpSide !== null) {
       const w = ws.find(x => (x.side || '') === _wpSide);
       if (w) {
-        _wpNote[_wpSide] = w.note || '';
-        const el = document.getElementById('workerpop-stats'); if (el) el.innerHTML = _wpStatsChips(_wpLive[_wpSide] || w.stats, w.note);
+        _wpNote[_wpSide] = _wpNoteText(w);
+        const el = document.getElementById('workerpop-stats'); if (el) el.innerHTML = _wpStatsChips(_wpLive[_wpSide] || w.stats, _wpNoteText(w));
       }
     }
     // Live aliveness for the DAG region containers: hand the freshest list to the pane so its
@@ -307,6 +324,15 @@ function _wpPaintTabs() {
 // WHERE and WHAT this worker is. Telemetry says how it is DOING; none of it answers "which host,
 // over what, in which environment, and was it adopted warm" — the questions a worker that won't run
 // at all raises. Only fields the server actually sent are shown, so a local worker stays short.
+// Seconds as the coarsest unit that still reads exactly, for the worker chips.
+function _wpDur(s) {
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.round(s / 60) + 'm';
+  if (s < 86400) return (s / 3600).toFixed(s % 3600 ? 1 : 0) + 'h';
+  return (s / 86400).toFixed(s % 86400 ? 1 : 0) + 'd';
+}
+
 function _wpIdentChips(r) {
   const p = [];
   const row = (k, v) => p.push('<span class="widchip"><span class="widchip-k">' + k + '</span>' +
@@ -319,6 +345,25 @@ function _wpIdentChips(r) {
   r.spawned && row('spawned', r.spawned);
   r.dataRoot && row('data', r.dataRoot);
   r.env && row('env', String(r.env).replace(/^.*\/(?=[^/]+\/[^/]+$)/, '…/'));
+  // A scheduler region runs on borrowed time: the allocation's own end, and the idle timer that may
+  // hand the node back sooner. Both are on the row because both end this worker. Derived from the
+  // pushed instants at DRAW time, so the ticker below keeps them honest between pushes.
+  // The server sends AGES, measured in its own clock; `_wpAt` is when they landed in ours. Every
+  // instant here is therefore local, and a skewed hub or compute node cannot bend the display.
+  const since = (Date.now() - (+r._at || Date.now())) / 1000;
+  if (+r.walltimeLeft >= 0) row('walltime', _wpDur(+r.walltimeLeft - since) + ' left');
+  // A rate that has not been fitted yet is shown as unknown, not as zero: "0ppm" would claim these
+  // clocks were measured and found not to drift.
+  if (r.clockSamples) {
+    const ppm = (r.clockDriftPpm === undefined || r.clockDriftPpm === null) ? '--' : r.clockDriftPpm + 'ppm';
+    row('clock', '±' + r.clockRttMs + 'ms · ' + ppm);
+  }
+  if (+r.idleRelease > 0) {
+    const idle = (+r.idleFor || 0) + since;
+    const left = +r.idleRelease - idle;
+    row('idle', _wpDur(idle) + ' / ' + _wpDur(+r.idleRelease) +
+                (left > 0 ? ' — releases in ' + _wpDur(left) : ' — releasing'));
+  }
   return p.join('');
 }
 
@@ -377,10 +422,12 @@ async function _wpRefresh() {
       '</b> <button class="wrl-change" onclick="closeWorkerPop(); toggleRunLoc(event)">change ▾</button>'; }
     else { rl.style.display = 'none'; rl.innerHTML = ''; }
   }
-  _wpNote[side] = r.note || '';
+  _wpNote[side] = _wpNoteText(r);
+  r._at = Date.now();          // anchor the server's ages in this machine's clock
+  _wpShown = r;
   const idb = document.getElementById('workerpop-ident');
   if (idb) idb.innerHTML = _wpIdentChips(r);
-  document.getElementById('workerpop-stats').innerHTML = _wpStatsChips(r.stats, r.note);
+  document.getElementById('workerpop-stats').innerHTML = _wpStatsChips(r.stats, _wpNoteText(r));
   // Seed the chronological buffer from the snapshot; live lines then append via onWorkerLog. Parsed + rendered
   // newest-record-first so multi-line records stay right-way-up. Trailing blank line from the file is dropped.
   _wpRaw = r.log ? r.log.split('\n').filter((l, i, a) => l.length || i < a.length - 1) : [];
@@ -476,3 +523,12 @@ document.addEventListener('keydown', e => {
     e.stopPropagation(); _wpCloseMenu(); closeWorkerPop();
   }
 }, true);
+
+// The allocation clocks are wall-clock facts, not push-driven ones: redraw them every second while a
+// popup is open so a walltime does not sit still until the next state arrives.
+setInterval(() => {
+  if (_wpSide === null || !_wpShown) return;
+  if (!(+_wpShown.walltimeLeft >= 0 || +_wpShown.idleRelease > 0)) return;
+  const idb = document.getElementById('workerpop-ident');
+  if (idb) idb.innerHTML = _wpIdentChips(_wpShown);
+}, 1000);

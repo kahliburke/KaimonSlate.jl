@@ -17,7 +17,7 @@ const fName = signal(''), fWarm = signal(0), fPre = signal(''), fRoot = signal('
 // When the host fronts a scheduler, `host` is where you ASK, not where the work runs — the node is
 // granted, not chosen. These are what the request needs.
 const fSched = signal('none'), fPart = signal(''), fWall = signal(''), fCpus = signal(''),
-      fMem = signal(''), fGpus = signal(''), fAcct = signal('');
+      fMem = signal(''), fGpus = signal(''), fAcct = signal(''), fIdle = signal(''), fWarn = signal('');
 
 const pj = (s) => { try { return JSON.parse(s || '{}'); } catch (_) { return {}; } };
 const fmtB = (b) => (b = +b || 0, b < 1024 ? b + 'B' : b < 1048576 ? Math.round(b / 1024) + 'KB' : b < 1073741824 ? Math.round(b / 1048576) + 'MB' : (b / 1073741824).toFixed(1) + 'GB');
@@ -33,6 +33,21 @@ function buildSysimage(name) {
   fetch('/api/sysimage/build', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ region: name }) })
     .then(r => r.json()).then(d => { if (!d || !d.ok) { sysd.value = { ...sysd.value, [name]: { ok: false, error: (d && d.error) || 'build failed to start' } }; return; } setTimeout(() => loadSysimage(name), 3000); }).catch(() => {});
 }
+// The server returns codes with the values behind them. The wording is here, beside the fields.
+function saveError(d) {
+  const c = d && d.error;
+  if (c === 'warn_not_shorter')
+    return 'the warning (' + (d.idle_warn || '—') + ') must be shorter than the idle timeout (' +
+           (d.idle_release || '—') + ') — a warning that arrives with the release cannot be answered';
+  return c || 'failed';
+}
+function saveNotes(d) {
+  return ((d && d.notes) || []).map(n =>
+    n.code === 'idle_outlives_walltime'
+      ? 'the walltime (' + n.walltime + ') is shorter than the idle timeout (' + n.idle_release +
+        '), so the allocation ends first and the timeout will never fire'
+      : n.code).filter(Boolean);
+}
 function saveRegion() {
   const h = focusHost.value, name = (fName.value || '').trim();
   if (!name) { rmsg.value = { text: 'give the region a name', err: true }; return; }
@@ -45,13 +60,15 @@ function saveRegion() {
   const alloc = scheduler === 'none' ? {} : {
     partition: (fPart.value || '').trim(), walltime: (fWall.value || '').trim(),
     cpus: Math.max(0, parseInt(fCpus.value, 10) || 0), mem: (fMem.value || '').trim(),
-    gpus: (fGpus.value || '').trim(), account: (fAcct.value || '').trim() };
+    gpus: (fGpus.value || '').trim(), account: (fAcct.value || '').trim(),
+    idle_release: (fIdle.value || '').trim(), idle_warn: (fWarn.value || '').trim() };
   rmsg.value = { text: warm > 0 ? 'Saving + warming…' : 'Saving…' };
   fetch('/api/regions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, host: h, warm, preload, transport, base_port, data_root, sysimage, scheduler, ...alloc }) })
     .then(r => r.json()).then(d => {
-      if (!d || !d.ok) { rmsg.value = { text: (d && d.error) || 'failed', err: true }; return; }
+      if (!d || !d.ok) { rmsg.value = { text: saveError(d), err: true }; return; }
       const ports = (base_port && warm > 0) ? (' · ports ' + base_port + '–' + (base_port + 3 * warm - 1)) : '', rootS = data_root ? (' · root ' + data_root) : '';
-      rmsg.value = { text: 'Region “' + name + '” saved' + (warm > 0 ? (' → ' + warm + ' warm · ' + transport + ports + rootS + ' — workers booting…') : (' · ' + transport + rootS)) };
+      const notes = saveNotes(d);
+      rmsg.value = { text: 'Region “' + name + '” saved' + (warm > 0 ? (' → ' + warm + ' warm · ' + transport + ports + rootS + ' — workers booting…') : (' · ' + transport + rootS)) + (notes.length ? ' — ' + notes.join('; ') : ''), warn: notes.length > 0 };
       loadRegions().then(() => { editRegion.value = regionsOn(h).find(x => x.name === name) || editRegion.value; });
       if (warm > 0) { let n = 0; (function poll() { if (focusHost.value !== h) return; fetchRoster(h); if (++n < 6) setTimeout(poll, 2500); })(); }
     }).catch(() => { rmsg.value = { text: 'request failed', err: true }; });
@@ -217,6 +234,10 @@ function SchedulerRows() {
         <input class="rppport" autocomplete="off" placeholder="mem" title="e.g. 16G (blank = site default)" value=${fMem.value} onInput=${ev => fMem.value = ev.target.value}/>
         <input class="rppport" autocomplete="off" placeholder="gpus" title=${'e.g. 1, or a100:2 — blank means a CPU node' + (parts.some(p => p.gpus) ? '' : '. No partition here reports GPUs.')} value=${fGpus.value} onInput=${ev => fGpus.value = ev.target.value}/>
         <input class="rppport" autocomplete="off" placeholder="account" title="project to bill (blank = default)" value=${fAcct.value} onInput=${ev => fAcct.value = ev.target.value}/></div>
+      <div class="rpprow"><label>Release when idle</label>
+        <input class="rppport" autocomplete="off" placeholder="never" title="how long with no cell running on this region before its node is given back — 30m, 1h, 2d, 1w. Blank means never." value=${fIdle.value} onInput=${ev => fIdle.value = ev.target.value}/>
+        <input class="rppport" autocomplete="off" placeholder="warn" title="how long before that to ask whether you are still there — 5m, 1h. Must be shorter than the idle timeout." value=${fWarn.value} onInput=${ev => fWarn.value = ev.target.value}/>
+        <span class="pddim" style="font-size:.76rem">idle time, then how long before it to ask. Blank keeps the node until the walltime ends; getting another means queueing again.</span></div>
       <div class="rpprow rppsysrow"><label></label><div class="rppsysbox">A worker starts on the node this allocation grants, not on <code>${h}</code>. Reopening attaches to the same allocation while it lasts; when it expires the next cell that needs the region asks for another.</div></div>`}`;
 }
 
@@ -262,14 +283,14 @@ effect(() => {   // seed the editor form from the selected region (or blank for 
   const e = editRegion.value, h = focusHost.value; if (!h) return;
   if (e && e.name) { fName.value = e.name; fWarm.value = +e.warm || 0; fPre.value = e.preload || ''; fRoot.value = e.data_root || ''; fTr.value = e.transport || 'tunnel'; fPort.value = e.base_port > 0 ? e.base_port : ''; fSys.value = !!e.sysimage;
     fSched.value = e.scheduler || 'none'; fPart.value = e.partition || ''; fWall.value = e.walltime || '';
-    fCpus.value = e.cpus > 0 ? e.cpus : ''; fMem.value = e.mem || ''; fGpus.value = e.gpus || ''; fAcct.value = e.account || ''; }
+    fCpus.value = e.cpus > 0 ? e.cpus : ''; fMem.value = e.mem || ''; fGpus.value = e.gpus || ''; fAcct.value = e.account || ''; fIdle.value = e.idle_release || ''; fWarn.value = e.idle_warn || ''; }
   else { fName.value = ''; fWarm.value = 0; fPre.value = ''; fRoot.value = ''; fTr.value = hostTransport(h); fPort.value = ''; fSys.value = false;
     // A NEW region on a host that fronts a scheduler defaults to using it, with a walltime already
     // filled in: an allocation with no end time is the one people forget they are holding.
     const si = schedInfo.value[h];
     fSched.value = (si && si.suggested) ? si.suggested : 'none';
     fPart.value = ''; fWall.value = fSched.value === 'none' ? '' : '01:00:00';
-    fCpus.value = ''; fMem.value = ''; fGpus.value = ''; fAcct.value = ''; }
+    fCpus.value = ''; fMem.value = ''; fGpus.value = ''; fAcct.value = ''; fIdle.value = ''; fWarn.value = ''; }
   rmsg.value = null;
 });
 effect(() => { const e = editRegion.value; if (e && e.name && focusHost.value) loadSysimage(e.name); });   // editing → fetch build status

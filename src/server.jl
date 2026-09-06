@@ -1015,8 +1015,9 @@ const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, kernel obje
 const _REGION_PRIMING = Set{Tuple{String,UInt}}()
 const _REGION_LOCK = ReentrantLock()
 
-"The status a cell carries while the scheduler holds its request and has not granted a node yet."
+# Codes a BLOCKED cell carries. The page turns each into words; nothing here is a sentence.
 const WAIT_QUEUED = "queued"
+const WAIT_NOT_SIGNED_IN = "not_signed_in"
 
 """
     RegionWaiting(why, note = "")
@@ -1029,17 +1030,16 @@ A distinct TYPE rather than a message match: the same call path also raises genu
 region that is not defined, a worker that could not start — and telling them apart by reading the
 text would go wrong the first time someone rewords one.
 
-The wait comes in two pieces because it is read in two places. `why` is the status, two or three
-words, sized for the cell header beside the region name. `note` is what a reader wants only once
-they ask: which host, and what happens next.
+`why` is a code and `host` is the machine it is about. Neither is written for a reader: the page
+words the wait, beside the chip that shows it.
 """
 struct RegionWaiting <: Exception
     why::String
-    note::String
+    host::String
 end
 RegionWaiting(why::AbstractString) = RegionWaiting(String(why), "")
 Base.showerror(io::IO, e::RegionWaiting) =
-    print(io, e.why, isempty(e.note) ? "" : " — " * e.note)
+    print(io, e.why, isempty(e.host) ? "" : " (" * e.host * ")")
 
 # ── Consent-gated region introduction (PEER_TUNNEL_PLAN §5.1) ─────────────────────────────────────
 # When a notebook's region set changes (via `region_on` OR a cell `region=` tag, UI or MCP alike), a new
@@ -1537,6 +1537,10 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
                 try; _workers_push!(nb); catch; end   # the pill says "queued" NOW, not once it lands
             end
             ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
+            # A NODE JUST ARRIVED, so the idle clock starts now. Without this it carries over the
+            # wait that preceded the grant — time when nothing was held and nothing could be idle —
+            # and a region that queued longer than its own timeout is released the moment it lands.
+            ReportEngine.region_host(r) == r.host || _region_used!(String(name))
             # Queue waits are measured in minutes on a real cluster, so the cell that asked must not
             # be left saying "run me again" — nobody should have to poll a notebook by hand. The
             # node landing is the event; re-arm the runner and the waiting cells run themselves.
@@ -1599,14 +1603,11 @@ function _region_kernel!(nb::LiveNotebook, name::String)
                 # that only a person can supply — which background work is not allowed to ask for.
                 # So say which of the two is missing, because they need different things from you.
                 ReportEngine.Sweep.connected(r.host) ||
-                    throw(RegionWaiting("not signed in",
-                                        "$(r.host) needs a sign-in — use the padlock at the top of the page"))
+                    throw(RegionWaiting(WAIT_NOT_SIGNED_IN, r.host))
                 _place_in_background!(name, nb)
                 # A queue wait is minutes on a busy cluster, so this is not a "try again" — the
                 # placement task re-runs this cell itself when the scheduler grants a node.
-                throw(RegionWaiting(WAIT_QUEUED,
-                                    "waiting for $(r.host) to grant a node; the cell starts by " *
-                                    "itself when the scheduler does"))
+                throw(RegionWaiting(WAIT_QUEUED, r.host))
             end
         end
         target = ReportEngine._region_target(r; origin_env = origin_env, host = host)   # transport/datadir/region from the def; env = the notebook's
@@ -1933,7 +1934,9 @@ function _liveness_sweep!(nb::LiveNotebook)
         end
         ok = false; err = nothing
         try
+            t1 = time_ns()
             r = ReportEngine._tool(k, "__slate_running", Dict{String,Any}(); timeout = _LIVENESS_PING_TIMEOUT)
+            _note_clock!(k, r, t1, time_ns())   # the heartbeat is already a round trip; measure it
             run = r isa NamedTuple ? get(r, :running, nothing) :
                   r isa AbstractDict ? get(r, "running", get(r, :running, nothing)) : nothing
             if run !== nothing
@@ -2265,20 +2268,332 @@ end
 # round trip per held region, so this runs on its own minute-scale clock rather than the 5s sweep.
 const _REGION_SWEEP_AT = Ref(0.0)
 const _REGION_SWEEP_EVERY = 60.0
+# The supervisor's own interval, so a deadline check can round UP to it. Sampling on a tick can only
+# ever notice a deadline late; anticipating one tick means a warning lands a little early instead,
+# and a minute's notice is worth more than a minute is worth being exact.
+const _SUPERVISOR_TICK_S = 5.0
+
+# When a region's cells last ran, and which regions have been warned their node is about to go.
+# Idle is measured from the last region CELL, not from the worker: the hub polls every worker for
+# telemetry, so by that measure nothing is ever idle.
+const _REGION_LAST_USED = Dict{String,Float64}()
+const _REGION_RELEASE_WARNED = Dict{String,Float64}()
+const _REGION_USE_LOCK = ReentrantLock()
+
+# Stamped when a region cell starts as well as when it finishes, so a cell running longer than the
+# idle window does not have its own region released underneath it.
+_region_used!(name::AbstractString) = isempty(name) ? nothing : lock(_REGION_USE_LOCK) do
+    _REGION_LAST_USED[String(name)] = time()
+    delete!(_REGION_RELEASE_WARNED, String(name))    # any use cancels a pending release
+    nothing
+end
+
+# How long a region has gone unused. One never seen used starts its clock now, so a hub restart
+# cannot release a node the moment it comes back.
+function _region_idle_for(name::AbstractString)
+    hub = lock(_REGION_USE_LOCK) do
+        get!(_REGION_LAST_USED, String(name), time())
+    end
+    # A node cannot have been idle longer than we have HELD it. Without this floor a region carries
+    # its pre-grant wait into the new allocation — the queue wait, when nothing was held and nothing
+    # could be idle — and one that queued longer than its own timeout is released on arrival. Covers
+    # adoption too, where a reopened notebook attaches to a job without a grant happening here.
+    try
+        r = ReportEngine.region_get(String(name))
+        if r !== nothing
+            p = ReportEngine.region_placement(r)
+            p === nothing || (hub = max(hub, p.ts))
+        end
+    catch
+    end
+    # The worker's own account of when it last had work, fused in. It sees evals the hub never
+    # dispatched, so it can only ever move the clock FORWARD — and a silent worker (dead, or a
+    # network blip) reports nothing, which must not read as "maximally idle" and release its node.
+    return time() - max(hub, _worker_last_eval(String(name)))
+end
+
+# The newest `last_eval` any live kernel for this region has reported. 0 when none has.
+function _worker_last_eval(name::AbstractString)
+    best = 0.0
+    try
+        for (key, k) in (lock(_REGION_LOCK) do; collect(_REGION_KERNELS); end)
+            key[2] == name || continue
+            cn = (k isa ReportEngine.GateKernel && k.conn !== nothing) ? k.conn.name : ""
+            isempty(cn) && continue
+            st = ReportEngine.kernel_stats(cn)
+            st === nothing && continue
+            wm = try; Float64(st.latest.last_eval_mono); catch; -1.0; end
+            wm < 0 && continue                        # worker predates the field — nothing to fuse
+            hub_ns = ReportEngine.ClockTrack.to_hub_ns(cn, wm)
+            hub_ns === nothing && continue            # unmeasured mapping — fall back to our own stamp
+            # Monotonic ns on this machine → wall seconds on this machine.
+            le = time() - (Float64(time_ns()) - hub_ns) / 1e9
+            le > best && (best = le)
+        end
+    catch
+    end
+    return best
+end
+
+# Runs on the 5 s supervisor tick, not the minute clock: every decision below reads local state, so
+# sampling is free, and a deadline is only ever as accurate as the interval that checks it — on a
+# minute's cadence a one-minute warning could arrive with seconds left. What costs a round trip is
+# the notice and the release, and each of those happens once per idle stretch.
+# A reader that failed while its region was still waiting can stay failed. The re-arm that fires
+# when the node lands may run BEFORE the reader has errored — the runner is still working down the
+# notebook — and nothing looks again, so the cell sits red holding a value nobody recomputed.
+#
+# Once the region cell is FRESH, a downstream cell still ERRORED or BLOCKED is stale by definition.
+# Re-armed ONCE per failure: a reader that fails again is failing for its own reasons, and retrying
+# it every tick would be a loop rather than a repair.
+const _READER_REARMED = Set{Tuple{String,String}}()
+
+function _reconcile_stranded_readers!(nb::LiveNotebook)
+    n = 0
+    lock(nb.lock) do
+        ready = String[c.id for c in nb.report.cells
+                       if !isempty(_cell_region(c)) && c.state == FRESH]
+        isempty(ready) && return
+        blast = ReportEngine.dependents_of(nb.report, ready)
+        for c in nb.report.cells
+            (c.id in blast && !(c.id in ready)) || continue
+            key = (nb.id, c.id)
+            if c.state == FRESH || c.state == STALE || c.state == RUNNING
+                delete!(_READER_REARMED, key)             # recovered — a later failure gets its own go
+                continue
+            end
+            _region_recoverable(c) || continue
+            key in _READER_REARMED && continue
+            push!(_READER_REARMED, key)
+            ReportEngine.restale!(c) && (n += 1)
+        end
+        n > 0 && (nb.version += 1)
+    end
+    n > 0 || return nothing
+    try; _broadcast(nb, string(nb.version)); catch; end
+    ReportEngine._rlog("supervisor: $n reader(s) were left failed while a region was waiting — re-armed")
+    _ensure_runner!(nb)
+    return nothing
+end
+
+# One measured exchange, from a `__slate_running` reply that carried the worker's monotonic bracket.
+# Silently ignored for a worker too old to report them — the caller then has no mapping and says so,
+# rather than inventing one.
+function _note_clock!(k, r, t1::UInt64, t4::UInt64)
+    cn = try; (k isa ReportEngine.GateKernel && k.conn !== nothing) ? String(k.conn.name) : ""; catch; ""; end
+    isempty(cn) && return nothing
+    g(sym) = r isa NamedTuple ? get(r, sym, nothing) :
+             r isa AbstractDict ? get(r, String(sym), get(r, sym, nothing)) : nothing
+    t2 = g(:mono_recv); t3 = g(:mono_send)
+    (t2 === nothing || t3 === nothing) && return nothing
+    try; ReportEngine.ClockTrack.note_exchange!(cn, Float64(t1), Float64(t2), Float64(t3), Float64(t4)); catch; end
+    return nothing
+end
+
+# Converge the mapping AT CONNECT instead of waiting for the heartbeat to accumulate enough samples,
+# which at one every few seconds is most of a minute. A short burst costs a handful of tiny round
+# trips once, and the fastest of them is the one the fit leans on.
+const _CLOCK_SEED_N = 8
+
+function _seed_clock!(k)
+    Threads.@spawn try
+        for _ in 1:_CLOCK_SEED_N
+            t1 = time_ns()
+            r = ReportEngine._tool(k, "__slate_running", Dict{String,Any}(); timeout = 10.0)
+            _note_clock!(k, r, t1, time_ns())
+            sleep(0.05)          # spread them enough that a single stall cannot skew the whole burst
+        end
+        cn = try; k.conn === nothing ? "" : String(k.conn.name); catch; ""; end
+        if !isempty(cn)
+            q = ReportEngine.ClockTrack.clock_quality(cn)
+            q.ok && ReportEngine._rlog("clock: $cn mapped — best rtt $(round(q.rtt_ns / 1e6; digits = 2))ms, " *
+                                       "drift " * (q.drift_ppm === nothing ? "not yet fitted" :
+                                                   "$(round(q.drift_ppm; digits = 1))ppm") *
+                                       ", $(q.samples) samples")
+        end
+    catch e
+        ReportEngine._rlog("clock: seeding the worker mapping failed — " * first(sprint(showerror, e), 120))
+    end
+    return nothing
+end
 
 function _sweep_idle_regions!(h)
-    time() - _REGION_SWEEP_AT[] < _REGION_SWEEP_EVERY && return nothing
-    _REGION_SWEEP_AT[] = time()
     busy = lock(_PLACING_LOCK) do; Set{String}(_PLACING); end
+    nbs_of = Dict{String,Vector{LiveNotebook}}()      # region → the open notebooks using it
     for nb in lock(h.lock) do; collect(values(h.notebooks)); end
         lock(nb.lock) do
             for c in nb.report.cells
-                c.state == BLOCKED || continue
                 r = _cell_region(c)
-                isempty(r) || push!(busy, r)
+                isempty(r) && continue
+                let v = get!(Vector{LiveNotebook}, nbs_of, r); nb in v || push!(v, nb); end
+                # A cell that is RUNNING on the region, or waiting for it, means the region is in
+                # use whatever the clock says.
+                (c.state == BLOCKED || c.state == RUNNING) && push!(busy, r)
+                c.state == RUNNING && _region_used!(r)
             end
         end
     end
+    _warn_expiring_regions!(nbs_of)
+    _release_idle_regions!(nbs_of, busy)
+    # Reaching the cluster to reconcile a region that holds a node with nothing on it is the one
+    # thing here that is not free, so it keeps its own minute clock.
+    if time() - _REGION_SWEEP_AT[] >= _REGION_SWEEP_EVERY
+        _REGION_SWEEP_AT[] = time()
+        _sweep_dead_regions!(busy)
+    end
+    return nothing
+end
+
+# How much warning a walltime gets. Unlike the idle timer this is not opt-in: the job ends whatever
+# anyone configured, and the only thing worse than losing the node is losing it unannounced.
+# Two notices per allocation: one with time to act, one with time to save. Not opt-in — the job ends
+# whatever anyone configured. Ascending, so the tightest threshold that applies is the one that fires.
+const _WALLTIME_WARN_AT = (60.0, 300.0)
+const _WALLTIME_WARNED = Dict{Tuple{String,Float64},Float64}()   # (region, threshold) → deadline announced
+
+# The allocation's own end, from the lease `region_place!` recorded off the scheduler. Reading it
+# costs nothing, so every held node is checked on every tick.
+function _warn_expiring_regions!(nbs_of)
+    for r in ReportEngine.regions()
+        r.scheduler === :none && continue
+        p = ReportEngine.region_placement(r)
+        p === nothing && continue
+        left = p.until - time()
+        left > 0 || continue
+        for thr in _WALLTIME_WARN_AT
+            left <= thr + _SUPERVISOR_TICK_S || continue
+            key = (r.name, thr)
+            prev = get(_WALLTIME_WARNED, key, 0.0)
+            # The placement is re-read off the scheduler every `_PLACE_TTL`, and the deadline it
+            # recomputes drifts by a second or two each time. Exact equality made every refresh look
+            # like a new deadline and re-fired the notice; only a move larger than the smallest
+            # extension anyone can ask for is a real one.
+            (prev > 0 && p.until <= prev + 30) && break
+            _WALLTIME_WARNED[key] = p.until
+            _push_alloc_notice!(get(nbs_of, r.name, LiveNotebook[]), r,
+                                Dict{String,Any}("kind" => "walltime", "seconds_left" => round(Int, left)))
+            break
+        end
+    end
+    return nothing
+end
+
+# The node is held, nothing has used it for `idle_release` minutes, and the region asked to have it
+# taken back. Opt-in (0 = never) because getting one again costs a queue wait, and someone iterating
+# on a cell between thinks is exactly who must not pay that by surprise.
+#
+# The region's `idle_warn` lead decides how long before the release the question goes out. Running
+# any cell on the region cancels it (`_region_used!`). This is what separates an idle notebook from
+# a person reading output between runs, which look identical from here.
+function _release_idle_regions!(nbs_of, busy)
+    for r in ReportEngine.regions()
+        (r.scheduler === :none || r.idle_release <= 0 || r.name in busy) && continue
+        ReportEngine._region_holds_node(r) || continue
+        idle = _region_idle_for(r.name)
+        nbs = get(nbs_of, r.name, LiveNotebook[])
+        # Ask before the deadline, by the region's own lead, so the answer can still change the
+        # outcome. Once per idle stretch; any cell on the region clears it.
+        if r.idle_warn > 0 && idle + _SUPERVISOR_TICK_S >= r.idle_release - r.idle_warn
+            warned = lock(_REGION_USE_LOCK) do; get(_REGION_RELEASE_WARNED, r.name, 0.0); end
+            if warned == 0.0
+                lock(_REGION_USE_LOCK) do; _REGION_RELEASE_WARNED[r.name] = time(); end
+                left = max(0, r.idle_release - idle)
+                _ask_still_there!(nbs, r, round(Int, left))
+            end
+        end
+        idle >= r.idle_release || continue
+        ReportEngine._rlog("region[$(r.name)]: idle $(ReportEngine.Sweep.format_duration(idle)) past " *
+                           "its $(ReportEngine.Sweep.format_duration(r.idle_release)) limit — " *
+                           "releasing its node")
+        try
+            ReportEngine.region_release!(r)
+            lock(_REGION_USE_LOCK) do; delete!(_REGION_RELEASE_WARNED, r.name); end
+            # Nobody was here to see it — that is why it happened — so the notice is KEPT and pushed
+            # again when a page next connects, rather than broadcast once into an empty room.
+            _hold_released_notice!(nbs, r, "idle")
+            _push_alloc_event!(nbs, r.name, "released"; reason = "idle")
+            for nb in nbs; try; _workers_push!(nb); catch; end; end
+        catch e
+            ReportEngine._rlog("region[$(r.name)]: idle release failed — " *
+                               first(sprint(showerror, e), 120))
+        end
+    end
+    return nothing
+end
+
+# Ask whoever is there whether the region's node is still wanted.
+#
+# Pushed as fields: which region, on what node, how long is left, whether this site will let the
+# allocation be lengthened. The page renders it, since the page knows which buttons it is offering.
+#
+# `extendable` comes from a real minimum-size extension (`extend_allocation!`), because no site
+# advertises the permission. It costs one round trip, taken only when someone is about to be asked a
+# question whose options depend on the answer.
+# What just happened to a region's node, to whoever is looking. The popup is one consumer; the pills
+# and the region panel are others, and none of them should have to be told separately.
+function _push_alloc_event!(nbs, region::AbstractString, event::AbstractString; extra...)
+    payload = merge(Dict{String,Any}("region" => String(region), "event" => String(event)),
+                    Dict{String,Any}(String(k) => v for (k, v) in extra))
+    for nb in nbs
+        try; _broadcast(nb, "allocevent:" * JSON.json(payload)); catch; end
+        try; _workers_push!(nb); catch; end
+    end
+    return nothing
+end
+
+function _push_alloc_notice!(nbs, r, extra::Dict{String,Any})
+    # Whether this site allows an extension is decided by asking for the smallest one there is; the
+    # popup offers the control only when the answer was yes.
+    ext = try
+        ReportEngine.Sweep.can_extend_allocation!(ReportEngine.region_scheduler(r), r.host,
+                                                  ReportEngine.region_alloc_name(r))
+    catch e
+        (; ok = false, reason = :unreachable, said = first(sprint(showerror, e), 200), added_s = 0)
+    end
+    p = ReportEngine.region_placement(r)
+    payload = merge(Dict{String,Any}("region" => r.name, "host" => r.host,
+                                     "node" => ReportEngine.region_host(r),
+                                     "walltime_left" => p === nothing ? -1 :
+                                                       max(0, round(Int, p.until - time())),
+                                     "idle_release" => r.idle_release, "idle_warn" => r.idle_warn,
+                                     "extendable" => ext.ok === true,
+                                     "extend_reason" => String(ext.reason),
+                                     "scheduler_said" => ext.said), extra)
+    ReportEngine._rlog("region[$(r.name)]: $(payload["kind"]) notice — " *
+                       "$(payload["seconds_left"])s left, extendable=$(ext.ok === true) ($(ext.reason))")
+    for nb in nbs
+        try; _broadcast(nb, "allocnotice:" * JSON.json(payload)); catch; end
+    end
+    return nothing
+end
+
+_ask_still_there!(nbs, r, left_s::Int) =
+    _push_alloc_notice!(nbs, r, Dict{String,Any}("kind" => "idle", "seconds_left" => left_s))
+
+# A node that went while nobody was looking. Held per notebook until a page acknowledges it: the
+# release happens BECAUSE the notebook was idle, so pushing it once would announce it to no one.
+const _RELEASED_NOTICE = Dict{String,Dict{String,Any}}()   # nb id → payload
+const _RELEASED_LOCK = ReentrantLock()
+
+function _hold_released_notice!(nbs, r, reason::AbstractString)
+    payload = Dict{String,Any}("kind" => "released", "reason" => reason, "region" => r.name,
+                               "host" => r.host, "node" => "", "seconds_left" => 0,
+                               "idle_release" => r.idle_release, "idle_warn" => r.idle_warn,
+                               "extendable" => false, "extend_reason" => "no_allocation",
+                               "scheduler_said" => "")
+    for nb in nbs
+        lock(_RELEASED_LOCK) do; _RELEASED_NOTICE[nb.id] = payload; end
+        try; _broadcast(nb, "allocnotice:" * JSON.json(payload)); catch; end
+    end
+    return nothing
+end
+
+"A release the notebook has not been told about yet, or `nothing`."
+pending_released_notice(nbid) = lock(_RELEASED_LOCK) do; get(_RELEASED_NOTICE, String(nbid), nothing); end
+clear_released_notice!(nbid) = (lock(_RELEASED_LOCK) do; delete!(_RELEASED_NOTICE, String(nbid)); end; nothing)
+
+# A region holding a node with nothing left on it at all — no workers, idle timer or not.
+function _sweep_dead_regions!(busy)
     for r in ReportEngine.regions()
         (r.scheduler === :none || r.name in busy) && continue
         ReportEngine._region_holds_node(r) || continue
@@ -2310,6 +2625,9 @@ function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, in
         end
         try; _reconcile_blocked_regions!(nb)
         catch e; ReportEngine._rlog("supervisor: blocked-region reconcile error on $(nb.id): " * first(sprint(showerror, e), 120))
+        end
+        try; _reconcile_stranded_readers!(nb)
+        catch e; ReportEngine._rlog("supervisor: stranded-reader reconcile error on $(nb.id): " * first(sprint(showerror, e), 120))
         end
         try; _watchdog_scan!(nb)
         catch e; ReportEngine._rlog("watchdog: scan error on $(nb.id): " * first(sprint(showerror, e), 120))
@@ -2475,7 +2793,7 @@ end
 # transient failure can't kill the loop.
 function _ensure_run_supervisor!(h)   # NOTE: `Hub` defined later (server_hub.jl) — untyped so this loads
     _RUN_SUPERVISOR[] === nothing || return nothing
-    _RUN_SUPERVISOR[] = Timer(5.0; interval = 5.0) do _
+    _RUN_SUPERVISOR[] = Timer(_SUPERVISOR_TICK_S; interval = _SUPERVISOR_TICK_S) do _
         try; _supervise_runs!(h); catch; end
     end
     return nothing
@@ -2821,6 +3139,7 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
     end
     try
         ReportEngine.prepare!(kernel, nb.report; explicit = forced)
+        _seed_clock!(kernel)          # converge the clock mapping now, not over the next minute
         _prime_namespace!(nb, kernel, side)
         stop_narrating()
         try; _workers_push!(nb); catch; end   # connected → pill flips out of "starting"; telemetry takes over
@@ -2860,7 +3179,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         wait = e isa RegionWaiting
         ReportEngine._rlog("region: " * (wait ? "holding " : "cannot route ") * cell.id * ": " * msg)
         lock(nb.lock) do
-            wait ? ReportEngine.mark_blocked!(cell, e.why, e.note) :
+            wait ? ReportEngine.mark_blocked!(cell, e.why, e.host) :
                    ReportEngine.mark_errored!(cell, msg)
             _broadcast_progress(nb, cell)
         end
@@ -2899,7 +3218,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         wait && ReportEngine._rlog("region: holding " * cell.id * " (input transfer): " *
                                    sprint(showerror, presync_err))
         lock(nb.lock) do
-            wait ? ReportEngine.mark_blocked!(cell, presync_err.why, presync_err.note) :
+            wait ? ReportEngine.mark_blocked!(cell, presync_err.why, presync_err.host) :
                    ReportEngine.mark_errored!(cell, "region boundary transfer failed: " *
                                                     sprint(showerror, presync_err))
             _broadcast_progress(nb, cell)
@@ -2909,6 +3228,12 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     # Everything a region cell had to wait for is done; from here it is on a worker like any other,
     # and the orphan reconciler should judge it normally again.
     _region_prepared!(nb.id, cell.id)
+    let rg = _cell_region(cell)
+        if !isempty(rg)
+            _region_used!(rg)              # the idle clock runs from region CELLS, not worker traffic
+            try; _workers_push!(nb); catch; end   # …and the panel is showing that clock
+        end
+    end
     src, srchash, memo, locked = lock(nb.lock) do
         ReportEngine.mark_running!(cell)
         _broadcast_progress(nb, cell)

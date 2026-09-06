@@ -476,6 +476,9 @@ function _parse_telemetry(raw::AbstractString)
          load1   = Float64(get(d, "load1", -1.0)),
          sys_mem_total = Int(get(d, "sys_mem_total", 0)),
          sys_mem_free  = Int(get(d, "sys_mem_free", 0)),
+         # When the WORKER last had work, on ITS monotonic clock. Meaningless here until mapped
+         # through `ClockTrack`; `-1` from a worker too old to report it.
+         last_eval_mono = Float64(get(d, "last_eval_mono", -1.0)),
          ts      = Float64(get(d, "ts", 0.0)),
          rcv     = time())
     catch

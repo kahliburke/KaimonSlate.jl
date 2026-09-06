@@ -937,6 +937,7 @@ const _CANCEL_LOCK = ReentrantLock()
 const _RUNNING_TASKS = Dict{String,Task}()
 const _WARM_STATUS = Ref{String}("")     # pool worker's preload/precompile progress → telemetry → pool UI
 const _LAST_HUB_REQ = Ref(time())        # wall time of the last hub heartbeat (__slate_running) — the spin-guard's orphan signal
+const _LAST_EVAL_AT = Ref(time_ns())     # MONOTONIC: reported as an instant, mapped into hub time by ClockTrack
 const _BATCH_CANCEL = Ref(false)          # set by __slate_cancel; checked by the batch evalfn
 
 # The wire-form of a cancelled cell — an error result so the UI marks it interrupted (not stuck).
@@ -2405,9 +2406,12 @@ end
 set the hub reconciles its run-registry against. A cell the hub still marks `running` that is absent
 here was orphaned (the worker bounced under it) and can be safely reset. Cheap: a snapshot under the lock."
 function __slate_running()
+    t2 = time_ns()             # monotonic, this machine — the hub pairs it with its own send/receive
     _LAST_HUB_REQ[] = time()   # the supervisor's heartbeat — proof the hub is still driving us; the spin-guard treats staleness as "orphaned"
     ids = lock(_CANCEL_LOCK) do; String[String(k) for k in keys(_RUNNING_TASKS)]; end
-    return (; running = ids, ts = time())
+    # `mono_recv`/`mono_send` bracket the work done here, so the hub can subtract it out and be left
+    # with the network. Monotonic, so this machine's clock being stepped never perturbs the measure.
+    return (; running = ids, ts = time(), mono_recv = t2, mono_send = time_ns())
 end
 
 # Materialize content-addressed blobs into THIS worker's data dir (`datadir()`) — the receiving half
@@ -2858,6 +2862,9 @@ function _telemetry_loop!(stats_path::String)
         # thinks is running but that's absent here is orphaned). Cheap: just the keys under the lock.
         runids = lock(_CANCEL_LOCK) do; collect(keys(_RUNNING_TASKS)); end
         evals = length(runids)
+        # When this worker last had work, which only it can say: it sees every eval, whatever path
+        # brought it. The hub used to infer this from cell dispatch and so missed anything else.
+        evals > 0 && (_LAST_EVAL_AT[] = time_ns())
         # Spin-guard: an orphaned worker (hub restarted / connection died) can wedge a thread at ~one full
         # core forever — a userspace busy-loop that hogs the host while doing nothing useful. Detect the
         # wedge from three independent signals and self-terminate: HOT cpu, an EMPTY run set (no cell is
@@ -2885,6 +2892,7 @@ function _telemetry_loop!(stats_path::String)
         line = "{\"cpu\":$cpu,\"rss\":$(rssbytes()),\"gc_ms\":$gcms,\"evals\":$evals," *
                "\"running\":$running,\"warm\":\"$warm\",\"memo_bytes\":$memo," *
                "\"sys_cpu\":$syscpu,\"load1\":$load1,\"sys_mem_total\":$smt,\"sys_mem_free\":$smf," *
+               "\"last_eval_mono\":$(_LAST_EVAL_AT[])," *
                "\"ts\":$(round(Int, time()))}"
         try; KaimonGate._publish_stream("slate_telemetry", line); catch; end
         isempty(stats_path) || try                          # roster sidecar — remote workers only

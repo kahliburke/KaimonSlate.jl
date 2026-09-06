@@ -6,4 +6,5 @@ import './notebook.js';
 import './toc.js';       // Table of Contents — first island migrated off the classic scripts
 import './health.js';    // Watchdog health badge + panel
 import './mesh.js';      // Consent-gated region introduction popup (PEER_TUNNEL_PLAN §5.1)
+import './allocnotice.js'; // Compute node about to be released, or already gone
 import './extensions.js'; // Extensions gallery — browse + install from the curated registry

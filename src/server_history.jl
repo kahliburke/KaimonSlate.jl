@@ -869,10 +869,12 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         # keys reconcile off, instead of a fuzzy string comparison that can drift.
         "hash"    => SlateHistory._sha(c.source),
         "state"   => lowercase(string(c.state)),
-        # Why a BLOCKED cell cannot run yet — for the header, NOT the output area. "" otherwise, so
-        # the browser can key on the string alone. `blocked_at` is when the wait started, so the
-        # page can count up without the server pushing a tick.
+        # Why a BLOCKED cell cannot run yet — for the header, NOT the output area. A CODE the page
+        # words itself, with the host it is about; "" when the cell is not blocked, so the browser
+        # can key on the string alone. `blocked_at` is when the wait started, so the page can count
+        # up without the server pushing a tick.
         "blocked" => c.blocked,
+        "blockedHost" => c.blocked_host,
         "blockedAt" => c.blocked_at,
         "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(_mdsrc, c.interp) :
                         (live_placeholder && _is_live(c) ? _live_output_placeholder() : output_html(c))),
@@ -1138,6 +1140,27 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
         catch
         end
     end
+    # A scheduler region's worker lives on borrowed time, twice over: the allocation ends at its
+    # walltime, and Slate may hand the node back before that if nothing uses it. Both are clocks the
+    # worker row should show, and both are read locally — the lease from the cached placement, the
+    # idle stretch from the hub's own record — so a pill costs no round trip.
+    # The allocation's clocks, from the one place that computes them — the telemetry relay sends the
+    # same fields, and two copies of this arithmetic would drift.
+    merge!(d, _region_alloc_facts(String(side)))
+    # How well this worker's clock is mapped into ours. Worth showing: it bounds how much any
+    # cross-machine timing on this row can be trusted.
+    if k isa ReportEngine.GateKernel && k.conn !== nothing
+        try
+            q = ReportEngine.ClockTrack.clock_quality(String(k.conn.name))
+            if q.ok
+                d["clockRttMs"] = round(q.rtt_ns / 1e6; digits = 2)
+                d["clockSamples"] = q.samples
+                # Absent, not zero, until a rate has been fitted — the page shows "--" for it.
+                q.drift_ppm === nothing || (d["clockDriftPpm"] = round(q.drift_ppm; digits = 1))
+            end
+        catch
+        end
+    end
     # Latest telemetry (cpu/rss/host cpu/mem) → a JSON string the pill popup parses. Fully guarded: a
     # telemetry hiccup must NEVER throw here, or it takes the whole `state_json` (the notebook) down.
     if k isa ReportEngine.GateKernel
@@ -1166,14 +1189,27 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
             # still sitting there warm — so naming it "stopped responding" sends you to restart
             # something that is fine. Ask which it is at read time rather than recording a reason:
             # signing back in then flips the note on its own.
+            #
+            # A compute node is a THIRD case and looks exactly like the second: its session goes when
+            # the allocation does, so "not signed in to c1" is both true and useless — nobody signs in
+            # to a compute node, and the padlock cannot help. What ended is the allocation.
             sh = ReportEngine.session_host(k)
-            d["note"]   = k.redial_hold ?
-                ((!isempty(sh) && !ReportEngine.Sweep.connected(sh)) ?
-                    "not signed in to $sh — use the padlock at the top of the page" :
-                    "worker stopped responding — press ▶ or re-run to reconnect") :
-                let last = ReportEngine.last_bringup_line()
-                    isempty(last) ? "starting up…" : last
-                end
+            code, host = if !k.redial_hold
+                ("bringup", "")
+            elseif !isempty(sh) && ReportEngine._was_routed(sh)
+                ("allocation_ended", sh)
+            elseif !isempty(sh) && !ReportEngine.Sweep.connected(sh)
+                ("not_signed_in", sh)
+            else
+                ("unresponsive", "")
+            end
+            d["noteCode"] = code
+            isempty(host) || (d["noteHost"] = host)
+            # `note` stays for the one case that is not a state but a running commentary: what the
+            # provisioner last said while bringing a worker up.
+            code == "bringup" && (d["note"] = let last = ReportEngine.last_bringup_line()
+                isempty(last) ? "starting up…" : last
+            end)
         elseif since !== nothing
             el = round(Int, time() - something(since, time()))
             d["status"] = "degraded"
