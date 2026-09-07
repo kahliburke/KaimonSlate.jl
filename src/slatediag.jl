@@ -152,7 +152,10 @@ function diag_log_line(; every::Real = 300.0)
         # leaves a stale baseline behind, so a registry that empties and refills reports the delta
         # against whatever it held before it emptied.
         prev = get(_LAST, k, -1); _LAST[k] = v
-        v > 0 || continue                       # printed only when there is something to say
+        # An unreadable gauge is SAID so, not skipped. Silently dropping it is how a registry that was
+        # renamed out from under its callback reads as a quiet one.
+        v < 0 && (push!(parts, "$k=err"); continue)
+        v > 0 || continue                       # a zero has nothing to say
         d = (first_run || prev < 0) ? 0 : v - prev
         push!(parts, d == 0 ? "$k=$v" : string(k, "=", v, "(", d > 0 ? "+" : "", d, ")"))
     end

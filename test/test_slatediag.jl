@@ -87,5 +87,9 @@ const SD = KaimonSlate.SlateDiag
         # zero rather than from whatever it held before it emptied.
         n[] = 2
         @test occursin("t_growing=2(+2)", SD.diag_log_line(every = 0.0))
+        # A gauge whose registry was renamed out from under it must say so rather than vanish, which
+        # would read as a quiet registry instead of a broken callback.
+        SD.diag_gauge!("t_gone", () -> error("renamed"))
+        @test occursin("t_gone=err", SD.diag_log_line(every = 0.0))
     end
 end
