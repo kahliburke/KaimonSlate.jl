@@ -1231,9 +1231,19 @@ function _make_router(h::Hub)
             cn = try; k.conn === nothing ? "" : String(k.conn.name); catch; ""; end
             st = isempty(cn) ? nothing : ReportEngine.kernel_stats(cn)
             side = _kernel_side_label(nb, k)
+            # Where a HOST ROSTER would file this worker. A scheduler region's worker runs on the
+            # granted node, but its manifest lives on the shared filesystem and is probed through the
+            # login node — so the roster calls it `login:port` and this record calls it `node:port`.
+            # Two names for one worker, and the monitor merges on that name: without this it lists a
+            # region worker twice, once live from here and once as the stale manifest the roster
+            # found. Absent for an ordinary host, where both views already agree.
+            v = try; ReportEngine.via(host); catch; nothing; end
             push!(out, Dict{String,Any}(
                 "host" => host, "region" => region,
                 "port" => k.port,
+                # NOT a replacement for `host`: reaching this worker still means addressing the node,
+                # which the transport routes through the login session on its own.
+                (v === nothing ? () : ("viaHost" => String(v.host),))...,
                 # No local process to inspect — the wire IS the liveness signal here, and the liveness
                 # sweep drops a dead one, so a kernel mid-redial reads as idle rather than dead.
                 "alive" => true,

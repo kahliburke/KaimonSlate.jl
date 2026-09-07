@@ -113,7 +113,10 @@ async function tick() {
     // A notebook can be run on any ssh host, with no region defined and nothing parked — the registry
     // would never name that host, so probe the hosts the hub is actually holding kernels on as well.
     // Without this the whole host is unqueried and its workers never appear.
-    nbRemote.value.forEach(w => w.host && (hs[w.host] = 1));
+    // Under the name a roster read uses. A scheduler region's kernel names the granted node, and
+  // probing that separately reads the same shared directory a second time and lists every worker
+  // twice — as well as paying a second ssh round trip for it.
+  nbRemote.value.forEach(w => { const h = filedUnder(w); h && (hs[h] = 1); });
     const hosts = Object.keys(hs);
     hostData.value = await Promise.all(hosts.map(h =>
       fetch('/api/remote-workers?host=' + encodeURIComponent(h)).then(r => r.json())
@@ -161,18 +164,37 @@ function Spark({ samples, get, color, min, max, now }) {
 // Merge on host:port, preferring the host's richer record but taking the live binding from the hub.
 // Entries carry `bound` = the hub kernel, i.e. "this is serving an open notebook from here".
 // Pure over its two arguments (asserted by test/js/worker_merge.mjs — keep it that way).
+// The name a worker is FILED under, which is not always the machine it runs on. A scheduler region's
+// worker lives on the granted node, but its manifest sits on the shared filesystem and is probed
+// through the login node — so the roster files it under the login host and the hub knows it by the
+// node. Keying on the running host alone listed such a worker twice: the hub's live kernel, and the
+// roster's stale manifest for the same process, with contradictory verdicts.
+// The name a worker is FILED under, which is not always the machine it runs on. A scheduler region's
+// worker lives on the granted node, but its manifest sits on the shared filesystem and is read
+// through the login node, so that is the name every roster read uses. `viaHost` is present only when
+// the two differ.
+//
+// Used twice, and both uses matter: keying the merge, and deciding which hosts to probe at all.
+// Probing the node separately reads the SAME directory over the shared filesystem and returns the
+// same manifests under a second name, which is two rows for one worker before the hub kernel is even
+// looked at.
+const filedUnder = k => k.viaHost || k.host;
 function mergeRosters(hostRosters, hubKernels) {
+  const mergeKey = (host, port) => String(host) + ':' + String(port);
   const out = [], idx = {};
   (hostRosters || []).forEach(h => (h.workers || []).forEach(w => {
     const e = { w, host: h.host, region: pj(w.manifest).region || '', bound: null };
-    idx[h.host + ':' + w.port] = e; out.push(e);
+    idx[mergeKey(h.host, w.port)] = e; out.push(e);
   }));
   (hubKernels || []).forEach(k => {
-    const e = idx[k.host + ':' + k.port];
-    if (e) { e.bound = k; e.region = k.region || ''; return; }
+    const e = idx[mergeKey(filedUnder(k), k.port)];
+    // The hub's `host` wins on the merged entry: it names the machine the worker actually runs on,
+    // which is what a reap has to address.
+    if (e) { e.bound = k; e.region = k.region || ''; e.host = k.host || e.host; return; }
     // Not in any roster: the host probe failed, or (forwarded wire) there is no host to probe.
+    // Filed under the same name the roster would use, so a probe that succeeds later matches it.
     const ne = { w: k, host: k.host, region: k.region || '', bound: k };
-    idx[k.host + ':' + k.port] = ne; out.push(ne);
+    idx[mergeKey(filedUnder(k), k.port)] = ne; out.push(ne);
   });
   return out;
 }
@@ -199,7 +221,11 @@ function WorkerRow({ w, host, bound }) {
   const merged = mergeWorker(w, bound);
   const alive = isAlive(merged);
   const state = workerState(merged);
-  const cpu = (st.cpu !== undefined && st.cpu >= 0) ? st.cpu : null;
+  // A dead worker's telemetry is its LAST sample, written before the process ended. Rendering it in
+  // the live columns showed a worker that had been gone for a day or two as burning a quarter of a
+  // core on a cluster nobody had touched, which is a alarming way to say "nothing is running here".
+  const cpu = (alive && st.cpu !== undefined && st.cpu >= 0) ? st.cpu : null;
+  const rss = alive ? st.rss : 0;
   const running = Array.isArray(st.running) ? st.running : [];
   const warm = st.warm || '', warming = warm.indexOf('warming') === 0;
   const nb = mf.notebook ? String(mf.notebook).replace(/#[^#]*$/, '').replace(/\.jl$/, '') : '';
@@ -211,7 +237,12 @@ function WorkerRow({ w, host, bound }) {
   const runTxt = !alive ? 'dead' : running.length ? ('▶ ' + running.join(', ')) : warming ? ('⏳ ' + warm)
     : warm.indexOf('ready') === 0 ? ('✓ ' + warm)
     : (state === 'attached' || bound) ? (nb || 'idle') : (nb ? '↩ ' + nb : 'idle');
-  const runTip = (state !== 'attached' && !bound && nb && !running.length && !warm)
+  const runTip = !alive
+    // WHEN it died is what makes a dead row readable as leftovers rather than as something wrong
+    // right now. Its manifest outlives it, which is the only reason the row is here at all.
+    ? 'process is gone' + (w.lastActivity ? ' · last seen ' + ago(w.lastActivity) : '') +
+      (nb ? ' · last served ' + nb : '') + ' — reaping clears its leftover files'
+    : (state !== 'attached' && !bound && nb && !running.length && !warm)
     ? 'detached from ' + nb + (w.stateSince ? ' · idle since ' + ago(w.stateSince) : '') + ' — reopening it reattaches here'
     : runTxt;
   const cpuPct = cpu == null ? 0 : (cpu <= 0 ? 0 : Math.max(5, Math.min(100, cpu)));
@@ -222,7 +253,7 @@ function WorkerRow({ w, host, bound }) {
       <span class="actbadge ${state}">${state}</span></span>
     <span class="actbar">${(cpu == null || cpuPct <= 0) ? null : html`<span class="actbarf" style=${`width:${cpuPct}%;background-color:${barCol}`}></span>`}</span>
     <span class="actcpun">${cpu == null ? '—' : cpu + '%'}</span>
-    <span class="actrss">${st.rss ? fmtB(st.rss) : '—'}</span>
+    <span class="actrss">${rss ? fmtB(rss) : '—'}</span>
     <span class="actrun ${(runTxt === 'idle' || runTxt.charAt(0) === '↩') ? 'idle' : ''}" title=${runTip}>${runTxt}</span></div>`;
 }
 
@@ -239,7 +270,9 @@ function Monitor() {
                                          : (byRegion[x.region] = byRegion[x.region] || [])).push(x));
   let totRss = 0, busy = 0; const shown = {}; const groups = [];
   const rows = (xs) => xs.map(x => {
-    const st = pj(x.w.stats); totRss += st.rss || 0;
+    // Only what is actually resident counts: a dead worker's last sample is not memory in use, and
+    // summing it made the footer's total describe a machine that no longer exists.
+    const st = pj(x.w.stats); if (isAlive(x.w)) totRss += st.rss || 0;
     const running = Array.isArray(st.running) ? st.running : [];
     if (isAlive(x.w) && (running.length > 0 || (st.evals || 0) > 0 || (st.warm || '').indexOf('warming') === 0)) busy++;
     return html`<${WorkerRow} w=${x.w} host=${x.host} bound=${x.bound}/>`;

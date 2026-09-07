@@ -21,7 +21,12 @@ for (let i = src.indexOf('{', start); i < src.length; i++) {
 }
 if (end < 0) { console.error('worker_merge: unbalanced braces'); process.exit(2); }
 const pjSrc = "const pj = (s) => { try { return JSON.parse(s || '{}'); } catch (_) { return {}; } };\n";
-const mergeRosters = new Function(pjSrc + src.slice(start, end) + '\nreturn mergeRosters;')();
+// `filedUnder` is module scope in activity.js because the poll needs it too (it decides which hosts
+// to probe, and probing a node separately re-reads the same shared directory). Take the real line
+// rather than restating it here, so the rule under test cannot drift from the shipped one.
+const fu = /^const filedUnder = .*$/m.exec(src);
+if (!fu) { console.error('worker_merge: could not locate filedUnder in activity.js'); process.exit(2); }
+const mergeRosters = new Function(pjSrc + fu[0] + '\n' + src.slice(start, end) + '\nreturn mergeRosters;')();
 
 const mf = (o) => JSON.stringify(o);
 const roster = (host, ws) => ({ host, workers: ws });
@@ -88,6 +93,32 @@ const find = (es, host, port) => es.filter(e => e.host === host && +e.w.port ===
   eq('roster with no workers', mergeRosters([{ host: 'x' }], []).length, 0);
   const es = mergeRosters([], [kNb, kNb]);
   eq('duplicate hub kernels collapse', es.length, 1);
+}
+
+{ // A SCHEDULER REGION's worker is filed under two different names, and this is the case every
+  // fixture above quietly assumed away by giving both views the same host.
+  //
+  // The worker runs on the granted node (`c1`). Its manifest lives on the shared filesystem and is
+  // probed through the login node, so the roster files it under `slate-slurm`. Keyed on the running
+  // host alone, the two views never meet and the monitor shows one worker twice: the hub's live
+  // kernel, and the roster's manifest for the same process, reporting a contradictory state and a
+  // CPU figure frozen at whatever it was when the worker died.
+  const wOnNode = { port: 9118, alive: false, state: 'attached',
+                    manifest: mf({ region: 'slurmgpu', notebook: 'slurm_wait.jl' }) };
+  const kOnNode = { host: 'c1', viaHost: 'slate-slurm', region: 'slurmgpu', port: 9118,
+                    alive: true, state: 'attached', manifest: mf({ nbid: 'nb9', region: 'slurmgpu' }) };
+  const es = mergeRosters([roster('slate-slurm', [wOnNode])], [kOnNode]);
+  eq('a region worker is ONE row, not two', es.length, 1);
+  eq('and it is bound to the live kernel', es[0].bound, kOnNode);
+  eq('region carried through', es[0].region, 'slurmgpu');
+  // The row addresses the machine the worker RUNS on: that is what a reap has to reach.
+  eq('host is the node, not the login', es[0].host, 'c1');
+
+  // Without `viaHost` the two are genuinely different workers and must stay two rows — the fix must
+  // not collapse a same-port pair on unrelated hosts.
+  const noVia = mergeRosters([roster('slate-slurm', [wOnNode])],
+                             [{ ...kOnNode, viaHost: undefined }]);
+  eq('no viaHost means no merge', noVia.length, 2);
 }
 
 if (fails.length) { console.error('worker_merge FAIL:\n' + fails.join('\n')); process.exit(1); }
