@@ -465,7 +465,7 @@
   // untouched, so it still renders + exports; the chip selects/deletes as a single unit, and the
   // rest of the cell stays editable. Only genuinely long blobs collapse (a hand-written `data:` stays).
   const _DATA_URI_RE = /data:([\w.+-]+\/[\w.+-]+)?;base64,[A-Za-z0-9+/=]{48,}/g;
-  const _fmtChitBytes = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+  const _fmtChitBytes = n => window.slateBytes(n);
   class DataUriChit extends WidgetType {
     constructor(label) { super(); this.label = label; }
     eq(o) { return o.label === this.label; }

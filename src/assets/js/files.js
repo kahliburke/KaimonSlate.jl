@@ -27,12 +27,7 @@ const _filesHiddenPref = () => localStorage.getItem(_lsKey('Hidden')) === '1';
 function _assetURL(path) {
   return '/n/' + NB_ID + '/asset/' + String(path).split(/[\\/]/).map(encodeURIComponent).join('/');
 }
-function _fmtBytes(n) {
-  if (!(n > 0)) return '0 B';
-  const u = ['B', 'KB', 'MB', 'GB']; let i = 0, v = n;
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return (i === 0 ? v : v.toFixed(v < 10 ? 1 : 0)) + ' ' + u[i];
-}
+const _fmtBytes = n => window.slateBytes(n);
 function _kindIcon(kind) {
   return kind === 'image' ? '🖼️' : kind === 'audio' ? '🔊' : kind === 'video' ? '🎬'
        : kind === 'binary' ? '📦' : '📄';

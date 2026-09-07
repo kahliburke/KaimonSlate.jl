@@ -44,6 +44,13 @@ GithubPagesTarget(; name = "github-pages", repo::AbstractString, branch = "gh-pa
 
 function publish(t::GithubPagesTarget, nb::LiveNotebook; slug = "", site_title = "",
                  site_description = "", bundle = false, kwargs...)
+    # The single-doc path publishes into the branch ROOT at `/<slug>/`; it has no subpath of its own.
+    # Refuse rather than drop the subdir on the floor: silently publishing to the wrong place is how a
+    # doc lands on top of a site that is supposed to live beside it. The SITE sync (`deploy_dir`) is
+    # the path that honours a subdir.
+    isempty(strip(t.subdir, '/')) ||
+        error("target '$(t.name)' is pinned to the subpath '$(t.subdir)'; a single-document publish " *
+              "writes the branch root. Publish it as part of a site, or use a target without a subdir.")
     r = publish_site(nb, t.repo; slug = slug, site_title = site_title, site_description = site_description,
                      private = t.private, create = t.create, bundle = bundle, kwargs...)
     ok = r.pagesEnabled || r.deployStatus == "unchanged"
@@ -393,7 +400,11 @@ end
 # `deploy_dir(target, dir)` is the shared "push this exact dir" op (github force-push / CLI upload);
 # each host's `publish(nb)` also routes through it after building a single-doc dir.
 function deploy_dir(t::GithubPagesTarget, dir::AbstractString)
-    r = deploy_dir_to_gh_pages(t.repo, dir; private = t.private, create = t.create)
+    # `branch`/`subdir` reach the deploy. They are what `with_subpath` sets so several sites can share
+    # one repo, and what `_location_clash` permits on that basis; ignoring them here is what made the
+    # second site's deploy overwrite the first.
+    r = deploy_dir_to_gh_pages(t.repo, dir; private = t.private, create = t.create,
+                               branch = t.branch, subdir = t.subdir)
     return PublishResult(; ok = r.ok, url = r.url, commit = r.commit, status = r.ok ? "ok" : "error", log = r.error)
 end
 function deploy_dir(t::GenericUploadTarget, dir::AbstractString)

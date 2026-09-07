@@ -4829,31 +4829,71 @@ no per-doc clone/merge). The "deploy a prebuilt dir" primitive a SITE uses to pu
 build to GitHub, mirroring what the S3/Cloudflare/Netlify upload adapters do with the same dir. Creates
 the repo + enables Pages if needed. Operates on a copy so the canonical local build stays git-free.
 """
+# Assemble the branch work tree for a gh-pages deploy at `work/site`, and report whether it came from
+# an existing branch. Start from that branch when there is one, and replace ONLY what this deploy owns:
+# the whole tree at the root, or just `<subdir>/`. That is what lets several sites share one repo —
+# `with_subpath` builds exactly that arrangement and `_location_clash` permits it, so a deploy that
+# rebuilt the branch from scratch quietly destroyed whichever site pushed last.
+#
+# Split out from the `gh`-driven wrapper because this is the part with the interesting behaviour, and
+# it is testable against a plain local repo: pass a `file://` URL and no GitHub is involved.
+function _gh_pages_stage!(work::AbstractString, srcdir::AbstractString, url::AbstractString,
+                          branch::AbstractString, subdir::AbstractString; fresh::Bool = false)
+    wdir = joinpath(work, "site")
+    cloned = !fresh && _git_run(work, _gh_git(`clone --depth 1 --branch $branch --single-branch $url site`))[1]
+    cloned || (mkpath(wdir); _git_run(wdir, `git init -q -b $branch`)[1] || error("git init failed"))
+    sub = strip(String(subdir), '/')
+    if isempty(sub)
+        for e in readdir(wdir)                       # root deploy owns everything but the repo itself
+            e == ".git" && continue
+            rm(joinpath(wdir, e); recursive = true, force = true)
+        end
+        # Entry by entry, NOT `cp(srcdir, wdir; force=true)`: that removes `wdir` first and takes `.git`
+        # with it, leaving nothing to commit to.
+        for e in readdir(srcdir)
+            cp(joinpath(srcdir, e), joinpath(wdir, e); force = true)
+        end
+    else
+        dest = joinpath(wdir, sub)
+        rm(dest; recursive = true, force = true)     # this subpath only — siblings are another site's
+        mkpath(dirname(dest))
+        cp(srcdir, dest; force = true)
+    end
+    return (; wdir, cloned)
+end
+
 function deploy_dir_to_gh_pages(repo::AbstractString, dir::AbstractString; private::Bool = false,
-                                create::Bool = true, wait_deploy::Bool = true)
+                                create::Bool = true, wait_deploy::Bool = true,
+                                branch::AbstractString = "gh-pages", subdir::AbstractString = "")
     gh = Sys.which("gh"); gh === nothing && error("`gh` CLI not found")
     occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be owner/name")
     owner, name = split(repo, "/")
     url = "https://github.com/$repo.git"
+    br = isempty(strip(String(branch))) ? "gh-pages" : strip(String(branch))
+    sub = strip(String(subdir), '/')
     work = mktempdir()
     try
-        wdir = joinpath(work, "site"); cp(dir, wdir)                 # copy: don't add .git/workflow to the cache
+        created = false
         if !_gh_ok(`$gh repo view $repo`)
             create || error("repo $repo doesn't exist and “create” is off")
             _git_run(work, `$gh repo create $repo $(private ? "--private" : "--public")`)[1] || error("gh repo create failed")
+            created = true
         end
-        mkpath(joinpath(wdir, dirname(_PAGES_WF_FILE)))
+        st = _gh_pages_stage!(work, dir, url, br, sub; fresh = created)
+        wdir = st.wdir
+        mkpath(joinpath(wdir, dirname(_PAGES_WF_FILE)))               # the workflow lives at the branch ROOT
         write(joinpath(wdir, _PAGES_WF_FILE), _PAGES_WF_YAML)
         pok, plog = _ensure_pages_workflow!(gh, repo)
-        _git_run(wdir, `git init -q -b gh-pages`)
         _git_run(wdir, `git add -A`)
         okc, logc = _git_run(wdir, `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish site"`)
         okc || error("git commit failed: $logc")
         sha = strip(_git_run(wdir, `git rev-parse HEAD`)[2])
-        ok, log = _git_run(wdir, _gh_git(`push --force $url gh-pages`))
+        # Fast-forward onto the branch we started from; force only when we built it from nothing.
+        ok, log = _git_run(wdir, st.cloned ? _gh_git(`push $url $br`) : _gh_git(`push --force $url $br`))
         ok || error("git push failed: $log")
         dep = wait_deploy ? _await_pages_deploy(gh, repo, sha) : (; ok = true, conclusion = "success", done = true, url = "")
-        return (; ok = pok && dep.ok, url = "https://$owner.github.io/$name/", commit = sha,
+        site = "https://$owner.github.io/$name/" * (isempty(sub) ? "" : sub * "/")
+        return (; ok = pok && dep.ok, url = site, commit = sha,
                 error = pok ? (dep.ok ? "" : "Pages deploy: $(dep.conclusion)") : strip(replace(plog, r"\s+" => " ")))
     finally
         rm(work; recursive = true, force = true)

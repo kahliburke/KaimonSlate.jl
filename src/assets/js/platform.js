@@ -100,3 +100,36 @@
     else boot();
   }
 })();
+
+// ── Byte sizes ────────────────────────────────────────────────────────────────
+// One human byte formatter for the whole UI. It was written TEN times across these files, each with
+// its own cutoffs: two of them collided on the global name `_fmtBytes` (whichever script loaded last
+// won, so a panel rendered through a formatter its author never wrote), one floored at 1 KB so a
+// small value read as bigger than it was, and one spelled the unit `kB`.
+//
+// The value picks both the unit and the precision, which is what every copy was approximating: the
+// unit is the largest that leaves a mantissa below 1024, and a mantissa under 10 keeps one decimal
+// (4.2 KB says something 4 KB does not) while a larger one does not (317 KB, not 317.4 KB). Whole
+// bytes are never fractional.
+//
+//   slateBytes(4300)                    → '4.2 KB'
+//   slateBytes(4300, {compact: true})   → '4.2KB'      dense rows, no space
+//   slateBytes(4300, {letter: true})    → '4.2K'       the monitor's narrowest columns
+//
+// Lives HERE, not in core.js, because the front page loads only platform.js + its islands; a helper
+// in core.js is reachable from the notebook shell alone. (core.js keeps its own `_bytes`: that is the
+// `:bytes` TABLE COLUMN format, which takes its digit count from the author's column spec and is
+// mirrored in Julia `format.jl` under a golden-fixture parity test. Different contract, not a copy.)
+const _SLATE_BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+window.slateBytes = function slateBytes(n, opts) {
+  const o = opts || {};
+  let v = +n;
+  if (!isFinite(v)) v = 0;
+  const sign = v < 0 ? '-' : '';
+  v = Math.abs(v);
+  let i = 0;
+  while (v >= 1024 && i < _SLATE_BYTE_UNITS.length - 1) { v /= 1024; i++; }
+  const num = i === 0 ? String(Math.round(v)) : v.toFixed(v < 10 ? 1 : 0);
+  const unit = o.letter ? (i === 0 ? 'B' : _SLATE_BYTE_UNITS[i][0]) : _SLATE_BYTE_UNITS[i];
+  return sign + num + ((o.compact || o.letter) ? '' : ' ') + unit;
+};

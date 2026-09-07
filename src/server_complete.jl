@@ -3058,8 +3058,14 @@ mutable struct _WSConn
     # a stand-in here). One writer only — a WebSocket cannot interleave concurrent sends.
     ws::Any
     wlock::ReentrantLock
+    # Serializes the "is there room?" check with the `put!` it authorizes. A bounded `Channel` has no
+    # try-put: `put!` BLOCKS when full, and blocking here is the one thing this queue exists to
+    # prevent. Held only across a put into a channel already known to have room, so it never waits on
+    # the socket and can't itself become the stall.
+    qlock::ReentrantLock
 end
-_wsconn(cap::Int) = _WSConn(Channel{Union{String,Vector{UInt8}}}(cap), Threads.Atomic{Int}(0), nothing, ReentrantLock())
+_wsconn(cap::Int) = _WSConn(Channel{Union{String,Vector{UInt8}}}(cap), Threads.Atomic{Int}(0), nothing,
+                            ReentrantLock(), ReentrantLock())
 
 # The one place bytes reach the socket. A named function rather than an inline call so the ordering
 # rules below can be tested against a stand-in socket — they are concurrency invariants, and a real
@@ -3094,16 +3100,33 @@ end
 # emits arrive on the poller task, replies on per-call tasks — `put!` is safe, the count is atomic.
 function _ws_send!(c::_WSConn, msg::Union{AbstractString,Vector{UInt8}})
     isopen(c.out) || return nothing
-    if Base.n_avail(c.out) >= c.out.sz_max
-        Threads.atomic_add!(c.dropped, 1); return nothing
+    frame = msg isa AbstractString ? String(msg) : msg
+    # Check and enqueue under one lock. Two things made the un-synchronized version block the very
+    # caller it promises never to block: a marker plus a frame is TWO puts behind a check that
+    # reserved one slot, and two producers (an emit on the poller, a reply on its own task) could both
+    # pass the check and then both put. Reserve what this call will actually use, while holding it.
+    lock(c.qlock) do
+        d = c.dropped[]
+        need = d > 0 ? 2 : 1                       # the `dropped` marker rides in front of the frame
+        if c.out.sz_max - Base.n_avail(c.out) < need
+            Threads.atomic_add!(c.dropped, 1); return nothing
+        end
+        # Claimed only once there is room for it. Taking the count first and then failing to enqueue
+        # is how a drop episode went unreported: the client is never told it fell behind.
+        Threads.atomic_sub!(c.dropped, d)
+        try
+            d > 0 && put!(c.out, "{\"t\":\"dropped\",\"n\":$d}")
+            # Always through the queue. Writing straight to the socket here would save a task wake per
+            # frame, and it was tried: it blocks the CALLER for the duration of the write, so one slow
+            # page stalls the poller — and with it every notebook's stream, not just the slow one's. A
+            # test measured 2.6s to emit 50 frames at a 50ms client. The wake is worth paying; this
+            # guarantee is not for sale.
+            put!(c.out, frame)
+        catch
+            d > 0 && Threads.atomic_add!(c.dropped, d)   # closed mid-send — keep owing the report
+        end
+        return nothing
     end
-    d = Threads.atomic_xchg!(c.dropped, 0)
-    d > 0 && (try; put!(c.out, "{\"t\":\"dropped\",\"n\":$d}"); catch; end)
-    # Always through the queue. Writing straight to the socket here would save a task wake per frame,
-    # and it was tried: it blocks the CALLER for the duration of the write, so one slow page stalls
-    # the poller — and with it every notebook's stream, not just the slow one's. A test measured 2.6s
-    # to emit 50 frames at a 50ms client. The wake is worth paying; this guarantee is not for sale.
-    try; put!(c.out, msg isa AbstractString ? String(msg) : msg); catch; end
     return nothing
 end
 

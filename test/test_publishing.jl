@@ -527,4 +527,65 @@ end
             @test_throws ErrorException NS.with_subpath(NS.target_from_ledger(led.targets["cf"]), "x")
         end
     end
+
+    # `with_subpath` builds a github-pages target under a subpath so several sites can share one repo,
+    # and `_location_clash` allows that pairing on the strength of it. The deploy has to honour it: it
+    # used to rebuild the branch from scratch and force-push, so whichever site synced last became the
+    # whole branch. Driven against a REAL local repo over `file://` — the git behaviour is the part
+    # that was wrong, and none of it needs GitHub.
+    @testset "gh-pages deploy keeps a sibling subpath" begin
+        git = Sys.which("git")
+        if git === nothing
+            @info "git not found — skipping the gh-pages staging test"
+            @test true
+        else
+            mktempdir() do root
+                run_ok(dir, cmd) = success(pipeline(setenv(Cmd(cmd; dir = dir),
+                    "GIT_CONFIG_GLOBAL" => "/dev/null", "GIT_CONFIG_SYSTEM" => "/dev/null",
+                    "HOME" => root); stdout = devnull, stderr = devnull))
+                bare = joinpath(root, "origin.git"); mkpath(bare)
+                @test run_ok(bare, `$git init -q --bare -b gh-pages`)
+                url = "file://" * bare
+                # Seed the branch with site A at /alpha/ plus a root file, the way a first sync leaves it.
+                seed = joinpath(root, "seed"); mkpath(joinpath(seed, "alpha"))
+                write(joinpath(seed, "alpha", "index.html"), "<h1>alpha</h1>")
+                write(joinpath(seed, "root.txt"), "keep me")
+                @test run_ok(seed, `$git init -q -b gh-pages`)
+                @test run_ok(seed, `$git add -A`)
+                @test run_ok(seed, `$git -c user.email=t@t -c user.name=t commit -q -m seed`)
+                @test run_ok(seed, `$git push -q $url gh-pages`)
+
+                # Now sync site B into /beta/. Only /beta/ is this deploy's to replace.
+                src = joinpath(root, "build"); mkpath(src)
+                write(joinpath(src, "index.html"), "<h1>beta</h1>")
+                work = joinpath(root, "work"); mkpath(work)
+                st = NS._gh_pages_stage!(work, src, url, "gh-pages", "beta")
+                @test st.cloned                                            # started from the existing branch
+                @test isfile(joinpath(st.wdir, "beta", "index.html"))
+                @test read(joinpath(st.wdir, "alpha", "index.html"), String) == "<h1>alpha</h1>"
+                @test read(joinpath(st.wdir, "root.txt"), String) == "keep me"
+
+                # Re-syncing a subpath REPLACES it rather than merging into it, so a file the site no
+                # longer builds does not linger.
+                write(joinpath(st.wdir, "beta", "stale.html"), "old")
+                work2 = joinpath(root, "work2"); mkpath(work2)
+                st2 = NS._gh_pages_stage!(work2, src, url, "gh-pages", "beta")
+                @test !isfile(joinpath(st2.wdir, "beta", "stale.html"))
+                @test isfile(joinpath(st2.wdir, "alpha", "index.html"))    # sibling still untouched
+
+                # A ROOT deploy owns the whole tree: the sibling goes, and `.git` survives.
+                work3 = joinpath(root, "work3"); mkpath(work3)
+                st3 = NS._gh_pages_stage!(work3, src, url, "gh-pages", "")
+                @test isfile(joinpath(st3.wdir, "index.html"))
+                @test !isdir(joinpath(st3.wdir, "alpha")) && !isfile(joinpath(st3.wdir, "root.txt"))
+                @test isdir(joinpath(st3.wdir, ".git"))
+
+                # No branch to clone (a repo just created) → build it fresh, and say so, because that
+                # is the one case the caller may force-push.
+                work4 = joinpath(root, "work4"); mkpath(work4)
+                st4 = NS._gh_pages_stage!(work4, src, url, "does-not-exist", "beta")
+                @test !st4.cloned && isfile(joinpath(st4.wdir, "beta", "index.html"))
+            end
+        end
+    end
 end

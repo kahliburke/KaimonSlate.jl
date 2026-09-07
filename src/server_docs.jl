@@ -79,16 +79,25 @@ function _doc_chunks(doc::AbstractString)
     return length(chunks) > _DOC_CHUNK_MAX ? chunks[1:_DOC_CHUNK_MAX] : chunks
 end
 
-"Embed + upsert harvested doc records into the search index. Returns the count indexed."
+"""
+Embed + upsert harvested doc records into the search index. Returns the number of symbols ACTUALLY
+written — 0 when the backend is unreachable, and short of `length(records)` when some failed.
+
+That distinction is the caller's only signal. `_autoindex!` persists "indexed at version X" into the
+durable cache on the strength of it, and a version once recorded is never revisited: reporting a run
+that reached no Qdrant as a full success left those packages permanently unindexed, with `search_docs`
+quietly returning nothing for them.
+"""
 function index_docs!(records)
     _agent_available() || return 0
     isempty(records) && return 0
-    _ensure_docs_collection()
+    _ensure_docs_collection() || return 0        # backend down — nothing was or will be written
     n = 0
     for r in records
         modname = string(get(r, "module", "")); name = string(get(r, "name", ""))
         doc = string(get(r, "doc", "")); text = "$modname.$name\n$doc"
         chunks = _doc_chunks(doc)
+        wrote = false
         # Each chunk carries the qualified name so a match on a later paragraph still knows what it
         # is about. The first chunk's id is the id the whole record would have had, so re-indexing an
         # existing collection overwrites in place instead of leaving the old single point behind.
@@ -105,9 +114,16 @@ function index_docs!(records)
                       # a name or fragment anywhere in it. Only the vector is per-chunk.
                       "payload" => Dict("module" => modname, "name" => name, "doc" => doc,
                                         "text" => text, "metadata" => Dict("module" => modname)))
-            try; _kt(:qdrant_upsert_points, Dict("collection" => _DOCS_COLLECTION, "points" => [pt])); catch; end
+            try
+                _kt(:qdrant_upsert_points, Dict("collection" => _DOCS_COLLECTION, "points" => [pt]))
+                wrote = true
+            catch
+            end
         end
-        n += 1                                   # count SYMBOLS indexed, not vectors written
+        # Count SYMBOLS indexed, not vectors written — but only those that reached the index. A symbol
+        # whose every chunk failed to embed or upsert is not indexed, and counting it made the return
+        # value mean "records offered" rather than "records stored".
+        wrote && (n += 1)
     end
     return n
 end
@@ -395,10 +411,19 @@ function _autoindex!(nb::LiveNotebook)
             pkgs = String[k for k in claimed if k != "Slate" && k != "ECharts"]
             if !isempty(pkgs)
                 recs = ReportEngine.harvest_docs(nb.kernel, nb.report, pkgs)
-                index_docs!(recs)
-                ensure_docs_fts!()   # mirror the new text+metadata payloads into the FTS index
-                for n in pkgs; _doc_cache_put!(n, get(want, n, "")); end
-                @info "slate: auto-indexed docs" notebook = nb.id packages = pkgs symbols = length(recs)
+                # Guarded like the Slate/ECharts branches above, and for the reason they are: the
+                # cache is DURABLE and a recorded version is never revisited, so writing one for a run
+                # that indexed nothing (Qdrant down) leaves those packages unsearchable until the
+                # schema is bumped. Per batch, not per package — one `index_docs!` covers them all,
+                # so "nothing landed" is the finest failure this can distinguish.
+                np = index_docs!(recs)
+                if np == 0
+                    @warn "slate: docs index wrote nothing (backend unavailable?) — not recording these as indexed" notebook = nb.id packages = pkgs
+                else
+                    ensure_docs_fts!()   # mirror the new text+metadata payloads into the FTS index
+                    for n in pkgs; _doc_cache_put!(n, get(want, n, "")); end
+                    @info "slate: auto-indexed docs" notebook = nb.id packages = pkgs symbols = np
+                end
             end
         catch e
             @warn "slate: auto-index failed" exception = (e, catch_backtrace()) maxlog = 5

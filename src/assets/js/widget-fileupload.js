@@ -11,8 +11,7 @@
 // bind server-side — so from the reactive graph's point of view nothing unusual happened.
 
 (function () {
-  const KB = 1024, MB = 1024 * 1024;
-  const human = n => n < KB ? n + ' B' : n < MB ? (n / KB).toFixed(0) + ' KB' : (n / MB).toFixed(1) + ' MB';
+  const human = n => window.slateBytes(n);
   const esc = s => window.slateEscHtml(s);
 
   // What the control looks like in each of its three states. Kept as one function so the states

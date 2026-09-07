@@ -519,7 +519,7 @@ async function _dagXferDashRefresh() {
   const allRates = T.flatMap(t => t.pts.map(p => p[1])).filter(r => r > 0);
   const avg = T.length ? T.reduce((a, t) => a + t.avg, 0) / T.length : 0;
   const peak = T.reduce((a, t) => Math.max(a, t.peak), 0);
-  const hum = b => b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : b < 1073741824 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
+  const hum = b => window.slateBytes(b);
   const tiles = document.getElementById('dagxd-tiles');
   if (tiles) tiles.innerHTML = [
     ['total moved', hum(totalBytes)], ['transfers', String(T.length)],
@@ -1188,6 +1188,44 @@ function _dagSetZoneHi(zn) {
   zr.add(_dagZoneHi);
 }
 
+// ── Edge drawing, shared by the region-edge and cell-edge renderItems ────────────────────────────
+// Both draw the same shape — a routed polyline smoothed into a curve, ending at an arrowhead whose
+// size tracks the zoom — and both had their own copy of the maths. The copies were identical to the
+// character apart from two head-size constants, which is the argument for parameters rather than a
+// second transcription of a Catmull-Rom basis nobody wants to re-derive.
+
+// Mean pixels per layout unit, clamped. The arrowhead scales with the zoom so it stays proportionate
+// to the boxes, but the clamp stops it pinning at a few px against a huge node when zoomed out, or
+// ballooning at extreme zoom.
+function _dagArrowScale(api) {
+  const o = api.coord([0, 0]);
+  return Math.max(0.85, Math.min(3.2,
+    ((Math.abs(api.coord([1, 0])[0] - o[0]) + Math.abs(api.coord([0, 1])[1] - o[1])) / 2) || 1));
+}
+
+// A routed polyline → cubic bezier segments approximating a Catmull-Rom spline through its points.
+// `end` replaces the final point (it is the arrowhead's BASE, not its tip, so a semi-transparent
+// stroke doesn't show through the head). The ends are duplicated to pin the curve to them. Returns
+// the `shape` objects only; the caller supplies style and z-order, which is all the two differ in.
+function _dagSplineShapes(pts, end) {
+  const cpts = pts.slice(0, pts.length - 1); cpts.push(end);
+  const m = cpts.length, P = [cpts[0], cpts[0], ...cpts, cpts[m - 1], cpts[m - 1]];
+  const out = [];
+  for (let i = 0; i + 3 < P.length; i++) {
+    const a1 = P[i + 1], a2 = P[i + 2], a3 = P[i + 3];
+    out.push({
+      // The first segment starts exactly on the source point; later ones start where the previous
+      // segment ended, which is the basis's own knot rather than a control point.
+      x1: i === 0 ? cpts[0][0] : (P[i][0] + 4 * a1[0] + a2[0]) / 6,
+      y1: i === 0 ? cpts[0][1] : (P[i][1] + 4 * a1[1] + a2[1]) / 6,
+      cpx1: (2 * a1[0] + a2[0]) / 3, cpy1: (2 * a1[1] + a2[1]) / 3,
+      cpx2: (a1[0] + 2 * a2[0]) / 3, cpy2: (a1[1] + 2 * a2[1]) / 3,
+      x2: (a1[0] + 4 * a2[0] + a3[0]) / 6, y2: (a1[1] + 4 * a2[1] + a3[1]) / 6,
+    });
+  }
+  return out;
+}
+
 function _dagOption() {
   const st = window.__slateState; if (!st) return null;
   const m = _dagModel(st.cells || []);
@@ -1414,8 +1452,7 @@ function _dagOption() {
             pts = [api.coord(a), api.coord(b)];
           }
           const n = pts.length, tip = pts[n - 1], prev = pts[n - 2];
-          const _o0 = api.coord([0, 0]);
-          const _sc = Math.max(0.85, Math.min(3.2, ((Math.abs(api.coord([1, 0])[0] - _o0[0]) + Math.abs(api.coord([0, 1])[1] - _o0[1])) / 2) || 1));
+          const _sc = _dagArrowScale(api);
           const ah = 9 * _sc, aw = 4.2 * _sc;
           const dl = Math.hypot(tip[0] - prev[0], tip[1] - prev[1]) || 1, ux = (tip[0] - prev[0]) / dl, uy = (tip[1] - prev[1]) / dl;
           const bx = tip[0] - ux * ah, by = tip[1] - uy * ah;
@@ -1428,17 +1465,8 @@ function _dagOption() {
           if (n === 2) {
             kids.push({ type: 'line', silent: true, style: line, shape: { x1: pts[0][0], y1: pts[0][1], x2: bx, y2: by } });
           } else {
-            const cpts = pts.slice(0, n - 1); cpts.push([bx, by]);
-            const m2 = cpts.length, Pp = [cpts[0], cpts[0], ...cpts, cpts[m2 - 1], cpts[m2 - 1]];
-            for (let i = 0; i + 3 < Pp.length; i++) {
-              const a1 = Pp[i + 1], a2 = Pp[i + 2], a3 = Pp[i + 3];
-              const sx2 = (a1[0] + 4 * a2[0] + a3[0]) / 6, sy2 = (a1[1] + 4 * a2[1] + a3[1]) / 6;
-              const px2 = i === 0 ? cpts[0][0] : (Pp[i][0] + 4 * a1[0] + a2[0]) / 6;
-              const py2 = i === 0 ? cpts[0][1] : (Pp[i][1] + 4 * a1[1] + a2[1]) / 6;
-              kids.push({ type: 'bezierCurve', silent: true, style: line, shape: {
-                x1: px2, y1: py2, cpx1: (2 * a1[0] + a2[0]) / 3, cpy1: (2 * a1[1] + a2[1]) / 3,
-                cpx2: (a1[0] + 2 * a2[0]) / 3, cpy2: (a1[1] + 2 * a2[1]) / 3, x2: sx2, y2: sy2 } });
-            }
+            for (const shape of _dagSplineShapes(pts, [bx, by]))
+              kids.push({ type: 'bezierCurve', silent: true, style: line, shape });
           }
           kids.push({ type: 'polygon', silent: true, style: { fill: col, opacity: 0.95 },
             shape: { points: [[tip[0], tip[1]], [bx - uy * aw, by + ux * aw], [bx + uy * aw, by - ux * aw]] } });
@@ -1496,8 +1524,7 @@ function _dagOption() {
           // Arrowhead tracks the zoom so it stays proportionate to the boxes, but clamped to a pixel
           // band — it grows as you zoom in (instead of pinning at a few px against a huge node) without
           // ballooning at extreme zoom or vanishing when zoomed out. Scale = mean px per layout unit.
-          const _o0 = api.coord([0, 0]);
-          const _sc = Math.max(0.85, Math.min(3.2, ((Math.abs(api.coord([1, 0])[0] - _o0[0]) + Math.abs(api.coord([0, 1])[1] - _o0[1])) / 2) || 1));
+          const _sc = _dagArrowScale(api);
           const ah = 7 * _sc, aw = 3.4 * _sc;
           let ux, uy;                                  // arrival unit tangent → arrowhead direction
           // The stroke stops at the head's BASE (not the tip) so the semi-transparent line doesn't
@@ -1518,19 +1545,8 @@ function _dagOption() {
             kids.push({ type: 'line', shape: { x1: s0[0], y1: s0[1], x2: tip[0] - ux * ah, y2: tip[1] - uy * ah }, style });
           } else {
             const prev = pts[n - 2], dl = Math.hypot(tip[0] - prev[0], tip[1] - prev[1]) || 1; ux = (tip[0] - prev[0]) / dl; uy = (tip[1] - prev[1]) / dl;
-            const cpts = pts.slice(0, n - 1); cpts.push([tip[0] - ux * ah, tip[1] - uy * ah]);   // last point → arrow base
-            const m2 = cpts.length, Pp = [cpts[0], cpts[0], ...cpts, cpts[m2 - 1], cpts[m2 - 1]];
-            for (let i = 0; i + 3 < Pp.length; i++) {
-              const a1 = Pp[i + 1], a2 = Pp[i + 2], a3 = Pp[i + 3];
-              const sx2 = (a1[0] + 4 * a2[0] + a3[0]) / 6, sy2 = (a1[1] + 4 * a2[1] + a3[1]) / 6;
-              const px2 = i === 0 ? cpts[0][0] : (Pp[i][0] + 4 * a1[0] + a2[0]) / 6;
-              const py2 = i === 0 ? cpts[0][1] : (Pp[i][1] + 4 * a1[1] + a2[1]) / 6;
-              kids.push({ type: 'bezierCurve', style, shape: {
-                x1: px2, y1: py2,
-                cpx1: (2 * a1[0] + a2[0]) / 3, cpy1: (2 * a1[1] + a2[1]) / 3,
-                cpx2: (a1[0] + 2 * a2[0]) / 3, cpy2: (a1[1] + 2 * a2[1]) / 3,
-                x2: sx2, y2: sy2 } });
-            }
+            for (const shape of _dagSplineShapes(pts, [tip[0] - ux * ah, tip[1] - uy * ah]))
+              kids.push({ type: 'bezierCurve', style, shape });   // ends at the arrow BASE
           }
           const bx = tip[0] - ux * ah, by = tip[1] - uy * ah;
           kids.push({ type: 'polygon', shape: { points: [[tip[0], tip[1]], [bx - uy * aw, by + ux * aw], [bx + uy * aw, by - ux * aw]] },
@@ -1790,11 +1806,7 @@ function _dagPreview(c, kind) {
   return '';
 }
 
-// Bytes → compact human string (the card's transfer rows; the dash has its own inline copy).
-function _dagBytes(b) {
-  return b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB'
-    : b < 1073741824 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
-}
+const _dagBytes = b => window.slateBytes(b);
 
 // Boundary transfers touching THIS cell, from the live trace ring (/api/transfer-stats). OUTBOUND =
 // a value this cell DEFINES shipped to another region (matched by def name). INBOUND = a value this

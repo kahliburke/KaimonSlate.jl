@@ -17,7 +17,8 @@ let _wpRaw = [];                  // chronological raw log lines for the OPEN po
 let _wpWorkers = [];              // latest worker list — the popup's tab strip, kept in step with the pills
 const _WP_LOG_MAX = 2000;        // cap the client-side buffer so a chatty worker can't grow it unbounded
 const _wpEsc = s => window.slateEscHtml(s);
-const _wpMB = v => (v == null || v < 0) ? '' : (v / 2 ** 20 >= 1024 ? (v / 2 ** 30).toFixed(1) + 'GB' : Math.round(v / 2 ** 20) + 'MB');
+// '' for absent/negative, so a chip is omitted rather than showing a meaningless zero.
+const _wpBytes = v => (v == null || v < 0) ? '' : window.slateBytes(v, { compact: true });
 
 // A telemetry sample (JSON string) → the full breakdown as wrapping labelled chips (HTML). No truncation:
 // every metric stays visible on its own chip, wrapping to a new row as needed. `note` shows when there's no
@@ -34,13 +35,13 @@ function _wpStatsChips(statsJson, note) {
     '<span class="wchip-v" style="min-width:' + w + 'ch">' + _wpEsc(v) + '</span></span>';
   const p = [];
   if (s.cpu >= 0) p.push(chip('cpu', s.cpu + '%', 5));
-  if (s.rss > 0) p.push(chip('rss', _wpMB(s.rss), 5));
+  if (s.rss > 0) p.push(chip('rss', _wpBytes(s.rss), 5));
   if (s.evals > 0) p.push(chip('running', s.evals, 2));
   if (s.gc_ms > 0) p.push(chip('gc', s.gc_ms + 'ms', 6));
-  if (s.memo >= 0) p.push(chip('memo', _wpMB(s.memo), 5));
+  if (s.memo >= 0) p.push(chip('memo', _wpBytes(s.memo), 5));
   if (s.sys_cpu >= 0) p.push(chip('host cpu', s.sys_cpu + '%', 5));
   if (s.load1 >= 0) p.push(chip('load', s.load1, 5));
-  if (s.sys_mem_total > 0) p.push(chip('host mem', _wpMB(s.sys_mem_total - s.sys_mem_free) + ' / ' + _wpMB(s.sys_mem_total), 13));
+  if (s.sys_mem_total > 0) p.push(chip('host mem', _wpBytes(s.sys_mem_total - s.sys_mem_free) + ' / ' + _wpBytes(s.sys_mem_total), 13));
   return warn + p.join('');
 }
 
@@ -124,7 +125,7 @@ function _wpPillStat(statsJson) {
   if (s.warm && s.warm.indexOf('warming') === 0) return '⏳ ' + s.warm;
   const p = [];
   if (s.cpu >= 1) p.push(Math.round(s.cpu) + '%');   // hide 0% on a resting worker — it's just noise (popup still shows it)
-  if (s.rss > 0) p.push(_wpMB(s.rss));
+  if (s.rss > 0) p.push(_wpBytes(s.rss));
   return p.join(' · ');
 }
 

@@ -58,16 +58,25 @@ const _PROVIDERS = Dict{String,Any}()
 const _PROVIDER_ORDER = String[]
 const _PROVIDER_SEQ = Ref(0)
 const _MAX_PROVIDERS = 200
+# Independent cells evaluate in PARALLEL (`run_scheduled` spawns each on the thread pool), and the
+# browser's page requests arrive on their own gate task, so registration races registration and both
+# race the lookup. Two consequences without this: `_PROVIDER_SEQ[] += 1` is a read-modify-write, so
+# two tables can mint the same id and one then serves the other's rows; and a `setindex!` that rehashes
+# while another task is mid-`get` corrupts the Dict. The three collections must also move together —
+# an id in `_PROVIDER_ORDER` whose entry is missing from `_PROVIDERS` evicts nothing.
+const _PROVIDER_LOCK = ReentrantLock()
 
 function _register_provider!(p)
-    _PROVIDER_SEQ[] += 1
-    id = "pt" * string(_PROVIDER_SEQ[]; base = 16)
-    _PROVIDERS[id] = p
-    push!(_PROVIDER_ORDER, id)
-    while length(_PROVIDER_ORDER) > _MAX_PROVIDERS
-        delete!(_PROVIDERS, popfirst!(_PROVIDER_ORDER))
+    lock(_PROVIDER_LOCK) do
+        _PROVIDER_SEQ[] += 1
+        id = "pt" * string(_PROVIDER_SEQ[]; base = 16)
+        _PROVIDERS[id] = p
+        push!(_PROVIDER_ORDER, id)
+        while length(_PROVIDER_ORDER) > _MAX_PROVIDERS
+            delete!(_PROVIDERS, popfirst!(_PROVIDER_ORDER))
+        end
+        return id
     end
-    return id
 end
 
 # Build a PageRequest from the frontend's JSON body (string keys, loose types).
@@ -85,7 +94,9 @@ end
 # (`_cellval` lives in tables.jl, included first.) Returns an empty page if the id
 # is unknown (e.g. evicted, or a stale id from a since-recomputed cell).
 function _provider_page(id::AbstractString, req::PageRequest)
-    p = get(_PROVIDERS, String(id), nothing)
+    # Look up under the lock, then fetch OFF it: `fetch_page` runs the user's provider (a DB query, a
+    # file scan) and holding the registry across that would serialize every page request in the process.
+    p = lock(_PROVIDER_LOCK) do; get(_PROVIDERS, String(id), nothing); end
     p === nothing && return (rows = Vector{Any}[], total = 0)
     res = try
         fetch_page(p, req)

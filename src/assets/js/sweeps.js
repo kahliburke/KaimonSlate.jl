@@ -36,10 +36,9 @@ function etaClock(secs) {
                     : t.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })) + ' ' + hhmm;
 }
 
-const humBytes = b => b == null ? '—' :
-  b < 1024 ? b + ' B' :
-  b < 1048576 ? (b / 1024).toFixed(1) + ' KB' :
-  b < 1073741824 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
+// One byte formatter for the app (platform.js, loaded by both shells). The `—` for a missing size
+// stays here: a sweep reports no total until its first shard lands, and that is not zero bytes.
+const humBytes = b => b == null ? '—' : window.slateBytes(b);
 
 (function () {
   // Slate's OWN cell settings — these mean something to the notebook, not to the scheduler, and so

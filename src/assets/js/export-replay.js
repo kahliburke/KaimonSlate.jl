@@ -41,9 +41,7 @@ const totals = computed(() => {
   return { bytes, evals, secs, measured };
 });
 
-function fmtBytes(b) {
-  return b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : b >= 1024 ? (b / 1024).toFixed(0) + ' kB' : b + ' B';
-}
+const fmtBytes = b => window.slateBytes(b);
 function fmtSecs(s) { return s < 1 ? '<1s' : s < 60 ? s.toFixed(0) + 's' : (s / 60).toFixed(1) + 'm'; }
 
 // `<id>:<n>` pairs, ids percent-encoded (a mark id is `<cell>:<control>` and a control may be non-ASCII).
