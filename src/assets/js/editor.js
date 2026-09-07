@@ -37,6 +37,11 @@
     for (const v of _views) if (v.dom && !v.dom.isConnected) _views.delete(v);
     return [..._views];
   };
+  // Published for the same reason it exists: anything asking a question ABOUT THE PAGE rather than
+  // about a given cell needs the whole set. `palette.js` asks which view has focus, and got that
+  // wrong from the cell map. Each view carries `_edctx` ({markdown, cellId, lang}), which is how a
+  // caller tells a web cell's CSS pane from a Julia cell editor.
+  window.slateAllEditors = _allViews;
 
   // ── code-highlight theme (Settings → Editor syntax). Each theme is a COMPLETE look — token
   //    colours AND editor chrome (background, gutter, selection, active line, caret) — defined once

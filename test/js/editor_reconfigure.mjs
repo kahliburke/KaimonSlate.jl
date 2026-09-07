@@ -66,5 +66,46 @@ if (/acompComp\.reconfigure\(\s*_acompExt\(/.test(src)) {
   fail('a reconfigure still rebuilds completion from _acompExt — that is the Julia/markdown source');
 }
 
+// ── 5. Page-wide questions outside this file use the registry too ────────────────
+// The invariant is not local to editor.js. "Which view has focus" is about the PAGE: a web cell's
+// CSS pane can hold focus and is not in `window.editors`, so the cell map answers with the wrong
+// view or with none. That is why the registry is published.
+//
+// A loop over the cell map is only wrong when it wants the VIEW. `restore.js` loops the same map for
+// its crash backup and is right to: it uses the id and lets `edText` assemble a web cell's panes.
+const pal = readFileSync(join(here, '..', '..', 'src', 'assets', 'js', 'palette.js'), 'utf8');
+if (!/window\.slateAllEditors\s*=/.test(src)) fail('editor.js no longer publishes slateAllEditors');
+if (/for\s*\(\s*const\s+id\s+in\s+editors\s*\)[\s\S]{0,160}?hasFocus/.test(pal)) {
+  fail('palette.js finds the focused view by looping the cell map — use window.slateAllEditors()');
+}
+if (!/slateAllEditors\s*\(\s*\)/.test(pal)) fail('palette.js does not read the editor registry');
+
+// ── 6. Julia symbol help applies where the text is Julia ─────────────────────────
+// ⌘⇧K looks a symbol up in Julia's docs. A web pane is not Julia, and the HTML pane happens to be
+// the view registered for its cell — so before this, one web cell answered two ways: a Base lookup
+// on an HTML token in one pane, a silent dock toggle in the others.
+const jt = /const\s+_juliaTree\s*=\s*[\s\S]*?;\n/.exec(pal);
+if (!jt) { fail('palette.js no longer decides which editors get Julia symbol help'); }
+else {
+  const isJulia = new Function(jt[0] + 'return _juliaTree;')();
+  // No `lang` means the Julia tree — a code cell, a markdown cell, a .jl file (see `_fileLang`).
+  const cases = [
+    ['a code cell', { markdown: false, cellId: 'a' }, true],
+    ['a markdown cell', { markdown: true, cellId: 'a' }, true],
+    ['a .jl file editor', {}, true],
+    ["a web cell's HTML pane", { lang: 'html', cellId: 'a' }, false],
+    ["a web cell's CSS pane", { lang: 'css', cellId: 'a' }, false],
+    ["a web cell's JS pane", { lang: 'js', cellId: 'a' }, false],
+    ['a plain-text file editor', { lang: 'plain' }, false],
+  ];
+  for (const [what, ctx, want] of cases) {
+    if (isJulia({ _edctx: ctx }) !== want) {
+      fail(`${what} should ${want ? '' : 'not '}get Julia symbol help`);
+    }
+  }
+  if (isJulia(null) !== false) fail('no focused editor should not get Julia symbol help');
+  if (isJulia({}) !== false) fail('a view with no context should not get Julia symbol help');
+}
+
 if (bad) { console.error(`editor_reconfigure: ${bad} check(s) failed`); process.exit(1); }
 console.log('editor_reconfigure: ok');

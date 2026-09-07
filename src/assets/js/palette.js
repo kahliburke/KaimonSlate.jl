@@ -317,15 +317,26 @@ function _symbolAtCursor(view) {                    // CM6 EditorView
   while (b < text.length && ident(text[b])) b++;
   return text.slice(a, b).replace(/^\.+|\.+$/g, '');
 }
-function _focusedEditorCM() {                       // whichever cell editor (EditorView) has focus, else null
-  if (typeof editors === 'undefined') return null;
-  for (const id in editors) { const v = editors[id]; if (v && v.hasFocus) return v; }
+// Whichever editor has focus, from the REGISTRY rather than the cell map. `window.editors` holds one
+// view per cell, so a web cell's CSS and JS panes are not in it and a file editor never is — asking
+// it which view has focus answered a page-wide question with a map that cannot know.
+function _focusedEditorCM() {
+  const all = (window.slateAllEditors && window.slateAllEditors()) || [];
+  for (const v of all) if (v && v.hasFocus) return v;
   return null;
 }
+// Symbol help is JULIA documentation, so it applies where the text is Julia. A view's `_edctx.lang`
+// names a non-Julia grammar (a web cell's html/css/js pane, or a file the Julia tree would only
+// mis-colour); no `lang` is the Julia tree, which covers code cells, markdown cells and .jl files.
+//
+// Without this, the same web cell behaved two ways: its HTML pane is the one registered for the
+// cell, so ⌘⇧K there looked up an HTML token in Base, while the CSS and JS panes were invisible here
+// and quietly toggled the dock instead.
+const _juliaTree = v => { const c = v && v._edctx; return !!c && !c.lang; };
 // ⌘⇧K: help for the symbol under the cursor (refocus the cell on close), else toggle the dock.
 // Exposed so the CM6 editor keymap can bind it — CM6's defaultKeymap otherwise eats ⌘⇧K (deleteLine).
 function openDocsAtCursor() {
-  const cm = _focusedEditorCM(), sym = cm ? _symbolAtCursor(cm) : '';
+  const cm = _focusedEditorCM(), sym = (cm && _juliaTree(cm)) ? _symbolAtCursor(cm) : '';
   if (sym) { const pos = cm.state.selection.main.head; openDocsFor(sym); _docReturn = { cm, pos }; }
   else toggleDocs();
 }
