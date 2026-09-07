@@ -3981,6 +3981,19 @@ for f in worker-*.json; do
     sz=$(wc -c < "worker-$port.log" | awk '{print $1+0}')
     mt=$(stat -c %Y "worker-$port.log" 2>/dev/null || stat -f %m "worker-$port.log" 2>/dev/null || echo 0)
   fi
+  # Collect the record of a worker that is GONE. A process ends but its manifest stays, and the
+  # roster is built from manifests, so every host accumulated an entry per worker it had ever run.
+  # Nothing else removes them: every reap in the hub is aimed at one host and port, or at a region
+  # it is currently using.
+  #
+  # Two conditions, both required. `pgrep` says the process is not there, so there is nothing to
+  # orphan. And it has been quiet far longer than any restart or reattach takes, so a probe racing
+  # a worker that is coming back cannot delete a manifest still in use. The LOG stays: it is the
+  # only account of what the worker did, and it is not what puts the entry in the roster.
+  if [ "$alive" = "0" ] && [ "$mt" -gt 0 ] && [ $(( $(date +%s) - mt )) -gt 21600 ]; then
+    rm -f "$f" "worker-$port.state" "worker-$port.stats"
+    continue
+  fi
   st=""; [ -f "worker-$port.state" ] && st=$(cat "worker-$port.state" 2>/dev/null)
   body=$(tr -d '\n\r' < "$f" 2>/dev/null); [ -n "$body" ] || body='{}'
   tj=""; [ -f "worker-$port.stats" ] && tj=$(tr -d '\n\r' < "worker-$port.stats" 2>/dev/null)
