@@ -82,7 +82,7 @@ async function cancelRun() {
 async function restartWorker(side) {
   const region = side && side !== 'local';
   const msg = region
-    ? ('Restart the “' + side + '” region worker?\n\nIts cells re-run on a fresh worker; the main kernel and other regions stay up.')
+    ? ('Restart the `' + side + '` region worker?\n\nIts cells re-run on a fresh worker; the main kernel and other regions stay up.')
     : 'Restart the worker?\n\nThis clears the namespace — every value recomputes on the next run. Use it when a kernel is wedged (runaway / unreachable) and a graceful stop can\'t reach it.';
   if (!confirm(msg)) return;
   try { await window.api('POST', '/api/restart', region ? { side } : undefined); poll(); } catch (_) {}

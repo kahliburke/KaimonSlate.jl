@@ -577,6 +577,16 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
   background:rgba(210,168,80,.12); }
 /* The chip is a button; its inner text must not become the click target, or the handler sees a
    child it did not expect. */
+/* A region whose WORKER is unwell, in the same two colours the topbar pill uses: amber for a wire
+   that has dropped or is dialling, muted yellow for one that is up but missing liveness. The chip and
+   the pill report the same worker, so they read as one vocabulary rather than two.
+   `!important` beats the per-region hue the chip sets inline for a healthy region. */
+.cregion.unwell { color:#e8a13f !important; border-color:color-mix(in srgb, #e8a13f 55%, var(--border)) !important;
+  background:color-mix(in srgb, #e8a13f 12%, var(--bg3)); }
+.cregion.degraded { color:#c2b158 !important; border-color:color-mix(in srgb, #c2b158 55%, var(--border)) !important;
+  background:color-mix(in srgb, #c2b158 12%, var(--bg3)); }
+.cregion.unwell .cregst, .cregion.degraded .cregst { opacity:.9; }
+.cregion.unwell .cregst::before, .cregion.degraded .cregst::before { content:'· '; opacity:.55; }
 .cregion.blocked .cregst, .cregion.blocked .blockwait { pointer-events:none; }
 .cregion.blocked .cregst { opacity:.9; }
 .cregion.blocked .cregst::before { content:'· '; opacity:.55; }
@@ -2249,6 +2259,16 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
          box-shadow:0 16px 48px rgba(0,0,0,.55); }
 
 .modal .msg { color:var(--text); font-size:.92rem; line-height:1.5; margin-bottom:16px; white-space:pre-wrap; word-break:break-word; }
+/* The question, then what it costs. Same two elements every dialog builds (see `_setMessage`), so a
+   confirm written today reads like one written a month ago. */
+.modal .msg .modalq { font-size:1.02rem; font-weight:600; line-height:1.35; margin-bottom:9px; }
+.modal .msg .modalp { color:var(--dim); font-size:.88rem; line-height:1.55; }
+.modal .msg .modalp + .modalp { margin-top:7px; }
+/* A name in the sentence, set apart by type rather than by quotes — the same monospace the region
+   chip and the worker pill use, so the thing you are about to act on looks like itself. */
+.modal .msg .modalname { font-family:'Cascadia Code',ui-monospace,monospace; font-size:.92em;
+  color:var(--val); background:color-mix(in srgb, var(--val) 10%, transparent);
+  border-radius:4px; padding:1px 5px; }
 .modal .row { display:flex; justify-content:flex-end; gap:10px; }
 /* Text entry inside the shared modal (promptDark) — the app's `window.prompt` replacement. */
 .modal .modalinput { display:block; width:100%; box-sizing:border-box; margin-top:12px; background:var(--bg3);

@@ -242,6 +242,9 @@ function onWorkersUpdate(ws) {
   try {
     ws = ws || [];
     renderWorkers({ workers: ws });       // feeds the model on the way through
+    // The cell chips carry the same worker fact as the pills, so they follow the same push rather
+    // than waiting for the next full state render.
+    window.refreshRegionChips && window.refreshRegionChips();
     if (_wpSide !== null) {
       const w = ws.find(x => (x.side || '') === _wpSide);
       if (w) {
@@ -417,7 +420,7 @@ window.wpShutdown = async function (side) {
   try { await window.api('POST', '/api/worker-action', { side, action: 'shutdown' }); closeWorkerPop(); } catch (_) {}
 };
 window.wpRelease = async function (side) {
-  if (!await _wpConfirm('Release “' + side + '”’s node?\nIts workers are reaped and the node goes back to ' +
+  if (!await _wpConfirm('Release the node held for `' + side + '`?\nIts workers are reaped and the node goes back to ' +
                         'the scheduler. The next run queues for another.', 'Release', 'danger')) return;
   try { await window.api('POST', '/api/worker-action', { side, action: 'release' }); closeWorkerPop(); } catch (_) {}
 };

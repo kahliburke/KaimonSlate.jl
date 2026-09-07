@@ -83,7 +83,7 @@ function saveRegion() {
     }).catch(() => { rmsg.value = { text: 'request failed', err: true }; });
 }
 function deleteRegion(h, name) {
-  confirmP('Delete region “' + name + '”?\nIts workers are reaped. On a scheduler region the allocation is released too.', 'Delete', 'danger').then(ok => {
+  confirmP('Delete region `' + name + '`?\nIts workers are reaped. On a scheduler region the allocation is released too.', 'Delete', 'danger').then(ok => {
     if (!ok) return;
     fetch('/api/regions/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).then(r => r.json())
       .then(() => { if (editRegion.value && editRegion.value.name === name) editRegion.value = null; loadRegions(); fetchRoster(h); }).catch(() => {});
@@ -132,7 +132,7 @@ function sysNote(name, checked, editing) {
 // The cache lives in the model, so releasing here also clears what the notebook's region panel shows.
 const loadAlloc = (name, force = false) => loadAllocation(name, force);
 async function releaseAlloc(name) {
-  if (!await confirmP('Release the allocation held for “' + name + '”?\nWorkers on that node go with it; the next cell asks the scheduler for a new one.', 'Release', 'danger')) return;
+  if (!await confirmP('Release the allocation held for `' + name + '`?\nWorkers on that node go with it; the next cell asks the scheduler for a new one.', 'Release', 'danger')) return;
   await fetch('/api/allocation/release', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ region: name }) }).catch(() => {});
   refreshAllocation(name); loadRegions();
 }

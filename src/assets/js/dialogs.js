@@ -8,11 +8,65 @@ function _modalClose(v) {
 }
 // `opts.html` = true renders `message` as HTML (caller must supply trusted/escaped markup); default is
 // safe textContent. `opts.buttons` on a button entry closes with that value.
+
+// A dialog asks ONE question and then explains it. Callers already write them that way — a question,
+// a newline, the consequences — but the whole string landed in one element at one size, so the
+// question and the small print carried equal weight and the reader had to parse a paragraph to find
+// what they were being asked.
+//
+// Split on the first newline: question above, explanation below, each in its own element. Built as
+// DOM with textContent rather than markup, so a region or notebook name in the text cannot inject.
+// A single-line message keeps the old flat rendering; there is no hierarchy to show.
+
+// A name inside a sentence needs to be separable from it. Quotes did that and read badly — a region
+// in the possessive came out as `Release “gpu”’s node?`, a closing quote hard against an apostrophe —
+// so a name in `backticks` is set in the same monospace the region chip uses instead. The delimiter
+// is dropped; only the styling survives.
+//
+// Each piece goes in as textContent, so a name is never parsed as markup however it was spelled.
+// PAIRS only. Splitting on the delimiter would make a single stray backtick swallow the rest of the
+// line into a name and eat the character that caused it — and these strings are built by
+// concatenation around values nobody validated for punctuation.
+function _fillText(el, text) {
+  const s = String(text), re = /`([^`]+)`/g;
+  let last = 0, m;
+  while ((m = re.exec(s)) !== null) {
+    if (m.index > last) el.appendChild(document.createTextNode(s.slice(last, m.index)));
+    const c = document.createElement('code');
+    c.className = 'modalname';
+    c.textContent = m[1];
+    el.appendChild(c);
+    last = m.index + m[0].length;
+  }
+  if (last < s.length) el.appendChild(document.createTextNode(s.slice(last)));
+}
+
+function _setMessage(el, message) {
+  el.textContent = '';
+  const text = String(message);
+  const nl = text.indexOf('\n');
+  if (nl < 0) { _fillText(el, text); return; }
+  const q = document.createElement('div');
+  q.className = 'modalq';
+  _fillText(q, text.slice(0, nl));
+  el.appendChild(q);
+  // Blank lines and single newlines both separate paragraphs: callers use each to mean the same
+  // thing, and honouring the difference would only make two dialogs written a week apart look
+  // different for no reason.
+  for (const para of text.slice(nl + 1).split(/\n+/)) {
+    if (!para.trim()) continue;
+    const p = document.createElement('div');
+    p.className = 'modalp';
+    _fillText(p, para);
+    el.appendChild(p);
+  }
+}
+
 function dlg(message, buttons, opts) {
   return new Promise(resolve => {
     _modalResolve = resolve;
     const row = document.getElementById('modalrow'), msgEl = document.getElementById('modalmsg');
-    if (opts && opts.html) msgEl.innerHTML = message; else msgEl.textContent = message;
+    if (opts && opts.html) msgEl.innerHTML = message; else _setMessage(msgEl, message);
     row.innerHTML = '';
     buttons.forEach(b => { const el = document.createElement('button'); el.textContent = b.label;
       if (b.cls) el.className = b.cls; el.onclick = () => _modalClose(b.value); row.appendChild(el); });

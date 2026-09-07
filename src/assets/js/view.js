@@ -332,9 +332,59 @@ function cellRegionChip(c) {
   // replaces this node before mouseup — so the click event is never delivered here and the first
   // click appears to do nothing. Opening on mousedown runs before the node can be taken away.
   if (loc.local) return `<span class="cregion local" onmousedown="window.openRegionPanel('${c.id}', event)" title="runs on the main kernel (this notebook’s home) — click to change">💻 local</span>`;
+  // A cell's chip says where it runs; whether that place is REACHABLE is the other half of the same
+  // fact, and the topbar pill was carrying it alone. A chip that reads the same when the worker is
+  // gone as when it is healthy makes you look somewhere else to find out.
   const hue = (typeof _dagRegionHue === 'function' && _dagRegionHue(loc.name)) || '#8a90a8';
-  return `<span class="cregion" style="color:${hue};border-color:${hue}" onmousedown="window.openRegionPanel('${c.id}', event)" title="runs on ‘${_esc(loc.name)}’ — click for the region">🖧 ${_esc(loc.name)}</span>`;
+  const cls = _regChipStatus(loc.name);
+  return `<span class="cregion${cls.cls}" data-reg="${_esc(loc.name)}"` +
+    (cls.cls ? '' : ` style="color:${hue};border-color:${hue}"`) +
+    ` onmousedown="window.openRegionPanel('${c.id}', event)"` +
+    ` title="${_esc(cls.title || ('runs on ‘' + loc.name + '’ — click for the region'))}">🖧 ${_esc(loc.name)}` +
+    (cls.word ? ` <span class="cregst">${_esc(cls.word)}</span>` : '') + '</span>';
 }
+
+// How a region's worker is doing, for the chip. Read from the shared model, so the chip, the topbar
+// pill and the worker popup cannot disagree about the same worker.
+//
+// `none` means the model has not heard about this region yet (a first render before the worker list
+// arrives), which is NOT the same as trouble — it stays a plain chip rather than flashing an alarm
+// on every page load.
+function _regChipStatus(name) {
+  const M = window.slateModel, w = M.getWorker(name);
+  const st = M.workerStatus(w);
+  if (!w || st === 'ok' || st === 'none') return { cls: '', word: '', title: '' };
+  // The server names the wait when it knows it ("queued" for a scheduler region, "no worker" for one
+  // nothing has started). Otherwise the status word is the honest short answer.
+  const word = w.face || st;
+  return {
+    cls: st === 'degraded' ? ' degraded' : ' unwell',
+    word: word,
+    title: 'runs on ‘' + name + '’ — ' + (w.note || word) + ' (click for the region)',
+  };
+}
+
+// Repaint the chips when the worker list changes, without re-rendering every cell. The pills already
+// update on that push; the chips are the same fact in a different place and were only catching up on
+// the next full state render.
+window.refreshRegionChips = function () {
+  document.querySelectorAll('#nb .cregion[data-reg]:not(.blocked)').forEach(el => {
+    const name = el.getAttribute('data-reg') || '';
+    const s = _regChipStatus(name);
+    el.classList.toggle('degraded', s.cls === ' degraded');
+    el.classList.toggle('unwell', s.cls === ' unwell');
+    if (s.cls) el.removeAttribute('style');
+    else if (!el.getAttribute('style')) {
+      const hue = (typeof _dagRegionHue === 'function' && _dagRegionHue(name)) || '#8a90a8';
+      el.setAttribute('style', `color:${hue};border-color:${hue}`);
+    }
+    if (s.title) el.title = s.title;
+    let st = el.querySelector('.cregst');
+    if (!s.word) { st && st.remove(); return; }
+    if (!st) { st = document.createElement('span'); st.className = 'cregst'; el.appendChild(document.createTextNode(' ')); el.appendChild(st); }
+    if (st.textContent !== s.word) st.textContent = s.word;
+  });
+};
 
 // ── Cell kinds ────────────────────────────────────────────────────────────────────────────────
 // The ONE description of what a cell can be — read by the kind switcher in every cell header, and
@@ -724,8 +774,8 @@ function _regAlloc(a, reg) {
 // Give the node back now. Confirmed, because anything running on it dies with it.
 window.releaseRegionAlloc = async function (reg) {
   const ok = window.confirmDark ? await window.confirmDark(
-    'Release ' + reg + '\u2019s node?\nIts workers are reaped and anything running on them stops.',
-    'Release', 'danger') : window.confirm('Release ' + reg + '\u2019s node?');
+    'Release the node held for `' + reg + '`?\nIts workers are reaped and anything running on them stops.',
+    'Release', 'danger') : window.confirm('Release the node held for ' + reg + '?');
   if (!ok) return;
   try {
     await fetch('/api/allocation/release', { method: 'POST', headers: { 'Content-Type': 'application/json' },
