@@ -3476,8 +3476,12 @@ _region_target(r::Region; origin_env::AbstractString = r.preload, host::Abstract
 # a file transfer) needs the same answer many times over, and asking the scheduler is a round trip. It is
 # cached against the allocation's job id, so an allocation that expired and was re-granted on a
 # different node invalidates it rather than pointing workers at a node we no longer hold.
-const _REGION_PLACE = Dict{String,NamedTuple{(:host, :job, :ts, :until),
-                                             Tuple{String,String,Float64,Float64}}}()
+#
+# `ts` is when the node was GRANTED and `checked` when the scheduler was last asked about it. They
+# were one field, which meant a refresh looked like a fresh grant to the idle timer that floors its
+# clock with `ts` — so an idle timeout longer than `_PLACE_TTL` could never mature.
+const _REGION_PLACE = Dict{String,NamedTuple{(:host, :job, :ts, :checked, :until),
+                                             Tuple{String,String,Float64,Float64,Float64}}}()
 const _REGION_PLACE_LOCK = ReentrantLock()
 const _PLACE_TTL = 20.0        # how long a placement is trusted without re-asking the scheduler
 
@@ -3555,7 +3559,7 @@ function region_place!(r::Region; wait_s::Real = 120)
     isempty(r.host) && error("region '$(r.name)' has a scheduler but no host to ask")
     name = region_alloc_name(r)
     cached = _placement(r)
-    if cached !== nothing && time() - cached.ts < _PLACE_TTL
+    if cached !== nothing && time() - cached.checked < _PLACE_TTL
         return (cached.host, nothing)
     end
     a = Sweep.allocation_node!(kind, r.host, name; wait_s = wait_s, walltime = _alloc_walltime(r),
@@ -3574,10 +3578,27 @@ function region_place!(r::Region; wait_s::Real = 120)
     # fresh full walltime is how a placement outlives its job.
     lease = _sched_seconds(isempty(a.timeleft) ? _alloc_walltime(r) : a.timeleft)
     lock(_REGION_PLACE_LOCK) do
-        _REGION_PLACE[r.name] = (host = a.node, job = a.id, ts = time(), until = time() + lease)
+        prev = get(_REGION_PLACE, r.name, nothing)
+        _REGION_PLACE[r.name] = (host = a.node, job = a.id,
+                                 ts = _granted_ts(prev, a.node, a.id, time()),
+                                 checked = time(), until = time() + lease)
     end
     return (a.node, a)
 end
+
+"""
+    _granted_ts(prev, host, job, now_) -> Float64
+
+When the node we are now holding was GRANTED. The same node and job carried over from the previous
+placement keep their original stamp; anything else is a new grant and starts now.
+
+Two different clocks used to share one field. `_PLACE_TTL` re-asks the scheduler every few seconds
+and rewrote `ts` each time, while the idle timer reads `ts` as the floor on how long the node can
+have been idle — so a held node looked freshly granted forever and the idle timeout could never
+mature. `checked` is the refresh stamp now; this is the grant.
+"""
+_granted_ts(prev, host, job, now_::Float64) =
+    (prev !== nothing && prev.host == host && prev.job == job) ? Float64(prev.ts) : now_
 
 # An allocation with no walltime is one the site's default decides the cost of. An hour is the
 # conventional interactive default and is what the region form seeds; this is only the backstop for
@@ -3665,7 +3686,8 @@ function region_extend_lease!(r::Region, add_s::Real)
     lock(_REGION_PLACE_LOCK) do
         p = get(_REGION_PLACE, r.name, nothing)
         p === nothing && return false
-        _REGION_PLACE[r.name] = (host = p.host, job = p.job, ts = p.ts, until = p.until + add_s)
+        _REGION_PLACE[r.name] = (host = p.host, job = p.job, ts = p.ts,
+                                 checked = p.checked, until = p.until + add_s)
         return true
     end
 end

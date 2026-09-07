@@ -182,7 +182,7 @@ end
         RE.route!("ghost-node-1", "nowhere.invalid", "42", :pbs)
         lock(RE._REGION_PLACE_LOCK) do
             RE._REGION_PLACE["ghost"] = (host = "ghost-node-1", job = "42",
-                                         ts = time(), until = time() + 600)
+                                         ts = time(), checked = time(), until = time() + 600)
         end
         @test RE.region_host(RE.region_get("ghost")) == "ghost-node-1"
         empty!(NS._REARM_AT)

@@ -148,7 +148,7 @@ const RE = KaimonSlate.ReportEngine
                 RE.route!("c9", "login", "77")
                 lock(RE._REGION_PLACE_LOCK) do
                     RE._REGION_PLACE["gpu"] = (host = "c9", job = "77", ts = time(),
-                                               until = time() + 600)
+                                               checked = time(), until = time() + 600)
                 end
                 try
                     g = NS._region_alloc_facts("gpu")
@@ -157,6 +157,49 @@ const RE = KaimonSlate.ReportEngine
                 finally
                     lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
                     RE.route!("c9", "")
+                end
+            end
+
+            # ── the grant stamp is not the refresh stamp ──────────────────────────────────────
+            # These were ONE field, and the two clocks that read it want opposite things. The
+            # placement is re-asked of the scheduler every `_PLACE_TTL`; the idle timer reads the
+            # same field as "how long have we held this node" and floors the idle clock with it. So
+            # every refresh made a node that had been sitting for an hour look freshly granted, the
+            # idle clock could never grow past the refresh interval, and an idle timeout longer than
+            # that could never fire at all. Nothing failed; the release simply never came.
+            @testset "a placement refresh does not reset the grant clock" begin
+                held = (host = "c1", job = "77", ts = 1000.0, checked = 1000.0, until = 9e9)
+                # Same node, same job: this is the SAME grant, however often we re-ask about it.
+                @test RE._granted_ts(held, "c1", "77", 2000.0) == 1000.0
+                # A different node, or the same node under a new job, is a new grant.
+                @test RE._granted_ts(held, "c2", "77", 2000.0) == 2000.0
+                @test RE._granted_ts(held, "c1", "88", 2000.0) == 2000.0
+                # Nothing held before is a new grant.
+                @test RE._granted_ts(nothing, "c1", "77", 2000.0) == 2000.0
+
+                # And the idle clock keeps counting across a refresh. A region last USED ten minutes
+                # ago, holding a node granted then, whose placement was re-checked a moment ago:
+                # `checked` moves, `ts` does not, so the idle stretch is the real ten minutes rather
+                # than being capped at the refresh interval. Under the old single field this read as
+                # zero and the release never came.
+                lock(NS._REGION_USE_LOCK) do; NS._REGION_LAST_USED["gpu"] = time() - 600; end
+                lock(RE._REGION_PLACE_LOCK) do
+                    RE._REGION_PLACE["gpu"] = (host = "c1", job = "77", ts = time() - 600,
+                                               checked = time(), until = time() + 600)
+                end
+                try
+                    @test NS._region_idle_for("gpu") >= 590
+                    # The refresh stamp must not be what the idle clock reads: moving `checked` to
+                    # now again changes nothing, which is the whole fix.
+                    lock(RE._REGION_PLACE_LOCK) do
+                        p = RE._REGION_PLACE["gpu"]
+                        RE._REGION_PLACE["gpu"] = (host = p.host, job = p.job, ts = p.ts,
+                                                   checked = time(), until = p.until)
+                    end
+                    @test NS._region_idle_for("gpu") >= 590
+                finally
+                    lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
+                    lock(NS._REGION_USE_LOCK) do; delete!(NS._REGION_LAST_USED, "gpu"); end
                 end
             end
 
@@ -246,7 +289,7 @@ const RE = KaimonSlate.ReportEngine
                 RE.route!("c9", "login", "77")
                 lock(RE._REGION_PLACE_LOCK) do
                     RE._REGION_PLACE["leased"] =
-                        (host = "c9", job = "77", ts = time(), until = time() + 60)
+                        (host = "c9", job = "77", ts = time(), checked = time(), until = time() + 60)
                 end
                 @test RE.region_host(r) == "c9"                # inside the lease: the node we hold
                 @test RE._region_holds_node(r)
@@ -260,7 +303,7 @@ const RE = KaimonSlate.ReportEngine
 
                 lock(RE._REGION_PLACE_LOCK) do
                     RE._REGION_PLACE["leased"] =
-                        (host = "c9", job = "77", ts = time(), until = time() - 1)
+                        (host = "c9", job = "77", ts = time(), checked = time(), until = time() - 1)
                 end
                 @test RE.region_host(r) == "login"             # past it: nothing placed, ask again
                 @test !RE._region_holds_node(r)
