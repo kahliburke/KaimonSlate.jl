@@ -2,6 +2,15 @@
 const NB_ID = decodeURIComponent((location.pathname.match(/^\/n\/([^\/]+)/) || ['', ''])[1]);
 const _apipath = p => p.replace(/^\/api\//, '/api/' + NB_ID + '/');
 
+// HTML-escape a value for interpolation into markup. The ONE escaper: it had been written thirteen
+// times across these files in three different coverages (`&<>`, `&<>"`, `&<>"'`), and the narrow ones
+// were reached by call sites that interpolate into ATTRIBUTE positions, where an unescaped quote ends
+// the attribute. Covers all five so one helper is correct in both text and attribute context, and
+// treats null/undefined as empty rather than printing "null". On `window` so the ES-module islands
+// can reach it too — a classic script's lexical `const` is invisible to them.
+window.slateEscHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
 // Is this page an APP (server_app.jl)? Read from the bootstrap object the server injects into
 // <head>, so it is true from the very first script — `body.app` is only added on DOMContentLoaded
 // and is therefore useless to anything that can run earlier.

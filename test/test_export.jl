@@ -639,7 +639,7 @@ end
 end
 
 @testset "Typst slide frag preserves the override Bool (regression)" begin
-    # A slide code-cell frag is `(cell, nothing)`. `_emit_slide_frag!` must forward the themed-render
+    # A slide code-cell frag carries no source override. `_emit_slide_frag!` must forward the themed-render
     # `override::Bool` to `_emit_output!`, NOT shadow it with the frag's source-override — before the fix,
     # a code cell on a slide passed `override=nothing` into a `::Bool` kwarg and threw at the call.
     rep = _RE.parse_report("#%% code id=c\n1 + 1\n")
@@ -650,7 +650,8 @@ end
     io = IOBuffer(); dir = mktempdir()
     try
         # override=true is the themed-render flag; it must reach _emit_output! as a Bool (no throw).
-        @test (NS._emit_slide_frag!(io, dir, "s1f1", nb, (c, nothing); theme = "dark", override = true,
+        frag = (cell = c, src = nothing, interpbase = 0)
+        @test (NS._emit_slide_frag!(io, dir, "s1f1", nb, frag; theme = "dark", override = true,
                                     show_source = false, include_params = false); true)
     finally
         rm(dir; recursive = true, force = true)

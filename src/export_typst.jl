@@ -390,7 +390,9 @@ end
 # bare `@key` (prose) — the latter only for defined keys, so emails/handles are left literal.
 function _rewrite_text_citations(text, citekeys, emit; figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text)
     t = replace(text, r"\[([^\]\n]*@[^\]\n]*)\]" => m -> begin
-        r = _rewrite_bracket_cite(m[2:end-1], emit; figrefs = figrefs, figemit = figemit); r === nothing ? m : r
+        # `chop` strips the brackets safely; byte slicing breaks on a non-ASCII locator (`[@k, p. 3–4]`).
+        r = _rewrite_bracket_cite(chop(m; head = 1, tail = 1), emit; figrefs = figrefs, figemit = figemit)
+        r === nothing ? m : r
     end)
     (isempty(citekeys) && isempty(figrefs)) && return t
     return replace(t, r"(?<![\w@/])@([\w:.\-]+)" => m -> begin
@@ -437,8 +439,11 @@ function _interp_typst_text(o)
     for ch in o.display
         if ch.mime == "text/latex"
             t = strip(String(copy(ch.data)))
-            startswith(t, "\$\$") && endswith(t, "\$\$") && length(t) >= 4 && return t[3:end-2]
-            startswith(t, "\$")  && endswith(t, "\$")  && length(t) >= 2 && return t[2:end-1]
+            # `chop`, not byte slicing: `$θ$` would index into the middle of the last character.
+            startswith(t, "\$\$") && endswith(t, "\$\$") && length(t) >= 4 &&
+                return chop(t; head = 2, tail = 2)
+            startswith(t, "\$")  && endswith(t, "\$")  && length(t) >= 2 &&
+                return chop(t; head = 1, tail = 1)
             return t
         end
     end
@@ -484,13 +489,7 @@ function _compfig_stager(c::Cell, dir::AbstractString, base::AbstractString, com
     end
 end
 
-# Re-emit a fence as a literal code block, with a backtick run long enough to survive a body that
-# contains one of its own.
-function _md_fence_block(lang::AbstractString, body::AbstractString)
-    b = rstrip(String(body), '\n')
-    ticks = "`"^max(3, maximum((length(m.match) for m in eachmatch(r"`+", b)); init = 2) + 1)
-    return string("\n\n", ticks, lang, "\n", b, "\n", ticks, "\n\n")
-end
+const _md_fence_block = ReportEngine._md_fence_block   # the one fence-source reconstruction (widgets.jl)
 
 # ── Admonitions → blockquotes ─────────────────────────────────────────────────────────────────────
 # The live renderer parses `!!! category "Title"` (CommonMark's `AdmonitionRule`) into a coloured
@@ -575,13 +574,20 @@ _rewrite_bracket_math(s) =
 # citations rewritten to sentinels for the preamble's cite rule. `compfig(i)` returns the staged
 # filename for the i-th interpolation's component figure, or `nothing` — the caller owns staging
 # because only it has the project dir (see `_build_typst_project`).
+#
+# `src` may be a FRAGMENT of the cell (a `---`-split slide chunk, or the body left after the hoisted
+# H1 was dropped). `_md_template` numbers a fragment's interpolations from 1, while `c.interp` and
+# `_component_slots` are numbered across the whole cell, so a fragment must say how many precede it:
+# that is `interpbase`. Get it wrong and the fragment silently renders an earlier one's value.
 function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{String}(),
-                       figrefs = Dict{String,Tuple{Int,String}}(), compfig = _ -> nothing)
+                       figrefs = Dict{String,Tuple{Int,String}}(), compfig = _ -> nothing,
+                       interpbase::Integer = 0)
     tmpl, exprs = ReportEngine._md_template(src)
     s = tmpl
     for i in 1:length(exprs)
-        o = i <= length(c.interp) ? c.interp[i] : nothing
-        s = replace(s, ReportEngine._interp_token(i) => _interp_typst_md(exprs[i], o, compfig(i)))
+        g = i + Int(interpbase)                      # this fragment's i-th ⇒ the cell's g-th
+        o = g <= length(c.interp) ? c.interp[g] : nothing
+        s = replace(s, ReportEngine._interp_token(i) => _interp_typst_md(exprs[i], o, compfig(g)))
     end
     s = _normalize_math_delims(s)
     s = _admonitions_to_quotes(s)
@@ -927,9 +933,12 @@ function _split_md_rules(src::AbstractString)
     return parts
 end
 
-# A slide: ordered body fragments `(cell, src_override)` (override is a `---`-split markdown
-# chunk, else `nothing` = use the whole cell) plus the `:notes` cells attached to it.
-const SlideFrag = Tuple{Cell,Union{String,Nothing}}
+# A slide: ordered body fragments plus the `:notes` cells attached to it. `src` is a `---`-split
+# markdown chunk, or `nothing` for the whole cell. `interpbase` is how many of the cell's `{{ }}`
+# interpolations precede this chunk: a chunk is numbered from 1 by `_md_template` while `Cell.interp`
+# is numbered across the whole cell, so the chunk has to carry where it starts. It is computed here,
+# where the chunks are cut in order, rather than left to whoever renders one.
+const SlideFrag = NamedTuple{(:cell, :src, :interpbase),Tuple{Cell,Union{String,Nothing},Int}}
 
 function _slide_segments(cells; level::Integer = 2)
     slides = NamedTuple{(:frags, :notes),Tuple{Vector{SlideFrag},Vector{Cell}}}[]
@@ -947,13 +956,16 @@ function _slide_segments(cells; level::Integer = 2)
         d = c.kind == MARKDOWN ? _first_heading_depth(c.source) : nothing
         starts = (:slide in c.flags) || (d !== nothing && d <= level)
         if c.kind == MARKDOWN && length(_split_md_rules(c.source)) > 1
+            base = 0                                  # interpolations consumed by the chunks so far
             for (j, part) in enumerate(_split_md_rules(c.source))
                 ((j == 1 && starts) || j > 1) && flush!()
-                isempty(strip(part)) || push!(frags, (c, String(part)))
+                isempty(strip(part)) ||
+                    push!(frags, (cell = c, src = String(part), interpbase = base))
+                base += _md_interp_count(part)        # counted even for a skipped blank chunk
             end
         else
             starts && flush!()
-            push!(frags, (c, nothing))
+            push!(frags, (cell = c, src = nothing, interpbase = 0))
         end
     end
     flush!()
@@ -1085,6 +1097,19 @@ function figure_index(report)
         startswith(label, "fig:") || (labels["fig:" * label] = (n, anchor))
     end
     return (; numbers, labels, capfor)
+end
+
+# How many `{{ }}` interpolations a markdown fragment consumes, numbered the way `Cell.interp` is.
+# NOT a scan for `{{`: `_desugar_fences` rewrites every language-tagged fence into an interpolation
+# too, so an ordinary ```julia block occupies an index exactly like an explicit `{{ }}`.
+_md_interp_count(src::AbstractString) = length(ReportEngine._md_template(String(src))[2])
+
+# The title cell's body copy with the hoisted H1 dropped, plus how many interpolations went with it.
+# `Cell.interp` is numbered across the WHOLE cell, so a body that no longer starts at the top no longer
+# starts at interpolation 1; the returned offset is what keeps source and interp list paired.
+function _body_after_hoisted_h1(c::Cell)
+    src = _strip_leading_h1(c.source)
+    return (src, _md_interp_count(c.source) - _md_interp_count(src))
 end
 
 # Drop the FIRST H1 line (and any blank lines it leaves at the top) from a markdown source — used to
@@ -1390,9 +1415,11 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                 print(io, "#grid(columns: (", join(fill("1fr", rowopen[c.id]), ", "), "), column-gutter: 1.2em, align: top,\n")
             inrow && print(io, "[")                   # each row cell is one grid slot
             if c.kind == MARKDOWN
-                src = c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source   # hoisted H1 → not in body
+                # hoisted H1 → not in body, and the interpolations it held come off the front too
+                src, ibase = c.id == fm.titlecell ? _body_after_hoisted_h1(c) : (c.source, 0)
                 md = _md_for_typst(c, src; citekeys = citekeys, figrefs = figidx.labels,
-                                   compfig = _compfig_stager(c, dir, base, compfigs, mediasz))
+                                   compfig = _compfig_stager(c, dir, base, compfigs, mediasz),
+                                   interpbase = ibase)
                 md = _stage_typst_md_media(md, dir, base, _proj_root(nb); sizes = mediasz)   # author-embedded images → staged files
                 if isempty(strip(md))
                     inrow || continue                # empty markdown: standalone → skip; in a row → empty slot
@@ -1434,11 +1461,16 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
 end
 
 # Emit one slide fragment (a whole cell, or a `---`-split markdown chunk) into the doc.
-function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, charttheme = "", override = false, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all", sizes = nothing, compfigs::_CompFigs = _NO_COMPFIGS)
-    c, srcoverride = frag                    # frag[2] is a per-frag SOURCE override (String/nothing), NOT the themed-render Bool `override`
+# `frag` is a `SlideFrag`-shaped NamedTuple, annotated loosely on purpose: NamedTuple type parameters
+# are INVARIANT, so a literal whose `src` is a concrete `String` (or `Nothing`) is not a subtype of
+# `SlideFrag`'s `Union{String,Nothing}` field, and a `::SlideFrag` annotation would reject every caller
+# that builds one inline rather than pushing it through a `Vector{SlideFrag}`.
+function _emit_slide_frag!(io::IO, dir, base, nb, frag::NamedTuple; theme, charttheme = "", override = false, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all", sizes = nothing, compfigs::_CompFigs = _NO_COMPFIGS)
+    c, srcoverride = frag.cell, frag.src     # `frag.src` is a per-frag SOURCE override (String/nothing), NOT the themed-render Bool `override`
     if c.kind == MARKDOWN
         md = _md_for_typst(c, srcoverride === nothing ? c.source : srcoverride; citekeys = citekeys,
-                           compfig = _compfig_stager(c, dir, base, compfigs, sizes))
+                           compfig = _compfig_stager(c, dir, base, compfigs, sizes),
+                           interpbase = frag.interpbase)
         md = _stage_typst_md_media(md, dir, base, _proj_root(nb); sizes = sizes)   # author-embedded images → staged files
         isempty(strip(md)) && return
         write(joinpath(dir, base * ".md"), md)
@@ -1487,14 +1519,14 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
         segs = _slide_segments(cells; level = level)
         for (si, seg) in enumerate(segs)
             # drop hoisted title/abstract cells and the bibliography (rendered as a closing slide)
-            frags = [f for f in seg.frags if !(f[1].id in fm.skip) && !(:bibliography in f[1].flags)]
+            frags = [f for f in seg.frags if !(f.cell.id in fm.skip) && !(:bibliography in f.cell.flags)]
             isempty(frags) && continue
             print(io, "#slide[\n")
             # Group consecutive `column=N` frags into side-by-side rows (anchored by the preceding
             # untagged frag), each rendered as a Typst `grid` slot — same layout as the doc flow.
             fragrows = Vector{Vector{Int}}()
             for fi in 1:length(frags)
-                (_cell_column(frags[fi][1]) >= 2 && !isempty(fragrows)) ?
+                (_cell_column(frags[fi].cell) >= 2 && !isempty(fragrows)) ?
                     push!(fragrows[end], fi) : push!(fragrows, Int[fi])
             end
             for row in fragrows
@@ -1503,8 +1535,13 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
                                    "), column-gutter: 1.2em, align: top,\n")
                 for fi in row
                     frag = frags[fi]
-                    # Strip the hoisted H1 from the implicit-title cell so it isn't repeated on a body slide.
-                    f = (frag[1].id == fm.titlecell && frag[2] === nothing) ? (frag[1], _strip_leading_h1(frag[1].source)) : frag
+                    # Strip the hoisted H1 from the implicit-title cell so it isn't repeated on a body
+                    # slide — taking the interpolation offset with it (see `_body_after_hoisted_h1`).
+                    f = frag
+                    if frag.cell.id == fm.titlecell && frag.src === nothing
+                        body, off = _body_after_hoisted_h1(frag.cell)
+                        f = (cell = frag.cell, src = body, interpbase = off)
+                    end
                     multi && print(io, "[")
                     _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme, charttheme = ct, override = override,
                                       show_source = show_source, include_params = include_params, citekeys = citekeys,

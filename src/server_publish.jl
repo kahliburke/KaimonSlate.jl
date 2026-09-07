@@ -400,8 +400,8 @@ function _doc_entry_is(nb::LiveNotebook, d)
 end
 
 "For THIS notebook: every site with `{member, isHome, targets, url}`, plus the known targets — the read
-model the notebook's Publish panel paints. Membership is matched by the site build's recorded source
-path (slug as a fallback for pre-migration builds); front page is the site's built home (`site_frontpage`)."
+model the notebook's Publish panel paints. Membership is matched on the notebook's stable `docid` alone
+(see `_doc_entry_is`); front page is the site's built home (`site_frontpage`)."
 function publish_sites_info(nb::LiveNotebook)
     store = PublishLedger.default_store()
     led = PublishLedger.load(store)
@@ -544,9 +544,9 @@ end
 # notebooks were re-exported. Best-effort per member — one failed rebuild is logged, the rest proceed.
 function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; on_event = nothing)
     man = _read_site_manifest(dir)
-    # Match members to open notebooks by source path, then slug, then TITLE (see `_doc_entry_is`) — so a
-    # manifest written before `source` was recorded, or under a CUSTOM slug, still resolves to its open
-    # notebook without a one-off re-publish.
+    # Match members to open notebooks on `docid` (see `_doc_entry_is`) — no path/slug/title heuristics, so
+    # a renamed doc or a CUSTOM slug still resolves. A manifest entry written before ids were recorded
+    # carries none and cannot match here; `publish_to_site!` is where such an entry gets re-linked.
     nbs = lock(hub.lock) do; collect(values(hub.notebooks)); end
     say(msg) = on_event === nothing || on_event(0, :status, msg)
     note(msg) = on_event === nothing || on_event(0, :log, msg)

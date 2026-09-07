@@ -93,6 +93,11 @@ export function setLiveState(id, s) {
   // Clearing is isDirty's job — it re-checks the text, so the mark lifts the moment the editor
   // agrees with the saved source, whether that came from running, undoing, or discarding.
   if (s === 'edited') markDirty(id);
+  // Only when it CHANGES. An editor's input handler calls this on every keystroke, and a fresh
+  // object each time notifies the signal, which re-runs the top-level render across the whole
+  // document for a value that is already what it was. `markDirty` and `clearEdited` beside it are
+  // guarded the same way.
+  if (liveStates.value[id] === s) return;
   liveStates.value = { ...liveStates.value, [id]: s };
 }
 
@@ -106,6 +111,13 @@ export function markDirty(id) { if (!localDirty.value[id]) localDirty.value = { 
 // in liveStates outranks everything in <Cell>, so without this the badge sat on `edited` until
 // the next server push. Deliberately not driven by cell state — clearing on a neighbour's
 // `fresh`/`running` push was observed dropping a genuine unsaved edit.
+// Drop ONE transient mark, and only if it is still the one we mean. A run that has finished must
+// stop reading `running`, while an `edited` mark from typing during the run has to survive — so this
+// takes the value it expects rather than clearing whatever is there.
+export function clearLiveState(id, expect) {
+  if (liveStates.value[id] !== expect) return;
+  const l = { ...liveStates.value }; delete l[id]; liveStates.value = l;
+}
 export function clearEdited(id) {
   if (localDirty.value[id]) { const d = { ...localDirty.value }; delete d[id]; localDirty.value = d; }
   if (liveStates.value[id] === 'edited') { const l = { ...liveStates.value }; delete l[id]; liveStates.value = l; }
@@ -122,4 +134,4 @@ export function isDirty(id, source) {
 
 // Bridge for the classic (non-module) scripts, which can't `import`. They call these;
 // Preact components import the signals directly above.
-window.slateStore = { nbState, selected, selectedSet, focus, editing, cells, title, worker, liveStates, localDirty, applyState, setSelected, setSelection, toggleInSelection, setFocus, setEditingCell, setLiveState, markDirty, clearEdited, isDirty, srcEq };
+window.slateStore = { nbState, selected, selectedSet, focus, editing, cells, title, worker, liveStates, localDirty, applyState, setSelected, setSelection, toggleInSelection, setFocus, setEditingCell, setLiveState, clearLiveState, markDirty, clearEdited, isDirty, srcEq };

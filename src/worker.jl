@@ -2126,6 +2126,11 @@ include(joinpath(@__DIR__, "defname.jl"))
 # package's files lazily — only on the first revision — so before any edit `mod_exs_infos` is
 # empty; the same disk parse for seed AND diff also keeps body-hashes directly comparable.
 const _SRC_DEFS = Dict{String,Dict{String,UInt64}}()
+# Two independent writers: `_seed_new_src_defs!` runs from `_src_digest` on whatever eval task is
+# computing a memo key (several at once, on real threads), and `_changed_names` runs on the src
+# watcher. Both rehash the Dict, so they need to be serialised. The file PARSE stays outside the
+# lock — it is the slow part, and the worst a concurrent parse costs is doing it twice.
+const _SRC_DEFS_LOCK = ReentrantLock()
 _file_path(pd, rpath) = try; joinpath(pd.info.basedir, String(rpath)); catch; String(rpath); end
 
 # (def-name → body-hash) for one source file — `file_defs` in defname.jl, alongside the extractor
@@ -2142,8 +2147,11 @@ function _seed_new_src_defs!()
     try
         for pd in values(R.pkgdatas), rpath in pd.info.files
             path = _file_path(pd, rpath)
-            haskey(_SRC_DEFS, path) && continue
-            _SRC_DEFS[path] = _file_defs(path)
+            lock(_SRC_DEFS_LOCK) do; haskey(_SRC_DEFS, path); end && continue
+            defs = _file_defs(path)                      # parsed off the lock
+            lock(_SRC_DEFS_LOCK) do
+                get!(_SRC_DEFS, path, defs)              # a racing seeder may have won; either is fine
+            end
         end
     catch
     end
@@ -2159,8 +2167,8 @@ function _changed_names(queue)
         try
             pd, rpath = item
             path = _file_path(pd, rpath)
-            newdefs = _file_defs(path)
-            olddefs = get(_SRC_DEFS, path, nothing)
+            newdefs = _file_defs(path)                   # parsed off the lock
+            olddefs = lock(_SRC_DEFS_LOCK) do; get(_SRC_DEFS, path, nothing); end
             if olddefs === nothing
                 union!(changed, keys(newdefs))                 # unseeded → report all (first edit)
             else
@@ -2171,7 +2179,7 @@ function _changed_names(queue)
                     haskey(newdefs, nm) || push!(changed, nm)
                 end
             end
-            _SRC_DEFS[path] = newdefs
+            lock(_SRC_DEFS_LOCK) do; _SRC_DEFS[path] = newdefs; end
         catch
         end
     end

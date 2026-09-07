@@ -15,7 +15,7 @@
   const raw = [];            // raw Pkg output lines (the collapsible build log), bounded
   const RAW_MAX = 300;
 
-  const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const esc = s => window.slateEscHtml(s);
 
   // A structured status frame arrived.
   window.onPrepare = function (json) {

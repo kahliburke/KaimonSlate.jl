@@ -39,7 +39,7 @@
 
   const now = () => performance.now();
   const fmt = (ms) => ms < 1000 ? Math.round(ms) + 'ms' : (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
-  const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const esc = s => window.slateEscHtml(s);
   const setLive = (id, s) => { try { window.slateStore && window.slateStore.setLiveState(id, s); } catch (_) {} };
 
   // A batch is "active" while there are cells left to run (or any cell is still executing). Pill

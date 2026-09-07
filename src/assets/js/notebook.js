@@ -119,7 +119,13 @@ function Editor({ cell }) {
       const p = host.querySelector('.cm-placeholder'); if (p) p.remove();
       let primed = false;
       view = window.mkEditor(host, {
-        doc: cell.source, cellId: cell.id, markdown: cell.kind === 'md',
+        // Seed from the LIVE source too, for the same reason the comment below gives. This effect has
+        // `[]` deps, so `mount` closes over the FIRST render's `cell` and may not run until the reader
+        // scrolls to it — by which time an agent edit or a file-watcher refresh can have landed, which
+        // the Cell effect wrote to `srcMap` and the placeholder precisely BECAUSE no editor existed
+        // yet. Seeding from the closure re-opened the cell at its old text.
+        doc: (window.srcMap && window.srcMap[cell.id] != null) ? window.srcMap[cell.id] : cell.source,
+        cellId: cell.id, markdown: cell.kind === 'md',
         // Compare against the LIVE server source (srcMap), NOT the mount-time `cell.source` closure —
         // else applying an agent/external edit via edSetText (which fires this) would look like a USER
         // edit, falsely marking the cell `edited` + backing it up, which later pops phantom reconcile
@@ -162,13 +168,16 @@ function Editor({ cell }) {
     const io = new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) mount(); }, { rootMargin: '600px 0px' });
     io.observe(host);
     window.hydrateSoon && window.hydrateSoon('ed:' + cell.id, mount);   // background fallback for off-screen cells
-    // A workbook mounts NOW rather than waiting to be scrolled into view. Lazy mounting is there to
-    // avoid building an editor for every cell of a long document; a workbook has few, and each is a
-    // cell the reader is meant to type in. Waiting costs them a visible gap, because a full
-    // re-render unmounts the editors and the callback that would rebuild this one queues behind
-    // whatever the page is doing (finishing their run), leaving the placeholder on screen until it
-    // drains. Placed after the observer exists: `mount` disconnects it.
-    if (_app.workbook) mount();
+    // A workbook mounts an ON-SCREEN exercise immediately instead of waiting for the observer to be
+    // serviced, which can queue behind whatever the page is already doing and leave the reader
+    // looking at a cell with no editor in it. Strictly the visible ones: mounting every tagged cell
+    // up front is one long synchronous build of every editor in the document, which is the cost the
+    // lazy path exists to spread out. Off-screen cells still wait for the observer.
+    if (_app.workbook) {
+      const r = host.getBoundingClientRect();
+      const margin = window.innerHeight;   // matches the observer's rootMargin in spirit, not exactly
+      if (r.bottom > -margin && r.top < window.innerHeight + margin) mount();
+    }
     return () => {
       try { io.disconnect(); } catch (_) {}
       if (window._editorMount) delete window._editorMount[cell.id];
@@ -385,12 +394,14 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     if (el && collapsed !== wasCollapsed.current) { wasCollapsed.current = collapsed; _animateCollapse(el, collapsed); }
   }, [collapsed]);
 
-  // Dispose this cell's ECharts when it unmounts; charts otherwise update in place.
+  // Dispose this cell's ECharts and animation players when it unmounts; both otherwise update in place.
   useEffect(() => () => {
     const cs = window.charts[c.id];
     if (cs) { cs.forEach(i => { try { i.dispose(); } catch (_) {} }); delete window.charts[c.id]; }
     const el = ref.current;   // inline `{{ echart }}` instances live on the nodes, not in window.charts
     if (el) el.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} } });
+    // A player owns a WebGL texture array, so an undisposed one holds GPU memory for the page's life.
+    window.disposeAnimations && window.disposeAnimations(c.id);
     // Cancel any pending debounced snapshot (core.js _snapCell) — its closure holds a reference
     // to the now-disposed chart instances and would otherwise fire against a removed cell.
     if (window._cancelSnap) window._cancelSnap(c.id);
@@ -496,9 +507,10 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
         // Dispose any inline `{{ echart }}` instances before the innerHTML swap orphans their nodes
         // (their ECharts instance + zrender would otherwise leak on every markdown re-render).
         md.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} e._inst = null; } });
-        last.current.out = h; window._swapOutput(md, h); window.typesetVisible(md, c.id);
+        last.current.out = h; window._swapOutput(md, h, '', () => window.typesetVisible(md, c.id));
       }
       if ((c.controls || []).length) window.syncControlValuesSoon(c);
+      window.slateMarkBlank && window.slateMarkBlank(el, c);
       return;
     }
     // A cell you're actively editing is YOURS until you resolve. When its editor holds unsaved edits
@@ -521,8 +533,13 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     let _landed = true;
     const out = el.querySelector('.output');
     if (!_conflicted && !_stale && c.output !== last.current.out) {
-      if (out) { last.current.out = c.output; window._swapOutput(out, c.output, c.live); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
-      else _landed = false;                       // host not committed yet — retry on the next pass
+      if (out) {
+        last.current.out = c.output;
+        // Typeset and clamp AFTER the swap has decoded, not beside it (main): doing them inline ran
+        // them against the outgoing content.
+        window._swapOutput(out, c.output, c.live,
+                           () => { window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); });
+      } else _landed = false;                     // host not committed yet — retry on the next pass
     }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     window._applyMissingPkg && window._applyMissingPkg(c);   // "Package X not found" → one-click install banner
@@ -549,6 +566,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // applied and leaving it blank until its next change.
     if (!_conflicted && !_stale && _landed) window.slateRevMark && window.slateRevMark(c);
     if ((c.binds && c.binds.length) || (c.controls && c.controls.length)) window.syncControlValuesSoon(c);
+    // Last: whether this cell shows anything is only knowable once its output, charts, tables and
+    // controls are in place. The reading view collapses `.cell-blank` (see notebook.css).
+    window.slateMarkBlank && window.slateMarkBlank(el, c);
 
     // Only a plain code cell has the always-on <Editor> to refresh once it becomes visible.
     const visible = !window.hasBinds(c) && !c.collapsed && !c.codeHidden;

@@ -96,8 +96,9 @@ const humBytes = b => b == null ? '—' :
     return spellOf(o);
   };
 
-  const esc = s => String(s).replace(/[&<>"]/g, ch =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+  // Was a local copy that missed `'` — one helper now, so an apostrophe in a sweep or cluster name
+  // is escaped here the same as everywhere else.
+  const esc = s => window.slateEscHtml(s);
 
   const cellTags = id => {
     const st = window.__slateState || window.nbState || {};

@@ -70,6 +70,43 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
         @test occursin("part two", segs[2].frags[1][2])
     end
 
+    @testset "a --- chunk resolves ITS OWN interpolations" begin
+        # `_md_template` numbers a fragment's interpolations from 1, but `Cell.interp` is numbered
+        # across the whole cell — so a chunk has to carry how many precede it or every chunk after the
+        # first silently renders an earlier chunk's value. The fence matters: `_desugar_fences` turns
+        # every tagged fence into an interpolation too, so counting `{{` would put the offset at 1 here
+        # and still land on the wrong entry.
+        src = "#%% md id=s\n## One\n\n```julia\nx = 1\n```\n\nalpha {{ a }}\n\n---\n\n## Two\n\nbeta {{ b }}\n"
+        c = RE.parse_report(src).cells[end]
+        out(v) = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], v, nothing, nothing, 1.0)
+        c.interp = [out(""), out("111"), out("222")]        # slot 1 is the fence (no captured value)
+        segs = NS._slide_segments([c]; level = 2)
+        @test length(segs) == 2
+        f1, f2 = segs[1].frags[1], segs[2].frags[1]
+        @test (f1.interpbase, f2.interpbase) == (0, 2)
+        m1 = NS._md_for_typst(c, f1.src; interpbase = f1.interpbase)
+        m2 = NS._md_for_typst(c, f2.src; interpbase = f2.interpbase)
+        @test occursin("111", m1) && !occursin("222", m1)
+        @test occursin("222", m2) && !occursin("111", m2)
+        @test occursin("x = 1", m1)                          # unclaimed fence still prints as code
+        # The offset is what does the work. Drop it and chunk two reads slot 1 — here the fence, which
+        # captured nothing — so `beta` renders with its value missing entirely rather than merely wrong.
+        @test !occursin("222", NS._md_for_typst(c, f2.src; interpbase = 0))
+    end
+
+    @testset "dropping the hoisted H1 shifts the interpolation base" begin
+        # The title cell's H1 is hoisted into the title block and removed from the body. Anything
+        # interpolated in that line goes with it, so the body no longer starts at interpolation 1.
+        src = "#%% md id=t\n# Report for {{ who }}\n\nbody says {{ what }}\n"
+        c = RE.parse_report(src).cells[end]
+        out(v) = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], v, nothing, nothing, 1.0)
+        c.interp = [out("ACME"), out("hello")]
+        body, base = NS._body_after_hoisted_h1(c)
+        @test base == 1 && !occursin("Report for", body)
+        md = NS._md_for_typst(c, body; interpbase = base)
+        @test occursin("hello", md) && !occursin("ACME", md)
+    end
+
     @testset "slide/notes are known tags and round-trip" begin
         @test :slide in RE._KNOWN_TAGS
         @test :notes in RE._KNOWN_TAGS

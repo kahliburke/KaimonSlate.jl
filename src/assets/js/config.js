@@ -13,10 +13,7 @@ function toggleConfig() {
   if (_configOpen) loadConfig();
 }
 
-function _cfgEsc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g,
-    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
+const _cfgEsc = s => window.slateEscHtml(s);
 
 // Reap the running agent so a model/permission change binds on the NEXT message (transcript kept).
 // Returns false if the user backs out of stopping an in-flight turn.

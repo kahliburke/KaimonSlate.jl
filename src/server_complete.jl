@@ -518,15 +518,31 @@ end
 # The notebook's project root (its parent project dir — the `@asset` base). "" ⇒ in-process / no project.
 _proj_root(nb::LiveNotebook) = String(get(nb.report.meta, "assetbase", ""))
 
+# Resolve `rel` under `root` and confine it there: the result must BE `root` or sit beneath it.
+# Returns the normalized absolute path, or `nothing` if it escapes.
+#
+# The single implementation of the containment rule. It had been hand-inlined at six call sites in
+# three variants, and three of those tested `startswith(p, root * "/")` with a hard-coded forward
+# slash — on Windows `normpath` emits backslashes, so that comparison is false for every path inside
+# the root and the guard rejects everything (or, written the other way round, admits everything).
+# Comparing against `path_separator` is what makes it hold on both.
+function _confined_path(root::AbstractString, rel::AbstractString)
+    isempty(root) && return nothing
+    rp = normpath(String(root))
+    r = strip(String(rel), ['/', '\\'])
+    # `joinpath(rp, "")` keeps a trailing separator, so an empty `rel` would hand back `root/` where
+    # every other input yields a clean path. Return the root itself.
+    ap = isempty(r) ? rp : normpath(joinpath(rp, r))
+    sep = Base.Filesystem.path_separator
+    (ap == rp || startswith(ap, endswith(rp, sep) ? rp : rp * sep)) || return nothing
+    return ap
+end
+
 # Confine a client-supplied RELATIVE path to `root`: reject absolute paths and any `..` escape.
 # Returns the normalized absolute path, or "" if the root is unset or the path escapes.
 function _safe_proj_path(root::AbstractString, rel::AbstractString)
     (isempty(root) || isempty(rel) || isabspath(rel)) && return ""
-    rp = normpath(String(root))
-    ap = normpath(joinpath(rp, String(rel)))
-    sep = Base.Filesystem.path_separator
-    (ap == rp || startswith(ap, endswith(rp, sep) ? rp : rp * sep)) || return ""
-    return ap
+    return something(_confined_path(root, rel), "")
 end
 
 # Project tree under `root`: dirs (that contain something) before files, alphabetical, skipping
@@ -900,10 +916,8 @@ function _make_router(h::Hub)
             return nothing
         end
         root === nothing && return HTTP.Response(404, "no such package asset dir (package loaded?)")
-        rootn = normpath(root)
-        p = normpath(joinpath(rootn, strip(sub, '/')))
-        # stay inside the vendored dir (accept either separator so the guard holds on Windows too)
-        (p == rootn || startswith(p, rootn * "/") || startswith(p, rootn * "\\")) || return HTTP.Response(404)
+        p = _confined_path(root, sub)             # stay inside the vendored dir
+        p === nothing && return HTTP.Response(404)
         isfile(p) || return HTTP.Response(404, "no such asset")
         bytes = read(p)
         # `provide_assets!` serves a STABLE but MUTABLE path — the file on disk changes when the package is
@@ -959,10 +973,8 @@ function _make_router(h::Hub)
         nb === nothing && return HTTP.Response(404, "no such notebook")
         base = String(get(nb.report.meta, "assetbase", ""))
         isempty(base) && return HTTP.Response(404, "notebook has no asset root")
-        rootn = normpath(base)
-        p = normpath(joinpath(rootn, strip(sub, '/')))
-        # stay inside the project dir (accept either separator so the guard holds on Windows too)
-        (p == rootn || startswith(p, rootn * "/") || startswith(p, rootn * "\\")) || return HTTP.Response(404)
+        p = _confined_path(base, sub)            # stay inside the project dir
+        p === nothing && return HTTP.Response(404)
         isfile(p) || return HTTP.Response(404, "no such asset")
         HTTP.Response(200, ["Content-Type" => _site_ctype(p), "Cache-Control" => "no-store"], read(p))
     end)
@@ -1774,7 +1786,12 @@ function _make_router(h::Hub)
             return _app_denied(req.target)
         end
         edit_cell!(nb, cid, get(b, "source", ""); force = get(b, "force", false) === true)
-        _json(state_json(nb))
+        # The receipt, not the notebook. The result of this run already reaches the browser over the
+        # live `celldone:` push, so answering with full state sends every cell's output a second time
+        # — the dominant cost of a run on a large document. `revs` lets the client notice a push that
+        # never arrived and pull `/state` once (see `applyAck`), which is the cover the full reply
+        # used to give for free. Same trade the bind route already makes.
+        _json(_ack_json(nb))
     end))
     HTTP.register!(router, "POST", "/api/{id}/complete", req -> _withnb(h, req, nb -> begin
         body = _body(req)
@@ -3049,11 +3066,13 @@ _wsconn(cap::Int) = _WSConn(Channel{Union{String,Vector{UInt8}}}(cap), Threads.A
 # WebSocket is the one thing a test of them does not need.
 _raw_send(ws, frame) = HTTP.WebSockets.send(ws, frame)
 
-# Drain whatever is queued, in order, until the channel closes. `wait` parks until something is
-# queued WITHOUT removing it, so a frame only ever leaves the queue with the write lock held — which
-# is what makes the fast path's emptiness check in `_ws_send!` trustworthy. Taking first and locking
-# second would leave a window where the queue reads empty while a frame is still in flight, and a
-# direct send would overtake it: an audio block delivered out of order.
+# Drain whatever is queued, in order, until the channel closes: one wake clears the whole backlog, so a
+# burst costs one wakeup rather than one per frame. `wait` parks until something is queued WITHOUT
+# removing it, so a frame only leaves the queue with the write lock held.
+#
+# This is now the ONLY writer — `_ws_send!` always goes through the queue, so ordering follows from the
+# single drain task rather than from the lock. `wlock` is kept because these are concurrency invariants
+# worth being able to test against a stand-in socket (see `_raw_send`).
 function _ws_drain!(c::_WSConn)
     while true
         wait(c.out)
@@ -3629,6 +3648,7 @@ function stop_hub(h::Hub)
         try; shutdown!(nb.kernel); catch; end
         _teardown_region!(nb)
     end
+    _stop_run_supervisor!()          # its closure holds THIS hub — see `_ensure_run_supervisor!`
     h.server === nothing || close(h.server)
     return nothing
 end

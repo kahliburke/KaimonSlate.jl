@@ -11,6 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { loadEscHtml } from './_esc_src.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(here, '..', '..', 'src', 'assets', 'js', 'agent.js'), 'utf8');
@@ -33,7 +34,9 @@ function sliceConst(name) {
   return m[0];
 }
 
-const mdLite = new Function(`
+// `_esca` delegates to the shared escaper on `window`, which node has no notion of — inject the REAL
+// one from core.js rather than a stand-in, so this test fails if that implementation regresses too.
+const mdLite = new Function('window', `
   ${sliceConst('_esca')}
   ${sliceConst('_urlScheme')}
   const _safeHref = u => {
@@ -43,7 +46,7 @@ const mdLite = new Function(`
   };
   ${sliceFn('mdLite')}
   return mdLite;
-`)();
+`)({ slateEscHtml: loadEscHtml() });
 
 const fails = [];
 const eq = (label, got, want) => { if (got !== want) fails.push(`${label}:\n  got  ${got}\n  want ${want}`); };

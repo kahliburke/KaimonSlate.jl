@@ -146,6 +146,15 @@ function _fence_call(expr::AbstractString)
     return (lang = ast.args[2]::String, body = ast.args[3]::String, info = ast.args[4]::String)
 end
 
+# Re-emit a fence as a literal code block, with a backtick run long enough to survive a body that
+# contains one of its own. Lives beside `_fence_call` because every renderer needs the same fallback:
+# an unclaimed language must come out indistinguishable from a fence that was never rewritten.
+function _md_fence_block(lang::AbstractString, body::AbstractString)
+    b = rstrip(String(body), '\n')
+    ticks = "`"^max(3, maximum((length(m.match) for m in eachmatch(r"`+", b)); init = 2) + 1)
+    return string("\n\n", ticks, lang, "\n", b, "\n", ticks, "\n\n")
+end
+
 function _md_template(src::AbstractString)
     s = _desugar_fences(src); out = IOBuffer(); exprs = String[]
     i = firstindex(s); n = lastindex(s)
@@ -443,7 +452,6 @@ function MultiCheckBox(options, default = Any[]; label = nothing)  # checkbox li
     specs, labeled = _norm_options(options)
     return Widget("multicheck", _opt_params(label, specs, labeled), Any[d isa Pair ? d.first : d for d in default])
 end
-_is_multi(kind) = kind == "multiselect" || kind == "multicheck"
 ColorPicker(default::AbstractString = "#3aa0ff"; label = nothing) = Widget("color", _wparams(label), String(default))
 DateField(default = ""; label = nothing) = Widget("date", _wparams(label), string(default))
 TimeField(default = ""; label = nothing) = Widget("time", _wparams(label), string(default))
@@ -1650,10 +1658,24 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
         tmpl, exprs = $(_md_template)(String(str))
         tokfn = $(_interp_token)
         mdparse = $(Markdown.parse)
+        fencefn = $(_fence_call)
+        fenceblk = $(_md_fence_block)
         blk = Expr(:block, :(local __md_s = $tmpl))
         for (i, e) in enumerate(exprs)
             tok = tokfn(i)
-            push!(blk.args, :(__md_s = replace(__md_s, $tok => string($(esc(Base.Meta.parse(e)))))))
+            # `_md_template` rewrites EVERY tagged fence into an interpolation, and an unclaimed
+            # language answers `nothing`. Interpolating that gives the literal text "nothing" where a
+            # ```julia block should be, so fall back to the block's own source — the same fallback the
+            # live renderer and the Typst exporter make, so a standalone run reads identically.
+            fc = fencefn(e)
+            if fc === nothing
+                push!(blk.args, :(__md_s = replace(__md_s, $tok => string($(esc(Base.Meta.parse(e)))))))
+            else
+                src = fenceblk(fc.lang, fc.body)
+                push!(blk.args, :(local __md_v = $(esc(Base.Meta.parse(e)))))
+                push!(blk.args, :(__md_s = replace(__md_s, $tok =>
+                    (__md_v === nothing ? $src : string(__md_v)))))
+            end
         end
         push!(blk.args, Expr(:call, $(_standalone_show_md), Expr(:call, mdparse, :__md_s)))
         blk

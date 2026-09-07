@@ -32,8 +32,14 @@ content_type(p) = get(MIME_BY_EXT, lowercase(splitext(p)[2]), "application/octet
 # rejecting path traversal. Returns the absolute file path or nothing.
 function resolve_path(target::AbstractString)
     path = HTTP.URIs.unescapeuri(first(split(target, '?')))
-    full = normpath(joinpath(ROOT, lstrip(path, '/')))
-    (full == ROOT || startswith(full, ROOT * "/")) || return nothing   # traversal guard
+    root = normpath(ROOT)
+    full = normpath(joinpath(root, strip(path, ['/', '\\'])))
+    # Traversal guard. Compared against the platform separator, not a hard-coded "/": `normpath`
+    # emits backslashes on Windows, where a "/"-only test never matches a path inside the root.
+    # (This file ships INSIDE a published site and runs standalone, so it carries its own copy of
+    # the rule rather than calling the server's `_confined_path`.)
+    sep = Base.Filesystem.path_separator
+    (full == root || startswith(full, endswith(root, sep) ? root : root * sep)) || return nothing
     if isdir(full)
         idx = joinpath(full, "index.html")
         return isfile(idx) ? idx : nothing

@@ -20,12 +20,26 @@
 #   'V'                              → reply "2" — protocol version probe. A v1 server answers
 #                                      "err: unknown cmd", telling a hub to stay on 'P' single-frame
 #                                      puts (a multipart 'p' would EFSM-wedge it).
+#   'C'                              → reply: comma-joined capability tokens this server understands.
+#                                      New abilities are announced HERE rather than by bumping 'V',
+#                                      whose reply senders compare for equality with "2" — a bump
+#                                      would silently drop every existing sender to the v1 copy path.
+#                                      An older server answers "err: unknown cmd", which reads as
+#                                      "no capabilities" without a special case.
 #   'H' <hex,hex,…>                  → reply: comma-joined hashes the server DOESN'T have (dedup).
-#   'P' <64-hex><u8 last><chunk…>    → reply "ok"/"done"/"err:…" — single-frame put; chunks stream
+#   'P' <64-hex><u8 flags><chunk…>   → reply "ok"/"done"/"err:…" — single-frame put; chunks stream
 #                                      into a tmp, sha256-verified on the last, atomic-renamed into
 #                                      the CAS: a corrupt/truncated transfer never lands.
-#   'p' <64-hex><u8 last> ‖ <chunk>  → same put, TWO frames: 66-byte header + a raw payload frame
+#   'p' <64-hex><u8 flags> ‖ <chunk> → same put, TWO frames: 66-byte header + a raw payload frame
 #                                      (the sender may zero-copy it over an mmap).
+#
+# Put flags (the byte after the hash) are a BITFIELD: 0x01 = last chunk, 0x02 = first chunk
+# ("restart" capability). Older code wrote 0x00/0x01 and tested the byte with `== 0x01`, so the low
+# bit keeps its old meaning and an old sender is read correctly. 0x02 exists because the wire
+# otherwise gives a receiver no way to tell a CONTINUATION from a RESTART: a transfer that died
+# mid-blob leaves a partial tmp, and the retry used to append to it and then fail sha verification
+# for that hash forever. A sender only sets it after seeing "restart" in the 'C' reply, so a new
+# sender never hands an old server a flag byte it would misread as "not last".
 #   'G' <64-hex>:<offset>:<len>      → PULL one chunk (the reverse direction). TWO reply frames:
 #                                      "ok <total>" (or "err: …" alone) + the payload, sent
 #                                      zero-copy over an mmap of the blob. RANGE-ADDRESSED — the
@@ -68,7 +82,22 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
     open_tmps = Dict{String,Tuple{IOStream,String}}()   # hash → (io, tmppath)
     # One put chunk (either framing): append to the blob's tmp; on the last chunk verify the sha
     # and atomically land it in the CAS.
-    put_chunk! = function (h::String, last::Bool, writechunk!)
+    put_chunk! = function (h::String, last::Bool, writechunk!; first::Bool = false)
+        # Content-addressed: a blob already in the CAS is BY DEFINITION the bytes being offered, so a
+        # re-push (a sender that retried after the land, or two senders racing the same content) is
+        # answered without opening a tmp. Without this the second sender appends to a fresh tmp,
+        # re-lands identical bytes, and pays the whole transfer to do it.
+        MemoStore.has_blob(root, h) && return last ? "done" : "ok"
+        # A first chunk means the sender is starting this blob over, so whatever is half-written under
+        # this hash is from an abandoned attempt. Drop it: appending to it is what made a retried
+        # transfer fail sha verification every time from then on.
+        if first
+            prev = pop!(open_tmps, h, nothing)
+            if prev !== nothing
+                try; close(prev[1]); catch; end
+                try; rm(prev[2]; force = true); catch; end
+            end
+        end
         io, tmp = get!(open_tmps, h) do
             bdir = joinpath(root, "blobs"); mkpath(bdir)
             t = tempname(bdir)
@@ -78,6 +107,9 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
         last || return "ok"
         close(io); delete!(open_tmps, h)
         got = MemoStore.sha_file_hex(tmp)
+        # A mismatch means the accumulated bytes are not `h` — most often a sender that restarted a
+        # blob mid-flight, whose second attempt appended to this partial. Drop it so the NEXT attempt
+        # starts from an empty tmp instead of failing forever on the same wreckage.
         got == h || (rm(tmp; force = true); return "err: hash mismatch (got $got)")
         dest = MemoStore.blob_path(root, h)
         mkpath(dirname(dest)); mv(tmp, dest; force = true)
@@ -97,15 +129,17 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
                 cmd = Char(data[1])
                 if cmd == 'V'
                     "2"
+                elseif cmd == 'C'
+                    "restart"          # understands the 0x02 first-chunk put flag
                 elseif cmd == 'H'
                     hs = split(String(copy(data))[2:end], ","; keepempty = false)
                     join([h for h in hs if !MemoStore.has_blob(root, String(h))], ",")
                 elseif cmd == 'p'
-                    h = String(copy(data[2:65])); last = data[66] == 0x01
+                    h = String(copy(data[2:65])); fl = data[66]
                     payload = length(frames) >= 2 ? frames[2] : Z.Message()
-                    put_chunk!(h, last, io -> GC.@preserve payload begin
+                    put_chunk!(h, (fl & 0x01) != 0x00, io -> GC.@preserve payload begin
                         unsafe_write(io, pointer(payload), length(payload))
-                    end)
+                    end; first = (fl & 0x02) != 0x00)
                 elseif cmd == 'G'
                     parts = split(String(copy(data))[2:end], ':')
                     h = String(parts[1])
@@ -126,8 +160,9 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
                     end
                 elseif cmd == 'P'
                     d = copy(data)
-                    h = String(d[2:65]); last = d[66] == 0x01
-                    put_chunk!(h, last, io -> write(io, @view d[67:end]))
+                    h = String(d[2:65]); fl = d[66]
+                    put_chunk!(h, (fl & 0x01) != 0x00, io -> write(io, @view d[67:end]);
+                               first = (fl & 0x02) != 0x00)
                 elseif cmd == 'M'
                     s = String(copy(data))[2:end]
                     nl = findfirst('\n', s)
@@ -159,6 +194,14 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
             end
         end
     finally
+        # A sender that vanished mid-blob leaves its tmp open. Nothing will ever finish it, so releasing
+        # the handle and the partial file here is the difference between a bounded server and one that
+        # accumulates open descriptors and half-blobs for as long as it runs.
+        for (_, (io, tmp)) in open_tmps
+            try; close(io); catch; end
+            try; rm(tmp; force = true); catch; end
+        end
+        empty!(open_tmps)
         try; close(sock); catch; end
     end
     return nothing

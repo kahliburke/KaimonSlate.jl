@@ -20,6 +20,17 @@
     if (!host) return false;
     const specs = c.animations || [];
     let insts = players[c.id] || (players[c.id] = []);
+    // Reconcile against the ARRAY as well as the DOM. A cell remounts under the same id whenever it
+    // is re-parented (gaining or losing a `column=N` tag moves it in or out of the row wrapper), and
+    // it comes back with an empty `.anim` host while `players[id]` still holds the old players. The
+    // two counts then disagree, the loops below mount fresh boxes, and `setManifest` goes to the
+    // OLD players — which are attached to detached nodes, so the new boxes stay blank and the old
+    // frame stacks are never released. Start over when they have drifted apart.
+    if (insts.length !== host.children.length) {
+      insts.forEach(p => p && p.dispose());
+      insts.length = 0;
+      host.innerHTML = '';
+    }
     while (host.children.length > specs.length) {                 // dispose extras
       host.removeChild(host.lastChild);
       const p = insts.pop(); p && p.dispose();
@@ -32,6 +43,16 @@
     }
     specs.forEach((s, i) => insts[i].setManifest(s));
     return true;
+  };
+
+  // Release a cell's players and forget them. Called from the cell's unmount cleanup, beside the
+  // inline-chart disposal — a frame stack is a WebGL texture array, so an unreleased one holds real
+  // GPU memory for the life of the page.
+  window.disposeAnimations = function disposeAnimations(cellId) {
+    const insts = players[cellId];
+    if (!insts) return;
+    insts.forEach(p => { try { p && p.dispose(); } catch (_) {} });
+    delete players[cellId];
   };
 
   const VERT = `#version 300 es

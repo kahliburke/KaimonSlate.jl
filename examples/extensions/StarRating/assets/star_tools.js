@@ -22,13 +22,14 @@
     v.focus();
   };
 
-  // (2) Editor extension: a CM6 keymap that inserts ★ at the cursor. `ctx = { markdown, cellId }`;
-  // return [] for markdown cells so it only augments code editors. `window.CM6` is the host's bundled
-  // CodeMirror surface (keymap, EditorView, …) — an extension MUST build against it, not its own copy.
+  // (2) Editor extension: a CM6 keymap that inserts ★ at the cursor. `ctx = { markdown, cellId, lang }`;
+  // return [] for markdown and for a web cell's panes so it only augments Julia editors. `window.CM6`
+  // is the host's bundled CodeMirror surface (keymap, EditorView, …) — an extension MUST build
+  // against it, not its own copy.
   var registerEditorExt = function () {
     if (!window.slateRegisterEditorExtension || !window.CM6) return false;
     window.slateRegisterEditorExtension(function (ctx) {
-      if (ctx.markdown) return [];
+      if (ctx.markdown || ctx.lang) return [];   // ctx.lang names a web cell's pane; absent on a Julia cell
       return window.CM6.keymap.of([{
         key: "Ctrl-Alt-8",   // 8 = '*' — insert a star at the cursor
         run: function (view) {

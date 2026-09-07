@@ -74,7 +74,7 @@ function dlg(message, buttons, opts) {
     const pr = row.querySelector('.primary') || row.lastChild; if (pr) pr.focus();
   });
 }
-const _escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const _escHtml = s => window.slateEscHtml(s);
 const confirmDark = (msg, ok, cls) => dlg(msg, [{ label: 'Cancel', value: false }, { label: ok || 'OK', value: true, cls: cls || 'primary' }]);
 const alertDark = msg => dlg(msg, [{ label: 'OK', value: true, cls: 'primary' }]);
 // These are `const`s in a classic script, so they are NOT properties of `window` and an ES module

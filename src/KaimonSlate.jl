@@ -446,11 +446,7 @@ function set_configured_port!(port::Integer)
     p = Int(port)
     cfg = _slate_config()
     p > 0 ? (cfg["port"] = p) : delete!(cfg, "port")
-    try
-        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
-    catch e
-        @warn "slate: could not persist port setting" exception = e
-    end
+    _persist_slate_config!(cfg)
     return p
 end
 

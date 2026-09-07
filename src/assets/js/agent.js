@@ -70,13 +70,13 @@ function setWorking(on) {
   if (b) b.classList.toggle('pulse', on && !open);
   renderAgentMsgs();
 }
-const _esca = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const _esca = s => window.slateEscHtml(s);
 // URL guards for agent-authored content (LLM/tool text can reflect untrusted repo data): detect the
 // scheme the way a browser would — after stripping control/whitespace chars, so `java\tscript:` can't
 // slip past — and block anything but the allowlisted schemes, then neutralize quotes so a crafted
 // link/image can't break out of the href/src attribute.
 const _urlScheme = s => { const m = String(s == null ? '' : s).replace(/[\x00-\x20]+/g, '').match(/^([a-z][a-z0-9+.-]*):/i); return m ? m[1].toLowerCase() : ''; };
-const _safeHref = u => {   // arrives already &<>-escaped from _esca; only scheme + quotes remain
+const _safeHref = u => {   // arrives already HTML-escaped from _esca; only the scheme remains to check
   const sc = _urlScheme(u);
   if (sc && !['http', 'https', 'mailto'].includes(sc)) return '#';
   return String(u).replace(/"/g, '%22').replace(/'/g, '%27');
@@ -84,7 +84,7 @@ const _safeHref = u => {   // arrives already &<>-escaped from _esca; only schem
 const _safeImgSrc = u => {
   const sc = _urlScheme(u);
   if (sc && !['http', 'https', 'data'].includes(sc)) return '';
-  return String(u == null ? '' : u).replace(/[&"'<>]/g, c => ({ '&': '&amp;', '"': '&quot;', "'": '&#39;', '<': '&lt;', '>': '&gt;' }[c]));
+  return window.slateEscHtml(u);
 };
 // Deterministic hue per crew label so each agent gets a stable lane color.
 function _crewHue(name) { let h = 0; for (const c of String(name)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }

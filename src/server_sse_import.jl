@@ -383,8 +383,10 @@ function _start_watcher!(nb::LiveNotebook)
     # `@asset` reactivity: watch the files cells read via `@asset` → on a content change, recompute
     # the readers (server_asset_changed). Event-driven (one short `watch_file` per file, first-wins)
     # with a 2 s ceiling that re-derives the set (picks up newly-added deps) and covers atomic-rename
-    # saves a single-file watch can miss — the same idiom as the notebook-file watcher above. A
-    # content-hash diff means a metadata-only touch (or our own read) never triggers a recompute.
+    # saves a single-file watch can miss — the same idiom as the notebook-file watcher above. The diff is
+    # on mtime, so a metadata-only touch that leaves mtime alone never triggers a recompute; hashing is
+    # deliberately not used here because reading a file to hash it bumps atime, which `watch_file` then
+    # reports as a change (see `_asset_mtime`).
     @async while !stop[]
         try
             files = _asset_files(nb)

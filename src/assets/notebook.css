@@ -303,8 +303,14 @@ body.zen #nb { margin-top:22px; }
 /* Collapse a code cell that renders nothing (no markdown / output / table / chart / live control) so a
    reading pass has no blank gaps where a pure definition cell used to be. A bind cell whose only content
    is a surfaced-elsewhere `.hostedph` chip counts as empty — its live control renders in its host cell.
-   `:has()` — modern browsers. */
-body.zen #nb .cell:not(:has(.md)):not(:has(.output *)):not(:has(.tables *)):not(:has(.echarts *)):not(:has(.controls:not(.empty))):not(:has(.binds > :not(.hostedph))) { display:none !important; }
+   A WORKBOOK cell is never collapsed: its editor is its content, so it has something to show with no
+   output at all.
+
+   `.cell-blank` is set by the renderer (`markBlank`, view.js) rather than asked of the browser with a
+   `:has()` chain. That chain was six clauses tested against every cell in the document, and `:has()`
+   is LIVE — the browser re-evaluated it during style recalc on any DOM change, which during a run is
+   continuous. The renderer already knows what it just drew, so it answers once per cell it touches. */
+body.zen #nb .cell.cell-blank { display:none !important; }
 /* Floating exit affordance (the topbar with the toggle is hidden in zen). */
 .zenexit { display:none; }
 body.zen .zenexit { display:inline-flex; align-items:center; gap:6px; position:fixed; top:14px; right:18px;

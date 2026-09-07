@@ -41,6 +41,27 @@ const NS = KaimonSlate.NotebookServer
         @test NS._safe_proj_path("", "src/a.jl") == ""       # no root ⇒ detached
     end
 
+    @testset "_confined_path is the one containment rule" begin
+        # Every path-serving route resolves through this, so the rule is asserted here rather than
+        # once per caller. `nothing` = escaped.
+        root = mktempdir()
+        mkpath(joinpath(root, "src"))
+        want = normpath(joinpath(root, "src", "a.jl"))
+        @test NS._confined_path(root, "src/a.jl") == want
+        @test NS._confined_path(root, "/src/a.jl") == want          # leading slash is stripped, not absolute
+        @test NS._confined_path(root, "src/../src/a.jl") == want
+        @test NS._confined_path(root, "") == normpath(root)         # the root itself is inside itself
+        @test NS._confined_path(root, "..") === nothing
+        @test NS._confined_path(root, "../secret") === nothing
+        @test NS._confined_path(root, "src/../../etc/passwd") === nothing
+        @test NS._confined_path("", "src/a.jl") === nothing
+        # A sibling whose name merely EXTENDS the root's must not read as being inside it — the
+        # separator is what distinguishes `/tmp/site` from `/tmp/site-evil`.
+        @test NS._confined_path(root, string("../", basename(root), "-evil/x")) === nothing
+        # Confinement holds for a root written with a trailing separator.
+        @test NS._confined_path(root * Base.Filesystem.path_separator, "src/a.jl") == want
+    end
+
     @testset "_proj_tree shows all files with kinds, prunes noise" begin
         root = mktempdir()
         mkpath(joinpath(root, "src"))

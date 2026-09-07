@@ -321,7 +321,10 @@ function _parse_controls(s::AbstractString)
         t = strip(t)
         isempty(t) && continue
         if startswith(t, "[") && endswith(t, "]")
-            names = String[String(strip(n)) for n in split(t[2:end-1], ',') if !isempty(strip(n))]
+            # `chop`, not `t[2:end-1]`: byte indexing lands mid-character when the group's last
+            # name ends in a non-ASCII character, so a bind named `sb_ρ` threw StringIndexError.
+            inner = chop(t; head = 1, tail = 1)
+            names = String[String(strip(n)) for n in split(inner, ',') if !isempty(strip(n))]
             isempty(names) || push!(cols, names)
         else
             push!(cols, String[t])
@@ -646,6 +649,10 @@ const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # target — authored intent that travels with the file (see the git-noise/sidecar discussion).
 const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "macroexpand", "agentmodel", "runon",
                       "regions",
+                      # `juliaflags` = extra flags for THIS notebook's worker process. Registered in
+                      # the settings UI and pushed to a live kernel, so leaving it out here made it a
+                      # setting that took effect and then vanished on the next open.
+                      "juliaflags",
                       # `@replay` export resolution, as `<mark id>:<stride>` pairs. Authored intent —
                       # how much detail this document's controls need to carry — so it travels with the
                       # `.jl` rather than living in one person's browser.
@@ -657,7 +664,7 @@ const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload
                            # the kernel to recover their true reads/writes). Off = conservative static
                            # analysis only, for the rare macro with expansion-time side effects.
                            "macroexpand" => :bool, "replaystrides" => :string,
-                           "agentmodel" => :string,
+                           "agentmodel" => :string, "juliaflags" => :string,
                            # `runon` = this notebook's DURABLE run-location override ("host[,transport]"):
                            # a machine-specific ssh alias the author chose to bake in (the *session* and
                            # *global* run-location layers live in runtime meta / slate.json, never here).

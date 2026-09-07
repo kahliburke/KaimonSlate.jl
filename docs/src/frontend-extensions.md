@@ -254,7 +254,7 @@ Add a CodeMirror 6 extension to every cell editor:
 
 ```js
 window.slateRegisterEditorExtension(ctx => {
-  if (ctx.markdown) return [];                     // ctx = { markdown, cellId } — code cells only
+  if (ctx.markdown || ctx.lang) return [];         // ctx = { markdown, cellId, lang } — Julia cells only
   return window.CM6.keymap.of([
     { key: "Ctrl-Alt-l", run: view => { console.log(ctx.cellId, view.state.doc.length); return true; } },
   ]);
@@ -265,6 +265,10 @@ window.slateRegisterEditorExtension(ctx => {
 defaults). `window.CM6` is the bundled CodeMirror surface (`keymap`, `EditorView`, `Decoration`,
 `StateField`, …). Register before cells hydrate; editors that open later pick it up, and already-open
 editors reconfigure immediately.
+
+Every editor is consulted, a web cell's HTML, CSS and JS panes included. `ctx.lang` is how you tell
+them apart: it names the pane's language and is undefined for a Julia cell editor, so the check above
+is what "Julia source only" looks like. A pane carries no cell id.
 
 ## See also
 

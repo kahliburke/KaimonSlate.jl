@@ -350,6 +350,12 @@ async function _fileOp(body) {
 
 async function _fileOpNew(dir) {
   if (!_filesTree || _filesTree.detached) return;
+  // This ends by mounting the new file, which replaces whatever is in the editor. Every other path
+  // that swaps it asks first (`_filesOpen`, `_filesOpenNotebook`, the open-notebooks strip); without
+  // this, creating a file silently discarded unsaved edits to the one you were in — and cleared
+  // `_fileDirty` on the way, so the beforeunload guard could not catch it either. Asked BEFORE the
+  // name prompt, so a cancel costs nothing.
+  if (!await _filesConfirmDiscard()) return;
   const rel = await promptDark('New file in ' + (dir || _filesTree.name || 'project') + ':', '', { ok: 'Create', placeholder: 'name.jl', selectAll: true });
   if (!rel) return;
   const path = _joinRel(dir, rel).replace(/^\/+/, '');
@@ -361,6 +367,7 @@ async function _fileOpNew(dir) {
     if (!r.ok) { await alertDark('Could not create ' + path + ':\n' + (await r.text())); return; }
     const j = await r.json().catch(() => ({}));
     await _filesLoadTree({ select: path });
+    _filesStashState();                      // remember the outgoing file's scroll/cursor, as `_filesOpen` does
     _filesMount(path, '', j.mtime || 0);
   } catch (e) { await alertDark('Create failed: ' + e); }
 }

@@ -222,7 +222,7 @@ function paletteCommands() {
   return cmds;
 }
 let _cmd = [], _cmdSel = 0;
-const _escc = s => s.replace(/[&<>"]/g, x => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[x]));
+const _escc = s => window.slateEscHtml(s);
 // Recently-used commands bubble to the top (persisted in localStorage) — the palette learns your habits.
 const _MRU_KEY = 'slate.palette.mru';
 function _mruLoad() { try { return JSON.parse(localStorage.getItem(_MRU_KEY) || '[]'); } catch (_) { return []; } }
@@ -531,7 +531,7 @@ function _sigParams(root) {
 // CommonMark code blocks are plain text → safe to re-emit as escaped HTML with CamelCase
 // type tokens wrapped as links (e.g. `-> Vector{Float64}` → Vector and Float64 clickable).
 function _linkifyCode(el) {
-  const TYPE = /[A-Z][A-Za-z0-9_]+/g, esc = s => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const TYPE = /[A-Z][A-Za-z0-9_]+/g, esc = s => window.slateEscHtml(s);
   const txt = el.textContent; let out = '', last = 0, m;
   while ((m = TYPE.exec(txt))) {
     out += esc(txt.slice(last, m.index));

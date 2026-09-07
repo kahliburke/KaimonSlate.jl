@@ -76,6 +76,84 @@ end
         end
     end
 
+    # ── PUT side: what happens when a transfer dies mid-blob and the sender tries again ──────────
+    # The wire carries (hash, flags, payload) and nothing else, so a receiver cannot tell a
+    # CONTINUATION from a RESTART on its own. The 0x02 first-chunk flag is what tells it.
+    _req(port) = (s = ZMQ.Socket(ZMQ.REQ); s.rcvtimeo = 5000; s.linger = 0;
+                  ZMQ.connect(s, "tcp://127.0.0.1:$port"); s)
+    _ask(s, frame) = (ZMQ.send(s, frame); String(copy(ZMQ.recv(s))))
+    _put(s, h, flags, chunk) =
+        _ask(s, vcat(UInt8['P'], Vector{UInt8}(codeunits(h)), UInt8[flags], chunk))
+    _thirds(d) = (n = length(d) ÷ 3; (d[1:n], d[n+1:2n], d[2n+1:end]))
+
+    @testset "a restarted put discards the abandoned partial" begin
+        mktempdir() do a
+            mktempdir() do b
+                data = rand(UInt8, 90_000)
+                h, _ = MemoStore.put_blob(io -> write(io, data), a)
+                port, stop = serve(b)
+                s = _req(port)
+                try
+                    @test occursin("restart", _ask(s, UInt8['C']))   # capability is advertised
+                    c1, c2, c3 = _thirds(data)
+                    @test _put(s, h, 0x02, c1) == "ok"               # attempt one, then it dies
+                    @test _put(s, h, 0x02, c1) == "ok"               # attempt two starts over
+                    @test _put(s, h, 0x00, c2) == "ok"
+                    @test _put(s, h, 0x01, c3) == "done"
+                    @test MemoStore.has_blob(b, h)
+                    _, back = MemoStore.with_blob(io -> read(io), b, h)
+                    @test back == data                               # not the abandoned bytes + these
+                finally
+                    ZMQ.close(s); stop()
+                end
+            end
+        end
+    end
+
+    @testset "without the flag, a retry appends to the wreckage and never verifies" begin
+        # This is the behaviour the flag exists to prevent, and it is also what an OLD sender still
+        # gets — hence the capability probe rather than a silent change of meaning for 0x00.
+        mktempdir() do a
+            mktempdir() do b
+                data = rand(UInt8, 90_000)
+                h, _ = MemoStore.put_blob(io -> write(io, data), a)
+                port, stop = serve(b)
+                s = _req(port)
+                try
+                    c1, c2, c3 = _thirds(data)
+                    @test _put(s, h, 0x00, c1) == "ok"
+                    @test _put(s, h, 0x00, c1) == "ok"               # restart, unmarked → appended
+                    @test _put(s, h, 0x00, c2) == "ok"
+                    @test startswith(_put(s, h, 0x01, c3), "err")     # sha over c1+c1+c2+c3
+                    @test !MemoStore.has_blob(b, h)                   # and nothing corrupt landed
+                    # The failed attempt drops its tmp, so a clean retry now succeeds.
+                    @test _put(s, h, 0x00, c1) == "ok"
+                    @test _put(s, h, 0x00, c2) == "ok"
+                    @test _put(s, h, 0x01, c3) == "done"
+                    @test MemoStore.has_blob(b, h)
+                finally
+                    ZMQ.close(s); stop()
+                end
+            end
+        end
+    end
+
+    @testset "a put of a blob already in the CAS costs nothing" begin
+        mktempdir() do b
+            data = rand(UInt8, 40_000)
+            h, _ = MemoStore.put_blob(io -> write(io, data), b)       # already present
+            port, stop = serve(b)
+            s = _req(port)
+            try
+                @test _put(s, h, 0x03, UInt8[]) == "done"             # answered without a tmp
+                _, back = MemoStore.with_blob(io -> read(io), b, h)
+                @test back == data                                    # untouched by the empty put
+            finally
+                ZMQ.close(s); stop()
+            end
+        end
+    end
+
     @testset "a missing blob errors and never lands a partial" begin
         mktempdir() do a
             mktempdir() do b

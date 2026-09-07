@@ -12,15 +12,16 @@ async function runCell(id, force = false) {
   // it. Automatic/reactive renders keep the marker, so an unchanged output still doesn't double-run.
   const _out = document.querySelector('#cell-' + id + ' .output');
   if (_out) _out.__slateOut = undefined;
-  const state = await api('POST', '/api/cell/' + id, { source: editors[id] ? edText(id) : (srcMap[id] || ''), force: !!force });
-  const after = (state.cells || []).find(c => c.id === id);
-  // A code cell that gains (or loses) @bind widgets — or flips kind — changes its DOM
-  // *structure*: the in-place patch (updateStates) can't inject the widget rows, so the
-  // controls wouldn't appear. Rebuild fully in that case; otherwise patch in place.
-  if (before && after && (hasBinds(before) !== hasBinds(after) || before.kind !== after.kind))
-    renderAll(state);
-  else
-    updateStates(state);
+  const ack = await api('POST', '/api/cell/' + id, { source: editors[id] ? edText(id) : (srcMap[id] || ''), force: !!force });
+  // The run answers with a receipt; the RESULT arrives over the live push, which also handles the
+  // structural case (a cell gaining or losing `@bind` widgets makes `patchCells` fall back to a full
+  // publish).
+  applyAck(ack);
+  // The local `running` mark was ours to set, so it is ours to lift: nothing clears it now that the
+  // reply carries no state (`applyState` used to wipe every transient mark). Scoped to `running` so
+  // an `edited` mark from typing during the run survives.
+  const _store = window.slateStore;
+  if (_store && _store.clearLiveState) _store.clearLiveState(id, 'running');
 }
 async function addCell(after, kind, before, edit) {
   const oldIds = new Set(cellIds());
@@ -68,7 +69,7 @@ async function addCellWithSource(after, source, name) {
       } catch (_) { /* keep the generated id */ }
     }
   }
-  renderAll(await api('POST', '/api/cell/' + cid, { source }));
+  applyAck(await api('POST', '/api/cell/' + cid, { source }));   // a receipt now; the push carries the result
   selectCell(cid, true);
   return cid;
 }

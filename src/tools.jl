@@ -477,7 +477,6 @@ function Base.show(io::IO, ::MIME"text/html", tc::ToolCall)
     # re-fired in place — a tool call is a thing you tune, and re-running the cell to change one
     # argument would also re-run everything downstream of it.
     live = !isempty(tc.channel)
-    uid = "tc" * string(hash((tc.name, tc.at)); base = 16)
     if !isempty(tc.params)
         print(io, """<table style="width:100%;border-collapse:collapse">
             <thead><tr style="color:var(--muted);font-size:11px;text-align:left">

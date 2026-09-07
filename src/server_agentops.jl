@@ -986,7 +986,7 @@ function paste_cells!(nb::LiveNotebook, after_id::AbstractString, specs)
     i = isempty(after_id) ? length(cells) : something(_index_of(cells, after_id), length(cells))
     pos = i
     for spec in specs
-        kind = (get(spec, "kind", "code") == "md") ? MARKDOWN : CODE
+        kind = _cellkind(String(get(spec, "kind", "code")))
         src  = String(get(spec, "source", ""))
         nid  = n == 1 ? single_id : _gen_id(nb.report)   # multi: _gen_id sees prior inserts → unique
         pos += 1
@@ -1215,27 +1215,29 @@ end
 function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString; source = nothing)
     cells = nb.report.cells
     i = _index_of(cells, id); i === nothing && return nb
-    _snapshot!(nb)
-    old = cells[i]
-    # Carry over the latest (possibly unsaved) editor text on the way through, so a convert never
-    # discards edits. Convert + restale the cell and its dependents, but DON'T evaluate: changing a
-    # cell's kind must not run the code (the user runs it when ready) — unlike _commit_structure!.
-    src = source === nothing ? old.source : String(source)
-    # Converting OUT of a web cell: the browser sends the reassembled `@web(...)` skin as `source`, and a
-    # plain code/markdown cell shouldn't inherit that wrapper — unwrap it so `code → web → code` round-trips
-    # back to the original text instead of accumulating a `@web(...)` skin.
-    newkind = _cellkind(kind)
-    if old.kind == WEB && newkind != WEB
-        src = ReportEngine._web_unwrap(src)
+    lock(nb.lock) do                     # serialize the mutation + persist vs the async runner (reentrant)
+        _snapshot!(nb)
+        old = cells[i]
+        # Carry over the latest (possibly unsaved) editor text on the way through, so a convert never
+        # discards edits. Convert + restale the cell and its dependents, but DON'T evaluate: changing a
+        # cell's kind must not run the code (the user runs it when ready) — unlike _commit_structure!.
+        src = source === nothing ? old.source : String(source)
+        # Converting OUT of a web cell: the browser sends the reassembled `@web(...)` skin as `source`, and a
+        # plain code/markdown cell shouldn't inherit that wrapper — unwrap it so `code → web → code` round-trips
+        # back to the original text instead of accumulating a `@web(...)` skin.
+        newkind = _cellkind(kind)
+        if old.kind == WEB && newkind != WEB
+            src = ReportEngine._web_unwrap(src)
+        end
+        cells[i] = Cell(old.id, newkind, src)
+        build_dependencies!(nb.report)
+        stale = dependents_of(nb.report, [old.id])
+        for c in nb.report.cells
+            c.id in stale && ReportEngine.restale!(c)
+        end
+        _persist!(nb)
     end
-    cells[i] = Cell(old.id, newkind, src)
-    build_dependencies!(nb.report)
-    stale = dependents_of(nb.report, [old.id])
-    for c in nb.report.cells
-        c.id in stale && ReportEngine.restale!(c)
-    end
-    _persist!(nb)
-    _autoindex!(nb)                      # the new source may introduce a `using`
+    _autoindex!(nb)                      # the new source may introduce a `using` (spawns; off the lock)
     return nb
 end
 

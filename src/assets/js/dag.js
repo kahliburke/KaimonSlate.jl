@@ -566,7 +566,7 @@ window._dagXferDashRefresh = _dagXferDashRefresh;
 const _DAG_ROUTE_COL = { direct: '#3fb96e', ssh: '#4f7cf0', relay: '#e8a13f', unresolved: '#6a7183' };
 const _DAG_ROUTE_LBL = { direct: 'direct', ssh: 'ssh-bridge', relay: 'relay', unresolved: 'unresolved' };
 function _dagAge(s) { return s < 0 ? '' : s < 90 ? s + 's ago' : Math.round(s / 60) + 'm ago'; }
-function _dagEsc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+const _dagEsc = s => window.slateEscHtml(s);
 
 // ── Region-routing overlay data ─────────────────────────────────────────────────────────────────
 // The peer-plan routes, keyed 'src\0dst', fetched while the region overlay is on (verdicts + measured
@@ -2160,10 +2160,6 @@ function _dagLinkClick(id) {
   // Toggle: the same pair again REMOVES the manual edge (mirrors the preview's ✕).
   _dagSetNeeds(tgt, cur.includes(src) ? cur.filter(x => x !== src) : [...cur, src]);
 }
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && _dagLinkMode) dagLinkToggle();
-});
-
 function _dagQueue() {
   if (!_dagOpen() || _dagRaf) return;
   _dagRaf = requestAnimationFrame(() => { _dagRaf = 0; _dagRender(); });
@@ -2313,6 +2309,10 @@ function dagFit() {
     if (e.defaultPrevented) return;
     const t = e.target;
     if (t && t.closest && t.closest('.cm-editor, input, textarea, [contenteditable]')) return;
+    // Innermost layer first, and each case RETURNS. Link mode used to be handled by a second
+    // listener of its own, which disarmed the mode and then let this one run on the same keystroke
+    // and close the whole pane — so leaving link mode threw away the graph you were drawing on.
+    if (_dagLinkMode) { dagLinkToggle(); return; }
     if (_dagCardEl()) { _dagCardClose(); return; }
     if (_dagOpen()) toggleDag();
   });

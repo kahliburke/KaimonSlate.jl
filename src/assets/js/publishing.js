@@ -8,8 +8,7 @@
   let _doc = null;    // this notebook's doc info (docId, slug, events)
   let _sitesData = null;   // this notebook's per-site membership/front-page state (for the confirm-on-replace check)
 
-  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
-    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const esc = s => window.slateEscHtml(s);
   const el = id => document.getElementById(id);
 
   function openPublishing() { el('pubbg').classList.add('show'); refresh(); }

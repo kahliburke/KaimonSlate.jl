@@ -181,12 +181,10 @@ function _table_from_tables(x)
         names = Base.invokelatest(T.columnnames, cols)
         snames = String[string(n) for n in names]
         coldata = Any[Base.invokelatest(T.getcolumn, cols, n) for n in names]
-        n = isempty(coldata) ? 0 : maximum(length, coldata)
-        # Bounds-safe like `_from_columns` below: a Tables.jl source isn't guaranteed to have
-        # equal-length columns (DataFrames does, but the interface itself doesn't), so a ragged
-        # column would otherwise throw a BoundsError here instead of degrading to a padded cell.
-        rows = Vector{Any}[Any[_cellval(i <= length(coldata[j]) ? coldata[j][i] : nothing) for j in eachindex(coldata)] for i in 1:n]
-        return _finish(_infer_columns(snames, coldata), rows)   # `coldata` are RAW columns
+        # `_from_columns` for the padding: a Tables.jl source isn't guaranteed to have equal-length
+        # columns (DataFrames does, but the interface itself doesn't), so a ragged column degrades to
+        # a padded cell rather than throwing a BoundsError.
+        return _from_columns(snames, coldata)
     catch
         return nothing
     end

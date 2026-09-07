@@ -12,6 +12,10 @@
 
   let el = null, current = null, waitingFor = null, waitTimer = null;
 
+  // One escaper for the whole app (core.js). Declared here, above every use: a `const` has a
+  // temporal dead zone where the `function` it replaced was hoisted.
+  const esc = s => window.slateEscHtml(s);
+
   function close() {
     if (el) { el.remove(); el = null; }
     if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
@@ -72,10 +76,6 @@
     close();
   }
 
-  function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
 
   // A prompt with nothing to type — "Duo push sent" and the like. ssh still wants a newline back,
   // so the dialog offers a button rather than a field: there is no answer, only an acknowledgement.

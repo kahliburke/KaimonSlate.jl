@@ -14,8 +14,7 @@ const gapi = async (method, path, body) => {
                                 body: body ? JSON.stringify(body) : undefined });
   return r.json();
 };
-const _rlEsc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
-  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const _rlEsc = s => window.slateEscHtml(s);
 
 // Reflect the effective run-location into the toolbar pill (called from updateChrome on every state).
 function renderRunLoc(state) {

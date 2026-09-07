@@ -129,6 +129,13 @@ _is_server_write(report_id, h::UInt64) =
 # write+capture chokepoint for in-app mutations (replaces bare `write(...)`).
 function _persist!(nb::LiveNotebook; source::AbstractString = "browser", label::AbstractString = "")
     s = serialize_report(nb.report)
+    # What `sync_from_file!` will re-derive from disk when it sees this write: it re-parses and
+    # re-serializes, so it recovers THIS text and not the carried footers appended below. The ring is
+    # compared against that canonical form, so it has to hold the canonical hash — recording the hash
+    # of the full written bytes made the guard unmatchable for exactly the notebooks that carry a
+    # `Slate.bundle`/`Slate.preview` footer, and a watcher tick that read an intermediate write then
+    # rolled the live report back to it.
+    canon = hash(s)
     # Preserve a self-contained `.jl`'s env artifacts. `serialize_report` writes only the lightweight
     # env/config footers, so without this the FIRST edit-save silently strips the `Slate.bundle` (and
     # `Slate.preview`) footer — the file stops being self-contained: it no longer `expand`s, and a
@@ -142,7 +149,7 @@ function _persist!(nb::LiveNotebook; source::AbstractString = "browser", label::
     catch e
         @warn "KaimonSlate: could not preserve bundle footer on save" exception = (e, catch_backtrace())
     end
-    _note_server_write!(nb.report.id, hash(s))   # register BEFORE writing: a watcher tick fired by
+    _note_server_write!(nb.report.id, canon)     # register BEFORE writing: a watcher tick fired by
     write(nb.path, s)                             # this write must recognize it as OURS, not external
     nb.version += 1                               # every in-app commit advances the version (CAS basis)
     _history!(nb; source = source, label = label)

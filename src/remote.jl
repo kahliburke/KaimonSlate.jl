@@ -541,8 +541,8 @@ end
 # added gate tool can't appear on a live worker). The hub recomputes this on every reattach and reaps
 # + cold-spawns any worker whose stamp is behind — so editing `worker.jl` reprovisions the remote
 # instead of silently running stale code. Cached by the newest payload mtime (one stat sweep per
-# check, not a re-hash). The reprovision ACTION is opt-in (`KAIMONSLATE_REPROVISION_STALE=1`) — see
-# `_payload_current`; the stamp itself is always computed so the detection is ready when re-enabled.
+# check, not a re-hash). Reprovision-on-drift is ON; `KAIMONSLATE_SKIP_PAYLOAD_CHECK=1` turns it off —
+# see `_payload_current`.
 const _PAYLOAD_SHA_CACHE = Ref{Tuple{Float64,String}}((-1.0, ""))
 function _payload_sha()
     srcdir = @__DIR__
@@ -1365,7 +1365,7 @@ end
 # Is the live worker `k` running the CURRENT worker payload? Compares its boot-baked stamp
 # (`__slate_env_info().payload_sha`) to `_payload_sha()`. Stale — or an old worker that reports none —
 # ⇒ false, and `attached!` reaps + cold-spawns it. A flaky env_info call ⇒ true (don't reap on a
-# transient error; liveness is validated separately). Gated OFF by default — see the body.
+# transient error; liveness is validated separately). ON by default — see the body.
 function _payload_current(k)::Bool
     # Reprovision-on-drift is ON by default (skip with KAIMONSLATE_SKIP_PAYLOAD_CHECK=1). The worker SWAP
     # is now safe: `k.ns_gen` bumps on a fresh namespace (cold spawn / adopt) and the region dedups fold it
@@ -2125,13 +2125,14 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
         # This matters for WARM workers: a reattached worker may still RUN v1 code even though
         # its on-disk payload was re-provisioned.
         v2 = req(UInt8['V']) == "2"
+        restart = _blob_can_restart(req)
         t0 = time()
         want = want_hashes(req, hashes)
         sent = 0; nbytes = 0
         for h in want
             p = joinpath(root, "blobs", "sha256", h[1:2], String(h))
             isfile(p) || (_rlog("memo push: missing local blob $h — skipped"); continue)
-            nbytes += _send_blob!(Z, sock, req, p, String(h), v2)
+            nbytes += _send_blob!(Z, sock, req, p, String(h), v2; restart = restart)
             sent += 1
         end
         for (k, s) in picked
@@ -2163,10 +2164,21 @@ want_hashes(req, hashes) =
 # the Message's origin keeps the mmap alive until the frame is out — REQ/REP: by the reply);
 # v1 = single-frame copy-chunk 'P'. Returns the bytes sent. Shared by the memo push and the
 # region runner's single-binding transfers.
-function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool; on_progress = nothing)
+# Does this data channel understand the 0x02 first-chunk put flag? Asked once per connection, off the
+# 'C' capability reply — NOT off 'V', whose "2" every sender compares for equality to pick the
+# zero-copy framing. An older server answers "err: unknown cmd", which is simply not a match.
+_blob_can_restart(req) = try; occursin("restart", req(UInt8['C'])); catch; false; end
+
+# `restart` marks the FIRST chunk so a receiver can drop the partial left by an attempt that died
+# mid-blob. Without it the retry appends to that wreckage and fails sha verification for good. Only
+# ever set when the peer advertised the capability: an old receiver tests the flag byte with `== 0x01`
+# and would read `0x03` (first AND last, i.e. a single-chunk blob) as "not last" and never land it.
+function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool;
+                     on_progress = nothing, restart::Bool = false)
     sz = filesize(path)
     nbytes = 0
     tick() = on_progress === nothing || on_progress(nbytes, sz)
+    flags(first, last) = UInt8((last ? 0x01 : 0x00) | (first && restart ? 0x02 : 0x00))
     if v2 && sz > 0
         mm = Mmap.mmap(path, Vector{UInt8}, sz)
         off = 0
@@ -2174,7 +2186,7 @@ function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool; on
         while off < sz
             n = min(chunk, sz - off)
             last = off + n >= sz
-            hdr = vcat(UInt8['p'], Vector{UInt8}(codeunits(h)), UInt8[last ? 0x01 : 0x00])
+            hdr = vcat(UInt8['p'], Vector{UInt8}(codeunits(h)), UInt8[flags(off == 0, last)])
             Z.send(sock, hdr; more = true)
             Z.send(sock, Z.Message(mm, pointer(mm) + off, n))
             r = String(copy(Z.recv(sock)))
@@ -2184,12 +2196,14 @@ function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool; on
         end
     else
         open(path, "r") do io
+            first = true
             while true
                 chunk = read(io, 1 << 20)
                 last = eof(io)
-                r = req(vcat(UInt8['P'], Vector{UInt8}(codeunits(h)), UInt8[last ? 0x01 : 0x00], chunk))
+                r = req(vcat(UInt8['P'], Vector{UInt8}(codeunits(h)), UInt8[flags(first, last)], chunk))
                 startswith(r, "err") && error("blob push $h: $r")
                 nbytes += length(chunk)
+                first = false
                 tick()
                 last && break
             end
@@ -2217,13 +2231,14 @@ function push_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractStrin
     try
         req(frame) = (Z.send(sock, frame); String(copy(Z.recv(sock))))
         v2 = req(UInt8['V']) == "2"
+        restart = _blob_can_restart(req)
         want = want_hashes(req, [String(hash)])
         if isempty(want)                                   # already there
             on_plan === nothing || on_plan(0, meta)
             return 0
         end
         on_plan === nothing || on_plan(Int(filesize(p)), meta)   # exact bytes; may throw (preview gate)
-        return _send_blob!(Z, sock, req, p, String(hash), v2; on_progress = on_progress)
+        return _send_blob!(Z, sock, req, p, String(hash), v2; on_progress = on_progress, restart = restart)
     finally
         try; Z.close(sock); catch; end
     end
@@ -3823,8 +3838,7 @@ function _region_reconcile_impl!(r::Region)
                _manifest_get(w["manifest"], "hub") == gethostname()]
     # A region's def can change (new preload/transport) — its old idle workers still carry the region tag
     # but the wrong env dir/transport, so they can't serve it. `fits` distinguishes usable warm from stale.
-    fits(w) = _manifest_get(w["manifest"], "project") == t.project &&
-              _manifest_get(w["manifest"], "transport") == string(r.transport)
+    fits(w) = _worker_env_fits(w, t.project, string(r.transport))
     dead  = [w for w in mine if w["alive"] !== true]
     stale = [w for w in mine if _region_warm_worker(w, r.name) && !fits(w) && !_region_claimed(host, w["port"])]
     for w in vcat(dead, stale)

@@ -9,8 +9,7 @@
 // and a readout, which is more than view.js's one-<input> built-in chain is for.
 
 (function () {
-  const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const esc = s => window.slateEscHtml(s);
 
   // Decimals to show, derived from the step — a step of 0.05 wants two, a step of 10 wants none.
   function precision(step) {

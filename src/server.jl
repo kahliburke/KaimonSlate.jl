@@ -2906,6 +2906,16 @@ function _ensure_run_supervisor!(h)   # NOTE: `Hub` defined later (server_hub.jl
     return nothing
 end
 
+# Release the sweeper on hub shutdown. Its closure captures the hub, so leaving it running would keep
+# supervising a torn-down one — and, because `_ensure_run_supervisor!` is a no-op while the ref is set,
+# a hub restarted in the SAME process (the TUI's `[r]`) would come up with no supervisor at all.
+function _stop_run_supervisor!()
+    t = _RUN_SUPERVISOR[]
+    _RUN_SUPERVISOR[] = nothing
+    t === nothing || (try; close(t); catch; end)
+    return nothing
+end
+
 # ── Transfer preview (approve-by-rerun) ─────────────────────────────────────────────────────
 # Rides transfer_binding!'s `on_plan` hook, which fires AFTER the encode and the dedup check —
 # so the preview quotes the EXACT bytes about to cross (an mmap-backed arrow frame prices as

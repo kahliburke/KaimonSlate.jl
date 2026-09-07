@@ -5,10 +5,7 @@
 // aligned beside it. Loop lines show every iteration's value in sequence. Line numbers align
 // 1:1 with the source because the @trace wrapper joins on one line (see eval.jl).
 
-function _trcEsc(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
+const _trcEsc = s => window.slateEscHtml(s);
 
 // Build the integrated "code + values" view for `source` (string) and `rows` ([{line,name,value}]).
 // Each source line renders as a code row. Lines captured ONCE show their value directly below.

@@ -67,7 +67,12 @@
     const banner = document.getElementById('appfail');
     const text = document.getElementById('appfailtext');
     if (!banner || !text) return;
-    const errCell = document.querySelector('#nb .cell:has(.err)');
+    // The error block, then its cell — NOT `.cell:has(.err)`. This runs on a timer for the life of
+    // the page, and `:has()` makes the browser test every cell in the document each time; finding
+    // the (usually absent) error block first and walking up is the same answer for a fraction of
+    // the work, which matters on a long notebook.
+    const _err = document.querySelector('#nb .err');
+    const errCell = _err && _err.closest('.cell');
     if (!errCell) { banner.style.display = 'none'; _failCell = null; return; }
     _failCell = errCell;
     const label = cellLabel(errCell);

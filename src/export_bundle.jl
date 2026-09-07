@@ -364,7 +364,23 @@ end
 function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::AbstractString, cells::AbstractString;
                           history::Bool = true, assetbase::AbstractString = "", assetfiles = Dict{String,String}(),
                           extra = String[])
+    # `mktempdir()` alone only registers an atexit hook, so the staging tree would survive for the whole
+    # hub process — and it is not small: a full-history git bundle, the repo's tracked tree, and every
+    # vendored path-dep, once per export. The result is a base64 String, so nothing points into it.
     stage = mktempdir()
+    try
+        return _stage_bundle_b64(stage, projectdir, pathdeps, nbpath, cells;
+                                 history = history, assetbase = assetbase, assetfiles = assetfiles,
+                                 extra = extra)
+    finally
+        rm(stage; recursive = true, force = true)
+    end
+end
+
+function _stage_bundle_b64(stage::AbstractString, projectdir::AbstractString, pathdeps,
+                           nbpath::AbstractString, cells::AbstractString;
+                           history::Bool = true, assetbase::AbstractString = "",
+                           assetfiles = Dict{String,String}(), extra = String[])
     top = _root_repo(projectdir, pathdeps, nbpath)
     # Author-embedded media (drag/drop / paste → project files the asset route serves) is UNTRACKED,
     # so it rides in neither the git tree/bundle nor the env staging — copy each REFERENCED file

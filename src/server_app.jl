@@ -166,8 +166,9 @@ _app_denied(target::AbstractString) = HTTP.Response(403,
                    "route" => String(first(split(target, '?'))))))
 
 # `/` on an app hub is the notebook, not the switcher. One notebook is the overwhelmingly common
-# case (an exported app serves exactly one); with several, the first by insertion wins so the URL is
-# at least stable within a run.
+# case (an exported app serves exactly one); with several, the alphabetically first id wins. `Dict` key
+# order is not insertion order, which is why the sort is there — without it the URL would move between
+# runs for the same set of notebooks.
 function _app_root_target(h::Hub)
     id = lock(h.lock) do
         ks = collect(keys(h.notebooks))

@@ -43,6 +43,10 @@ const _MAX_KEEP_BYTES = Ref(50_000_000)
 # a worker session, not in the captured HTML). Process-global — one worker serves one notebook. Read by the
 # `__slate_rerender_live` worker tool; the value is the ORIGINAL object so `show` re-renders it live.
 const _LIVE_OUTPUTS = Dict{String,Any}()
+# Cells evaluate concurrently on worker threads while `__slate_rerender_live` arrives on its own task,
+# so the store and the re-render snapshot race. Held only across the Dict access, never across a
+# `run_capture` (which takes it again to record its own result).
+const _LIVE_OUTPUTS_LOCK = ReentrantLock()
 
 # Hard character ceiling for a single text blob (used by tests; the live value-capping path uses
 # `_cap_keep!`). Truncates with a "… ⚠ truncated — N more characters." marker.
@@ -436,13 +440,11 @@ function Base.show(io::IO, ::MIME"text/plain", r::AssetRef)
 end
 Base.show(io::IO, r::AssetRef) = print(io, "AssetRef(", repr(r.path), ")")
 
-# Split an asset `name` into (filename-safe base, extension). An extension in the name wins; otherwise
-# it's derived from `mime` (or defaults to a raw blob). Keeps published paths human-readable.
-function _asset_name_parts(name::AbstractString, mime::AbstractString)
-    base, dotext = splitext(String(name))
-    ext = isempty(dotext) ? _asset_ext_for(mime) : lstrip(dotext, '.')
-    safe = replace(isempty(base) ? "asset" : base, r"[^A-Za-z0-9._-]" => "_")
-    return (safe, ext)
+# An asset `name`'s extension: one in the name wins, otherwise it's derived from `mime` (defaulting to
+# a raw blob). The filename-safe base is `_asset_base`, which this deliberately does not duplicate.
+function _asset_ext(name::AbstractString, mime::AbstractString)
+    _, dotext = splitext(String(name))
+    return isempty(dotext) ? _asset_ext_for(mime) : lstrip(dotext, '.')
 end
 _asset_ext_for(mime::AbstractString) =
     occursin("json", mime) ? "json" : occursin("csv", mime) ? "csv" :
@@ -511,14 +513,14 @@ function _save_asset(name::AbstractString, data; mime::AbstractString = "", dtyp
     if data isa AbstractVector{UInt8} || data isa AbstractString
         bytes = data isa AbstractString ? Vector{UInt8}(codeunits(String(data))) : Vector{UInt8}(data)
         deft  = data isa AbstractString ? "text/plain" : "application/octet-stream"
-        _, ext = _asset_name_parts(name, isempty(mime) ? deft : mime)
+        ext = _asset_ext(name, isempty(mime) ? deft : mime)
         m = isempty(mime) ? _asset_mime_for(ext) : String(mime)
         path = string("data/", _asset_base(name), "-", _asset_hash(bytes), ".", ext)
         return _asset_push!((; name = String(name), path, mime = m, bytes))
     end
     # A JSON-able Julia value — the worker has no JSON dep (like echarts/tables), so the bytes are
     # encoded server-side; `value` crosses on the output wire. Hash the value for a stable path.
-    _, ext = _asset_name_parts(name, "application/json")
+    ext = _asset_ext(name, "application/json")
     path = string("data/", _asset_base(name), "-", _asset_hash(data), ".", ext)
     return _asset_push!((; name = String(name), path, mime = "application/json", value = data))
 end
@@ -852,10 +854,12 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # an extension's marker class to find out.
     live = err === nothing && value !== nothing && !quiet &&
            (try Base.invokelatest(SlateExtensionsBase.slate_live_render, value) catch; false end) === true
-    if live
-        _LIVE_OUTPUTS[cid] = (source = String(source), filename = String(filename))
-    else
-        delete!(_LIVE_OUTPUTS, cid)
+    lock(_LIVE_OUTPUTS_LOCK) do
+        if live
+            _LIVE_OUTPUTS[cid] = (source = String(source), filename = String(filename))
+        else
+            delete!(_LIVE_OUTPUTS, cid)
+        end
     end
 
     return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
@@ -882,7 +886,7 @@ function rerender_live_outputs(mod::Module)
     # reason.
     ctx = _build_slate_ctx(mod, "", "", String[])
     outs = Tuple{String,Vector{Tuple{String,Vector{UInt8}}}}[]
-    for (cid, spec) in collect(_LIVE_OUTPUTS)
+    for (cid, spec) in lock(() -> collect(_LIVE_OUTPUTS), _LIVE_OUTPUTS_LOCK)
         w = try
             run_capture(mod, spec.source, spec.filename; capture = DemuxCapture(), slate_ctx = ctx)
         catch

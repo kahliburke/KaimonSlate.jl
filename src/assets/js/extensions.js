@@ -22,7 +22,7 @@ const category = signal('');        // '' = all
 const busy = signal('');            // name of the extension currently installing ('' = none)
 const zoom = signal('');            // screenshot URL shown full-screen ('' = none)
 
-const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const esc = s => window.slateEscHtml(s);
 
 const entries = computed(() => (data.value && data.value.entries) || []);
 // A view over the same list, not a separate screen: browsing and managing what's already here are

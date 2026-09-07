@@ -16,7 +16,7 @@ const _wpNote = {};
 let _wpRaw = [];                  // chronological raw log lines for the OPEN popup (snapshot + streamed), re-parsed on each change
 let _wpWorkers = [];              // latest worker list — the popup's tab strip, kept in step with the pills
 const _WP_LOG_MAX = 2000;        // cap the client-side buffer so a chatty worker can't grow it unbounded
-const _wpEsc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const _wpEsc = s => window.slateEscHtml(s);
 const _wpMB = v => (v == null || v < 0) ? '' : (v / 2 ** 20 >= 1024 ? (v / 2 ** 30).toFixed(1) + 'GB' : Math.round(v / 2 ** 20) + 'MB');
 
 // A telemetry sample (JSON string) → the full breakdown as wrapping labelled chips (HTML). No truncation:

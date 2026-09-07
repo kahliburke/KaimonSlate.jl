@@ -2,7 +2,7 @@
 // (the /api/bind POST target); `b` is its spec ({name,widget,params,value}). Used
 // by both the standalone @bind cell and any cell's control strip — wherever a
 // widget renders, changing it drives recompute the same way.
-const _esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const _esc = s => window.slateEscHtml(s);
 // Is this page an APP? Read from the bootstrap object the server injects into <head>, NOT from
 // `body.app` — that class is added by appmode.js on DOMContentLoaded, while a state can render
 // before then. Anything here that asks "am I an app?" before that moment would get `false` and act
@@ -1110,7 +1110,7 @@ async function commitSource(id) {
     const sed = cell.querySelector('.srcedit'); if (sed) sed.style.display = 'none';
     const d = _disp(cell); if (d) d.style.display = '';
   }
-  renderAll(await api('POST', '/api/cell/' + id, { source: src }));   // re-render in its new form
+  applyAck(await api('POST', '/api/cell/' + id, { source: src }));   // a receipt now; the push re-renders it
 }
 function cancelSource(id) {
   setEditing(id, false);   // destroying a focused editor fires no blur — leave edit mode explicitly
@@ -1150,6 +1150,38 @@ function revIsNew(c) {
   return seen === undefined || c.rev > seen;
 }
 function revMark(c) { if (c && typeof c.rev === 'number') _cellRev[c.id] = c.rev; }
+
+// Does this cell render anything a reader would see? Drives `.cell-blank`, which the reading view
+// collapses so a pure definition cell leaves no gap mid-document. Replaces a `:has()` chain in the
+// stylesheet: same question, asked once per cell when its contents change, rather than by the browser
+// against every cell on every style recalc.
+//
+// Answered from the CELL, not from its DOM. A chart paints asynchronously — ECharts sizes itself after
+// the render that created its container — so asking the DOM says "nothing here", collapses the cell,
+// and a display:none container can never lay out: the chart then never appears at all. The payload
+// already knows a chart is coming. (`:has()` got away with it by being live; a class is not.)
+//
+// A surfaced control does not count: `b.hosted` means the live widget renders in another cell and
+// this one shows only a chip. A WORKBOOK cell is never blank — its editor is what the reader came for.
+function markBlank(el, c) {
+  if (!el || !el.classList) return;
+  const has = sel => !!el.querySelector(sel);
+  const blank = c
+    ? !(el.classList.contains('workbook')
+        || c.kind === 'md'
+        || /<\w/.test(c.output || '')
+        || (c.echarts || []).length
+        || (c.tables || []).length
+        || (c.animations || []).length
+        || (c.controls || []).flat().length
+        || (c.binds || []).some(b => !b.hosted))
+    // No payload in hand (a caller that only has the element): fall back to the DOM, which is right
+    // for everything already painted.
+    : !(el.classList.contains('workbook') || has('.md') || has('.output *') || has('.tables *')
+        || has('.echarts *') || has('.controls:not(.empty)') || has('.binds > :not(.hostedph)'));
+  el.classList.toggle('cell-blank', blank);
+}
+window.slateMarkBlank = markBlank;
 function resetCellRevs() { for (const k in _cellRev) delete _cellRev[k]; }
 window.slateRevIsNew = revIsNew;
 window.slateRevMark = revMark;
@@ -1169,10 +1201,19 @@ window.slateResetCellRevs = resetCellRevs;
 // give back exactly the payload we just stopped sending.
 let _gapTimer = null;
 function applyAck(ack) {
-  if (!ack || !ack.revs) { if (ack && ack.cells) updateStates(ack); return; }   // older server: full state
+  // No `revs` means this was not a receipt: a refusal (a workbook 403 carries an error body) or a
+  // transport failure. Nothing to apply either way. There is no full-state fallback because there is
+  // no version skew to absorb — the page's scripts are served by the process answering it.
+  if (!ack || !ack.revs) return;
   clearTimeout(_gapTimer);
   _gapTimer = setTimeout(async () => {
-    const missing = Object.keys(ack.revs).some(id => revIsNew({ id, rev: ack.revs[id] }));
+    // Only cells we have a baseline for. `revIsNew` answers true for a cell never seen, and a
+    // revision is stamped only where a payload actually reached the DOM — so most of a freshly
+    // loaded document has no stamp, and treating that as evidence of a lost push made every receipt
+    // pull the whole document back down. Never stamp here to close that gap: doing it before a cell
+    // renders marks it applied when nothing was drawn, and the cell stays blank until it next
+    // changes (see `revIsNew`).
+    const missing = Object.keys(ack.revs).some(id => _cellRev[id] !== undefined && ack.revs[id] > _cellRev[id]);
     if (!missing) return;
     try { updateStates(await api('GET', '/api/state')); } catch (_) {}   // a push was lost — resync once
   }, 2000);
@@ -1221,8 +1262,8 @@ function patchCells(cells) {
       cell.className = cell.className.replace(/\bstate-\S+/, 'state-' + (_conflicted ? 'edited' : nc.state));
       const badge = cell.querySelector('.badge'); if (badge) badge.textContent = _conflicted ? 'edited' : nc.state;
       if (!_conflicted) {
-        if (nc.kind === 'md') { const md = cell.querySelector('.md'); if (md) { _swapOutput(md, mdHtml(nc)); typeset(md); } }
-        else { const out = cell.querySelector('.output'); if (out) { _swapOutput(out, nc.output, nc.live); typeset(out); } }
+        if (nc.kind === 'md') { const md = cell.querySelector('.md'); if (md) _swapOutput(md, mdHtml(nc), '', () => typeset(md)); }
+        else { const out = cell.querySelector('.output'); if (out) _swapOutput(out, nc.output, nc.live, () => typeset(out)); }
       }
     }
     // Every consumer of the payload, not just the ones that existed when this was written:
@@ -1238,7 +1279,19 @@ function patchCells(cells) {
     }
     // Spend the stamp only now, only if the cell was actually on the page, and only if everything
     // that had work to do managed it — see `revIsNew`.
-    if (cell && _landed) revMark(nc);
+    //
+    // Not for a CONFLICTED cell either: every write above was skipped for it, so nothing was drawn,
+    // and stamping anyway records a payload as applied that never reached the DOM. The reconcile
+    // flow's "use the incoming change" re-applies through `patchCells` (restore.js), which
+    // `revIsNew` would then reject as stale — leaving the cell showing your old text with no way
+    // back.
+    //
+    // `markBlank` is about how the cell LOOKS, not about the payload, so a render that could not
+    // mount its host does not hold it back.
+    if (cell && !_conflicted) {
+      if (_landed) revMark(nc);
+      markBlank(cell, nc);
+    }
   });
   window.onCellsPatched && window.onCellsPatched(cells);       // states/durations moved (DAG panel)
   window.renderRunPill && window.renderRunPill();              // a cell just changed state → refresh the error pill
@@ -1425,7 +1478,7 @@ function updateChrome(state) {
   // doesn't have it. Disable the button up front instead of letting the first turn error out.
   const ab = document.getElementById('agentbtn');
   if (ab) {
-    const avail = state.agentAvailable !== false;   // absent (older server) → assume available
+    const avail = !!state.agentAvailable;   // `state_json` always carries it
     ab.disabled = !avail;
     ab.title = avail ? 'agent chat'
                      : 'agent chat needs Kaimon — this hub is running standalone. Start Kaimon and open the notebook from its hub.';
@@ -1616,37 +1669,69 @@ function syncControlValues(state) {
 // Preact and stick — the pulsing-bracket bug). Cleared when the authoritative state arrives.
 function setState(id, s) { window.slateStore && window.slateStore.setLiveState(id, s); }
 
-// Replace a cell's output, reserving its current height until the new content
-// (notably a base64 <img>, which has no size until it decodes) lays out. Without
-// this the output collapses to ~0 height mid-swap; Safari then clamps scrollTop to
-// the now-shorter page and the figure scrolls out of view (the P2 scroll bug).
+// Replace a cell's output, reserving its current height until the new content lays out. Without
+// this the output collapses to ~0 height mid-swap; Safari then clamps scrollTop to the now-shorter
+// page and the figure scrolls out of view (the P2 scroll bug).
 // `live` is the cell's session-boundness marker ('render' | 'placeholder' | '') — see `_live_output_placeholder`.
-function _swapOutput(out, html, live) {
+// `after` is the caller's post-swap work (typesetting, clamping) on the NEW content. It is a
+// callback rather than the next statement because a figure swap finishes asynchronously below.
+function _swapOutput(out, html, live, after) {
+  const finish = () => { if (after) after(); };
   // A SESSION-BOUND output the page has already booted outranks the placeholder that stands in for it.
   // The placeholder is right for a fresh page (the stored HTML belongs to a dead session), but it rides
   // in every full-state payload — and every mutating API call answers with full state — so without this
   // the next run of ANY cell blanks a working live output back to "connecting…", permanently: nothing
   // re-renders it until the next SSE connect. Keep the mounted one (and its `__slateOut`, so the matching
   // `celldone` re-render stays a no-op). Extension-agnostic: no markup is inspected, only the flag.
-  if (live === 'placeholder' && out.__slateLive) return;
+  if (live === 'placeholder' && out.__slateLive) return finish();
   // A single run swaps the output TWICE — the `celldone:` push (patchCells) AND the run's HTTP-response
   // render (the Preact <Cell> effect) both carry the SAME output. Re-running its <script> twice re-boots a
   // figure needlessly and, for a side-effecting web-cell fragment, fires its effect twice (a double
   // `alert`, a double append). Skip a swap whose output already matches what's mounted: identical output
   // never needs to re-render or re-run. A genuinely new output (or a real change on re-run) still swaps.
-  if (out.__slateOut === html) return;
+  if (out.__slateOut === html) return finish();
   out.__slateOut = html;
   out.__slateLive = live === 'render';
-  out.style.minHeight = out.offsetHeight + 'px';
-  out.innerHTML = html;
-  runScripts(out);   // <script> set via innerHTML is inert — re-create so figures boot
-  mountOutputComponents(out);   // mount any `slate_render` component OUTPUTS in the freshly-swapped output
-  const imgs = out.querySelectorAll('img');
-  const release = () => { out.style.minHeight = ''; };
-  if (!imgs.length) { requestAnimationFrame(release); return; }
-  let n = imgs.length;
-  const done = () => { if (--n <= 0) release(); };
-  imgs.forEach(im => im.complete ? done() : (im.onload = im.onerror = done));
+
+  // Parse off-DOM first. Assigning `out.innerHTML` tears the previous figure out immediately and
+  // puts up an <img> that has nothing to paint until its bytes arrive and decode, so every
+  // re-render shows a hole for at least one frame — the flicker you see dragging a slider that
+  // drives a plot. A detached div still belongs to this document, so its images fetch and decode
+  // there while the old figure is untouched on screen; the swap is then one frame from one picture
+  // to the next. (A <template> will not do: its contents are inert and never fetch anything.)
+  const stage = document.createElement('div');
+  stage.innerHTML = html;
+  const imgs = Array.from(stage.querySelectorAll('img')).filter(im => im.src);
+
+  // Two figure renders can be in flight at once (a fast slider outruns a decode). Only the latest may
+  // land — an older one committing afterwards would put a superseded plot back on the page.
+  const seq = (out.__slateSwapSeq = (out.__slateSwapSeq || 0) + 1);
+  const commit = () => {
+    if (out.__slateSwapSeq !== seq) return;
+    out.style.minHeight = out.offsetHeight + 'px';
+    out.replaceChildren(...Array.from(stage.childNodes));
+    runScripts(out);   // a <script> from parsed HTML is inert — re-create so figures boot
+    mountOutputComponents(out);   // mount any `slate_render` component OUTPUTS in the freshly-swapped output
+    const mounted = out.querySelectorAll('img');
+    const release = () => { out.style.minHeight = ''; };
+    if (!mounted.length) requestAnimationFrame(release);
+    else {
+      let n = mounted.length;
+      const one = () => { if (--n <= 0) release(); };
+      mounted.forEach(im => im.complete ? one() : (im.onload = im.onerror = one));
+    }
+    finish();
+  };
+  if (!imgs.length) return commit();   // text, markdown, tables: nothing to wait for
+
+  // A broken image is not what this guards: a 404 rejects fast and commits right away. It guards a
+  // fetch that stalls, where the alternative to waiting is showing the reader a hole. Holding the
+  // previous figure is the better answer for as long as it stays plausible, hence a whole second.
+  let committed = false;
+  const go = () => { if (committed) return; committed = true; clearTimeout(deadline); commit(); };
+  const deadline = setTimeout(go, 1000);
+  Promise.all(imgs.map(im => im.decode ? im.decode().catch(() => {})
+                                       : new Promise(r => { im.onload = im.onerror = r; }))).then(go);
 }
 
 // A <script> assigned via innerHTML is parsed but never executed. Rich output

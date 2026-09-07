@@ -13,8 +13,7 @@
 (function () {
   const KB = 1024, MB = 1024 * 1024;
   const human = n => n < KB ? n + ' B' : n < MB ? (n / KB).toFixed(0) + ' KB' : (n / MB).toFixed(1) + ' MB';
-  const esc = s => String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const esc = s => window.slateEscHtml(s);
 
   // What the control looks like in each of its three states. Kept as one function so the states
   // can't drift apart in layout — the reader should see the same control change, not three
