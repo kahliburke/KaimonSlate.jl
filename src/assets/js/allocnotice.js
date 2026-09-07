@@ -109,7 +109,9 @@ function IdleBody({ n }) {
   return html`<div>
     <h3 class="antitle">Still using ${n.region}?</h3>
     <${Where} n=${n}/>
-    <p class="anlede">Idle ${human(n.idle_release)}. Releasing in <${Countdown} n=${n}/>.</p>
+    <p class="anlede">Idle ${human(n.idle_release)}. ${secondsLeft(n) <= 0
+      ? html`Releasing now.`
+      : html`Releasing in <${Countdown} n=${n}/>.`}</p>
     <p class="andim">Next run re-queues.</p>
     <${Extend} n=${n}/>
     ${err.value ? html`<div class="anerr">${err.value}</div>` : null}
@@ -123,11 +125,16 @@ function IdleBody({ n }) {
 }
 
 function WalltimeBody({ n }) {
+  // At zero the countdown has nothing left to count, and "expires in 0s" describes a future that has
+  // already happened. The advice goes with it: there is no longer time to act on it.
+  const over = secondsLeft(n) <= 0;
   return html`<div>
-    <h3 class="antitle">${n.region}: allocated time expiring</h3>
+    <h3 class="antitle">${n.region}: allocated time ${over ? 'has run out' : 'expiring'}</h3>
     <${Where} n=${n}/>
-    <p class="anlede">This worker's allocated time expires in <${Countdown} n=${n}/>. Persist any
-      results before the scheduler ends the session.</p>
+    <p class="anlede">${over
+      ? html`This worker's allocated time has run out. The scheduler is ending the session.`
+      : html`This worker's allocated time expires in <${Countdown} n=${n}/>. Persist any
+             results before the scheduler ends the session.`}</p>
     <p class="andim">Next run re-queues.</p>
     <${Extend} n=${n}/>
     ${err.value ? html`<div class="anerr">${err.value}</div>` : null}
