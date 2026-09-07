@@ -160,6 +160,36 @@ const RE = KaimonSlate.ReportEngine
                 end
             end
 
+            # ── a dead worker's series does not outlive it ────────────────────────────────────
+            # Both registries are keyed by the gate connection name, and every respawn mints a new
+            # one. Both shipped with a `forget` function that nothing called, so a hub that restarted
+            # a worker all afternoon kept a clock mapping and a telemetry ring for every worker it
+            # had ever had. Measured at 9 of each on a hub with one notebook and one region.
+            @testset "per-connection state is swept when its worker goes" begin
+                RE.ClockTrack.note_exchange!("slate-dead-1", 0, 10, 20, 40)
+                RE.ClockTrack.note_exchange!("slate-dead-2", 0, 10, 20, 40)
+                RE._record_telemetry!("slate-dead-1", "{\"cpu\":1}")
+                try
+                    @test "slate-dead-1" in RE.ClockTrack.tracked_conns()
+                    @test "slate-dead-2" in RE.ClockTrack.tracked_conns()
+
+                    # The sweep reads only the open notebooks and their kernels, so a stand-in
+                    # with no notebooks says "nothing is attached" without standing a hub up. Every
+                    # entry above is then unreachable by definition.
+                    nohub = (lock = ReentrantLock(), notebooks = Dict{String,Any}())
+                    NS._sweep_stale_conn_state!(nohub)
+                    @test !("slate-dead-1" in RE.ClockTrack.tracked_conns())
+                    @test !("slate-dead-2" in RE.ClockTrack.tracked_conns())
+                    @test !("slate-dead-1" in RE.kernel_stats_conns())
+                    # And the sweep is idempotent: nothing left to drop is not an error.
+                    @test NS._sweep_stale_conn_state!(nohub) === nothing
+                finally
+                    RE.ClockTrack.forget_clock!("slate-dead-1")
+                    RE.ClockTrack.forget_clock!("slate-dead-2")
+                    RE.forget_kernel_stats("slate-dead-1")
+                end
+            end
+
             # ── the grant stamp is not the refresh stamp ──────────────────────────────────────
             # These were ONE field, and the two clocks that read it want opposite things. The
             # placement is re-asked of the scheduler every `_PLACE_TTL`; the idle timer reads the

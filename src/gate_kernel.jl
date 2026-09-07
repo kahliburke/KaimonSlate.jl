@@ -524,6 +524,9 @@ forget_kernel_stats(conn_name::AbstractString) = lock(_STATS_LOCK) do
     delete!(_KERNEL_STATS, String(conn_name)); nothing
 end
 
+"Every connection with a telemetry series, for the sweep that drops the dead ones."
+kernel_stats_conns() = lock(_STATS_LOCK) do; collect(keys(_KERNEL_STATS)); end
+
 # Pull the next batch of gate-stream messages. Prefer the event-driven blocking
 # `wait_stream_messages!` (parks on the SUB FDs — near-zero idle CPU) when the Kaimon build
 # provides it; otherwise fall back to the non-blocking `drain_stream_messages!` + a short sleep.

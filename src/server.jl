@@ -2418,6 +2418,36 @@ function _seed_clock!(k)
     return nothing
 end
 
+# Per-connection state — a worker's clock mapping and its telemetry ring — is keyed by the gate
+# connection name, and every respawn mints a new one. Both registries shipped with a `forget`
+# function and no caller, so a hub that restarted a worker all afternoon kept a series for every
+# worker it had ever had, none of them reachable.
+#
+# SWEPT rather than dropped at teardown. Six paths clear a kernel's connection, and the bug was a
+# teardown function nobody called: adding a seventh call site invites the eighth path to forget
+# again. Comparing against what is actually attached cannot be forgotten.
+#
+# A name is never reused, so a name no live kernel holds is dead. A wire that drops and comes back
+# loses its history here, which is the same thing `forget_kernel_stats` was written to do: stale
+# telemetry that outlives its worker is what misleads the watchdog.
+function _sweep_stale_conn_state!(h)
+    live = Set{String}()
+    for snb in lock(h.lock) do; collect(values(h.notebooks)); end
+        k = snb.kernel
+        (k isa ReportEngine.GateKernel && k.conn !== nothing) && push!(live, String(k.conn.name))
+    end
+    for (_, k) in lock(_REGION_LOCK) do; collect(_REGION_KERNELS); end
+        (k isa ReportEngine.GateKernel && k.conn !== nothing) && push!(live, String(k.conn.name))
+    end
+    for name in ReportEngine.kernel_stats_conns()
+        name in live || ReportEngine.forget_kernel_stats(name)
+    end
+    for name in ReportEngine.ClockTrack.tracked_conns()
+        name in live || ReportEngine.ClockTrack.forget_clock!(name)
+    end
+    return nothing
+end
+
 function _sweep_idle_regions!(h)
     busy = lock(_PLACING_LOCK) do; Set{String}(_PLACING); end
     nbs_of = Dict{String,Vector{LiveNotebook}}()      # region → the open notebooks using it
@@ -2612,6 +2642,9 @@ function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, in
     end
     try; _sweep_idle_regions!(h)              # hub-wide too: a region is not a notebook's to release
     catch e; ReportEngine._rlog("supervisor: region sweep error: " * first(sprint(showerror, e), 120))
+    end
+    try; _sweep_stale_conn_state!(h)          # drop the series of workers that are gone
+    catch e; ReportEngine._rlog("supervisor: conn-state sweep error: " * first(sprint(showerror, e), 120))
     end
     try                                       # a leak is only visible as a series, so write one
         line = SlateDiag.diag_log_line()

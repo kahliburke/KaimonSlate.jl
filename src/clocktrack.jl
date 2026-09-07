@@ -17,7 +17,7 @@
 # shorten someone's allocation.
 module ClockTrack
 
-export note_exchange!, to_hub_ns, clock_quality, forget_clock!
+export note_exchange!, to_hub_ns, clock_quality, forget_clock!, tracked_conns
 
 # One exchange: when it happened (hub monotonic, ns), the offset it implies, and what it cost.
 const _WINDOW = 32          # samples kept per connection
@@ -149,5 +149,8 @@ function clock_quality(conn::AbstractString)
 end
 
 forget_clock!(conn::AbstractString) = (lock(_LOCK) do; delete!(_TRACKS, String(conn)); end; nothing)
+
+"Every connection with a mapping, for the sweep that drops the ones no worker holds any more."
+tracked_conns() = lock(_LOCK) do; collect(keys(_TRACKS)); end
 
 end # module ClockTrack
