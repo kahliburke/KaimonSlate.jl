@@ -3671,6 +3671,11 @@ function region_forget_placement!(r::Region)
     held === nothing && return false
     route!(held.host, "")
     stop_sync_host!(held.host)
+    # The data forwards go with the route, for the same reason `_placement` drops them when a lease
+    # runs out: their far end is a node we no longer hold. A forward left open to a node that is gone
+    # is not idle — the session pumps every forward at every wait, so a dead one is swept forever and
+    # costs a core between them. Releasing on idle used to leave one behind on every cycle.
+    Threads.@spawn try; _evict_data_tunnels!(held.host); catch; end
     return true
 end
 
