@@ -706,9 +706,15 @@ let _regPanel = null, _regFor = '';
 function _regRow(label, value) {
   return value ? `<div class="blkrow"><span>${_esc(label)}</span><div>${_esc(value)}</div></div>` : '';
 }
+// `ok` reports whether the SCHEDULER COULD BE ASKED, not whether it holds anything: nothing held
+// answers `ok` with `state: 'none'`. Reading `ok` as "there is an allocation" left the panel offering
+// Release for a node that had already gone back, on a row that said `none`.
+// Mirrors the server's own `settled` (allocation.jl): none or unreachable means nothing to give back.
+const _REG_UNHELD = ['', 'none', 'unreachable'];
 function _regAlloc(a, reg) {
   if (a === undefined) return '<div class="blkrow blkdim"><span>Allocation</span><div>asking…</div></div>';
-  if (!a || !a.ok) return '<div class="blkrow blkdim"><span>Allocation</span><div>none held</div></div>';
+  if (!a || !a.ok || _REG_UNHELD.includes(String(a.state || '')))
+    return '<div class="blkrow blkdim"><span>Allocation</span><div>none held</div></div>';
   const bits = [a.state || '', a.node || '', a.id ? '#' + a.id : '', a.timeleft ? a.timeleft + ' left' : ''];
   // Releasing belongs next to the allocation it names. It bills for the time it is HELD, so the
   // control has to be where you read that you are holding one, not one page away in Remotes.
