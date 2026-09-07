@@ -706,20 +706,20 @@ let _regPanel = null, _regFor = '';
 function _regRow(label, value) {
   return value ? `<div class="blkrow"><span>${_esc(label)}</span><div>${_esc(value)}</div></div>` : '';
 }
-// `ok` reports whether the SCHEDULER COULD BE ASKED, not whether it holds anything: nothing held
-// answers `ok` with `state: 'none'`. Reading `ok` as "there is an allocation" left the panel offering
-// Release for a node that had already gone back, on a row that said `none`.
-// Mirrors the server's own `settled` (allocation.jl): none or unreachable means nothing to give back.
-const _REG_UNHELD = ['', 'none', 'unreachable'];
+// `held` is the server's answer, not this panel's guess. `ok` only ever meant "the scheduler could be
+// asked", and reading it as "there is an allocation" is what left a Release button on a row saying
+// `none` after the node had already gone back.
 function _regAlloc(a, reg) {
+  const M = window.slateModel;
   if (a === undefined) return '<div class="blkrow blkdim"><span>Allocation</span><div>asking…</div></div>';
-  if (!a || !a.ok || _REG_UNHELD.includes(String(a.state || '')))
-    return '<div class="blkrow blkdim"><span>Allocation</span><div>none held</div></div>';
+  if (!a || !a.ok) return '<div class="blkrow blkdim"><span>Allocation</span><div>unavailable</div></div>';
+  if (!M.isHeld(a)) return '<div class="blkrow blkdim"><span>Allocation</span><div>none held</div></div>';
   const bits = [a.state || '', a.node || '', a.id ? '#' + a.id : '', a.timeleft ? a.timeleft + ' left' : ''];
   // Releasing belongs next to the allocation it names. It bills for the time it is HELD, so the
   // control has to be where you read that you are holding one, not one page away in Remotes.
   return '<div class="blkrow"><span>Allocation</span><div>' + _esc(bits.filter(Boolean).join(' · ')) +
-         ' <button class="regprel" onclick="window.releaseRegionAlloc(\'' + _esc(reg) + '\')">Release</button></div></div>';
+         ' <button class="regprel" onclick="window.releaseRegionAlloc(\'' + _esc(reg) + '\')">' +
+         _esc(M.releaseVerb(a)) + '</button></div></div>';
 }
 // Give the node back now. Confirmed, because anything running on it dies with it.
 window.releaseRegionAlloc = async function (reg) {
@@ -730,6 +730,7 @@ window.releaseRegionAlloc = async function (reg) {
   try {
     await fetch('/api/allocation/release', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                              body: JSON.stringify({ region: reg }) });
+    window.slateModel.refreshAllocation(reg);   // and every other view reading it follows
   } catch (_) {}
   if (typeof closeRegionPanel === 'function') closeRegionPanel();
 };
@@ -814,8 +815,11 @@ window.openRegionPanel = function (id, ev) {
     .then(j => { L = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [] };
                  _blkLoad.set(reg, { at: Date.now(), data: L }); paint(L, A); })
     .catch(() => paint(null, A));
-  fetch('/api/allocation?region=' + encodeURIComponent(reg)).then(r => r.json())
-    .then(j => { A = j; paint(L, A); }).catch(() => { A = null; paint(L, A); });
+  // Through the shared cache, so releasing from the Remotes roster invalidates what this panel would
+  // otherwise still be holding. Forced: opening the panel is the moment you want the current answer,
+  // and this is also the call that reconciles the hub against the scheduler.
+  window.slateModel.refreshAllocation(reg).then(j => { A = j; paint(L, A); })
+    .catch(() => { A = null; paint(L, A); });
 };
 addEventListener('mousedown', e => {
   if (!_regFor) return;

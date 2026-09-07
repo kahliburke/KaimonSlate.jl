@@ -6,6 +6,15 @@ import { html } from 'htm/preact';
 import { signal, effect } from '@preact/signals';
 import { detail, focusHost, editRegion, pendingRegion, regions, parked, loadRegions, schedInfo, loadScheduler } from './stores.js';
 import { hostTransport } from './hoststore.js';
+// One answer to "is a node held" and "what is giving it back called", shared with the notebook's
+// pills and panels — these used to be worked out here, and differently in two other files. model.js
+// is a classic script loaded before every module, so it is always here by the time this runs.
+const { allocState, releaseVerb, isAlive, workerState,
+        getAllocation, loadAllocation, refreshAllocation } = window.slateModel;
+// The model holds plain state (no signals — it cannot import them). Mirror its changes into one
+// signal so this island re-renders when an allocation lands, however it was asked for.
+const modelTick = signal(0);
+window.slateModel.subscribe(() => { modelTick.value++; });
 
 const roster  = signal({});    // host -> workers[] | undefined (loading)
 const rmsg    = signal(null);  // {text, err} save-status line
@@ -120,30 +129,27 @@ function sysNote(name, checked, editing) {
 // Worth its own row rather than a line in a status message: an allocation bills for the time it is
 // HELD, not the time it is used, so what is being held — and the way to give it back — should be
 // where you are already looking, not something to remember.
-const alloc = signal({});   // region name -> payload | null (asking) | undefined (never asked)
-function loadAlloc(name, force = false) {
-  if (!name || (!force && alloc.value[name] !== undefined)) return;
-  alloc.value = { ...alloc.value, [name]: null };
-  fetch('/api/allocation?region=' + encodeURIComponent(name)).then(r => r.json())
-    .then(d => { alloc.value = { ...alloc.value, [name]: d || { ok: false } }; })
-    .catch(() => { alloc.value = { ...alloc.value, [name]: { ok: false, error: 'unreachable' } }; });
-}
+// The cache lives in the model, so releasing here also clears what the notebook's region panel shows.
+const loadAlloc = (name, force = false) => loadAllocation(name, force);
 async function releaseAlloc(name) {
   if (!await confirmP('Release the allocation held for “' + name + '”?\nWorkers on that node go with it; the next cell asks the scheduler for a new one.', 'Release', 'danger')) return;
   await fetch('/api/allocation/release', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ region: name }) }).catch(() => {});
-  loadAlloc(name, true); loadRegions();
+  refreshAllocation(name); loadRegions();
 }
 function AllocationRow(name) {
   if (!name || fSched.value === 'none') return null;
-  const a = alloc.value[name];
+  modelTick.value;                    // subscribe this row to model changes
+  const a = getAllocation(name);
   if (a === undefined) return null;   // the seed effect asks; render never triggers a fetch
   const body =
     a === null ? html`<span class="pddim"><span class="hydspin"></span> asking ${focusHost.value}…</span>`
     : !a.ok ? html`<span class="pddim">${a.error || 'unavailable'}</span>`
-    : a.state === 'running' ? html`<span class="rppsysok">✓ node <code>${a.node}</code>${a.timeleft ? ' · ' + a.timeleft + ' left' : ''} · job ${a.id}</span>
-        <button class="rppsysbtn" title="release the node now; it bills while held" onClick=${() => releaseAlloc(name)}>Release</button>`
-    : a.state === 'pending' ? html`<span class="pddim"><span class="hydspin"></span> queued as job ${a.id} — a cell on this region waits for it</span>
-        <button class="rppsysbtn" title="withdraw the request" onClick=${() => releaseAlloc(name)}>Cancel</button>`
+    // `allocState` and the verb come from the hub, so this row and the notebook's cannot disagree
+    // about whether a node is held or about what giving it back is called.
+    : allocState(a) === 'running' ? html`<span class="rppsysok">✓ node <code>${a.node}</code>${a.timeleft ? ' · ' + a.timeleft + ' left' : ''} · job ${a.id}</span>
+        <button class="rppsysbtn" title="release the node now; it bills while held" onClick=${() => releaseAlloc(name)}>${releaseVerb(a)}</button>`
+    : allocState(a) === 'pending' ? html`<span class="pddim"><span class="hydspin"></span> queued as job ${a.id} — a cell on this region waits for it</span>
+        <button class="rppsysbtn" title="withdraw the request" onClick=${() => releaseAlloc(name)}>${releaseVerb(a)}</button>`
     : html`<span class="pddim">nothing held — the first cell on this region asks for a node</span>`;
   return html`<div class="rpprow"><label>Allocation</label><div class="rppsysbox">${body}
     <button class="rppsysbtn" title="ask the scheduler again" onClick=${() => loadAlloc(name, true)}>↻</button></div></div>`;
@@ -254,10 +260,10 @@ function Roster() {
         if (st.memo_bytes > 0) tel.push('memo ' + fmtB(st.memo_bytes));
         const warm = st.warm || '', wc = warm.indexOf('ready') === 0 ? '#56d364' : warm.indexOf('warming') === 0 ? '#e8a13f' : '#8a90a8';
         return html`<div class="rppworker" title="worker details + history" onClick=${ev => { if (ev.target.closest && ev.target.closest('.rppwacts')) return; detail.value = { host: h, port: +w.port }; }}>
-          <div class="rppw1"><span class="rppwport">${w.alive ? '🟢' : '⚪'} :${w.port}</span>
-            ${w.state ? html`<span class=${'rppbadge ' + (w.state === 'attached' ? 'attached' : 'idle')}>${w.state}</span>` : null}
+          <div class="rppw1"><span class="rppwport">${isAlive(w) ? '🟢' : '⚪'} :${w.port}</span>
+            ${w.state ? html`<span class=${'rppbadge ' + (workerState(w) === 'attached' ? 'attached' : 'idle')}>${w.state}</span>` : null}
             ${mf.region ? html`<span class="rppbadge pool">${mf.region}</span>` : null}
-            ${(w.state === 'attached' && mf.notebook) ? html`<span class="rppwnb">${mf.notebook}</span>` : null}
+            ${(workerState(w) === 'attached' && mf.notebook) ? html`<span class="rppwnb">${mf.notebook}</span>` : null}
             ${tel.length ? html`<div class="rppwtel">${tel.join(' · ')}</div>` : null}
             ${warm ? html`<div class="rppwtel" style=${'color:' + wc}>${warm.indexOf('warming') === 0 ? '⏳ ' : warm.indexOf('ready') === 0 ? '✓ ' : ''}${warm}</div>` : null}</div>
           <div class="rppwacts">

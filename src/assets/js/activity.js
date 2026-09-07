@@ -19,6 +19,10 @@ import { html, render } from 'htm/preact';
 import { signal } from '@preact/signals';
 import { useEffect } from 'preact/hooks';
 import { detail, openRegionConfig } from './stores.js';   // shared with the other home-page islands
+// The liveness/attachment questions, answered once. This island had the careful version and the
+// remotes roster had a looser one, so the same worker read green here and grey there. model.js is a
+// classic script loaded before every module, so it is always here by the time this runs.
+const { isAlive, workerState, mergeWorker } = window.slateModel;
 
 const POLL_MS = 3000;
 const regions  = signal([]);     // /api/regions            → [{name,host,warm,status,…}]
@@ -45,7 +49,7 @@ const confirmP = (msg, ok, cls) => (window.confirmDark ? window.confirmDark(msg,
 async function reapWorker(host, w, bound) {
   const mf = mergeManifest(w, bound), port = +w.port;
   const nb = mf.notebook ? '\nIt is serving “' + String(mf.notebook).replace(/#[^#]*$/, '') + '”' +
-    (((bound && bound.state) || w.state) === 'attached' ? ' and is ATTACHED — that notebook loses its kernel.' : '.') : '';
+    (workerState(mergeWorker(w, bound)) === 'attached' ? ' and is ATTACHED — that notebook loses its kernel.' : '.') : '';
   if (!await confirmP('Reap worker :' + port + ' on ' + host + '?' + nb +
       '\nThis kills the process and removes its files — any un-fetched results are lost.', 'Reap', 'danger')) return;
   reaping.value = { port };
@@ -189,11 +193,12 @@ function findEntry(host, port) {
 // ── monitor: one worker row ──────────────────────────────────────────────────────────
 function WorkerRow({ w, host, bound }) {
   const st = pj(w.stats), mf = mergeManifest(w, bound);
-  const alive = w.alive !== false;
   // The hub's own kernel outranks the host's `.state` sidecar, which is written by the worker and can
-  // lag a reattach — if we hold a live wire to it, it is attached.
-  const rawState = (bound && bound.state) || w.state;
-  const state = !alive ? 'dead' : (rawState === 'attached' ? 'attached' : 'idle');
+  // lag a reattach — if we hold a live wire to it, it is attached. `mergeWorker` is that precedence,
+  // shared so the remotes roster cannot merge the two the other way round.
+  const merged = mergeWorker(w, bound);
+  const alive = isAlive(merged);
+  const state = workerState(merged);
   const cpu = (st.cpu !== undefined && st.cpu >= 0) ? st.cpu : null;
   const running = Array.isArray(st.running) ? st.running : [];
   const warm = st.warm || '', warming = warm.indexOf('warming') === 0;
@@ -236,7 +241,7 @@ function Monitor() {
   const rows = (xs) => xs.map(x => {
     const st = pj(x.w.stats); totRss += st.rss || 0;
     const running = Array.isArray(st.running) ? st.running : [];
-    if (x.w.alive !== false && (running.length > 0 || (st.evals || 0) > 0 || (st.warm || '').indexOf('warming') === 0)) busy++;
+    if (isAlive(x.w) && (running.length > 0 || (st.evals || 0) > 0 || (st.warm || '').indexOf('warming') === 0)) busy++;
     return html`<${WorkerRow} w=${x.w} host=${x.host} bound=${x.bound}/>`;
   });
   const group = (head, xs) => html`<div>${head}${xs.length ? rows(xs) : html`<div class="actempty">no workers</div>`}</div>`;
@@ -290,7 +295,7 @@ function Acts({ host, w, bound, isLocal }) {
   const canReap = !isLocal && !!host;
   const note = r && r.err ? html`<span class="wdacterr">⚠ ${r.err}</span>`
     : isLocal ? 'Bound to an open notebook — it exits when that notebook closes.'
-    : !mf.nbid ? (w.alive === false ? 'Not running — reaping clears its leftover files on ' + host + '.'
+    : !mf.nbid ? (!isAlive(w) ? 'Not running — reaping clears its leftover files on ' + host + '.'
                                     : 'Reaping kills the process and removes its files on ' + host + '.')
     : canReap ? 'Serving an open notebook on ' + host + '. Reaping kills it and that notebook loses its kernel.'
               : 'An already-running worker this hub attached to — it outlives the notebook and the hub does not manage it.';
@@ -326,7 +331,7 @@ function WorkerDetail() {
     // A worker bound to an open notebook — on this machine or on a host — has a manifest that can't be
     // stale. Only an unbound remote one can be detached, in which case it names the notebook it LAST
     // served, which must not read as "serving now".
-    const state = (bound && bound.state) || w.state;
+    const state = workerState(mergeWorker(w, bound));
     const det = !isLocal && !bound && state !== 'attached';
     row('Host', isLocal ? 'this machine' : (host || 'forwarded wire (no host)'));
     if (mf.region) row('Region', mf.region, mf.region);
@@ -342,10 +347,10 @@ function WorkerDetail() {
     const span = samples.length >= 2 ? (samples[samples.length - 1].t - samples[0].t) : 0;   // window covered (s)
     const axis = html`<div class="wdaxis"><span>${span > 0 ? '−' + fmtSpan(span) : ''}</span><span>now</span></div>`;
     return html`
-      <div class="wdhead"><strong>${w.alive !== false ? '🟢' : '⚪'} :${w.port}</strong>
+      <div class="wdhead"><strong>${isAlive(w) ? '🟢' : '⚪'} :${w.port}</strong>
         <span class="wdsub">${(state || '') + (mf.region ? ' · ' + mf.region : '')}</span></div>
       <div class="wdgrid">${rows}</div>
-      ${(det && mf.notebook && w.alive !== false) ? html`<div class="wdhint">Detached but still warm — its namespace, loaded packages and memo store survive. Reopening that notebook on this host reattaches to this worker instead of paying a cold boot.${mf.region ? ' Until then its region can hand it to another notebook with the same env.' : ' No other notebook will reuse it, so reap it if you are done with that one.'}</div>` : null}
+      ${(det && mf.notebook && isAlive(w)) ? html`<div class="wdhint">Detached but still warm — its namespace, loaded packages and memo store survive. Reopening that notebook on this host reattaches to this worker instead of paying a cold boot.${mf.region ? ' Until then its region can hand it to another notebook with the same env.' : ' No other notebook will reuse it, so reap it if you are done with that one.'}</div>` : null}
       <div class="wdstats">
         ${st.cpu >= 0 ? chip('CPU', st.cpu + '%') : null} ${st.rss ? chip('RSS', fmtB2(st.rss)) : null}
         ${st.memo_bytes > 0 ? chip('Memo store', fmtB2(st.memo_bytes)) : null}

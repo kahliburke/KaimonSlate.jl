@@ -143,6 +143,9 @@ function _wpLabel(side, host) {
 let _wpPendingWs = [], _wpPaintTimer = null;
 function renderWorkers(state) {
   const ws = (state && state.workers) || [];
+  // Both paths into the pills come through here — the full notebook state and the pushed list — so
+  // this is where the model is fed. Everything downstream reads it rather than this array.
+  window.slateModel.applyWorkers(ws);
   // Cheap, non-jarring bits run NOW (never debounced): drop live samples for vanished workers, and the main
   // worker's compact stat on the #runloc pill.
   const keep = new Set(['', ...ws.map(w => w.side || '')]);
@@ -160,7 +163,7 @@ function renderWorkers(state) {
 // Severity rank — the most attention-worthy worker surfaces first; everything calmer folds away. The main is
 // ranked like any other (no special-casing): 4 disconnected · 3 degraded · 2 starting · 1 running · 0 idle-ok.
 function _wpSeverity(w) {
-  const st = w.status || (w.connected ? 'ok' : 'connecting');
+  const st = window.slateModel.workerStatus(w);
   if (st === 'disconnected') return 4;
   if (st === 'degraded') return 3;
   if (st === 'connecting') return 2;
@@ -186,7 +189,7 @@ function _wpNoteText(w) {
 }
 
 function _wpFace(w) {
-  const st = w.status || (w.connected ? 'ok' : 'connecting');
+  const st = window.slateModel.workerStatus(w);
   // A server-named state wins: "connecting" is a poor description of a region sitting in a
   // scheduler queue, and only the server knows which it is.
   if (w.face && st !== 'ok') return w.face;
@@ -207,7 +210,7 @@ function _wpPaintStrip(ws) {
   const ranked = ws.slice().sort((a, b) => _wpSeverity(b) - _wpSeverity(a));
   const top = ranked[0], side = top.side || '';
   const icon = (!side && !top.host) ? '💻' : '🖧';
-  const st = top.status || (top.connected ? 'ok' : 'connecting');
+  const st = window.slateModel.workerStatus(top);
   const cls = st === 'degraded' ? ' degraded' : (st === 'ok' ? '' : ' reconnecting');
   const face = _wpFace(top);
   const rows = ranked.map(w => {
@@ -226,7 +229,7 @@ function _wpPaintStrip(ws) {
 }
 
 // Health dot for a dropdown row: 🟢 ok · 🟡 degraded · 🟠 connecting/disconnected.
-function _wpOverflowDot(w) { const st = w.status || (w.connected ? 'ok' : 'connecting');
+function _wpOverflowDot(w) { const st = window.slateModel.workerStatus(w);
   return st === 'degraded' ? '🟡' : (st === 'ok' ? '🟢' : '🟠'); }
 
 // Short reason for a degraded pill face — pull the "Ns" out of the note ("no liveness reply for 18s …").
@@ -238,7 +241,7 @@ function _wpUnwellShort(note) { const m = note && /(\d+)s/.exec(note); return m 
 function onWorkersUpdate(ws) {
   try {
     ws = ws || [];
-    renderWorkers({ workers: ws });
+    renderWorkers({ workers: ws });       // feeds the model on the way through
     if (_wpSide !== null) {
       const w = ws.find(x => (x.side || '') === _wpSide);
       if (w) {
@@ -254,9 +257,20 @@ function onWorkersUpdate(ws) {
 
 // A worker telemetry sample pushed over the WS → update its pill face live (and the popup breakdown if
 // that side's popup is open), WITHOUT waiting for the next notebook state. `side===""` is the main worker.
-function onWorkerTelemetry(side, statsJson) {
+function onWorkerTelemetry(side, statsJson, alloc) {
   side = side || '';
   _wpLive[side] = statsJson;
+  // The allocation clocks ride this frame. They used to be dropped in wscall.js, so the popup's
+  // walltime and idle rows came from the one-shot fetch that opened it and then stood still.
+  window.slateModel.applyTelemetry(side, statsJson, alloc);
+  if (_wpSide === side && _wpShown && alloc) {
+    for (const k of ['scheduler', 'held', 'allocState', 'walltimeLeft',
+                     'idleRelease', 'idleWarn', 'idleFor']) delete _wpShown[k];
+    Object.assign(_wpShown, alloc);
+    _wpShown._at = Date.now();          // these ages are as of NOW, so the tick counts from here
+    const ib = document.getElementById('workerpop-ident'); if (ib) ib.innerHTML = _wpIdentChips(_wpShown);
+    const ab = document.getElementById('workerpop-acts');  if (ab) ab.innerHTML = _wpActions(_wpShown);
+  }
   const box = document.getElementById('workerpills');
   const pill = box && box.querySelector('.wpill[data-side="' + (window.CSS && CSS.escape ? CSS.escape(side) : side) + '"]');
   // Only patch the face when the pill is showing its normal stat — leave a degraded/reconnecting pill's status
@@ -377,13 +391,15 @@ function _wpIdentChips(r) {
 // label that reads like the node goes back. With no allocation, stopping the process is the whole
 // of it.
 function _wpActions(r) {
-  const side = r.side || '', held = +r.walltimeLeft >= 0;
+  const M = window.slateModel, side = r.side || '';
   const b = (label, fn, cls) => '<button class="wpact' + (cls ? ' ' + cls : '') +
     '" onclick="' + fn + '">' + label + '</button>';
   const q = "'" + String(side).replace(/'/g, "\\'") + "'";
+  // A queued request is withdrawn rather than released, so the label follows the allocation's state.
+  const verb = M.releaseVerb(r) === 'Cancel' ? '⏏ Cancel request' : '⏏ Release node';
   return b('⟲ Restart', 'window.wpRestart(' + q + ')') +
-         (held ? b('⏏ Release node', 'window.wpRelease(' + q + ')', 'danger')
-               : b('■ Shut down', 'window.wpShutdown(' + q + ')', 'danger'));
+         (M.isHeld(r) ? b(verb, 'window.wpRelease(' + q + ')', 'danger')
+                      : b('■ Shut down', 'window.wpShutdown(' + q + ')', 'danger'));
 }
 
 const _wpConfirm = (msg, ok, cls) => (window.confirmDark ? window.confirmDark(msg, ok, cls)
@@ -450,7 +466,7 @@ async function _wpRefresh() {
     const w = (_wpWorkers || []).find(x => (x.side || '') === side);
     r = Object.assign({ side: side }, w || {}, { log: "" , _noLog: true });
   }
-  const dot = !r.connected ? '🟠' : (r.status === 'degraded' ? '🟡' : '🟢');
+  const dot = _wpOverflowDot(r);   // same rank as every other dot: degraded outranks a live wire
   document.getElementById('workerpop-title').innerHTML = dot + ' ' + (r.side ? 'region' : 'main worker') +
     ' · ' + _wpEsc(_wpLabel(r.side, r.host)) + (r.port ? ' :' + r.port : '');
   // The run-location picker (formerly the #runloc caret) lives here now — only for the MAIN worker, since a
@@ -565,11 +581,11 @@ document.addEventListener('keydown', e => {
   }
 }, true);
 
-// The allocation clocks are wall-clock facts, not push-driven ones: redraw them every second while a
-// popup is open so a walltime does not sit still until the next state arrives.
+// The allocation clocks tick between pushes: redraw them every second while a popup is open so a
+// walltime does not sit still until the next sample arrives.
 setInterval(() => {
   if (_wpSide === null || !_wpShown) return;
-  if (!(+_wpShown.walltimeLeft >= 0 || +_wpShown.idleRelease > 0)) return;
+  if (!window.slateModel.isHeld(_wpShown)) return;   // nothing held, nothing counting down
   const idb = document.getElementById('workerpop-ident');
   if (idb) idb.innerHTML = _wpIdentChips(_wpShown);
 }, 1000);

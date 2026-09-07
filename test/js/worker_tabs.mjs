@@ -31,6 +31,20 @@ const constOf = name => {
 };
 const MAX = constOf('_WP_TABS_MAX');
 
+// `_wpSeverity` reads the shared worker model for a worker's health, so the REAL model goes in
+// rather than a stub: a stub would let the ranking and the definition of `status` drift apart, which
+// is the class of bug the model was introduced to end. model.js is a classic script, so evaluating
+// it is all it takes.
+const modelSrc = readFileSync(join(here, '..', '..', 'src', 'assets', 'js', 'model.js'), 'utf8');
+globalThis.window = globalThis.window || {};
+try { (0, eval)(modelSrc); } catch (e) {
+  console.error('worker_tabs: could not evaluate model.js —', e.message);
+  process.exit(2);
+}
+if (!globalThis.window.slateModel) {
+  console.error('worker_tabs: model.js did not define window.slateModel'); process.exit(2);
+}
+
 // `_wpPaintTabs` writes DOM, so the selection rule is re-derived here from the same inputs it uses:
 // `_wpSeverity` (sliced from the source, so a change to the ranking is caught) plus the max.
 const severity = new Function('_wpLive', `${sliceFn('_wpSeverity')}\n  return _wpSeverity;`)({});

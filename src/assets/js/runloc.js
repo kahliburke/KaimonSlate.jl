@@ -209,8 +209,9 @@ async function rlManageWorkers(ev) {
   const rows = ws.map(w => {
     let mf = {}; try { mf = JSON.parse(w.manifest || '{}'); } catch (_) {}
     const age = w.lastActivity ? (Math.round((now - w.lastActivity) / 60) + 'm ago') : 'never';
-    const abandoned = w.alive && w.lastActivity && (now - w.lastActivity > 3600);
-    return '<div class="rlworker"><div class="rlwinfo"><b>' + (w.alive ? '🟢' : '⚪') + ' :' + w.port + '</b> ' +
+    const live = window.slateModel.isAlive(w);
+    const abandoned = live && w.lastActivity && (now - w.lastActivity > 3600);
+    return '<div class="rlworker"><div class="rlwinfo"><b>' + (live ? '🟢' : '⚪') + ' :' + w.port + '</b> ' +
       _rlEsc(mf.notebook || '?') + '<div class="rldetail">last activity: ' + age +
       (abandoned ? ' · <span class="rlabandon">possibly abandoned</span>' : '') +
       (mf.spawned ? ' · since ' + _rlEsc(mf.spawned) : '') + '</div></div>' +

@@ -336,7 +336,7 @@ function _dagWorkersList() { return _dagWorkersLive || (window.__slateState && w
 function _dagRegionWorker(name) { return _dagWorkersList().find(w => (w.side || '') === name) || null; }
 // Status → dot colour. `none` (no active worker for a declared region) is a hollow grey ring.
 const _DAG_STATUS_COL = { ok: '#3fb96e', degraded: '#e8b23f', connecting: '#e8a13f', disconnected: '#e0596a', none: '#6a7183' };
-function _dagWorkerStatus(w) { return w ? (w.status || (w.connected ? 'ok' : 'connecting')) : 'none'; }
+function _dagWorkerStatus(w) { return window.slateModel.workerStatus(w); }
 function _dagRegionLegend() {
   const pane = document.getElementById('dagpane') || document.getElementById('dag');
   let el = document.getElementById('dagregleg');

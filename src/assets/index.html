@@ -1917,6 +1917,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 </a>
 <!-- Home-page Preact island: the remote-activity monitor + worker-detail popup (replaces the former
      inline innerHTML render). Bridges to the vanilla Remotes modal via window.slateOpen* helpers. -->
+<script src="/assets/js/model.js"></script>   <!-- one worker/allocation model; classic, so the modules below can rely on it -->
 <script type="module" src="/assets/js/activity.js"></script>
 <!-- Remotes modal island: host setup + SSE preflight + known-hosts list + xfer + the region focus view
      (imports Focus from remotes-focus.js) + the run-on pickers. Driven by shared signals (stores.js). -->
