@@ -3617,15 +3617,32 @@ function _reap_region_workers!(r::Region)
     return n
 end
 
+"""
+    region_forget_placement!(r) -> Bool
+
+Drop what this hub BELIEVES it holds for `r`, without telling the scheduler anything. True when there
+was a placement to forget.
+
+The node goes as a unit: its route and its file syncer go with it. A watcher left pointed at a node
+we no longer hold pushes the next local edit to a machine the scheduler has already reassigned.
+
+Distinct from `region_release!`, which gives the node BACK. This is for the case where it is already
+gone and only our record of it is left — an allocation killed from the cluster side, or one whose
+walltime ran out while the hub was not looking.
+"""
+function region_forget_placement!(r::Region)
+    held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
+    held === nothing && return false
+    route!(held.host, "")
+    stop_sync_host!(held.host)
+    return true
+end
+
 function region_release!(r::Region)
     kind = region_scheduler(r)
     kind === :none && return false
     _reap_region_workers!(r)                     # before the node goes — see above
-    held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
-    # The node goes as a unit: its workers are reaped and its route dropped. A file watcher left
-    # pointed at it outlives all of that and pushes the next local edit to a machine the scheduler
-    # has already given to someone else.
-    held === nothing || (route!(held.host, ""); stop_sync_host!(held.host))
+    region_forget_placement!(r)
     return try
         Sweep.release_allocation!(kind, r.host, region_alloc_name(r))
     catch e

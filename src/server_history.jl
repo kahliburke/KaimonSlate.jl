@@ -1120,7 +1120,13 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
     host = try; (k isa ReportEngine.GateKernel && k.target isa ReportEngine.RemoteTarget) ?
                 String(k.target.ssh_host) : ""; catch; ""; end
     d = Dict{String,Any}("side" => String(side), "host" => host,
-                         "kind" => st["kind"], "port" => st["port"], "connected" => st["connected"])
+                         "kind" => st["kind"], "port" => st["port"], "connected" => st["connected"],
+                         # A kernel the hub is holding exists, so `alive` is settled here rather than
+                         # left for each reader to guess from a missing field. The roster's own
+                         # entries answer the same two questions for workers no notebook owns, and
+                         # readers that merge the two must not have to reconcile the vocabularies.
+                         "alive" => true,
+                         "state" => st["connected"] === true ? "attached" : "idle")
     # WHERE and WHAT this worker is, not just how it's doing. Telemetry says a worker is busy; none of
     # it says which host, over which transport, on which ports, in which environment, or whether it
     # was adopted warm — and those are the facts you need when a region cell won't run at all.
@@ -1248,8 +1254,13 @@ function _workers_json(nb::LiveNotebook)
         placing = lock(_PLACING_LOCK) do; side in _PLACING; end
         host = r === nothing ? "" : String(r.host)
         sched = r !== nothing && r.scheduler !== :none
-        push!(out, Dict{String,Any}(
+        # The SAME record shape as a real worker's, short a process. A placeholder that answered
+        # `alive`/`state`/`held` differently — or not at all — would put the reader back to guessing
+        # from missing fields, which is the whole thing this vocabulary exists to stop. A queued
+        # region genuinely has an allocation pending, so it carries those facts like any other.
+        push!(out, merge!(Dict{String,Any}(
             "side" => side, "host" => host, "kind" => "gate", "port" => 0, "connected" => false,
+            "alive" => false, "state" => "none",
             "status" => placing ? "connecting" : "disconnected",
             # What the pill SAYS. "connecting" describes a dial; a scheduler queue is a wait of a
             # different kind and length, and the difference is the whole reason to look at the pill.
@@ -1257,7 +1268,8 @@ function _workers_json(nb::LiveNotebook)
             "note" => placing ? (sched ? "queued for a node on $host — starts by itself when the scheduler grants one"
                                        : "starting a worker on $host") :
                       r === nothing ? "no region '$side' in the registry" :
-                      "no worker yet — a cell tagged region=$side will start one"))
+                      "no worker yet — a cell tagged region=$side will start one"),
+            _region_alloc_facts(side)))
     end
     return out
 end

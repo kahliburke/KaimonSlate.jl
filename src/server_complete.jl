@@ -751,6 +751,25 @@ function _local_kernel_history(h::Hub, port::Int)
     return Any[]
 end
 
+# A region's worker state changed → tell the pages that care. "Care" is having a cell on that region;
+# a notebook that never mentions it has nothing to redraw.
+#
+# Off the request, because it takes each notebook's lock and the caller must not wait on that. At
+# module scope rather than inside `_make_router`, where every handler closes over one shared scope
+# and a loop variable would be an assignment they all see.
+function _announce_region_change!(h, name::AbstractString, f = _workers_push!)
+    Threads.@spawn try
+        for anb in lock(h.lock) do; collect(values(h.notebooks)); end
+            uses = lock(anb.lock) do; any(c -> _cell_region(c) == name, anb.report.cells); end
+            uses && (try; f(anb); catch; end)
+        end
+    catch e
+        ReportEngine._rlog("region[$name]: announcing the change failed — " *
+                           first(sprint(showerror, e), 120))
+    end
+    return nothing
+end
+
 # Everything the hub holds between requests, handed to SlateDiag as callbacks so it needs no
 # knowledge of these names and nothing breaks when one is added or renamed.
 function _register_diag_gauges!(h)
@@ -1254,9 +1273,17 @@ function _make_router(h::Hub)
         end for r in ReportEngine.regions()],
         "parked" => [Dict("host" => p.host, "label" => p.label, "port" => p.port,
                           "idle_s" => p.idle_s) for p in ReportEngine.parked_wires()])))
-    # What a scheduler region is HOLDING, and the button that gives it back. Separate from
-    # /api/regions because it costs a round trip to the login node, and because an allocation bills
-    # for the time it is held — so it wants to be visible on its own and lettable-go on demand.
+    # What a scheduler region is HOLDING, asked of the scheduler itself. Separate from /api/regions
+    # because it costs a round trip to the login node, and because an allocation bills for the time
+    # it is held — so it wants to be visible on its own and lettable-go on demand.
+    #
+    # This is also the hub's RECONCILIATION. Everything else reads the cached placement, which is a
+    # belief; the scheduler is the fact. When the two disagree the belief is wrong, so it is dropped
+    # here and every open page is told — otherwise a node killed from the cluster side goes on
+    # showing a walltime and a Release button until something else happens to notice.
+    #
+    # Only ever DROPS a belief the scheduler contradicts. It never asks for a node and never gives
+    # one back, so refreshing a panel cannot cost or free an allocation.
     HTTP.register!(router, "GET", "/api/allocation", req -> begin
         name = get(HTTP.queryparams(HTTP.URI(req.target)), "region", "")
         r = ReportEngine.region_get(name)
@@ -1265,8 +1292,18 @@ function _make_router(h::Hub)
         a = ReportEngine.region_allocation(r)
         (a === nothing || a.state === :unreachable) &&
             return _json(Dict("ok" => false, "error" => "cannot reach $(r.host)"))
+        # `ok` means the scheduler could be ASKED. It said nothing about whether anything is held,
+        # which readers took it for — so `held` is answered here, by the same rule the rest of the
+        # hub uses, rather than re-derived from `state` by each caller.
+        held = !ReportEngine.Sweep.settled(a)
+        if !held && ReportEngine._region_holds_node(r)
+            ReportEngine.region_forget_placement!(r)
+            ReportEngine._rlog("region[$(r.name)]: the scheduler holds nothing — dropped the stale placement")
+            _announce_region_change!(h, r.name)
+        end
         _json(Dict("ok" => true, "scheduler" => String(r.scheduler), "job_name" => a.name,
                    "id" => a.id, "state" => String(a.state), "node" => a.node,
+                   "held" => held, "allocState" => String(a.state),
                    "timeleft" => a.timeleft, "via" => r.host))
     end)
     # How busy the cluster is, for a cell that is waiting on it. "Queued" says nothing about whether
@@ -1324,18 +1361,7 @@ function _make_router(h::Hub)
         _region_used!(name)
         # The clock the page is showing just moved, and nothing else would say so until the next
         # state push — which for an idle notebook is exactly what there isn't.
-        #
-        # Off the request, and with its own loop name: every handler in `_make_router` closes over the
-        # same scope, so a `for nb in …` here would be an assignment to a name they all share (Julia
-        # boxes it), and the request must not sit on `nb.lock` while the page waits.
-        Threads.@spawn try
-            for wnb in lock(h.lock) do; collect(values(h.notebooks)); end
-                uses = lock(wnb.lock) do; any(c -> _cell_region(c) == name, wnb.report.cells); end
-                uses && (try; _workers_push!(wnb); catch; end)
-            end
-        catch e
-            ReportEngine._rlog("keep: worker push failed — " * first(sprint(showerror, e), 120))
-        end
+        _announce_region_change!(h, name)
         _json(Dict("ok" => true, "region" => name))
     end)
     HTTP.register!(router, "POST", "/api/allocation/release", req -> begin
@@ -1344,16 +1370,9 @@ function _make_router(h::Hub)
         r === nothing && return _json(Dict("ok" => false, "error" => "no region `$name`"))
         ok = ReportEngine.region_release!(r)
         # Say so. The node is gone the moment this returns, and a panel still showing its walltime
-        # reads as one that is still held. Off the request, and with its own loop name — see the
-        # `keep` route for both reasons.
-        ok && Threads.@spawn try
-            for rnb in lock(h.lock) do; collect(values(h.notebooks)); end
-                uses = lock(rnb.lock) do; any(c -> _cell_region(c) == r.name, rnb.report.cells); end
-                uses && _push_alloc_event!([rnb], r.name, "released"; reason = "manual")
-            end
-        catch e
-            ReportEngine._rlog("release: announcing it failed — " * first(sprint(showerror, e), 120))
-        end
+        # reads as one that is still held.
+        ok && _announce_region_change!(h, r.name,
+                                       nb -> _push_alloc_event!([nb], r.name, "released"; reason = "manual"))
         _json(Dict("ok" => ok, "region" => r.name))
     end)
     # Create/update a named region (full-record upsert) and reconcile toward its warm count. The def is
@@ -3148,19 +3167,28 @@ function _telemetry_push!(h, conn_name::AbstractString, sample)
     return nothing
 end
 
-# What the hub knows about a region's node, for the pill: when the allocation ends, and the idle
-# policy that may end it sooner. Absolute instants, so the page can tick them between samples. Empty
-# for the main kernel and for a region with no scheduler.
+# What the hub knows about a region's node: whether one is held, on what terms, and the idle policy
+# that may end it before its walltime does. Every reader of a worker record gets this same answer —
+# the page derives none of it. Empty for the main kernel and for a region with no scheduler, which is
+# the one case absence still means something: the question does not apply.
 function _region_alloc_facts(side::AbstractString)
     d = Dict{String,Any}()
     isempty(side) && return d
     try
         r = ReportEngine.region_get(side)
         (r === nothing || r.scheduler === :none) && return d
-        # Every field here describes a HELD allocation. With none held there is no walltime to run
-        # out and nothing for the idle timer to release, and showing either reads as a node that is
-        # still ours.
+        # THREE states, said out loud, because the page cannot work them out from what is present.
+        # Absence used to carry the meaning — no walltime meant no node — and every reader invented
+        # its own test for it, which is how the same worker came to read as held in one panel and
+        # free in another. `scheduler` says the question applies at all; `held` answers it; and
+        # `allocState` says which KIND of held, since a queued request is withdrawn rather than
+        # released. All three are local: a granted node is a placement, a queued one is `_PLACING`.
+        d["scheduler"] = String(r.scheduler)
         p = ReportEngine.region_placement(r)
+        queued = lock(_PLACING_LOCK) do; String(side) in _PLACING; end
+        d["allocState"] = p !== nothing ? "running" : queued ? "pending" : "none"
+        # Mirrors `Sweep.settled`: running or queued is something to give back, nothing else is.
+        d["held"] = d["allocState"] != "none"
         p === nothing && return d
         # DURATIONS, not instants: the page is a third clock again, and only an age survives the
         # crossing. It anchors these to its own `Date.now()` on receipt and ticks from there.

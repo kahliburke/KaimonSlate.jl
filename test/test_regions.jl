@@ -46,6 +46,22 @@ const RE = KaimonSlate.ReportEngine
         end
     end
 
+    # The one place that answers "is a node held", "is this worker alive", "how healthy is it" for
+    # every pill, panel and roster. Four components used to answer the first for themselves, from
+    # three different fields, and disagreed. Pure JS, so it's asserted from node; skips without it.
+    @testset "model.js worker predicates (node, if available)" begin
+        node = Sys.which("node")
+        if node === nothing
+            @info "node not found — skipping the model.js predicate assertions"
+            @test true
+        else
+            io = IOBuffer()
+            ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", "worker_model.mjs"))`; stdout = io, stderr = io))
+            ok || print(String(take!(io)))
+            @test ok
+        end
+    end
+
     # A wire that goes silent used to write one identical line per 8s sweep for as long as it stayed
     # silent — a worker unresponsive for a working day produced hundreds of KB of the same sentence,
     # which buries the events that would explain it. Log the first failure, then once per interval.
@@ -97,6 +113,52 @@ const RE = KaimonSlate.ReportEngine
             # Nothing is held until a node is granted, so the idle sweep has nothing to give back —
             # and must not spend a `scancel` per tick saying so.
             @test !RE._region_holds_node(gpu)
+
+            # ── the record every panel reads ──────────────────────────────────────────────────
+            # Four components used to work out "is a node held" for themselves, from four different
+            # fields, and disagreed: the same worker read as held in one panel and free in another.
+            # The answer is given here, once, so none of them has to derive it.
+            @testset "allocation facts say held rather than implying it" begin
+                # Absence means only one thing now: the question does not apply. The main kernel has
+                # no region, and an ordinary host has no scheduler to hold anything.
+                @test isempty(NS._region_alloc_facts(""))
+                @test isempty(NS._region_alloc_facts("plain"))
+                @test isempty(NS._region_alloc_facts("no-such-region"))
+
+                # A scheduler region with no node SAYS so. Reading this as "not applicable" (which is
+                # what an empty answer would have meant) is what hid a released node behind a Release
+                # button.
+                f = NS._region_alloc_facts("gpu")
+                @test f["scheduler"] == "slurm"
+                @test f["held"] === false && f["allocState"] == "none"
+                # ...and nothing that only makes sense for a held node comes along with it.
+                @test !any(haskey(f, k) for k in ("walltimeLeft", "idleFor", "idleRelease"))
+
+                # Queued is HELD: a request in the scheduler's queue is withdrawn, not ignored, and a
+                # panel that treated it as nothing offered no way to take it back.
+                lock(NS._PLACING_LOCK) do; push!(NS._PLACING, "gpu"); end
+                try
+                    q = NS._region_alloc_facts("gpu")
+                    @test q["held"] === true && q["allocState"] == "pending"
+                finally
+                    lock(NS._PLACING_LOCK) do; delete!(NS._PLACING, "gpu"); end
+                end
+
+                # A granted node is `running`, and only then do the clocks appear.
+                RE.route!("c9", "login", "77")
+                lock(RE._REGION_PLACE_LOCK) do
+                    RE._REGION_PLACE["gpu"] = (host = "c9", job = "77", ts = time(),
+                                               until = time() + 600)
+                end
+                try
+                    g = NS._region_alloc_facts("gpu")
+                    @test g["held"] === true && g["allocState"] == "running"
+                    @test 0 < g["walltimeLeft"] <= 600
+                finally
+                    lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
+                    RE.route!("c9", "")
+                end
+            end
 
             # Warm workers are for a host you keep them on. A scheduler region's node is an
             # allocation, so a worker kept between notebooks is on a machine that may already be
