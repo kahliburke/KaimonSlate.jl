@@ -198,7 +198,7 @@ function _memo_dir()
                !isempty(home)  ? joinpath(abspath(expanduser(home)), "cache") :
                joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(get(ENV, "HOME", tempdir()), ".cache")), "kaimonslate")
         d = joinpath(base, "memo")
-        try; mkpath(d); catch; d = joinpath(tempdir(), "kaimonslate-memo"); mkpath(d); end
+        try; mkpath(d); catch; d = joinpath(tempdir(), "kaimonslate-" * get(ENV, "USER", "user") * "-memo"); mkpath(d); end
         _MEMO_DIR[] = d
     end
     return _MEMO_DIR[]

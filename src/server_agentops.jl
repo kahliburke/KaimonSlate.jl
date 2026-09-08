@@ -1026,10 +1026,26 @@ function set_controls_map!(nb::LiveNotebook, map)
     isempty(map) && return nb
     lock(nb.lock) do                     # serialize the mutation + persist vs the async runner
         _snapshot!(nb)
+        moved = Set{String}()            # bind names whose set of hosts changed
         for (id, cols) in map
             i = _index_of(nb.report.cells, id); i === nothing && continue
-            cleaned = Vector{String}[String[String(n) for n in col] for col in cols]
-            nb.report.cells[i].controls = filter(!isempty, cleaned)
+            cleaned = filter(!isempty, Vector{String}[String[String(n) for n in col] for col in cols])
+            cell = nb.report.cells[i]
+            cell.controls == cleaned && continue
+            union!(moved, symdiff(Set{String}(Iterators.flatten(cell.controls)),
+                                  Set{String}(Iterators.flatten(cleaned))))
+            cell.controls = cleaned
+            # The client carries a cell object forward across pushes when its `rev` is unchanged,
+            # so a strip that moved without a bump is never re-rendered.
+            ReportEngine.bump_rev!(cell)
+        end
+        # A bind renders as a live widget where it is declared, or as a chip naming its host, so
+        # the DECLARING cell's payload changes whenever hosting does and needs its own bump.
+        for name in moved
+            owner = ReportEngine.bind_owner(nb.report, name)
+            isempty(owner) && continue
+            j = _index_of(nb.report.cells, owner)
+            j === nothing || ReportEngine.bump_rev!(nb.report.cells[j])
         end
         _persist!(nb)
     end

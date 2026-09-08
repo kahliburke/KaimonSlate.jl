@@ -160,3 +160,68 @@ const RE = KaimonSlate.ReportEngine
         end
     end
 end
+
+# On unix `tempdir()` is one directory shared by every account, so a FIXED name under it belongs to
+# whoever creates it first and is 0700-unwritable by anyone else — the second user on a shared host
+# lost their worker and hub logs, and (because the pump's `open` sat outside its `try`) the pipe was
+# then never drained and the worker wedged on a full buffer (issue #27, PR #26).
+@testset "the worker log directory is private to this user" begin
+    @testset "the tag separates accounts and stays one path component" begin
+        tag(u, n) = withenv(RE._slate_user_tag, "USER" => u, "USERNAME" => n)
+        @test tag("alice", nothing) == "alice"
+        @test tag("bob", nothing) == "bob"
+        # Windows never sets USER — it spells it USERNAME, and a domain-qualified login carries a
+        # separator that would otherwise nest the directory or escape it entirely.
+        @test tag(nothing, "CORP\\alice") == "CORP_alice"
+        @test tag(nothing, "alice") == "alice"
+    end
+
+    @testset "a scrubbed environment still separates accounts" begin
+        # `env -i` — a daemon, a bare container — supplies neither variable. Falling back to a
+        # CONSTANT would quietly put every account back into one shared directory.
+        t = withenv(RE._slate_user_tag, "USER" => nothing, "USERNAME" => nothing)
+        @test !isempty(t)
+        if Sys.isunix()
+            @test t == string(ccall(:getuid, Cuint, ()))
+        end
+    end
+
+    @testset "two users get two directories, both under tempdir()" begin
+        dir(u) = withenv(RE._slate_tmpdir, "USER" => u, "USERNAME" => nothing)
+        a, b = dir("alice"), dir("bob")
+        @test a != b
+        @test startswith(a, tempdir()) && startswith(b, tempdir())
+        @test basename(a) == "kaimonslate-alice"
+    end
+
+    @testset "a directory we own is created, and created private" begin
+        d = joinpath(mktempdir(), "logs")
+        @test RE._own_private_dir(d) == true
+        @test isdir(d)
+        if Sys.isunix()
+            @test (filemode(stat(d)) & 0o077) == 0     # nothing readable by group or other
+        end
+    end
+
+    @testset "a directory we cannot own is refused, not written to" begin
+        # Stands in for the real case — another account created it first, so it can neither be
+        # chmod'd nor trusted. Worker output carries notebook data, so the answer is to decline the
+        # directory rather than leak into it.
+        f = tempname(); write(f, "a file, not a directory")
+        @test RE._own_private_dir(joinpath(f, "logs")) == false
+        @test RE._own_private_dir("") == false
+    end
+
+    @testset "a squatted directory costs privacy, not logging" begin
+        # Refusing outright would be safe and would ALSO lose the logs — which is the complaint that
+        # started this. The resolved directory is private either way, and it is resolved once so the
+        # hub log, the worker logs and the reap all name the same place.
+        d = RE._slate_logdir()
+        @test !isempty(d) && isdir(d)
+        @test RE._slate_logdir() == d            # memoized: every caller agrees
+        if Sys.isunix()
+            @test (filemode(stat(d)) & 0o077) == 0
+        end
+    end
+
+end

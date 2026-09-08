@@ -4407,14 +4407,15 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
                         inactive::Bool = false, app::Bool = false, workbook::Bool = false,
                         appdefaults::AbstractDict = Dict{String,Any}())
     # Swap the logger BEFORE anything spawns so worker-spawn infos land in the file.
-    logpath = joinpath(tempdir(), "kaimonslate", "hub-$port.log")
+    logdir = ReportEngine._slate_logdir()
+    logpath = isempty(logdir) ? "" : joinpath(logdir, "hub-$port.log")
     logio = nothing
     prevlogger = nothing
-    if quiet
+    # `_slate_logdir` has already guaranteed the directory is ours and 0700 (the hub log records
+    # request/worker detail, so other local users stay out); the file is locked to 0600 below. An
+    # empty path means it found nowhere private at all — then the banner reports no log.
+    if quiet && !isempty(logpath)
         try
-            mkpath(dirname(logpath))
-            # Private perms: the hub log records request/worker detail; keep other local users out.
-            Sys.isunix() && (try; chmod(dirname(logpath), 0o700); catch; end)
             logio = open(logpath, "a")
             Sys.isunix() && (try; chmod(logpath, 0o600); catch; end)
             println(logio, "── serve_notebook  $(Dates.now())  $path ──")

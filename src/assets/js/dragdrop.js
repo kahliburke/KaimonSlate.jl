@@ -42,10 +42,13 @@ async function unhostControl(name, cellId) {
 // Check/uncheck to surface/hide each in the cell's control strip; All / None for the whole set.
 function openControlPicker(id, ev) {
   if (ev) ev.stopPropagation();
+  const pop = document.getElementById('ctlpop');
+  // 🎛 toggles. The outside-click handler exempts `.autoctl` so a click on the button doesn't
+  // race the reopen, which leaves closing to this second click.
+  if (pop.classList.contains('show') && pop.dataset.cell === id) { hideControlPicker(); return; }
   const c = _cellById(id), { aff, other } = pickerNames(c);   // affecting (own + read) first, then every other @bind
   if (!aff.length && !other.length) return;
   const present = new Set([].concat(...columnsOf(id)));
-  const pop = document.getElementById('ctlpop');
   pop.dataset.cell = id;
   const row = n => `<label class="ctlrow"><input type="checkbox" data-n="${_escc(n)}"${present.has(n) ? ' checked' : ''}>` +
                    `<span>${_escc(n)}</span></label>`;

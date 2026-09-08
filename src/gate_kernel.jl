@@ -730,6 +730,67 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     """
 end
 
+# On unix `tempdir()` is one directory shared by every account on the box, so a fixed "kaimonslate"
+# name belongs to whoever creates it first and is unwritable (0700) by anyone else — the second user
+# on a shared host gets EACCES for the life of the machine. Namespace it per user. `USER` is the unix
+# spelling and `USERNAME` the Windows one; falling back to the uid keeps accounts apart even when a
+# scrubbed environment (a daemon exec'd with `env -i`, a bare container) supplies neither. Windows
+# resolves `tempdir()` under the user's own profile already, so the tag there is only cosmetic.
+function _slate_user_tag()
+    tag = get(ENV, "USER", get(ENV, "USERNAME", ""))
+    isempty(strip(tag)) && (tag = string(try
+        Sys.isunix() ? ccall(:getuid, Cuint, ()) : hash(homedir()) % 100000
+    catch
+        hash(homedir()) % 100000
+    end))
+    # A tag reaches the filesystem as one path COMPONENT: a domain-qualified Windows login
+    # ("CORP\alice") or any separator in it would otherwise silently nest or escape the directory.
+    return replace(strip(tag), r"[^A-Za-z0-9_.-]" => "_")
+end
+_slate_tmpdir() = joinpath(tempdir(), "kaimonslate-" * _slate_user_tag())
+
+# `_slate_tmpdir()` under a world-writable /tmp is a PREDICTABLE name, so another local user can
+# create it first — and then `mkpath` succeeds, the `chmod 0700` below fails (not ours to chmod) and
+# is swallowed, and worker logs carrying notebook data land somewhere readable. Own it or don't use
+# it: a directory that isn't ours, or won't hold 0700, is refused so the caller falls back to
+# discarding output rather than leaking it. Non-unix has no such shared tmp, so it always passes.
+function _own_private_dir(dir::AbstractString)
+    isempty(dir) && return false
+    try
+        mkpath(dir)
+        Sys.isunix() || return true
+        chmod(dir, 0o700)                      # throws when we don't own it — that's the check
+        st = stat(dir)
+        return st.uid == ccall(:getuid, Cuint, ()) && (filemode(st) & 0o077) == 0
+    catch
+        return false
+    end
+end
+
+# The directory this process actually writes its logs to: the per-user name when we can own it, else
+# a fresh private one. Refusing outright would be safe but would also cost a squatted user their logs
+# for good, which is the complaint that started this. `mktempdir` picks an unguessable name and
+# creates it 0700, so the fallback is private by construction.
+#
+# Resolved once and memoized: the hub log, the worker logs and the reap must all name the SAME
+# directory. Under the lock because the hub and a worker spawn can race here, and two resolutions
+# that both fell through to `mktempdir` would scatter those logs across two directories.
+const _LOGDIR = Ref{String}("")
+const _LOGDIR_LOCK = ReentrantLock()
+function _slate_logdir()
+    lock(_LOGDIR_LOCK) do
+        isempty(_LOGDIR[]) || return _LOGDIR[]
+        d = _slate_tmpdir()
+        if !_own_private_dir(d)
+            alt = try; mktempdir(; prefix = "kaimonslate-", cleanup = false); catch; ""; end
+            @warn "Slate log directory is not ours — another account created it first" dir = d fallback = alt
+            d = alt
+        end
+        _LOGDIR[] = d
+        return d
+    end
+end
+
 function _spawn_worker!(k::GateKernel)
     k.ns_gen += 1   # a fresh LOCAL process ⇒ blank namespace (mirrors spawn_and_connect_remote!): the
                     # ns_gen-keyed re-establish re-primes it — main-kernel @bind registrations here, and
@@ -738,11 +799,11 @@ function _spawn_worker!(k::GateKernel)
     port, stream_port = _next_ports()
     k.port = port; k.stream_port = stream_port
     _clear_stale_pin!(port)
-    logdir = joinpath(tempdir(), "kaimonslate"); mkpath(logdir)
-    # Worker stdout/stderr can carry notebook data — keep the shared tmp dir private (0700) so
-    # other local users can't read the logs; the file itself is locked to 0600 when opened below.
-    Sys.isunix() && (try; chmod(logdir, 0o700); catch; end)
-    k.logpath = joinpath(logdir, "worker-$port.log")
+    # Worker stdout/stderr can carry notebook data, so the log only gets written to a directory we
+    # own and can keep private (0700); the file itself is locked to 0600 when opened below. An empty
+    # logpath means "nowhere safe to write" — the pump discards output instead, and still drains.
+    logdir = _slate_logdir()
+    k.logpath = isempty(logdir) ? "" : joinpath(logdir, "worker-$port.log")
     # Thread config. OpenBLAS spawns a pool of ~ncores whose IDLE threads busy-spin (polling the
     # clock against a park timeout) — for an interactive notebook firing many tiny BLAS ops they
     # never reach the timeout and peg the cores doing no work. Cap the BLAS pool to 1 by default
@@ -788,14 +849,23 @@ function _spawn_worker!(k::GateKernel)
     close(out.in)
     online = k.online   # captured once — a respawn gets a fresh GateKernel, so this can't go stale mid-pump
     Threads.@spawn begin
-        io = open(k.logpath, "w")
-        Sys.isunix() && (try; chmod(k.logpath, 0o600); catch; end)
+        io = nothing
+        if isempty(k.logpath)
+            @warn "SlateWorker has nowhere private to log — worker output is being discarded"
+        else
+            try
+                io = open(k.logpath, "w")
+                Sys.isunix() && (try; chmod(k.logpath, 0o600); catch; end)
+            catch e
+                @warn "SlateWorker log file could not be opened — worker output is being discarded" log = k.logpath exception = e
+            end
+        end
         try
             # Line-by-line (not chunked `readavailable`) so a slow first-run precompile can narrate
             # itself live via `online`, mirroring the remote path's `_run_streamed`. Net effect on the
             # log file is the same content, just written one newline-terminated line at a time.
             for line in eachline(out)
-                println(io, line); flush(io)
+                io === nothing || (println(io, line); flush(io))
                 if online !== nothing
                     s = strip(line)
                     isempty(s) || (try; online(String(s)); catch; end)
@@ -803,7 +873,7 @@ function _spawn_worker!(k::GateKernel)
             end
         catch
         finally
-            close(io)
+            io === nothing || close(io)
         end
         # EOF on the pipe means the PROCESS is gone. That is the one death signal which is exact and
         # immediate — the liveness probe can only ever infer death from silence, and silence is also

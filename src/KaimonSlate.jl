@@ -926,7 +926,7 @@ function create_tools(GateTool::Type)
             if !(k.target isa ReportEngine.RemoteTarget)
                 ReportEngine.shutdown!(k)
                 for ext in ("log", "json", "state", "stats")
-                    try; rm(joinpath(tempdir(), "kaimonslate", "worker-$(k.port).$ext"); force = true); catch; end
+                    try; rm(joinpath(ReportEngine._slate_logdir(), "worker-$(k.port).$ext"); force = true); catch; end
                 end
                 return "✅ reaped worker-$(k.port) for '$(nb.id)' (process killed, files removed). " *
                        "It has no worker until the next run — action=restart brings one straight back."
@@ -1695,7 +1695,10 @@ function create_tools(GateTool::Type)
         catch e
             return "PDF export failed: " * sprint(showerror, e)
         end
-        out = isempty(path) ? joinpath(tempdir(), "slate-export",
+        # Per-user default directory, for the same reason the worker logs are: a fixed name under the
+        # shared unix `tempdir()` belongs to whoever creates it first, and everyone after them gets
+        # EACCES on the write. An explicit `path` is the caller's business and is used as given.
+        out = isempty(path) ? joinpath(tempdir(), "slate-export-" * ReportEngine._slate_user_tag(),
                   replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".pdf") : String(path)
         try
             mkpath(dirname(out)); write(out, pdf)

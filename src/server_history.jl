@@ -530,8 +530,12 @@ end
 const _DBLOB_DIR = Ref{String}("")
 function _dblob_dir()
     if _DBLOB_DIR[] == ""
+        # `cache_home()` resolves the same XDG path by default and additionally honours the
+        # KAIMONSLATE_HOME / _CACHE_HOME overrides, so a worktree hub keeps its own blob tier.
+        # The tmp fallback is namespaced per user: a fixed name under a shared /tmp belongs to
+        # whoever creates it first and is unwritable by anyone else.
         d = joinpath(SlateHome.cache_home(), "blobs")
-        try; mkpath(d); catch; d = joinpath(tempdir(), "kaimonslate-blobs"); mkpath(d); end
+        try; mkpath(d); catch; d = joinpath(tempdir(), "kaimonslate-" * get(ENV, "USER", "user") * "-blobs"); mkpath(d); end
         _DBLOB_DIR[] = d
     end
     return _DBLOB_DIR[]
