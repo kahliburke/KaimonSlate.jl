@@ -18,33 +18,52 @@ There are two surfaces:
 | --- | --- |
 | **Document** | One notebook, as a publishable unit. Its identity (`docId`) is embedded in the `.jl` itself, so it survives file moves, renames, and repo changes — the ledger always knows it's the same document. |
 | **Site** | A portfolio/blog: **one** local build (`/sites/<name>/`) that gathers **many** documents, newest-first, behind a generated index. Publishing into a site is **additive** — other documents are preserved. |
-| **Target** (destination) | Where a site **deploys**: GitHub Pages, Cloudflare Pages, Netlify, S3, R2, or rsync to your own box. A site can have several — its one build syncs to all of them. |
+| **Target** (destination) | Where a site **deploys**: GitHub Pages, Cloudflare Pages, Netlify, S3, R2, or rsync to your own box. A site can have several — its one build syncs to all of them. A site attaches to a target at an optional **subpath**, so several sites can share one repo or bucket. |
 | **Secret** | A credential (an API token) a target needs. Stored **only on your machine** (in the config home, `chmod 600`) and referenced by name — secret **values never enter the ledger** or any published output. |
-| **Ledger** | The record of what's published where, with history. Kept in a private GitHub **gist** (or a local file), so it **syncs across your machines** and carries **no secrets**. |
-| **Zenodo archive** | A permanent, immutable, **citable DOI** version of a notebook — a separate action from live-site publishing (see [below](#archive-a-citable-version-zenodo)). |
+| **Ledger** | The record of what's published where, with history. Kept in a secret GitHub **gist** (or a local file), so it **syncs across your machines** and carries **no secrets**. |
+| **Zenodo archive** | A permanent, immutable, **citable DOI** version of a notebook — a separate action from live-site publishing (see [below](#Archive-a-citable-version-Zenodo)). |
 
 The relationship in one line: a **notebook** publishes into a **site**; the site accumulates it
 into one build; the site **syncs** that build to its **destination targets**.
 
+Blank subpath means the target's root. Cloudflare Pages and Netlify are root-only. Saving a site is
+refused if another site already claims the same target and subpath.
+
+### Copying a notebook copies its identity
+
+Because the `docId` lives in the `.jl`, copying the file gives you two files that are **one
+document**: one history, one agent transcript, one published slot. Slate notices and offers two
+answers. **☰ → ⑂ Split from copy…** forks this copy into a document of its own, copying the stores so
+neither side loses anything. Or keep sharing and silence the notice, which is recorded against this
+path so the other copy still gets told.
+
 ## Publish a notebook
 
-Open **☰ → ☁ Publish…**. Choose (or create) the **site** to publish into and set:
+Open **☰ → ☁ Publish…**. The panel lists your sites. Tick one to add this notebook to it, use **★**
+to make the notebook that site's front page, and set:
 
-- **Site title** — the heading on the site's blog front page (set once; kept on later publishes).
+- **▶ Run live** — embed the reproducible bundle and a launcher so a visitor can rehydrate and run
+  the notebook (see [Export → self-contained `.jl`](export.md#Self-contained-single-source-.jl)).
+- **Include source** — cell source on the page, or uncheck for a clean reading page.
+- **Git history** — with Run live on, ship the project's full history so a visitor can branch and
+  open a pull request with matching commits. Off ships a source-only snapshot, which is safer for a
+  public page.
+- **Outputs** — all, figures only, or none.
+- **Theme** — *As-is* (default, keeps the notebook's live palette), or *Light* / *Dark*, which force
+  one and re-render native Makie figures to match.
+- **Renderer** — how charts are drawn on the published page: *Auto* keeps each chart's own setting,
+  *SVG* renders them all as vector.
+- **Width** — the content column of the published page; the far end is full width.
 - **Document path** (`slug`) — the `/<slug>/` this document lives at; auto-filled from the title.
   Re-publishing the same slug **updates it in place**.
-- **Theme** — *Dark* (matches the UI) or *Light* (publication).
-- **Source** — include cell source, or uncheck for a clean reading page.
-- **Runnable** — embed the reproducible bundle + a "Run live" launcher so a visitor can rehydrate
-  and run the notebook (see [Export → self-contained `.jl`](export.md#self-contained-single-source-jl)).
-- **Git history** — ship the project's full git history in the bundle (for branch/PR with matching
-  commits), or a source-only snapshot (safer for a public page).
-- **Destinations** — for a **new** site, tick where it should deploy (Pages, Cloudflare, …). An
-  existing site's destinations are managed in the [manager](#the-publishing-manager).
 
-Click **☁ Publish into site**. KaimonSlate renders this notebook into the site's local build at
-`/sites/<name>/`, then **syncs** the whole build to every destination. When it finishes, a live
+Then press that site's **☁ Publish**. KaimonSlate renders this notebook into the site's local build
+at `/sites/<name>/`, then **syncs** the whole build to every destination. When it finishes, a live
 URL appears; **Already published** shows where this document currently lives.
+
+Sites themselves, their titles and their destinations are created in the
+[Publishing manager](#The-Publishing-manager), linked from the bottom of the panel. The site title and
+the new-site destination checklist live in **More export options…**, next to it.
 
 ![The Publish panel: the sites this notebook belongs to (each with a front-page star and a ☁ Publish action), the publish options (run-live bundle, source, git history, outputs, theme, width, document path), and an "Already published" column showing where it's live](./assets/publish-panel.png)
 
@@ -58,7 +77,7 @@ URL appears; **Already published** shows where this document currently lives.
 By default a site's root is a generated blog index (a card per document, newest first). To author
 your own landing page instead, tag a notebook **`home`** and mark where the document listing goes
 with a **`docindex`** cell — see [Documents & Citations](documents.md) and
-[Cell tags](cell-tags.md#site-tags). The `home` notebook renders to the site root; the card grid
+[Cell tags](cell-tags.md#Site-tags). The `home` notebook renders to the site root; the card grid
 is injected at the `docindex` cell and refreshed on every publish.
 
 ## The Publishing manager
@@ -76,8 +95,14 @@ your **sites** and **targets**, not individual notebooks.
 - **Front page** — which notebook is the `home` page (or a nudge to tag one).
 - Add or remove documents, create a **new site**, or delete one.
 
+Deleting a site removes its definition and its local build at `/sites/<name>/`. Deleting a site or a
+target also offers to **purge** the deployed side. That genuinely tears down an rsync-serve
+destination, stopping its server and removing the served directory. GitHub Pages, Cloudflare, Netlify
+and buckets are left live and have to be cleaned up in the host's own console.
+
 **Publish targets** — a tile per target (name + kind + a live link). **+ Add target** to create
-one; drill into any target for three tabs:
+one; a target opens as one page with three sections, a single **Save changes** button, and a delete
+action at the bottom:
 
 - **Content** — which sites deploy here (for Zenodo, the archived versions).
 - **Config** — the target's settings (repo, project id, bucket, URL, …).
@@ -104,7 +129,7 @@ several hosts at once.
 | **S3** | `aws s3 sync` | `s3://bucket/prefix` | AWS creds (environment/profile) | optional mirror-delete |
 | **R2** | `aws s3 sync --endpoint-url …` | dest + R2 endpoint | AWS-style creds | Cloudflare R2 |
 | **rsync** | `rsync -az` over ssh | `user@host:/var/www` | your ssh keys | self-hosted |
-| **Zenodo** | mints a DOI (not a site host) | deposition id | Zenodo API token (secret) | see [below](#archive-a-citable-version-zenodo) |
+| **Zenodo** | mints a DOI (not a site host) | deposition id | Zenodo API token (secret) | see [below](#Archive-a-citable-version-Zenodo) |
 
 CLI-based targets (Pages, S3/R2, rsync) use the credentials already on your machine; Cloudflare,
 Netlify, and Zenodo take an API token you save as a **secret** and reference by name.
@@ -122,9 +147,13 @@ live until you hit **▶ Sync**, which re-deploys without needing to open a note
 
 ## Archive a citable version (Zenodo)
 
-From the Publish panel, **📄 Archive → mint DOI** deposits the notebook's fully reproducible
-standalone bundle to [Zenodo](https://zenodo.org) and mints a **permanent, citable DOI**. Each
-archive of the same notebook becomes a **new version** under a shared concept DOI.
+**📄 Archive → mint DOI** deposits the notebook's fully reproducible standalone bundle to
+[Zenodo](https://zenodo.org) and mints a **permanent, citable DOI**. Each archive of the same
+notebook becomes a **new version** under a shared concept DOI.
+
+The control is in the export dialog, under *Archive a version (Zenodo, permanent DOI)*, reached from
+**☰ → ⬆ Export…** or from **More export options…** in the Publish panel. It needs a zenodo target
+with its token saved in Secrets.
 
 !!! warning "Permanent and immutable"
     A published Zenodo version **cannot be edited or deleted**. Archive at milestones — a release, a
@@ -134,10 +163,12 @@ archive of the same notebook becomes a **new version** under a shared concept DO
 ## The ledger
 
 The ledger is a small structured record of your documents, targets, sites, and publish history. By
-default it lives in a **private, self-locating GitHub gist** (git-versioned for free), so it
-follows you across machines and never forks; without `gh` it falls back to a local file. It carries
-**no secrets** — only target config and `secretRef` names — and a no-network cache paints the
-front page instantly. Force a backend with `KAIMONSLATE_LEDGER_BACKEND=local|gist`.
+default it lives in a **secret, self-locating GitHub gist** (git-versioned for free), so it
+follows you across machines and never forks; without `gh` it falls back to a local file. A no-network
+cache paints the front page instantly. Force a backend with `KAIMONSLATE_LEDGER_BACKEND=local|gist`.
+
+A secret gist is unlisted, not access-controlled: anyone with the URL can read it. That is exactly
+why the ledger carries **no secrets**, only target config and `secretRef` names.
 
 ## From the agent
 
@@ -148,6 +179,10 @@ canonical local copy, and the site deploys to its destinations.
 
 - **`slate_publish`** — publish a notebook into the site it belongs to (`site=` picks one when it
   belongs to several). `targets=` is the escape hatch for a standalone document that isn't in a site.
+  It refuses Zenodo targets: a deposit is immutable, so it is never something that rides along with a
+  site push.
+- **`slate_archive`** — deposit the standalone bundle to a Zenodo target and mint a DOI. `target=` is
+  needed only when several archive targets exist.
 - **`slate_site_membership`** — read which sites a notebook belongs to, join or leave one, and
   set/clear it as the site's front page.
 - **`slate_site_publish`** — stage and deploy a whole site. Defaults to a **dry run** that returns

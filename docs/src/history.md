@@ -1,12 +1,14 @@
 # Timeline
 
-Every edit to a notebook is captured to a durable, content-addressed history — a built-in
-**Timeline** you open with the **🕘** button: scrub back through every checkpoint, diff,
-restore, or replay the notebook building itself up from scratch.
+Every edit to a notebook is captured to a durable, content-addressed history. Open it from
+**☰ → 🕘 History**: scrub back through every checkpoint, diff, restore, or replay the notebook
+building itself up from scratch.
 
 ## What gets recorded
 
-Each checkpoint stores the full serialized notebook plus per-cell digests, tagged by source:
+Each checkpoint stores the full serialized notebook once as a content-addressed, compressed object,
+plus a log entry recording only the cells that changed or were removed. That per-cell delta is also
+the index behind a cell's own version timeline. Entries are tagged by source:
 
 | Icon | Source |
 | --- | --- |
@@ -20,6 +22,12 @@ Each checkpoint stores the full serialized notebook plus per-cell digests, tagge
 Captures are **deduplicated by content hash**, so a no-op capture is free and the store stays
 clean. A low-frequency background snapshot guarantees an at-least-periodic capture even for
 changes that slip past the op-level checkpoints.
+
+History is filed under the notebook's **document id**, not its path, so moving or renaming the file
+keeps it. The id lives in the `.jl`, which means copying the file gives both copies one history (and
+one agent transcript, and one published slot). Slate says so once and offers
+**☰ → ⑂ Split from copy…**, which gives this file a fresh id and copies the stores, so neither side
+loses anything. See [Publishing](publishing.md#Copying-a-notebook-copies-its-identity).
 
 ## Browsing and diffing
 
@@ -35,16 +43,24 @@ restore is itself recorded as a new checkpoint, so you can always come straight 
 
 ## Replay — the buildup
 
-Press **▶ Replay** to step through every checkpoint in order, watching the notebook build
-itself up from origin to now. This is both a storytelling tool and the basis for generating
-the animated demos in this documentation: a headless browser replays a curated notebook's
-history and records it.
+Press **▶ Replay** to step through the checkpoints in order, showing each one's diff in the preview
+pane, so you can watch the notebook take shape change by change.
+
+Replay only shows. Putting the notebook back into one of those states is the separate
+**↩ Restore this version** button.
 
 ## Undo / redo
 
-**⌘Z / ⌘⇧Z** step back through source snapshots for quick reversals, deferring to the editor's
-own text undo while a cell editor is focused. Each entry is labelled with the action it reverses,
-so the menu reads **↶ Undo cut 3 cells**.
+**⌘Z / ⌘⇧Z** step back through source snapshots for quick reversals. Each entry is labelled with the
+action it reverses, so the menu reads **↶ Undo cut 3 cells**.
+
+Inside a focused cell editor, ⌘Z first undoes your typing. Once that stack is spent it keeps going,
+stepping back through that cell's own recorded versions from the history store. The cell header shows
+the age of the version you land on (`↶ 2h ago`, then `· oldest` at the beginning), ⌘⇧Z steps forward
+again, and typing commits the version you are on.
+
+That per-cell history is a different axis from restoring: it walks one cell's distinct past sources,
+where a restore puts the whole notebook back to a checkpoint.
 
 The stack lives in the hub alongside the open notebook — not in the page — so it **survives a
 reload, a closed tab, and a reconnect days later**. You come back to a notebook and pick up where

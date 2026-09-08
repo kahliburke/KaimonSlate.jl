@@ -6,9 +6,10 @@ documentation.
 
 ## Command palette — ⌘K
 
-Press **⌘K** (or click the **⌘K** hint in the top bar) to open a fuzzy-searchable list of
-*every* action, each with its keyboard shortcut. Type to filter, **↑/↓** to move, **↵** to
-run.
+Press **⌘K** (or click the **⌘K** hint in the top bar) to open a searchable list of *every* action,
+each with its keyboard shortcut. Type to filter, **↑/↓** to move, **↵** to run. Filtering matches the
+words in a command's label, so type what the command is called rather than an abbreviation of it.
+Recently used commands come first.
 
 ![The command palette: a fuzzy-searchable list of every action with its shortcut](./assets/command-palette.png)
 
@@ -17,8 +18,10 @@ navigator:
 
 - **Cell actions** — add / move / delete / convert / split / merge, run stale, show a cell's
   dependency chain.
-- **Panels** — Packages, Worker log, [Timeline](history.md).
-- **Export** — HTML, publication PDF, print, or self-contained `.jl` (see [Export](export.md)).
+- **Panels** — Packages, Worker log, History (the [Timeline](history.md)), Extensions.
+- **Export & publish** — one *Export…* entry covering HTML, publication PDF, Markdown, a
+  self-contained `.jl` and an app folder, plus *Export PDF (slides)* and Publish (see
+  [Export](export.md) and [Publishing](publishing.md)).
 - **`@bind` snippets** — insert any widget (`Slider`, `Toggle`, `Select`, …) as a ready-to-edit
   snippet.
 - **Recipes** — drop in a starter chart or table cell.
@@ -33,7 +36,11 @@ it); ⌘-shortcuts work globally, including from inside the editor.
 
 Press **⌘⇧K** to open the **help dock**. With the cursor on a symbol it opens that symbol's
 documentation directly; otherwise it's a search box over the notebook's package docs (a hybrid
-semantic + full-text query — press **↵** to run it).
+semantic + full-text query). It runs shortly after you stop typing, and **↵** runs it immediately.
+
+The search half needs Kaimon's documentation index, which harvests and embeds packages in the
+background as they load. Without that backend, and in a standalone or exported run where
+auto-indexing is off, search returns nothing. Direct `?name` lookup still works.
 
 ![The help dock: a docstring with clickable signature types, an exports grid, and a related-items rail](./assets/help-docs.png)
 
@@ -44,9 +51,13 @@ The dock is built for *drilling in*, not just one lookup:
 - **Exports grid** — looking up a module lists its exports as chips, colour-coded by kind;
   click to dive into any of them.
 - **Related rail** — neighbouring/related items are offered alongside the doc.
+- **Slate's own API** — Slate's helpers (`@bind`, `Slider`, `echart`, `slate_table`, …) and ECharts
+  option paths such as `yAxis.type` resolve from Slate's own registries, so they look up like any
+  package symbol even though they have no package docstring.
 - **Back / forward** — **‹ ›** walk your lookup history; **esc** dismisses the dock.
-- **Insert** — **↵** drops the bare name at the selected cell's cursor (or copies the qualified
-  name if no cell is focused).
+- **Open** — **↵** opens the selected result's documentation.
+- **Insert** — double-click a result to drop the bare name at the selected cell's cursor (or copy
+  the qualified name if no cell is focused).
 
 Because it reads the *notebook's* environment, the help reflects exactly the package versions
 loaded in this notebook — including packages you added through the [Packages](packages.md)

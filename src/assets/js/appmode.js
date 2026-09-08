@@ -192,7 +192,8 @@
     window.toggleZen = () => {};
     window.exitZen = () => {};
     applyDisplaySettings();
-    bindDisplaySettings({ theme: 'apptheme', wide: 'appwide', page: 'apppage', pagev: 'apppagev',
+    bindDisplaySettings({ theme: 'apptheme', renderer: 'apprenderer',
+                          wide: 'appwide', page: 'apppage', pagev: 'apppagev',
                           fig: 'appfig', figv: 'appfigv', zoom: 'appzoom', zoomv: 'appzoomv',
                           wrap: 'appwrap',
                           // Editor rows: bound always, shown only for a workbook (notebook.css).

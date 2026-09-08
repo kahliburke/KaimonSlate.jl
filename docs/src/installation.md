@@ -20,6 +20,10 @@ your `PATH`. Step 3 below covers that.
   the AI agent. For the agent's models: a logged-in `claude` CLI (Claude models) and/or a running
   [Ollama](https://ollama.com) (local models).
 
+To try Slate without installing a Julia toolchain at all, the repository ships a container image with
+Slate, Kaimon and their dependencies already in it. Build and run instructions are in
+`docker/README.md`.
+
 ## Recommended path
 
 ### 1. Install Kaimon
@@ -106,6 +110,9 @@ Julia REPL:
 ```sh
 slate                 # start (or attach to) the hub + status TUI
 slate my_analysis.jl  # also open that notebook in the browser (created if missing)
+slate --port 8080     # a one-off port for this launch; the saved setting is unchanged
+slate --status        # print the hub and its notebooks, then exit (0 = up, 1 = no hub)
+slate --help          # every flag
 ```
 
 !!! warning "`slate` at the `julia>` prompt won't work"
@@ -154,9 +161,15 @@ Julia packages built on `SlateExtensionsBase` (see [Writing an Extension](extens
 Packages that live in General install directly. The rest are published through **SlateRegistry**,
 a registry that sits alongside General; add it once per machine:
 
+The normal way to install one is from inside a notebook, through the
+[🧩 Extensions gallery](extension-gallery.md) or the [📦 Packages panel](packages.md). The first
+install adds the registry for you, so nothing below is needed.
+
+As a manual fallback, add the registry to your own environment:
+
 ```julia-repl
 pkg> registry add https://github.com/kahliburke/SlateRegistry
-pkg> add SlatePlotly      # into the notebook's environment
+pkg> add SlatePlotly
 ```
 
 Pkg searches every installed registry, so adding it changes nothing about how ordinary packages
@@ -198,20 +211,23 @@ However you start it, `slate` shows a terminal dashboard:
   Slate is registered with Kaimon.
 - **Notebooks** — a live table of every open notebook: cells, running / stale / errored counts,
   its worker port, and URL.
-- **Keys** — `↑↓`/`enter` open the selected notebook, `o` opens the hub index, `r` restarts the
-  hub you own, `s` starts a local hub (when waiting on the extension), `q` quits.
+- **Keys** — `↑↓`/`enter` open the selected notebook, `d` shows its details, `c` closes it (press
+  twice to confirm), `o` opens the hub index in your browser, `r` restarts the hub you own, `s`
+  starts a local hub (when waiting on the extension), `p` sets the hub port and saves it (applied on
+  the next hub start, and `KAIMONSLATE_PORT` still overrides it), `q` quits.
 
 ## Embedding (programmatic)
 
 To drive the hub from your own script instead of the app, the REPL API is still available —
-`serve_notebook` / `start_server` / `stop_server` — see [Configuration](configuration.md#serving)
+`serve_notebook` / `start_server` / `stop_server` — see [Configuration](hub.md#serving)
 and the [API Reference](api.md).
 
 !!! tip "In-process vs. gate worker"
-    Even standalone, a notebook gets its own **gate worker** when it sits inside a Julia project
-    and Kaimon's gate is available — giving it a clean namespace, a tailable log, package
-    management, and isolation from the server. Otherwise it evaluates in-process. See
-    [Architecture](architecture.md).
+    A notebook gets its own **gate worker** whenever Slate is running as a Kaimon extension, whether
+    or not it sits inside a Julia project (a detached notebook simply gets its own environment under
+    the depot). That gives it a clean namespace, a tailable log, package management, and isolation
+    from the server. A standalone hub started with `slate --own` has no gate, so its notebooks
+    evaluate in-process. See [Architecture](architecture.md).
 
 ## Next steps
 

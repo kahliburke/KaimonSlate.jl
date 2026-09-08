@@ -16,15 +16,31 @@ notebook's SSE so the chat pane updates live (streaming text, tool calls, and fi
 
 ### The tool surface
 
+A selection of the surface. The full set runs to more than forty tools, with the worker, region,
+publishing and export ones documented on their own pages.
+
 | Tool | Purpose |
 | --- | --- |
+| `slate_api` | the index of Slate's cell helpers: one name, several batched, a category, or `all` |
 | `slate_read` | the whole notebook — every cell's source + output/error |
 | `slate_add_cell` | append a cell, **run it**, return its result |
 | `slate_edit_cell` | revise a cell, run it, return its result |
 | `slate_run` | run a cell (or all stale) |
+| `slate_rename_cell` | give a cell a meaningful id |
 | `slate_delete_cell` | remove a cell |
+| `slate_pkg` | add or remove a package in the notebook's own environment |
 | `slate_view` | **see** a cell's rendered figure (returns the image) |
 | `slate_search_docs` / `slate_index_docs` | semantic search of the notebook's package docs |
+
+`slate_api` is the reference the agent reads before writing a cell, so what it writes uses the
+helpers that actually exist with their real arguments. `slate_search_docs` searches the same content
+under the module name "Slate". The agent also has `slate_inspect`, `slate_eval`, `slate_eval_js` and
+`slate_diag`.
+
+`slate_eval` runs code in the notebook's worker **without adding a cell**, and its result lands in
+the [scratchpad](notebook-basics.md#The-scratchpad) behind the 🧪 pill, which badges in-flight and
+unread runs. Scratch output is read-only text, values and static images, and the panel's 🧹 button
+empties it.
 
 Tool calls are shown in the chat with friendly labels (e.g. `➕ add cell`, `🖼 view
 figure`) rather than raw `mcp__kaimon__…` names.
@@ -52,10 +68,11 @@ agent at specific cells without it reading everything.
 Today the in-browser agent runs on **Claude** (via the `claude` CLI) or a **locally-configured
 model** (Ollama); support for more agents through **ACP** (the Agent Client Protocol) is planned.
 
-In **⚙ Settings**:
+In **☰ → ⚙ Settings**:
 
-- **Agent model** — Sonnet (default), Opus, Haiku, or any locally-installed **Ollama** model
-  (listed automatically from your Ollama install). See [Configuration](configuration.md).
+- **Agent model** — Sonnet (default), Opus, Haiku, any locally-served model found on your **Ollama**
+  or **vmlx** server (both listed automatically), or **Custom…**, which sends an exact model id
+  straight through (`ollama:llama3.1`, say). See [Running the Hub](hub.md#Environment-variables).
 - **Agent permissions** — `lab` (default: slate/ex/edit tools), `auto` (model
   self-governs), `default` (edits only), or `bypass` (no checks; trusted only).
 
@@ -87,6 +104,22 @@ crew) drive one notebook without clobbering each other:
 
 Both are opt-in, so the solo-agent path is unaffected. Each crew member gets a colored lane
 in the chat.
+
+A tool call that reaches the notebook from outside its own chat, such as an agent running in your
+terminal or one Kaimon spawned for another notebook, is surfaced in the pane too, marked **⚡
+external**. Every write to the notebook is visible in one place. Those are buffered like any other
+message, so a reload replays them.
+
+## Tool cells
+
+A `#%% tool` cell holds an `@tool name(arg = value)` call, invoking one of the session's gate tools
+in this process and rendering the tool's full declared parameter list beside the result. That turns
+an agent's action into a durable, re-runnable part of the document rather than a line in a
+transcript.
+
+`slate_tools()` lists what this session exposes. `tool_handle(tc)` threads a background call's run id
+into the next call. A tool cell is never swept up by an automatic run, so reopening a notebook or a
+reactive update does not re-fire it.
 
 ## Working without Kaimon
 

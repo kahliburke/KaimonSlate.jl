@@ -146,4 +146,17 @@ defs(src) = _collect_defs!(Dict{String,UInt64}(), Meta.parseall(src))
             @test src_tree_digest([joinpath(dir, "nope")]) == SRC_DIGEST_EMPTY
         end
     end
+
+    # Several methods share one name, so the per-name entry FOLDS them. Assigning instead would keep
+    # only the last, and an edit to any earlier method would hash identically — no hot-reload banner,
+    # and an unchanged memo key, so a cached result from the old code gets restored.
+    @testset "a change to any method of a name changes its hash" begin
+        base  = "f(x::Int)=1\nf(x::Float64)=2\nf(x::String)=3\ng()=0"
+        first = replace(base, "f(x::Int)=1"     => "f(x::Int)=99")
+        mid   = replace(base, "f(x::Float64)=2" => "f(x::Float64)=99")
+        last_ = replace(base, "f(x::String)=3"  => "f(x::String)=99")
+        a = defs(base)
+        @test all(defs(v)["f"] != a["f"] for v in (first, mid, last_))   # every method is tracked
+        @test all(defs(v)["g"] == a["g"] for v in (first, mid, last_))   # and nothing else moves
+    end
 end

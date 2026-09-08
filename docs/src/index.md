@@ -44,7 +44,7 @@ features:
     details: Every edit is captured to a durable, content-addressed history. Scrub the rail, diff any checkpoint, restore non-destructively, or ▶ replay the whole buildup of the notebook.
   - icon: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a3 3 0 0 1 3 3v1h3a1 1 0 0 1 1 1v3h1a3 3 0 0 1 0 6h-1v3a1 1 0 0 1-1 1h-3v-1a3 3 0 0 0-6 0v1H6a1 1 0 0 1-1-1v-3H4a3 3 0 0 1 0-6h1V8a1 1 0 0 1 1-1h3V6a3 3 0 0 1 3-3z"/></svg>
     title: Extend anything
-    link: frontend-extensions
+    link: extensions
     details: Widgets, output types, front-end assets, and whole subsystems arrive as ordinary Julia packages built on a lean SDK. Integrate a plotting stack, a solver, a device, or your own UI without forking the notebook.
   - icon: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><path d="M12 12v9"/><path d="m16 16-4-4-4 4"/></svg>
     title: Publish to the web

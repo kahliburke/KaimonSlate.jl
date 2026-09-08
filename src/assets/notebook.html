@@ -80,7 +80,6 @@
       <button onclick="togglePackages();closeTopMenu()">📦 Packages</button>
       <button onclick="openExtensions();closeTopMenu()">🧩 Extensions</button>
       <button onclick="window.open('/#clusters','_blank');closeTopMenu()" title="clusters that sweep cells submit to, set up on the front page">🏭 Compute targets ↗</button>
-<button onclick="toggleConfig();closeTopMenu()">🎚 Notebook config</button>
       <button onclick="toggleAct();closeTopMenu()">📋 Activity log</button>
       <button onclick="toggleLog();closeTopMenu()">🪵 Worker log</button>
       <button onclick="toggleHistory();closeTopMenu()">🕘 History</button>
@@ -316,6 +315,7 @@
   <button class="appgear" onclick="appSettingsToggle(event)" title="display settings">⚙</button>
   <div class="appsetpop" id="appsetpop" onclick="event.stopPropagation()">
     <div class="asrow"><label for="apptheme">Theme</label><select id="apptheme"></select></div>
+    <div class="asrow"><label for="apprenderer">Chart renderer</label><select id="apprenderer"></select></div>
     <div class="asrow"><label for="appwide">Full page width</label><input type="checkbox" id="appwide"/></div>
     <div class="asrow"><label for="apppage">Column width</label>
       <input type="range" id="apppage" min="720" max="2200" step="20"/><span class="asv" id="apppagev"></span></div>
@@ -385,12 +385,6 @@
   </div>
   <div id="pkglist" class="pkglist"></div>
 </aside>
-<aside id="configpanel" class="logpanel">
-  <div class="aphead"><strong>🎚 Notebook config</strong><span id="configstatus" class="hint"></span>
-    <button class="pclose" onclick="toggleConfig()" title="close">✕</button></div>
-  <div class="confighint">Per-notebook overrides. Each setting starts from your global default and can be pinned to this notebook (the pinned ones travel in the <code>.jl</code>). Agent permission is remembered locally and never written to the file.</div>
-  <div id="configlist" class="configlist"></div>
-</aside>
 <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
 <div class="modal-bg" id="tracebg"><div class="modal tracemodal">
   <div class="tracehd"><strong>🔍 <span id="tracetitle">Trace</span></strong><span class="tracesub" id="tracesub"></span><button class="tracestop" onclick="stopTraceModal()" title="turn off tracing for this cell">stop tracing</button><button class="tracex" onclick="closeTraceModal()" title="close (Esc)">✕</button></div>
@@ -402,6 +396,20 @@
 <div class="ctlpop tagpop" id="tagpop"></div>
 <div class="modal-bg" id="setbg"><div class="modal setmodal">
   <div class="msg"><strong>Settings</strong></div>
+  <!-- Two scopes, one dialog: your global preferences and this notebook's overrides. Several
+       settings exist in both (agent model, permissions) — see `setSettingsScope` in settings.js. -->
+  <div class="setscope">
+    <button type="button" data-scope="global" class="on" onclick="setSettingsScope('global')">Global</button>
+    <button type="button" data-scope="notebook" onclick="setSettingsScope('notebook')">This notebook</button>
+    <span id="configstatus" class="setscopehint"></span>
+  </div>
+  <div class="setsearch"><input id="setfilter" type="search" placeholder="Search settings…" autocomplete="off" spellcheck="false"/></div>
+  <div class="setcols">
+  <div class="setnav" id="settabs"><!-- built from the group headers of the active scope (settings.js) --></div>
+  <!-- Per-notebook rows, built from /api/config by config.js. Same section list + filter as the
+       global scope drives it; only the group/row selectors differ. -->
+  <div class="setbody configlist" id="configlist" style="display:none"></div>
+  <div class="setbody" id="setbody">
   <div class="setsec">Display</div>
   <div class="setrow"><label>Full page width</label>
     <span class="rt"><input type="checkbox" id="setwide"/></span></div>
@@ -418,6 +426,8 @@
   <div class="setsec">Appearance</div>
   <div class="setrow"><label title="Overall colour theme for the Slate notebook UI">Theme</label>
     <select id="settheme"><!-- options populated from SLATE_UI_THEMES (settings.js) --></select></div>
+  <div class="setrow"><label>Chart renderer</label>
+    <select id="setrenderer"><!-- options populated from SLATE_RENDERERS (settings.js) --></select></div>
   <div class="setrow"><label title="Theme for code syntax highlighting in the editor — token colours and editor chrome">Editor syntax</label>
     <select id="setsyntax"><!-- options populated from the cm6 theme registry (settings.js) --></select></div>
   <div class="setsec">Editing</div>
@@ -433,10 +443,8 @@
     <span class="rt"><input type="range" id="setcompdelay" min="0" max="1000" step="25"/><span id="setcompdelayv"></span> ms</span></div>
   <div class="setrow"><label title="What Tab does when the autocomplete popup is open. Accept: Tab (and Enter) accept the highlighted item — the standard IDE convention. Navigate: Tab moves down the list, Shift-Tab up; only Enter accepts.">Tab in autocomplete</label>
     <span class="rt"><select id="setcomptab"><option value="accept">Accept (standard)</option><option value="navigate">Navigate list</option></select></span></div>
-  <div class="setsec">Execution</div>
-  <div class="setrow sethint"><span></span>Global execution settings (default run location, transfer chunk size, carry budget) live on the <strong>front page → Remotes</strong> — this notebook's own run location is the toolbar "Running on" picker.</div>
   <div class="setsec">Agent</div>
-  <div class="setrow"><label title="Your default model for every notebook. A single notebook can override it in 🎚 Notebook config.">Agent model (global default)</label>
+  <div class="setrow"><label title="Your default model for every notebook. A single notebook can override it under “This notebook”.">Agent model (global default)</label>
     <select id="setmodel">
       <option value="">Sonnet (default)</option>
       <option value="opus">Opus</option>
@@ -445,7 +453,7 @@
     </select></div>
   <div class="setrow" id="setmodelcustomrow" style="display:none"><label title="An exact model id/version passed straight to the agent (claude --model), or a prefixed local model. E.g. claude-opus-4-8, sonnet[1m], ollama:llama3.1">Custom model</label>
     <input id="setmodelcustom" class="settext" type="text" placeholder="e.g. claude-opus-4-8, sonnet[1m], ollama:llama3.1" autocomplete="off" spellcheck="false"/></div>
-  <div class="setrow"><label title="Your default permission preset for every notebook. A notebook can override it locally (never written to the file) in 🎚 Notebook config.">Agent permissions (global default)</label>
+  <div class="setrow"><label title="Your default permission preset for every notebook. A notebook can override it locally (never written to the file) under “This notebook”.">Agent permissions (global default)</label>
     <select id="setperm">
       <option value="">Lab (default — slate tools + edits)</option>
       <option value="auto">Auto (model self-governs)</option>
@@ -453,7 +461,9 @@
       <option value="bypass">Bypass (no checks — trusted only)</option>
     </select></div>
   <div class="setrow sethint" id="setmodelhint" style="display:none"><span></span>↻ restarts the agent on your next message (chat history kept).</div>
-  <div class="setrow sethint"><span></span>Per-notebook settings (threads, parallel, slides, agent-model override…) live in <strong>☰ → 🎚 Notebook config</strong>.</div>
+  </div>
+  </div>
+  <div class="setempty" id="setempty" style="display:none">No settings match.</div>
   <div class="row"><button class="primary" onclick="closeSettings()">Done</button></div>
 </div></div>
 <div class="modal-bg" id="pubbg"><div class="modal setmodal pubmodal">
@@ -470,6 +480,7 @@
         <label title="Ship the project's full git history in the runnable bundle so a visitor can branch &amp; PR with matching commits (off = source-only snapshot; safer for a public site)"><input type="checkbox" id="pubopt_history"/> Git history</label>
         <label title="Which cell outputs appear on the page">Outputs <select id="pubopt_outputs"><option value="all">All</option><option value="figures">Figures only</option><option value="none">None</option></select></label>
         <label title="As-is keeps the notebook's live palette; Light/Dark force one (and re-render native Makie figures to match)">Theme <select id="pubopt_theme"><option value="asis">As-is</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+        <label title="How interactive charts are drawn on the published page. Auto keeps each chart's own setting; SVG renders them all as vector.">Renderer <select id="pubopt_renderer"><option value="">Auto</option><option value="canvas">Canvas</option><option value="svg">SVG</option></select></label>
         <label title="Content column width of the published page — the far end is full width (100%)">Width <input type="range" id="pubopt_width" min="620" max="1620" step="20" value="900" oninput="_htmlWidthSync(this)" style="vertical-align:middle;width:110px"/> <span id="pubopt_widthout" class="pubdim" style="font-size:.76rem"></span></label>
       </div>
       <div class="puboptrow" id="pubopts2">
@@ -563,6 +574,12 @@
       <option value="small">Small</option>
       <option value="smaller">Smaller</option>
       <option value="tiny">Tiny</option>
+    </select></div>
+  <div class="setrow exrow fmt-html fmt-website"><label title="How interactive charts are drawn in the exported page. Auto keeps whatever each chart asked for; SVG renders them all as vector. A reader can override this with ?renderer=svg on the URL.">Chart renderer</label>
+    <select id="htmlrenderer">
+      <option value="">Auto — each chart's own setting</option>
+      <option value="canvas">Canvas — faster on large series</option>
+      <option value="svg">SVG — vector, crisper in print</option>
     </select></div>
   <div class="setrow exrow fmt-html fmt-website"><label title="Content column width of the exported/published page — the far end is full width (100%)">Page width</label>
     <div class="memoq">

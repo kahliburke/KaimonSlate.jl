@@ -30,8 +30,8 @@ worse package, only a quieter one.
 
 Alongside the description you may find:
 
-- **Provides** — the concrete things the extension adds: `@bind` controls, cell toolbar buttons,
-  ⌘K commands, output renderers.
+- **Provides** — the concrete things the extension adds, as its author listed them: `@bind` controls,
+  cell toolbar buttons, ⌘K commands, output renderers.
 - **Getting started** — the few lines that put it to work.
 - **Example notebook** — a runnable demo in the extension's own repository.
 
@@ -94,5 +94,12 @@ The registry is curated: an extension is listed because it was registered there.
 an ordinary `Pkg.add`, and the package is ordinary Julia code with the same access to your machine as
 anything else you install. Treat it with the same judgement.
 
-If you want to publish your own, see [Writing an Extension](extensions.md) — registering the package
-is the only requirement to be listed.
+Both the registry and the catalog the gallery reads are configurable, so you can point it at a fork
+or a mirror. A `"catalog"` object in `slate.json` takes `url`, `registry` and `registry_url`
+(equivalently `KAIMONSLATE_CATALOG_URL`, `KAIMONSLATE_CATALOG_REGISTRY` and
+`KAIMONSLATE_CATALOG_REGISTRY_URL`, with `slate.json` winning over the environment). The defaults
+are the SlateRegistry catalog and its GitHub repository.
+
+If you want to publish your own, see [Writing an Extension](extensions.md) for the code and
+[Listing an Extension](listing-an-extension.md) for getting it onto the shelf. Registering the
+package is the only requirement to be listed.

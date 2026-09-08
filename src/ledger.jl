@@ -261,7 +261,10 @@ function from_dict(d)
     return l
 end
 
+"Serialize a [`Ledger`](@ref) to indented JSON. Round-trips with [`from_json`](@ref)."
 to_json(l::Ledger) = JSON.json(to_dict(l), 2)
+
+"Parse a [`Ledger`](@ref) back from the JSON [`to_json`](@ref) writes."
 from_json(s::AbstractString) = from_dict(JSON.parse(String(s)))
 
 # ── Pluggable store interface ────────────────────────────────────────────────────────────────────

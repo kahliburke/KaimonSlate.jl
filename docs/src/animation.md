@@ -29,7 +29,16 @@ Control how frames are colour-scaled with `clim`:
 | `(lo, hi)` | an explicit fixed range |
 
 Other keywords: `colormap` (`:auto` or any name), `fps`, `transform` (e.g. `log`), `dither`,
-`loop`, `autoplay`, `title`, and `x`/`y` axis coordinates.
+`loop`, `autoplay`, `title`, `colorbar`, `x`/`y` axis coordinates, and `times` (per-frame time
+values, shown in the player's readout).
+
+`height`, `width` and `maxheight` set the displayed size in CSS pixels. Left alone, the canvas fills
+the cell width and is capped at 560 px tall.
+
+`maxbytes` caps the raw frame stack, default 128 MB. A larger stack raises an error telling you to use
+fewer or smaller frames, or to raise the cap.
+
+`animate(f, nframes)` is the generator form: frame `i` comes from `f(i)`.
 
 ## Image frames
 

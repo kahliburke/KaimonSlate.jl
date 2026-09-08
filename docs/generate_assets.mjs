@@ -25,7 +25,7 @@ const PORT = Number(process.env.SLATE_DOCS_PORT || 8799)
 const BASE = `http://127.0.0.1:${PORT}`
 const SCALE = 2
 const FIRST = 'demo'                                          // serve_notebook opens this one
-const EXTRA = ['widgets', 'charts', 'anim', 'docs', 'tables', 'hero'] // opened over /api/open
+const EXTRA = ['widgets', 'charts', 'anim', 'docs', 'tables', 'hero', 'app', 'live', 'web'] // opened over /api/open
 
 mkdirSync(OUT, { recursive: true })
 const VIDTMP = mkdtempSync(join(tmpdir(), 'slate-vid-'))
@@ -690,6 +690,150 @@ async function galleryShots(browser) {
   } catch (e) { log('! gallery shots skipped:', e.message.split('\n')[0]) }
 }
 
+// ── app mode / workbook (real: `?app=1` is a view-only preview on an ordinary hub) ─────────────
+// The app posture is a property of the PROCESS, so a docs hub cannot actually be locked down —
+// `?app=1` renders exactly the reader's view without the enforcement, which is what a screenshot
+// needs. `&workbook=1` additionally returns the editor on cells the document tags `workbook`.
+async function appShots(browser) {
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await runNotebook(page, 'app')
+
+    for (const [qs, name] of [['?app=1', 'app-view.png'], ['?app=1&workbook=1', 'app-workbook.png']]) {
+      await page.goto(`${BASE}/n/app${qs}`, { waitUntil: 'domcontentloaded' })
+      await page.waitForSelector('.cell', { timeout: 30_000 })
+      await page.addStyleTag({ content: '.warn{display:none!important} #doclauncher{display:none!important}' })
+      await sleep(1600)
+      await page.evaluate(() => window.scrollTo(0, 0))
+      const clip = await page.evaluate(() => ({ x: 0, y: 0, width: Math.min(window.innerWidth, 1280),
+                                                height: Math.min(window.innerHeight, 860) }))
+      await page.screenshot({ path: join(OUT, name), clip })
+      log(`✓ ${name}`)
+    }
+
+    // A single workbook exercise cell: the accent frame, the "your turn" label, Run / Reset.
+    await page.goto(`${BASE}/n/app?app=1&workbook=1`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('.cell', { timeout: 30_000 })
+    await page.addStyleTag({ content: '.warn{display:none!important} #doclauncher{display:none!important}' })
+    await sleep(1600)
+    await cellShot(page, 'ex_inertia', 'workbook-cell.png')
+    await page.context().close()
+  } catch (e) { log('! app shots skipped:', e.message.split('\n')[0]) }
+}
+
+// ── the Settings dialog, both scopes (the full run captures these inline too) ───────────────────
+async function settingsShots(browser) {
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await runNotebook(page, 'demo')
+    await page.evaluate(() => window.openSettings && window.openSettings())
+    await sleep(900)
+    await elShot(page, '#setbg .setmodal', 'settings.png')
+    await page.evaluate(() => window.setSettingsScope && window.setSettingsScope('notebook'))
+    await sleep(1200)
+    await elShot(page, '#setbg .setmodal', 'settings-notebook.png')
+    await page.context().close()
+  } catch (e) { log('! settings shots skipped:', e.message.split('\n')[0]) }
+}
+
+// ── the Files panel (real — the demo notebooks sit in a project, so the tree has a root) ───────
+async function filesShots(browser) {
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await runNotebook(page, 'demo')
+    await page.evaluate(() => window.toggleFiles && window.toggleFiles())
+    await page.waitForSelector('#filespanel.open', { timeout: 8000 })
+    await sleep(1200)
+    await elShot(page, '#filespanel', 'files-panel.png')
+
+    // Filter to one file and click its row, so the right pane shows the editor (with highlighting)
+    // instead of the "select a file" empty state. `_filesOpen` is module-local, so click the row.
+    await page.evaluate(() => {
+      const box = document.getElementById('filesfilter')
+      if (box) { box.value = 'widgets.jl'; box.dispatchEvent(new Event('input', { bubbles: true })) }
+    })
+    await sleep(900)
+    const opened = await page.evaluate(() => {
+      const row = [...document.querySelectorAll('#filestree [data-kind]')]
+        .find((r) => /widgets\.jl/.test(r.textContent || ''))
+      if (!row) return false
+      row.click(); return true
+    })
+    if (!opened) { log('! files-editor: no widgets.jl row'); await page.context().close(); return }
+    await page.waitForSelector('#filespanel .cm-content', { timeout: 8000 })
+    await sleep(1200)
+    await elShot(page, '#filespanel', 'files-editor.png')
+    await page.context().close()
+  } catch (e) { log('! files shots skipped:', e.message.split('\n')[0]) }
+}
+
+// ── hot-reload + memo badges (synthetic: both need a gate worker, which the docs hub has not) ──
+// The banner is rendered by panels.js off an SSE frame, so calling the renderer directly produces
+// the identical DOM without needing Revise, a worker, or a source edit.
+async function bannerShots(browser) {
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await runNotebook(page, 'demo')
+    await page.evaluate(() => window.showSrcReload && window.showSrcReload(4))
+    await sleep(500)
+    await elShot(page, '#srcbanner', 'srcreload-banner.png')
+    await page.evaluate(() => window.showSrcError && window.showSrcError('UndefVarError: `stiffness` not defined'))
+    await sleep(500)
+    await elShot(page, '#srcbanner', 'srcerror-banner.png')
+    await page.context().close()
+  } catch (e) { log('! banner shots skipped:', e.message.split('\n')[0]) }
+}
+
+// ── the export dialog's replay step (synthetic plan: a real sweep needs a gate worker) ─────────
+// `/replay-plan` answers `{replays: {<mark id>: {…}}}`; the dialog reads control/cell/kind/slice/
+// values/strideable/bytes_per_value off each entry and reveals itself with `display:flex`.
+const REPLAY_PLAN = {
+  replays: {
+    'figure:w': { control: 'w', cell: 'figure', kind: 'slider', strideable: true,
+                  values: 41, slice: [240], bytes_per_value: 1920, seconds_per_value: 0.031 },
+    'tbl:w': { control: 'w', cell: 'tbl', kind: 'slider', strideable: true,
+               values: 41, slice: [24], bytes_per_value: 192, seconds_per_value: 0.004 },
+    'surface:mode': { control: 'mode', cell: 'surface', kind: 'select', strideable: false,
+                      values: 3, slice: [64, 64], bytes_per_value: 32768, seconds_per_value: 0.12 },
+  },
+}
+async function replayShots(browser) {
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await page.route('**/replay-plan*', (r) =>
+      r.fulfill({ contentType: 'application/json', body: JSON.stringify(REPLAY_PLAN) }))
+    await runNotebook(page, 'demo')
+    await page.evaluate(() => window.openReplayStep && window.openReplayStep())
+    await page.waitForSelector('#exreplaybg .exrp', { timeout: 8000 })
+    await sleep(700)
+    await elShot(page, '#exreplaybg .exrp', 'replay-step.png')
+    await page.context().close()
+  } catch (e) { log('! replay shots skipped:', e.message.split('\n')[0]) }
+}
+
+// ── live updates + web cells (real) ────────────────────────────────────────────────────────────
+async function liveShots(browser) {
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await runNotebook(page, 'live')
+    await cellShot(page, 'gauge', 'reactive-gauge.png')
+    await cellShot(page, 'go', 'onclick-button.png')
+    // Re-run the progress cell and catch it mid-flight, so the bar is partway rather than done.
+    await page.evaluate(() => window.runCell && window.runCell('progress', true))
+    await sleep(700)
+    await cellShot(page, 'progress', 'progress-bar.png')
+    await page.context().close()
+  } catch (e) { log('! live shots skipped:', e.message.split('\n')[0]) }
+}
+async function webShots(browser) {
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await runNotebook(page, 'web')
+    await cellShot(page, 'webcell', 'web-cell.png')
+    await page.context().close()
+  } catch (e) { log('! web shots skipped:', e.message.split('\n')[0]) }
+}
+
 async function main() {
   const server = startServer()
   let browser
@@ -706,6 +850,20 @@ async function main() {
     if (process.env.SLATE_HERO_ONLY === '1') { await heroShot(browser); log('done (hero-only) — assets in', OUT); return }
     // SLATE_GALLERY_ONLY=1 captures just the Extensions gallery (fast iteration on those shots).
     if (process.env.SLATE_GALLERY_ONLY === '1') { await galleryShots(browser); log('done (gallery-only) — assets in', OUT); return }
+    // One gate per newer group, same fast-iteration pattern as the ones above.
+    if (process.env.SLATE_APP_ONLY === '1') { await appShots(browser); log('done (app-only)'); return }
+    if (process.env.SLATE_FILES_ONLY === '1') { await filesShots(browser); log('done (files-only)'); return }
+    if (process.env.SLATE_BANNER_ONLY === '1') { await bannerShots(browser); log('done (banner-only)'); return }
+    if (process.env.SLATE_REPLAY_ONLY === '1') { await replayShots(browser); log('done (replay-only)'); return }
+    if (process.env.SLATE_LIVE_ONLY === '1') { await liveShots(browser); log('done (live-only)'); return }
+    if (process.env.SLATE_WEB_ONLY === '1') { await webShots(browser); log('done (web-only)'); return }
+    if (process.env.SLATE_SETTINGS_ONLY === '1') { await settingsShots(browser); log('done (settings-only)'); return }
+    // All of the above in one server boot, for iterating on the newer groups together.
+    if (process.env.SLATE_NEW_ONLY === '1') {
+      await appShots(browser); await filesShots(browser); await bannerShots(browser)
+      await replayShots(browser); await liveShots(browser); await webShots(browser)
+      log('done (new-only)'); return
+    }
     // SLATE_PUBLISH_ONLY=1 captures just the Publish panel (fast iteration on that capture).
     if (process.env.SLATE_PUBLISH_ONLY === '1') {
       const p = await (await newContext(browser)).newPage()
@@ -781,10 +939,15 @@ async function main() {
           await page.evaluate(() => window.toggleHistory && window.toggleHistory())
         } catch (e) { log('! history-panel skipped:', e.message.split('\n')[0]) }
 
-        // settings modal
+        // Settings modal, both scopes. The section list is built from the group headers of whichever
+        // scope is active, and the per-notebook rows are fetched, so give each a moment to populate.
         try {
           await page.evaluate(() => window.openSettings && window.openSettings())
+          await sleep(900)
           await elShot(page, '#setbg .setmodal', 'settings.png')
+          await page.evaluate(() => window.setSettingsScope && window.setSettingsScope('notebook'))
+          await sleep(1200)
+          await elShot(page, '#setbg .setmodal', 'settings-notebook.png')
           await page.evaluate(() => window.closeSettings && window.closeSettings())
         } catch (e) { log('! settings skipped:', e.message.split('\n')[0]) }
 
@@ -935,6 +1098,14 @@ async function main() {
     // ── regions / DAG / mesh (synthetic — no real hosts) ─────────────────────────────────────
     await regionShots(browser)
     await galleryShots(browser)
+
+    // ── app mode, files, banners, replay, live updates, web cells ────────────────────────────
+    await appShots(browser)
+    await filesShots(browser)
+    await bannerShots(browser)
+    await replayShots(browser)
+    await liveShots(browser)
+    await webShots(browser)
 
     // ── webm: drag the slider → the chart re-renders live (reactivity) ───────────────────────
     // Frame the slider AND the chart together (slider is the cell right above the chart) so the

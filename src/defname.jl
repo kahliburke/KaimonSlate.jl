@@ -57,7 +57,11 @@ function _collect_defs!(d::Dict{String,UInt64}, ex)
     else
         nm = _def_name(ex)
         if nm !== nothing
-            d[nm] = hash(_strip_lines(ex))
+            # FOLD, don't overwrite: several methods of one function (or a type plus its constructors)
+            # share a name, and assigning here would keep only the last one — an edit to any earlier
+            # method would then hash identically, so it would raise no hot-reload banner AND leave the
+            # memo key unchanged, restoring a cached result computed from the old code.
+            d[nm] = hash(_strip_lines(ex), get(d, nm, UInt64(0)))
         elseif ex.head === :macrocall
             # A DOCUMENTED module parses as `@doc "…" module M … end`, so the `:module` branch above
             # never sees it and every definition inside is lost. Most packages document their top

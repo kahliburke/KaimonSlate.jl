@@ -2,13 +2,20 @@
 
 ## Cell types
 
+There are four kinds:
+
 - **Code cells** evaluate Julia. The last expression's value renders below, along with
   stdout and any rich display (images, ECharts, tables, LaTeX).
 - **Markdown cells** render GitHub-flavored markdown with LaTeX math and double-brace
-  interpolation of Julia values.
+  interpolation of Julia values. GFM tables work, as do `!!! note "Title"` admonitions; the category
+  is free-form, so a notebook can coin its own.
+- **Web cells** hold HTML, CSS and JS in their own panes, for building an interface that talks to
+  Julia. See [Front-end Extensions](frontend-extensions.md).
+- **Tool cells** hold an `@tool name(...)` call, defining a tool the [agent](agent.md) can call. They
+  are never swept up by an automatic run, so reopening a notebook does not re-fire one.
 
-Toggle a cell's type with the header button (`M↓` / `{·}`) or press `m` / `y` in command
-mode.
+The cell header shows a button for each kind the cell is *not* (`{·}` code, `</>` web, `⌁` tool,
+`M↓` markdown). In command mode, `y` / `m` / `w` convert to code, markdown and web.
 
 A code cell shows an always-on editor with tree-based Julia highlighting (CodeMirror 6 + the
 Lezer Julia grammar), the run button, timing, and state badge:
@@ -25,12 +32,22 @@ KaimonSlate uses a Jupyter-style two-mode model:
 | Key | Action |
 | --- | --- |
 | `↑`/`k`, `↓`/`j` | move selection |
-| `⇧↑` / `⇧↓` | **move the cell** up/down |
+| `⇧↑` / `⇧↓` (also `⇧K` / `⇧J`) | extend the selection to the cell above / below |
+| `⌥↑` / `⌥↓` | **move the cell** up/down |
+| `Esc` | collapse a multi-selection back to one cell |
 | `⏎` | enter edit mode |
 | `a` / `b` | add cell above / below |
-| `m` / `y` | to markdown / to code |
+| `c` / `x` / `v` | copy / cut / paste cell(s) |
+| `m` / `y` / `w` | to markdown / to code / to [web](frontend-extensions.md) |
 | `dd` | delete cell |
 | `⇧M` | merge with the cell below |
+
+Select several cells with shift-click (a range) or ⌘/Ctrl-click (toggle one), as well as the
+⇧-arrow keys. Delete, cut, copy and the type-toggle keys then act on the whole selection, and a
+floating chip shows how many are selected. The cell clipboard is shared across notebook tabs.
+
+You can also reorder with the mouse: drag the **⠿** grip in a cell's header and a drop line shows
+where it will land, or use the header's ↑/↓ buttons to move it one place.
 
 In edit mode:
 
@@ -41,13 +58,58 @@ In edit mode:
 | `⌘⇧-` / `Ctrl⇧-` | split the cell at the cursor |
 | `⇥` | completion (Julia REPL completions + cell-local bindings) |
 
-Notebook-wide: **⌘Z / ⌘⇧Z** undo/redo structural changes, **⌘K** the command palette,
-**⌘⇧K** the docs search palette.
+Notebook-wide:
+
+| Key | Action |
+| --- | --- |
+| `⌘↵` | run stale cells |
+| `⌘K` / `⌘⇧K` | command palette / docs search |
+| `⌘⇧A` | agent panel |
+| `⌘⇧F` | controls palette |
+| `⌘⇧L` | table of contents |
+| `⌘⇧G` | dependency graph |
+| `⌘⇧S` | scratchpad |
+| `⌘Z` / `⌘⇧Z` | undo / redo structural changes |
 
 ## Running cells
 
-Run a single cell with **⇧⏎**, or **▶ Run stale** in the top bar to recompute every stale
-cell. The kernel dot in the top bar breathes while a computation is in flight.
+Run a single cell with **⇧⏎**, or press **⌘⏎** (**Ctrl⏎**) to recompute every stale cell. The same
+action is in the command palette as *Run stale cells*. The kernel dot in the top bar breathes while a
+computation is in flight.
+
+### Stopping a run
+
+A run in flight can be interrupted. That leaves the namespace intact, so everything computed so far
+is still there. **⟲ Restart worker** is the heavier option: it discards the run and the namespace
+with it.
+
+### When a run gets stuck
+
+A supervisor sweeps every few seconds and raises a badge in the top bar when something looks wrong:
+amber for a warning, red for something critical. Clicking it opens a panel naming each alert, a
+stalled kernel or a runaway loop, with the recovery action for that alert (stop the run, or restart
+the worker).
+
+## The scratchpad
+
+**☰ → 🧪 Scratchpad** (⌘⇧S) opens a panel where you can run Julia in the notebook's own kernel
+without creating a cell or touching the `.jl`. Results stream in with a timestamp, 🧹 clears them,
+and the 🧪 pill in the top bar lights up while something is running there.
+
+It is the place for a quick check that is not part of the document. The [agent](agent.md)'s
+`slate_eval` runs in the same scratchpad.
+
+## Opening a cold notebook
+
+The first open of a notebook whose packages are not yet precompiled shows a banner reading
+*Precompiling k/N · <package>*, with elapsed time and a collapsible build log. This is one-time;
+later opens are fast, and you can keep editing while it runs.
+
+Installing a package mid-session is different: that shows a blocking overlay, because the notebook is
+paused while its environment resolves and precompiles.
+
+A notebook can also open **inactive**, showing its stored results with no worker behind it. See
+[the front page](getting-started.md#The-front-page).
 
 ## Quiet cells
 

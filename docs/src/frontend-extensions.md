@@ -21,10 +21,21 @@ with `{{ }}` interpolation, the same as a markdown cell:
     css"""#wave { font: 600 1.5rem system-ui; color: {{ color }} }""",
     js"""
       const f = {{ freq }};                 // interpolated as a JSON literal
-      document.getElementById("wave").textContent = `frequency ${f}`;
+      root.querySelector("#wave").textContent = `frequency ${f}`;
     """,
 )
 ```
+
+The JS pane runs with three things of its own:
+
+- **`root`** — the cell's own output element. Query and append inside it, so two cells running the
+  same code cannot reach into each other.
+- **`echo(…)`** — print a line into the cell and the browser console.
+- **top-level `await`** — `await import(…)`, `await window.slateCall(…)`.
+
+An error thrown or a promise rejected in the pane renders onto the cell.
+
+![A web cell with its HTML, CSS and JS panes stacked above the rendered output: interpolated notebook values, a root.querySelector call, an echo line, and the bar chart the JS drew](./assets/web-cell.png)
 
 - **It's reactive.** The variables inside `{{ }}` are the cell's inputs, so the web cell re-renders
   whenever they change — drag a `@bind freq` slider and the markup updates live, with no `slateCall`
@@ -74,7 +85,7 @@ files on disk stay plain).
 `@asset "path"` reads a file relative to the notebook's project dir and returns its **contents** as a
 `String` (`@asset bytes "path"` → `Vector{UInt8}` for binaries). Because the path is a source
 literal, the file is a first-class reactive input: edit it on disk and the reading cell re-runs. See
-[Live updates → Reacting to files](live-updates.md#reacting-to-files-asset). For a *computed* path,
+[Live updates → Reacting to files](live-updates.md#Reacting-to-files-—-@asset). For a *computed* path,
 use `readfile(path)` (not statically tracked — no cache-fold, no watcher).
 
 ### `@use` — import an ES module
@@ -90,14 +101,19 @@ exports:
 ```julia
 #%% code id=celebrate
 WebPage(js = """
-  import confetti from "canvas-confetti";
-  confetti();
+  import("canvas-confetti").then(m => m.default());
 """)
 ```
 
+Use dynamic `import()`, not a top-level `import` statement. A notebook's JS runs as a classic
+script, so a static import is a syntax error and the cell renders an error block instead. The import
+map resolves the bare specifier either way. A web cell's JS pane supports top-level await, so there
+you can write `const confetti = (await import("canvas-confetti")).default;`.
+
 `@use` is a no-op at runtime — only the literal string pair is extracted, so both arguments must be
-literals. The import map is fixed at page load, so **adding or changing a `@use` needs a reload**
-(editing the JS that uses it is instant).
+literals. Adding a **new** specifier reaches an already-open page, because the import map is extended
+in place. Re-pointing a specifier the page has already declared needs a reload: once declared, a
+specifier cannot be redefined. Editing the JS that uses it is instant either way.
 
 ## Talking to Julia from the browser
 
@@ -129,6 +145,11 @@ const r = await window.slateCall("stats", { n: 1000 });
   reconnects).
 - Handlers run on the worker's interactive thread, so they stay responsive during a compute batch.
   One handler per channel; re-running the cell replaces it.
+- A fourth argument sends **raw binary**: `slateCall(channel, args, onProgress, buffers)` ships each
+  `ArrayBuffer` or typed array in `buffers` as a binary WebSocket frame ahead of the call, and the
+  handler reads them as `args.__slate_buffers`, a `Vector{Vector{UInt8}}`. No base64 anywhere.
+  Going the other way, `slate_emit` of a `SlateBinary` arrives at the `slateOnStream` handler as
+  `{…meta, d: TypedArray, dims}`.
 
 ### Stream progress during a call
 
@@ -159,22 +180,29 @@ The one-argument handler form (`slate_on("ch", args -> …)`) keeps working unch
 parameter is opt-in. `onProgress` is optional on the JS side, and any progress frames that arrive
 after the reply (or a timeout) are ignored.
 
-### `slateTask` — a call with progress and status, as signals
+### `slateTask` — a call with progress and status, as one signal
 
 `slateTask` wraps a progress-reporting call in a small state machine so the UI can render it
 directly, and **supersedes** an in-flight run when you start a new one (the last run wins). It's the
 ergonomic layer over `slateCall(channel, args, onProgress)`.
 
+It is not built in. It ships as a small module with the examples, which you copy into your notebook's
+project directory and import:
+
 ```js
-const task = slateTask("region_stat");   // one task, reused across runs
+const { slateTask } = await import(location.pathname + "/asset/webassets/slatetask.js");
 
-task.run({ region: "gpu" });             // start (or restart, superseding any in-flight run)
+const t = slateTask("region_stat");   // one task, reused across runs
+await t.run({ region: "gpu" });       // start (or restart, superseding any in-flight run)
+```
 
-// reactive signals you render from:
-task.state.value      // "idle" | "loading" | "done" | "error"
-task.progress.value   // the latest progress payload (the NamedTuple from progress(…)), or null
-task.result.value     // the resolved value once state is "done"
-task.error.value      // the error once state is "error"
+`t.state` is a single signal holding the whole state, so one subscription covers every transition:
+
+```js
+t.state.value.status     // "idle" | "loading" | "done" | "error"
+t.state.value.progress   // the latest payload from progress(…), or null
+t.state.value.result     // the resolved value once status is "done"
+t.state.value.error      // the error string once status is "error"
 ```
 
 Reach for `slateTask` when a control should kick off a Julia computation and show live progress then
@@ -201,8 +229,16 @@ const stop = window.slateOnStream("tick", d => {
 
 Pass any JSON-serializable value (a `NamedTuple`/`Dict`/`Vector`/scalar) — the value itself, not a
 pre-encoded JSON string. `slateOnStream` returns an unsubscribe function; one handler per channel, so
-a re-rendered cell re-registers and replaces the previous one. For bulk data, ship it as an `@asset`
+a re-rendered cell re-registers and replaces the previous one. For bulk data, publish it as an asset
 rather than emitting it.
+
+### Shipping generated data to the browser
+
+`save_asset(name, data)` in Julia publishes generated bytes, a numeric array, or any JSON-able value
+as a cell asset and returns a ref. The browser reads it back with `await Slate.asset(ref)`, where a
+numeric array comes back as a decoded typed array with its shape, or resolves a file's URL with
+`Slate.assetUrl("webassets/foo.js")`. Both work live and in a static export, where the bytes ride
+along inside the page. See [Live Updates](live-updates.md#Writing-files-out).
 
 ## Extending the UI
 
@@ -247,6 +283,22 @@ window.slateRegisterWidget("mathfield", {
 Register the widget at notebook load (in a `WebPage` or an `@asset`ed script). Any `custom_widget`
 whose `kind` matches picks it up, and reading `answer` in another cell recomputes it when the widget
 pushes a new value.
+
+### Cell toolbar buttons — `slateRegisterCellAction`
+
+```js
+window.slateRegisterCellAction({
+  id: "mypkg-convert",
+  icon: "⇄",
+  title: "Convert this cell",
+  show: cell => cell.kind === "code",
+  onClick: (cellId, cell, event) => { /* … */ },
+});
+```
+
+Adds a button to every cell's action strip. `id` deduplicates, so re-registering replaces rather than
+stacks; `show(cell)` gates it per cell. Package authors have a Julia wrapper,
+[`register_cell_action!`](extensions.md).
 
 ### Editor extensions — `slateRegisterEditorExtension`
 

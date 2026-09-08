@@ -15,10 +15,15 @@ slate_table(df)
 - **Sort** — click a column header; click again to flip ascending/descending. Numeric columns
   sort numerically, not lexically.
 - **Filter** — the box above the table filters rows as you type (a *search* box for server-paged
-  tables — see [below](#big-data-server-paging)).
-- **Page** — large results paginate, with a page-size control; the footer shows the visible range.
+  tables — see [below](#Big-data-—-server-paging)).
+- **Page** — large results paginate. The footer shows the visible range and the total, and a page
+  number can be clicked to jump. Page size is 25 for an ordinary table and is set by `page_size` only
+  when `paged = true`; the reader cannot change it.
 
 Each column can opt out of sorting or filtering; numeric columns right-align by default.
+
+An ordinary table ships at most **5000 rows**, and says so in the footer (`capped at 5000 of N`) when
+it truncates. Use `paged = true`, or `slate_query`, to browse past that.
 
 ## Column formatting
 
@@ -41,11 +46,22 @@ and **`coltype`** override the inferred defaults:
 ```julia
 slate_table(df;
     format = (Revenue = :currency, Margin = (kind = :percent, digits = 1), Size = :bytes),
-    align  = (Product = :left))
+    align  = (Product = :left,))
+```
+
+Each of these takes a `NamedTuple`, so a one-entry one needs its trailing comma. `(Product = :left)`
+without it is a parenthesized assignment, and `slate_table` rejects it.
+
+`default_format` applies one spec to **every** numeric column, for when you would otherwise list them
+all. An explicit `format` entry for a column still wins:
+
+```julia
+slate_table(df; default_format = :integer, format = (Margin = :percent,))
 ```
 
 The same formatting is applied server-side, so it carries into exported HTML and PDF (see
-[Publishing](#publishing-and-export)).
+[Publishing](#Publishing-and-export)). `export_rows = n` caps a fixed export (PDF, markdown, static
+HTML) to the first `n` rows with a "showing n of N" note, leaving the live table fully paginated.
 
 ## In-cell visualization
 
@@ -67,22 +83,37 @@ row as a `NamedTuple`, so downstream cells can read its fields:
 @bind sel TableSelect(df)      # sel.product, sel.revenue, … ; `nothing` until a row is clicked
 ```
 
+Only the first `maxrows` rows (default 200) are rendered and selectable, so a large frame stays
+responsive; the footer flags the truncation. Raise it with `TableSelect(df; maxrows = 1000)`, and
+give `default` a 1-based row index to start with one selected.
+
 ## Big data — server paging
 
 For large or lazy data, keep it **server-side** so only the visible page crosses the wire:
 
 ```julia
 slate_table(df; paged = true, page_size = 100)   # eager table, paged over the wire
-slate_query(provider)                            # a lazy, server-paged provider
+slate_query(conn, "SELECT …")                    # a SQL source, paged in the database
 ```
 
-Sorting, filtering, and paging then run against the provider **where the cells evaluate** (the
-gate worker), so a million-row frame stays snappy in the browser.
+Sorting, filtering, and paging then run **where the cells evaluate** (the gate worker), so a
+million-row frame stays snappy in the browser. `slate_query` goes further and pushes them into SQL,
+against a DBInterface connection such as a `DuckDB.DB` or `SQLite.DB`.
+
+For a source that is neither a frame nor SQL, subtype `PagedProvider` and give it `page_columns` and
+`fetch_page`.
+
+## Matrices
+
+Returning a bare `AbstractMatrix` renders it without you asking. A small one becomes KaTeX, or dotted
+notation when it is a little larger; a large or sparse one becomes a downsampled heatmap.
+
+`slate_matrix(M; kind, max_cells, …)` overrides that choice, or its defaults.
 
 ## In markdown, and when published
 
 Tables interpolate into markdown cells with double-brace interpolation, so a table can sit inline
-in your prose (see [Notebook Basics](notebook-basics.md#markdown-interpolation)):
+in your prose (see [Notebook Basics](notebook-basics.md#Markdown-interpolation)):
 
 ```markdown
 Latest figures: {{ slate_table(df) }}

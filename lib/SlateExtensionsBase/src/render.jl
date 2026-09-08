@@ -16,6 +16,13 @@ descriptor VERSION lives in the payload (`{v, …}`), not the MIME string — on
   replaces a hand-rolled `Base.show(::MIME"text/html")`.
 """
 const SlateComponentMIME = MIME"application/vnd.kaimonslate.component+json"
+
+"""
+    SlateHtmlMIME
+
+The MIME a value shows under when its [`slate_render`](@ref) returns an HTML fragment rather than a
+component descriptor. The escape hatch beside [`SlateComponentMIME`](@ref).
+"""
 const SlateHtmlMIME      = MIME"application/vnd.kaimonslate.html+html"
 
 # An HTML-fragment escape-hatch payload — `slate_render` returns one of these to render raw HTML through

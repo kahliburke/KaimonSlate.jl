@@ -9,7 +9,7 @@ Run the **`slate` app** (install it with `pkg> app add KaimonSlate` — see
 [Installation](installation.md) for the full steps):
 
 ```sh
-slate                 # start the hub + status TUI, and open the front page
+slate                 # start the hub and show the status TUI
 slate intro.jl        # …or jump straight into a notebook (created if new)
 ```
 
@@ -24,19 +24,36 @@ shell reports `command not found`, that `PATH` step is what's missing; see
 
 ### The front page
 
-Plain `slate` opens the hub's **front page** in your browser (at **`http://127.0.0.1:8765`**) — the
-launcher for every notebook, and where you open or upload a document:
+The hub's **front page** lives at **`http://127.0.0.1:8765`**. It is the launcher for every notebook,
+and where you open or upload a document. Press **`o`** in the status TUI to open it, or visit that
+address yourself. Only `slate <file.jl>` opens a browser on its own.
 
 ![The KaimonSlate hub front page: an open-a-notebook row with path completion, a Run-on selector, ⬆ Upload and 🖧 Remotes buttons, a ☁ Publishing manager, the list of open notebooks, and a published-sites strip](./assets/home.png)
 
-- **Open by path** — type a `.jl` path (Tab completes) and hit **Open**, or pass it on the shell as
+- **Open by path** — type a path (Tab completes) and hit **Open**, or pass it on the shell as
   `slate path/to/notebook.jl`. A path that doesn't exist yet is created.
-- **⬆ Upload** — pick a `.jl` from *this* computer; the hub saves it and opens it. (You can also just
+- **＋ New notebook** — create an empty notebook at a path you pick, starting from the last directory
+  you opened from.
+- **⬆ Upload** — pick a file from *this* computer; the hub saves it and opens it. (You can also just
   ask the **💬 agent** to open one.)
+- **Launch worker on open** — checked, a notebook boots its worker and runs as it opens. Unchecked, it
+  opens inactive as a static preview you can launch later. The setting sticks per browser.
 - **Open notebooks** — everything currently open on the hub; click to jump back in.
+- **Recent** — a searchable list of notebooks you have opened, kept per browser.
 - **Run on** — choose where a notebook's worker runs: locally, or on a remote SSH host you set up with
   **🖧 Remotes**. See [Remotes](remotes.md).
 - **☁ Publishing** — manage published sites and destinations. See [Publishing](publishing.md).
+
+Open and Upload both classify whatever you point them at. A Slate notebook opens directly. A plain
+Julia script is copied beside itself as `<stem>-notebook.jl` and opened as a notebook, leaving your
+original untouched. A self-contained bundle offers to be expanded into a project rather than opened
+bare. A runnable `.html` export has its embedded notebook extracted first, then follows the bundle
+path.
+
+A notebook opened from a bundle you downloaded or uploaded starts **inactive**: it shows the render
+stored inside it and spawns nothing. Clicking the grey *Inactive* pill opens a popover naming the
+packages involved and warning about precompile time, then boots the worker, restores cached results
+and runs. Your own files open live.
 
 Open one and you're in the notebook itself:
 
@@ -54,8 +71,8 @@ x = 21
 - **⇧⏎** runs the cell.
 - **⌘⇧⏎** (or **Ctrl⇧⏎**) runs and opens a fresh cell below — the keyboard "next cell" flow.
 
-A cell's left border shows its state: blue = fresh, gold = stale, orange = edited (unsaved),
-green = running, red = errored.
+A cell's left border shows its state: green = fresh, gold = stale, orange = edited (unsaved),
+blue and pulsing = running, red = errored.
 
 ## Reactivity
 
@@ -69,8 +86,9 @@ Now change the first cell to `x = 50` and run it. The second cell **restales and
 automatically** — it depends on `x`, so KaimonSlate re-runs it for you. This is the core
 idea; see [Reactive Cells](reactivity.md).
 
-To see what feeds a cell, click the **🔗** button on its header: every upstream precursor
-lights up gold, and the view scrolls to the topmost one. Press `Esc` to clear.
+To see what a cell is connected to, click the **🔗** button on its header. The notebook filters down
+to that cell's dependency chain, its precursors and its dependents, and a banner appears across the
+top. Click the banner or press `Esc` to return to the whole notebook.
 
 ## Add a control with @bind
 
@@ -114,14 +132,15 @@ running cells one at a time so you can watch:
 
 Click **✨** on a cell to scope a turn to that cell and its dependency cone, or type **@**
 in the chat to reference a specific cell by id. Pick the model and permission preset in
-**⚙ Settings**. See [The AI Agent](agent.md).
+**☰ → ⚙ Settings**. See [The AI Agent](agent.md).
 
 ## Export
 
-When you're done, export from the **☰** menu: a self-contained **HTML** document, a
-publication-quality **PDF** (typeset server-side with Typst — themes, columns, vector
-figures), **Print HTML** for a quick browser PDF, or a fully reproducible **self-contained
-`.jl`** (cells + environment + source). See [Export](export.md).
+When you're done, **☰ → ⬆ Export…** offers a self-contained **HTML** page, a publication-quality
+**PDF** (typeset server-side with Typst, with themes, columns and vector figures), **Markdown** for
+pasting elsewhere, a fully reproducible **self-contained `.jl`** (cells + environment + source), and
+an **App** folder that runs as an application. See [Export](export.md) and
+[App Mode](app-mode.md).
 
 ## Publish
 

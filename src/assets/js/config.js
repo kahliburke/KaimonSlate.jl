@@ -1,17 +1,14 @@
-// ── Notebook config panel ───────────────────────────────────────────────────────
+// ── Per-notebook overrides — the "This notebook" scope of the Settings dialog ────
 // One unified view of every DURABLE per-notebook override. The execution/slides/bibstyle/agent-model
 // rows are server-backed via /api/config (registry-driven — they travel in the `.jl` Slate.config
 // footer). The agent PERMISSION row is kept LOCAL (localStorage, per notebook) and is NEVER written
 // to the file — a `bypass` preset must not ride a shared notebook. Each row shows its effective
 // value, a source badge (notebook override / global / default), and a "follow global" clear.
 
-let _configOpen = false;
-function toggleConfig() {
-  const p = document.getElementById('configpanel');
-  p.classList.toggle('open');
-  _configOpen = p.classList.contains('open');
-  if (_configOpen) loadConfig();
-}
+// These rows live in the Settings dialog's "This notebook" scope — they used to be a side panel of
+// their own, which kept them a surface away from the global defaults they override. Kept as a named
+// function because the top menu, the palette and app mode all reach for it.
+function toggleConfig() { openSettings('notebook'); }
 
 const _cfgEsc = s => window.slateEscHtml(s);
 
@@ -118,7 +115,11 @@ async function loadConfig() {
   html += _cfgPermRow();                              // client-only permission row at the end
   document.getElementById('configlist').innerHTML = html;
   const n = items.filter(it => it.overridden).length + (nbAgentPerm() ? 1 : 0);
-  document.getElementById('configstatus').textContent = n ? `${n} override${n === 1 ? '' : 's'}` : 'all defaults';
+  const st = document.getElementById('configstatus');
+  if (st) st.textContent = n ? `${n} override${n === 1 ? '' : 's'}` : 'all defaults';
+  // The rows were just replaced, so the section list has to be rebuilt over the new nodes (and the
+  // per-section override counts recomputed with them).
+  try { window.slateSettingsNav && window.slateSettingsNav('notebook').rebuild(); } catch (_) {}
 }
 
 // Set a server-backed override (footer). agentmodel additionally reaps the agent so it rebinds.

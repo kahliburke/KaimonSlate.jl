@@ -17,8 +17,8 @@ about defining a region, assigning cells to it, and how data crosses the boundar
 
 !!! note "New and evolving (v1)"
     Regions are a recent addition and still stabilizing. The single-worker path — running a *whole*
-    notebook [on one host](remotes.md#run-a-notebook-on-a-remote) — is the settled option; per-cell
-    regions add power with the [caveats below](#current-limits).
+    notebook [on one host](remotes.md#Run-a-notebook-on-a-remote) — is the settled option; per-cell
+    regions add power with the [caveats below](#Current-limits).
 
 ## Assigning a cell to a region
 
@@ -48,11 +48,14 @@ the front page, not in any one notebook. A region carries:
 - an optional **preload** — a *local* project dir whose environment is replicated on the host and
   precompiled on idle workers, so a notebook adopts a ready worker instead of cold-booting,
 - a **data root** — a *remote* path pinned as the workers' `datadir()` / `@sfile`,
-- a **cache root** — a *remote* path for the region's own durable [cache](memoization.md), kept
-  separate from other workers on the box (so a co-located region moves a blob across the boundary
-  rather than deduping it to nothing against a shared store),
 - a **warm** count — how many workers to keep booted and idle, ready to *adopt* (0 = cold spin on demand),
-- and worker **thread counts** (`"<compute>,<interactive>"`).
+- and an optional **sysimage**.
+
+Three more settings exist but are not in the manager. A **cache root** (a remote path for the
+region's own durable [cache](memoization.md), kept separate from other workers on the box), worker
+**thread counts**, and the `curve` toggle are set only from the agent tool
+`slate_region(name; cache_root = …, threads = …, curve = false)`. Saving the region from the Regions
+manager clears them.
 
 Many regions can point at the **same host** with different config (e.g. `gpu` and `gpu_scratch` on one box
 with different data roots). Names are folded to identifiers (`slate-remote` → `slate_remote`) so they
@@ -88,7 +91,7 @@ cell's kernel first, **just in time** — you never move data by hand.
 - **Only the boundary crosses.** A large frame that's produced *and* consumed on the same region
   never leaves it; only a value read across a side boundary transfers.
 - **Content-addressed transfer.** Values cross as content-addressed blobs over the dedicated data
-  channel; a `DataFrame` crosses as Arrow IPC (see [Memoization → Arrow](memoization.md#arrow-tables-and-codecs)).
+  channel; a `DataFrame` crosses as Arrow IPC (see [Memoization → Arrow](memoization.md#Arrow-tables-and-codecs)).
   Identical content dedups at every hop, and an unchanged value doesn't re-ship — a per-transfer
   freshness token (source run + any mutators + the current `@bind` value + the destination worker's
   generation) collapses a repeat to nothing.
@@ -100,9 +103,9 @@ cell's kernel first, **just in time** — you never move data by hand.
   the fix: tag the producing cell `resource`.
 
 Where the values actually flow, how fast, and over which link is all visible from the
-[DAG pane](dag.md#steering-regions-from-the-dag) — its **⇄ peer routing plan**, **📊 transfers**
+[DAG pane](dag.md#Steering-regions-from-the-DAG) — its **⇄ peer routing plan**, **📊 transfers**
 dashboard, and the **mesh-connect** consent live there. See
-[The Dependency Graph → Steering regions from the DAG](dag.md#steering-regions-from-the-dag).
+[The Dependency Graph → Steering regions from the DAG](dag.md#Steering-regions-from-the-DAG).
 
 ## Seeing where cells run
 
@@ -133,11 +136,13 @@ Regions are powerful but still settling. Today:
 
 - **Keep the main kernel local** while a region is active.
 - **`@bind`-declaring cells stay on the main kernel** — declare controls locally, read them anywhere.
-- **Cross-boundary mutation is undefined.** A region cell should *produce* values, not mutate an
-  object that lives on the main kernel. An untagged cell that mutates a region value auto-follows its
-  target one hop, but deeper mutation chains aren't guaranteed.
+- **Cross-boundary mutation is rejected.** A region cell should *produce* values, not mutate an
+  object that lives on the main kernel. A cell that tries errors, and the message names the cell that
+  owns the value and suggests splitting the cell or deriving a new binding. An untagged cell that
+  mutates a region value auto-follows its target one hop, but deeper mutation chains aren't
+  guaranteed.
 
-Expect this surface to grow; the whole-notebook [remote placement](remotes.md#run-a-notebook-on-a-remote)
+Expect this surface to grow; the whole-notebook [remote placement](remotes.md#Run-a-notebook-on-a-remote)
 is the conservative choice when you want everything elsewhere.
 
 ## From the agent
@@ -145,6 +150,14 @@ is the conservative choice when you want everything elsewhere.
 Under [Kaimon](agent.md), define a region with `slate_region(name; host, warm, preload, data_root, …)`,
 choose which regions a notebook uses with `slate_region_on(notebook, "name1,name2")`, and list the
 registry with `slate_regions()`.
+
+For cross-region work there are four more, the agent-side equivalents of the
+[DAG pane's](dag.md#Steering-regions-from-the-DAG) region toolbar:
+
+- `slate_peer_plan(regions)` dry-runs the route for each region pair (`refresh="1"` re-probes).
+- `slate_peer_introduce(regions)` arms the worker-to-worker SSH mesh.
+- `slate_peer_teardown(region)` removes that region's mesh artifacts.
+- `slate_transfers()` lists active and recent boundary transfers.
 
 ## See also
 

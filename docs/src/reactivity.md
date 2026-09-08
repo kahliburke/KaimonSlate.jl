@@ -17,6 +17,20 @@ x = 10            y = x + 1                     z = y^2
 Editing **A** marks A, B, and C stale; running stale cells recomputes all three in order.
 Editing **C** marks only C.
 
+Cells that depend on each other run in order. Cells that do not run **at the same time**, which is on
+by default. Document order is the safety backstop, so two cells writing the same name still run in
+order. Turn it off per notebook under **☰ → ⚙ Settings → This notebook** if a cell's side effects need strict
+document order.
+
+!!! warning "One namespace, last writer wins"
+    All cells share one namespace. If two code cells define the same name, the later one wins, and
+    editing the earlier one looks like reactivity has stopped working. Slate flags this with a ⚠
+    badge naming the variable on every cell that defines it; click it to see the others. Give each
+    value one defining cell, or rename.
+
+Source files are reactive inputs too: saving a file in the project the notebook runs against restales
+the cells that use what you changed. See [Editing project source](hot-reload.md).
+
 ## Cell states
 
 The left border and badge show each cell's state:
@@ -33,13 +47,14 @@ The left border and badge show each cell's state:
 
 ## Seeing dependencies
 
-Click the **🔗** button on a code cell to highlight its **upstream cone** — every precursor
-it (transitively) reads from is bordered gold with an "⬆ feeds <id>" badge, and the view
-scrolls to the topmost precursor. Click a precursor to jump to it; press `Esc` or click 🔗
-again to clear.
+Click the **🔗** button on a code cell to filter the notebook down to that cell's **dependency
+chain**: its transitive precursors, the cell itself, and its transitive dependents. Everything
+outside the chain collapses out of the flow, the focused cell gets an outline, and a banner names the
+cell and how many cells are in the chain. Click the banner, click 🔗 again, or press `Esc` to exit.
 
-This is the navigation companion to reactivity: the engine already restales the *downstream*
-cone on a change; the 🔗 view lets you trace *upstream* to find a cause.
+This is the navigation companion to reactivity. The engine restales the downstream cone on a change;
+the 🔗 view puts both directions on screen at once so you can trace a value to its cause and see what
+it feeds.
 
 ![Dependency-chain focus: only the selected cell's precursors and dependents are shown](./assets/deps-cone.png)
 

@@ -23,7 +23,22 @@ KaimonSlate.NotebookServer.close_notebook!
 KaimonSlate.NotebookServer.stop_hub
 ```
 
-## Top-level
+## Exports
+
+The names `using KaimonSlate` brings into scope. Their docstrings live in the submodules below, but
+these are the public spellings.
+
+```@docs
+KaimonSlate.expand
+KaimonSlate.standalone!
+KaimonSlate.export_app
+KaimonSlate.app_defaults
+KaimonSlate.register_extension
+```
+
+## Configuration accessors
+
+The persisted settings behind [Running the Hub](hub.md), readable and settable from Julia.
 
 ```@autodocs
 Modules = [KaimonSlate]
@@ -39,9 +54,16 @@ names a third-party package is meant to use.
 Modules = [SlateExtensionsBase]
 ```
 
-The sections below document the internal submodules. These are not part of the stable public
-API — they're listed for contributors and the curious. Each `@autodocs` block picks up every
-remaining docstring in its module (the entry points above are not repeated).
+## The notebook API
+
+The helpers you call from inside a cell — `slate_table`, `echart`, `animate`, `@bind`, `@replay`,
+`save_asset` and the rest — are public, and their guide pages are [Charts](visualization.md),
+[Tables](tables.md), [Widgets](widgets.md), [Animation](animation.md),
+[Live Updates](live-updates.md) and [Offline Interactivity](replay.md).
+
+Their docstrings are rendered below under **Report engine**, because that is the module they live in.
+Everything else in that section, and the two sections after it, is internal: the serving and
+rendering layers, listed for contributors and the curious.
 
 ## Notebook server
 
@@ -66,4 +88,39 @@ Turning evaluated cells into HTML/markdown output.
 
 ```@autodocs
 Modules = [KaimonSlate.ReportRender]
+```
+
+## Publish ledger
+
+The record behind [Publishing](publishing.md): documents, sites, targets and events, and the gist
+and local backends that persist them.
+
+```@autodocs
+Modules = [KaimonSlate.PublishLedger]
+```
+
+## Memo store
+
+The content-addressed store behind [Memoization & Caching](memoization.md): manifests, blobs,
+pinning and garbage collection.
+
+```@autodocs
+Modules = [KaimonSlate.NotebookServer.MemoStore]
+```
+
+## Effect store
+
+Durable per-cell declared-effect records, keyed by cell source digest.
+
+```@autodocs
+Modules = [KaimonSlate.EffectStore]
+```
+
+## State homes
+
+Where Slate keeps its config, data and cache, as described under
+[Configuration](hub.md#Where-Slate-keeps-its-state).
+
+```@autodocs
+Modules = [KaimonSlate.SlateHome]
 ```

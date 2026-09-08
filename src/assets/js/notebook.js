@@ -323,7 +323,7 @@ function EChart({ spec, index, readies }) {
     let live = true;
     ready.current = window.chartRuntime.scripts(spec).then(() => {
       if (!live || !el) return null;
-      const inst = window.chartRuntime.init(el);
+      const inst = window.chartRuntime.init(el, spec);
       return window.chartRuntime.apply(el, inst, spec).then(() => inst);
     });
     readies.current[index] = ready.current;

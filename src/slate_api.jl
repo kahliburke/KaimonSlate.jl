@@ -182,6 +182,20 @@ Note a JS function CANNOT be passed here (or to any `formatter`): an option is s
 with no reviver, so a function-shaped string arrives as a string, and ECharts calling it throws on
 every tooltip update — which wedges the crosshair rather than failing visibly. `valuefmt` exists
 precisely because that route doesn't work."""),
+    SlateApiEntry("renderer", "Charts",
+        "How a chart rasterises — `:canvas` (default) or `:svg`.",
+        ["svg", "canvas", "vector", "blank chart", "black chart", "print", "crisp"],
+        "echart(…; renderer = :svg)",
+        """How an interactive chart is drawn. `:canvas` (the default) rasterises to a bitmap and stays
+fast on large series; `:svg` draws into the DOM, so text stays selectable and crisp under zoom and
+print.
+```julia
+echart(:line, x, y; renderer = :svg)
+```
+A reader can override this for themselves in **Settings → Chart renderer**, and that choice wins —
+a browser that cannot composite a canvas draws every chart as a blank rectangle, and the reader
+hitting that is usually not the author. In a static HTML export, where there is no Settings panel,
+`?renderer=svg` on the URL does the same."""),
     SlateApiEntry("series", "Charts",
         "One named series of a multi-series `echart` (mixed kinds, dual axes).",
         ["overlay", "legend", "multiple", "dual axis"],
@@ -329,7 +343,8 @@ datafile === nothing ? md"Upload a file to begin." : CSV.read(datafile.path, Dat
     or a field either — the value is an ordinary array, and the renderer finds it wherever you put it.
 
     REQUIREMENTS: the control must have a finite domain, and `expr` must return a numeric array of the
-    same shape for every value. Both are checked as you write the cell, not at export.
+    same shape for every value. The domain is checked as you write the cell; the shape is checked at
+    export, when the sweep runs.
 
     Every control whose domain can be enumerated qualifies, which is more of them than it sounds:
 
@@ -388,8 +403,9 @@ SlateApiEntry("playhead", "Widgets",
         """A CANCELLABLE sleep for use inside `@onclick`/`@onchange` bodies — a new click or `cancel`
         stops the run at its next `pause`. `pause(0.1)`."""),
     SlateApiEntry("cancel", "Live", "Cooperatively stop a running `@onclick` handler.",
-        ["stop", "abort", "interrupt", "kill"], "cancel(:name)",
-        """Cooperatively stop a running `@onclick` handler (it stops at its next `pause`). `cancel(:level)`."""),
+        ["stop", "abort", "interrupt", "kill"], "cancel(:control)",
+        """Cooperatively stop a running `@onclick` handler (it stops at its next `pause`). Names the
+        CONTROL whose handler is running, not the reactive it writes: for `@onclick go`, `cancel(:go)`."""),
     SlateApiEntry("Cancelled", "Live",
         "The exception a cancelled handler unwinds with — lets a `catch` tell a stop from a failure.",
         ["cancel", "stop", "exception", "error", "catch", "interrupt"], "e isa Cancelled",

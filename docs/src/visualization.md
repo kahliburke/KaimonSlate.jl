@@ -91,7 +91,58 @@ echart(series(:line, x, sin.(x); name = "sin", smooth = true),
 ![A composable ECharts chart mixing a line and bar series](./assets/chart-composable.png)
 
 Charts also work inside markdown cells via double-brace interpolation — see
-[Notebook Basics](notebook-basics.md#markdown-interpolation).
+[Notebook Basics](notebook-basics.md#Markdown-interpolation).
+
+### Zooming
+
+ECharts does not zoom at all unless asked. `zoom` turns it on:
+
+```julia
+echart(:line, x, y; zoom = true)
+```
+
+`true` gives the wheel and drag gesture plus the affordances that make it usable: zoom-to-region,
+undo, and reset. `:inside` is the gesture alone, `:slider` a range bar under the axis, and `:both` is
+slider plus gesture. A bare `dataZoom = [(type = "inside",)]` is invisible and has no way back, which
+is why the keyword exists. `zoom` applies to every x axis, so a multi-panel chart zooms as one, and an
+explicit `dataZoom` or `toolbox` of your own wins.
+
+### The chart as an input
+
+`select = :span` makes the chart's x-range a live input: drag across it and a `@bind`ed variable
+follows.
+
+```julia
+@bind span RangeSlider(400:4000)
+echart(:line, ν, absorbance; select = :span)
+```
+
+Dragging the chart and moving the slider are two ways into one value.
+
+### Choosing a renderer
+
+ECharts draws to a canvas by default, which stays fast on large series. `renderer = :svg` draws into
+the DOM instead, so text stays selectable and crisp under zoom and print:
+
+```julia
+echart(:line, x, y; renderer = :svg)
+```
+
+This is a preference, not a guarantee. A reader can set their own in
+[Settings](settings.md#Chart-renderer) and that wins, because whether the canvas path works
+depends on the browser doing the viewing, and the person hitting a blank chart is usually not the
+author. On a static export the equivalent is `?renderer=svg` on the URL.
+
+### Formatting tooltip numbers
+
+`valuefmt` takes the same vocabulary as a [table's](tables.md#Column-formatting) formats:
+`:fixed`, `:scientific`, `:percent`, `:integer`, `:currency`, `:bytes`, or the longer
+`(kind = :fixed, digits = 5)` form. `series(...; valuefmt = ...)` wins for that series.
+
+A JS function cannot be passed as a formatter: the option is serialised to JSON with no reviver, so a
+function string prints literally. Use these presets, or an ECharts string template.
+
+`height` and `width` size the chart.
 
 ## One look — ECharts & Makie
 

@@ -8,6 +8,8 @@ results — and nothing that can put the document into a state they can't recove
 App mode is that second posture. The notebook still runs live: sliders move, fits recompute, figures
 redraw. What's gone is everything that edits it.
 
+![A notebook served as an app: title, prose, two sliders and the chart and table they drive, with no editors, no cell chrome and no toolbar](./assets/app-view.png)
+
 ## Serving an existing notebook as an app
 
 App mode is a property of the **process**, not of the document. A hub started with `app = true`
@@ -47,6 +49,9 @@ The folder holds the notebook's reproducible bundle plus launchers. The recipien
 The first run installs the application's packages and precompiles them — several minutes is normal.
 Later starts are fast. Nothing waits on stdin, so it also runs unattended under systemd, in a
 container, or as `nohup ./run.sh &`.
+
+That first run needs network access. It fetches Slate itself into a shared environment and
+instantiates the notebook's manifest. Once that has happened the app starts offline.
 
 An app is not a separate export format. It **is** the standalone bundle; "app" is a posture the
 launcher takes. Which is also why updating a deployed app is `export_app` again over the same folder
@@ -98,7 +103,88 @@ export_app(nb, dir; appdefaults = app_defaults(theme = "midnight", pagewidth = 1
 ```
 
 These are defaults, not enforcement. A visitor who has chosen keeps their choice — the app's settings
-popover offers the same reader-facing subset, and `localStorage` still wins.
+popover offers the same reader-facing subset (theme, page width, and the
+[chart renderer](settings.md#Chart-renderer)), and `localStorage` still wins.
+
+## Workbook mode
+
+A course notebook is an app in every respect but one: some cells are the reader's to write. Workbook
+mode opens exactly those cells and leaves the rest of the document read-only.
+
+Mark a cell by adding the `workbook` tag to its header:
+
+```julia
+#%% code id=ex_double workbook
+function double(x)
+    missing
+end
+
+#%% code id=try_double workbook
+double(21)
+
+#%% code id=chk_double
+isequal(double(21), 42)
+```
+
+The check cell carries no tag, so the reader cannot rewrite the test that grades them. It uses
+`isequal` because an unimplemented stub returns `missing`.
+
+There is no checkbox for `workbook` in the 🏷 tag popover. Type it into the `#%%` header, or add it
+through the popover's "add custom tag" input.
+
+### Serving one
+
+Workbook mode is a property of the process, like app mode, and it is refused without it:
+
+```julia
+hub = start_hub(; port = 8080, app = true, workbook = true)
+```
+
+`workbook = true` on its own throws. A document can never turn an ordinary hub into a workbook by
+carrying a tag.
+
+To ship one, tick **Workbook** in the Export dialog's App format, or pass the keyword:
+
+```julia
+export_app(nb, "dist/exercises"; workbook = true)
+```
+
+Preview either posture while authoring by appending `?app=1` or `?app=1&workbook=1` to a notebook
+URL. As with the app preview, that gives you the view and none of the enforcement.
+
+![The same document served as a workbook: the read-only cells render as prose and output, while the exercise cells below them are editable](./assets/app-workbook.png)
+
+### What the reader gets
+
+Tagged cells come back as editors, framed and labelled "your turn". Each one has **Run** and
+**Reset to the original**. Running an exercise also saves it, so the reader's work survives a reload.
+
+![A workbook exercise cell: an accent-bordered frame labelled YOUR TURN, an editable stub function, its output, and Run and Reset to the original buttons](./assets/workbook-cell.png)
+
+They also get a scratchpad for working out an answer before committing it (⌘⇧S, or the floating 🧪
+launcher), which never touches the document. The command palette returns with a reader-only command
+list: search the docs, settings, scratchpad, table of contents, run stale cells, jump to a cell.
+Editor preferences (keymap, syntax theme, wrap) appear in the settings popover.
+
+**Reset** restores the cell as the author shipped it. That original has to be stored separately,
+because saving a workbook is the ordinary notebook save and the reader's answers overwrite the served
+`.jl`. `export_app` writes a second pristine copy of the bundle into the folder and points the
+launcher at it, which roughly doubles the exported folder's size. Serving a workbook by hand instead
+of from an export needs the same copy, either at `SLATE_WORKBOOK_ORIGINAL` or as a sibling
+`.<notebook>.jl.original`. Without one, Reset reports that it has no original on file.
+
+### A workbook is not a sandbox
+
+A workbook reader runs their own code in the notebook's Julia worker. That is the point of the
+exercise, and it means the reader has arbitrary code execution with that process's filesystem,
+network and credentials. The scratchpad grants the same thing with no cell check at all.
+
+Combined with [there being no authentication](#Access-control) and `run.jl` binding `0.0.0.0` by
+default, a workbook on a shared address is a remote shell for anyone who can reach the port.
+
+There is also one document and one worker. Two readers on the same deployed workbook overwrite each
+other's answers. The deployment this is built for is one bundle per reader, running on their own
+machine, where they could equally well open a REPL.
 
 ## What a visitor cannot do
 
@@ -111,8 +197,24 @@ deliberately added, which is the direction a lockdown should fail in.
 So a visitor cannot edit a cell, install a package, reach the filesystem, talk to the agent, or
 publish, because **those routes are not served at all** — not merely hidden in the UI.
 
-The agent is off by default for the same reason; pass `agent = true` to `export_app` if an app's
-readers genuinely need it.
+A workbook widens that allowlist by seven routes: edit one cell, run, completions, the two scratchpad
+routes, fetch a cell's original, and docstring lookup and search. Reaching a route is not authority to
+use it. The cell id rides in the path, and the two routes that take one check it against the
+document's `workbook` tags before doing anything. A request for an untagged cell is refused with a
+403 naming the route.
+
+The agent is off by default. Pass `agent = true` to `export_app` if an app's readers genuinely need
+it. The Export dialog cannot turn it on, so that path is the Julia function only.
+
+## Getting data in and out
+
+[`FileUpload`](widgets.md) is how a reader gets data in: the file lands in the notebook's
+[data directory](project-files.md#The-data-directory) and binds as a path your cells can read. It is
+one of the few write paths app mode allows.
+
+[`download_button`](live-updates.md#Writing-files-out) is how they leave with a result. An app's
+reader has no cell to run and no filesystem to look in, so anything they are meant to keep needs an
+explicit way out. It works live, in a static export, and on a published page.
 
 ## Access control
 
@@ -144,5 +246,7 @@ the person running the app is often not the person who wrote it.
 ## See also
 
 - [Export](export.md) — static HTML, PDF and the standalone `.jl` bundle this builds on
+- [Offline interactivity](replay.md) — keeping controls working with no server at all, which is the
+  other way to hand someone a document they can drive
 - [Publishing](publishing.md) — putting a rendered document on the web, for reading rather than use
 - [Widgets & `@bind`](widgets.md) — the controls an app's visitor drives

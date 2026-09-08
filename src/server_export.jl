@@ -1271,14 +1271,25 @@ const _EXPORT_CHART_RUNTIME_JS = string(
     "try{return fmtCell(v,f);}catch(e){return String(v);}};}",
     "function _slateSansMaps(o){if(!o)return o;",
     "var mk=Array.isArray(o.series)&&o.series.some(function(x){return x&&(x.__replay||x.__valuefmt);});",
-    "if(!o.registerMap&&!o.__size&&!o.requireScripts&&!o.__valuefmt&&!mk)return o;",
-    "var c=Object.assign({},o);delete c.registerMap;delete c.__size;delete c.requireScripts;",
+    "if(!o.registerMap&&!o.__size&&!o.requireScripts&&!o.__valuefmt&&!o.__renderer&&!mk)return o;",
+    "var c=Object.assign({},o);delete c.registerMap;delete c.__size;delete c.requireScripts;delete c.__renderer;",
     "if(mk)c.series=o.series.map(function(x){if(!x||(!x.__replay&&!x.__valuefmt))return x;",
     "var y=Object.assign({},x);delete y.__replay;",
     "if(y.__valuefmt){y.tooltip=Object.assign({},y.tooltip,{valueFormatter:_slateValueFmt(y.__valuefmt)});delete y.__valuefmt;}",
     "return y;});",
     "if(c.__valuefmt){c.tooltip=Object.assign({},c.tooltip,{valueFormatter:_slateValueFmt(c.__valuefmt)});delete c.__valuefmt;}",
     "return c;}",
+    # Renderer, most specific first. A reader whose browser cannot composite a canvas gets blank
+    # charts and has no Settings panel to fix it — an exported page is a file, not the app — so
+    # `?renderer=svg` on the URL is their way out and outranks everything the author chose.
+    # localStorage is honoured too, which only reaches an export served from the app's own origin,
+    # but costs nothing to check. Then the export-wide choice (`_slateExportRenderer`, written by the
+    # writer below; empty unless the dialog forced one), then the chart's own `renderer=` kwarg.
+    "function _slateRenderer(o){var q='',v='';",
+    "try{q=new URLSearchParams(location.search).get('renderer')||'';}catch(e){}",
+    "try{v=localStorage.getItem('slateRenderer')||'';}catch(e){}",
+    "var r=q||v||(window._slateExportRenderer||'')||(o&&o.__renderer)||'canvas';",
+    "return r==='svg'?'svg':'canvas';}",
     # ── `@replay` in an ECharts figure ───────────────────────────────────────────────────────
     # `Slate.replay.wire` (emitted with the asset shim above) owns everything except the call
     # that puts a slice on screen. What is left is the only ECharts-specific part: the DSL ZIPS,
@@ -1327,7 +1338,8 @@ const _EXPORT_CHART_RUNTIME_JS = string(
     # A GL lib (requireScripts) must load BEFORE echarts.init — an instance created before
     # echarts-gl registers its 3D views renders a GL series blank. So init INSIDE the .then.
     "Promise.all([_slateEnsureMaps(reqs),_slateEnsureScripts(opt&&opt.requireScripts)]).then(function(){",
-    "var ch=echarts.init(el,'slate');ch.setOption(_slateSansMaps(opt));_slateWireReplay(ch,opt);",
+    "var ch=echarts.init(el,'slate',{renderer:_slateRenderer(opt)});",
+    "ch.setOption(_slateSansMaps(opt));_slateWireReplay(ch,opt);",
     "window.addEventListener('resize',function(){ch.resize();});});});}",
     "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);"
 )
@@ -2636,8 +2648,18 @@ function _export_importmap_for(nb::LiveNotebook, offline::Bool = false, mode::Sy
     return _export_importmap(isempty(merged) ? nothing : merged)
 end
 
+# The export-wide renderer, normalised. An unrecognised value means "leave each chart alone" rather
+# than an error: this arrives from a query param, and a typo there should not fail an export that is
+# otherwise fine.
+_export_renderer(r::AbstractString) = (s = lowercase(strip(r)); s in ("canvas", "svg") ? s : "")
+
 function export_html(nb::LiveNotebook; include_source::Bool = true,
                      theme::AbstractString = "dark", charttheme::AbstractString = "",
+                     # Force every chart in THIS export to one renderer: "canvas", "svg", or ""
+                     # (each chart keeps its own `renderer=`). An export-time output decision —
+                     # SVG for print/archival crispness — not the reader-side escape hatch, which
+                     # is `?renderer=` on the URL and outranks this.
+                     renderer::AbstractString = "",
                      override::Bool = false, code::AbstractString = "normal",
                      outputs::AbstractString = "all", og_image::AbstractString = "",
                      og_url::AbstractString = "", og_type::AbstractString = "article",
@@ -3028,6 +3050,9 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             print(io, _EXPORT_ECHARTS_THEME_JS,
                   "var _slateMaps=", mapsjs, ";",
                   "var _slateCharts=[", join(("['" * id * "'," * opt * "]" for (id, opt) in charts), ","), "];",
+                  # Export-wide renderer. Empty ⇒ each chart keeps its own `renderer=`; set ⇒ the
+                  # whole export is forced to it (a vector export for print, say).
+                  "window._slateExportRenderer=", JSON.json(_export_renderer(renderer)), ";",
                   # Register a chart's geo maps before its first paint: an inlined map (`_slateMaps`)
                   # registers synchronously, otherwise fetch the (rewritten) url. A registered/absent map
                   # resolves immediately, so a non-geo chart pays nothing.
@@ -5260,7 +5285,8 @@ end
 Serialize the notebook to GitHub-flavored Markdown for copy-paste (Discourse / Slack / GitHub /
 Obsidian / docs). Prose rides verbatim; `[@cite]` and `[@fig:label]` render to their in-text form
 (per the notebook's bibstyle) with a trailing References section; code cells become fenced ```julia
-blocks; text outputs are fenced; figures / frozen charts embed as `![Figure N](data:image/…;base64,…)`;
+blocks; text outputs are fenced; figures / frozen charts embed as a markdown image whose source is a
+base64 `data:` URI;
 tables become GFM tables. Data-URI images are self-contained but not every host renders them (GitHub
 strips them) — for those, upload the standalone `.jl` (+ a PNG/SVG) alongside.
 """

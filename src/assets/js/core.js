@@ -67,6 +67,9 @@ function _pubSpec(spec) {
 // charts, the same way CairoMakie figures come through. Debounced so animation settles
 // and reactive ticks don't spam; raw fetch so it doesn't pulse the busy indicator.
 const _snapPending = {};
+// ECharts draws into either a <canvas> or an <svg> child — ask the DOM rather than a painter
+// internal, which is a zrender detail that moves between versions.
+const _isSvgChart = inst => { try { return !!inst.getDom().querySelector('svg'); } catch (_) { return false; } };
 window._cancelSnap = cellId => { clearTimeout(_snapPending[cellId]); delete _snapPending[cellId]; };
 function _snapCell(cellId, insts, spec) {
   // The snapshot exists for the AGENT's slate_view and for PDF export — neither of which an app
@@ -77,6 +80,13 @@ function _snapCell(cellId, insts, spec) {
   _snapPending[cellId] = setTimeout(() => {
     delete _snapPending[cellId];
     const inst = insts[0]; if (!inst) return;
+    // `getDataURL({type:'png'})` reads the raster backing, which an SVG-rendered instance does not
+    // have — so it cannot return a PNG, and posting whatever it does return would store a non-image
+    // under a PNG's name. Skipping degrades cleanly: PDF export re-renders the spec on demand
+    // (`_renderChartSvg`), and slate_view is left without an image for this cell. Rasterising
+    // offscreen instead would not help — a reader on SVG is usually there BECAUSE canvas is broken
+    // in their browser, so the offscreen capture would come back blank too.
+    if (_isSvgChart(inst)) return;
     let png = '';
     // PNG (dark theme) → matches the live UI for the agent's slate_view, AND is the PDF-export
     // fallback for this cell. We used to ALSO eagerly re-render the spec offscreen as vector SVG
@@ -151,9 +161,9 @@ function _ensureMaps(spec) {
 function _sansMaps(s) {
   if (!s) return s;
   const marked = Array.isArray(s.series) && s.series.some(x => x && (x.__replay || x.__valuefmt));
-  if (!s.registerMap && !s.__size && !s.requireScripts && !s.__valuefmt && !s.__select && !marked) return s;
+  if (!s.registerMap && !s.__size && !s.requireScripts && !s.__valuefmt && !s.__select && !s.__renderer && !marked) return s;
   const c = Object.assign({}, s);
-  delete c.registerMap; delete c.__size; delete c.requireScripts; delete c.__select;
+  delete c.registerMap; delete c.__size; delete c.requireScripts; delete c.__select; delete c.__renderer;
   // Shallow-copy only the series that carry a mark — the DATA arrays are shared, not cloned, so this
   // stays cheap on a spec holding a few thousand points.
   if (marked) c.series = s.series.map(x => {
@@ -723,11 +733,11 @@ function _ensureSlateTheme() {
   if (_slateThemeReady || typeof echarts === 'undefined') return;
   try { echarts.registerTheme('slate', _slateEchartsTheme()); _slateThemeReady = true; } catch (_) {}
 }
-// A Slate theme switch changed the CSS vars: rebuild the 'slate' theme and re-init every chart under
-// it (ECharts snapshots a theme at init, so a restyle means dispose + re-create + re-setOption).
-window._onSlateThemeChange = () => {
+// Tear every chart on the page down and rebuild it from its spec. ECharts snapshots BOTH its theme
+// and its renderer at init, so changing either is a dispose + re-create + re-setOption — there is no
+// in-place setter for them.
+window._reinitCharts = () => {
   try {
-    _slateThemeReady = false; _ensureSlateTheme();
     // Inline `{{ echart }}` instances are still owned here, so they are disposed and re-rendered
     // directly. A code cell's charts are owned by the Preact host (`chartRuntime.onGen` below), which
     // re-creates them by bumping a generation the component's effect depends on — disposing them from
@@ -738,6 +748,36 @@ window._onSlateThemeChange = () => {
     ((window.__slateState || {}).cells || []).forEach(c => { try { renderCharts(c); } catch (_) {} });
   } catch (_) {}
 };
+// A Slate theme switch changed the CSS vars: rebuild the 'slate' theme, then rebuild the charts on it.
+window._onSlateThemeChange = () => {
+  try { _slateThemeReady = false; _ensureSlateTheme(); } catch (_) {}
+  window._reinitCharts();
+};
+
+// ── Chart renderer: canvas (default) or svg ──────────────────────────────────────────────────────
+// ECharts rasterises to a <canvas>, which is the right default — it stays fast on the large series a
+// notebook produces. But canvas goes through the browser's GPU compositor, and when that path is
+// broken (a driver fault, a blocked GPU feature, an extension that neuters canvas) the chart
+// composites as a blank rectangle even though ECharts itself is running correctly — the tooltip still
+// tracks the data under a chart showing nothing. SVG draws into the DOM and sidesteps that path.
+//
+// Which renderer to use is therefore a property of the BROWSER doing the viewing, not of the
+// notebook: the same document is fine in one browser and blank in another, and the reader who hits
+// the fault is usually not the author and often cannot edit the source at all. So the viewer's own
+// preference outranks the spec's `renderer=`, and both fall back to canvas.
+const _RENDERERS = new Set(['canvas', 'svg']);
+function _viewerRenderer() {
+  const v = localStorage.getItem('slateRenderer');
+  return _RENDERERS.has(v) ? v : '';                 // '' = follow the spec, then the canvas default
+}
+function _rendererFor(spec) {
+  const s = spec && spec.__renderer;
+  return _viewerRenderer() || (_RENDERERS.has(s) ? s : 'canvas');
+}
+function _initChart(el, spec) {
+  _ensureSlateTheme();
+  return echarts.init(el, 'slate', { renderer: _rendererFor(spec) });
+}
 
 // ── The imperative half of a code cell's charts ──────────────────────────────────────────────────
 // Preact owns the container and the LIFECYCLE (see `EChartHost` in notebook.js); everything that
@@ -755,7 +795,7 @@ window.chartRuntime = {
   // A package-vendored lib (echarts-gl via `requireScripts`) must load BEFORE `echarts.init`: an
   // instance created before echarts-gl registers its 3D views paints blank and throws on resize.
   scripts(spec) { return spec && spec.requireScripts ? _ensureScripts(spec) : Promise.resolve(); },
-  init(el) { _ensureSlateTheme(); const inst = echarts.init(el, 'slate'); el.__inst = inst; return inst; },
+  init(el, spec) { const inst = _initChart(el, spec); el.__inst = inst; return inst; },
   apply(el, inst, spec) {
     _applySize(el, inst, spec);
     return _ensurePrereqs(spec)
@@ -834,7 +874,7 @@ function renderCharts(c) {
     // The GL-lib deferral that applied to the whole cell now applies per placeholder — same rule,
     // narrower scope: init only after `requireScripts` has loaded.
     window.chartRuntime.scripts(spec).then(() => {
-      if (!el._inst) { _ensureSlateTheme(); el._inst = echarts.init(el, 'slate'); }
+      if (!el._inst) el._inst = _initChart(el, spec);
       _applySize(el, el._inst, spec);
       return _ensurePrereqs(spec)
         .then(() => _geoSafeSetOption(el._inst, spec))

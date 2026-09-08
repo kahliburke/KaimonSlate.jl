@@ -573,6 +573,7 @@ function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; o
                            history = get(b, "history", false) === true,
                            theme = String(get(b, "theme", "dark")),
                            charttheme = String(get(b, "charttheme", "")),
+                           renderer = String(get(b, "renderer", "")),
                            override = get(b, "override", false) === true,
                            outputs = String(get(b, "outputs", "all")),
                            include_source = get(b, "source", true) === true)
@@ -930,6 +931,7 @@ function _sse_site_publish(stream::HTTP.Stream, h::Hub)
     wq = get(q, "width", "")   # content column width: px, "full" (=100%), or unset ⇒ default
     bopts = (slug = get(q, "slug", ""), site_title = get(q, "siteTitle", ""),
              theme = get(q, "theme", "dark"), charttheme = get(q, "charttheme", ""),
+             renderer = get(q, "renderer", ""),
              override = get(q, "override", "0") == "1", outputs = get(q, "outputs", "all"),
              include_source = get(q, "source", "1") == "1", bundle = get(q, "bundle", "0") == "1",
              history = get(q, "history", "0") == "1",

@@ -383,6 +383,8 @@ end
 #    map ("zoom disconnected from the scatter"). Pass an explicit `progressive = N` to opt back in.
 # 3. Top-level `height`/`width` become `__size` — a Slate front-end directive (the chart div is
 #    sized before init/resize), NOT an ECharts option key, so it's split out and stripped client-side.
+# 4. `renderer` becomes `__renderer` — likewise a front-end directive: it is an argument to
+#    `echarts.init`, not part of the option model, and a viewer setting can override it.
 function _slate_normalize!(opt::Dict{String,Any})
     t = get(opt, "title", nothing)
     (t isa AbstractString || t isa Symbol) && (opt["title"] = Dict{String,Any}("text" => String(t)))
@@ -404,7 +406,20 @@ function _slate_normalize!(opt::Dict{String,Any})
         haskey(opt, k) && (sz[k] = pop!(opt, k))
     end
     isempty(sz) || (opt["__size"] = sz)
+    haskey(opt, "renderer") && (opt["__renderer"] = _renderer_wire(pop!(opt, "renderer")))
     return opt
+end
+
+# `renderer = :svg` — how the chart RASTERISES, not what it draws. Canvas (the default) stays fast on
+# large series; SVG draws into the DOM, which keeps text selectable and crisp under zoom or print.
+# A reader whose browser can't composite a canvas can force SVG for themselves from Settings, and that
+# choice outranks this one (see `_rendererFor` in core.js) — so this is an authoring preference, not a
+# guarantee about what any given viewer gets.
+function _renderer_wire(v)
+    s = lowercase(String(v isa AbstractString ? v : Symbol(v)))
+    s in ("canvas", "svg") ||
+        throw(ArgumentError("echart: renderer must be :canvas or :svg, got $(repr(v))"))
+    return s
 end
 
 # ── `select`: drag on a chart to set a `@bind` range ─────────────────────────────────────────────
@@ -652,7 +667,8 @@ const _EC_TOPLEVEL = Set{String}(["xAxis", "yAxis", "grid", "dataZoom", "visualM
     # (and wins). Both become the `__valuefmt` wire marker in `_slate_normalize!`.
     # `zoom` likewise expands to the `dataZoom` (+ `toolbox`) components — see `_apply_zoom!`;
     # `select = :binding` makes the chart's x-range an INPUT for a `@bind` — see `_apply_select!`.
-    "registerMap", "height", "width", "valuefmt", "zoom", "select"])
+    # `renderer = :canvas | :svg` picks the rasteriser — see `_renderer_wire`; rides as `__renderer`.
+    "registerMap", "height", "width", "valuefmt", "zoom", "select", "renderer"])
 
 # Express: a single series + simple layout. Kwargs naming a top-level component (xAxis/yAxis/grid/…)
 # go on the OPTION (so `yAxis=(type=:log,)` makes a log axis); everything else styles the series.

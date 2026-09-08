@@ -10,7 +10,7 @@ This is what makes a long-lived notebook feel warm: edit one cell and only its d
 
 !!! note "Gate workers only"
     The durable store lives in the notebook's **gate worker**. A notebook running
-    [in-process](configuration.md#kernel-selection) (no worker) has no durable cache — its results
+    [in-process](hub.md#Kernel-selection) (no worker) has no durable cache — its results
     live only as long as the session.
 
 ## The durable store
@@ -27,7 +27,13 @@ falling back to `~/.cache/…`). It has two kinds of file:
 
 The store is **bounded**: an LRU cap (set `KAIMONSLATE_MEMO_CAP_GB`, else an adaptive fraction of
 free disk) evicts the oldest entries first, and a blob is deleted only when no surviving manifest
-references it.
+references it. Persist the cap instead with `KaimonSlate.set_memo_cap_gb!(gb)`, which writes
+`memo_cap_gb` to the config and restarts running workers so it takes effect immediately; pass `0` to
+clear the override.
+
+A [`locked`](cell-tags.md#Locking-a-result) cell's entry is **pinned** and never evicted, so pins can
+hold the store above its cap. Everything else is subject to the LRU, including a `cache`-tagged
+entry. A single value larger than the cap can never stay cached.
 
 ## What gets cached, and when
 
@@ -42,18 +48,32 @@ references it.
   would resurrect stale data.
 
 Set these with the 🏷 tag editor or a `#%%` header token — see [Cell Tags](cell-tags.md#caching).
-Markdown cells, `using`/`import` barriers, notebook-local function definitions, and
-[`resource`](cell-tags.md) cells (live DB/file/socket handles) are never cached.
+
+![The tag editor popover over a cell header, with the Caching & execution group offering cache, nocache, resource, locked and trace](./assets/tag-editor.png)
+
+Never cached: markdown cells, `using`/`import` barriers, notebook-local function definitions,
+[`resource`](cell-tags.md) cells (live DB/file/socket handles), cells that declare a `reactive` or
+carry [`@replay`](replay.md) (both create live session state by running), and cells the engine
+classifies as non-deterministic (`rand`, wall-clock). The cell's cache badge names the specific
+reason.
+
+`@replay` in particular is excluded because restoring a memoized cell skips its body, which would
+bring the figure back with no sweep registered.
 
 ## Cache keys — what invalidates a result
 
 A cell's result restores only when **all** of its real inputs are unchanged. The key is a hash of:
 
 - the cell's own source, and the source of **every cell upstream of it**;
-- the current values of any `@bind` controls the cell reads (moving a slider re-keys);
+- the current values of any named session state the cell reads — `@bind` controls and `reactive`
+  values alike (moving a slider or pushing a new reactive value re-keys);
 - the contents of any `@asset` files it (or an upstream cell) references;
 - the notebook's **package versions**;
-- the **developed `src/`** of the project — so editing a function a cell calls invalidates the entry.
+- the **developed `src/`** of the project — so editing a function a cell calls invalidates the entry;
+- the freeze stamp of any [`locked`](cell-tags.md#Locking-a-result) cell upstream, so refreshing a
+  frozen value re-keys everything below it.
+
+Toggling `trace` on a cell re-keys it too.
 
 Change any of those and the cell recomputes; change nothing and it restores. Set
 `KAIMONSLATE_MEMO_DEBUG=1` to log the key components.
@@ -84,7 +104,8 @@ Two helpers, callable from a cell:
   hashes. `slate_table(slate_memo_entries())` renders exactly what a cold open will restore;
   `name="x"` filters to entries carrying a binding `x`.
 
-And to answer **"why did this cell (not) restore?"** directly:
+And to answer **"why did this cell (not) restore?"**, there is an agent tool, called from an agent or
+the MCP toolset rather than from cell code:
 
 - **`slate_memo_trace(notebook; cell="")`** → what the cache *did* on each cell's latest eval:
   the action (**restored / stored / recomputed / unkeyed**), the full cache key with its source- and
@@ -127,7 +148,7 @@ large tabular/array data reopen and transfer far faster.
 - The Arrow blob is a plain Arrow IPC file on disk, so its bytes are readable by external tools
   (DuckDB, pyarrow). Note this is a property of the stored bytes — KaimonSlate doesn't currently
   surface the blob path for you.
-- **These codecs also power [region boundary transfers](regions.md#how-boundary-values-cross)** — a
+- **These codecs also power [region boundary transfers](regions.md#How-boundary-values-cross)** — a
   `DataFrame` crosses between kernels as Arrow IPC, moved zero-copy over the data channel.
 
 ## Your cache follows you
@@ -135,7 +156,7 @@ large tabular/array data reopen and transfer far faster.
 When a notebook runs on a [remote worker](remotes.md), `slate_sync_memo` pushes the whole store to it
 (dedup-aware) so the remote **restores** cached results instead of recomputing them. On attach, recent
 entries are carried automatically when moving them beats recomputing. See
-[Remotes → Your cache follows you](remotes.md#your-cache-follows-you).
+[Remotes → Your cache follows you](remotes.md#Your-cache-follows-you).
 
 ## See also
 

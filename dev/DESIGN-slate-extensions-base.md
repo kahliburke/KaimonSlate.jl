@@ -1,5 +1,10 @@
 # SlateExtensionsBase.jl — an extension SDK for Slate
 
+> **Historical design note.** This records how the SDK was arrived at, and parts of it describe work
+> that has since shipped. For how to write an extension today, read
+> [docs/src/extensions.md](../docs/src/extensions.md) and
+> [docs/src/listing-an-extension.md](../docs/src/listing-an-extension.md).
+
 ## Problem (from disberd's critique, verified against the code)
 
 External packages that want to add Slate widgets/renderers/etc. must either:
@@ -165,11 +170,13 @@ REMAINING: refactor remote.jl to adopt the shared fingerprint/staleness (its rsy
 remote transport of the same dev-path rule); register SEB in General = the durable end of dev-path
 fragility. custom_controls left broken until the extension restarts (per steer — no manual env delete).
 
-## Package front-end registry — INCOMPLETE (finish GiacSlate on it FIRST)
+## Package front-end registry — SHIPPED
 
-SEB `frontend.jl` (`register_widget!`/`provide_frontend!`) is committed but **DORMANT — it does
-nothing yet** (no hub wiring). This is half-built scaffolding; treat it as NOT done. Completing
-GiacSlate on it is the #1 next task ([[finish-features-completely]]). "Done" =
+This section recorded the registry while it was still scaffolding. It is now wired and in use:
+`register_widget!`, `provide_frontend!`, `register_component!`, `provide_assets!` and
+`provide_import!` all work, and the user-facing account is
+[docs/src/extensions.md](../docs/src/extensions.md). The checklist below is kept as the record of
+what "done" meant at the time.
 
 1. **Hub harvests the `:frontend` cell-effect + injects the script** into the page (live shell +
    static export). SEB already declares it via `ctx.effect(:frontend; id, js)`; the hub side (harvest
@@ -190,7 +197,3 @@ Cesium/echarts-gl (standalone single-file can't inline heavy asset trees — ser
   touches load-bearing bind logic; needs the bind test suite green).
 - **Conservative** — base owns types + `to_widget` + the unknown-kind hook; core keeps its
   existing if-chain and only routes *unknown* kinds through the registry (smaller blast radius).
-</content>
-</invoke>
-<invoke name="AskUserQuestion">
-<parameter name="questions">[{"question": "How aggressive should the core refactor be when wiring KaimonSlate onto SlateExtensionsBase?", "header": "Refactor scope", "multiSelect": false, "options": [{"label": "Full dogfood (Recommended)", "description": "Rewrite core's coerce_bind/_reconcile_bind string if-chains as register_kind! calls, so built-in widgets ride the exact same extension seam third parties do. Cleanest and self-testing; touches load-bearing bind logic, so I'll keep the bind test suite green throughout."}, {"label": "Conservative", "description": "Base owns Widget/Choice/WebPage/to_widget + slate_context + an unknown-kind hook. Core keeps its existing coerce/reconcile if-chain and only routes UNKNOWN kinds through the registry. Smaller blast radius, but built-ins and extensions use slightly different paths."}, {"label": "Just the package first", "description": "Build SlateExtensionsBase.jl standalone (types + interface + context + docs) and prove it by porting GiacSlate/NeuroSlate onto it, BEFORE touching KaimonSlate's injection at all. Lowest risk; core rewiring is a follow-up once the SDK shape is validated."}]}]

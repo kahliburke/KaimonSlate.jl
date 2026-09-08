@@ -25,6 +25,28 @@ function setSlateTheme(name) {
   try { window._onSlateThemeChange && window._onSlateThemeChange(); } catch (_) {}
 }
 
+// ── Chart renderer ──────────────────────────────────────────────────────────────
+// How interactive charts rasterise. This is a READER setting, not a document one — see `_rendererFor`
+// in core.js: a browser whose canvas path is broken draws every chart as a blank rectangle, and the
+// person hitting that is usually not the author and often cannot edit the notebook at all. "Auto"
+// defers to the chart's own `renderer=` kwarg, which defaults to canvas.
+const SLATE_RENDERERS = [
+  { name: '', label: 'Auto' },
+  { name: 'canvas', label: 'Canvas' },
+  { name: 'svg', label: 'SVG' },
+];
+function curChartRenderer() {
+  const v = localStorage.getItem('slateRenderer');
+  return (v === 'canvas' || v === 'svg') ? v : '';
+}
+function setChartRenderer(v) {
+  if (v === 'canvas' || v === 'svg') localStorage.setItem('slateRenderer', v);
+  else localStorage.removeItem('slateRenderer');
+  // ECharts fixes the renderer at init, so switching means rebuilding every instance.
+  try { window._reinitCharts && window._reinitCharts(); } catch (_) {}
+}
+window.setChartRenderer = setChartRenderer;
+
 // ── Figure display width ────────────────────────────────────────────────────────
 // Max display width (px) for rendered figures/images, exposed as a CSS var (`--fig-max`) on
 // <body>. Full-page-width mode drops the page's max-width so tables/charts/code can breathe —
@@ -164,6 +186,12 @@ function bindDisplaySettings(ids) {
     th.value = curSlateTheme();
     th.onchange = () => setSlateTheme(th.value);
   }
+  const rend = el('renderer');
+  if (rend) {
+    rend.innerHTML = SLATE_RENDERERS.map(r => `<option value="${r.name}">${r.label}</option>`).join('');
+    rend.value = curChartRenderer();
+    rend.onchange = () => setChartRenderer(rend.value);
+  }
   // Full page width overrides the column width, so the two are wired together: the column slider
   // is disabled (not hidden) while full width is on, which shows the reader why it stopped working.
   const wide = el('wide'), page = el('page'), pagev = el('pagev');
@@ -223,6 +251,179 @@ function bindDisplaySettings(ids) {
 }
 window.bindDisplaySettings = bindDisplaySettings;
 
+// ── Section list + filter, over any grouped panel ───────────────────────────────
+// Sections are DERIVED from the group headers already in the markup — every row belongs to the
+// header above it — so adding a setting stays a one-line change and the nav follows with no list to
+// keep in sync. That is what lets one implementation drive both scopes of this dialog: the global
+// rows are static HTML with `.setsec`/`.setrow`, the per-notebook rows are built from /api/config
+// with `.cfggroup`/`.cfgrow`, and neither needs to know about the other.
+//
+// Filtering searches what the reader can actually read: visible text plus `title` tooltips and input
+// placeholders, which is where most of a setting's vocabulary lives ("vim", "trackpad", "svg"). It
+// spans every section — a filter that only searched the section you were already looking at would be
+// a worse version of reading it.
+const _NAV_MAX_HITS = 6;      // a filter is a shortcut, not a second way to read the whole panel
+function slateSectionNav(opt) {
+  const grpSel = opt.group || '.setsec', rowSel = opt.row || '.setrow';
+  const max = opt.max || _NAV_MAX_HITS;
+  const el = x => typeof x === 'string' ? document.getElementById(x) : x;
+  const token = {};        // identity of THIS instance — see the filter wiring in `rebuild`
+  let tab = '';
+
+  function sections() {
+    const body = el(opt.body);
+    if (!body) return [];
+    const out = [];
+    let cur = null;
+    for (const node of body.children) {
+      if (node.matches(grpSel)) { cur = { name: node.textContent.trim(), head: node, rows: [] }; out.push(cur); }
+      else if (cur && node.matches(rowSel)) cur.rows.push(node);
+    }
+    // A section holding no control is a signpost, not a destination: no nav entry (an entry you
+    // cannot act in is a dead end) and its rows stay hidden.
+    for (const s of out) s.nav = s.rows.some(r => r.querySelector('input,select,textarea,button'));
+    return out;
+  }
+  // Searchable text for a row, computed once and cached on the node. Config rows are replaced
+  // wholesale on every render, so the cache expires with them.
+  function rowText(r) {
+    if (r._navText != null) return r._navText;
+    const attrs = Array.from(r.querySelectorAll('[title],[placeholder]'))
+      .map(n => (n.getAttribute('title') || '') + ' ' + (n.getAttribute('placeholder') || '')).join(' ');
+    r._navText = (r.textContent + ' ' + attrs + ' ' + (r.getAttribute('title') || ''))
+      .toLowerCase().replace(/\s+/g, ' ');
+    return r._navText;
+  }
+  // A few rows have their own visibility logic (the custom-model row, the restart hint). The section
+  // list still hides them when their section isn't showing, but it must never RE-show one its owner
+  // meant to keep hidden — so the owner's last intent is remembered and restored, not guessed.
+  const ownerHidden = r => !!r._navForced && (r._navOwn ?? r.style.display) === 'none';
+  function show(r, on, cat) {
+    if (!on) {
+      if (r._navForced && r.style.display !== 'none') r._navOwn = r.style.display;
+      r.style.display = 'none';
+      r.removeAttribute('data-cat');
+      return;
+    }
+    r.style.display = r._navForced ? (r._navOwn ?? 'none') : '';
+    if (cat) r.setAttribute('data-cat', cat); else r.removeAttribute('data-cat');
+  }
+  function apply() {
+    const secs = sections();
+    const navSecs = secs.filter(s => s.nav);
+    if (!navSecs.length) return;
+    const filt = el(opt.filter), status = el(opt.status), nav = el(opt.nav);
+    const q = ((filt || {}).value || '').trim().toLowerCase();
+    if (!tab || !navSecs.some(s => s.name === tab)) tab = navSecs[0].name;
+    const btns = nav ? Array.from(nav.children) : [];
+
+    if (!q) {
+      for (const s of secs) {
+        const on = s.nav && s.name === tab;
+        s.head.style.display = 'none';        // the nav entry beside it already names the section
+        for (const r of s.rows) show(r, on, '');
+      }
+      // Browsing: each entry carries how many of its rows are MARKED (an overridden setting), so the
+      // list doubles as a summary of what this notebook has changed.
+      btns.forEach(b => {
+        const s = navSecs.find(x => x.name === b.dataset.sec);
+        const n = (opt.mark && s) ? s.rows.filter(r => !ownerHidden(r) && opt.mark(r)).length : 0;
+        b.classList.toggle('on', b.dataset.sec === tab);
+        b.classList.remove('hit'); delete b.dataset.hits;
+        b.classList.toggle('marked', n > 0);
+        if (n) b.dataset.marks = String(n); else delete b.dataset.marks;
+      });
+      if (status) status.style.display = 'none';
+      return;
+    }
+    // Filtering spans every section, so results are a flat list in panel order and each row carries a
+    // chip naming the section it came from — the reader is after one setting, not a section, and
+    // headers would bury a single hit under its group. Capped: past a handful the useful move is a
+    // better query, and the count of what is hidden says so.
+    const hits = [];
+    for (const s of navSecs) {
+      for (const r of s.rows) {
+        if (ownerHidden(r)) continue;               // not on show for its own reasons — not a result
+        if (rowText(r).includes(q) || s.name.toLowerCase().includes(q)) hits.push([s, r]);
+      }
+    }
+    const keep = new Map(hits.slice(0, max).map(([s, r]) => [r, s.name]));
+    const counts = {};
+    for (const [s] of hits) counts[s.name] = (counts[s.name] || 0) + 1;
+    for (const s of secs) {
+      s.head.style.display = 'none';
+      for (const r of s.rows) show(r, keep.has(r), keep.get(r));
+    }
+    btns.forEach(b => {
+      const n = counts[b.dataset.sec] || 0;
+      b.classList.remove('on', 'marked'); delete b.dataset.marks;
+      b.classList.toggle('hit', n > 0);
+      if (n) b.dataset.hits = String(n); else delete b.dataset.hits;
+    });
+    if (status) {
+      const extra = hits.length - keep.size;
+      status.textContent = !hits.length ? 'No settings match.'
+        : `+${extra} more match${extra === 1 ? '' : 'es'} — keep typing to narrow.`;
+      status.style.display = (!hits.length || extra > 0) ? '' : 'none';
+    }
+  }
+  function rebuild() {
+    const nav = el(opt.nav), filt = el(opt.filter);
+    const secs = sections().filter(s => s.nav);
+    if (nav) {
+      nav.innerHTML = secs.map(s => `<button type="button" data-sec="${window.slateEscHtml(s.name)}"><span>${window.slateEscHtml(s.name)}</span></button>`).join('');
+      Array.from(nav.children).forEach(b => {
+        b.onclick = () => { tab = b.dataset.sec; if (filt) filt.value = ''; apply(); };   // a click is a reset
+      });
+    }
+    // Both scopes share one filter input and one nav element, so the guard has to key on the
+    // INSTANCE. Keying it on an element id left the input bound to whichever scope wired it first,
+    // and typing in the other scope silently did nothing.
+    if (filt && filt._navWired !== token) { filt._navWired = token; filt.oninput = apply; }
+    apply();
+  }
+  // Rows whose visibility is owned elsewhere — flagged so the list leaves them alone rather than
+  // fighting the code that toggles them.
+  function forced(ids) { ids.forEach(id => { const n = el(id); if (n) n._navForced = true; }); }
+  return { apply, rebuild, forced, get tab() { return tab; }, set tab(v) { tab = v; } };
+}
+window.slateSectionNav = slateSectionNav;
+
+// ── Scope: your global preferences vs THIS notebook's overrides ─────────────────
+// One dialog, two scopes. These were separate surfaces — a modal and a side panel — which hid the
+// relationship that matters most: several settings exist in BOTH, as a global default in one and a
+// per-notebook override in the other (agent model and permissions are the pair people trip over).
+// A scope switch puts them one click apart, and the section list shows how many rows this notebook
+// has actually pinned.
+let _setScope = 'global';
+const _setNavs = {};
+function _setNavFor(scope) {
+  if (!_setNavs[scope]) {
+    _setNavs[scope] = scope === 'notebook'
+      ? slateSectionNav({ body: 'configlist', nav: 'settabs', filter: 'setfilter', status: 'setempty',
+                          group: '.cfggroup', row: '.cfgrow',
+                          // An overridden row is one pinned to this notebook — its badge says so.
+                          mark: r => !!r.querySelector('.cfgbadge.override') })
+      : slateSectionNav({ body: 'setbody', nav: 'settabs', filter: 'setfilter', status: 'setempty' });
+  }
+  return _setNavs[scope];
+}
+function setSettingsScope(scope) {
+  _setScope = scope === 'notebook' ? 'notebook' : 'global';
+  const gb = document.getElementById('setbody'), cb = document.getElementById('configlist');
+  if (gb) gb.style.display = _setScope === 'global' ? '' : 'none';
+  if (cb) cb.style.display = _setScope === 'notebook' ? '' : 'none';
+  document.querySelectorAll('.setscope button').forEach(b => b.classList.toggle('on', b.dataset.scope === _setScope));
+  const filt = document.getElementById('setfilter');
+  if (filt) filt.value = '';                      // a scope is a different set of rows — start clean
+  // The notebook rows are fetched, so `loadConfig` rebuilds the list when they land (see config.js).
+  if (_setScope === 'notebook') { try { loadConfig(); } catch (_) {} }
+  else _setNavFor('global').rebuild();
+  if (filt) filt.focus();
+}
+window.setSettingsScope = setSettingsScope;
+window.slateSettingsNav = _setNavFor;             // config.js rebuilds the list after each render
+
 // Apply the persisted reader settings that live on the BODY (the CSS-var ones apply themselves at
 // load, above). Called once at startup by whichever view boots — both postures need it, so neither
 // owns it. `dragdrop.js` historically did the full-width half; this is the single place now.
@@ -233,7 +434,7 @@ function applyDisplaySettings() {
 window.applyDisplaySettings = applyDisplaySettings;
 
 // ── Settings modal ────────────────────────────────────────────────────────────
-function openSettings() {
+function openSettings(scope) {
   const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
   deb.value = updateMs; v.textContent = updateMs;
   deb.oninput = () => { updateMs = parseInt(deb.value, 10) || 0; v.textContent = updateMs; localStorage.setItem('slateUpdateMs', updateMs); };
@@ -265,7 +466,8 @@ function openSettings() {
   }
   // Theme + widths + scroll-zoom + output wrap — the reader-facing block, shared verbatim with app
   // mode's display popover (see `bindDisplaySettings` above).
-  bindDisplaySettings({ theme: 'settheme', wide: 'setwide', page: 'setpage', pagev: 'setpagev',
+  bindDisplaySettings({ theme: 'settheme', renderer: 'setrenderer',
+                        wide: 'setwide', page: 'setpage', pagev: 'setpagev',
                         fig: 'setfig', figv: 'setfigv', zoom: 'setzoom', zoomv: 'setzoomv',
                         wrap: 'setwrap' });
   // Soft-wrap long lines in the CODE editor (markdown editors always wrap). Live across all editors.
@@ -275,7 +477,7 @@ function openSettings() {
     wraped.onchange = () => { window.setEditorWrap && window.setEditorWrap(wraped.checked); };
   }
   // Per-notebook settings (hot-reload, parallel, threads, slides, bibstyle, agent-model override)
-  // now live in the "🎚 Notebook config" panel (config.js) — a single view with effective value +
+  // live in this dialog's "This notebook" scope (config.js) — a single view with effective value +
   // source badge + clear-override, instead of being scattered here.
   // (The overall Slate UI theme is bound above, with the rest of the reader-facing settings.)
   // Editor syntax theme — options come from the cm6 theme registry (window._syntaxThemes), so adding
@@ -354,7 +556,15 @@ function openSettings() {
   // Global execution settings (default run location, transfer chunk size, carry budget) live on
   // the front page's Remotes dialog (index.html) — not in per-notebook settings. The notebook's
   // OWN run location is the toolbar "Running on" picker (runloc.js).
+  // Built LAST: every row above is in place, so the section list and the filter index see the final
+  // panel. `scope` lets a caller open straight onto the notebook's overrides (the top menu and the
+  // palette both do); anything else means the global scope.
+  _setNavFor('global').forced(['setmodelcustomrow', 'setmodelhint']);
   document.getElementById('setbg').classList.add('show');
+  // Search-first: `setSettingsScope` clears the filter and puts the caret in it, so opening and
+  // typing finds a setting without a click. Has to follow `show` — focus doesn't take on a
+  // display:none subtree.
+  setSettingsScope(scope === 'notebook' ? 'notebook' : 'global');
 }
 // Your GLOBAL agent-model default ('' = server default = sonnet).
 function agentModel() { return localStorage.getItem('slateAgentModel') || ''; }

@@ -27,8 +27,10 @@ clusters — works too, by authenticating **once** through a dialog in the page;
 
 ## Set up a host
 
-On the hub's [front page](getting-started.md#the-front-page), click **🖧 Remotes** to add and test a
-host:
+On the hub's [front page](getting-started.md#The-front-page), click **🖧 Remotes** to add and test a
+host. Each row in **Known remotes** carries a **★ Default** button that makes it the hub-wide
+default, so a notebook with no session or notebook override opens there; **★ Unset** puts the default
+back to local.
 
 ![The Remotes dialog: a host field, the transport choice (SSH tunnel / Direct · CURVE), a Test & prime button, the known-remotes list with per-host region counts, and the notebook-wide data-transfer settings](./assets/remotes-modal.png)
 
@@ -60,7 +62,14 @@ Two ways to place a notebook's worker:
 
 - **When you open it** — the front page's **Run on** selector (next to Open / ⬆ Upload) picks
   *local* or a configured host before the notebook opens.
-- **On a live notebook** — switch it any time; the worker moves and the notebook re-runs.
+- **On a live notebook** — the toolbar's **Running on** pill (`💻 local ▾`); its ▾ opens a picker
+  with local, your known remotes, transport and pinned ports, a 🩺 Test & prime run, and a worker
+  list with Reap. Apply it at whichever scope you want. The same picker is reachable as **change ▾**
+  in the worker panel. The worker moves and the notebook re-runs.
+
+There is also a machine-wide default run location, set from the Remotes dialog and persisted to
+`slate.json` in your config home. It decides where a notebook with no override of its own runs; empty
+means locally.
 
 Placement has a **scope**, so you control how sticky it is:
 
@@ -78,7 +87,7 @@ connection). To keep workers **pre-booted and ready to adopt** — startup in ab
 a cold boot — define a **[region](regions.md)** with a `warm` count and route cells to it. Warm
 pooling is now part of the region model: a region with `warm > 0` *is* a warm pool, and its
 `preload` replicates a project so the adopted worker already has its packages loaded. See
-[Regions → Defining a region](regions.md#defining-a-region).
+[Regions → Defining a region](regions.md#Defining-a-region).
 
 ## Your cache follows you
 
@@ -118,10 +127,12 @@ happening and where.
 - **`regions()`** — the compute registry: every configured region (host, warm count, preload, data
   root, last reconcile) and parked wires. (See [Regions](regions.md).)
 
-**The Remote activity strip** — on the hub's front page, a live "top" for your remote/region workers,
-**grouped by region**: each worker row shows a CPU meter, RSS, and *what it's doing* (▶ running-cell
-ids · ⏳ warming · ✓ ready · idle), with a click-through detail popup (cpu/rss sparklines + full
-telemetry). It refreshes every few seconds and hides itself when you have no regions or remote hosts.
+**The Worker activity panel** — on the hub's front page, a live "top" for every worker the hub knows
+about: this machine's workers under **💻 this machine**, notebooks placed on a host grouped by host,
+and region workers grouped by region. Each row shows a CPU meter, RSS, and *what it's doing*
+(▶ running-cell ids · ⏳ warming · ✓ ready · idle), with a click-through detail popup (cpu/rss
+sparklines and full telemetry) that can also restart, open or reap the worker. It refreshes every few
+seconds, and appears whenever any notebook has a worker, local or not.
 
 ![The Remote activity strip: workers grouped by region (db · db-box, gpu · gpu-box), each row with a CPU meter, RSS, and status — one attached and running ▶ train, one warm and ✓ ready · CUDA](./assets/remote-activity.png)
 
@@ -129,19 +140,19 @@ telemetry). It refreshes every few seconds and hides itself when you have no reg
 
 **Inside the notebook:**
 
-- **The worker/region pill** (top bar) — a live status pill for the notebook's worker, and one per
-  active region, ranked so the one needing attention shows first. Click it for a dropdown of every
-  worker plus a side panel that **streams that worker's log and telemetry** (cpu / rss / running cell)
-  live over the page's WebSocket — no polling.
+- **The worker pill** (top bar) — one pill, showing whichever worker most needs attention
+  (disconnected, degraded, starting, running, idle). Click it for a dropdown of every worker plus a
+  side panel with a tab per worker that **streams that worker's log and telemetry** (cpu / rss /
+  running cell) live over the page's WebSocket — no polling.
 
-  ![The top-bar worker/region pills — one per kernel (main + each active region), each showing its live status](./assets/worker-pills.png)
+  ![The top-bar worker pill showing the most salient worker's live status, with a dropdown listing every worker](./assets/worker-pills.png)
 
   ![A worker-log popup opened from a region pill: the header (region · gpu · gpu-box :9300) with cpu / rss / running / memo chips, above a live tail of the worker's log — attach, sync_memo, running eval, and a boundary transfer](./assets/worker-log.png)
 - **🪵 Worker log** (**☰ → Worker log**, or the command palette) — a full tail of the main worker's
   log, following the bottom as it grows. For a remote worker it interleaves the local orchestration
   log and the remote worker's own log.
 - The [DAG pane](dag.md)'s **🖧 region map** and per-cell provenance chips show where each cell last
-  ran and how much data crossed the boundary — see [Regions → Seeing where cells run](regions.md#seeing-where-cells-run).
+  ran and how much data crossed the boundary — see [Regions → Seeing where cells run](regions.md#Seeing-where-cells-run).
 - **📋 Activity log** — a per-cell run feed (distinct from the worker pill and the front-page strip).
 
 !!! note "`slate_diag` is browser diagnostics, not worker state"
@@ -165,11 +176,11 @@ has the full parameters (`slate_api("remote")` lists them):
 | `slate_sync_memo(notebook)` | Push the notebook's full cache to its remote worker. |
 
 Defining named regions and assigning them to a notebook has its own tools — `slate_region`,
-`slate_region_on`, `slate_regions` — see [Regions → From the agent](regions.md#from-the-agent).
+`slate_region_on`, `slate_regions` — see [Regions → From the agent](regions.md#From-the-agent).
 
 ## See also
 
 - [Regions](regions.md) — run *part* of one notebook on a remote kernel while the rest stays local.
 - [Memoization & Caching](memoization.md) — the durable cache that `sync_memo` moves.
-- [Configuration](configuration.md) — hub port, kernel selection, environment variables.
+- [Running the Hub](hub.md) — hub port, kernel selection, environment variables.
 - [Packages](packages.md) — a notebook's per-project environment (what `preload` replicates).

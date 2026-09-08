@@ -15,8 +15,17 @@ shared dependency). It runs in one of three modes, chosen automatically:
   its own environment (kept under the depot), seeded from the parent (the parent package is
   `dev`'d in and its deps + `Manifest` are copied, versions preserved) and resolved as one
   environment. Adds and pins re-resolve the whole env, so the notebook can **override the
-  base**. The parent's `Project.toml` is never touched.
+  base**. Forking reads the parent and does not modify it.
 - **Detached** — no enclosing project, so the notebook environment *is* everything.
+
+You rarely have to open the panel to install something. When a cell fails on a `using` for a package
+that is not installed, the error itself offers an **Add** button that installs it into the notebook's
+environment, pinned to the version your global environment already had where that is known, and then
+re-runs the stale cells.
+
+That banner also offers **Add to project**, which writes the dependency into the enclosing
+`Project.toml` so every notebook in the project gets it. It appears only when there is a project to
+add to, and it is the one path that modifies the parent.
 
 If the enclosing project's `Manifest.toml` later changes, a forked notebook **auto-resyncs**
 on open: it re-seeds from the parent and re-adds your packages (preserved), keeping it one
@@ -36,6 +45,12 @@ The status line reads e.g. `3 notebook · 41 from parent` (or `· detached`).
 - **Add** — `Pkg.add` in the notebook's own env (forking first if needed), then the notebook
   re-runs so a `using` lights up live. The first add can take a while (seed + resolve +
   precompile); the kernel dot pulses while it works.
+
+  The box takes more than a registry name: a version pin (`CSV@0.10`), a git URL with an optional
+  `#rev`, or a local path, which is `dev`'d so it hot-reloads and travels to a remote worker. Several
+  entries separated by spaces or commas install in one resolve and one precompile. The panel badges a
+  `dev`'d checkout **dev** and a git dependency **git**, since neither resolves on another machine
+  unless the source travels with it.
 - **Remove** — `Pkg.rm` from the notebook env, confirmed first. Parent rows can't be removed.
 
 ## The Extensions gallery
@@ -70,7 +85,7 @@ It round-trips cleanly (it's never parsed as a cell), only changes when your pac
 and is **reconstructed on open**: if you `git clone` a notebook whose env dir is gone, opening
 it rebuilds the environment from the footer (seed from parent, add the pinned packages). For a
 *fully* self-contained artifact — the complete `Project` + `Manifest` + local source — see
-[Export → self-contained `.jl`](export.md#self-contained-single-source-jl).
+[Export → self-contained `.jl`](export.md#Self-contained-single-source-.jl).
 
 ## Requirements
 
@@ -81,7 +96,10 @@ why: there is no notebook environment to manage.
 ## Under the hood
 
 The UI calls `GET /api/<id>/packages` (provenance via the set difference *active − parent −
-parent-package*) and `POST /api/<id>/package` (`{op: "add"|"rm", name}`). Operations run
-through worker tools (`__slate_pkg`, and `__slate_fork` / `__slate_sync_parent` /
-`__slate_reconstruct` for the env lifecycle); on success the notebook restales and re-runs and
+parent-package*) and `POST /api/<id>/package`
+(`{op: "add"|"rm"|"update", name, target: "notebook"|"project"}`). Operations run
+through worker tools (`__slate_pkg`, `__slate_pkg_parent` for a write to the enclosing project,
+`__slate_registry_add` for installing a registry into the worker's depot, and `__slate_fork` /
+`__slate_sync_parent` / `__slate_reconstruct` for the env lifecycle); on success the notebook
+restales and re-runs and
 the footer refreshes.

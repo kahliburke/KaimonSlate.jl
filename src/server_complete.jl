@@ -2117,6 +2117,7 @@ function _make_router(h::Hub)
         pw = _width_px(qp)                          # content column width: px, "full" (=100%), or unset ⇒ default
         html = export_html(nb; include_source = get(qp, "source", "1") != "0",
                            theme = get(qp, "theme", "dark"), charttheme = get(qp, "charttheme", ""),
+                           renderer = get(qp, "renderer", ""),
                            override = get(qp, "override", "0") == "1", code = get(qp, "code", "normal"),
                            outputs = get(qp, "outputs", "all"), runnable = _run, embed_bundle = _run,
                            history = get(qp, "history", "0") == "1",   # source-only by default (public page)
@@ -2188,6 +2189,7 @@ function _make_router(h::Hub)
         pw = _width_px(qp)
         r = export_gist(nb; include_source = get(qp, "source", "1") != "0",
                         theme = get(qp, "theme", "dark"), charttheme = get(qp, "charttheme", ""),
+                        renderer = get(qp, "renderer", ""),
                         override = get(qp, "override", "0") == "1", code = get(qp, "code", "normal"),
                         outputs = get(qp, "outputs", "all"), width = pw)
         _json(Dict{String,Any}("ok" => r.ok, "url" => r.url, "preview" => r.preview,

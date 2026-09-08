@@ -20,25 +20,57 @@ lines(1:n, sin.(range(0, 4π, n)))
 
 | Constructor | Renders | Value |
 | --- | --- | --- |
-| `Slider(range)` / `Slider(lo, hi; step)` | range slider | number |
+| `Slider(range)` / `Slider(lo, hi; step)` | slider | number |
+| `RangeSlider(range)` / `RangeSlider(lo, hi; step)` | two-thumb slider | `(lo, hi)` NamedTuple, always sorted and in bounds |
 | `NumberField(default; min, max)` | number input | number |
 | `Checkbox(default)` / `Toggle(default)` | checkbox / switch | `Bool` |
 | `TextField(default)` / `TextArea(default; rows)` | text input | `String` |
 | `Select(options)` / `Radio(options)` | dropdown / radio group | chosen option |
-| `MultiSelect(options)` | multi-select | `Vector` |
+| `MultiSelect(options)` / `MultiCheckBox(options)` | multi-select / checkbox group | `Vector` |
 | `ColorPicker(default)` | color picker | hex `String` |
 | `DateField()` / `TimeField()` | date / time picker | `String` |
+| `FileUpload(; accept, maxbytes)` | file picker / drop target | `UploadedFile`, or `nothing` until something is uploaded |
 | `Button(label)` | action button | click count |
 | `TableSelect(data)` | clickable [table](tables.md) | clicked row as a `NamedTuple` (or `nothing`) |
 | `playhead(anim)` | [animation](animation.md) player (driven) | current frame index |
+
+`RangeSlider` binds one interval rather than two numbers, so the reader cannot cross the ends:
+
+```julia
+@bind span RangeSlider(400:4000; default = (1500, 1800), label = "region")
+lo, hi = span            # destructures · span.lo / span.hi by name
+```
+
+`FileUpload` stores the reader's bytes under the notebook's `datadir()` and binds an `UploadedFile`
+with `.path` (a real path you can read), `.name`, `.size` and `.mime`:
+
+```julia
+@bind datafile FileUpload(; accept = ".csv", label = "Data")
+datafile === nothing ? md"Upload a file to begin." : CSV.read(datafile.path, DataFrame)
+```
+
+`accept` filters the picker. It is a convenience, not a guarantee, so validate what you got.
+`FileUpload` is also one of the few write paths an [app-mode](app-mode.md) visitor is allowed, which
+makes it the way a reader gets data into an app.
+
+### Labelled options
+
+Any option may be a bare value or a `value => label` pair. As soon as one is a pair, the bound
+variable is a `Choice`: it compares, hashes, prints and interpolates as its value, so it drops into
+arithmetic and dictionary keys unchanged, while `.value`, `.label` and `.index` reach the parts.
+`MultiSelect` and `MultiCheckBox` bind a `Selection`, an ordered read-only map of those pairs.
+`Radio` renders markdown and `$math$` in its labels.
 
 `Button` pairs with [`@onclick`](live-updates.md) to run an action on click. `TableSelect` renders
 any [`slate_table`](tables.md)-compatible data and binds the row you click; `playhead` is a
 *driven* control that receives an animation's current frame so another cell can react to playback.
 
-All accept a `label` keyword. The value **reconciles** across re-runs: re-running a bind cell
-updates the widget's range/options but keeps the user's current value (unless its type or
-domain changed).
+Every widget takes a `label` keyword except `Button`, whose text is its first positional argument.
+The value **reconciles** across re-runs: re-running a bind cell updates the widget's range/options
+but keeps the user's current value (unless its type or domain changed).
+
+`MultiSelect` is the compact dropdown, for a long option list; `MultiCheckBox` is the checkbox list,
+for a small discrete set.
 
 !!! tip "Insert a control fast"
     Press **⌘K** and type "bind" to insert any of these as a snippet — at the cursor of the
@@ -148,6 +180,13 @@ Changing a control posts the new value to its defining cell, which restales and 
 readers (see [Reactive Cells](reactivity.md)). While you drag, updates are rate-limited and
 coalesced so the kernel isn't flooded; releasing flushes the final value. Every widget bound
 to the same variable — strip copies included — stays in lockstep.
+
+## In a static export
+
+An exported HTML page has no Julia behind it, so by default a control renders as real markup and
+stays disabled. Marking the expression it drives with `@replay` makes it work anyway: the export
+computes every position the control can take and ships the results with the page. See
+[Offline interactivity](replay.md).
 
 ## Custom widgets
 

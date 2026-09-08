@@ -430,7 +430,10 @@ Base.getindex(r::ReplayArray, i::Int) = r.data[i]
 Base.getindex(r::ReplayArray{T,N}, I::Vararg{Int,N}) where {T,N} = r.data[I...]
 Base.IndexStyle(::Type{<:ReplayArray}) = IndexLinear()
 
+"One-dimensional [`ReplayArray`](@ref)."
 const ReplayVector{T} = ReplayArray{T,1}
+
+"Two-dimensional [`ReplayArray`](@ref)."
 const ReplayMatrix{T} = ReplayArray{T,2}
 
 """

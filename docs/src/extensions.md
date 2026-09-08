@@ -132,10 +132,13 @@ A component module default-exports a function of `{ value, set, params }`:
 `import`s resolve against the page's import map, which serves Preact, htm, signals and
 `@slate/widget` — pinned and offline-capable, so there is no build step and no CDN.
 
-Prefer [`required_assets`](@ref) (lazy, dispatch-driven, shown above). The eager alternative is
-[`register_component!`](@ref) from `__init__`, which is what you want if the front-end is not tied
-to one widget type. For a plain `<script>` that calls `window.slateRegisterWidget` itself, use
-[`register_widget!`](@ref).
+[`required_assets`](@ref) (lazy, dispatch-driven, shown above) and
+[`register_component!`](@ref) from `__init__` (eager) are the two forms of the same thing, and both
+bind a component module to one widget kind. Prefer the lazy one.
+
+For a script that is not tied to a widget at all, use [`provide_frontend!`](@ref) with an id of your
+own, as the `__slate_frontend` example below does. For a plain `<script>` that calls
+`window.slateRegisterWidget` itself, use [`register_widget!`](@ref).
 
 ## Rich output
 
@@ -154,18 +157,43 @@ detection — Slate's display capture prefers these over `text/html` and `text/p
 Returning a [`WebPage`](@ref) is the blunter option: CSS, HTML and JS strings composed into one
 self-contained `text/html` output, identical live and in a static export.
 
+### Markdown fences
+
+An extension can claim a fenced-code language in markdown cells:
+
+```julia
+register_fence_renderer!("mermaid", src -> MermaidDiagram(src))
+```
+
+Every ```` ```mermaid ```` block then renders through you. The renderer is called as `f(source, info)`
+(or `f(source)`) and returns the value to display, which goes through the same `slate_render`
+dispatch a returned value would. Returning `nothing` leaves an ordinary code block, and a renderer
+that throws degrades that one block rather than the cell. Register from `__init__` or
+`__slate_frontend`; languages match case-insensitively.
+
 ## Shipping assets
 
 | You have | Use |
 |---|---|
-| One component module for a widget type | [`required_assets`](@ref) |
-| One script, not tied to a widget | [`provide_frontend!`](@ref) / [`register_component!`](@ref) |
+| One component module for a widget type | [`required_assets`](@ref) / [`register_component!`](@ref) |
+| One script, not tied to a widget | [`provide_frontend!`](@ref) |
 | A directory — a library with workers, fonts, wasm | [`provide_assets!`](@ref) |
 | A large blob shared across outputs, **live only** | [`provide_served_asset!`](@ref) |
 
 Read files off disk rather than embedding JS in Julia strings, so your front-end stays a real
 `.js` file you can lint and debug: [`@pkg_asset`](@ref) for a file, [`@pkg_dir`](@ref) for a
 directory.
+
+If your front-end code imports a third-party ES module, declare the specifier yourself rather than
+asking every notebook author to write `@use`:
+
+```julia
+provide_import!("mermaid", "https://esm.sh/mermaid@11.4.1")
+```
+
+That adds the import-map entry for every notebook that loads your package, so your own JS can import
+the bare specifier live and in exports. A notebook's own `@use` of the same specifier wins. Pin an
+exact version: an export resolves the URL to bytes.
 
 A vendored directory is served at `/ext-assets/<YourPackage>/…` while your package is loaded, and
 is copied into static exports. Build the URLs with [`@ext_asset_url`](@ref) so they cannot drift
@@ -210,7 +238,14 @@ slate_emit("ticks", data)              # Julia → JS; received by window.slateO
 slate_on("compute", a -> f(a.x))       # JS → Julia; invoked by window.slateCall("compute", …)
 ```
 
+`slate_off(channel)` drops a handler again, typically from a `slate_on_cleanup` callback when the
+handler was transient.
+
 For numeric streams, [`SlateBinary`](@ref) sends packed binary frames rather than JSON.
+
+Two more accessors are worth knowing. `slate_regions()` reports the regions the current notebook
+uses. `slate_everywhere` / `slate_effect` declare process-global state your package registers, so it
+is re-established on every [region](regions.md) worker rather than only the one that ran the cell.
 
 Register a per-cell resource's teardown with [`slate_on_cleanup`](@ref) — it runs before the cell
 re-evaluates, when it is deleted, and before a namespace rebuild. The callback runs later, outside
@@ -241,9 +276,10 @@ end
 ```
 
 Note that it takes `slate_on` as an argument: front-end scripts are process-global, but handlers
-belong to a specific notebook's namespace. The hook must be **cheap and idempotent** — it runs
-every drain, which is what lets it self-heal after a namespace rebuild. `provide_frontend!` dedups
-by `id` and `slate_on` replaces by channel, so re-running it is a no-op.
+belong to a specific notebook's namespace. Slate rescans loaded modules on every run drain but
+invokes each package's hook **once per notebook-namespace generation**, so it re-fires after a
+namespace rebuild, which is what re-installs its handlers. Keep it **cheap and idempotent** anyway:
+`provide_frontend!` dedups by `id` and `slate_on` replaces by channel, so re-running it is a no-op.
 
 Defining the method is also how Slate detects your package as an extension; a module without one
 contributes nothing.
@@ -322,50 +358,12 @@ SlateExtensionsBase = "0.10"
 
 Slate's Extensions gallery (⌘K → "Extensions") browses a curated registry and installs from it.
 **Registering your package is the only requirement** — there is no manifest to write and no
-approval form. A package with no extra files still gets a real listing: name, version, repository
-and compat come from the registry, and the description is harvested from your `README.md`,
-`Project.toml` `description`, or module docstring, whichever exists.
+approval form. A package with no extra files still gets a real listing, with its description
+harvested from the repository.
 
-To enrich the listing, add an optional `SlateExtension.toml` at your package root. Every key in it
-is optional, so you can add one field or all of them, whenever you like:
-
-```toml
-title    = "Star Rating"
-tagline  = "A ★ rating control for @bind"
-icon     = "★"                          # an emoji, or an image URL
-categories  = ["controls", "examples"]
-screenshots = ["https://you.github.io/YourPkg.jl/shot.png"]
-example  = "notebooks/stars_demo.jl"    # a demo notebook you already maintain — linked, and photographed
-snippet  = """
-using StarRating
-@bind rating Stars(; max = 5)
-"""
-```
-
-**Host your images, don't commit them.** A repo-relative path works (it resolves against your
-default branch), but screenshots get regenerated often and a package repository is a poor place to
-accumulate binaries. Point at GitHub Pages, a release asset, or any CDN — the catalog build mirrors
-whatever it can fetch into the published artifact, so the gallery serves its own copy and your host
-only needs to be reachable when the catalog is built.
-
-To get a starting screenshot, run this from the KaimonSlate repository:
-
-```sh
-node docs/generate_extension_assets.mjs --path /path/to/YourPkg.jl
-```
-
-It builds a throwaway project, runs your `example` notebook headless, photographs the page, and
-writes it to a scratch directory for you to upload. It is deliberately unclever — a picture of your
-own notebook, nothing composed. If you want better imagery, make it yourself.
-
-`snippet` is worth filling in: it is offered as a starter cell immediately after install, which is
-what turns an installed package into a working one — installing does not `using` it.
-
-Prose and images are read from your default branch, so fixing a description doesn't need a release.
-Versions always come from the registry.
-
-`examples/extensions/StarRating` in this repository has a fully populated `SlateExtension.toml` to
-copy from.
+Adding a tagline, an icon, categories, screenshots and a starter snippet takes one optional file.
+See [Listing an Extension](listing-an-extension.md) for the full field reference, the screenshot
+generator and the rules on hosting images.
 
 ## Worked examples
 

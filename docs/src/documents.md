@@ -34,9 +34,10 @@ and the OG social-card metadata.
 
 ## Bibliography
 
-Tag a markdown cell `bibliography`. Its body is either **embedded BibTeX** or one-or-more
+Tag a markdown cell `bibliography`. Its body is **either** embedded BibTeX **or** one-or-more
 **`.bib` file paths** (one per line, resolved relative to the notebook and copied into exports).
-Inline and external entries can be mixed.
+One cell cannot hold both: a cell containing any `@entry{…}` is read as embedded BibTeX and its
+path lines are ignored. To use both, write two bibliography cells.
 
 ```julia
 #%% md id=bib bibliography
@@ -46,6 +47,8 @@ Inline and external entries can be mixed.
   year   = {1984},
   publisher = {Addison-Wesley}
 }
+
+#%% md id=bibfile bibliography
 references.bib
 ```
 
@@ -73,19 +76,33 @@ references card.
 ## Citation style
 
 Set the citation style per notebook in **Settings → Citation style** (persisted as `bibstyle` in
-the [Notebook config](configuration.md#notebook-config)):
+[Settings, under This notebook](settings.md#This-notebook)):
 
-`ieee` · `apa` · `chicago-author-date` · `mla` · `nature` · `vancouver` · `harvard`
+`ieee` · `apa` · `chicago-author-date` · `chicago-notes` · `mla` · `nature` · `vancouver` ·
+`harvard-cite-them-right`
+
+The value is passed straight to Typst, so it has to be a name Typst knows. Harvard is
+`harvard-cite-them-right`; a bare `harvard` fails the export.
 
 Numeric styles (IEEE, Nature, Vancouver) render `[1]` and order the References by first citation;
 author–date styles (APA, Chicago, MLA, Harvard) render `(Knuth, 1984)` and order alphabetically.
 
 ## Figures
 
-Markdown caption cells become **numbered figures** on export (`Figure N.`), and a reference to a
-figure label links to it — the same cross-reference machinery as citations. Figures embed as
-vectors where possible (CairoMakie → PDF, ECharts → SVG) so they stay crisp in print. See
-[Export](export.md) and [Charts & Tables](visualization.md).
+Tag a markdown cell **`caption`** and it captions the output of the cell above it, becoming a
+**numbered figure** on export (`Figure N.`). Give it a `label=` to cross-reference it, and `for=` to
+caption a cell other than the one directly above:
+
+```julia
+#%% md id=cap1 caption label=scaling
+Throughput against core count.
+```
+
+Refer to it from any markdown cell with `[@fig:scaling]`, the same cross-reference machinery as
+citations. That renders as a link in the live notebook and as plain `Figure N` in the PDF.
+
+Figures embed as vectors where possible (CairoMakie → PDF, ECharts → SVG) so they stay crisp in
+print. See [Export](export.md) and [Charts & Tables](visualization.md).
 
 !!! tip "From notebook to paper"
     Add a `title` cell, an `abstract` cell, and a `bibliography` cell; cite with `[@key]`; then

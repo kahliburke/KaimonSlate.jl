@@ -32,11 +32,13 @@
                 history: ck('pubopt_history') ? '1' : '0', outputs: val('pubopt_outputs') || 'all',
                 theme: t.theme, charttheme: t.charttheme || '', override: t.override ? '1' : '0',
                 width: (typeof _htmlWidthQS === 'function' ? _htmlWidthQS(el('pubopt_width')) : ''),
+                renderer: val('pubopt_renderer'),
                 slug: (el('pubopt_slug') && el('pubopt_slug').value.trim()) || '' };
     try {
       localStorage.setItem('slate_siterunnable', o.bundle); localStorage.setItem('slate_sitesource', o.source);
       localStorage.setItem('slate_sitehistory', o.history); localStorage.setItem('slate_sitetheme', pick);
       localStorage.setItem('slate_siteoutputs', o.outputs);
+      localStorage.setItem('slate_siterenderer', o.renderer);
     } catch (e) {}
     return o;
   }
@@ -47,6 +49,7 @@
     set('pubopt_runnable', g('slate_siterunnable')); set('pubopt_source', g('slate_sitesource'));
     set('pubopt_history', g('slate_sitehistory'));
     sel('pubopt_theme', g('slate_sitetheme')); sel('pubopt_outputs', g('slate_siteoutputs'));
+    sel('pubopt_renderer', g('slate_siterenderer'));
     // Page width — shared preference with the HTML/Website export slider (`slate_htmlwidth`).
     const wEl = el('pubopt_width');
     if (wEl) { const w = g('slate_htmlwidth'); if (w != null) wEl.value = w; if (typeof _htmlWidthSync === 'function') _htmlWidthSync(wEl); }

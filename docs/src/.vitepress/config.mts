@@ -101,51 +101,10 @@ export default withMermaid(defineConfig({
       { text: 'API', link: '/api' },
     ],
 
-    sidebar: [
-      {
-        text: 'Introduction',
-        items: [
-          { text: 'Installation', link: '/installation' },
-          { text: 'Getting Started', link: '/getting-started' },
-          { text: 'Architecture', link: '/architecture' },
-        ],
-      },
-      {
-        text: 'Guide',
-        items: [
-          { text: 'Notebook Basics', link: '/notebook-basics' },
-          { text: 'Cell Tags & Caching', link: '/cell-tags' },
-          { text: 'Memoization & Caching', link: '/memoization' },
-          { text: 'Command Palette & Help', link: '/palette-and-help' },
-          { text: 'Reactive Cells', link: '/reactivity' },
-          { text: 'The Dependency Graph', link: '/dag' },
-          { text: 'Live Updates', link: '/live-updates' },
-          { text: 'Widgets & @bind', link: '/widgets' },
-          { text: 'Charts', link: '/visualization' },
-          { text: 'Tables', link: '/tables' },
-          { text: 'Animation', link: '/animation' },
-          { text: 'Front-end Extensions', link: '/frontend-extensions' },
-          { text: 'Writing an Extension', link: '/extensions' },
-          { text: 'Documents & Citations', link: '/documents' },
-          { text: 'Slides & Present', link: '/slides' },
-          { text: 'The AI Agent', link: '/agent' },
-          { text: 'Timeline', link: '/history' },
-          { text: 'Export', link: '/export' },
-          { text: 'App Mode', link: '/app-mode' },
-          { text: 'Publishing', link: '/publishing' },
-          { text: 'Packages', link: '/packages' },
-          { text: 'Configuration', link: '/configuration' },
-          { text: 'Remotes', link: '/remotes' },
-          { text: 'Regions', link: '/regions' },
-        ],
-      },
-      {
-        text: 'Reference',
-        items: [
-          { text: 'API Reference', link: '/api' },
-        ],
-      },
-    ],
+    // Generated from `pages` in docs/make.jl by DocumenterVitepress, so the sidebar cannot drift
+    // from the page list. `nav` above stays hand-written: the same substitution feeds both, and
+    // the top bar wants three entries rather than every page.
+    sidebar: 'REPLACE_ME_DOCUMENTER_VITEPRESS',
 
     outline: {
       level: [2, 3],

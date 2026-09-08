@@ -15,17 +15,24 @@ laid out automatically and updated as you edit and run.
 
 ![The DAG pane: the notebook's cells as a dataflow graph, each node colored by state, with heat-map and region-map toggles](./assets/dag-pane.png)
 
-- **Node color** mirrors each cell's [state](reactivity.md#cell-states) — fresh / stale / running /
-  errored — so a wave of gold shows exactly what a change restaled.
+- **A node's border** mirrors the cell's [state](reactivity.md#Cell-states) — fresh / stale /
+  running / errored — so a wave of gold shows exactly what a change restaled. A dashed border means
+  the cell's result is durably cached.
+- **The fill and the corner wedge** carry the output type. The fill is what 🔥 heat and 🖧 region
+  mode repurpose (region wins when both are on), so the state border stays readable in every mode.
 - **⚙ display** — **show setup cells** (`using`/`import` and their edges) and **show isolated cells**
   (cells with no dataflow edges) are off by default, keeping the graph to the cells that actually
   pass data.
+- **Navigating** — hovering a node lights up its lineage: amber for everything upstream, teal for
+  everything downstream, bold for its direct neighbours. Clicking opens the node's detail card,
+  ⇧-clicking jumps to that cell in the notebook. Scroll zooms and drag pans. The **?** button in the
+  pane header lists the same gestures.
 - **⇅ direction** — layout orientation; *auto* follows the pane shape (a tall pane lays out
   top-down).
 - **◨ dock** and the **grip** re-side and resize the pane.
 - **🔥 heat map** — color cells by accumulated compute time (hotter = more expensive), to find the
   bottleneck in a pipeline.
-- **🖧 region map** — color cells by *where they run* (see [Regions](#regions-run-cells-on-another-kernel)).
+- **🖧 region map** — color cells by *where they run* (see [Regions](#Regions-—-run-cells-on-another-kernel)).
 
 ## Manual edges
 
@@ -35,6 +42,11 @@ that a later cell reads back. Assert those yourself so the engine keeps the two 
 
 - **`needs=id1,id2`** header tag — set it with the **🏷 tag editor** or directly in the cell header.
   It names the earlier code cells this one depends on.
+- **`mutates=name1,name2`** header tag — declare that this cell changes those existing values in
+  place, when it does so through a call or an alias the analyzer cannot follow (`update!(df)`). The
+  cell then counts as a writer of those names, so later readers chain off it and restale, and its
+  cached result snapshots the post-mutation value. Declare it at a [region](regions.md) boundary in
+  particular: an undeclared hidden mutation there forks the two copies rather than just going stale.
 - **🔗 link mode** in the DAG pane — click it, then click two cells to draw a manual edge (shown
   **dashed**); click a dashed edge to remove it.
 
@@ -98,6 +110,10 @@ hub). The dialog spells out exactly what it installs — an on-host **ed25519 ke
 ![The connect-regions consent dialog listing the region pair and hosts, what it installs (ed25519 key, single-port grant, host-key pin), and Not now / Connect & exchange keys buttons](./assets/mesh-consent.png)
 
 ![The same dialog mid-connect: an "exchanging keys · gpu → db (1/2)" progress line and a disabled "Connecting…" button](./assets/mesh-connecting.png)
+
+**⇄ disconnect** is the inverse, and revokes this notebook's mesh everywhere it was installed: the
+on-host keys, the scoped grants, and the host-key pins. Cross-region transfers fall back to relaying
+through the hub, and ⇄ connect re-installs it whenever you want it back.
 
 While a value crosses the boundary, the **consuming cell** shows a live progress bar
 (`⇄ <name>: N/M MB ← host`) — driven on its own data channel, so a big move never looks like a hang.

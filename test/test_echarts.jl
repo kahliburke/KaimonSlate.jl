@@ -283,6 +283,21 @@ const RE = ReportEngine
         # Unknown presets fail loudly rather than silently formatting as :fixed.
         @test_throws ArgumentError RE.echart(:line, [1, 2], [3, 4]; valuefmt = :nonsense)
     end
+    @testset "renderer: an init argument, not an option key" begin
+        wire(o) = get(o, "__renderer", nothing)
+        svg = RE.echart(:line, [1, 2], [3, 4]; renderer = :svg).option
+        @test wire(svg) == "svg"
+        @test !haskey(svg, "renderer")                     # never reaches ECharts as itself
+        # Canvas is the default, and a chart that didn't ask carries no marker — the front end
+        # falls back on its own, so every spec would otherwise pay for a key it doesn't need.
+        @test wire(RE.echart(:line, [1, 2], [3, 4]).option) === nothing
+        @test wire(RE.echart(:line, [1, 2], [3, 4]; renderer = :canvas).option) == "canvas"
+        # Every form funnels through `_slate_normalize!`, and the value is case-insensitive.
+        @test wire(RE.echart(; series = [(type = "bar", data = [1])], renderer = "SVG").option) == "svg"
+        @test wire(RE.echart(RE.series(:line, [1, 2], [3, 4]); renderer = :svg).option) == "svg"
+        # A renderer ECharts has no backend for fails at build rather than initialising blank.
+        @test_throws ArgumentError RE.echart(:line, [1, 2], [3, 4]; renderer = :webgl)
+    end
     # (The reference-is-surfaced-to-agents assertions live in test_agentops.jl, where NotebookServer's
     #  `slate_api_reference` is already in scope.)
 
