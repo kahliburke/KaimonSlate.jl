@@ -27,6 +27,17 @@ const fName = signal(''), fWarm = signal(0), fPre = signal(''), fRoot = signal('
 // granted, not chosen. These are what the request needs.
 const fSched = signal('none'), fPart = signal(''), fWall = signal(''), fCpus = signal(''),
       fMem = signal(''), fGpus = signal(''), fAcct = signal(''), fIdle = signal(''), fWarn = signal('');
+// Everything the fixed fields cannot say, as ordered rows so a half-typed one does not vanish while
+// you are still typing it. Stored as a map; kept as a list here because two blank names are two
+// rows to the eye and one key to a map.
+const fOpts = signal([]);          // [{k, v}]
+const fPro = signal('');
+const fMore = signal(false);       // the disclosure
+const fOptMenu = signal(-1);       // which option row has its suggestion menu open (-1 = none)
+// What the fold is hiding that is actually set. A collapsed section must never conceal a setting
+// nobody would have guessed was there — the cluster form counts the same way.
+const filledExtras = () =>
+  fOpts.value.filter(o => (o.k || '').trim()).length + ((fPro.value || '').trim() ? 1 : 0);
 
 const pj = (s) => { try { return JSON.parse(s || '{}'); } catch (_) { return {}; } };
 const fmtB = (b) => window.slateBytes(b, { compact: true });
@@ -66,11 +77,21 @@ function saveRegion() {
   const transport = fTr.value;
   const base_port = transport === 'direct' ? (parseInt(fPort.value, 10) || 0) : 0;
   const preload = (fPre.value || '').trim(), data_root = (fRoot.value || '').trim(), sysimage = !!fSys.value;
+  const SO = window.slateSchedOpts;
+  // Rows → the stored map. A row with no NAME is a half-typed one and is dropped; a row with a name
+  // and no value is a switch (`--exclusive`) and is kept. Names go through the shared normaliser, so
+  // typing the scheduler's spelling lands on the key the cell editor would have stored.
+  const optMap = {};
+  for (const r of fOpts.value) {
+    const k = SO ? SO.toKey(r.k) : String(r.k || '').trim();
+    if (k) optMap[k] = String(r.v == null ? '' : r.v).trim();
+  }
   const alloc = scheduler === 'none' ? {} : {
     partition: (fPart.value || '').trim(), walltime: (fWall.value || '').trim(),
     cpus: Math.max(0, parseInt(fCpus.value, 10) || 0), mem: (fMem.value || '').trim(),
     gpus: (fGpus.value || '').trim(), account: (fAcct.value || '').trim(),
-    idle_release: (fIdle.value || '').trim(), idle_warn: (fWarn.value || '').trim() };
+    idle_release: (fIdle.value || '').trim(), idle_warn: (fWarn.value || '').trim(),
+    options: optMap, prologue: (fPro.value || '').trim() };
   rmsg.value = { text: warm > 0 ? 'Saving + warming…' : 'Saving…' };
   fetch('/api/regions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, host: h, warm, preload, transport, base_port, data_root, sysimage, scheduler, ...alloc }) })
     .then(r => r.json()).then(d => {
@@ -206,6 +227,73 @@ function Editor() {
 // On an ordinary host, `host` IS the machine. On a cluster's front door it is only where you ASK:
 // the scheduler grants a node, and which one is an output of the request. So these rows appear only
 // when the host has a scheduler, and what they collect is what the request needs.
+// The scheduler options a region carries, and the shell its worker wants first. Rarely set, so
+// folded away — with a count, because a fold that hides a setting silently is worse than a long
+// form. The catalogue, the spelling and the warnings are `schedopts.js`, shared with the sweep
+// cell's editor so one name means one thing in both.
+function MoreRows(kind) {
+  const SO = window.slateSchedOpts;
+  const rows = fOpts.value;
+  const setRow = (i, patch) => {
+    const next = rows.map((r, j) => (j === i ? { ...r, ...patch } : r));
+    // Keep exactly one trailing blank row to type into, and drop the others.
+    const kept = next.filter((r, j) => (r.k || '').trim() || (r.v || '').trim() || j === next.length - 1);
+    fOpts.value = kept;
+  };
+  const addRow = () => { fOpts.value = [...rows, { k: '', v: '' }]; };
+  const delRow = i => { fOpts.value = rows.filter((_, j) => j !== i); };
+  const n = filledExtras();
+  return html`
+    <div class="rpprow rppmorehd">
+      <label></label>
+      <button type="button" class="rppmorebtn" onClick=${() => fMore.value = !fMore.value}>
+        ${fMore.value ? '▾' : '▸'} More settings${n ? html`<span class="rppmoren">${n} set</span>` : ''}</button>
+      <span class="pddim" style="font-size:.76rem">scheduler options and a startup command</span></div>
+    ${!fMore.value ? null : html`
+      <div class="rpprow rppmorebody"><label>Options</label>
+        <div class="rppopts">
+          ${rows.map((r, i) => {
+            const key = SO ? SO.toKey(r.k) : (r.k || '');
+            const warn = SO ? SO.warnFor(key, kind) : '';
+            const hits = (SO && fOptMenu.value === i) ? SO.matches(r.k, kind, SO.MENU_MAX, SO.FIELD_OWNED) : [];
+            const pick = o => {
+              setRow(i, { k: SO.spellOf(o, kind) });
+              fOptMenu.value = -1;
+            };
+            return html`<div class=${'rppoptrow' + (warn ? ' unknown' : '')}>
+              <input class="rppoptk" autocomplete="off" spellcheck="false" placeholder="option"
+                     value=${r.k}
+                     onInput=${ev => { setRow(i, { k: ev.target.value }); fOptMenu.value = i; }}
+                     onFocus=${() => fOptMenu.value = i}
+                     onBlur=${() => setTimeout(() => { if (fOptMenu.value === i) fOptMenu.value = -1; }, 120)}/>
+              <input class="rppoptv" autocomplete="off" spellcheck="false" placeholder="value"
+                     title="leave blank for a switch such as exclusive"
+                     value=${r.v} onInput=${ev => setRow(i, { v: ev.target.value })}/>
+              <button type="button" class="rppoptdel" title="remove this option" tabindex="-1"
+                      onClick=${() => delRow(i)}>✕</button>
+              ${warn ? html`<span class="rppoptwarn">${warn}</span>` : null}
+              ${hits.length ? html`<div class="rppoptmenu">
+                ${hits.map(o => html`<div class="rppoptmi"
+                    onMouseDown=${ev => { ev.preventDefault(); pick(o); }}>
+                  <span class="rppoptminame">${SO.spellOf(o, kind)}</span>
+                  <span class="rppoptmihint">${SO.hintOf(o, kind)}</span></div>`)}
+              </div>` : null}</div>`;
+          })}
+          <button type="button" class="rppoptadd" onClick=${addRow}>+ option</button>
+          <div class="rppfieldhint">Sent as the scheduler spells them. An unlisted name is still
+            sent: a site has its own, and dropping one silently is worse than not suggesting it.</div>
+        </div></div>
+      <div class="rpprow rppmorebody"><label>Before start</label>
+        <div class="rppfields" style="flex-direction:column;align-items:stretch">
+          <textarea class="rpppre rppprologue" rows="2" autocomplete="off"
+                    placeholder="module load cuda"
+                    value=${fPro.value} onInput=${ev => fPro.value = ev.target.value}></textarea>
+          <span class="rppfieldhint">Shell run on the granted node before the worker starts. The
+            allocation itself only holds the node, so this is the one place that reaches the
+            worker's environment. A failure here stops the worker rather than booting it
+            unconfigured.</span></div></div>`}`;
+}
+
 function SchedulerRows() {
   const h = focusHost.value, si = schedInfo.value[h];
   if (si === null) return html`<div class="rpprow"><label>Scheduler</label><span class="pddim"><span class="hydspin"></span> asking ${h}…</span></div>`;
@@ -215,6 +303,9 @@ function SchedulerRows() {
   // `module load` that detection cannot see.)
   if (!kinds.length && fSched.value === 'none') return null;
   const chosen = fSched.value;
+  // Fetched once per page, and only when there is a scheduler to describe. `load` dedupes an
+  // in-flight fetch and returns immediately once it has the list, so calling it per render is free.
+  if (chosen !== 'none' && window.slateSchedOpts) window.slateSchedOpts.load();
   const parts = ((si && si.partitions) || {})[chosen] || [];
   const opts = ['none', ...kinds.filter(k => k !== 'none')];
   if (chosen !== 'none' && !opts.includes(chosen)) opts.push(chosen);   // honour a saved choice
@@ -236,15 +327,29 @@ function SchedulerRows() {
         <input class="rppn" autocomplete="off" placeholder="01:00:00" value=${fWall.value} onInput=${ev => fWall.value = ev.target.value}/>
         <span class="pddim" style="font-size:.76rem">how long to hold it — it bills for the time held, not used</span></div>
       <div class="rpprow"><label>Resources</label>
-        <input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="cpus" title="tasks/cores to request (blank = site default)" value=${fCpus.value} onInput=${ev => fCpus.value = ev.target.value}/>
-        <input class="rppport" autocomplete="off" placeholder="mem" title="e.g. 16G (blank = site default)" value=${fMem.value} onInput=${ev => fMem.value = ev.target.value}/>
-        <input class="rppport" autocomplete="off" placeholder="gpus" title=${'e.g. 1, or a100:2 — blank means a CPU node' + (parts.some(p => p.gpus) ? '' : '. No partition here reports GPUs.')} value=${fGpus.value} onInput=${ev => fGpus.value = ev.target.value}/>
-        <input class="rppport" autocomplete="off" placeholder="account" title="project to bill (blank = default)" value=${fAcct.value} onInput=${ev => fAcct.value = ev.target.value}/></div>
-      <div class="rpprow"><label>Release when idle</label>
-        <input class="rppport" autocomplete="off" placeholder="never" title="how long with no cell running on this region before its node is given back — 30m, 1h, 2d, 1w. Blank means never." value=${fIdle.value} onInput=${ev => fIdle.value = ev.target.value}/>
-        <input class="rppport" autocomplete="off" placeholder="warn" title="how long before that to ask whether you are still there — 5m, 1h. Must be shorter than the idle timeout." value=${fWarn.value} onInput=${ev => fWarn.value = ev.target.value}/>
-        <span class="pddim" style="font-size:.76rem">idle time, then how long before it to ask. Blank keeps the node until the walltime ends; getting another means queueing again.</span></div>
-      <div class="rpprow rppsysrow"><label></label><div class="rppsysbox">A worker starts on the node this allocation grants, not on <code>${h}</code>. Reopening attaches to the same allocation while it lasts; when it expires the next cell that needs the region asks for another.</div></div>`}`;
+      <div class="rppfields">
+        ${[['cpus', fCpus, 'cpus', 'tasks/cores to request'],
+           ['memory', fMem, '16G', 'per node'],
+           ['gpus', fGpus, '1', 'or a100:2'],
+           ['account', fAcct, '', 'project to bill']].map(([name, sig, ph, hint]) => html`
+          <label class="rppfield"><span class="rppfieldname">${name}</span>
+            <input class="rppport" autocomplete="off" placeholder=${ph}
+                   title=${hint + ' (blank = site default)' +
+                            (name === 'gpus' && !parts.some(p => p.gpus)
+                              ? '. No partition on this host reports GPUs.' : '')}
+                   value=${sig.value} onInput=${ev => sig.value = ev.target.value}/>
+            <span class="rppfieldhint">${hint}</span></label>`)}
+      </div></div>
+    <div class="rpprow"><label>Release when idle</label>
+      <div class="rppfields">
+        ${[['idle for', fIdle, 'never', 'no cell running on this region — 30m, 1h, 2d'],
+           ['warn before', fWarn, 'none', 'ask first, this long ahead — must be shorter']].map(([name, sig, ph, hint]) => html`
+          <label class="rppfield"><span class="rppfieldname">${name}</span>
+            <input class="rppport" autocomplete="off" placeholder=${ph} title=${hint}
+                   value=${sig.value} onInput=${ev => sig.value = ev.target.value}/>
+            <span class="rppfieldhint">${hint}</span></label>`)}
+      </div></div>
+    ${MoreRows(chosen)}`}`;
 }
 
 function Roster() {
@@ -289,14 +394,23 @@ effect(() => {   // seed the editor form from the selected region (or blank for 
   const e = editRegion.value, h = focusHost.value; if (!h) return;
   if (e && e.name) { fName.value = e.name; fWarm.value = +e.warm || 0; fPre.value = e.preload || ''; fRoot.value = e.data_root || ''; fTr.value = e.transport || 'tunnel'; fPort.value = e.base_port > 0 ? e.base_port : ''; fSys.value = !!e.sysimage;
     fSched.value = e.scheduler || 'none'; fPart.value = e.partition || ''; fWall.value = e.walltime || '';
-    fCpus.value = e.cpus > 0 ? e.cpus : ''; fMem.value = e.mem || ''; fGpus.value = e.gpus || ''; fAcct.value = e.account || ''; fIdle.value = e.idle_release || ''; fWarn.value = e.idle_warn || ''; }
+    fCpus.value = e.cpus > 0 ? e.cpus : ''; fMem.value = e.mem || ''; fGpus.value = e.gpus || ''; fAcct.value = e.account || ''; fIdle.value = e.idle_release || ''; fWarn.value = e.idle_warn || '';
+    // A map has no order, so the rows are sorted: the form reads the same on every open.
+    fOpts.value = Object.keys(e.options || {}).sort().map(k => ({ k, v: (e.options || {})[k] }));
+    fPro.value = e.prologue || '';
+    // Open the fold when the REGION has something folded away, so a saved setting is never out of
+    // sight. Read from `e`, never from the form's own signals: `filledExtras()` reads `fOpts`, which
+    // would subscribe this seeding effect to it — then adding a row would re-run the seed, reset the
+    // rows to what was stored, and the new row would vanish as the fold snapped shut.
+    fMore.value = Object.keys(e.options || {}).length > 0 || !!(e.prologue || '').trim(); }
   else { fName.value = ''; fWarm.value = 0; fPre.value = ''; fRoot.value = ''; fTr.value = hostTransport(h); fPort.value = ''; fSys.value = false;
     // A NEW region on a host that fronts a scheduler defaults to using it, with a walltime already
     // filled in: an allocation with no end time is the one people forget they are holding.
     const si = schedInfo.value[h];
     fSched.value = (si && si.suggested) ? si.suggested : 'none';
     fPart.value = ''; fWall.value = fSched.value === 'none' ? '' : '01:00:00';
-    fCpus.value = ''; fMem.value = ''; fGpus.value = ''; fAcct.value = ''; fIdle.value = ''; fWarn.value = ''; }
+    fCpus.value = ''; fMem.value = ''; fGpus.value = ''; fAcct.value = ''; fIdle.value = ''; fWarn.value = '';
+    fOpts.value = []; fPro.value = ''; fMore.value = false; }
   rmsg.value = null;
 });
 effect(() => { const e = editRegion.value; if (e && e.name && focusHost.value) loadSysimage(e.name); });   // editing → fetch build status

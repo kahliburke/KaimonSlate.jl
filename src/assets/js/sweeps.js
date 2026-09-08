@@ -55,40 +55,22 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
   // A CATALOGUE, not a permitted set: an unrecognised name warns and is still sent. A scheduler has
   // far more options than are worth naming and sites add their own, so refusing what we have not
   // heard of would be the same mistake as silently dropping it.
-  let CATALOGUE = [];
-  const catBy = k => CATALOGUE.find(o => o.key === k || o.flag === k);
+  // The catalogue and every rule about a name live in `schedopts.js`, shared with the region form's
+  // editor. These are the same functions with this panel's KIND already applied: two editors that
+  // disagreed about what a name means would store one setting twice and emit one flag.
+  const SO = () => window.slateSchedOpts;
+  const catBy = k => (SO() ? SO().find(k) : null);
 
   // Which scheduler the cell's cluster runs, set when the panel renders. It decides how an option is
   // SPELLED and whether it can be said at all — `constraint` is a real sbatch flag and nothing on
   // PBS — but never what is stored: the key is the same either way, so re-pointing a cell at the
   // other kind of cluster re-labels its options instead of losing them.
   let KIND = 'slurm';
-  // On SLURM the box shows the sbatch flag, which is the vocabulary a SLURM user has in front of
-  // them. PBS has no equivalent vocabulary of flag names — its settings live inside `-l select=…` —
-  // so there the box shows Slate's own key and the PBS spelling goes in the hint.
-  const spellOf = o => (KIND === 'pbs' ? o.key : o.flag);
-  const availOf = o => (KIND === 'pbs' ? o.pbs !== '' : o.flag !== '');
-  const hintOf = o => !availOf(o) ? `no ${KIND} equivalent — ${o.hint}`
-                    : KIND === 'pbs' && o.pbs ? `${o.pbs} — ${o.hint}` : o.hint;
-  async function loadCatalogue() {
-    if (CATALOGUE.length) return;
-    // Raw fetch: this list belongs to the MACHINE, not to a notebook, and `api()` would rewrite the
-    // path into the per-notebook namespace.
-    try {
-      CATALOGUE = (await (await fetch('/api/sched-options')).json()).options || [];
-    } catch (_) {}
-  }
-
-  // What the user typed → the key it is STORED under. Three of Slate's names differ from sbatch's
-  // (`cpus`/`cpus-per-task`, `walltime`/`time`, …), so a catalogue lookup comes first: typing the
-  // sbatch spelling must land on the same key as picking it from the list, or the two become
-  // separate settings that both emit the same flag. Otherwise `-` → `_`, since a stored key has to
-  // match [A-Za-z][A-Za-z0-9_]* and no sbatch long option contains `_`.
-  const toKey = s => {
-    const t = String(s).trim().replace(/^-+/, '');
-    const o = catBy(t) || catBy(t.replace(/-/g, '_'));
-    return o ? o.key : t.replace(/-/g, '_');
-  };
+  const spellOf = o => SO().spellOf(o, KIND);
+  const availOf = o => SO().availOf(o, KIND);
+  const hintOf = o => SO().hintOf(o, KIND);
+  const loadCatalogue = () => (SO() ? SO().load() : Promise.resolve([]));
+  const toKey = s => (SO() ? SO().toKey(s) : String(s).trim().replace(/^-+/, '').replace(/-/g, '_'));
   const toFlag = k => {
     const o = catBy(k);
     if (!o) return KIND === 'pbs' ? String(k) : String(k).replace(/_/g, '-');
@@ -295,23 +277,14 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
   // moment the box is focused — eighteen options is a wall that buries the two fields underneath it,
   // and it cannot be capped from CSS because the browser draws it. This filters as you type, shows
   // nothing until you do, and scrolls past a handful.
-  const OPT_MENU_MAX = 6;
-  function optMatches(typed) {
-    const t = String(typed).trim().replace(/^-+/, '').replace(/_/g, '-').toLowerCase();
-    if (!t) return [];
-    // Prefix first, then anywhere — so typing `mem` offers `mem` before `mem-per-cpu`, and `cpu`
-    // still finds `cpus-per-task`.
-    const pre = [], mid = [];
-    for (const o of CATALOGUE) {
-      if (!availOf(o)) continue;                   // this scheduler cannot say it: do not offer it
-      const f = spellOf(o).toLowerCase().replace(/_/g, '-');
-      if (f === t) continue;                       // already exact: nothing to suggest
-      if (f.startsWith(t)) pre.push(o); else if (f.includes(t)) mid.push(o);
-    }
-    return [...pre, ...mid];
-  }
+  // The filter lives in `schedopts.js` now, shared with the region form's editor: the two offer the
+// same names for the same typing, or the same setting entered in each becomes two settings.
+const OPT_MENU_MAX = (window.slateSchedOpts && window.slateSchedOpts.MENU_MAX) || 6;
+function optMatches(typed) {
+  return window.slateSchedOpts ? window.slateSchedOpts.matches(typed, KIND, OPT_MENU_MAX) : [];
+}
 
-  function showOptMenu(row, inp) {
+function showOptMenu(row, inp) {
     const menu = row.querySelector('.swopt-menu');
     const ms = optMatches(inp.value);
     if (!ms.length) { menu.hidden = true; return; }

@@ -1273,6 +1273,18 @@ end
 # actually came up. Shared by the notebook spawn path and `warm_pool!` — a pool worker is just
 # a launch with no notebook (`label=""`, `pool=true`, state starts at `idle`, and `warm_deps`
 # pays the preload env's package loads while nobody is attached).
+# The shell a region asks to have run before its worker boots, ready to splice into the launch line.
+# Empty for a region with none and for every non-region spawn, so the line is unchanged there.
+#
+# Trailing `&&`: the launch is a chain, and a prologue that fails should stop the boot rather than
+# start a worker in an environment that was not set up.
+function _region_prologue(region::AbstractString)
+    isempty(region) && return ""
+    r = try; region_get(region); catch; nothing; end
+    (r === nothing || isempty(strip(r.prologue))) && return ""
+    return "{ " * strip(r.prologue) * " ; } && "
+end
+
 function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
                          label::AbstractString, parent::AbstractString,
                          threads::AbstractString = "", extra_flags::AbstractString = "",
@@ -1309,7 +1321,12 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
         "JOPT=''"   # region didn't opt into a sysimage → always a plain boot
     xflags = effective_worker_extra_flags(extra_flags)
     jl = "julia \$JOPT --project=$proj --startup-file=no --threads=$nthreads $xflags $remote_script '$tag'"
-    launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && $siresolve && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
+    # A region's prologue, if it has one: `module load cuda`, a scratch dir, a venv. It runs HERE and
+  # nowhere else. The allocation's own job body only sleeps, so shell put there would exit without
+  # touching anything, and `_run_on` carries every poll and status command too — a `module load` on
+  # each of those would be paid hundreds of times to configure a shell that then exits.
+  pro = _region_prologue(region)
+  launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && $pro$siresolve && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
     _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
     # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
     # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
@@ -3215,6 +3232,21 @@ struct Region
     # How long before that to ask whether anyone is still there. SECONDS, and shorter than
     # `idle_release`, or the question arrives too late to be answered.
     idle_warn::Int
+    # ── What the fields above cannot say ─────────────────────────────────────────────────────
+    # Everything else the scheduler will take, as the sweep cell's editor stores it: KEY => VALUE
+    # against `Sweep.sched_options()`, spelled per scheduler at request time by the same
+    # `sbatch_flag`/`pbs_flag` the batch side uses. `qos`, `constraint`, `exclusive`, `reservation`
+    # and a site's own names all live here rather than each earning a field.
+    #
+    # Structured rather than a block of verbatim flags, so the region form can offer the same
+    # catalogue, hints and warnings the cell does, and so re-pointing a region at the other
+    # scheduler re-spells what it can and says what it cannot.
+    options::Dict{String,String}
+    # Shell run on the granted node BEFORE the worker starts — `module load cuda`, a scratch dir,
+    # a venv. NOT what a batch target's prologue does, which wraps the task body: a region's job
+    # body only sleeps, so anything run there would exit without ever touching the worker. This
+    # runs in the worker's own shell inside the allocation, which is the only place it can matter.
+    prologue::String
 end
 
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
@@ -3239,6 +3271,20 @@ _region_warm_for(d, scheduler::Symbol) = _warm_for(_asint(get(d, "warm", 0)), sc
 _region_scheduler_of(d) =
     Symbol(let x = String(get(d, "scheduler", "none")); isempty(x) ? "none" : x end)
 
+# Scheduler options as the sweep cell stores them: a flat map of key => value. Values are kept as
+# STRINGS whatever JSON made of them, so `nodes = 2` and `nodes = "2"` are one setting rather than
+# two spellings that render differently.
+function _region_options_of(d)
+    o = get(d, "options", nothing)
+    o isa AbstractDict || return Dict{String,String}()
+    out = Dict{String,String}()
+    for (k, v) in o
+        ks = strip(String(k)); isempty(ks) && continue
+        out[ks] = v === nothing ? "" : (v isa AbstractString ? String(v) : string(v))
+    end
+    return out
+end
+
 _region_from_dict(d::AbstractDict) = Region(
     String(get(d, "name", "")), String(get(d, "host", "")),
     Symbol(let t = String(get(d, "transport", "tunnel")); isempty(t) ? "tunnel" : t end),
@@ -3253,12 +3299,15 @@ _region_from_dict(d::AbstractDict) = Region(
     String(get(d, "partition", "")), String(get(d, "walltime", "")), _asint(get(d, "cpus", 0)),
     String(get(d, "mem", "")), String(get(d, "gpus", "")), String(get(d, "account", "")),
     String(get(d, "alloc_name", "")), max(0, _asint(get(d, "idle_release", 0))),
-    max(0, _asint(get(d, "idle_warn", 0))))
+    max(0, _asint(get(d, "idle_warn", 0))),
+    # Absent ⇒ no extra options, which is what every region written before this meant.
+    _region_options_of(d), String(get(d, "prologue", "")))
 _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
     "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
     "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
     "curve" => r.curve, "uuid" => r.uuid, "peer" => r.peer,
-    "scheduler" => String(r.scheduler), "partition" => r.partition, "walltime" => r.walltime,
+    "scheduler" => String(r.scheduler), "options" => r.options, "prologue" => r.prologue,
+    "partition" => r.partition, "walltime" => r.walltime,
     "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus, "account" => r.account,
     "alloc_name" => r.alloc_name, "idle_release" => r.idle_release, "idle_warn" => r.idle_warn)
 
@@ -3329,7 +3378,8 @@ function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "
                      data_root = "", cache_root = "", warm = 0, threads = "", sysimage = false,
                      curve = true, uuid = "", peer = "",
                      scheduler = :none, partition = "", walltime = "", cpus = 0, mem = "",
-                     gpus = "", account = "", alloc_name = "", idle_release = 0, idle_warn = 0)
+                     gpus = "", account = "", alloc_name = "", idle_release = 0, idle_warn = 0,
+                     options = Dict{String,String}(), prologue = "")
     n = _fold_region(name)   # tag-safe id — MUST match region_get/region_delete! + a cell's `region=` tag
     isempty(n) && error("region name required")
     return lock(_REGIONS_LOCK) do
@@ -3349,7 +3399,8 @@ function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "
                    _asbool(sysimage), _asbool(curve), u, pe,
                    sched, String(partition), String(walltime), Int(cpus),
                    String(mem), String(gpus), String(account), String(alloc_name),
-                   max(0, Int(idle_release)), max(0, Int(idle_warn)))
+                   max(0, Int(idle_release)), max(0, Int(idle_warn)),
+          _region_options_of(Dict("options" => options)), String(prologue))
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)
         r
@@ -3579,7 +3630,7 @@ function region_place!(r::Region; wait_s::Real = 120)
     end
     a = Sweep.allocation_node!(kind, r.host, name; wait_s = wait_s, walltime = _alloc_walltime(r),
                                partition = r.partition, cpus = r.cpus, mem = r.mem,
-                               gpus = r.gpus, account = r.account)
+                               gpus = r.gpus, account = r.account, options = r.options)
     if !Sweep.alive(a)
         held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
         held === nothing || route!(held.host, "")   # nothing is holding it now; the route is a lie

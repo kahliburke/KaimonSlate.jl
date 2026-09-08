@@ -179,11 +179,17 @@ export function Clusters() {
         <div class="rpprow"><label></label><span class="pddim">Use scratch, not $HOME.</span></div>
         <div class="rpprow"><label>Partition</label>${Partitions()}</div>
         <div class="rpprow"><label>Per job</label>
-          <input class="rppport" autocomplete="off" spellcheck="false" placeholder="walltime" title="e.g. 01:00:00" value=${kWalltime.value} onInput=${ev => kWalltime.value = ev.target.value}/>
-          <input class="rppn" type="text" inputmode="numeric" autocomplete="off" placeholder="cpus" value=${kCpus.value} onInput=${ev => kCpus.value = ev.target.value}/>
-          <input class="rppn" autocomplete="off" spellcheck="false" placeholder="mem" title=${kKind.value === 'pbs' ? 'e.g. 8gb' : 'e.g. 8G'} value=${kMem.value} onInput=${ev => kMem.value = ev.target.value}/>
-          <span class="pddim">a cell can override these</span></div>
-        <div class="rpprow"><label>Project</label>
+      <div class="rppfields">
+        ${[['walltime', kWalltime, '01:00:00', 'time limit per job'],
+           ['cpus', kCpus, '4', 'cores per job'],
+           ['memory', kMem, kKind.value === 'pbs' ? '8gb' : '8G', 'per job']].map(([nm, sig, ph, hint]) => html`
+          <label class="rppfield"><span class="rppfieldname">${nm}</span>
+            <input class="rppport" autocomplete="off" spellcheck="false" placeholder=${ph}
+                   title=${hint} value=${sig.value} onInput=${ev => sig.value = ev.target.value}/>
+            <span class="rppfieldhint">${hint}</span></label>`)}
+      </div>
+      <span class="pddim">a cell can override these</span></div>
+    <div class="rpprow"><label>Project</label>
           <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="/path/to/project  (folder with Project.toml, on the cluster)" value=${kProject.value} onInput=${ev => kProject.value = ev.target.value}/></div>`}
       ${isLocal ? html`
         <div class="rpprow"><label>Project</label>

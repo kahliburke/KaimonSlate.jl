@@ -1285,6 +1285,9 @@ function _make_router(h::Hub)
                  # As the user wrote them, so the form shows "1h" rather than 3600.
                  "idle_release" => ReportEngine.Sweep.format_duration(r.idle_release),
                  "idle_warn" => ReportEngine.Sweep.format_duration(r.idle_warn),
+                 # Everything the fixed fields cannot say, as the sweep cell's editor stores it,
+                 # plus the shell to run before a worker boots.
+                 "options" => r.options, "prologue" => r.prologue,
                  # Where the workers actually ARE. For a scheduler region that is the granted node,
                  # and it is the thing worth showing — `host` is only where the asking happens.
                  # Read from the hub's cached placement: listing regions must never queue for a node.
@@ -1453,7 +1456,16 @@ function _make_router(h::Hub)
                                      gpus = strip(String(get(b, "gpus", ""))),
                                      account = strip(String(get(b, "account", ""))),
                                      alloc_name = strip(String(get(b, "alloc_name", ""))),
-                                     idle_release = idle_s, idle_warn = warn_s)
+                                     idle_release = idle_s, idle_warn = warn_s,
+                                     # A name with no value is a switch (`--exclusive`), so an empty value is kept. Only a
+                                     # NAMELESS entry is dropped, which is what a half-typed row in the editor is.
+                                     options = let o = get(b, "options", nothing)
+                                         o isa AbstractDict ?
+                                             Dict{String,String}(strip(String(k)) => (v === nothing ? "" : string(v))
+                                                                 for (k, v) in o if !isempty(strip(String(k)))) :
+                                             Dict{String,String}()
+                                     end,
+                                     prologue = strip(String(get(b, "prologue", ""))))
         do_reconcile && Threads.@spawn try
             ReportEngine.region_reconcile!(r.name)   # no-op when warm==0 except draining excess
         catch e

@@ -239,13 +239,53 @@ end
 # host — a poll, a release, a cell reaching the cluster — is stuck behind it. `sbatch` returns as
 # soon as the job is queued, which is what `allocation_node!`'s poll loop is already there to
 # follow up. The node is reached with `srun --overlap`, which joins the running job either way.
-function _slurm_request_script(name; walltime, partition, cpus, mem, gpus, account, extra)
+# The catalogued options a region carries, spelled for the scheduler it is asking. The catalogue and
+# the spellings are `Sweep.sched_options()` and `BatchLauncher.sbatch_flag`/`pbs_flag` — the same
+# ones a sweep cell edits and submits against, so one cluster described twice says one thing.
+#
+# An option this scheduler cannot express is DROPPED, not guessed at. The catalogue already knows
+# which those are: `pbs_flag` answers "" when PBS has no way to say it, and a `select=…` fragment
+# when the setting belongs inside a chunk statement rather than on the command line. Inventing a flag
+# would fail the submission at best, and quietly ask for something else at worst.
+# A region already has a box for these, and the request emits each from its own argument. An
+# option repeating one would put the same flag on the command line twice, which is a request nobody
+# wrote: the scheduler takes whichever it takes, and the form shows a value that is not what was
+# asked for. The BOX wins, because it is the one visible in the region's summary.
+const _FIELD_OWNED = Set(["cpus", "mem", "walltime", "partition", "account", "gpus"])
+
+function _option_args(kind::Symbol, options)
+    args = String[]
+    isempty(options) && return args
+    for k in sort!(collect(keys(options)))              # sorted: a stable command for a stable request
+        key = strip(String(k)); isempty(key) && continue
+        # Dropped rather than merged: a stored duplicate is stale config, not an override.
+        key in _FIELD_OWNED && continue
+        v = strip(String(get(options, k, "")))
+        sym = Symbol(replace(key, '-' => '_'))
+        if kind === :slurm
+            f = BatchLauncher.sbatch_flag(sym)
+            isempty(f) && continue
+            # A valueless option is a switch (`--exclusive`), not a flag with an empty argument.
+            push!(args, isempty(v) ? "--" * f : "--" * f * "=" * shq(v))
+        else
+            f = BatchLauncher.pbs_flag(sym)
+            (isempty(f) || occursin('…', f)) && continue
+            # `-l` takes `name=value`; everything else takes its value as the next word.
+            push!(args, isempty(v) ? f : startswith(f, "-l ") ? f * "=" * shq(v) : f * " " * shq(v))
+        end
+    end
+    return args
+end
+
+function _slurm_request_script(name; walltime, partition, cpus, mem, gpus, account, extra,
+                               options = Dict{String,String}())
     args = String["-J", shq(name), "-t", shq(walltime), "-o", "/dev/null"]
     cpus > 0 && append!(args, ["-n", string(cpus)])
     isempty(partition) || append!(args, ["-p", shq(partition)])
     isempty(mem)       || append!(args, ["--mem", shq(mem)])
     isempty(gpus)      || append!(args, ["--gpus", shq(gpus)])
     isempty(account)   || append!(args, ["-A", shq(account)])
+    append!(args, _option_args(:slurm, options))
     isempty(extra)     || push!(args, extra)
     return """
     sbatch $(join(args, " ")) 2>&1 <<'SLATE_HOLD_EOF'
@@ -258,7 +298,8 @@ end
 
 # The node is held for as long as the job lives, and the scheduler ends the job at its walltime,
 # which is exactly the lease asked for. The sleep only has to outlast that.
-function _pbs_request_script(name; walltime, partition, cpus, mem, gpus, account, extra)
+function _pbs_request_script(name; walltime, partition, cpus, mem, gpus, account, extra,
+                            options = Dict{String,String}())
     res = Dict{Symbol,Any}()
     cpus > 0 && (res[:cpus] = cpus)
     isempty(mem)  || (res[:mem] = String(mem))
@@ -269,6 +310,7 @@ function _pbs_request_script(name; walltime, partition, cpus, mem, gpus, account
     args = String["-N", shq(name), "-l", shq("select=" * sel), "-l", shq("walltime=" * walltime)]
     isempty(partition) || append!(args, ["-q", shq(partition)])
     isempty(account)   || append!(args, ["-A", shq(account)])
+    append!(args, _option_args(:pbs, options))
     isempty(extra)     || push!(args, extra)
     return """
     qsub $(join(args, " ")) 2>&1 <<'SLATE_HOLD_EOF'
@@ -291,12 +333,13 @@ function request_allocation!(kind::Symbol, host::AbstractString, name::AbstractS
                              partition::AbstractString = "",
                              cpus::Integer = 1, mem::AbstractString = "",
                              gpus::AbstractString = "", account::AbstractString = "",
-                             extra::AbstractString = "")
+                             extra::AbstractString = "",
+                             options = Dict{String,String}())
     cur = find_allocation(kind, host, name)
     cur.state === :none || return cur   # already held, or unreachable — either way, do not submit
     mk = kind === :slurm ? _slurm_request_script :
          kind === :pbs   ? _pbs_request_script : _unsupported_scheduler(kind)
-    ok, out = run_there(host, mk(name; walltime, partition, cpus, mem, gpus, account, extra))
+    ok, out = run_there(host, mk(name; walltime, partition, cpus, mem, gpus, account, extra, options))
     ok || @debug "allocation request failed" kind out
     return find_allocation(kind, host, name)
 end

@@ -160,6 +160,101 @@ const RE = KaimonSlate.ReportEngine
                 end
             end
 
+            # ── what the fixed fields cannot say ──────────────────────────────────────────────
+            # A region carries the same scheduler options a sweep cell does, spelled by the same
+            # catalogue, so one cluster described for a sweep and for a region says one thing.
+            @testset "a region's scheduler options reach the request" begin
+                S = RE.Sweep
+                opts = Dict("constraint" => "avx512", "exclusive" => "", "qos" => "high")
+                sl = S._slurm_request_script("j"; walltime = "01:00:00", partition = "", cpus = 0,
+                                             mem = "", gpus = "", account = "", extra = "",
+                                             options = opts)
+                # Values are shell-quoted, so an option whose value has a space cannot become two arguments.
+                @test occursin("--constraint='avx512'", sl)
+                @test occursin("--qos='high'", sl)
+                # A valueless option is a switch, not a flag with an empty argument: `--exclusive=`
+                # is a different request, and some schedulers reject it outright.
+                @test occursin("--exclusive", sl) && !occursin("--exclusive=", sl)
+                # A value with a space stays ONE argument. Unquoted it would split and the
+                # scheduler would read the tail as a separate option.
+                spaced = S._slurm_request_script("j"; walltime = "01:00:00", partition = "", cpus = 0,
+                                                 mem = "", gpus = "", account = "", extra = "",
+                                                 options = Dict("comment" => "two words"))
+                @test occursin("--comment='two words'", spaced)
+
+                # Sorted, so the same region asks the same question twice running.
+                @test findfirst("--constraint", sl)[1] < findfirst("--qos", sl)[1]
+
+                # PBS spells what it can and stays silent about the rest. `constraint` has no PBS
+                # equivalent, and inventing one would fail the submission or quietly ask for
+                # something else — the catalogue already records which those are.
+                pb = S._pbs_request_script("j"; walltime = "01:00:00", partition = "", cpus = 0,
+                                           mem = "", gpus = "", account = "", extra = "",
+                                           options = opts)
+                @test occursin("-l qos='high'", pb)
+                @test !occursin("constraint", pb)
+
+                # A name the form already has a box for is DROPPED, not emitted a second time. The
+                # request builds `--mem` from its own argument; an option repeating it would put the
+                # flag on the command line twice and the scheduler would take whichever it took,
+                # while the form went on showing the value that lost.
+                dup = S._slurm_request_script("j"; walltime = "01:00:00", partition = "", cpus = 0,
+                                              mem = "8G", gpus = "", account = "", extra = "",
+                                              options = Dict("mem" => "64G", "qos" => "high"))
+                @test occursin("--mem '8G'", dup)          # the box
+                @test !occursin("64G", dup)                # not the stale option
+                @test occursin("--qos='high'", dup)        # and everything else still passes
+
+                # No options is the request exactly as it was before any of this existed.
+                bare = S._slurm_request_script("j"; walltime = "01:00:00", partition = "", cpus = 0,
+                                               mem = "", gpus = "", account = "", extra = "")
+                @test !occursin("--constraint", bare) && !occursin("--qos", bare)
+            end
+
+            @testset "a region's prologue runs where it can matter" begin
+                # In the worker's own shell, before the worker boots. Not in the allocation's job
+                # body, which only sleeps, and not on `_run_on`, which carries every poll too.
+                RE.region_set!("prol"; host = "login", scheduler = :slurm,
+                               prologue = "module load cuda")
+                try
+                    p = RE._region_prologue("prol")
+                    @test occursin("module load cuda", p)
+                    # Chained, so a prologue that fails stops the boot rather than starting a worker
+                    # into an environment that was never set up.
+                    @test endswith(p, "&& ")
+                    # A region without one, and a spawn that is not a region's, leave the line alone.
+                    @test RE._region_prologue("") == ""
+                    @test RE._region_prologue("no-such-region") == ""
+                    RE.region_set!("noprol"; host = "login", scheduler = :slurm)
+                    @test RE._region_prologue("noprol") == ""
+                finally
+                    try; RE.region_delete!("prol"); RE.region_delete!("noprol"); catch; end
+                end
+            end
+
+            @testset "options and prologue survive a round trip" begin
+                RE.region_set!("rt"; host = "login", scheduler = :slurm,
+                               options = Dict("qos" => "high"), prologue = "module load x")
+                try
+                    r = RE.region_get("rt")
+                    @test r.options == Dict("qos" => "high") && r.prologue == "module load x"
+                    # Through the stored form, which is what a reopened hub reads.
+                    back = RE._region_from_dict(RE._region_to_dict(r))
+                    @test back.options == r.options && back.prologue == r.prologue
+                    # A record written before these fields existed reads as having neither, rather
+                    # than failing to parse.
+                    old = RE._region_from_dict(Dict("name" => "old", "host" => "h"))
+                    @test isempty(old.options) && old.prologue == ""
+                    # A number in the stored JSON is one setting with the string it renders as, not
+                    # a second spelling of it.
+                    num = RE._region_from_dict(Dict("name" => "n", "host" => "h",
+                                                    "options" => Dict("nodes" => 2)))
+                    @test num.options == Dict("nodes" => "2")
+                finally
+                    try; RE.region_delete!("rt"); catch; end
+                end
+            end
+
             # ── a dead worker's series does not outlive it ────────────────────────────────────
             # Both registries are keyed by the gate connection name, and every respawn mints a new
             # one. Both shipped with a `forget` function that nothing called, so a hub that restarted

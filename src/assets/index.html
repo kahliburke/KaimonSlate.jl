@@ -195,6 +195,46 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rpprow{display:flex;align-items:center;gap:10px;margin-bottom:9px;}
 .rpprow>label:not(.rppchk){flex:0 0 88px;color:#8a90a8;font-size:.8rem;}
 .rppact{display:flex;gap:8px;padding-left:98px;}
+/* A labelled field. The inputs used to carry their meaning in a placeholder, which is exactly the
+   text that disappears once a value is typed — so a saved region showed four bare numbers and you
+   could not tell cpus from gpus without clearing one. The name stays; the hint is the tooltip's
+   text, shown small so a wide form explains itself and a narrow one still fits. */
+.rppfields{display:flex;flex-wrap:wrap;gap:10px;flex:1 1 auto;min-width:0;}
+.rppfield{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 92px;}
+.rppfieldname{color:#8a90a8;font-size:.7rem;letter-spacing:.02em;}
+.rppfield>input{width:100%;box-sizing:border-box;}
+/* WRAPS rather than truncating: a clipped hint is worse than a ragged row, and the longest of
+   them is the one carrying the caveat you most need. */
+.rppfieldhint{color:#5c6280;font-size:.68rem;line-height:1.3;}
+/* A host or region name inside a sentence should not break across lines mid-word. */
+.rppnowrap{white-space:nowrap;}
+/* Rarely-set settings, folded. The count on the disclosure is the point: a fold that hides a
+   setting silently is worse than a longer form. */
+.rppmorebtn{background:none;border:0;color:#9aa3c0;font-size:.8rem;cursor:pointer;padding:2px 0;}
+.rppmorebtn:hover{color:#569cd6;}
+.rppmoren{margin-left:7px;color:#e8a13f;font-size:.7rem;border:1px solid #3a3320;background:#221c0f;border-radius:8px;padding:1px 6px;}
+.rppopts{display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0;}
+.rppoptrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.rppoptk,.rppoptv{background:#10131f;color:#cdd3e6;border:1px solid #2a2e40;border-radius:6px;padding:5px 8px;font-family:Menlo,monospace;font-size:.76rem;min-width:0;}
+.rppoptk{flex:1 1 150px;} .rppoptv{flex:1 1 110px;}
+.rppoptdel{background:none;border:0;color:#6a7090;cursor:pointer;font-size:.8rem;}
+.rppoptdel:hover{color:#e0596a;}
+.rppoptadd{align-self:flex-start;background:#10131f;color:#9aa3c0;border:1px dashed #2a2e40;border-radius:6px;padding:4px 10px;font-size:.76rem;cursor:pointer;}
+.rppoptadd:hover{border-color:#569cd6;color:#569cd6;}
+/* A warning, never an error: the name is sent either way. */
+.rppoptwarn{color:#e8a13f;font-size:.7rem;flex:1 1 100%;}
+.rppoptrow{position:relative;}
+.rppoptrow.unknown .rppoptk{border-color:#5a4a22;}
+/* Our own menu, not a datalist: a datalist opens the whole list on focus and the browser draws it,
+   so it can be neither filtered nor capped. This shows nothing until you type. */
+.rppoptmenu{position:absolute;top:100%;left:0;right:0;z-index:40;margin-top:3px;max-height:180px;
+  overflow-y:auto;background:#0f1220;border:1px solid #2a2e40;border-radius:7px;
+  box-shadow:0 8px 20px rgba(0,0,0,.45);}
+.rppoptmi{display:flex;gap:9px;align-items:baseline;padding:5px 9px;cursor:pointer;}
+.rppoptmi:hover{background:#1a1f33;}
+.rppoptminame{font-family:Menlo,monospace;font-size:.76rem;color:#cdd3e6;white-space:nowrap;}
+.rppoptmihint{color:#6a7090;font-size:.7rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.rppprologue{font-family:Menlo,monospace;font-size:.76rem;resize:vertical;width:100%;box-sizing:border-box;}
 .rppn{width:56px;background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 8px;font-size:.82rem;text-align:center;}
 .rppname{flex:1 1 auto;min-width:0;background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 9px;font-size:.82rem;}
 .rppname[readonly]{color:#9aa3c0;background:#0c0f19;border-style:dashed;}
@@ -1918,6 +1958,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 <!-- Home-page Preact island: the remote-activity monitor + worker-detail popup (replaces the former
      inline innerHTML render). Bridges to the vanilla Remotes modal via window.slateOpen* helpers. -->
 <script src="/assets/js/model.js"></script>   <!-- one worker/allocation model; classic, so the modules below can rely on it -->
+<script src="/assets/js/schedopts.js"></script>   <!-- the scheduler-option catalogue, shared with the sweep cell editor -->
 <script type="module" src="/assets/js/activity.js"></script>
 <!-- Remotes modal island: host setup + SSE preflight + known-hosts list + xfer + the region focus view
      (imports Focus from remotes-focus.js) + the run-on pickers. Driven by shared signals (stores.js). -->
