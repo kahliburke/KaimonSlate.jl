@@ -1,6 +1,6 @@
 name = "KaimonSlate"
 uuid = "f7b954f5-0334-4562-ac21-b005218ce1da"
-version = "1.4.9"
+version = "1.5.0"
 authors = ["Kahli Burke <kahli@kahliburke.com>"]
 
 [deps]
@@ -61,7 +61,7 @@ Serialization = "1.11.0"
 SlateExtensionsBase = "0.10.4"
 Sockets = "1.11.0"
 TOML = "1.0.3"
-Tachikoma = "2.5.0"
+Tachikoma = "2.6.1"
 Tar = "1.10"
 Typst_jll = "0.14"
 julia = "1.12"
