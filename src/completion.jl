@@ -53,6 +53,40 @@ end
 # the name, so it lingers as `f (generic function with 0 methods)`). Excludes builtins (whose
 # `methods` is empty) so getfield/tuple/etc. aren't dropped. (Note: this also hides an intentional
 # empty interface stub `function f end`, which is uncommon and still typeable.)
+# Is the completion being asked for AFTER a dot (`Mod.foo`) rather than for a bare identifier?
+# Scan back over the identifier being typed and look at what precedes it.
+function _is_dotted(s::AbstractString, p::Integer)
+    cu = codeunits(s); i = Int(p)
+    isid(b) = (UInt8('a') <= b <= UInt8('z')) || (UInt8('A') <= b <= UInt8('Z')) ||
+              (UInt8('0') <= b <= UInt8('9')) || b == UInt8('_') || b == UInt8('!')
+    while i > 0 && isid(cu[i]); i -= 1; end
+    return i >= 1 && cu[i] == UInt8('.')
+end
+
+# For `Mod.<tab>`, is `name` part of what `Mod` actually offers?
+#
+# `names(M; all=true, imported=true)` — what REPLCompletions enumerates — also returns everything M
+# reached through its OWN `using Base`. For a small module that is two of its own functions against
+# roughly eleven hundred inherited ones, so the names someone opened `Mod.` to find sort in past
+# every operator in Base. True for what M defines and what M exports (the latter so a module that
+# re-exports another package's API, via Reexport or plain `export`, still counts as offering it).
+# These are ordered FIRST rather than filtered, so `Mod.sin` stays reachable, just not in the way.
+# Anything we cannot judge counts as API: mis-sorting a name is cheaper than burying it.
+function _module_api(parent::Module, name::AbstractString)
+    # `_comp_text` renders a macro as `@foo` and a STRING macro as `foo"`, but the binding behind the
+    # latter is `@foo_str` — without this the lookup below can't resolve one and every inherited
+    # string macro counts as API.
+    sym = endswith(name, '"') && !startswith(name, '"') ? Symbol("@", chop(name), "_str") : Symbol(name)
+    try
+        isdefined(parent, sym) || return true
+        Base.binding_module(parent, sym) === parent && return true      # defined here
+        Base.isexported(parent, sym) && return true                     # re-exported here
+        return isdefined(Base, :ispublic) ? Base.ispublic(parent, sym) : false
+    catch
+        return true
+    end
+end
+
 function _dead_stub(parent::Module, name::AbstractString)
     sym = Symbol(name)
     (parent isa Module && isdefined(parent, sym)) || return false
@@ -140,6 +174,12 @@ function slate_completions(mod::Module, code::AbstractString, pos::Integer)
     s = String(code); p = clamp(Int(pos), 0, ncodeunits(s))
     items = Tuple{String,String}[]
     from = p; to = p
+    dotted = _is_dotted(s, p)
+    # `Mod.<tab>` should lead with what Mod provides rather than everything Mod itself imported.
+    # Inherited names go to `tail` and are appended after, which the route's stable re-rank then
+    # preserves within a kind tier. Only for a DOTTED completion into some OTHER module: a bare
+    # identifier resolves in the notebook's own namespace, where inherited Base names are the point.
+    tail = Tuple{String,String}[]
     try
         comps, range, _ = REPL.REPLCompletions.completions(s, p, mod)
         from = first(range) - 1; to = last(range)
@@ -147,6 +187,8 @@ function slate_completions(mod::Module, code::AbstractString, pos::Integer)
             t = _comp_text(c)
             isempty(t) && continue
             c isa REPL.REPLCompletions.ModuleCompletion && _dead_stub(c.parent, t) && continue
+            demote = dotted && c isa REPL.REPLCompletions.ModuleCompletion &&
+                     c.parent !== mod && !_module_api(c.parent, t)
             k = _comp_kind(c)
             # A string-macro completion (`colorant"`, `r"`, …) — an identifier ending in a lone
             # `"` (not a quoted dict key, which starts with `"`). Tag it so the UI shows a proper
@@ -160,9 +202,10 @@ function slate_completions(mod::Module, code::AbstractString, pos::Integer)
             # CURRENT cell's own bindings are lifted a further tier ("local") by the /complete route.
             (k == "const" || k == "var") && c isa REPL.REPLCompletions.ModuleCompletion &&
                 c.parent === mod && _owned_by(mod, t) && (k = "notebook")
-            push!(items, (t, k))
+            push!(demote ? tail : items, (t, k))
         end
     catch
     end
+    append!(items, tail)
     return (items = items, from = from, to = to)
 end
