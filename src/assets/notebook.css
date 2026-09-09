@@ -2268,7 +2268,20 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .relchip:hover { border-color: var(--accent); color: var(--accent); }
   .docpanel .docbody { flex: 1; min-height: 0; max-height: none; }
-  .dochdr { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  .dochdr { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border);
+    position: relative; }
+  /* Name suggestions for the docs search box. Same shape as the Packages panel's `.pkgsug`, anchored
+     under the input rather than the whole row. Hidden until there is something to show, so an empty
+     box never leaves a stray border. */
+  .docsug { position: absolute; top: calc(100% - 1px); left: 68px; right: 44px; z-index: 6; max-height: 260px;
+    overflow: auto; display: none; background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 0 0 7px 7px; box-shadow: 0 10px 24px #0009; }
+  .docsug div { padding: 5px 11px; cursor: pointer; font-size: .84rem; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; display: flex; align-items: center; gap: 8px; }
+  .docsug div:hover, .docsug div.on { background: var(--accent); color: var(--strong); }
+  /* Where the name came from: a binding the notebook has loaded, or a package it could load. */
+  .docsug .dsk { flex: 0 0 auto; font-size: .68rem; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); }
+  .docsug div.on .dsk { color: var(--strong); opacity: .8; }
   .dochdr input { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--bg3);
     border-radius: 7px; padding: 7px 11px; font-size: 13px; outline: none; }
   .dochdr input:focus { border-color: var(--accent); }

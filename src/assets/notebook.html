@@ -701,6 +701,9 @@
     <button id="docfwd" class="docnav" onclick="_navFwd()" title="forward">›</button>
     <input id="docin" placeholder="Search docs or type a name… (⌘⇧K)" autocomplete="off" spellcheck="false"/>
     <button id="docmin" class="docnav" onclick="minimizeDocs()" title="minimize">▾</button>
+    <!-- Name suggestions under the search box. Anchored to .dochdr (position:relative), so it
+         overlays the results list rather than displacing it. -->
+    <div id="docsug" class="docsug"></div>
   </div>
   <div class="docbody"><ul id="doclist" class="doclist"></ul><div id="docdetail" class="docdetail"></div><div id="docrelated" class="docrelated"></div></div>
 </aside>
