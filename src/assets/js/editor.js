@@ -16,7 +16,7 @@
 
           autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
           completionStatus, startCompletion, acceptCompletion, snippet,
-          cmSearch, cmView } = CM;
+          cmSearch, cmView, cmAutocomplete } = CM;
 
   // ── Every live editor view ──────────────────────────────────────────────────────
   // The audience for a settings change: theme, wrap, keymap, completion delay and the extension
@@ -820,7 +820,20 @@
         ? () => autocompletion({ icons: true, activateOnTypingDelay: _completeDelay(),
             override: [localCompletionSource, scopeCompletionSource(globalThis)] })
         : () => autocompletion({ icons: true, activateOnTypingDelay: _completeDelay() });
-    const cellKeys = (opts.keys || []).map(k => ({ key: k.key, run: () => { k.run(); return true; } }));
+    // Cell-level keys (Shift-Enter run, ⌘⇧Enter run-and-add, split, commitSource) all APPLY the cell
+    // and move on, so an open completion popup has outlived its question — it used to stay up over
+    // the result. Dismissed here rather than in each caller's binding: this is the one place every
+    // cell key passes through, and none of them wants the list left behind. `pending` counts too (a
+    // query still in flight would pop a list open after the cell had already run).
+    const cellKeys = (opts.keys || []).map(k => ({
+      key: k.key,
+      run: v => {
+        if (v && completionStatus(v.state) !== null) {
+          try { cmAutocomplete.closeCompletion(v); } catch (_) {}
+        }
+        k.run(); return true;
+      },
+    }));
     const _edctx = { markdown: !!opts.markdown, cellId: opts.cellId, lang: opts.lang };   // for registered editor extensions
     // Web-cell panes (HTML/CSS/JS) indent 2 spaces — the web convention — vs Julia's 4. Drives
     // auto-indent (Enter / indentOnInput) and Tab; the language's indent service reads `indentUnit`.
