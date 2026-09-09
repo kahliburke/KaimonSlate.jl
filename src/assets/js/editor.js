@@ -9,7 +9,7 @@
           ViewPlugin, WidgetType, Prec,
           vimMode, vimApi, vimGetCM, emacsMode,
           keymap, defaultKeymap, history, historyKeymap, undoDepth, redoDepth, indentWithTab, toggleComment,
-          indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection,
+          indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection, tooltips,
           syntaxHighlighting, julia, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
           htmlLang, cssLang, jsLang, jsEmbed, scopeCompletionSource, localCompletionSource,
           syntaxErrorLinter,
@@ -830,6 +830,13 @@
       doc: opts.doc || '',
       extensions: [
         history(), drawSelection(), bracketMatching(), closeBrackets(), indentOnInput(),
+        // The completion popup is parented on <body>, not inside the editor. A cell clips to its
+        // rounded corners with `overflow:hidden` (notebook.css `.cell`), and a tooltip rendered
+        // inside the editor DOM inherits that clip — CM6 detects an overflow ancestor and
+        // repositions, but Safari does not end up with a visible popup. Outside the cell there is
+        // nothing to clip it. The `.cm-tooltip` rules are global and the theme variables sit on
+        // `:root`, so the popup still themes correctly from here.
+        tooltips({ parent: document.body }),
         indentUnit.of(_indent), EditorState.tabSize.of(webLang ? 2 : 4), errField, originField, flashField,
         wrapComp.of(_wrapExt(!!opts.markdown)),
         ...lang,

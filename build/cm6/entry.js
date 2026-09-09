@@ -2,7 +2,7 @@
 // global `CM6`). Exposes the CM6 primitives the editor wrapper (cm6compat.js) needs, plus a Julia
 // LanguageSupport whose highlighting comes from @plutojl/lezer-julia's parser + a styleTags map.
 import { EditorView, keymap, drawSelection, highlightActiveLine, highlightSpecialChars,
-         crosshairCursor, Decoration, ViewPlugin, WidgetType } from "@codemirror/view";
+         crosshairCursor, Decoration, ViewPlugin, WidgetType, tooltips } from "@codemirror/view";
 import { EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder, Transaction, Prec } from "@codemirror/state";
 // Modal editing (Settings → Editing → Editor keymap). `vimApi` is the global command registry —
 // Slate registers the ex commands that mean something for a notebook cell (:w runs it, :q leaves
@@ -259,6 +259,7 @@ const juliaHighlightStyle = juliaThemes["dark-plus"];   // default / back-compat
 export {
   EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder, Transaction, Prec,
   keymap, drawSelection, highlightActiveLine, highlightSpecialChars, crosshairCursor, Decoration, ViewPlugin, WidgetType,
+  tooltips,                             // completion popup parenting — see the editor's extension list
   defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess, toggleComment,
   undoDepth, redoDepth,
   indentUnit, bracketMatching, indentOnInput, syntaxTree,
