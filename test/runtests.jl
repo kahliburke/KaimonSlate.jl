@@ -12,6 +12,7 @@ module Parsched;  include("test_parsched.jl");  end
 module Memostore; include("test_memostore.jl"); end
 module Slatetask; include("test_slatetask.jl"); end
 module Batchsweep; include("test_batchsweep.jl"); end
+module Transfer;  include("test_transfer.jl");  end
 module Dataset; include("test_dataset.jl"); end
 module Sweepcell; include("test_sweepcell.jl"); end
 module Effectstore; include("test_effectstore.jl"); end
@@ -61,7 +62,7 @@ module WsOrder;   include("test_ws_order.jl");   end
 # Every module above belongs here. A file that is `include`d but left out of this tuple is still
 # COMPILED, so it never looks broken — it is simply never run, and its testsets pass silently by
 # not existing.
-const _TESTMODS = (Defname, Prepare, Demux, Parsched, Memostore, Slatetask, Batchsweep, Dataset, Sweepcell, Effectstore, Blobchannel, RemotePool, Regions, SlateDiagT, Parallel, Animation, Echarts, SlateLook, Engine, Eval, Deps,
+const _TESTMODS = (Defname, Prepare, Demux, Parsched, Memostore, Slatetask, Batchsweep, Transfer, Dataset, Sweepcell, Effectstore, Blobchannel, RemotePool, Regions, SlateDiagT, Parallel, Animation, Echarts, SlateLook, Engine, Eval, Deps,
                    Envprep, Tools, Registry, Toolcell,
                    Web, Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi, Agentops, Repro, Slides,
                    Frontmatter, Export, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, WsOrder)

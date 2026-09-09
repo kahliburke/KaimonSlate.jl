@@ -346,7 +346,7 @@ end
 
 # Run `cmd`, streaming `input` to its stdin and collecting stdout. This is what replaces rsync: the
 # metadata directories are small text files, so `tar` over the channel moves them in one round trip.
-function _exec_io(s::Session, cmd::AbstractString, input::Union{Vector{UInt8},Nothing};
+function _exec_io(s::Session, cmd::AbstractString, input::Union{Vector{UInt8},IO,Nothing};
                   timeout::Real = 300.0)
     ch = _open_channel(s)
     ch == C_NULL && return (false, UInt8[], "channel_open: " * _lasterr(s))
@@ -355,19 +355,34 @@ function _exec_io(s::Session, cmd::AbstractString, input::Union{Vector{UInt8},No
         return (false, UInt8[], "exec: " * _lasterr(s))
     end
     if input !== nothing
-        off = 0
+        # An `IO` is read a chunk at a time, so what is SENT never has to fit in memory. A project
+        # directory is tarred to a temp file and handed over as a stream: the archive is already as
+        # large as the tree, and holding a second copy of it as a byte vector is what turned a big
+        # project into an out-of-memory failure rather than a slow transfer.
         deadline = time() + timeout
-        while off < length(input)
-            n = ccall((:libssh2_channel_write_ex, LIB), Cssize_t,
-                      (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t),
-                      ch, 0, pointer(input, off + 1), length(input) - off)
-            if n == Cssize_t(EAGAIN)
-                time() > deadline && break
-                _ready(s, 5.0); continue
+        buf = input isa IO ? Vector{UInt8}(undef, 256 * 1024) : input
+        while true
+            n = if input isa IO
+                eof(input) ? 0 : readbytes!(input, buf)
+            else
+                length(buf)                       # a plain vector is one pass
             end
-            n < 0 && break
-            off += Int(n)
+            n == 0 && break
+            off = 0
+            while off < n
+                w = ccall((:libssh2_channel_write_ex, LIB), Cssize_t,
+                          (Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t),
+                          ch, 0, pointer(buf, off + 1), n - off)
+                if w == Cssize_t(EAGAIN)
+                    time() > deadline && @goto sent
+                    _ready(s, 5.0); continue
+                end
+                w < 0 && @goto sent
+                off += Int(w)
+            end
+            input isa IO || break                 # the vector case wrote it all
         end
+        @label sent
         _again(s, () -> ccall((:libssh2_channel_send_eof, LIB), Cint, (Ptr{Cvoid},), ch); timeout = 10.0)
     end
     out = IOBuffer(); err = IOBuffer()
@@ -677,7 +692,7 @@ exec(host::AbstractString, cmd::AbstractString; ask) =
 Like `exec`, but streams `input` to the command's stdin and returns stdout as bytes. This is what
 carries a tar archive in either direction without a second authenticated transport.
 """
-exec_io(host::AbstractString, cmd::AbstractString, input::Union{Vector{UInt8},Nothing}; ask) =
+exec_io(host::AbstractString, cmd::AbstractString, input::Union{Vector{UInt8},IO,Nothing}; ask) =
     _request(String(host), :io, (String(cmd), input),
              (false, UInt8[], "session for $host is gone"); ask = ask)
 

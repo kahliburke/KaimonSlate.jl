@@ -226,12 +226,24 @@ so a store root is a store root and never a glob or a variable.
 shq(s) = "'" * replace(String(s), "'" => "'\\''") * "'"
 
 """
+    shq_path(s) -> String
+
+`shq` for a PATH, which may begin `~/`. Quoting is what makes a path with a space one word, and it
+is also what stops the shell expanding `~` — so a destination like `~/.cache/kaimonslate/remote`
+was creating a directory literally named `~` beside the home directory, while the Julia running on
+the far side resolved the same string against the real home and looked somewhere else. Only the
+leading `~/` is handled: a bare `~user` form is not something these paths use, and the rest of the
+path stays quoted so it is still exactly one word.
+"""
+shq_path(s) = (p = String(s); startswith(p, "~/") ? "\"\$HOME\"/" * shq(SubString(p, 3)) : shq(p))
+
+"""
     run_io(host, script, input) -> (ok, stdout::Vector{UInt8})
 
 `run_there` with bytes on stdin and bytes back — how files and archives cross without a second
 authenticated transport.
 """
-function run_io(host::AbstractString, script::AbstractString, input::Union{Vector{UInt8},Nothing})
+function run_io(host::AbstractString, script::AbstractString, input::Union{Vector{UInt8},IO,Nothing})
     if isempty(host)
         out = IOBuffer()
         ok = try
@@ -252,7 +264,7 @@ end
 
 "Write `data` to `path` on the host, creating its directory."
 function put_file(host::AbstractString, data::Vector{UInt8}, path::AbstractString)
-    script = "mkdir -p " * shq(dirname(String(path))) * " && cat > " * shq(String(path))
+    script = "mkdir -p " * shq_path(dirname(String(path))) * " && cat > " * shq_path(String(path))
     return first(run_io(host, script, data))
 end
 
@@ -279,6 +291,147 @@ function _excluded(rel::AbstractString, pats)
     return false
 end
 
+# ── What travels ─────────────────────────────────────────────────────────────────────────────
+# A project directory is shipped WHOLESALE, which is fine until something large sits beside the
+# code: a data directory, a results tree, a checkout of inputs. None of it is code and none of it
+# belongs on the far side, but the exclude list above could not tell — it is a fixed handful of
+# names, so a project whose root holds hundreds of gigabytes tries to send all of it.
+#
+# Two sources, both belonging to the PROJECT rather than to the host, because "too big to ship" is
+# a fact about the project and is the same fact for every remote it goes to:
+#
+#   .gitignore     Honoured whenever the directory is a git work tree. `git ls-files` answers
+#                  "tracked, plus untracked and not ignored" exactly, which is the intent, and it
+#                  reads the whole ignore chain (nested files, excludesFile, info/exclude) rather
+#                  than a reimplementation of it.
+#   .slateignore   Beside Project.toml, gitignore syntax. For a directory that IS tracked but is
+#                  not worth sending, and for projects that are not git repositories at all.
+#
+# `.slateignore` may also name a REGION, for the one thing that genuinely varies by destination: a
+# host that already has the data by other means (a shared filesystem, a sync service). A section
+# `[region:<name>]` applies only when shipping there, and `!pattern` un-ignores. Kept in the
+# project's file rather than the region's definition because a region is global across projects,
+# and `data/` names a different directory in each of them.
+const _SLATEIGNORE = ".slateignore"
+
+# Files git would keep: tracked + untracked-not-ignored. `nothing` when this is not a work tree or
+# git is unavailable, which is the signal to fall back to shipping everything but the fixed names.
+function _git_kept(dir::AbstractString)
+    out = try
+        d = abspath(String(dir))
+        readchomp(`git -C $d ls-files -c -o --exclude-standard -z`)
+    catch
+        return nothing
+    end
+    keep = Set{String}()
+    for f in split(out, '\0'; keepempty = false)
+        push!(keep, replace(String(f), '\\' => '/'))
+    end
+    return keep
+end
+
+# One `.slateignore` rule: a gitignore-style pattern plus whether it un-ignores.
+struct _IgnoreRule
+    negated::Bool
+    anchored::Bool      # a leading `/` — matches from the project root only
+    dironly::Bool       # a trailing `/` — matches a directory, and so its whole subtree
+    pat::String
+end
+
+# The GLOBAL section, then the one for `region` if it names one. Later rules win, so a region's
+# lines override the defaults above them — which is what makes "everywhere except this host"
+# and "only on this host" both expressible.
+function _slateignore_rules(dir::AbstractString, region::AbstractString)
+    f = joinpath(String(dir), _SLATEIGNORE)
+    isfile(f) || return _IgnoreRule[]
+    rules, active = _IgnoreRule[], true
+    for raw in eachline(f)
+        line = strip(raw)
+        (isempty(line) || startswith(line, '#')) && continue
+        if startswith(line, '[') && endswith(line, ']')
+            sec = strip(SubString(line, 2, lastindex(line) - 1))
+            active = !startswith(sec, "region:") ||
+                     strip(SubString(sec, ncodeunits("region:") + 1)) == String(region)
+            continue
+        end
+        active || continue
+        neg = startswith(line, '!')
+        neg && (line = strip(SubString(line, 2)))
+        isempty(line) && continue
+        anch = startswith(line, '/')
+        anch && (line = SubString(line, 2))
+        dironly = endswith(line, '/')
+        dironly && (line = SubString(line, 1, lastindex(line) - 1))
+        isempty(line) || push!(rules, _IgnoreRule(neg, anch, dironly, String(line)))
+    end
+    return rules
+end
+
+# A gitignore pattern against ONE path component or a whole relative path. `*` and `?` only —
+# character classes are rare in these files and a wrong match here silently drops a file.
+function _glob_match(pat::AbstractString, s::AbstractString)
+    occursin('*', pat) || occursin('?', pat) || return pat == s
+    re = "^" * replace(Base.escape_string(String(pat)),
+                       "\\*" => "*", "\\?" => "?") * "\$"
+    re = replace(re, "." => "\\.", "*" => "[^/]*", "?" => "[^/]")
+    return occursin(Regex(re), String(s))
+end
+
+# Does `rel` (a path relative to the project root, `/`-separated) match? An UNANCHORED pattern with
+# no slash matches any component, so `data/` catches `a/b/data/x` — gitignore's own rule, and the
+# one people rely on. A match on any parent prefix carries the whole subtree.
+function _rule_hits(r::_IgnoreRule, rel::AbstractString)
+    parts = split(String(rel), '/'; keepempty = false)
+    if occursin('/', r.pat)                       # a path pattern: match from the root
+        pp = split(r.pat, '/'; keepempty = false)
+        length(parts) >= length(pp) || return false
+        return all(i -> _glob_match(pp[i], parts[i]), eachindex(pp))
+    end
+    r.anchored && return !isempty(parts) && _glob_match(r.pat, parts[1])
+    # `dironly` means only a DIRECTORY matches, so the last component of a file path cannot.
+    last_i = r.dironly ? length(parts) - 1 : length(parts)
+    return any(i -> _glob_match(r.pat, parts[i]), 1:max(last_i, 0))
+end
+
+"""
+    transfer_keep(dir; region, excludes) -> (rel -> Bool)
+
+Which relative paths under `dir` may travel. `.gitignore` (via git) and `.slateignore` decide,
+with the fixed `excludes` applied on top — those name things that must never travel regardless
+(`.git`, a Manifest the far side is meant to resolve itself).
+"""
+function transfer_keep(dir::AbstractString; region::AbstractString = "",
+                       excludes::Vector{String} = String[])
+    kept = _git_kept(dir)
+    rules = _slateignore_rules(dir, region)
+    return function (rel::AbstractString)
+        r = replace(String(rel), '\\' => '/')
+        _excluded(r, excludes) && return false
+        # A directory is offered before its contents; keep it so the walk can descend, and let the
+        # files inside be judged on their own. Dropping it here would prune a subtree that
+        # `.slateignore` may have un-ignored.
+        isdirpath = isdir(joinpath(String(dir), r))
+        if kept !== nothing && !isdirpath && !(r in kept)
+            return false                                   # git ignores it, or it is not a file git sees
+        end
+        hit = false
+        for ru in rules                                    # later rules win
+            _rule_hits(ru, r) && (hit = !ru.negated)
+        end
+        return !hit
+    end
+end
+
+# Skip anything that is not a regular file, directory or symlink. A store is written while it is
+# shipped — an atomic write stages a temp file and renames it away — and `Tar` stats each entry
+# after listing its parent, so an entry that vanished in between reports a type it refuses to encode
+# and aborts the ENTIRE archive. Losing one in-flight temp is correct; losing the sync is not, and
+# it fails far from here (a marker that never reached the store).
+function _sendable(abs::AbstractString)
+    st = try; lstat(abs); catch; return false; end
+    return ispath(st) && (isfile(st) || isdir(st) || islink(st))
+end
+
 "A tar of `dir`, keeping the relative paths `keep` accepts."
 function _archive(dir::AbstractString, keep = _ -> true)
     root = abspath(String(dir))
@@ -286,8 +439,31 @@ function _archive(dir::AbstractString, keep = _ -> true)
     # `Tar.create` hands its predicate an ABSOLUTE path. Callers reason in paths relative to `dir` —
     # which is also what lands in the archive — so convert before asking, and use `/` regardless of
     # what the local platform separates with.
-    Tar.create(p -> keep(replace(relpath(String(p), root), '\\' => '/')), root, io)
+    Tar.create(p -> _sendable(String(p)) &&
+                    keep(replace(relpath(String(p), root), '\\' => '/')), root, io)
     return take!(io)
+end
+
+"""
+    _archive_file(dir, keep) -> path
+
+The same archive, written to a temp FILE. For a directory whose size is not known in advance — a
+user's project — because `_archive` holds the whole tar in memory and a second copy of a tree that
+is already large is what turns a big project into an out-of-memory failure instead of a slow
+transfer. The caller deletes it.
+"""
+function _archive_file(dir::AbstractString, keep = _ -> true)
+    root = abspath(String(dir))
+    path, io = mktemp()
+    try
+        Tar.create(p -> _sendable(String(p)) &&
+                        keep(replace(relpath(String(p), root), '\\' => '/')), root, io)
+        close(io)
+        return path
+    catch
+        close(io); rm(path; force = true)
+        rethrow()
+    end
 end
 
 "Unpack a tar into `dest`, MERGING with what is there — a mirror is updated, not replaced."
@@ -311,22 +487,36 @@ end
 
 "Copy a local directory's contents to `dest` on the host."
 function put_dir(host::AbstractString, localdir::AbstractString, dest::AbstractString;
-                 delete::Bool = false, excludes::Vector{String} = String[])
+                 delete::Bool = false, excludes::Vector{String} = String[],
+                 region::AbstractString = "", filter::Bool = false)
     isdir(localdir) || return false
-    data = try
-        _archive(localdir, p -> !_excluded(p, excludes))
+    # `filter` is opt-in: this also ships Slate's OWN directories (the SDK source, a dev dep), which
+    # are not the user's project and have no ignore files to consult.
+    keep = filter ? transfer_keep(localdir; region, excludes) : (p -> !_excluded(p, excludes))
+    # Spilled to a file rather than held as bytes: this is the one transfer whose size is the user's
+    # to decide, and the archive of a project can be arbitrarily large.
+    tarpath = try
+        _archive_file(localdir, keep)
     catch e
         # A bare `false` here reads as the far side refusing the transfer, so name this side.
         @warn "slate: could not archive $localdir for transfer" exception = e
         return false
     end
-    if isempty(host)                    # same machine: no shell, so this works on Windows too
-        delete && rm(String(dest); force = true, recursive = true)
-        return _unarchive(data, dest)
+    try
+        if isempty(host)                # same machine: no shell, so this works on Windows too
+            delete && rm(String(dest); force = true, recursive = true)
+            return _unarchive(read(tarpath), dest)
+        end
+        script = (delete ? "rm -rf " * shq_path(String(dest)) * "; " : "") *
+                 "mkdir -p " * shq_path(String(dest)) * " && cd " * shq_path(String(dest)) * " && tar xf -"
+        # A DELEGATED call hands the input to another process, so it has to be bytes; that path is a
+        # worker asking the hub, where the bytes were always going to cross a process boundary. The
+        # direct path — the hub provisioning a host, which is where the large ones are — streams.
+        return has_delegate() ? first(run_io(host, script, read(tarpath))) :
+               open(tarpath, "r") do io; first(run_io(host, script, io)); end
+    finally
+        rm(tarpath; force = true)
     end
-    script = (delete ? "rm -rf " * shq(String(dest)) * "; " : "") *
-             "mkdir -p " * shq(String(dest)) * " && cd " * shq(String(dest)) * " && tar xf -"
-    return first(run_io(host, script, data))
 end
 
 "Copy named local files into `dest` on the host, flattened. All must share a directory."
@@ -342,7 +532,7 @@ function put_files(host::AbstractString, files, dest::AbstractString)
         return false
     end
     isempty(host) && return _unarchive(data, dest)
-    script = "mkdir -p " * shq(String(dest)) * " && cd " * shq(String(dest)) * " && tar xf -"
+    script = "mkdir -p " * shq_path(String(dest)) * " && cd " * shq_path(String(dest)) * " && tar xf -"
     return first(run_io(host, script, data))
 end
 
@@ -430,7 +620,7 @@ function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     isempty(s.host) && return true          # same machine: the mirror IS the store
     connected(s.host) || return false
     names = _dirlist(dirs)
-    script = "cd " * shq(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; tar cf - " * names
+    script = "cd " * shq_path(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; tar cf - " * names
     lock(_sync_lock(s.mirror)) do
         ok, data = run_io(String(s.host), script, nothing)
         ok || return false
@@ -460,10 +650,10 @@ function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
         (pres, _archive(s.mirror, p -> first(split(String(p), '/'; keepempty = false)) in keep))
     end
     isempty(present) && return true
-    wipe = String[shq(joinpath(s.root, d)) for d in present if sync_flags(d, :out)]
-    script = "mkdir -p " * shq(s.root) *
+    wipe = String[shq_path(joinpath(s.root, d)) for d in present if sync_flags(d, :out)]
+    script = "mkdir -p " * shq_path(s.root) *
              (isempty(wipe) ? "" : "; rm -rf " * join(wipe, " ")) *
-             "; cd " * shq(s.root) * " && tar xf -"
+             "; cd " * shq_path(s.root) * " && tar xf -"
     return first(run_io(String(s.host), script, data))
 end
 

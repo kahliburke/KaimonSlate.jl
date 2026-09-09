@@ -208,6 +208,24 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rppfieldhint{color:#5c6280;font-size:.68rem;line-height:1.3;}
 /* A host or region name inside a sentence should not break across lines mid-word. */
 .rppnowrap{white-space:nowrap;}
+/* What gets sent to a host. The two bars carry the argument — a size held back beside a size sent
+   is what tells you whether a rule is worth writing — so they read before the textarea, not after. */
+.rpptrrow{align-items:flex-start;}
+.rpptrbox{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:7px;}
+.rpptrtoggle{align-self:flex-start;}
+.rpptrbar{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:.74rem;
+  padding:4px 8px;border-radius:5px;border:1px solid #2a2f45;background:#161a29;}
+.rpptrbar.ok{border-color:#2f4a3a;}
+.rpptrbar.held{border-color:#4a3a2f;}
+.rpptrlabel{text-transform:uppercase;letter-spacing:.06em;font-size:.64rem;color:#7b83a8;}
+.rpptrsize{font-weight:600;color:#cfd4ea;}
+.rpptrtop{color:#5c6280;font-size:.68rem;white-space:nowrap;}
+.rpptrhint{color:#5c6280;font-size:.68rem;line-height:1.35;}
+.rpptrhint code{color:#8b93b8;background:#161a29;padding:0 3px;border-radius:3px;}
+.rpptrtext{width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.72rem;line-height:1.45;background:#0f1320;color:#cfd4ea;border:1px solid #2a2f45;
+  border-radius:5px;padding:6px 8px;resize:vertical;}
+.rpptract{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 /* Rarely-set settings, folded. The count on the disclosure is the point: a fold that hides a
    setting silently is worse than a longer form. */
 .rppmorebtn{background:none;border:0;color:#9aa3c0;font-size:.8rem;cursor:pointer;padding:2px 0;}

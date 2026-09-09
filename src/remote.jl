@@ -523,11 +523,49 @@ end
 # Send a local dir to the host as a tar over the shared session. Replaced rather than merged
 # when `delete`; `excludes` are matched per path component (see `Sweep.put_dir`).
 function _send_dir!(host, localdir::AbstractString, remotedir::AbstractString; delete::Bool = false,
-                 excludes::Vector{String} = String[])
+                 excludes::Vector{String} = String[], region::AbstractString = "",
+                 filter::Bool = false)
+    filter && _narrate_transfer(localdir, region, excludes)
     ok = _put_dir(host, String(localdir), String(remotedir);
-                       delete = delete, excludes = excludes)
+                       delete = delete, excludes = excludes, region = region, filter = filter)
     ok || _rlog("FAILED: sending $localdir → $host:$remotedir")
     return ok
+end
+
+# Above this, say where it is going and how to send less. A project root with a data directory
+# beside the code sends hundreds of times what the work needs, over a link that is often slow.
+# `.gitignore` already spares most of them; this is for what is tracked, or for a project that is
+# not a repository. It names the file because nobody goes looking for a transfer setting. They
+# notice a provision that has stopped.
+const _TRANSFER_LOUD_BYTES = 512 * 1024 * 1024
+
+function _narrate_transfer(localdir::AbstractString, region::AbstractString, excludes::Vector{String})
+    try
+        keep = Sweep.transfer_keep(localdir; region, excludes)
+        n, bytes = 0, 0
+        per = Dict{String,Int}()                   # top-level component => bytes, for the loud case
+        for (root, _, files) in walkdir(String(localdir)), f in files
+            rel = replace(relpath(joinpath(root, f), String(localdir)), '\\' => '/')
+            keep(rel) || continue
+            sz = try; Int(filesize(joinpath(root, f))); catch; 0; end
+            n += 1; bytes += sz
+            top = first(split(rel, '/'; keepempty = false))
+            per[top] = get(per, top, 0) + sz
+        end
+        mb = round(bytes / 1024^2; digits = 1)
+        _rlog("transfer: $(basename(rstrip(String(localdir), '/'))) → $n files, $(mb) MB" *
+              (isempty(region) ? "" : " (region $region)"))
+        bytes < _TRANSFER_LOUD_BYTES && return
+        big = sort!(collect(per); by = last, rev = true)
+        top = join(("$k ($(round(v / 1024^2; digits = 1)) MB)" for (k, v) in first(big, 3)), ", ")
+        _rlog("transfer: this is large and is packed in memory before it is sent. Biggest: $top. " *
+              "Add what should stay behind to $(Sweep._SLATEIGNORE) beside Project.toml " *
+              "(gitignore syntax; a [region:$(isempty(region) ? "<name>" : region)] section " *
+              "applies to one host only).")
+    catch e
+        @debug "slate: could not size a transfer" exception = (e, catch_backtrace())
+    end
+    return nothing
 end
 
 # ── provisioning ──────────────────────────────────────────────────────────────
@@ -634,7 +672,8 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
             _replicate_env!(t)                                # notebook env + worker infra
         elseif !isempty(parent_project) && isdir(parent_project)
             _rlog("provision [3/3] send parent project → $host:$(t.project) + instantiate (no resolved origin env)")
-            _send_dir!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"]) ||
+            _send_dir!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"],
+                           region = t.region, filter = true) ||
                 error("provision: could not send the parent project → $host")
             # Replicate the parent's dev'd path deps (e.g. a `[sources]` local package) into devsrc/ and
             # rewrite Project.toml's `[sources]` paths to point there — else the resolve below dangles on a
@@ -960,7 +999,7 @@ function _send_dev_deps!(t::RemoteTarget, local_env::AbstractString)
             continue
         end
         rp = "$_REMOTE_DEVSRC/$name"
-        _send_dir!(host, lpath, rp; excludes = [".git", "*.cov"]) ||
+        _send_dir!(host, lpath, rp; excludes = [".git", "*.cov"], region = t.region, filter = true) ||
             (_rlog("env: could not send dev dep '$name' → $host"); continue)
         push!(rewrites, (name, rp))
         _rlog("env: dev dep '$name' → $host:$rp")
@@ -1027,7 +1066,8 @@ function _replicate_env!(t::RemoteTarget)
     origin = t.origin_env
     _rlog("env: replicating origin env → $host:$(t.project)  (from $origin)")
     # 1. the origin project WHOLESALE, INCLUDING the Manifest (exact versions) + its own /src.
-    _send_dir!(host, origin, t.project; excludes = [".git", "*.cov", ".ready"]) ||
+    _send_dir!(host, origin, t.project; excludes = [".git", "*.cov", ".ready"],
+                     region = t.region, filter = true) ||
         error("env: could not send the origin project → $host")
     # 2. dev'd deps: send each local source into devsrc/<name>; collect (name → $HOME-relative remote path).
     rewrites = _send_dev_deps!(t, origin)

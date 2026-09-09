@@ -1298,6 +1298,67 @@ function _make_router(h::Hub)
         end for r in ReportEngine.regions()],
         "parked" => [Dict("host" => p.host, "label" => p.label, "port" => p.port,
                           "idle_s" => p.idle_s) for p in ReportEngine.parked_wires()])))
+    # ── What gets sent to a remote ───────────────────────────────────────────────────────────
+    # A region ships a LOCAL directory (its `preload`) for env parity, and that directory is the
+    # user's project — which routinely has data beside the code that has no business travelling.
+    # `.gitignore` already spares most of it; this edits the `.slateignore` beside it for the rest.
+    #
+    # The directory is resolved HERE from the region name rather than accepted as a parameter: the
+    # POST writes a file, and a path from the browser would be an arbitrary write.
+    _region_ship_dir(name::AbstractString) = begin
+        r = findfirst(x -> x.name == String(name), ReportEngine.regions())
+        r === nothing ? "" : ReportEngine.regions()[r].preload
+    end
+    HTTP.register!(router, "GET", "/api/transfer-rules", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        region = get(q, "region", "")
+        dir = _region_ship_dir(region)
+        isempty(dir) || isdir(dir) || (dir = "")
+        f = isempty(dir) ? "" : joinpath(dir, ReportEngine.Sweep._SLATEIGNORE)
+        # The PREVIEW is the point of the dialog: rules are abstract, "these 4 GB are going" is not.
+        kept, dropped, nkept, ndrop = Dict{String,Int}(), Dict{String,Int}(), 0, 0
+        if !isempty(dir)
+            try
+                keep = ReportEngine.Sweep.transfer_keep(dir; region,
+                                                        excludes = ["Manifest.toml", ".git", "*.cov"])
+                for (root, _, files) in walkdir(dir), fl in files
+                    rel = replace(relpath(joinpath(root, fl), dir), '\\' => '/')
+                    sz = try; Int(filesize(joinpath(root, fl))); catch; 0; end
+                    top = first(split(rel, '/'; keepempty = false))
+                    if keep(rel); kept[top] = get(kept, top, 0) + sz; nkept += 1
+                    else; dropped[top] = get(dropped, top, 0) + sz; ndrop += 1; end
+                end
+            catch
+            end
+        end
+        _tops(d) = sort!([Dict("name" => k, "bytes" => v) for (k, v) in d];
+                         by = x -> x["bytes"], rev = true)[1:min(8, length(d))]
+        return _json(Dict("region" => region, "dir" => dir,
+                          "file" => f, "exists" => !isempty(f) && isfile(f),
+                          "text" => (isempty(f) || !isfile(f)) ? "" : (try; read(f, String); catch; ""; end),
+                          "sent" => Dict("files" => nkept, "bytes" => sum(values(kept); init = 0),
+                                         "top" => _tops(kept)),
+                          "held" => Dict("files" => ndrop, "bytes" => sum(values(dropped); init = 0),
+                                         "top" => _tops(dropped))))
+    end)
+    HTTP.register!(router, "POST", "/api/transfer-rules", req -> begin
+        d = try; JSON.parse(String(req.body)); catch; Dict{String,Any}(); end
+        region = String(get(d, "region", ""))
+        dir = _region_ship_dir(region)
+        (isempty(dir) || !isdir(dir)) &&
+            return _json(Dict("ok" => false, "error" => "region '$region' ships no local directory"))
+        f = joinpath(dir, ReportEngine.Sweep._SLATEIGNORE)
+        txt = String(get(d, "text", ""))
+        try
+            # Empty means "no rules": remove the file rather than leaving an empty one, so the
+            # project does not carry a file that says nothing.
+            isempty(strip(txt)) ? rm(f; force = true) :
+                write(f, endswith(txt, "\n") ? txt : txt * "\n")
+            return _json(Dict("ok" => true, "file" => f))
+        catch e
+            return _json(Dict("ok" => false, "error" => sprint(showerror, e)))
+        end
+    end)
     # What a scheduler region is HOLDING, asked of the scheduler itself. Separate from /api/regions
     # because it costs a round trip to the login node, and because an allocation bills for the time
     # it is held — so it wants to be visible on its own and lettable-go on demand.
