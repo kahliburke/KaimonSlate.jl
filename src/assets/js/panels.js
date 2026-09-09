@@ -75,7 +75,10 @@ async function loadPackages() {
   const parent = (r.parent || []).slice().sort(byName);
   document.getElementById('pkgstatus').textContent =
     nb.length + ' notebook' + (parent.length ? ' · ' + parent.length + ' from parent' : (r.detached ? ' · detached' : '')) +
-    (_pkgManageable ? '' : ' · read-only (no project)');
+    // Unmanageable means an in-process kernel, which is a statement about WHERE cells run, not about
+    // whether the notebook sits in a project — a standalone notebook can have a parent project and
+    // still be read-only here, because there is no worker env to add into.
+    (_pkgManageable ? '' : ' · read-only (runs in-process)');
   const inp = document.getElementById('pkgin'); inp.disabled = !_pkgManageable;
   // Provenance badge: flag a dep that points at something machine-specific rather than a pinned
   // registry release — a dev'd local checkout ("dev", won't resolve elsewhere unless the source

@@ -160,6 +160,13 @@ end
 # of the notebook's package view + footer so they don't masquerade as the user's own deps.
 const _WORKER_INFRA_PKGS = Set(["KaimonGate", "Revise", "ExpressionExplorer", "SlateExtensionsBase"])
 
+# Can the UI offer add/remove for this kernel? A worker always can. An in-process kernel can too,
+# as long as it has somewhere of its own to put the package — its own env or the enclosing project.
+# Never the host's active project: that is the environment the hub itself is running out of, and a
+# notebook's dependency has no business being written into whatever project launched Slate.
+_pkg_manageable(::ReportEngine.Kernel) = true
+_pkg_manageable(k::InProcessKernel) = !isempty(k.envdir) || !isempty(k.projectdir)
+
 # The notebook's OWN packages (the delta beyond the parent project) as sorted
 # `{name, version, uuid}` — the set difference active − parent − parent-package. Shared by
 # the package viewer's "notebook" group and the `.jl` reproducibility footer.

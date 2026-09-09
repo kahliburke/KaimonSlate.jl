@@ -280,10 +280,9 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
     # so it inlines as a huge base64 blob. Project ⇒ the project dir; detached ⇒ the per-notebook fork-env
     # dir (a stable location that resolves identically on the hub and every region worker). The gate
     # branches below re-affirm this with their own values; this makes the in-process path get it too.
-    let proj = Base.current_project(dirname(abspath(path)))
-        parent = proj === nothing ? "" : dirname(proj)
-        report.meta["assetbase"] = isempty(parent) ? ReportEngine.notebook_env_dir(path) : parent
-    end
+    proj = Base.current_project(dirname(abspath(path)))
+    enclosing = proj === nothing ? "" : dirname(proj)
+    report.meta["assetbase"] = isempty(enclosing) ? ReportEngine.notebook_env_dir(path) : enclosing
     if ReportEngine.gate_available()
         ReportEngine._rlog("_select_kernel nb=$(basename(String(path))) runon=[$(get(report.meta, "runon", ""))] remoteworker=[$(get(report.meta, "remoteworker", ""))]")
         # Remote-worker opt-in: run this notebook's cells on an ALREADY-RUNNING worker reached at
@@ -381,7 +380,14 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             return GateKernel(parent; parent = parent, envdir = envdir, threads = th, extra_flags = ef, label = lbl, online = online)
         end
     end
-    return InProcessKernel()
+    # No gate (standalone `slate`, no Kaimon host): cells run in THIS process. The notebook still
+    # gets the same two environments a worker would be given — its enclosing project and its own
+    # env — layered onto LOAD_PATH rather than resolved into one, since there is no separate
+    # process whose active project we could repoint. The env dir is named now and materialised on
+    # the first package add, so a notebook that adds nothing costs nothing.
+    k = InProcessKernel(enclosing, ReportEngine.notebook_env_dir(path))
+    ReportEngine._layer_load_path!(k)
+    return k
 end
 
 function load_notebook(path::AbstractString; id::AbstractString = "", threads::AbstractString = "",

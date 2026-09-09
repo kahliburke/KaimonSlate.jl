@@ -2027,7 +2027,7 @@ function _make_router(h::Hub)
                    "parent" => e.parent,
                    "parentPath" => e.parentpath,
                    "detached" => e.detached,
-                   "manageable" => !(nb.kernel isa InProcessKernel)))
+                   "manageable" => _pkg_manageable(nb.kernel)))
     end))
     HTTP.register!(router, "POST", "/api/{id}/package", req -> _withnb(h, req, nb -> begin
         b = _body(req)

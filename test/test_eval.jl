@@ -595,4 +595,111 @@ end
         @test ex == ["a"] && occursin("xslateinterp", tmpl) && !occursin("{{", tmpl)
     end
 
+    # Standalone `slate` has no gate, so every notebook gets an InProcessKernel. That used to report
+    # `parent = nothing` unconditionally, so a notebook sitting inside a project was shown as
+    # "detached · no project" and its own project was never named anywhere.
+    @testset "an in-process kernel reports its enclosing project" begin
+        proj = mktempdir()
+        write(joinpath(proj, "Project.toml"), """
+              name = "DemoProj"
+              uuid = "4e21fceb-c7d8-4610-ab31-01a4a655e06a"
+              version = "0.1.0"
+
+              [deps]
+              Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+              TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+              """)
+        info = ReportEngine.env_info(ReportEngine.InProcessKernel(proj), ReportEngine.Report("nb", "nb"))
+        @test info.parent !== nothing
+        @test info.parent.name == "DemoProj"
+        @test info.parent.path == proj
+        @test [d["name"] for d in info.parent.deps] == ["Dates", "TOML"]   # sorted, straight off the file
+
+        @testset "and stays detached when there is genuinely no project" begin
+            @test ReportEngine.env_info(ReportEngine.InProcessKernel(),
+                                        ReportEngine.Report("nb", "nb")).parent === nothing
+        end
+
+        @testset "a directory without a Project.toml is not a project" begin
+            @test ReportEngine._project_group(mktempdir()) === nothing
+            @test ReportEngine._project_group("") === nothing
+        end
+
+        @testset "JuliaProject.toml counts too" begin
+            alt = mktempdir()
+            write(joinpath(alt, "JuliaProject.toml"), "name = \"AltProj\"\n")
+            @test ReportEngine._project_group(alt).name == "AltProj"
+        end
+    end
+
+    # Parity with the gate path: both targets exist for an in-process kernel too. The one thing it
+    # must never do is operate on the HOST's active project, which is the environment the hub is
+    # running out of — that is how a notebook's package ends up as a dependency of Slate itself.
+    @testset "in-process package ops never touch the host environment" begin
+        proj, env = mktempdir(), mktempdir()
+        write(joinpath(proj, "Project.toml"), "name = \"HostSafe\"\nuuid = \"4e21fceb-c7d8-4610-ab31-01a4a655e06a\"\n")
+        k = ReportEngine.InProcessKernel(proj, env)
+        r = ReportEngine.Report("nb", "nb")
+        before = Base.active_project()
+
+        @testset "a bad op is refused before anything is activated" begin
+            out = ReportEngine.pkg_op(k, r, "frobnicate", "Foo")
+            @test out["ok"] == false && occursin("bad op", out["message"])
+            @test Base.active_project() == before
+        end
+
+        @testset "the active project is restored even when the op throws" begin
+            # No registry resolution in the suite, so this fails inside Pkg — which is the point:
+            # the failure path has to put the host's project back, not leave it repointed.
+            ReportEngine.pkg_op(k, r, "rm", "NotInstalledAnywhere")
+            @test Base.active_project() == before
+        end
+
+        @testset "a detached notebook can still target its own env, but not a project" begin
+            d = ReportEngine.InProcessKernel("", env)
+            @test ReportEngine.pkg_op(d, r, "add", "Foo"; target = "project")["message"] ==
+                  "this notebook has no parent project"
+            @test Base.active_project() == before
+        end
+
+        @testset "with no env of its own there is nowhere to add" begin
+            bare = ReportEngine.InProcessKernel()
+            out = ReportEngine.pkg_op(bare, r, "add", "Foo")
+            @test out["ok"] == false && occursin("no environment of its own", out["message"])
+            @test Base.active_project() == before
+        end
+    end
+
+    @testset "LOAD_PATH layers most-specific first" begin
+        proj, env = mktempdir(), mktempdir()
+        was = copy(LOAD_PATH)
+        try
+            ReportEngine._layer_load_path!(ReportEngine.InProcessKernel(proj, env))
+            @test LOAD_PATH[1] == env && LOAD_PATH[2] == proj   # notebook env wins over its project
+            @test was ⊆ LOAD_PATH                               # the host's own entries survive
+            ReportEngine._layer_load_path!(ReportEngine.InProcessKernel(proj, env))
+            @test count(==(env), LOAD_PATH) == 1                # idempotent: reopening must not stack up
+        finally
+            empty!(LOAD_PATH); append!(LOAD_PATH, was)
+            ReportEngine._INPROC_PROJECT[] = ""
+        end
+    end
+
+    # Notebooks from one project share a resolution scope, which is the same scope a REPL session
+    # has. A SECOND project in the same process is the case that stops being explainable, so it is
+    # reported rather than left to surface as a package resolving to an unexpected version.
+    @testset "a second project in one process is reported" begin
+        a, b = mktempdir(), mktempdir()
+        was = copy(LOAD_PATH)
+        try
+            ReportEngine._INPROC_PROJECT[] = ""
+            @test_logs ReportEngine._layer_load_path!(ReportEngine.InProcessKernel(a, ""))
+            @test_logs ReportEngine._layer_load_path!(ReportEngine.InProcessKernel(a, ""))  # same project: silent
+            @test_logs (:warn, r"two projects") ReportEngine._layer_load_path!(ReportEngine.InProcessKernel(b, ""))
+        finally
+            empty!(LOAD_PATH); append!(LOAD_PATH, was)
+            ReportEngine._INPROC_PROJECT[] = ""
+        end
+    end
+
 end
