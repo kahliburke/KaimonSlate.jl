@@ -119,6 +119,12 @@ manifest_path(root::AbstractString, key::AbstractString) =
 
 has_blob(root::AbstractString, h::AbstractString) = _validhash(h) && isfile(blob_path(root, h))
 
+# Where a half-written file waits for its rename. NOT under `blobs/` or `manifests/`: a remote store
+# ships those directories by walking them into a tar, and a temp file that is renamed away between
+# the walk's readdir and its stat aborts the whole sync with "unsupported file type". Siblings of
+# them instead, so the walk never sees one, and on the same filesystem so the rename stays atomic.
+_staging_dir(root::AbstractString) = (d = joinpath(root, "tmp"); mkpath(d); d)
+
 # Atomically write to `dest`: `f(io)` streams into a temp file in `dir`, which is then renamed over
 # `dest` (rename is atomic on the same filesystem). On any failure the temp file is cleaned up and the
 # error rethrown. (`put_blob` open-codes its own variant — its destination is content-derived and it
@@ -147,7 +153,7 @@ throws (e.g. an unserializable value), cleaning up the temp file.
 function put_blob(f, root::AbstractString)
     broot = joinpath(root, "blobs")
     mkpath(broot)
-    tmp = tempname(broot)
+    tmp = tempname(_staging_dir(root))
     try
         open(f, tmp, "w")
         h = sha_file_hex(tmp)
@@ -193,7 +199,7 @@ function write_manifest(root::AbstractString, key::AbstractString, manifest::Abs
     mkpath(mdir)
     d = Dict{String,Any}(String(k) => v for (k, v) in manifest)
     d["fmt"] = FMT
-    _atomic_write(io -> TOML.print(io, d), mdir, manifest_path(root, key))
+    _atomic_write(io -> TOML.print(io, d), _staging_dir(root), manifest_path(root, key))
     return nothing
 end
 

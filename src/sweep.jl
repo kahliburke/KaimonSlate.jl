@@ -2035,7 +2035,18 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
     else
         error("unknown sweep action: $(action)")
     end
-    sync_out!(target)   # arming, cancellation and cleared attempts are all markers in the store
+    # Arming, cancellation and cleared attempts are all markers under `jobs/`, so send only that —
+    # the same narrowing `reconcile_and_sync!` uses. Sending everything also tars the blob tree,
+    # which is large and is being written while it is read.
+    #
+    # And the result is CHECKED. `jobs/` is deleted on the way out and never on the way in, so a
+    # push that did not happen leaves the store holding markers this hub just removed — and the next
+    # poll pulls them back. Disarming would silently undo itself and the sweep would resubmit, which
+    # reads as the reset button starting a run. Failing here says so instead.
+    if !sync_out!(target; dirs = ("jobs",))
+        error("sweep $(action): the store was not updated (host unreachable?) — " *
+              "the cluster still holds this sweep's markers, so retry once it is reachable")
+    end
     return status_payload(target, run, params, keys; plot)
 end
 
