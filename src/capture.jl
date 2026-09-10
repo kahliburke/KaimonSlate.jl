@@ -584,9 +584,12 @@ end
 # callback so one bad cleanup can't block the others (or the re-eval about to follow). Fired on re-eval
 # (run_capture), on delete (server broadcast → `__slate_cleanup_cells`), and on namespace rebuild.
 function _run_cell_cleanups!(reg::AbstractDict, cid::AbstractString)
-    cbs = get(reg, cid, nothing)
+    # TAKE, rather than read-then-remove. A cell can be torn down from more than one direction at
+    # once — a re-run, a delete broadcast, a namespace rebuild — and with a gap between the read and
+    # the delete both callers get the same callbacks and run them twice. Releasing a resource twice
+    # is how a double-close or a double-free surfaces, far from here.
+    cbs = pop!(reg, cid, nothing)
     cbs === nothing && return nothing
-    delete!(reg, cid)
     for cb in cbs
         try; cb(); catch e; @warn "slate: cell cleanup failed" cell = cid exception = e; end
     end

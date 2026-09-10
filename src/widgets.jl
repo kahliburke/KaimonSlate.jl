@@ -1330,6 +1330,39 @@ _invoke_slate_handler(f, sargs, progress) =
 # Context-specific helper *implementations* (echart/tables/refresh) are passed in;
 # the SET of names, the widget constructors, and the `@bind` macro are defined here
 # once. The per-eval `@bind` sink is task-local (run_capture seeds it); returns the populated module.
+# ── A registry two tasks may touch at once ───────────────────────────────────────────────────
+# The notebook namespace holds registries that are WRITTEN while a cell evaluates and READ from the
+# WebSocket dispatch task at the same time: `slate_on` registers a handler while the browser calls
+# one, a sweep registers its status channel while the card polls it. A plain `Dict` is not safe
+# under that, and the way it fails is not a nice error — a concurrent write during a rehash leaves a
+# slot marked full whose key is undefined, and the next lookup throws `UndefRefError` from inside
+# `ht_keyindex2_shorthash!`, nowhere near the code that caused it.
+#
+# `AbstractDict` so every existing call site (`get`, `setindex!`, `delete!`, `haskey`, `keys`) keeps
+# working unchanged, including the ones that only know they were handed "some dict".
+mutable struct SyncDict{V} <: AbstractDict{String,V}
+    d::Dict{String,V}
+    lk::ReentrantLock
+end
+SyncDict{V}() where {V} = SyncDict{V}(Dict{String,V}(), ReentrantLock())
+
+Base.getindex(s::SyncDict, k) = lock(s.lk) do; s.d[String(k)]; end
+Base.setindex!(s::SyncDict, v, k) = (lock(s.lk) do; s.d[String(k)] = v; end; s)
+Base.get(s::SyncDict, k, d) = lock(s.lk) do; get(s.d, String(k), d); end
+Base.get!(f::Function, s::SyncDict, k) = lock(s.lk) do; get!(f, s.d, String(k)); end
+Base.get!(s::SyncDict, k, d) = lock(s.lk) do; get!(s.d, String(k), d); end
+Base.pop!(s::SyncDict, k, d) = lock(s.lk) do; pop!(s.d, String(k), d); end
+Base.delete!(s::SyncDict, k) = (lock(s.lk) do; delete!(s.d, String(k)); end; s)
+Base.haskey(s::SyncDict, k) = lock(s.lk) do; haskey(s.d, String(k)); end
+Base.length(s::SyncDict) = lock(s.lk) do; length(s.d); end
+Base.isempty(s::SyncDict) = lock(s.lk) do; isempty(s.d); end
+Base.empty!(s::SyncDict) = (lock(s.lk) do; empty!(s.d); end; s)
+# Iteration and `keys` hand back a SNAPSHOT. A lock cannot be held across a caller's loop body, and
+# a loop over live storage is the race this type exists to remove.
+Base.keys(s::SyncDict) = lock(s.lk) do; collect(keys(s.d)); end
+Base.values(s::SyncDict) = lock(s.lk) do; collect(values(s.d)); end
+Base.iterate(s::SyncDict, st...) = iterate(lock(s.lk) do; collect(s.d); end, st...)
+
 function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTable,
                                 slate_query, slate_refresh, slate_progress = (frac; msg = "", id = "", done = false) -> nothing,
                                 slate_emit = (channel, data) -> nothing,
@@ -1371,7 +1404,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # The `__slate_call` worker tool (dispatched off the page WebSocket on the interactive thread) looks
     # the handler up in this per-namespace registry and invokes it. Fresh dict per namespace, so a
     # rebuild drops stale closures; a cell re-run just replaces its channel's handler.
-    slate_handlers = Dict{String,Any}()   # hoisted: `slate_tool` registers its Invoke channel here
+    slate_handlers = SyncDict{Any}()      # hoisted: `slate_tool` registers its Invoke channel here
     Core.eval(m, :(const __slate_handlers = $slate_handlers))
     # Accepts BOTH argument orders. The documented spelling is a do-block —
     #
@@ -1396,7 +1429,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # (run_capture), when it is DELETED (the server broadcasts removed ids), and before a namespace
     # rebuild — so re-running or dropping a cell doesn't leak what the last run allocated. Keyed by the
     # executing cell (task-local `:slate_cell`, seeded by run_capture); a rebuild drops the whole dict.
-    Core.eval(m, :(const __slate_cleanups = $(Dict{String,Vector{Any}}())))
+    Core.eval(m, :(const __slate_cleanups = $(SyncDict{Vector{Any}}())))
     Core.eval(m, :(const slate_on_cleanup = (f) -> (push!(get!($(Vector{Any}), __slate_cleanups,
         get(task_local_storage(), :slate_cell, "")), f); nothing)))
     # Invoke a `slate_on` handler FROM Julia (same as `window.slateCall` does from JS, but in-process —
