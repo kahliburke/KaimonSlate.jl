@@ -52,6 +52,7 @@ module Files;     include("test_files.jl");     end
 module Config;    include("test_config.jl");    end
 module WscallBinary; include("test_wscall_binary.jl"); end
 module WsOrder;   include("test_ws_order.jl");   end
+module BindObs;   include("test_bind_observable.jl"); end
 
 # Every module above belongs here. A file that is `include`d but left out of this tuple is still
 # COMPILED, so it never looks broken — it is simply never run, and its testsets pass silently by
@@ -59,7 +60,7 @@ module WsOrder;   include("test_ws_order.jl");   end
 const _TESTMODS = (Defname, Prepare, Demux, Parsched, Memostore, Effectstore, Blobchannel, RemotePool, Regions, Parallel, Animation, Echarts, SlateLook, Engine, Eval, Deps,
                    Envprep, Tools, Registry, Toolcell,
                    Web, Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi, Agentops, Repro, Slides,
-                   Frontmatter, Export, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, WsOrder)
+                   Frontmatter, Export, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, WsOrder, BindObs)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.
 # ReTest matches a plain String LITERALLY (regex metacharacters escaped), so "deps|eval" would match

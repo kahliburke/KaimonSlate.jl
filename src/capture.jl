@@ -625,6 +625,13 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
     # Register a per-cell cleanup callback (see the namespace's `__slate_cleanups`) — attributed to the
     # cell currently evaluating (task-local `:slate_cell`, seeded by run_capture).
     cleanup = _ns_defined(mod, :slate_on_cleanup) ? _ns_read(mod, :slate_on_cleanup) : (f) -> nothing
+    # The `@bind` surface, for an extension that DRAWS a control itself — a Bonito widget inside a
+    # WGLMakie figure, a custom canvas. It gets the capability, not the namespace: read a control's
+    # declared spec and current value, observe changes, or take it as an Observable. Handing over
+    # `__slate_bind_registry` would work equally well today and couple every extension to the
+    # namespace's private names.
+    reg = _ns_defined(mod, :__slate_bind_registry) ? _ns_read(mod, :__slate_bind_registry) : nothing
+    _entry(name) = (reg === nothing || !haskey(reg, Symbol(name))) ? nothing : reg[Symbol(name)]
     return (; region   = isempty(region) ? nothing : Symbol(region),
               notebook = String(notebook),
               side     = String(region),
@@ -633,7 +640,16 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
               effect   = _slate_effect,          # code→Slate declaration channel (zero-dep for packages)
               on       = on,
               off      = off,
-              cleanup  = cleanup)
+              cleanup  = cleanup,
+              # A control's declared widget (kind/params/default) and its current value.
+              bind_widget = (name) -> (e = _entry(name); e === nothing ? nothing : e[1]),
+              bind_value  = (name) -> (e = _entry(name); e === nothing ? nothing : e[2]),
+              # Value listeners + the Observable view (see widgets.jl `_do_on_bind`).
+              on_bind = _ns_defined(mod, :__slate_on_bind) ?
+                        _ns_read(mod, :__slate_on_bind) : (name, f) -> (() -> nothing),
+              bind_observable = _ns_defined(mod, :bind_observable) ?
+                                _ns_read(mod, :bind_observable) : (name) -> nothing,
+              bind_names = () -> (reg === nothing ? Symbol[] : sort!(collect(keys(reg)))))
 end
 
 function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string";
