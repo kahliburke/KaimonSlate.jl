@@ -2876,6 +2876,20 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     app || (try; _start_revise!(); catch e; @debug "Revise setup failed" exception = e; end)
     _HUB_STARTED[] = time()                  # `/status` reports uptime from here
     _APP_PROCESS[] = app                     # process-wide app flag, for the paths with no hub in hand
+    # Creating a blank notebook for a path that HAS history is the signature of a file that was
+    # deleted out from under us. Report it rather than handing back an empty document that then
+    # saves with a fresh docid and detaches from its own history. Installed here because the
+    # history store is a server-layer concern; ReportEngine only knows it is about to create a file.
+    ReportEngine._NB_MISSING_HOOK[] = function (p::String)
+        n = try; length(SlateHistory.entries(SlateHistory.Doc(p))); catch; 0; end
+        n == 0 && return nothing
+        @warn """
+              Creating a BLANK notebook at a path that already has history — the file is missing, \
+              not new. $n recorded revision(s) exist and still hold its content; the blank about to \
+              be written will save under a NEW docid and stop being connected to them.
+              """ path = p revisions = n recover = "KaimonSlate.NotebookServer.SlateHistory"
+        return nothing
+    end
     try; SlateHistory.migrate_once!(); catch e   # one-time: compact legacy history logs + compress objects
         @warn "KaimonSlate: history migration failed" exception = (e, catch_backtrace())
     end

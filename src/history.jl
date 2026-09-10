@@ -30,10 +30,29 @@ module SlateHistory
 using SHA, JSON, CodecZstd
 
 const _ROOT = Ref{String}("")
+# Resolved with the SAME precedence `SlateHome` uses — an explicit Slate cache home outranks XDG —
+# rather than reading XDG alone.
+#
+# Reading XDG alone made this store follow anything that repoints XDG for its own reasons. `slate
+# --ai` does exactly that: it isolates an embedded Kaimon by pointing XDG at a private directory,
+# and this quietly went with it. The consequence is not a misplaced file — the store holds the
+# path→docid mapping, so a notebook opened there has no history, is treated as a NEW document, and
+# gets a fresh docid. Undo and per-cell recovery fork away from the user's real store.
+#
+# `KAIMONSLATE_CACHE_HOME` already names Slate's cache home (it includes the `kaimonslate` segment),
+# so `history` hangs directly off it; the XDG path is a base and still gets the segment appended.
 function _root()
     isempty(_ROOT[]) || return _ROOT[]
-    cache = get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache"))
-    _ROOT[] = joinpath(cache, "kaimonslate", "history")
+    slate = get(ENV, "KAIMONSLATE_CACHE_HOME", "")
+    if isempty(slate)
+        home = get(ENV, "KAIMONSLATE_HOME", "")
+        slate = isempty(home) ? "" : joinpath(abspath(expanduser(home)), "cache", "kaimonslate")
+    end
+    _ROOT[] = if isempty(slate)
+        joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "history")
+    else
+        joinpath(abspath(expanduser(slate)), "history")
+    end
     return _ROOT[]
 end
 
