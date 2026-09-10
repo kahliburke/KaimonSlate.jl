@@ -339,6 +339,12 @@
     return (window.editors || {})[id] || null;
   };
 
+  // The editor for `id`, mounting whatever it takes to get one — a lazy code editor, or an overlay
+  // cell's source. Anything that WRITES to a cell needs this rather than `ensureEditor`: a markdown
+  // or @bind cell has no editor until its overlay is opened, and `edSetText` is a no-op without one,
+  // so an unmounted cell would silently swallow the write.
+  window.edEnsureSource = id => window.ensureEditor(id) || _mountSource(id);
+
   // Select a range in a cell and scroll it into view, mounting a lazy editor if needed. `mount` also
   // allows opening a md / @bind cell's source overlay, which is a visible change to the cell, so the
   // caller asks for it only on a deliberate step and not on find-as-you-type.
@@ -352,7 +358,7 @@
       catch (_) { return null; }
       return v;
     }
-    const v = window.ensureEditor(id) || (mount ? _mountSource(id) : null);
+    const v = mount ? window.edEnsureSource(id) : window.ensureEditor(id);
     if (!v) return null;
     const max = v.state.doc.length, a = Math.min(from, max), h = Math.min(to, max);
     try {

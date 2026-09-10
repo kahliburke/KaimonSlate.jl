@@ -163,6 +163,13 @@
   // offset cannot be dispatched to a pane. Rebuild the whole source and hand it to `edSetText`,
   // which splits it back into the panes the same way an agent edit does. Every other cell takes a
   // precise CodeMirror transaction, which keeps that cell's own undo history usable.
+  //
+  // `edEnsureSource`, not `ensureEditor`: a markdown or @bind cell renders its output and keeps its
+  // source in a hidden overlay, so it has NO editor until that overlay is opened. Resolving with
+  // `ensureEditor` returned null for exactly those cells and the edit was dropped on the floor —
+  // a Replace All would rewrite the code cells, skip every line of prose, and report only the count
+  // it managed. Opening the overlay is a visible change to the cell, which is why find-as-you-type
+  // does not do it; a replace is a deliberate write, so here it is the right trade.
   function applyToCell(cellId, edits) {
     if (window.webEditors && window.webEditors[cellId]) {
       const src = cellText(cellId);
@@ -171,7 +178,8 @@
       window.edSetText(cellId, out + src.slice(at));
       return true;
     }
-    const v = window.ensureEditor && window.ensureEditor(cellId);
+    const v = window.edEnsureSource ? window.edEnsureSource(cellId)
+                                    : (window.ensureEditor && window.ensureEditor(cellId));
     if (!v) return false;
     const max = v.state.doc.length;
     const changes = edits
@@ -203,11 +211,16 @@
       if (!byCell.has(m.cellId)) byCell.set(m.cellId, []);
       byCell.get(m.cellId).push({ from: m.from, to: m.to, insert: replacement(m) });
     }
-    let n = 0;
-    for (const [id, edits] of byCell) if (applyToCell(id, edits)) n += edits.length;
+    let n = 0, skipped = 0;
+    for (const [id, edits] of byCell) {
+      if (applyToCell(id, edits)) n += edits.length; else skipped += edits.length;
+    }
     cur = -1;
     recompute(null);
-    status(n + (n === 1 ? ' replacement' : ' replacements'));
+    // Say so when a cell refused the edit. Reporting only the successes reads as a completed
+    // Replace All while matches are still sitting in the document.
+    status(n + (n === 1 ? ' replacement' : ' replacements')
+             + (skipped ? ' · ' + skipped + ' skipped' : ''), !!skipped);
     rInput.focus();
   }
 
