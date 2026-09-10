@@ -588,7 +588,18 @@ function _run_cell_cleanups!(reg::AbstractDict, cid::AbstractString)
     cbs === nothing && return nothing
     delete!(reg, cid)
     for cb in cbs
-        try; cb(); catch e; @warn "slate: cell cleanup failed" cell = cid exception = e; end
+        # `invokelatest`, not a bare `cb()`. A cleanup callback is a closure built while the CELL
+        # ran — often inside a package method that Revise had just redefined — so its method can be
+        # newer than the world this loop is running in. A direct call then throws
+        # "MethodError … method may be too new", which the `catch` swallows into a warning: the
+        # resource is never released, and the leak the callback exists to prevent happens anyway,
+        # silently. Seen with a Bonito session teardown, which leaks a session, an inbox task and a
+        # browser subscription per re-run.
+        try
+            Base.invokelatest(cb)
+        catch e
+            @warn "slate: cell cleanup failed" cell = cid exception = (e, catch_backtrace())
+        end
     end
     return nothing
 end
