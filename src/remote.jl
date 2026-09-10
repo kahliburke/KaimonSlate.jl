@@ -525,11 +525,48 @@ end
 function _send_dir!(host, localdir::AbstractString, remotedir::AbstractString; delete::Bool = false,
                  excludes::Vector{String} = String[], region::AbstractString = "",
                  filter::Bool = false)
-    filter && _narrate_transfer(localdir, region, excludes)
+    filter && _gate_transfer(localdir, region, excludes)
     ok = _put_dir(host, String(localdir), String(remotedir);
                        delete = delete, excludes = excludes, region = region, filter = filter)
     ok || _rlog("FAILED: sending $localdir → $host:$remotedir")
+    ok && filter && _prune_remote!(host, localdir, remotedir, region, excludes)
     return ok
+end
+
+# A send MERGES, so ceasing to send something does not remove what earlier provisions already put
+# there. Pruning a directory then left it sitting on the far side at full size — the transfer got
+# smaller and the disk did not, which reads as the rules having done nothing.
+#
+# Only entries the rules now HOLD are removed, and only ones that exist locally, so this can never
+# reach anything the far side generated for itself (an instantiated Manifest, a `.ready` marker, the
+# sibling `devsrc/`). Saying "do not send assets/" means assets/ should not be there.
+function _prune_remote!(host, localdir::AbstractString, remotedir::AbstractString,
+                        region::AbstractString, excludes::Vector{String})
+    try
+        keep = Sweep.transfer_keep(localdir; region, excludes)
+        stale = String[]
+        for name in readdir(String(localdir))
+            name in (".git",) && continue
+            p = joinpath(String(localdir), name)
+            # Held ⇔ nothing under it would be sent. A partially-sent directory is left alone: its
+            # own files are judged individually and the ones still wanted are among them.
+            any_sent = false
+            for (root, _, fls) in (isdir(p) ? walkdir(p) : [(String(localdir), String[], [name])]), f in fls
+                rel = replace(relpath(joinpath(root, f), String(localdir)), '\\' => '/')
+                keep(rel) && (any_sent = true; break)
+            end
+            any_sent || push!(stale, name)
+        end
+        isempty(stale) && return nothing
+        base = Sweep.shq_path(String(remotedir))
+        script = "cd " * base * " 2>/dev/null || exit 0; rm -rf " *
+                 join((Sweep.shq(n) for n in stale), " ")
+        Sweep.run_io(host, script, nothing)
+        _rlog("transfer: removed $(join(stale, ", ")) from $host:$remotedir (held by the rules)")
+    catch e
+        @debug "slate: could not prune a remote project" exception = (e, catch_backtrace())
+    end
+    return nothing
 end
 
 # Above this, say where it is going and how to send less. A project root with a data directory
@@ -551,6 +588,33 @@ const _LAST_TRANSFER_LOCK = ReentrantLock()
 "What the last provision to `region` actually sent, or `nothing` if none has run this session."
 last_transfer(region::AbstractString) =
     lock(_LAST_TRANSFER_LOCK) do; get(_LAST_TRANSFER, String(region), nothing); end
+
+"""
+    _gate_transfer(localdir, region, excludes)
+
+Report what is about to be sent, and REFUSE to send it when it is large and nobody has said what
+should stay behind.
+
+Advisory was not enough. The cost of a provision is paid before anyone sees a number — the first run
+on a region is the slow one — so a panel that opens while the transfer proceeds anyway informs the
+user of something they can no longer prevent. This stops, and the run says why.
+
+It only ever fires when there are NO rules for the project: writing them, or recording that
+everything is meant to travel, answers it permanently. `transfer_warn_mb = 0` turns it off.
+"""
+function _gate_transfer(localdir::AbstractString, region::AbstractString, excludes::Vector{String})
+    m = _narrate_transfer(localdir, region, excludes)
+    m === nothing && return nothing
+    lim = _transfer_loud_bytes()
+    m.bytes < lim && return nothing
+    isfile(joinpath(String(localdir), Sweep._SLATEIGNORE)) && return nothing
+    mb = round(m.bytes / 1024^2; digits = 1)
+    lm = round(lim / 1024^2; digits = 1)
+    error("provisioning paused: this sends all $(mb) MB of " *
+          "$(basename(rstrip(String(localdir), '/'))) ($(m.files) files). " *
+          "Choose what travels in the graph pane's region panel, then run again. " *
+          "The limit is $(lm) MB. Change it with `transfer_warn_mb` in slate.json, or 0 to disable.")
+end
 
 function _narrate_transfer(localdir::AbstractString, region::AbstractString, excludes::Vector{String})
     try
@@ -574,13 +638,13 @@ function _narrate_transfer(localdir::AbstractString, region::AbstractString, exc
             _LAST_TRANSFER[String(region)] =
                 (; dir = String(localdir), files = n, bytes = bytes, at = time())
         end
-        bytes < _transfer_loud_bytes() && return
-        big = sort!(collect(per); by = last, rev = true)
-        top = join(("$k ($(round(v / 1024^2; digits = 1)) MB)" for (k, v) in first(big, 3)), ", ")
-        _rlog("transfer: this is large and is packed in memory before it is sent. Biggest: $top. " *
-              "Add what should stay behind to $(Sweep._SLATEIGNORE) beside Project.toml " *
-              "(gitignore syntax; a [region:$(isempty(region) ? "<name>" : region)] section " *
-              "applies to one host only).")
+        if bytes >= _transfer_loud_bytes()
+            big = sort!(collect(per); by = last, rev = true)
+            top = join(("$k ($(round(v / 1024^2; digits = 1)) MB)" for (k, v) in first(big, 3)), ", ")
+            _rlog("transfer: this is large. Biggest: $top. Choose what travels in the graph pane's " *
+                  "region panel, or list paths in $(Sweep._SLATEIGNORE) beside Project.toml.")
+        end
+        return (; files = n, bytes = bytes)
     catch e
         @debug "slate: could not size a transfer" exception = (e, catch_backtrace())
     end

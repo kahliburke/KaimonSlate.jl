@@ -1854,9 +1854,12 @@ body.modkey .cm-content { cursor: pointer; }
   border:1px solid var(--accent, #569cd6); background:var(--accent, #569cd6); color:#fff; }
 .dagtvsave[disabled] { opacity:.45; cursor:default; background:none; color:var(--muted, #8a91ab);
   border-color:var(--border, #2a2f45); }
-/* The unasked-for open needs to say why it appeared. */
-.dagtvguard { font-size:.7rem; line-height:1.4; color:var(--text); background:#2a2318;
-  border:1px solid #4a3a2f; border-radius:5px; padding:6px 8px; margin-bottom:6px; }
+/* Why the tool opened by itself. In FRONT of the notebook rather than inside the panel: a tool
+   that opens unasked has to say why before it is used, and the panel itself should be sizes and
+   toggles with nothing to read. Reuses the package-install overlay's blurred backdrop. */
+.dagguardcard { text-align:left; max-width:420px; }
+.dagguardbody { color:var(--text); font-size:.85rem; line-height:1.5; }
+.dagguardbody b { color:var(--accent); font-weight:600; }
 .dagtravelhint { color:var(--muted, #8a91ab); font-size:.68rem; line-height:1.4; }
 .dagtravelerr { color:#e0596a; font-size:.7rem; margin-bottom:4px; }
 .dagpp-sec { font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted, #8a91ab);

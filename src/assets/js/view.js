@@ -1379,6 +1379,11 @@ function _publishState(state) {
   window.__slateState = state;                  // latest state, always — so the store (a deferred
                                                 // module) can seed from it even if it loads AFTER
                                                 // this first ran (the boot reload() is async).
+  // A notebook that declares regions will ship this project to one of them on its first run there.
+  // If that is large and nobody has said what should stay behind, offer to prune it now — before
+  // the transfer is paid for. Checked HERE because this is where the regions become known; it
+  // self-limits to one check and opens the graph pane itself when it has something to say.
+  window.slateTransferGuard && window.slateTransferGuard();
   if (selectedId && !(state.cells || []).some(c => c.id === selectedId)) selectedId = null;   // dropped/renamed
   applyPackageImports(state);                   // module specifiers those scripts resolve — strictly before them
   injectFrontendScripts(state);                 // package-declared widget/editor scripts (before the re-render)

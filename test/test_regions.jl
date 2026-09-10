@@ -614,3 +614,36 @@ const RE = KaimonSlate.ReportEngine
     end
 
 end
+
+# Pruning has to reach the FAR SIDE, not just the wire.
+#
+# A send merges, so ceasing to send something leaves whatever earlier provisions already put there.
+# The transfer shrank and the remote directory did not, which reads as the rules having done
+# nothing at all — the number someone checks after pruning is what is sitting on the host.
+@testset "the remote loses what the rules now hold" begin
+    mktempdir() do src
+        mktempdir() do dst
+            for d in ("src", "assets", "keepme"); mkpath(joinpath(src, d)); end
+            write(joinpath(src, "Project.toml"), "name=\"T\"\n")
+            write(joinpath(src, "src", "main.jl"), "x = 1\n")
+            write(joinpath(src, "assets", "big.bin"), rand(UInt8, 50_000))
+            write(joinpath(src, "keepme", "k.txt"), "keep\n")
+            ex = ["Manifest.toml", ".git"]
+            landed() = sort([replace(relpath(joinpath(r, f), dst), '\\' => '/')
+                             for (r, _, fs) in walkdir(dst) for f in fs])
+
+            # An empty host means "this machine", which exercises the whole send + prune path
+            # without needing ssh.
+            RE._send_dir!("", src, dst; excludes = ex, region = "r", filter = true)
+            @test "assets/big.bin" in landed()
+
+            write(joinpath(src, ".slateignore"), "[region:r]\nassets/\n")
+            RE._send_dir!("", src, dst; excludes = ex, region = "r", filter = true)
+            after = landed()
+            @test !any(startswith(p, "assets") for p in after)     # gone from the far side
+            # …and nothing else was taken with it. A blanket replace would also remove what the
+            # host generated for itself, which is why only HELD entries are touched.
+            @test "keepme/k.txt" in after && "src/main.jl" in after
+        end
+    end
+end

@@ -353,7 +353,6 @@ function _dagRegionLegend() {
     _dagRegionNamesAll().map(n => `<button class="dagreglegbtn" onclick="_dagRegionDetail('${n.replace(/'/g, "\\'")}')" title="${n} — host, worker status, and what a provision to it ships"><i style="background:${_dagRegionHue(n)}"></i>${n === 'default' ? 'remote' : n}</button>`).join('') +
     (hasRemote ? `<button class="dagpeerbtn" onclick="_dagPeerPlan(false)" title="peer routing plan — how cross-region values move (direct / ssh-bridge / relay), the address each pair uses, and the mesh artifacts on each host">⇄ peer plan</button>` +
       `<button class="dagpeerbtn" onclick="_dagXferDash()" title="transfer summary — totals, throughput-over-time, the region peer-to-peer grid, and the rate distribution">📊 transfers</button>` : '');
-  _dagTravelGuard();
 }
 
 // Open this UNASKED when a provision is about to be expensive and nobody has said what should stay
@@ -369,6 +368,56 @@ let _dagTravelGuardDone = false;
 // arrives on every reload. Recorded in the FILE rather than the browser, so the answer travels with
 // the project instead of being re-asked on the next machine.
 let _dagGuardOpened = false;
+
+// The explanation belongs in front of the notebook, not inside the tool. A panel that opens on its
+// own has to say why before it is used, and the tool itself should be the tool — sizes and toggles,
+// nothing to read. The run is already stopped server-side by then, so this is not asking permission
+// to pause; it is saying what happened and offering the two ways forward.
+function _dagGuardModal(region, d) {
+  document.getElementById('dagguardbg')?.remove();
+  const el = document.createElement('div');
+  el.id = 'dagguardbg'; el.className = 'pkginstall-bg show';
+  el.innerHTML = `
+    <div class="pkginstall-card dagguardcard">
+      <div class="pkginstall-title">Large transfer paused</div>
+      <div class="dagguardbody">
+        Running on <b>${region}</b> sends all
+        <b>${window.slateBytes(d.sent.bytes, { compact: true })}</b> of
+        <b>${d.dir.split('/').pop()}</b>.
+      </div>
+      <div class="pkginstall-actions">
+        <button data-act="choose">Choose what travels</button>
+        <button data-act="all">Send it all</button>
+      </div>
+      <div class="pkginstall-note">Your answer is saved in the project.</div>
+    </div>`;
+  document.body.appendChild(el);
+  el.addEventListener('click', ev => {
+    const b = ev.target.closest('button'); if (!b) return;
+    el.remove();
+    if (b.dataset.act === 'choose') { _dagRegionDetail(region); return; }
+    _dagTravelsAcceptAll(region);                     // record "all of it travels", then continue
+  });
+}
+
+// "Send it all" — the decision, recorded, and the notebook carries on. Same POST the toggles use
+// with nothing held, which the server stores as a reviewed-and-nothing-held marker rather than
+// deleting the file, so the gate does not stop the very next run again.
+async function _dagTravelsAcceptAll(region) {
+  _dagGuardOpened = false;
+  try {
+    await fetch(_apipath('/api/transfer-rules'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ region: region || '', hold: [], known: [] }) });
+  } catch (_) {}
+  _dagResumeRun();
+}
+
+// The run stopped mid-notebook, so answering the question should finish it rather than leave the
+// reader to work out that they now have to press run themselves.
+function _dagResumeRun() {
+  try { typeof runAll === 'function' && runAll(); } catch (_) {}
+}
 async function _dagGuardDismissed() {
   if (!_dagGuardOpened) return;
   _dagGuardOpened = false;
@@ -385,7 +434,7 @@ async function _dagGuardDismissed() {
 async function _dagTravelGuard() {
   if (_dagTravelGuardDone) return;
   const regs = _dagRegionNamesAll();
-  if (!regs.length) return;
+  if (!regs.length) return;                   // no destinations yet; try again when there are
   _dagTravelGuardDone = true;                 // one attempt, whatever it finds
   try {
     const d = await (await fetch(_apipath('/api/transfer-rules') + '?region=')).json();
@@ -394,13 +443,13 @@ async function _dagTravelGuard() {
     // here to drift. 0 turns the warning off.
     const lim = (d.warn_mb || 0) * 1024 * 1024;
     if (lim <= 0 || (d.sent && d.sent.bytes || 0) < lim) return;
-    _dagRegionDetail(regs[0]);
+    // OPEN WHAT IT NEEDS. This has to reach someone who has never opened the graph pane — a warning
+    // that only appears once you are already inside the region overlay is not a warning, it is
+    // something you find after going looking, which is the opposite of arriving before the cost.
+    if (!_dagOpen()) toggleDag();
+    if (!_dagRegionsOn) dagRegions();
     _dagGuardOpened = true;
-    const b = document.getElementById('dagtravelbody');
-    if (b) b.insertAdjacentHTML('afterbegin',
-      `<div class="dagtvguard">This project ships
-       <b>${window.slateBytes(d.sent.bytes, { compact: true })}</b> to a region on the first run, and
-       has no rules yet. Prune what does not need to go before it costs you the transfer.</div>`);
+    _dagGuardModal(regs[0], d);
   } catch (_) {}
 }
 
@@ -445,6 +494,10 @@ function _dagRegionDetail(name) {
   _dagTravelsLoad(name, '');
 }
 window._dagRegionDetail = _dagRegionDetail;
+// Regions are declared in the notebook footer and arrive with the notebook state, so that is when
+// to ask — not when a pane renders. Retried on later state until there IS a region to warn about;
+// `_dagTravelGuardDone` keeps it to one actual check.
+window.slateTransferGuard = () => { try { _dagTravelGuard(); } catch (_) {} };
 window._dagRegPanelClear = () => { _dagRegPanelName = null; _dagGuardDismissed(); };
 
 // Load one level. The root load also seeds the totals and the current rule state.
@@ -544,7 +597,8 @@ async function _dagTravelsSave() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ region: _dagRegPanelName || '',
                              hold: [..._dagTree.hold], known: [..._dagTree.known] }) })).json();
-    _dagGuardOpened = false;
+    const wasGuard = _dagGuardOpened; _dagGuardOpened = false;
+    if (r && r.ok && wasGuard) _dagResumeRun();      // the run was paused on this answer
     if (!r || !r.ok) { const b = document.getElementById('dagtravelbody'); if (b) b.insertAdjacentHTML('afterbegin', `<div class="dagtravelerr">${(r && r.error) || 'could not save'}</div>`); return; }
     // Re-measure from disk. The totals shown until now were predicted from the toggles; after a
     // save they should be what the transfer will actually do.

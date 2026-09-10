@@ -1421,9 +1421,17 @@ function _make_router(h::Hub)
                                                String[String(x) for x in get(d, "hold", [])],
                                                String[String(x) for x in get(d, "known", [])])
             end
-            # Empty means "no rules": remove the file rather than leaving one that says nothing.
-            isempty(strip(txt)) ? rm(f; force = true) :
+            # An empty result means different things depending on who is asking. From the TOGGLES
+            # it is a decision — "I looked, all of this is meant to travel" — and it has to be
+            # recorded, or the size gate stops the next run and asks again. Only an explicit
+            # `text: ""` means "there are no rules here", which removes the file.
+            if isempty(strip(txt))
+                haskey(d, "text") ? rm(f; force = true) :
+                    write(f, "# Reviewed: everything in this project is meant to travel to a region.\n" *
+                             "# Delete this file to be asked again, or list paths below to hold them back.\n")
+            else
                 write(f, endswith(txt, "\n") ? txt : txt * "\n")
+            end
             return _json(Dict("ok" => true, "file" => f))
         catch e
             return _json(Dict("ok" => false, "error" => sprint(showerror, e)))
