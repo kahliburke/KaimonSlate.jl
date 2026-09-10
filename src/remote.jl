@@ -537,7 +537,20 @@ end
 # `.gitignore` already spares most of them; this is for what is tracked, or for a project that is
 # not a repository. It names the file because nobody goes looking for a transfer setting. They
 # notice a provision that has stopped.
-const _TRANSFER_LOUD_BYTES = 512 * 1024 * 1024
+# Set from `slate.json` at boot (see `KaimonSlate.transfer_warn_mb`); 0 disables the warning.
+const TRANSFER_WARN_MB = Ref(100.0)
+_transfer_loud_bytes() = TRANSFER_WARN_MB[] <= 0 ? typemax(Int) : round(Int, TRANSFER_WARN_MB[] * 1024^2)
+
+# The last provision transfer per region ("" = a notebook's own remote kernel). Reported by the
+# region panel, so what SHIPPED can be read beside what WOULD ship — the second is a prediction and
+# only the first is evidence.
+const _LAST_TRANSFER = Dict{String,NamedTuple{(:dir, :files, :bytes, :at),
+                                              Tuple{String,Int,Int,Float64}}}()
+const _LAST_TRANSFER_LOCK = ReentrantLock()
+
+"What the last provision to `region` actually sent, or `nothing` if none has run this session."
+last_transfer(region::AbstractString) =
+    lock(_LAST_TRANSFER_LOCK) do; get(_LAST_TRANSFER, String(region), nothing); end
 
 function _narrate_transfer(localdir::AbstractString, region::AbstractString, excludes::Vector{String})
     try
@@ -555,7 +568,13 @@ function _narrate_transfer(localdir::AbstractString, region::AbstractString, exc
         mb = round(bytes / 1024^2; digits = 1)
         _rlog("transfer: $(basename(rstrip(String(localdir), '/'))) → $n files, $(mb) MB" *
               (isempty(region) ? "" : " (region $region)"))
-        bytes < _TRANSFER_LOUD_BYTES && return
+        # Kept, not just logged. What a provision ACTUALLY sent is the honest answer to "did my
+        # rules do anything", and a log file is not where someone looking at a region will find it.
+        lock(_LAST_TRANSFER_LOCK) do
+            _LAST_TRANSFER[String(region)] =
+                (; dir = String(localdir), files = n, bytes = bytes, at = time())
+        end
+        bytes < _transfer_loud_bytes() && return
         big = sort!(collect(per); by = last, rev = true)
         top = join(("$k ($(round(v / 1024^2; digits = 1)) MB)" for (k, v) in first(big, 3)), ", ")
         _rlog("transfer: this is large and is packed in memory before it is sent. Biggest: $top. " *

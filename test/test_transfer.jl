@@ -128,6 +128,159 @@ end
     end
 end
 
+# Where the EDITOR for these rules lives, and what it is allowed to write to. Source-level, because
+# standing a server up to assert a path is more machinery than the claim needs — and the claim is
+# about scope, which is visible in the source.
+@testset "the rules editor is anchored on the project" begin
+    src = read(joinpath(@__DIR__, "..", "src", "server_complete.jl"), String)
+    dag = read(joinpath(@__DIR__, "..", "src", "assets", "js", "dag.js"), String)
+    focus = read(joinpath(@__DIR__, "..", "src", "assets", "js", "remotes-focus.js"), String)
+    css = read(joinpath(@__DIR__, "..", "src", "assets", "notebook.css"), String)
+    fails = String[]
+
+    # PER NOTEBOOK is how it is reached; PER PROJECT is what it edits. The route carries a notebook
+    # id so the project can be resolved server-side, and the file is written beside that project's
+    # Project.toml — not into the per-notebook fork env, which lives in the depot, is generated, and
+    # could never be committed.
+    occursin("\"/api/{id}/transfer-rules\"", src) ||
+        push!(fails, "the rules route is not scoped to a notebook")
+    occursin("_project_of(nb) = String(get(nb.report.meta, \"assetbase\", \"\"))", src) ||
+        push!(fails, "the project anchor is not `assetbase`")
+    # The two wrong anchors, named so a future edit cannot quietly pick one up again.
+    occursin("_region_ship_dir", src) &&
+        push!(fails, "the editor resolves a REGION's preload again — a region is global across projects")
+    occursin("notebook_env_dir", src) && occursin("transfer-rules", src) &&
+        occursin("origin_env", src) &&
+        push!(fails, "the editor may be resolving the fork env instead of the project")
+
+    # It belongs beside the region map, which is the pane that answers "where does my work go".
+    occursin("_dagRegionDetail", dag) || push!(fails, "the DAG pane has no region detail panel")
+    occursin("_dagTravelsToggle", dag) ||
+        push!(fails, "the tree has no prune toggle — this was a textarea once, and must not be again")
+    occursin("_dagTravelGuard", dag) ||
+        push!(fails, "nothing opens the tool before an expensive first provision")
+    # And it must NOT come back on the front page, where the project is not knowable.
+    occursin("TransferRules", focus) &&
+        push!(fails, "the front-page region editor grew a transfer panel again")
+
+    # A class the JS names but the stylesheet never defines renders as unstyled text, and nothing
+    # reports it — the parse test only checks that the script is syntactically valid.
+    for m in eachmatch(r"class=\"(dag(?:tv|travel|regleg|regfacts|reghue|regdot)[a-z-]*)", dag)
+        occursin("." * m.captures[1], css) || push!(fails, "CSS class .$(m.captures[1]) is undefined")
+    end
+
+    isempty(fails) || @info "transfer editor drift" fails
+    @test isempty(fails)
+end
+
+# Writing the rules FILE from a set of toggles. The tool shows a tree and the user clicks; this is
+# what turns that back into text — in a file a person may also have edited by hand.
+@testset "toggles edit the rules file without eating what they did not write" begin
+    ah = SW.apply_holds
+    @testset "the managed lines" begin
+        @test ah("", "", ["scratch", "dist"], ["scratch", "dist", "src"]) == "scratch/\ndist/\n"
+        @test ah("scratch/\n", "", ["scratch"], ["scratch"]) == "scratch/\n"      # idempotent
+        @test ah("scratch/\n", "", String[], ["scratch"]) == ""                   # unticked ⇒ gone
+        @test ah("", "", ["a/b"], ["a/b"]) == "a/b/\n"                            # a nested path
+    end
+    @testset "everything else is left alone" begin
+        # A pattern no toggle could have produced is not the UI's to delete. `known` is what the
+        # caller was in a position to decide about, and it may only remove from that.
+        @test ah("scratch/\n*.h5\n", "", String[], ["scratch"]) == "*.h5\n"
+        @test ah("!data/\n", "", String[], ["data"]) == "!data/\n"                # a deliberate un-ignore
+        @test ah("# mine\nscratch/\n", "", ["scratch"], ["scratch"]) == "# mine\nscratch/\n"
+    end
+    @testset "sections" begin
+        # A named section is created when absent, and edited in place when present — without
+        # disturbing the global preamble above it or another region's section below.
+        @test ah("scratch/\n", "gpu", ["data"], ["data", "scratch"]) ==
+              "scratch/\n\n[region:gpu]\ndata/\n"
+        @test ah("scratch/\n\n[region:gpu]\ndata/\n", "gpu", String[], ["data", "scratch"]) ==
+              "scratch/\n\n[region:gpu]\n"
+        # The added line lands INSIDE the section, not past the blank that separates it from the
+        # next one — where it would silently belong to a different host.
+        @test ah("[region:a]\nx/\n\n[region:b]\ny/\n", "a", ["z"], ["x", "z"]) ==
+              "[region:a]\nz/\n\n[region:b]\ny/\n"
+    end
+end
+
+# The pattern language is gitignore's, and this is where that claim is kept honest.
+#
+# It was previously an approximation, and the failure mode of an approximation here is SILENT: a
+# pattern that matches nothing looks exactly like one that was meant to match nothing, and the
+# result is a directory shipped that should have stayed home. `**`, character classes and escapes
+# all quietly matched nothing.
+@testset "the patterns really are gitignore's" begin
+    rules(text) = (d = mktempdir(); write(joinpath(d, SW._SLATEIGNORE), text * "\n");
+                   SW._slateignore_rules(d, ""))
+    ig(text, rel; isdir = false, git = false) = SW._ignored(rules(text), rel, isdir, git)
+
+    @testset "** crosses directories" begin
+        @test ig("**/*.h5", "a/b/x.h5")
+        @test ig("**/*.h5", "x.h5")            # `**/` is zero or more, so the root counts
+        @test ig("a/**/b", "a/b")              # …including none at all
+        @test ig("a/**/b", "a/x/y/b")
+        @test ig("logs/**", "logs/a/b.txt")
+    end
+    @testset "character classes" begin
+        @test ig("[Bb]uild/", "Build/x") && ig("[Bb]uild/", "build/x")
+        @test ig("[a-c]x", "bx")
+        @test ig("[!a]bc", "xbc")
+        @test !ig("[!a]bc", "abc")
+    end
+    @testset "escapes and trailing space" begin
+        @test ig("\\#lit", "#lit")             # not a comment
+        @test ig("\\!lit", "!lit")             # not a negation
+        @test ig("keep   ", "keep")            # unescaped trailing space is not part of the name
+    end
+    @testset "anchoring" begin
+        # A slash-free pattern matches at any depth; one that says WHERE is rooted.
+        @test ig("build/", "a/b/build/x")
+        @test ig("/data/", "data/x")
+        @test !ig("/data/", "sub/data/x")
+        @test !ig("a*b", "a/b")                # `*` never crosses a separator
+    end
+    @testset "git is a seed the rules may override" begin
+        # `.gitignore` decides first and `.slateignore` gets the last word, which is the same
+        # last-match-wins rule gitignore uses between its own layers.
+        @test ig("", "data/x"; git = true)                    # nothing said ⇒ git's answer stands
+        @test !ig("!data/x", "data/x"; git = true)            # send this one anyway
+        @test !ig("!**", "data/x"; git = true)                # ignore .gitignore for transfers
+        # …and git's own precedence: under an excluded DIRECTORY, re-inclusion is not possible.
+        @test ig("data/\n!data/keep", "data/keep")
+    end
+end
+
+# A rule has to match the very thing it names, not only what is under it. The editor asks "is this
+# directory held?" to draw its state; when the answer was always no, ticking a directory and saving
+# appeared to do nothing — the rule was written, the transfer honoured it, and the checkbox came
+# back unticked. A save that looks lost is worse than one that fails.
+@testset "a directory rule matches the directory, not just its contents" begin
+    mktempdir() do d
+        write(joinpath(d, SW._SLATEIGNORE), "assets/\nsub/deep/\n")
+        r = SW._slateignore_rules(d, "")
+        # Two different questions, deliberately answered by two functions.
+        #   `_rule_hits` — does this rule NAME this entry? The editor asks it per row, to draw a
+        #                  tick. A `dir/` rule names the directory, not the files inside it.
+        #   `_ignored`   — is this path excluded? Walks every parent, so a held directory carries
+        #                  its whole subtree, which is what the transfer actually needs.
+        names(rel; isdir = false) = any(x -> SW._rule_hits(x, rel; isdir), r)
+        out(rel; isdir = false) = SW._ignored(r, rel, isdir, false)
+
+        # the bug this testset exists for: a rule must name the very directory it is written about,
+        # or the editor draws an unticked box over a rule that is doing its job
+        @test names("assets"; isdir = true)
+        @test names("sub/deep"; isdir = true)
+        # a trailing slash means DIRECTORY, so a plain file of that name is untouched
+        @test !names("assets"; isdir = false)
+        @test !names("src"; isdir = true)
+        # and the subtree still goes, which is the transfer's question rather than the tick's
+        @test out("assets/big.bin")
+        @test out("sub/deep/x")
+        @test !out("src/main.jl")
+    end
+end
+
 @testset "a remote path both expands ~ and stays one word" begin
     # These two requirements pull against each other, and for a long time only one was met: the
     # destination was single-quoted, so `~/.cache/…` was created as a directory literally NAMED `~`

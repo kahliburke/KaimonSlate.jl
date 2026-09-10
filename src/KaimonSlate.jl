@@ -470,6 +470,28 @@ function set_memo_cap_gb!(gb::Real; respawn::Bool = true)
     return v
 end
 
+"""
+Size at which a provision is worth interrupting someone over, in MB.
+
+ONE number for both the loud hub-log line and the browser's offer to set up transfer rules before
+the first run pays for them. Two constants for one idea drift apart, and had: they were 512 and 256.
+
+GLOBAL, because it is a fact about the link rather than about a project or a region — the same
+project is nothing over a LAN and painful over hotel wifi. 0 disables the warning entirely.
+"""
+transfer_warn_mb()::Float64 =
+    something(tryparse(Float64, string(get(_slate_config(), "transfer_warn_mb", ""))), 100.0)
+
+"Persist the provisioning-size warning threshold (MB). `0` turns the warning off."
+function set_transfer_warn_mb!(mb::Real)
+    v = max(0.0, Float64(mb))
+    ReportEngine.TRANSFER_WARN_MB[] = v
+    cfg = _slate_config()
+    v == 100.0 ? delete!(cfg, "transfer_warn_mb") : (cfg["transfer_warn_mb"] = v)
+    _persist_slate_config!(cfg)
+    return v
+end
+
 "Configured data-channel chunk size in MB; 0.0 = unset (env / 8 MiB default applies)."
 blob_chunk_mb()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "blob_chunk_mb", ""))), 0.0)
 
@@ -582,6 +604,7 @@ function _load_slate_config!()
     ef = worker_extra_flags()
     isempty(ef) || (ReportEngine.WORKER_EXTRA_FLAGS[] = ef)
     ReportEngine.MEMO_CAP_GB[] = memo_cap_gb()
+    ReportEngine.TRANSFER_WARN_MB[] = transfer_warn_mb()
     ReportEngine.BLOB_CHUNK_MB[] = blob_chunk_mb()
     ReportEngine.CARRY_MAX_S[] = carry_max_s()
     ReportEngine.XFER_CONFIRM_S[] = xfer_confirm_s()

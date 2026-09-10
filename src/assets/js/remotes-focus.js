@@ -210,7 +210,6 @@ function Editor() {
       ? html`<div class="rpprow"><label>Warm</label><input class="rppn" type="text" inputmode="numeric" autocomplete="off" value=${fWarm.value} onInput=${ev => fWarm.value = ev.target.value}/><span class="pddim" style="font-size:.76rem">workers kept ready to adopt</span></div>`
       : null}
     <div class="rpprow"><label>Preload</label><input class="rpppre" autocomplete="off" placeholder="/path/to/project  (folder with Project.toml)" value=${fPre.value} onInput=${ev => fPre.value = ev.target.value}/></div>
-    ${editing ? TransferRules(e.name) : null}
     <div class="rpprow"><label>Data root</label><input class="rpproot" autocomplete="off" placeholder="/scratch  (a path ON THE HOST)" value=${fRoot.value} onInput=${ev => fRoot.value = ev.target.value}/></div>
     ${SchedulerRows()}
     ${AllocationRow(editing ? e.name : '')}
@@ -232,70 +231,6 @@ function Editor() {
 // folded away — with a count, because a fold that hides a setting silently is worse than a long
 // form. The catalogue, the spelling and the warnings are `schedopts.js`, shared with the sweep
 // cell's editor so one name means one thing in both.
-// ── What gets sent ──────────────────────────────────────────────────────────────────────────────
-// The preload directory is shipped to the host, and it is the user's project — which routinely has
-// data beside the code. `.gitignore` is honoured already; this edits the `.slateignore` next to it
-// for what is tracked but still not worth sending, and for projects that are not repositories.
-//
-// The SIZES are the reason this is a panel rather than a link to a file. A rule is abstract; "4.2 GB
-// in data/ is going" is not, and it is the number that makes someone write a rule at all.
-const trOpen = signal(false), trData = signal(null), trText = signal(''), trBusy = signal(false);
-
-function loadTransfer(region) {
-  trData.value = null;
-  fetch('/api/transfer-rules?region=' + encodeURIComponent(region))
-    .then(r => r.json())
-    .then(d => { trData.value = d; trText.value = (d && d.text) || ''; })
-    .catch(() => { trData.value = { dir: '' }; });
-}
-
-function saveTransfer(region) {
-  trBusy.value = true;
-  fetch('/api/transfer-rules', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                 body: JSON.stringify({ region, text: trText.value }) })
-    .then(r => r.json())
-    .then(d => { trBusy.value = false;
-                 if (d && d.ok) loadTransfer(region);          // re-measure: the point is the sizes
-                 else rmsg.value = { text: (d && d.error) || 'could not save', err: true }; })
-    .catch(() => { trBusy.value = false; rmsg.value = { text: 'could not save', err: true }; });
-}
-
-function TransferRules(region) {
-  const d = trData.value;
-  const bar = (label, side, cls) => !side ? null : html`
-    <div class=${'rpptrbar ' + cls}>
-      <span class="rpptrlabel">${label}</span>
-      <span class="rpptrsize">${fmtB(side.bytes || 0)}</span>
-      <span class="pddim">${side.files || 0} files</span>
-      ${(side.top || []).slice(0, 3).map(t => html`<span class="rpptrtop">${t.name} ${fmtB(t.bytes)}</span>`)}
-    </div>`;
-  return html`
-    <div class="rpprow rpptrrow"><label>Sent to host</label>
-      <div class="rpptrbox">
-        ${!trOpen.value
-          ? html`<button class="rpptrtoggle" onClick=${() => { trOpen.value = true; loadTransfer(region); }}>
-                   Review what gets sent…</button>`
-          : !d ? html`<span class="pddim">reading ${'…'}</span>`
-          : !d.dir ? html`<span class="pddim">This region has no preload directory, so nothing local is shipped.</span>`
-          : html`
-            ${bar('sent', d.sent, 'ok')}
-            ${bar('held back', d.held, 'held')}
-            <div class="rpptrhint">Rules for <code>${d.dir}</code>. <code>.gitignore</code> is always
-              honoured; these are for what it does not cover. One pattern per line, gitignore syntax.
-              A <code>[region:${region}]</code> section applies to this host only, and
-              <code>!pattern</code> puts something back.</div>
-            <textarea class="rpptrtext" rows="6" spellcheck="false"
-              placeholder=${'# never send these\nresults/\n*.h5\n\n[region:' + region + ']\n# already on this host\ndata/'}
-              value=${trText.value} onInput=${ev => trText.value = ev.target.value}></textarea>
-            <div class="rpptract">
-              <button class="rpptrsave" disabled=${trBusy.value}
-                onClick=${() => saveTransfer(region)}>${trBusy.value ? 'Saving…' : 'Save rules'}</button>
-              <button class="rpptrclose" onClick=${() => { trOpen.value = false; }}>Close</button>
-              ${d.exists ? html`<span class="pddim">${d.file}</span>` : html`<span class="pddim">no ${'.slateignore'} yet</span>`}
-            </div>`}
-      </div></div>`;
-}
-
 function MoreRows(kind) {
   const SO = window.slateSchedOpts;
   const rows = fOpts.value;
@@ -457,9 +392,6 @@ export function Focus() {
 effect(() => { const h = focusHost.value; if (h) { loadRegions(); fetchRoster(h); loadScheduler(h); } });   // focus → load
 effect(() => {   // seed the editor form from the selected region (or blank for "new")
   const e = editRegion.value, h = focusHost.value; if (!h) return;
-  // Collapse the transfer panel on every switch. Its contents are one region's directory and one
-  // region's sizes; left open it would show the previous region's under the new region's name.
-  trOpen.value = false; trData.value = null; trText.value = '';
   if (e && e.name) { fName.value = e.name; fWarm.value = +e.warm || 0; fPre.value = e.preload || ''; fRoot.value = e.data_root || ''; fTr.value = e.transport || 'tunnel'; fPort.value = e.base_port > 0 ? e.base_port : ''; fSys.value = !!e.sysimage;
     fSched.value = e.scheduler || 'none'; fPart.value = e.partition || ''; fWall.value = e.walltime || '';
     fCpus.value = e.cpus > 0 ? e.cpus : ''; fMem.value = e.mem || ''; fGpus.value = e.gpus || ''; fAcct.value = e.account || ''; fIdle.value = e.idle_release || ''; fWarn.value = e.idle_warn || '';

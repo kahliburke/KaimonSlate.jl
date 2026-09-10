@@ -467,6 +467,7 @@ const _TREE_TEXT_EXTS = Set{String}([
 const _TREE_TEXT_NAMES = Set{String}([
     ".gitignore", ".gitattributes", ".gitmodules", ".dockerignore", ".editorconfig", ".env",
     ".npmrc", ".prettierrc", ".eslintrc", ".babelrc",
+    ".slateignore",                     # ours, and the same shape as the `.gitignore` beside it
     "Dockerfile", "Makefile", "LICENSE", "README", "CITATION", "Procfile", "Justfile",
 ])
 # Media that render inline via the notebook's `/n/{id}/asset/**` byte route (no base64-through-JSON).
@@ -1299,66 +1300,135 @@ function _make_router(h::Hub)
         "parked" => [Dict("host" => p.host, "label" => p.label, "port" => p.port,
                           "idle_s" => p.idle_s) for p in ReportEngine.parked_wires()])))
     # ── What gets sent to a remote ───────────────────────────────────────────────────────────
-    # A region ships a LOCAL directory (its `preload`) for env parity, and that directory is the
-    # user's project — which routinely has data beside the code that has no business travelling.
-    # `.gitignore` already spares most of it; this edits the `.slateignore` beside it for the rest.
+    # Scoped to the PROJECT, and written INTO it. `.slateignore` sits beside `Project.toml`, so it
+    # is version-controlled, every notebook in that project obeys it, and a collaborator who clones
+    # the repo inherits it. A region only chooses which `[region:…]` section applies.
     #
-    # The directory is resolved HERE from the region name rather than accepted as a parameter: the
-    # POST writes a file, and a path from the browser would be an arbitrary write.
-    _region_ship_dir(name::AbstractString) = begin
-        r = findfirst(x -> x.name == String(name), ReportEngine.regions())
-        r === nothing ? "" : ReportEngine.regions()[r].preload
-    end
-    HTTP.register!(router, "GET", "/api/transfer-rules", req -> begin
+    # A notebook is how the editor is REACHED, never what the rules belong to — several notebooks
+    # share one project, and rules that differed between them would be one directory described two
+    # ways. So the anchor is `assetbase`, the notebook's project dir, and NOT its per-notebook fork
+    # env: that lives under the Julia depot, is generated, and could not be committed.
+    #
+    # Resolved server-side rather than taken as a parameter, because the POST writes a file and a
+    # path from the browser would be an arbitrary write.
+    _project_of(nb) = String(get(nb.report.meta, "assetbase", ""))
+    HTTP.register!(router, "GET", "/api/{id}/transfer-rules", req -> _withnb(h, req, nb -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
         region = get(q, "region", "")
-        dir = _region_ship_dir(region)
+        dir = _project_of(nb)
         isempty(dir) || isdir(dir) || (dir = "")
         f = isempty(dir) ? "" : joinpath(dir, ReportEngine.Sweep._SLATEIGNORE)
-        # The PREVIEW is the point of the dialog: rules are abstract, "these 4 GB are going" is not.
-        kept, dropped, nkept, ndrop = Dict{String,Int}(), Dict{String,Int}(), 0, 0
-        if !isempty(dir)
+        SWp = ReportEngine.Sweep
+        # ONE LEVEL of the tree, for the directory `path` (relative, "" = the project root). Lazy,
+        # because a project tree can be enormous and the decision is nearly always made a few levels
+        # down at most — walking all of it to draw a row nobody expands is work for nothing.
+        #
+        # Each row carries its RECURSIVE size, since that is what the decision turns on: the reason
+        # to prune `assets/` is what is under it, not the directory entry itself.
+        #
+        # WHY something is held matters as much as whether. A `.gitignore` decision is not this
+        # dialog's to reverse, so those rows are reported as settled rather than offered a toggle
+        # that would silently do nothing.
+        base = get(q, "path", "")
+        entries = Vector{Dict{String,Any}}()
+        here = isempty(dir) ? "" : normpath(joinpath(dir, base))
+        # Never above the project: `path` comes from the browser and joins into a filesystem walk.
+        (isempty(here) || !startswith(here, normpath(dir)) || !isdir(here)) && (here = "")
+        if !isempty(here)
             try
-                keep = ReportEngine.Sweep.transfer_keep(dir; region,
-                                                        excludes = ["Manifest.toml", ".git", "*.cov"])
-                for (root, _, files) in walkdir(dir), fl in files
-                    rel = replace(relpath(joinpath(root, fl), dir), '\\' => '/')
-                    sz = try; Int(filesize(joinpath(root, fl))); catch; 0; end
-                    top = first(split(rel, '/'; keepempty = false))
-                    if keep(rel); kept[top] = get(kept, top, 0) + sz; nkept += 1
-                    else; dropped[top] = get(dropped, top, 0) + sz; ndrop += 1; end
+                gitkept = SWp._git_kept(dir)
+                rules = SWp._slateignore_rules(dir, region)
+                keep = SWp.transfer_keep(dir; region, excludes = ["Manifest.toml", ".git", "*.cov"])
+                for name in sort!(readdir(here))
+                    (name == ".git" || name == SWp._SLATEIGNORE) && continue
+                    p = joinpath(here, name)
+                    rel0 = replace(relpath(p, dir), '\\' => '/')
+                    bytes = sent = 0; files = nsent = 0; githeld = 0
+                    for (root, _, fls) in (isdir(p) ? walkdir(p) : [(here, String[], [name])]), fl in fls
+                        rel = replace(relpath(joinpath(root, fl), dir), '\\' => '/')
+                        sz = try; Int(filesize(joinpath(root, fl))); catch; 0; end
+                        bytes += sz; files += 1
+                        if keep(rel); sent += sz; nsent += 1
+                        elseif gitkept !== nothing && !(rel in gitkept); githeld += 1
+                        end
+                    end
+                    files == 0 && continue
+                    ruled = any(r -> !r.negated && SWp._rule_hits(r, rel0; isdir = isdir(p)), rules)
+                    push!(entries, Dict{String,Any}(
+                        "name" => name, "path" => rel0, "dir" => isdir(p),
+                        "bytes" => bytes, "files" => files,
+                        "sent_bytes" => sent, "sent_files" => nsent,
+                        "state" => nsent == 0 && githeld == files ? "gitignored" :
+                                   nsent == 0 ? "held" : nsent == files ? "sent" : "partial",
+                        "ruled" => ruled))
                 end
             catch
             end
         end
-        _tops(d) = sort!([Dict("name" => k, "bytes" => v) for (k, v) in d];
-                         by = x -> x["bytes"], rev = true)[1:min(8, length(d))]
+        sort!(entries; by = e -> e["bytes"], rev = true)
+        # The headline totals describe the WHOLE PROJECT, whatever level is being browsed. They are
+        # the number someone came here for ("what does a provision cost"), and a figure that changed
+        # as you opened a directory would be measuring the view rather than the transfer.
+        tot_bytes = tot_sent = tot_files = tot_nsent = 0
+        if !isempty(dir)
+            try
+                keep = SWp.transfer_keep(dir; region, excludes = ["Manifest.toml", ".git", "*.cov"])
+                for (root, _, fls) in walkdir(dir), fl in fls
+                    rel = replace(relpath(joinpath(root, fl), dir), '\\' => '/')
+                    startswith(rel, ".git/") && continue
+                    sz = try; Int(filesize(joinpath(root, fl))); catch; 0; end
+                    tot_bytes += sz; tot_files += 1
+                    keep(rel) && (tot_sent += sz; tot_nsent += 1)
+                end
+            catch
+            end
+        end
+        # What the last provision ACTUALLY sent, beside what one would send now. The first is
+        # evidence and the second a prediction, and a difference between them is the useful signal:
+        # the rules changed since, or nothing has shipped yet under the rules on screen.
+        lt = ReportEngine.last_transfer(region)
         return _json(Dict("region" => region, "dir" => dir,
+                          # The browser decides whether to interrupt; the THRESHOLD is a setting and
+                          # is only stored in one place, so it travels with the answer.
+                          "warn_mb" => ReportEngine.TRANSFER_WARN_MB[],
                           "file" => f, "exists" => !isempty(f) && isfile(f),
+                          "last" => lt === nothing ? nothing :
+                                    Dict("files" => lt.files, "bytes" => lt.bytes,
+                                         "ago" => round(Int, time() - lt.at),
+                                         "dir" => basename(rstrip(lt.dir, '/'))),
                           "text" => (isempty(f) || !isfile(f)) ? "" : (try; read(f, String); catch; ""; end),
-                          "sent" => Dict("files" => nkept, "bytes" => sum(values(kept); init = 0),
-                                         "top" => _tops(kept)),
-                          "held" => Dict("files" => ndrop, "bytes" => sum(values(dropped); init = 0),
-                                         "top" => _tops(dropped))))
-    end)
-    HTTP.register!(router, "POST", "/api/transfer-rules", req -> begin
+                          "path" => base, "entries" => entries,
+                          "sent" => Dict("files" => tot_nsent, "bytes" => tot_sent),
+                          "held" => Dict("files" => tot_files - tot_nsent, "bytes" => tot_bytes - tot_sent)))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/transfer-rules", req -> _withnb(h, req, nb -> begin
         d = try; JSON.parse(String(req.body)); catch; Dict{String,Any}(); end
-        region = String(get(d, "region", ""))
-        dir = _region_ship_dir(region)
+        dir = _project_of(nb)
         (isempty(dir) || !isdir(dir)) &&
-            return _json(Dict("ok" => false, "error" => "region '$region' ships no local directory"))
+            return _json(Dict("ok" => false, "error" => "this notebook has no project directory to write rules into"))
         f = joinpath(dir, ReportEngine.Sweep._SLATEIGNORE)
-        txt = String(get(d, "text", ""))
+        region = String(get(d, "region", ""))
         try
-            # Empty means "no rules": remove the file rather than leaving an empty one, so the
-            # project does not carry a file that says nothing.
+            # Two ways in. `text` is the escape hatch for patterns a list of directories cannot say
+            # (`*.h5`, a negation). `hold` is what the toggles send: the entry names to keep back for
+            # this section, and the file is REWRITTEN from them — so unticking something removes its
+            # line instead of leaving the user to find and delete it.
+            txt = if haskey(d, "text")
+                String(d["text"])
+            else
+                cur = isfile(f) ? (try; read(f, String); catch; ""; end) : ""
+                ReportEngine.Sweep.apply_holds(cur, region,
+                                               String[String(x) for x in get(d, "hold", [])],
+                                               String[String(x) for x in get(d, "known", [])])
+            end
+            # Empty means "no rules": remove the file rather than leaving one that says nothing.
             isempty(strip(txt)) ? rm(f; force = true) :
                 write(f, endswith(txt, "\n") ? txt : txt * "\n")
             return _json(Dict("ok" => true, "file" => f))
         catch e
             return _json(Dict("ok" => false, "error" => sprint(showerror, e)))
         end
-    end)
+    end))
     # What a scheduler region is HOLDING, asked of the scheduler itself. Separate from /api/regions
     # because it costs a round trip to the login node, and because an allocation bills for the time
     # it is held — so it wants to be visible on its own and lettable-go on demand.

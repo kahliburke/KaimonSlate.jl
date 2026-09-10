@@ -330,17 +330,165 @@ function _git_kept(dir::AbstractString)
     return keep
 end
 
-# One `.slateignore` rule: a gitignore-style pattern plus whether it un-ignores.
+# One `.slateignore` rule. The pattern is compiled to a Regex over a WHOLE relative path rather than
+# matched component by component, because `**` has to be able to cross a `/` and a per-component
+# matcher cannot express that.
 struct _IgnoreRule
     negated::Bool
-    anchored::Bool      # a leading `/` — matches from the project root only
-    dironly::Bool       # a trailing `/` — matches a directory, and so its whole subtree
-    pat::String
+    dironly::Bool       # a trailing `/` — only a directory matches, and so its whole subtree
+    pat::String         # as written, for reporting
+    re::Regex
+end
+
+# ── gitignore patterns, for real ─────────────────────────────────────────────────────────────
+# This follows gitignore(5) rather than approximating it, because the failure mode of an
+# approximation is SILENT: a pattern that matches nothing looks exactly like a pattern that matches
+# nothing on purpose, and the result is a directory shipped that was meant to stay home.
+#
+#   *          anything except `/`          ?     one character except `/`
+#   [abc] [a-z] [!abc]                      \x    a literal x (so `\#`, `\!`, `\ `)
+#   **/pat     pat at any depth             a/**/b  zero or more directories between
+#   pat/**     everything under pat
+#
+# A pattern with no `/` in it (a trailing one aside) matches at ANY depth — `build` catches
+# `a/b/build`. One with an interior or leading `/` is anchored to the project root.
+function _pat_regex(pat::AbstractString, anchored::Bool)
+    io = IOBuffer(); i = 1; n = lastindex(pat)
+    while i <= n
+        c = pat[i]
+        if c == '\\' && i < n                       # escape: the next character is a literal
+            print(io, "\\", pat[nextind(pat, i)]); i = nextind(pat, nextind(pat, i)); continue
+        elseif c == '*'
+            j = nextind(pat, i)
+            if j <= n && pat[j] == '*'               # `**`
+                k = nextind(pat, j)
+                if k <= n && pat[k] == '/'           # `**/` → zero or more leading directories
+                    print(io, "(?:[^/]+/)*"); i = nextind(pat, k); continue
+                end
+                print(io, ".*"); i = k; continue     # trailing/bare `**` → anything, `/` included
+            end
+            print(io, "[^/]*"); i = j; continue
+        elseif c == '?'
+            print(io, "[^/]")
+        elseif c == '['                              # a character class, passed through with care
+            j = nextind(pat, i); neg = false
+            if j <= n && (pat[j] == '!' || pat[j] == '^'); neg = true; j = nextind(pat, j); end
+            body = IOBuffer()
+            while j <= n && pat[j] != ']'
+                pat[j] == '\\' && j < n && (print(body, "\\", pat[nextind(pat, j)]); j = nextind(pat, nextind(pat, j)); continue)
+                print(body, pat[j] in ('^', '\\') ? "\\" * pat[j] : string(pat[j])); j = nextind(pat, j)
+            end
+            cls = String(take!(body))
+            if j > n || isempty(cls)                 # unterminated: a literal `[`
+                print(io, "\\[")
+            else
+                print(io, "[", neg ? "^/" : "", cls, "]"); i = nextind(pat, j); continue
+            end
+        elseif c == '/'
+            print(io, "/")
+        else
+            print(io, occursin(c, raw"\^$.|+(){}") ? "\\" * c : string(c))
+        end
+        i = nextind(pat, i)
+    end
+    body = String(take!(io))
+    # Unanchored means "at any depth", which is gitignore's rule for a slash-free pattern.
+    return Regex("^" * (anchored ? "" : "(?:.*/)?") * body * "\$")
+end
+
+# Strip the trailing whitespace gitignore ignores, unless it was escaped.
+function _rstrip_unescaped(s::AbstractString)
+    t = String(s)
+    while !isempty(t) && isspace(t[end])
+        # An escaped trailing space is significant; count the backslashes before it.
+        b = 0; k = prevind(t, lastindex(t))
+        while k >= firstindex(t) && t[k] == '\\'; b += 1; k = prevind(t, k); end
+        isodd(b) && break
+        t = t[firstindex(t):prevind(t, lastindex(t))]
+    end
+    return t
+end
+
+"Parse one non-comment, non-blank `.slateignore` line into a rule, or `nothing` if it says nothing."
+function _parse_rule(line::AbstractString)
+    t = _rstrip_unescaped(line)
+    isempty(t) && return nothing
+    neg = startswith(t, '!')
+    neg && (t = SubString(t, 2))
+    isempty(t) && return nothing
+    dironly = endswith(t, '/')
+    dironly && (t = SubString(t, 1, prevind(t, lastindex(t))))
+    isempty(t) && return nothing
+    lead = startswith(t, '/')
+    lead && (t = SubString(t, 2))
+    isempty(t) && return nothing
+    # Anchored when the pattern says WHERE: a leading slash, or an interior one.
+    anchored = lead || occursin('/', t)
+    return _IgnoreRule(neg, dironly, String(t), _pat_regex(t, anchored))
 end
 
 # The GLOBAL section, then the one for `region` if it names one. Later rules win, so a region's
 # lines override the defaults above them — which is what makes "everywhere except this host"
 # and "only on this host" both expressible.
+"""
+    apply_holds(text, region, hold, known) -> String
+
+Rewrite `.slateignore` so that, in `region`'s section (`""` = the global preamble), exactly the
+paths in `hold` are held back — without disturbing anything else in the file.
+
+`known` is what the caller was in a position to decide about: the paths it showed. Only those may be
+REMOVED. A pattern the caller never displayed is left alone, which is what keeps a hand-written
+`*.h5`, a negation, or another region's section from being deleted by a UI that never knew about
+them. Editing a file someone may also edit by hand means touching only the lines you are sure of.
+"""
+function apply_holds(text::AbstractString, region::AbstractString, hold, known)
+    hold  = String[rstrip(String(x), '/') for x in hold]
+    known = Set(String[rstrip(String(x), '/') for x in known])
+    want  = String[h * "/" for h in hold]
+    header = "[region:$region]"
+    src = split(rstrip(String(text), '\n'), '\n'; keepempty = true)
+    isempty(strip(String(text))) && (src = String[])
+    out, seen = String[], Set{String}()
+    # The global preamble always exists; a named section may not, and is appended if it never shows.
+    in_section = isempty(region)
+    found, flushed = in_section, false
+    # Owed lines belong INSIDE the section, before whatever blank line separates it from the next
+    # one — otherwise removing a line and adding another moves the new one past the separator and
+    # into the following section, where it means something else entirely.
+    flush!() = begin
+        gap = 0
+        while !isempty(out) && isempty(strip(out[end])); pop!(out); gap += 1; end
+        for w in want; w in seen || push!(out, w); end
+        gap > 0 && push!(out, "")
+        flushed = true
+    end
+    for raw in src
+        t = strip(raw)
+        if startswith(t, '[') && endswith(t, ']')
+            in_section && !flushed && flush!()          # owed lines go in before the next section
+            in_section = (t == header); in_section && (found = true)
+            push!(out, String(raw)); continue
+        end
+        if in_section && !isempty(t) && !startswith(t, '#')
+            key = rstrip(lstrip(t, '!'), '/')
+            if key in known                             # ours to manage
+                startswith(t, '!') && (push!(out, String(raw)); continue)  # a negation is deliberate
+                push!(seen, key * "/")
+                key in hold || continue                                    # unticked ⇒ drop the line
+            end
+        end
+        push!(out, String(raw))
+    end
+    if !found                                            # section absent: start one
+        isempty(out) || push!(out, "")
+        push!(out, header); flush!()
+    elseif !flushed
+        flush!()
+    end
+    s = rstrip(join(out, '\n'), '\n')
+    return isempty(strip(s)) ? "" : s * "\n"
+end
+
 function _slateignore_rules(dir::AbstractString, region::AbstractString)
     f = joinpath(String(dir), _SLATEIGNORE)
     isfile(f) || return _IgnoreRule[]
@@ -355,14 +503,8 @@ function _slateignore_rules(dir::AbstractString, region::AbstractString)
             continue
         end
         active || continue
-        neg = startswith(line, '!')
-        neg && (line = strip(SubString(line, 2)))
-        isempty(line) && continue
-        anch = startswith(line, '/')
-        anch && (line = SubString(line, 2))
-        dironly = endswith(line, '/')
-        dironly && (line = SubString(line, 1, lastindex(line) - 1))
-        isempty(line) || push!(rules, _IgnoreRule(neg, anch, dironly, String(line)))
+        r = _parse_rule(line)
+        r === nothing || push!(rules, r)
     end
     return rules
 end
@@ -377,20 +519,42 @@ function _glob_match(pat::AbstractString, s::AbstractString)
     return occursin(Regex(re), String(s))
 end
 
-# Does `rel` (a path relative to the project root, `/`-separated) match? An UNANCHORED pattern with
-# no slash matches any component, so `data/` catches `a/b/data/x` — gitignore's own rule, and the
-# one people rely on. A match on any parent prefix carries the whole subtree.
-function _rule_hits(r::_IgnoreRule, rel::AbstractString)
-    parts = split(String(rel), '/'; keepempty = false)
-    if occursin('/', r.pat)                       # a path pattern: match from the root
-        pp = split(r.pat, '/'; keepempty = false)
-        length(parts) >= length(pp) || return false
-        return all(i -> _glob_match(pp[i], parts[i]), eachindex(pp))
+# Does ONE rule match `rel`? Reported to the editor, which asks per entry whether a rule holds it.
+# `dironly` is checked against what `rel` actually is.
+function _rule_hits(r::_IgnoreRule, rel::AbstractString; isdir::Bool = false)
+    (r.dironly && !isdir) && return false
+    return occursin(r.re, replace(String(rel), '\\' => '/'))
+end
+
+"""
+    _ignored(rules, rel, isdir, gitignored) -> Bool
+
+gitignore's own decision procedure, over `rel` and every directory above it.
+
+`gitignored` seeds the verdict, so `.gitignore` behaves as a first layer of rules that
+`.slateignore` may then override. That is what makes `!data/keep.csv` able to send one file git
+excludes, and `!**` (re-include everything) able to turn `.gitignore` off for transfers entirely —
+without a mode switch, because it is the same last-match-wins rule doing the work.
+
+A path under an EXCLUDED DIRECTORY cannot be re-included, which is git's rule and the reason the
+walk goes prefix by prefix rather than testing the whole path once.
+"""
+function _ignored(rules, rel::AbstractString, isdir::Bool, gitignored::Bool)
+    parts = split(replace(String(rel), '\\' => '/'), '/'; keepempty = false)
+    isempty(parts) && return false
+    for i in eachindex(parts)
+        p = join(parts[1:i], '/')
+        last = i == length(parts)
+        pisdir = last ? isdir : true
+        st = last ? gitignored : false
+        for r in rules
+            (r.dironly && !pisdir) && continue
+            occursin(r.re, p) && (st = !r.negated)
+        end
+        last && return st
+        st && return true          # a parent directory is out, so everything under it is out
     end
-    r.anchored && return !isempty(parts) && _glob_match(r.pat, parts[1])
-    # `dironly` means only a DIRECTORY matches, so the last component of a file path cannot.
-    last_i = r.dironly ? length(parts) - 1 : length(parts)
-    return any(i -> _glob_match(r.pat, parts[i]), 1:max(last_i, 0))
+    return false
 end
 
 """
@@ -406,19 +570,16 @@ function transfer_keep(dir::AbstractString; region::AbstractString = "",
     rules = _slateignore_rules(dir, region)
     return function (rel::AbstractString)
         r = replace(String(rel), '\\' => '/')
+        # The fixed excludes are not negotiable: `.git`, a Manifest the far side must resolve.
         _excluded(r, excludes) && return false
         # A directory is offered before its contents; keep it so the walk can descend, and let the
-        # files inside be judged on their own. Dropping it here would prune a subtree that
-        # `.slateignore` may have un-ignored.
+        # files inside be judged on their own.
         isdirpath = isdir(joinpath(String(dir), r))
-        if kept !== nothing && !isdirpath && !(r in kept)
-            return false                                   # git ignores it, or it is not a file git sees
-        end
-        hit = false
-        for ru in rules                                    # later rules win
-            _rule_hits(ru, r) && (hit = !ru.negated)
-        end
-        return !hit
+        isdirpath && return true
+        # git's verdict SEEDS the decision rather than ending it, so a `!` in `.slateignore` can
+        # send something git ignores. Without a repo there is no seed and the rules decide alone.
+        git = kept !== nothing && !(r in kept)
+        return !_ignored(rules, r, false, git)
     end
 end
 

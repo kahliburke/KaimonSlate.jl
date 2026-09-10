@@ -344,15 +344,218 @@ function _dagRegionLegend() {
     if (el) el.remove();
     const p = document.getElementById('dagpeerpanel'); if (p) p.remove();   // panels ride the overlay
     const x = document.getElementById('dagxferdash'); if (x) { _dagXferDashDispose(); x.remove(); }
+    const t = document.getElementById('dagregpanel'); if (t) { t.remove(); _dagRegPanelName = null; _dagGuardDismissed(); }
     return;
   }
   if (!el) { el = document.createElement('div'); el.id = 'dagregleg'; el.className = 'dagregleg'; pane.appendChild(el); }
   const hasRemote = _dagRegionNamesAll().length > 0;
   el.innerHTML = `<span><i style="background:#3a3f55"></i>main (local)</span>` +
-    _dagRegionNamesAll().map(n => `<span><i style="background:${_dagRegionHue(n)}"></i>${n === 'default' ? 'remote' : n}</span>`).join('') +
+    _dagRegionNamesAll().map(n => `<button class="dagreglegbtn" onclick="_dagRegionDetail('${n.replace(/'/g, "\\'")}')" title="${n} — host, worker status, and what a provision to it ships"><i style="background:${_dagRegionHue(n)}"></i>${n === 'default' ? 'remote' : n}</button>`).join('') +
     (hasRemote ? `<button class="dagpeerbtn" onclick="_dagPeerPlan(false)" title="peer routing plan — how cross-region values move (direct / ssh-bridge / relay), the address each pair uses, and the mesh artifacts on each host">⇄ peer plan</button>` +
       `<button class="dagpeerbtn" onclick="_dagXferDash()" title="transfer summary — totals, throughput-over-time, the region peer-to-peer grid, and the rate distribution">📊 transfers</button>` : '');
+  _dagTravelGuard();
 }
+
+// Open this UNASKED when a provision is about to be expensive and nobody has said what should stay
+// home. The cost of a transfer is paid before anyone sees a number — the first run on a region is
+// the slow one — so a tool that only helps after you have noticed is a tool that arrives too late.
+//
+// Fires once per notebook session, and only when there is no `.slateignore` at all: a project whose
+// author already made these decisions is not second-guessed, however big it is. That is also why
+// this is not a warning dialog — there is nothing to acknowledge, only something to set up.
+let _dagTravelGuardDone = false;
+// Set while a panel is on screen only because the guard put it there. Dismissing THAT is an answer
+// — "I looked, this is all meant to travel" — and it has to be recorded, or the same interruption
+// arrives on every reload. Recorded in the FILE rather than the browser, so the answer travels with
+// the project instead of being re-asked on the next machine.
+let _dagGuardOpened = false;
+async function _dagGuardDismissed() {
+  if (!_dagGuardOpened) return;
+  _dagGuardOpened = false;
+  const d = _dagTree.data;
+  if (!d || !d.dir || d.exists) return;              // they wrote rules, or there was nothing to ask
+  try {
+    await fetch(_apipath('/api/transfer-rules'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ region: _dagRegPanelName || '', text:
+        '# Reviewed: everything in this project is meant to travel to a region.\n' +
+        '# Delete this file to be asked again, or list paths below to hold them back.\n' }) });
+  } catch (_) {}
+}
+async function _dagTravelGuard() {
+  if (_dagTravelGuardDone) return;
+  const regs = _dagRegionNamesAll();
+  if (!regs.length) return;
+  _dagTravelGuardDone = true;                 // one attempt, whatever it finds
+  try {
+    const d = await (await fetch(_apipath('/api/transfer-rules') + '?region=')).json();
+    if (!d || !d.dir || d.exists) return;                       // already configured: leave it alone
+    // The threshold is a global setting, served with the answer so there is no second copy of it
+    // here to drift. 0 turns the warning off.
+    const lim = (d.warn_mb || 0) * 1024 * 1024;
+    if (lim <= 0 || (d.sent && d.sent.bytes || 0) < lim) return;
+    _dagRegionDetail(regs[0]);
+    _dagGuardOpened = true;
+    const b = document.getElementById('dagtravelbody');
+    if (b) b.insertAdjacentHTML('afterbegin',
+      `<div class="dagtvguard">This project ships
+       <b>${window.slateBytes(d.sent.bytes, { compact: true })}</b> to a region on the first run, and
+       has no rules yet. Prune what does not need to go before it costs you the transfer.</div>`);
+  } catch (_) {}
+}
+
+// 🖧 Region detail — click a region in the legend and get what it IS, plus what a provision to it
+// would cost and a way to cut that down.
+//
+// The provisioning tool is a FILE TREE with sizes and a prune toggle per row, not a text box: the
+// question is "should this 8 GB directory go", and the answer is a click on that directory. The
+// `.slateignore` it writes is a consequence, not something to author. Sizes are recursive, because
+// the reason to prune `assets/` is what is under it.
+//
+// Rows settled by `.gitignore` are shown but not offered a toggle — that decision belongs to the
+// repo, and a control that silently did nothing would be worse than none.
+let _dagRegPanelName = null;   // which region the panel is showing
+let _dagTree = { open: {}, rows: {}, hold: new Set(), known: new Set(), dirty: false, data: null };
+
+function _dagRegionDetail(name) {
+  const pane = document.getElementById('dagpane') || document.getElementById('dag');
+  if (!pane) return;
+  let el = document.getElementById('dagregpanel');
+  if (el && _dagRegPanelName === name) { el.remove(); _dagRegPanelName = null; _dagGuardDismissed(); return; }
+  _dagRegPanelName = name;
+  if (!el) {
+    el = document.createElement('div'); el.id = 'dagregpanel'; el.className = 'dagpeerpanel';
+    pane.appendChild(el);
+  }
+  const r = _dagDeclaredRegions().find(x => x.name === name) || { name };
+  const w = _dagRegionWorker(name);
+  const st = w ? _dagWorkerStatus(w) : 'none';
+  el.innerHTML =
+    `<div class="dagpeerhd"><b><i class="dagreghue" style="background:${_dagRegionHue(name)}"></i>${name}</b><span>` +
+    `<button onclick="{const p=document.getElementById('dagregpanel'); if(p) p.remove(); window._dagRegPanelClear();}">✕</button>` +
+    `</span></div>` +
+    `<div class="dagregfacts">` +
+      `<span><b>host</b> ${r.host || '—'}</span>` +
+      `<span><b>transport</b> ${r.transport || 'tunnel'}</span>` +
+      (r.scheduler && r.scheduler !== 'none' ? `<span><b>scheduler</b> ${r.scheduler}</span>` : '') +
+      `<span><b>worker</b> <i class="dagregdot" style="background:${_DAG_STATUS_COL[st] || '#6a7183'}"></i>${st}</span>` +
+    `</div>` +
+    `<div class="dagpeerbody dagtravelbody" id="dagtravelbody">reading the project…</div>`;
+  _dagTree = { open: {}, rows: {}, hold: new Set(), known: new Set(), dirty: false, data: null };
+  _dagTravelsLoad(name, '');
+}
+window._dagRegionDetail = _dagRegionDetail;
+window._dagRegPanelClear = () => { _dagRegPanelName = null; _dagGuardDismissed(); };
+
+// Load one level. The root load also seeds the totals and the current rule state.
+async function _dagTravelsLoad(region, path) {
+  const body = document.getElementById('dagtravelbody'); if (!body) return;
+  try {
+    const d = await (await fetch(_apipath('/api/transfer-rules') +
+      '?region=' + encodeURIComponent(region || '') + '&path=' + encodeURIComponent(path || ''))).json();
+    if (!path) _dagTree.data = d;
+    _dagTree.rows[path || ''] = d.entries || [];
+    for (const e of (d.entries || [])) {
+      _dagTree.known.add(e.path);
+      if (e.ruled) _dagTree.hold.add(e.path);
+    }
+    _dagTravelsRender();
+  } catch (_) {
+    body.textContent = 'could not read this project';
+  }
+}
+
+function _dagTravelsToggle(path) {
+  if (_dagTree.hold.has(path)) _dagTree.hold.delete(path); else _dagTree.hold.add(path);
+  _dagTree.dirty = true;
+  _dagTravelsRender();
+}
+window._dagTravelsToggle = _dagTravelsToggle;
+
+function _dagTravelsExpand(path) {
+  if (_dagTree.open[path]) { delete _dagTree.open[path]; _dagTravelsRender(); return; }
+  _dagTree.open[path] = true;
+  if (_dagTree.rows[path]) _dagTravelsRender();
+  else _dagTravelsLoad(_dagRegPanelName, path);
+}
+window._dagTravelsExpand = _dagTravelsExpand;
+
+// Is this row held, counting an ancestor that is? Pruning `assets/` prunes everything under it, and
+// the children must SAY so rather than showing a tick that no longer decides anything.
+function _dagHeldBy(path) {
+  for (const p of _dagTree.hold) if (path === p || path.startsWith(p + '/')) return p;
+  return null;
+}
+
+function _dagTravelsRender() {
+  const body = document.getElementById('dagtravelbody'); if (!body) return;
+  const d = _dagTree.data;
+  if (!d || !d.dir) { body.innerHTML = `<div class="dagtravelhint">This notebook has no project directory, so nothing local is shipped.</div>`; return; }
+  const mb = b => window.slateBytes(b || 0, { compact: true });
+  // Live totals: the server measured the saved rules, so unsaved toggles are applied here — the
+  // number has to move as you click, or the tool is not answering the question you opened it for.
+  let sent = d.sent.bytes, held = d.held.bytes;
+  for (const p of Object.keys(_dagTree.rows)) {
+    for (const e of _dagTree.rows[p]) {
+      const heldNow = !!_dagHeldBy(e.path), was = e.sent_bytes === 0;
+      if (heldNow && !was) { sent -= e.sent_bytes; held += e.sent_bytes; }
+      else if (!heldNow && was && e.ruled) { sent += e.bytes; held -= e.bytes; }
+    }
+  }
+  const rows = (path, depth) => (_dagTree.rows[path] || []).map(e => {
+    const by = _dagHeldBy(e.path), heldHere = by === e.path, heldAbove = by && !heldHere;
+    const git = e.state === 'gitignored';
+    const cls = git ? 'git' : by ? 'held' : 'sent';
+    const ctl = git ? `<span class="dagtvtag">.gitignore</span>`
+      : heldAbove ? `<span class="dagtvtag">in ${by}/</span>`
+      : `<button class="dagtvtick ${heldHere ? 'off' : 'on'}" title="${heldHere ? 'held back — click to send it' : 'shipping — click to hold it back'}"
+           onclick="_dagTravelsToggle('${e.path.replace(/'/g, "\\'")}')">${heldHere ? '✕' : '✓'}</button>`;
+    const caret = e.dir ? `<button class="dagtvcaret" onclick="_dagTravelsExpand('${e.path.replace(/'/g, "\\'")}')">${_dagTree.open[e.path] ? '▾' : '▸'}</button>` : `<span class="dagtvcaret"></span>`;
+    return `<div class="dagtvrow ${cls}" style="padding-left:${depth * 14}px">
+        ${caret}${ctl}
+        <span class="dagtvname">${e.name}${e.dir ? '/' : ''}</span>
+        <span class="dagtvsize">${mb(e.bytes)}</span>
+        <span class="dagtvfiles">${e.files} ${e.files === 1 ? 'file' : 'files'}</span>
+      </div>` + (e.dir && _dagTree.open[e.path] ? rows(e.path, depth + 1) : '');
+  }).join('');
+  // What a provision would send now, and what the last one did. A difference between them means
+  // the rules changed since — worth seeing, and invisible if only one of the two is shown.
+  const L = d.last;
+  const ago = s => s < 90 ? s + 's ago' : s < 5400 ? Math.round(s / 60) + 'm ago'
+                 : s < 172800 ? Math.round(s / 3600) + 'h ago' : Math.round(s / 86400) + 'd ago';
+  body.innerHTML =
+    `<div class="dagtvtotals">
+       <span class="dagtvsentbig">${mb(sent)}</span><span class="dagpp-dim">transferred</span>
+       ${held > 0 ? `<span class="dagtvheldbig">${mb(held)} held back</span>` : ''}
+     </div>
+     <div class="dagtvlast">${L
+       ? `last provision sent <b>${mb(L.bytes)}</b> · ${L.files} ${L.files === 1 ? 'file' : 'files'} · ${ago(L.ago)}`
+       : `nothing has been provisioned to this region yet`}</div>
+     <div class="dagtvtree">${rows('', 0)}</div>
+     <div class="dagtvact">
+       <button class="dagtvsave" ${_dagTree.dirty ? '' : 'disabled'} onclick="_dagTravelsSave()">${_dagTree.dirty ? 'Save' : 'Saved'}</button>
+       <span class="dagpp-dim">${d.dir}/.slateignore</span>
+     </div>`;
+}
+
+async function _dagTravelsSave() {
+  try {
+    const r = await (await fetch(_apipath('/api/transfer-rules'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ region: _dagRegPanelName || '',
+                             hold: [..._dagTree.hold], known: [..._dagTree.known] }) })).json();
+    _dagGuardOpened = false;
+    if (!r || !r.ok) { const b = document.getElementById('dagtravelbody'); if (b) b.insertAdjacentHTML('afterbegin', `<div class="dagtravelerr">${(r && r.error) || 'could not save'}</div>`); return; }
+    // Re-measure from disk. The totals shown until now were predicted from the toggles; after a
+    // save they should be what the transfer will actually do.
+    const open = _dagTree.open;
+    _dagTree = { open, rows: {}, hold: new Set(), known: new Set(), dirty: false, data: null };
+    await _dagTravelsLoad(_dagRegPanelName, '');
+    for (const p of Object.keys(open)) if (p) await _dagTravelsLoad(_dagRegPanelName, p);
+    _dagTravelsRender();
+  } catch (_) {}
+}
+window._dagTravelsSave = _dagTravelsSave;
 
 // ⇄ Peer routing plan — the DAG's window into how cross-region values actually move: the cached route
 // verdict per host-pair (direct / ssh-bridge / relay + the chosen address, with age), the mesh artifacts
@@ -1993,10 +2196,14 @@ function _dagRegCardShow(zn, cx, cy) {
     (meta ? `<div class="dagregcard-meta">${meta}</div>` : '') +
     (chips ? `<div class="dagregcard-chips">${chips}</div>`
            : `<div class="dagcard-dim">${st === 'none' ? 'no worker is currently serving this region' : 'no telemetry yet'}</div>`) +
-    (w ? '<div class="dagregcard-acts">' +
-      '<button data-act="log" title="open this worker’s live log + telemetry">🪵 Log</button>' +
-      ((zn.host && w.port) ? '<button data-act="reap" class="dagreap" title="kill this worker + remove its files — un-fetched results are lost">✕ Reap</button>' : '') +
-      '</div>' : '');
+    '<div class="dagregcard-acts">' +
+      // Provisioning is a property of the PROJECT, not of a running worker, so it is offered even
+      // when nothing is up — which is exactly when it is most useful to set before the first run.
+      '<button data-act="prov" title="what gets transferred to this region on a provision — prune the project tree">📦 Provisioning</button>' +
+      (w ? '<button data-act="log" title="open this worker’s live log + telemetry">🪵 Log</button>' +
+        ((zn.host && w.port) ? '<button data-act="reap" class="dagreap" title="kill this worker + remove its files — un-fetched results are lost">✕ Reap</button>' : '')
+         : '') +
+    '</div>';
   document.body.appendChild(card);
   if (cx != null) {                                                    // fresh hover → anchor beside the dot
     const cv = document.getElementById('dagcanvas'), r = cv ? cv.getBoundingClientRect() : { left: 0, top: 0 };
@@ -2007,6 +2214,7 @@ function _dagRegCardShow(zn, cx, cy) {
   card.addEventListener('mouseleave', _dagRegCardScheduleHide);
   card.addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.act === 'prov') { _dagRegCardHide(); _dagRegionDetail(zn.name); return; }
     if (b.dataset.act === 'log') { _dagRegCardHide(); if (typeof openWorkerPop === 'function') openWorkerPop(zn.name, e, true); return; }
     if (b.dataset.act === 'reap') {
       const host = zn.host, port = w.port;
@@ -2295,8 +2503,21 @@ function dagFit() {
   // trackpad pixel deltas; both axes get the same factor → aspect stays locked.
   const paneEl = document.getElementById('dagpane');
   if (paneEl) paneEl.addEventListener('wheel', e => {
-    if (!_dagChart || !_dagOpen()) return;
-    if (e.target.closest && e.target.closest('.dagcard, .daghelppop, .aphead')) return;   // cards/menus scroll normally
+    if (!_dagOpen()) return;
+    // Cards, menus and PANELS scroll normally. A panel is a list sitting on top of the canvas;
+    // zooming the graph under it while the reader is scrolling it is the wrong answer to the wheel.
+    //
+    // But it must not scroll the NOTEBOOK either. `overscroll-behavior: contain` handles a panel
+    // that scrolls and reaches its end; this handles the one whose content is shorter than its box,
+    // which does not scroll at all and would otherwise hand the whole delta straight to the page.
+    const inPanel = e.target.closest &&
+      e.target.closest('.dagcard, .daghelppop, .aphead, .dagpeerpanel, .dagxferdash');
+    if (inPanel) {
+      const sc = e.target.closest('.dagtvtree') || inPanel;
+      if (sc.scrollHeight <= sc.clientHeight) e.preventDefault();   // nothing to scroll here
+      return;
+    }
+    if (!_dagChart) { e.preventDefault(); return; }   // pane is up but the chart is not: still ours
     e.preventDefault(); e.stopPropagation();
     const f = Math.exp(-e.deltaY * 0.0016);
     const o = _dagChart.getOption(); if (!o || !o.dataZoom || o.dataZoom.length < 2) return;

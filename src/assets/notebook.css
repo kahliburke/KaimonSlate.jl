@@ -1695,7 +1695,11 @@ body.modkey .cm-content { cursor: pointer; }
 /* Pipeline DAG split pane — the live dataflow graph (dag.js) docked on the right, the
    notebook reflowing to the left half: click a node to navigate the code, watch the graph
    recompute while you edit. The divider is mouse-resizable (--dagw, persisted). */
-.dagpane { position:fixed; z-index:60; background:var(--bg2); display:none; flex-direction:column; }
+/* A wheel anywhere in this pane belongs to the pane. Without `overscroll-behavior`, a scrollable
+   child that reaches its end hands the rest of the delta to the ancestor — so reading to the bottom
+   of a panel silently starts scrolling the notebook behind it. `contain` keeps it here. */
+.dagpane { position:fixed; z-index:60; background:var(--bg2); display:none; flex-direction:column;
+  overscroll-behavior:contain; }
 .dagpane.open { display:flex; }
 /* Manual-edge link mode (🔗 header button, then click two cells; dag.js dagLinkToggle) */
 #daglinkbtn.on { color:#b39ddb; background:var(--bg3); box-shadow:inset 0 0 0 1px #7d6f9e; border-radius:5px; }
@@ -1721,7 +1725,7 @@ body.modkey .cm-content { cursor: pointer; }
 .dagcard { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:80;
   background:var(--bg); border:1px solid var(--border); border-radius:12px;
   padding:14px 18px; box-shadow:0 18px 52px #000c; font-size:.92rem;
-  width:760px; max-width:94vw; max-height:88vh; overflow:auto; }
+  width:760px; max-width:94vw; max-height:88vh; overflow:auto; overscroll-behavior:contain; }
 .dagcard-thumb { display:block; max-width:100%; max-height:440px; margin:6px auto; border-radius:8px;
   background:#fff0; }
 .dagcard-grid { grid-template-columns:1fr 1fr 1fr 1fr; }   /* four condensed chips in one row */
@@ -1795,13 +1799,66 @@ body.modkey .cm-content { cursor: pointer; }
   background:color-mix(in srgb, var(--bg) 70%, transparent); color:var(--text); font-size:.72rem; }
 .dagpeerbtn:hover { background:var(--accent); color:#fff; }
 .dagpeerpanel { position:absolute; left:10px; bottom:46px; z-index:8; width:min(600px, calc(100% - 20px)); max-height:62%;
-  overflow:auto; background:color-mix(in srgb, var(--bg) 94%, transparent); border:1px solid var(--border);
+  overflow:auto; overscroll-behavior:contain;
+  background:color-mix(in srgb, var(--bg) 94%, transparent); border:1px solid var(--border);
   border-radius:8px; padding:8px 10px; box-shadow:0 6px 24px rgba(0,0,0,.4); }
 .dagpeerhd { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-size:.8rem; color:var(--text); }
 .dagpeerhd button { cursor:pointer; border:1px solid var(--border); background:transparent; color:var(--text);
   border-radius:5px; padding:1px 7px; font-size:.72rem; margin-left:6px; }
 .dagpeerhd button:hover { background:var(--accent); color:#fff; }
 .dagpeerbody { font-size:.72rem; line-height:1.5; color:var(--text); }
+/* 📦 what travels — a prunable file tree with sizes. The rows ARE the control: a directory's size is
+   the reason to prune it, so size sits on every row rather than in a summary. */
+/* The legend is `pointer-events:none` so it never eats a drag on the canvas under it; anything
+   CLICKABLE in it has to opt back in, one control at a time. */
+.dagreglegbtn { display:inline-flex; align-items:center; gap:5px; background:none; border:none;
+  color:inherit; font:inherit; cursor:pointer; padding:1px 4px; border-radius:4px;
+  pointer-events:auto; }
+.dagreglegbtn:hover { background:var(--bg2, #161a29); }
+.dagreghue { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; }
+.dagregdot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; }
+.dagregfacts { display:flex; flex-wrap:wrap; gap:12px; font-size:.7rem; color:var(--muted, #8a91ab);
+  padding:5px 0 7px; border-bottom:1px solid var(--border, #2a2f45); margin-bottom:7px; }
+.dagregfacts b { color:var(--text); font-weight:500; margin-right:3px; }
+.dagtravelbody { display:flex; flex-direction:column; gap:7px; }
+/* The headline number, because "what does this cost" is why the panel was opened. */
+.dagtvtotals { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+.dagtvsentbig { font-size:1.15rem; font-weight:600; color:var(--text); }
+.dagtvheldbig { font-size:.7rem; color:#7fb98a; margin-left:auto; }
+/* Evidence, under the prediction. Dimmer, because it is context for the number above rather than
+   the number you came to read. */
+.dagtvlast { font-size:.68rem; color:var(--muted, #8a91ab); margin-top:-3px; }
+.dagtvlast b { color:var(--text); font-weight:600; }
+.dagtvtree { max-height:300px; overflow:auto; overscroll-behavior:contain;
+  border:1px solid var(--border, #2a2f45);
+  border-radius:5px; background:var(--bg, #0f1320); }
+.dagtvrow { display:flex; align-items:center; gap:7px; padding:2px 8px; font-size:.72rem;
+  border-bottom:1px solid rgba(255,255,255,.03); }
+.dagtvrow:last-child { border-bottom:none; }
+.dagtvrow.held .dagtvname, .dagtvrow.git .dagtvname { text-decoration:line-through; opacity:.55; }
+.dagtvrow.git { opacity:.7; }
+.dagtvcaret { width:14px; min-width:14px; background:none; border:none; color:var(--muted, #8a91ab);
+  cursor:pointer; padding:0; font-size:.7rem; text-align:left; }
+.dagtvtick { width:18px; min-width:18px; height:16px; border-radius:3px; cursor:pointer;
+  border:1px solid var(--border, #2a2f45); font-size:.66rem; line-height:1; padding:0; }
+.dagtvtick.on { background:#233a2b; color:#7fb98a; border-color:#2f4a3a; }
+.dagtvtick.off { background:#3a2a23; color:#d09a6a; border-color:#4a3a2f; }
+.dagtvname { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.dagtvsize { color:var(--text); font-variant-numeric:tabular-nums; }
+.dagtvfiles { color:var(--muted, #8a91ab); font-size:.66rem; min-width:56px; text-align:right; }
+.dagtvtag { font-size:.62rem; color:var(--muted, #8a91ab); border:1px solid var(--border, #2a2f45);
+  border-radius:3px; padding:0 4px; white-space:nowrap; }
+.dagtvact { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.dagtvsave { border-radius:4px; padding:2px 10px; font-size:.72rem; cursor:pointer;
+  border:1px solid var(--accent, #569cd6); background:var(--accent, #569cd6); color:#fff; }
+.dagtvsave[disabled] { opacity:.45; cursor:default; background:none; color:var(--muted, #8a91ab);
+  border-color:var(--border, #2a2f45); }
+/* The unasked-for open needs to say why it appeared. */
+.dagtvguard { font-size:.7rem; line-height:1.4; color:var(--text); background:#2a2318;
+  border:1px solid #4a3a2f; border-radius:5px; padding:6px 8px; margin-bottom:6px; }
+.dagtravelhint { color:var(--muted, #8a91ab); font-size:.68rem; line-height:1.4; }
+.dagtravelerr { color:#e0596a; font-size:.7rem; margin-bottom:4px; }
 .dagpp-sec { font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted, #8a91ab);
   margin:8px 0 3px; }
 /* in-panel action status (spinner + message) for connect / disconnect / recalculate — feedback where the
@@ -1814,7 +1871,8 @@ body.modkey .cm-content { cursor: pointer; }
 @keyframes dagppspin { to { transform:rotate(360deg); } }
 
 /* 📊 transfer summary — stat tiles + throughput timeline, region peer-to-peer grid, and rate KDE */
-.dagxferdash { position:absolute; left:10px; right:10px; bottom:46px; z-index:9; max-height:72%; overflow:auto;
+.dagxferdash { position:absolute; left:10px; right:10px; bottom:46px; z-index:9; max-height:72%;
+  overflow:auto; overscroll-behavior:contain;
   background:color-mix(in srgb, var(--bg) 95%, transparent); border:1px solid var(--border); border-radius:10px;
   padding:10px 12px; box-shadow:0 8px 30px rgba(0,0,0,.5); }
 .dagxd-h { display:flex; justify-content:space-between; align-items:center; font-size:.82rem; color:var(--text); margin-bottom:8px; }
