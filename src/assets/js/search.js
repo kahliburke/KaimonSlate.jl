@@ -44,10 +44,19 @@
     return sq.valid ? sq : false;
   }
 
+  // A one-character query over a book-length notebook finds tens of thousands of matches, which are
+  // no use to anyone and cost a full rescan on every step. Stop at this many — but SAY so (`capped`),
+  // because reporting a truncated total as though it were exact is worse than the truncation: the
+  // count read `5001` on a notebook that held far more, and Replace All would have quietly rewritten
+  // only the first slice of them.
+  const MAX_MATCHES = 5000;
+  let capped = false;
+
   // Every match in the notebook, in document order. `getCursor` takes an EditorState or a Text, so a
   // mounted cell is scanned in place and only an unmounted one pays for a `Text`. The capture groups
   // ride along for `$1` expansion in a regex replacement.
   function findAll() {
+    capped = false;
     const sq = query();
     if (!sq) return [];
     const Text = window.CM6.cmState.Text;
@@ -65,7 +74,7 @@
       try { cursor = sq.getCursor(doc); } catch (_) { continue; }
       for (let r = cursor.next(); !r.done; r = cursor.next()) {
         out.push({ cellId: id, from: r.value.from, to: r.value.to, groups: r.value.match || [] });
-        if (out.length > 5000) return out;         // a pathological query stops being useful long before this
+        if (out.length >= MAX_MATCHES) { capped = true; return out; }
       }
     }
     return out;
@@ -96,11 +105,15 @@
     if (input) input.classList.toggle('bad', !!bad);
   }
 
+  // How many matches there are, as a string. `5000+` once the scan stopped early — the total is not
+  // known, so it must not be printed as though it were.
+  const total = () => matches.length + (capped ? '+' : '');
+
   function report() {
     status(!input.value ? ''
            : !matches.length ? 'No results'
-           : cur >= 0 ? (cur + 1) + ' of ' + matches.length
-           : matches.length + (matches.length === 1 ? ' result' : ' results'),
+           : cur >= 0 ? (cur + 1) + ' of ' + total()
+           : total() + (matches.length === 1 ? ' result' : ' results'),
            !!input.value && !matches.length);
   }
 
@@ -132,7 +145,7 @@
     try { window.selectCell && window.selectCell(m.cellId, true); } catch (_) {}
     window.edReveal && window.edReveal(m.cellId, m.from, m.to, mount);
     paint();                                   // the cell may have only just mounted an editor
-    status((cur + 1) + ' of ' + matches.length);
+    status((cur + 1) + ' of ' + total());
     (focusEl || input).focus();
   }
 
@@ -217,6 +230,13 @@
   async function replaceAll() {
     recompute(matches[cur]);
     if (!matches.length) { report(); return; }
+    // The scan stopped at the cap, so "every match" is not what we hold. Replacing anyway would
+    // rewrite an arbitrary prefix of the notebook and report it as done; narrow the query instead.
+    if (capped) {
+      status(`Over ${MAX_MATCHES} matches — narrow the search first`, true);
+      rInput.focus();
+      return;
+    }
     const byCell = new Map();
     for (const m of matches) {
       if (!byCell.has(m.cellId)) byCell.set(m.cellId, []);
@@ -345,7 +365,7 @@
     if (!rInput.value) rInput.value = localStorage.getItem(LS.r) || '';
     input.focus(); input.select();
     recompute(null);
-    if (matches.length && cur < 0) { cur = 0; paint(); status('1 of ' + matches.length); }
+    if (matches.length && cur < 0) { cur = 0; paint(); status('1 of ' + total()); }
   }
 
   function close() {
