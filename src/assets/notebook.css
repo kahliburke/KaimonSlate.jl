@@ -2567,3 +2567,39 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 /* The panel with no log to show (an app refuses that route) — identity + telemetry still stand. */
 .wplog-none { padding:12px 14px; font-size:.78rem; color:var(--dim); line-height:1.5; }
 .wplog-none a { color:var(--accent); }
+
+/* ── Notebook-wide find bar (⌘F, js/search.js) ───────────────────────────────────────────────
+   Top-right of the window, above the docked panes (60) and the toast stack (80) but below the
+   modal layer (200), so it stays reachable while the DAG or agent pane is open. Hidden until
+   opened; `display:none` rather than opacity so it never eats clicks while closed. */
+.nbfind { display:none; position:fixed; top:calc(var(--topbar-h,49px) + 10px); right:16px; z-index:85;
+          align-items:flex-start; gap:4px; background:var(--bg2); border:1px solid var(--border);
+          border-radius:9px; padding:6px 8px; box-shadow:0 10px 28px #0009; font-size:.82rem; }
+.nbfind.show { display:flex; }
+/* The chevron spans both rows, as in VS Code's find widget. */
+.nbfind-toggle { align-self:stretch; padding:0 4px; font-size:.9rem; }
+.nbfind-rows { display:flex; flex-direction:column; gap:5px; }
+.nbfind-row { display:flex; align-items:center; gap:6px; }
+/* `showReplace` hides the replace row with the `hidden` attribute. An author rule beats the user
+   agent's `[hidden] { display:none }` whatever its specificity, so `display:flex` above would keep
+   the row on screen without this. */
+.nbfind-row[hidden] { display:none; }
+.nbfind-r { width:220px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+            border-radius:6px; padding:4px 8px; font-size:.82rem; font-family:inherit; outline:none; }
+.nbfind-r:focus { border-color:var(--accent); }
+.nbfind-do { border-color:var(--border); padding:4px 10px; }
+.nbfind-q { width:220px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+            border-radius:6px; padding:4px 8px; font-size:.82rem; font-family:inherit; outline:none; }
+.nbfind-q:focus { border-color:var(--accent); }
+.nbfind-q.bad { border-color:var(--red); }
+.nbfind-count { min-width:74px; color:var(--dim); font-variant-numeric:tabular-nums; }
+.nbfind-count.bad { color:var(--red); }
+/* The three query-mode switches (case / whole word / regex) and the two steppers share a look;
+   only the switches latch, which `.on` shows. */
+.nbfind button { background:none; border:1px solid transparent; border-radius:5px; color:var(--dim);
+                 padding:3px 6px; font-size:.78rem; line-height:1; cursor:pointer; }
+.nbfind button:hover { color:var(--text); background:var(--ovl); }
+.nbfind-opt { font-family:'Cascadia Code','Fira Code',monospace; }
+.nbfind-opt[data-opt="word"] { text-decoration:underline; }
+.nbfind-opt.on { color:var(--accent); border-color:var(--accent); background:var(--ovl); }
+.nbfind-x { margin-left:2px; }

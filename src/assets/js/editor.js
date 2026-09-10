@@ -6,7 +6,7 @@
   const CM = window.CM6;
   if (!CM) { console.error('CM6 bundle missing'); return; }
   const { EditorView, EditorState, Compartment, StateField, StateEffect, Decoration, Transaction,
-          ViewPlugin, WidgetType, Prec,
+          ViewPlugin, WidgetType, Prec, RangeSetBuilder,
           vimMode, vimApi, vimGetCM, emacsMode,
           keymap, defaultKeymap, history, historyKeymap, undoDepth, redoDepth, indentWithTab, toggleComment,
           indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection, tooltips,
@@ -259,6 +259,107 @@
   window.setLineNumbers = _setChrome('slateLineNumbers', gutterComp, v => _gutterExt(!!v._isFile));
   window.setIndentGuides = _setChrome('slateIndentGuides', guideComp, () => _guideExt());
   window.setCodeFolding = _setChrome('slateCodeFolding', foldComp, v => _foldExt(!!v._isMd));
+  // ── Notebook-wide search: match highlighting ──────────────────────────────────
+  // search.js owns the ⌘F bar and the cross-cell match list; a cell editor only paints what it is
+  // handed. Decorations map through edits, so highlights survive typing until the next recompute.
+  const setMatches = StateEffect.define();
+  const _mkMatch = Decoration.mark({ class: 'cm-nbmatch' });
+  const _mkMatchActive = Decoration.mark({ class: 'cm-nbmatch cm-nbmatch-active' });
+  const matchField = StateField.define({
+    create: () => Decoration.none,
+    update(deco, tr) {
+      deco = deco.map(tr.changes);
+      for (const e of tr.effects) if (e.is(setMatches)) {
+        const b = new RangeSetBuilder(), max = tr.state.doc.length;
+        for (const m of e.value) {
+          const from = Math.min(m.from, max), to = Math.min(m.to, max);
+          if (to > from) b.add(from, to, m.active ? _mkMatchActive : _mkMatch);
+        }
+        deco = b.finish();
+      }
+      return deco;
+    },
+    provide: f => EditorView.decorations.from(f),
+  });
+  // A web cell's source is the assembled @web(html"..", css"..", js"..") skin, so a match offset is
+  // against that string and not against any one pane. Replay `_webSkin`'s layout to learn where each
+  // pane's text sits inside it, so an offset can be moved into the pane that holds it. Without this
+  // the offsets reach the first pane and highlight arbitrary characters.
+  const _webSpans = id => {
+    const w = (window.webEditors || {})[id];
+    if (!w || !w.panes) return null;
+    const out = [];
+    let pos = '@web('.length;
+    for (const lang of ['html', 'css', 'js']) {
+      const view = w.panes[lang];
+      const text = view ? view.state.doc.toString() : '';
+      if (!text.trim()) continue;                       // `_webSkin` omits an empty section entirely
+      if (out.length) pos += ',\n'.length;
+      pos += lang.length + '"""\n'.length;
+      out.push({ lang, view, from: pos, to: pos + text.length });
+      pos += text.length + '\n"""'.length;
+    }
+    return out.length ? out : null;
+  };
+  // Move an assembled-source offset into the pane holding it. Null when it falls in the skin's own
+  // punctuation rather than in a section's text.
+  const _webAt = (spans, pos) => {
+    for (const sp of spans) if (pos >= sp.from && pos <= sp.to) return { sp, at: pos - sp.from };
+    return null;
+  };
+
+  // `ranges` is [{from, to, active?}] in ascending order; [] clears. A cell with no editor at all is
+  // a no-op — search.js still counts its matches, it just has nothing to paint them on.
+  window.edMarkMatches = (id, ranges) => {
+    const spans = _webSpans(id);
+    if (spans) {                                        // web cell: split the ranges across the panes
+      const per = new Map(spans.map(sp => [sp.lang, []]));
+      for (const m of ranges || []) {
+        const a = _webAt(spans, m.from), b = _webAt(spans, m.to);
+        if (!a || !b || a.sp !== b.sp) continue;        // a match spanning two sections cannot be painted
+        per.get(a.sp.lang).push({ from: a.at, to: b.at, active: m.active });
+      }
+      for (const sp of spans)
+        try { sp.view.dispatch({ effects: setMatches.of(per.get(sp.lang)) }); } catch (_) {}
+      return;
+    }
+    const v = (window.editors || {})[id];
+    if (!v) return;
+    try { v.dispatch({ effects: setMatches.of(ranges || []) }); } catch (_) {}
+  };
+  // A markdown or @bind cell renders its output and keeps its source in a hidden `.srcedit` overlay,
+  // so it has no editor for `ensureEditor` to return. Opening the overlay mounts one under the same
+  // id, which is what `editCellSource` does for the ✎ button. Focus is not taken here: `reveal` puts
+  // it back in the find box afterwards so Enter keeps stepping.
+  const _mountSource = id => {
+    const cell = document.getElementById('cell-' + id);
+    if (!cell || !cell.querySelector('.srcedit') || !window.editSource) return null;
+    const md = (cell.className || '').split(/\s+/).includes('md');
+    try { window.editSource(id, md ? 'markdown' : 'julia'); } catch (_) { return null; }
+    return (window.editors || {})[id] || null;
+  };
+
+  // Select a range in a cell and scroll it into view, mounting a lazy editor if needed. `mount` also
+  // allows opening a md / @bind cell's source overlay, which is a visible change to the cell, so the
+  // caller asks for it only on a deliberate step and not on find-as-you-type.
+  window.edReveal = (id, from, to, mount) => {
+    const spans = _webSpans(id);
+    if (spans) {                                     // web cell: select inside the pane that holds it
+      const a = _webAt(spans, from), b = _webAt(spans, to);
+      if (!a || !b || a.sp !== b.sp) return null;
+      const v = a.sp.view;
+      try { v.dispatch({ selection: { anchor: a.at, head: b.at }, effects: EditorView.scrollIntoView(a.at, { y: 'center' }) }); }
+      catch (_) { return null; }
+      return v;
+    }
+    const v = window.ensureEditor(id) || (mount ? _mountSource(id) : null);
+    if (!v) return null;
+    const max = v.state.doc.length, a = Math.min(from, max), h = Math.min(to, max);
+    try {
+      v.dispatch({ selection: { anchor: a, head: h }, effects: EditorView.scrollIntoView(a, { y: 'center' }) });
+    } catch (_) { return null; }
+    return v;
+  };
 
   // ── Editor-extension registry (extension point) ──────────────────────────────
   // A package can teach EVERY cell editor a new behaviour (e.g. render giac"…" as an
@@ -914,6 +1015,7 @@
         // `:root`, so the popup still themes correctly from here.
         tooltips({ parent: document.body }),
         indentUnit.of(_indent), EditorState.tabSize.of(webLang ? 2 : 4), errField, originField, flashField,
+        matchField,                      // notebook-wide search highlights (painted by search.js)
         wrapComp.of(_wrapExt(!!opts.markdown)),
         ..._multiCursor,
         ...(cmSearch ? [cmSearch.highlightSelectionMatches()] : []),   // marks the selection's other occurrences
@@ -956,6 +1058,11 @@
           // which only the Files-tab editor gets. `keymapModeComp` precedes this keymap, so on
           // Linux, where Mod is Ctrl, vim and emacs keep Ctrl-D.
           ...(cmSearch ? [{ key: 'Mod-d', run: cmSearch.selectNextOccurrence, preventDefault: true }] : []),
+          // ⌘F opens the notebook-wide search bar (search.js), not a per-cell panel — in a notebook
+          // the thing you are looking for is usually in a DIFFERENT cell. The Files-tab editor keeps
+          // CM6's own single-document panel: its `opts.extra` keymap out-precedences this one.
+          { key: 'Mod-f', run: () => { if (!window.slateSearchOpen) return false; window.slateSearchOpen(); return true; } },
+          { key: 'Mod-Alt-f', run: () => { if (!window.slateSearchOpen) return false; window.slateSearchOpen(true); return true; } },
           // ⌘⇧K = help (app shortcut). Bind it here so CM6's defaultKeymap `deleteLine` doesn't eat it.
           { key: 'Mod-Shift-k', run: () => { window.__docsHotkey = Date.now(); window.openDocsAtCursor && window.openDocsAtCursor(); return true; } },
           // ⌘⇧←/→ = back/forward through selected-cell nav history, IN the editor too — so after a
@@ -1041,6 +1148,9 @@
           // A folded block's placeholder — CM6's default is a boxed "…"; this keeps it quiet.
           '.cm-foldPlaceholder': { background: 'var(--ovl)', border: '1px solid var(--border)',
                                    color: 'var(--dim)', borderRadius: '3px', padding: '0 4px', margin: '0 2px' },
+          // Notebook-wide search matches: every hit tinted, the current one boxed.
+          '.cm-nbmatch': { background: 'rgba(255,215,0,.22)', borderRadius: '2px' },
+          '.cm-nbmatch-active': { background: 'rgba(255,215,0,.45)', outline: '1px solid var(--gold)' },
         }, { dark: true }),
       ],
     });
