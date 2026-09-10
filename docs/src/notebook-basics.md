@@ -70,6 +70,8 @@ Notebook-wide:
 | Key | Action |
 | --- | --- |
 | `⌘↵` | run stale cells |
+| `⌘F` / `⌘⌥F` | find across every cell / find and replace |
+| `⌘G` / `⇧⌘G` | next / previous match |
 | `⌘K` / `⌘⇧K` | command palette / docs search |
 | `⌘⇧A` | agent panel |
 | `⌘⇧F` | controls palette |
@@ -77,6 +79,25 @@ Notebook-wide:
 | `⌘⇧G` | dependency graph |
 | `⌘⇧S` | scratchpad |
 | `⌘Z` / `⌘⇧Z` | undo / redo structural changes |
+
+### Finding across the notebook
+
+**⌘F** opens one find bar for the whole document rather than a panel inside the focused cell — in a
+notebook what you are looking for is usually in a *different* cell. It walks every cell in order,
+counts the hits and steps between them across cell boundaries with **⏎** or **⌘G**. **⌘⌥F** opens the
+replace row as well; **⌘⏎** there replaces every match in the notebook.
+
+The three switches on the bar are match case (`Aa`), whole word (`ab`) and regular expression (`.*`).
+Whole word is decided by character category rather than `\b`, so it behaves sensibly for the Unicode
+names Julia encourages: searching `α` matches a standalone `α` and not the `α` inside `αβ`. In regex
+mode `$1`…`$9`, `$&` and `$$` expand in the replacement; in plain mode a `$` stays a `$`.
+
+Cells that have not been scrolled to yet still contribute to the count — their text comes from the
+last saved source. Stepping onto a match in a markdown or `@bind` cell opens that cell's source so
+the match can be shown, and replacing into one does the same.
+
+Inside the **Files** tab's whole-file editor, ⌘F keeps CodeMirror's own single-document find panel,
+scoped to that one file.
 
 ## Running cells
 

@@ -25,6 +25,9 @@ Four sections.
 | **Chart scroll-zoom** | How much a wheel notch zooms a chart that has zooming enabled. |
 | **Wrap text output** | Soft-wrap long lines of cell output instead of scrolling them. |
 | **Wrap code editor** | Soft-wrap long lines in the editor. |
+| **Line numbers** | Show a line-number gutter in every code cell. Off by default — a cell is usually short enough not to need one. The Files tab always numbers its lines. |
+| **Indent guides** | Draw a hairline at each indent level, so a nested block's extent is visible at a glance. |
+| **Code folding** | Let Julia blocks be collapsed from the gutter: `function`, `struct`, `module`, `macro`, `if`, `for`, `while`, `try`, `let`, `begin`, `quote` and `do`. A folded block keeps its own header line and its `end`. Markdown cells have no grammar to fold. |
 
 **Appearance**
 
