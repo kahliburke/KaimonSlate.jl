@@ -305,6 +305,10 @@ end
 # [s] in waiting mode: stop deferring to the extension and own the hub now.
 function _own_now!(m::SlateModel)
     m.mode == :waiting || return _flash!(m, "hub already running")
+    # Refuse when WE started the host: its extension binds this port, so owning one in-process would
+    # be two hubs racing for it. The status bar hides the offer, but the key still reaches here.
+    _EMBEDDED[] === nothing ||
+        return _flash!(m, "the Kaimon host is bringing this hub up — starting another would fight it for the port")
     try
         _own_hub!()
         m.mode = :owner
@@ -523,8 +527,14 @@ function _view_header(m::SlateModel, area::Rect, buf::Buffer, ok::Bool, register
     if m.mode == :waiting
         dots = "."^mod1(m.tick ÷ 8, 3)
         set_string!(buf, x + 8, inner.y, "◌ ", tstyle(:warning), inner)
+        # Two different situations wear this mode. Deferring to a Kaimon we did not start, where
+        # taking the port ourselves is a real alternative — and having started one with `--ai`,
+        # where it is not: that host's extension is coming up on this port, so the only thing to
+        # report is progress. Offering `[s]` there would invite the user to race their own host.
         set_string!(buf, x + 10, inner.y,
-            "waiting for Kaimon's slate extension$dots  ([s] starts a local hub instead)",
+            _EMBEDDED[] === nothing ?
+                "waiting for Kaimon's slate extension$dots  ([s] starts a local hub instead)" :
+                "Kaimon host running — loading its notebook hub$dots  (first start takes a few minutes)",
             tstyle(:warning), inner)
     else
         set_string!(buf, x + 8, inner.y, ok ? "● " : "○ ", ok ? tstyle(:success) : tstyle(:error), inner)
@@ -686,9 +696,15 @@ function _view_statusbar(m::SlateModel, area::Rect, buf::Buffer, ok::Bool)
     elseif time() < m.msg_until && !isempty(m.msg)
         [Span(" $(m.msg) ", tstyle(:warning, bold = true))]
     elseif m.mode == :waiting
-        [Span(" [q]uit ", tstyle(:text_dim)),
-         Span(" [p]ort ", tstyle(:text_dim)),
-         Span(" [s]tart local hub ", tstyle(:warning))]
+        # `[s]` starts an in-process hub INSTEAD of waiting. That is the right offer when we are
+        # deferring to someone else's Kaimon, and the wrong one when we started the host ourselves:
+        # its extension is about to bind this very port, so `[s]` would race it. Don't offer it.
+        _EMBEDDED[] === nothing ?
+            [Span(" [q]uit ", tstyle(:text_dim)),
+             Span(" [p]ort ", tstyle(:text_dim)),
+             Span(" [s]tart local hub ", tstyle(:warning))] :
+            [Span(" [q]uit ", tstyle(:text_dim)),
+             Span(" starting the Kaimon host's notebook hub… ", tstyle(:warning))]
     else
         [Span(" [q]uit ", tstyle(:text_dim)),
          Span(" [↑↓/enter] open notebook ", tstyle(:text_dim)),
@@ -719,6 +735,11 @@ Usage:
                         registered (default is to WAIT for the extension's hub)
   slate --port <n>      run the hub on port <n> for this launch (one-off; to set
                         it durably press [p] in the TUI or set KAIMONSLATE_PORT)
+  slate --ai [<n>]      start an isolated Kaimon host (MCP on port <n>, default 2828)
+                        and attach to it. This is what enables remote workers
+                        (`runon`) and lets a CLI agent drive the notebook. The first
+                        run installs it — minutes. Everything it writes stays under
+                        the Slate cache, and quitting stops it.
   slate --status        print the hub status and open notebooks, then exit
                         (exit code 0 = hub up, 1 = no hub)
   slate -h | --help     show this help
@@ -758,48 +779,121 @@ function _print_status()::Int
     return 0
 end
 
-# The `slate` app body (separate from `@main` so tests can call it directly).
-function _app_main(args::Vector{String})::Int
-    file = nothing
-    own = false
-    port_arg = nothing
+"""
+    _parse_app_args(args) -> NamedTuple
+
+Parse the `slate` command line. PURE — it starts nothing and prints nothing, so the whole grammar is
+testable without a terminal or a running host (`_app_main` below only performs what this decides).
+
+Returns `(; action, file, own, ai, ai_port, port, err)`. `action` is `:run`, `:help` or `:status`;
+`err` is a message when the line is malformed, and non-nothing `err` means nothing else is valid.
+
+Both flags accept both spellings (`--port 9000` / `--port=9000`, `--ai 2828` / `--ai=2828`) so there
+is no per-flag convention to remember. `--ai`'s value is OPTIONAL, though, and a notebook path is
+also positional — so the token after it is INSPECTED rather than consumed, and only counts as the
+port when it is a bare number in range. That is what keeps `slate --ai nb.jl` and `slate --ai --own`
+meaning what they look like.
+"""
+function _parse_app_args(args::Vector{String})
+    file = nothing; own = false; ai = false
+    port = nothing; ai_port = nothing
     want_port = false
-    for a in args
+    bad(msg) = (; action = :run, file, own, ai, ai_port, port, err = msg)
+    checkport(v, flag) = (p = tryparse(Int, strip(String(v)));
+                          (p === nothing || !(1 <= p <= 65535)) ? nothing : p)
+    i = 1
+    while i <= length(args)
+        a = args[i]
         if want_port
-            want_port = false; port_arg = a
+            want_port = false
+            p = checkport(a, "--port")
+            p === nothing && return bad("invalid --port '$a' (want 1–65535)")
+            port = p
         elseif a in ("-h", "--help")
-            print(_APP_HELP)
-            return 0
+            return (; action = :help, file, own, ai, ai_port, port, err = nothing)
         elseif a == "--status"
-            return _print_status()
+            return (; action = :status, file, own, ai, ai_port, port, err = nothing)
         elseif a == "--own"
             own = true
         elseif a == "--port"
-            want_port = true                       # value is the next argument
+            want_port = true                       # required value: the next argument, whatever it is
         elseif startswith(a, "--port=")
-            port_arg = a[length("--port=")+1:end]
+            v = a[length("--port=")+1:end]
+            p = checkport(v, "--port")
+            p === nothing && return bad("invalid --port '$v' (want 1–65535)")
+            port = p
+        elseif a == "--ai"
+            ai = true
+            if i < length(args)
+                p = checkport(args[i + 1], "--ai")
+                p === nothing || (ai_port = p; i += 1)   # a port; anything else is left for dispatch
+            end
+        elseif startswith(a, "--ai=")
+            v = a[length("--ai=")+1:end]
+            p = checkport(v, "--ai")
+            p === nothing && return bad("invalid --ai port '$v' (want 1–65535)")
+            ai = true; ai_port = p
         elseif startswith(a, "-")
-            println(stderr, "slate: unknown option '$a'\n")
-            print(stderr, _APP_HELP)
-            return 2
+            return bad("unknown option '$a'")
         elseif file === nothing
             file = a
         else
-            println(stderr, "slate: too many arguments (one notebook file)")
-            return 2
+            return bad("too many arguments (one notebook file)")
         end
+        i += 1
     end
-    if want_port
-        println(stderr, "slate: --port needs a value (e.g. --port 8080)")
+    want_port && return bad("--port needs a value (e.g. --port 8080)")
+    return (; action = :run, file, own, ai, ai_port, port, err = nothing)
+end
+
+# The `slate` app body (separate from `@main` so tests can call it directly).
+function _app_main(args::Vector{String})::Int
+    opt = _parse_app_args(args)
+    if opt.err !== nothing
+        println(stderr, "slate: ", opt.err, "\n")
+        print(stderr, _APP_HELP)
         return 2
     end
-    if port_arg !== nothing
-        p = tryparse(Int, strip(port_arg))
-        if p === nothing || !(1 <= p <= 65535)
-            println(stderr, "slate: invalid --port '$port_arg' (want 1–65535)")
+    opt.action == :help && (print(_APP_HELP); return 0)
+    opt.action == :status && return _print_status()
+    file = opt.file
+    own = opt.own
+    ai = opt.ai
+    ai_port_arg = opt.ai_port
+    opt.port === nothing ||
+        (_PORT[] = opt.port)                       # this run only — highest precedence; not persisted
+    # `--ai`: bring up an isolated headless Kaimon and let IT own the hub (as Slate's extension).
+    # Done before the startup-mode decision, because a host we start changes the answer: the mode
+    # goes from :owner (in-process, no gate, no remotes) to :viewer, attached to a hub that has one.
+    if ai
+        aiport = something(ai_port_arg, 2828)          # Kaimon's own default MCP port; validated in the parser
+        # The host starts a Slate extension that binds KAIMONSLATE_PORT. If something already
+        # answers there — typically the Slate extension under a Kaimon the user is already running —
+        # the two would fight over the port, and the loser's failure is buried in an extension log.
+        # Say so instead, and name the fix.
+        if _hub_running()
+            println(stderr, "slate: a hub is already answering on port $(_PORT[]), and --ai starts another one.")
+            println(stderr, "Give this one its own port, e.g. `slate --ai $aiport --port $(_PORT[] + 1)`,")
+            println(stderr, "or drop --ai to attach to the hub that is already there.")
             return 2
         end
-        _PORT[] = p                                # this run only — highest precedence; not persisted
+        printstyled("  ◆ Starting the Kaimon host (MCP on :$aiport)\n"; color = :cyan, bold = true)
+        try
+            # Narrate straight to the terminal: this runs BEFORE the TUI, and the first run is a
+            # multi-minute install that must not look like a hang.
+            start_embedded_kaimon!(aiport; online = line -> println("    ", line))
+        catch e
+            println(stderr, "slate: could not start the Kaimon host: ", sprint(showerror, e))
+            return 1
+        end
+        atexit(stop_embedded_kaimon!)                  # ours to stop; an attached host is never adopted
+        printstyled("  ◆ Host up. Its Slate extension is loading — the TUI attaches when it answers.\n";
+                    color = :cyan)
+        # Deliberately NOT waiting here. A cold extension start loads Slate's whole package set and
+        # takes minutes, and blocking on it means the terminal sits silent for that long and then
+        # reports a timeout, which reads as a failure of something that is merely slow. `:waiting`
+        # mode already polls for the extension's hub and attaches the moment it answers, with the
+        # state visible on screen — so go there instead of duplicating it behind a deadline.
     end
     if _maybe_onboard!()
         # Kaimon scans for extensions dynamically, so the entry we just wrote is picked up
@@ -809,7 +903,11 @@ function _app_main(args::Vector{String})::Int
         printstyled("  ✓ Registered as a Kaimon extension — attaching to its hub…\n"; color = :green, bold = true)
         println()
     end
-    mode = _startup_mode(_hub_running(), _ext_autostarts(), own)
+    # `--ai` always waits for the host's extension. The ordinary decision would ask whether Slate is
+    # a registered auto-start extension — but that reads the USER'S Kaimon registry, not the isolated
+    # one we just wrote, so someone with no Kaimon of their own would answer :owner and bind an
+    # in-process hub on the very port the extension is about to take.
+    mode = ai ? :waiting : _startup_mode(_hub_running(), _ext_autostarts(), own)
     if mode == :owner
         try
             _own_hub!()
