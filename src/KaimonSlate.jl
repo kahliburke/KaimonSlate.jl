@@ -320,14 +320,58 @@ function _kill_pid(pid::Integer)
     return nothing
 end
 
-# Restart-reaping backstop: kill leftover worker subprocesses from a previous
-# extension instance that exited non-gracefully (crash / hard kill), since that
-# path skips `on_shutdown`. Each worker's boot script carries the `SlateWorker.start`
-# marker in its argv, so a command-line match finds exactly ours. Called once at init,
-# BEFORE this instance spawns any worker, so it never targets our own children.
+# The PID that spawned `pid`, or 0 when it can't be determined. `ps` on unix; Win32_Process on
+# Windows, where a PID is never reparented so the parent may simply no longer exist.
+function _ppid(pid::Integer)
+    try
+        out = if Sys.iswindows()
+            readchomp(`powershell -NoProfile -NonInteractive -Command "(Get-CimInstance Win32_Process -Filter \"ProcessId=$pid\").ParentProcessId"`)
+        else
+            readchomp(`ps -o ppid= -p $pid`)
+        end
+        return something(tryparse(Int, strip(out)), 0)
+    catch
+        return 0
+    end
+end
+
+# Does this PID exist right now?
+_pid_alive(pid::Integer) = pid > 0 && try
+    Sys.iswindows() ? !isempty(strip(readchomp(`powershell -NoProfile -NonInteractive -Command "(Get-Process -Id $pid -ErrorAction SilentlyContinue).Id"`))) :
+                      success(pipeline(`ps -p $pid`; stdout = devnull, stderr = devnull))
+catch
+    false
+end
+
+# Is this worker genuinely ORPHANED — its spawning hub gone — rather than serving a hub that is
+# still running? A live hub is the worker's parent (`_spawn_worker!` runs it directly, no
+# intervening shell), so a worker whose parent is alive belongs to someone. A worker whose parent
+# died has been reparented to init on unix; on Windows the PID is left dangling instead.
+#
+# Unknown parentage counts as NOT orphaned. A worker that lingers is untidy; a worker killed out
+# from under a running notebook destroys work in progress, so the uncertain case has to fail safe.
+_is_orphan_worker(pid::Integer) = _orphaned_by(_ppid(pid))
+
+# The decision, split from the lookup so the whole truth table is testable without choreographing
+# real processes into being orphans (a shell's backgrounded child does not reliably outlive it).
+_orphaned_by(pp::Integer) =
+    pp == 0 ? false :                # couldn't tell → leave it alone
+    pp == 1 ? true :                 # reparented to init: its hub is gone
+    !_pid_alive(pp)                  # Windows leaves the PID dangling instead of reparenting
+
+# Restart-reaping backstop: kill leftover worker subprocesses from a previous extension instance
+# that exited non-gracefully (crash / hard kill), since that path skips `on_shutdown`. Each
+# worker's boot script carries the `SlateWorker.start` marker in its argv, so a command-line match
+# finds every Slate worker on the machine.
+#
+# Which is why the match alone is not the test. `pgrep` is machine-wide and these kills run as the
+# user, so reaping every match takes down the workers of any OTHER live hub owned by the same
+# person — a second checkout, a worktree, or `slate --ai` starting its own hub beside the one under
+# their Kaimon. That is not a leftover, it is someone's running notebook. Only processes whose
+# parent is actually gone are reaped.
 function _reap_orphan_workers!()
     for pid in _pids_matching("SlateWorker.start")
-        _kill_pid(pid)
+        _is_orphan_worker(pid) && _kill_pid(pid)
     end
     return nothing
 end
@@ -2306,6 +2350,7 @@ function on_event(channel, data, session_name)
     return nothing
 end
 
+include("embedded_kaimon.jl")   # `slate --ai`: an isolated headless Kaimon host (compute gate + MCP)
 include("app.jl")   # the `slate` Pkg-app entrypoint + Tachikoma status TUI
 
 """
