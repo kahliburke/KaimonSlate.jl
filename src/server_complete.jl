@@ -1434,6 +1434,18 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/controls", req -> _withnb(h, req, nb -> begin
         set_controls_map!(nb, get(_body(req), "map", Dict{String,Any}())); _json(state_json(nb))
     end))
+    # Rewrite many cells' sources in ONE operation — notebook-wide find-and-replace. Body
+    # {edits: {cellId: newSource, …}, label}. The browser sends each cell's COMPLETE new text (taken
+    # from its editor, so unsaved edits are carried in) rather than a find/replace instruction, the
+    # same way `cell-type` sends `source`. One undo entry + one history checkpoint for the whole
+    # rewrite, so ⌘Z reverses it as the single action the user asked for; `label` is what the undo
+    # toast and the timeline entry say. Cells land STALE — a text substitution shouldn't start a run.
+    HTTP.register!(router, "POST", "/api/{id}/cells-replace", req -> _withnb(h, req, nb -> begin
+        b = _body(req); e = get(b, "edits", nothing)
+        e isa AbstractDict || return _json(Dict("ok" => false, "changed" => 0))
+        n = replace_cells!(nb, e; label = String(get(b, "label", "replace")))
+        j = state_json(nb); j["changed"] = n; _json(j)
+    end))
     # Set/clear a cell behavior flag (collapsed / hidecode / trace / cache / …) across one or many cells
     # in ONE persist → one history entry. Body {flag, value, cells?}: `cells` (a list of ids) targets
     # just those, omitted ⇒ every applicable cell. An eval-affecting flag (trace/cache/…) restales and

@@ -144,10 +144,33 @@ if (!/argString[\s\S]{0,80}===\s*'!'[\s\S]{0,80}_discard/.test(src)) {
 if ((src.match(/_discard\(cm\)/g) || []).length !== 1) {
   console.error('vim_escape: _discard is reachable from more than the bang guard'); bad++;
 }
-// A md / @bind cell edits in the `.srcedit` overlay, which has no run — `:w` must commit there
-// instead, or it silently does nothing on exactly the cells whose source you opened deliberately.
-if (!/_overlay\(v\)[\s\S]{0,60}commitSource/.test(src)) {
-  console.error('vim_escape: :w does not commit in the source overlay'); bad++;
+// `:w` resolves through the shared `_apply`, which has to cover all three kinds of editor. Each of
+// these was a real silent no-op: an overlay cell has no run, and a whole-file editor has no cellId
+// at all, so `:w` in the Files tab did nothing and ⌘S was the only way to save a file.
+if (!/_run\s*=\s*cm\s*=>\s*_apply\(/.test(src)) {
+  console.error('vim_escape: :w does not route through _apply'); bad++;
+}
+if (!/_apply\s*=\s*\(v,\s*id\)[\s\S]{0,200}_onSave\(\)/.test(src)) {
+  console.error('vim_escape: _apply does not save a whole-file editor'); bad++;
+}
+if (!/_apply\s*=\s*\(v,\s*id\)[\s\S]{0,400}_overlayView\(v\)[\s\S]{0,60}commitSource/.test(src)) {
+  console.error('vim_escape: _apply does not commit in the source overlay'); bad++;
+}
+if (!/_apply\s*=\s*\(v,\s*id\)[\s\S]{0,400}runCell/.test(src)) {
+  console.error('vim_escape: _apply does not run a code cell'); bad++;
+}
+// The whole-file editor has to actually carry the callback `_apply` reaches for, or the branch above
+// is unreachable and `:w` goes back to doing nothing in the Files tab.
+if (!/view\._onSave\s*=\s*opts\.onSave/.test(src)) {
+  console.error('vim_escape: mkFileEditor does not expose _onSave'); bad++;
+}
+// Emacs gets the same verb under its own chord. The emacs keymap ships no C-x prefix, so without
+// this binding C-x C-s falls through to the browser.
+if (!/key:\s*'Ctrl-x Ctrl-s'[\s\S]{0,120}_apply\(/.test(src)) {
+  console.error('vim_escape: emacs C-x C-s is not bound to _apply'); bad++;
+}
+if (!/mode === 'emacs'[\s\S]{0,120}_emacsSave/.test(src)) {
+  console.error('vim_escape: the emacs save chord is not added for emacs mode'); bad++;
 }
 
 // The keymap setting is a registry, not a vim flag — so a mode can't be half-added (bundled but

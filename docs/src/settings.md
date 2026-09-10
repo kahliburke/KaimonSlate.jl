@@ -41,10 +41,25 @@ Four sections.
 
 | Setting | Effect |
 | --- | --- |
-| **Editor keymap** | Default, Vim or Emacs bindings in the cell editor. |
+| **Editor keymap** | Default, Vim or Emacs bindings in the cell editor. See below. |
 | **Live-update debounce** | Minimum delay (ms) between live recomputes while dragging a control. Higher = fewer recomputes on a slow kernel. |
 | **Autocomplete delay** | How long to wait before the completion popup opens. |
 | **Tab in autocomplete** | Whether ⇥ accepts the highlighted completion. |
+
+#### Saving under the Vim and Emacs keymaps
+
+A notebook has no save separate from execution, so "write this buffer" means *apply it* — and what
+that does depends on where you are:
+
+| You are in | `:w` (vim) · `C-x C-s` (emacs) does |
+| --- | --- |
+| a code cell | runs it |
+| a markdown or `@bind` cell's source | commits the source and returns to the rendered view |
+| a file in the **Files** tab | writes the file |
+
+Vim also takes `:wq` and `:x` (apply, then leave the editor), `:q` (leave, keeping your edits, the
+same as clicking away) and `:q!` (discard the edit and leave — the one way to abandon it in a single
+action). ⌘S saves a file under every keymap.
 
 **Agent**
 

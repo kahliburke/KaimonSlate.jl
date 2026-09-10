@@ -73,6 +73,22 @@
     for (const v of _allViews())
       try { v.dispatch({ effects: wrapComp.reconfigure((v._wrapMd || on) ? EditorView.lineWrapping : []) }); } catch (_) {}
   };
+  // "Apply this buffer" — what `:w` means, for whichever kind of editor you are in. A code cell
+  // runs; a md / @bind cell edits its source in the `.srcedit` OVERLAY, where there is no run and
+  // the apply action is commitSource (what Shift-Enter does there), which writes the source back and
+  // collapses to the rendered view; a whole-file editor writes the file. Same intent, three verbs.
+  //
+  // Shared by the vim Ex commands and the emacs `C-x C-s` chord, so the two keymaps cannot drift
+  // apart on what saving means. Returns whether it did anything, which is what a CM6 keymap wants.
+  const _overlayView = v => !!(v && v.dom && v.dom.closest && v.dom.closest('.srcedit'));
+  const _apply = (v, id) => {
+    if (v && v._onSave) { v._onSave(); return true; }           // whole-file editor (Files tab)
+    if (!id) return false;
+    if (_overlayView(v)) { window.commitSource && window.commitSource(id); return true; }
+    if (window.runCell) { window.runCell(id); return true; }
+    return false;
+  };
+
   // ── Editor keymap (Settings → Editing → Editor keymap) ──────────────────────────
   // `vim` / `emacs` layer an alternative keymap over every cell editor. In a Compartment so the
   // setting applies live to editors that are already open.
@@ -91,7 +107,19 @@
     const m = localStorage.getItem('slateEditorKeymap');
     return (m && _KEYMAP_MODES[m]) ? m : 'default';
   };
-  const _keymapExt = mode => (_KEYMAP_MODES[mode] ? _KEYMAP_MODES[mode]() : []);
+  // `C-x C-s` — save, the chord an emacs user's fingers already know. @replit/codemirror-emacs binds
+  // no `C-x` prefix at all, so it fell through to the browser and the only way to save a file was
+  // ⌘S. Runs the same `_apply` the vim `:w` does. `Prec.high` puts it ahead of the cell keymap, and
+  // CM6 resolves the two-stroke sequence itself.
+  const _emacsSave = keymap.of([{
+    key: 'Ctrl-x Ctrl-s',
+    run: view => _apply(view, (view._edctx && view._edctx.cellId) || null),
+    preventDefault: true,
+  }]);
+  const _keymapExt = mode =>
+    !_KEYMAP_MODES[mode] ? [] :
+    mode === 'emacs' ? [_KEYMAP_MODES[mode](), Prec.high(_emacsSave)] :
+    [_KEYMAP_MODES[mode]()];
   window.editorKeymapMode = _keymapMode;
   window.editorKeymapModes = () => Object.keys(_KEYMAP_MODES).filter(m => _KEYMAP_MODES[m]);
   window.setEditorKeymap = mode => {
@@ -159,16 +187,7 @@
     const _view = cm => (cm && cm.cm6) || null;
     const _cellOf = cm => { const v = _view(cm); return (v && v._edctx && v._edctx.cellId) || null; };
     const _leave = cm => { const v = _view(cm); try { if (v) v.contentDOM.blur(); } catch (_) {} };
-    // A md / @bind cell edits its source in the `.srcedit` OVERLAY, where there is no run — the
-    // apply action is commitSource (what Shift-Enter does there), which writes the source back and
-    // collapses to the rendered view. Same intent as running a code cell, different verb.
-    const _overlay = v => !!(v && v.dom && v.dom.closest && v.dom.closest('.srcedit'));
-    const _run = cm => {
-      const v = _view(cm), id = _cellOf(cm);
-      if (!id) return;
-      if (_overlay(v)) { window.commitSource && window.commitSource(id); return; }
-      if (window.runCell) window.runCell(id);
-    };
+    const _run = cm => _apply(_view(cm), _cellOf(cm));
     // `:q!` — throw the buffer away: put the saved source back, which drops the `edited` mark by
     // itself (the editor's own input handler re-checks the text). The only way to abandon an edit
     // in one action; plain `:q` keeps it, exactly as clicking away does.
@@ -788,6 +807,11 @@
       keys: opts.onSave ? [{ key: 'Mod-s', run: () => { opts.onSave(); return true; } }] : [],
       onDoc: () => { if (opts.onChange) opts.onChange(); },
     });
+    // The same save, reachable WITHOUT the keybinding. A whole-file editor has no `cellId`, so the
+    // alternative keymaps' "apply this buffer" verbs (`:w` / `:wq` / `:x` under vim, `C-x C-s` under
+    // emacs) had nothing to resolve and silently did nothing here — leaving ⌘S as the only way to
+    // save a file, which is exactly the key a vim or emacs user is not reaching for.
+    view._onSave = opts.onSave || null;
     // Restore where this file was last left (cursor + scroll), clamped to the current document —
     // the file may have changed on disk since.
     const st = opts.state;

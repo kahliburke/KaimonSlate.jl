@@ -166,10 +166,10 @@
   //
   // `edEnsureSource`, not `ensureEditor`: a markdown or @bind cell renders its output and keeps its
   // source in a hidden overlay, so it has NO editor until that overlay is opened. Resolving with
-  // `ensureEditor` returned null for exactly those cells and the edit was dropped on the floor —
-  // a Replace All would rewrite the code cells, skip every line of prose, and report only the count
-  // it managed. Opening the overlay is a visible change to the cell, which is why find-as-you-type
-  // does not do it; a replace is a deliberate write, so here it is the right trade.
+  // `ensureEditor` returned null for exactly those cells and the edit was dropped on the floor.
+  // Opening the overlay is a visible change to the cell, which is why find-as-you-type does not do
+  // it; replacing ONE match is a deliberate write to a cell you have already stepped to, so here it
+  // is the right trade. (Replace All does not come through here — see `replaceAll`.)
   function applyToCell(cellId, edits) {
     if (window.webEditors && window.webEditors[cellId]) {
       const src = cellText(cellId);
@@ -203,7 +203,18 @@
     else { paint(); report(); rInput.focus(); }
   }
 
-  function replaceAll() {
+  // Replace every match in the notebook — ONE operation, applied by the server.
+  //
+  // Not a loop of editor edits. A bulk rewrite has to be reversible as the single thing you asked
+  // for, and applying it here would leave one CM6 undo stack per touched cell: undoing a replace
+  // across nine cells would mean nine ⌘Z presses in nine editors, and a web cell could not be undone
+  // from the cell at all. `/api/cells-replace` puts the whole rewrite on the notebook's undo stack
+  // (⌘Z reverses it, and the toast reads back the label below) and records one timeline checkpoint.
+  //
+  // Each cell's COMPLETE new text goes over, not the match offsets: the server holds the last SAVED
+  // source, so sending offsets would apply them to the wrong text whenever a cell has unsaved edits.
+  // Building the text here from `cellText` — which reads the live editor — is what carries those in.
+  async function replaceAll() {
     recompute(matches[cur]);
     if (!matches.length) { report(); return; }
     const byCell = new Map();
@@ -211,16 +222,31 @@
       if (!byCell.has(m.cellId)) byCell.set(m.cellId, []);
       byCell.get(m.cellId).push({ from: m.from, to: m.to, insert: replacement(m) });
     }
-    let n = 0, skipped = 0;
-    for (const [id, edits] of byCell) {
-      if (applyToCell(id, edits)) n += edits.length; else skipped += edits.length;
+    const edits = {};
+    let n = 0;
+    for (const [id, ms] of byCell) {
+      const src = cellText(id);
+      let out = '', at = 0;
+      for (const e of ms) { out += src.slice(at, e.from) + e.insert; at = e.to; }
+      edits[id] = out + src.slice(at);
+      n += ms.length;
     }
+    const q = input.value, r = rInput ? rInput.value : '';
+    const label = `replace ${JSON.stringify(q)} → ${JSON.stringify(r)} `
+                + `(${n} in ${byCell.size} ${byCell.size === 1 ? 'cell' : 'cells'})`;
+    status('Replacing…');
+    let st = null;
+    try { st = await window.api('POST', '/api/cells-replace', { edits, label }); }
+    catch (_) { status('Replace failed', true); rInput.focus(); return; }
+    // The server owns the sources now, so re-render from what it returned rather than trusting the
+    // editors — cells it restaled have to show that.
+    // Bare `lastVersion`, not `window.lastVersion`: core.js declares it with `let`, so it is a global
+    // LEXICAL binding and never a property of `window` — assigning through `window` would set a
+    // shadow and leave the real one stale. Same idiom as `histRestore` in panels.js.
+    if (st && st.cells) { renderAll(st); if (st.version != null) lastVersion = st.version; }
     cur = -1;
     recompute(null);
-    // Say so when a cell refused the edit. Reporting only the successes reads as a completed
-    // Replace All while matches are still sitting in the document.
-    status(n + (n === 1 ? ' replacement' : ' replacements')
-             + (skipped ? ' · ' + skipped + ' skipped' : ''), !!skipped);
+    status(n + (n === 1 ? ' replacement' : ' replacements') + ' · ⌘Z to undo');
     rInput.focus();
   }
 

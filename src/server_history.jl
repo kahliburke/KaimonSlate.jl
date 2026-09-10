@@ -1390,6 +1390,53 @@ function _canonical_web_source(source::AbstractString)
     return ReportEngine._web_skin(; html = secs.html, css = secs.css, js = secs.js)
 end
 
+# Rewrite MANY cells' sources as ONE operation: one undo entry, one `.jl` write, one durable
+# checkpoint. `edits` maps cell id → that cell's complete new source.
+#
+# The reason this exists rather than a loop over `edit_cell!`: a bulk rewrite has to be undoable as
+# the single thing the user asked for. Notebook-wide find-and-replace used to apply straight to the
+# open editors, which left one CM6 undo stack per touched cell — reversing a replace across nine
+# cells meant nine separate ⌘Z presses in nine different editors, and a web cell could not be
+# reversed from the cell at all (its text lives in the pane editors). Going through the server
+# instead puts the whole rewrite on the notebook's own undo stack, where one ⌘Z reverses it and the
+# `label` is what the toast reports, and records ONE timeline checkpoint you can restore later.
+#
+# `label` describes the operation for both of those ("replace \"a\" → \"b\" (30 in 9 cells)").
+# `run=false` by default: a bulk text substitution restales what it touched and leaves it for the
+# user to run, the same way pasted cells land stale rather than evaluating themselves.
+# Returns the number of cells actually changed (0 ⇒ nothing recorded, nothing written).
+function replace_cells!(nb::LiveNotebook, edits::AbstractDict; label::AbstractString = "replace", run::Bool = false)
+    changed = 0
+    lock(nb.lock) do
+        cells = nb.report.cells
+        # Resolve + canonicalise first, so the snapshot is taken only if something really changes and
+        # a bad id can't leave a half-applied rewrite behind.
+        pending = Tuple{Int,String}[]
+        for (id, src) in edits
+            idx = findfirst(c -> c.id == String(id), cells)
+            idx === nothing && continue
+            s = cells[idx].kind == WEB ? _canonical_web_source(String(src)) : String(src)
+            cells[idx].source == s || push!(pending, (idx, s))
+        end
+        isempty(pending) && return
+        changed = length(pending)
+        _snapshot!(nb; label = label)
+        _preempt_superseded!(nb, (cells[i] for (i, _) in pending))
+        # Same dance as `edit_cell!`: swap every new source in, serialize the whole notebook, put the
+        # originals back, then hand the new text to `update_source!` — which has to compare against the
+        # OLD report to see what became stale.
+        saved = [(i, cells[i].source) for (i, _) in pending]
+        for (i, s) in pending; cells[i].source = s; end
+        new_full = serialize_report(nb.report)
+        for (i, s) in saved; cells[i].source = s; end
+        update_source!(nb.report, new_full)
+        run && _eval!(nb)
+        _persist!(nb; label = label)
+    end
+    changed > 0 && _autoindex!(nb)
+    return changed
+end
+
 # Edit a cell's source → reconcile (mark it + dependents stale) → run stale →
 # persist back to the `.jl`.
 function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString; announce::Bool = false, force::Bool = false, run::Bool = true)

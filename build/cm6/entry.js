@@ -125,6 +125,32 @@ const juliaTags = styleTags({
   "( )": t.paren, "[ ]": t.squareBracket, "{ }": t.brace,
 });
 
+// Where a fold over a block should START. Always a position on the block's FIRST line, so the
+// gutter arrow sits on the `function` / `if` / `for` line where you look for it — returning a
+// position further down moves the arrow to the bottom of the signature and leaves the opening line
+// with no control at all.
+//
+// Usually that is simply the end of the first line, which keeps the whole signature visible:
+// `function f(x)…end`. But a signature wrapped over several lines is cut wherever the line happened
+// to break, which showed `function long_signature(data::AbstractVector{<:Real},…end` — a dangling
+// comma that reads like a syntax error. What keeps a header open across lines is an unclosed
+// bracket, so in that case fold from just inside that bracket instead: `function long_signature(…end`
+// hides the parameter list without pretending to show part of it.
+//
+// Brackets inside strings and comments count too, so `f(s = ")")` can be read as complete when it
+// isn't. That only costs the wrapped-header refinement and falls back to the old behaviour.
+const _headerEnd = (state, node) => {
+  const first = state.doc.lineAt(node.from);
+  const text = first.text;
+  let depth = 0, openAt = -1;
+  for (let i = node.from - first.from; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "(" || ch === "[" || ch === "{") { if (depth === 0) openAt = i; depth++; }
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+  }
+  return (depth > 0 && openAt >= 0) ? first.from + openAt + 1 : first.to;
+};
+
 const juliaLanguage = LRLanguage.define({
   name: "julia",
   parser: juliaParser.configure({
@@ -137,15 +163,15 @@ const juliaLanguage = LRLanguage.define({
         "FunctionDefinition StructDefinition WhileStatement ForStatement IfStatement LetStatement TryStatement BeginStatement QuoteStatement ModuleDefinition MacroDefinition":
           (cx) => cx.baseIndent + (/^\s*(end|else|elseif|catch|finally)\b/.test(cx.textAfter) ? 0 : cx.unit),
       }),
-      // Fold from the end of the header LINE to the indentation before the closing keyword, so a
-      // folded block keeps its own signature and its own `end`: `function f(x)…end`. `foldInside`
-      // starts the range after the first child, which in this grammar is the keyword itself, so it
-      // would fold to `function…end` and hide the one part worth reading. Every block form the
-      // grammar names is listed, because the indent rule above already treats them all as blocks.
+      // Fold from the end of the HEADER to the indentation before the closing keyword, so a folded
+      // block keeps its own signature and its own `end`: `function f(x)…end`. `foldInside` starts
+      // the range after the first child, which in this grammar is the keyword itself, so it would
+      // fold to `function…end` and hide the one part worth reading. Every block form the grammar
+      // names is listed, because the indent rule above already treats them all as blocks.
       foldNodeProp.add({
         "FunctionDefinition MacroDefinition StructDefinition ModuleDefinition IfStatement WhileStatement ForStatement TryStatement LetStatement BeginStatement QuoteStatement DoClause":
           (node, state) => {
-            const headerEnd = state.doc.lineAt(node.from).to;
+            const headerEnd = _headerEnd(state, node);
             const last = state.doc.lineAt(node.to);
             const to = last.from + /^\s*/.exec(last.text)[0].length;
             return to > headerEnd ? { from: headerEnd, to } : null;

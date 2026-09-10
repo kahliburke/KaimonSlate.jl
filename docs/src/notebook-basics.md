@@ -94,7 +94,13 @@ mode `$1`…`$9`, `$&` and `$$` expand in the replacement; in plain mode a `$` s
 
 Cells that have not been scrolled to yet still contribute to the count — their text comes from the
 last saved source. Stepping onto a match in a markdown or `@bind` cell opens that cell's source so
-the match can be shown, and replacing into one does the same.
+the match can be shown.
+
+**Replace All is a single action.** It rewrites every match across the notebook in one step, which
+means one **⌘Z** puts it all back — the toast names what it undid — and the [timeline](history.md)
+gets one checkpoint labelled with the search and replacement, so you can also restore it later from
+**☰ → 🕘 History**. The rewritten cells are left stale rather than re-run: a text substitution
+decides what your code says, not when it should run.
 
 Inside the **Files** tab's whole-file editor, ⌘F keeps CodeMirror's own single-document find panel,
 scoped to that one file.

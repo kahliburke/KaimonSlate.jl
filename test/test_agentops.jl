@@ -461,6 +461,52 @@ end
     end
 end
 
+# `replace_cells!` — the bulk rewrite behind notebook-wide find-and-replace. The property that
+# matters is that it is ONE operation: applying it per-cell (which is what the browser used to do)
+# left one undo stack per touched cell, so reversing a replace across nine cells took nine separate
+# ⌘Z presses in nine editors and a web cell could not be reversed from the cell at all.
+@testset "bulk replace rewrites many cells as one undoable operation" begin
+    NS.SlateHistory._ROOT[] = mktempdir()
+    hub = NS.start_hub(; port = 8864)
+    try
+        nbp = tempname() * ".jl"
+        write(nbp, "#%% md id=intro\n@md\"\"\"\nthreshold prose\n\"\"\"\n" *
+                   "#%% code id=a\nthreshold = 1\n#%% code id=b\nthreshold + threshold\n")
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        NS._eval!(nb; wait_all = true)
+        src(id) = nb.report.cells[findfirst(c -> c.id == id, nb.report.cells)].source
+        before = Dict(c.id => c.source for c in nb.report.cells)
+
+        n = NS.replace_cells!(nb, Dict("intro" => replace(src("intro"), "threshold" => "cutoff"),
+                                       "a"     => replace(src("a"),     "threshold" => "cutoff"),
+                                       "b"     => replace(src("b"),     "threshold" => "cutoff"));
+                              label = "replace \"threshold\" → \"cutoff\" (4 in 3 cells)")
+
+        @test n == 3
+        # Markdown is rewritten too — the per-cell path skipped exactly those cells, because a md
+        # cell has no mounted editor until its source overlay is opened.
+        @test !occursin("threshold", join(c.source for c in nb.report.cells))
+        @test count(==("cutoff"), [m.match for m in eachmatch(r"cutoff", join(c.source for c in nb.report.cells))]) == 4
+
+        # ONE undo puts every cell back, and reports the label the caller gave.
+        @test NS.undo!(nb) == "replace \"threshold\" → \"cutoff\" (4 in 3 cells)"
+        @test all(c.source == before[c.id] for c in nb.report.cells)
+
+        # One durable checkpoint for the whole rewrite, carrying that same label.
+        labels = [get(e, "label", "") for e in NS.SlateHistory.entries(NS.nbdoc(nb))]
+        @test count(l -> occursin("replace", l), labels) == 1
+
+        # An id the notebook doesn't have is ignored rather than fatal, and a rewrite that changes
+        # nothing records nothing (so an accidental no-op can't bury the undo stack).
+        depth = length(nb.undo)
+        @test NS.replace_cells!(nb, Dict("nosuchcell" => "x = 1"); label = "ghost") == 0
+        @test NS.replace_cells!(nb, Dict("a" => src("a")); label = "no-op") == 0
+        @test length(nb.undo) == depth
+    finally
+        NS.stop_hub(hub)
+    end
+end
+
 # Liveness reporting for a BLOCKED agent call. `_note_run_progress` only fires after
 # _AGENT_PROGRESS_EVERY seconds of blocking, so no ordinary test path reaches it — call it
 # directly, or a rename/typo here (it reaches across into ReportEngine) ships silently.
