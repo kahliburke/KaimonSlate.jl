@@ -486,6 +486,33 @@ function openSettings(scope) {
     el.checked = localStorage.getItem(key) === '1';
     el.onchange = () => { window[apply] ? window[apply](el.checked) : localStorage.setItem(key, el.checked ? '1' : '0'); };
   }
+  // Matching-word highlight. Unlike the three above this one defaults ON — it is how the feature
+  // shipped — so the stored value is read as "not off" rather than "is on". Its colour list comes
+  // from editor.js so the two can't drift; `theme` (the default) tracks the notebook theme's accent.
+  {
+    const on = document.getElementById('setmatchhi');
+    if (on) {
+      on.checked = localStorage.getItem('slateMatchHighlight') !== '0';
+      on.onchange = () => window.setMatchHighlight && window.setMatchHighlight(on.checked);
+    }
+    // Swatches rather than a <select>: the choice IS a colour, so showing the colours is the whole
+    // point — and an <option>'s background is unstylable in Safari, so a coloured dropdown would
+    // silently degrade to a plain list there. Each swatch carries the tint at the strength the
+    // editor paints it, so what you pick is what you get; `theme` shows the live accent.
+    const tint = document.getElementById('setmatchtint');
+    if (tint && window.matchTintNames && window.matchTintValue) {
+      const paint = () => {
+        const cur = localStorage.getItem('slateMatchTint') || 'theme';
+        tint.innerHTML = window.matchTintNames().map(n =>
+          `<button class="swatch${n === cur ? ' on' : ''}" data-tint="${n}" title="${n[0].toUpperCase() + n.slice(1)}"
+                   style="--sw:${window.matchTintValue(n)}"></button>`).join('');
+        for (const b of tint.querySelectorAll('.swatch')) {
+          b.onclick = () => { window.setMatchTint && window.setMatchTint(b.dataset.tint); paint(); };
+        }
+      };
+      paint();
+    }
+  }
   // Per-notebook settings (hot-reload, parallel, threads, slides, bibstyle, agent-model override)
   // live in this dialog's "This notebook" scope (config.js) — a single view with effective value +
   // source badge + clear-override, instead of being scattered here.

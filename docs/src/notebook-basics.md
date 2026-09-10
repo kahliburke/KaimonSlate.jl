@@ -63,7 +63,12 @@ In edit mode:
 
 Extra carets type together.
 `Esc` drops back to a single caret, or clears a selection, and a second `Esc` returns to command mode.
-Under the vim keymap `Esc` keeps its vim meaning: it leaves insert or visual mode, and from normal mode it returns to command mode without collapsing the carets.
+That holds under every keymap. Vim reaches it one rung later: `Esc` leaves insert or visual mode
+first, then collapses the carets, and only once there is a single bare caret does it hand the cell
+back to command mode.
+
+Selecting a word also tints its other occurrences in that cell. Turn it off, or recolour it, under
+Settings → *Highlight matching words* and *Match highlight*.
 
 Notebook-wide:
 

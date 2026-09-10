@@ -28,6 +28,8 @@ Four sections.
 | **Line numbers** | Show a line-number gutter in every code cell. Off by default — a cell is usually short enough not to need one. The Files tab always numbers its lines. |
 | **Indent guides** | Draw a hairline at each indent level, so a nested block's extent is visible at a glance. |
 | **Code folding** | Let Julia blocks be collapsed from the gutter: `function`, `struct`, `module`, `macro`, `if`, `for`, `while`, `try`, `let`, `begin`, `quote` and `do`. A folded block keeps its own header line and its `end`. Markdown cells have no grammar to fold. |
+| **Highlight matching words** | Select a word and its other occurrences in that cell are tinted. On by default. |
+| **Match highlight** | Colour of that tint. **Theme** (the default) follows the notebook theme's accent, so it recolours when you switch theme; the named hues override it. A theme can set its own via the `--selmatch` CSS variable. |
 
 **Appearance**
 

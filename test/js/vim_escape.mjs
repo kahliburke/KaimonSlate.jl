@@ -105,13 +105,19 @@ check('a bare caret is not a rung', press(esc(), 'none', OFF, 1).collapsed, fals
 // and an Escape meant to dismiss a completion would silently drop the extra carets instead.
 check('an active completion outranks the carets', press(esc(), 'active', OFF, 2).collapsed, false);
 check('an active completion is still handed on with carets present', press(esc(), 'active', OFF, 2).handled, false);
-// Under vim this rung is skipped entirely. Normal-mode `<Esc>` is a deliberate no-op a vim user
-// presses to assert the mode, so it keeps the meaning main gives it and leaves the cell, extra
-// carets and all. This is the whole of vim's exposure to multiple cursors, and it is nil.
-check('vim normal mode does not collapse', press(esc(), 'none', NORMAL, 2).collapsed, false);
-check('vim normal mode still leaves the cell with carets', press(esc(), 'none', NORMAL, 2).blurred, true);
+// This rung applies under vim TOO. Extra carets are a state you have to be able to leave, and Escape
+// is the key everyone reaches for; skipping the rung under vim meant a vim user's only way back to
+// one caret was the mouse. Safe because the rung is a no-op on a bare caret (below), so normal-mode
+// `<Esc>` keeps its "assert the mode, then leave the cell" meaning whenever there is nothing to
+// collapse. Vim's block cursor does not stand in the way — the plugin draws it as a decoration and
+// leaves the selection empty, verified in a live editor.
+check('vim normal mode collapses extra carets', press(esc(), 'none', NORMAL, 2).collapsed, true);
+check('vim normal mode keeps the cell while collapsing', press(esc(), 'none', NORMAL, 2).blurred, false);
+check('vim normal mode with ONE caret still leaves the cell', press(esc(), 'none', NORMAL, 1).blurred, true);
 check('vim insert exits insert rather than collapsing', press(esc(), 'none', INSERT, 2).collapsed, false);
 check('vim insert still does not leave the cell', press(esc(), 'none', INSERT, 2).blurred, false);
+// Visual mode outranks it too: Escape leaves visual first, carets intact for the next press.
+check('vim visual exits visual rather than collapsing', press(esc(), 'none', VISUAL, 2).collapsed, false);
 // Emacs is modeless and binds no Escape, so `_vimState` is null for it and it collapses like the
 // default keymap; the OFF cases above are exactly that path.
 

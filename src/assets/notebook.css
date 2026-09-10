@@ -9,6 +9,11 @@
   --orange:#ce9178; --purple:#c586c0; --teal:#4ec9b0; --val:#4ec9b0;
   --strong:#fff; --rowstripe:rgba(255,255,255,.02); --ovl:rgba(255,255,255,.06);
   --page-pad:20px;   /* top/side gutter for the content column; reused by the agent drawer */
+  /* Tint for the matching-word highlight in the editor (Settings → "Match highlight"). Resolved
+     lazily, so pointing it at --accent gives every theme its own colour without a line per theme;
+     a theme whose accent reads badly as a fill can override this one variable. The editor mixes it
+     down to a translucent fill + outline, so a solid colour is the right thing to name here. */
+  --selmatch:var(--accent);
 }
 html[data-slate-theme="graphite"] {
   --bg:#15171c; --bg2:#1c1f26; --bg3:#23262e; --border:#33373f; --text:#d7dae1;
@@ -2567,6 +2572,23 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 /* The panel with no log to show (an app refuses that route) — identity + telemetry still stand. */
 .wplog-none { padding:12px 14px; font-size:.78rem; color:var(--dim); line-height:1.5; }
 .wplog-none a { color:var(--accent); }
+
+/* ── Colour swatches (Settings → Match highlight) ────────────────────────────────────────────
+   A row of the actual colours, because the setting IS a colour. `--sw` is the tint, set per button
+   from the editor's own palette; the fill uses the same 20% mix the editor paints so the swatch
+   shows what you'll get, over a stronger ring so a pale tint is still findable on the dark row.
+
+   Selectors are `.swatches .swatch`, not `.swatch`: the dialog is inside `.modal`, and `.modal
+   button` sets background/border/padding at a specificity a single class cannot beat — a bare
+   `.swatch` lost every one of those and the row came out as seven identical grey pills. */
+.swatches { display:inline-flex; gap:5px; align-items:center; }
+.swatches .swatch { width:17px; height:17px; min-width:0; padding:0; border-radius:50%; cursor:pointer;
+                    background:color-mix(in srgb, var(--sw) 20%, transparent);
+                    border:1.5px solid color-mix(in srgb, var(--sw) 55%, transparent); }
+.swatches .swatch:hover { border-color:color-mix(in srgb, var(--sw) 85%, transparent); }
+/* The selected one gets a ring in the page's own colours, so it reads as chosen regardless of how
+   pale its tint is — a heavier border alone was invisible on the lighter swatches. */
+.swatches .swatch.on { box-shadow:0 0 0 2px var(--bg2), 0 0 0 3.5px var(--text); }
 
 /* ── Notebook-wide find bar (⌘F, js/search.js) ───────────────────────────────────────────────
    Top-right of the window, above the docked panes (60) and the toast stack (80) but below the

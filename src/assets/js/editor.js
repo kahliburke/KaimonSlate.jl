@@ -171,10 +171,17 @@
         if (buf && buf.length) { try { vimApi.handleKey(cm, '<Esc>', 'user'); } catch (_) {} return true; }
       }
       // defaultKeymap's own Escape binding, which this ladder pre-empts: collapse a selection or
-      // extra carets. It returns false on a bare caret, so a plain Escape still leaves the cell.
-      // Not under vim, where normal-mode <Esc> is a no-op pressed to assert the mode; `vs` is null
-      // under emacs, which binds no Escape.
-      if (!vs && cmCommands.simplifySelection(view)) return true;
+      // extra carets. Under EVERY keymap, vim included — extra carets are a state you have to be
+      // able to get out of, and Escape is the key everyone reaches for. Leaving the cell with three
+      // carets still live meant the only way back to one was the mouse.
+      //
+      // It is safe to run this under vim because it returns false on a bare caret, so a plain
+      // normal-mode Escape still falls through to leaving the cell and keeps its "assert the mode"
+      // meaning. Vim's block cursor does NOT stand in the way: the replit plugin draws it as a
+      // decoration and leaves the selection empty, so `simplifySelection` sees nothing to collapse.
+      // Insert and visual mode are already handled above, so this rung is only ever reached from
+      // normal mode.
+      if (cmCommands.simplifySelection(view)) return true;
       view.contentDOM.blur();
       return true;
     },
@@ -233,6 +240,56 @@
     // ⌘ is go-to-definition and ⌃ is the macOS context menu, so require ⌥ alone.
     EditorView.clickAddsSelectionRange.of(e => e.altKey && !e.metaKey && !e.ctrlKey),
   ];
+
+  // ── Matching-word highlight ───────────────────────────────────────────────────
+  // Select a word and its other occurrences in that cell get tinted. CodeMirror's
+  // `highlightSelectionMatches`, which arrived with multiple cursors as a side effect of the same
+  // PR — so it is a setting rather than a fact, because whether it reads as helpful or as noise
+  // depends on how you work (select a single letter and it lights up half the cell).
+  //
+  // The tint is one colour applied at two strengths: a fill and a slightly stronger outline. It has
+  // to be translucent — a solid fill would swallow the syntax colours underneath and only work on
+  // one background — so the choice is a short list of hues rather than a free colour picker.
+  //
+  // The DEFAULT follows the UI theme: `--selmatch` (notebook.css) points at that theme's accent, so
+  // the highlight is recoloured by switching theme and needs no setting of its own to look right.
+  // The named hues are for overriding that deliberately.
+  const matchHiComp = new Compartment();
+  const MATCH_TINTS = {
+    theme:  'var(--selmatch, var(--accent))',   // follows the UI theme — the default
+    neutral: '#7f7f7f', blue: '#5a96ff', green: '#6ec878',
+    amber:   '#e6b450', violet: '#af8cf0', rose: '#f08296',
+  };
+  window.matchTintNames = () => Object.keys(MATCH_TINTS);
+  // The colour behind a name, so the Settings swatches can show the real thing rather than a second
+  // copy of the palette that could drift from this one. `theme` returns the CSS variable, which the
+  // swatch resolves against the live theme exactly as the editor does.
+  window.matchTintValue = n => MATCH_TINTS[n] || MATCH_TINTS.theme;
+  // Default ON: it is how the feature shipped, so a notebook does not silently change under anyone
+  // who has already got used to it. `'0'` is the only value that turns it off.
+  const _matchHiOn = () => localStorage.getItem('slateMatchHighlight') !== '0';
+  const _matchTint = () => MATCH_TINTS[localStorage.getItem('slateMatchTint')] || MATCH_TINTS.theme;
+  const _matchHiExt = () => {
+    if (!cmSearch || !_matchHiOn()) return [];
+    // `color-mix` rather than an rgba() literal, because the theme option is a CSS variable and its
+    // value isn't known here. Both halves come out of the same colour, so a hue swap moves together.
+    const c = _matchTint(), mix = pct => `color-mix(in srgb, ${c} ${pct}%, transparent)`;
+    return [
+      cmSearch.highlightSelectionMatches(),
+      // Overrides the fixed #99ff7780 green the extension ships, which ignores the editor theme.
+      EditorView.theme({
+        '.cm-selectionMatch': { backgroundColor: mix(20),
+                                outline: `1px solid ${mix(38)}`, borderRadius: '2px' },
+      }),
+    ];
+  };
+  const _applyMatchHi = () => {
+    for (const v of _allViews()) {
+      try { v.dispatch({ effects: matchHiComp.reconfigure(_matchHiExt()) }); } catch (_) {}
+    }
+  };
+  window.setMatchHighlight = on => { localStorage.setItem('slateMatchHighlight', on ? '1' : '0'); _applyMatchHi(); };
+  window.setMatchTint = name => { if (MATCH_TINTS[name]) { localStorage.setItem('slateMatchTint', name); _applyMatchHi(); } };
 
   // ── Editor chrome: line numbers, indent guides, code folding ──────────────────
   // The three structural affordances a cell deliberately did without. Each is off by default, so
@@ -785,8 +842,11 @@
   const _fileExtras = () => {
     const ex = [];
     if (cmView) ex.push(cmView.highlightActiveLine());
-    if (cmSearch) ex.push(cmSearch.search({ top: true }), cmSearch.highlightSelectionMatches(),
-                          keymap.of(cmSearch.searchKeymap));
+    // No `highlightSelectionMatches` here: `matchHiComp` (in `mkEditor`) already gives this editor
+    // the matching-word highlight and respects the Settings toggle. Adding it again mounted the
+    // plugin twice and, once the setting existed, kept it on in the Files tab after it was turned
+    // off everywhere else. The search PANEL's own `.cm-searchMatch` is a different thing and stays.
+    if (cmSearch) ex.push(cmSearch.search({ top: true }), keymap.of(cmSearch.searchKeymap));
     ex.push(EditorView.theme({
       '.cm-gutters': { background: 'transparent', border: 'none', opacity: '.55' },
       '.cm-panels': { background: 'var(--bg2)', color: 'var(--text)' },
@@ -1048,7 +1108,7 @@
         matchField,                      // notebook-wide search highlights (painted by search.js)
         wrapComp.of(_wrapExt(!!opts.markdown)),
         ..._multiCursor,
-        ...(cmSearch ? [cmSearch.highlightSelectionMatches()] : []),   // marks the selection's other occurrences
+        matchHiComp.of(_matchHiExt()),   // tint the selection's other occurrences (Settings; live)
         // Line numbers, indent guides and folding, off unless turned on in Settings and each
         // live-reconfigurable through its own compartment.
         gutterComp.of(_gutterExt(!!opts.file)), guideComp.of(_guideExt()),
@@ -1170,11 +1230,8 @@
           '.cm-cursor': { borderLeftColor: 'var(--text)' },
           '&.cm-focused': { outline: 'none' },
           '.cm-line': { padding: '0 4px' },
-          // highlightSelectionMatches ships a fixed #99ff7780 green that ignores the editor theme.
-          // Neutral tint instead, overridable per theme through the two variables.
-          '.cm-selectionMatch': { backgroundColor: 'var(--selmatch-bg, rgba(127,127,127,.20))',
-                                  outline: '1px solid var(--selmatch-line, rgba(127,127,127,.38))',
-                                  borderRadius: '2px' },
+          // `.cm-selectionMatch` is NOT styled here — it moved into `matchHiComp` so the Settings
+          // colour can be reconfigured live. A rule here would sit at the same precedence and race it.
           // A folded block's placeholder — CM6's default is a boxed "…"; this keeps it quiet.
           '.cm-foldPlaceholder': { background: 'var(--ovl)', border: '1px solid var(--border)',
                                    color: 'var(--dim)', borderRadius: '3px', padding: '0 4px', margin: '0 2px' },
