@@ -57,22 +57,21 @@ function bonito_controls(session, names::Symbol...; layout::Symbol = :column, la
     return Bonito.DOM.div(rows...; style = style, class = "bonito-slate-controls")
 end
 
-# The bind surface comes off the Slate execution context, which carries the capability rather than
-# the namespace: `bind_widget` / `bind_value` / `on_bind` / `bind_observable` / `bind_names`. Reading
-# `__slate_bind_registry` directly would work today and tie this extension to a private name.
-_ctx_call(f::Symbol, args...; default = nothing) = begin
-    g = SlateExtensionsBase._ctx_field(f)
-    g === nothing ? default : g(args...)
-end
+# The bind surface comes from SlateExtensionsBase, which is the canonical definition of the
+# execution-context convention. Reading the context's fields here by name would work today and is
+# exactly the hand-copying that drifts silently when Slate evolves — and it could not be expressed
+# as a version bound, so a new BonitoSlate against an older Slate would install cleanly and then
+# report "no such control" for a control that plainly exists. The `SlateExtensionsBase` compat
+# bound is what makes that a resolver error instead of a runtime mystery.
 
 "The Slate `Widget` (kind + params + default) behind a bound name; `nothing` if undeclared."
-_slate_widget(name::Symbol) = _ctx_call(:bind_widget, name)
+_slate_widget(name::Symbol) = SlateExtensionsBase.slate_bind_widget(name)
 
 "A control's current value, so a rebuilt widget opens where the reader left it."
-_slate_value(name::Symbol) = _ctx_call(:bind_value, name)
+_slate_value(name::Symbol) = SlateExtensionsBase.slate_bind_value(name)
 
 "Every control declared in this notebook, for `bonito_controls(:all)`."
-_slate_bind_names() = _ctx_call(:bind_names; default = Symbol[])
+_slate_bind_names() = SlateExtensionsBase.slate_bind_names()
 
 # One labelled widget row.
 function _control_row(session, name::Symbol, w, labels::Bool)
