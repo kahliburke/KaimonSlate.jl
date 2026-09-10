@@ -39,11 +39,17 @@ const vimApi = {
   exitVisualMode: () => { acted = 'visual'; },
   handleKey: (_cm, key) => { acted = 'key:' + key; },
 };
-const keydown = new Function('completionStatus', '_vimCM', '_vimState', 'vimApi', 'return function keydown(e, view) ' + body.slice(body.indexOf('{')) + ';')(
+// `cmCommands.simplifySelection` stands in for the selection rung. The real one collapses extra
+// carets or a non-empty selection and returns false on a bare caret, which is what lets a plain
+// Escape fall through to leaving the cell; `cursors > 1` models "there was something to collapse".
+let cursors = 1, collapsed = 0;
+const cmCommands = { simplifySelection: () => (cursors > 1 ? (collapsed++, cursors = 1, true) : false) };
+const keydown = new Function('completionStatus', '_vimCM', '_vimState', 'vimApi', 'cmCommands', 'return function keydown(e, view) ' + body.slice(body.indexOf('{')) + ';')(
   () => completion,
   () => (vimState ? { state: { vim: vimState } } : null),
   () => vimState,
   vimApi,
+  cmCommands,
 );
 const view = { state: {}, contentDOM: { blur: () => { blurred++; } } };
 const esc = (over = {}) => Object.assign({ key: 'Escape', ctrlKey: false, metaKey: false, altKey: false }, over);
@@ -53,11 +59,11 @@ function check(what, got, want) {
   if (got !== want) { console.error(`vim_escape: ${what} — got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); bad++; }
 }
 // One press under a given completion/vim state → {handled, blurred, acted}.
-function press(ev, comp, vs) {
-  completion = comp; vimState = vs; acted = null;
-  const before = blurred;
+function press(ev, comp, vs, carets = 1) {
+  completion = comp; vimState = vs; acted = null; cursors = carets;
+  const before = blurred, wasCollapsed = collapsed;
   const handled = keydown(ev, view);
-  return { handled, blurred: blurred > before, acted };
+  return { handled, blurred: blurred > before, acted, collapsed: collapsed > wasCollapsed };
 }
 
 const OFF = null, INSERT = { insertMode: true, visualMode: false };
@@ -89,7 +95,27 @@ check('visual exits even while a completion is pending', press(esc(), 'pending',
 check('a pending operator is cancelled', press(esc(), 'none', PENDING_OP).acted, 'key:<Esc>');
 check('a pending operator does not leave the cell', press(esc(), 'none', PENDING_OP).blurred, false);
 
-// Rung 4 — nothing inner is live, so Escape means what it has always meant.
+// Rung 4: a selection or an extra caret is inner to the cell itself, so Escape simplifies before it
+// will give up the cell. This is defaultKeymap's Escape command, which the ladder pre-empts.
+check('an extra caret collapses', press(esc(), 'none', OFF, 2).collapsed, true);
+check('collapsing does not leave the cell', press(esc(), 'none', OFF, 2).blurred, false);
+check('collapsing reports handled', press(esc(), 'none', OFF, 2).handled, true);
+check('a bare caret is not a rung', press(esc(), 'none', OFF, 1).collapsed, false);
+// The popup outranks the carets. Without this case the rung's position below rung 1 is unpinned,
+// and an Escape meant to dismiss a completion would silently drop the extra carets instead.
+check('an active completion outranks the carets', press(esc(), 'active', OFF, 2).collapsed, false);
+check('an active completion is still handed on with carets present', press(esc(), 'active', OFF, 2).handled, false);
+// Under vim this rung is skipped entirely. Normal-mode `<Esc>` is a deliberate no-op a vim user
+// presses to assert the mode, so it keeps the meaning main gives it and leaves the cell, extra
+// carets and all. This is the whole of vim's exposure to multiple cursors, and it is nil.
+check('vim normal mode does not collapse', press(esc(), 'none', NORMAL, 2).collapsed, false);
+check('vim normal mode still leaves the cell with carets', press(esc(), 'none', NORMAL, 2).blurred, true);
+check('vim insert exits insert rather than collapsing', press(esc(), 'none', INSERT, 2).collapsed, false);
+check('vim insert still does not leave the cell', press(esc(), 'none', INSERT, 2).blurred, false);
+// Emacs is modeless and binds no Escape, so `_vimState` is null for it and it collapses like the
+// default keymap; the OFF cases above are exactly that path.
+
+// Rung 5: nothing inner is live, so Escape means what it has always meant.
 check('normal mode leaves the cell', press(esc(), 'none', NORMAL).blurred, true);
 check('normal mode reports handled', press(esc(), 'none', NORMAL).handled, true);
 check('normal mode does not touch vim', press(esc(), 'none', NORMAL).acted, null);

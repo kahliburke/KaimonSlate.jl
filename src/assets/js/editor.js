@@ -5,7 +5,7 @@
 (function () {
   const CM = window.CM6;
   if (!CM) { console.error('CM6 bundle missing'); return; }
-  const { EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, Decoration, Transaction,
+  const { EditorView, EditorState, Compartment, StateField, StateEffect, Decoration, Transaction,
           ViewPlugin, WidgetType, Prec,
           vimMode, vimApi, vimGetCM, emacsMode,
           keymap, defaultKeymap, history, historyKeymap, undoDepth, redoDepth, indentWithTab, toggleComment,
@@ -16,7 +16,7 @@
 
           autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
           completionStatus, startCompletion, acceptCompletion, snippet,
-          cmSearch, cmView, cmAutocomplete } = CM;
+          cmSearch, cmView, cmAutocomplete, cmCommands } = CM;
 
   // ── Every live editor view ──────────────────────────────────────────────────────
   // The audience for a settings change: theme, wrap, keymap, completion delay and the extension
@@ -142,6 +142,11 @@
         const buf = vs.inputState && vs.inputState.keyBuffer;
         if (buf && buf.length) { try { vimApi.handleKey(cm, '<Esc>', 'user'); } catch (_) {} return true; }
       }
+      // defaultKeymap's own Escape binding, which this ladder pre-empts: collapse a selection or
+      // extra carets. It returns false on a bare caret, so a plain Escape still leaves the cell.
+      // Not under vim, where normal-mode <Esc> is a no-op pressed to assert the mode; `vs` is null
+      // under emacs, which binds no Escape.
+      if (!vs && cmCommands.simplifySelection(view)) return true;
       view.contentDOM.blur();
       return true;
     },
@@ -199,6 +204,16 @@
   };
 
   window.editors = window.editors || {};
+
+  // ── Multiple cursors ──────────────────────────────────────────────────────────
+  // The gestures are documented in notebook-basics.md. CodeMirror supplies the rest once multiple
+  // ranges are allowed: defaultKeymap already binds ⌘⌥↑/↓ to addCursorAbove/Below and Escape to
+  // simplifySelection, and `drawSelection()` (on every editor) draws the extra carets.
+  const _multiCursor = [
+    EditorState.allowMultipleSelections.of(true),   // without it CM6 discards all but one range
+    // ⌘ is go-to-definition and ⌃ is the macOS context menu, so require ⌥ alone.
+    EditorView.clickAddsSelectionRange.of(e => e.altKey && !e.metaKey && !e.ctrlKey),
+  ];
 
   // ── Editor-extension registry (extension point) ──────────────────────────────
   // A package can teach EVERY cell editor a new behaviour (e.g. render giac"…" as an
@@ -852,6 +867,8 @@
         tooltips({ parent: document.body }),
         indentUnit.of(_indent), EditorState.tabSize.of(webLang ? 2 : 4), errField, originField, flashField,
         wrapComp.of(_wrapExt(!!opts.markdown)),
+        ..._multiCursor,
+        ...(cmSearch ? [cmSearch.highlightSelectionMatches()] : []),   // marks the selection's other occurrences
         ...lang,
         // Web panes: inline syntax-error diagnostics (a red underline) as you type, so a typo like
         // `for x of …` is caught at author time instead of a cryptic runtime console error. No lint
@@ -883,6 +900,10 @@
           // inside the activate-on-typing delay and made you press it twice.
           ...completionKeymap,                  // popup nav/close, once there IS a popup
           ...cellKeys,
+          // ⌘⌥↑/↓ come from defaultKeymap. ⌘D does not: selectNextOccurrence is in searchKeymap,
+          // which only the Files-tab editor gets. `keymapModeComp` precedes this keymap, so on
+          // Linux, where Mod is Ctrl, vim and emacs keep Ctrl-D.
+          ...(cmSearch ? [{ key: 'Mod-d', run: cmSearch.selectNextOccurrence, preventDefault: true }] : []),
           // ⌘⇧K = help (app shortcut). Bind it here so CM6's defaultKeymap `deleteLine` doesn't eat it.
           { key: 'Mod-Shift-k', run: () => { window.__docsHotkey = Date.now(); window.openDocsAtCursor && window.openDocsAtCursor(); return true; } },
           // ⌘⇧←/→ = back/forward through selected-cell nav history, IN the editor too — so after a
@@ -960,6 +981,11 @@
           '.cm-cursor': { borderLeftColor: 'var(--text)' },
           '&.cm-focused': { outline: 'none' },
           '.cm-line': { padding: '0 4px' },
+          // highlightSelectionMatches ships a fixed #99ff7780 green that ignores the editor theme.
+          // Neutral tint instead, overridable per theme through the two variables.
+          '.cm-selectionMatch': { backgroundColor: 'var(--selmatch-bg, rgba(127,127,127,.20))',
+                                  outline: '1px solid var(--selmatch-line, rgba(127,127,127,.38))',
+                                  borderRadius: '2px' },
         }, { dark: true }),
       ],
     });

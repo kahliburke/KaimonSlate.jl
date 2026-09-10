@@ -57,6 +57,13 @@ In edit mode:
 | `⌘⇧⏎` / `Ctrl⇧⏎` | run and open a fresh cell below |
 | `⌘⇧-` / `Ctrl⇧-` | split the cell at the cursor |
 | `⇥` | completion (Julia REPL completions + cell-local bindings) |
+| `⌘⌥↑` / `⌘⌥↓` | add a caret on the line above / below |
+| `⌥`-click | add a caret at the click |
+| `⌘D` / `CtrlD` | select the word under the caret, then each next occurrence |
+
+Extra carets type together.
+`Esc` drops back to a single caret, or clears a selection, and a second `Esc` returns to command mode.
+Under the vim keymap `Esc` keeps its vim meaning: it leaves insert or visual mode, and from normal mode it returns to command mode without collapsing the carets.
 
 Notebook-wide:
 
