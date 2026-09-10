@@ -1280,6 +1280,10 @@ function state_json(nb::LiveNotebook)
     meta["runLocationNotebook"] = get(nb.report.meta, "runon", "")           # the DURABLE footer override ("" = none)
     meta["runLocationSession"] = get(nb.report.meta, "runon_session", "")    # the runtime session override ("" = none)
     meta["runLocationGlobal"] = RUNON_DEFAULT[]                              # the machine global default ("" = local)
+    # Can this hub honour a run-location at all? False on a standalone hub, where every remote path
+    # is behind `gate_available()` — so the pill must say it is running locally rather than display
+    # the host it was told to use and isn't. Same shape as `agentAvailable` above.
+    meta["remoteAvailable"] = ReportEngine.gate_available()
     meta["regions"] = _regions_json(nb)                                     # declared per-cell destinations (regionon footer) → tag editor + DAG zones
     meta["health"] = _health_json(nb)                                       # watchdog status + alerts (stall/runaway) → health panel
     meta["workers"] = _workers_json(nb)                                     # ACTIVE workers (main + each region) → topbar pills + log/status popup
