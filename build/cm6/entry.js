@@ -12,10 +12,13 @@ import { vim as vimMode, Vim as vimApi, getCM as vimGetCM } from "@replit/codemi
 // Emacs needs none of vim's Escape arbitration: it is modeless, uses M- (Alt) for Meta rather than
 // the ESC-prefix convention, and cancels with C-g — it binds no Escape at all.
 import { emacs as emacsMode } from "@replit/codemirror-emacs";
+// Indent guides. CodeMirror core has none, and this is the extension the ecosystem settled on,
+// from the same publisher as the vim and emacs keymaps above.
+import { indentationMarkers } from "@replit/codemirror-indentation-markers";
 import { defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess,
          toggleComment, undoDepth, redoDepth } from "@codemirror/commands";
 import { LRLanguage, LanguageSupport, syntaxHighlighting, HighlightStyle, indentNodeProp,
-         foldNodeProp, foldInside, indentUnit, bracketMatching, indentOnInput, syntaxTree } from "@codemirror/language";
+         foldNodeProp, indentUnit, bracketMatching, indentOnInput, syntaxTree } from "@codemirror/language";
 import { styleTags, tags as t } from "@lezer/highlight";
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
          completionStatus, snippet, startCompletion, acceptCompletion } from "@codemirror/autocomplete";
@@ -134,8 +137,19 @@ const juliaLanguage = LRLanguage.define({
         "FunctionDefinition StructDefinition WhileStatement ForStatement IfStatement LetStatement TryStatement BeginStatement QuoteStatement ModuleDefinition MacroDefinition":
           (cx) => cx.baseIndent + (/^\s*(end|else|elseif|catch|finally)\b/.test(cx.textAfter) ? 0 : cx.unit),
       }),
+      // Fold from the end of the header LINE to the indentation before the closing keyword, so a
+      // folded block keeps its own signature and its own `end`: `function f(x)…end`. `foldInside`
+      // starts the range after the first child, which in this grammar is the keyword itself, so it
+      // would fold to `function…end` and hide the one part worth reading. Every block form the
+      // grammar names is listed, because the indent rule above already treats them all as blocks.
       foldNodeProp.add({
-        "FunctionDefinition StructDefinition ModuleDefinition LetStatement BeginStatement": foldInside,
+        "FunctionDefinition MacroDefinition StructDefinition ModuleDefinition IfStatement WhileStatement ForStatement TryStatement LetStatement BeginStatement QuoteStatement DoClause":
+          (node, state) => {
+            const headerEnd = state.doc.lineAt(node.from).to;
+            const last = state.doc.lineAt(node.to);
+            const to = last.from + /^\s*/.exec(last.text)[0].length;
+            return to > headerEnd ? { from: headerEnd, to } : null;
+          },
       }),
     ],
   }),
@@ -270,6 +284,7 @@ export {
   autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, completionStatus, snippet,
   startCompletion, acceptCompletion,
   vimMode, vimApi, vimGetCM, emacsMode,  // alternative keymaps, off unless the setting selects one
+  indentationMarkers,                    // indent guides, off unless the setting selects them
   // Full module namespaces for editor extensions (see the import note above).
   cmView, cmState, cmCommands, cmLanguage, cmAutocomplete, cmSearch, cmHighlight,
 };

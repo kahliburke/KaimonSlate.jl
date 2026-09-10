@@ -16,7 +16,7 @@
 
           autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
           completionStatus, startCompletion, acceptCompletion, snippet,
-          cmSearch, cmView, cmAutocomplete, cmCommands } = CM;
+          cmSearch, cmView, cmAutocomplete, cmCommands, cmLanguage, indentationMarkers } = CM;
 
   // ── Every live editor view ──────────────────────────────────────────────────────
   // The audience for a settings change: theme, wrap, keymap, completion delay and the extension
@@ -214,6 +214,51 @@
     // ⌘ is go-to-definition and ⌃ is the macOS context menu, so require ⌥ alone.
     EditorView.clickAddsSelectionRange.of(e => e.altKey && !e.metaKey && !e.ctrlKey),
   ];
+
+  // ── Editor chrome: line numbers, indent guides, code folding ──────────────────
+  // The three structural affordances a cell deliberately did without. Each is off by default, so
+  // the notebook keeps its uncluttered look until asked, and each sits in a Compartment so a
+  // Settings toggle applies LIVE to every open editor — the `setEditorWrap` pattern. The
+  // Files-tab whole-file editor forces line numbers on regardless: it is a document you scroll
+  // and navigate, not a cell.
+  const gutterComp = new Compartment();    // line numbers + active-line gutter highlight
+  const guideComp = new Compartment();     // indent guides
+  const foldComp = new Compartment();      // code folding + the fold gutter
+  const _prefOn = k => localStorage.getItem(k) === '1';
+
+  // Every editor gets the gutter, markdown cells included. A markdown cell is always soft-wrapped
+  // (see `_wrapExt`), so a number marks a logical line and a wrapped paragraph leaves blanks
+  // beside its later rows. A whole-file editor keeps its gutter whatever the setting says.
+  const _gutterExt = isFile => (cmView && (isFile || _prefOn('slateLineNumbers')))
+    ? [cmView.lineNumbers(), cmView.highlightActiveLineGutter()] : [];
+
+  // A markdown cell has no grammar (entry.js bundles Julia, HTML, CSS and JS), so it has no syntax
+  // tree and nothing to fold. Section folding would need @codemirror/lang-markdown in the bundle.
+  const _foldExt = isMd => (cmLanguage && !isMd && _prefOn('slateCodeFolding'))
+    ? [cmLanguage.codeFolding(), cmLanguage.foldGutter(), keymap.of(cmLanguage.foldKeymap)] : [];
+
+  // ── Indent guides ─────────────────────────────────────────────────────────────
+  // A hairline at each indent stop; CodeMirror core has none. One neutral color serves both editor
+  // themes. `codeOnly` stops a guide at the last line of its block rather than running it through
+  // the gap below. The active-block highlight rebuilds every marker on a selection change, and is
+  // off because a cell is short enough not to need the cue.
+  const _GUIDE = 'rgba(127,127,127,.34)';
+  const _guideExt = () => (indentationMarkers && _prefOn('slateIndentGuides'))
+    ? indentationMarkers({ thickness: 1, markerType: 'codeOnly', highlightActiveBlock: false,
+                           colors: { light: _GUIDE, dark: _GUIDE } })
+    : [];
+
+  // Live-apply a chrome toggle across every open editor. `key` is the localStorage flag, `comp`
+  // the compartment holding that piece, `build` its extension for one view.
+  const _setChrome = (key, comp, build) => on => {
+    localStorage.setItem(key, on ? '1' : '0');
+    for (const v of _allViews()) {
+      try { v.dispatch({ effects: comp.reconfigure(build(v)) }); } catch (_) {}
+    }
+  };
+  window.setLineNumbers = _setChrome('slateLineNumbers', gutterComp, v => _gutterExt(!!v._isFile));
+  window.setIndentGuides = _setChrome('slateIndentGuides', guideComp, () => _guideExt());
+  window.setCodeFolding = _setChrome('slateCodeFolding', foldComp, v => _foldExt(!!v._isMd));
 
   // ── Editor-extension registry (extension point) ──────────────────────────────
   // A package can teach EVERY cell editor a new behaviour (e.g. render giac"…" as an
@@ -607,11 +652,13 @@
     return null;
   };
   // A whole-file editor (the Files panel) — unlike a cell, it's a document you scroll and navigate,
-  // so it gets what a cell deliberately doesn't: line numbers + active-line highlight, and CM6's
-  // find/replace panel (⌘F / ⌘⌥F, ⌘G to step). Both ship inside cm6.bundle.js already.
+  // so it gets what a cell only gets on request: an active-line highlight and CM6's own
+  // find/replace panel (⌘F / ⌘⌥F, ⌘G to step), scoped to the one file rather than the notebook.
+  // Its line numbers come from the shared `gutterComp` (forced on by `opts.file`), so the two
+  // never stack into a double gutter when the notebook-wide toggle is also on.
   const _fileExtras = () => {
     const ex = [];
-    if (cmView) ex.push(cmView.lineNumbers(), cmView.highlightActiveLineGutter(), cmView.highlightActiveLine());
+    if (cmView) ex.push(cmView.highlightActiveLine());
     if (cmSearch) ex.push(cmSearch.search({ top: true }), cmSearch.highlightSelectionMatches(),
                           keymap.of(cmSearch.searchKeymap));
     ex.push(EditorView.theme({
@@ -628,6 +675,7 @@
     const view = mkEditor(parent, {
       doc: text,
       markdown: md,
+      file: true,
       lang: md ? undefined : _fileLang(opts.filename),
       extra: _fileExtras(),
       keys: opts.onSave ? [{ key: 'Mod-s', run: () => { opts.onSave(); return true; } }] : [],
@@ -869,6 +917,10 @@
         wrapComp.of(_wrapExt(!!opts.markdown)),
         ..._multiCursor,
         ...(cmSearch ? [cmSearch.highlightSelectionMatches()] : []),   // marks the selection's other occurrences
+        // Line numbers, indent guides and folding, off unless turned on in Settings and each
+        // live-reconfigurable through its own compartment.
+        gutterComp.of(_gutterExt(!!opts.file)), guideComp.of(_guideExt()),
+        foldComp.of(_foldExt(!!opts.markdown)),
         ...lang,
         // Web panes: inline syntax-error diagnostics (a red underline) as you type, so a typo like
         // `for x of …` is caught at author time instead of a cryptic runtime console error. No lint
@@ -986,10 +1038,15 @@
           '.cm-selectionMatch': { backgroundColor: 'var(--selmatch-bg, rgba(127,127,127,.20))',
                                   outline: '1px solid var(--selmatch-line, rgba(127,127,127,.38))',
                                   borderRadius: '2px' },
+          // A folded block's placeholder — CM6's default is a boxed "…"; this keeps it quiet.
+          '.cm-foldPlaceholder': { background: 'var(--ovl)', border: '1px solid var(--border)',
+                                   color: 'var(--dim)', borderRadius: '3px', padding: '0 4px', margin: '0 2px' },
         }, { dark: true }),
       ],
     });
     view._wrapMd = !!opts.markdown;   // markdown views stay wrapped when the code-wrap toggle flips
+    view._isFile = !!opts.file;       // whole-file editors keep line numbers whatever the toggle says
+    view._isMd = !!opts.markdown;     // markdown cells have no grammar, so nothing to fold
     view._mkAcomp = mkAcomp;          // rebuilds THIS editor's completion source on a settings change
     view._edctx = _edctx;             // ctx for reconfiguring registered editor extensions
     // Join the live set (see `_allViews`) and leave it on destroy, whoever destroys it — a pane

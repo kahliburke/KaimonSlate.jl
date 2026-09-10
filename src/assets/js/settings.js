@@ -476,6 +476,16 @@ function openSettings(scope) {
     wraped.checked = localStorage.getItem('slateWrapEditor') === '1';
     wraped.onchange = () => { window.setEditorWrap && window.setEditorWrap(wraped.checked); };
   }
+  // Editor chrome — line numbers, indent guides, code folding. Off by default so a cell keeps the
+  // uncluttered look; each applies live to every open editor via its compartment (editor.js).
+  for (const [id, key, apply] of [['setlinenums', 'slateLineNumbers', 'setLineNumbers'],
+                                  ['setguides', 'slateIndentGuides', 'setIndentGuides'],
+                                  ['setfolding', 'slateCodeFolding', 'setCodeFolding']]) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.checked = localStorage.getItem(key) === '1';
+    el.onchange = () => { window[apply] ? window[apply](el.checked) : localStorage.setItem(key, el.checked ? '1' : '0'); };
+  }
   // Per-notebook settings (hot-reload, parallel, threads, slides, bibstyle, agent-model override)
   // live in this dialog's "This notebook" scope (config.js) — a single view with effective value +
   // source badge + clear-override, instead of being scattered here.
