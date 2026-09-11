@@ -536,7 +536,8 @@ _marks_from(files::Vector{String}, lines::Vector{Int}) =
 # `debug_command` advances one lowered expression, so several consecutive steps
 # can sit on one source line. A step the user asked for should move somewhere
 # visible, so advance until the position changes or the frame does.
-function _advance!(s::_DebugSession, cmd::Symbol; max_micro::Int = 500)
+function _advance!(s::_DebugSession, cmd::Symbol; max_micro::Int = 500,
+                   skip::Union{Nothing,Tuple{String,Int}} = nothing)
     ji = _ji()
     start = (_frame_position(s.frame)..., objectid(s.frame))
     micro = 0
@@ -563,9 +564,18 @@ function _advance!(s::_DebugSession, cmd::Symbol; max_micro::Int = 500)
         s.steps += 1
         # Landing on an armed breakpoint ends the step, whatever was asked for — otherwise
         # `continue` walks straight through every one it hits.
-        s.at_breakpoint = _on_breakpoint(s.frame)
-        s.at_breakpoint && return
         now = (_frame_position(s.frame)..., objectid(s.frame))
+        s.at_breakpoint = _on_breakpoint(s.frame)
+        # `skip` is the position the caller has already seen and wants to get past. A breakpoint
+        # inside a loop is hit once per iteration, so plain `continue` lands on the same line over
+        # and over; this walks through those without disarming anything, and still stops at a
+        # DIFFERENT breakpoint or at the end.
+        if s.at_breakpoint && skip !== nothing && (now[1], now[2]) == skip
+            s.at_breakpoint = false
+            micro >= max_micro && return
+            continue
+        end
+        s.at_breakpoint && return
         (now != start || micro >= max_micro) && return
     end
 end
@@ -663,17 +673,23 @@ function debug_step!(; mode::String = "next")::DebugState
     cmd = mode == "next"     ? :n      :
           mode == "into"     ? :s      :
           mode == "out"      ? :finish :
-          mode == "continue" ? :c      : nothing
+          mode == "continue" ? :c      :
+          mode == "past"     ? :c      : nothing
     # Checked here rather than left to the interpreter: `_advance!` treats a throw as the run
     # ending, so an unrecognized verb would tear down a live session. Answer with the state as it
     # stands instead — nothing moved, and `steps` says so.
     cmd === nothing && return _state(s)
     if cmd === :c
+        # `past` means "I have seen this one" — the line being stood on is skipped for the rest of
+        # this step, so a breakpoint inside a loop does not stop on every iteration. The mark is
+        # not disarmed: it still catches the next run, and a different breakpoint still stops this
+        # one. Without it, getting out of a loop meant clearing the breakpoint and setting it again.
+        skip = mode == "past" && s.frame !== nothing ? _frame_position(s.frame) : nothing
         # Run to the end of the cell — but each top-level statement is its own frame, so
         # "continue" has to walk from one to the next rather than stopping at the first
         # boundary. A breakpoint ends the walk: that is the whole point of setting one.
         while !s.finished
-            _advance!(s, :c)
+            _advance!(s, :c; skip = skip)
             s.at_breakpoint && break
         end
     else

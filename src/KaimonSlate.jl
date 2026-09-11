@@ -1212,9 +1212,13 @@ function create_tools(GateTool::Type)
 
     Advance the session. `next` runs the line and stops on the next one in this frame; `into`
     descends into the call on this line when its module is being interpreted; `out` finishes this
-    frame and stops at the caller; `continue` runs on until a breakpoint or the end of the cell.
+    frame and stops at the caller; `continue` runs on until a breakpoint or the end of the cell;
+    `past` does the same but ignores the breakpoint it is standing on.
 
-    On a loop, `continue` with a breakpoint is the tool — stepping 10,000 iterations is not.
+    On a loop, a breakpoint plus `continue` is the tool — stepping 10,000 iterations is not. But a
+    breakpoint inside a loop is hit on every iteration, so once you have seen what that line does,
+    `past` carries on without stopping there again. It does not disarm anything: a DIFFERENT
+    breakpoint still stops you, and this one still catches the next run.
     """
     function dbg_step(notebook::String; mode::String = "next")::String
         nb, err = _nb(notebook); nb === nothing && return err
@@ -1277,7 +1281,7 @@ function create_tools(GateTool::Type)
     """
     function dbg_ask(notebook::String, question::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        reply = NotebookServer.ask_and_wait(nb, "question", _dbg_who(), strip(question))
+        reply = NotebookServer.ask_and_wait(nb, NotebookServer.DEBUG_ROLE, "question", _dbg_who(), strip(question))
         return isempty(strip(reply)) ? "No answer came back. Decide for yourself and say what you assumed." : reply
     end
 
@@ -1400,7 +1404,7 @@ function create_tools(GateTool::Type)
         nb, err = _nb(notebook); nb === nothing && return err
         who = _dbg_who()
         owner = NotebookServer._debug_session(nb).owner
-        NotebookServer.sign_off!(nb, who, strip(summary))
+        NotebookServer.sign_off!(nb, NotebookServer.DEBUG_ROLE, who, strip(summary))
         # Three outcomes, and they are not the same thing: a cell that ran to the end has already
         # closed its own session, which is not "someone else has it".
         isempty(owner) && return "Signed off. The session had already finished."

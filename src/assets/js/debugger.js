@@ -518,6 +518,8 @@ function Controls({ compact }) {
     ${B('into', '⤓', 'Into', 'F11')}
     ${B('out', '⤒', 'Out', '⇧F11')}
     ${B('continue', '▶▶', 'Continue', 'F5')}
+    ${st.value && st.value.at_breakpoint
+      ? B('past', '▶|', 'Past', 'continue without stopping here again  (⇧F5 is Stop)') : null}
     <span class="dbgsp"></span>
     <button class="dbgb dbgb-stop" disabled=${busy.value} title="⇧F5"
       onClick=${stopDebug}><span class="dbgbg">■</span>${compact ? null : html`<span>Stop</span>`}</button>

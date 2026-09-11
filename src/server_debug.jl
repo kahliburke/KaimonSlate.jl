@@ -370,7 +370,9 @@ How to work:
 - Form a hypothesis and test it by evaluating in the paused frame's own scope. That is the fastest
   instrument you have; use it far more than you step.
 - On a loop, set a breakpoint and continue. Stepping through iterations is how a session dies of
-  old age.
+  old age. That breakpoint is hit on EVERY iteration, so once you have seen what the line does,
+  use `past` rather than continuing onto it again and again; it leaves the breakpoint armed. Once you have seen what that line does,  continues without stopping on it again,
+  so you do not have to clear the breakpoint and set it back.
 - Starting a cell again re-runs it from the top — that is how you watch a block a second time.
 - The values you see are SUMMARIES. A frame may be on another machine holding far more than could
   be sent. If a summary is not enough, evaluate something that answers your question there
@@ -394,11 +396,18 @@ not work it out" — a wrong confident answer costs more than an honest empty on
 Be brief in chat. Say what you are about to look at and why, then look.
 """
 
-"What the subject cell's upstream neighbours are, so a specialist starts oriented."
-function _cell_context(nb::LiveNotebook, cid::AbstractString)
-    i = findfirst(c -> c.id == cid, nb.report.cells)
+"""
+The subject cell and where its inputs come from, so a specialist starts oriented.
+
+Not `_cell_context` (server_export.jl), which builds the same idea for a CHAT turn: that one opens
+by explaining that the user clicked ✨ and tells the agent which of `slate_read` / `slate_view` to
+reach for, and a specialist has neither. Same question, different reader.
+"""
+function _specialist_cell_context(nb::LiveNotebook, cid::AbstractString)
+    cells = nb.report.cells
+    i = findfirst(c -> c.id == cid, cells)
     i === nothing && return ""
-    cell = nb.report.cells[i]
+    cell = cells[i]
     io = IOBuffer()
     println(io, "Cell `", cid, "`", isempty(_cell_region(cell)) ? "" : " (runs on region " * _cell_region(cell) * ")", ":")
     println(io, "```julia\n", rstrip(cell.source), "\n```")
@@ -410,13 +419,25 @@ function _cell_context(nb::LiveNotebook, cid::AbstractString)
     elseif o !== nothing && !isempty(txt(o.value_repr))
         println(io, "\nIt currently evaluates to: `", first(txt(o.value_repr), 300), "`")
     end
-    ups = String[]
-    for c in nb.report.cells
-        c.id == cid && break
-        isempty(intersect(c.writes, cell.reads)) || push!(ups, c.id)
+    # The whole upstream cone, not just cells it reads from directly: a function it calls may be
+    # defined two cells back, and stepping into that reports `cell:<that id>` as its file.
+    byid = Dict(c.id => c for c in cells)
+    up = Set{String}(); frontier = String[cid]
+    while !isempty(frontier)
+        c = get(byid, pop!(frontier), nothing); c === nothing && continue
+        for d in c.deps
+            (d == cid || d in up) && continue
+            push!(up, d); push!(frontier, d)
+        end
     end
-    isempty(ups) || println(io, "\nIts inputs come from: ", join(ups, ", "),
-                            " — a function defined in one of those reports its file as `cell:<that id>`.")
+    if !isempty(up)
+        println(io, "\nIts inputs come from these cells, whose code it can step into. A function",
+                " defined in one reports its file as `cell:<that id>`:")
+        for c in cells
+            c.id in up || continue
+            println(io, "  [`", c.id, "`] ", replace(strip(first(split(c.source, "\n"))), r"\s+" => " "))
+        end
+    end
     return String(take!(io))
 end
 
@@ -425,7 +446,7 @@ function debug_briefing(nb::LiveNotebook, cid::AbstractString, task::AbstractStr
     io = IOBuffer()
     println(io, "Notebook `", nb.id, "` (", basename(nb.path), ").")
     println(io)
-    println(io, _cell_context(nb, cid))
+    println(io, _specialist_cell_context(nb, cid))
     s = _debug_session(nb)
     if !isempty(s.cell)
         println(io, "\nThere is already a session on cell `", s.cell, "`, owned by ", s.owner,
