@@ -602,6 +602,24 @@ function openSettings(scope) {
   };
   addLocalModels('/api/ollama-models', 'ollama', 'Ollama');
   addLocalModels('/api/vmlx-models', 'vmlx', 'vmlx');
+  // Agents reached over the Agent Client Protocol (opencode, …). Unlike the local
+  // servers above these ids arrive fully assembled — `acp:<agent>:<model>`, where
+  // the model half may itself contain colons — so they're used verbatim rather
+  // than built from a prefix.
+  const addAcpModels = () => {
+    [...mdl.querySelectorAll('option[value^="acp:"]')].forEach(o => o.remove());
+    return api('GET', '/api/acp-models').then(r => {
+      (r && r.models || []).forEach(id => {
+        const parts = id.split(':');
+        const o = document.createElement('option');
+        o.value = id;
+        o.textContent = (parts[1] || 'acp') + ' · ' + parts.slice(2).join(':');
+        mdl.appendChild(o);
+      });
+      reflectModel();
+    }).catch(() => {});
+  };
+  addAcpModels();
   const perm = document.getElementById('setperm');
   perm.value = agentPerm();
   perm.onchange = () => switchSetting(perm, 'slateAgentPerm', 'change permissions', 'permissions');
