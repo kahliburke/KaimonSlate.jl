@@ -12,6 +12,7 @@ import { Component } from 'preact';
 import { useRef, useEffect } from 'preact/hooks';
 import { effect, signal } from '@preact/signals';
 import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal, editing as editingSignal, localDirty as dirtySignal, isDirty, srcEq, clearEdited } from './store.js';
+import { DebugStrip } from './debugger.js';
 
 const raw = s => ({ __html: s || '' });
 const _reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -573,7 +574,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // here — including its own @bind — actually render), then the toggle source editor + output.
     body = html`<div class="binds"></div><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div>${srcedit}<div class="output"></div><div class="tables"></div><${EChartHost} cell=${c} /><div class="anim"></div>`;
   } else {
-    body = html`<${Editor} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><${EChartHost} cell=${c} /><div class="anim"></div>`;
+    // The debugger strip sits between the code and its output — where the cell's result would be,
+    // because while a session is running that is what it is.
+    body = html`<${Editor} cell=${c} /><${DebugStrip} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><${EChartHost} cell=${c} /><div class="anim"></div>`;
   }
   return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
 }

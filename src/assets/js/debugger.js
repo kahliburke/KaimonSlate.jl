@@ -1,0 +1,1184 @@
+// Cell debugger — Preact island. Two surfaces over one session.
+//
+// The STRIP lives under the cell being stepped: controls, where it is running, and the values in
+// scope. It is where you spend most of a session, because most of a session is spent on the cell's
+// own lines, which the cell's own editor is already showing (gold line, via markDebugLine).
+//
+// The FOCUS view is for the moment you step INTO something. The frame is then a method in a file —
+// usually on a different machine from the browser — and the cell has no line to highlight because
+// the code is not in it. So the focus view shows that source, the call stack that got there, and a
+// scratchpad that evaluates in the paused frame.
+//
+// Nothing here is remote-aware beyond a label. The server resolves which kernel a cell runs on once,
+// at start (server_debug.jl), and every verb after that lands on the same one — a region worker
+// across an SSH tunnel answers the same five routes a local one does. What IS remote-aware is the
+// values: a frame on a compute node can hold far more than a viewer wants, so what arrives is a
+// summary (type, size, a clipped repr) and never the value.
+import { html, render } from 'htm/preact';
+import { signal, computed } from '@preact/signals';
+import { useRef, useEffect } from 'preact/hooks';
+
+// ── state ─────────────────────────────────────────────────────────────────────────────────────────
+// One session per notebook (the interpreter's compiled-module scope is process-global, so two at
+// once on one kernel would fight over it) — hence one signal, not a map.
+const st = signal(null);      // the debug state from the server, or null when nothing is running
+const busy = signal(false);   // a verb is in flight — the controls disable rather than queue
+const focus = signal(false);  // focus view open
+const probes = signal([]);    // scratchpad history: {expr, ok, repr, type, error}
+const changed = signal(new Set());  // names whose repr moved on the last step (for the flash)
+// Breakpoints, as the server holds them: [{file, line}]. `file` is `cell:<id>` for notebook code
+// and a real path for a package — the browser never interprets it, it only groups by it.
+const marks = signal([]);
+// Requests an agent is BLOCKED on: [{id, kind, from, text}]. A question it needs answered, or
+// permission to disturb a session it does not own. Its turn is stopped until one of these is
+// answered, so they are shown where the session is, not tucked in a notification.
+const asks = signal([]);
+
+const live = computed(() => st.value && !st.value.finished);
+export const debugCell = computed(() => (st.value ? st.value.cell : ''));
+
+const A = (m, p, b) => window.api(m, p, b);
+
+// Which names changed between two states — the point of stepping is watching a value arrive, so
+// the ones that just moved are worth marking. Keyed by name across BOTH panes; a local and a
+// binding never share a name in the same frame.
+function diffNames(prev, next) {
+  const out = new Set();
+  if (!prev || !next) return out;
+  const was = new Map();
+  for (const v of [...(prev.locals || []), ...(prev.bindings || [])]) was.set(v.name, v.repr);
+  for (const v of [...(next.locals || []), ...(next.bindings || [])]) {
+    if (was.get(v.name) !== v.repr) out.add(v.name);
+  }
+  return out;
+}
+
+// Paint the gutters from the server's set. Grouped by cell so an editor is dispatched once, and
+// every code cell is repainted — including the ones dropping back to none — so a cleared
+// breakpoint cannot leave a dot behind.
+let _painted = [];
+function paintMarks(ms) {
+  marks.value = ms || [];
+  const byCell = new Map();
+  for (const m of marks.value) {
+    if (!m.file || m.file.indexOf('cell:') !== 0) continue;
+    const id = m.file.slice(5);
+    if (!byCell.has(id)) byCell.set(id, []);
+    byCell.get(id).push(m.line);
+  }
+  for (const id of _painted) if (!byCell.has(id)) window.setBreakpointLines?.(id, []);
+  for (const [id, lines] of byCell) window.setBreakpointLines?.(id, lines);
+  _painted = [...byCell.keys()];
+}
+
+// The gutter is mounted only while the notebook is debugging — see setDebugGutter. A session or a
+// breakpoint both count, so a mark survives Stop and you can set the next one without restarting.
+function syncGutter() {
+  window.setDebugGutter?.(!!st.value || marks.value.length > 0);
+}
+
+async function setMark(file, line, on) {
+  try {
+    const r = await A('POST', '/api/debug/mark', on === undefined ? { file, line } : { file, line, on });
+    paintMarks(r && r.marks);
+    syncGutter();
+  } catch (e) {}
+}
+const toggleMark = (cellId, line) => setMark('cell:' + cellId, line);
+const clearMark = (file, line) => setMark(file, line, false);
+window.onBreakpointClick?.(toggleMark);
+
+let _flashTimer = null;
+function apply(next) {
+  changed.value = diffNames(st.value, next);
+  const prev = st.value ? st.value.cell : '';
+  const s = (next && next.session === false) ? null : next;
+  st.value = s;
+  // The cell's own editor carries the "you are here" line, but only while the frame really is in
+  // that cell. Stepping into a method defined elsewhere clears it rather than leaving the mark on a
+  // line that is no longer the one running.
+  const here = s && !s.finished && s.in_cell ? s.cell : '';
+  if (prev && prev !== here) window.clearDebugLine?.(prev);
+  if (s && s.cell && s.cell !== here) window.clearDebugLine?.(s.cell);
+  if (here) window.markDebugLine?.(here, s.line);
+  if (s && s.asks !== undefined) asks.value = s.asks || [];
+  if (s && s.marks) paintMarks(s.marks);
+  syncGutter();
+  window._slateRefreshCells?.();   // the header's 🐞 reflects whether this cell has the session
+  if (_flashTimer) clearTimeout(_flashTimer);
+  _flashTimer = setTimeout(() => { changed.value = new Set(); }, 900);
+}
+
+// ── verbs ─────────────────────────────────────────────────────────────────────────────────────────
+
+// Start on a cell. The editor's CURRENT text is what runs: you step what you are looking at, not
+// what was last saved — a debugger that made you save first would be a worse editor.
+export async function startDebug(cellId) {
+  if (busy.value) return;
+  busy.value = true;
+  try {
+    const source = (window.edText && window.edText(cellId)) || '';
+    const r = await A('POST', '/api/debug/start', { cell: cellId, source });
+    apply(r);
+    probes.value = [];
+    // Straight into the workspace. Stepping is involved enough that the cell is never where you
+    // actually want to be, and making you click twice to get there was busywork.
+    if (r && !r.finished && !r.error) focus.value = true;
+  } catch (e) { apply(null); } finally { busy.value = false; }
+}
+export async function step(mode) {
+  if (busy.value || !live.value) return;
+  busy.value = true;
+  try { apply(await A('POST', '/api/debug/step', { mode })); }
+  catch (e) { apply(null); } finally { busy.value = false; }
+}
+export async function stopDebug() {
+  const cell = debugCell.value;
+  busy.value = true;
+  try { await A('POST', '/api/debug/stop', {}); } catch (e) {}
+  busy.value = false;
+  focus.value = false;
+  apply(null);
+  if (cell) window.clearDebugLine && window.clearDebugLine(cell);
+}
+// Runs the probe and says nothing about the result: the server broadcasts every evaluation, and
+// this page receives that broadcast like any other. Appending here TOO listed each probe twice —
+// the same trap the state panes avoid by rendering what they are told rather than what they asked
+// for. An evaluation that fails to reach the server is reported here, because no push will come.
+async function probe(expr) {
+  if (!expr.trim() || !live.value) return;
+  try {
+    await A('POST', '/api/debug/eval', { expr });
+  } catch (e) {
+    probes.value = [...probes.value, { expr, ok: false, repr: '', type: '', error: 'request failed' }];
+  }
+}
+
+// ── the specialist ────────────────────────────────────────────────────────────────────────────────
+// Summoned from inside the session you are already in. It works in the chat pane — reasoning and
+// every tool call streaming as it goes — so the pane opens with it.
+const models = signal(null);     // ACP backends, loaded on first open of the picker
+const summoning = signal(false);
+const pickerOpen = signal(false);
+const specialist = signal(null); // {agent_id, cell, model} once one is here
+
+async function loadModels() {
+  if (models.value) return;
+  try {
+    const r = await A('GET', '/api/acp-models');
+    models.value = (r && r.models) || [];
+  } catch (e) { models.value = []; }
+}
+
+async function summon(model) {
+  const s = st.value;
+  if (!s || summoning.value) return;
+  summoning.value = true; pickerOpen.value = false;
+  try {
+    const r = await A('POST', '/api/debug/agent', { cell: s.cell, model: model || '' });
+    if (r && r.ok) {
+      specialist.value = { agent_id: r.agent_id, cell: r.cell, model: model || '' };
+      focus.value = true;   // the debugging workspace is where it works — and where you watch it
+    }
+  } catch (e) {} finally { summoning.value = false; }
+}
+
+// The picker. An ACP agent can reach ~70 models, which is a list you search, not one you scroll —
+// so it opens on a filter box, and the last model you used is offered first because in practice
+// you summon the same one over and over.
+const filter = signal('');
+const lastModel = () => { try { return localStorage.getItem('slateDbgModel') || ''; } catch (_) { return ''; } };
+
+// The bare model name: `acp:opencode:opencode/claude-sonnet-5` → `claude-sonnet-5`.
+const bareModel = (m) => String(m).replace(/^acp:\w+:/, '').replace(/^.*\//, '');
+// Its family — the first hyphen-segment with any version digits stripped, so `claude-sonnet-5`,
+// `gpt-5.4-mini` and `qwen3.6-plus` land under claude / gpt / qwen. Cheap and wrong for nothing in
+// the current list; a name it can't parse simply becomes its own group rather than being hidden.
+const familyOf = (m) => (bareModel(m).split('-')[0].replace(/[\d.]+$/, '') || 'other').toLowerCase();
+
+// Grouped, each family's own models in the order the server gave them (newest last there, so
+// reversed here — you almost always want the newest of a family).
+function byFamily(list) {
+  const g = new Map();
+  for (const m of list) {
+    const f = familyOf(m);
+    if (!g.has(f)) g.set(f, []);
+    g.get(f).push(m);
+  }
+  return [...g.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+}
+
+function Summon() {
+  const s = st.value;
+  if (!s || s.finished) return null;
+  if (specialist.value) {
+    return html`<button class="dbgspec on" title="a debugging specialist is working on this — open the workspace"
+      onClick=${() => focus.value = true}>🐞 specialist</button>`;
+  }
+  const pick = (m) => { try { localStorage.setItem('slateDbgModel', m); } catch (_) {} summon(m); };
+  const q = filter.value.trim().toLowerCase();
+  const all = models.value || [];
+  const shown = q ? all.filter(m => m.toLowerCase().includes(q)) : all;
+  const prev = lastModel();
+  const open = () => {
+    pickerOpen.value = !pickerOpen.value;
+    filter.value = '';
+    loadModels();
+  };
+  return html`<span class="dbgspecwrap">
+    <button class="dbgspec" disabled=${summoning.value}
+      title="bring in a debugging specialist to work on this cell with you"
+      onClick=${open}>${summoning.value ? 'summoning…' : '＋ specialist'}</button>
+    ${pickerOpen.value ? html`<div class="dbgspecmenu">
+      <input class="dbgspecfind" autofocus placeholder="search models…" value=${filter.value}
+        onInput=${e => filter.value = e.target.value}
+        onKeyDown=${e => {
+          if (e.key === 'Escape') { pickerOpen.value = false; }
+          // Enter takes the top of the list, which is what the search narrowed it to.
+          else if (e.key === 'Enter' && shown.length) pick(shown[0]);
+        }} />
+      <div class="dbgspeclist">
+        ${!q && prev ? html`<div class="dbgspecrow recent" onClick=${() => pick(prev)}>
+            <span class="dbgspecmark">↩</span>${bareModel(prev)}</div>` : null}
+        ${!q ? html`<div class="dbgspecrow" onClick=${() => pick('')}>
+            <span class="dbgspecmark">·</span>Default model</div>` : null}
+        ${models.value === null ? html`<div class="dbgspecnote">loading…</div>`
+          : !all.length ? html`<div class="dbgspecnote">no ACP agents installed</div>`
+          : !shown.length ? html`<div class="dbgspecnote">nothing matches “${filter.value}”</div>`
+          // Searching already narrows, so a query renders flat; browsing renders by family.
+          : q ? shown.map(m => html`<div class="dbgspecrow" key=${m} onClick=${() => pick(m)}>
+                  ${bareModel(m)}</div>`)
+          : byFamily(shown).map(([fam, ms]) => html`<div class="dbgspecgrp" key=${fam}>
+              <div class="dbgspechead">${fam}<span class="dbgspecn">${ms.length}</span></div>
+              ${ms.map(m => html`<div class="dbgspecrow" key=${m} onClick=${() => pick(m)}>
+                  ${bareModel(m)}</div>`)}
+            </div>`)}
+      </div>
+      ${all.length ? html`<div class="dbgspecfoot">${shown.length} of ${all.length}</div>` : null}
+    </div>` : null}
+  </span>`;
+}
+
+// ── the specialist's transcript ────────────────────────────────────────────────────────────────
+// Its own, not the chat panel's. A debugging transcript wants different things on screen: a step
+// is one line saying where it landed, not a JSON blob; an evaluation is the expression and its
+// answer; and the whole thing sits beside the frame it is talking about.
+const convo = signal([]);   // [{role:'said'|'think'|'act'|'brief'|'you', text, verb, detail, done}]
+const working = signal(false);
+// The standing instructions and toolset, which go in at spawn and never appear on the event bus.
+const brief = signal(null);
+const briefOpen = signal(false);
+async function loadBrief() {
+  briefOpen.value = !briefOpen.value;
+  if (brief.value || !briefOpen.value) return;
+  try { brief.value = await A('GET', '/api/debug/brief'); } catch (e) { brief.value = { system: '(unavailable)' }; }
+}
+
+// A tool call, named the way a debugger session reads. Everything the specialist can call is one
+// of seven verbs, so the row is the verb plus what came back — not the tool name and its arguments.
+const VERB = {
+  dbg_start: 'start', dbg_step: 'step', dbg_frame: 'frame', dbg_eval: 'eval',
+  dbg_break: 'breakpoint', dbg_ask: 'ask', dbg_done: 'done',
+};
+const verbOf = (title) => {
+  const t = String(title || '').replace(/^.*?(dbg_\w+).*$/, '$1');
+  return VERB[t] || null;
+};
+// The one line worth keeping from a result: where it stopped, or what the answer was.
+function gist(verb, text) {
+  const s = String(text || '').trim();
+  if (!s) return '';
+  if (verb === 'eval') return s.split('\n')[0].slice(0, 160);
+  const stop = s.match(/^[⏸✅⛔].*$/m);
+  if (stop) return stop[0].replace(/^⏸\s*/, '').slice(0, 160);
+  return s.split('\n')[0].slice(0, 160);
+}
+
+window.onDebugAgentEvent = (env) => {
+  if (!env || (env.crew || '').indexOf('debugger') < 0) return;
+  const d = env.data || {}, k = env.kind;
+  const list = convo.value.slice();
+  // What it was TOLD, shown alongside what it said. The opening brief arrives this way, and
+  // dropping it left the transcript starting at the specialist's first move with no sign of the
+  // question it was answering — you cannot judge the answer without seeing the brief.
+  if (k === 'user_text') {
+    const txt = (d.content && d.content.text) || d.text || '';
+    if (txt && !list.some(m => m.role === 'brief' && m.text === txt)) {
+      list.push({ role: 'brief', text: txt, done: true });
+      convo.value = list;
+    }
+    return;
+  }
+  if (k === 'assistant_text' || k === 'thought' || k === 'assistant') {
+    const role = k === 'thought' ? 'think' : 'said';
+    const txt = (d.content && d.content.text) || d.text || '';
+    const last = list[list.length - 1];
+    if (d.delta === true) {
+      if (!txt) return;
+      if (last && last.role === role && !last.done) last.text += txt;
+      else list.push({ role, text: txt, done: false });
+    } else if (last && last.role === role && !last.done) {
+      last.text = txt || last.text; last.done = true;
+    } else if (txt) list.push({ role, text: txt, done: true });
+  } else if (k === 'tool_use') {
+    const c = d.call || {};
+    const verb = verbOf(c.title || c.kind);
+    if (!verb) return;                       // a refused tool shows up as its result, not a row
+    if (!list.some(m => m.id === c.toolCallId)) {
+      const inp = c.rawInput || {};
+      list.push({ role: 'act', id: c.toolCallId, verb,
+                  arg: inp.mode || inp.expr || inp.cell || (inp.file ? inp.file + ':' + inp.line : ''),
+                  detail: '', done: false });
+    }
+  } else if (k === 'tool_result') {
+    const u = d.update || {};
+    const m = list.find(x => x.id === u.toolCallId);
+    if (!m) return;
+    const c = ((u.content || [])[0] || {}).content || {};
+    m.detail = gist(m.verb, c.text);
+    m.failed = String(u.status || '') === 'failed';
+    m.done = true;
+  } else if (k === 'turn_started') working.value = true;
+  else if (k === 'result' || k === 'turn_ended') {
+    working.value = false;
+    convo.value = list;
+    // Anything you typed while it worked goes in now, before it takes its next step.
+    setTimeout(flushQueue, 0);
+    return;
+  }
+  convo.value = list;
+};
+
+// Clearing the transcript is a VIEW action, not `chat-clear` — that reaps every agent and wipes
+// the notebook's whole conversation, which would kill the specialist mid-thought. So the pane
+// empties and a watermark records how much of the server's log has been read, which is what makes
+// the clear survive a reload without destroying anything.
+const _wmKey = () => 'slateDbgSeen:' + (window.NB_ID || '');
+const seenMark = () => { const n = parseInt(localStorage.getItem(_wmKey()), 10); return isFinite(n) ? n : 0; };
+
+async function clearConvo() {
+  convo.value = [];
+  try {
+    const log = await A('GET', '/api/agent-log');
+    localStorage.setItem(_wmKey(), String(((log && log.events) || []).length));
+  } catch (e) {}
+}
+
+// Talking to it WHILE it works.
+//
+// A turn cannot take a second message: the backend fires another `session/prompt` on the same ACP
+// session and clears the buffer the running turn is accumulating into, so the reply you were
+// reading is destroyed. So a message sent mid-turn is HELD and delivered when the turn ends — it
+// still reaches the specialist before its next move, which is what you wanted it for. If you need
+// it to stop and read you now, interrupt: that ends the turn and the queue flushes into the gap.
+const queued = signal([]);
+
+async function deliver(text) {
+  try { await A('POST', '/api/chat', { text, crew: 'debugger' }); }
+  catch (e) { working.value = false; }
+}
+
+function sayToSpecialist(text) {
+  if (!text.trim()) return;
+  convo.value = [...convo.value, { role: 'you', text, done: true, held: working.value }];
+  if (working.value) { queued.value = [...queued.value, text]; return; }
+  working.value = true;
+  deliver(text);
+}
+
+// Flush on the turn boundary, joined into ONE turn — several notes typed while it worked are one
+// piece of context, not a queue of interruptions to answer in order.
+function flushQueue() {
+  const q = queued.value;
+  if (!q.length) return false;
+  queued.value = [];
+  convo.value = convo.value.map(m => (m.held ? { ...m, held: false } : m));
+  working.value = true;
+  deliver(q.join('\n\n'));
+  return true;
+}
+
+async function interruptSpecialist() {
+  try { await A('POST', '/api/chat-interrupt', {}); } catch (e) {}
+  working.value = false;
+  setTimeout(flushQueue, 300);   // let the turn-ended event land before the next turn opens
+}
+
+async function answerAsk(id, text) {
+  try {
+    const r = await A('POST', '/api/debug/answer', { id, text });
+    asks.value = (r && r.asks) || [];
+  } catch (e) {}
+}
+
+// ── live push ─────────────────────────────────────────────────────────────────────────────────────
+// Every verb the server runs is broadcast, whoever ran it. That is what makes an agent's session
+// watchable: the strip and the focus view are reading the session, not their own last click.
+window.onDebugPush = (p) => {
+  if (!p) return;
+  if (p.asks !== undefined) asks.value = p.asks || [];
+  if (p.ask) asks.value = [...asks.value.filter(a => a.id !== p.ask.id), p.ask];
+  if (p.probe) {
+    const v = p.probe;
+    probes.value = [...probes.value, {
+      expr: v.expr || '', ok: !!v.ok, repr: v.value ? v.value.repr : '',
+      type: v.value ? v.value.type : '', error: v.error,
+    }];
+    return;
+  }
+  if (p.specialist) { specialist.value = p.specialist; return; }
+  if (p.session === false) { specialist.value = null; apply(null); paintMarks(p.marks || []); syncGutter(); return; }
+  if (p.marks !== undefined && p.cell === undefined) { paintMarks(p.marks); syncGutter(); return; }
+  if (p.cell !== undefined) apply(p);
+};
+
+// A page that reloads mid-session picks the session back up rather than orphaning it in the worker.
+(async function resume() {
+  try {
+    // The specialist and its transcript outlive a reload: both live on the server, so replay them
+    // rather than showing an empty pane beside a session that is plainly still going.
+    const log = await A('GET', '/api/agent-log');
+    const aid = (log && log.agents && log.agents.debugger) || '';
+    if (aid) specialist.value = { agent_id: aid, cell: '', model: '' };
+    const events = (log && log.events) || [];
+    // Skip what was cleared. The server's log is capped and pops from the front, so a watermark
+    // past the end means it has rotated — treat that as nothing to skip rather than showing blank.
+    const skip = seenMark() <= events.length ? seenMark() : 0;
+    for (const line of events.slice(skip)) {
+      try { window.onDebugAgentEvent(JSON.parse(line)); } catch (e) {}
+    }
+    working.value = false;   // a turn that was live when the page went away is not live now
+  } catch (e) {}
+  try {
+    const r = await A('GET', '/api/debug/frame');
+    if (r && r.session) return apply(r);
+    const m = await A('GET', '/api/debug/marks');   // no session, but the breakpoints outlive one
+    paintMarks(m && m.marks);
+    syncGutter();
+  } catch (e) {}
+})();
+
+// ── shared bits ───────────────────────────────────────────────────────────────────────────────────
+
+const shortFile = f => {
+  if (!f) return '';
+  if (f.indexOf('cell:') === 0) return 'cell ' + f.slice(5);
+  const p = f.split('/');
+  return p.length > 2 ? p.slice(-2).join('/') : f;
+};
+
+// Where this is happening — never implied by the notebook, which can be stepping code on a compute
+// node while the rest of it runs locally.
+function Locus({ s, big }) {
+  if (!s) return null;
+  const remote = !!s.side;
+  return html`<span class=${'dbgloc' + (remote ? ' remote' : '') + (big ? ' big' : '')}
+    title=${remote ? 'the frame lives on ' + s.where : 'this notebook’s own kernel'}>
+    ${remote ? '\u{1F5A7} ' : '\u{1F4BB} '}${remote ? s.where : 'local'}</span>`;
+}
+
+// One value: name, what it is, and a clipped repr. Never the value itself — see the file header.
+// A binding the session hasn't reached yet still HOLDS last run's value; shown dimmed and labelled
+// so it can't be read as the answer this session produced.
+function Val({ v, flash }) {
+  const unset = !v.type;
+  const stale = !unset && v.fresh === false;
+  return html`<div class=${'dbgval' + (flash ? ' chg' : '') + (unset ? ' unset' : '') + (stale ? ' stale' : '')}
+    title=${stale ? 'from the previous run — this line has not run yet in this session' : ''}>
+    <span class="dbgvn">${v.name}</span>
+    <span class="dbgvt" title=${v.type}>${unset ? '—' : v.type}${v.size ? ' ' + v.size : ''}</span>
+    <span class="dbgvr" title=${v.repr}>${unset ? 'not assigned yet' : v.repr}</span>
+  </div>`;
+}
+
+function Vals({ title, items, hint }) {
+  if (!items || !items.length) return null;
+  const ch = changed.value;
+  return html`<div class="dbgvals">
+    <div class="dbgvhead" title=${hint || ''}>${title}<span class="dbgvn-count">${items.length}</span></div>
+    ${items.map(v => html`<${Val} key=${v.name} v=${v} flash=${ch.has(v.name)} />`)}
+  </div>`;
+}
+
+// The step controls. One row, in the order you reach for them, with Stop set apart so it is never
+// the button you hit while stepping quickly.
+function Controls({ compact }) {
+  const d = busy.value || !live.value;
+  const B = (mode, glyph, label, tip) => html`<button class=${'dbgb dbgb-' + mode} disabled=${d}
+    title=${tip} onClick=${() => step(mode)}><span class="dbgbg">${glyph}</span>${compact ? null : html`<span>${label}</span>`}</button>`;
+  return html`<div class="dbgctl">
+    ${B('next', '⤷', 'Next', 'F10')}
+    ${B('into', '⤓', 'Into', 'F11')}
+    ${B('out', '⤒', 'Out', '⇧F11')}
+    ${B('continue', '▶▶', 'Continue', 'F5')}
+    <span class="dbgsp"></span>
+    <button class="dbgb dbgb-stop" disabled=${busy.value} title="⇧F5"
+      onClick=${stopDebug}><span class="dbgbg">■</span>${compact ? null : html`<span>Stop</span>`}</button>
+  </div>`;
+}
+
+// Who is driving. Absent for your own session — the common case shouldn't carry a label.
+function Owner({ s }) {
+  if (!s || !s.owner || s.owner === 'human') return null;
+  return html`<span class="dbgowner" title="an agent is driving this session — your controls still work">
+    ⌁ ${s.owner.replace(/^agent:/, '')}</span>`;
+}
+
+// An agent waiting on an answer. Its turn is stopped here, so this is a blocking prompt, not a
+// notice: consent gets two buttons, a question gets a box.
+//
+// Rendered INSIDE the specialist pane, with the rest of its voice. It used to be a band across
+// the whole workspace, which put agent prose in two places at once — the band and the transcript
+// — and read as two different conversations happening about the same thing.
+function Asks() {
+  const list = asks.value;
+  if (!list.length) return null;
+  return html`<div class="dbgasks">${list.map(a => html`<div class=${'dbgask ' + a.kind} key=${a.id}>
+    <div class="dbgaskq">${a.text}</div>
+    ${a.kind === 'consent'
+      ? html`<div class="dbgaskbtns">
+          <button class="dbgb" onClick=${() => answerAsk(a.id, 'yes')}>Allow</button>
+          <button class="dbgb dbgb-stop" onClick=${() => answerAsk(a.id, 'no')}>Keep it</button></div>`
+      : html`<form class="dbgpform" onSubmit=${e => { e.preventDefault(); const el = e.target.querySelector('input');
+               const v = el.value; el.value = ''; answerAsk(a.id, v); }}>
+          <span class="dbgpp">›</span><input autocomplete="off" autofocus placeholder="answer…" /></form>`}
+  </div>`)}</div>`;
+}
+
+// ── the cell strip ────────────────────────────────────────────────────────────────────────────────
+
+export function DebugStrip({ cell }) {
+  const s = st.value;
+  if (!s || s.cell !== cell.id) return null;
+  const done = s.finished;
+  if (done) {
+    return html`<div class="dbgstrip done"><div class="dbgbar">
+      <span class=${'dbgdone' + (s.error ? ' err' : '')}>
+        ${s.error ? '⚠ ' + s.error : '✓ finished' + (s.result ? ' — ' + s.result.repr : '')}</span>
+      <span class="dbgsp"></span>
+      <button class="dbgb dbgb-stop" onClick=${stopDebug}><span class="dbgbg">✕</span><span>Close</span></button>
+    </div></div>`;
+  }
+  // A ribbon, not a control surface. A column the width of a cell cannot hold a stack, a source
+  // pane, forty locals and a specialist — trying made all four bad. The cell keeps the one thing
+  // only it can show (the gold line in its own editor) and a line saying where the session is;
+  // everything else is the workspace, one click away.
+  return html`<div class=${'dbgstrip' + (s.side ? ' remote' : '')}>
+    <div class="dbgbar open" title="open the debugging workspace" onClick=${() => focus.value = true}>
+      <span class="dbgribbon">▸ debugging</span>
+      ${s.at_breakpoint ? html`<span class="dbgbp" title="stopped at a breakpoint">●</span>` : null}
+      <span class="dbgscope">${s.scope}</span>
+      <span class="dbgfile" title=${s.file}>${shortFile(s.file)}${s.line ? ':' + s.line : ''}</span>
+      <span class="dbgsp"></span>
+      <span class="dbgsteps">${s.steps} ${s.steps === 1 ? 'step' : 'steps'}</span>
+      <${Owner} s=${s} />
+      <${Locus} s=${s} />
+      <button class="dbgexp" title="open the debugging workspace"
+        onClick=${e => { e.stopPropagation(); focus.value = true; }}>⤢</button>
+      <button class="dbgexp" title="end the session"
+        onClick=${e => { e.stopPropagation(); stopDebug(); }}>■</button>
+    </div>
+    ${asks.value.length ? html`<div class="dbgaskbadge" onClick=${() => focus.value = true}>
+      ❓ the specialist is waiting on you — open the workspace to answer</div>` : null}
+  </div>`;
+}
+
+// ── the focus view ────────────────────────────────────────────────────────────────────────────────
+
+// A read-only CodeMirror showing the frame's source, with the gutter re-based so its numbers read
+// as the file's. The text comes from the kernel (server_debug.jl fills in a cell's own source):
+// `file` is a path on that machine, and reading it here would show a different file, or none.
+function Source({ s }) {
+  const host = useRef(null), vw = useRef(null), file = useRef(s.file);
+  file.current = s.file;   // the click handler is installed once; read the CURRENT file from a ref
+  useEffect(() => {
+    if (!host.current || !window.slateSourceViewer) return;
+    vw.current = window.slateSourceViewer(host.current, {
+      onToggleLine: (absLine) => setMark(file.current, absLine),
+    });
+    return () => { try { vw.current && vw.current.destroy(); } catch (e) {} vw.current = null; };
+  }, []);
+  useEffect(() => {
+    const v = vw.current; if (!v) return;
+    v.setDoc(s.source || '', s.srcfirst || 1);
+    if (s.line) v.setLine(s.line);
+  }, [s.source, s.srcfirst, s.line]);
+  // Repaint whenever the marks change OR the frame moves to another file — the armed lines shown
+  // are only the ones belonging to the source on screen.
+  useEffect(() => {
+    const v = vw.current; if (!v) return;
+    v.setMarks(marks.value.filter(m => m.file === s.file).map(m => m.line));
+  }, [marks.value, s.file, s.source]);
+  return html`<div class="dbgsrc">
+    <div class="dbgsrchead"><span class="dbgfile" title=${s.file}>${shortFile(s.file)}</span>
+      <span class="dbgscope">${s.scope}</span>
+      <span class="dbgsp"></span>
+      ${s.source && !marks.value.length
+        ? html`<span class="dbgsrchint">click the margin to set a breakpoint</span>` : null}
+      ${s.source ? null : html`<span class="dbgnosrc">no source</span>`}</div>
+    <div class="dbgsrcbody" ref=${host}></div>
+  </div>`;
+}
+
+// The call stack, outermost last — the frame you are in sits at the top, where the eye starts.
+function Stack({ s }) {
+  const fr = [...(s.stack || [])].reverse();
+  return html`<div class="dbgrail">
+    <div class="dbgrhead">call stack</div>
+    <div class="dbgstack">${fr.map((f, i) => html`<div class=${'dbgfr' + (i === 0 ? ' cur' : '')} key=${i}>
+      <div><span class="dbgfrm">${i === 0 ? '▸' : '·'}</span> <span class="dbgscope">${f.scope}</span></div>
+      <span class="dbgfile" title=${f.file}>${shortFile(f.file)}:${f.line}</span>
+    </div>`)}</div>
+    ${marks.value.length ? html`<div class="dbgrhead dbgrhead2">breakpoints</div>
+      <div class="dbgmarks">${marks.value.map(m => html`<div class="dbgmark" key=${m.file + ':' + m.line}>
+        <span class="dbgfile" title=${m.file}>${shortFile(m.file)}:${m.line}</span>
+        <button class="dbgmarkx" title="clear" onClick=${() => clearMark(m.file, m.line)}>✕</button>
+      </div>`)}</div>` : null}
+    <div class="dbgrhead dbgrhead2" title="modules stepped rather than run compiled">interpreting</div>
+    <div class="dbginterp">${(s.interpreting || []).map(m => html`<span class="dbgmod" key=${m}>${m}</span>`)}</div>
+  </div>`;
+}
+
+// Evaluate in the paused frame. The frame's locals are bound first, so a probe sees exactly what
+// the code sees at that line — including on a machine you have no REPL on.
+// A REPL's worth of history, because a debugging probe is usually the previous one with one
+// thing changed. ↑/↓ walk it when the caret is on the first/last line, so a multi-line expression
+// still navigates normally.
+const hist = [];
+let histAt = 0;
+
+function Scratch({ s }) {
+  const host = useRef(null), view = useRef(null), logRef = useRef(null);
+
+  const run = () => {
+    const v = view.current; if (!v) return true;
+    const code = v.state.doc.toString().trim();
+    if (!code) return true;
+    hist.push(code); histAt = hist.length;
+    v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: '' } });
+    probe(code).then(() => {
+      const el = logRef.current; if (el) el.scrollTop = el.scrollHeight;
+    });
+    return true;
+  };
+  // Recall only from the edge of the document, so ↑ inside a multi-line probe still moves the caret.
+  const recall = (dir) => () => {
+    const v = view.current; if (!v || !hist.length) return false;
+    const st2 = v.state, pos = st2.selection.main.head, line = st2.doc.lineAt(pos);
+    if (dir < 0 && line.number !== 1) return false;
+    if (dir > 0 && line.number !== st2.doc.lines) return false;
+    histAt = Math.max(0, Math.min(hist.length, histAt + dir));
+    const text = histAt >= hist.length ? '' : hist[histAt];
+    v.dispatch({ changes: { from: 0, to: st2.doc.length, insert: text },
+                 selection: { anchor: text.length } });
+    return true;
+  };
+
+  useEffect(() => {
+    if (!host.current || !window.mkEditor) return;
+    // The same factory the cells use, so highlighting, completion and the keymap are the ones
+    // already in your fingers — a probe is Julia, and typing it should feel like typing a cell.
+    view.current = window.mkEditor(host.current, {
+      doc: '',
+      cellId: '__dbgscratch',
+      keys: [{ key: 'Enter', run }, { key: 'Mod-Enter', run },
+             { key: 'ArrowUp', run: recall(-1) }, { key: 'ArrowDown', run: recall(1) }],
+    });
+    return () => { try { view.current && view.current.destroy(); } catch (e) {} view.current = null; };
+  }, []);
+
+  return html`<div class="dbgscratch">
+    <div class="dbgrhead">scratchpad
+      <span class="dbgsp"></span>
+      <span class="dbgscope">${s.scope}</span>
+    </div>
+    <div class="dbgprobes" ref=${logRef}>${probes.value.map((p, i) => html`<div class="dbgprobe" key=${i}>
+      <div class="dbgpq">${p.expr}</div>
+      <div class=${'dbgpa' + (p.ok ? '' : ' err')} title=${p.ok ? p.type : ''}>${p.ok ? p.repr : p.error}</div>
+    </div>`)}
+    </div>
+    <div class="dbgped"><span class="dbgpp">›</span><div class="dbgpedhost" ref=${host}></div></div>
+  </div>`;
+}
+
+// ── resizable panes ────────────────────────────────────────────────────────────────────────────
+// A debugging session is not one shape. Reading a long method wants the source wide; watching a
+// specialist reason wants the transcript wide; a frame with forty locals wants the values tall.
+// So every divider drags, and where you put it is remembered — per pane, across sessions.
+const _lsNum = (k, d) => { const v = parseFloat(localStorage.getItem(k)); return isFinite(v) ? v : d; };
+const paneRail = signal(_lsNum('slateDbgRail', 220));    // px
+const paneRight = signal(_lsNum('slateDbgRight', 360));  // px
+const paneVals = signal(_lsNum('slateDbgVals', 34));     // % of the middle column
+const paneConvo = signal(_lsNum('slateDbgConvo', 58));   // % of the right column
+
+// One drag handler for all four. `apply` turns a pointer position into the new size; the store
+// is written on release rather than per-frame, so a drag is one localStorage write.
+function drag(e, sig, key, apply) {
+  e.preventDefault();
+  const move = (ev) => { sig.value = apply(ev); };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    try { localStorage.setItem(key, String(sig.value)); } catch (_) {}
+    document.body.style.cursor = '';
+  };
+  document.body.style.cursor = e.currentTarget.dataset.axis === 'y' ? 'row-resize' : 'col-resize';
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// A divider. Double-click restores the default, which is the escape hatch for a pane dragged shut.
+function Grip({ axis, onDrag, onReset }) {
+  return html`<div class=${'dbggrip ' + axis} data-axis=${axis}
+    onPointerDown=${onDrag} onDblClick=${onReset}></div>`;
+}
+
+// The specialist, working, beside the frame it is working on. Deliberately not the chat panel:
+// this is a debugging transcript — what it thought, what it did, where that landed.
+function Convo({ s }) {
+  const inp = useRef(null), log = useRef(null);
+  useEffect(() => { const el = log.current; if (el) el.scrollTop = el.scrollHeight; }, [convo.value.length]);
+  const send = (e) => {
+    e.preventDefault();
+    const el = inp.current; if (!el) return;
+    const v = el.value; el.value = '';
+    sayToSpecialist(v);
+  };
+  const here = !!specialist.value;
+  return html`<div class="dbgconvo">
+    <div class="dbgrhead">specialist
+      ${working.value ? html`<span class="hydspin"></span>` : null}
+      <span class="dbgsp"></span>
+      ${here ? html`<span class="dbgcrew">${bareModel(specialist.value.model || 'default')}</span>` : null}
+      ${working.value ? html`<button class="dbgclear" title="stop its turn so it reads you now"
+        onClick=${interruptSpecialist}>interrupt</button>` : null}
+      <button class=${'dbgclear' + (briefOpen.value ? ' on' : '')}
+        title="what this specialist was told: standing instructions and the tools it may call"
+        onClick=${loadBrief}>brief</button>
+      ${convo.value.length ? html`<button class="dbgclear" title="clear this transcript (the specialist keeps working)"
+        onClick=${clearConvo}>clear</button>` : null}
+      ${here ? null : html`<${Summon} />`}
+    </div>
+    ${briefOpen.value ? html`<div class="dbgbrief">
+      ${brief.value === null ? html`<div class="dbgcempty">loading…</div>` : html`
+        <div class="dbgbriefhead">may call</div>
+        <div class="dbginterp">${(brief.value.tools || []).map(t => html`<span class="dbgmod" key=${t}>${t}</span>`)}</div>
+        <div class="dbgbriefhead">standing instructions</div>
+        <pre class="dbgbrieftxt">${brief.value.system || ''}</pre>`}
+    </div>` : null}
+    <div class="dbgclog" ref=${log}>
+      ${!here && !convo.value.length
+        ? html`<div class="dbgcempty">No specialist here yet.<${Summon} /></div>` : null}
+      ${convo.value.map((m, i) => m.role === 'act'
+        ? html`<div class=${'dbgcact' + (m.failed ? ' err' : '') + (m.done ? '' : ' live')} key=${i}>
+            <span class="dbgcverb">${m.verb}</span>
+            ${m.arg ? html`<span class="dbgcarg">${m.arg}</span>` : null}
+            ${m.detail ? html`<span class="dbgcgist">${m.detail}</span>` : null}
+          </div>`
+        : html`<div class=${'dbgcmsg ' + m.role + (m.held ? ' held' : '') + (m.open ? ' open' : '')} key=${i}
+            onClick=${m.role === 'brief' ? () => {
+              convo.value = convo.value.map((x, j) => (j === i ? { ...x, open: !x.open } : x));
+            } : undefined}>${m.text}
+            ${m.held ? html`<span class="dbgheld">waiting for its turn to end</span>` : null}</div>`)}
+    </div>
+    <${Asks} />
+    <form class="dbgpform" onSubmit=${send}>
+      <span class="dbgpp">${'\u{1F4AC}'}</span>
+      <input ref=${inp} autocomplete="off" disabled=${!here}
+        placeholder=${!here ? 'summon a specialist first'
+                    : working.value ? 'it is working — this goes in when the turn ends'
+                    : 'tell it what you know…'} />
+    </form>
+  </div>`;
+}
+
+function Focus() {
+  if (!focus.value) return null;
+  const s = st.value;
+  if (!s || s.finished) return null;
+  return html`<div class="dbgfocusbg" onClick=${e => { if (e.target.classList.contains('dbgfocusbg')) focus.value = false; }}>
+    <div class=${'dbgfocus' + (s.side ? ' remote' : '')}>
+      <div class="dbgfhead">
+        <span class="dbgftitle">▸ stepping</span>
+        <span class="dbgfcell">cell ${s.cell}</span>
+        <${Owner} s=${s} />
+        <${Locus} s=${s} big=${true} />
+        <span class="dbgsp"></span>
+        <span class="dbgsteps">${s.steps} ${s.steps === 1 ? 'step' : 'steps'}</span>
+        <button class="dbgfx" title="close (the session keeps running)" onClick=${() => focus.value = false}>✕</button>
+      </div>
+      <div class="dbgfctl"><${Controls} /></div>
+      <div class="dbgfbody"
+        style=${'grid-template-columns:' + paneRail.value + 'px 5px minmax(0,1fr) 5px ' + paneRight.value + 'px'}>
+        <${Stack} s=${s} />
+        <${Grip} axis="x"
+          onDrag=${e => drag(e, paneRail, 'slateDbgRail', ev => {
+            const box = document.querySelector('.dbgfbody').getBoundingClientRect();
+            return clamp(ev.clientX - box.left, 0, box.width - 360);
+          })}
+          onReset=${() => { paneRail.value = 220; localStorage.setItem('slateDbgRail', '220'); }} />
+        <div class="dbgfmid">
+          <${Source} s=${s} />
+          <${Grip} axis="y"
+            onDrag=${e => drag(e, paneVals, 'slateDbgVals', ev => {
+              const box = document.querySelector('.dbgfmid').getBoundingClientRect();
+              return clamp((box.bottom - ev.clientY) / box.height * 100, 0, 85);
+            })}
+            onReset=${() => { paneVals.value = 34; localStorage.setItem('slateDbgVals', '34'); }} />
+          <div class="dbgfvals" style=${'height:' + paneVals.value + '%'}>
+            <${Vals} title="locals" items=${s.locals} />
+            <${Vals} title="cell" items=${s.bindings} hint="module-level bindings of the cell" />
+          </div>
+        </div>
+        <${Grip} axis="x"
+          onDrag=${e => drag(e, paneRight, 'slateDbgRight', ev => {
+            const box = document.querySelector('.dbgfbody').getBoundingClientRect();
+            return clamp(box.right - ev.clientX, 0, box.width - 360);
+          })}
+          onReset=${() => { paneRight.value = 360; localStorage.setItem('slateDbgRight', '360'); }} />
+        <div class="dbgfright">
+          <div class="dbgconvowrap" style=${'height:' + paneConvo.value + '%'}><${Convo} s=${s} /></div>
+          <${Grip} axis="y"
+            onDrag=${e => drag(e, paneConvo, 'slateDbgConvo', ev => {
+              const box = document.querySelector('.dbgfright').getBoundingClientRect();
+              return clamp((ev.clientY - box.top) / box.height * 100, 0, 100);
+            })}
+            onReset=${() => { paneConvo.value = 58; localStorage.setItem('slateDbgConvo', '58'); }} />
+          <${Scratch} s=${s} />
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── keys ──────────────────────────────────────────────────────────────────────────────────────────
+// The conventional debugger keys, live only while a session is. They are ignored while the focus is
+// in a text field, so the scratchpad and the cell editors keep every key they already had.
+document.addEventListener('keydown', (e) => {
+  if (!live.value) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable ||
+            (t.closest && t.closest('.cm-editor')))) {
+    if (!(e.key === 'Escape' && focus.value)) return;
+  }
+  if (e.key === 'F10') { e.preventDefault(); step('next'); }
+  else if (e.key === 'F11') { e.preventDefault(); step(e.shiftKey ? 'out' : 'into'); }
+  else if (e.key === 'F5') { e.preventDefault(); e.shiftKey ? stopDebug() : step('continue'); }
+  else if (e.key === 'Escape' && focus.value) { e.preventDefault(); focus.value = false; }
+});
+
+// ── the cell header button ────────────────────────────────────────────────────────────────────────
+window.slateDebugCell = (id) => (debugCell.value === id ? stopDebug() : startDebug(id));
+window.slateDebugActive = (id) => debugCell.value === id;
+// What the scratchpad's completion should offer first: the names actually in scope at the paused
+// line. The server's completer works on the namespace and cannot see a frame's locals.
+window.slateDebugNames = () => {
+  const s = st.value;
+  if (!s || s.finished) return [];
+  return [...(s.locals || []), ...(s.bindings || [])]
+    .filter(v => v.type)
+    .map(v => ({ name: v.name, type: v.type }));
+};
+
+// ── styles ────────────────────────────────────────────────────────────────────────────────────────
+// Every colour is a theme token: the notebook ships seven themes, three of them light, and a
+// hardcoded value is right in at most one of them.
+const style = document.createElement('style');
+style.textContent = `
+.dbgstrip { margin:6px 0 0; border:1px solid color-mix(in srgb, var(--gold) 40%, var(--border));
+  border-radius:8px; background:var(--bg2); overflow:hidden; font-size:.8rem;
+  box-shadow:0 1px 0 color-mix(in srgb, var(--gold) 18%, transparent) inset; }
+.dbgstrip.remote { border-color:color-mix(in srgb, var(--purple) 45%, var(--border)); }
+.dbgstrip.done { border-color:var(--border); }
+
+.dbgbar { display:flex; align-items:center; gap:8px; padding:6px 8px;
+  background:color-mix(in srgb, var(--gold) 7%, var(--bg2)); border-bottom:1px solid var(--border); }
+.dbgstrip.remote .dbgbar { background:color-mix(in srgb, var(--purple) 8%, var(--bg2)); }
+.dbgstrip.done .dbgbar { background:var(--bg2); border-bottom:none; }
+.dbgsp { flex:1 1 auto; }
+
+.dbgctl { display:flex; align-items:center; gap:4px; }
+.dbgb { display:inline-flex; align-items:center; gap:5px; padding:3px 9px; font-size:.78rem;
+  border-radius:6px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+  cursor:pointer; line-height:1.5; }
+.dbgb:hover:not(:disabled) { border-color:var(--gold); color:var(--strong); }
+.dbgb:disabled { opacity:.4; cursor:default; }
+.dbgbg { font-size:.9em; opacity:.85; }
+.dbgb-next:hover:not(:disabled) { background:color-mix(in srgb, var(--gold) 16%, var(--bg3)); }
+.dbgb-continue:hover:not(:disabled) { background:color-mix(in srgb, var(--green) 16%, var(--bg3)); border-color:var(--green); }
+.dbgb-stop:hover:not(:disabled) { background:color-mix(in srgb, var(--red) 16%, var(--bg3)); border-color:var(--red); color:var(--red); }
+
+.dbgloc { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:11px;
+  border:1px solid var(--border); color:var(--dim); font-size:.72rem; white-space:nowrap; }
+.dbgloc.remote { color:var(--purple); border-color:var(--purple);
+  background:color-mix(in srgb, var(--purple) 10%, transparent); }
+.dbgloc.big { font-size:.78rem; padding:3px 10px; }
+
+.dbgspecwrap { position:relative; display:inline-block; }
+.dbgspec { padding:3px 9px; font-size:.75rem; border-radius:6px; background:var(--bg3);
+  color:var(--dim); border:1px dashed var(--border); cursor:pointer; white-space:nowrap; }
+.dbgspec:hover:not(:disabled) { color:var(--teal); border-color:var(--teal); border-style:solid; }
+.dbgspec.on { color:var(--teal); border-color:var(--teal); border-style:solid;
+  background:color-mix(in srgb, var(--teal) 12%, var(--bg3)); }
+/* Anchored to the RIGHT: the button lives at the top-right of the specialist pane, and a
+   left-anchored menu of this width would hang off the edge of the column. */
+.dbgspecmenu { position:absolute; z-index:80; top:calc(100% + 4px); right:0;
+  width:max(280px, 22vw); display:flex; flex-direction:column;
+  background:var(--bg2); border:1px solid var(--border); border-radius:8px; overflow:hidden;
+  box-shadow:0 8px 26px rgba(0,0,0,.4); }
+.dbgspecfind { flex:0 0 auto; padding:7px 10px; background:var(--bg3); color:var(--text);
+  border:none; border-bottom:1px solid var(--border); outline:none; font-size:.78rem; }
+.dbgspecfind:focus { border-bottom-color:var(--accent); }
+/* A list this long is scrolled, not shown — bounded so the menu can never outgrow the window. */
+.dbgspeclist { flex:1 1 auto; max-height:min(360px, 45vh); overflow:auto; padding:3px 0; }
+.dbgspecrow { display:flex; align-items:baseline; gap:7px; padding:5px 10px; font-size:.76rem;
+  cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  font-family:var(--mono,ui-monospace,monospace); }
+.dbgspecrow:hover { background:var(--ovl); color:var(--teal); }
+.dbgspecrow.recent { color:var(--teal); }
+/* Family headers, so ~70 models read as a handful of groups. Sticky, because you scroll past
+   several of them looking for one. */
+.dbgspechead { position:sticky; top:0; z-index:1; display:flex; align-items:baseline; gap:6px;
+  padding:4px 10px 3px; background:var(--bg2); color:var(--dim);
+  font-size:.66rem; text-transform:uppercase; letter-spacing:.08em;
+  border-top:1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.dbgspecgrp:first-child .dbgspechead { border-top:none; }
+.dbgspecn { opacity:.6; font-variant-numeric:tabular-nums; }
+.dbgspecgrp .dbgspecrow { padding-left:18px; }
+.dbgspecmark { flex:0 0 auto; color:var(--dim); }
+.dbgspecnote { padding:6px 10px; font-size:.72rem; color:var(--dim); }
+.dbgspecfoot { flex:0 0 auto; padding:4px 10px; font-size:.68rem; color:var(--dim);
+  border-top:1px solid var(--border); font-variant-numeric:tabular-nums; }
+
+.dbgowner { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:11px;
+  font-size:.72rem; white-space:nowrap; color:var(--teal); border:1px solid var(--teal);
+  background:color-mix(in srgb, var(--teal) 10%, transparent); }
+
+/* The specialist is blocked on this. Sits at the foot of its own pane, just above the box you
+   would reply in — one column, one voice. */
+.dbgasks { flex:0 0 auto; display:flex; flex-direction:column; gap:7px; margin-top:8px;
+  padding:8px 9px; border-radius:7px; border:1px solid var(--teal);
+  background:color-mix(in srgb, var(--teal) 10%, transparent); }
+.dbgask { display:flex; flex-direction:column; gap:7px; font-size:.78rem; }
+.dbgaskq { color:var(--strong); line-height:1.5; }
+.dbgaskbtns { display:flex; gap:6px; }
+.dbgask .dbgpform { margin-top:0; }
+/* In the cell ribbon, when the workspace is shut: a nudge, not the prompt itself. */
+.dbgaskbadge { padding:5px 10px; font-size:.74rem; cursor:pointer; color:var(--teal);
+  border-top:1px solid var(--border);
+  background:color-mix(in srgb, var(--teal) 10%, transparent); }
+.dbgaskbadge:hover { background:color-mix(in srgb, var(--teal) 18%, transparent); }
+
+.dbgexp { padding:2px 7px; border-radius:6px; background:transparent; border:1px solid transparent;
+  color:var(--dim); cursor:pointer; font-size:.9rem; line-height:1; }
+.dbgexp:hover { color:var(--accent); border-color:var(--border); background:var(--bg3); }
+
+/* The in-cell ribbon: one clickable line into the workspace. */
+.dbgbar.open { cursor:pointer; font-family:var(--mono,ui-monospace,monospace); font-size:.74rem; }
+.dbgbar.open:hover { background:color-mix(in srgb, var(--gold) 13%, var(--bg2)); }
+.dbgstrip.remote .dbgbar.open:hover { background:color-mix(in srgb, var(--purple) 14%, var(--bg2)); }
+.dbgribbon { color:var(--gold); font-weight:600; white-space:nowrap; }
+.dbgstrip.remote .dbgribbon { color:var(--purple); }
+.dbgclear { padding:1px 7px; border-radius:5px; font-size:.68rem; background:transparent;
+  border:1px solid var(--border); color:var(--dim); cursor:pointer;
+  text-transform:none; letter-spacing:0; }
+.dbgclear:hover { color:var(--red); border-color:var(--red); }
+.dbgscope { color:var(--accent); }
+.dbgbp { color:var(--red); font-size:.8em; }
+.dbgfile { color:var(--dim); }
+.dbgsteps { color:var(--dim); font-size:.72rem; font-variant-numeric:tabular-nums; }
+.dbgdone { color:var(--green); font-size:.78rem; }
+.dbgdone.err { color:var(--red); }
+
+.dbgvals { flex:1 1 260px; min-width:0; padding-top:6px; }
+.dbgvhead { display:flex; align-items:baseline; gap:6px; color:var(--dim); font-size:.68rem;
+  text-transform:uppercase; letter-spacing:.07em; padding-bottom:3px; }
+/* A count, not a second word in the heading. */
+.dbgvn-count { color:var(--dim); opacity:.45; font-size:.9em; text-transform:none; letter-spacing:0;
+  font-variant-numeric:tabular-nums; }
+
+.dbgval { display:grid; grid-template-columns:minmax(60px,auto) minmax(0,1fr) minmax(0,2fr);
+  gap:10px; align-items:baseline; padding:2px 4px; border-radius:4px;
+  font-family:var(--mono,ui-monospace,monospace); font-size:.74rem; line-height:1.6; }
+.dbgval:hover { background:var(--ovl); }
+.dbgval.chg { animation:dbgflash 900ms ease-out; }
+@keyframes dbgflash {
+  0% { background:color-mix(in srgb, var(--gold) 45%, transparent); }
+  100% { background:transparent; }
+}
+.dbgvn { color:var(--strong); }
+.dbgvt { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dbgvr { color:var(--val); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dbgval.unset .dbgvr { color:var(--dim); font-style:italic; }
+/* Holds the PREVIOUS run's value — the line that writes it hasn't run yet this session. Dimmed
+   rather than hidden: it is still what is in the namespace, and sometimes that's what you want. */
+.dbgval.stale { opacity:.5; }
+.dbgval.stale .dbgvn::after { content:'·'; margin-left:5px; color:var(--gold); }
+
+/* ── focus view ─────────────────────────────────────────────────────────────── */
+.dbgfocusbg { position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.55);
+  display:flex; align-items:center; justify-content:center; padding:24px; }
+.dbgfocus { display:flex; flex-direction:column; width:min(1580px,100%); height:min(900px,100%);
+  background:var(--bg); border:1px solid color-mix(in srgb, var(--gold) 40%, var(--border));
+  border-radius:12px; overflow:hidden; box-shadow:0 18px 60px rgba(0,0,0,.45); }
+.dbgfocus.remote { border-color:color-mix(in srgb, var(--purple) 45%, var(--border)); }
+
+.dbgfhead { display:flex; align-items:center; gap:10px; padding:9px 12px;
+  background:color-mix(in srgb, var(--gold) 8%, var(--bg2)); border-bottom:1px solid var(--border); }
+.dbgfocus.remote .dbgfhead { background:color-mix(in srgb, var(--purple) 10%, var(--bg2)); }
+.dbgftitle { color:var(--gold); font-weight:600; font-size:.86rem; }
+.dbgfocus.remote .dbgftitle { color:var(--purple); }
+.dbgfcell { color:var(--dim); font-family:var(--mono,ui-monospace,monospace); font-size:.78rem; }
+.dbgfx { padding:2px 8px; border-radius:6px; background:transparent; border:1px solid transparent;
+  color:var(--dim); cursor:pointer; }
+.dbgfx:hover { color:var(--red); border-color:var(--border); background:var(--bg3); }
+.dbgfctl { padding:7px 12px; border-bottom:1px solid var(--border); background:var(--bg2); }
+
+/* Three columns — where you came from, where you are, who you are working with — with every
+   divider draggable, because a debugging session is not one shape. Sizes come from inline styles
+   (the signals), so the grid template is set in JS; only the grips are styled here. */
+.dbgfbody { flex:1 1 auto; min-height:0; display:grid; }
+.dbgfmid { display:flex; flex-direction:column; min-width:0; min-height:0; }
+
+.dbggrip { background:transparent; flex:0 0 auto; position:relative; z-index:2; }
+.dbggrip.x { cursor:col-resize; }
+.dbggrip.y { cursor:row-resize; height:5px; margin:-2px 0; }
+/* The hairline shows on hover/drag only, so an idle workspace has no seams drawn across it. */
+.dbggrip::after { content:''; position:absolute; inset:0; background:transparent; transition:background .12s; }
+.dbggrip:hover::after, .dbggrip:active::after { background:var(--accent); }
+.dbggrip.x::after { left:2px; right:2px; }
+.dbggrip.y::after { top:2px; bottom:2px; }
+
+.dbgconvowrap { min-height:0; display:flex; flex-direction:column; }
+.dbgrail { min-height:0; overflow:auto; padding:10px; border-right:1px solid var(--border);
+  background:var(--bg2); }
+.dbgrhead { display:flex; align-items:baseline; gap:6px; color:var(--dim); font-size:.68rem;
+  text-transform:uppercase; letter-spacing:.07em; margin:2px 0 5px; }
+/* A scope is a Julia name, and Main.NB is not MAIN.NB — undo the header's casing for anything
+   that carries an identifier. (No backticks in here: this whole block is a template literal.) */
+.dbgrhead .dbgscope, .dbgrhead .dbgcrew, .dbgrhead .dbgfile { text-transform:none; letter-spacing:0; }
+.dbgrhead2 { margin-top:16px; }
+.dbgfr { display:flex; flex-direction:column; gap:1px; padding:4px 6px; border-radius:5px;
+  font-family:var(--mono,ui-monospace,monospace); font-size:.73rem; border-left:2px solid transparent; }
+.dbgfr .dbgfile { font-size:.92em; padding-left:13px; }
+.dbgfr.cur { background:color-mix(in srgb, var(--gold) 12%, transparent); border-left-color:var(--gold); }
+.dbgfrm { color:var(--gold); }
+.dbgfr .dbgscope { display:inline; }
+.dbgmarks { display:flex; flex-direction:column; gap:2px; }
+.dbgmark { display:flex; align-items:center; gap:6px; padding:2px 6px; border-radius:5px;
+  font-family:var(--mono,ui-monospace,monospace); font-size:.72rem;
+  border-left:2px solid var(--red); background:color-mix(in srgb, var(--red) 8%, transparent); }
+.dbgmark .dbgfile { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dbgmarkx { padding:0 4px; background:transparent; border:none; color:var(--dim); cursor:pointer; font-size:.8rem; }
+.dbgmarkx:hover { color:var(--red); }
+.dbginterp { display:flex; flex-wrap:wrap; gap:4px; }
+.dbgmod { padding:1px 7px; border-radius:9px; background:var(--bg3); border:1px solid var(--border);
+  color:var(--teal); font-size:.7rem; font-family:var(--mono,ui-monospace,monospace); }
+
+.dbgsrc { display:flex; flex-direction:column; min-width:0; min-height:0; }
+.dbgsrchead { display:flex; align-items:baseline; gap:10px; padding:6px 12px;
+  border-bottom:1px solid var(--border); font-family:var(--mono,ui-monospace,monospace); font-size:.74rem; }
+.dbgnosrc { color:var(--dim); font-style:italic; }
+/* Said once, in the pane where the margin is — it is not obvious that a read-only viewer is
+   clickable. Hidden as soon as anything is armed, which is the proof you found it. (Gated in JS
+   on the mark COUNT, not on a dot being present: the gutter's own spacer contains one always.) */
+.dbgsrchint { color:var(--dim); font-size:.68rem; opacity:.65;
+  font-family:'Segoe UI',system-ui,sans-serif; }
+.dbgsrcbody { flex:1 1 auto; min-height:0; overflow:auto; }
+.dbgsrcbody .cm-editor { height:100%; }
+.dbgsrcbody .cm-scroller { overflow:auto; }
+
+.dbgfright { display:flex; flex-direction:column; min-width:0; min-height:0;
+  border-left:1px solid var(--border); background:var(--bg2); }
+/* Values sit UNDER the source, in the same column, because they belong to the line above them.
+   Height is dragged (inline style); 0 is allowed, so the pane can be shut and reopened. */
+.dbgfvals { flex:0 0 auto; min-height:0; overflow:auto; padding:8px 12px;
+  border-top:1px solid var(--border); display:flex; flex-wrap:wrap; gap:0 20px; }
+.dbgfvals .dbgvals { flex:1 1 300px; min-width:0; }
+/* One line per value. Stacking the repr underneath cost two rows and a gap each — four locals
+   filled the pane, and a frame routinely has thirty. */
+.dbgfvals .dbgval { padding:1px 4px; line-height:1.45; }
+.dbgfvals .dbgvhead { padding-bottom:2px; }
+
+/* ── the specialist pane ─────────────────────────────────────────────────────── */
+.dbgconvo { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding:8px 12px 6px; }
+.dbgcrew { color:var(--teal); font-family:var(--mono,ui-monospace,monospace);
+  font-size:.68rem; text-transform:none; letter-spacing:0; }
+.dbgclog { flex:1 1 auto; min-height:60px; overflow:auto; display:flex; flex-direction:column; gap:5px;
+  padding-right:2px; }
+.dbgcempty { color:var(--dim); font-size:.76rem; display:flex; flex-direction:column;
+  align-items:flex-start; gap:8px; padding:6px 0; }
+.dbgcmsg { font-size:.78rem; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
+.dbgcmsg.said { color:var(--text); }
+.dbgcmsg.think { color:var(--dim); font-style:italic; border-left:2px solid var(--border); padding-left:7px; }
+.dbgcmsg.you { color:var(--strong); background:var(--ovl); border-radius:6px; padding:5px 8px; }
+/* The turn it was handed. Collapsed to a few lines — it is context, not conversation — and
+   expands on click, because when an answer looks wrong the brief is the first thing to check. */
+.dbgcmsg.brief { color:var(--dim); font-size:.72rem; white-space:pre-wrap;
+  border-left:2px solid var(--accent); padding:4px 0 4px 8px;
+  max-height:5.2em; overflow:hidden; cursor:zoom-in; }
+.dbgcmsg.brief:hover { color:var(--text); }
+.dbgcmsg.brief.open { max-height:none; cursor:zoom-out; }
+
+.dbgbrief { flex:0 0 auto; max-height:40%; overflow:auto; margin-bottom:6px; padding:7px 9px;
+  border:1px solid var(--border); border-radius:7px; background:var(--bg3); }
+.dbgbriefhead { color:var(--dim); font-size:.66rem; text-transform:uppercase; letter-spacing:.07em;
+  margin:2px 0 4px; }
+.dbgbriefhead + .dbginterp + .dbgbriefhead { margin-top:9px; }
+.dbgbrieftxt { margin:0; white-space:pre-wrap; word-break:break-word; color:var(--text);
+  font-family:var(--mono,ui-monospace,monospace); font-size:.68rem; line-height:1.5; }
+.dbgclear.on { color:var(--accent); border-color:var(--accent); }
+/* Typed while it was working — sent, but not yet delivered. Dashed until it goes. */
+.dbgcmsg.held { border:1px dashed var(--teal); background:transparent; }
+.dbgheld { display:block; margin-top:3px; color:var(--teal); font-size:.68rem; font-style:italic; }
+/* One step, one line: the verb, what it was given, and where it landed. */
+.dbgcact { display:flex; align-items:baseline; gap:7px; font-size:.72rem;
+  font-family:var(--mono,ui-monospace,monospace); padding:1px 0; }
+.dbgcact.live { opacity:.55; }
+.dbgcverb { flex:0 0 auto; color:var(--teal); }
+.dbgcact.err .dbgcverb { color:var(--red); }
+.dbgcarg { flex:0 0 auto; color:var(--strong); }
+.dbgcgist { flex:1 1 auto; min-width:0; color:var(--dim);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* Takes whatever the transcript above it isn't using — drag their divider up and the scratchpad
+   grows into the space. Content sits at the TOP: the input follows the probes rather than being
+   pinned to the floor, so an empty pad is a box under its heading, not a box below a void. */
+.dbgscratch { flex:1 1 auto; min-height:0; display:flex; flex-direction:column;
+  justify-content:flex-start; border-top:1px solid var(--border); padding:8px 12px 10px; }
+/* Grows with what is in it; an empty scratchpad should not hold open a third of the column. */
+.dbgprobes { flex:0 1 auto; min-height:0; overflow:auto;
+  font-family:var(--mono,ui-monospace,monospace); font-size:.73rem; }
+.dbgprobe { padding:3px 0; border-bottom:1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.dbgpq { color:var(--dim); }
+.dbgpq::before { content:'\\203A '; color:var(--accent); }
+.dbgpa { color:var(--val); white-space:pre-wrap; word-break:break-word; }
+.dbgpa.err { color:var(--red); }
+.dbgpform { display:flex; align-items:center; gap:6px; margin-top:7px; padding:4px 8px;
+  border:1px solid var(--border); border-radius:6px; background:var(--bg3); }
+.dbgpform:focus-within { border-color:var(--accent); }
+.dbgpp { color:var(--accent); font-family:var(--mono,ui-monospace,monospace); flex:0 0 auto; }
+.dbgpform input { flex:1 1 auto; background:transparent; border:none; outline:none; color:var(--text);
+  font-family:var(--mono,ui-monospace,monospace); font-size:.76rem; }
+
+/* The probe editor: a real CodeMirror, so completion, highlighting and the keymap match the cells.
+   Enter runs it, ⇧Enter is a newline (CodeMirror's own), ↑/↓ walk history from the document edge. */
+.dbgped { display:flex; align-items:flex-start; gap:6px; margin-top:7px; padding:3px 8px;
+  border:1px solid var(--border); border-radius:6px; background:var(--bg3); }
+.dbgped:focus-within { border-color:var(--accent); }
+.dbgpedhost { flex:1 1 auto; min-width:0; }
+.dbgpedhost .cm-editor { background:transparent; font-size:.76rem; }
+.dbgpedhost .cm-content { padding:2px 0; }
+.dbgpedhost .cm-line { padding:0; }
+.dbgpedhost .cm-focused { outline:none; }
+
+/* No width breakpoint: the grid template is an inline style (the drag signals), and hiding a grid
+   ITEM does not free its track — the remaining panes would slide into the wrong ones. Narrow
+   screens are served by the same thing wide ones are: drag the rail shut. */
+`;
+document.head.appendChild(style);
+
+const host = document.createElement('div');
+document.body.appendChild(host);
+render(html`<${Focus} />`, host);

@@ -3308,6 +3308,8 @@ include("server_hub.jl")
 # After server_hub.jl: its signatures dispatch on `Hub`, which is defined there.
 include("server_app.jl")       # app mode (served-as-an-application posture) + the /status page
 include("server_publish.jl")   # Publishing manager service layer (ledger view, targets, secrets, SSE publish)
+include("server_specialists.jl") # narrow agents summoned into a notebook: roles, briefs, the ask channel
+include("server_debug.jl")     # cell debugger: route the stepping verbs to the kernel the cell runs on
 include("server_complete.jl")
 
 # ── Standalone convenience (one notebook) ─────────────────────────────────────

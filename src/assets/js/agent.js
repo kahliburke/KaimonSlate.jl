@@ -351,6 +351,10 @@ function _argCid(args) {
 }
 function agentEvent(env) {
   if (!env) return;
+  // The debugger's focus view keeps its OWN transcript of the specialist working, rendered for a
+  // debugging session rather than for chat. It reads the same envelopes; the panel below is
+  // unaffected either way, so a crew member appears in both places without either owning it.
+  try { window.onDebugAgentEvent && window.onDebugAgentEvent(env); } catch (e) {}
   const d = env.data || {};
   const k = env.kind;
   const crew = env.crew || '';   // crew label of the speaking agent ('' = solo/default)

@@ -5508,7 +5508,8 @@ function _agent_cwd(path::AbstractString)
     return proj === nothing ? d : dirname(proj)
 end
 function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::AbstractString = "",
-                        permission::AbstractString = "")
+                        permission::AbstractString = "",
+                        system_prompt::AbstractString = "", allowed_tools::Vector{String} = String[])
     label = String(crew)
     existing = get(nb.agents, label, "")
     if !isempty(existing)
@@ -5556,7 +5557,12 @@ function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::Abst
             # pick another preset in Settings ("auto"/"default"/"bypass"); it binds at spawn,
             # so a change reaps the agent (chat-kill) and the next turn respawns on it.
             "permission" => (isempty(permission) ? "lab" : String(permission)),
-            "system_prompt" => _agent_system_prompt(nb))
+            # A crew member with its own brief is a SPECIALIST: it gets that brief instead of the
+            # notebook-authoring one, and an allowlist that is the whole of its world. The
+            # narrowness is the point, not a safety rail — an agent that can only step, look and
+            # evaluate has nothing to do but debug, and that is what makes it good at it.
+            "system_prompt" => (isempty(system_prompt) ? _agent_system_prompt(nb) : String(system_prompt)))
+    isempty(allowed_tools) || (open_args["allowed_tools"] = allowed_tools)
     isempty(model) || (open_args["model"] = model)   # omit → Kaimon's default (sonnet)
     res = try
         _agent_call(:agent_open, open_args)

@@ -424,7 +424,7 @@ function _await_real(k::PendingKernel)
     return k.real::Kernel
 end
 
-# The 14 Kernel operations with no generic `::Kernel` fallback — each blocks for the real
+# The 19 Kernel operations with no generic `::Kernel` fallback — each blocks for the real
 # kernel, then forwards. (`shutdown!`, `cancel_cells`, `memo_pin!`, `worker_log_tail`, the
 # 5-arg memo `eval_capture`, and `_kernel_status` already have safe non-blocking `::Kernel`
 # fallbacks above/elsewhere and need no override here.)
@@ -456,6 +456,19 @@ bundle_info(k::PendingKernel, report::Report) = bundle_info(_await_real(k), repo
 pkg_op(k::PendingKernel, report::Report, op::AbstractString, name::AbstractString; target::AbstractString = "notebook") =
     pkg_op(_await_real(k), report, op, name; target)
 registry_add(k::PendingKernel, report::Report, url::AbstractString) = registry_add(_await_real(k), report, url)
+debug_start!(k::PendingKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
+             mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[]) =
+    debug_start!(_await_real(k), report; cell = cell, source = source,
+                 mark_files = mark_files, mark_lines = mark_lines)
+debug_marks!(k::PendingKernel, report::Report; mark_files::Vector{String} = String[],
+             mark_lines::Vector{Int} = Int[]) =
+    debug_marks!(_await_real(k), report; mark_files = mark_files, mark_lines = mark_lines)
+debug_step!(k::PendingKernel, report::Report; mode::AbstractString = "next") =
+    debug_step!(_await_real(k), report; mode = mode)
+debug_frame(k::PendingKernel, report::Report) = debug_frame(_await_real(k), report)
+debug_eval_expr(k::PendingKernel, report::Report; expr::AbstractString = "") =
+    debug_eval_expr(_await_real(k), report; expr = expr)
+debug_stop!(k::PendingKernel, report::Report) = debug_stop!(_await_real(k), report)
 
 """
     complete(kernel, report, code, pos) -> (; items, from, to)
@@ -498,6 +511,60 @@ cell). The gate kernel forwards to its worker.
 """
 interpolate(::InProcessKernel, report::Report, exprs::Vector{String}) =
     CellOutput[_eval_capture(report_module(report), e) for e in exprs]
+
+# ── cell debugger ─────────────────────────────────────────────────────────────
+#
+# The stepper (worker_debug.jl) is included by the engine AND the worker, so the
+# same five verbs exist on both sides of a gate. These are the kernel-level entry
+# points the SERVER calls: in-process reaches straight into the namespace, and the
+# gate kernel forwards to `__slate_debug_*` in the worker — which is also how a
+# region cell gets stepped on the machine it runs on, with no transport of its own.
+#
+# Every verb answers with a `DebugState`; there is no separate error channel,
+# because a failure to start is a terminal state a viewer already knows how to
+# render (see `_error_state`).
+
+"""
+    debug_start!(kernel, report; cell, source) -> DebugState
+
+Begin stepping `source` (the cell's code) where this kernel's cells evaluate.
+Returns the state BEFORE the first line runs.
+"""
+debug_start!(::InProcessKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
+             mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[]) =
+    debug_start!(report_module(report); cell = String(cell), source = String(source),
+                 mark_files = mark_files, mark_lines = mark_lines)
+
+"""
+    debug_marks!(kernel, report; mark_files, mark_lines) -> DebugState
+
+Arm exactly these `file:line` breakpoints on the session, replacing whatever was set.
+"""
+debug_marks!(::InProcessKernel, ::Report; mark_files::Vector{String} = String[],
+             mark_lines::Vector{Int} = Int[]) =
+    debug_marks!(; mark_files = mark_files, mark_lines = mark_lines)
+
+"""
+    debug_step!(kernel, report; mode) -> DebugState
+
+Advance the session: `next` | `into` | `out` | `continue`.
+"""
+debug_step!(::InProcessKernel, ::Report; mode::AbstractString = "next") =
+    debug_step!(; mode = String(mode))
+
+"The current state without advancing."
+debug_frame(::InProcessKernel, ::Report) = debug_frame()
+
+"""
+    debug_eval_expr(kernel, report; expr) -> DebugEval
+
+Evaluate `expr` in the paused frame's scope, where the values live.
+"""
+debug_eval_expr(::InProcessKernel, ::Report; expr::AbstractString = "") =
+    debug_eval_expr(; expr = String(expr))
+
+"Abandon the session and restore the interpreter's scope."
+debug_stop!(::InProcessKernel, ::Report) = debug_stop!()
 
 """
     harvest_docs(kernel, report, mod_names) -> Vector{Dict}

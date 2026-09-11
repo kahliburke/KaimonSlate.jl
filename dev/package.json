@@ -1,0 +1,8 @@
+{
+  "name": "kaimonslate-dev",
+  "private": true,
+  "description": "Dev-only tooling. Playwright backs dev/shot.mjs, which screenshots a served notebook so a UI change can be looked at rather than inferred from the DOM.",
+  "dependencies": {
+    "playwright": "^1.63.0"
+  }
+}

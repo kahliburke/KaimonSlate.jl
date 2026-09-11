@@ -411,6 +411,14 @@ function cellHeaderInner(c) {
       `<button class="askai" onclick="askCell('${c.id}')" title="ask the AI about this cell">✨</button>` +
       (c.kind === 'code' ? `<button onclick="toggleDeps('${c.id}')" title="focus: show only this cell's dependency chain (Esc to exit)">🔗</button>` : '') + autoctl +
       (isCode ? `<button class="trace${c.trace ? ' on' : ''}" onclick="toggleTrace('${c.id}')" title="${c.trace ? 'open the trace inspector' : 'trace this cell — inspect each value in a popup'}">🔍</button>` : '') +
+      // Step this cell line by line, on whichever kernel it runs on. Re-clicking the cell that
+      // HAS the session ends it, so the button is the whole control for "am I debugging this".
+      // Plain code cells only — that is where the strip mounts, and a web or tool cell has no
+      // Julia top level to walk.
+      ((isCode && c.kind === 'code') ? (() => {
+        const on = window.slateDebugActive && window.slateDebugActive(c.id);
+        return `<button class="dbgcell${on ? ' on' : ''}" onclick="window.slateDebugCell && window.slateDebugCell('${c.id}')" title="${on ? 'stop stepping this cell' : 'step this cell line by line'}">🐞</button>`;
+      })() : '') +
       (isCode ? `<button class="hidecode${c.codeHidden ? ' on' : ''}" onclick="toggleHideCode('${c.id}')" title="${c.codeHidden ? 'show code' : 'hide code — show only the output'}">${c.codeHidden ? '🙈' : '👁'}</button>` : '') +
       `<button class="tagbtn${(c.tags && c.tags.length) ? ' on' : ''}" onclick="openTagEditor('${c.id}', event)" title="cell tags${(c.tags && c.tags.length) ? ': ' + c.tags.join(', ') : ''}">🏷</button>` +
       editSrc +

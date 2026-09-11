@@ -575,9 +575,17 @@
       })).json();
     } catch (_) { return null; }
     const raw = d.completions || [];
-    if (!raw.length) return null;
-    const from = _charFromByte(code, d.from);
-    const to = _charFromByte(code, d.to);
+    // In the debugger's scratchpad the names that matter most are the paused FRAME's locals, and
+    // the server's completer cannot see them: they belong to a frame, not to the namespace. Offer
+    // them first (the boost outranks every server tier), then everything the namespace knows.
+    const frame = (ctx.view && ctx.view._cellId === '__dbgscratch' && window.slateDebugNames)
+      ? window.slateDebugNames().map((n, i) => ({
+          label: n.name, detail: n.type || 'in frame', type: 'variable', boost: 200 - i }))
+      : [];
+    if (!raw.length && !frame.length) return null;
+    // A reply with no completions carries no range, so fall back to the word under the caret.
+    const from = raw.length ? _charFromByte(code, d.from) : (word ? word.from : ctx.pos);
+    const to = raw.length ? _charFromByte(code, d.to) : ctx.pos;
     const options = raw.map((it, i) => {
       const o = (it && typeof it === 'object') ? it : { text: String(it) };
       const text = o.text != null ? o.text : (o.label != null ? o.label : String(it));
@@ -618,7 +626,7 @@
     // and omit `validFor` so each keystroke re-queries the server. Normal completions keep CM6's
     // fuzzy filter + `validFor` (no backslash needed — that span is handled here).
     if (bs) return { from, to, options, filter: false };
-    return { from, to, options, validFor: /^[\w!]*$/ };
+    return { from, to, options: frame.concat(options), validFor: /^[\w!]*$/ };
   }
 
   // Is the cursor inside a fenced code block? Markdown editors have no language tree, so count
@@ -695,6 +703,11 @@
   const errField = mkField(setErr, 'cm-errorline');
   const flashField = mkField(setFlash, 'cm-errorline-flash');
   const originField = mkField(setOrigin, 'cm-errorline-origin');
+  // The debugger's "you are here" line. A fourth independent mark rather than reusing the error
+  // one: a cell can be stopped on a line AND still be showing where it last threw, and those two
+  // want to stay distinguishable.
+  const setDbg = StateEffect.define();
+  const dbgField = mkField(setDbg, 'cm-dbgline');
 
   // ── Inline data-URI "chit" ────────────────────────────────────────────────────────────────────
   // A pasted/dropped image with no project to attach into lands in the cell source as a HUGE
@@ -746,12 +759,160 @@
   window.clearErrorLine = (id) => { const v = editors[id]; if (v) v.dispatch({ effects: setErr.of(null) }); };
   window.markOriginLine = (id, line1) => { const v = editors[id]; if (v) v.dispatch({ effects: setOrigin.of(_validLine(v, line1) ? line1 : null) }); };
   window.clearOriginLine = (id) => { const v = editors[id]; if (v) v.dispatch({ effects: setOrigin.of(null) }); };
+  // Debugger: mark (and scroll to) the line the cell is stopped on. Never focuses the editor —
+  // the keys belong to the step controls while a session is running, not to typing.
+  window.markDebugLine = (id, line1) => {
+    const v = window.ensureEditor ? window.ensureEditor(id) : editors[id];
+    if (!v) return;
+    if (!_validLine(v, line1)) return v.dispatch({ effects: setDbg.of(null) });
+    v.dispatch({ effects: [setDbg.of(line1), EditorView.scrollIntoView(v.state.doc.line(line1).from, { y: 'nearest' })] });
+  };
+  window.clearDebugLine = (id) => { const v = editors[id]; if (v) v.dispatch({ effects: setDbg.of(null) }); };
+
   window.flashLine = (id, line1) => {
     const v = editors[id]; if (!v || !_validLine(v, line1)) return;
     const off = v.state.doc.line(line1).from;
     v.dispatch({ selection: { anchor: off }, effects: [setFlash.of(line1), EditorView.scrollIntoView(off, { y: 'center' })] });
     setTimeout(() => { try { v.dispatch({ effects: setFlash.of(null) }); } catch (_) {} }, 1300);  // > the 1.2s flash animation
     v.focus();
+  };
+
+  // ── breakpoint gutter ─────────────────────────────────────────────────────────
+  // A margin you click to arm a line. Mounted only while the notebook is DEBUGGING — a permanent
+  // column on every code cell would change how the whole notebook reads for a feature most
+  // sessions never use, and the session is exactly when it earns its width.
+  //
+  // The editor owns where a breakpoint is DRAWN; it owns nothing about where one IS. A click calls
+  // out and paints nothing; the lines come back through `setBreakpointLines` once the server has
+  // them, so the dot you see is always a breakpoint that exists on the kernel.
+  const bpComp = new Compartment();
+  const setBps = StateEffect.define();
+  const bpField = StateField.define({
+    create: () => [],
+    update(lines, tr) {
+      for (const e of tr.effects) if (e.is(setBps)) return e.value || [];
+      return lines;
+    },
+  });
+  let _bpOn = false;
+  let _bpClick = null;   // (cellId, line) — set by the debugger island
+
+  const _bpMarker = cmView && class extends cmView.GutterMarker {
+    toDOM() { const s = document.createElement('span'); s.className = 'cm-bpdot'; return s; }
+  };
+  const _bpExt = () => {
+    if (!cmView || !_bpOn) return [];
+    return [cmView.gutter({
+      class: 'cm-bpgutter',
+      markers(v) {
+        const lines = v.state.field(bpField, false) || [];
+        const rs = [];
+        for (const n of lines) {
+          if (n >= 1 && n <= v.state.doc.lines) rs.push(new _bpMarker().range(v.state.doc.line(n).from));
+        }
+        return Decoration.set(rs, true);
+      },
+      initialSpacer: () => new _bpMarker(),
+      domEventHandlers: {
+        mousedown(v, block, ev) {
+          ev.preventDefault();
+          if (!_bpClick) return true;
+          _bpClick(v._cellId || '', v.state.doc.lineAt(block.from).number);
+          return true;
+        },
+      },
+    })];
+  };
+  // Enter/leave debug mode across every open editor at once.
+  window.setDebugGutter = (on) => {
+    on = !!on;
+    if (on === _bpOn) return;
+    _bpOn = on;
+    for (const v of _allViews()) {
+      try { v.dispatch({ effects: bpComp.reconfigure(_bpExt()) }); } catch (_) {}
+    }
+  };
+  window.onBreakpointClick = (fn) => { _bpClick = fn; };
+  window.setBreakpointLines = (id, lines) => {
+    const v = editors[id]; if (!v) return;
+    try { v.dispatch({ effects: setBps.of((lines || []).slice()) }); } catch (_) {}
+  };
+
+  // ── read-only source viewer ───────────────────────────────────────────────────
+  // A CodeMirror view for source the user cannot edit: the debugger's frame pane, showing a method
+  // that lives on whichever machine the kernel runs on. Built here rather than in the caller so it
+  // picks up the notebook's own syntax theme and Julia grammar, and so a theme change reaches it
+  // through the same compartments every other editor uses.
+  //
+  // `firstLine` offsets the gutter: the text is one method, not the file, so its numbers have to
+  // read as the file's — the whole point is to be able to say "src/ridge.jl:14" and see line 14.
+  window.slateSourceViewer = (parent, opts) => {
+    opts = opts || {};
+    const cur = curSyntaxTheme();
+    let offset = 1;
+    const lnComp = new Compartment();
+    const _ln = () => (cmView ? [cmView.lineNumbers({ formatNumber: n => String(n + offset - 1) })] : []);
+    // A breakpoint margin, on the pane where the code actually IS. The cell editor has one too,
+    // but a session opens straight into the workspace now, so this is where you go to arm a line
+    // — including inside a method, which no cell editor shows.
+    //
+    // The document is one method, not the file, so a line here is `n + offset - 1` of the file:
+    // the caller is told the FILE's line, which is the only number a breakpoint can be set on.
+    const bpGutter = (cmView && opts.onToggleLine) ? [cmView.gutter({
+      class: 'cm-bpgutter',
+      markers(v) {
+        const lines = v.state.field(bpField, false) || [];
+        const rs = [];
+        for (const n of lines) {
+          if (n >= 1 && n <= v.state.doc.lines) rs.push(new _bpMarker().range(v.state.doc.line(n).from));
+        }
+        return Decoration.set(rs, true);
+      },
+      initialSpacer: () => new _bpMarker(),
+      domEventHandlers: {
+        mousedown(v, block, ev) {
+          ev.preventDefault();
+          opts.onToggleLine(v.state.doc.lineAt(block.from).number + offset - 1);
+          return true;
+        },
+      },
+    })] : [];
+    const view = new EditorView({
+      parent,
+      doc: '',
+      extensions: [
+        EditorView.editable.of(false), EditorState.readOnly.of(true),
+        bpField, ...bpGutter, lnComp.of(_ln()), dbgField, julia(),
+        chromeComp.of(chromeFor(cur)), themeComp.of(styleFor(cur)),
+        EditorView.lineWrapping,
+      ],
+    });
+    view._isViewer = true;
+    _views.add(view);
+    return {
+      view,
+      // Replace the text and re-base the gutter in one transaction, so the numbers can never be
+      // briefly right for the previous frame's source.
+      setDoc(text, firstLine) {
+        offset = Math.max(1, firstLine | 0);
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: String(text || '') },
+          effects: [lnComp.reconfigure(_ln()), setDbg.of(null)],
+        });
+      },
+      // Paint armed lines. Given in FILE numbers (that is how a breakpoint is expressed); the ones
+      // outside this method's text simply don't appear.
+      setMarks(absLines) {
+        view.dispatch({ effects: setBps.of((absLines || []).map(n => n - offset + 1)) });
+      },
+      // `absLine` is a line of the FILE; the document starts at `offset`.
+      setLine(absLine) {
+        const n = (absLine | 0) - offset + 1;
+        if (!_validLine(view, n)) return view.dispatch({ effects: setDbg.of(null) });
+        view.dispatch({ effects: [setDbg.of(n), EditorView.scrollIntoView(view.state.doc.line(n).from, { y: 'center' })] });
+      },
+      destroy() { _views.delete(view); view.destroy(); },
+    };
   };
 
   // ── clean accessors the rest of the UI uses ───────────────────────────────────
@@ -1104,7 +1265,10 @@
         // nothing to clip it. The `.cm-tooltip` rules are global and the theme variables sit on
         // `:root`, so the popup still themes correctly from here.
         tooltips({ parent: document.body }),
-        indentUnit.of(_indent), EditorState.tabSize.of(webLang ? 2 : 4), errField, originField, flashField,
+        indentUnit.of(_indent), EditorState.tabSize.of(webLang ? 2 : 4), errField, originField, flashField, dbgField,
+        // Breakpoint gutter. Built from the CURRENT mode, so a cell mounted mid-session (lazy
+        // hydration, or one you just added) comes up with the margin the others already have.
+        bpField, bpComp.of(_bpExt()),
         matchField,                      // notebook-wide search highlights (painted by search.js)
         wrapComp.of(_wrapExt(!!opts.markdown)),
         ..._multiCursor,
@@ -1244,6 +1408,7 @@
     view._wrapMd = !!opts.markdown;   // markdown views stay wrapped when the code-wrap toggle flips
     view._isFile = !!opts.file;       // whole-file editors keep line numbers whatever the toggle says
     view._isMd = !!opts.markdown;     // markdown cells have no grammar, so nothing to fold
+    view._cellId = opts.cellId || ''; // a breakpoint-gutter click has to say WHICH cell's line
     view._mkAcomp = mkAcomp;          // rebuilds THIS editor's completion source on a settings change
     view._edctx = _edctx;             // ctx for reconfiguring registered editor extensions
     // Join the live set (see `_allViews`) and leave it on destroy, whoever destroys it — a pane

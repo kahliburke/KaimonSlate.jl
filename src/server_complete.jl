@@ -152,6 +152,7 @@ function restart_kernel!(nb::LiveNotebook)
     # Interrupt any in-flight eval first so `shutdown!` doesn't block behind it (the deadlock this fixes:
     # holding nb.lock across `shutdown!` while the runner needs nb.lock to finish → hub wedges).
     _interrupt_inflight!(nb)
+    try; stop_debug!(nb; serialize = false, force = true); catch; end   # the frame lives in the worker about to die
     try; ReportEngine.shutdown!(nb.kernel; kill_remote = true); catch; end
     _teardown_region!(nb; kill = true)       # region kernels restart fresh too (+ sync state reset)
     with_report(nb) do report                # lock only for the report reset/mutate (no round-trip)
@@ -2435,6 +2436,8 @@ function _make_router(h::Hub)
     end))
     # Publishing manager: ledger view, target/secret config, per-notebook doc info (see server_publish.jl).
     _register_publish_routes!(router, h)
+    # Cell debugger: start/step/frame/eval/stop, routed to the cell's own kernel (see server_debug.jl).
+    _register_debug_routes!(router, h)
     return router
 end
 
@@ -3060,6 +3063,10 @@ function close_notebook!(h::Hub, id::AbstractString)
     # exist (see `_STATE_DIGESTS`).
     ReportEngine.forget_state_writes!(id)
     _interrupt_inflight!(nb)               # stop an in-flight eval so `shutdown!` doesn't block behind it
+    # Before the region detaches: a warm worker outlives this notebook, and a live debug
+    # session leaves its interpreter scoped to our modules for whoever adopts it next.
+    try; stop_debug!(nb; serialize = false, force = true); catch; end
+    forget_debug!(id); forget_specialists!(id)   # ids are reused when the file reopens
     try; shutdown!(nb.kernel); catch; end
     _teardown_region!(nb)                  # detach — a remote region idles warm like the main kernel
     lock(_EVAL_MUTEX_LOCK) do; delete!(_EVAL_MUTEX, id); end
@@ -3079,6 +3086,7 @@ function stop_hub(h::Hub)
     for nb in nbs
         _close_listeners(nb); _stop_live_rerender!(nb); _stop_watchers!(nb); _unwire_callbacks!(nb)
         _interrupt_inflight!(nb)
+        try; stop_debug!(nb; serialize = false, force = true); catch; end
         try; shutdown!(nb.kernel); catch; end
         _teardown_region!(nb)
     end

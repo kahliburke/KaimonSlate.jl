@@ -524,6 +524,8 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
 .fuprog .fulabel { color:var(--dim); font-size:.75rem; }
 
 .cellhead .trace.on { color:var(--accent); }
+/* 🐞 while this cell holds the debug session — the strip below it is the rest of the story. */
+.cellhead .dbgcell.on { color:var(--gold); }
 
 /* Trace inspector modal: source lines with captured values shown beneath each line. */
 .tracemodal { max-width:820px; width:92%; padding:0; overflow:hidden; }
@@ -808,6 +810,21 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   100% { background:rgba(255,110,70,0); }
 }
 .cm-editor .cm-line.cm-errorline-flash { animation:cm-errorflash 1.2s ease-out; }
+/* The line the debugger is stopped on. Gold rather than the error red — the cell is not in trouble,
+   it is waiting — and the same left-bar idiom as the error marks so a reader already knows how to
+   read it. The wash is slightly stronger than `errorline`'s: this one is where you are looking. */
+.cm-editor .cm-line.cm-dbgline { background:color-mix(in srgb, var(--gold) 16%, transparent);
+  box-shadow:inset 3px 0 0 var(--gold); transition:background .18s ease; }
+/* Breakpoint margin. Mounted only while the notebook is debugging (editor.js `setDebugGutter`), so
+   an ordinary notebook keeps its full width. A faint dot follows the pointer down the column, the
+   way every debugger does it, and an armed line shows a solid one. */
+.cm-editor .cm-bpgutter { width:15px; cursor:pointer; }
+.cm-editor .cm-bpgutter .cm-gutterElement { display:flex; align-items:center; justify-content:center; }
+.cm-bpdot { width:9px; height:9px; border-radius:50%; background:var(--red);
+  box-shadow:0 0 0 1px color-mix(in srgb, var(--red) 45%, transparent); }
+.cm-editor .cm-bpgutter .cm-gutterElement:not(:has(.cm-bpdot)):hover::after {
+  content:''; width:9px; height:9px; border-radius:50%;
+  background:color-mix(in srgb, var(--red) 32%, transparent); }
 /* Vim normal-mode block cursor. @replit/codemirror-vim draws it in a hard salmon (#ff9696) that
    reads as an error next to the real error highlights right above — and leaves it behind as an
    empty outlined box in every editor that ISN'T focused, so a notebook full of cells looked like it
