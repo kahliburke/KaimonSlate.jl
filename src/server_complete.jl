@@ -411,14 +411,33 @@ end
 const _ACP_MODEL_CACHE = Ref{Tuple{Float64,Vector{String}}}((0.0, String[]))
 const _ACP_MODEL_TTL = 300.0
 
+"""
+Per-agent model enumeration: the ACP agent name, the executable that has to be on PATH, and how
+to list its models.
+
+`list` returns bare ids; `_acp_models` adds the `acp:<agent>:` prefix. Agents differ in whether
+they can be asked: opencode prints its catalogue, while `claude-agent-acp` only offers a list
+inside a live session, so its ids are named here. `agent` must match Kaimon's `ACP_AGENTS`.
+
+The claude ids are the `value` fields of the `model` entry in that agent's `configOptions`, and
+nothing else is accepted — `default` is its name for the most capable model, not a placeholder to
+be replaced with `opus`.
+"""
+const _ACP_MODEL_SOURCES = [
+    (agent = "opencode", exe = "opencode",
+     list = () -> (String(strip(l)) for l in split(_capture(`opencode models`, 8), '\n'))),
+    (agent = "claude", exe = "claude-agent-acp",
+     list = () -> ["default", "sonnet", "haiku"]),
+]
+
 function _acp_models()
     at, cached = _ACP_MODEL_CACHE[]
     (time() - at) < _ACP_MODEL_TTL && return cached
     models = String[]
-    if Sys.which("opencode") !== nothing
-        for line in split(_capture(`opencode models`, 8), '\n')
-            id = strip(line)
-            isempty(id) || push!(models, "acp:opencode:" * id)
+    for src in _ACP_MODEL_SOURCES
+        Sys.which(src.exe) === nothing && continue
+        for id in src.list()
+            isempty(id) || push!(models, "acp:$(src.agent):$id")
         end
     end
     _ACP_MODEL_CACHE[] = (time(), models)

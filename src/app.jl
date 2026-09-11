@@ -210,6 +210,8 @@ mutable struct SlateModel <: Model
     lock::ReentrantLock          # guards notebooks/ok/registered/hub_version (refresher ↔ view)
     notebooks::Vector{Any}
     ok::Bool                     # last refresh reached a hub
+    seen_ok::Bool                # a hub has answered at least once this run — tells a hub still
+                                 # coming up (optimistic) from one that has stopped (an error)
     registered::Bool             # Slate present in Kaimon's extensions.json
     hub_version::String          # version of the hub we're attached to ("" = not asked/not up)
     pending::Union{Nothing,String}  # notebook to open once a hub exists (waiting mode)
@@ -219,6 +221,8 @@ mutable struct SlateModel <: Model
     rows::Vector{Any}            # the raw notebook dicts, aligned with the table rows
     _table_hash::UInt            # rebuild the table only when its data changes
     detail::Bool                 # the [d] notebook-detail modal is open
+    kaimon_view::Bool            # [k]: the embedded host's own TUI has the frame
+    quit_confirm::Bool           # `q` asked; waiting on y/n
     port_edit::Union{Nothing,String}  # the [p] port-input prompt buffer (nothing = closed)
     close_arm_id::String         # [c] pressed once for this notebook — second press confirms
     close_arm_until::Float64
@@ -226,9 +230,9 @@ mutable struct SlateModel <: Model
 end
 SlateModel(mode::Symbol; pending = nothing) =
     SlateModel(mode, _base(), false, 0, "", 0.0,
-               ReentrantLock(), Any[], false, false, "", pending,
+               ReentrantLock(), Any[], false, false, false, "", pending,
                ResizableLayout(Vertical, [Fixed(6), Fill(1), Fixed(1)]),
-               nothing, Any[], UInt(0), false, nothing, "", 0.0, nothing)
+               nothing, Any[], UInt(0), false, false, false, nothing, "", 0.0, nothing)
 
 # Open the notebook that was queued while we waited for a hub (then browser it).
 function _open_pending!(m::SlateModel)
@@ -264,7 +268,7 @@ end
 
 # Snapshot the shared status under the lock (the refresher task writes it).
 _status(m::SlateModel) = lock(m.lock) do
-    (copy(m.notebooks), m.ok, m.registered, m.hub_version)
+    (copy(m.notebooks), m.ok, m.seen_ok, m.registered, m.hub_version)
 end
 
 # Pull fresh status into the model (called from the background refresher).
@@ -298,6 +302,7 @@ function _refresh!(m::SlateModel)
     ver = !ok ? "" : isempty(ver) ? _hub_version(m.mode) : ver
     lock(m.lock) do
         m.notebooks = nbs; m.ok = ok; m.registered = reg; m.hub_version = ver
+        m.seen_ok |= ok
     end
     return nothing
 end
@@ -413,6 +418,35 @@ function Tachikoma.cleanup!(m::SlateModel)
 end
 
 function Tachikoma.update!(m::SlateModel, evt::KeyEvent)
+    if m.quit_confirm                 # the confirmation owns the keys
+        @match (evt.key, evt.char) begin
+            (:char, 'y') || (:enter, _) => (m.quit = true)
+            _ => (m.quit_confirm = false)
+        end
+        return nothing
+    end
+    # The embedded host's TUI owns every key while it is shown — it has its own tabs, its own `q`,
+    # its own Esc. So the way back cannot be a key it might want: Ctrl-] is the telnet escape and
+    # nothing in that TUI binds it. Quit is disabled over there (`KAIMON_EMBEDDED`), so the only
+    # way out is this one, and the status bar keeps saying so.
+    if m.kaimon_view
+        tw = embedded_terminal()
+        # Ctrl-] toggles, so the key in is the key out. Ctrl-[ would be the tidier partner but it
+        # IS Escape — the same byte — so it can only be told apart under the kitty keyboard
+        # protocol, where it arrives as '{'; accepted when offered, never relied on. Ctrl-C exits
+        # too: quit is disabled in the host, so forwarding it would do nothing at all.
+        #
+        # Tachikoma decodes a control byte as `byte + 0x60`, so these arrive as '}' and '{' rather
+        # than as the bracket you pressed.
+        if tw === nothing || evt.key === :ctrl_c ||
+           (evt.key === :ctrl && evt.char in ('}', '{', '|'))
+            m.kaimon_view = false
+            tw === nothing && _flash!(m, "no embedded Kaimon host to show")
+            return nothing
+        end
+        handle_key!(tw, evt)
+        return nothing
+    end
     if m.port_edit !== nothing         # the [p] port-input prompt owns the keys
         @match (evt.key, evt.char) begin
             (:escape, _) => (m.port_edit = nothing)
@@ -437,7 +471,8 @@ function Tachikoma.update!(m::SlateModel, evt::KeyEvent)
     # It leaves our action keys (q/d/c/s/r/o/enter) untouched.
     dt !== nothing && !isempty(m.rows) && handle_key!(dt, evt) && return nothing
     @match (evt.key, evt.char) begin
-        (:ctrl_c, _) || (:ctrl, 'c') || (:char, 'q') => (m.quit = true)
+        (:ctrl, '}') => _show_kaimon!(m)          # Ctrl-] — the same chord toggles back
+        (:ctrl_c, _) || (:ctrl, 'c') || (:char, 'q') => (m.quit_confirm = true)
         (:enter, _)  => _open_selected!(m)
         (:char, 'd') => begin
             sel = dt === nothing ? 0 : dt.selected
@@ -445,6 +480,7 @@ function Tachikoma.update!(m::SlateModel, evt::KeyEvent)
         end
         (:char, 'c') => _close_selected!(m)
         (:char, 's') => _own_now!(m)
+        (:char, 'k') => _show_kaimon!(m)
         (:char, 'p') => (m.port_edit = string(_PORT[]))   # open the port-input prompt, pre-filled
         (:char, 'r') => _flash!(m, _restart_hub!(m))
         (:char, 'o') => begin
@@ -459,6 +495,14 @@ end
 # Mouse: drag the pane divider, drag column borders, click a row to select it,
 # wheel-scroll the table. A live column drag keeps priority over the divider.
 function Tachikoma.update!(m::SlateModel, evt::MouseEvent)
+    # The host's pane takes the mouse while it is shown. `handle_mouse!` checks the event against
+    # the rect it last rendered into and forwards an SGR sequence only when the host asked for
+    # mouse reporting, so this is a no-op for a host that does not want it.
+    if m.kaimon_view
+        tw = embedded_terminal()
+        tw === nothing || handle_mouse!(tw, evt)
+        return nothing
+    end
     dt = m.table
     (dt === nothing || dt.col_drag == 0) && handle_resize!(m.layout, evt)
     dt === nothing && return nothing
@@ -468,15 +512,77 @@ end
 
 function Tachikoma.view(m::SlateModel, f::Frame)
     m.tick += 1
-    nbs, ok, registered, hubver = _status(m)
+    nbs, ok, seen_ok, registered, hubver = _status(m)
+    # Keep the host's emulator fed every frame, shown or not. A pane that only caught up while
+    # visible would replay its whole boot on the first switch, and the size it was spawned at
+    # would stick until then.
+    tw = embedded_terminal()
+    tw === nothing || Tachikoma.drain!(tw)
+    if m.kaimon_view && tw !== nothing
+        # Our status bar stays: the way back is a key nothing on screen mentions, and the pane
+        # covers everything that would otherwise say so.
+        tw.show_scrollbar = false   # a full-screen alt-screen host has no scrollback worth a bar
+        area = f.area
+        pane = Rect(area.x, area.y, area.width, max(1, area.height - 1))
+        bar  = Rect(area.x, area.y + pane.height, area.width, 1)
+        # No `pty_resize!` here: `render` compares the pane against its own last size and resizes
+        # the screen AND the pty itself. Doing it here too sent a different width moments earlier
+        # (render subtracts a column when the scrollbar is on), so the host got two SIGWINCHes at
+        # two sizes and painted its tab bar over itself.
+        render(tw, pane, f.buffer)
+        _view_kaimon_bar(m, bar, f.buffer)
+        return nothing
+    end
     panes = split_layout(m.layout, f.area)
     length(panes) == 3 || return
-    _view_header(m, panes[1], f.buffer, ok, registered, hubver)
+    _view_header(m, panes[1], f.buffer, ok, seen_ok, registered, hubver)
     _sync_table!(m, nbs)
     m.table === nothing || (m.table.tick = m.tick; render(m.table, panes[2], f.buffer))
     _view_statusbar(m, panes[3], f.buffer, ok)
     render_resize_handles!(f.buffer, m.layout)
     m.detail && _view_detail(m, f)   # on top of everything
+    m.quit_confirm && _view_quit_confirm(m, f)
+    return nothing
+end
+
+# Quitting is not just this window: `slate --ai` started the Kaimon host, and leaving stops it and
+# every notebook it is serving. Worth a keystroke, and worth SAYING which of the two it is.
+function _view_quit_confirm(m::SlateModel, f::Frame)
+    owns = embedded_kaimon_running()
+    lines = owns ?
+        ["This also stops the Kaimon host and the", "notebooks it is serving."] :
+        ["The hub keeps running.", ""]
+    w = clamp(maximum(textwidth.(lines)) + 6, 34, max(20, f.area.width - 4))
+    inner = render(Block(title = " quit slate? ",
+                         border_style = tstyle(:warning, bold = true),
+                         title_style = tstyle(:warning, bold = true),
+                         box = BOX_HEAVY),
+                   center(f.area, w, 6), f.buffer)
+    for y in inner.y:bottom(inner), x in inner.x:right(inner)
+        set_char!(f.buffer, x, y, ' ', Style(bg = theme().bg))
+    end
+    for (i, l) in enumerate(lines)
+        isempty(l) && continue
+        set_string!(f.buffer, inner.x + 1, inner.y + i - 1, l, tstyle(:text), inner)
+    end
+    set_string!(f.buffer, inner.x + 1, bottom(inner),
+                "[y] quit    [n/esc] stay", tstyle(:accent, bold = true), inner)
+    return nothing
+end
+
+_show_kaimon!(m::SlateModel) =
+    embedded_terminal() === nothing ?
+        _flash!(m, "no embedded Kaimon host — `slate --ai` starts one") :
+        (m.kaimon_view = true)
+
+# The one line kept below the host's pane. It is the only thing on screen that knows how to get
+# out, since everything else belongs to the other TUI.
+function _view_kaimon_bar(m::SlateModel, area::Rect, buf::Buffer)
+    tw = embedded_terminal()
+    set_string!(buf, area.x, area.y, " "^max(0, area.width), tstyle(:text_dim), area)
+    set_string!(buf, area.x + 1, area.y, " [ctrl-]] slate ", tstyle(:accent, bold = true), area)
+    tw !== nothing && Tachikoma.pty_alive(tw.pty) && return nothing
+    set_string!(buf, area.x + 18, area.y, "host exited", tstyle(:error), area)
     return nothing
 end
 
@@ -513,8 +619,17 @@ function _view_detail(m::SlateModel, f::Frame)
     return nothing
 end
 
-function _view_header(m::SlateModel, area::Rect, buf::Buffer, ok::Bool, registered::Bool,
-                      hubver::AbstractString)
+"""
+Spinner for the Server row, where the settled states are `●` and `○`.
+
+Tachikoma's sets are braille, which reads as a different widget sitting where a status dot goes.
+These are the same Geometric Shapes block as those two marks, so the row keeps one mark that
+changes rather than swapping in a second kind. All four frames are one cell wide.
+"""
+const SPINNER_CIRCLE = ['◐', '◓', '◑', '◒']
+
+function _view_header(m::SlateModel, area::Rect, buf::Buffer, ok::Bool, seen_ok::Bool,
+                      registered::Bool, hubver::AbstractString)
     inner = render(Block(title = " slate — KaimonSlate ",
                          border_style = tstyle(:accent),
                          title_style = tstyle(:accent, bold = true)),
@@ -525,24 +640,38 @@ function _view_header(m::SlateModel, area::Rect, buf::Buffer, ok::Bool, register
 
     lbl(0, "Server")
     if m.mode == :waiting
-        dots = "."^mod1(m.tick ÷ 8, 3)
-        set_string!(buf, x + 8, inner.y, "◌ ", tstyle(:warning), inner)
+        # The marker animates instead of the text growing a tail of dots. Trailing dots change the
+        # line's width every few frames, which jitters the parenthetical after it; every frame here
+        # is one cell wide. Divided by 4 rather than the table's 2 because this set has four frames
+        # to the table's ten, and the same divisor would spin it more than twice as fast.
+        spin = SPINNER_CIRCLE[mod1(m.tick ÷ 4 + 1, length(SPINNER_CIRCLE))]
+        set_string!(buf, x + 8, inner.y, string(spin, " "), tstyle(:warning), inner)
         # Two different situations wear this mode. Deferring to a Kaimon we did not start, where
         # taking the port ourselves is a real alternative — and having started one with `--ai`,
         # where it is not: that host's extension is coming up on this port, so the only thing to
         # report is progress. Offering `[s]` there would invite the user to race their own host.
         set_string!(buf, x + 10, inner.y,
             _EMBEDDED[] === nothing ?
-                "waiting for Kaimon's slate extension$dots  ([s] starts a local hub instead)" :
-                "Kaimon host running — loading its notebook hub$dots  (first start takes a few minutes)",
+                "waiting for Kaimon's slate extension  ([s] starts a local hub instead)" :
+                "Kaimon host running — loading its notebook hub  (first start takes a few minutes)",
             tstyle(:warning), inner)
     else
-        set_string!(buf, x + 8, inner.y, ok ? "● " : "○ ", ok ? tstyle(:success) : tstyle(:error), inner)
+        # A hub that has not answered YET is still starting; one that answered and then stopped has
+        # failed. Only the second is red. `:waiting` ends as soon as the port accepts a connection,
+        # which is well before the hub serves anything, so without this the normal path spends its
+        # last stretch of startup reporting a failure that has not happened.
+        starting = !ok && !seen_ok
+        mark, mst = ok        ? ("● ", tstyle(:success)) :
+                    starting  ? (string(SPINNER_CIRCLE[mod1(m.tick ÷ 4 + 1, length(SPINNER_CIRCLE))], " "),
+                                 tstyle(:warning)) :
+                                ("○ ", tstyle(:error))
+        set_string!(buf, x + 8, inner.y, mark, mst, inner)
         set_string!(buf, x + 10, inner.y,
-            !ok ? (m.mode == :owner ? "starting…" : "hub not answering") :
+            !ok ? (m.mode == :owner ? "starting…" :
+                   starting ? "connecting to the Kaimon host's hub…" : "hub not answering") :
             m.mode == :owner ? "up — this process owns the hub" :
                                "attached — external hub (Kaimon extension)",
-            tstyle(:text), inner)
+            starting ? tstyle(:warning) : tstyle(:text), inner)
     end
     lbl(1, "URL")
     set_string!(buf, x + 8, inner.y + 1, m.base, tstyle(:accent), inner)
@@ -708,6 +837,10 @@ function _view_statusbar(m::SlateModel, area::Rect, buf::Buffer, ok::Bool)
     else
         [Span(" [q]uit ", tstyle(:text_dim)),
          Span(" [↑↓/enter] open notebook ", tstyle(:text_dim)),
+         # Only when there IS one — the key does nothing otherwise, and an offer that does
+         # nothing is worse than no offer.
+         (embedded_terminal() === nothing ? Span("", tstyle(:text_dim)) :
+              Span(" [ctrl-]] kaimon ", tstyle(:accent))),
          Span(" [d]etails ", tstyle(:text_dim)),
          Span(" [c]lose notebook ", tstyle(:text_dim)),
          Span(" [o]pen index ", tstyle(:text_dim)),
@@ -881,7 +1014,10 @@ function _app_main(args::Vector{String})::Int
         try
             # Narrate straight to the terminal: this runs BEFORE the TUI, and the first run is a
             # multi-minute install that must not look like a hang.
-            start_embedded_kaimon!(aiport; online = line -> println("    ", line))
+            # A PTY only when this process will run the TUI that can display it: with no tty
+            # there is nothing to switch to, and headless keeps its log instead.
+            start_embedded_kaimon!(aiport; online = line -> println("    ", line),
+                                   tui = (stdout isa Base.TTY) && (stdin isa Base.TTY))
         catch e
             println(stderr, "slate: could not start the Kaimon host: ", sprint(showerror, e))
             return 1

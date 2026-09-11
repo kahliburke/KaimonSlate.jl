@@ -32,6 +32,23 @@ _embedded_root() = get(ENV, "KAIMONSLATE_KAIMON_HOME", joinpath(SlateHome.cache_
 _embedded_config_home() = joinpath(_embedded_root(), "config")   # → XDG_CONFIG_HOME
 _embedded_env()         = joinpath(_embedded_root(), "env")      # → --project
 
+"""
+Julia threads for the embedded Kaimon host, as `"<compute>,<interactive>"`.
+
+Set at the spawn rather than inherited: `Base.julia_cmd()` does not carry `--threads`, so whatever
+the hub was started with never reaches the host, while a `JULIA_NUM_THREADS=1` in the environment
+DOES — and one OS thread is the configuration that wedges. The host answers `fs/read_text_file`
+for ACP agents, and a read that never returns (a named pipe, a stalled mount) holds an OS thread
+for good; with too few the scheduler stops, and the process then survives SIGTERM. Two threads
+carried one such read but failed most runs with two at once, so this is headroom rather than a
+measured minimum.
+
+Mirrors `default_worker_threads` and is overridden the same way, by env var. Use `--threads=`
+rather than `-t` at the spawn: only the long spelling takes `auto` in the first position.
+"""
+default_kaimon_threads() = string(min(Sys.CPU_THREADS, 8), ",2")
+kaimon_threads() = get(ENV, "KAIMONSLATE_KAIMON_THREADS", default_kaimon_threads())
+
 # The gate puts a unix socket under `<XDG_CACHE_HOME>/kaimon/sock/<uuid>-stream.sock`, and a unix
 # socket path has a hard length limit (~104 bytes on macOS/BSD, 108 on Linux) that is NOT a path
 # limit — it is the size of a struct field, so exceeding it is a hard error, not a truncation. The
@@ -68,9 +85,12 @@ The environment the embedded host runs in. Two halves, and both are required:
 Also: no periodic index sync. Ollama may not be running, and indexing is not why Slate started a
 host — same reasoning as the `KAIMONSLATE_NO_AUTOINDEX` the exported-app runner sets.
 """
-function _embedded_env_vars(port::Integer)
+function _embedded_env_vars(port::Integer; tui::Bool = false)
     real = SlateHome                                   # the user's own homes, resolved BEFORE we repoint XDG
     return [
+        # Tells the host its lifetime is ours, so its TUI stops offering to quit. Only meaningful
+        # on the PTY path, where that TUI is reachable at all.
+        "KAIMON_EMBEDDED" => (tui ? "1" : nothing),
         "XDG_CONFIG_HOME" => _embedded_config_home(),
         "XDG_CACHE_HOME"  => _embedded_cache_home(),
         "KAIMONSLATE_CONFIG_HOME" => real.config_home(),
@@ -195,7 +215,29 @@ end
 
 # The running embedded host, when WE started it. `nothing` when we attached to one the user was
 # already running — which must never be stopped on our way out.
+# Included before `app.jl`, which is where the TUI's own `import Tachikoma` lives — and the PTY
+# handle appears in method SIGNATURES below, which resolve at definition time rather than at call.
+import Tachikoma
+
 const _EMBEDDED = Ref{Any}(nothing)
+
+"""
+The host's terminal, when it was spawned under a PTY, else `nothing`.
+
+Headless is still the right shape when nothing can display it — a `slate` with no tty, or a run
+that never opens the TUI. Under the TUI the host gets a PTY instead and keeps its own interface,
+which the app can show in a pane: same process either way, only reachable in one of them.
+"""
+embedded_terminal() = (t = _EMBEDDED[]; t isa Tachikoma.TerminalWidget ? t : nothing)
+
+_embedded_alive(p::Base.Process) = process_running(p)
+_embedded_alive(t::Tachikoma.TerminalWidget) = Tachikoma.pty_alive(t.pty)
+_embedded_alive(::Nothing) = false
+
+_embedded_signal!(p::Base.Process) = process_running(p) && kill(p)
+_embedded_signal!(t::Tachikoma.TerminalWidget) =
+    Tachikoma.pty_alive(t.pty) && t.pty.child_pid > 0 &&
+        ccall(:kill, Cint, (Cint, Cint), t.pty.child_pid, Base.SIGTERM) == 0
 
 """
     start_embedded_kaimon!(port; online = nothing) -> Bool
@@ -209,7 +251,7 @@ Registration goes through the ordinary `register_extension()` — it resolves Ka
 from `XDG_CONFIG_HOME` at call time, so running it under the isolated environment writes the
 isolated registry with no special-casing.
 """
-function start_embedded_kaimon!(port::Integer; online = nothing)
+function start_embedded_kaimon!(port::Integer; online = nothing, tui::Bool = false)
     _EMBEDDED[] === nothing || return false
     note = msg -> (online === nothing || (try; online(String(msg)); catch; end); nothing)
     # A previous run that was killed outright can leave its host or extension behind, still holding
@@ -230,7 +272,7 @@ function start_embedded_kaimon!(port::Integer; online = nothing)
     _ensure_embedded_env!(; online = online) ||
         error("slate --ai: could not build the Kaimon environment in $(_embedded_env()) — see the output above")
     _write_kaimon_config!(port)
-    envv = _embedded_env_vars(port)
+    envv = _embedded_env_vars(port; tui = tui)
     # Register under the ISOLATED config dir, not the user's. `_kaimon_dir()` reads XDG_CONFIG_HOME
     # at call time and refuses when the directory is absent, so create it first.
     withenv(envv...) do
@@ -238,8 +280,12 @@ function start_embedded_kaimon!(port::Integer; online = nothing)
         register_extension(; announce = false)
     end
     note("Starting the Kaimon host on port $port")
-    cmd = addenv(`$(Base.julia_cmd()) --project=$(_embedded_env()) --startup-file=no
-                  -m Kaimon --headless --port $port`, envv...)
+    # `--headless` is dropped for the PTY path: the point is to keep the host's own TUI, which is
+    # the thing the app then shows. Everything else about the process is identical.
+    argv = [Base.julia_cmd().exec[1], "--project=$(_embedded_env())", "--startup-file=no",
+            "--threads=$(kaimon_threads())", "-m", "Kaimon", "--port", string(port)]
+    tui || insert!(argv, length(argv) - 2, "--headless")
+    cmd = addenv(Cmd(argv), envv...)
     log = joinpath(_embedded_root(), "kaimon.log")
     mkpath(dirname(log))
     # Delimited per run. The log is appended to, and the failure report below shows its tail — so
@@ -254,23 +300,57 @@ function start_embedded_kaimon!(port::Integer; online = nothing)
     catch
         devnull
     end
-    proc = run(pipeline(cmd; stdin = devnull, stdout = io, stderr = io); wait = false)
-    _EMBEDDED[] = proc
+    handle = if tui
+        # Under a PTY the host writes to the terminal, not to the log, so a boot failure has to be
+        # read off the screen instead of tailed from the file. Started at a nominal size; the app
+        # resizes it to the real pane on the first frame.
+        Tachikoma.TerminalWidget(argv; rows = 40, cols = 120, env = _pty_env(envv),
+                                 dir = _embedded_root(), scrollback_limit = 5000)
+    else
+        run(pipeline(cmd; stdin = devnull, stdout = io, stderr = io); wait = false)
+    end
+    _EMBEDDED[] = handle
     # A host that dies on boot (a port already taken, a broken env) otherwise looks identical to one
     # that is merely slow: the caller waits out its whole deadline and then reports "not answering
     # yet", with the actual reason sitting in a log file. Give it a moment to fail, and if it does,
     # say why HERE with the tail of what it wrote.
     for _ in 1:20
         sleep(0.25)
-        process_running(proc) || break
+        tui && Tachikoma.drain!(handle)      # keep the emulator fed so a failure is legible below
+        _embedded_alive(handle) || break
     end
-    if !process_running(proc)
+    if !_embedded_alive(handle)
         _EMBEDDED[] = nothing
-        error("slate --ai: the Kaimon host exited immediately (code $(proc.exitcode)).\n" *
-              _log_tail(log, 12) * "\nFull log: $log")
+        detail = tui ? _screen_tail(handle, 12) : _log_tail(log, 12)
+        error("slate --ai: the Kaimon host exited immediately.\n" * detail * "\nFull log: $log")
     end
     @info "slate: embedded Kaimon host started" port root = _embedded_root() log
     return true
+end
+
+"""
+The environment for a PTY-spawned host: ours, with the isolation overlaid.
+
+`pty_spawn` passes `env` to `posix_spawn` as the WHOLE environment rather than as additions, so
+this has to start from `ENV` — unlike `addenv`, which the headless path uses. Entries set to
+`nothing` mean "unset", so they are dropped rather than stringified into the word "nothing".
+"""
+function _pty_env(envv)
+    e = Dict{String,String}(String(k) => String(v) for (k, v) in ENV)
+    for (k, v) in envv
+        v === nothing ? delete!(e, String(k)) : (e[String(k)] = String(v))
+    end
+    return e
+end
+
+"Last `n` non-blank lines on a terminal's screen, indented, for an error message."
+function _screen_tail(tw, n::Int)
+    sc = tw.screen
+    lines = [rstrip(String([sc.cells[r, c].char for c in 1:size(sc.cells, 2)]))
+             for r in 1:size(sc.cells, 1)]
+    filter!(!isempty, lines)
+    isempty(lines) && return "    (the host wrote nothing before exiting)"
+    return join(("    " * l for l in lines[max(1, end - n + 1):end]), "\n")
 end
 
 # Last `n` non-blank lines THIS RUN wrote, indented, for an error message. Only lines after the
@@ -296,13 +376,17 @@ function stop_embedded_kaimon!()
     p === nothing && return nothing
     _EMBEDDED[] = nothing
     try
-        process_running(p) && kill(p)          # SIGTERM: the host stops its own extensions on the way out
+        # SIGTERM: the host stops its own extensions on the way out. Under a PTY that means
+        # signalling the child directly — closing the master only gives it EOF on stdin, which a
+        # TUI reading keys will happily sit through.
+        _embedded_signal!(p)
     catch
     end
     for _ in 1:20                              # give it that chance before forcing anything
-        process_running(p) || break
+        _embedded_alive(p) || break
         sleep(0.25)
     end
+    p isa Tachikoma.TerminalWidget && (try; Tachikoma.close!(p); catch; end)
     _reap_embedded_strays!()
     return nothing
 end

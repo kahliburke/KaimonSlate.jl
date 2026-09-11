@@ -296,7 +296,10 @@ function gist(verb, text) {
 }
 
 window.onDebugAgentEvent = (env) => {
-  if (!env || (env.crew || '').indexOf('debugger') < 0) return;
+  // Exactly this role, not a name containing it. The server stamps `crew` with the specialist's
+  // registered name verbatim (relay_agent_event), so a substring test would quietly pull a second
+  // role's events into this transcript once one is registered whose name contains this one.
+  if (!env || env.crew !== DEBUG_ROLE) return;
   const d = env.data || {}, k = env.kind;
   const list = convo.value.slice();
   // What it was TOLD, shown alongside what it said. The opening brief arrives this way, and
@@ -375,7 +378,7 @@ async function clearConvo() {
 const queued = signal([]);
 
 async function deliver(text) {
-  try { await A('POST', '/api/chat', { text, crew: 'debugger' }); }
+  try { await A('POST', '/api/chat', { text, crew: DEBUG_ROLE }); }
   catch (e) { working.value = false; }
 }
 
