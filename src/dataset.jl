@@ -42,10 +42,19 @@ const DATASET_MIN_CHUNKS = 8
 
 _ds_arrayable(v) = v isa Array && isbitstype(eltype(v)) && !isempty(v)
 
+# A package the UNIT loaded is newer than this function. `_codec_loaded` finds DataFrames because a
+# sweep body did `using DataFrames`, but that happened after this code was compiled, so its methods
+# are not visible from this call site's world age and calling one directly raises "the applicable
+# method may be too new". Every call into a soft-detected package has to go through `invokelatest`.
+# The type is fetched the same way: a binding resolved in the old world is the same trap.
+_late(D::Module, name::Symbol) = Base.invokelatest(getglobal, D, name)
+_latecall(D::Module, name::Symbol, args...) = Base.invokelatest(_late(D, name), args...)
+
 function _ds_columns(v)
     D = _codec_loaded("DataFrames")
-    if D !== nothing && v isa D.DataFrame
-        return (String[String(n) for n in D.names(v)], Any[c for c in D.eachcol(v)])
+    if D !== nothing && v isa _late(D, :DataFrame)
+        return (String[String(n) for n in _latecall(D, :names, v)],
+                Any[c for c in _latecall(D, :eachcol, v)])
     end
     if v isa NamedTuple && !isempty(v) && all(c -> c isa AbstractVector, values(v))
         n = length(first(values(v)))

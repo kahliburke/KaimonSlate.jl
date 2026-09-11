@@ -34,7 +34,10 @@ _rawable(v) = v isa Array && isbitstype(eltype(v)) && !isempty(v)
 function _codec_pick(v)
     _rawable(v) && return "raw"
     D = _codec_loaded("DataFrames")
-    D !== nothing && v isa D.DataFrame && _codec_loaded("Arrow") !== nothing && return "arrow"
+    # `invokelatest` for the same reason as `_ds_columns`: the package was loaded after this was
+    # compiled, so even the type binding is not visible from here.
+    D !== nothing && v isa Base.invokelatest(getglobal, D, :DataFrame) &&
+        _codec_loaded("Arrow") !== nothing && return "arrow"
     return "jls"
 end
 
@@ -80,7 +83,9 @@ function _codec_decode(codec::String, path::String, zc::Bool)
     elseif codec == "arrow"
         A = _codec_loaded("Arrow"); D = _codec_loaded("DataFrames")
         (A === nothing || D === nothing) && error("arrow codec: Arrow/DataFrames not loaded yet")
-        return D.DataFrame(A.Table(path); copycols = !zc)   # zc ⇒ arrow-backed (immutable) columns
+        # Both packages were loaded at RUNTIME, so neither call is visible from this world age.
+        tbl = Base.invokelatest(Base.invokelatest(getglobal, A, :Table), path)
+        return Base.invokelatest(Base.invokelatest(getglobal, D, :DataFrame), tbl; copycols = !zc)
     else
         return open(Serialization.deserialize, path, "r")
     end
