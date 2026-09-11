@@ -455,7 +455,7 @@ body.app .appsetpop.open { display:block; position:absolute; top:calc(100% + 8px
    whoever deployed the app can still get at it without leaving the page. */
 body.app .err .err-bt { display:none; }
 body.app .err.showtrace .err-bt { display:block; }
-body.app .err { border-left:3px solid var(--bad,#f85149); background:rgba(248,81,73,.07);
+body.app .err { border-left:3px solid var(--red); background:color-mix(in srgb, var(--red) 7%, transparent);
   border-radius:0 8px 8px 0; padding:10px 14px; position:relative; }
 body.app .err::after { content:"details"; position:absolute; top:8px; right:12px; font-size:.7rem;
   color:var(--dim); cursor:pointer; border:1px solid var(--border); border-radius:6px; padding:1px 7px; }
@@ -467,7 +467,7 @@ body.app .err .errjump { cursor:default; }   /* nothing to jump TO — the edito
 body.app .appfail { display:flex; align-items:center; gap:10px; margin:0 auto; max-width:var(--page-max,980px);
   padding:11px 16px; background:rgba(248,81,73,.1); border:1px solid rgba(248,81,73,.35);
   border-radius:9px; font-size:.85rem; color:var(--text); }
-body.app .appfail .appfailicon { color:var(--bad,#f85149); font-size:1rem; }
+body.app .appfail .appfailicon { color:var(--red); font-size:1rem; }
 body.app .appfail .appfailtext { flex:1; }
 body.app .appfail .appfailjump { background:var(--bg3); color:var(--dim); border:1px solid var(--border);
   border-radius:7px; padding:3px 10px; font-size:.76rem; cursor:pointer; }
@@ -517,7 +517,7 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
 .fufile { display:inline-flex; align-items:center; gap:6px; color:var(--text); font-size:.79rem;
   background:var(--bg3); border:1px solid var(--border); border-radius:7px; padding:3px 9px; max-width:280px; }
 .fufile .fusize { color:var(--dim); font-size:.71rem; }
-.fuerr { color:var(--bad,#f85149); font-size:.75rem; max-width:340px; }
+.fuerr { color:var(--red); font-size:.75rem; max-width:340px; }
 .fuprog { display:inline-flex; align-items:center; gap:9px; }
 .fuprog .fubar { width:130px; height:5px; border-radius:3px; background:var(--bg3); overflow:hidden; }
 .fuprog .fufill { display:block; height:100%; background:var(--accent); transition:width .12s linear; }
