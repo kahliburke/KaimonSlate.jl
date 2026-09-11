@@ -2574,6 +2574,14 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .wplog-none { padding:12px 14px; font-size:.78rem; color:var(--dim); line-height:1.5; }
 .wplog-none a { color:var(--accent); }
 
+/* ── The button whose panel is open (panels.js) ──────────────────────────────────────────────
+   Accent border + text, the same "this is on" idiom as `.ftbtn.on` and the cell-header toggles, so
+   an open panel is traceable back to the control that opened it — and to the control that closes
+   it again. The topbar buttons are borderless until then, so the border is what does the work; the
+   two inside the ☰ menu are full-width rows, where the accent text carries it. */
+.topbar button.panelon { border-color:var(--accent); color:var(--accent); background:var(--ovl); }
+#topmenu button.panelon { color:var(--accent); background:var(--ovl); }
+
 /* ── Colour swatches (Settings → Match highlight) ────────────────────────────────────────────
    A row of the actual colours, because the setting IS a colour. `--sw` is the tint, set per button
    from the editor's own palette; the fill uses the same 20% mix the editor paints so the swatch
