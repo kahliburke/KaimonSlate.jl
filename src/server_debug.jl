@@ -228,16 +228,23 @@ end
 """
 May `who` disturb this notebook's session — end it, or start a different one over it?
 
-Yes when there is nothing running, when they own it, or when they are a person. No only in the
-one case that matters: an agent reaching for a session a human is using. It has to ask (see
-[`request_consent`](@ref)), the same way Kaimon's own debug tools will not resume out from under
-someone who is still looking around.
+Yes when there is nothing running, when they own it, or when they are a person: it is their
+notebook. Yes also for the ORCHESTRATOR that summoned the specialist holding it, because
+supervising includes deciding the work is finished — an agent that can start a specialist but not
+stop one is not supervising it, only launching it. That is the one case where an agent may end
+another's session, and it exists only because `summon!` recorded who summoned whom.
+
+No for any other agent, which is the case that matters: one reaching for a session a human is
+using. It has to ask (see [`request_consent`](@ref)), the same way Kaimon's own debug tools will
+not resume out from under someone who is still looking around.
 """
 function may_disturb(nb::LiveNotebook, who::AbstractString)
     s = _debug_session(nb)
     isempty(s.cell) && return true
     s.owner == String(who) && return true
-    return !_is_agent(who)
+    _is_agent(who) || return true
+    # The session's owner is the specialist; this asks whether `who` is the agent that summoned it.
+    return !isempty(s.owner) && orchestrator_of(nb, DEBUG_ROLE) == String(who)
 end
 
 "The source of the cell a frame's pseudo-file names, or `nothing` when it isn't one."
@@ -569,7 +576,7 @@ const DEBUG_ROLE = "debugger"
 
 "The verbs a debugging specialist may call. This list IS its job description."
 const DEBUG_VERBS = String["dbg_start", "dbg_step", "dbg_frame", "dbg_eval",
-                           "dbg_break", "dbg_watch", "dbg_ask", "dbg_done"]
+                           "dbg_break", "dbg_watch", "dbg_ask", "dbg_choose", "dbg_done"]
 
 const DEBUG_BRIEF = """
 You are a debugging specialist working inside a Slate notebook, alongside the person who called
@@ -607,7 +614,8 @@ they may say no; that is not an error, and you should carry on looking rather th
 Their hands always work, so the frame can move under you — re-read it if you are surprised.
 
 When you have an answer, or you have run out of ideas, or going further would not help, finish and
-say what you found. Deciding you are done is yours to make. Say what is true, including "I could
+say what you found. Deciding you are done is yours to make — and if an orchestrator summoned you,
+it may also decide, since it can see a goal you cannot. Say what is true, including "I could
 not work it out" — a wrong confident answer costs more than an honest empty one.
 
 Be brief in chat. Say what you are about to look at and why, then look.
@@ -720,6 +728,21 @@ function _register_debug_routes!(router, h::Hub)
         get(r, "ok", false) === true && @async (try; refresh_live_watches!(nb); catch; end)
         _json(r)
     end))
+    # Agent roles + the policy over them. Global rather than per-notebook: a specialist's verbs and
+    # whether a generalist may step are facts about this installation, not about one document.
+    HTTP.register!(router, "GET", "/api/agent-roles", _ ->
+        _json(Dict{String,Any}("roles" => specialist_roles_json(),
+                               "debug_specialist_only" => debug_specialist_only(),
+                               "checker_on" => checker_on())))
+    HTTP.register!(router, "POST", "/api/agent-roles", req -> begin
+        b = _body(req)
+        haskey(b, "debug_specialist_only") &&
+            set_debug_specialist_only!(get(b, "debug_specialist_only", false) === true)
+        haskey(b, "checker_on") && set_checker_on!(get(b, "checker_on", false) === true)
+        _json(Dict{String,Any}("ok" => true, "roles" => specialist_roles_json(),
+                               "debug_specialist_only" => debug_specialist_only(),
+                               "checker_on" => checker_on()))
+    end)
     HTTP.register!(router, "GET", "/api/{id}/debug/marks", req -> _withnb(h, req, nb ->
         _json(Dict{String,Any}("marks" => _marks_json(nb)))))
     # Summon a specialist onto a cell. Answers as soon as it is briefed — the work happens in the

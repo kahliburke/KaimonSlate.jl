@@ -411,6 +411,25 @@ end
 worker_threads()::String = String(get(_slate_config(), "worker_threads", ""))
 
 """
+    debug_specialist_only() -> Bool
+
+May only the debugging specialist drive a session, or may any agent?
+
+The point of a specialist is an agent that cannot wander: eight verbs and no way to read another
+cell, refactor something on the way past, or decide the real problem is elsewhere. A generalist
+holding the same verbs has the whole toolset too, so it does the work itself — reasonably, and
+then keeps going.
+
+On, a generalist that reaches for a stepping verb is told to summon one instead. Off, it drives
+directly, which is fewer hops for a narrow bug. A setting rather than a rule because which is
+better depends on the bug, and that is worth finding out by using both.
+"""
+debug_specialist_only()::Bool = NotebookServer.debug_specialist_only()
+
+"Turn the specialist-only rule on or off, and remember it."
+set_debug_specialist_only!(on::Bool) = NotebookServer.set_debug_specialist_only!(on)
+
+"""
     set_worker_threads!(spec; respawn=true) -> String
 
 Persist the worker Julia-thread spec (e.g. `"4,1"` or `"auto"`), apply it to future worker spawns,
@@ -623,6 +642,23 @@ function _load_slate_config!()
     NotebookServer._RUNON_PERSIST[] = function (spec)
         cfg = _slate_config(); cfg["run_location"] = String(spec)
         _persist_slate_config!(cfg)
+        return nothing
+    end
+    # Same shape for the specialist-only rule, and loaded here too: the ref is the live value and
+    # the file is where it came from, so a restart has to put it back or the setting looks like it
+    # did not stick.
+    NotebookServer.DEBUG_SPECIALIST_ONLY[] = get(_slate_config(), "debug_specialist_only", false) === true
+    NotebookServer.CHECKER_ON[] = get(_slate_config(), "checker_on", false) === true
+    NotebookServer._CHECKER_PERSIST[] = function (on)
+        cfg = _slate_config(); cfg["checker_on"] = on
+        _persist_slate_config!(cfg)
+        @info "slate: the checker is now $(on ? "on" : "off")"
+        return nothing
+    end
+    NotebookServer._DEBUG_SPECIALIST_ONLY_PERSIST[] = function (on)
+        cfg = _slate_config(); cfg["debug_specialist_only"] = on
+        _persist_slate_config!(cfg)
+        @info "slate: debug driving is now $(on ? "specialist-only" : "open to any agent")"
         return nothing
     end
     return nothing
@@ -1110,6 +1146,26 @@ function create_tools(GateTool::Type)
     # Every call here is an AGENT: the browser reaches the session over HTTP, not MCP. That
     # identity is what the ownership rule turns on — a session a person started is not one of
     # these tools' to end or take over without asking (see `may_disturb`).
+    # Why a generalist is turned away from the stepping verbs (see `debug_specialist_only`), or
+    # "" when it may proceed.
+    #
+    # Refused rather than hidden: a tool that is simply absent sends an agent looking for another
+    # way to do the same thing, while a refusal naming `dbg_summon` tells it what the right move
+    # is. Only KAIMON AGENTS are judged — a person driving from the browser or an MCP client is
+    # not an agent that can wander, and blocking them would break the manual path the UI is.
+    function _dbg_refusal(nb)
+        debug_specialist_only() || return ""
+        who = _dbg_who()
+        startswith(who, "agent:") || return ""
+        who == "agent:mcp" && return ""                # an MCP client with no agent id: a person
+        mine = NotebookServer.specialist_here(nb, NotebookServer.DEBUG_ROLE)
+        who == "agent:" * String(mine) && return ""    # the specialist itself
+        return "⛔ Stepping is the debugging specialist's. Call `dbg_summon(notebook, cell, task=…)` " *
+               "to put one on it, then supervise with `dbg_wait` / `dbg_tell` / `dbg_ask`, and " *
+               "`dbg_done` when it has answered. (Turn this off with " *
+               "`KaimonSlate.set_debug_specialist_only!(false)`.)"
+    end
+
     _dbg_who() = (a = _agent_id(); "agent:" * (isempty(a) ? (c = _caller(); isempty(c) ? "mcp" : c) : a))
 
     # A frame, rendered for reading rather than for a renderer. Values are summaries — type, size,
@@ -1204,6 +1260,7 @@ function create_tools(GateTool::Type)
     """
     function dbg_start(notebook::String, cell::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
         return _dbg_render(NotebookServer.start_debug!(nb, strip(cell); by = _dbg_who()))
     end
 
@@ -1222,6 +1279,7 @@ function create_tools(GateTool::Type)
     """
     function dbg_step(notebook::String; mode::String = "next")::String
         nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
         return _dbg_render(NotebookServer.step_debug!(nb, strip(mode)))
     end
 
@@ -1233,6 +1291,7 @@ function create_tools(GateTool::Type)
     """
     function dbg_frame(notebook::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
         return _dbg_render(NotebookServer.frame_debug(nb))
     end
 
@@ -1245,11 +1304,82 @@ function create_tools(GateTool::Type)
     """
     function dbg_eval(notebook::String, expr::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
         r = NotebookServer.eval_debug(nb, expr)
         get(r, "ok", false) === true || return "⛔ " * string(get(r, "error", "evaluation failed"))
         v = get(r, "value", nothing)
         v === nothing && return "(no value)"
         return string(get(v, "repr", ""), "  ::", get(v, "type", ""), get(v, "size", ""))
+    end
+
+    """
+        check_ok(notebook; note="") -> String
+
+    You reviewed the changes and found nothing wrong. Say so and stop.
+
+    Recorded rather than discarded. "Looked, clean" is information: without it, silence is
+    indistinguishable from a crash, a stall, or a model that lost the thread, and a reviewer you
+    cannot tell from a dead one gets ignored either way.
+    """
+    function check_ok(notebook::String; note::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        NotebookServer.checker_ok!(nb, note)
+        return "✓ recorded: nothing to report."
+    end
+
+    """
+        check_flag(notebook, cell, what) -> String
+
+    Report one thing that is wrong, in one cell.
+
+    `cell` is required. A finding that cannot point at a cell is an opinion, and the reader has no
+    way to act on it. Say what is wrong and what you saw that says so — this is read between
+    someone else's turns, so it has to be worth the interruption on its own.
+
+    One call per finding. Two unrelated problems are two flags, not one paragraph.
+    """
+    function check_flag(notebook::String, cell::String, what::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = NotebookServer.checker_flag!(nb, strip(cell), what)
+        get(r, "ok", true) === false && return "⛔ " * String(get(r, "error", "could not record that"))
+        return "⚑ flagged $(strip(cell))."
+    end
+
+    """
+        dbg_choose(notebook, question, options) -> String
+
+    Put a choice to the person and block until they pick one. Returns the chosen VALUE.
+
+    `options` is `value=label` pairs separated by `|`, e.g.
+
+        dbg_choose(notebook="nb", question="Which model should the debugging specialist use?",
+                   options="acp:claude:sonnet=Sonnet — fast, good at traces|" *
+                           "acp:claude:default=Opus — slower, better at subtle coupling")
+
+    Use this instead of asking in prose whenever you already know the alternatives. You have done
+    the work of finding them; making someone retype one is both slower and a way to get a typo you
+    will not notice until the call fails. It is also how you propose a fix: the options are what
+    you would do, and the answer is whether to do it.
+
+    Blocks like `dbg_ask`, so the same rules apply — the person may be away, and the call can be
+    abandoned before they answer. The notebook shows the question with a button per option.
+    """
+    function dbg_choose(notebook::String, question::String, options::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        isempty(strip(question)) && return "⛔ a choice needs a question"
+        opts = Tuple{String,String}[]
+        for part in split(options, '|')
+            isempty(strip(part)) && continue
+            i = findfirst('=', part)
+            v = i === nothing ? strip(part) : strip(part[1:i-1])
+            l = i === nothing ? strip(part) : strip(part[i+1:end])
+            isempty(v) || push!(opts, (String(v), String(isempty(l) ? v : l)))
+        end
+        length(opts) < 2 && return "⛔ a choice needs at least two options (value=label|value=label)"
+        reply = NotebookServer.ask_and_wait(nb, NotebookServer.DEBUG_ROLE, "choice", _dbg_who(),
+                                            strip(question); options = opts)
+        isempty(strip(reply)) && return "No answer — the question is still open, or it timed out."
+        return String(strip(reply))
     end
 
     """
@@ -1271,6 +1401,7 @@ function create_tools(GateTool::Type)
     """
     function dbg_watch(notebook::String, file::String, line::Int; expr::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
         r = NotebookServer.watch_debug!(nb, strip(file), line; expr = expr)
         get(r, "ok", false) === true || return "⛔ " * string(get(r, "error", "could not set that"))
         ws = get(r, "watches", [])
@@ -1299,6 +1430,7 @@ function create_tools(GateTool::Type)
     function dbg_break(notebook::String, file::String, line::Int; on::String = "toggle",
                        cond::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
         want = on == "toggle" ? nothing : (on in ("1", "true", "on", "yes"))
         r = NotebookServer.mark_debug!(nb, strip(file), line; on = want,
                                        cond = isempty(cond) ? nothing : cond)
@@ -2668,6 +2800,9 @@ function create_tools(GateTool::Type)
         GateTool("dbg_eval", dbg_eval; timeout_ms = CELL_RUN_MS),
         GateTool("dbg_break", dbg_break),
         GateTool("dbg_watch", dbg_watch),
+        GateTool("dbg_choose", dbg_choose),
+        GateTool("check_ok", check_ok),
+        GateTool("check_flag", check_flag),
         GateTool("dbg_ask", dbg_ask; timeout_ms = ASK_MS),
         GateTool("dbg_done", dbg_done),
         # The orchestrator's half of the pair: summon a specialist with a brief only you can

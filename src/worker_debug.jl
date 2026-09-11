@@ -20,16 +20,25 @@ const _JI = Ref{Union{Nothing,Module}}(nothing)
 
 function _ji()
     _JI[] === nothing || return _JI[]
+    # Every read of these bindings goes through `invokelatest`, including the `isdefined` check.
+    #
+    # `@eval(Main, import …)` creates the binding in a NEWER world than this method is running in,
+    # so reading it directly is a world-age violation: Julia 1.12 warns ("may malfunction under
+    # Revise") and later versions will make it an error. It is not only the import — `Main.Revise`
+    # is loaded by whoever started the session, which is also after this code was compiled.
+    _has(mod, name) = Base.invokelatest(isdefined, mod, name)
+    _get(mod, name) = Base.invokelatest(getfield, mod, name)
     m = try
-        getfield(getfield(Main, :Revise), :JuliaInterpreter)
+        _has(Main, :Revise) ? _get(_get(Main, :Revise), :JuliaInterpreter) : nothing
     catch
-        try
-            @eval(Main, import JuliaInterpreter)
-            getfield(Main, :JuliaInterpreter)
-        catch
-            nothing
-        end
+        nothing
     end
+    m === nothing && (m = try
+        _has(Main, :JuliaInterpreter) || @eval(Main, import JuliaInterpreter)
+        _get(Main, :JuliaInterpreter)
+    catch
+        nothing
+    end)
     m === nothing && error("the cell debugger needs JuliaInterpreter, which normally arrives with " *
                            "Revise; add it to this notebook's environment to debug here")
     return (_JI[] = m)
@@ -90,8 +99,10 @@ function _interpret_set(ns::Module)
     catch
     end
     try
-        R = getfield(Main, :Revise)
-        for (id, pkgdata) in R.pkgdatas
+        # `invokelatest` for the same reason as in `_ji`: Revise is loaded by whoever started the
+        # session, so its binding belongs to a world later than this method's.
+        R = Base.invokelatest(getfield, Main, :Revise)
+        for (id, pkgdata) in Base.invokelatest(getfield, R, :pkgdatas)
             m = get(Base.loaded_modules, id, nothing)
             m === nothing && continue
             base = try; R.basedir(pkgdata); catch; ""; end

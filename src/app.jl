@@ -420,7 +420,11 @@ end
 function Tachikoma.update!(m::SlateModel, evt::KeyEvent)
     if m.quit_confirm                 # the confirmation owns the keys
         @match (evt.key, evt.char) begin
-            (:char, 'y') || (:enter, _) => (m.quit = true)
+            # A second `q` confirms rather than cancelling. The key that opened this is the one
+            # already under the finger, so `qq` is the fast path for someone who meant it — which
+            # is what keeps the confirmation from being a tax on the common case. Anything else
+            # cancels, so the accident it exists to catch is still caught.
+            (:char, 'y') || (:char, 'q') || (:enter, _) => (m.quit = true)
             _ => (m.quit_confirm = false)
         end
         return nothing
@@ -566,7 +570,7 @@ function _view_quit_confirm(m::SlateModel, f::Frame)
         set_string!(f.buffer, inner.x + 1, inner.y + i - 1, l, tstyle(:text), inner)
     end
     set_string!(f.buffer, inner.x + 1, bottom(inner),
-                "[y] quit    [n/esc] stay", tstyle(:accent, bold = true), inner)
+                "[y/q] quit    [n/esc] stay", tstyle(:accent, bold = true), inner)
     return nothing
 end
 

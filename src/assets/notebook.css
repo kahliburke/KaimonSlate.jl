@@ -2002,7 +2002,11 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
   background:var(--bg3); color:var(--red); border:1px solid color-mix(in srgb, var(--red) 40%, var(--border)); }
 .rlreap:hover { background:color-mix(in srgb, var(--red) 16%, var(--bg3)); }
 .apinput { display:flex; flex-wrap:wrap; gap:8px; padding:14px 18px; border-top:1px solid var(--border); }
-.apinput textarea { flex:1; min-width:0; resize:none; height:54px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+/* `min-height`, not `height`: the box grows with what you type (see apAutoGrow), and a fixed
+   height made it something you typed past instead of into. The cap lives in the JS, which is also
+   where the scrollbar is turned on — past the cap it scrolls, below it a scrollbar over empty
+   space is just noise. */
+.apinput textarea { flex:1; min-width:0; resize:none; min-height:54px; overflow-y:hidden; background:var(--bg3); color:var(--text); border:1px solid var(--border);
   border-radius:8px; padding:8px 10px; font-family:inherit; font-size:.86rem;
   scrollbar-width:thin; scrollbar-color:var(--bg2) transparent; }
 .apinput textarea:focus { outline:none; border-color:var(--accent); }
@@ -2667,3 +2671,18 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .nbfind-opt[data-opt="word"] { text-decoration:underline; }
 .nbfind-opt.on { color:var(--accent); border-color:var(--accent); background:var(--ovl); }
 .nbfind-x { margin-left:2px; }
+
+/* ── Settings › Specialists ───────────────────────────────────────────────────
+   A role is shown with its verb COUNT as well as the list: nine against a hundred-odd tools is
+   what narrowness means here, and it is not something you should have to measure by eye. */
+.setroleslist { display:flex; flex-direction:column; gap:6px; align-items:flex-end; max-width:420px; }
+.setrole { display:flex; flex-wrap:wrap; gap:5px; align-items:baseline; justify-content:flex-end; }
+.setrole b { color:var(--accent); }
+.setrolep { padding:0 5px; border:1px solid var(--border); border-radius:4px;
+  color:var(--dim); font-size:.72em; }
+.setrolen { color:var(--dim); font-size:.78em; }
+/* The verbs wrap onto their own line and read small — present so the claim is checkable, not
+   because anyone needs to read them every time they open Settings. */
+.setrolev { flex:1 0 100%; text-align:right; line-height:1.7; }
+.setrolev code { padding:1px 4px; background:var(--bg3); border-radius:3px; font-size:.72em; }
+.setrolenone { color:var(--dim); }

@@ -1372,12 +1372,16 @@ _debug_tool(k::GateKernel, cell::AbstractString, name::String, args::Dict{String
 
 function debug_start!(k::GateKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
                       mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
-                      mark_conds::Vector{String} = String[])
+                      mark_conds::Vector{String} = String[],
+                      watch_files::Vector{String} = String[], watch_lines::Vector{Int} = Int[],
+                      watch_exprs::Vector{String} = String[])
     prepare!(k, report)
     return _debug_tool(k, cell, "__slate_debug_start",
                        Dict{String,Any}("cell" => String(cell), "source" => String(source),
                                         "mark_files" => mark_files, "mark_lines" => mark_lines,
-                                        "mark_conds" => mark_conds))
+                                        "mark_conds" => mark_conds,
+                                        "watch_files" => watch_files, "watch_lines" => watch_lines,
+                                        "watch_exprs" => watch_exprs))
 end
 
 debug_marks!(k::GateKernel, ::Report; mark_files::Vector{String} = String[],

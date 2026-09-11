@@ -458,9 +458,12 @@ pkg_op(k::PendingKernel, report::Report, op::AbstractString, name::AbstractStrin
 registry_add(k::PendingKernel, report::Report, url::AbstractString) = registry_add(_await_real(k), report, url)
 debug_start!(k::PendingKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
              mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
-             mark_conds::Vector{String} = String[]) =
+             mark_conds::Vector{String} = String[],
+             watch_files::Vector{String} = String[], watch_lines::Vector{Int} = Int[],
+             watch_exprs::Vector{String} = String[]) =
     debug_start!(_await_real(k), report; cell = cell, source = source,
-                 mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds)
+                 mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds,
+                 watch_files = watch_files, watch_lines = watch_lines, watch_exprs = watch_exprs)
 debug_marks!(k::PendingKernel, report::Report; mark_files::Vector{String} = String[],
              mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[]) =
     debug_marks!(_await_real(k), report; mark_files = mark_files, mark_lines = mark_lines,
@@ -540,9 +543,12 @@ Returns the state BEFORE the first line runs.
 """
 debug_start!(::InProcessKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
              mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
-             mark_conds::Vector{String} = String[]) =
+             mark_conds::Vector{String} = String[],
+             watch_files::Vector{String} = String[], watch_lines::Vector{Int} = Int[],
+             watch_exprs::Vector{String} = String[]) =
     debug_start!(report_module(report); cell = String(cell), source = String(source),
-                 mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds)
+                 mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds,
+                 watch_files = watch_files, watch_lines = watch_lines, watch_exprs = watch_exprs)
 
 """
     debug_marks!(kernel, report; mark_files, mark_lines, mark_conds) -> DebugState

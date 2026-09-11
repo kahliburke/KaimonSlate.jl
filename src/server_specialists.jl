@@ -239,9 +239,17 @@ const ASK_TIMEOUT = 900.0   # 15 minutes: long enough for a person to come back 
 mutable struct Ask
     id::String
     role::String        # which specialist is asking
-    kind::String        # "question" | "consent"
+    kind::String        # "question" | "consent" | "choice"
     from::String        # its agent id
     text::String
+    # A "choice" offers these instead of a text box. Two beats of the same shape need it — pick a
+    # model from a list, and decide whether to apply a proposed fix — and both are worse as free
+    # text: an agent that has already worked out the options should not make you retype one, and a
+    # typo in a model name is a failure you find out about a minute later.
+    #
+    # Each is `(value, label)`. The VALUE is what the asker receives, so it can be an id while the
+    # label reads like a sentence.
+    options::Vector{Tuple{String,String}}
     answer::Channel{String}
 end
 
@@ -249,9 +257,45 @@ const _ASKS = Dict{String,Dict{String,Ask}}()   # nb.id → ask id → ask
 const _ASK_SEQ = Ref(0)
 
 ask_json(a::Ask) = Dict{String,Any}("id" => a.id, "role" => a.role, "kind" => a.kind,
-                                    "from" => a.from, "text" => a.text)
+                                    "from" => a.from, "text" => a.text,
+                                    "options" => [Dict{String,Any}("value" => v, "label" => l)
+                                                  for (v, l) in a.options])
 asks_json(nb::LiveNotebook) = lock(_SPEC_LOCK) do
     [ask_json(a) for a in values(get(_ASKS, nb.id, Dict{String,Ask}()))]
+end
+
+# Whether only the DEBUG specialist may drive a debug session. Named for the role it gates, not
+# for "specialist" in general: with more than one role registered, a policy about one of them has
+# to say which. Held here as a live ref with a persist
+# hook, the same way RUNON_DEFAULT is: NotebookServer has no business knowing where the config file
+# lives, and KaimonSlate has no business owning a policy the server enforces.
+const DEBUG_SPECIALIST_ONLY = Ref(false)
+const _DEBUG_SPECIALIST_ONLY_PERSIST = Ref{Any}(nothing)
+
+debug_specialist_only()::Bool = DEBUG_SPECIALIST_ONLY[]
+
+function set_debug_specialist_only!(on::Bool)
+    DEBUG_SPECIALIST_ONLY[] = on
+    p = _DEBUG_SPECIALIST_ONLY_PERSIST[]
+    p === nothing || (try; p(on); catch e; @warn "slate: could not persist the specialist-only setting" exception = e; end)
+    return on
+end
+
+"""
+Every registered specialist role, as the Settings panel shows them.
+
+What a role IS, rather than what it is doing: its verbs, the permission preset it spawns under, and
+the first line of its brief. The point of showing this is that a specialist's narrowness is the
+reason to use one, and narrowness you cannot see is a claim rather than a fact.
+"""
+specialist_roles_json() = lock(_SPEC_LOCK) do
+    [Dict{String,Any}(
+        "name" => s.name,
+        "verbs" => copy(s.verbs),
+        "permission" => s.permission,
+        # One line: the full brief is hundreds of words and belongs in `dbg_brief`, not a settings row.
+        "summary" => (ls = split(strip(String(s.brief)), '\n'); isempty(ls) ? "" : String(first(ls))),
+     ) for s in sort!(collect(values(SPECIALISTS)); by = x -> x.name)]
 end
 
 "Hand the orchestrator a blocked question as a turn — the push that makes this agent-to-agent."
@@ -285,10 +329,13 @@ is never wedged forever on an empty room; for consent that answer is NO, because
 permission.
 """
 function ask_and_wait(nb::LiveNotebook, role::AbstractString, kind::AbstractString,
-                      from::AbstractString, text::AbstractString; timeout::Float64 = ASK_TIMEOUT)
+                      from::AbstractString, text::AbstractString;
+                      options = Tuple{String,String}[], timeout::Float64 = ASK_TIMEOUT)
     a = lock(_SPEC_LOCK) do
         id = string("ask", _ASK_SEQ[] += 1)
-        ask = Ask(id, String(role), String(kind), String(from), String(text), Channel{String}(1))
+        ask = Ask(id, String(role), String(kind), String(from), String(text),
+                  Tuple{String,String}[(String(v), String(l)) for (v, l) in options],
+                  Channel{String}(1))
         get!(() -> Dict{String,Ask}(), _ASKS, nb.id)[id] = ask
         ask
     end

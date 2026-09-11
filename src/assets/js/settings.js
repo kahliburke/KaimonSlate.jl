@@ -433,11 +433,52 @@ function applyDisplaySettings() {
 }
 window.applyDisplaySettings = applyDisplaySettings;
 
+// ── Specialists ───────────────────────────────────────────────────────────────
+// Loaded when the dialog opens rather than at startup: it is a round trip nobody needs until they
+// are looking at it, and the roles are registered by extensions so the answer can change.
+async function loadAgentRoles() {
+  const box = document.getElementById('setroles'), chk = document.getElementById('setspeconly');
+  if (!box) return;
+  try {
+    const r = await api('GET', '/api/agent-roles');
+    if (chk) chk.checked = !!(r && r.debug_specialist_only);
+    const chk2 = document.getElementById('setcheckeron');
+    if (chk2) chk2.checked = !!(r && r.checker_on);
+    const roles = (r && r.roles) || [];
+    box.innerHTML = roles.length ? roles.map(x => {
+      const verbs = (x.verbs || []).map(v => '<code>' + window.slateEscHtml(v) + '</code>').join(' ');
+      // The COUNT is the point — nine verbs against a hundred-odd tools is what "narrow" means
+      // here, and it is not obvious from a list you have to measure by eye.
+      return '<span class="setrole"><b>' + window.slateEscHtml(x.name) + '</b>' +
+             '<span class="setrolep" title="permission preset it spawns under">' +
+             window.slateEscHtml(x.permission || 'default') + '</span>' +
+             '<span class="setrolen">' + (x.verbs || []).length + ' verbs</span>' +
+             '<span class="setrolev">' + verbs + '</span></span>';
+    }).join('') : '<span class="setrolenone">none registered</span>';
+  } catch (e) {
+    box.textContent = 'unavailable';
+  }
+}
+async function setAgentRole(patch) {
+  try {
+    const r = await api('POST', '/api/agent-roles', patch);
+    const a = document.getElementById('setspeconly'), b = document.getElementById('setcheckeron');
+    if (a && r) a.checked = !!r.debug_specialist_only;
+    if (b && r) b.checked = !!r.checker_on;
+  } catch (e) {}
+}
+window.loadAgentRoles = loadAgentRoles;
+
 // ── Settings modal ────────────────────────────────────────────────────────────
 function openSettings(scope) {
   const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
   deb.value = updateMs; v.textContent = updateMs;
   deb.oninput = () => { updateMs = parseInt(deb.value, 10) || 0; v.textContent = updateMs; localStorage.setItem('slateUpdateMs', updateMs); };
+  const spec = document.getElementById('setspeconly');
+  if (spec) spec.onchange = () => setAgentRole({ debug_specialist_only: spec.checked });
+  const chkr = document.getElementById('setcheckeron');
+  if (chkr) chkr.onchange = () => setAgentRole({ checker_on: chkr.checked });
+  loadAgentRoles();
   // Autocomplete: typing delay before the popup auto-opens (applies to newly opened editors), and what
   // Tab does when the popup is open (applies live). Defaults: 250ms, Accept (the standard convention).
   const cd = document.getElementById('setcompdelay'), cdv = document.getElementById('setcompdelayv');

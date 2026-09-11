@@ -117,6 +117,61 @@ include("debug_fake_agent.jl")
             @test isempty(NS._debug_session(nb).cell)
         end
 
+        @testset "a choice is answered by picking, not by typing" begin
+            picked = Ref("")
+            fake_agent_reset!((args, text) -> begin
+                picked[] = NS.ask_and_wait(nb, "debugger", "choice", AGENT,
+                                           "Which model should the specialist use?";
+                                           options = [("acp:claude:sonnet", "Sonnet — fast"),
+                                                      ("acp:claude:default", "Opus — better at coupling")])
+            end)
+            NS.tell!(nb, "debugger", "offer me a model")
+            chosen = ""
+            for _ in 1:200
+                as = NS.asks_json(nb)
+                if !isempty(as)
+                    a = first(as)
+                    @test a["kind"] == "choice"
+                    # The options ride with the question: a client cannot render buttons for
+                    # alternatives it was not told about.
+                    @test length(a["options"]) == 2
+                    @test first(a["options"])["label"] == "Sonnet — fast"
+                    chosen = String(first(a["options"])["value"])
+                    NS.answer_ask!(nb, String(a["id"]), chosen)
+                    break
+                end
+                sleep(0.02)
+            end
+            fake_agent_settle!()
+            # The asker gets the VALUE, so it can be an id while the label reads like a sentence.
+            @test picked[] == "acp:claude:sonnet"
+        end
+
+        @testset "the summoning orchestrator may end its specialist's session" begin
+            NS.register_orchestrator!(nb, "debugger", AGENT)
+            NS.start_debug!(nb, "drive"; by = "agent:the-specialist")
+            try
+                @test NS._debug_session(nb).owner == "agent:the-specialist"
+                # No consent round trip: supervising includes deciding the work is done, and an
+                # agent that can start a specialist but not stop one is not supervising it.
+                @test NS.may_disturb(nb, AGENT)
+                @test NS.stop_debug!(nb; by = AGENT)
+                @test isempty(NS._debug_session(nb).cell)
+                @test isempty(NS.asks_json(nb))          # nobody was asked anything
+            finally
+                NS.stop_debug!(nb; by = NS.HUMAN)
+            end
+        end
+
+        @testset "an unrelated agent still may not" begin
+            NS.start_debug!(nb, "drive"; by = "agent:the-specialist")
+            try
+                @test !NS.may_disturb(nb, "agent:a-stranger")
+            finally
+                NS.stop_debug!(nb; by = NS.HUMAN)
+            end
+        end
+
         @testset "a specialist may not end a session it does not own" begin
             NS.start_debug!(nb, "drive"; by = NS.HUMAN)
             try

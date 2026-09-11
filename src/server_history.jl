@@ -128,6 +128,9 @@ _is_server_write(report_id, h::UInt64) =
 # Persist the notebook to its `.jl` AND record a durable checkpoint. The single
 # write+capture chokepoint for in-app mutations (replaces bare `write(...)`).
 function _persist!(nb::LiveNotebook; source::AbstractString = "browser", label::AbstractString = "")
+    # Every mutation lands here, whoever made it — so this is where the checker learns there is
+    # work to review. Swallowed: a reviewer is an optional extra and must not be able to fail a save.
+    try; note_persist!(nb); catch; end
     s = serialize_report(nb.report)
     # What `sync_from_file!` will re-derive from disk when it sees this write: it re-parses and
     # re-serializes, so it recovers THIS text and not the carried footers appended below. The ring is

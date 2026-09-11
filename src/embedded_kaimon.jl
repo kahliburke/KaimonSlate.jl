@@ -234,6 +234,15 @@ _embedded_alive(p::Base.Process) = process_running(p)
 _embedded_alive(t::Tachikoma.TerminalWidget) = Tachikoma.pty_alive(t.pty)
 _embedded_alive(::Nothing) = false
 
+"""
+Did THIS process start a Kaimon host that is still running?
+
+Asked before quitting, because the answer changes what quitting MEANS: with a host of ours behind
+it, leaving stops the host and every notebook it serves; attached to someone else's hub, leaving
+is just closing a window.
+"""
+embedded_kaimon_running() = _embedded_alive(_EMBEDDED[])
+
 _embedded_signal!(p::Base.Process) = process_running(p) && kill(p)
 _embedded_signal!(t::Tachikoma.TerminalWidget) =
     Tachikoma.pty_alive(t.pty) && t.pty.child_pid > 0 &&

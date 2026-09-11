@@ -5645,6 +5645,9 @@ function relay_agent_event(channel::AbstractString, data)
         # meanwhile (else a stale timer would wrongly un-busy the new turn → edits mislabeled).
         t = time()
         @async (sleep(8.0); get(_AGENT_TURN, nb.id, 0.0) <= t && (nb.agent_busy = false))
+        # A turn ending is what the checker watches. Only the NOTEBOOK agent's, not a specialist's:
+        # a reviewer reviewing the reviewer is a loop, and the checker's own sign-off would wake it.
+        isempty(crew) && (try; nudge_checker!(nb); catch; end)
     end
     # Always push live (token + tool-input deltas stream to the pane). Buffer for
     # reload-replay, but SKIP the liveness chunks (`data.delta == true` and

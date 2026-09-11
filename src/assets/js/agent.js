@@ -19,7 +19,9 @@ function toggleAgent() {
   p.classList.toggle('open');
   const open = p.classList.contains('open');
   document.body.classList.toggle('agent-open', open);   // slide cells left of the panel
-  if (open) { document.getElementById('apin').focus(); setWorking(agentWorking); }
+  // Sized on OPEN, not only at load: `scrollHeight` is 0 while the panel is hidden, so a draft
+  // left in the box would come back the wrong height until the first keystroke.
+  if (open) { document.getElementById('apin').focus(); apAutoGrow(); setWorking(agentWorking); }
 }
 // Maximize / restore the agent panel — a wide near-fullscreen view for reading detailed replies.
 function toggleAgentMax() {
@@ -309,9 +311,26 @@ function _uiThemeDark() {
     return t ? !!t.dark : true;
   } catch (_) { return true; }
 }
+// Grow the box to fit what is in it, up to a cap.
+//
+// A textarea cannot do this from CSS: its height is a fixed number of rows, so a fixed height was
+// a box you type past rather than into. Measuring needs the height reset to `auto` first —
+// `scrollHeight` reports the CONTENT height only when the element is not already constraining it,
+// so reading it without that returns whatever it was last set to and the box never shrinks again.
+const AP_MAX_H = 320;
+function apAutoGrow() {
+  const el = document.getElementById('apin'); if (!el) return;
+  el.style.height = 'auto';
+  const want = Math.min(el.scrollHeight, AP_MAX_H);
+  el.style.height = want + 'px';
+  // Past the cap it scrolls; below it, a scrollbar over empty space is noise.
+  el.style.overflowY = el.scrollHeight > AP_MAX_H ? 'auto' : 'hidden';
+}
+
 async function agentSend() {
   const inp = document.getElementById('apin'), text = inp.value.trim(); if (!text) return;
-  inp.value = ''; _stopArmed = false; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
+  inp.value = ''; apAutoGrow();     // back to one line, or a sent paragraph leaves a hole
+  _stopArmed = false; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
   try {
     const r = await api('POST', '/api/chat', { text, target: _chatTarget || '', model: effectiveAgentModel(), permission: effectiveAgentPerm(), dark: _uiThemeDark() });
     if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); agentStatus(''); setWorking(false); }
@@ -469,6 +488,10 @@ function _insertMention(i) {
   _closeMention(); ta.focus(); ta.setSelectionRange(np, np);
 }
 document.getElementById('apin').addEventListener('input', updateMention);
+document.getElementById('apin').addEventListener('input', apAutoGrow);
+// Pasting fires `input`, but a programmatic set (a draft restored, a template inserted) does not —
+// so size it once at load too, rather than leaving a prefilled box the wrong height.
+apAutoGrow();
 document.getElementById('apin').addEventListener('blur', () => setTimeout(_closeMention, 150));
 document.getElementById('apin').addEventListener('keydown', e => {
   if (_mention.open) {                                  // mention menu intercepts nav keys

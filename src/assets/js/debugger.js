@@ -622,6 +622,15 @@ function Asks() {
       ? html`<div class="dbgaskbtns">
           <button class="dbgb" onClick=${() => answerAsk(a.id, 'yes')}>Allow</button>
           <button class="dbgb dbgb-stop" onClick=${() => answerAsk(a.id, 'no')}>Keep it</button></div>`
+      : a.kind === 'choice' && (a.options || []).length
+      /* Buttons, not a text box: whoever asked has already worked out the alternatives, and making
+         someone retype one of them is slower and invites a typo nobody notices until the call
+         using it fails. The LABEL is what you read, the VALUE is what the asker gets back. */
+      ? html`<div class="dbgaskopts">
+          ${a.options.map(o => html`<button class="dbgopt" key=${o.value} title=${o.value}
+              onClick=${() => answerAsk(a.id, o.value)}>${o.label}</button>`)}
+          <button class="dbgopt skip" title="answer in your own words instead"
+              onClick=${() => answerAsk(a.id, '')}>none of these</button></div>`
       : html`<form class="dbgpform" onSubmit=${e => { e.preventDefault(); const el = e.target.querySelector('input');
                const v = el.value; el.value = ''; answerAsk(a.id, v); }}>
           <span class="dbgpp">›</span><input autocomplete="off" autofocus placeholder="answer…" /></form>`}
@@ -1382,6 +1391,13 @@ style.textContent = `
 .dbgtile.big .dbgtilechart { height:calc(100% - 10px); min-height:320px; }
 .dbgtileout img, .dbgtileout svg { max-width:100%; height:auto; }
 .dbgtileempty { color:var(--dim); font-family:var(--mono,ui-monospace,monospace); font-size:.7rem; }
+.dbgaskopts { display:flex; flex-wrap:wrap; gap:5px; margin-top:5px; }
+/* Wrapping, not a row: an option's label is a sentence explaining the trade-off, and truncating
+   it to fit leaves you choosing between two things you cannot tell apart. */
+.dbgopt { padding:4px 9px; border:1px solid var(--teal); border-radius:6px; background:transparent;
+  color:var(--teal); cursor:pointer; font-size:.74rem; text-align:left; max-width:100%; }
+.dbgopt:hover { background:color-mix(in srgb, var(--teal) 15%, transparent); }
+.dbgopt.skip { border-color:var(--border); color:var(--dim); }
 .dbgaddwatch { align-self:center; padding:2px 8px; background:transparent; border:1px dashed var(--border);
   border-radius:6px; color:var(--dim); cursor:pointer; font-size:.7rem; white-space:nowrap; }
 .dbgaddwatch:hover { color:var(--teal); border-color:var(--teal); }
