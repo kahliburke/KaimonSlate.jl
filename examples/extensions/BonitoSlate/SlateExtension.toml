@@ -24,8 +24,11 @@ example = "notebooks/controls.jl"
 # Upload the generated PNG to the docs-assets release, as StarRating does.
 screenshots = ["https://github.com/kahliburke/KaimonSlate.jl/releases/download/docs-assets/BonitoSlate-notebook.png"]
 
-# Videos are not generated — record one and add it here to give the card a poster + clip:
-# video = "https://github.com/kahliburke/KaimonSlate.jl/releases/download/docs-assets/BonitoSlate-demo.mp4"
+# Recorded with `node docs/record_extension_demo.mjs --url <served notebook> --cell fig_3d`, which
+# drives the controls with a real pointer and films the result — a screenshot cannot show the point
+# of this extension, which is that the figure updates in place instead of being rebuilt. Hosted for
+# the same reason as the screenshot.
+video   = "https://github.com/kahliburke/KaimonSlate.jl/releases/download/docs-assets/BonitoSlate-demo.mp4"
 docs    = "https://kahliburke.github.io/KaimonSlate.jl/extensions/"
 
 provides = [
