@@ -130,6 +130,44 @@ function _restore_interpreter!(saved::Set{Module})
 end
 
 # ── frame reporting ───────────────────────────────────────────────────────────
+#
+# Wire shapes are NamedTuples, not Dicts. They ride the gate unchanged (their type
+# comes from Base, so it is the same on both sides of a worker boundary — a struct
+# defined here would be `SlateWorker.X` in a worker and `ReportEngine.X` in the
+# server and fail to deserialize), and the fields are typed and always present, so
+# a viewer never has to guess whether a key exists.
+#
+# `scope` rather than `where`: `where` is a keyword and cannot name a field.
+
+"One local variable, summarized."
+const DebugLocal = @NamedTuple{name::String, type::String, size::String, repr::String}
+
+"One frame in the call stack."
+const DebugFrame = @NamedTuple{file::String, line::Int, scope::String}
+
+"""
+Everything needed to render a paused frame.
+
+Every field is always present. `finished` says whether the run is over, and when
+it is, `result` holds the value and the frame fields are empty rather than absent.
+"""
+const DebugState = @NamedTuple{
+    cell::String,
+    finished::Bool,
+    steps::Int,
+    interpreting::Vector{String},
+    file::String,
+    line::Int,
+    scope::String,
+    in_cell::Bool,
+    locals::Vector{DebugLocal},
+    stack::Vector{DebugFrame},
+    result::Union{DebugLocal,Nothing},
+    error::Union{String,Nothing},
+}
+
+"The answer to evaluating an expression in a paused frame."
+const DebugEval = @NamedTuple{ok::Bool, value::Union{DebugLocal,Nothing}, error::Union{String,Nothing}}
 
 """
 One local, summarized.
@@ -139,7 +177,7 @@ the point of building this against a remote region first was to make that
 impossible to forget. The summary carries what a reader needs to decide whether
 to ask for more.
 """
-function _local_summary(name, value)
+function _local_summary(name, value)::DebugLocal
     t = try; string(typeof(value)); catch; "?"; end
     sz = try
         value isa AbstractArray ? string(size(value)) : ""
@@ -147,21 +185,21 @@ function _local_summary(name, value)
         ""
     end
     rep = try
-        s = repr(value; context = IOContext(devnull, :limit => true, :compact => true))
-        length(s) > 200 ? s[1:200] * "…" : s
+        r = repr(value; context = IOContext(devnull, :limit => true, :compact => true))
+        length(r) > 200 ? r[1:200] * "…" : r
     catch e
         "<repr failed: $(sprint(showerror, e))>"
     end
-    Dict{String,Any}("name" => string(name), "type" => t, "size" => sz, "repr" => rep)
+    return (name = string(name), type = t, size = sz, repr = rep)
 end
 
 # Lowered code carries compiler temporaries and loop state with generated or empty
 # names. They are noise in a variables pane.
 _is_user_local(n) = (s = string(n); !isempty(s) && !startswith(s, "#") && s != "_")
 
-function _frame_locals(fr)
+function _frame_locals(fr)::Vector{DebugLocal}
     ji = _ji()
-    out = Dict{String,Any}[]
+    out = DebugLocal[]
     try
         for v in ji.locals(fr)
             _is_user_local(v.name) || continue
@@ -169,10 +207,10 @@ function _frame_locals(fr)
         end
     catch
     end
-    out
+    return out
 end
 
-_frame_where(fr) = try
+_frame_scope(fr) = try
     sc = _ji().scopeof(fr)
     sc isa Method ? string(sc.module, ".", sc.name) : string(sc)
 catch
@@ -185,43 +223,41 @@ function _frame_position(fr)
     catch
         ("?", 0)
     end
-    (string(file), Int(line))
+    return (string(file), Int(line))
 end
 
 "The frame stack, outermost first, so a UI can render a call stack."
-function _frame_stack(fr)
+function _frame_stack(fr)::Vector{DebugFrame}
     ji = _ji()
-    out = Dict{String,Any}[]
+    out = DebugFrame[]
     f = fr
     while f !== nothing
         file, line = _frame_position(f)
-        pushfirst!(out, Dict{String,Any}("file" => file, "line" => line, "where" => _frame_where(f)))
+        pushfirst!(out, (file = file, line = line, scope = _frame_scope(f)))
         f = try; ji.caller(f); catch; nothing; end
     end
-    out
+    return out
 end
 
-function _state(s::_DebugSession)
-    st = Dict{String,Any}("cell" => s.cell, "finished" => s.finished, "steps" => s.steps,
-                          "interpreting" => sort!([string(nameof(m)) for m in s.interpret]))
-    if s.error !== nothing
-        st["error"] = sprint(showerror, s.error)
-    end
+function _state(s::_DebugSession)::DebugState
+    interp = sort!([string(nameof(m)) for m in s.interpret])
+    err = s.error === nothing ? nothing : sprint(showerror, s.error)
     if s.finished || s.frame === nothing
-        st["result"] = s.error === nothing ? _local_summary("result", s.result) : nothing
-        return st
+        return (cell = s.cell, finished = true, steps = s.steps, interpreting = interp,
+                file = "", line = 0, scope = "", in_cell = false,
+                locals = DebugLocal[], stack = DebugFrame[],
+                result = err === nothing ? _local_summary("result", s.result) : nothing,
+                error = err)
     end
     file, line = _frame_position(s.frame)
-    st["file"] = file
-    st["line"] = line
-    st["where"] = _frame_where(s.frame)
-    # Specifically the cell being stepped, not merely "some cell": a function defined
-    # in another cell reports `cell:<that one>`, and treating that as in-cell makes a
-    # viewer highlight a line number that belongs to a different source.
-    st["in_cell"] = (file == "cell:" * s.cell)
-    st["locals"] = _frame_locals(s.frame)
-    st["stack"] = _frame_stack(s.frame)
-    return st
+    return (cell = s.cell, finished = false, steps = s.steps, interpreting = interp,
+            file = file, line = line, scope = _frame_scope(s.frame),
+            # Specifically the cell being stepped, not merely "some cell": a function
+            # defined in another cell reports `cell:<that one>`, and treating that as
+            # in-cell makes a viewer highlight a line belonging to different source.
+            in_cell = (file == "cell:" * s.cell),
+            locals = _frame_locals(s.frame), stack = _frame_stack(s.frame),
+            result = nothing, error = err)
 end
 
 # ── stepping ──────────────────────────────────────────────────────────────────
@@ -273,21 +309,28 @@ end
 
 # ── RPC verbs ─────────────────────────────────────────────────────────────────
 
+"A terminal state carrying only an explanation — same shape as any other, so a
+viewer renders it without a special case."
+_error_state(cell::AbstractString, msg::AbstractString)::DebugState =
+    (cell = String(cell), finished = true, steps = 0, interpreting = String[],
+     file = "", line = 0, scope = "", in_cell = false,
+     locals = DebugLocal[], stack = DebugFrame[], result = nothing, error = String(msg))
+
+
 """
-    debug_start!(ns; cell = cell, source = source) -> Dict
+    debug_start!(ns; cell = cell, source = source) -> DebugState
 
 Build a frame for the cell's code without running it. Returns the state before
 the first line executes, so the caller sees the starting point rather than a
 result.
 """
-function debug_start!(ns::Module; cell::String = "", source::String = "")
+function debug_start!(ns::Module; cell::String = "", source::String = "")::DebugState
     debug_stop!()
     ji = _ji()
     ex = try
         Meta.parseall(source; filename = "cell:$cell")
     catch e
-        return Dict{String,Any}("cell" => cell, "finished" => true,
-                                "error" => sprint(showerror, e))
+        return _error_state(cell, sprint(showerror, e))
     end
     interpret = _interpret_set(ns)
     saved = _scope_interpreter!(interpret)
@@ -298,8 +341,7 @@ function debug_start!(ns::Module; cell::String = "", source::String = "")
         end
     catch e
         _restore_interpreter!(saved)
-        return Dict{String,Any}("cell" => cell, "finished" => true,
-                                "error" => sprint(showerror, e))
+        return _error_state(cell, sprint(showerror, e))
     end
     s = _DebugSession(cell, nothing, pairs, ns, saved, interpret, false, nothing, nothing, 0)
     _next_thunk!(s)
@@ -308,14 +350,14 @@ function debug_start!(ns::Module; cell::String = "", source::String = "")
 end
 
 """
-    debug_step!(mode) -> Dict
+    debug_step!(mode) -> DebugState
 
 `next` stays in this frame, `into` descends into an interpreted call, `out`
 finishes the current frame, `continue` runs the rest of the cell.
 """
-function debug_step!(; mode::String = "next")
+function debug_step!(; mode::String = "next")::DebugState
     s = _DEBUG[]
-    s === nothing && return Dict{String,Any}("error" => "no debug session — call start first")
+    s === nothing && return _error_state("", "no debug session — call start first")
     s.finished && return _state(s)
     cmd = mode == "into"     ? :s  :
           mode == "out"      ? :so :
@@ -332,36 +374,35 @@ function debug_step!(; mode::String = "next")
 end
 
 "Current state without advancing."
-function debug_frame()
+function debug_frame()::DebugState
     s = _DEBUG[]
-    s === nothing && return Dict{String,Any}("error" => "no debug session")
+    s === nothing && return _error_state("", "no debug session")
     return _state(s)
 end
 
 """
-    debug_eval_expr(expr) -> Dict
+    debug_eval_expr(expr) -> DebugEval
 
 Evaluate an expression in the paused frame's scope. The frame's locals are bound
 first, so a probe sees exactly what the code sees at that line.
 """
-function debug_eval_expr(; expr::String = "")
+function debug_eval_expr(; expr::String = "")::DebugEval
     s = _DEBUG[]
-    s === nothing && return Dict{String,Any}("error" => "no debug session")
-    s.frame === nothing && return Dict{String,Any}("error" => "session has finished")
-    ji = _ji()
+    s === nothing && return (ok = false, value = nothing, error = "no debug session")
+    s.frame === nothing && return (ok = false, value = nothing, error = "session has finished")
     try
-        val = ji.eval_code(s.frame, expr)
-        return Dict{String,Any}("ok" => true, "value" => _local_summary("value", val))
+        val = _ji().eval_code(s.frame, expr)
+        return (ok = true, value = _local_summary("value", val), error = nothing)
     catch e
-        return Dict{String,Any}("ok" => false, "error" => sprint(showerror, e))
+        return (ok = false, value = nothing, error = sprint(showerror, e))
     end
 end
 
 "Abandon the session and put the interpreter's scope back the way it was."
 function debug_stop!()
     s = _DEBUG[]
-    s === nothing && return Dict{String,Any}("stopped" => false)
+    s === nothing && return (stopped = false, steps = 0)
     try; _restore_interpreter!(s.saved_compiled); catch; end
     _DEBUG[] = nothing
-    return Dict{String,Any}("stopped" => true, "steps" => s.steps)
+    return (stopped = true, steps = s.steps)
 end
