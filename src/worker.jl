@@ -51,6 +51,15 @@ include(joinpath(@__DIR__, "slate_matrix.jl")) # slate_matrix — auto-render fo
 include(joinpath(@__DIR__, "trace.jl"))     # @trace / SlateTrace inline value tracing (engine + worker)
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query (provider registry)
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
+include(joinpath(@__DIR__, "worker_debug.jl")) # step a cell line by line (shared with the engine)
+
+# Gate-tool wrappers: the stepper is namespace-agnostic, the worker supplies its own.
+__slate_debug_start(; cell::String = "", source::String = "") =
+    debug_start!(_NS[]; cell = cell, source = source)
+__slate_debug_step(; mode::String = "next") = debug_step!(; mode = mode)
+__slate_debug_frame() = debug_frame()
+__slate_debug_eval(; expr::String = "") = debug_eval_expr(; expr = expr)
+__slate_debug_stop() = debug_stop!()
 include(joinpath(@__DIR__, "envprep.jl"))   # shared notebook-env prep policy (seed/dev-path/staleness; engine + worker + remote)
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs where the deps are loaded)
 include(joinpath(@__DIR__, "demux.jl"))     # task-demux output capture (parallel evaluator I/O isolation)
@@ -2491,6 +2500,13 @@ function tools()
         KaimonGate.GateTool("__slate_cleanup_cells", __slate_cleanup_cells),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
+        # Cell debugger. Verbs ride this same RPC path, so they reach a remote
+        # region worker with no extra transport.
+        KaimonGate.GateTool("__slate_debug_start", __slate_debug_start),
+        KaimonGate.GateTool("__slate_debug_step", __slate_debug_step),
+        KaimonGate.GateTool("__slate_debug_frame", __slate_debug_frame),
+        KaimonGate.GateTool("__slate_debug_eval", __slate_debug_eval),
+        KaimonGate.GateTool("__slate_debug_stop", __slate_debug_stop),
     KaimonGate.GateTool("__slate_memo_snapshot", __slate_memo_snapshot),
         # `@replay`: what the marks would cost, and running them. Export-only — an ordinary run touches
         # neither, because the macro is a pass-through while a notebook is being edited.

@@ -131,9 +131,12 @@ _hub_port_taken() = !ReportEngine._port_free(_PORT[])
 
 # Where Kaimon comes from: a local checkout when `SLATE_KAIMON_PATH` names one (same override the
 # exported-app runner honours), else the registry.
-_kaimon_spec() = (p = strip(get(ENV, "SLATE_KAIMON_PATH", ""));
-                  isempty(p) ? "Pkg.PackageSpec(name=\"Kaimon\")" :
-                               "Pkg.PackageSpec(path=raw\"$(abspath(expanduser(p)))\")")
+# A local checkout is `develop`ed, not `add`ed: `Pkg.add` on a path CLONES the repo at
+# its current commit, so edits in the checkout are invisible until they are committed.
+# `develop` tracks the directory, which is what someone pointing at a checkout means.
+_kaimon_add_call() = (p = strip(get(ENV, "SLATE_KAIMON_PATH", ""));
+                      isempty(p) ? "Pkg.add(Pkg.PackageSpec(name=\"Kaimon\"))" :
+                                   "Pkg.develop(Pkg.PackageSpec(path=raw\"$(abspath(expanduser(p)))\"))")
 
 """
     _ensure_embedded_env!(; online = nothing) -> Bool
@@ -163,7 +166,7 @@ function _ensure_embedded_env!(; online = nothing)
     code = """
         import Pkg
         Pkg.activate(raw"$env")
-        Pkg.add($(_kaimon_spec()))
+        $(_kaimon_add_call())
         import Kaimon
         let pf = joinpath(pkgdir(Kaimon), "Project.toml")
             deps = collect(keys(get(Pkg.TOML.parsefile(pf), "deps", Dict{String,Any}())))
