@@ -22,6 +22,11 @@ jobs:
     permissions: # julia-actions/cache proactively deletes old caches it created
       actions: write
       contents: read
+    # Spanning two Julias costs one compat range: ReTest 0.3.4 does not precompile on 1.13 (it
+    # imports Test.push_testset/pop_testset, which 1.13 removed) and 0.4 is itself gated to 1.13+,
+    # so Project.toml lists `ReTest = "0.3.4, 0.4"` and each version resolves the one that works.
+    # That note lives here rather than beside the bound, because Pkg rewrites Project.toml on every
+    # resolve and drops comments.
     strategy:
       fail-fast: false
       matrix:
