@@ -75,6 +75,22 @@ tool_names(s::Specialist) = String[gate_namespace() * "_" * v for v in s.verbs]
 # Keyed by BOTH, so one notebook can host several specialists at once — a debugger and a profiler
 # looking at the same cell is a thing to want, not a collision to prevent.
 
+"""
+Push a specialist-framework event to every open page, tagged with the role it belongs to.
+
+Its own channel, not the debugger's. Everything here — a blocked question, a sign-off, a
+specialist arriving — happens to every kind of specialist, and pushing it on `debug:` gave it only
+a debugger-shaped place to appear. A surface listens on `specialist:` and filters on `role`, so a
+profiler's question reaches a profiler's pane without either knowing about the other.
+"""
+function broadcast_specialist(nb::LiveNotebook, role::AbstractString, payload::Dict{String,Any})
+    try
+        _broadcast(nb, "specialist:" * JSON.json(merge(payload, Dict("role" => String(role)))))
+    catch
+    end
+    return nothing
+end
+
 const _SPEC_LOCK = ReentrantLock()
 const _SPEC_BRIEFING = Dict{Tuple{String,String},String}()   # (nb, role) → last opening turn
 const _SPEC_ORCH = Dict{Tuple{String,String},String}()       # (nb, role) → orchestrator agent id
@@ -108,7 +124,7 @@ function summon!(nb::LiveNotebook, role::AbstractString; subject::AbstractString
     lock(_SPEC_LOCK) do; _SPEC_BRIEFING[(nb.id, s.name)] = turn; end
     register_orchestrator!(nb, s.name, orchestrator)
     _agent_call(:agent_send, Dict{String,Any}("agent_id" => aid, "text" => turn))
-    _broadcast_debug(nb, Dict{String,Any}("specialist" => Dict{String,Any}(
+    broadcast_specialist(nb, s.name, Dict{String,Any}("specialist" => Dict{String,Any}(
         "agent_id" => aid, "crew" => s.name, "cell" => String(subject), "model" => String(model))))
     return Dict{String,Any}("ok" => true, "agent_id" => aid, "crew" => s.name,
                             "cell" => String(subject))
@@ -196,7 +212,7 @@ function sign_off!(nb::LiveNotebook, role::AbstractString, who::AbstractString, 
     catch e
         @debug "specialist: sign-off could not reach the chat" exception = e
     end
-    _broadcast_debug(nb, Dict{String,Any}("signoff" => Dict{String,Any}(
+    broadcast_specialist(nb, role, Dict{String,Any}("signoff" => Dict{String,Any}(
         "role" => String(role), "from" => String(who), "text" => text)))
     return nothing
 end
@@ -271,7 +287,7 @@ function ask_and_wait(nb::LiveNotebook, role::AbstractString, kind::AbstractStri
         get!(() -> Dict{String,Ask}(), _ASKS, nb.id)[id] = ask
         ask
     end
-    _broadcast_debug(nb, Dict{String,Any}("ask" => ask_json(a)))
+    broadcast_specialist(nb, a.role, Dict{String,Any}("ask" => ask_json(a)))
     _page_orchestrator(nb, a)
     reply = ""
     timer = Timer(timeout) do _
@@ -285,7 +301,7 @@ function ask_and_wait(nb::LiveNotebook, role::AbstractString, kind::AbstractStri
             d = get(_ASKS, nb.id, nothing)
             d === nothing || delete!(d, a.id)
         end
-        _broadcast_debug(nb, Dict{String,Any}("asks" => asks_json(nb)))
+        broadcast_specialist(nb, a.role, Dict{String,Any}("asks" => asks_json(nb)))
     end
     return reply
 end

@@ -21,6 +21,7 @@ import { useRef, useEffect } from 'preact/hooks';
 // ── state ─────────────────────────────────────────────────────────────────────────────────────────
 // One session per notebook (the interpreter's compiled-module scope is process-global, so two at
 // once on one kernel would fight over it) — hence one signal, not a map.
+const DEBUG_ROLE = 'debugger';   // which specialist this workspace is for
 const st = signal(null);      // the debug state from the server, or null when nothing is running
 const busy = signal(false);   // a verb is in flight — the controls disable rather than queue
 const focus = signal(false);  // focus view open
@@ -414,10 +415,17 @@ async function answerAsk(id, text) {
 // ── live push ─────────────────────────────────────────────────────────────────────────────────────
 // Every verb the server runs is broadcast, whoever ran it. That is what makes an agent's session
 // watchable: the strip and the focus view are reading the session, not their own last click.
-window.onDebugPush = (p) => {
-  if (!p) return;
+// Specialist-framework events arrive on their own channel and name the role they belong to, so a
+// second kind of specialist gets its own pane without either surface knowing about the other.
+window.onSpecialistPush = (p) => {
+  if (!p || p.role !== DEBUG_ROLE) return;
   if (p.asks !== undefined) asks.value = p.asks || [];
   if (p.ask) asks.value = [...asks.value.filter(a => a.id !== p.ask.id), p.ask];
+  if (p.specialist) specialist.value = p.specialist;
+};
+
+window.onDebugPush = (p) => {
+  if (!p) return;
   if (p.probe) {
     const v = p.probe;
     probes.value = [...probes.value, {
@@ -426,8 +434,7 @@ window.onDebugPush = (p) => {
     }];
     return;
   }
-  if (p.specialist) { specialist.value = p.specialist; return; }
-  if (p.session === false) { specialist.value = null; apply(null); paintMarks(p.marks || []); syncGutter(); return; }
+    if (p.session === false) { specialist.value = null; apply(null); paintMarks(p.marks || []); syncGutter(); return; }
   if (p.marks !== undefined && p.cell === undefined) { paintMarks(p.marks); syncGutter(); return; }
   if (p.cell !== undefined) apply(p);
 };
