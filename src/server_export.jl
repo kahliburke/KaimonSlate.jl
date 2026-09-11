@@ -5493,8 +5493,9 @@ end
 # `crew` is a crew label ("" = the default/solo agent — id stays `slate-<id>` for
 # back-compat so a re-adopted agent matches across an extension restart). Multiple
 # crew agents share one notebook; `_AGENT_ROUTES` already maps each id → this nb.
-# `model` ("" = service default = sonnet) binds at spawn only — an already-running
-# crew agent keeps its model until reaped (the UI kills it on a model-setting change).
+# `model` ("" = service default = sonnet). An ACP agent can be repointed at another
+# model on its live session, so a model change keeps the conversation; every other
+# backend binds it to the process at spawn and the agent is reaped and reopened.
 # The agent's working dir = the notebook's PROJECT ROOT (the dir holding the active Project.toml),
 # NOT the notebook file's own directory. The `lab` preset runs Claude Code in `acceptEdits` mode,
 # which only auto-accepts edits inside the workspace (cwd); rooting at the project lets the agent
@@ -5515,12 +5516,30 @@ function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::Abst
         # Kaimon's agent service restarted under us — must not be sent into (that's the "endpoint not
         # available" / silent failure); close + forget it here so we spawn a fresh one below and chat
         # self-heals. If we can't even check the status (service hiccup), assume it's gone and respawn.
-        alive = try
-            String(get(_agent_call(:agent_status, Dict{String,Any}("agent_id" => existing)), "status", "")) != "dead"
+        st = try
+            _agent_call(:agent_status, Dict{String,Any}("agent_id" => existing))
         catch
-            false
+            Dict{String,Any}()
         end
-        alive && return existing
+        alive = String(get(st, "status", "")) != "dead" && !isempty(st)
+        if alive
+            # A model change used to mean killing the agent and losing the chat.
+            # ACP carries a model method, so try to repoint the live session first
+            # and only fall through to the reap below when the backend can't.
+            want = String(model)
+            if !isempty(want) && want != String(get(st, "model", ""))
+                switched = try
+                    get(_agent_call(:agent_set_model,
+                                    Dict{String,Any}("agent_id" => existing, "model" => want)),
+                        "switched", false) === true
+                catch
+                    false
+                end
+                switched && return existing
+            else
+                return existing
+            end
+        end
         try; _agent_call(:agent_close, Dict{String,Any}("agent_id" => existing)); catch; end   # free the id
         lock(_AGENT_LOCK) do
             delete!(_AGENT_ROUTES, existing); delete!(_AGENT_CREW, existing); delete!(nb.agents, label)

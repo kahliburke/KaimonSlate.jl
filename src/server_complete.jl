@@ -395,6 +395,35 @@ end
 _ollama_models() = _tags_models(get(ENV, "OLLAMA_HOST", "http://127.0.0.1:11434"))
 _vmlx_models()   = _tags_models(get(ENV, "VMLX_HOST", "http://127.0.0.1:8000"))
 
+"Run a command for its stdout, giving up after `secs` rather than blocking a request handler."
+function _capture(cmd::Cmd, secs::Real)
+    out = Ref("")
+    t = @async try; out[] = read(cmd, String); catch; end
+    timedwait(() -> istaskdone(t), float(secs)) === :ok ? out[] : ""
+end
+
+# Models reachable through an ACP agent, for the same Settings dropdown. Kaimon's
+# ACPClientBackend routes an `acp:<agent>:<model>` id to anything speaking the
+# Agent Client Protocol, so these ids are returned ready to use rather than
+# needing the browser to know the scheme. Listing shells out and the dropdown
+# asks every time it opens, hence the cache; best-effort, [] if not installed.
+const _ACP_MODEL_CACHE = Ref{Tuple{Float64,Vector{String}}}((0.0, String[]))
+const _ACP_MODEL_TTL = 300.0
+
+function _acp_models()
+    at, cached = _ACP_MODEL_CACHE[]
+    (time() - at) < _ACP_MODEL_TTL && return cached
+    models = String[]
+    if Sys.which("opencode") !== nothing
+        for line in split(_capture(`opencode models`, 8), '\n')
+            id = strip(line)
+            isempty(id) || push!(models, "acp:opencode:" * id)
+        end
+    end
+    _ACP_MODEL_CACHE[] = (time(), models)
+    models
+end
+
 include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Typst (uses types defined above)
 include("memostore.jl")      # MemoStore (server-side copy — stateless, root passed explicitly): pack/unpack
 include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-contained single-source .jl
@@ -2248,6 +2277,9 @@ function _make_router(h::Hub)
         _json(Dict("models" => _ollama_models()))))
     HTTP.register!(router, "GET", "/api/{id}/vmlx-models", req -> _withnb(h, req, _ ->
         _json(Dict("models" => _vmlx_models()))))
+    # ACP agents (opencode, …) — ids arrive fully prefixed, ready for agent_open.
+    HTTP.register!(router, "GET", "/api/{id}/acp-models", req -> _withnb(h, req, _ ->
+        _json(Dict("models" => _acp_models()))))
     # Semantic docs search (docs v2) — for the UI palette; the agent uses slate.search_docs.
     HTTP.register!(router, "GET", "/api/{id}/docsearch", req -> _withnb(h, req, nb -> begin
         q = strip(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))
