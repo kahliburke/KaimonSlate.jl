@@ -62,20 +62,20 @@
   <span id="scratchrun" class="scratchrun" style="display:none" onclick="toggleScratch()" title="scratch activity — click to open the Scratchpad"><span class="scrdot"></span>🧪 <span class="scrlabel">scratch</span></span>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
   <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
-  <button onclick="toggleTOC()" title="table of contents — jump to a heading (⌘⇧L)">📑 Contents</button>
-  <button onclick="toggleDag()" title="pipeline graph — the notebook's dataflow DAG, live (⌘⇧G)">🕸 DAG</button>
-  <button onclick="toggleFiles()" title="edit this notebook's package source (src/ + notebooks/) — save reloads via Revise">📁 Files</button>
-  <button onclick="togglePalette()" title="controls palette — all @bind widgets">🎛 Controls</button>
-  <button id="agentbtn" onclick="toggleAgent()" title="agent chat">💬 Agent</button>
+  <button data-panel="tocpanel" onclick="toggleTOC()" title="table of contents — jump to a heading (⌘⇧L)">📑 Contents</button>
+  <button data-panel="dagpane" onclick="toggleDag()" title="pipeline graph — the notebook's dataflow DAG, live (⌘⇧G)">🕸 DAG</button>
+  <button data-panel="filespanel" onclick="toggleFiles()" title="edit this notebook's package source (src/ + notebooks/) — save reloads via Revise">📁 Files</button>
+  <button data-panel="palette" onclick="togglePalette()" title="controls palette — all @bind widgets">🎛 Controls</button>
+  <button id="agentbtn" data-panel="agentpanel" onclick="toggleAgent()" title="agent chat">💬 Agent</button>
   <div class="menuwrap">
     <button onclick="toggleTopMenu(event)" title="more actions">☰</button>
     <div id="topmenu" class="topmenu">
       <button onclick="togglePackages();closeTopMenu()">📦 Packages</button>
       <button onclick="openExtensions();closeTopMenu()">🧩 Extensions</button>
       <button onclick="toggleAct();closeTopMenu()">📋 Activity log</button>
-      <button onclick="toggleLog();closeTopMenu()">🪵 Worker log</button>
-      <button onclick="toggleHistory();closeTopMenu()">🕘 History</button>
-      <button id="scratchbtn" onclick="toggleScratch();closeTopMenu()">🧪 Scratchpad</button>
+      <button data-panel="logpanel" onclick="toggleLog();closeTopMenu()">🪵 Worker log</button>
+      <button data-panel="histpanel" onclick="toggleHistory();closeTopMenu()">🕘 History</button>
+      <button id="scratchbtn" data-panel="scratchpanel" onclick="toggleScratch();closeTopMenu()">🧪 Scratchpad</button>
       <button onclick="enterPresent();closeTopMenu()" title="present this notebook as a slide deck (⌘⇧P)">📽 Present</button>
       <button onclick="toggleZen();closeTopMenu()" title="reading mode — hide code &amp; chrome, show only markdown + output (Esc to exit)">🧘 Zen mode</button>
       <hr>
@@ -412,6 +412,17 @@
     <span class="rt"><input type="checkbox" id="setwrap"/></span></div>
   <div class="setrow"><label title="Soft-wrap long lines in the code editor. Markdown cells always wrap.">Wrap code editor</label>
     <span class="rt"><input type="checkbox" id="setwraped"/></span></div>
+  <div class="setrow"><label title="Show line numbers in the gutter of every code cell. The Files tab always shows them.">Line numbers</label>
+    <span class="rt"><input type="checkbox" id="setlinenums"/></span></div>
+  <div class="setrow"><label title="Draw a thin vertical line at each indent level, so a nested block's extent is visible at a glance">Indent guides</label>
+    <span class="rt"><input type="checkbox" id="setguides"/></span></div>
+  <div class="setrow"><label title="Let Julia blocks (function, if, for, while, try, let, begin, module, struct) be collapsed from the gutter — v is open, &gt; is folded">Code folding</label>
+    <span class="rt"><input type="checkbox" id="setfolding"/></span></div>
+  <div class="setrow"><label title="Select a word and its other occurrences in that cell are tinted">Highlight matching words</label>
+    <span class="rt"><input type="checkbox" id="setmatchhi"/></span></div>
+  <div class="setrow"><label title="Colour of the matching-word tint. Theme follows the notebook theme's accent.">Match highlight</label>
+    <span class="rt"><span class="swname" id="setmatchtintname"></span>
+      <span class="swatches" id="setmatchtint"><!-- swatches built from matchTintNames() (settings.js) --></span></span></div>
   <div class="setsec">Appearance</div>
   <div class="setrow"><label title="Overall colour theme for the Slate notebook UI">Theme</label>
     <select id="settheme"><!-- options populated from SLATE_UI_THEMES (settings.js) --></select></div>
@@ -725,6 +736,7 @@
 <script src="/assets/js/cellops.js"></script>
 <script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/keyboard.js"></script>
+<script src="/assets/js/search.js"></script>   <!-- ⌘F: one find bar across every cell -->
 <script src="/assets/js/settings.js"></script>
 <script src="/assets/js/appmode.js"></script>   <!-- app mode: reading view, app bar, plain-language failures -->
 <script src="/assets/js/workbook.js"></script>  <!-- workbook mode: run/reset on the cells a reader fills in -->

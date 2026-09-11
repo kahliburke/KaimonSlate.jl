@@ -12,10 +12,13 @@ import { vim as vimMode, Vim as vimApi, getCM as vimGetCM } from "@replit/codemi
 // Emacs needs none of vim's Escape arbitration: it is modeless, uses M- (Alt) for Meta rather than
 // the ESC-prefix convention, and cancels with C-g — it binds no Escape at all.
 import { emacs as emacsMode } from "@replit/codemirror-emacs";
+// Indent guides. CodeMirror core has none, and this is the extension the ecosystem settled on,
+// from the same publisher as the vim and emacs keymaps above.
+import { indentationMarkers } from "@replit/codemirror-indentation-markers";
 import { defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess,
          toggleComment, undoDepth, redoDepth } from "@codemirror/commands";
 import { LRLanguage, LanguageSupport, syntaxHighlighting, HighlightStyle, indentNodeProp,
-         foldNodeProp, foldInside, indentUnit, bracketMatching, indentOnInput, syntaxTree } from "@codemirror/language";
+         foldNodeProp, indentUnit, bracketMatching, indentOnInput, syntaxTree } from "@codemirror/language";
 import { styleTags, tags as t } from "@lezer/highlight";
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
          completionStatus, snippet, startCompletion, acceptCompletion } from "@codemirror/autocomplete";
@@ -122,6 +125,32 @@ const juliaTags = styleTags({
   "( )": t.paren, "[ ]": t.squareBracket, "{ }": t.brace,
 });
 
+// Where a fold over a block should START. Always a position on the block's FIRST line, so the
+// gutter arrow sits on the `function` / `if` / `for` line where you look for it — returning a
+// position further down moves the arrow to the bottom of the signature and leaves the opening line
+// with no control at all.
+//
+// Usually that is simply the end of the first line, which keeps the whole signature visible:
+// `function f(x)…end`. But a signature wrapped over several lines is cut wherever the line happened
+// to break, which showed `function long_signature(data::AbstractVector{<:Real},…end` — a dangling
+// comma that reads like a syntax error. What keeps a header open across lines is an unclosed
+// bracket, so in that case fold from just inside that bracket instead: `function long_signature(…end`
+// hides the parameter list without pretending to show part of it.
+//
+// Brackets inside strings and comments count too, so `f(s = ")")` can be read as complete when it
+// isn't. That only costs the wrapped-header refinement and falls back to the old behaviour.
+const _headerEnd = (state, node) => {
+  const first = state.doc.lineAt(node.from);
+  const text = first.text;
+  let depth = 0, openAt = -1;
+  for (let i = node.from - first.from; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "(" || ch === "[" || ch === "{") { if (depth === 0) openAt = i; depth++; }
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+  }
+  return (depth > 0 && openAt >= 0) ? first.from + openAt + 1 : first.to;
+};
+
 const juliaLanguage = LRLanguage.define({
   name: "julia",
   parser: juliaParser.configure({
@@ -134,8 +163,19 @@ const juliaLanguage = LRLanguage.define({
         "FunctionDefinition StructDefinition WhileStatement ForStatement IfStatement LetStatement TryStatement BeginStatement QuoteStatement ModuleDefinition MacroDefinition":
           (cx) => cx.baseIndent + (/^\s*(end|else|elseif|catch|finally)\b/.test(cx.textAfter) ? 0 : cx.unit),
       }),
+      // Fold from the end of the HEADER to the indentation before the closing keyword, so a folded
+      // block keeps its own signature and its own `end`: `function f(x)…end`. `foldInside` starts
+      // the range after the first child, which in this grammar is the keyword itself, so it would
+      // fold to `function…end` and hide the one part worth reading. Every block form the grammar
+      // names is listed, because the indent rule above already treats them all as blocks.
       foldNodeProp.add({
-        "FunctionDefinition StructDefinition ModuleDefinition LetStatement BeginStatement": foldInside,
+        "FunctionDefinition MacroDefinition StructDefinition ModuleDefinition IfStatement WhileStatement ForStatement TryStatement LetStatement BeginStatement QuoteStatement DoClause":
+          (node, state) => {
+            const headerEnd = _headerEnd(state, node);
+            const last = state.doc.lineAt(node.to);
+            const to = last.from + /^\s*/.exec(last.text)[0].length;
+            return to > headerEnd ? { from: headerEnd, to } : null;
+          },
       }),
     ],
   }),
@@ -270,6 +310,7 @@ export {
   autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, completionStatus, snippet,
   startCompletion, acceptCompletion,
   vimMode, vimApi, vimGetCM, emacsMode,  // alternative keymaps, off unless the setting selects one
+  indentationMarkers,                    // indent guides, off unless the setting selects them
   // Full module namespaces for editor extensions (see the import note above).
   cmView, cmState, cmCommands, cmLanguage, cmAutocomplete, cmSearch, cmHighlight,
 };

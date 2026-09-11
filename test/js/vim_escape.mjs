@@ -39,11 +39,17 @@ const vimApi = {
   exitVisualMode: () => { acted = 'visual'; },
   handleKey: (_cm, key) => { acted = 'key:' + key; },
 };
-const keydown = new Function('completionStatus', '_vimCM', '_vimState', 'vimApi', 'return function keydown(e, view) ' + body.slice(body.indexOf('{')) + ';')(
+// `cmCommands.simplifySelection` stands in for the selection rung. The real one collapses extra
+// carets or a non-empty selection and returns false on a bare caret, which is what lets a plain
+// Escape fall through to leaving the cell; `cursors > 1` models "there was something to collapse".
+let cursors = 1, collapsed = 0;
+const cmCommands = { simplifySelection: () => (cursors > 1 ? (collapsed++, cursors = 1, true) : false) };
+const keydown = new Function('completionStatus', '_vimCM', '_vimState', 'vimApi', 'cmCommands', 'return function keydown(e, view) ' + body.slice(body.indexOf('{')) + ';')(
   () => completion,
   () => (vimState ? { state: { vim: vimState } } : null),
   () => vimState,
   vimApi,
+  cmCommands,
 );
 const view = { state: {}, contentDOM: { blur: () => { blurred++; } } };
 const esc = (over = {}) => Object.assign({ key: 'Escape', ctrlKey: false, metaKey: false, altKey: false }, over);
@@ -53,11 +59,11 @@ function check(what, got, want) {
   if (got !== want) { console.error(`vim_escape: ${what} — got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); bad++; }
 }
 // One press under a given completion/vim state → {handled, blurred, acted}.
-function press(ev, comp, vs) {
-  completion = comp; vimState = vs; acted = null;
-  const before = blurred;
+function press(ev, comp, vs, carets = 1) {
+  completion = comp; vimState = vs; acted = null; cursors = carets;
+  const before = blurred, wasCollapsed = collapsed;
   const handled = keydown(ev, view);
-  return { handled, blurred: blurred > before, acted };
+  return { handled, blurred: blurred > before, acted, collapsed: collapsed > wasCollapsed };
 }
 
 const OFF = null, INSERT = { insertMode: true, visualMode: false };
@@ -89,7 +95,33 @@ check('visual exits even while a completion is pending', press(esc(), 'pending',
 check('a pending operator is cancelled', press(esc(), 'none', PENDING_OP).acted, 'key:<Esc>');
 check('a pending operator does not leave the cell', press(esc(), 'none', PENDING_OP).blurred, false);
 
-// Rung 4 — nothing inner is live, so Escape means what it has always meant.
+// Rung 4: a selection or an extra caret is inner to the cell itself, so Escape simplifies before it
+// will give up the cell. This is defaultKeymap's Escape command, which the ladder pre-empts.
+check('an extra caret collapses', press(esc(), 'none', OFF, 2).collapsed, true);
+check('collapsing does not leave the cell', press(esc(), 'none', OFF, 2).blurred, false);
+check('collapsing reports handled', press(esc(), 'none', OFF, 2).handled, true);
+check('a bare caret is not a rung', press(esc(), 'none', OFF, 1).collapsed, false);
+// The popup outranks the carets. Without this case the rung's position below rung 1 is unpinned,
+// and an Escape meant to dismiss a completion would silently drop the extra carets instead.
+check('an active completion outranks the carets', press(esc(), 'active', OFF, 2).collapsed, false);
+check('an active completion is still handed on with carets present', press(esc(), 'active', OFF, 2).handled, false);
+// This rung applies under vim TOO. Extra carets are a state you have to be able to leave, and Escape
+// is the key everyone reaches for; skipping the rung under vim meant a vim user's only way back to
+// one caret was the mouse. Safe because the rung is a no-op on a bare caret (below), so normal-mode
+// `<Esc>` keeps its "assert the mode, then leave the cell" meaning whenever there is nothing to
+// collapse. Vim's block cursor does not stand in the way — the plugin draws it as a decoration and
+// leaves the selection empty, verified in a live editor.
+check('vim normal mode collapses extra carets', press(esc(), 'none', NORMAL, 2).collapsed, true);
+check('vim normal mode keeps the cell while collapsing', press(esc(), 'none', NORMAL, 2).blurred, false);
+check('vim normal mode with ONE caret still leaves the cell', press(esc(), 'none', NORMAL, 1).blurred, true);
+check('vim insert exits insert rather than collapsing', press(esc(), 'none', INSERT, 2).collapsed, false);
+check('vim insert still does not leave the cell', press(esc(), 'none', INSERT, 2).blurred, false);
+// Visual mode outranks it too: Escape leaves visual first, carets intact for the next press.
+check('vim visual exits visual rather than collapsing', press(esc(), 'none', VISUAL, 2).collapsed, false);
+// Emacs is modeless and binds no Escape, so `_vimState` is null for it and it collapses like the
+// default keymap; the OFF cases above are exactly that path.
+
+// Rung 5: nothing inner is live, so Escape means what it has always meant.
 check('normal mode leaves the cell', press(esc(), 'none', NORMAL).blurred, true);
 check('normal mode reports handled', press(esc(), 'none', NORMAL).handled, true);
 check('normal mode does not touch vim', press(esc(), 'none', NORMAL).acted, null);
@@ -118,10 +150,33 @@ if (!/argString[\s\S]{0,80}===\s*'!'[\s\S]{0,80}_discard/.test(src)) {
 if ((src.match(/_discard\(cm\)/g) || []).length !== 1) {
   console.error('vim_escape: _discard is reachable from more than the bang guard'); bad++;
 }
-// A md / @bind cell edits in the `.srcedit` overlay, which has no run — `:w` must commit there
-// instead, or it silently does nothing on exactly the cells whose source you opened deliberately.
-if (!/_overlay\(v\)[\s\S]{0,60}commitSource/.test(src)) {
-  console.error('vim_escape: :w does not commit in the source overlay'); bad++;
+// `:w` resolves through the shared `_apply`, which has to cover all three kinds of editor. Each of
+// these was a real silent no-op: an overlay cell has no run, and a whole-file editor has no cellId
+// at all, so `:w` in the Files tab did nothing and ⌘S was the only way to save a file.
+if (!/_run\s*=\s*cm\s*=>\s*_apply\(/.test(src)) {
+  console.error('vim_escape: :w does not route through _apply'); bad++;
+}
+if (!/_apply\s*=\s*\(v,\s*id\)[\s\S]{0,200}_onSave\(\)/.test(src)) {
+  console.error('vim_escape: _apply does not save a whole-file editor'); bad++;
+}
+if (!/_apply\s*=\s*\(v,\s*id\)[\s\S]{0,400}_overlayView\(v\)[\s\S]{0,60}commitSource/.test(src)) {
+  console.error('vim_escape: _apply does not commit in the source overlay'); bad++;
+}
+if (!/_apply\s*=\s*\(v,\s*id\)[\s\S]{0,400}runCell/.test(src)) {
+  console.error('vim_escape: _apply does not run a code cell'); bad++;
+}
+// The whole-file editor has to actually carry the callback `_apply` reaches for, or the branch above
+// is unreachable and `:w` goes back to doing nothing in the Files tab.
+if (!/view\._onSave\s*=\s*opts\.onSave/.test(src)) {
+  console.error('vim_escape: mkFileEditor does not expose _onSave'); bad++;
+}
+// Emacs gets the same verb under its own chord. The emacs keymap ships no C-x prefix, so without
+// this binding C-x C-s falls through to the browser.
+if (!/key:\s*'Ctrl-x Ctrl-s'[\s\S]{0,120}_apply\(/.test(src)) {
+  console.error('vim_escape: emacs C-x C-s is not bound to _apply'); bad++;
+}
+if (!/mode === 'emacs'[\s\S]{0,120}_emacsSave/.test(src)) {
+  console.error('vim_escape: the emacs save chord is not added for emacs mode'); bad++;
 }
 
 // The keymap setting is a registry, not a vim flag — so a mode can't be half-added (bundled but

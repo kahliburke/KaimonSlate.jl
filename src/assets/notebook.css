@@ -9,6 +9,11 @@
   --orange:#ce9178; --purple:#c586c0; --teal:#4ec9b0; --val:#4ec9b0;
   --strong:#fff; --rowstripe:rgba(255,255,255,.02); --ovl:rgba(255,255,255,.06);
   --page-pad:20px;   /* top/side gutter for the content column; reused by the agent drawer */
+  /* Tint for the matching-word highlight in the editor (Settings → "Match highlight"). Resolved
+     lazily, so pointing it at --accent gives every theme its own colour without a line per theme;
+     a theme whose accent reads badly as a fill can override this one variable. The editor mixes it
+     down to a translucent fill + outline, so a solid colour is the right thing to name here. */
+  --selmatch:var(--accent);
 }
 html[data-slate-theme="graphite"] {
   --bg:#15171c; --bg2:#1c1f26; --bg3:#23262e; --border:#33373f; --text:#d7dae1;
@@ -450,7 +455,7 @@ body.app .appsetpop.open { display:block; position:absolute; top:calc(100% + 8px
    whoever deployed the app can still get at it without leaving the page. */
 body.app .err .err-bt { display:none; }
 body.app .err.showtrace .err-bt { display:block; }
-body.app .err { border-left:3px solid var(--bad,#f85149); background:rgba(248,81,73,.07);
+body.app .err { border-left:3px solid var(--red); background:color-mix(in srgb, var(--red) 7%, transparent);
   border-radius:0 8px 8px 0; padding:10px 14px; position:relative; }
 body.app .err::after { content:"details"; position:absolute; top:8px; right:12px; font-size:.7rem;
   color:var(--dim); cursor:pointer; border:1px solid var(--border); border-radius:6px; padding:1px 7px; }
@@ -462,7 +467,7 @@ body.app .err .errjump { cursor:default; }   /* nothing to jump TO — the edito
 body.app .appfail { display:flex; align-items:center; gap:10px; margin:0 auto; max-width:var(--page-max,980px);
   padding:11px 16px; background:rgba(248,81,73,.1); border:1px solid rgba(248,81,73,.35);
   border-radius:9px; font-size:.85rem; color:var(--text); }
-body.app .appfail .appfailicon { color:var(--bad,#f85149); font-size:1rem; }
+body.app .appfail .appfailicon { color:var(--red); font-size:1rem; }
 body.app .appfail .appfailtext { flex:1; }
 body.app .appfail .appfailjump { background:var(--bg3); color:var(--dim); border:1px solid var(--border);
   border-radius:7px; padding:3px 10px; font-size:.76rem; cursor:pointer; }
@@ -512,7 +517,7 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
 .fufile { display:inline-flex; align-items:center; gap:6px; color:var(--text); font-size:.79rem;
   background:var(--bg3); border:1px solid var(--border); border-radius:7px; padding:3px 9px; max-width:280px; }
 .fufile .fusize { color:var(--dim); font-size:.71rem; }
-.fuerr { color:var(--bad,#f85149); font-size:.75rem; max-width:340px; }
+.fuerr { color:var(--red); font-size:.75rem; max-width:340px; }
 .fuprog { display:inline-flex; align-items:center; gap:9px; }
 .fuprog .fubar { width:130px; height:5px; border-radius:3px; background:var(--bg3); overflow:hidden; }
 .fuprog .fufill { display:block; height:100%; background:var(--accent); transition:width .12s linear; }
@@ -755,8 +760,8 @@ body.resizing { cursor:col-resize; user-select:none; }
 .output pre { margin:0; white-space:pre; }
 body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .output .out { color:var(--dim); } .output .val { color:var(--val); }
-.output .err { color:var(--red); background:rgba(229,117,117,.06); }
-.output .warn { color:var(--gold); background:rgba(255,215,0,.06); font-size:.86rem; }
+.output .err { color:var(--red); background:color-mix(in srgb, var(--red) 6%, transparent); }
+.output .warn { color:var(--gold); background:color-mix(in srgb, var(--gold) 6%, transparent); font-size:.86rem; }
 .output .err .srcref, .output .warn .srcref { color:var(--accent); text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
 .output .err .srcref:hover, .output .warn .srcref:hover { color:var(--strong); }
 /* Error message syntax coloring (the .err block default is red — softened toward the theme text
@@ -788,11 +793,12 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .pkgmissing .pmadd.alt:hover { border-color:var(--accent); color:var(--accent); }
 /* The offending source line, tinted in CodeMirror 6 while the cell is errored (+ a brief flash on jump).
    CM6 applies the class to the `.cm-line` element via a line Decoration. */
-.cm-editor .cm-line.cm-errorline { background:rgba(229,117,117,.12); box-shadow:inset 3px 0 0 var(--red);
+.cm-editor .cm-line.cm-errorline { background:color-mix(in srgb, var(--red) 12%, transparent); box-shadow:inset 3px 0 0 var(--red);
   transition:background .35s ease; }
 /* The actual offending line (error origin — may be a different cell than the one that threw):
    a touch brighter + a bolder gutter bar to distinguish it from faint call-site lines. */
-.cm-editor .cm-line.cm-errorline-origin { background:rgba(240,104,94,.22); box-shadow:inset 4px 0 0 #ff6b6b;
+.cm-editor .cm-line.cm-errorline-origin { background:color-mix(in srgb, var(--red) 22%, transparent);
+  box-shadow:inset 4px 0 0 color-mix(in srgb, var(--red) 80%, var(--strong));
   transition:background .35s ease; }
 /* Error / jump flash: an orange-red highlight that fades IN then back OUT (a pulse) rather than
    appearing and abruptly cutting; settles onto the faint overlay above when the line is errored. */
@@ -1769,6 +1775,11 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 /* Worker (re)provisioning/connecting — amber + pulse so a slow respawn is visible here, not green. */
 .runloc.reconnecting { color:#e8a13f; border-color:color-mix(in srgb, #e8a13f 55%, var(--border));
   background:color-mix(in srgb, #e8a13f 12%, var(--bg3)); animation:btnpulse 1.1s ease-in-out infinite; }
+/* A run-location this hub cannot honour (no compute gate): the notebook IS running, just not where it
+   was told to. Muted yellow like `.degraded`, deliberately not the amber `.reconnecting` pulse —
+   nothing is in flight, the setting is simply not in effect. */
+.runloc.refused { color:#c2b158; border-color:color-mix(in srgb, #c2b158 55%, var(--border));
+  background:color-mix(in srgb, #c2b158 12%, var(--bg3)); }
 /* Dormant standalone — no worker by design; a calm grey "click to launch" chip (a gentle hover cue). */
 .runloc.inactive { color:var(--dim); border-color:var(--border); border-style:dashed;
   background:color-mix(in srgb, var(--dim) 8%, var(--bg3)); }
@@ -2562,3 +2573,80 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 /* The panel with no log to show (an app refuses that route) — identity + telemetry still stand. */
 .wplog-none { padding:12px 14px; font-size:.78rem; color:var(--dim); line-height:1.5; }
 .wplog-none a { color:var(--accent); }
+
+/* ── The button whose panel is open (panels.js) ──────────────────────────────────────────────
+   Accent border + text, the same "this is on" idiom as `.ftbtn.on` and the cell-header toggles, so
+   an open panel is traceable back to the control that opened it — and to the control that closes
+   it again. The topbar buttons are borderless until then, so the border is what does the work; the
+   two inside the ☰ menu are full-width rows, where the accent text carries it. */
+.topbar button.panelon { border-color:var(--accent); color:var(--accent); background:var(--ovl); }
+#topmenu button.panelon { color:var(--accent); background:var(--ovl); }
+
+/* ── Colour swatches (Settings → Match highlight) ────────────────────────────────────────────
+   A row of the actual colours, because the setting IS a colour. `--sw` is the tint, set per button
+   from the editor's own palette; the fill uses the same 20% mix the editor paints so the swatch
+   shows what you'll get, over a stronger ring so a pale tint is still findable on the dark row.
+
+   Selectors are `.swatches .swatch`, not `.swatch`: the dialog is inside `.modal`, and `.modal
+   button` sets background/border/padding at a specificity a single class cannot beat — a bare
+   `.swatch` lost every one of those and the row came out as seven identical grey pills. */
+.swatches { display:inline-flex; gap:5px; align-items:center; }
+.swatches .swatch { width:17px; height:17px; min-width:0; padding:0; border-radius:50%; cursor:pointer;
+                    background:color-mix(in srgb, var(--sw) 20%, transparent);
+                    border:1.5px solid color-mix(in srgb, var(--sw) 55%, transparent); }
+.swatches .swatch:hover { border-color:color-mix(in srgb, var(--sw) 85%, transparent); }
+/* The selected one gets a ring in the page's own colours, so it reads as chosen regardless of how
+   pale its tint is — a heavier border alone was invisible on the lighter swatches. */
+.swatches .swatch.on { box-shadow:0 0 0 2px var(--bg2), 0 0 0 3.5px var(--text); }
+/* The "follow the theme" swatch. It paints in the theme's accent, which makes it look like just
+   another fixed colour sitting beside the fixed blue — so it carries a hollow centre to say it
+   stands for a rule rather than for the colour it happens to be showing right now. */
+.swatches .swatch.auto { position:relative; }
+.swatches .swatch.auto::after { content:''; position:absolute; inset:3.5px; border-radius:50%;
+                                border:1.5px solid var(--text); opacity:.55; }
+/* The chosen colour, named. The row alone cannot say what "follow the theme" means, and a tooltip
+   is only found by accident.
+   It sits BEFORE the swatches, and the two have opposite flex behaviour: the strip never shrinks,
+   the name shrinks (and ellipsises) to fit. Order alone was not enough — a name long enough to
+   overfill the row pushed the whole `.rt` past the row's right edge, so the swatches still shifted
+   by a few pixels as the text changed length and the colour you were aiming at moved out from under
+   the pointer. */
+.swname { margin-right:10px; color:var(--dim); font-size:.78rem; white-space:nowrap;
+          flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.swatches { flex:0 0 auto; }
+
+/* ── Notebook-wide find bar (⌘F, js/search.js) ───────────────────────────────────────────────
+   Top-right of the window, above the docked panes (60) and the toast stack (80) but below the
+   modal layer (200), so it stays reachable while the DAG or agent pane is open. Hidden until
+   opened; `display:none` rather than opacity so it never eats clicks while closed. */
+.nbfind { display:none; position:fixed; top:calc(var(--topbar-h,49px) + 10px); right:16px; z-index:85;
+          align-items:flex-start; gap:4px; background:var(--bg2); border:1px solid var(--border);
+          border-radius:9px; padding:6px 8px; box-shadow:0 10px 28px #0009; font-size:.82rem; }
+.nbfind.show { display:flex; }
+/* The chevron spans both rows, as in VS Code's find widget. */
+.nbfind-toggle { align-self:stretch; padding:0 4px; font-size:.9rem; }
+.nbfind-rows { display:flex; flex-direction:column; gap:5px; }
+.nbfind-row { display:flex; align-items:center; gap:6px; }
+/* `showReplace` hides the replace row with the `hidden` attribute. An author rule beats the user
+   agent's `[hidden] { display:none }` whatever its specificity, so `display:flex` above would keep
+   the row on screen without this. */
+.nbfind-row[hidden] { display:none; }
+.nbfind-r { width:220px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+            border-radius:6px; padding:4px 8px; font-size:.82rem; font-family:inherit; outline:none; }
+.nbfind-r:focus { border-color:var(--accent); }
+.nbfind-do { border-color:var(--border); padding:4px 10px; }
+.nbfind-q { width:220px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+            border-radius:6px; padding:4px 8px; font-size:.82rem; font-family:inherit; outline:none; }
+.nbfind-q:focus { border-color:var(--accent); }
+.nbfind-q.bad { border-color:var(--red); }
+.nbfind-count { min-width:74px; color:var(--dim); font-variant-numeric:tabular-nums; }
+.nbfind-count.bad { color:var(--red); }
+/* The three query-mode switches (case / whole word / regex) and the two steppers share a look;
+   only the switches latch, which `.on` shows. */
+.nbfind button { background:none; border:1px solid transparent; border-radius:5px; color:var(--dim);
+                 padding:3px 6px; font-size:.78rem; line-height:1; cursor:pointer; }
+.nbfind button:hover { color:var(--text); background:var(--ovl); }
+.nbfind-opt { font-family:'Cascadia Code','Fira Code',monospace; }
+.nbfind-opt[data-opt="word"] { text-decoration:underline; }
+.nbfind-opt.on { color:var(--accent); border-color:var(--accent); background:var(--ovl); }
+.nbfind-x { margin-left:2px; }

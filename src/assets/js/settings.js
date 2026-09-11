@@ -476,6 +476,58 @@ function openSettings(scope) {
     wraped.checked = localStorage.getItem('slateWrapEditor') === '1';
     wraped.onchange = () => { window.setEditorWrap && window.setEditorWrap(wraped.checked); };
   }
+  // Editor chrome — line numbers, indent guides, code folding. Off by default so a cell keeps the
+  // uncluttered look; each applies live to every open editor via its compartment (editor.js).
+  for (const [id, key, apply] of [['setlinenums', 'slateLineNumbers', 'setLineNumbers'],
+                                  ['setguides', 'slateIndentGuides', 'setIndentGuides'],
+                                  ['setfolding', 'slateCodeFolding', 'setCodeFolding']]) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.checked = localStorage.getItem(key) === '1';
+    el.onchange = () => { window[apply] ? window[apply](el.checked) : localStorage.setItem(key, el.checked ? '1' : '0'); };
+  }
+  // Matching-word highlight. Unlike the three above this one defaults ON — it is how the feature
+  // shipped — so the stored value is read as "not off" rather than "is on". Its colour list comes
+  // from editor.js so the two can't drift; `theme` (the default) tracks the notebook theme's accent.
+  {
+    const on = document.getElementById('setmatchhi');
+    if (on) {
+      on.checked = localStorage.getItem('slateMatchHighlight') !== '0';
+      on.onchange = () => window.setMatchHighlight && window.setMatchHighlight(on.checked);
+    }
+    // Swatches rather than a <select>: the choice IS a colour, so showing the colours is the whole
+    // point — and an <option>'s background is unstylable in Safari, so a coloured dropdown would
+    // silently degrade to a plain list there. Each swatch carries the tint at the strength the
+    // editor paints it, so what you pick is what you get.
+    //
+    // `theme` is the odd one out and has to LOOK it. It renders in whatever the current theme's
+    // accent is, so on its own it is indistinguishable from the fixed blue sitting next to it — you
+    // could neither tell which swatch meant "follow the theme" nor what colour picking it would
+    // give. It gets a marker ring, and the current choice is named in text beside the row, so the
+    // answer is on screen instead of in a tooltip.
+    const tint = document.getElementById('setmatchtint');
+    const tintName = document.getElementById('setmatchtintname');
+    if (tint && window.matchTintNames && window.matchTintValue) {
+      const label = n => n === 'theme' ? 'Theme' : n[0].toUpperCase() + n.slice(1);
+      const paint = () => {
+        const cur = localStorage.getItem('slateMatchTint') || 'theme';
+        tint.innerHTML = window.matchTintNames().map(n =>
+          `<button class="swatch${n === cur ? ' on' : ''}${n === 'theme' ? ' auto' : ''}" data-tint="${n}"
+                   title="${n === 'theme' ? 'Follow the notebook theme’s accent colour' : label(n)}"
+                   style="--sw:${window.matchTintValue(n)}"></button>`).join('');
+        // Short enough not to crowd the row. What "theme accent" MEANS lives in the swatch's own
+        // tooltip and in the marker ring, not in a sentence the row has no space for.
+        if (tintName) tintName.textContent = cur === 'theme' ? 'Theme accent' : label(cur);
+        for (const b of tint.querySelectorAll('.swatch')) {
+          b.onclick = () => { window.setMatchTint && window.setMatchTint(b.dataset.tint); paint(); };
+        }
+      };
+      paint();
+      // The theme swatch shows the LIVE accent, so a theme change has to repaint it.
+      const themeSel = document.getElementById('settheme');
+      if (themeSel) themeSel.addEventListener('change', () => setTimeout(paint, 60));
+    }
+  }
   // Per-notebook settings (hot-reload, parallel, threads, slides, bibstyle, agent-model override)
   // live in this dialog's "This notebook" scope (config.js) — a single view with effective value +
   // source badge + clear-override, instead of being scattered here.

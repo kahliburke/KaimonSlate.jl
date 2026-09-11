@@ -25,6 +25,11 @@ Four sections.
 | **Chart scroll-zoom** | How much a wheel notch zooms a chart that has zooming enabled. |
 | **Wrap text output** | Soft-wrap long lines of cell output instead of scrolling them. |
 | **Wrap code editor** | Soft-wrap long lines in the editor. |
+| **Line numbers** | Show a line-number gutter in every code cell. Off by default — a cell is usually short enough not to need one. The Files tab always numbers its lines. |
+| **Indent guides** | Draw a hairline at each indent level, so a nested block's extent is visible at a glance. |
+| **Code folding** | Let Julia blocks be collapsed from the gutter: `function`, `struct`, `module`, `macro`, `if`, `for`, `while`, `try`, `let`, `begin`, `quote` and `do`. A folded block keeps its own header line and its `end`. Markdown cells have no grammar to fold. |
+| **Highlight matching words** | Select a word and its other occurrences in that cell are tinted. On by default. |
+| **Match highlight** | Colour of that tint, as a row of swatches. **Theme accent** (the default, marked with a ring) follows the notebook theme, so it recolours when you switch theme; the named hues override it. A theme can set its own via the `--selmatch` CSS variable. |
 
 **Appearance**
 
@@ -38,10 +43,25 @@ Four sections.
 
 | Setting | Effect |
 | --- | --- |
-| **Editor keymap** | Default, Vim or Emacs bindings in the cell editor. |
+| **Editor keymap** | Default, Vim or Emacs bindings in the cell editor. See below. |
 | **Live-update debounce** | Minimum delay (ms) between live recomputes while dragging a control. Higher = fewer recomputes on a slow kernel. |
 | **Autocomplete delay** | How long to wait before the completion popup opens. |
 | **Tab in autocomplete** | Whether ⇥ accepts the highlighted completion. |
+
+#### Saving under the Vim and Emacs keymaps
+
+A notebook has no save separate from execution, so "write this buffer" means *apply it* — and what
+that does depends on where you are:
+
+| You are in | `:w` (vim) · `C-x C-s` (emacs) does |
+| --- | --- |
+| a code cell | runs it |
+| a markdown or `@bind` cell's source | commits the source and returns to the rendered view |
+| a file in the **Files** tab | writes the file |
+
+Vim also takes `:wq` and `:x` (apply, then leave the editor), `:q` (leave, keeping your edits, the
+same as clicking away) and `:q!` (discard the edit and leave — the one way to abandon it in a single
+action). ⌘S saves a file under every keymap.
 
 **Agent**
 

@@ -38,8 +38,16 @@ function renderRunLoc(state) {
   closeLaunchPop();   // a launch flipped it live — dismiss any lingering launch popover
   const loc = (state && state.runLocation) || '';
   const src = (state && state.runLocationSource) || 'default';
-  const host = loc ? loc.split(',')[0] : '';
-  document.getElementById('runlocicon').textContent = host ? '🖧' : '💻';
+  // A hub with no compute gate cannot honour a run-location: every remote path is behind
+  // `gate_available()`, so the notebook runs HERE whatever the picker says. Showing the requested
+  // host would be reporting a destination that is not being used — so the pill reads local, and
+  // says why on hover. `remoteAvailable` is absent on an older server, hence the `!== false`.
+  const canRemote = !state || state.remoteAvailable !== false;
+  const wanted = loc ? loc.split(',')[0] : '';
+  const host = canRemote ? wanted : '';
+  const refused = !canRemote && !!wanted;
+  el.classList.toggle('refused', refused);
+  document.getElementById('runlocicon').textContent = refused ? '⚠' : host ? '🖧' : '💻';
   // Worker-health overlay: while the worker is (re)provisioning/connecting — a restart, a fresh remote
   // spawn, or a genuine disconnect of a runnable notebook — the pill must NOT sit there looking
   // connected. It goes amber and pulses with "· starting…"/"· reconnecting…" so a slow remote respawn
@@ -52,12 +60,18 @@ function renderRunLoc(state) {
   el.classList.toggle('remote', !!host);
   el.classList.toggle('reconnecting', busy);
   const srcTxt = src === 'session' ? 'session' : src === 'notebook' ? 'saved' : src === 'global' ? 'global' : '';
-  const se = document.getElementById('runlocsrc'); se.textContent = busy ? '' : srcTxt; se.style.display = (!busy && srcTxt) ? '' : 'none';
+  // When the location is refused, the badge would read "local · saved" — which describes the
+  // setting being IGNORED, next to the place actually being used. Say what happened instead.
+  const badge = refused ? 'not ' + wanted : srcTxt;
+  const se = document.getElementById('runlocsrc'); se.textContent = busy ? '' : badge; se.style.display = (!busy && badge) ? '' : 'none';
   // While starting/reconnecting, hide the cpu·rss stat too — showing "starting… 0% · 694MB" is
   // self-contradictory (the numbers are meaningless mid-boot) and clutters the pill.
   const rs = document.getElementById('runlocstat'); if (rs) rs.style.display = busy ? 'none' : '';
   el.title = busy ? ((host ? ('worker on ' + host) : 'local worker') + ' — ' +
                      (state.hydrating ? 'starting up (provisioning / connecting)…' : 'reconnecting…'))
+           : refused ? ('This notebook is set to run on ' + wanted + ' (' + (srcTxt || 'set') +
+                        '), but this hub has no compute gate, so it is running LOCALLY. ' +
+                        'Remote execution needs the Kaimon host.')
            : host ? ('worker runs on ' + host + ' (' + (srcTxt || 'set') + ') — click to change')
                   : 'worker runs locally — click to run it on another machine';
 }

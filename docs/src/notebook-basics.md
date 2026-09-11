@@ -57,12 +57,26 @@ In edit mode:
 | `⌘⇧⏎` / `Ctrl⇧⏎` | run and open a fresh cell below |
 | `⌘⇧-` / `Ctrl⇧-` | split the cell at the cursor |
 | `⇥` | completion (Julia REPL completions + cell-local bindings) |
+| `⌘⌥↑` / `⌘⌥↓` | add a caret on the line above / below |
+| `⌥`-click | add a caret at the click |
+| `⌘D` / `CtrlD` | select the word under the caret, then each next occurrence |
+
+Extra carets type together.
+`Esc` drops back to a single caret, or clears a selection, and a second `Esc` returns to command mode.
+That holds under every keymap. Vim reaches it one rung later: `Esc` leaves insert or visual mode
+first, then collapses the carets, and only once there is a single bare caret does it hand the cell
+back to command mode.
+
+Selecting a word also tints its other occurrences in that cell. Turn it off, or recolour it, under
+Settings → *Highlight matching words* and *Match highlight*.
 
 Notebook-wide:
 
 | Key | Action |
 | --- | --- |
 | `⌘↵` | run stale cells |
+| `⌘F` / `⌘⌥F` | find across every cell / find and replace |
+| `⌘G` / `⇧⌘G` | next / previous match |
 | `⌘K` / `⌘⇧K` | command palette / docs search |
 | `⌘⇧A` | agent panel |
 | `⌘⇧F` | controls palette |
@@ -70,6 +84,31 @@ Notebook-wide:
 | `⌘⇧G` | dependency graph |
 | `⌘⇧S` | scratchpad |
 | `⌘Z` / `⌘⇧Z` | undo / redo structural changes |
+
+### Finding across the notebook
+
+**⌘F** opens one find bar for the whole document rather than a panel inside the focused cell — in a
+notebook what you are looking for is usually in a *different* cell. It walks every cell in order,
+counts the hits and steps between them across cell boundaries with **⏎** or **⌘G**. **⌘⌥F** opens the
+replace row as well; **⌘⏎** there replaces every match in the notebook.
+
+The three switches on the bar are match case (`Aa`), whole word (`ab`) and regular expression (`.*`).
+Whole word is decided by character category rather than `\b`, so it behaves sensibly for the Unicode
+names Julia encourages: searching `α` matches a standalone `α` and not the `α` inside `αβ`. In regex
+mode `$1`…`$9`, `$&` and `$$` expand in the replacement; in plain mode a `$` stays a `$`.
+
+Cells that have not been scrolled to yet still contribute to the count — their text comes from the
+last saved source. Stepping onto a match in a markdown or `@bind` cell opens that cell's source so
+the match can be shown.
+
+**Replace All is a single action.** It rewrites every match across the notebook in one step, which
+means one **⌘Z** puts it all back — the toast names what it undid — and the [timeline](history.md)
+gets one checkpoint labelled with the search and replacement, so you can also restore it later from
+**☰ → 🕘 History**. The rewritten cells are left stale rather than re-run: a text substitution
+decides what your code says, not when it should run.
+
+Inside the **Files** tab's whole-file editor, ⌘F keeps CodeMirror's own single-document find panel,
+scoped to that one file.
 
 ## Running cells
 

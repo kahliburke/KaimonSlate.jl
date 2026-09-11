@@ -174,10 +174,22 @@ can't drift apart on what "open a new path" means.
 function ensure_notebook_file!(path::AbstractString)
     isfile(path) && return String(path)
     d = dirname(abspath(path))
+    # "Create it" is right for a path nobody has opened before. It is the WRONG reading when this
+    # exact path has a history: the document existed, its file is now gone, and silently handing
+    # back a blank makes a vanished notebook look like a new one. The blank then gets saved with a
+    # fresh docid, which detaches it from its own history and hides the loss. Say it instead — the
+    # history holds the content, and the recovery is only possible if someone knows to look.
+    if _NB_MISSING_HOOK[] !== nothing
+        try; Base.invokelatest(_NB_MISSING_HOOK[], String(path)); catch; end
+    end
     isempty(d) || mkpath(d)
     write(path, "#%% md id=intro\n# New Notebook\n")
     return String(path)
 end
+
+# Called with a path that is about to be created blank. Installed by the server layer, which is
+# where the history store lives (ReportEngine cannot see it). `nothing` = nobody is listening.
+const _NB_MISSING_HOOK = Ref{Any}(nothing)
 
 # Markdown `{{ expr }}` interpolation helpers (`_interp_token` / `_md_template` / `_md_interp_exprs`)
 # live in `widgets.jl` — the file shared by BOTH ReportEngine (this module) and the standalone
