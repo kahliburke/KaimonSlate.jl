@@ -1386,6 +1386,30 @@ debug_marks!(k::GateKernel, ::Report; mark_files::Vector{String} = String[],
                 Dict{String,Any}("mark_files" => mark_files, "mark_lines" => mark_lines,
                                  "mark_conds" => mark_conds))
 
+debug_watch!(k::GateKernel, ::Report; watch_files::Vector{String} = String[],
+             watch_lines::Vector{Int} = Int[], watch_exprs::Vector{String} = String[]) =
+    _debug_tool(k, "", "__slate_debug_watch",
+                Dict{String,Any}("watch_files" => watch_files, "watch_lines" => watch_lines,
+                                 "watch_exprs" => watch_exprs))
+
+# Traces are the one debug payload that is a plain Dict rather than a DebugState, so it does not
+# go through `_debug_tool` (which normalises into that shape).
+debug_frame_locals!(k::GateKernel, ::Report) =
+    try
+        v = _tool(k, "__slate_debug_frame_locals", Dict{String,Any}(); timeout = _DEBUG_TIMEOUT)
+        v === nothing ? String[] : String[String(x) for x in v]
+    catch
+        String[]
+    end
+
+debug_traces(k::GateKernel, ::Report) =
+    try
+        t = _tool(k, "__slate_debug_traces", Dict{String,Any}(); timeout = _DEBUG_TIMEOUT)
+        t === nothing ? Dict{String,Any}() : t
+    catch
+        Dict{String,Any}()
+    end
+
 debug_step!(k::GateKernel, ::Report; mode::AbstractString = "next") =
     _debug_tool(k, "", "__slate_debug_step", Dict{String,Any}("mode" => String(mode)))
 

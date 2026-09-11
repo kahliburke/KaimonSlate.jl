@@ -1253,6 +1253,34 @@ function create_tools(GateTool::Type)
     end
 
     """
+        dbg_watch(notebook, file, line; expr) -> String
+
+    Sample an expression every time a line runs, without stopping, and keep the series.
+
+    This answers a question stepping cannot: not what a value is now, but what it has been.
+    `dbg_watch(file="cell:step", line=7, expr="maximum(abs, u)")` then `dbg_step(mode="continue")`
+    gives you the whole trajectory — which is how you see that something fell for fifty iterations
+    before it turned, and where it turned. A number at one breakpoint cannot show that.
+
+    `dbg_frame` reports each watch with how many samples it has and its first, last, smallest and
+    largest — enough to see a turn without moving a hundred thousand numbers through a tool result.
+    The full series goes to the notebook's chart. Pair a watch with `dbg_break(cond=…)` on the same
+    line: sample every pass, stop on the pass that matters.
+
+    Non-numeric values are skipped, since a trace is a curve. An empty `expr` clears the watch.
+    """
+    function dbg_watch(notebook::String, file::String, line::Int; expr::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = NotebookServer.watch_debug!(nb, strip(file), line; expr = expr)
+        get(r, "ok", false) === true || return "⛔ " * string(get(r, "error", "could not set that"))
+        ws = get(r, "watches", [])
+        isempty(strip(expr)) && return "○ cleared the watch on $file:$line"
+        return "◉ watching `$(strip(expr))` at $file:$line\n" *
+               "watches: " * join([string(get(w, "file", ""), ":", get(w, "line", 0),
+                                          " → ", get(w, "expr", "")) for w in ws], ", ")
+    end
+
+    """
         dbg_break(notebook, file, line; on="toggle", cond="") -> String
 
     Arm or clear a breakpoint. `file` is what a frame reports — `cell:<id>` for notebook code, a
@@ -2639,6 +2667,7 @@ function create_tools(GateTool::Type)
         GateTool("dbg_frame", dbg_frame),
         GateTool("dbg_eval", dbg_eval; timeout_ms = CELL_RUN_MS),
         GateTool("dbg_break", dbg_break),
+        GateTool("dbg_watch", dbg_watch),
         GateTool("dbg_ask", dbg_ask; timeout_ms = ASK_MS),
         GateTool("dbg_done", dbg_done),
         # The orchestrator's half of the pair: summon a specialist with a brief only you can

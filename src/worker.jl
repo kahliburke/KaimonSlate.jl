@@ -65,6 +65,11 @@ __slate_debug_eval(; expr::String = "") = debug_eval_expr(; expr = expr)
 __slate_debug_marks(; mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
                       mark_conds::Vector{String} = String[]) =
     debug_marks!(; mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds)
+__slate_debug_watch(; watch_files::Vector{String} = String[], watch_lines::Vector{Int} = Int[],
+                      watch_exprs::Vector{String} = String[]) =
+    debug_watch!(; watch_files = watch_files, watch_lines = watch_lines, watch_exprs = watch_exprs)
+__slate_debug_traces() = debug_traces()
+__slate_debug_frame_locals() = debug_frame_locals!()
 __slate_debug_stop() = debug_stop!()
 include(joinpath(@__DIR__, "envprep.jl"))   # shared notebook-env prep policy (seed/dev-path/staleness; engine + worker + remote)
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs where the deps are loaded)
@@ -2513,6 +2518,9 @@ function tools()
         KaimonGate.GateTool("__slate_debug_frame", __slate_debug_frame),
         KaimonGate.GateTool("__slate_debug_eval", __slate_debug_eval),
         KaimonGate.GateTool("__slate_debug_marks", __slate_debug_marks),
+        KaimonGate.GateTool("__slate_debug_watch", __slate_debug_watch),
+        KaimonGate.GateTool("__slate_debug_traces", __slate_debug_traces),
+        KaimonGate.GateTool("__slate_debug_frame_locals", __slate_debug_frame_locals),
         KaimonGate.GateTool("__slate_debug_stop", __slate_debug_stop),
     KaimonGate.GateTool("__slate_memo_snapshot", __slate_memo_snapshot),
         # `@replay`: what the marks would cost, and running them. Export-only — an ordinary run touches

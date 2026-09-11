@@ -465,6 +465,12 @@ debug_marks!(k::PendingKernel, report::Report; mark_files::Vector{String} = Stri
              mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[]) =
     debug_marks!(_await_real(k), report; mark_files = mark_files, mark_lines = mark_lines,
                  mark_conds = mark_conds)
+debug_watch!(k::PendingKernel, report::Report; watch_files::Vector{String} = String[],
+             watch_lines::Vector{Int} = Int[], watch_exprs::Vector{String} = String[]) =
+    debug_watch!(_await_real(k), report; watch_files = watch_files, watch_lines = watch_lines,
+                 watch_exprs = watch_exprs)
+debug_traces(k::PendingKernel, report::Report) = debug_traces(_await_real(k), report)
+debug_frame_locals!(k::PendingKernel, report::Report) = debug_frame_locals!(_await_real(k), report)
 debug_step!(k::PendingKernel, report::Report; mode::AbstractString = "next") =
     debug_step!(_await_real(k), report; mode = mode)
 debug_frame(k::PendingKernel, report::Report) = debug_frame(_await_real(k), report)
@@ -547,6 +553,27 @@ Arm exactly these `file:line` breakpoints on the session, replacing whatever was
 debug_marks!(::InProcessKernel, ::Report; mark_files::Vector{String} = String[],
              mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[]) =
     debug_marks!(; mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds)
+
+"""
+    debug_watch!(kernel, report; watch_files, watch_lines, watch_exprs) -> DebugState
+
+Sample each expression every time its line runs, without stopping. Answers the question a stepper
+cannot: not what a value is now, but what it has been.
+"""
+debug_watch!(::InProcessKernel, ::Report; watch_files::Vector{String} = String[],
+             watch_lines::Vector{Int} = Int[], watch_exprs::Vector{String} = String[]) =
+    debug_watch!(; watch_files = watch_files, watch_lines = watch_lines, watch_exprs = watch_exprs)
+
+"Samples collected so far, expression → values in execution order."
+debug_traces(::InProcessKernel, ::Report) = debug_traces()
+
+"""
+    debug_frame_locals!(kernel, report) -> Vector{String}
+
+Publish the paused frame's locals where ordinary notebook code can reach them, and say which names
+are there. A live watch wraps its source in a `let` over exactly these.
+"""
+debug_frame_locals!(::InProcessKernel, ::Report) = debug_frame_locals!()
 
 """
     debug_step!(kernel, report; mode) -> DebugState

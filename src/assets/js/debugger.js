@@ -101,13 +101,49 @@ const toggleMark = (cellId, line) => setMark('cell:' + cellId, line);
 // locals shown there.
 const condOf = (file, line) =>
   (marks.value.find(m => m.file === file && m.line === line) || {}).cond || '';
-async function editCond(file, line) {
-  const cur = condOf(file, line);
-  const next = window.prompt(
-    `Stop at ${file}:${line} only when…\n\nA Julia expression over that frame's locals, e.g.\n` +
-    `  maximum(abs, du) > 1e3\n  any(isnan, u)\n  i == 4700\n\nEmpty stops every time.`, cur);
-  if (next === null) return;                       // cancelled — leave it exactly as it was
-  await setMark(file, line, undefined, next.trim());
+// Which breakpoint is being edited, as "file:line", or null. One at a time: the editor is a real
+// CodeMirror and two of them competing for the completion popup is worse than a queue.
+const condEdit = signal(null);
+
+// Watches: where to sample, and what. Separate from marks even on the same line — one asks to be
+// interrupted, the other asks to be shown a history, and you usually want both.
+const watches = signal([]);
+const traces = signal({});          // expr → the samples it has collected
+const watchEdit = signal(null);     // "file:line" being edited, or "" for the new-watch row
+
+// Live watches: a piece of the notebook re-evaluated at every stop. `spec` is either Julia text or
+// `cell:<id>`. Each carries its own status, because "this does not evaluate here" is the ordinary
+// condition of stepping rather than a failure — you walk into a frame where the name is not yet a
+// thing. `cell` is the rendered output, and is dropped on any non-ok status so a stale picture is
+// never left standing in for a current one.
+const liveW = signal([]);                   // [spec]
+const liveOut = signal({});                 // spec → {status, why, cell}
+const liveOpen = signal(null);              // spec shown full size, or null
+const liveAdd = signal(false);              // the "add a watch" editor is open
+
+async function setLive(source, on) {
+  try {
+    const r = await A('POST', '/api/debug/live', on === undefined ? { source } : { source, on });
+    if (r && r.live) liveW.value = r.live;
+  } catch (e) {}
+}
+const dropLive = (spec) => setLive(spec, false);
+
+async function setWatch(file, line, expr) {
+  try {
+    const r = await A('POST', '/api/debug/watch', { file, line, expr });
+    if (r && r.watches) watches.value = r.watches;
+  } catch (e) {}
+}
+
+// Fetched rather than pushed: a series is thousands of numbers and the state payload carries only
+// a summary. Pulled when the run stops, which is when there is something new to look at.
+async function loadTraces() {
+  if (!watches.value.length) { traces.value = {}; return; }
+  try {
+    const r = await A('GET', '/api/debug/traces');
+    if (r && r.ok) traces.value = r.traces || {};
+  } catch (e) {}
 }
 const clearMark = (file, line) => setMark(file, line, false);
 window.onBreakpointClick?.(toggleMark);
@@ -130,6 +166,9 @@ function apply(next) {
   if (here) window.markDebugLine?.(here, s.line);
   if (s && s.asks !== undefined) asks.value = s.asks || [];
   if (s && s.marks) paintMarks(s.marks);
+  if (s && s.watches) watches.value = s.watches;
+  if (s && s.live) liveW.value = s.live;
+  s && !s.finished === false && loadTraces();
   syncGutter();
   window._slateRefreshCells?.();   // the header's 🐞 reflects whether this cell has the session
   if (_flashTimer) clearTimeout(_flashTimer);
@@ -464,6 +503,12 @@ window.onDebugPush = (p) => {
     return;
   }
     if (p.session === false) { specialist.value = null; apply(null); paintMarks(p.marks || []); syncGutter(); return; }
+  if (p.livecell) {
+    const d = p.livecell;
+    liveOut.value = { ...liveOut.value, [d.spec]: { status: d.status, why: d.why, cell: d.cell } };
+    return;
+  }
+  if (p.live !== undefined && p.cell === undefined) { liveW.value = p.live; return; }
   if (p.marks !== undefined && p.cell === undefined) { paintMarks(p.marks); syncGutter(); return; }
   if (p.cell !== undefined) apply(p);
 };
@@ -694,10 +739,15 @@ function Stack({ s }) {
         <span class="dbgfile" title=${m.file}>${shortFile(m.file)}:${m.line}</span>
         <button class=${'dbgmarkc' + (m.cond ? ' on' : '')}
                 title=${m.cond ? 'stops only when: ' + m.cond : 'stop only when an expression holds'}
-                onClick=${() => editCond(m.file, m.line)}>${m.cond ? 'when' : '+when'}</button>
+                onClick=${() => condEdit.value = m.file + ':' + m.line}>${m.cond ? 'when' : '+when'}</button>
         <button class="dbgmarkx" title="clear" onClick=${() => clearMark(m.file, m.line)}>✕</button>
       </div>
-      ${m.cond ? html`<div class="dbgcond" title=${m.cond}>${m.cond}</div>` : null}`)}</div>` : null}
+      ${condEdit.value === m.file + ':' + m.line
+        ? html`<${CondEditor} file=${m.file} line=${m.line} initial=${m.cond || ''}
+                 onDone=${t => { condEdit.value = null;
+                                 t === null || setMark(m.file, m.line, undefined, t); }} />`
+        : (m.cond ? html`<div class="dbgcond" title=${m.cond}
+                          onClick=${() => condEdit.value = m.file + ':' + m.line}>${m.cond}</div>` : null)}`)}</div>` : null}
     <div class="dbgrhead dbgrhead2" title="modules stepped rather than run compiled">interpreting</div>
     <div class="dbginterp">${(s.interpreting || []).map(m => html`<span class="dbgmod" key=${m}>${m}</span>`)}</div>
   </div>`;
@@ -762,6 +812,140 @@ function Scratch({ s }) {
     </div>`)}
     </div>
     <div class="dbgped"><span class="dbgpp">›</span><div class="dbgpedhost" ref=${host}></div></div>
+  </div>`;
+}
+
+// The predicate editor: the SAME factory the cells and the scratchpad use, so completion,
+// highlighting and the keymap are the ones already in your fingers. A predicate is Julia written
+// against the paused frame's locals — exactly what the scratchpad completes — so a browser prompt
+// box was the wrong surface for it twice over: no completion, and not Slate's UI.
+function CondEditor({ file, line, initial, onDone }) {
+  const host = useRef(null), view = useRef(null);
+  const commit = () => {
+    const v = view.current;
+    const text = v ? v.state.doc.toString().trim() : '';
+    onDone(text);
+    return true;
+  };
+  useEffect(() => {
+    if (!host.current || !window.mkEditor) return;
+    view.current = window.mkEditor(host.current, {
+      doc: initial || '',
+      cellId: '__dbgcond',            // shares the scratchpad's frame-local completion source
+      keys: [{ key: 'Enter', run: commit }, { key: 'Mod-Enter', run: commit },
+             { key: 'Escape', run: () => { onDone(null); return true; } }],
+    });
+    try { view.current.focus(); } catch (e) {}
+    return () => { try { view.current && view.current.destroy(); } catch (e) {} view.current = null; };
+  }, []);
+  return html`<div class="dbgcondedit">
+    <span class="dbgcondwhen">when</span>
+    <div class="dbgcondhost" ref=${host}></div>
+    <button class="dbgcondok" title="set (enter)" onClick=${commit}>✓</button>
+    <button class="dbgcondx" title="cancel (esc)" onClick=${() => onDone(null)}>✕</button>
+  </div>`;
+}
+
+// ── live watches ───────────────────────────────────────────────────────────────────────────────
+// A strip of tiles under the source, because the point of a live view is seeing it WHILE you read
+// the line you are stopped on. Each tile renders through the notebook's own cell renderer, so a
+// plot is a plot and an echart is an echart — nothing here knows what a chart is, which is why
+// pointing a watch at a cell you already wrote works at all.
+
+// Put a cell payload on screen. `output` is already HTML (text, images — a Makie figure arrives as
+// one), but an echart is a SPEC that needs a live instance, which is why the scratch panel shows
+// "run it in a real cell to see the chart" instead of the chart. A live view whose main use is a
+// chart cannot do that, so the specs are mounted here.
+function mountLiveOutput(el, c) {
+  (el.__charts || []).forEach(ch => { try { ch.dispose(); } catch (e) {} });
+  el.__charts = [];
+  el.replaceChildren();
+  if (c.output) {
+    const stage = document.createElement('div');
+    stage.className = 'dbgtileout';
+    stage.innerHTML = c.output;
+    el.appendChild(stage);
+  }
+  for (const spec of (c.echarts || [])) {
+    if (!window.echarts || !window.slateInitChart) break;
+    const box = document.createElement('div');
+    box.className = 'dbgtilechart';
+    el.appendChild(box);
+    try {
+      const inst = window.slateInitChart(box);
+      inst.setOption(spec, true);
+      el.__charts.push(inst);
+    } catch (e) {}
+  }
+  if (!c.output && !(c.echarts || []).length) {
+    const p = document.createElement('div');
+    p.className = 'dbgtileempty';
+    p.textContent = c.value_repr || '(no output)';
+    el.appendChild(p);
+  }
+}
+
+// The output is a cell payload, so it mounts the same way any cell's output does. Rendering it
+// small costs no more than rendering it large: a chart sizes to its box. What costs is the
+// EVALUATION, which is why it happens on stop rather than on every frame.
+function LiveTile({ spec, expanded }) {
+  const host = useRef(null);
+  const rec = liveOut.value[spec] || {};
+  useEffect(() => {
+    const el = host.current; if (!el) return;
+    if (rec.status !== 'ok' || !rec.cell) { el.replaceChildren(); return; }
+    mountLiveOutput(el, rec.cell);
+    // A chart sizes to its box, so expanding is a resize rather than a scale — the redraw is what
+    // makes the big version actually more readable instead of just bigger.
+    const ro = new ResizeObserver(() => { (el.__charts || []).forEach(c => { try { c.resize(); } catch (e) {} }); });
+    ro.observe(el);
+    return () => { ro.disconnect(); };
+  }, [rec.cell, rec.status, expanded]);
+  const label = spec.indexOf('cell:') === 0 ? spec.slice(5) : spec;
+  return html`<div class=${'dbgtile' + (expanded ? ' big' : '') + (rec.status && rec.status !== 'ok' ? ' quiet' : '')}>
+    <div class="dbgtilehead">
+      <span class=${'dbgtilename' + (spec.indexOf('cell:') === 0 ? ' iscell' : '')}
+            title=${spec}>${label}</span>
+      <span class="dbgsp"></span>
+      ${rec.status === 'unavailable'
+        ? html`<span class="dbgtilenote" title=${rec.why}>not in this frame</span>` : null}
+      ${rec.status === 'error'
+        ? html`<span class="dbgtilenote err" title=${rec.why}>error</span>` : null}
+      <button class="dbgtilebtn" title=${expanded ? 'shrink' : 'expand'}
+              onClick=${() => liveOpen.value = expanded ? null : spec}>${expanded ? '⤡' : '⤢'}</button>
+      <button class="dbgtilebtn" title="remove" onClick=${() => dropLive(spec)}>✕</button>
+    </div>
+    <div class="dbgtilebody" ref=${host}></div>
+  </div>`;
+}
+
+// Adding one: the same editor the predicates use, so completion and highlighting are the cell
+// keymap. `cell:<id>` is offered as text rather than as a picker — it is one token, and typing it
+// keeps a single input for both kinds instead of a mode switch.
+function LiveStrip() {
+  if (!liveW.value.length && !liveAdd.value) {
+    return html`<div class="dbgstrip2">
+      <button class="dbgaddwatch" onClick=${() => liveAdd.value = true}>+ live view</button>
+    </div>`;
+  }
+  return html`<div class="dbgstrip2">
+    <div class="dbgtiles">
+      ${liveW.value.map(spec => html`<${LiveTile} key=${spec} spec=${spec} expanded=${false} />`)}
+    </div>
+    ${liveAdd.value
+      ? html`<${CondEditor} file="" line=${0} initial=""
+               onDone=${t => { liveAdd.value = false; t && setLive(t, true); }} />`
+      : html`<button class="dbgaddwatch" onClick=${() => liveAdd.value = true}>+ live view</button>`}
+  </div>`;
+}
+
+// Expanded: over the focus view, dismissed like the detail modal. Same output, bigger box — the
+// chart redraws at the new size rather than being scaled up.
+function LiveOverlay() {
+  const spec = liveOpen.value;
+  if (!spec) return null;
+  return html`<div class="dbgoverlay" onClick=${e => { if (e.target === e.currentTarget) liveOpen.value = null; }}>
+    <div class="dbgoverlaybox"><${LiveTile} spec=${spec} expanded=${true} /></div>
   </div>`;
 }
 
@@ -863,6 +1047,7 @@ function Focus() {
   if (!s || s.finished) return null;
   return html`<div class="dbgfocusbg" onClick=${e => { if (e.target.classList.contains('dbgfocusbg')) focus.value = false; }}>
     <div class=${'dbgfocus' + (s.side ? ' remote' : '')}>
+      <${LiveOverlay} />
       <div class="dbgfhead">
         <span class="dbgftitle">▸ stepping</span>
         <span class="dbgfcell">cell ${s.cell}</span>
@@ -884,6 +1069,7 @@ function Focus() {
           onReset=${() => { paneRail.value = 220; localStorage.setItem('slateDbgRail', '220'); }} />
         <div class="dbgfmid">
           <${Source} s=${s} />
+          <${LiveStrip} />
           <${Grip} axis="y"
             onDrag=${e => drag(e, paneVals, 'slateDbgVals', ev => {
               const box = document.querySelector('.dbgfmid').getBoundingClientRect();
@@ -1083,7 +1269,10 @@ style.textContent = `
 /* ── focus view ─────────────────────────────────────────────────────────────── */
 .dbgfocusbg { position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.55);
   display:flex; align-items:center; justify-content:center; padding:24px; }
-.dbgfocus { display:flex; flex-direction:column; width:min(1580px,100%); height:min(900px,100%);
+/* Positioned, so the expanded live view sits over THIS box rather than the viewport: the focus
+   view is already a dialog, and an overlay escaping it would cover the page behind. (No backticks
+   in here — this whole block is a template literal.) */
+.dbgfocus { position:relative; display:flex; flex-direction:column; width:min(1580px,100%); height:min(900px,100%);
   background:var(--bg); border:1px solid color-mix(in srgb, var(--gold) 40%, var(--border));
   border-radius:12px; overflow:hidden; box-shadow:0 18px 60px rgba(0,0,0,.45); }
 .dbgfocus.remote { border-color:color-mix(in srgb, var(--purple) 45%, var(--border)); }
@@ -1153,6 +1342,53 @@ style.textContent = `
 .dbgcond { margin:0 6px 3px 18px; padding:1px 5px; border-left:2px solid var(--teal);
   color:var(--teal); font-family:var(--mono,ui-monospace,monospace); font-size:.68rem;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dbgcondedit { display:flex; align-items:center; gap:4px; margin:1px 6px 3px 14px; padding:1px 4px;
+  border-left:2px solid var(--teal); border-radius:4px;
+  background:color-mix(in srgb, var(--teal) 8%, transparent); }
+.dbgcondwhen { color:var(--teal); font-size:.66rem; font-family:var(--mono,ui-monospace,monospace); }
+.dbgcondhost { flex:1 1 auto; min-width:0; }
+.dbgcondhost .cm-editor { background:transparent; font-size:.72rem; }
+.dbgcondhost .cm-content { padding:1px 2px; }
+.dbgcondhost .cm-gutters { display:none; }
+.dbgcondok, .dbgcondx { padding:0 3px; background:transparent; border:none; cursor:pointer; font-size:.7rem; }
+.dbgcondok { color:var(--teal); }
+.dbgcondx { color:var(--dim); }
+.dbgcond { cursor:pointer; }
+/* The live-view strip: under the source, because the point of a live view is seeing it WHILE you
+   read the line you are stopped on. Tiles scroll horizontally rather than wrapping — comparing two
+   traces side by side is the case this exists for, and wrapping breaks the comparison. */
+.dbgstrip2 { display:flex; align-items:stretch; gap:6px; padding:4px 6px;
+  border-top:1px solid var(--border); background:var(--bg2); overflow-x:auto; flex:0 0 auto; }
+.dbgtiles { display:flex; gap:6px; align-items:stretch; }
+.dbgtile { display:flex; flex-direction:column; min-width:190px; max-width:340px;
+  border:1px solid var(--border); border-radius:6px; background:var(--bg); overflow:hidden; }
+/* Sized to content with a cap, not a uniform grid: forcing a scalar into a chart-sized box wastes
+   the height the source needs. */
+.dbgtile .dbgtilebody { max-height:150px; overflow:auto; padding:3px 5px; }
+.dbgtile.big { min-width:0; max-width:none; width:100%; height:100%; border:none; }
+.dbgtile.big .dbgtilebody { max-height:none; height:100%; }
+.dbgtile.quiet { opacity:.55; }
+.dbgtilehead { display:flex; align-items:center; gap:4px; padding:2px 5px;
+  border-bottom:1px solid var(--border); font-size:.68rem; }
+.dbgtilename { font-family:var(--mono,ui-monospace,monospace); color:var(--dim);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px; }
+.dbgtilename.iscell { color:var(--teal); }
+.dbgtilenote { color:var(--dim); font-size:.64rem; }
+.dbgtilenote.err { color:var(--red); }
+.dbgtilebtn { padding:0 3px; background:transparent; border:none; color:var(--dim);
+  cursor:pointer; font-size:.7rem; }
+.dbgtilebtn:hover { color:var(--fg); }
+.dbgtilechart { width:100%; height:130px; }
+.dbgtile.big .dbgtilechart { height:calc(100% - 10px); min-height:320px; }
+.dbgtileout img, .dbgtileout svg { max-width:100%; height:auto; }
+.dbgtileempty { color:var(--dim); font-family:var(--mono,ui-monospace,monospace); font-size:.7rem; }
+.dbgaddwatch { align-self:center; padding:2px 8px; background:transparent; border:1px dashed var(--border);
+  border-radius:6px; color:var(--dim); cursor:pointer; font-size:.7rem; white-space:nowrap; }
+.dbgaddwatch:hover { color:var(--teal); border-color:var(--teal); }
+.dbgoverlay { position:absolute; inset:0; z-index:40; display:flex; padding:24px;
+  background:color-mix(in srgb, var(--bg) 82%, transparent); }
+.dbgoverlaybox { flex:1 1 auto; border:1px solid var(--border); border-radius:10px;
+  background:var(--bg2); overflow:hidden; }
 .dbgmarkx { padding:0 4px; background:transparent; border:none; color:var(--dim); cursor:pointer; font-size:.8rem; }
 .dbgmarkx:hover { color:var(--red); }
 .dbginterp { display:flex; flex-wrap:wrap; gap:4px; }

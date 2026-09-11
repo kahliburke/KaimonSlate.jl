@@ -242,6 +242,61 @@ end
         end
     end
 
+    @testset "watch expressions" begin
+        # A watch samples at every execution of its line and never stops the run. That is the
+        # question a stepper cannot answer: not what a value is now, but what it has been — which
+        # is the shape a divergence has, and it is a curve rather than a number.
+        src = "t = 0\nfor i in 1:400\n  global t += i\nend\nt\n"
+        st = RE.debug_start!(Sandbox; cell = "w", source = src,
+                             watch_files = ["cell:w"], watch_lines = [3],
+                             watch_exprs = ["t"])
+        try
+            st = step!("continue")
+            @test st.finished                      # a watch does not pause anything
+            tr = RE.debug_traces()
+            @test haskey(tr, "t")
+            @test length(tr["t"]) == 400           # one sample per iteration
+            @test tr["t"][1] == 0.0                # `t` BEFORE the first add
+            @test tr["t"][end] == sum(1:399)
+            @test issorted(tr["t"])                # monotonic, as a running sum must be
+            # The SUMMARY rides in every state; the series does not. A hundred thousand samples
+            # belong in a chart, not in each step's payload.
+            sm = only(st.traces)
+            @test sm.expr == "t" && sm.n == 400
+            @test sm.first == 0.0 && sm.last == Float64(sum(1:399))
+            @test sm.min == 0.0 && sm.max == sm.last
+        finally
+            RE.debug_stop!()
+        end
+
+        # An expression that errors on some iteration must not take the run down with it: a watch
+        # observes, and an observer that can break the thing it watches is worse than none.
+        st = RE.debug_start!(Sandbox; cell = "w2", source = "s = 0\nfor i in 1:50\n  global s += i\nend\ns\n",
+                             watch_files = ["cell:w2"], watch_lines = [3],
+                             watch_exprs = ["nosuchbinding + 1"])
+        try
+            st = step!("continue")
+            @test st.finished
+            @test only(b.repr for b in st.bindings if b.name == "s") == "1275"
+            @test isempty(RE.debug_traces()["nosuchbinding + 1"])   # nothing recorded, nothing broken
+        finally
+            RE.debug_stop!()
+        end
+
+        # Watches and predicate breakpoints coexist: sample every pass, stop on the one that matters.
+        st = RE.debug_start!(Sandbox; cell = "w3", source = "t = 0\nfor i in 1:400\n  global t += i\nend\nt\n",
+                             mark_files = ["cell:w3"], mark_lines = [3], mark_conds = ["i == 300"],
+                             watch_files = ["cell:w3"], watch_lines = [3], watch_exprs = ["t"])
+        try
+            st = step!("continue")
+            @test st.at_breakpoint
+            @test RE.debug_eval_expr(; expr = "i").value.repr == "300"
+            @test length(RE.debug_traces()["t"]) == 300   # sampled all the way up to the stop
+        finally
+            RE.debug_stop!()
+        end
+    end
+
     @testset "interpreter scope is restored" begin
         ji = RE._ji()
         saved = copy(ji.compiled_modules)

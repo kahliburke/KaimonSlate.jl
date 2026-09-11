@@ -49,6 +49,151 @@ const _DEBUG_LOCK = ReentrantLock()
 # instead of arming a second one on the same line.
 const _DEBUG_MARKS = Dict{String,Dict{Tuple{String,Int},String}}()   # nb.id → {(file,line) => cond}
 
+# Watches live beside marks and outlive a session the same way: you decide what to plot before you
+# start, and re-running the cell should keep plotting it.
+const _DEBUG_WATCHES = Dict{String,Dict{Tuple{String,Int},String}}()  # nb.id → {(file,line) => expr}
+
+# A LIVE watch is the other half of the idea, and it has no line: it is a piece of the notebook
+# re-evaluated every time the session stops, so its output tracks the run. `source` is either Julia
+# text or `cell:<id>`, naming a cell whose source is fetched at each evaluation — so a chart you
+# already wrote becomes a live view by pointing at it, and editing that cell updates what you see.
+#
+# These evaluate in the notebook's NAMESPACE rather than the paused frame. What makes them useful
+# is reading the values the stepped cell is building, and a cell's top-level writes land in the
+# namespace as each statement completes — so a referenced chart redraws as the run progresses.
+# Frame locals are the scratchpad's job, and a sampled watch's.
+const _DEBUG_LIVE_WATCH = Dict{String,Vector{String}}()      # nb.id → [source]
+
+_live_watches(nb::LiveNotebook) = lock(_DEBUG_LOCK) do
+    copy(get(_DEBUG_LIVE_WATCH, nb.id, String[]))
+end
+
+"""
+Bind the paused frame's locals around `src`, so a watch written against them resolves.
+
+Only the NAMES appear in the generated source: a value has no source form, so it arrives at run
+time through the dict the kernel published. Notebook globals still resolve; a local of the same
+name shadows one, which is the scoping a reader expects from the line they are stopped on.
+
+With no frame — no session, or a finished one — this is the identity, and the watch falls back to
+namespace scope rather than failing. A chart over accumulated results is still worth seeing after
+the run ends.
+"""
+function _wrap_frame_scope(src::AbstractString, names::Vector{String})
+    isempty(names) && return String(src)
+    binds = join(["$(n) = $(ReportEngine.FRAME_BINDING)[:$(n)]" for n in names], ", ")
+    return "let " * binds * "\n" * String(src) * "\nend"
+end
+
+"Resolve a live watch to the Julia it should run: literal text, or the named cell's source."
+function _live_source(nb::LiveNotebook, spec::AbstractString)
+    startswith(spec, "cell:") || return String(spec)
+    id = chopprefix(String(spec), "cell:")
+    i = findfirst(c -> c.id == id, nb.report.cells)
+    return i === nothing ? "" : String(nb.report.cells[i].source)
+end
+
+"""
+    live_watch!(nb, source; on) -> Dict
+
+Add or remove a live watch. `source` is Julia, or `cell:<id>` to track a cell.
+"""
+function live_watch!(nb::LiveNotebook, source::AbstractString; on::Union{Bool,Nothing} = nothing)
+    src = String(strip(source))
+    isempty(src) && return Dict{String,Any}("ok" => false, "error" => "a live watch needs an expression or a cell",
+                                            "live" => _live_watches(nb))
+    lock(_DEBUG_LOCK) do
+        v = get!(() -> String[], _DEBUG_LIVE_WATCH, nb.id)
+        want = on === nothing ? !(src in v) : on
+        want ? (src in v || push!(v, src)) : filter!(!=(src), v)
+    end
+    r = Dict{String,Any}("ok" => true, "live" => _live_watches(nb))
+    _broadcast_debug(nb, Dict{String,Any}("live" => r["live"]))
+    return r
+end
+
+"""
+How a live watch's run turned out: `ok`, `unavailable`, or `error`.
+
+`unavailable` is what a watch looks like from a frame where its names do not exist, which happens
+constantly while stepping and is not worth a red box. Julia reports exactly that as an
+`UndefVarError`, so it is separable from a genuine mistake in the expression.
+"""
+function _live_status(out)
+    ex = try; out.exception; catch; nothing; end
+    ex === nothing && return ("ok", "")
+    txt = string(ex)
+    occursin("UndefVarError", txt) && return ("unavailable", first(txt, 200))
+    return ("error", first(txt, 200))
+end
+
+"""
+Re-evaluate every live watch and push the results.
+
+Runs after a step, on the notebook's eval mutex exactly as a cell does — a live watch is ordinary
+notebook code and must not race the stepper's own round trip. Each result is broadcast as a cell,
+so the browser renders it with the SAME pipeline a cell's output uses: a plot is a plot, an echart
+is an echart, a table is a table. Nothing here knows what a chart is.
+"""
+function refresh_live_watches!(nb::LiveNotebook)
+    specs = _live_watches(nb)
+    isempty(specs) && return nothing
+    s = _debug_session(nb)
+    # Locals are published ONCE per refresh, not once per watch: they are the same frame for all
+    # of them, and the round trip is the expensive part.
+    names = isempty(s.cell) ? String[] :
+        (try; _debug_on(nb, s.side, k -> ReportEngine.debug_frame_locals!(k, nb.report)); catch; String[]; end)
+    for (i, spec) in enumerate(specs)
+        src = _live_source(nb, spec)
+        isempty(strip(src)) && continue
+        # A CELL reference is notebook code and names notebook globals, so it runs as written. A
+        # CUSTOM expression is the one you write to look at locals, so it gets the frame — which
+        # is the whole reason for writing one instead of pointing at a cell.
+        run_src = startswith(spec, "cell:") ? src : _wrap_frame_scope(src, names)
+        cell = Cell(string("__dbglive", i), CODE, src)   # show what was WRITTEN, not the wrapper
+        ReportEngine.mark_running!(cell)
+        out = try
+            lock(_eval_mutex(nb)) do
+                ReportEngine.eval_capture(nb.kernel, nb.report, run_src, "dbglive")
+            end
+        catch e
+            # A watch that cannot run is ordinary, not a fault: it must never take the session
+            # with it. The stepper is what matters here and it is not this watch's business.
+            _broadcast_debug(nb, Dict{String,Any}("livecell" => Dict{String,Any}(
+                "spec" => spec, "status" => "error", "why" => first(sprint(showerror, e), 200))))
+            continue
+        end
+        ReportEngine.mark_result!(cell, out)
+        # The SAME payload a scratch cell rides on, so the browser renders it with the cell
+        # renderer rather than anything this feature invents. A plot is a plot because nothing
+        # here decided otherwise.
+        # Three states, not two, and the difference is the point. An expression naming something
+        # that is not in THIS frame is the normal condition of stepping — you walk into a method
+        # where `u` does not exist — so it reports as unavailable and the tile goes quiet. A real
+        # error is shown. Neither may leave the previous render on screen looking current: a stale
+        # chart presented as live is worse than an empty one.
+        status, why = _live_status(out)
+        _broadcast_debug(nb, Dict{String,Any}("livecell" => Dict{String,Any}(
+            "spec" => spec, "status" => status, "why" => why,
+            "cell" => status == "ok" ? scratch_cell_json(cell) : nothing)))
+    end
+    return nothing
+end
+
+_watches(nb::LiveNotebook) = lock(_DEBUG_LOCK) do
+    d = get(_DEBUG_WATCHES, nb.id, Dict{Tuple{String,Int},String}())
+    [(k[1], k[2], v) for (k, v) in sort!(collect(d); by = first)]
+end
+
+function _watches_wire(nb::LiveNotebook)
+    ws = _watches(nb)
+    return (files = String[w[1] for w in ws], lines = Int[w[2] for w in ws],
+            exprs = String[w[3] for w in ws])
+end
+
+_watches_json(nb::LiveNotebook) =
+    [Dict{String,Any}("file" => f, "line" => l, "expr" => e) for (f, l, e) in _watches(nb)]
+
 _marks(nb::LiveNotebook) = lock(_DEBUG_LOCK) do
     d = get(_DEBUG_MARKS, nb.id, Dict{Tuple{String,Int},String}())
     [(k[1], k[2], v) for (k, v) in sort!(collect(d); by = first)]
@@ -76,7 +221,8 @@ _debug_forget!(nb::LiveNotebook) = lock(_DEBUG_LOCK) do; delete!(_DEBUG_LIVE, nb
 
 "Drop a closed notebook's breakpoints — the ids are reused when the same file is reopened."
 forget_debug!(id::AbstractString) = lock(_DEBUG_LOCK) do
-    delete!(_DEBUG_MARKS, String(id)); delete!(_DEBUG_LIVE, String(id))
+    delete!(_DEBUG_MARKS, String(id)); delete!(_DEBUG_WATCHES, String(id))
+    delete!(_DEBUG_LIVE, String(id))
 end
 
 """
@@ -156,7 +302,7 @@ function _debug_json(nb::LiveNotebook, st, side::AbstractString)
         "file" => st.file, "line" => st.line, "scope" => st.scope, "in_cell" => st.in_cell,
         "at_breakpoint" => st.at_breakpoint,
         "source" => src, "srcfirst" => first,
-        "marks" => _marks_json(nb),
+        "marks" => _marks_json(nb), "watches" => _watches_json(nb),
         "locals" => [_local_json(v) for v in st.locals],
         "bindings" => [_local_json(v) for v in st.bindings],
         "stack" => frames, "sources" => srcs,
@@ -167,6 +313,12 @@ function _debug_json(nb::LiveNotebook, st, side::AbstractString)
         # someone else is steering — or one stalled on a question — has to be legible as that.
         "owner" => _debug_session(nb).owner,
         "asks" => asks_json(nb),
+        # Summaries only. The series drives the chart and is fetched separately; putting it here
+        # would push a hundred thousand samples through every step.
+        "live" => _live_watches(nb),
+        "traces" => [Dict{String,Any}("expr" => t.expr, "n" => t.n, "first" => t.first,
+                                      "last" => t.last, "min" => t.min, "max" => t.max)
+                     for t in (hasproperty(st, :traces) ? st.traces : [])],
     )
 end
 
@@ -236,7 +388,8 @@ function stop_debug!(nb::LiveNotebook; serialize::Bool = true, by::AbstractStrin
     catch e
         @debug "debug: stop failed (session dropped anyway)" exception = e
     end
-    _broadcast_debug(nb, Dict{String,Any}("session" => false, "marks" => _marks_json(nb)))
+    _broadcast_debug(nb, Dict{String,Any}("session" => false, "marks" => _marks_json(nb),
+                                          "watches" => _watches_json(nb)))
     return true
 end
 
@@ -272,10 +425,13 @@ function start_debug!(nb::LiveNotebook, cid::AbstractString; source::AbstractStr
     end
     _, side = _region_route(nb, cell)
     mk = _marks_wire(nb)
+    wt = _watches_wire(nb)
     st = _debug_on(nb, side, k ->
         ReportEngine.debug_start!(k, nb.report; cell = String(cid), source = src,
                                   mark_files = mk.files, mark_lines = mk.lines,
-                                  mark_conds = mk.conds))
+                                  mark_conds = mk.conds,
+                                  watch_files = wt.files, watch_lines = wt.lines,
+                                  watch_exprs = wt.exprs))
     st.error === nothing && _debug_remember!(nb, cid, side, by)
     return _pushed(nb, _debug_json(nb, st, side))
 end
@@ -292,14 +448,20 @@ function step_debug!(nb::LiveNotebook, mode::AbstractString = "next")
     isempty(s.cell) && return _debug_json(nb, ReportEngine._error_state("", "this notebook has no debug session"), "")
     st = _debug_on(nb, s.side, k -> ReportEngine.debug_step!(k, nb.report; mode = String(mode)))
     st.finished && _debug_forget!(nb)
-    return _pushed(nb, _debug_json(nb, st, s.side))
+    r = _pushed(nb, _debug_json(nb, st, s.side))
+    # After the frame is published, not before: the tiles should follow the step rather than delay
+    # it, and a watch that takes a second to draw must not make the step feel like it took one.
+    # Detached for the same reason — nothing about stepping waits on a watch.
+    @async try; refresh_live_watches!(nb); catch; end
+    return r
 end
 
 "The current frame without advancing. `session` says whether there is one at all."
 function frame_debug(nb::LiveNotebook)
     s = _debug_session(nb)
     isempty(s.cell) &&
-        return Dict{String,Any}("session" => false, "marks" => _marks_json(nb), "asks" => asks_json(nb))
+        return Dict{String,Any}("session" => false, "marks" => _marks_json(nb),
+                                "watches" => _watches_json(nb), "asks" => asks_json(nb))
     st = _debug_on(nb, s.side, k -> ReportEngine.debug_frame(k, nb.report))
     j = _debug_json(nb, st, s.side); j["session"] = true
     return j
@@ -317,6 +479,50 @@ function eval_debug(nb::LiveNotebook, expr::AbstractString)
     # pushed so a reader watching an agent work sees the questions it asked, not only its answers.
     _broadcast_debug(nb, Dict{String,Any}("probe" => r))
     return r
+end
+
+"""
+    watch_debug!(nb, file, line; expr) -> Dict
+
+Sample `expr` every time `file:line` runs, without stopping. An empty `expr` clears the watch.
+
+Separate from a breakpoint even when they share a line: one asks to be interrupted, the other asks
+to be shown a history, and you usually want both on the same line — sample every pass, stop on the
+pass that matters.
+"""
+function watch_debug!(nb::LiveNotebook, file::AbstractString, line::Integer;
+                      expr::AbstractString = "")
+    (isempty(file) || line <= 0) && return Dict{String,Any}("ok" => false,
+                                                            "error" => "a watch needs a file and a line",
+                                                            "watches" => _watches_json(nb))
+    lock(_DEBUG_LOCK) do
+        d = get!(() -> Dict{Tuple{String,Int},String}(), _DEBUG_WATCHES, nb.id)
+        key = (String(file), Int(line))
+        isempty(strip(expr)) ? delete!(d, key) : (d[key] = String(strip(expr)))
+    end
+    s = _debug_session(nb)
+    if !isempty(s.cell)          # live session: re-arm now, else it waits for the next start
+        wt = _watches_wire(nb)
+        _debug_on(nb, s.side, k ->
+            ReportEngine.debug_watch!(k, nb.report; watch_files = wt.files,
+                                      watch_lines = wt.lines, watch_exprs = wt.exprs))
+    end
+    r = Dict{String,Any}("ok" => true, "file" => String(file), "line" => Int(line),
+                         "expr" => String(strip(expr)), "watches" => _watches_json(nb))
+    _broadcast_debug(nb, Dict{String,Any}("watches" => r["watches"]))
+    return r
+end
+
+"The samples each watched expression has collected, as plain arrays the browser can plot."
+function traces_debug(nb::LiveNotebook)
+    s = _debug_session(nb)
+    isempty(s.cell) && return Dict{String,Any}("ok" => true, "traces" => Dict{String,Any}())
+    tr = try
+        _debug_on(nb, s.side, k -> ReportEngine.debug_traces(k, nb.report))
+    catch e
+        return Dict{String,Any}("ok" => false, "error" => sprint(showerror, e))
+    end
+    return Dict{String,Any}("ok" => true, "traces" => tr)
 end
 
 """
@@ -363,7 +569,7 @@ const DEBUG_ROLE = "debugger"
 
 "The verbs a debugging specialist may call. This list IS its job description."
 const DEBUG_VERBS = String["dbg_start", "dbg_step", "dbg_frame", "dbg_eval",
-                           "dbg_break", "dbg_ask", "dbg_done"]
+                           "dbg_break", "dbg_watch", "dbg_ask", "dbg_done"]
 
 const DEBUG_BRIEF = """
 You are a debugging specialist working inside a Slate notebook, alongside the person who called
@@ -497,6 +703,22 @@ function _register_debug_routes!(router, h::Hub)
         on = haskey(b, "on") ? (get(b, "on", true) === true) : nothing
         cond = haskey(b, "cond") ? String(get(b, "cond", "")) : nothing
         _json(mark_debug!(nb, String(get(b, "file", "")), Int(get(b, "line", 0)); on = on, cond = cond))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/debug/watch", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        _json(watch_debug!(nb, String(get(b, "file", "")), Int(get(b, "line", 0));
+                           expr = String(get(b, "expr", ""))))
+    end))
+    HTTP.register!(router, "GET", "/api/{id}/debug/traces", req -> _withnb(h, req, nb ->
+        _json(traces_debug(nb))))
+    HTTP.register!(router, "POST", "/api/{id}/debug/live", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        on = haskey(b, "on") ? (get(b, "on", true) === true) : nothing
+        r = live_watch!(nb, String(get(b, "source", "")); on = on)
+        # Draw the new one immediately rather than waiting for the next step: adding a watch is
+        # itself a request to see it.
+        get(r, "ok", false) === true && @async (try; refresh_live_watches!(nb); catch; end)
+        _json(r)
     end))
     HTTP.register!(router, "GET", "/api/{id}/debug/marks", req -> _withnb(h, req, nb ->
         _json(Dict{String,Any}("marks" => _marks_json(nb)))))

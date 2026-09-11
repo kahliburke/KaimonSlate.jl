@@ -575,10 +575,16 @@
       })).json();
     } catch (_) { return null; }
     const raw = d.completions || [];
-    // In the debugger's scratchpad the names that matter most are the paused FRAME's locals, and
-    // the server's completer cannot see them: they belong to a frame, not to the namespace. Offer
-    // them first (the boost outranks every server tier), then everything the namespace knows.
-    const frame = (ctx.view && ctx.view._cellId === '__dbgscratch' && window.slateDebugNames)
+    // In the debugger's editors the names that matter most are the paused FRAME's locals, and the
+    // server's completer cannot see them: they belong to a frame, not to the namespace. Offer them
+    // first (the boost outranks every server tier), then everything the namespace knows.
+    //
+    // Matched by PREFIX, not by the one id: the scratchpad was the first of these editors and is
+    // not the only one — a breakpoint predicate and a watch expression are written against the
+    // same frame and want the same names. Keying on `__dbgscratch` alone left the newer ones
+    // completing against the namespace, which silently offers the wrong thing rather than nothing.
+    const frame = (ctx.view && String(ctx.view._cellId || '').startsWith('__dbg') &&
+                   window.slateDebugNames)
       ? window.slateDebugNames().map((n, i) => ({
           label: n.name, detail: n.type || 'in frame', type: 'variable', boost: 200 - i }))
       : [];

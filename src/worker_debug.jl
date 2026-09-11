@@ -52,6 +52,12 @@ mutable struct _DebugSession
     before::Set{Symbol}             # namespace contents at start, to spot what the cell adds
     at_breakpoint::Bool             # the last step stopped ON a breakpoint, not by finishing
     marks::Vector{Any}              # the JuliaInterpreter breakpoints this session set
+    watches::Vector{Any}            # armed breakpoints that only RECORD (see `_arm!`)
+    want_marks::Vector{Any}         # what was ASKED for, since marks and watches share a line
+    want_watches::Vector{Any}       #   slot and have to be composed rather than armed twice
+    # expression → the values it took, in execution order. A watch answers a question the stepper
+    # cannot: not "what is it now" but "what has it been", which is the shape of a divergence.
+    traces::Dict{String,Vector{Float64}}
     # Which of `writes` this session has actually executed. Tracked per top-level statement, so
     # "fresh" is a fact about what has run rather than a guess from whether a value changed —
     # re-running a cell and getting the same answer must not read as stale.
@@ -178,6 +184,15 @@ the viewer happens to be shows a different file, or none.
 const DebugSource = @NamedTuple{file::String, first::Int, text::String}
 
 """
+What one watch has seen so far, small enough to ride in every state payload.
+
+The series itself can be a hundred thousand samples; that belongs in a chart, and is fetched with
+`debug_traces`. These are what a reader decides on — still climbing, or turned, and how far.
+"""
+const DebugTrace = @NamedTuple{expr::String, n::Int, first::Float64, last::Float64,
+                               min::Float64, max::Float64}
+
+"""
 Everything needed to render a paused frame.
 
 Every field is always present. `finished` says whether the run is over, and when
@@ -208,6 +223,7 @@ const DebugState = @NamedTuple{
     stack::Vector{DebugFrame},
     result::Union{DebugLocal,Nothing},
     error::Union{String,Nothing},
+    traces::Vector{DebugTrace},
 }
 
 "The answer to evaluating an expression in a paused frame."
@@ -252,6 +268,51 @@ function _frame_locals(fr)::Vector{DebugLocal}
     catch
     end
     return out
+end
+
+"""
+The paused frame's locals, by name, for code that needs the VALUES rather than a summary.
+
+Published into the notebook's namespace under a fixed name so a live watch can reach them from
+ordinary source text: only the NAMES can go into generated source, since a value has no source
+form, so the source says `u = __dbg_frame[:u]` and the value arrives through here at run time.
+That keeps a frame-scoped watch on the same capture path as any other cell — nothing about
+plotting or rendering has to know the debugger exists.
+"""
+const FRAME_BINDING = :__dbg_frame
+
+function _frame_local_values(fr)
+    d = Dict{Symbol,Any}()
+    fr === nothing && return d
+    ji = _ji()
+    try
+        for v in ji.locals(fr)
+            _is_user_local(v.name) || continue
+            d[Symbol(v.name)] = v.value
+        end
+    catch
+    end
+    return d
+end
+
+"""
+    debug_frame_locals!() -> Vector{String}
+
+Publish the paused frame's locals into the namespace and answer which names are available.
+
+Called before a live watch runs, so the watch's generated `let` binds names that exist. A name
+that has gone out of scope simply stops being offered rather than becoming a stale value.
+"""
+function debug_frame_locals!()
+    s = _DEBUG[]
+    s === nothing && return String[]
+    d = _frame_local_values(s.frame)
+    try
+        Core.eval(s.ns, :(const $(FRAME_BINDING) = $d))
+    catch
+        return String[]
+    end
+    return sort!(String[String(k) for k in keys(d)])
 end
 
 _frame_scope(fr) = try
@@ -444,7 +505,7 @@ function _state(s::_DebugSession)::DebugState
                 source = "", srcfirst = 0, sources = DebugSource[],
                 locals = DebugLocal[], bindings = _module_bindings(s), stack = DebugFrame[],
                 result = err === nothing ? _local_summary("result", s.result) : nothing,
-                error = err)
+                error = err, traces = _trace_summaries(s))
     end
     file, line = _frame_position(s.frame)
     src, srcfirst = _frame_source(s.frame)
@@ -459,7 +520,7 @@ function _state(s::_DebugSession)::DebugState
             source = src, srcfirst = srcfirst, sources = st.sources,
             locals = _frame_locals(s.frame), bindings = _module_bindings(s),
             stack = st.stack,
-            result = nothing, error = err)
+            result = nothing, error = err, traces = _trace_summaries(s))
 end
 
 # ── breakpoints ───────────────────────────────────────────────────────────────
@@ -523,14 +584,8 @@ Applied to already-compiled code immediately and to anything compiled later, so 
 breakpoint inside a function the cell has not called yet still fires when it does.
 """
 function _set_marks!(s::_DebugSession, marks::Vector{DebugMark})
-    ji = _ji()
-    _clear_marks!(s)
-    for m in marks
-        m.line > 0 && !isempty(m.file) || continue
-        bp = try; ji.breakpoint(m.file, m.line, _mark_condition(s, m.cond)); catch; nothing; end
-        bp === nothing || push!(s.marks, bp)
-    end
-    return nothing
+    s.want_marks = copy(marks)
+    _arm!(s)
 end
 
 """
@@ -555,6 +610,141 @@ function _mark_condition(s::_DebugSession, cond::AbstractString)
     end
     (ex isa Expr && ex.head === :incomplete) && return nothing
     return (s.ns, :(try; ($ex) === true; catch; false; end))
+end
+
+"One watched line: sample `expr` every time `file:line` runs."
+const DebugWatch = @NamedTuple{file::String, line::Int, expr::String}
+
+"How many samples one watch keeps. A long run must not turn a diagnostic into a memory problem."
+const WATCH_CAP = 200_000
+
+"""
+Record one sample, from inside a running frame.
+
+Reached by VALUE from the compiled predicate rather than by name: the predicate is evaluated in
+the notebook's namespace, where this function is not in scope under any name, and interpolating
+the function object sidesteps the question entirely.
+
+Non-numbers are skipped rather than stored: a trace is for plotting, and the question a watch
+answers ("what has this been") is a numeric one. Anything that throws is skipped too — a watch
+must never be able to break the run it is observing.
+"""
+function _watch_push!(store::Vector{Float64}, v)
+    try
+        x = Float64(v)
+        length(store) < WATCH_CAP && push!(store, x)
+    catch
+    end
+    return nothing
+end
+
+"""
+Arm exactly `watches`, replacing whatever was set.
+
+A watch is a breakpoint whose predicate has a side effect and then declines to stop. The predicate
+runs in the frame at every execution of its line, which is precisely the sampling point wanted,
+and returning `false` means the run never pauses. So this needs no interpreter machinery of its
+own beyond what a conditional breakpoint already uses.
+"""
+function _set_watches!(s::_DebugSession, watches::Vector{DebugWatch})
+    s.want_watches = copy(watches)
+    _arm!(s)
+end
+
+"""
+Arm every mark and watch, composing the ones that share a line.
+
+JuliaInterpreter keeps ONE breakpoint per statement, so arming a watch and a mark at the same
+`file:line` does not give you both — the second silently replaces the first, and whichever lost
+stops working. That is not hypothetical: a watch on the line a predicate was armed on left the
+predicate disarmed and the run went to completion without stopping.
+
+So the two are built together. Each line gets a single condition that records every watch on it
+and then answers with the mark's predicate, which is the behaviour wanted anyway: sample every
+pass, stop on the pass that matters.
+"""
+function _arm!(s::_DebugSession)
+    ji = _ji()
+    for bp in s.marks;   try; ji.remove(bp); catch; end; end
+    for bp in s.watches; try; ji.remove(bp); catch; end; end
+    empty!(s.marks); empty!(s.watches)
+
+    # (file, line) → the record-calls for it, and the mark predicate if one is armed there.
+    recs = Dict{Tuple{String,Int},Vector{Expr}}()
+    for w in s.want_watches
+        w.line > 0 && !isempty(w.file) && !isempty(strip(w.expr)) || continue
+        ex = try; Meta.parse(strip(w.expr)); catch; continue; end
+        (ex isa Expr && ex.head === :incomplete) && continue
+        store = get!(() -> Float64[], s.traces, String(w.expr))
+        # The expression is evaluated INSIDE the try, not passed as an argument to a function that
+        # catches: an argument is evaluated at the call site, so a watch on a name that does not
+        # exist yet threw out of the condition and took the run down with it.
+        push!(get!(() -> Expr[], recs, (String(w.file), Int(w.line))),
+              :(try; $(_watch_push!)($store, $ex); catch; end))
+    end
+
+    lines = Set{Tuple{String,Int}}(keys(recs))
+    for m in s.want_marks
+        m.line > 0 && !isempty(m.file) || continue
+        push!(lines, (String(m.file), Int(m.line)))
+    end
+    markcond = Dict((String(m.file), Int(m.line)) => m.cond for m in s.want_marks)
+
+    for key in sort!(collect(lines))
+        file, line = key
+        body = Expr(:block, get(recs, key, Expr[])...)
+        # What the composed condition finally ANSWERS, which is three different cases and not two:
+        #   a mark with a predicate  → that predicate
+        #   a mark without one       → `true`, stop every time
+        #   watches only             → `false`, sample and never stop
+        # Treating "no predicate" as "do not stop" disarmed every plain breakpoint.
+        pred = _mark_condition(s, get(markcond, key, ""))
+        push!(body.args, pred !== nothing ? pred[2] : haskey(markcond, key))
+        bp = try; ji.breakpoint(file, line, (s.ns, body)); catch; nothing; end
+        bp === nothing && continue
+        haskey(markcond, key) ? push!(s.marks, bp) : push!(s.watches, bp)
+    end
+    return nothing
+end
+
+_watches_from(files::Vector{String}, lines::Vector{Int}, exprs::Vector{String}) =
+    DebugWatch[(file = files[i], line = lines[i], expr = exprs[i])
+               for i in 1:min(length(files), length(lines), length(exprs))]
+
+"""
+    debug_watch!(; watch_files, watch_lines, watch_exprs) -> DebugState
+
+Replace the watched expressions. Existing traces for an expression that is still watched are kept,
+so adding a second watch mid-run does not discard what the first has already collected.
+"""
+function debug_watch!(; watch_files::Vector{String} = String[],
+                        watch_lines::Vector{Int} = Int[],
+                        watch_exprs::Vector{String} = String[])::DebugState
+    s = _DEBUG[]
+    s === nothing && return _error_state("", "no debug session")
+    bad = findfirst(e -> !isempty(_mark_cond_error(e)), watch_exprs)
+    bad === nothing || return _error_state("",
+        "watch expression does not parse: $(_mark_cond_error(watch_exprs[bad]))")
+    for k in collect(keys(s.traces))                 # drop traces nobody is watching any more
+        k in watch_exprs || delete!(s.traces, k)
+    end
+    _set_watches!(s, _watches_from(watch_files, watch_lines, watch_exprs))
+    return _state(s)
+end
+
+"The samples each watched expression has collected so far — the full series, for plotting."
+debug_traces() = (s = _DEBUG[]; s === nothing ? Dict{String,Vector{Float64}}() : deepcopy(s.traces))
+
+"Per-watch summaries for a state payload, in the order the watches were declared."
+function _trace_summaries(s::_DebugSession)
+    out = DebugTrace[]
+    for (k, xs) in sort!(collect(s.traces); by = first)
+        isempty(xs) ?
+            push!(out, (expr = k, n = 0, first = NaN, last = NaN, min = NaN, max = NaN)) :
+            push!(out, (expr = k, n = length(xs), first = xs[1], last = xs[end],
+                        min = minimum(xs), max = maximum(xs)))
+    end
+    return out
 end
 
 "Does this predicate parse? Reported at arm time, since a broken one is silent afterwards."
@@ -653,7 +843,7 @@ _error_state(cell::AbstractString, msg::AbstractString)::DebugState =
      file = "", line = 0, scope = "", in_cell = false, at_breakpoint = false,
      source = "", srcfirst = 0, sources = DebugSource[],
      locals = DebugLocal[], bindings = DebugLocal[], stack = DebugFrame[],
-     result = nothing, error = String(msg))
+     result = nothing, error = String(msg), traces = DebugTrace[])
 
 
 """
@@ -666,7 +856,10 @@ result.
 function debug_start!(ns::Module; cell::String = "", source::String = "",
                       mark_files::Vector{String} = String[],
                       mark_lines::Vector{Int} = Int[],
-                      mark_conds::Vector{String} = String[])::DebugState
+                      mark_conds::Vector{String} = String[],
+                      watch_files::Vector{String} = String[],
+                      watch_lines::Vector{Int} = Int[],
+                      watch_exprs::Vector{String} = String[])::DebugState
     debug_stop!()
     ji = _ji()
     ex = try
@@ -695,10 +888,12 @@ function debug_start!(ns::Module; cell::String = "", source::String = "",
     # reported as this session's only once the statement that writes it has actually finished.
     per_thunk = Vector{Symbol}[_toplevel_writes(p[2]) for p in pairs]
     s = _DebugSession(cell, nothing, pairs, ns, saved, interpret, false, nothing, nothing, 0,
-                      _toplevel_writes(ex), before, false, Any[],
+                      _toplevel_writes(ex), before, false, Any[], Any[], Any[], Any[],
+                      Dict{String,Vector{Float64}}(),
                       per_thunk, Symbol[], Set{Symbol}())
     # Armed before the first frame is built, so `continue` from the very first step honors them.
     _set_marks!(s, _marks_from(mark_files, mark_lines, mark_conds))
+    _set_watches!(s, _watches_from(watch_files, watch_lines, watch_exprs))
     _next_thunk!(s)
     _DEBUG[] = s
     return _state(s)
@@ -791,7 +986,9 @@ end
 function debug_stop!()
     s = _DEBUG[]
     s === nothing && return (stopped = false, steps = 0)
-    try; _clear_marks!(s); catch; end
+    # Watches are process-global breakpoints like marks, so a session disarms what it armed —
+    # otherwise a region worker returning to the warm pool carries them into the next notebook.
+    try; s.want_marks = Any[]; s.want_watches = Any[]; _arm!(s); catch; end
     try; _restore_interpreter!(s.saved_compiled); catch; end
     _DEBUG[] = nothing
     return (stopped = true, steps = s.steps)
