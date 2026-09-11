@@ -169,23 +169,28 @@ end
 
 Send a specialist a turn.
 
-Refuses while it is WORKING rather than sending anyway: a second prompt into a live ACP session
-clears the buffer the running turn is accumulating into, so the trampled reply is lost. Refusing
-is a worse answer than queueing and an honest one — a queue the caller cannot see is worse still.
+Whether a message can land DURING a turn is the agent's own capability, not a fact about the
+protocol. An agent that queues prompts takes it immediately; one that does not loses the reply in
+progress when a second prompt arrives, so for those the message is refused and the caller told to
+wait or interrupt. Asking beats assuming: refusing for everyone would borrow one agent's
+limitation and impose it on every backend.
 """
 function tell!(nb::LiveNotebook, role::AbstractString, text::AbstractString)
     aid = specialist_here(nb, role)
     isempty(aid) && return Dict{String,Any}("ok" => false,
                                             "error" => "no '$role' here — summon one first")
-    status = try
-        String(get(_agent_call(:agent_status, Dict{String,Any}("agent_id" => aid)), "status", ""))
+    st = try
+        _agent_call(:agent_status, Dict{String,Any}("agent_id" => aid))
     catch
-        ""
+        Dict{String,Any}()
     end
+    status = String(get(st, "status", ""))
     status == "dead" && return Dict{String,Any}("ok" => false, "error" => "the $role is gone — summon another")
-    status == "working" &&
+    if status == "working" && get(st, "queues_prompts", false) !== true
         return Dict{String,Any}("ok" => false, "busy" => true,
-                                "error" => "it is mid-turn; wait for it to finish, or interrupt it first")
+                                "error" => "it is mid-turn and this agent does not queue prompts; " *
+                                           "wait for it to finish, or interrupt it first")
+    end
     _agent_call(:agent_send, Dict{String,Any}("agent_id" => aid, "text" => String(text)))
     return Dict{String,Any}("ok" => true, "agent_id" => aid)
 end
