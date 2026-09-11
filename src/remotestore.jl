@@ -627,15 +627,30 @@ function _archive_file(dir::AbstractString, keep = _ -> true)
     end
 end
 
-"Unpack a tar into `dest`, MERGING with what is there — a mirror is updated, not replaced."
+"""
+Unpack a tar into `dest`, MERGING with what is there: a mirror is updated, not replaced.
+
+Per FILE, which is the whole point and is what `cp` cannot do. `cp(dir; force = true)` REMOVES the
+destination directory and puts the source in its place, so extracting a `manifests/` that the store
+sent deleted every manifest written here since the last push — a sweep descriptor created moments
+earlier among them. This said "merging" and replaced, which is the worst combination: the contract
+a caller relies on is the one the code does not keep.
+"""
 function _unarchive(data::Vector{UInt8}, dest::AbstractString)
     isempty(data) && return true
     tmp = ""
     try
         tmp = Tar.extract(IOBuffer(data))
-        mkpath(String(dest))
-        for e in readdir(tmp)
-            cp(joinpath(tmp, e), joinpath(String(dest), e); force = true, follow_symlinks = false)
+        root = String(dest)
+        mkpath(root)
+        for (dir, _, files) in walkdir(tmp)
+            rel = relpath(dir, tmp)
+            out = rel == "." ? root : joinpath(root, rel)
+            mkpath(out)
+            for f in files
+                # File by file, overwriting what the store also has and leaving everything else.
+                cp(joinpath(dir, f), joinpath(out, f); force = true, follow_symlinks = false)
+            end
         end
         return true
     catch e
@@ -736,25 +751,30 @@ end
 """
     sync_flags(dir, direction) -> Bool
 
-Whether a sync of `dir` in `direction` may DELETE what the far side no longer has. Decided by who
-writes the directory, and it is the rule that goes wrong silently.
+Whether a sync of `dir` in `direction` may DELETE what the far side no longer has.
 
-  `manifests/`, `status/`  written by the JOBS, so the store is authoritative. Delete on the way IN;
-                           never on the way OUT, which would race a unit finishing between a pull
-                           and a push and erase a result nobody has seen. Removing one deliberately
-                           is `forget!`.
+A pull NEVER deletes. The mirror is not only a copy of the store: local code writes into it too — a
+sweep descriptor is written here and pushed afterwards — and a pull that replaced `manifests/`
+wholesale removed anything written since the last push. That is not a race, it is certain loss in
+that window, and it surfaced far away as "no sweep descriptor for key …" on a sweep that had just
+been created. Wiping a directory other tasks write into also gave the tar walk a file that vanished
+underneath it.
 
-  `jobs/`                  written by the HUB — the submission index, the armed and cancelled
-                           markers, the attempt counts. Delete on the way OUT, which is how
-                           disarming and clearing attempts take effect; never on the way IN, or a
-                           store copy that is merely older erases what the hub just wrote. The pull
-                           exists only so a FRESH hub can recover a submission it did not make.
+Deliberate removal does not need the wipe and never did: `forget_results!` drops the manifest from
+the mirror AND asks the store to drop its copy, so a reset propagates both ways on its own. What the
+wipe uniquely covered was a manifest removed at the STORE by something else entirely — an external
+scratch purge. That now leaves a stale entry here until something reads it and finds no blob, which
+is a worse diagnostic but a far better failure than deleting work nobody has pushed yet.
 
-  `blobs/`                 content-addressed, so a blob the store already has is byte-identical.
+  `jobs/`   written by the HUB — the submission index, the armed and cancelled markers, the attempt
+            counts. Deleted on the way OUT, which is how disarming and clearing attempts take
+            effect. The pull exists only so a FRESH hub can recover a submission it did not make.
+
+  `blobs/`  content-addressed, so a blob the store already has is byte-identical.
 """
 function sync_flags(dir::AbstractString, direction::Symbol)
     d = String(dir)
-    direction === :in && return d != "jobs"
+    direction === :in && return false          # a pull merges; see above
     direction === :out && return d == "jobs"
     error("sync_flags: direction is :in or :out, got :$direction")
 end
@@ -776,17 +796,100 @@ _sync_lock(mirror::AbstractString) = lock(_SYNC_LOCKS_LOCK) do
     get!(ReentrantLock, _SYNC_LOCKS, String(mirror))
 end
 
+# ── …and across processes ────────────────────────────────────────────────────────────────────
+# The lock above is a `ReentrantLock` in a process-local table, so it orders the tasks in ONE
+# process and nothing else. A mirror is not owned by one process: the hub and a notebook worker both
+# resolve the same cache home, so two of them sync the same directory with no mutual exclusion at
+# all. Measured rather than assumed — two processes entered that lock 18µs apart and both held it.
+#
+# A directory is the portable atomic primitive: `mkdir` either creates or fails, on every filesystem
+# and OS worth having. The holder leaves its identity inside so a lock outliving its owner can be
+# told from one that is simply busy.
+_lock_dir(mirror::AbstractString) = rstrip(String(mirror), '/') * ".synclock"
+
+# How long a sync may hold it. Generous, because the lock is held ACROSS AN SSH ROUND TRIP and a
+# slow cluster is not a broken one.
+const _LOCK_STALE_S = 900.0
+# How long to wait for someone else before giving up and going ahead anyway. Blocking a sync
+# forever on a lock is worse than the overlap the lock exists to prevent: the overlap is now
+# survivable (a pull merges, an archive tolerates a file that vanishes), whereas a hung sync stalls
+# the notebook that asked for it.
+const _LOCK_WAIT_S = 60.0
+
+_lock_alive(pid::Int, host::AbstractString) =
+    host != gethostname() ? true :                       # another machine: cannot tell, assume alive
+    pid == getpid() ? true :
+    (try; Sys.isunix() ? ccall(:kill, Cint, (Cint, Cint), pid, 0) == 0 : true; catch; true; end)
+
+# Break a lock whose owner is gone, or which is simply too old to be real work.
+function _lock_stale(d::AbstractString)
+    info = try; read(joinpath(d, "owner"), String); catch; ""; end
+    parts = split(strip(info), ' '; keepempty = false)
+    length(parts) == 3 || return true                    # unreadable: assume abandoned
+    pid = something(tryparse(Int, parts[1]), 0)
+    at  = something(tryparse(Float64, parts[3]), 0.0)
+    time() - at > _LOCK_STALE_S && return true
+    return !_lock_alive(pid, parts[2])
+end
+
+# Depth per mirror, so a nested sync in the SAME process does not deadlock against its own file
+# lock. Guarded by the in-process lock, which the caller already holds.
+const _LOCK_DEPTH = Dict{String,Int}()
+
+"""
+    with_store_lock(f, mirror)
+
+Run `f` with exclusive access to `mirror`, against every task in this process AND every other
+process on this machine. Falls through to running `f` anyway if the lock cannot be had within
+`_LOCK_WAIT_S`, having said so: a sync that never runs is a worse failure than one that overlaps.
+"""
+function with_store_lock(f, mirror::AbstractString)
+    lock(_sync_lock(mirror)) do
+        m = String(mirror)
+        depth = get(_LOCK_DEPTH, m, 0)
+        _LOCK_DEPTH[m] = depth + 1
+        held = false
+        try
+            if depth == 0
+                d = _lock_dir(m)
+                deadline = time() + _LOCK_WAIT_S
+                while true
+                    try
+                        mkdir(d)
+                        write(joinpath(d, "owner"), "$(getpid()) $(gethostname()) $(time())")
+                        held = true
+                        break
+                    catch
+                        isdir(d) && _lock_stale(d) && (try; rm(d; recursive = true, force = true); catch; end; continue)
+                        if time() > deadline
+                            @warn "slate: sync lock busy, proceeding without it" mirror = m
+                            break
+                        end
+                        sleep(0.05)
+                    end
+                end
+            end
+            return f()
+        finally
+            held && (try; rm(_lock_dir(m); recursive = true, force = true); catch; end)
+            _LOCK_DEPTH[m] = depth
+            depth == 0 && delete!(_LOCK_DEPTH, m)
+        end
+    end
+end
+
 "Bring the local mirror up to date with the store's metadata. One round trip."
 function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     isempty(s.host) && return true          # same machine: the mirror IS the store
     connected(s.host) || return false
     names = _dirlist(dirs)
     script = "cd " * shq_path(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; tar cf - " * names
-    lock(_sync_lock(s.mirror)) do
+    with_store_lock(s.mirror) do
         ok, data = run_io(String(s.host), script, nothing)
         ok || return false
+        # Merged, never replaced. `_unarchive` copies over the top, so what the store has wins
+        # per file and what only exists here survives to be pushed.
         for d in dirs
-            sync_flags(d, :in) && rm(joinpath(s.mirror, String(d)); force = true, recursive = true)
             mkpath(joinpath(s.mirror, String(d)))
         end
         return _unarchive(data, s.mirror)
@@ -804,7 +907,7 @@ function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
     connected(s.host) || return false
     # Under the same lock as `pull_meta!`: this READS the mirror to build the archive, and a pull
     # rewriting those directories underneath it would ship a half-replaced tree.
-    present, data = lock(_sync_lock(s.mirror)) do
+    present, data = with_store_lock(s.mirror) do
         pres = String[String(d) for d in dirs if isdir(joinpath(s.mirror, String(d)))]
         isempty(pres) && return (pres, nothing)
         keep = Set(pres)

@@ -360,8 +360,14 @@ const MS = RE.MemoStore
         del(d, dir) = S.sync_flags(d, dir)
         @test !del("jobs", :in)                     # hub state is never erased by a stale store copy
         @test del("jobs", :out)                     # …and disarming takes effect by deleting there
-        @test del("manifests", :in) && del("status", :in)     # the store is authoritative for these
-        @test !del("manifests", :out) && !del("status", :out) # …so a push must not race a finishing unit
+        # A pull deletes NOTHING, and that is a correction rather than a relaxation. The mirror is
+        # also written locally — a sweep descriptor is written here and pushed afterwards — so a
+        # pull that replaced `manifests/` removed anything written since the last push. Not a race:
+        # certain loss in that window, surfacing far away as "no sweep descriptor for key …" on a
+        # sweep that had just been created. Deliberate removal never needed it, because
+        # `forget_results!` drops the manifest here AND asks the store to drop its copy.
+        @test !del("manifests", :in) && !del("status", :in)
+        @test !del("manifests", :out) && !del("status", :out) # …and a push must not race a finishing unit
         @test !del("blobs", :out)                   # content-addressed: what is there is identical
         @test_throws ErrorException S.sync_flags("jobs", :sideways)
 

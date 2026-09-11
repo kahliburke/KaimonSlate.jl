@@ -309,6 +309,80 @@ end
     end
 end
 
+# A mirror is not owned by one process. The hub and a notebook worker resolve the same cache home,
+# so both sync the same directory — and the lock that was supposed to order them was a
+# `ReentrantLock` in a process-local table, which orders the tasks in ONE process and nothing else.
+# Two processes were measured entering it 18µs apart and both holding it for three seconds.
+#
+# The properties below are the ones that make a cross-process lock safe rather than a new way to
+# hang: it is held across an ssh round trip, so every failure mode has to end in progress.
+@testset "the store lock spans processes" begin
+    @testset "a lock whose owner is gone is broken" begin
+        m = mktempdir(); d = SW._lock_dir(m)
+        mkdir(d); write(joinpath(d, "owner"), "999999 $(gethostname()) $(time())")
+        t0 = time()
+        @test SW.with_store_lock(m) do; :ran end === :ran
+        @test time() - t0 < 5            # broken, not waited out
+    end
+    @testset "a lock older than any real sync is broken" begin
+        # Even one whose pid is alive: a pid is reused, and 900s is far past any round trip.
+        m = mktempdir(); d = SW._lock_dir(m)
+        mkdir(d); write(joinpath(d, "owner"), "$(getpid()) $(gethostname()) $(time() - 100_000)")
+        @test SW.with_store_lock(m) do; :ran end === :ran
+    end
+    @testset "nesting in one process does not deadlock on its own lock" begin
+        m = mktempdir()
+        @test SW.with_store_lock(m) do; SW.with_store_lock(m) do; :inner end end === :inner
+    end
+    @testset "a throw releases it" begin
+        m = mktempdir()
+        @test_throws ErrorException SW.with_store_lock(m) do; error("boom") end
+        @test !isdir(SW._lock_dir(m))    # not leaked, or every later sync waits out the timeout
+        @test SW.with_store_lock(m) do; :ran end === :ran
+    end
+end
+
+# A pull must never delete what has not been pushed yet.
+#
+# The mirror is not only a copy of the store: local code writes into it and pushes afterwards. A
+# pull that replaced `manifests/` wholesale removed anything written since the last push — certain
+# loss, not a race — and it surfaced far away as "no sweep descriptor for key …" on a sweep that had
+# just been created. It also handed the tar walk files that vanished underneath it.
+@testset "a pull merges rather than replacing" begin
+    @testset "the flags say so" begin
+        # Stated on the function, because the wipe is what a future tidy-up would put back.
+        for d in ("manifests", "status", "jobs", "blobs")
+            @test SW.sync_flags(d, :in) == false
+        end
+        # Outbound is unchanged: `jobs/` is hub-owned, and deleting there is how disarming and
+        # clearing attempts take effect.
+        @test SW.sync_flags("jobs", :out)
+        @test !SW.sync_flags("manifests", :out)
+    end
+
+    @testset "an unpushed manifest survives a pull" begin
+        mktempdir() do mirror
+            for d in ("manifests", "status", "jobs"); mkpath(joinpath(mirror, d)); end
+            # What the store sends back: one manifest it knows about. Built OUTSIDE the mirror so
+            # the fixture cannot contaminate what is being measured, and archived whole — a
+            # predicate that matched only `manifests/…` would exclude the DIRECTORY entry and Tar
+            # would never descend into it.
+            data = mktempdir() do remote
+                mkpath(joinpath(remote, "manifests"))
+                MS.write_manifest(remote, "from_store", Dict("status" => "ok"))
+                SW._archive(remote)
+            end
+
+            # What this side wrote and has NOT pushed. Before the fix, the pull deleted it.
+            MS.write_manifest(mirror, "written_here", Dict("status" => "ok"))
+
+            @test SW._unarchive(data, mirror)
+            @test isfile(joinpath(mirror, "manifests", "written_here.toml"))   # survived
+            @test isfile(joinpath(mirror, "manifests", "from_store.toml"))     # and the store's landed
+        end
+    end
+end
+
 @testset "a sync survives the store being written" begin
     # `put_blob` and `_atomic_write` stage a half-written file and rename it into place. That temp
     # file used to live in the directory being shipped, so a transfer running at the same time
