@@ -372,10 +372,11 @@ async function _runDocSearch() {
     if (_IDENT_RE.test(q)) {                        // exact name/module → live lookup, pinned on top
       try {
         const hr = await api('GET', '/api/help?name=' + encodeURIComponent(q));
+        const hname = _bareName(hr && hr.module, hr && hr.name);
         if (hr && hr.name && (hr.docHtml || (hr.exports && hr.exports.length) || hr.kind !== 'unknown'))
-          results = [{ module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml,
+          results = [{ module: hr.module || hr.name, name: hname, doc: hr.doc, docHtml: hr.docHtml,
                        exports: hr.exports || [], kind: hr.kind, exact: true, _enriched: true },
-                     ...results.filter(r => !(r.name === hr.name && (r.module || '') === (hr.module || '')))];
+                     ...results.filter(r => !(r.name === hname && (r.module || '') === (hr.module || '')))];
       } catch (_) {}
     }
   }
@@ -460,6 +461,11 @@ async function _renderRelated(r) {
   }
 }
 const _lookupName = r => (r.module && r.module !== r.name) ? r.module + '.' + r.name : r.name;
+// A record keeps `name` BARE and `module` as the qualifier, and everything that displays or re-looks-up
+// a record composes the two. `/api/help?name=Mod.fn` answers with the qualified name in `name`, so a
+// record built straight from that reply renders `Mod.Mod.fn`. Only reachable by searching a dotted
+// name, which is what name completion now produces.
+const _bareName = (mod, nm) => (mod && nm && nm.startsWith(mod + '.')) ? nm.slice(mod.length + 1) : nm;
 // Lazily upgrade the shown record with a LIVE help lookup — fills in a module's exports
 // (the drill-down grid) + a fresh docstring, so ANY module/binding becomes browseable, not
 // just an exactly-typed query. One lookup per record (cached on the record).
@@ -570,7 +576,7 @@ async function helpLookup(name) {
   const rec = (!hr.docHtml && !(hr.exports && hr.exports.length) && !resolved)
     ? { name, module: '', kind: 'unknown', exports: [], _enriched: true,
         docHtml: `<div class="dim">No binding named <code>${_escc(name)}</code> in this notebook — check the spelling, or whether its package is loaded here.</div>` }
-    : { module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml, exports: hr.exports || [], kind: hr.kind, _enriched: true };
+    : { module: hr.module || hr.name, name: _bareName(hr.module, hr.name), doc: hr.doc, docHtml: hr.docHtml, exports: hr.exports || [], kind: hr.kind, _enriched: true };
   _go({ q: v.q || '', results: v.results || [], sel: v.sel || 0, rec });
 }
 // Insert the bare name at the selected cell's cursor, else copy the qualified name.
@@ -598,20 +604,136 @@ document.getElementById('docrelated').addEventListener('click', e => { const c =
 // Auto-search as you type, DEBOUNCED 500ms — the docs search is an expensive embedding+FTS query,
 // so we coalesce keystrokes rather than fire per-character. Enter still works: it forces an
 // immediate search on a new query, or opens the selected result once the query has been searched.
-let _docDebounce = null;
+let _docDebounce = null, _docSugDebounce = null;
+// The same typing pause the cell editor's popup uses (Settings → Editing, `slateCompleteDelay`,
+// default 250ms). Read per keystroke so the slider applies without a reload, and deliberately NOT
+// the 500ms search debounce above: suggesting a name is a cheap lookup, running the semantic search
+// is not, so they settle at different speeds.
+const _docCompleteDelay = () => { const n = parseInt(localStorage.getItem('slateCompleteDelay'), 10); return Number.isFinite(n) ? n : 250; };
 document.getElementById('docin').addEventListener('input', () => {
-  clearTimeout(_docDebounce);
+  clearTimeout(_docDebounce); clearTimeout(_docSugDebounce);
+  _docSugDebounce = setTimeout(_docSuggest, _docCompleteDelay());
   _docDebounce = setTimeout(() => {
     const q = document.getElementById('docin').value.trim();
     if (q && q !== _docLastQ) _runDocSearch();   // new query settled → search
   }, 500);
 });
+
+// ── Name completion for the search box ───────────────────────────────────────────────────────────
+// Searching docs means knowing the name, which is the thing you came here to find out. Two sources,
+// because they answer different halves: `/complete` resolves where the kernel's bindings live (what
+// this notebook has actually loaded, including its own definitions), and `/pkg-complete` matches
+// installable + stdlib names (so `Linea` finds LinearAlgebra before anything has loaded it).
+//
+// `/pkg-complete` is NOT on a workbook's route allowlist (server_app.jl), and rightly so — a reader
+// there cannot install anything, and offering a package whose docs `/help` then can't produce is a
+// dead end. So an app asks only the first source.
+//
+// Keys are only taken while the list is OPEN. Closed, Tab keeps moving between the panel's controls
+// and the arrows keep driving the results list, so a reader who never wants names never notices this.
+let _docCands = [], _docSelIdx = -1;
+const _docsug = () => document.getElementById('docsug');
+function _docHideSug() { _docCands = []; _docSelIdx = -1; const d = _docsug(); if (d) d.style.display = 'none'; }
+function _docPaintSug() {
+  const d = _docsug(); if (!d) return;
+  if (!_docCands.length) { _docHideSug(); return; }
+  d.innerHTML = _docCands.map((c, i) =>
+    `<div class="${i === _docSelIdx ? 'on' : ''}" data-i="${i}">` +
+    `<span>${_escc(c.text)}</span><span class="dsk">${_escc(c.kind)}</span></div>`).join('');
+  d.style.display = 'block';
+  const on = d.children[_docSelIdx]; if (on) on.scrollIntoView({ block: 'nearest' });
+}
+// The token being completed: the trailing dotted identifier.
+function _docToken(q) {
+  const m = /([A-Za-z_][A-Za-z0-9_!]*(?:\.[A-Za-z_][A-Za-z0-9_!]*)*\.?)$/.exec(q);
+  return m ? m[1] : '';
+}
+// Names are only suggested when the WHOLE query is a name lookup — one identifier, possibly dotted.
+// This box has two jobs, and the other one is semantic prose search ("draw a heatmap"), whose last
+// word is identifier-shaped too. Suggesting there would put a highlighted name under Enter and
+// answer a question nobody asked, and would take the arrow keys away from the results list while
+// someone is reading it. A name query has neither problem, which is what makes autoselect safe.
+const _docNameQuery = q => _IDENT_RE.test(q) || /^[A-Za-z_][A-Za-z0-9_!]*(\.[A-Za-z_][A-Za-z0-9_!]*)*\.$/.test(q);
+let _docSugSeq = 0;
+async function _docSuggest() {
+  const inp = document.getElementById('docin'), q = inp.value.trim();
+  const tok = _docToken(q);
+  if (tok.length < 2 || !_docNameQuery(q)) { _docHideSug(); return; }
+  const seq = ++_docSugSeq;
+  const seen = new Set(), out = [];
+  const add = (text, kind) => { if (text && !seen.has(text)) { seen.add(text); out.push({ text, kind }); } };
+  try {
+    const r = await api('POST', '/api/complete', { code: tok, pos: tok.length });
+    for (const c of ((r && r.completions) || []).slice(0, 40)) add(c.text, c.kind || 'name');
+  } catch (_) {}
+  if (!(window.__SLATE_APP__ && window.__SLATE_APP__.on)) {
+    const bare = tok.indexOf('.') < 0 ? tok : '';       // a package name is never dotted
+    if (bare) {
+      try {
+        const p = await api('GET', '/api/pkg-complete?q=' + encodeURIComponent(bare));
+        for (const n of ((p && p.names) || []).slice(0, 20)) add(n, 'package');
+      } catch (_) {}
+    }
+  }
+  if (seq !== _docSugSeq) return;                       // a later keystroke already answered
+  // Top entry selected, so Enter commits it without a trip through the arrows. Safe because this
+  // only runs for a name query (see `_docNameQuery`) — Enter had nothing else to mean here.
+  _docCands = out.slice(0, 30); _docSelIdx = _docCands.length ? 0 : -1;
+  _docPaintSug();
+}
+// Move the highlight by `dir`, wrapping. Shared by the arrows and by Tab in navigate-mode.
+function _docMoveSug(dir) {
+  const n = _docCands.length; if (!n) return;
+  _docSelIdx = dir < 0 ? (_docSelIdx <= 0 ? n - 1 : _docSelIdx - 1)
+                       : (_docSelIdx < 0 ? 0 : (_docSelIdx + 1) % n);
+  _docPaintSug();
+}
+// Replace the completed token in place, so `Base.sin` completes its tail without losing the prefix.
+// NOT `_docPick` — that name is taken by the results-list action above (insert the name into the
+// selected cell). Two same-named function declarations in one scope silently keep the later one.
+function _docSugAccept(i) {
+  const c = _docCands[i]; if (!c) return;
+  const inp = document.getElementById('docin'), q = inp.value, tok = _docToken(q);
+  const head = tok ? q.slice(0, q.length - tok.length) : q;
+  const dot = tok.lastIndexOf('.');
+  inp.value = head + (dot >= 0 ? tok.slice(0, dot + 1) : '') + c.text;
+  _docHideSug();
+  inp.focus();
+  // Both timers: a suggest still in flight would re-open the list over the name just committed, and
+  // the search debounce is superseded by the immediate run below.
+  clearTimeout(_docDebounce); clearTimeout(_docSugDebounce);
+  _docSugSeq++;                                         // and disown any request already awaiting
+  _runDocSearch();                                      // a chosen name is a query worth answering now
+}
+_docsug().addEventListener('mousedown', e => {
+  const d = e.target.closest('div[data-i]'); if (d) { e.preventDefault(); _docSugAccept(+d.dataset.i); }
+});
+document.getElementById('docin').addEventListener('blur', () => setTimeout(_docHideSug, 120));
 document.getElementById('docin').addEventListener('keydown', e => {
   const v = _view(), sel = v ? v.sel : 0;
+  const sugOpen = _docCands.length > 0;
+  // While the name list is open it owns the keys: arrows move the highlight, Enter commits it, and
+  // Escape dismisses the list — which hands the arrows back to the RESULTS list below.
+  if (sugOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    e.preventDefault();
+    _docMoveSug(e.key === 'ArrowUp' ? -1 : 1);
+    return;
+  }
+  // Tab obeys `slateCompleteTab` (Settings → Editing), the same preference the cell editor's popup
+  // reads — one answer to "what does Tab do in a completion list", not two that can disagree.
+  if (sugOpen && e.key === 'Tab') {
+    const nav = (localStorage.getItem('slateCompleteTab') || 'accept') === 'navigate';
+    if (!nav && !e.shiftKey) { e.preventDefault(); _docSugAccept(_docSelIdx < 0 ? 0 : _docSelIdx); return; }
+    if (nav) { e.preventDefault(); _docMoveSug(e.shiftKey ? -1 : 1); return; }
+    // accept-mode Shift-Tab: nothing to accept backwards, so let it leave the field as usual.
+  }
+  // (Escape never reaches here: the dock's capture-phase listener handles it, and closes the name
+  // list before the dock.)
   if (e.key === 'ArrowDown') { e.preventDefault(); _select(sel + 1); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); _select(sel - 1); }
   else if (e.key === 'Enter') {
     e.preventDefault();
+    if (sugOpen && _docSelIdx >= 0) { _docSugAccept(_docSelIdx); return; }   // commit the highlighted name
     clearTimeout(_docDebounce);                  // pre-empt the pending debounced search
     const q = document.getElementById('docin').value.trim();
     if (q && q !== _docLastQ) { _runDocSearch(); return; }   // new query → search
@@ -625,7 +747,14 @@ document.getElementById('docin').addEventListener('keydown', e => {
 // Esc anywhere in the open dock closes it (minimizes) — users expect Escape to dismiss the popup,
 // not walk history. Back/forward stay on the ‹ › nav buttons.
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && !_docMin) { e.preventDefault(); e.stopPropagation(); minimizeDocs(); }
+  if (e.key === 'Escape' && !_docMin) {
+    e.preventDefault(); e.stopPropagation();
+    // Innermost first. The name list is a popup INSIDE the dock, and this listener is on `document`
+    // in the CAPTURE phase — it sees Escape before the search box does, so dismissing the list has
+    // to happen here or not at all. One press closes the list, a second closes the dock.
+    if (_docCands.length) { _docHideSug(); return; }
+    minimizeDocs();
+  }
 }, true);
 _restoreDocs();
 

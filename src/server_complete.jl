@@ -2032,6 +2032,18 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/controls", req -> _withnb(h, req, nb -> begin
         set_controls_map!(nb, get(_body(req), "map", Dict{String,Any}())); _json(state_json(nb))
     end))
+    # Rewrite many cells' sources in ONE operation — notebook-wide find-and-replace. Body
+    # {edits: {cellId: newSource, …}, label}. The browser sends each cell's COMPLETE new text (taken
+    # from its editor, so unsaved edits are carried in) rather than a find/replace instruction, the
+    # same way `cell-type` sends `source`. One undo entry + one history checkpoint for the whole
+    # rewrite, so ⌘Z reverses it as the single action the user asked for; `label` is what the undo
+    # toast and the timeline entry say. Cells land STALE — a text substitution shouldn't start a run.
+    HTTP.register!(router, "POST", "/api/{id}/cells-replace", req -> _withnb(h, req, nb -> begin
+        b = _body(req); e = get(b, "edits", nothing)
+        e isa AbstractDict || return _json(Dict("ok" => false, "changed" => 0))
+        n = replace_cells!(nb, e; label = String(get(b, "label", "replace")))
+        j = state_json(nb); j["changed"] = n; _json(j)
+    end))
     # Set/clear a cell behavior flag (collapsed / hidecode / trace / cache / …) across one or many cells
     # in ONE persist → one history entry. Body {flag, value, cells?}: `cells` (a list of ids) targets
     # just those, omitted ⇒ every applicable cell. An eval-affecting flag (trace/cache/…) restales and
@@ -2688,7 +2700,7 @@ function _make_router(h::Hub)
                    "parent" => e.parent,
                    "parentPath" => e.parentpath,
                    "detached" => e.detached,
-                   "manageable" => !(nb.kernel isa InProcessKernel)))
+                   "manageable" => _pkg_manageable(nb.kernel)))
     end))
     HTTP.register!(router, "POST", "/api/{id}/package", req -> _withnb(h, req, nb -> begin
         b = _body(req)
@@ -3649,6 +3661,20 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     app || (try; _start_revise!(); catch e; @debug "Revise setup failed" exception = e; end)
     _HUB_STARTED[] = time()                  # `/status` reports uptime from here
     _APP_PROCESS[] = app                     # process-wide app flag, for the paths with no hub in hand
+    # Creating a blank notebook for a path that HAS history is the signature of a file that was
+    # deleted out from under us. Report it rather than handing back an empty document that then
+    # saves with a fresh docid and detaches from its own history. Installed here because the
+    # history store is a server-layer concern; ReportEngine only knows it is about to create a file.
+    ReportEngine._NB_MISSING_HOOK[] = function (p::String)
+        n = try; length(SlateHistory.entries(SlateHistory.Doc(p))); catch; 0; end
+        n == 0 && return nothing
+        @warn """
+              Creating a BLANK notebook at a path that already has history — the file is missing, \
+              not new. $n recorded revision(s) exist and still hold its content; the blank about to \
+              be written will save under a NEW docid and stop being connected to them.
+              """ path = p revisions = n recover = "KaimonSlate.NotebookServer.SlateHistory"
+        return nothing
+    end
     try; SlateHistory.migrate_once!(); catch e   # one-time: compact legacy history logs + compress objects
         @warn "KaimonSlate: history migration failed" exception = (e, catch_backtrace())
     end

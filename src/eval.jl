@@ -325,12 +325,34 @@ gate kernel dispatches to its worker; in-process fires directly. A no-op for a b
 run_cleanups!(::Kernel, ::Report, ids) = nothing
 
 """
-    InProcessKernel <: Kernel
+    InProcessKernel(projectdir = "", envdir = "") <: Kernel
 
-Evaluate cells in the report's own in-process `Module`. Stateless — the namespace
-lives on `report.mod`, managed by [`report_module`](@ref) / [`reset_module!`](@ref).
+Evaluate cells in the report's own in-process `Module`. The namespace lives on `report.mod`,
+managed by [`report_module`](@ref) / [`reset_module!`](@ref).
+
+Environment model — the same one [`GateKernel`](@ref) documents, reached differently:
+
+- `projectdir` is the notebook's enclosing project (`""` = detached).
+- `envdir` is the notebook's OWN env, where its package adds land. Created on the first add, so a
+  notebook that adds nothing costs nothing, exactly like the gate path's base mode.
+
+A `GateKernel` gets those as ONE resolved environment because it owns a worker process to activate
+it in. In-process there is no such process: the host's active project is the running hub's own, and
+switching it would repoint the hub underneath itself. So the two directories are layered onto
+`LOAD_PATH` instead — notebook env, then enclosing project, then the host env. That is a stack
+rather than a single resolve, so a package present at two versions is settled by order rather than
+by Pkg, which is the one way this differs from a worker.
+
+`LOAD_PATH` is also process-wide, so several notebooks open in one in-process hub share one stack
+and the most recently opened sits in front. Workers do not have that problem because each owns its
+own process; here it is the reason a notebook from a different project wants its own `slate`.
 """
-struct InProcessKernel <: Kernel end
+struct InProcessKernel <: Kernel
+    projectdir::String
+    envdir::String
+end
+InProcessKernel() = InProcessKernel("", "")
+InProcessKernel(projectdir::AbstractString) = InProcessKernel(String(projectdir), "")
 
 "Ensure the kernel's namespace exists and is ready to evaluate into."
 prepare!(::InProcessKernel, report::Report) = report_module(report)
@@ -595,15 +617,45 @@ one `pkg_op` adds/removes into.
 """
 project_deps(::InProcessKernel, ::Report) = _active_project_deps()
 
-# In-process has no parent to fork from (cells already run in the host's active
-# project — same "env IS the whole world" semantics as a GateKernel detached notebook) —
-# but unlike a GateKernel's fresh worker env, that active project already carries the
-# running app's OWN deps, so filter those out via the startup baseline: only what a
-# notebook itself added should show in the package panel / reproducibility footer.
-function env_info(::InProcessKernel, ::Report)
-    base = _INPROCESS_BASE_DEPS[]
-    deps = filter(d -> !(string(get(d, "name", "")) in base), _active_project_deps())
-    return (notebook = (path = dirname(Pkg.project().path), deps = deps), parent = nothing)
+# In-process has no worker env to fork, so cells run in the host's active project. That project
+# already carries the running app's OWN deps, so filter those out via the startup baseline: only
+# what a notebook itself added should show in the package panel / reproducibility footer.
+#
+# The notebook's ENCLOSING project is still reported as the parent when there is one. It is not an
+# environment the notebook can add to from here (that is why the panel stays read-only), but it is
+# on LOAD_PATH and its packages are what the notebook can `using`, so calling such a notebook
+# "detached" was wrong: it named the one project the notebook actually depends on.
+function env_info(k::InProcessKernel, ::Report)
+    own = _project_group(k.envdir)
+    if own === nothing
+        # No env of its own yet (base mode). The only notebook-specific packages are then whatever
+        # was added to the HOST project at runtime, which the startup baseline isolates.
+        base = _INPROCESS_BASE_DEPS[]
+        deps = filter(d -> !(string(get(d, "name", "")) in base), _active_project_deps())
+        own = (path = dirname(Pkg.project().path), name = "", deps = deps)
+    end
+    return (notebook = own, parent = _project_group(k.projectdir))
+end
+
+# `(path, name, deps)` for a project directory, read straight off its Project.toml. Deliberately
+# NOT via `Pkg.dependencies()`: that reports the ACTIVE project, which for an in-process kernel is
+# the host's, not this one. Versions come from the host's resolved set when it happens to share the
+# package and are left blank otherwise, since an unresolved project has no version to state.
+function _project_group(dir::AbstractString)
+    isempty(dir) && return nothing
+    file = joinpath(dir, "Project.toml")
+    isfile(file) || (file = joinpath(dir, "JuliaProject.toml"))
+    isfile(file) || return nothing
+    proj = try; Pkg.TOML.parsefile(file); catch; return nothing; end   # via Pkg: ReportEngine has no TOML import
+    resolved = try; Pkg.dependencies(); catch; Dict(); end
+    deps = Dict{String,Any}[]
+    for (name, uuid) in get(proj, "deps", Dict{String,Any}())
+        pi = get(resolved, Base.UUID(String(uuid)), nothing)
+        ver = (pi === nothing || pi.version === nothing) ? "" : string(pi.version)
+        push!(deps, Dict{String,Any}("name" => String(name), "version" => ver, "uuid" => String(uuid)))
+    end
+    sort!(deps; by = d -> d["name"])
+    return (path = String(dir), name = String(get(proj, "name", "")), deps = deps)
 end
 bundle_info(::InProcessKernel, ::Report) = (projectdir = "", pathdeps = NamedTuple[])
 
@@ -617,27 +669,93 @@ so this is a no-op there.
 memo_pin!(::Kernel, ::Report, ::AbstractString, ::Bool) = nothing
 
 """
-    pkg_op(kernel, report, op, name) -> Dict{String,Any}
+    pkg_op(kernel, report, op, name; target="notebook") -> Dict{String,Any}
 
-Add (`op="add"`) or remove (`op="rm"`) a package in the kernel's active project — the
-notebook's own dependency environment. The gate kernel mutates its worker's project; the
-in-process kernel has no separate worker to fork an env in, so cells already run in the
-process's own active project — same "env IS the whole world" semantics as a GateKernel's
-detached notebook (`server.jl`'s `parent == ""` case). `target` is accepted for API parity
-with `GateKernel` but has no separate object to select (no parent to add to instead).
+Add (`op="add"`), remove (`op="rm"`) or update a package. `target="notebook"` operates on the
+notebook's OWN env; `target="project"` operates on the enclosing project, shared with everything
+else in it. Both kernels offer both targets.
+
+The gate kernel hands the operation to its worker. The in-process kernel has no worker, so it does
+the same work here: activate the target environment, run the op, and put the host's own project
+back. That activation is process-global for its duration, which is why it is serialised — see
+[`InProcessKernel`](@ref) for why in-process layers environments instead of resolving one.
+
+Never operates on the host's active project. Adding a notebook's package to the environment the
+hub itself is running out of would write a dependency into whatever project launched Slate.
 Returns `{ok, message}`.
 """
-function pkg_op(::InProcessKernel, ::Report, op::AbstractString, name::AbstractString;
+function pkg_op(k::InProcessKernel, ::Report, op::AbstractString, name::AbstractString;
                 target::AbstractString = "notebook")
     op in ("add", "rm", "update") || return Dict{String,Any}("ok" => false, "message" => "bad op '$op'")
-    try
+    dir = if String(target) == "project"
+        isempty(k.projectdir) && return Dict{String,Any}("ok" => false, "message" => "this notebook has no parent project")
+        k.projectdir
+    else
+        isempty(k.envdir) && return Dict{String,Any}("ok" => false, "message" => "this notebook has no environment of its own")
+        ensure_notebook_env!(k.envdir)   # first add materialises it — base mode until then
+    end
+    r = _in_env(dir) do
         op == "add"    ? Pkg.add(String(name)) :
         op == "update" ? Pkg.update(String(name)) :
                          Pkg.rm(String(name))
         return Dict{String,Any}("ok" => true, "message" => "")
-    catch e
-        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     end
+    # A fresh notebook env only becomes reachable to `using` once it exists, and the enclosing
+    # project has to stay behind it. Re-layering after the op keeps that order true.
+    r["ok"] === true && _layer_load_path!(k)
+    return r
+end
+
+# Run `f` with `dir` as the active project, then restore. `Base.ACTIVE_PROJECT` is process-global,
+# so a cell evaluating concurrently would otherwise resolve against the wrong environment for the
+# duration of a `Pkg.add` — which for a heavy package is a long window. One lock across every
+# in-process package operation; the gate path needs none because its worker is a separate process.
+const _INPROC_ENV_LOCK = ReentrantLock()
+function _in_env(f, dir::AbstractString)
+    lock(_INPROC_ENV_LOCK) do
+        was = Base.active_project()                   # the project FILE path, or nothing
+        try
+            Pkg.activate(String(dir); io = devnull)
+            return f()
+        catch e
+            return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+        finally
+            # Restored through Base rather than `Pkg.activate`: `active_project()` hands back a
+            # path to a Project.toml, and this is its exact inverse (`nothing` = the default env).
+            try; Base.set_active_project(was); catch; end
+        end
+    end
+end
+
+# Put this notebook's environments on LOAD_PATH, most specific first: its own env, then the
+# enclosing project, then whatever the host already had. Idempotent, and it re-asserts the relative
+# order on every call so a later add can't leave the project ahead of the notebook env.
+function _layer_load_path!(k::InProcessKernel)
+    _warn_second_project(k.projectdir)
+    for d in (k.projectdir, k.envdir)          # pushed in reverse precedence; each `pushfirst!` wins
+        isempty(d) && continue
+        isdir(d) || continue
+        filter!(!=(d), LOAD_PATH)
+        pushfirst!(LOAD_PATH, d)
+    end
+    isempty(k.projectdir) || (_INPROC_PROJECT[] = k.projectdir)
+    return nothing
+end
+
+# One in-process hub holds one LOAD_PATH, so its notebooks share a single resolution scope — the
+# same scope a REPL session has, and fine for notebooks from one project. A notebook from a SECOND
+# project is a different matter: both projects end up stacked, the newer in front, and which one a
+# shared package resolves from stops being a property of the notebook you are looking at. Say so
+# once, rather than letting it be discovered as a package that inexplicably has the wrong version.
+const _INPROC_PROJECT = Ref{String}("")
+function _warn_second_project(dir::AbstractString)
+    (isempty(dir) || isempty(_INPROC_PROJECT[]) || _INPROC_PROJECT[] == dir) && return nothing
+    @warn """
+          Slate is serving notebooks from two projects in ONE process, so they share a single \
+          package resolution scope and the newer project takes precedence. Run a separate `slate` \
+          per project to keep them apart.
+          """ first = _INPROC_PROJECT[] second = dir
+    return nothing
 end
 
 """

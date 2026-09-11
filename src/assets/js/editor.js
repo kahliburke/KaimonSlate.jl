@@ -5,18 +5,18 @@
 (function () {
   const CM = window.CM6;
   if (!CM) { console.error('CM6 bundle missing'); return; }
-  const { EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, Decoration, Transaction,
-          ViewPlugin, WidgetType, Prec,
+  const { EditorView, EditorState, Compartment, StateField, StateEffect, Decoration, Transaction,
+          ViewPlugin, WidgetType, Prec, RangeSetBuilder,
           vimMode, vimApi, vimGetCM, emacsMode,
           keymap, defaultKeymap, history, historyKeymap, undoDepth, redoDepth, indentWithTab, toggleComment,
-          indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection,
+          indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection, tooltips,
           syntaxHighlighting, julia, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
           htmlLang, cssLang, jsLang, jsEmbed, scopeCompletionSource, localCompletionSource,
           syntaxErrorLinter,
 
           autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
           completionStatus, startCompletion, acceptCompletion, snippet,
-          cmSearch, cmView } = CM;
+          cmSearch, cmView, cmAutocomplete, cmCommands, cmLanguage, indentationMarkers } = CM;
 
   // ── Every live editor view ──────────────────────────────────────────────────────
   // The audience for a settings change: theme, wrap, keymap, completion delay and the extension
@@ -78,6 +78,22 @@
     for (const v of _allViews())
       try { v.dispatch({ effects: wrapComp.reconfigure((v._wrapMd || on) ? EditorView.lineWrapping : []) }); } catch (_) {}
   };
+  // "Apply this buffer" — what `:w` means, for whichever kind of editor you are in. A code cell
+  // runs; a md / @bind cell edits its source in the `.srcedit` OVERLAY, where there is no run and
+  // the apply action is commitSource (what Shift-Enter does there), which writes the source back and
+  // collapses to the rendered view; a whole-file editor writes the file. Same intent, three verbs.
+  //
+  // Shared by the vim Ex commands and the emacs `C-x C-s` chord, so the two keymaps cannot drift
+  // apart on what saving means. Returns whether it did anything, which is what a CM6 keymap wants.
+  const _overlayView = v => !!(v && v.dom && v.dom.closest && v.dom.closest('.srcedit'));
+  const _apply = (v, id) => {
+    if (v && v._onSave) { v._onSave(); return true; }           // whole-file editor (Files tab)
+    if (!id) return false;
+    if (_overlayView(v)) { window.commitSource && window.commitSource(id); return true; }
+    if (window.runCell) { window.runCell(id); return true; }
+    return false;
+  };
+
   // ── Editor keymap (Settings → Editing → Editor keymap) ──────────────────────────
   // `vim` / `emacs` layer an alternative keymap over every cell editor. In a Compartment so the
   // setting applies live to editors that are already open.
@@ -96,7 +112,19 @@
     const m = localStorage.getItem('slateEditorKeymap');
     return (m && _KEYMAP_MODES[m]) ? m : 'default';
   };
-  const _keymapExt = mode => (_KEYMAP_MODES[mode] ? _KEYMAP_MODES[mode]() : []);
+  // `C-x C-s` — save, the chord an emacs user's fingers already know. @replit/codemirror-emacs binds
+  // no `C-x` prefix at all, so it fell through to the browser and the only way to save a file was
+  // ⌘S. Runs the same `_apply` the vim `:w` does. `Prec.high` puts it ahead of the cell keymap, and
+  // CM6 resolves the two-stroke sequence itself.
+  const _emacsSave = keymap.of([{
+    key: 'Ctrl-x Ctrl-s',
+    run: view => _apply(view, (view._edctx && view._edctx.cellId) || null),
+    preventDefault: true,
+  }]);
+  const _keymapExt = mode =>
+    !_KEYMAP_MODES[mode] ? [] :
+    mode === 'emacs' ? [_KEYMAP_MODES[mode](), Prec.high(_emacsSave)] :
+    [_KEYMAP_MODES[mode]()];
   window.editorKeymapMode = _keymapMode;
   window.editorKeymapModes = () => Object.keys(_KEYMAP_MODES).filter(m => _KEYMAP_MODES[m]);
   window.setEditorKeymap = mode => {
@@ -147,6 +175,18 @@
         const buf = vs.inputState && vs.inputState.keyBuffer;
         if (buf && buf.length) { try { vimApi.handleKey(cm, '<Esc>', 'user'); } catch (_) {} return true; }
       }
+      // defaultKeymap's own Escape binding, which this ladder pre-empts: collapse a selection or
+      // extra carets. Under EVERY keymap, vim included — extra carets are a state you have to be
+      // able to get out of, and Escape is the key everyone reaches for. Leaving the cell with three
+      // carets still live meant the only way back to one was the mouse.
+      //
+      // It is safe to run this under vim because it returns false on a bare caret, so a plain
+      // normal-mode Escape still falls through to leaving the cell and keeps its "assert the mode"
+      // meaning. Vim's block cursor does NOT stand in the way: the replit plugin draws it as a
+      // decoration and leaves the selection empty, so `simplifySelection` sees nothing to collapse.
+      // Insert and visual mode are already handled above, so this rung is only ever reached from
+      // normal mode.
+      if (cmCommands.simplifySelection(view)) return true;
       view.contentDOM.blur();
       return true;
     },
@@ -159,16 +199,7 @@
     const _view = cm => (cm && cm.cm6) || null;
     const _cellOf = cm => { const v = _view(cm); return (v && v._edctx && v._edctx.cellId) || null; };
     const _leave = cm => { const v = _view(cm); try { if (v) v.contentDOM.blur(); } catch (_) {} };
-    // A md / @bind cell edits its source in the `.srcedit` OVERLAY, where there is no run — the
-    // apply action is commitSource (what Shift-Enter does there), which writes the source back and
-    // collapses to the rendered view. Same intent as running a code cell, different verb.
-    const _overlay = v => !!(v && v.dom && v.dom.closest && v.dom.closest('.srcedit'));
-    const _run = cm => {
-      const v = _view(cm), id = _cellOf(cm);
-      if (!id) return;
-      if (_overlay(v)) { window.commitSource && window.commitSource(id); return; }
-      if (window.runCell) window.runCell(id);
-    };
+    const _run = cm => _apply(_view(cm), _cellOf(cm));
     // `:q!` — throw the buffer away: put the saved source back, which drops the `edited` mark by
     // itself (the editor's own input handler re-checks the text). The only way to abandon an edit
     // in one action; plain `:q` keeps it, exactly as clicking away does.
@@ -204,6 +235,218 @@
   };
 
   window.editors = window.editors || {};
+
+  // ── Multiple cursors ──────────────────────────────────────────────────────────
+  // The gestures are documented in notebook-basics.md. CodeMirror supplies the rest once multiple
+  // ranges are allowed: defaultKeymap already binds ⌘⌥↑/↓ to addCursorAbove/Below and Escape to
+  // simplifySelection, and `drawSelection()` (on every editor) draws the extra carets.
+  const _multiCursor = [
+    EditorState.allowMultipleSelections.of(true),   // without it CM6 discards all but one range
+    // ⌘ is go-to-definition and ⌃ is the macOS context menu, so require ⌥ alone.
+    EditorView.clickAddsSelectionRange.of(e => e.altKey && !e.metaKey && !e.ctrlKey),
+  ];
+
+  // ── Matching-word highlight ───────────────────────────────────────────────────
+  // Select a word and its other occurrences in that cell get tinted. CodeMirror's
+  // `highlightSelectionMatches`, which arrived with multiple cursors as a side effect of the same
+  // PR — so it is a setting rather than a fact, because whether it reads as helpful or as noise
+  // depends on how you work (select a single letter and it lights up half the cell).
+  //
+  // The tint is one colour applied at two strengths: a fill and a slightly stronger outline. It has
+  // to be translucent — a solid fill would swallow the syntax colours underneath and only work on
+  // one background — so the choice is a short list of hues rather than a free colour picker.
+  //
+  // The DEFAULT follows the UI theme: `--selmatch` (notebook.css) points at that theme's accent, so
+  // the highlight is recoloured by switching theme and needs no setting of its own to look right.
+  // The named hues are for overriding that deliberately.
+  const matchHiComp = new Compartment();
+  const MATCH_TINTS = {
+    theme:  'var(--selmatch, var(--accent))',   // follows the UI theme — the default
+    neutral: '#7f7f7f', blue: '#5a96ff', green: '#6ec878',
+    amber:   '#e6b450', violet: '#af8cf0', rose: '#f08296',
+  };
+  window.matchTintNames = () => Object.keys(MATCH_TINTS);
+  // The colour behind a name, so the Settings swatches can show the real thing rather than a second
+  // copy of the palette that could drift from this one. `theme` returns the CSS variable, which the
+  // swatch resolves against the live theme exactly as the editor does.
+  window.matchTintValue = n => MATCH_TINTS[n] || MATCH_TINTS.theme;
+  // Default ON: it is how the feature shipped, so a notebook does not silently change under anyone
+  // who has already got used to it. `'0'` is the only value that turns it off.
+  const _matchHiOn = () => localStorage.getItem('slateMatchHighlight') !== '0';
+  const _matchTint = () => MATCH_TINTS[localStorage.getItem('slateMatchTint')] || MATCH_TINTS.theme;
+  const _matchHiExt = () => {
+    if (!cmSearch || !_matchHiOn()) return [];
+    // `color-mix` rather than an rgba() literal, because the theme option is a CSS variable and its
+    // value isn't known here. Both halves come out of the same colour, so a hue swap moves together.
+    const c = _matchTint(), mix = pct => `color-mix(in srgb, ${c} ${pct}%, transparent)`;
+    return [
+      cmSearch.highlightSelectionMatches(),
+      // Overrides the fixed #99ff7780 green the extension ships, which ignores the editor theme.
+      EditorView.theme({
+        '.cm-selectionMatch': { backgroundColor: mix(20),
+                                outline: `1px solid ${mix(38)}`, borderRadius: '2px' },
+      }),
+    ];
+  };
+  const _applyMatchHi = () => {
+    for (const v of _allViews()) {
+      try { v.dispatch({ effects: matchHiComp.reconfigure(_matchHiExt()) }); } catch (_) {}
+    }
+  };
+  window.setMatchHighlight = on => { localStorage.setItem('slateMatchHighlight', on ? '1' : '0'); _applyMatchHi(); };
+  window.setMatchTint = name => { if (MATCH_TINTS[name]) { localStorage.setItem('slateMatchTint', name); _applyMatchHi(); } };
+
+  // ── Editor chrome: line numbers, indent guides, code folding ──────────────────
+  // The three structural affordances a cell deliberately did without. Each is off by default, so
+  // the notebook keeps its uncluttered look until asked, and each sits in a Compartment so a
+  // Settings toggle applies LIVE to every open editor — the `setEditorWrap` pattern. The
+  // Files-tab whole-file editor forces line numbers on regardless: it is a document you scroll
+  // and navigate, not a cell.
+  const gutterComp = new Compartment();    // line numbers + active-line gutter highlight
+  const guideComp = new Compartment();     // indent guides
+  const foldComp = new Compartment();      // code folding + the fold gutter
+  const _prefOn = k => localStorage.getItem(k) === '1';
+
+  // Every editor gets the gutter, markdown cells included. A markdown cell is always soft-wrapped
+  // (see `_wrapExt`), so a number marks a logical line and a wrapped paragraph leaves blanks
+  // beside its later rows. A whole-file editor keeps its gutter whatever the setting says.
+  const _gutterExt = isFile => (cmView && (isFile || _prefOn('slateLineNumbers')))
+    ? [cmView.lineNumbers(), cmView.highlightActiveLineGutter()] : [];
+
+  // A markdown cell has no grammar (entry.js bundles Julia, HTML, CSS and JS), so it has no syntax
+  // tree and nothing to fold. Section folding would need @codemirror/lang-markdown in the bundle.
+  const _foldExt = isMd => (cmLanguage && !isMd && _prefOn('slateCodeFolding'))
+    ? [cmLanguage.codeFolding(), cmLanguage.foldGutter(), keymap.of(cmLanguage.foldKeymap)] : [];
+
+  // ── Indent guides ─────────────────────────────────────────────────────────────
+  // A hairline at each indent stop; CodeMirror core has none. One neutral color serves both editor
+  // themes. `codeOnly` stops a guide at the last line of its block rather than running it through
+  // the gap below. The active-block highlight rebuilds every marker on a selection change, and is
+  // off because a cell is short enough not to need the cue.
+  const _GUIDE = 'rgba(127,127,127,.34)';
+  const _guideExt = () => (indentationMarkers && _prefOn('slateIndentGuides'))
+    ? indentationMarkers({ thickness: 1, markerType: 'codeOnly', highlightActiveBlock: false,
+                           colors: { light: _GUIDE, dark: _GUIDE } })
+    : [];
+
+  // Live-apply a chrome toggle across every open editor. `key` is the localStorage flag, `comp`
+  // the compartment holding that piece, `build` its extension for one view.
+  const _setChrome = (key, comp, build) => on => {
+    localStorage.setItem(key, on ? '1' : '0');
+    for (const v of _allViews()) {
+      try { v.dispatch({ effects: comp.reconfigure(build(v)) }); } catch (_) {}
+    }
+  };
+  window.setLineNumbers = _setChrome('slateLineNumbers', gutterComp, v => _gutterExt(!!v._isFile));
+  window.setIndentGuides = _setChrome('slateIndentGuides', guideComp, () => _guideExt());
+  window.setCodeFolding = _setChrome('slateCodeFolding', foldComp, v => _foldExt(!!v._isMd));
+  // ── Notebook-wide search: match highlighting ──────────────────────────────────
+  // search.js owns the ⌘F bar and the cross-cell match list; a cell editor only paints what it is
+  // handed. Decorations map through edits, so highlights survive typing until the next recompute.
+  const setMatches = StateEffect.define();
+  const _mkMatch = Decoration.mark({ class: 'cm-nbmatch' });
+  const _mkMatchActive = Decoration.mark({ class: 'cm-nbmatch cm-nbmatch-active' });
+  const matchField = StateField.define({
+    create: () => Decoration.none,
+    update(deco, tr) {
+      deco = deco.map(tr.changes);
+      for (const e of tr.effects) if (e.is(setMatches)) {
+        const b = new RangeSetBuilder(), max = tr.state.doc.length;
+        for (const m of e.value) {
+          const from = Math.min(m.from, max), to = Math.min(m.to, max);
+          if (to > from) b.add(from, to, m.active ? _mkMatchActive : _mkMatch);
+        }
+        deco = b.finish();
+      }
+      return deco;
+    },
+    provide: f => EditorView.decorations.from(f),
+  });
+  // A web cell's source is the assembled @web(html"..", css"..", js"..") skin, so a match offset is
+  // against that string and not against any one pane. Replay `_webSkin`'s layout to learn where each
+  // pane's text sits inside it, so an offset can be moved into the pane that holds it. Without this
+  // the offsets reach the first pane and highlight arbitrary characters.
+  const _webSpans = id => {
+    const w = (window.webEditors || {})[id];
+    if (!w || !w.panes) return null;
+    const out = [];
+    let pos = '@web('.length;
+    for (const lang of ['html', 'css', 'js']) {
+      const view = w.panes[lang];
+      const text = view ? view.state.doc.toString() : '';
+      if (!text.trim()) continue;                       // `_webSkin` omits an empty section entirely
+      if (out.length) pos += ',\n'.length;
+      pos += lang.length + '"""\n'.length;
+      out.push({ lang, view, from: pos, to: pos + text.length });
+      pos += text.length + '\n"""'.length;
+    }
+    return out.length ? out : null;
+  };
+  // Move an assembled-source offset into the pane holding it. Null when it falls in the skin's own
+  // punctuation rather than in a section's text.
+  const _webAt = (spans, pos) => {
+    for (const sp of spans) if (pos >= sp.from && pos <= sp.to) return { sp, at: pos - sp.from };
+    return null;
+  };
+
+  // `ranges` is [{from, to, active?}] in ascending order; [] clears. A cell with no editor at all is
+  // a no-op — search.js still counts its matches, it just has nothing to paint them on.
+  window.edMarkMatches = (id, ranges) => {
+    const spans = _webSpans(id);
+    if (spans) {                                        // web cell: split the ranges across the panes
+      const per = new Map(spans.map(sp => [sp.lang, []]));
+      for (const m of ranges || []) {
+        const a = _webAt(spans, m.from), b = _webAt(spans, m.to);
+        if (!a || !b || a.sp !== b.sp) continue;        // a match spanning two sections cannot be painted
+        per.get(a.sp.lang).push({ from: a.at, to: b.at, active: m.active });
+      }
+      for (const sp of spans)
+        try { sp.view.dispatch({ effects: setMatches.of(per.get(sp.lang)) }); } catch (_) {}
+      return;
+    }
+    const v = (window.editors || {})[id];
+    if (!v) return;
+    try { v.dispatch({ effects: setMatches.of(ranges || []) }); } catch (_) {}
+  };
+  // A markdown or @bind cell renders its output and keeps its source in a hidden `.srcedit` overlay,
+  // so it has no editor for `ensureEditor` to return. Opening the overlay mounts one under the same
+  // id, which is what `editCellSource` does for the ✎ button. Focus is not taken here: `reveal` puts
+  // it back in the find box afterwards so Enter keeps stepping.
+  const _mountSource = id => {
+    const cell = document.getElementById('cell-' + id);
+    if (!cell || !cell.querySelector('.srcedit') || !window.editSource) return null;
+    const md = (cell.className || '').split(/\s+/).includes('md');
+    try { window.editSource(id, md ? 'markdown' : 'julia'); } catch (_) { return null; }
+    return (window.editors || {})[id] || null;
+  };
+
+  // The editor for `id`, mounting whatever it takes to get one — a lazy code editor, or an overlay
+  // cell's source. Anything that WRITES to a cell needs this rather than `ensureEditor`: a markdown
+  // or @bind cell has no editor until its overlay is opened, and `edSetText` is a no-op without one,
+  // so an unmounted cell would silently swallow the write.
+  window.edEnsureSource = id => window.ensureEditor(id) || _mountSource(id);
+
+  // Select a range in a cell and scroll it into view, mounting a lazy editor if needed. `mount` also
+  // allows opening a md / @bind cell's source overlay, which is a visible change to the cell, so the
+  // caller asks for it only on a deliberate step and not on find-as-you-type.
+  window.edReveal = (id, from, to, mount) => {
+    const spans = _webSpans(id);
+    if (spans) {                                     // web cell: select inside the pane that holds it
+      const a = _webAt(spans, from), b = _webAt(spans, to);
+      if (!a || !b || a.sp !== b.sp) return null;
+      const v = a.sp.view;
+      try { v.dispatch({ selection: { anchor: a.at, head: b.at }, effects: EditorView.scrollIntoView(a.at, { y: 'center' }) }); }
+      catch (_) { return null; }
+      return v;
+    }
+    const v = mount ? window.edEnsureSource(id) : window.ensureEditor(id);
+    if (!v) return null;
+    const max = v.state.doc.length, a = Math.min(from, max), h = Math.min(to, max);
+    try {
+      v.dispatch({ selection: { anchor: a, head: h }, effects: EditorView.scrollIntoView(a, { y: 'center' }) });
+    } catch (_) { return null; }
+    return v;
+  };
 
   // ── Editor-extension registry (extension point) ──────────────────────────────
   // A package can teach EVERY cell editor a new behaviour (e.g. render giac"…" as an
@@ -597,13 +840,18 @@
     return null;
   };
   // A whole-file editor (the Files panel) — unlike a cell, it's a document you scroll and navigate,
-  // so it gets what a cell deliberately doesn't: line numbers + active-line highlight, and CM6's
-  // find/replace panel (⌘F / ⌘⌥F, ⌘G to step). Both ship inside cm6.bundle.js already.
+  // so it gets what a cell only gets on request: an active-line highlight and CM6's own
+  // find/replace panel (⌘F / ⌘⌥F, ⌘G to step), scoped to the one file rather than the notebook.
+  // Its line numbers come from the shared `gutterComp` (forced on by `opts.file`), so the two
+  // never stack into a double gutter when the notebook-wide toggle is also on.
   const _fileExtras = () => {
     const ex = [];
-    if (cmView) ex.push(cmView.lineNumbers(), cmView.highlightActiveLineGutter(), cmView.highlightActiveLine());
-    if (cmSearch) ex.push(cmSearch.search({ top: true }), cmSearch.highlightSelectionMatches(),
-                          keymap.of(cmSearch.searchKeymap));
+    if (cmView) ex.push(cmView.highlightActiveLine());
+    // No `highlightSelectionMatches` here: `matchHiComp` (in `mkEditor`) already gives this editor
+    // the matching-word highlight and respects the Settings toggle. Adding it again mounted the
+    // plugin twice and, once the setting existed, kept it on in the Files tab after it was turned
+    // off everywhere else. The search PANEL's own `.cm-searchMatch` is a different thing and stays.
+    if (cmSearch) ex.push(cmSearch.search({ top: true }), keymap.of(cmSearch.searchKeymap));
     ex.push(EditorView.theme({
       '.cm-gutters': { background: 'transparent', border: 'none', opacity: '.55' },
       '.cm-panels': { background: 'var(--bg2)', color: 'var(--text)' },
@@ -618,11 +866,17 @@
     const view = mkEditor(parent, {
       doc: text,
       markdown: md,
+      file: true,
       lang: md ? undefined : _fileLang(opts.filename),
       extra: _fileExtras(),
       keys: opts.onSave ? [{ key: 'Mod-s', run: () => { opts.onSave(); return true; } }] : [],
       onDoc: () => { if (opts.onChange) opts.onChange(); },
     });
+    // The same save, reachable WITHOUT the keybinding. A whole-file editor has no `cellId`, so the
+    // alternative keymaps' "apply this buffer" verbs (`:w` / `:wq` / `:x` under vim, `C-x C-s` under
+    // emacs) had nothing to resolve and silently did nothing here — leaving ⌘S as the only way to
+    // save a file, which is exactly the key a vim or emacs user is not reaching for.
+    view._onSave = opts.onSave || null;
     // Restore where this file was last left (cursor + scroll), clamped to the current document —
     // the file may have changed on disk since.
     const st = opts.state;
@@ -825,7 +1079,20 @@
         ? () => autocompletion({ icons: true, activateOnTypingDelay: _completeDelay(),
             override: [localCompletionSource, scopeCompletionSource(globalThis)] })
         : () => autocompletion({ icons: true, activateOnTypingDelay: _completeDelay() });
-    const cellKeys = (opts.keys || []).map(k => ({ key: k.key, run: () => { k.run(); return true; } }));
+    // Cell-level keys (Shift-Enter run, ⌘⇧Enter run-and-add, split, commitSource) all APPLY the cell
+    // and move on, so an open completion popup has outlived its question — it used to stay up over
+    // the result. Dismissed here rather than in each caller's binding: this is the one place every
+    // cell key passes through, and none of them wants the list left behind. `pending` counts too (a
+    // query still in flight would pop a list open after the cell had already run).
+    const cellKeys = (opts.keys || []).map(k => ({
+      key: k.key,
+      run: v => {
+        if (v && completionStatus(v.state) !== null) {
+          try { cmAutocomplete.closeCompletion(v); } catch (_) {}
+        }
+        k.run(); return true;
+      },
+    }));
     const _edctx = { markdown: !!opts.markdown, cellId: opts.cellId, lang: opts.lang };   // for registered editor extensions
     // Web-cell panes (HTML/CSS/JS) indent 2 spaces — the web convention — vs Julia's 4. Drives
     // auto-indent (Enter / indentOnInput) and Tab; the language's indent service reads `indentUnit`.
@@ -835,8 +1102,22 @@
       doc: opts.doc || '',
       extensions: [
         history(), drawSelection(), bracketMatching(), closeBrackets(), indentOnInput(),
+        // The completion popup is parented on <body>, not inside the editor. A cell clips to its
+        // rounded corners with `overflow:hidden` (notebook.css `.cell`), and a tooltip rendered
+        // inside the editor DOM inherits that clip — CM6 detects an overflow ancestor and
+        // repositions, but Safari does not end up with a visible popup. Outside the cell there is
+        // nothing to clip it. The `.cm-tooltip` rules are global and the theme variables sit on
+        // `:root`, so the popup still themes correctly from here.
+        tooltips({ parent: document.body }),
         indentUnit.of(_indent), EditorState.tabSize.of(webLang ? 2 : 4), errField, originField, flashField,
+        matchField,                      // notebook-wide search highlights (painted by search.js)
         wrapComp.of(_wrapExt(!!opts.markdown)),
+        ..._multiCursor,
+        matchHiComp.of(_matchHiExt()),   // tint the selection's other occurrences (Settings; live)
+        // Line numbers, indent guides and folding, off unless turned on in Settings and each
+        // live-reconfigurable through its own compartment.
+        gutterComp.of(_gutterExt(!!opts.file)), guideComp.of(_guideExt()),
+        foldComp.of(_foldExt(!!opts.markdown)),
         ...lang,
         // Web panes: inline syntax-error diagnostics (a red underline) as you type, so a typo like
         // `for x of …` is caught at author time instead of a cryptic runtime console error. No lint
@@ -868,6 +1149,15 @@
           // inside the activate-on-typing delay and made you press it twice.
           ...completionKeymap,                  // popup nav/close, once there IS a popup
           ...cellKeys,
+          // ⌘⌥↑/↓ come from defaultKeymap. ⌘D does not: selectNextOccurrence is in searchKeymap,
+          // which only the Files-tab editor gets. `keymapModeComp` precedes this keymap, so on
+          // Linux, where Mod is Ctrl, vim and emacs keep Ctrl-D.
+          ...(cmSearch ? [{ key: 'Mod-d', run: cmSearch.selectNextOccurrence, preventDefault: true }] : []),
+          // ⌘F opens the notebook-wide search bar (search.js), not a per-cell panel — in a notebook
+          // the thing you are looking for is usually in a DIFFERENT cell. The Files-tab editor keeps
+          // CM6's own single-document panel: its `opts.extra` keymap out-precedences this one.
+          { key: 'Mod-f', run: () => { if (!window.slateSearchOpen) return false; window.slateSearchOpen(); return true; } },
+          { key: 'Mod-Alt-f', run: () => { if (!window.slateSearchOpen) return false; window.slateSearchOpen(true); return true; } },
           // ⌘⇧K = help (app shortcut). Bind it here so CM6's defaultKeymap `deleteLine` doesn't eat it.
           { key: 'Mod-Shift-k', run: () => { window.__docsHotkey = Date.now(); window.openDocsAtCursor && window.openDocsAtCursor(); return true; } },
           // ⌘⇧←/→ = back/forward through selected-cell nav history, IN the editor too — so after a
@@ -945,10 +1235,20 @@
           '.cm-cursor': { borderLeftColor: 'var(--text)' },
           '&.cm-focused': { outline: 'none' },
           '.cm-line': { padding: '0 4px' },
+          // `.cm-selectionMatch` is NOT styled here — it moved into `matchHiComp` so the Settings
+          // colour can be reconfigured live. A rule here would sit at the same precedence and race it.
+          // A folded block's placeholder — CM6's default is a boxed "…"; this keeps it quiet.
+          '.cm-foldPlaceholder': { background: 'var(--ovl)', border: '1px solid var(--border)',
+                                   color: 'var(--dim)', borderRadius: '3px', padding: '0 4px', margin: '0 2px' },
+          // Notebook-wide search matches: every hit tinted, the current one boxed.
+          '.cm-nbmatch': { background: 'rgba(255,215,0,.22)', borderRadius: '2px' },
+          '.cm-nbmatch-active': { background: 'rgba(255,215,0,.45)', outline: '1px solid var(--gold)' },
         }, { dark: true }),
       ],
     });
     view._wrapMd = !!opts.markdown;   // markdown views stay wrapped when the code-wrap toggle flips
+    view._isFile = !!opts.file;       // whole-file editors keep line numbers whatever the toggle says
+    view._isMd = !!opts.markdown;     // markdown cells have no grammar, so nothing to fold
     view._mkAcomp = mkAcomp;          // rebuilds THIS editor's completion source on a settings change
     view._edctx = _edctx;             // ctx for reconfiguring registered editor extensions
     // Join the live set (see `_allViews`) and leave it on destroy, whoever destroys it — a pane

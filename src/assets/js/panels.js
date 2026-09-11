@@ -75,7 +75,10 @@ async function loadPackages() {
   const parent = (r.parent || []).slice().sort(byName);
   document.getElementById('pkgstatus').textContent =
     nb.length + ' notebook' + (parent.length ? ' · ' + parent.length + ' from parent' : (r.detached ? ' · detached' : '')) +
-    (_pkgManageable ? '' : ' · read-only (no project)');
+    // Unmanageable means an in-process kernel, which is a statement about WHERE cells run, not about
+    // whether the notebook sits in a project — a standalone notebook can have a parent project and
+    // still be read-only here, because there is no worker env to add into.
+    (_pkgManageable ? '' : ' · read-only (runs in-process)');
   const inp = document.getElementById('pkgin'); inp.disabled = !_pkgManageable;
   // Provenance badge: flag a dep that points at something machine-specific rather than a pinned
   // registry release — a dev'd local checkout ("dev", won't resolve elsewhere unless the source
@@ -666,3 +669,30 @@ window.clearScratch = function () {
   try { fetch(_apipath('/api/scratch/clear'), { method: 'POST' }); } catch (_) {}
   _scratchCells = []; _scRender();                               // optimistic; server broadcast confirms
 };
+
+// ── Open panels light up the button that opens them ──────────────────────────────────────────
+// The side panels (Files / Controls / Agent / Worker log / History) slide in from the right and
+// look alike, so with one open there was nothing to say WHICH, and nothing to say that the button
+// you pressed is also the button that closes it. Each opener carries `data-panel="<panel id>"`
+// (notebook.html) and gets `.panelon` for as long as that panel is open.
+//
+// Driven by a MutationObserver on the panel rather than by the toggles: several of them are opened
+// from more than one place (agent.js reveals its panel directly when a message arrives, a `.pclose`
+// button closes it, the ☰ menu opens two of them), so reflecting the panel's OWN state is the only
+// version that cannot fall out of sync. It also needs no change to the five toggle functions, which
+// live in four different files.
+(function () {
+  const buttons = [...document.querySelectorAll('[data-panel]')];
+  if (!buttons.length) return;
+  const sync = () => {
+    for (const b of buttons) {
+      const p = document.getElementById(b.dataset.panel);
+      b.classList.toggle('panelon', !!(p && p.classList.contains('open')));
+    }
+  };
+  for (const b of buttons) {
+    const p = document.getElementById(b.dataset.panel);
+    if (p) new MutationObserver(sync).observe(p, { attributes: true, attributeFilter: ['class'] });
+  }
+  sync();
+})();

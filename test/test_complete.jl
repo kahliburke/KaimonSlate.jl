@@ -4,6 +4,7 @@
 using ReTest
 using KaimonSlate
 import REPL
+import Logging   # `@test_logs min_level=` in the run-location testset below
 const NS = KaimonSlate.NotebookServer
 const RE = KaimonSlate.ReportEngine   # completion.jl (`_comp_text`/`slate_completions`) is shared engine+worker → it lives here
 
@@ -132,4 +133,92 @@ end
     @test NS._png_dims(pngbytes) == (640, 480)
     @test NS._externalize_blobs("", html) == html   # empty nbid → unchanged (export path keeps inline base64)
     @test NS._externalize_blobs("nbX", "<p>no images</p>") == "<p>no images</p>"
+end
+
+# `Mod.<tab>` enumerates `names(M; all=true, imported=true)`, which also returns everything M
+# reached through its own `using Base` — roughly eleven hundred names for a module that defines two.
+# The module's own bindings sort in behind every Base operator, so they are ordered first instead.
+module _ApiFixture
+export shown
+shown() = 1
+hidden() = 2
+end
+
+@testset "a module's own names lead its dotted completion" begin
+    m = Module(:CompNB)
+    # Bound directly rather than `using`: a relative import path inside a bare Module resolves
+    # against Main, not the test module.
+    Core.eval(m, :(const _ApiFixture = $(_ApiFixture)))
+    code = "_ApiFixture."
+    items = RE.slate_completions(m, code, ncodeunits(code)).items
+    texts = first.(items)
+
+    @testset "nothing is removed" begin
+        # Base is reachable as `_ApiFixture.sin` and stays offered, just not in the way.
+        @test "sin" in texts
+        @test length(items) > 100
+    end
+
+    @testset "its own bindings come first" begin
+        lead = texts[1:min(8, end)]
+        @test "shown" in lead && "hidden" in lead     # exported and unexported alike: both are ITS names
+        @test findfirst(==("shown"), texts) < findfirst(==("sin"), texts)
+        @test findfirst(==("hidden"), texts) < findfirst(==("sin"), texts)
+    end
+
+    @testset "a bare identifier is untouched" begin
+        # No dot: the notebook namespace's inherited Base names are exactly what is wanted, so the
+        # demotion must not apply. `sinc`/`sincos` are Base names reached through `using Base`.
+        bare = first.(RE.slate_completions(m, "sinc", 4).items)
+        @test "sincos" in bare
+    end
+
+    @testset "string macros are judged by their real binding" begin
+        # `_comp_text` renders `@b_str` as `b"`; without normalizing that, every inherited string
+        # macro looked unjudgeable and was treated as the module's own API.
+        @test RE._module_api(_ApiFixture, "shown") == true
+        @test RE._module_api(_ApiFixture, "b\"") == false      # inherited from Base
+    end
+end
+
+# Every remote path (`remoteworker`, `runon`, region kernels) lives inside `gate_available()`, so a
+# hub without a compute gate answered the request in the negative SILENTLY: the notebook ran locally,
+# the toolbar went on showing the host it was not using, and the one log line that records the
+# decision was itself inside the branch that never ran.
+@testset "a run-location this hub cannot honour is reported, not swallowed" begin
+    # The suite has no `Main.Kaimon`, which IS the standalone posture this is about.
+    @test RE.gate_available() == false
+
+    mknb = src -> begin
+        dir = mktempdir(); path = joinpath(dir, "nb.jl"); write(path, src)
+        (path, RE.parse_report(src))
+    end
+    # `_select_kernel` layers the notebook's env onto LOAD_PATH; keep the suite's own intact.
+    withpath = f -> (was = copy(LOAD_PATH); try; f(); finally; empty!(LOAD_PATH); append!(LOAD_PATH, was); end)
+
+    @testset "a durable runon warns, and still runs" begin
+        path, r = mknb("#%% code id=a\n1\n")
+        r.meta["runon"] = "studio"
+        withpath() do
+            k = @test_logs (:warn, r"asked to run elsewhere") match_mode = :any NS._select_kernel(path, r)
+            @test k isa RE.InProcessKernel      # refused the destination, not the notebook
+        end
+    end
+
+    @testset "an attach spec warns too" begin
+        path, r = mknb("#%% code id=a\n1\n")
+        r.meta["remoteworker"] = "9100,9101"
+        withpath() do
+            @test_logs (:warn, r"asked to run elsewhere") match_mode = :any NS._select_kernel(path, r)
+        end
+    end
+
+    @testset "a local notebook says nothing" begin
+        # The warning has to be about a REQUEST that cannot be met, not about lacking a gate — a
+        # notebook that never asked for a remote is not in an unexpected state.
+        path, r = mknb("#%% code id=a\n1\n")
+        withpath() do
+            @test_logs min_level = Logging.Warn NS._select_kernel(path, r)
+        end
+    end
 end

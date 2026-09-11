@@ -31,8 +31,21 @@ using SHA, JSON, CodecZstd
 import ..SlateHome        # where the history root lives; a nested module inherits no imports
 
 const _ROOT = Ref{String}("")
+# Resolved with the SAME precedence `SlateHome` uses — an explicit Slate cache home outranks XDG —
+# rather than reading XDG alone.
+#
+# Reading XDG alone made this store follow anything that repoints XDG for its own reasons. `slate
+# --ai` does exactly that: it isolates an embedded Kaimon by pointing XDG at a private directory,
+# and this quietly went with it. The consequence is not a misplaced file — the store holds the
+# path→docid mapping, so a notebook opened there has no history, is treated as a NEW document, and
+# gets a fresh docid. Undo and per-cell recovery fork away from the user's real store.
+#
+# `KAIMONSLATE_CACHE_HOME` already names Slate's cache home (it includes the `kaimonslate` segment),
+# so `history` hangs directly off it; the XDG path is a base and still gets the segment appended.
 function _root()
     isempty(_ROOT[]) || return _ROOT[]
+    # `SlateHome.cache_home()` IS that precedence, so this cannot drift from the blob, memo and
+    # site stores that already resolve through it.
     _ROOT[] = joinpath(SlateHome.cache_home(), "history")
     return _ROOT[]
 end

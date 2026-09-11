@@ -261,6 +261,7 @@ const _APP_SKIP_SCRIPTS = (
     "trace.js",        # the @trace inspector modal
     "dag.js",          # the dataflow graph pane
     "palette.js",      # ⌘K command palette, control snippets, the docs browser
+    "search.js",       # ⌘F across cells — a reader wants the BROWSER's find, over rendered prose
 )
 # Vendor code loaded solely FOR one of the above; the graph library is ~100 kB parsed for a pane the
 # app has no way to open.

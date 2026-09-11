@@ -326,10 +326,9 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
     # so it inlines as a huge base64 blob. Project ⇒ the project dir; detached ⇒ the per-notebook fork-env
     # dir (a stable location that resolves identically on the hub and every region worker). The gate
     # branches below re-affirm this with their own values; this makes the in-process path get it too.
-    let proj = Base.current_project(dirname(abspath(path)))
-        parent = proj === nothing ? "" : dirname(proj)
-        report.meta["assetbase"] = isempty(parent) ? ReportEngine.notebook_env_dir(path) : parent
-    end
+    proj = Base.current_project(dirname(abspath(path)))
+    enclosing = proj === nothing ? "" : dirname(proj)
+    report.meta["assetbase"] = isempty(enclosing) ? ReportEngine.notebook_env_dir(path) : enclosing
     if ReportEngine.gate_available()
         ReportEngine._rlog("_select_kernel nb=$(basename(String(path))) runon=[$(get(report.meta, "runon", ""))] remoteworker=[$(get(report.meta, "remoteworker", ""))]")
         # Remote-worker opt-in: run this notebook's cells on an ALREADY-RUNNING worker reached at
@@ -427,7 +426,26 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             return GateKernel(parent; parent = parent, envdir = envdir, threads = th, extra_flags = ef, label = lbl, online = online)
         end
     end
-    return InProcessKernel()
+    # Asked to run somewhere else, with no gate to do it with. Every remote path — `remoteworker`,
+    # `runon`, and the region kernels — lives inside the branch above, so without a gate the request
+    # is answered in the negative SILENTLY: the notebook runs here, the toolbar goes on showing the
+    # host it is not using, and not even the `_rlog` line above is reached to record the decision.
+    # Say it once, here. `remoteAvailable` in `state_json` tells the browser the same thing.
+    let want = _effective_runon(report), rw = strip(String(get(report.meta, "remoteworker", "")))
+        if !isempty(want) || !isempty(rw)
+            asked = isempty(want) ? "remoteworker $rw" : want
+            ReportEngine._rlog("_select_kernel nb=$(basename(String(path))) wanted=[$asked] but there is no compute gate — running LOCALLY in-process")
+            @warn "slate: this notebook asked to run elsewhere, but this hub has no compute gate — running locally instead" notebook = basename(String(path)) requested = asked source = _runon_source(report) hint = "remote execution needs the Kaimon host; a standalone hub cannot spawn or dial a remote worker"
+        end
+    end
+    # No gate (standalone `slate`, no Kaimon host): cells run in THIS process. The notebook still
+    # gets the same two environments a worker would be given — its enclosing project and its own
+    # env — layered onto LOAD_PATH rather than resolved into one, since there is no separate
+    # process whose active project we could repoint. The env dir is named now and materialised on
+    # the first package add, so a notebook that adds nothing costs nothing.
+    k = InProcessKernel(enclosing, ReportEngine.notebook_env_dir(path))
+    ReportEngine._layer_load_path!(k)
+    return k
 end
 
 function load_notebook(path::AbstractString; id::AbstractString = "", threads::AbstractString = "",
