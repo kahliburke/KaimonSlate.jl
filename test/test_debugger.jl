@@ -200,6 +200,48 @@ end
         @test isempty([bp for bp in ji.breakpoints() if occursin("cell:bp", string(bp))])
     end
 
+    @testset "conditional breakpoints" begin
+        # The point of a predicate: reach an iteration you could not step to. A plain mark on
+        # line 3 stops on i=1, which is the pass that is fine.
+        src = "t = 0\nfor i in 1:5000\n  global t += i\nend\nt\n"
+        st = RE.debug_start!(Sandbox; cell = "cbp", source = src,
+                             mark_files = ["cell:cbp"], mark_lines = [3],
+                             mark_conds = ["i == 4700"])
+        try
+            st = step!("continue")
+            @test st.at_breakpoint
+            @test st.line == 3
+            @test RE.debug_eval_expr(; expr = "i").value.repr == "4700"   # one continue, not 4700 steps
+        finally
+            RE.debug_stop!()
+        end
+
+        # A predicate that errors must neither stop nor abort the run: `shouldbreak` asserts
+        # `::Bool` on the result, so an unwrapped one would take the whole cell down.
+        st = RE.debug_start!(Sandbox; cell = "cbp2", source = "s = 0\nfor i in 1:20\n  global s += i\nend\ns\n",
+                             mark_files = ["cell:cbp2"], mark_lines = [3],
+                             mark_conds = ["nosuchbinding > 1"])
+        try
+            st = step!("continue")
+            @test st.finished
+            @test !st.at_breakpoint
+            @test only(b.repr for b in st.bindings if b.name == "s") == "210"
+        finally
+            RE.debug_stop!()
+        end
+
+        # A predicate that does not parse is refused when armed, rather than silently never firing.
+        st = RE.debug_start!(Sandbox; cell = "cbp3", source = "x = 1\nx + 1\n")
+        try
+            bad = RE.debug_marks!(; mark_files = ["cell:cbp3"], mark_lines = [2],
+                                    mark_conds = ["x >"])
+            @test !isempty(bad.error)
+            @test occursin("does not parse", bad.error)
+        finally
+            RE.debug_stop!()
+        end
+    end
+
     @testset "interpreter scope is restored" begin
         ji = RE._ji()
         saved = copy(ji.compiled_modules)

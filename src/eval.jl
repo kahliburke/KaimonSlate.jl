@@ -457,12 +457,14 @@ pkg_op(k::PendingKernel, report::Report, op::AbstractString, name::AbstractStrin
     pkg_op(_await_real(k), report, op, name; target)
 registry_add(k::PendingKernel, report::Report, url::AbstractString) = registry_add(_await_real(k), report, url)
 debug_start!(k::PendingKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
-             mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[]) =
+             mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
+             mark_conds::Vector{String} = String[]) =
     debug_start!(_await_real(k), report; cell = cell, source = source,
-                 mark_files = mark_files, mark_lines = mark_lines)
+                 mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds)
 debug_marks!(k::PendingKernel, report::Report; mark_files::Vector{String} = String[],
-             mark_lines::Vector{Int} = Int[]) =
-    debug_marks!(_await_real(k), report; mark_files = mark_files, mark_lines = mark_lines)
+             mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[]) =
+    debug_marks!(_await_real(k), report; mark_files = mark_files, mark_lines = mark_lines,
+                 mark_conds = mark_conds)
 debug_step!(k::PendingKernel, report::Report; mode::AbstractString = "next") =
     debug_step!(_await_real(k), report; mode = mode)
 debug_frame(k::PendingKernel, report::Report) = debug_frame(_await_real(k), report)
@@ -531,18 +533,20 @@ Begin stepping `source` (the cell's code) where this kernel's cells evaluate.
 Returns the state BEFORE the first line runs.
 """
 debug_start!(::InProcessKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
-             mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[]) =
+             mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
+             mark_conds::Vector{String} = String[]) =
     debug_start!(report_module(report); cell = String(cell), source = String(source),
-                 mark_files = mark_files, mark_lines = mark_lines)
+                 mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds)
 
 """
-    debug_marks!(kernel, report; mark_files, mark_lines) -> DebugState
+    debug_marks!(kernel, report; mark_files, mark_lines, mark_conds) -> DebugState
 
-Arm exactly these `file:line` breakpoints on the session, replacing whatever was set.
+Arm exactly these `file:line` breakpoints on the session, replacing whatever was set. A non-empty
+`mark_conds[i]` makes that one fire only when the expression holds in the frame.
 """
 debug_marks!(::InProcessKernel, ::Report; mark_files::Vector{String} = String[],
-             mark_lines::Vector{Int} = Int[]) =
-    debug_marks!(; mark_files = mark_files, mark_lines = mark_lines)
+             mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[]) =
+    debug_marks!(; mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds)
 
 """
     debug_step!(kernel, report; mode) -> DebugState

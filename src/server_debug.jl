@@ -44,16 +44,21 @@ const _DEBUG_LOCK = ReentrantLock()
 # `file` is whatever a frame reports: `cell:<id>` for notebook code, a real path for a package.
 # The server never interprets it — the kernel matches it against its own frames, which is the only
 # place that can be done, because the path belongs to that machine.
-const _DEBUG_MARKS = Dict{String,Set{Tuple{String,Int}}}()   # nb.id → {(file, line)}
+# Keyed by `(file, line)` with the predicate as the VALUE, not part of the key: a line is one
+# breakpoint whether or not it carries a condition, so editing the predicate changes that mark
+# instead of arming a second one on the same line.
+const _DEBUG_MARKS = Dict{String,Dict{Tuple{String,Int},String}}()   # nb.id → {(file,line) => cond}
 
 _marks(nb::LiveNotebook) = lock(_DEBUG_LOCK) do
-    sort!(collect(get(_DEBUG_MARKS, nb.id, Set{Tuple{String,Int}}())))
+    d = get(_DEBUG_MARKS, nb.id, Dict{Tuple{String,Int},String}())
+    [(k[1], k[2], v) for (k, v) in sort!(collect(d); by = first)]
 end
 
 # Split for the wire: parallel scalar vectors ride the gate with the least ceremony.
 function _marks_wire(nb::LiveNotebook)
     ms = _marks(nb)
-    return (files = String[m[1] for m in ms], lines = Int[m[2] for m in ms])
+    return (files = String[m[1] for m in ms], lines = Int[m[2] for m in ms],
+            conds = String[m[3] for m in ms])
 end
 
 const _NO_SESSION = DebugSession("", "", "")
@@ -151,7 +156,7 @@ function _debug_json(nb::LiveNotebook, st, side::AbstractString)
         "file" => st.file, "line" => st.line, "scope" => st.scope, "in_cell" => st.in_cell,
         "at_breakpoint" => st.at_breakpoint,
         "source" => src, "srcfirst" => first,
-        "marks" => [Dict{String,Any}("file" => f, "line" => l) for (f, l) in _marks(nb)],
+        "marks" => _marks_json(nb),
         "locals" => [_local_json(v) for v in st.locals],
         "bindings" => [_local_json(v) for v in st.bindings],
         "stack" => frames, "sources" => srcs,
@@ -242,7 +247,8 @@ end
 # only caller: the debugging agent drives the same session through MCP. One implementation means a
 # specialist and a reader cannot end up with different semantics for `step`.
 
-_marks_json(nb::LiveNotebook) = [Dict{String,Any}("file" => f, "line" => l) for (f, l) in _marks(nb)]
+_marks_json(nb::LiveNotebook) =
+    [Dict{String,Any}("file" => f, "line" => l, "cond" => c) for (f, l, c) in _marks(nb)]
 
 """
     start_debug!(nb, cell; source) -> Dict
@@ -268,7 +274,8 @@ function start_debug!(nb::LiveNotebook, cid::AbstractString; source::AbstractStr
     mk = _marks_wire(nb)
     st = _debug_on(nb, side, k ->
         ReportEngine.debug_start!(k, nb.report; cell = String(cid), source = src,
-                                  mark_files = mk.files, mark_lines = mk.lines))
+                                  mark_files = mk.files, mark_lines = mk.lines,
+                                  mark_conds = mk.conds))
     st.error === nothing && _debug_remember!(nb, cid, side, by)
     return _pushed(nb, _debug_json(nb, st, side))
 end
@@ -313,27 +320,31 @@ function eval_debug(nb::LiveNotebook, expr::AbstractString)
 end
 
 """
-    mark_debug!(nb, file, line; on) -> Dict
+    mark_debug!(nb, file, line; on, cond) -> Dict
 
 Arm or clear a breakpoint. `on === nothing` toggles, which is what a gutter click wants. Allowed
 with no session running: marking a line and then starting is the normal order of the work.
 """
-function mark_debug!(nb::LiveNotebook, file::AbstractString, line::Integer; on::Union{Bool,Nothing} = nothing)
+function mark_debug!(nb::LiveNotebook, file::AbstractString, line::Integer;
+                     on::Union{Bool,Nothing} = nothing, cond::Union{String,Nothing} = nothing)
     (isempty(file) || line <= 0) && return Dict{String,Any}("ok" => false,
                                                             "error" => "a breakpoint needs a file and a line",
                                                             "marks" => _marks_json(nb))
     armed = lock(_DEBUG_LOCK) do
-        set = get!(() -> Set{Tuple{String,Int}}(), _DEBUG_MARKS, nb.id)
+        d = get!(() -> Dict{Tuple{String,Int},String}(), _DEBUG_MARKS, nb.id)
         key = (String(file), Int(line))
-        want = on === nothing ? !(key in set) : on
-        want ? push!(set, key) : delete!(set, key)
+        # Setting a condition arms the line if it was not armed: asking for a predicate is asking
+        # to stop there, and a predicate on a line nobody is watching would do nothing.
+        want = on !== nothing ? on : cond !== nothing ? true : !haskey(d, key)
+        want ? (d[key] = cond === nothing ? get(d, key, "") : String(cond)) : delete!(d, key)
         want
     end
     s = _debug_session(nb)
     if !isempty(s.cell)          # live session: re-arm now, else it waits for the next start
         mk = _marks_wire(nb)
         _debug_on(nb, s.side, k ->
-            ReportEngine.debug_marks!(k, nb.report; mark_files = mk.files, mark_lines = mk.lines))
+            ReportEngine.debug_marks!(k, nb.report; mark_files = mk.files, mark_lines = mk.lines,
+                                      mark_conds = mk.conds))
     end
     r = Dict{String,Any}("ok" => true, "on" => armed, "file" => String(file), "line" => Int(line),
                          "marks" => _marks_json(nb))
@@ -454,7 +465,8 @@ function debug_briefing(nb::LiveNotebook, cid::AbstractString, task::AbstractStr
     end
     ms = _marks(nb)
     isempty(ms) || println(io, "\nBreakpoints already set: ",
-                           join([string(f, ":", l) for (f, l) in ms], ", "))
+                           join([isempty(c) ? string(f, ":", l) : string(f, ":", l, " when ", c)
+                                 for (f, l, c) in ms], ", "))
     println(io)
     println(io, isempty(strip(task)) ?
         "Find out what this cell actually does, and report anything that looks wrong." : strip(task))
@@ -483,7 +495,8 @@ function _register_debug_routes!(router, h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/debug/mark", req -> _withnb(h, req, nb -> begin
         b = _body(req)
         on = haskey(b, "on") ? (get(b, "on", true) === true) : nothing
-        _json(mark_debug!(nb, String(get(b, "file", "")), Int(get(b, "line", 0)); on = on))
+        cond = haskey(b, "cond") ? String(get(b, "cond", "")) : nothing
+        _json(mark_debug!(nb, String(get(b, "file", "")), Int(get(b, "line", 0)); on = on, cond = cond))
     end))
     HTTP.register!(router, "GET", "/api/{id}/debug/marks", req -> _withnb(h, req, nb ->
         _json(Dict{String,Any}("marks" => _marks_json(nb)))))

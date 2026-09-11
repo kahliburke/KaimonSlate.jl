@@ -1371,17 +1371,20 @@ _debug_tool(k::GateKernel, cell::AbstractString, name::String, args::Dict{String
     end
 
 function debug_start!(k::GateKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
-                      mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[])
+                      mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
+                      mark_conds::Vector{String} = String[])
     prepare!(k, report)
     return _debug_tool(k, cell, "__slate_debug_start",
                        Dict{String,Any}("cell" => String(cell), "source" => String(source),
-                                        "mark_files" => mark_files, "mark_lines" => mark_lines))
+                                        "mark_files" => mark_files, "mark_lines" => mark_lines,
+                                        "mark_conds" => mark_conds))
 end
 
 debug_marks!(k::GateKernel, ::Report; mark_files::Vector{String} = String[],
-             mark_lines::Vector{Int} = Int[]) =
+             mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[]) =
     _debug_tool(k, "", "__slate_debug_marks",
-                Dict{String,Any}("mark_files" => mark_files, "mark_lines" => mark_lines))
+                Dict{String,Any}("mark_files" => mark_files, "mark_lines" => mark_lines,
+                                 "mark_conds" => mark_conds))
 
 debug_step!(k::GateKernel, ::Report; mode::AbstractString = "next") =
     _debug_tool(k, "", "__slate_debug_step", Dict{String,Any}("mode" => String(mode)))

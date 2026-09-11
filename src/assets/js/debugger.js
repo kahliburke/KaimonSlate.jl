@@ -30,6 +30,10 @@ const changed = signal(new Set());  // names whose repr moved on the last step (
 // Breakpoints, as the server holds them: [{file, line}]. `file` is `cell:<id>` for notebook code
 // and a real path for a package — the browser never interprets it, it only groups by it.
 const marks = signal([]);
+// Which stack frame the source pane shows. `null` follows the current frame, which is what you
+// want while stepping; an index pins a CALLER, because the line you are stopped on is often not
+// the line that is wrong — the arguments that got you here were built further up.
+const selFrame = signal(null);
 // Requests an agent is BLOCKED on: [{id, kind, from, text}]. A question it needs answered, or
 // permission to disturb a session it does not own. Its turn is stopped until one of these is
 // answered, so they are shown where the session is, not tucked in a notification.
@@ -78,19 +82,41 @@ function syncGutter() {
   window.setDebugGutter?.(!!st.value || marks.value.length > 0);
 }
 
-async function setMark(file, line, on) {
+async function setMark(file, line, on, cond) {
+  const body = { file, line };
+  if (on !== undefined) body.on = on;
+  if (cond !== undefined) body.cond = cond;
   try {
-    const r = await A('POST', '/api/debug/mark', on === undefined ? { file, line } : { file, line, on });
+    const r = await A('POST', '/api/debug/mark', body);
+    if (r && r.ok === false) { probes.value = [...probes.value, { expr: cond, ok: false, error: r.error }]; return; }
     paintMarks(r && r.marks);
     syncGutter();
   } catch (e) {}
 }
 const toggleMark = (cellId, line) => setMark('cell:' + cellId, line);
+
+// A breakpoint that only fires when an expression holds. This is what makes a long run reachable:
+// stopping on the first pass of a loop shows the iteration that is fine, and you cannot step to
+// the four-thousandth. The predicate is evaluated in that frame, so it is written in terms of the
+// locals shown there.
+const condOf = (file, line) =>
+  (marks.value.find(m => m.file === file && m.line === line) || {}).cond || '';
+async function editCond(file, line) {
+  const cur = condOf(file, line);
+  const next = window.prompt(
+    `Stop at ${file}:${line} only when…\n\nA Julia expression over that frame's locals, e.g.\n` +
+    `  maximum(abs, du) > 1e3\n  any(isnan, u)\n  i == 4700\n\nEmpty stops every time.`, cur);
+  if (next === null) return;                       // cancelled — leave it exactly as it was
+  await setMark(file, line, undefined, next.trim());
+}
 const clearMark = (file, line) => setMark(file, line, false);
 window.onBreakpointClick?.(toggleMark);
 
 let _flashTimer = null;
 function apply(next) {
+  // Any move invalidates the pin: the stack has changed underneath it, so index 2 of the new one
+  // is not the frame you were reading.
+  selFrame.value = null;
   changed.value = diffNames(st.value, next);
   const prev = st.value ? st.value.cell : '';
   const s = (next && next.session === false) ? null : next;
@@ -600,7 +626,22 @@ export function DebugStrip({ cell }) {
 // A read-only CodeMirror showing the frame's source, with the gutter re-based so its numbers read
 // as the file's. The text comes from the kernel (server_debug.jl fills in a cell's own source):
 // `file` is a path on that machine, and reading it here would show a different file, or none.
-function Source({ s }) {
+// The frame the source pane is showing: the selected caller, or the current frame. A caller's
+// text is already in `s.sources` — every frame ships its own, indexed by `frame.src` — so this
+// costs a lookup rather than a round trip.
+function shownFrame(s) {
+  const st = s.stack || [], sel = selFrame.value;
+  if (sel === null || sel < 0 || sel >= st.length) {
+    return { file: s.file, scope: s.scope, line: s.line, source: s.source,
+             srcfirst: s.srcfirst, caller: false };
+  }
+  const f = st[sel], src = (s.sources || [])[f.src - 1];
+  return { file: f.file, scope: f.scope, line: f.line,
+           source: src ? src.text : '', srcfirst: src ? src.first : 1, caller: true };
+}
+
+function Source({ s: raw }) {
+  const s = shownFrame(raw);
   const host = useRef(null), vw = useRef(null), file = useRef(s.file);
   file.current = s.file;   // the click handler is installed once; read the CURRENT file from a ref
   useEffect(() => {
@@ -621,9 +662,11 @@ function Source({ s }) {
     const v = vw.current; if (!v) return;
     v.setMarks(marks.value.filter(m => m.file === s.file).map(m => m.line));
   }, [marks.value, s.file, s.source]);
-  return html`<div class="dbgsrc">
+  return html`<div class=${'dbgsrc' + (s.caller ? ' caller' : '')}>
     <div class="dbgsrchead"><span class="dbgfile" title=${s.file}>${shortFile(s.file)}</span>
       <span class="dbgscope">${s.scope}</span>
+      ${s.caller ? html`<button class="dbgback" onClick=${() => selFrame.value = null}
+          title="back to the frame execution is stopped in">▸ back to current</button>` : null}
       <span class="dbgsp"></span>
       ${s.source && !marks.value.length
         ? html`<span class="dbgsrchint">click the margin to set a breakpoint</span>` : null}
@@ -637,15 +680,24 @@ function Stack({ s }) {
   const fr = [...(s.stack || [])].reverse();
   return html`<div class="dbgrail">
     <div class="dbgrhead">call stack</div>
-    <div class="dbgstack">${fr.map((f, i) => html`<div class=${'dbgfr' + (i === 0 ? ' cur' : '')} key=${i}>
+    <div class="dbgstack">${fr.map((f, i) => {
+      const idx = (s.stack || []).length - 1 - i;          // `fr` is reversed for display
+      const sel = selFrame.value === idx || (selFrame.value === null && i === 0);
+      return html`<div class=${'dbgfr' + (i === 0 ? ' cur' : '') + (sel ? ' sel' : '')} key=${i}
+        title="show this frame's source"
+        onClick=${() => selFrame.value = (i === 0 ? null : idx)}>
       <div><span class="dbgfrm">${i === 0 ? '▸' : '·'}</span> <span class="dbgscope">${f.scope}</span></div>
       <span class="dbgfile" title=${f.file}>${shortFile(f.file)}:${f.line}</span>
-    </div>`)}</div>
+    </div>`; })}</div>
     ${marks.value.length ? html`<div class="dbgrhead dbgrhead2">breakpoints</div>
       <div class="dbgmarks">${marks.value.map(m => html`<div class="dbgmark" key=${m.file + ':' + m.line}>
         <span class="dbgfile" title=${m.file}>${shortFile(m.file)}:${m.line}</span>
+        <button class=${'dbgmarkc' + (m.cond ? ' on' : '')}
+                title=${m.cond ? 'stops only when: ' + m.cond : 'stop only when an expression holds'}
+                onClick=${() => editCond(m.file, m.line)}>${m.cond ? 'when' : '+when'}</button>
         <button class="dbgmarkx" title="clear" onClick=${() => clearMark(m.file, m.line)}>✕</button>
-      </div>`)}</div>` : null}
+      </div>
+      ${m.cond ? html`<div class="dbgcond" title=${m.cond}>${m.cond}</div>` : null}`)}</div>` : null}
     <div class="dbgrhead dbgrhead2" title="modules stepped rather than run compiled">interpreting</div>
     <div class="dbginterp">${(s.interpreting || []).map(m => html`<span class="dbgmod" key=${m}>${m}</span>`)}</div>
   </div>`;
@@ -1076,12 +1128,31 @@ style.textContent = `
 .dbgfr .dbgfile { font-size:.92em; padding-left:13px; }
 .dbgfr.cur { background:color-mix(in srgb, var(--gold) 12%, transparent); border-left-color:var(--gold); }
 .dbgfrm { color:var(--gold); }
+.dbgfr { cursor:pointer; }
+.dbgfr:hover { background:color-mix(in srgb, var(--fg) 6%, transparent); }
+/* The pinned frame reads as teal, the frame execution is actually stopped in stays gold — they
+   are different claims and the eye should not have to check which is which. */
+.dbgfr.sel:not(.cur) { background:color-mix(in srgb, var(--teal) 14%, transparent);
+  border-left-color:var(--teal); }
+.dbgback { margin-left:6px; padding:0 6px; background:transparent; border:1px solid var(--teal);
+  border-radius:4px; color:var(--teal); cursor:pointer; font-size:.66rem; }
+.dbgback:hover { background:color-mix(in srgb, var(--teal) 16%, transparent); }
+.dbgsrc.caller .dbgsrcbody { box-shadow:inset 3px 0 0 var(--teal); }
 .dbgfr .dbgscope { display:inline; }
 .dbgmarks { display:flex; flex-direction:column; gap:2px; }
 .dbgmark { display:flex; align-items:center; gap:6px; padding:2px 6px; border-radius:5px;
   font-family:var(--mono,ui-monospace,monospace); font-size:.72rem;
   border-left:2px solid var(--red); background:color-mix(in srgb, var(--red) 8%, transparent); }
 .dbgmark .dbgfile { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dbgmarkc { padding:0 5px; background:transparent; border:1px solid var(--line); border-radius:4px;
+  color:var(--dim); cursor:pointer; font-size:.68rem; font-family:var(--mono,ui-monospace,monospace); }
+.dbgmarkc:hover { color:var(--teal); border-color:var(--teal); }
+.dbgmarkc.on { color:var(--teal); border-color:var(--teal); }
+/* The predicate on its own line: these get long, and truncating the only thing that says WHEN a
+   breakpoint fires hides the part that matters. */
+.dbgcond { margin:0 6px 3px 18px; padding:1px 5px; border-left:2px solid var(--teal);
+  color:var(--teal); font-family:var(--mono,ui-monospace,monospace); font-size:.68rem;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .dbgmarkx { padding:0 4px; background:transparent; border:none; color:var(--dim); cursor:pointer; font-size:.8rem; }
 .dbgmarkx:hover { color:var(--red); }
 .dbginterp { display:flex; flex-wrap:wrap; gap:4px; }

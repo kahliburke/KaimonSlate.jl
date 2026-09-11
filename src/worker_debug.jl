@@ -478,8 +478,15 @@ end
 # Everything this session sets is remembered in `marks` and removed on stop, so a
 # region worker that goes back to the warm pool goes back unmarked.
 
-"One armed line: the file as the frame reports it, and the line within that file."
-const DebugMark = @NamedTuple{file::String, line::Int}
+"""
+One armed line: the file as the frame reports it, the line within that file, and an optional
+predicate that has to hold for it to fire (`""` = fire every time).
+
+The predicate is what makes a long run reachable. Instability that starts at step 4,700 cannot be
+found by stepping 4,700 times, and a line breakpoint inside the loop stops on the first
+iteration — which is the one that is fine. `maximum(abs, du) > 1e3` stops on the one that is not.
+"""
+const DebugMark = @NamedTuple{file::String, line::Int, cond::String}
 
 """
 Is the frame sitting on a breakpoint someone armed?
@@ -520,16 +527,54 @@ function _set_marks!(s::_DebugSession, marks::Vector{DebugMark})
     _clear_marks!(s)
     for m in marks
         m.line > 0 && !isempty(m.file) || continue
-        bp = try; ji.breakpoint(m.file, m.line); catch; nothing; end
+        bp = try; ji.breakpoint(m.file, m.line, _mark_condition(s, m.cond)); catch; nothing; end
         bp === nothing || push!(s.marks, bp)
     end
     return nothing
 end
 
+"""
+Compile a mark's predicate into the form JuliaInterpreter wants, or `nothing` for an
+unconditional one.
+
+Paired with the session's namespace rather than left bare: a bare `Expr` is resolved in `Main`
+(`JuliaInterpreter._unpack`), where a notebook's own bindings do not exist. The frame's locals
+come from the frame either way.
+
+Wrapped so it cannot throw or return a non-`Bool`. The predicate runs on EVERY execution of that
+line, and `shouldbreak` asserts `::Bool` on the result, so an expression that errors on some
+iteration would abort the run rather than decline to stop — which is worse than not firing. A
+predicate that never holds is the cost of that, hence the parse check at arm time below.
+"""
+function _mark_condition(s::_DebugSession, cond::AbstractString)
+    isempty(strip(cond)) && return nothing
+    ex = try
+        Meta.parse(strip(cond))
+    catch
+        return nothing
+    end
+    (ex isa Expr && ex.head === :incomplete) && return nothing
+    return (s.ns, :(try; ($ex) === true; catch; false; end))
+end
+
+"Does this predicate parse? Reported at arm time, since a broken one is silent afterwards."
+function _mark_cond_error(cond::AbstractString)
+    isempty(strip(cond)) && return ""
+    ex = try
+        Meta.parse(strip(cond))
+    catch e
+        return sprint(showerror, e)
+    end
+    (ex isa Expr && ex.head === :incomplete) && return "incomplete expression"
+    return ""
+end
+
 # The wire form is two parallel vectors of scalars rather than a vector of pairs: it
 # is what survives the gate with the least ceremony (the `table_page` convention).
-_marks_from(files::Vector{String}, lines::Vector{Int}) =
-    DebugMark[(file = files[i], line = lines[i]) for i in 1:min(length(files), length(lines))]
+_marks_from(files::Vector{String}, lines::Vector{Int}, conds::Vector{String} = String[]) =
+    DebugMark[(file = files[i], line = lines[i],
+               cond = i <= length(conds) ? conds[i] : "")
+              for i in 1:min(length(files), length(lines))]
 
 # ── stepping ──────────────────────────────────────────────────────────────────
 
@@ -620,7 +665,8 @@ result.
 """
 function debug_start!(ns::Module; cell::String = "", source::String = "",
                       mark_files::Vector{String} = String[],
-                      mark_lines::Vector{Int} = Int[])::DebugState
+                      mark_lines::Vector{Int} = Int[],
+                      mark_conds::Vector{String} = String[])::DebugState
     debug_stop!()
     ji = _ji()
     ex = try
@@ -652,7 +698,7 @@ function debug_start!(ns::Module; cell::String = "", source::String = "",
                       _toplevel_writes(ex), before, false, Any[],
                       per_thunk, Symbol[], Set{Symbol}())
     # Armed before the first frame is built, so `continue` from the very first step honors them.
-    _set_marks!(s, _marks_from(mark_files, mark_lines))
+    _set_marks!(s, _marks_from(mark_files, mark_lines, mark_conds))
     _next_thunk!(s)
     _DEBUG[] = s
     return _state(s)
@@ -730,10 +776,14 @@ Replace the session's breakpoints with exactly this set, without advancing. Answ
 with the current state so a caller gets one shape back from every verb.
 """
 function debug_marks!(; mark_files::Vector{String} = String[],
-                        mark_lines::Vector{Int} = Int[])::DebugState
+                        mark_lines::Vector{Int} = Int[],
+                        mark_conds::Vector{String} = String[])::DebugState
     s = _DEBUG[]
     s === nothing && return _error_state("", "no debug session")
-    _set_marks!(s, _marks_from(mark_files, mark_lines))
+    bad = findfirst(c -> !isempty(_mark_cond_error(c)), mark_conds)
+    bad === nothing || return _error_state("",
+        "breakpoint condition does not parse: $(_mark_cond_error(mark_conds[bad]))")
+    _set_marks!(s, _marks_from(mark_files, mark_lines, mark_conds))
     return _state(s)
 end
 

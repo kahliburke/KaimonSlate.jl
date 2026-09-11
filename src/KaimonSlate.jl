@@ -1253,21 +1253,34 @@ function create_tools(GateTool::Type)
     end
 
     """
-        dbg_break(notebook, file, line; on="toggle") -> String
+        dbg_break(notebook, file, line; on="toggle", cond="") -> String
 
     Arm or clear a breakpoint. `file` is what a frame reports — `cell:<id>` for notebook code, a
     path for a package — so copy it from `dbg_frame`. Breakpoints may be set before a session
     exists and survive one, which is the order the work usually happens in.
+
+    `cond` is a Julia expression that has to hold, in that frame, for the line to stop: pass
+    `cond="maximum(abs, du) > 1e3"` and `dbg_step(mode="continue")` lands on the first iteration
+    where it does. This is how a long run is reached at all — a plain breakpoint inside a loop
+    stops on the first pass, which is usually the one that is fine, and stepping to iteration
+    4,700 is not something you can do. Write it in terms of the locals `dbg_frame` reports.
+
+    A predicate that errors while running does not stop and does not abort the run, so a
+    misspelled name reads as a breakpoint that never fires.
     """
-    function dbg_break(notebook::String, file::String, line::Int; on::String = "toggle")::String
+    function dbg_break(notebook::String, file::String, line::Int; on::String = "toggle",
+                       cond::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         want = on == "toggle" ? nothing : (on in ("1", "true", "on", "yes"))
-        r = NotebookServer.mark_debug!(nb, strip(file), line; on = want)
+        r = NotebookServer.mark_debug!(nb, strip(file), line; on = want,
+                                       cond = isempty(cond) ? nothing : cond)
         get(r, "ok", false) === true || return "⛔ " * string(get(r, "error", "could not set that"))
         ms = get(r, "marks", [])
-        return (get(r, "on", false) === true ? "● armed " : "○ cleared ") * "$file:$line\n" *
-               (isempty(ms) ? "no breakpoints set" :
-                "breakpoints: " * join([string(get(m, "file", ""), ":", get(m, "line", 0)) for m in ms], ", "))
+        shown(m) = string(get(m, "file", ""), ":", get(m, "line", 0),
+                          isempty(String(get(m, "cond", ""))) ? "" : " when " * String(get(m, "cond", "")))
+        return (get(r, "on", false) === true ? "● armed " : "○ cleared ") * "$file:$line" *
+               (isempty(cond) ? "" : " when $cond") * "\n" *
+               (isempty(ms) ? "no breakpoints set" : "breakpoints: " * join(shown.(ms), ", "))
     end
 
     """
@@ -2601,7 +2614,7 @@ function create_tools(GateTool::Type)
     ASK_MS      =   960_000
     RENDER_MS   =   900_000   # Typst render + figure warm, doc harvest — one silent round-trip
 
-    return [
+    tools = [
         GateTool("api", api),
         GateTool("open", nb_open),
         GateTool("list", nb_list),
@@ -2666,6 +2679,40 @@ function create_tools(GateTool::Type)
         GateTool("site_membership", site_membership_tool),
         GateTool("site_publish", site_publish_tool),
     ]
+    _warn_undocumented_tools(GateTool, tools)
+    return tools
+end
+
+"""
+Say so, now, if any tool would reach a client with no description.
+
+A bare tool is silent in every other way: it registers, dispatches and works, and the only symptom
+is a model that never calls it because it cannot tell what it does. `test_tool_docs.jl` is the
+durable guard; this is for whoever is running right now, since that is who can still fix it.
+
+Descriptions are recovered by scanning the source file UP from each closure's definition line, so
+the usual cause is something placed between a docstring and its `function` line — a comment is
+enough. It also reads empty when the file has been EDITED under a running host: the line numbers
+come from the compiled method and the text from disk, so they stop agreeing. That case is not a
+defect and clears on restart, which is why this warns rather than throws.
+"""
+function _warn_undocumented_tools(GateTool::Type, tools)
+    bare = String[]
+    try
+        KG = parentmodule(GateTool)
+        isdefined(KG, :_source_docstring) || return nothing
+        for t in tools
+            d = try; strip(String(KG._source_docstring(t.handler))); catch; ""; end
+            isempty(d) && push!(bare, t.name)
+        end
+    catch
+        return nothing          # never let a diagnostic stop the extension from loading
+    end
+    isempty(bare) && return nothing
+    @warn """slate: $(length(bare)) tool(s) will reach agents with NO description — they will \
+             mostly go uncalled. Check for a comment between the docstring and the `function` \
+             line; if the source was edited while this host was running, restart it.""" tools = bare
+    return nothing
 end
 
 """

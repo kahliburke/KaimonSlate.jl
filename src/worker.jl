@@ -55,13 +55,16 @@ include(joinpath(@__DIR__, "worker_debug.jl")) # step a cell line by line (share
 
 # Gate-tool wrappers: the stepper is namespace-agnostic, the worker supplies its own.
 __slate_debug_start(; cell::String = "", source::String = "",
-                      mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[]) =
-    debug_start!(_NS[]; cell = cell, source = source, mark_files = mark_files, mark_lines = mark_lines)
+                      mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
+                      mark_conds::Vector{String} = String[]) =
+    debug_start!(_NS[]; cell = cell, source = source, mark_files = mark_files,
+                 mark_lines = mark_lines, mark_conds = mark_conds)
 __slate_debug_step(; mode::String = "next") = debug_step!(; mode = mode)
 __slate_debug_frame() = debug_frame()
 __slate_debug_eval(; expr::String = "") = debug_eval_expr(; expr = expr)
-__slate_debug_marks(; mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[]) =
-    debug_marks!(; mark_files = mark_files, mark_lines = mark_lines)
+__slate_debug_marks(; mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
+                      mark_conds::Vector{String} = String[]) =
+    debug_marks!(; mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds)
 __slate_debug_stop() = debug_stop!()
 include(joinpath(@__DIR__, "envprep.jl"))   # shared notebook-env prep policy (seed/dev-path/staleness; engine + worker + remote)
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs where the deps are loaded)
