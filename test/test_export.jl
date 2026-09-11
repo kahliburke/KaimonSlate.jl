@@ -562,7 +562,10 @@ end
     nref = _RE._save_asset("nt", (msg = "hi", n = 42))            # NamedTuple → JSON
     harvested = _RE._harvest_assets(task_local_storage(:slate_assets))
     delete!(task_local_storage(), :slate_assets)
-    @test "$(ref)" == "data/airports-1d6b6d68.json"               # AssetRef interpolates to its path
+    @test "$(ref)" == "data/airports-d3198338.json"               # AssetRef interpolates to its path
+    # Not just "a hash": the SAME hash on every Julia. This literal is the guard on that — it is
+    # what a published site's asset filenames are, so a version-dependent digest would rename
+    # every one of them on an upgrade.
     @test ref.mime == "application/json"
     @test length(harvested) == 5                                  # dup collapsed (6 saved → 5)
     @test any(a -> endswith(a.path, ".bin"), harvested)           # raw bytes → .bin

@@ -470,7 +470,12 @@ function _asset_base(name::AbstractString)
     safe == stem && return safe
     return string(safe, "-", string(hash(stem) % UInt16; base = 36))
 end
-_asset_hash(x) = string(hash(x) % UInt32; base = 16, pad = 8)   # short id → cache-bust + dedup
+# Short id → cache-bust + dedup. `slate_fingerprint`, not `hash`: this ends up in the FILENAME of an
+# exported asset, so it has to mean the same thing everywhere. `hash` is not stable across Julia
+# versions (1.12 and 1.13 disagree on the same bytes), which would rename every asset in a published
+# site on a Julia upgrade and give two collaborators different names for identical content — exactly
+# the dedup this is for. It also leaks Dict iteration order, which the JSON branch below passes in.
+_asset_hash(x) = slate_fingerprint(x)[1:8]
 
 function _asset_push!(rec)
     rec = merge(rec, (; created = time()))   # stamp when the cell produced it (survives memo restore)
