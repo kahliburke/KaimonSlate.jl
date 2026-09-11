@@ -26,7 +26,8 @@ jobs:
       fail-fast: false
       matrix:
         version:
-          - '1.12'   # the `slate` app + engine target Julia 1.12
+          - '1.12'   # the `slate` app + engine target Julia 1.12, and compat floors there
+          - '1.13'   # current release: catch what the next Julia breaks before a user does
         os:
           - ubuntu-latest
     steps:
