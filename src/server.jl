@@ -2898,7 +2898,13 @@ function server_celldone(nb::LiveNotebook, run_id::AbstractString, cid::Abstract
         _dirty = pop!(get!(Set{String}, _DIRTY_WHILE_RUNNING, nb.id), c.id, nothing) !== nothing
         ReportEngine.mark_result!(c, out)
         _dirty && ReportEngine.restale!(c)
-        c.binds = out.binds
+        # A live re-render (`run_id == "reconnect"`) delivers only the fresh fragment for a browser
+        # that just connected. Its wire carries no binds, because it is not a cell evaluation
+        # result — so assigning them here DELETES the controls of any cell that both declares
+        # `@bind`s and returns a session-bound output. That is exactly the shape of a figure drawn
+        # with its own controls: they stayed declared in Julia but vanished from the page the
+        # moment a browser connected, so nothing on the client could drive them.
+        run_id == "reconnect" || (c.binds = out.binds)
         _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :everywhere classification)
         _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
         _broadcast_progress(nb, c)
