@@ -218,7 +218,23 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
 
     pre = isempty(prologue) ? "" : prologue * "\n"
     dev = isempty(pname) ? "" : "Pkg.develop(Pkg.PackageSpec(path=raw\"$(remote_pkg)\"));"
-    code = "using Pkg; Pkg.activate(raw\"$(envdir)\"); $dev Pkg.instantiate(); Pkg.precompile()"
+    # The parent's deps become DIRECT deps of the task environment, not merely transitive ones.
+    #
+    # `develop` alone makes them reachable from the parent package's own code and nowhere else: a
+    # sweep body runs at top level IN this environment, and Julia resolves `using Foo` against the
+    # active project's direct deps. So a parent that lists a package precisely so the compute nodes
+    # have it — which is the whole reason a task-env package carries deps it never imports — got an
+    # environment where `using` it still failed. Loading by UUID happened to work, which is why the
+    # one package Slate loads that way (Arrow) masked this for as long as it did.
+    depnames = try
+        pt = Pkg.TOML.parsefile(joinpath(parent, "Project.toml"))
+        sort!(String[k for k in keys(get(pt, "deps", Dict{String,Any}()))])
+    catch
+        String[]
+    end
+    addl = isempty(depnames) ? "" :
+        "Pkg.add([" * join(("Pkg.PackageSpec(name=raw\"$(d)\")" for d in depnames), ", ") * "]);"
+    code = "using Pkg; Pkg.activate(raw\"$(envdir)\"); $dev $addl Pkg.instantiate(); Pkg.precompile()"
     ok, out = _ssh_run(host, "$(pre)$(julia) --startup-file=no -e '$(code)' && " *
                              "printf '%s' '$(fp)' > $(stamp)")
     ok || error("could not instantiate the task environment on $(host):\n$(strip(out))")
