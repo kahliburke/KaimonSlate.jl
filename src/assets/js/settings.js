@@ -498,19 +498,34 @@ function openSettings(scope) {
     // Swatches rather than a <select>: the choice IS a colour, so showing the colours is the whole
     // point — and an <option>'s background is unstylable in Safari, so a coloured dropdown would
     // silently degrade to a plain list there. Each swatch carries the tint at the strength the
-    // editor paints it, so what you pick is what you get; `theme` shows the live accent.
+    // editor paints it, so what you pick is what you get.
+    //
+    // `theme` is the odd one out and has to LOOK it. It renders in whatever the current theme's
+    // accent is, so on its own it is indistinguishable from the fixed blue sitting next to it — you
+    // could neither tell which swatch meant "follow the theme" nor what colour picking it would
+    // give. It gets a marker ring, and the current choice is named in text beside the row, so the
+    // answer is on screen instead of in a tooltip.
     const tint = document.getElementById('setmatchtint');
+    const tintName = document.getElementById('setmatchtintname');
     if (tint && window.matchTintNames && window.matchTintValue) {
+      const label = n => n === 'theme' ? 'Theme' : n[0].toUpperCase() + n.slice(1);
       const paint = () => {
         const cur = localStorage.getItem('slateMatchTint') || 'theme';
         tint.innerHTML = window.matchTintNames().map(n =>
-          `<button class="swatch${n === cur ? ' on' : ''}" data-tint="${n}" title="${n[0].toUpperCase() + n.slice(1)}"
+          `<button class="swatch${n === cur ? ' on' : ''}${n === 'theme' ? ' auto' : ''}" data-tint="${n}"
+                   title="${n === 'theme' ? 'Follow the notebook theme’s accent colour' : label(n)}"
                    style="--sw:${window.matchTintValue(n)}"></button>`).join('');
+        // Short enough not to crowd the row. What "theme accent" MEANS lives in the swatch's own
+        // tooltip and in the marker ring, not in a sentence the row has no space for.
+        if (tintName) tintName.textContent = cur === 'theme' ? 'Theme accent' : label(cur);
         for (const b of tint.querySelectorAll('.swatch')) {
           b.onclick = () => { window.setMatchTint && window.setMatchTint(b.dataset.tint); paint(); };
         }
       };
       paint();
+      // The theme swatch shows the LIVE accent, so a theme change has to repaint it.
+      const themeSel = document.getElementById('settheme');
+      if (themeSel) themeSel.addEventListener('change', () => setTimeout(paint, 60));
     }
   }
   // Per-notebook settings (hot-reload, parallel, threads, slides, bibstyle, agent-model override)

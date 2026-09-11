@@ -760,8 +760,8 @@ body.resizing { cursor:col-resize; user-select:none; }
 .output pre { margin:0; white-space:pre; }
 body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .output .out { color:var(--dim); } .output .val { color:var(--val); }
-.output .err { color:var(--red); background:rgba(229,117,117,.06); }
-.output .warn { color:var(--gold); background:rgba(255,215,0,.06); font-size:.86rem; }
+.output .err { color:var(--red); background:color-mix(in srgb, var(--red) 6%, transparent); }
+.output .warn { color:var(--gold); background:color-mix(in srgb, var(--gold) 6%, transparent); font-size:.86rem; }
 .output .err .srcref, .output .warn .srcref { color:var(--accent); text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
 .output .err .srcref:hover, .output .warn .srcref:hover { color:var(--strong); }
 /* Error message syntax coloring (the .err block default is red — softened toward the theme text
@@ -793,11 +793,12 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .pkgmissing .pmadd.alt:hover { border-color:var(--accent); color:var(--accent); }
 /* The offending source line, tinted in CodeMirror 6 while the cell is errored (+ a brief flash on jump).
    CM6 applies the class to the `.cm-line` element via a line Decoration. */
-.cm-editor .cm-line.cm-errorline { background:rgba(229,117,117,.12); box-shadow:inset 3px 0 0 var(--red);
+.cm-editor .cm-line.cm-errorline { background:color-mix(in srgb, var(--red) 12%, transparent); box-shadow:inset 3px 0 0 var(--red);
   transition:background .35s ease; }
 /* The actual offending line (error origin — may be a different cell than the one that threw):
    a touch brighter + a bolder gutter bar to distinguish it from faint call-site lines. */
-.cm-editor .cm-line.cm-errorline-origin { background:rgba(240,104,94,.22); box-shadow:inset 4px 0 0 #ff6b6b;
+.cm-editor .cm-line.cm-errorline-origin { background:color-mix(in srgb, var(--red) 22%, transparent);
+  box-shadow:inset 4px 0 0 color-mix(in srgb, var(--red) 80%, var(--strong));
   transition:background .35s ease; }
 /* Error / jump flash: an orange-red highlight that fades IN then back OUT (a pulse) rather than
    appearing and abruptly cutting; settles onto the faint overlay above when the line is errored. */
@@ -2589,6 +2590,22 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 /* The selected one gets a ring in the page's own colours, so it reads as chosen regardless of how
    pale its tint is — a heavier border alone was invisible on the lighter swatches. */
 .swatches .swatch.on { box-shadow:0 0 0 2px var(--bg2), 0 0 0 3.5px var(--text); }
+/* The "follow the theme" swatch. It paints in the theme's accent, which makes it look like just
+   another fixed colour sitting beside the fixed blue — so it carries a hollow centre to say it
+   stands for a rule rather than for the colour it happens to be showing right now. */
+.swatches .swatch.auto { position:relative; }
+.swatches .swatch.auto::after { content:''; position:absolute; inset:3.5px; border-radius:50%;
+                                border:1.5px solid var(--text); opacity:.55; }
+/* The chosen colour, named. The row alone cannot say what "follow the theme" means, and a tooltip
+   is only found by accident.
+   It sits BEFORE the swatches, and the two have opposite flex behaviour: the strip never shrinks,
+   the name shrinks (and ellipsises) to fit. Order alone was not enough — a name long enough to
+   overfill the row pushed the whole `.rt` past the row's right edge, so the swatches still shifted
+   by a few pixels as the text changed length and the colour you were aiming at moved out from under
+   the pointer. */
+.swname { margin-right:10px; color:var(--dim); font-size:.78rem; white-space:nowrap;
+          flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.swatches { flex:0 0 auto; }
 
 /* ── Notebook-wide find bar (⌘F, js/search.js) ───────────────────────────────────────────────
    Top-right of the window, above the docked panes (60) and the toast stack (80) but below the
