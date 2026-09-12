@@ -284,9 +284,20 @@ end
     @test occursin("[s]", KS._restart_hub!(KS.SlateModel(:waiting)))
     # a queued file survives construction (opened on the waiting→viewer flip)
     @test KS.SlateModel(:waiting; pending = "nb.jl").pending == "nb.jl"
-    # quit keys flip the flag
+    # `q` asks first and a second `q` confirms — the key that opened the prompt is the one already
+    # under the finger, so `qq` stays the fast path for someone who meant it.
+    KS.Tachikoma.update!(m, KS.Tachikoma.KeyEvent(:char, 'q'))
+    @test m.quit_confirm
+    @test !KS.Tachikoma.should_quit(m)
     KS.Tachikoma.update!(m, KS.Tachikoma.KeyEvent(:char, 'q'))
     @test KS.Tachikoma.should_quit(m)
+
+    # Anything else cancels, which is the accident the prompt exists to catch.
+    m2 = KS.SlateModel(:viewer)
+    KS.Tachikoma.update!(m2, KS.Tachikoma.KeyEvent(:char, 'q'))
+    KS.Tachikoma.update!(m2, KS.Tachikoma.KeyEvent(:char, 'x'))
+    @test !m2.quit_confirm
+    @test !KS.Tachikoma.should_quit(m2)
 end
 
 @testset "the TUI reports which Slate the hub is running" begin

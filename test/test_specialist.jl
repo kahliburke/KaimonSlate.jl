@@ -6,6 +6,7 @@
 # session back. That layer had no tests at all, because exercising it meant spawning an agent.
 
 using ReTest
+using Sockets
 using KaimonSlate
 const NS = KaimonSlate.NotebookServer
 # What an agent caller looks like. `may_disturb` asks `_is_agent`, which keys on this prefix, so a
@@ -17,7 +18,13 @@ include("debug_fake_agent.jl")
 
 @testset "specialist loop" begin
     NS.SlateHistory._ROOT[] = mktempdir()
-    hub = NS.start_hub(; port = 8861)
+    # Ask the OS for a free one rather than naming a port. A fixed port is shared with another
+    # suite in this same run, and a hub that cannot bind used to be indistinguishable from one that
+    # could — the suite hung instead of failing, and left the port held for the next run too.
+    port = let s = Sockets.listen(Sockets.localhost, 0)
+        p = Int(Sockets.getsockname(s)[2]); close(s); p
+    end
+    hub = NS.start_hub(; port = port)
     try
         nbp = tempname() * ".jl"
         # A loop long enough that stepping to the interesting iteration is not an option — which
@@ -147,8 +154,33 @@ include("debug_fake_agent.jl")
             @test picked[] == "acp:claude:sonnet"
         end
 
+        @testset "file access is granted to the notebook's agent, not to a specialist" begin
+            # The agent has no shell or file tools until it asks and is told yes. What it asks for
+            # is a preset, and the preset binds at spawn — so the grant has to outlive the turn and
+            # then replace the agent, or "allowed" means nothing until the hub restarts.
+            @test NS._effective_perm(nb, "", "") == "notebook"
+            @test NS._effective_perm(nb, "bypass", "") == "bypass"   # the picker, when there's no grant
+            try
+                NS.grant_agent_permission!(nb, "lab")
+                @test NS._effective_perm(nb, "", "") == "lab"
+                @test NS._effective_perm(nb, "notebook", "") == "lab"   # a grant outranks the picker
+                # A specialist's preset comes from its role. Widening it here would undo the
+                # allowlist that is the reason to summon one.
+                @test NS._effective_perm(nb, "specialist", "debugger") == "specialist"
+            finally
+                delete!(NS._PERM_GRANT, nb.id)
+            end
+            @test NS._effective_perm(nb, "", "") == "notebook"
+        end
+
         @testset "the summoning orchestrator may end its specialist's session" begin
-            NS.register_orchestrator!(nb, "debugger", AGENT)
+            # Registering an orchestrator means later asks are PAGED to it as a turn, which runs
+            # whatever script is loaded. Leave the asking one in place and a consent request below
+            # spawns a specialist that asks its own question and blocks on it for the full timeout,
+            # outliving the suite.
+            fake_agent_reset!((args, text) -> nothing)
+            fake_agent_alive!(AGENT)                     # an orchestrator it cannot send to is not one
+            @test NS.register_orchestrator!(nb, "debugger", AGENT)
             NS.start_debug!(nb, "drive"; by = "agent:the-specialist")
             try
                 @test NS._debug_session(nb).owner == "agent:the-specialist"
@@ -181,7 +213,9 @@ include("debug_fake_agent.jl")
                 r = @async NS.stop_debug!(nb; by = AGENT)
                 sleep(0.3)
                 @test NS._debug_session(nb).owner == NS.HUMAN   # not taken while unanswered
-                as = NS.asks_json(nb)
+                # By kind, not `first`: other asks can be open at the same time, and answering the
+                # wrong one leaves this turn blocked until the timeout.
+                as = filter(a -> get(a, "kind", "") == "consent", NS.asks_json(nb))
                 @test !isempty(as)                              # it ASKED rather than acted
                 NS.answer_ask!(nb, String(get(first(as), "id", "")), "no")
                 wait(r)

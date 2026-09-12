@@ -29,6 +29,15 @@ function fake_agent_reset!(script)
     return nothing
 end
 
+"""
+Mark an agent id as live without opening it through `summon!`.
+
+An orchestrator is a caller, not something this notebook spawned, and `register_orchestrator!`
+refuses an id it cannot send to — so a stand-in orchestrator has to exist before it can be
+registered, or the test asserts on an authority that was silently never granted.
+"""
+fake_agent_alive!(aid::AbstractString) = (Main.Kaimon.KaimonGate.OPEN[String(aid)] = true; nothing)
+
 "Block until every turn handed to the fake has finished running its script."
 function fake_agent_settle!(; timeout = 30.0)
     deadline = time() + timeout
@@ -49,38 +58,47 @@ end
 # gets back, so the stub answers in that shape. Only the handful of tools the specialist framework
 # actually reaches are implemented; anything else returns an error string, which `_agent_call`
 # raises — an unimplemented tool should fail loudly rather than look like an empty success.
-module Kaimon
-module KaimonGate
-const JSON = Main.KaimonSlate.JSON
+#
+# The stub has to BE `Main.Kaimon`, since that is where the production lookup goes, but the state
+# above belongs to whichever module included this file — `runtests.jl` gives every test file its
+# own. So the stub is evaluated into `Main` and pointed back at its includer through `HOME`.
+isdefined(Main, :Kaimon) || @eval Main module Kaimon
+    module KaimonGate
 
-const OPEN = Dict{String,Bool}()
+    const HOME = Ref{Module}(Main)      # the test module holding FAKE_CALLS and friends
+    const OPEN = Dict{String,Bool}()
 
-function call_tool(tool::Symbol, args::Dict{String,Any})
-    push!(Main.FAKE_CALLS, (tool, deepcopy(args)))
-    if tool === :agent_open
-        aid = String(get(args, "id", "fake-agent"))
-        OPEN[aid] = true
-        return JSON.json(Dict("agent_id" => aid))
-    elseif tool === :agent_status
-        aid = String(get(args, "agent_id", ""))
-        return JSON.json(Dict("status" => get(OPEN, aid, false) ? "idle" : "dead",
-                              "model" => "fake"))
-    elseif tool === :agent_close
-        delete!(OPEN, String(get(args, "agent_id", "")))
-        return JSON.json(Dict("closed" => true))
-    elseif tool === :agent_send
-        text = String(get(args, "text", ""))
-        push!(Main.FAKE_TURNS, text)
-        # On a task, not inline: a script that calls `dbg_ask` blocks until someone answers, and
-        # the answerer is the test — which is still inside this call if we run it here.
-        push!(Main.FAKE_TASKS, Threads.@spawn Main.FAKE_SCRIPT[](args, text))
-        return JSON.json(Dict("turn" => length(Main.FAKE_TURNS)))
-    elseif tool === :agent_interrupt
-        return JSON.json(Dict("interrupted" => true))
-    elseif tool === :agent_set_model
-        return JSON.json(Dict("switched" => true))
+    function call_tool(tool::Symbol, args::Dict{String,Any})
+        H = HOME[]
+        JSON = H.KaimonSlate.JSON
+        push!(H.FAKE_CALLS, (tool, deepcopy(args)))
+        if tool === :agent_open
+            aid = String(get(args, "id", "fake-agent"))
+            OPEN[aid] = true
+            return JSON.json(Dict("agent_id" => aid))
+        elseif tool === :agent_status
+            aid = String(get(args, "agent_id", ""))
+            return JSON.json(Dict("status" => get(OPEN, aid, false) ? "idle" : "dead",
+                                  "model" => "fake"))
+        elseif tool === :agent_close
+            delete!(OPEN, String(get(args, "agent_id", "")))
+            return JSON.json(Dict("closed" => true))
+        elseif tool === :agent_send
+            text = String(get(args, "text", ""))
+            push!(H.FAKE_TURNS, text)
+            # On a task, not inline: a script that calls `dbg_ask` blocks until someone answers,
+            # and the answerer is the test — which is still inside this call if we run it here.
+            push!(H.FAKE_TASKS, Threads.@spawn H.FAKE_SCRIPT[](args, text))
+            return JSON.json(Dict("turn" => length(H.FAKE_TURNS)))
+        elseif tool === :agent_interrupt
+            return JSON.json(Dict("interrupted" => true))
+        elseif tool === :agent_set_model
+            return JSON.json(Dict("switched" => true))
+        end
+        # Built rather than interpolated: this module is defined through `@eval`, which would
+        # substitute a `$` at macro-expansion time instead of leaving it for the string.
+        return string("Error: the fake agent does not implement ", tool)
     end
-    return "Error: the fake agent does not implement $tool"
-end
-end # module KaimonGate
+    end # module KaimonGate
 end # module Kaimon
+Main.Kaimon.KaimonGate.HOME[] = @__MODULE__
