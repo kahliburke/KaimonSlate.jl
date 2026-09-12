@@ -20,9 +20,15 @@ include("debug_fake_agent.jl")
 # without a gate in the process.
 struct ToolSpec
     name::String
+    f::Any
     timeout_ms::Any
 end
-ToolSpec(name, _f; timeout_ms = nothing) = ToolSpec(String(name), timeout_ms)
+ToolSpec(name, f; timeout_ms = nothing) = ToolSpec(String(name), f, timeout_ms)
+# A tool asks the gate who is calling, through `parentmodule(GateTool)` — which is this module when
+# the stand-in above is the tool type. `nothing` from both is what a plain MCP client looks like,
+# so the calls below are treated as a person rather than as an agent.
+current_caller() = nothing
+current_agent_id() = nothing
 
 @testset "specialist loop" begin
     NS.SlateHistory._ROOT[] = mktempdir()
@@ -233,6 +239,49 @@ ToolSpec(name, _f; timeout_ms = nothing) = ToolSpec(String(name), timeout_ms)
                 t = by[v]
                 @test t.timeout_ms !== nothing
                 @test t.timeout_ms > NS.ASK_TIMEOUT * 1000      # milliseconds, and with headroom
+            end
+        end
+
+        @testset "the protocol's tools work when called" begin
+            # Everything above drives NotebookServer directly. An agent reaches it through the tool
+            # layer instead, and a wrong argument name or a mistyped call there survives parsing and
+            # every test that does not actually invoke one.
+            tools = Dict(t.name => t.f for t in KaimonSlate.create_tools(ToolSpec))
+            old = KaimonSlate._HUB[]
+            KaimonSlate._HUB[] = hub
+            try
+                f = NS.record_finding!(nb, "debugger", AGENT; cell = "drive",
+                                       claim = "the sum overflows", evidence = "total > typemax")
+
+                listed = tools["dbg_findings"](nb.id)
+                @test occursin(f.id, listed)
+                @test occursin("the sum overflows", listed)
+
+                @test occursin("⛔", tools["check_verdict"](nb.id, f.id, "maybe", "unsure"))
+                @test occursin("⛔", tools["check_verdict"](nb.id, f.id, "confirmed", ""))
+                @test occursin("no finding", tools["check_verdict"](nb.id, "nope", "confirmed", "x"))
+                @test occursin("disputed",
+                               tools["check_verdict"](nb.id, f.id, "disputed", "`drive` cannot overflow"))
+                @test f.verdict == "disputed"
+
+                # The proposal blocks on a person, so the person is another task here.
+                answerer = Threads.@spawn begin
+                    for _ in 1:400
+                        as = [a for a in NS.asks_json(nb) if get(a, "kind", "") == "choice"]
+                        isempty(as) || (NS.answer_ask!(nb, String(first(as)["id"]), "go"); break)
+                        sleep(0.02)
+                    end
+                end
+                out = tools["dbg_propose"](nb.id, f.id, "rewrite the accumulator", "it disputes cleanly")
+                wait(answerer)
+                @test occursin("Approved", out)
+                @test f.plan == "rewrite the accumulator"
+                @test f.decision == "go"
+
+                @test occursin("⛔", tools["dbg_propose"](nb.id, f.id, "", "no plan"))
+                @test occursin("no finding", tools["dbg_propose"](nb.id, "nope", "x", "y"))
+            finally
+                KaimonSlate._HUB[] = old
             end
         end
 
