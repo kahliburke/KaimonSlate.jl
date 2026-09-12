@@ -35,6 +35,12 @@ Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
 Tar = "a4e569a6-e804-4fa4-b0f3-eef7a1d5b13e"
 Typst_jll = "eb4b1da6-20f6-5c66-9826-fdb8ad410d0e"
 
+[weakdeps]
+Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
+
+[extensions]
+KaimonSlateTablesExt = "Tables"
+
 [compat]
 Base64 = "1.11.0"
 CodecZlib = "0.7.8"
@@ -63,6 +69,7 @@ Serialization = "1.11.0"
 SlateExtensionsBase = "0.10.5"
 Sockets = "1.11.0"
 TOML = "1.0.3"
+Tables = "1"
 Tachikoma = "2.6.1"
 Tar = "1.10"
 Typst_jll = "0.14"
@@ -75,8 +82,9 @@ Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 ReTest = "e0db7c4e-2690-44b9-bad6-7687da720f89"
+Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 ZMQ = "c2297ded-f4af-51ae-bb23-16f91089e4e1"
 
 [targets]
-test = ["Arrow", "DataFrames", "Random", "ReTest", "Test", "ZMQ"]
+test = ["Arrow", "DataFrames", "Random", "ReTest", "Tables", "Test", "ZMQ"]

@@ -8,6 +8,10 @@ using KaimonSlate
 # Loaded so the TABLE path is genuinely exercised: the codecs soft-detect Arrow, so without it here
 # every table assertion below would quietly take the "no addressable form" branch and pass vacuously.
 using Arrow, DataFrames
+# The Tables.jl integration is a package EXTENSION, so it only exists once Tables is loaded here.
+# Arrow and DataFrames both depend on it, which is the point: it appears exactly for the readers who
+# could use it.
+import Tables
 # A stdlib that `Main` does not import, which is the point of the eltype-resolution test below.
 import Dates
 const RE = KaimonSlate.ReportEngine
@@ -223,6 +227,93 @@ const MS = RE.MemoStore
             @test ds.whole_why == "eager"
             out = sprint(show, MIME"text/plain"(), ds)
             @test occursin("data=auto", out) && occursin("reset", out)
+        end
+    end
+
+    @testset "another package can stream the dataset, a chunk at a time" begin
+        # The dataset already reads lazily; what it could not do was let SOMEONE ELSE read it that
+        # way. `Tables.partitions` is that handover: one table per stored chunk, so a consumer
+        # writes each piece as it arrives and peak residency is one chunk however big the dataset.
+        mktempdir() do root
+            t = RE.Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                     payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = RE.Sweep.@sweep(RE.Sweep.paramgrid(part = 1:4), t; submit = false, lazy = true) do p
+                n = 250
+                (; i = collect(1:n), x = float.(1:n) .* p.part)
+            end
+            for c in RE.BatchSweep.sweep_chunks(root, r.run); ST.run_chunk(root, c); end
+            ds = RE.Sweep.refresh!(r).dataset
+            @test length(ds) == 1000
+
+            # The extension is loaded, so the dataset IS a table to the ecosystem.
+            @test Tables.istable(typeof(ds))
+            @test Tables.columnaccess(typeof(ds))
+            # The schema is answered off the INDEX, so it costs no read…
+            sch = Tables.schema(ds)
+            @test sch.names == (:part, :i, :x)
+            @test sch.types == (Int64, Int64, Float64)
+            # …and DataFrame(ds) now means what it looks like.
+            @test nrow(DataFrame(ds)) == 1000
+
+            parts = collect(Tables.partitions(ds))
+            @test length(parts) == RE.Sweep.query_cost(ds).of_chunks   # one per stored chunk
+            @test length(parts) > 1                                    # …and it really is split
+            @test all(p -> keys(p) == (:part, :i, :x), parts)
+            # Concatenating the partitions is the dataset: same rows, same order, nothing dropped.
+            @test sum(p -> length(p.i), parts) == 1000
+            @test reduce(vcat, [collect(p.i) for p in parts]) == ds[1:1000].i
+            @test reduce(vcat, [collect(p.x) for p in parts]) == ds[1:1000].x
+
+            # The point of the exercise: Arrow writes it by walking the partitions, and what comes
+            # back is the same table. Nothing here ever held more than one chunk.
+            out = joinpath(root, "streamed.arrow")
+            Arrow.write(out, ds)
+            back = DataFrame(Arrow.Table(out))
+            @test nrow(back) == 1000
+            @test back.i == ds[1:1000].i
+            @test back.x == ds[1:1000].x
+            @test back.part == collect(ds[1:1000].part)   # the BlockColumn flattens on the way out
+
+            # The read guard is priced off the index and refuses BEFORE any bytes move. Set absurdly
+            # low here so the same dataset trips it, then lifted at each of the three scopes.
+            old = RE.Sweep.read_limit()
+            try
+                RE.Sweep.read_limit!(1)
+                e = try; DataFrame(ds); "" catch x; sprint(showerror, x); end
+                @test occursin("over the", e) && occursin("read_limit", e)
+                # …the call outranks the session…
+                @test nrow(DataFrame(RE.Sweep.load(ds, 1:1000; max_bytes = nothing))) == 1000
+                # …and so does the sweep, leaving the session's setting alone.
+                r.read_limit = nothing
+                @test nrow(DataFrame(r.dataset)) == 1000
+                @test RE.Sweep.read_limit() == 1
+                r.read_limit = :default
+                @test_throws ErrorException DataFrame(r.dataset)
+            finally
+                RE.Sweep.read_limit!(old)
+            end
+            # Rows that rode a manifest cost nothing to hand over, so they are never refused.
+            inl = RE.Sweep.@sweep(RE.Sweep.paramgrid(g = 1:2), t; submit = false) do p
+                (; v = float(p.g))
+            end
+            for c in RE.BatchSweep.sweep_chunks(root, inl.run); ST.run_chunk(root, c); end
+            old2 = RE.Sweep.read_limit()
+            try
+                RE.Sweep.read_limit!(1)
+                @test nrow(DataFrame(RE.Sweep.refresh!(inl).dataset)) == 2
+            finally
+                RE.Sweep.read_limit!(old2)
+            end
+
+            # A shape with no row space says so rather than handing over nonsense.
+            arr = RE.Sweep.@sweep(RE.Sweep.paramgrid(x = 1:2), t; submit = false, lazy = true) do p
+                collect(1:50) .* p.x
+            end
+            for c in RE.BatchSweep.sweep_chunks(root, arr.run); ST.run_chunk(root, c); end
+            dsa = RE.Sweep.refresh!(arr).dataset
+            @test dsa.kind === :array
+            e = try; RE.Sweep.partitions(dsa); "" catch x; sprint(showerror, x); end
+            @test occursin("arrays, not rows", e)
         end
     end
 

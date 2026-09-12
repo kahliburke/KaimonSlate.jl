@@ -755,7 +755,13 @@ mutable struct ShardedResult
     rows::Vector{NamedTuple}
     telemetry::BatchSweep.Telemetry
     plot::Any                     # rows -> chart, drawn live on the card (nothing = no chart)
+    # How much this sweep in particular may hand back in one read (see `read_limit`). `:default`
+    # follows the process-wide setting; set it to loosen or disable the guard for THIS sweep without
+    # touching any other.
+    read_limit::Any
 end
+ShardedResult(key, run, target, params, keys, plan, rows, telemetry, plot) =
+    ShardedResult(key, run, target, params, keys, plan, rows, telemetry, plot, :default)
 
 Base.length(r::ShardedResult) = length(getfield(r, :rows))
 Base.getindex(r::ShardedResult, i) = getfield(r, :rows)[i]
@@ -804,7 +810,8 @@ function Base.getproperty(r::ShardedResult, s::Symbol)
     # data it describes.
     s === :dataset    && return _dataset_of(store_root(getfield(r, :target)),
                                             getfield(r, :params), getfield(r, :keys),
-                                            getfield(r, :run), source_of(getfield(r, :target)))
+                                            getfield(r, :run), source_of(getfield(r, :target));
+                                            limit = getfield(r, :read_limit))
     s === :results    && return [row for row in rows if row.status == "ok"]
     # What the units RETURNED, straight from the manifests. This is the accessor analysis should
     # reach for: it is the same cost at four units and four million, where `[row.value[] …]` is a
@@ -1498,6 +1505,7 @@ struct Dataset
     whole_why::String             # …and why: "shape" | "eager" | "arrow" | ""
     label::String                 # the sweep it came from, for transfer accounting
     purged::Bool                  # the index survived, the bytes did not
+    limit::Any                    # this sweep's read guard; `:default` follows `read_limit()`
 end
 
 # The per-unit facts, as columns. Off the default projection; `select` reaches them by name.
@@ -1510,7 +1518,7 @@ _value_name(ds, c) = Symbol(c) in ds.pnames ? Symbol(String(c), "_result") : Sym
 
 function Dataset(kind::Symbol, parts::Vector{DatasetPart}, whole::Integer = 0,
                  label::AbstractString = "", purged::Bool = false,
-                 whole_why::AbstractString = "")
+                 whole_why::AbstractString = ""; limit = :default)
     pnames = Symbol[]
     for p in parts
         p.params isa NamedTuple || continue
@@ -1525,7 +1533,7 @@ function Dataset(kind::Symbol, parts::Vector{DatasetPart}, whole::Integer = 0,
     starts = Int[]; at = 1
     for p in parts; push!(starts, at); at += p.rows; end
     return Dataset(kind, parts, pnames, cols, typs, starts, Int(whole), String(whole_why),
-                   String(label), purged)
+                   String(label), purged, limit)
 end
 
 # ── Surviving the purge ──────────────────────────────────────────────────────────────────────
@@ -1635,7 +1643,7 @@ end
 # Assembled from the shard manifests: one part per GRID POINT, in grid order, whatever that point
 # produced. A partial sweep gives a partial dataset rather than an error — the same property that
 # lets the rest of the fabric be watched while it runs.
-function _dataset_of(root, params, keys, label = "", src = LocalSource(root))
+function _dataset_of(root, params, keys, label = "", src = LocalSource(root); limit = :default)
     parts = DatasetPart[]
     kind = :table
     whole = 0
@@ -1694,14 +1702,14 @@ function _dataset_of(root, params, keys, label = "", src = LocalSource(root))
             end
             # One probe, not one per chunk: if the first blob is gone the store was purged.
             gone = !isempty(parts) && !part_present(parts[1])
-            return Dataset(kind, parts, whole, label, gone)
+            return Dataset(kind, parts, whole, label, gone; limit = limit)
         end
     end
     # Only the INDEXED parts are worth outliving the store: inline rows live in the manifests, which
     # the purge takes with the blobs, and a placeholder describes nothing.
     remember_index!(label, root, filter(p -> p.backend === :indexed, parts), kind)
     why = "shape" in whys ? "shape" : "arrow" in whys ? "arrow" : "eager" in whys ? "eager" : ""
-    return Dataset(kind, parts, whole, label, false, why)
+    return Dataset(kind, parts, whole, label, false, why; limit = limit)
 end
 
 Base.length(ds::Dataset) = isempty(ds.parts) ? 0 : ds.starts[end] + ds.parts[end].rows - 1
@@ -1805,6 +1813,40 @@ end
 # call site. Raise it deliberately per call.
 const DATASET_ROW_CAP = 1_000_000
 
+# ── How much a single read may bring back ─────────────────────────────────────────────────────
+# BYTES, not rows, because bytes are what hurt: a million rows of two numbers is a few tens of MB
+# and a million rows of two hundred columns is not. The figure is free — `query_cost` already
+# computes it off the index, before anything is read — so this refuses BEFORE the transfer rather
+# than during it.
+#
+# A guard, not a law. It exists so that `DataFrame(ds)` on a sweep that turns out to be terabytes
+# stops and says so instead of quietly filling memory. Anyone who means it says so and it gets out
+# of the way, at whichever scope suits: a setting for this session, or one for a single sweep.
+const _READ_LIMIT = Ref{Any}(512 * 1024^2)
+
+"""
+    read_limit() -> Int | Nothing
+    read_limit!(bytes) -> bytes
+
+The most any ONE read may bring back, in bytes, for this session. `nothing` turns the guard off.
+
+    Sweep.read_limit!(4 * 1024^3)     # this session will hand back up to 4 GB at a time
+    Sweep.read_limit!(nothing)        # …or as much as is asked for, on my head be it
+
+A single sweep can differ from the session: `r.read_limit = nothing` frees that one and leaves
+every other guarded. A `max_bytes` argument to `load` outranks both, since it is the most specific
+statement of intent there is.
+
+Only reads that touch the STORE are counted. Rows carried in a manifest cost nothing to hand over
+and are never refused.
+"""
+read_limit() = _READ_LIMIT[]
+read_limit!(bytes) = (_READ_LIMIT[] = bytes === nothing ? nothing : Int(bytes); bytes)
+
+# `:default` at either level means "ask the level above". The result's setting wins over the
+# session's, which is what makes loosening one sweep a local act.
+_effective_limit(x) = x === :default ? _READ_LIMIT[] : x
+
 """
     ds[rows]            -> NamedTuple of columns
     ds[rows, columns]   -> …only those columns
@@ -1837,7 +1879,7 @@ The read behind `ds[rows]`, with the cap exposed. Raising `max_rows` is how you 
 look — deliberately, at one call site, with the number written down.
 """
 function load(ds::Dataset, rows::AbstractUnitRange; select = nothing,
-              max_rows::Integer = DATASET_ROW_CAP, record::Bool = true)
+              max_rows::Integer = DATASET_ROW_CAP, max_bytes = :default, record::Bool = true)
     ds.purged && error("this dataset's data has been purged from the store — the index survived, " *
                        "so the schema and counts are still readable, but the bytes are gone. " *
                        "Re-run the sweep to rebuild it.")
@@ -1868,9 +1910,30 @@ function load(ds::Dataset, rows::AbstractUnitRange; select = nothing,
     # The facts repeat down a unit's whole block, so they are off the projection until named.
     fwant = want === nothing ? Symbol[] : Symbol[k for k in _FACT_NAMES if k in want]
 
+    # Priced BEFORE anything is read, off the index alone, so a read too big to want is refused
+    # rather than half-made. Only STORED bytes count: rows that rode a manifest are already here.
+    span = _ds_span(ds, rows)
+    cap = _effective_limit(max_bytes === :default ? ds.limit : max_bytes)
+    if cap !== nothing
+        want = 0
+        for (i, local_rows) in span
+            p = ds.parts[i]
+            p.backend === :indexed || continue
+            for (pos, _, _, _) in SlateTask.table_chunks(p.index, local_rows)
+                want += Int(p.index["chunks"][pos]["bytes"])
+            end
+        end
+        want <= cap || error(
+            "this read would bring back $(_bytes(want)), over the $(_bytes(cap)) limit for one " *
+            "read — narrow the range, project fewer columns, use `scan(ds; …)` to filter it " *
+            "down, or lift the guard: `Sweep.load(ds, rows; max_bytes = …)` for this call, " *
+            "`r.read_limit = …` for this sweep, `Sweep.read_limit!(…)` for the session " *
+            "(`nothing` anywhere means no limit)")
+    end
+
     blocks = Any[]
     bytes = 0; opened = 0; t0 = time()
-    for (i, local_rows) in _ds_span(ds, rows)
+    for (i, local_rows) in span
         p = ds.parts[i]
         # Charged BEFORE the read, off the index: these are the chunks the slice resolves to, so
         # the figure is what the query costs whether the bytes come off a mmap or a wire.
@@ -1959,7 +2022,7 @@ function Base.getindex(ds::Dataset, var::Symbol)
     length(parts) == length(ds.parts) ||
         error("`$(name)` is in $(length(parts)) of $(length(ds.parts)) units — a variable that " *
               "only some units wrote cannot be one dataset")
-    return Dataset(_ds_kind(parts[1].index), parts, ds.whole, ds.label, ds.purged)
+    return Dataset(_ds_kind(parts[1].index), parts, ds.whole, ds.label, ds.purged; limit = ds.limit)
 end
 
 """
@@ -2133,6 +2196,118 @@ function scan(ds::Dataset; select = nothing, between = nothing, where = nothing,
     _record!(ds.label, isempty(ds.parts) ? "" : ds.parts[1].root, :rows, bytes, opened,
              (time() - t0) * 1000)
     return NamedTuple{Tuple(want)}(Tuple(isempty(k) ? k : identity.(k) for k in keep))
+end
+
+# ── Handing the dataset to someone else's code ────────────────────────────────────────────────
+# A Dataset reads lazily already — a slice opens only the chunks it names, `between` prunes off the
+# index, an array part slices by byte offset. What it could not do was let ANOTHER package read it
+# that way: a consumer had to be handed materialised columns, which for a dataset that outgrew
+# memory meant it could not be handed over at all.
+#
+# One partition per stored CHUNK is the shape that fixes it, because that is the unit the store is
+# already built in. `Arrow.write` and `CSV.write` ask a source for its partitions and write each as
+# it arrives, so the peak resident cost is one chunk however large the dataset is.
+#
+# Deliberately NOT a `Tables.columns` method (see `ext/KaimonSlateTablesExt.jl`): that would mean
+# "materialise all of it", which is the one thing `DATASET_ROW_CAP` exists to prevent. Ask for a
+# slice when you want that, and the cost stays visible at the call site.
+
+"""
+    DatasetPartitions
+
+A Dataset as a sequence of column tables, one per stored chunk. Iterating reads a chunk at a time.
+"""
+struct DatasetPartitions
+    ds::Dataset
+    blocks::Vector{Tuple{UnitRange{Int},Int,Int}}
+end
+
+"""
+    partitions(ds) -> iterator of column tables
+
+The dataset chunk by chunk, in row order, each piece a NamedTuple of columns carrying the
+parameters that produced it. This is what lets a dataset larger than memory be written out or read
+by another package: only one chunk is resident at a time.
+
+    Arrow.write("out.arrow", ds)        # via Tables.partitions — streams
+    for part in Sweep.partitions(ds)    # …or walk it yourself
+        @show length(first(part))
+    end
+
+Rows that rode a manifest come back as one partition per unit, and a unit that has not landed
+contributes its row of `missing` — the same row space `ds[1:n]` has, split along how it is stored.
+"""
+function partitions(ds::Dataset)
+    ds.kind === :table ||
+        error(ds.kind === :group ?
+              "this dataset holds named variables, not one row space — `ds[:name]` picks one " *
+              "(`keys(ds)` lists them), and that is what streams" :
+              "this dataset holds arrays, not rows — `ds[k]` for part k, then slice that part")
+    return DatasetPartitions(ds, _scan_blocks(ds, nothing))
+end
+
+"""
+    column_schema(ds) -> (names, types)
+
+What `ds[rows]` will hand back, worked out from the index without reading anything.
+
+`Union{Missing,T}` is decided rather than guessed: a column is missing exactly where a part does not
+carry it — a unit that has not landed, or one whose body took a branch that returned different
+fields — and which columns a part has is recorded. Parameters are read off the values themselves, so
+they need no resolution at all.
+
+A stored column's type is recorded as a NAME, and resolving it needs the package that defines it
+loaded here (`SlateTask.eltype_of`). When it will not resolve the answer is `Any`, which is true but
+imprecise — better than refusing to answer, and better than a type that cannot be loaded.
+"""
+function column_schema(ds::Dataset)
+    names = Symbol[]; types = Any[]
+    for k in ds.pnames
+        push!(names, k)
+        T = Union{}
+        gap = false
+        for p in ds.parts
+            if p.params isa NamedTuple && hasproperty(p.params, k)
+                T = Union{T,typeof(getproperty(p.params, k))}
+            else
+                gap = true
+            end
+        end
+        T === Union{} && (T = Any)
+        push!(types, gap ? Union{Missing,T} : T)
+    end
+    for (j, c) in enumerate(ds.columns)
+        push!(names, _value_name(ds, c))
+        # The first part that declares this column names its type; a part that does not declare it
+        # is where `missing` comes from.
+        T = Any
+        gap = false
+        for p in ds.parts
+            pc = get(p.index, "columns", String[])
+            at = findfirst(==(c), String.(pc))
+            if at === nothing
+                gap = true
+            elseif T === Any
+                nm = get(p.index, "types", String[])
+                at <= length(nm) && (T = try; SlateTask.eltype_of(String(nm[at])); catch; Any; end)
+            end
+        end
+        push!(types, gap ? Union{Missing,T} : T)
+        j == length(ds.columns) && break
+    end
+    return (names, types)
+end
+
+Base.length(p::DatasetPartitions) = length(p.blocks)
+Base.eltype(::Type{DatasetPartitions}) = NamedTuple
+Base.IteratorSize(::Type{DatasetPartitions}) = Base.HasLength()
+function Base.iterate(p::DatasetPartitions, i::Int = 1)
+    i > length(p.blocks) && return nothing
+    rng, _, _ = p.blocks[i]
+    # Read through `load`, so a partition is the same columns, the same names and the same transfer
+    # accounting a slice of that range would give. Recorded per chunk rather than in one lump: a
+    # stream can run for a long time, and the read figure should move while it does.
+    return (load(p.ds, rng), i + 1)
 end
 
 _bytes(n::Integer) = n < 1024 ? "$(n) B" :
