@@ -20,6 +20,10 @@ the `Widget` struct itself never crosses a process boundary.
   (live and in exports).
 - **Execution context** — [`slate_context`](@ref) and its accessors ([`slate_region`](@ref),
   [`slate_emit`](@ref), [`slate_effect`](@ref), …) read Slate's per-cell context.
+- **Reading the notebook's controls** — [`slate_bind_widget`](@ref), [`slate_bind_value`](@ref),
+  [`slate_bind_names`](@ref), [`slate_on_bind`](@ref) and [`slate_bind_observable`](@ref), for an
+  extension that DRAWS a `@bind` control itself rather than leaving it to Slate's chrome. Pair with
+  `hidden(…)` at the `@bind` site so the notebook does not draw a second copy.
 
 ## Front-end contract (JS globals; no Julia dependency)
 

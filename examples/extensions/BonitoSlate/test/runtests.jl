@@ -42,6 +42,32 @@ w(kind, params, default) = SlateExtensionsBase.Widget(kind, Dict{String,Any}(par
     @test BS._slate_bind_names() == Symbol[]
 end
 
+@testset "a core too old to populate the surface is named, not blamed on the user" begin
+    # The compat bound gets the accessors but cannot force a core that FILLS them, so an older
+    # Slate answers every one with `nothing` — which at the call site looks exactly like a control
+    # that was never declared. The check has to fire before that confusion can happen.
+    old = (; region = nothing, notebook = "test", side = "", regions = Symbol[],
+             emit = (c, v) -> nothing, on = (c, f) -> nothing, off = (c) -> nothing,
+             cleanup = (f) -> nothing, effect = (args...) -> nothing)
+    @test !hasproperty(old, :bind_widget)
+    err = try
+        task_local_storage(:slate_ctx, old) do
+            BS.bonito_controls(nothing, :anything)
+        end
+        nothing
+    catch e
+        sprint(showerror, e)
+    end
+    @test err !== nothing
+    @test occursin("KaimonSlate", err)          # says what to upgrade
+    @test occursin(BS._CORE_WITH_BINDS, err)    # and to which version
+    @test !occursin("no such control", err)     # never the misleading one
+
+    # A Dict-shaped context is the other permitted shape, and must be judged the same way.
+    @test BS._require_bind_surface(Dict(:bind_widget => (n -> nothing))) === nothing
+    @test_throws ErrorException BS._require_bind_surface(Dict(:region => nothing))
+end
+
 @testset "widget mapping follows the control's declared spec" begin
     with_ctx(values = Dict{Symbol,Any}(:s => 0.5)) do
         sl = BS._build_widget(:s, w("slider", ("min" => 0.0, "max" => 1.0, "step" => 0.25), 0.0))

@@ -36,6 +36,7 @@ the export — in step.
 function bonito_controls(session, names::Symbol...; layout::Symbol = :column, labels::Bool = true)
     ctx = SlateExtensionsBase.slate_context()
     ctx === nothing && error("bonito_controls must run inside a Slate cell (no execution context)")
+    _require_bind_surface(ctx)
     isempty(names) && error("bonito_controls: name at least one control, e.g. bonito_controls(:decay)")
 
     # `:all` — every control the notebook declares, in name order. Convenient for a scratch figure;
@@ -59,10 +60,29 @@ end
 
 # The bind surface comes from SlateExtensionsBase, which is the canonical definition of the
 # execution-context convention. Reading the context's fields here by name would work today and is
-# exactly the hand-copying that drifts silently when Slate evolves — and it could not be expressed
-# as a version bound, so a new BonitoSlate against an older Slate would install cleanly and then
-# report "no such control" for a control that plainly exists. The `SlateExtensionsBase` compat
-# bound is what makes that a resolver error instead of a runtime mystery.
+# exactly the hand-copying that drifts silently when Slate evolves.
+#
+# The compat bound gets us the ACCESSORS but not a core that populates them: they were added inside
+# 0.10, so that a change breaking no existing extension did not force every one of them to
+# re-release. An older Slate therefore resolves fine and then answers every accessor with `nothing`
+# — indistinguishable, at the call site, from a control that was never declared. Check once, up
+# front, and say which version is missing rather than blaming the user's `@bind`.
+
+# The version that first populated the control fields. Any core at or above it supplies all five;
+# below it, none — they were added together.
+const _CORE_WITH_BINDS = "1.7.0"
+
+function _require_bind_surface(ctx)
+    # The context is a NamedTuple or a Dict, whichever the core built — the same two shapes
+    # SlateExtensionsBase itself accepts.
+    present = ctx isa AbstractDict ?
+        (haskey(ctx, :bind_widget) || haskey(ctx, "bind_widget")) :
+        hasproperty(ctx, :bind_widget)
+    present && return nothing
+    error("bonito_controls: this Slate core does not provide the control accessors — " *
+          "needs KaimonSlate ≥ $_CORE_WITH_BINDS. Upgrade it, or drop the `hidden(…)` from the " *
+          "`@bind` and let Slate draw the control in the notebook instead.")
+end
 
 "The Slate `Widget` (kind + params + default) behind a bound name; `nothing` if undeclared."
 _slate_widget(name::Symbol) = SlateExtensionsBase.slate_bind_widget(name)

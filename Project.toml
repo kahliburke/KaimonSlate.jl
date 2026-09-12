@@ -1,6 +1,6 @@
 name = "KaimonSlate"
 uuid = "f7b954f5-0334-4562-ac21-b005218ce1da"
-version = "1.6.0"
+version = "1.7.0"
 authors = ["Kahli Burke <kahli@kahliburke.com>"]
 
 [deps]
@@ -57,7 +57,7 @@ REPL = "1.11.0"
 ReTest = "0.3.4, 0.4"
 SHA = "0.7, 1"
 Serialization = "1.11.0"
-SlateExtensionsBase = "0.11"
+SlateExtensionsBase = "0.10.5"
 Sockets = "1.11.0"
 TOML = "1.0.3"
 Tachikoma = "2.6.1"

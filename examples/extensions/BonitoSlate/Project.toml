@@ -26,11 +26,13 @@ WGLMakie = "276b4fcb-3e11-5398-bf8b-a0c2d153d008"
 # themselves all report success. Requiring 5 here forces WGLMakie >= 0.13.13, the first release
 # that accepts it.
 Bonito = "5"
-# 0.11 for the control accessors (`slate_bind_widget`/`_value`/`_names`) that `bonito_controls`
-# builds a native widget from. They are provided by Slate core through the execution context, so
-# without this bound the package would install against an older Slate and then report "no such
-# control" for controls that exist — a resolver error is the honest failure.
-SlateExtensionsBase = "0.11"
+# 0.10.5 for the control accessors (`slate_bind_widget`/`_value`/`_names`) that `bonito_controls`
+# builds a native widget from. The accessors are additive, so this stays inside 0.10 rather than
+# forcing every other extension pinned at "0.10" to re-release for a change that breaks none of
+# them. The cost is that the bound no longer implies a Slate new enough to POPULATE them — core
+# supplies them through the execution context — so `bonito_controls` checks for the capability
+# itself and names the version it needs. See `_require_bind_surface` in src/controls.jl.
+SlateExtensionsBase = "0.10.5"
 julia = "1.10"
 
 [extras]
