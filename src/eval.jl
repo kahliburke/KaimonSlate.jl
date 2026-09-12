@@ -316,6 +316,19 @@ abstract type Kernel end
 shutdown!(::Kernel; kill_remote::Bool = false) = nothing
 
 """
+    kernel_connected(kernel) -> Bool
+
+Can this kernel be asked anything right now? A worker-backed kernel has no connection while its
+worker is starting or being reprovisioned; an in-process one is always reachable.
+
+For callers that can answer usefully without the kernel — a read-only panel, a best-effort sync —
+asking this first is what separates "not yet" from "went wrong". Without it the internal transport
+error surfaces verbatim, and a UI shows the name of a gate tool to someone who was looking at a
+cluster.
+"""
+kernel_connected(::Kernel) = true
+
+"""
     run_cleanups!(kernel, report, ids)
 
 Run the `slate_on_cleanup` callbacks that the given cells registered, in the namespace where they live

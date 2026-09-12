@@ -1176,6 +1176,8 @@ _pkg_op_timeout()         = _rcfg("pkg_op_timeout",         "KAIMONSLATE_PKG_OP_
 # Gate timeout for a parent-project /src sync.
 _sync_parent_timeout()    = _rcfg("sync_parent_timeout",    "KAIMONSLATE_SYNC_PARENT_TIMEOUT",    600.0)
 
+kernel_connected(k::GateKernel) = k.conn !== nothing
+
 # Synchronous gate tool call → the tool's raw return value (binary wire-form).
 function _tool(k::GateKernel, name::String, args::Dict; timeout::Float64 = 120.0)
     # A clear, retryable error instead of a cryptic `_req_send_recv(::Nothing,…)` MethodError when the

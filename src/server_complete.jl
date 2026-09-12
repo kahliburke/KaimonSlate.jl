@@ -2082,6 +2082,13 @@ function _make_router(h::Hub)
         spec = ReportEngine.cluster_get(name)
         spec === nothing &&
             return _json(Dict("error" => "no compute target named `$name` on this machine"))
+        # A worker that is starting or being reprovisioned is not a failure, and saying so in the
+        # transport's own words — naming a gate tool and a kernel label — tells the reader nothing
+        # they can act on. This panel is read-only, so "not yet" is an honest answer.
+        ReportEngine.kernel_connected(nb.kernel) ||
+            return _json(Dict("error" =>
+                "The cluster view is read from this notebook's worker, which is not connected " *
+                "right now. It fills in once the worker is up.", "waiting" => true))
         r = try
             ReportEngine._tool(nb.kernel, "__slate_cluster_status",
                                Dict{String,Any}("name" => name, "spec" => spec))
