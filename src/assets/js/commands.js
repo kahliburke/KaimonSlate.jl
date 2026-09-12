@@ -339,25 +339,30 @@ R({ id: 'view.notebooks', label: 'All notebooks', group: 'Panels', ctx: ['comman
 // F5 and F11 are in SLATE_KEYS_DISCOURAGED: the browser yields them on preventDefault, and the
 // Keyboard panel says what taking them costs. `_dbgLive` is what makes that cost conditional, since
 // with no session running the command declines and Reload works as usual.
+// `available` asks whether this PAGE has the feature, and the Keyboard panel lists only what is
+// available. A debugger you could rebind only while stopped at a line would be no use, so these are
+// available whenever the island loaded, and being between sessions is handled by DECLINING the key.
+// That also leaves F5 as Reload and Escape to its other claimants while nothing is being stepped.
+const _hasDbg = _has('slateDebugStep');
 const _dbgLive = () => typeof window.slateDebugLive === 'function' && window.slateDebugLive();
-const _dbg = (name, ...args) => () => { _fn(name, ...args); };
+const _dbg = (name, ...args) => () => (_dbgLive() ? (_fn(name, ...args), true) : false);
 R({ id: 'debug.next', label: 'Debugger: step to the next line', group: 'Debug', ctx: ['global'],
-    keys: ['F10'], inst: true, available: _dbgLive, run: _dbg('slateDebugStep', 'next') });
+    keys: ['F10'], inst: true, soft: true, available: _hasDbg, run: _dbg('slateDebugStep', 'next') });
 R({ id: 'debug.into', label: 'Debugger: step into a call on this line', group: 'Debug', ctx: ['global'],
-    keys: ['F11'], inst: true, available: _dbgLive, run: _dbg('slateDebugInto') });
+    keys: ['F11'], inst: true, soft: true, available: _hasDbg, run: _dbg('slateDebugInto') });
 R({ id: 'debug.out', label: 'Debugger: finish this frame and stop at the caller', group: 'Debug',
-    ctx: ['global'], keys: ['Shift-F11'], inst: true, available: _dbgLive, run: _dbg('slateDebugStep', 'out') });
+    ctx: ['global'], keys: ['Shift-F11'], inst: true, soft: true, available: _hasDbg,
+    run: _dbg('slateDebugStep', 'out') });
 R({ id: 'debug.continue', label: 'Debugger: continue to the next breakpoint', group: 'Debug',
-    ctx: ['global'], keys: ['F5'], inst: true, available: _dbgLive, run: _dbg('slateDebugStep', 'continue') });
+    ctx: ['global'], keys: ['F5'], inst: true, soft: true, available: _hasDbg,
+    run: _dbg('slateDebugStep', 'continue') });
 R({ id: 'debug.skip', label: 'Debugger: disable this breakpoint and continue', group: 'Debug',
-    ctx: ['global'], keys: [], inst: true, available: _dbgLive, run: _dbg('slateDebugSkip') });
+    ctx: ['global'], keys: [], inst: true, soft: true, available: _hasDbg, run: _dbg('slateDebugSkip') });
 R({ id: 'debug.stop', label: 'Debugger: end the session', group: 'Debug', ctx: ['global'],
-    keys: ['Shift-F5'], available: _dbgLive, run: _dbg('slateDebugStop') });
-// Only a binding while the workspace is open. Escape has other claimants, so this DECLINES the key
-// rather than swallowing it when there is nothing to close.
+    keys: ['Shift-F5'], soft: true, available: _hasDbg, run: _dbg('slateDebugStop') });
+// Declines unless the workspace is actually open, so Escape reaches whatever else wants it.
 R({ id: 'debug.closeFocus', label: 'Debugger: close the workspace (the session keeps running)',
-    group: 'Debug', ctx: ['global'], keys: ['Escape'], inst: true, soft: true,
-    available: () => _dbgLive() && typeof window.slateDebugFocused === 'function' && window.slateDebugFocused(),
+    group: 'Debug', ctx: ['global'], keys: ['Escape'], inst: true, soft: true, available: _hasDbg,
     run: () => (typeof window.slateDebugCloseFocus === 'function' ? window.slateDebugCloseFocus() : false) });
 
 // ── Inside the editor ─────────────────────────────────────────────────────────
