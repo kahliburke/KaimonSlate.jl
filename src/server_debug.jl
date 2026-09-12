@@ -441,9 +441,11 @@ function start_debug!(nb::LiveNotebook, cid::AbstractString; source::AbstractStr
     _, side = _region_route(nb, cell)
     mk = _marks_wire(nb)
     wt = _watches_wire(nb)
-    # A new session is a new investigation: what was looked at before it belongs to whatever that
-    # was, and counting it here would let a finding inherit someone else's diligence.
-    reset_cells_seen!(nb, [String(cid)])
+    # Added, not reset. A specialist told to follow a value upstream reads the cells that produce
+    # it BEFORE it starts stepping — which is the right order — and wiping the record here accused
+    # one of never having looked at what it had just read. An investigation runs up to and including
+    # its conclusion, so the clearing belongs at the finding (`record_finding!`), not here.
+    note_cells_seen!(nb, [String(cid)])
     st = _debug_on(nb, side, k ->
         ReportEngine.debug_start!(k, nb.report; cell = String(cid), source = src,
                                   mark_files = mk.files, mark_lines = mk.lines,

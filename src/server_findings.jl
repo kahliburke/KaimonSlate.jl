@@ -198,6 +198,10 @@ function record_finding!(nb::LiveNotebook, role::AbstractString, from::AbstractS
         f.id = string("find", _FINDING_SEQ[] += 1)
         push!(get!(() -> Finding[], _FINDINGS, nb.id), f)
     end
+    # An investigation ends where its conclusion is filed, so the next one starts from nothing.
+    # `unread_upstream` above was computed first, and is kept on the finding — the record of what
+    # this one did not look at survives the reset that follows it.
+    reset_cells_seen!(nb)
     broadcast_specialist(nb, f.role, Dict{String,Any}("finding" => finding_json(f)))
     return f
 end
