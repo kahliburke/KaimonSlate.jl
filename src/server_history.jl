@@ -131,6 +131,9 @@ function _persist!(nb::LiveNotebook; source::AbstractString = "browser", label::
     # Every mutation lands here, whoever made it — so this is where the checker learns there is
     # work to review. Swallowed: a reviewer is an optional extra and must not be able to fail a save.
     try; note_persist!(nb); catch; end
+    # Only when the notebook says to carry them; otherwise this clears any stale copy so turning the
+    # option off actually removes them from the file rather than freezing the last set written.
+    try; stage_findings!(nb); catch; end
     s = serialize_report(nb.report)
     # What `sync_from_file!` will re-derive from disk when it sees this write: it re-parses and
     # re-serializes, so it recovers THIS text and not the carried footers appended below. The ring is
@@ -253,6 +256,11 @@ end
 const _CONFIG_UI = (
     (key = "agentmodel", group = "Agent", label = "Agent model", type = :string, default = "",
      choices = String[], global_default = nothing, restart = false),
+    # Off by default: a finding's evidence runs to paragraphs, and carrying that in the document on
+    # every save is diff noise. On, the notebook takes its own conclusions with it — which is what
+    # someone opening it on another machine has no other way to get.
+    (key = "sharefindings", group = "Agent", label = "Carry findings in the file", type = :bool,
+     default = false, choices = String[], global_default = nothing, restart = false),
     (key = "threads", group = "Execution", label = "Worker threads", type = :string, default = "",
      choices = String[], global_default = () -> ReportEngine.WORKER_THREADS[], restart = true),
     (key = "juliaflags", group = "Execution", label = "Extra Julia flags", type = :string, default = "",

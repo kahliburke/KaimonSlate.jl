@@ -704,6 +704,37 @@ function _specialist_cell_context(nb::LiveNotebook, cid::AbstractString)
     return String(take!(io))
 end
 
+"""
+What has already been concluded about this cell and the cells feeding it.
+
+Findings were recorded and then never handed to anybody. A specialist investigated a notebook where
+the cause had already been found, reviewed and fixed, and worked it out again from nothing —
+because nothing told it that had happened. A conclusion nobody is given is a conclusion nobody has.
+
+Scoped to the subject's own dependency cone: a finding about an unrelated corner of the notebook is
+someone else's answer to someone else's question, and pasting all of them in would bury the one that
+matters.
+"""
+function _prior_findings(nb::LiveNotebook, cid::AbstractString)
+    fs = lock(_SPEC_LOCK) do; copy(_findings!(nb)); end
+    isempty(fs) && return ""
+    near = Set{String}([String(cid)]); union!(near, upstream_cells(nb, cid))
+    rel = [f for f in fs if isempty(f.cell) || f.cell in near]
+    isempty(rel) && return ""
+    io = IOBuffer()
+    println(io, "\nALREADY ESTABLISHED about this cell or its inputs. Start from these rather than ",
+            "rediscovering them, and say so if you find one is wrong:")
+    for f in rel
+        println(io, "  • cell `", isempty(f.cell) ? "(none named)" : f.cell, "` — ", f.claim)
+        isempty(f.verdict) || println(io, "    reviewed: ", f.verdict,
+                                      isempty(f.verdict_why) ? "" : " (" * f.verdict_why * ")")
+        isempty(f.decision) ||
+            println(io, "    the person decided: ", f.decision,
+                    isempty(f.plan) ? "" : " — on the plan: " * f.plan)
+    end
+    return String(take!(io))
+end
+
 "The opening turn for a debugging specialist: this notebook, this cell, right now."
 function debug_briefing(nb::LiveNotebook, cid::AbstractString, task::AbstractString)
     io = IOBuffer()
@@ -719,6 +750,7 @@ function debug_briefing(nb::LiveNotebook, cid::AbstractString, task::AbstractStr
     isempty(ms) || println(io, "\nBreakpoints already set: ",
                            join([isempty(c) ? string(f, ":", l) : string(f, ":", l, " when ", c)
                                  for (f, l, c) in ms], ", "))
+    print(io, _prior_findings(nb, cid))
     println(io)
     println(io, isempty(strip(task)) ?
         "Find out what this cell actually does, and report anything that looks wrong." : strip(task))
@@ -805,10 +837,12 @@ function _register_debug_routes!(router, h::Hub)
     # What the specialist was told: standing brief, allowed tools, opening turn.
     HTTP.register!(router, "GET", "/api/{id}/debug/brief", req -> _withnb(h, req, nb ->
         _json(brief_of(nb, DEBUG_ROLE))))
-    # Every question currently blocking someone, for a page that has just loaded. The pushes only
-    # reach a page that was already open, so without this a reload hides a blocked agent completely.
+    # What a page needs to catch up on after a load: questions currently blocking someone, and the
+    # findings recorded so far. Both arrive as pushes, which only reach a page that was already
+    # open — so without this a reload hid a blocked agent entirely, and showed an older finding only
+    # if something happened to re-broadcast it, arriving out of order when it did.
     HTTP.register!(router, "GET", "/api/{id}/asks", req -> _withnb(h, req, nb ->
-        _json(Dict{String,Any}("asks" => asks_json(nb)))))
+        _json(Dict{String,Any}("asks" => asks_json(nb), "findings" => findings_json(nb)))))
     # Answer an agent's question or consent request — this is what unblocks its turn.
     HTTP.register!(router, "POST", "/api/{id}/debug/answer", req -> _withnb(h, req, nb -> begin
         b = _body(req)
