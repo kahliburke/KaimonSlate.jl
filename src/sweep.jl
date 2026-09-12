@@ -2756,7 +2756,7 @@ results away.
 """
 function handle_action(target::SweepTarget, run::AbstractString, params, keys,
                        action::AbstractString; plot = nothing, notify = nothing,
-                       arg::AbstractString = "")
+                       landed = nothing, arg::AbstractString = "")
     sync_in!(target)
     root = store_root(target)
     l = launcher_for(target)
@@ -2765,6 +2765,12 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
     # results stays frozen at "nothing has landed yet" until someone re-runs a cell by hand — which
     # is exactly the manual bookkeeping this fabric exists to remove.
     if action == "settled"
+        # The result object is a SNAPSHOT: its counters come from the plan stored on it, and only a
+        # re-run of the sweep cell rebuilds that — which must not happen, or the sweep resubmits. So
+        # a settle left `r.settled` reading false beside a card that said "finished, with failures",
+        # and every counter with it. Re-read here, where the card has just established that they
+        # changed, rather than on property access, where it would cost a manifest per shard.
+        landed === nothing || landed()
         notify === nothing || notify()
         return status_payload(target, run, params, keys; plot, advance = false)
     end
@@ -4117,6 +4123,9 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # start it. The card's poll advances an armed sweep, which is where watching belongs.
     submit && BatchSweep.arm!(root, run)
     reconcile_and_sync!(target, run, launcher; cap, submit = submit && _reachable(target))
+    # Filled with the result below, so the card's settle report can bring the OBJECT level with what
+    # the card already knows. A Ref because the channel is registered before the result exists.
+    rref = Ref{Any}(nothing)
     # The card's live channel. Registered here rather than by the author, so a sweep cell needs no
     # wiring to be watchable. `register` is the notebook's `slate_on`; outside a notebook (a
     # standalone run, a test) it is simply absent and the card renders static.
@@ -4143,7 +4152,9 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         register(status_channel(run), _args -> status_payload(target, run, ps, ks; plot))
         register(action_channel(run),
                  a -> handle_action(target, run, ps, ks, String(get(a, :action, ""));
-                                    plot, notify = note, arg = String(get(a, :arg, ""))))
+                                    plot, notify = note,
+                                    landed = () -> (rref[] === nothing || refresh!(rref[])),
+                                    arg = String(get(a, :arg, ""))))
     end
 
     pl = BatchSweep.plan(root, run; launcher)
@@ -4165,7 +4176,9 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         end
     end
 
-    return ShardedResult(key, run, target, collect(params), keys, pl, rows, tl, plot)
+    r = ShardedResult(key, run, target, collect(params), keys, pl, rows, tl, plot)
+    rref[] = r
+    return r
 end
 
 # Free names in the body that are bound in the calling module and look like DATA. These travel with

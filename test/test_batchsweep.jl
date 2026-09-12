@@ -289,6 +289,56 @@ end
         end
     end
 
+    @testset "the settle report brings the result level with the card" begin
+        # A sweep finishes long after the cell that started it returned, and that cell must NOT be
+        # re-run (it would resubmit) — so the result object keeps the plan it was built with. The
+        # card polls the store and knew better: it read "finished, with failures" beside an
+        # `r.settled` of false, and every counter was stale with it.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false) do p
+                p.x == 2 ? error("bad") : p.x
+            end
+            # Built before anything ran, so the snapshot says nothing has landed.
+            @test !r.settled && r.done == 0
+
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            # The store has moved on; the object has not, and nothing about reading it says so.
+            @test !r.settled && r.done == 0
+
+            # What the card reports when it sees the sweep stop. `landed` is the hook `run_sweep`
+            # wires to the live result; supplied here by hand since no notebook registered one.
+            s = Sweep.handle_action(t, r.run, r.params, r.keys, "settled";
+                                    landed = () -> Sweep.refresh!(r))
+            @test s["settled"] && s["done"] == 4               # the card's view
+            @test r.settled && r.done == 4                     # …and now the object's too
+            @test r.failed == 1 && r.ok == 3
+            # Settled means every unit reached a terminal state; the failure does not unsettle it.
+            @test r.state === :partial
+        end
+
+        # …and the same thing through the wiring a notebook actually gets, since the hook above was
+        # handed in by the test. `run_sweep` registers the action channel BEFORE the result exists,
+        # so it fills a Ref afterwards; a Ref left empty would make all of this a no-op in the one
+        # place it matters.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            chans = Dict{String,Any}()
+            r2 = Sweep.run_sweep(t, [(; x = 1), (; x = 2)], "p -> p.x";
+                                 register = (ch, f) -> (chans[String(ch)] = f))
+            @test !r2.settled && r2.done == 0
+            for c in BS.sweep_chunks(root, r2.run); SlateTask.run_chunk(root, c); end
+            @test !r2.settled                                   # still the snapshot
+
+            act = chans[Sweep.action_channel(r2.run)]
+            s = act(Dict(:action => "settled"))
+            @test s["settled"] && s["done"] == 2
+            @test r2.settled && r2.done == 2 && r2.ok == 2      # the Ref was filled and fired
+        end
+    end
+
     @testset "a host says whether it fronts a scheduler" begin
         # What kind of host this is decides what a region on it MEANS, and so which questions its
         # configuration should ask. A plain machine: ssh in and run. A scheduler's front door: ask
