@@ -1582,6 +1582,34 @@ end
             # The dataset renders too — it is built during the card's own render.
             @test !isempty(sprint((io, v) -> show(io, MIME"text/plain"(), v), r.dataset))
         end
+
+        # …and when the dataset cannot be assembled at all. Building it is the one part of a card
+        # that reaches outside the sweep, so whatever goes wrong out there must cost the data line
+        # and nothing else. Without the guard the card degrades to plain text with no error
+        # anywhere, which reads as "the card is broken" and points at nothing.
+        #
+        # The failure is injected by handing it an unusable shard key, since the store itself is
+        # careful: a missing root yields no manifests and a corrupt one parses to `nothing`, so
+        # neither throws. It stands in for the unforeseen, which is the category that matters here —
+        # a purged scratch, a dropped mount, a process holding a stale version of a type.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p; (; y = p.x); end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            Sweep.refresh!(r)
+            @test_throws ArgumentError MemoStore.read_manifest(root, "../not a key")  # the injection
+            stranded = Sweep.ShardedResult(getfield(r, :key), getfield(r, :run), t,
+                                           getfield(r, :params), ["../not a key", "../nor this"],
+                                           getfield(r, :plan), getfield(r, :rows),
+                                           getfield(r, :telemetry), getfield(r, :plot))
+            @test_throws Exception stranded.dataset      # the dataset really is unreachable
+            html = sprint((io, v) -> show(io, MIME"text/html"(), v), stranded)
+            @test occursin("data-sweep", html)           # …and the card is still a card
+            @test occursin("2 / 2", html)                # still reporting what it does know
+            @test occursin("<div data-sw='data'></div>", html)   # only the data line went quiet
+            @test !isempty(String(Sweep.text(stranded)))
+        end
     end
 
     @testset "printing a sweep does not print the grid" begin

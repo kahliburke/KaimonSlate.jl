@@ -2710,14 +2710,23 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         "signed_in" => connected(target_host(target)))
     # The data line grows as units land, so it rides the poll too. Off the indices, so a sweep
     # writing terabytes still costs manifest reads to watch.
-    ds = _dataset_of(root, params, keys, run, source_of(target))
-    out["data"] = _data_html(ds)
-    # …and the same two figures as NUMBERS, for the notebook-level pill. The card can render HTML;
-    # the topbar panel aggregates across sweeps and needs to add them up.
-    if any(p -> p.backend === :indexed, ds.parts)
-        out["dsbytes"] = databytes(ds)
-        out["dsread"] = transferred(run)
-        out["dskind"] = String(ds.kind)
+    #
+    # Fenced off for the same reason as on the card: this is the one part of the payload that reads
+    # the STORE, and a poll that throws stops the counters, the chart and the buttons updating. The
+    # data line going quiet is the smaller loss by far.
+    try
+        ds = _dataset_of(root, params, keys, run, source_of(target))
+        out["data"] = _data_html(ds)
+        # …and the same two figures as NUMBERS, for the notebook-level pill. The card can render
+        # HTML; the topbar panel aggregates across sweeps and needs to add them up.
+        if any(p -> p.backend === :indexed, ds.parts)
+            out["dsbytes"] = databytes(ds)
+            out["dsread"] = transferred(run)
+            out["dskind"] = String(ds.kind)
+        end
+    catch e
+        @debug "sweep: could not build the data line" run exception = e
+        out["data"] = ""
     end
 
     # The chart rides the SAME poll as the counters, so a filling plot costs no extra round trip and
@@ -3073,6 +3082,18 @@ function _data_html(ds::Dataset)
                   "font-family:ui-monospace,monospace'>", _esc(join(bits, " · ")), "</div>")
 end
 
+# …and the same, for a dataset that cannot be ASSEMBLED. Building it reconstructs indexes from the
+# store, which is the one part of a card that fails for reasons the sweep itself is fine about, so
+# the progress the card exists to show has to outlive that.
+function _safe_data_html(r::ShardedResult)
+    try
+        return _data_html(r.dataset)
+    catch e
+        @debug "sweep: could not build the data line" exception = e
+        return ""
+    end
+end
+
 # Why a sweep stopped, and what to do about it. The three ways of stopping short need different
 # things, so they read differently. "" while the sweep is still going.
 # A cluster nobody has signed in to. The card can read nothing and submit nothing until then, so it
@@ -3299,7 +3320,11 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     # Both of these are emitted as CONTAINERS even when empty, and their contents ride the poll —
     # a sweep that starts failing while you watch it has to grow its own explanation and error list.
     # Rendered here rather than rebuilt in the browser so there is one renderer and it cannot drift.
-    print(io, "<div data-sw='data'>", _data_html(r.dataset), "</div>")
+    # Everything about STORED OUTPUT is optional chrome on a card whose job is to report progress, so
+    # it is fenced off. A `text/html` method that throws does not surface as an error — the notebook
+    # falls back to the next MIME and the card silently becomes a line of text — so a dataset the
+    # store cannot answer for would take the whole card down and give no clue why.
+    print(io, "<div data-sw='data'>", _safe_data_html(r), "</div>")
     println(io, "<div data-sw='why'>", _why_html(p), "</div>")
     println(io, "<div data-sw='fails'>", _fails_html(getfield(r, :rows)), "</div>")
     # Empty at render and filled only by the Logs button. The poll never carries this key, so what
