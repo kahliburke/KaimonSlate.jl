@@ -104,20 +104,38 @@ function _extBadge(on) {
 // Turn a raw tool identifier (e.g. "mcp__kaimon__slate_add_cell") into a friendly,
 // icon-prefixed label for the chat. Known tools get a hand-picked icon + name; any
 // other tool falls back to its prefix-stripped, de-underscored form.
+// Keyed on the BARE verb, not the full tool name: a gate serves under a namespace, so the same
+// verb arrives as `slate_read` in one install and `slate_dbg_read` in another. Keying on the full
+// name meant every tool from a non-default namespace missed and rendered as "slate dbg dbg eval".
 const _TOOL_LABEL = {
-  slate_read:'📖 read notebook', slate_add_cell:'➕ add cell', slate_edit_cell:'✏️ edit cell',
-  slate_run:'▶ run cell', slate_delete_cell:'🗑 delete cell', slate_view:'🖼 view figure', slate_surface:'🎛 surface controls',
-  slate_search_docs:'🔎 search docs', slate_index_docs:'📇 index docs',
-  slate_acquire_floor:'🔒 acquire floor', slate_release_floor:'🔓 release floor',
-  slate_inspect:'🔬 inspect cell', slate_diag:'🩺 diagnostics', slate_eval:'λ scratch eval', slate_eval_js:'🧩 eval JS', slate_export_pdf:'📄 export PDF',
-  slate_list:'📚 list notebooks', slate_open:'📂 open notebook', slate_close:'📕 close notebook',
-  ex:'λ eval', qdrant_search_code:'🔎 search code', goto_definition:'↪ goto def',
+  read:'📖 read notebook', add_cell:'➕ add cell', edit_cell:'✏️ edit cell',
+  run:'▶ run cell', delete_cell:'🗑 delete cell', view:'🖼 view figure', surface:'🎛 surface controls',
+  search_docs:'🔎 search docs', index_docs:'📇 index docs',
+  acquire_floor:'🔒 acquire floor', release_floor:'🔓 release floor',
+  inspect:'🔬 inspect cell', diag:'🩺 diagnostics', eval:'λ scratch eval', eval_js:'🧩 eval JS', export_pdf:'📄 export PDF',
+  list:'📚 list notebooks', open:'📂 open notebook', close:'📕 close notebook',
+  rename_cell:'🏷 rename cell', pkg:'📦 packages', request_file_access:'🔑 ask for file access',
+  dbg_start:'🐞 start debugging', dbg_step:'👣 step', dbg_frame:'🧾 frame',
+  dbg_eval:'🔬 look at a value', dbg_break:'⏹ breakpoint', dbg_watch:'📈 watch',
+  dbg_summon:'🐞 summon debugger', dbg_wait:'⏳ wait for specialist', dbg_tell:'💬 tell specialist',
+  dbg_ask:'❓ ask', dbg_choose:'❓ offer a choice', dbg_answer:'✔ answer', dbg_done:'✓ finish debugging',
+  check_ok:'✔ checked', check_flag:'⚑ flagged',
+  ex:'λ eval', qdrant_search_code:'🔎 search code', search_code:'🔎 search code', goto_definition:'↪ goto def',
   search_methods:'🔎 search methods', format_code:'✨ format', run_tests:'✅ run tests',
   Read:'📄 read file', Edit:'✏️ edit file', Write:'📝 write file', Bash:'⌨ shell',
   Grep:'🔎 grep', Glob:'🔎 glob', TodoWrite:'📋 todo', WebFetch:'🌐 fetch', WebSearch:'🌐 web',
 };
-function _prettyTool(name) {
+// The bare verb behind a namespaced tool name, or the name itself when it isn't one.
+function _bareTool(name) {
   let s = String(name || 'tool').replace(/^mcp__[a-z0-9_]+__/i, '');   // drop the MCP server prefix
+  // Drop leading segments until one is a verb we know. `slate_dbg_dbg_eval` → `dbg_eval`, which
+  // stops there rather than going on to `eval` and calling a frame probe a scratch eval.
+  let t = s;
+  while (!_TOOL_LABEL[t] && t.includes('_')) t = t.slice(t.indexOf('_') + 1);
+  return _TOOL_LABEL[t] ? t : s;
+}
+function _prettyTool(name) {
+  const s = _bareTool(name);
   if (_TOOL_LABEL[s]) return _TOOL_LABEL[s];
   // Already-friendly title (has a space / capital) → keep as-is; else de-snake_case it.
   if (/[ A-Z]/.test(s) && !s.includes('_')) return s;
@@ -202,6 +220,12 @@ function _agentMsgHtml(m) {
     return `<div class="apmsg tool${lane}${m.external ? ' ext' : ''}${hasDetail ? ' expandable' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}` +
       `${hasDetail ? '<span class="toolcaret">▸</span>' : ''}${_esca(m.text)}${cidChip}${codePre}${detail}</div>`;
   }
+  if (m.role === 'toolrun') {
+    const inner = m.items.map(_agentMsgHtml).join('');
+    return `<div class="apmsg tool run expandable" ${tag}>${_crewBadge(m.crew)}` +
+      `<span class="toolcaret">▸</span>${_esca(m.text)} <span class="toolrunn">×${m.items.length}</span>` +
+      `<div class="tooldetail">${inner}</div></div>`;
+  }
   if (m.role === 'ask') {
     const btns = (m.answered != null)
       ? `<div class="apaskdone">✓ ${_esca(m.answeredLabel || m.answered)}</div>`
@@ -214,6 +238,26 @@ function _agentMsgHtml(m) {
     : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
     :                     `<div class="apmsg ${m.role}${lane}${m.external ? ' ext' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}${_esca(m.text)}</div>`);
 }
+// A run of the same tool, as one row. Debugging is the case that forced this: reading a value in a
+// frame means four or five `dbg_eval` calls in a row, and as one row each they buried the sentences
+// around them. The run collapses to a count and opens to the individual calls.
+const _RUN_MIN = 3;
+function _collapseRuns(msgs) {
+  const out = [];
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.role !== 'tool' || m.code) { out.push(m); continue; }   // a code-carrying call is worth its own row
+    let j = i;
+    while (j + 1 < msgs.length && msgs[j + 1].role === 'tool' && !msgs[j + 1].code &&
+           msgs[j + 1].text === m.text && msgs[j + 1].crew === m.crew) j++;
+    const n = j - i + 1;
+    if (n < _RUN_MIN) { for (let k = i; k <= j; k++) out.push(msgs[k]); }
+    else out.push({ role: 'toolrun', text: m.text, crew: m.crew, items: msgs.slice(i, j + 1),
+                    done: msgs.slice(i, j + 1).every(x => x.done) });
+    i = j;
+  }
+  return out;
+}
 const _nodeFromHtml = h => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content.firstChild; };
 function renderAgentMsgs() {
   if (_suppressAgentRender) return;   // skip per-event re-renders during a replay (O(n²) markdown+KaTeX)
@@ -225,16 +269,19 @@ function renderAgentMsgs() {
   // keep their live DOM — and the scroll position inside a tool-output/code block isn't reset to the
   // top every streaming delta. Completed-and-rendered messages are skipped entirely (cheap streaming).
   el.querySelectorAll(':scope > .apworking').forEach(n => n.remove());   // drop indicator → indices align
+  // Reconcile against the COLLAPSED list, not agentMsgs: a run of repeated calls is one node, so
+  // the index a node sits at is its position here rather than in the raw transcript.
+  const view = _collapseRuns(agentMsgs);
   const changed = [];
-  for (let i = 0; i < agentMsgs.length; i++) {
-    const m = agentMsgs[i], node = el.children[i];
+  for (let i = 0; i < view.length; i++) {
+    const m = view[i], node = el.children[i];
     if (node && m.done && node.dataset.done === '1') continue;          // immutable completed msg → leave it
     const html = _agentMsgHtml(m);
     if (!node) { const n = _nodeFromHtml(html); n.dataset.h = html; n.dataset.done = m.done ? '1' : '0'; el.appendChild(n); changed.push(n); }
     else if (node.dataset.h !== html) { const n = _nodeFromHtml(html); n.dataset.h = html; n.dataset.done = m.done ? '1' : '0'; el.replaceChild(n, node); changed.push(n); }
     else node.dataset.done = m.done ? '1' : '0';
   }
-  while (el.children.length > agentMsgs.length) el.removeChild(el.lastChild);   // drop trailing extras
+  while (el.children.length > view.length) el.removeChild(el.lastChild);   // drop trailing extras
   if (agentWorking) {
     const s = Math.max(0, Math.floor((Date.now() - agentT0) / 1000));
     const w = _nodeFromHtml(`<div class="apworking"><span class="dots"><i></i><i></i><i></i></span>working… ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}` +

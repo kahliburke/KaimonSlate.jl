@@ -155,8 +155,14 @@ function apply(next) {
   selFrame.value = null;
   changed.value = diffNames(st.value, next);
   const prev = st.value ? st.value.cell : '';
+  const had = !!(st.value && !st.value.finished);
   const s = (next && next.session === false) ? null : next;
   st.value = s;
+  // A session appearing where there was none opens the workspace, whoever started it. An agent's
+  // session arrives as a push and would otherwise run entirely off-screen — the whole reason to
+  // watch one work is that you can see it. Only on the TRANSITION, so closing the view mid-session
+  // stays closed and the next step does not drag it back open.
+  if (!had && s && !s.finished && !s.error) focus.value = true;
   // The cell's own editor carries the "you are here" line, but only while the frame really is in
   // that cell. Stepping into a method defined elsewhere clears it rather than leaving the mark on a
   // line that is no longer the one running.
@@ -185,11 +191,10 @@ export async function startDebug(cellId) {
   try {
     const source = (window.edText && window.edText(cellId)) || '';
     const r = await A('POST', '/api/debug/start', { cell: cellId, source });
+    // Straight into the workspace — `apply` opens it on the transition, for this start and for an
+    // agent's alike. Stepping is involved enough that the cell is never where you want to be.
     apply(r);
     probes.value = [];
-    // Straight into the workspace. Stepping is involved enough that the cell is never where you
-    // actually want to be, and making you click twice to get there was busywork.
-    if (r && !r.finished && !r.error) focus.value = true;
   } catch (e) { apply(null); } finally { busy.value = false; }
 }
 export async function step(mode) {
@@ -366,6 +371,10 @@ window.onDebugAgentEvent = (env) => {
   // role's events into this transcript once one is registered whose name contains this one.
   if (!env || env.crew !== DEBUG_ROLE) return;
   const d = env.data || {}, k = env.kind;
+  // Anything arriving from it means a turn is in flight. Keying the spinner on `turn_started`
+  // alone left the pane looking idle whenever a backend doesn't send one — rows appeared
+  // underneath with nothing saying the specialist was still going.
+  if (k !== 'result' && k !== 'turn_ended') working.value = true;
   const list = convo.value.slice();
   // What it was TOLD, shown alongside what it said. The opening brief arrives this way, and
   // dropping it left the transcript starting at the specialist's first move with no sign of the

@@ -1333,6 +1333,9 @@ input.toggle:checked::after { left:18px; }
 .apmsg.tool .toolnav:hover { background:color-mix(in srgb, var(--accent) 18%, transparent); color:var(--strong); }
 .apmsg.err { align-self:flex-start; color:var(--red); }
 .apmsg.note { align-self:center; background:none; color:var(--dim); font-size:.74rem; padding:2px 6px; max-width:100%; }
+/* A collapsed run of the same tool. The count carries the information the repeated rows did. */
+.apmsg.tool.run .toolrunn { color:var(--accent); font-size:.72rem; }
+.apmsg.tool.run .tooldetail > .apmsg.tool { padding-left:14px; }
 /* A question the agent is BLOCKED on. Accented and full width, because ignoring it stops the turn. */
 .apmsg.ask { align-self:stretch; max-width:100%; background:var(--bg2); border:1px solid var(--bg3);
              border-left:2px solid var(--accent); border-radius:5px; padding:8px 10px; }
