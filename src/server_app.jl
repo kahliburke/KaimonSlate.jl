@@ -44,6 +44,10 @@ const _APP_GET = (
     r"^/api/[^/]+/output/",          # the full text behind a truncated result
     r"^/api/[^/]+/health$",          # watchdog badge
     r"^/api/version$",               # which Slate is serving this app — the first line of any report
+    # The reader's own keyboard shortcuts. READ only: a keymap is a preference, not a capability, and
+    # someone who has rebound ⌘↵ should keep it here. The PUT is absent on purpose — an app hub is not
+    # the place to write to the operator's config — so a change made in an app stays in that browser.
+    r"^/api/keymap$",
 )
 
 # What a player needs to POST. Every one of these drives the *running* document; none of them can

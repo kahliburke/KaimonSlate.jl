@@ -1107,15 +1107,17 @@ function editSource(id, mode) {
       onDoc: () => { if (!window.slateStore.srcEq(edText(id), srcMap[id] || '')) { setState(id, 'edited'); window._backupSoon && window._backupSoon(); }
                      else window.slateStore.clearEdited(id); },
       onFocus: () => setEditing(id, true), onBlur: () => setEditing(id, false),
+      // Command ids, not chords — the keymap supplies the chord. "Apply this editor" means COMMIT the
+      // source here rather than run a cell, which is exactly why the editor binds these itself.
+      //
+      // NO Escape binding: Escape means the same thing in every editor — leave edit mode, keep the
+      // text. (It used to cancelSource, which destroyed the editor and dropped whatever you had
+      // typed.) The overlay stays open in command mode; a second Escape collapses it back to rendered
+      // via toggleSource, which commits a changed source rather than discarding it.
       keys: [
-        { key: 'Shift-Enter', run: () => commitSource(id) },
-        // NO Escape binding here: Escape means the same thing in every editor — leave edit mode,
-        // keep the text. (It used to cancelSource, which destroyed the editor and dropped whatever
-        // you had typed.) The overlay stays open in command mode; a second Escape collapses it back
-        // to rendered via toggleSource, which commits a changed source rather than discarding it.
-        { key: 'Shift-Mod-Enter', run: () => commitAndAddBelow(id) },
-        { key: 'Shift-Ctrl-Enter', run: () => commitAndAddBelow(id) },
-        { key: 'Shift-Mod--', run: () => splitCell(id) }, { key: 'Shift-Ctrl--', run: () => splitCell(id) },
+        { cmd: 'cell.run', run: () => commitSource(id) },
+        { cmd: 'cell.runAndAdd', run: () => commitAndAddBelow(id) },
+        { cmd: 'cell.split', run: () => splitCell(id) },
       ],
     });
     // Pending unsaved-edit restore for a markdown / @bind cell (its editor opens on demand).

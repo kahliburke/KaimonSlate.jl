@@ -138,7 +138,7 @@
   //
   // The command palette comes back too, because an app has no topbar and this is the only route to
   // the docs, the contents and the scratchpad. Its LIST is what makes that safe: in a workbook
-  // palette.js offers a curated reader set, not the authoring commands (see `_READER_CMDS` there).
+  // palette.js offers a curated reader set, not the authoring commands (`_WORKBOOK_CMDS` there).
   const _READER_OPENERS = ['openDocs', 'openDocsFor', 'openDocsAtCursor', 'openPalette'];
   function disableAuthoringOpeners() {
     const noop = function () {};
@@ -151,24 +151,43 @@
     }
   }
 
-  // Slate's shortcuts are registered as ordinary bubble-phase listeners on `document`, so a single
-  // CAPTURE listener on `window` runs before all of them. It stops propagation but deliberately does
-  // NOT preventDefault: the browser's own combinations — find, print, reload, zoom, copy — are how a
-  // reader works with a page and must keep working. Only Slate's handlers are cut out.
-  // A workbook's reader needs a few of Slate's own shortcuts back, because an app has no topbar to
-  // click instead: the command palette, docs, contents, and the scratchpad. Listed as combinations
-  // rather than by unblocking a mode, so everything else stays swallowed.
-  function _workbookKeyAllowed(e) {
-    if (!APP.workbook || !(e.metaKey || e.ctrlKey)) return false;
-    const k = (e.key || '').toLowerCase();
-    return e.shiftKey ? (k === 'k' || k === 'l' || k === 's') : k === 'k';
+  // Slate's shortcuts are dispatched from one CAPTURE listener on `document` (keymap.js), so a capture
+  // listener on `window` runs ahead of it. It stops propagation but deliberately does NOT
+  // preventDefault: the browser's own combinations — find, print, reload, zoom, copy — are how a reader
+  // works with a page and must keep working. Only Slate's own dispatch is cut out.
+  //
+  // A reader needs a few of Slate's shortcuts back, because an app has no topbar to click instead. The
+  // allowlist is by COMMAND ID rather than by chord. The chords are the reader's to change now, so a
+  // list of literal combinations would stop matching as soon as they did, and would have to be kept in
+  // step with the keymap presets in a second place. Asking the keymap what an event resolves to keeps
+  // this an allowlist while letting someone who moved the palette to ⌘⇧P still reach it.
+  //
+  // Reading and setting up your own view is allowed for every app reader; writing Julia is a workbook's
+  // addition. Nothing here can change the document, and the routes behind anything that could are not
+  // served at all (server_app.jl), so this layer is convenience rather than the security boundary.
+  const _READER_CMDS = ['view.toc', 'view.settings', 'view.keymap'];
+  const _WORKBOOK_CMDS = ['view.palette', 'view.docs', 'view.scratch', 'nb.runStale',
+                          'cell.run', 'cell.runAdvance', 'nb.cancel'];
+  function _readerKeyAllowed(e) {
+    const km = window.slateKeymap;
+    if (!km) return false;
+    const allowed = APP.workbook ? _READER_CMDS.concat(_WORKBOOK_CMDS) : _READER_CMDS;
+    for (const chord of km.eventChords(e)) {
+      for (const hit of km.lookup(chord)) if (allowed.indexOf(hit.id) >= 0) return true;
+    }
+    return false;
   }
   function blockAuthoringKeys(e) {
+    // The Keyboard panel is RECORDING a chord — every key belongs to it, including the ones this
+    // blocker exists to swallow, since those are exactly what someone rebinding wants to try. Without
+    // this the panel would be unusable in an app: the keystroke never reaches its listener, so nothing
+    // is recorded and the field looks broken.
+    if (window.slateKeymap && window.slateKeymap.suspended()) return;
     // Typing into a control is the one thing a reader DOES do with the keyboard.
     const t = e.target;
     if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ''))) return;
     if (e.key === 'Tab' || e.key === 'Escape') return;   // focus order and dismissal stay intact
-    if (_workbookKeyAllowed(e)) return;
+    if (_readerKeyAllowed(e)) return;
     e.stopImmediatePropagation();
   }
 
@@ -198,6 +217,10 @@
                           wrap: 'appwrap',
                           // Editor rows: bound always, shown only for a workbook (notebook.css).
                           keymap: 'appkeymap', syntax: 'appsyntax', edwrap: 'appedwrap' });
+    // A reader's shortcuts follow them into an app — the preset picker here, the full editor behind
+    // the same Customise… button. The keymap GET is on the app-mode allowlist; the PUT is not, so a
+    // change made here stays in this browser rather than writing the operator's config.
+    window.bindKeymapSettings && window.bindKeymapSettings({ preset: 'appkmpreset' });
     // No title element to fill: the document's own `role=title` cell IS the page heading, and
     // repeating it in chrome only competed with it. The browser TAB still carries the document
     // title, substituted server-side into `<title>` (see _inject_app).

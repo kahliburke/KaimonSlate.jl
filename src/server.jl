@@ -4233,6 +4233,7 @@ include("publish_zenodo.jl")   # Zenodo archival target — versioned citable DO
 include("server_hub.jl")
 # After server_hub.jl: its signatures dispatch on `Hub`, which is defined there.
 include("server_app.jl")       # app mode (served-as-an-application posture) + the /status page
+include("server_keymap.jl")    # the user's keyboard shortcuts, in their own config file
 include("server_publish.jl")   # Publishing manager service layer (ledger view, targets, secrets, SSE publish)
 include("server_complete.jl")
 

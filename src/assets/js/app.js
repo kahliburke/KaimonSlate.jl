@@ -8,3 +8,4 @@ import './health.js';    // Watchdog health badge + panel
 import './mesh.js';      // Consent-gated region introduction popup (PEER_TUNNEL_PLAN §5.1)
 import './allocnotice.js'; // Compute node about to be released, or already gone
 import './extensions.js'; // Extensions gallery — browse + install from the curated registry
+import './keymap-ui.js';  // Settings → Keyboard — rebind any shortcut, switch keymap presets

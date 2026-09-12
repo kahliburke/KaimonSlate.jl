@@ -328,12 +328,12 @@
   }
 
   // ── Keyboard (active only while the deck or presenter is up) ─────────────────
+  // Deck navigation is not in the keymap: these keys mean something only while the deck is on screen,
+  // where it owns the whole window, and a reader watching a slideshow is not going to rebind →. What
+  // ENTERS the deck is the `view.present` command, so that chord is configurable like every other.
   document.addEventListener('keydown', e => {
     if (IS_PRESENTER) { _presenterKey(e); return; }
-    if (!D.open) {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'P' || e.key === 'p')) { e.preventDefault(); enterPresent(); }
-      return;
-    }
+    if (!D.open) return;
     const tag = (e.target && e.target.tagName) || '';
     if (/INPUT|TEXTAREA/.test(tag) || (e.target && e.target.isContentEditable)) return;  // let editors type
     switch (e.key) {

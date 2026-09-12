@@ -251,6 +251,46 @@ function bindDisplaySettings(ids) {
 }
 window.bindDisplaySettings = bindDisplaySettings;
 
+// ── Keymap preset picker ───────────────────────────────────────────────────────
+// Bound the same way as the display block, and for the same reason: two views offer it — the authoring
+// Settings modal and app mode's display popover — so the wiring lives here once. `ids` maps to
+// `{preset, count}`; a missing id is skipped.
+//
+// It re-reads on `slate:keymap-changed` so the count stays right while the Customise… dialog is open
+// behind it, and so switching preset from that dialog moves this select too. Both views are
+// long-lived DOM, so without that they would drift the moment anything changed elsewhere.
+function bindKeymapSettings(ids) {
+  const km = window.slateKeymap;
+  if (!km) return;
+  const sel = ids.preset ? document.getElementById(ids.preset) : null;
+  const out = ids.count ? document.getElementById(ids.count) : null;
+  const paint = () => {
+    if (sel) {
+      const presets = km.presets();
+      // Rebuilt each time: an extension could in principle contribute a preset, and rebuilding is
+      // cheaper than deciding whether the list changed.
+      sel.innerHTML = presets.map(p => `<option value="${p.name}" title="${window.slateEscHtml(p.about || '')}">${window.slateEscHtml(p.label)}</option>`).join('');
+      sel.value = km.preset();
+    }
+    if (out) {
+      const n = window.slateCmd ? window.slateCmd.all().filter(c => km.isCustom(c.id)).length : 0;
+      const bad = km.conflicts().length;
+      out.textContent = (n ? `${n} customised` : 'none customised') + (bad ? ` · ${bad} conflicting` : '');
+      out.classList.toggle('warn', bad > 0);
+    }
+  };
+  if (sel) sel.onchange = () => km.setPreset(sel.value);
+  // The Settings modal re-binds on every open, so the subscription is attached once per element set —
+  // otherwise each open would add another listener and the repaint would run N times per change.
+  const marker = sel || out;
+  if (marker && !marker._kmSubscribed) {
+    marker._kmSubscribed = true;
+    window.addEventListener('slate:keymap-changed', paint);
+  }
+  paint();
+}
+window.bindKeymapSettings = bindKeymapSettings;
+
 // ── Section list + filter, over any grouped panel ───────────────────────────────
 // Sections are DERIVED from the group headers already in the markup — every row belongs to the
 // header above it — so adding a setting stays a one-line change and the nav follows with no list to
@@ -464,6 +504,11 @@ function openSettings(scope) {
     ct.value = localStorage.getItem('slateCompleteTab') || 'accept';
     ct.onchange = () => localStorage.setItem('slateCompleteTab', ct.value);
   }
+  // Keymap preset + how many shortcuts have been changed on top of it. The preset select lives here
+  // because it is the one keyboard decision most people ever make; everything finer is the Customise…
+  // dialog (keymap-ui.js). The count is the honest summary of what that dialog holds — "3 customised"
+  // tells you there is something in there, where a bare button tells you nothing.
+  bindKeymapSettings({ preset: 'setkeymappreset', count: 'setkeymapcount' });
   // Theme + widths + scroll-zoom + output wrap — the reader-facing block, shared verbatim with app
   // mode's display popover (see `bindDisplaySettings` above).
   bindDisplaySettings({ theme: 'settheme', renderer: 'setrenderer',

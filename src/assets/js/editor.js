@@ -134,6 +134,62 @@
       try { v.dispatch({ effects: keymapModeComp.reconfigure(_keymapExt(m)) }); } catch (_) {}
     }
   };
+  // ── Slate's own in-editor bindings, from the keymap ─────────────────────────────
+  // The chords used to be written out in `mkEditor`'s keymap, which meant they were the one set of
+  // Slate shortcuts nobody could change and the one set the palette's hints couldn't see. Now the
+  // commands are declared in commands.js, their chords come from whichever keymap is active, and this
+  // file supplies only the four implementations that genuinely need the editor's own state.
+  //
+  // Placement does the arbitration, without a single `Prec` call. Within one precedence level CM6
+  // tries bindings in extension order, and this compartment sits after `keymapModeComp` and
+  // `opts.extra` but before the keymap holding `defaultKeymap`:
+  //
+  //   vim / emacs  →  per-editor extras (the Files tab's ⌘F panel)  →  THESE  →  CM6's defaults
+  //
+  // So a modal keymap's binding wins (picking vim means asking for vim's keys), the Files editor keeps
+  // its own find panel, and ⌘⇧K still isn't eaten by `defaultKeymap`'s `deleteLine`.
+  const slateKeysComp = new Compartment();
+  const cellKeysComp = new Compartment();       // this editor's own "apply" keys (see `_mkCellKeys`)
+  const _slateKeysExt = () => {
+    const specs = (window.slateKeymap ? window.slateKeymap.editorSpecs() : [])
+      .map(s => ({ key: s.key, run: s.run }));
+    return specs.length ? keymap.of(specs) : [];
+  };
+
+  // Implementations for the four `editor.*` commands declared in commands.js. A CM6 command returns
+  // false when it did not apply, and the keymap treats that as declining the key — which is how ⌘D
+  // falls through to the browser in an editor that has no multi-select extension.
+  if (window.slateBindEditorCommand) {
+    const bind = window.slateBindEditorCommand;
+    bind('editor.comment', (_t, v) => (v && v.state ? toggleComment(v) : false));
+    bind('editor.complete', (_t, v) => (v && v.state ? startCompletion(v) : false));
+    // `selectNextOccurrence` lives in searchKeymap, which only the Files-tab editor is given, so the
+    // chord is bound here for every editor instead. Absent bundle → decline, don't throw.
+    bind('editor.nextOccurrence', (_t, v) =>
+      !!(cmSearch && v && v.state) && cmSearch.selectNextOccurrence(v));
+    bind('editor.gotoDefinition', (_t, v) => {
+      if (!v || !v.state) return false;
+      const pos = v.state.selection.main.head, w = v.state.wordAt(pos);
+      if (!w) return false;
+      let name = v.state.doc.sliceString(w.from, w.to);
+      if (v.state.doc.sliceString(w.to, w.to + 1) === '!') name += '!';   // Julia bang functions
+      return !!(window.gotoDef && window.gotoDef(name, v._edctx && v._edctx.cellId));
+    });
+  }
+  // A rebind has to reach editors that are already open, so both compartments are reconfigured across
+  // every live view — the same pattern as the theme, wrap and completion-delay settings. The
+  // per-editor "apply" keys are rebuilt from the view's own closure (`_mkCellKeys`), since what ⇧⏎
+  // means depends on which kind of editor it is.
+  window.addEventListener('slate:keymap-changed', () => {
+    const ext = _slateKeysExt();
+    for (const v of _allViews()) {
+      try {
+        v.dispatch({ effects: [slateKeysComp.reconfigure(ext),
+                               ...(v._mkCellKeys ? [cellKeysComp.reconfigure(v._mkCellKeys())] : [])] });
+      } catch (_) {}
+    }
+  });
+
   // An editor's vim adapter / state, or null when vim is off or not yet attached. The state carries
   // `{insertMode, visualMode, inputState:{keyBuffer}}`.
   const _vimCM = v => { try { return (vimGetCM && v && vimGetCM(v)) || null; } catch (_) { return null; } };
@@ -1079,20 +1135,31 @@
         ? () => autocompletion({ icons: true, activateOnTypingDelay: _completeDelay(),
             override: [localCompletionSource, scopeCompletionSource(globalThis)] })
         : () => autocompletion({ icons: true, activateOnTypingDelay: _completeDelay() });
-    // Cell-level keys (Shift-Enter run, ⌘⇧Enter run-and-add, split, commitSource) all APPLY the cell
-    // and move on, so an open completion popup has outlived its question — it used to stay up over
-    // the result. Dismissed here rather than in each caller's binding: this is the one place every
-    // cell key passes through, and none of them wants the list left behind. `pending` counts too (a
-    // query still in flight would pop a list open after the cell had already run).
-    const cellKeys = (opts.keys || []).map(k => ({
-      key: k.key,
-      run: v => {
-        if (v && completionStatus(v.state) !== null) {
-          try { cmAutocomplete.closeCompletion(v); } catch (_) {}
-        }
-        k.run(); return true;
-      },
-    }));
+    // Cell-level keys (⇧⏎ apply, ⌘⇧⏎ run-and-add) all APPLY the cell and move on, so an open
+    // completion popup has outlived its question — it used to stay up over the result. Dismissed here
+    // rather than in each caller's binding: this is the one place every cell key passes through, and
+    // none of them wants the list left behind. `pending` counts too (a query still in flight would pop
+    // a list open after the cell had already run).
+    //
+    // A caller names the COMMAND (`cmd: 'cell.run'`) and supplies what applying means for its kind of
+    // editor — run the cell, commit a source overlay, run the scratchpad — and the chord comes from the
+    // keymap. The three used to hardcode 'Shift-Enter', which is why ⇧⏎ was the one Slate shortcut the
+    // Keyboard panel could not reach. `key` is still honoured for a binding with no command behind it.
+    const _mkCellKeys = () => {
+      const out = [];
+      for (const k of opts.keys || []) {
+        const run = v => {
+          if (v && completionStatus(v.state) !== null) {
+            try { cmAutocomplete.closeCompletion(v); } catch (_) {}
+          }
+          k.run(); return true;
+        };
+        const chords = k.cmd && window.slateKeymap ? window.slateKeymap.chordsFor(k.cmd)
+                     : k.key ? [k.key] : [];
+        for (const key of chords) out.push({ key, run });
+      }
+      return out.length ? keymap.of(out) : [];
+    };
     const _edctx = { markdown: !!opts.markdown, cellId: opts.cellId, lang: opts.lang };   // for registered editor extensions
     // Web-cell panes (HTML/CSS/JS) indent 2 spaces — the web convention — vs Julia's 4. Drives
     // auto-indent (Enter / indentOnInput) and Tab; the language's indent service reads `indentUnit`.
@@ -1141,6 +1208,12 @@
         // Per-editor extras (the Files-tab editor's gutters + find/replace). Ahead of the keymap
         // below so an extra's bindings — ⌘F, ⌘G — take precedence over the defaults.
         ...(opts.extra || []),
+        // This editor's own "apply" keys, and then Slate's in-editor bindings — both from the keymap
+        // (keymap.js) rather than written out here, so they are rebindable in Settings → Keyboard and
+        // cannot disagree with the same command's chord outside the editor. Both in Compartments, so a
+        // rebind reaches editors that are already open.
+        cellKeysComp.of(_mkCellKeys()),
+        slateKeysComp.of(_slateKeysExt()),
         keymap.of([
           // Escape is handled by `_escapeLadder` above, not here: it has to out-rank vim's key
           // interception as well as this keymap, and only a Prec.highest handler does. It defers to
@@ -1148,30 +1221,12 @@
           // CM6's own closeCompletion answers yes to pending, which swallowed an Escape typed
           // inside the activate-on-typing delay and made you press it twice.
           ...completionKeymap,                  // popup nav/close, once there IS a popup
-          ...cellKeys,
-          // ⌘⌥↑/↓ come from defaultKeymap. ⌘D does not: selectNextOccurrence is in searchKeymap,
-          // which only the Files-tab editor gets. `keymapModeComp` precedes this keymap, so on
-          // Linux, where Mod is Ctrl, vim and emacs keep Ctrl-D.
-          ...(cmSearch ? [{ key: 'Mod-d', run: cmSearch.selectNextOccurrence, preventDefault: true }] : []),
-          // ⌘F opens the notebook-wide search bar (search.js), not a per-cell panel — in a notebook
-          // the thing you are looking for is usually in a DIFFERENT cell. The Files-tab editor keeps
-          // CM6's own single-document panel: its `opts.extra` keymap out-precedences this one.
-          { key: 'Mod-f', run: () => { if (!window.slateSearchOpen) return false; window.slateSearchOpen(); return true; } },
-          { key: 'Mod-Alt-f', run: () => { if (!window.slateSearchOpen) return false; window.slateSearchOpen(true); return true; } },
-          // ⌘⇧K = help (app shortcut). Bind it here so CM6's defaultKeymap `deleteLine` doesn't eat it.
-          { key: 'Mod-Shift-k', run: () => { window.__docsHotkey = Date.now(); window.openDocsAtCursor && window.openDocsAtCursor(); return true; } },
-          // ⌘⇧←/→ = back/forward through selected-cell nav history, IN the editor too — so after a
-          // ⌘-click go-to-definition (which focuses the target editor) you can jump straight back.
-          // (Overrides CM's select-to-line-start; use Home / ⌘← then ⇧ for that.)
-          { key: 'Mod-Shift-ArrowLeft', run: () => { window.navBack && window.navBack(); return true; } },
-          { key: 'Mod-Shift-ArrowRight', run: () => { window.navFwd && window.navFwd(); return true; } },
-          { key: 'Mod-/', run: toggleComment }, { key: 'Ctrl-/', run: toggleComment },
           // Tab in an OPEN popup accepts or navigates down, per the `slateCompleteTab` setting
           // (default: accept — see `_tabMode`). Closed, it opens the popup when a word/`\`/`.` precedes
           // the cursor, else indents. Enter always accepts + closes. Shift-Tab navigates up / indents
-          // less. (macOS eats Ctrl-Space, so Alt-Space is the reliable manual trigger.)
+          // less. Tab is not in the keymap panel: it is the editor's most overloaded key and its
+          // behaviour is a SETTING (Tab in autocomplete), not a binding.
           { key: 'Tab', run: tabComplete }, { key: 'Shift-Tab', run: shiftTabComplete },
-          { key: 'Ctrl-Space', run: startCompletion }, { key: 'Alt-Space', run: startCompletion },
           // ⌘Z / ⌘⇧Z: while the editor's own undo stack has depth, use it; once it's spent,
           // keep undoing back through THIS cell's durable snapshots (returns false only when
           // there's local history to spend, so CM's own undo then runs).
@@ -1250,6 +1305,7 @@
     view._isFile = !!opts.file;       // whole-file editors keep line numbers whatever the toggle says
     view._isMd = !!opts.markdown;     // markdown cells have no grammar, so nothing to fold
     view._mkAcomp = mkAcomp;          // rebuilds THIS editor's completion source on a settings change
+    view._mkCellKeys = _mkCellKeys;   // rebuilds THIS editor's apply keys when the keymap changes
     view._edctx = _edctx;             // ctx for reconfiguring registered editor extensions
     // Join the live set (see `_allViews`) and leave it on destroy, whoever destroys it — a pane
     // removed from a web cell, a cell unmounted, a file editor closed.
