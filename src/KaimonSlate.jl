@@ -1411,7 +1411,9 @@ function create_tools(GateTool::Type)
     and you are the only one who knows what this notebook is for. Judge it, then propose ONE course
     of action.
 
-    Say the plan in `plan` and your reasoning in `why`. If the checker disputed, say so and say why
+    Say the plan in `plan` — ONE sentence, imperative, the thing you would do. Put the argument in
+    `why`, which is where there is room for it. A plan that runs to a paragraph is a plan the person
+    has to parse before they can agree with it. If the checker disputed, say so and say why
     you think what you think — a located disagreement tells the person exactly where their judgement
     is needed, and presenting a tidy consensus you had to manufacture wastes the one thing they are
     better at than you. If the plan needs file access you do not have, say that in the plan: this is
@@ -1428,7 +1430,9 @@ function create_tools(GateTool::Type)
         f = NotebookServer.finding_by_id(nb, strip(finding))
         f === nothing && return "⛔ no finding `$(strip(finding))` on this notebook"
         NotebookServer.set_plan!(nb, f.id, strip(plan))
-        q = string("**", strip(plan), "**\n\n", strip(why))
+        # Not emphasised: a plan runs to a few sentences and bolding the lot makes a wall of heavy
+        # type rather than a heading. The card gives the first paragraph its prominence.
+        q = string(strip(plan), "\n\n", strip(why))
         reply = NotebookServer.ask_and_wait(nb, "", "choice", _dbg_who(), q;
             options = [("go", "Go ahead"), ("no", "Don't")])
         # An unanswered proposal is a refusal. Nobody was there, and a plan nobody approved must not

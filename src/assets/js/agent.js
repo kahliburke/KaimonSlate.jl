@@ -119,6 +119,11 @@ function _crewBadge(crew) {
          ` title="${_esca(_crewName(crew))}" aria-label="${_esca(_crewName(crew))}">` +
          `${_esca(_crewMark(crew))}</span>`;
 }
+// Only an AGENT gets named. What you typed is yours, and a system line belongs to the app — an
+// empty `crew` means "the notebook's agent" on a message the agent produced and nothing of the
+// sort on one you did, so the badge has to read the role rather than the crew alone.
+const _NOT_AN_AGENT = new Set(['user', 'note', 'searching']);
+const _speakerBadge = m => (_NOT_AN_AGENT.has(m.role) ? '' : _crewBadge(m.crew));
 // The same name as a block heading rather than an inline chip — for a grouped run of actions,
 // where it is said once for the whole block.
 function _crewLabel(crew) {
@@ -250,6 +255,9 @@ function _agentMsgHtml(m) {
     return `<div class="apmsg tool${lane}${m.external ? ' ext' : ''}${hasDetail ? ' expandable' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}` +
       `${hasDetail ? '<span class="toolcaret">▸</span>' : ''}${_esca(m.text)}${cidChip}${codePre}${detail}</div>`;
   }
+  if (m.role === 'searching') {
+    return `<div class="apmsg note searching">${_esca(m.text)}</div>`;
+  }
   if (m.role === 'toolrun') {
     // The crew once, at the top, then the calls as a list. Each line keeps its own expandable
     // args/result — the compaction is of the repeated chrome, not of the detail.
@@ -273,27 +281,41 @@ function _agentMsgHtml(m) {
     const v = f.verdict ? `<span class="apfindv ${_esca(f.verdict)}">${_esca(f.verdict)}</span>` : '';
     const gap = (f.unread_upstream || []).length
       ? `<div class="apfindgap">never looked at ${_esca(f.unread_upstream.join(', '))} — which produce its inputs</div>` : '';
-    const why = f.verdict_why ? `<div class="apfindwhy">${_esca(f.verdict_why)}</div>` : '';
     const dec = f.decision ? `<span class="apfinddec">${f.decision === 'go' ? '✓ approved'
       : f.decision === 'no' ? '✕ declined' : '✎ ' + _esca(f.decision)}</span>` : '';
     const plan = f.plan ? `<div class="apfindplan">plan: ${_esca(f.plan)}${dec}</div>` : '';
-    return `<div class="apmsg finding ${_esca(f.verdict || 'open')}">` +
-      `<div class="apfindh"><span class="apfindc">${_esca(f.cell || '(no cell named)')}</span>${v}</div>` +
+    // The claim is the headline and stays; the evidence and the reviewer's working are what make
+    // this a record rather than a sentence, and they run to paragraphs. Two findings rendered in
+    // full were most of a screen, so they fold — the claim is what you read, the rest is what you
+    // check it against when you want to.
+    const detail = (f.evidence || f.verdict_why)
+      ? `<div class="apfinddetail">` +
+        (f.evidence ? `<div class="tdlabel">evidence</div><div class="apfindev">${_esca(f.evidence)}</div>` : '') +
+        (f.verdict_why ? `<div class="tdlabel">verdict</div><div class="apfindwhy">${_esca(f.verdict_why)}</div>` : '') +
+        `</div>` : '';
+    return `<div class="apmsg finding ${_esca(f.verdict || 'open')}${detail ? ' expandable' : ''}">` +
+      `<div class="apfindh">${detail ? '<span class="toolcaret">▸</span>' : ''}` +
+      `<span class="apfindc">${_esca(f.cell || '(no cell named)')}</span>${v}</div>` +
       `<div class="apfindclaim">${_esca(f.claim)}</div>` +
-      (f.evidence ? `<div class="apfindev">${_esca(f.evidence)}</div>` : '') +
-      gap + why + plan + `</div>`;
+      gap + plan + detail + `</div>`;
   }
   if (m.role === 'ask') {
     // Answered only. While it is open the card above the page owns it — the live controls being in
     // two places at once is how you end up answering the same question twice.
     if (m.answered == null) return `<div class="apmsg note">… waiting on your answer above</div>`;
-    return `<div class="apmsg ask answered"><div class="apaskq">${_esca(m.text)}</div>` +
-           `<div class="apaskdone">✓ ${_esca(m.answeredLabel || m.answered)}</div></div>`;
+    // Once answered it is a record, not a question: what you were asked, in a line, and what you
+    // said. Re-rendering the whole proposal made the answer the smallest thing on screen.
+    const asked = String(m.text || '').split('\n')[0];
+    return `<div class="apmsg ask answered expandable">` +
+           `<div class="apaskdone">✓ ${_esca(m.answeredLabel || m.answered)}</div>` +
+           `<div class="apaskasked">${_esca(asked)}</div>` +
+           `<div class="apaskfull">${mdLite(m.text)}</div></div>`;
   }
   return (
       m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${_safeImgSrc(m.src)}" alt="agent image"></div>`
     : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
-    :                     `<div class="apmsg ${m.role}${lane}${m.external ? ' ext' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}${_esca(m.text)}</div>`);
+    :                     `<div class="apmsg ${m.role}${lane}${m.external ? ' ext' : ''}" ${tag}>` +
+                          `${_speakerBadge(m)}${_extBadge(m.external)}${_esca(m.text)}</div>`);
 }
 // Consecutive tool calls by the same agent, as ONE block: the crew named once as a heading, then a
 // line per call. They do not have to be the same tool — a debugging specialist's run is watch,
@@ -302,11 +324,28 @@ function _agentMsgHtml(m) {
 //
 // A call carrying code keeps its own row: the code is the content, and folding it into a list would
 // hide the thing worth reading.
+// Calls that change nothing and show YOU nothing — the agent reaching for its own tools, or
+// waiting. Recording each one permanently was like logging an import: it pushed the actual work
+// apart, and an agent that searches twice in a row got two rows saying so.
+//
+// While one is in flight it becomes a transient line, because the pause is worth explaining. Then
+// it goes. The value is that line's caption; a kind with no caption disappears silently.
+const _PLUMBING = {
+  ToolSearch: '⋯ discovering tools',
+  dbg_wait: '⋯ waiting for the specialist',
+  TodoWrite: '',
+};
+const _plumbingOf = m => (m.role === 'tool' ? _PLUMBING[m.raw || m.text] : undefined);
+const _isPlumbing = m => _plumbingOf(m) !== undefined;
+
 const _RUN_MIN = 2;
 function _collapseRuns(msgs) {
   const out = [];
+  let searching = null;   // the caption of a plumbing call still in flight, or null
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
+    if (_isPlumbing(m)) { searching = m.done ? null : (_plumbingOf(m) || null); continue; }
+    searching = null;
     if (m.role !== 'tool' || m.code) { out.push(m); continue; }
     let j = i;
     while (j + 1 < msgs.length && msgs[j + 1].role === 'tool' && !msgs[j + 1].code &&
@@ -317,6 +356,7 @@ function _collapseRuns(msgs) {
                     done: msgs.slice(i, j + 1).every(x => x.done) });
     i = j;
   }
+  if (searching) out.push({ role: 'searching', text: searching });
   return out;
 }
 const _nodeFromHtml = h => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content.firstChild; };
@@ -360,6 +400,10 @@ function renderAgentMsgs() {
     if (nav && nav.dataset.cid) { try { window.selectCell && window.selectCell(nav.dataset.cid, true); } catch (_) {} return; }
     const line = e.target.closest('.toolline.expandable');   // one call inside a grouped run
     if (line) { line.classList.toggle('expanded'); return; }
+    const find = e.target.closest('.apmsg.finding.expandable');
+    if (find) { find.classList.toggle('expanded'); return; }
+    const ask = e.target.closest('.apmsg.ask.answered.expandable');
+    if (ask) { ask.classList.toggle('expanded'); return; }
     const tool = e.target.closest('.apmsg.tool.expandable'); if (tool) tool.classList.toggle('expanded');   // reveal full args/result
   });
 })();
@@ -384,6 +428,21 @@ async function loadAgentLog() {
     // that's genuinely still running keeps its agents, so this doesn't touch a real in-flight reload.)
     if (agentWorking && !Object.keys(r.agents || {}).length) setWorking(false);
     renderAgentMsgs();
+  } catch (_) {}
+  await loadAsksAndFindings();
+}
+
+// Findings and blocked questions are pushed, and a push only reaches a page that was already open.
+// After a reload the transcript replayed but these did not: a question blocking an agent was
+// invisible, and a finding from before the reload appeared only if something later re-broadcast it
+// — arriving at the bottom, out of order, when it did.
+async function loadAsksAndFindings() {
+  try {
+    const r = await api('GET', '/api/asks');
+    if (!r) return;
+    for (const f of (r.findings || [])) _agentFinding(f);
+    for (const a of (r.asks || [])) if (!a.role) _agentAsk(a);
+    renderAsks();
   } catch (_) {}
 }
 // A blocked question from the notebook's OWN agent (no specialist role), so it belongs in the
@@ -606,6 +665,7 @@ function agentEvent(env) {
     let tm = agentMsgs.find(m => m.role === 'tool' && m.id === c.toolCallId);
     if (!tm) { tm = { role: 'tool', id: c.toolCallId, title: '', inputBuf: '', code: '', done: false, crew }; agentMsgs.push(tm); }
     if (env.external) tm.external = true;   // a tool call from OUTSIDE this notebook's chat (an external agent)
+    tm.raw = _bareTool(c.title || c.kind || tm.raw || 'tool');
     tm.title = _prettyTool(c.title || c.kind || tm.title || 'tool');
     tm.text = tm.title;
     if (c.rawInput) { tm.code = _extractCode(JSON.stringify(c.rawInput)) || tm.code; tm.args = c.rawInput; const cc = _argCid(c.rawInput); cc && (tm.cid = cc); }

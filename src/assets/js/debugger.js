@@ -162,6 +162,15 @@ async function loadTraces() {
     if (r && r.ok) traces.value = r.traces || {};
   } catch (e) {}
 }
+// What a watch has seen so far. The frame carries a SUMMARY per expression (the series itself is
+// thousands of numbers and is fetched separately, only when something wants to draw it).
+const _traceOf = (w) => ((st.value && st.value.traces) || []).find(t => t.expr === w.expr) || null;
+// Non-finite samples arrive as null — a watched value reaching NaN is most of why someone watches
+// one — so a missing number is shown as such rather than as the string "null".
+const _fmtN = (x) => (x === null || x === undefined ? '—'
+  : Math.abs(x) >= 1e4 || (x !== 0 && Math.abs(x) < 1e-3) ? Number(x).toExponential(2)
+  : String(Number(x.toFixed(4))));
+
 const clearMark = (file, line) => setMark(file, line, false);
 window.onBreakpointClick?.(toggleMark);
 
@@ -611,6 +620,65 @@ function Vals({ title, items, hint }) {
   </div>`;
 }
 
+// A watched expression is a series, not a reading: `n` samples taken as the run went on, and what
+// makes it worth having is the shape. So it is drawn, in its own strip.
+//
+// The series is already fetched (`loadTraces`) and was never drawn anywhere, which left a sampled
+// watch showing a single number — the one thing a series is least useful reduced to.
+function Spark({ xs }) {
+  if (!xs || xs.length < 2) return null;
+  const pts = xs.filter(v => v !== null && v !== undefined && isFinite(v));
+  if (pts.length < 2) return null;
+  const lo = Math.min(...pts), hi = Math.max(...pts);
+  const span = (hi - lo) || 1;
+  const W = 132, H = 26;
+  // Non-finite samples break the line rather than being drawn as zero: a gap is what happened.
+  let d = '', pen = false;
+  xs.forEach((v, i) => {
+    const x = (i / (xs.length - 1)) * W;
+    if (v === null || v === undefined || !isFinite(v)) { pen = false; return; }
+    const y = H - ((v - lo) / span) * H;
+    d += (pen ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
+    pen = true;
+  });
+  return html`<svg class="dbgspark" viewBox=${'0 0 ' + W + ' ' + H} preserveAspectRatio="none">
+    <path d=${d.trim()} fill="none" stroke="currentColor" stroke-width="1.2" />
+  </svg>`;
+}
+
+function WatchStrip({ s }) {
+  const ws = watches.value;
+  const here = s && s.line ? s.file + ':' + s.line : '';
+  return html`<div class="dbgrhead dbgrhead2" title="sampled every time that line runs, without stopping">
+      watches
+      ${here ? html`<button class="dbgwadd" title=${'sample an expression every time line ' + s.line + ' runs'}
+        onClick=${() => watchEdit.value = here}>+</button>` : null}
+    </div>
+    <div class="dbgwatches">
+      ${!ws.length && watchEdit.value === null
+        ? html`<div class="dbgwempty">none</div>` : null}
+      ${ws.map(w => { const t = _traceOf(w), xs = traces.value[w.expr] || [];
+        return html`<div class="dbgwatch" key=${w.file + ':' + w.line}>
+          <div class="dbgwtop">
+            <span class="dbgwx" title=${w.expr}>${w.expr}</span>
+            <button class="dbgwrm" title="stop sampling" onClick=${() => setWatch(w.file, w.line, '')}>✕</button>
+          </div>
+          <${Spark} xs=${xs} />
+          <div class="dbgwrange">
+            ${t ? html`<span class="dbgwnow">${_fmtN(t.last)}</span> ${t.n}× · ${_fmtN(t.min)} … ${_fmtN(t.max)}`
+                : html`<span title=${w.file}>waiting for ${shortFile(w.file)}:${w.line}</span>`}
+          </div>
+        </div>`; })}
+      ${watchEdit.value !== null
+        ? html`<${CondEditor} file="" line=${0} initial="" label="sample"
+                 onDone=${t => { const at = watchEdit.value; watchEdit.value = null;
+                                 if (t === null || !t.trim() || !at) return;
+                                 const i = at.lastIndexOf(':');
+                                 setWatch(at.slice(0, i), Number(at.slice(i + 1)), t.trim()); }} />`
+        : null}
+    </div>`;
+}
+
 // The step controls. One row, in the order you reach for them, with Stop set apart so it is never
 // the button you hit while stepping quickly.
 function Controls({ compact }) {
@@ -818,6 +886,7 @@ function Stack({ s }) {
                                  t === null || setMark(m.file, m.line, undefined, t); }} />`
         : (m.cond ? html`<div class="dbgcond" title=${m.cond}
                           onClick=${() => condEdit.value = m.file + ':' + m.line}>${m.cond}</div>` : null)}`)}</div>` : null}
+    <${WatchStrip} s=${s} />
     <div class="dbgrhead dbgrhead2" title="modules stepped rather than run compiled">interpreting</div>
     <div class="dbginterp">${(s.interpreting || []).map(m => html`<span class="dbgmod" key=${m}>${m}</span>`)}</div>
   </div>`;
@@ -889,7 +958,7 @@ function Scratch({ s }) {
 // highlighting and the keymap are the ones already in your fingers. A predicate is Julia written
 // against the paused frame's locals — exactly what the scratchpad completes — so a browser prompt
 // box was the wrong surface for it twice over: no completion, and not Slate's UI.
-function CondEditor({ file, line, initial, onDone }) {
+function CondEditor({ file, line, initial, onDone, label }) {
   const host = useRef(null), view = useRef(null);
   const commit = () => {
     const v = view.current;
@@ -909,7 +978,7 @@ function CondEditor({ file, line, initial, onDone }) {
     return () => { try { view.current && view.current.destroy(); } catch (e) {} view.current = null; };
   }, []);
   return html`<div class="dbgcondedit">
-    <span class="dbgcondwhen">when</span>
+    <span class="dbgcondwhen">${label || 'when'}</span>
     <div class="dbgcondhost" ref=${host}></div>
     <button class="dbgcondok" title="set (enter)" onClick=${commit}>✓</button>
     <button class="dbgcondx" title="cancel (esc)" onClick=${() => onDone(null)}>✕</button>
@@ -1487,6 +1556,23 @@ body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
   color:var(--teal); cursor:pointer; font-size:.74rem; text-align:left; max-width:100%; }
 .dbgopt:hover { background:color-mix(in srgb, var(--teal) 15%, transparent); }
 .dbgopt.skip { border-color:var(--border); color:var(--dim); }
+/* The expression, what it is now, and what it has been. */
+.dbgwatches { display:flex; flex-direction:column; }
+.dbgwatches .dbgwatch { padding:4px 0 6px; border-bottom:1px solid var(--bg3); }
+.dbgwatches .dbgwatch:last-child { border-bottom:none; }
+.dbgwtop { display:flex; align-items:baseline; gap:7px; }
+.dbgwx { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-family:'Cascadia Code',monospace; font-size:.74rem; color:var(--teal); }
+.dbgwat { font-size:.64rem; color:var(--dim); }
+.dbgwrm { cursor:pointer; background:none; border:none; padding:0 2px; color:var(--dim); font-size:.7rem; }
+.dbgwrm:hover { color:var(--red,#e57575); }
+.dbgwnow { font-family:'Cascadia Code',monospace; font-size:.76rem; color:var(--strong); }
+.dbgspark { display:block; width:100%; height:26px; color:var(--teal); margin:2px 0 1px; }
+.dbgwrange { font-size:.66rem; color:var(--dim); }
+.dbgwempty { font-size:.7rem; color:var(--dim); font-style:italic; padding:2px 0; }
+.dbgwadd { cursor:pointer; background:none; border:1px dashed var(--border); border-radius:4px;
+  color:var(--dim); font-size:.7rem; line-height:1; padding:1px 6px; }
+.dbgwadd:hover { color:var(--teal); border-color:var(--teal); }
 .dbgaddwatch { align-self:center; padding:2px 8px; background:transparent; border:1px dashed var(--border);
   border-radius:6px; color:var(--dim); cursor:pointer; font-size:.7rem; white-space:nowrap; }
 .dbgaddwatch:hover { color:var(--teal); border-color:var(--teal); }
