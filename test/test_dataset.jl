@@ -672,4 +672,147 @@ const MS = RE.MemoStore
             @test length(get(m2, "bindings", Any[])) == 1
         end
     end
+
+    # ── Adopting a file the unit wrote itself ────────────────────────────────────────────────
+    # The built-in HDF5 and NetCDF readers need those packages, which this suite deliberately does
+    # not depend on — a format adapter must be optional or it is not an adapter. So the mechanism is
+    # exercised through a REGISTERED one over a trivial format, which is the same path a third party
+    # takes. The built-ins are covered against real files on the cluster demo.
+    #
+    #   name:dim,dim:v,v,v   one line per variable, Float64 values
+    function _mkvarfile(path, vars; attrs = "")
+        open(path, "w") do io
+            isempty(attrs) || println(io, "#", attrs)
+            for (name, dims, vals) in vars
+                println(io, name, ":", join(dims, ","), ":", join(vals, ","))
+            end
+        end
+        return path
+    end
+
+    function _register_toy_adapter!()
+        ST.register_dataset_adapter!("toy",
+            path -> endswith(path, ".toy"),
+            function (path)
+                fattrs = Dict{String,Any}()
+                vars = NamedTuple{(:name, :dims, :attrs, :data)}[]
+                for line in eachline(path)
+                    if startswith(line, "#")
+                        fattrs["note"] = line[2:end]
+                        continue
+                    end
+                    name, dims, vals = split(line, ":")
+                    data = isempty(vals) ? Float64[] : parse.(Float64, split(vals, ","))
+                    push!(vars, (; name = String(name),
+                                   dims = String[String(d) for d in split(dims, ",") if !isempty(d)],
+                                   attrs = Dict{String,Any}("units" => "toy"),
+                                   data))
+                end
+                return (fattrs, vars)
+            end)
+    end
+
+    @testset "an adopted file indexes as a group of ordinary datasets" begin
+        _register_toy_adapter!()
+        mktempdir() do root
+            f = _mkvarfile(joinpath(root, "a.toy"),
+                           [("sst", ["lon", "lat"], 1:6), ("lon", ["lon"], 10:12)];
+                           attrs = "a run of nothing")
+            idx, n = ST.write_dataset!(root, ST.adopt(f))
+            @test idx["kind"] == "group" && idx["format"] == "toy"
+            @test [v["name"] for v in idx["vars"]] == ["sst", "lon"]
+            @test idx["attrs"]["note"] == "a run of nothing"
+            @test idx["vars"][1]["dims"] == ["lon", "lat"]
+            @test idx["vars"][1]["attrs"]["units"] == "toy"
+            # Each variable is an ORDINARY index — that is what makes the read side unchanged.
+            sst = idx["vars"][1]["index"]
+            @test sst["kind"] == "array" && sst["rows"] == 6 && sst["eltype"] == "Float64"
+            @test ST.dataset_elements(root, sst, 2:4) == [2.0, 3.0, 4.0]
+            @test n == sum(v["index"]["bytes"] for v in idx["vars"])
+
+            # A variable with no addressable form is NAMED rather than silently absent.
+            g = _mkvarfile(joinpath(root, "b.toy"), [("ok", ["x"], 1:3), ("empty", ["x"], [])])
+            gidx, _ = ST.write_dataset!(root, ST.adopt(g))
+            @test [v["name"] for v in gidx["vars"]] == ["ok"]
+            @test [s["name"] for s in gidx["skipped"]] == ["empty"]
+        end
+    end
+
+    @testset "adopting says what it cannot read" begin
+        _register_toy_adapter!()
+        mktempdir() do root
+            e = try; ST.write_dataset!(root, ST.adopt(joinpath(root, "nope.toy"))); ""
+                catch x; sprint(showerror, x); end
+            @test occursin("no such file", e)
+            write(joinpath(root, "x.weird"), "hello")
+            e2 = try; ST.write_dataset!(root, ST.adopt(joinpath(root, "x.weird"))); ""
+                 catch x; sprint(showerror, x); end
+            @test occursin("nothing here can read", e2) && occursin("register_dataset_adapter!", e2)
+            # Two files claiming the same variable name is a collision, not a last-one-wins merge.
+            a = _mkvarfile(joinpath(root, "c1.toy"), [("sst", ["x"], 1:3)])
+            b = _mkvarfile(joinpath(root, "c2.toy"), [("sst", ["x"], 4:6)])
+            e3 = try; ST.write_dataset!(root, ST.adopt([a, b])); "" catch x; sprint(showerror, x); end
+            @test occursin("both hold a variable named sst", e3)
+            # …while distinct names across files adopt as ONE dataset, which is the directory case.
+            d = _mkvarfile(joinpath(root, "c3.toy"), [("pressure", ["x"], 7:9)])
+            merged, _ = ST.write_dataset!(root, ST.adopt([a, d]))
+            @test [v["name"] for v in merged["vars"]] == ["sst", "pressure"]
+        end
+    end
+
+    @testset "the notebook reads an adopted file as it reads any dataset" begin
+        _register_toy_adapter!()
+        mktempdir() do root
+            t = RE.Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                     payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = RE.Sweep.@sweep(RE.Sweep.paramgrid(day = 1:4), t; submit = false, lazy = true) do p
+                f = joinpath(datadir(), "grid_$(p.day).toy")
+                open(f, "w") do io
+                    println(io, "#day ", p.day)
+                    println(io, "sst:lon,lat:", join((1:6) .* p.day, ","))
+                    println(io, "lon:lon:10,11,12")
+                end
+                adopt(f)
+            end
+            for c in RE.BatchSweep.sweep_chunks(root, r.run); ST.run_chunk(root, c); end
+            ds = RE.Sweep.refresh!(r).dataset
+
+            @test ds.kind === :group
+            @test RE.Sweep.nparts(ds) == 4
+            @test keys(ds) == ["sst", "lon"]
+            @test RE.Sweep.dimensions(ds, :sst) == ["lon", "lat"]
+            @test RE.Sweep.attributes(ds, :sst)["units"] == "toy"
+            @test RE.Sweep.attributes(ds)["note"] == "day 1"
+            shown = sprint(show, MIME"text/plain"(), ds)
+            @test occursin("2 variables", shown) && occursin("(lon, lat)", shown)
+
+            # Picking a variable hands back an ORDINARY array dataset — same type, same reads.
+            sst = ds[:sst]
+            @test sst.kind === :array && RE.Sweep.nparts(sst) == 4
+            @test sst[1][1:6] == Float64.(1:6)          # unit day=1
+            @test sst[3][1:6] == Float64.((1:6) .* 3)   # …and day=3 is a different part
+            @test ds[:lon][2][1:3] == [10.0, 11.0, 12.0]
+
+            # The group itself has no row space, and says so rather than failing obscurely.
+            e = try; ds[1:3]; "" catch x; sprint(showerror, x); end
+            @test occursin("named variables", e) && occursin("keys(ds)", e)
+            e2 = try; ds[:nope]; "" catch x; sprint(showerror, x); end
+            @test occursin("no variable `nope`", e2) && occursin("sst", e2)
+        end
+    end
+
+    @testset "adopt needs the cell to have asked for a dataset" begin
+        # Without `data=lazy` the value would be serialized as an inert struct naming a path that
+        # does not exist on the reader's machine — a failure met much later and much further away.
+        _register_toy_adapter!()
+        mktempdir() do root
+            f = _mkvarfile(joinpath(root, "d.toy"), [("v", ["x"], 1:3)])
+            ST.write_chunk!(root, "c1"; fn_src = "p -> adopt($(repr(f)))",
+                            params = [(; i = 1)], keys = ["k1"])
+            r = ST.run_chunk(root, "c1")
+            @test (r.ran, r.failed) == (0, 1)
+            _, st, err = ST.result(root, "k1")
+            @test st == "error" && occursin("data=lazy", String(err))
+        end
+    end
 end

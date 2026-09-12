@@ -117,6 +117,44 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
         end
     end
 
+    @testset "a shard writes its own files through datadir()/@sfile" begin
+        # The case this exists for: a unit that writes an HDF5 or NetCDF file itself rather than
+        # returning a value. It needs a portable place to put it, and the notebook's `datadir()` is
+        # a notebook-namespace name that a bare shard module does not have — so a body written
+        # against it failed with UndefVarError on every unit.
+        mktempdir() do root
+            src = """
+            p -> begin
+                write(@sfile("cubes/cube_\$(p).bin"), "vol-\$(p)")
+                (; dir = datadir(), path = @sfile("cubes/cube_\$(p).bin"))
+            end
+            """
+            chunk, keys = mkchunk(root, 2; fn_src = src,
+                                  setup_src = "const SETUP_DIR = datadir()")
+            r = SlateTask.run_chunk(root, chunk)
+            @test (r.ran, r.failed) == (2, 0)
+            vals = [SlateTask.result(root, k)[3] for k in keys]
+            @test all(v -> v.dir == joinpath(root, "data"), vals)
+            # `@sfile` created the intermediate directory, so the write target was usable directly.
+            @test [read(v.path, String) for v in vals] == ["vol-1", "vol-2"]
+            # gc walks blobs and manifests only, so a data directory beside them survives it.
+            MemoStore.gc(root; cap = 0)
+            @test all(v -> isfile(v.path), vals)
+        end
+    end
+
+    @testset "a region's pinned data root wins over the store's" begin
+        mktempdir() do root
+            mktempdir() do pinned
+                withenv("KAIMONSLATE_DATADIR" => pinned) do
+                    chunk, keys = mkchunk(root, 1; fn_src = "p -> datadir()")
+                    SlateTask.run_chunk(root, chunk)
+                    @test SlateTask.result(root, keys[1])[3] == pinned
+                end
+            end
+        end
+    end
+
     @testset "gc does not collect a live shard's artifact blob" begin
         # The bug this guards: artifacts are blobs referenced only from a batch-specific manifest
         # field, so unless _manifest_blobs knows about them they look orphaned and gc deletes the

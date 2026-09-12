@@ -1430,6 +1430,12 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # rebuild — so re-running or dropping a cell doesn't leak what the last run allocated. Keyed by the
     # executing cell (task-local `:slate_cell`, seeded by run_capture); a rebuild drops the whole dict.
     Core.eval(m, :(const __slate_cleanups = $(SyncDict{Vector{Any}}())))
+    # Each cell's top-level statements, as SOURCE, keyed by the filename it was evaluated under
+    # (`cell:<id>`) — which is also what a method defined there records in `Method.file`. That pair
+    # is what lets a sweep find the text of a helper the notebook defined: the function value knows
+    # which cell it came from, and this knows what that cell said. Written by `_eval_cell_source`;
+    # a namespace rebuild drops it with everything else.
+    Core.eval(m, :(const __slate_cell_stmts = $(SyncDict{Vector{String}}())))
     Core.eval(m, :(const slate_on_cleanup = (f) -> (push!(get!($(Vector{Any}), __slate_cleanups,
         get(task_local_storage(), :slate_cell, "")), f); nothing)))
     # Invoke a `slate_on` handler FROM Julia (same as `window.slateCall` does from JS, but in-process —

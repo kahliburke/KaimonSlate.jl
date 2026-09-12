@@ -624,6 +624,11 @@ store_root(t::LocalTarget) = t.root
 # The hub plans against the MIRROR for a remote cluster — a local directory holding a copy of the
 # store's metadata. `root_remote` stays the job's view and never changes.
 store_root(t::ClusterTarget) = plan_root(t)
+# The store as the SCHEDULER sees it. Distinct from `store_root` because a job's output file is on
+# the cluster's filesystem, under the path the job was given — reading it means naming that path,
+# not the mirror the hub plans against.
+job_root(t::LocalTarget) = t.root
+job_root(t::ClusterTarget) = t.root_remote
 chunk_size(t::LocalTarget) = t.chunk
 chunk_size(t::ClusterTarget) = t.chunk
 
@@ -755,7 +760,7 @@ Base.eltype(::Type{ShardedResult}) = NamedTuple
 # property that mutates on read is a trap.
 const _DERIVED = (:state, :total, :done, :ok, :failed, :pending, :fraction, :percent,
                   :eta, :rate, :idle, :stalled_for, :blocked, :settled,
-                  :results, :summaries, :errors, :hosts, :bytes, :armed, :dataset)
+                  :results, :records, :summaries, :table, :errors, :hosts, :bytes, :armed, :dataset)
 
 function Base.getproperty(r::ShardedResult, s::Symbol)
     s in fieldnames(ShardedResult) && return getfield(r, s)
@@ -787,9 +792,14 @@ function Base.getproperty(r::ShardedResult, s::Symbol)
                                             getfield(r, :params), getfield(r, :keys),
                                             getfield(r, :run), source_of(getfield(r, :target)))
     s === :results    && return [row for row in rows if row.status == "ok"]
-    # The charting values, straight from the manifests. This is the accessor analysis should reach
-    # for: it is the same cost at four units and four million.
+    # What the units RETURNED, straight from the manifests. This is the accessor analysis should
+    # reach for: it is the same cost at four units and four million, where `[row.value[] …]` is a
+    # blob read per unit and a way to spell "all of it" by accident.
+    s === :records    && return [row.record for row in rows if row.status == "ok"]
+    # The charting figure — the same thing unless `summary =` derived one.
     s === :summaries  && return [row.summary for row in rows if row.status == "ok"]
+    # The grid as one row per point. The view a sweep is usually FOR, and manifest-only like the rest.
+    s === :table      && return table(r)
     s === :errors     && return [row for row in rows if row.status == "error"]
     s === :bytes      && return sum(row.bytes for row in rows; init = 0)
     s === :hosts      && return unique([row.ran_on for row in rows if !isempty(row.ran_on)])
@@ -1426,9 +1436,16 @@ arrays stay separate parts, since output of differing shape has no single meanin
     ds[1:1000]              # a bounded slice
     ds[1:1000, (:t, :e)]    # …and only these columns
     scan(ds; between = (:e, 3, Inf), where = r -> r.ok, limit = 10_000)
+
+A sweep of ADOPTED FILES is a `:group` — a namespace rather than one shape, because a NetCDF or
+HDF5 file holds several named variables. Picking one gives back an ordinary dataset, so nothing
+past that point is special:
+
+    keys(ds)                # the variable names
+    ds[:sst][1]             # part 1 of the `sst` variable, then slice it
 """
 struct Dataset
-    kind::Symbol                  # :table | :array
+    kind::Symbol                  # :table | :array | :group
     parts::Vector{DatasetPart}
     columns::Vector{String}
     types::Vector{String}
@@ -1492,13 +1509,26 @@ function recall_index(run::AbstractString)
     return try; TOML.parsefile(p); catch; nothing; end
 end
 
+_ds_kind(d::AbstractDict) = (k = String(get(d, "kind", "table"));
+                             k == "array" ? :array : k == "group" ? :group : :table)
+
+# One variable's entry in a group index, or `nothing`.
+_group_var(index::AbstractDict, name::AbstractString) =
+    for v in get(index, "vars", Any[])
+        v isa AbstractDict && String(get(v, "name", "")) == name && return v
+    end
+
 "Has this part's data actually survived? A remembered index can outlive the bytes it describes."
 function part_present(p::DatasetPart)
+    # A group holds no bytes of its own — its variables do. Probe the first, for the same reason
+    # only one chunk is probed below: this answers "was the store purged", not "is every blob here".
+    idx = _ds_kind(p.index) === :group ?
+          (vs = get(p.index, "vars", Any[]); isempty(vs) ? p.index : vs[1]["index"]) : p.index
     blobs = String[]
-    if String(get(p.index, "kind", "")) == "array"
-        push!(blobs, String(p.index["blob"]))
+    if String(get(idx, "kind", "")) == "array"
+        push!(blobs, String(idx["blob"]))
     else
-        cs = get(p.index, "chunks", Any[])
+        cs = get(idx, "chunks", Any[])
         isempty(cs) || push!(blobs, String(first(cs)["blob"]))   # one probe, not thousands
     end
     isempty(blobs) && return true
@@ -1528,7 +1558,7 @@ function _dataset_of(root, params, keys, label = "", src = LocalSource(root))
             continue
         end
         d = Dict{String,Any}(String(kk) => vv for (kk, vv) in idx)
-        kind = String(d["kind"]) == "array" ? :array : :table
+        kind = _ds_kind(d)
         push!(parts, DatasetPart(String(root), d, prm, Int(get(d, "rows", 0)),
                                  Int(get(d, "bytes", 0)), String(label), src))
     end
@@ -1538,7 +1568,7 @@ function _dataset_of(root, params, keys, label = "", src = LocalSource(root))
     if isempty(parts) && whole == 0 && !isempty(label)
         remembered = recall_index(label)
         if remembered !== nothing
-            kind = String(get(remembered, "kind", "table")) == "array" ? :array : :table
+            kind = _ds_kind(remembered)
             for pd in get(remembered, "parts", Any[])
                 pd isa AbstractDict || continue
                 idx = Dict{String,Any}(String(k) => v for (k, v) in get(pd, "index", Dict()))
@@ -1562,8 +1592,27 @@ databytes(ds::Dataset) = sum(p -> p.bytes, ds.parts; init = 0)
 function Base.show(io::IO, ::MIME"text/plain", ds::Dataset)
     n = length(ds)
     println(io, "Dataset — ", nparts(ds), " part", nparts(ds) == 1 ? "" : "s", ", ",
-            ds.kind === :table ? "$(n) rows" : "$(n) elements", ", ", _bytes(databytes(ds)))
-    if ds.kind === :table
+            ds.kind === :table ? "$(n) rows" :
+            ds.kind === :array ? "$(n) elements" :
+            "$(length(get(isempty(ds.parts) ? Dict() : ds.parts[1].index, "vars", Any[]))) variables",
+            ", ", _bytes(databytes(ds)))
+    if isempty(ds.parts)
+        println(io, "   nothing has landed yet")
+    elseif ds.kind === :group
+        for v in get(ds.parts[1].index, "vars", Any[])
+            d = get(v, "dims", String[])
+            shape = get(v["index"], "dims", Int[])
+            println(io, "   ", rpad(String(v["name"]), 18),
+                    isempty(shape) ? "$(get(v["index"], "rows", 0)) rows" :
+                    join(shape, "×") * " " * String(get(v["index"], "eltype", "")),
+                    isempty(d) ? "" : "  (" * join(d, ", ") * ")")
+        end
+        for s in get(ds.parts[1].index, "skipped", Any[])
+            println(io, "   ", rpad(String(s["name"]), 18), "— not stored: ", String(s["why"]))
+        end
+        println(io, "   from ", String(get(ds.parts[1].index, "source", "")),
+                " · keys(ds) for the names · ds[:name] for one variable")
+    elseif ds.kind === :table
         for (c, t) in zip(ds.columns, ds.types)
             println(io, "   ", rpad(c, 18), t)
         end
@@ -1628,7 +1677,10 @@ function load(ds::Dataset, rows::AbstractUnitRange; select = nothing,
                        "so the schema and counts are still readable, but the bytes are gone. " *
                        "Re-run the sweep to rebuild it.")
     ds.kind === :table ||
-        error("this dataset holds arrays, not rows — `ds[k]` for part k, then slice that part")
+        error(ds.kind === :group ?
+              "this dataset holds named variables, not one row space — `ds[:name]` picks one " *
+              "(`keys(ds)` lists them), and that is what you read rows or elements from" :
+              "this dataset holds arrays, not rows — `ds[k]` for part k, then slice that part")
     n = length(ds)
     (first(rows) >= 1 && last(rows) <= n) ||
         throw(BoundsError("rows $(rows) outside 1:$(n)"))
@@ -1660,8 +1712,76 @@ Base.getindex(ds::Dataset, rows::AbstractUnitRange, col::Symbol) = getindex(ds, 
 "Part `k` of an array dataset — a handle, not its contents."
 function Base.getindex(ds::Dataset, k::Integer)
     ds.kind === :array ||
-        error("this dataset is a table — `ds[rows]` reads rows; `ds.parts[$k]` is the raw part")
+        error("this dataset is a $(ds.kind) — " *
+              (ds.kind === :group ? "`ds[:name]` picks a variable, then `[k]` picks a part" :
+               "`ds[rows]` reads rows; `ds.parts[$k]` is the raw part"))
     return ds.parts[k]
+end
+
+"""
+    keys(ds) -> Vector{String}
+
+The variable names in a group dataset — what an adopted file held. Read off the index, so it costs
+nothing. Empty for a table or array dataset, which have one shape and so no names to choose between.
+"""
+Base.keys(ds::Dataset) =
+    ds.kind === :group && !isempty(ds.parts) ?
+    String[String(v["name"]) for v in get(ds.parts[1].index, "vars", Any[])] : String[]
+
+"""
+    ds[:sst] -> Dataset
+
+One variable of a group dataset, as an ordinary dataset. The whole point of the group being a
+namespace rather than a shape: what comes back is a normal `:array` or `:table`, so slicing,
+`scan`, chunk pruning and the transfer accounting are the same code they always were.
+
+The variable must be present in every landed unit — a sweep whose units wrote different variables
+is several datasets, not one, and is better adopted separately.
+"""
+function Base.getindex(ds::Dataset, var::Symbol)
+    ds.kind === :group ||
+        error("this dataset has one shape and no named variables — " *
+              (ds.kind === :array ? "`ds[k]` for part k" : "`ds[rows]` for rows"))
+    name = String(var)
+    parts = DatasetPart[]
+    for p in ds.parts
+        v = _group_var(p.index, name)
+        v === nothing && continue
+        idx = Dict{String,Any}(String(k) => vv for (k, vv) in v["index"])
+        push!(parts, DatasetPart(p.root, idx, p.params, Int(get(idx, "rows", 0)),
+                                 Int(get(idx, "bytes", 0)), p.label, p.src))
+    end
+    isempty(parts) && error("no variable `$(name)` here — this dataset holds " *
+                            (isempty(keys(ds)) ? "none" : join(keys(ds), ", ")))
+    length(parts) == length(ds.parts) ||
+        error("`$(name)` is in $(length(parts)) of $(length(ds.parts)) units — a variable that " *
+              "only some units wrote cannot be one dataset")
+    return Dataset(_ds_kind(parts[1].index), parts, ds.whole, ds.label, ds.purged)
+end
+
+"""
+    attributes(ds) -> Dict
+    attributes(ds, :sst) -> Dict
+
+What the adopted file said about itself: units, a calendar, a run id — whatever the format carried.
+Metadata is most of why a file format was chosen, so it is kept rather than dropped on the way in.
+"""
+attributes(ds::Dataset) =
+    isempty(ds.parts) ? Dict{String,Any}() :
+    Dict{String,Any}(get(ds.parts[1].index, "attrs", Dict{String,Any}()))
+function attributes(ds::Dataset, var::Symbol)
+    isempty(ds.parts) && return Dict{String,Any}()
+    v = _group_var(ds.parts[1].index, String(var))
+    v === nothing && error("no variable `$(var)` here — this dataset holds " * join(keys(ds), ", "))
+    return Dict{String,Any}(get(v, "attrs", Dict{String,Any}()))
+end
+
+"The dimension names of one variable, in the order the file stored them (empty when it named none)."
+function dimensions(ds::Dataset, var::Symbol)
+    isempty(ds.parts) && return String[]
+    v = _group_var(ds.parts[1].index, String(var))
+    v === nothing && error("no variable `$(var)` here — this dataset holds " * join(keys(ds), ", "))
+    return String[String(d) for d in get(v, "dims", String[])]
 end
 
 Base.show(io::IO, p::DatasetPart) =
@@ -1789,14 +1909,30 @@ _bytes(n::Integer) = n < 1024 ? "$(n) B" :
                      n < 1024^3 ? "$(round(n / 1024^2; digits = 1)) MB" :
                      "$(round(n / 1024^3; digits = 2)) GB"
 
-# A grouped summary comes back as a NamedTuple, so it reads the way it was written: a unit that
-# reported `(; loss, acc)` is asked for `row.summary.loss`.
-function _summary_of(m)
-    s = get(m, "summary", nothing)
+# A grouped value comes back as a NamedTuple, so it reads the way it was written: a unit that
+# reported `(; loss, acc)` is asked for `row.record.loss`.
+# `order` is the author's own field order when the manifest recorded one. Without it the fields come
+# back however the Dict hashed them, which is stable within a process and nothing more — so a
+# results table's columns moved between reads. Sorted otherwise, because arbitrary-but-fixed still
+# beats arbitrary.
+function _named(s, order = nothing)
     s isa AbstractDict || return s
-    ks = Tuple(Symbol.(collect(keys(s))))
-    return NamedTuple{ks}(Tuple(collect(values(s))))
+    ks = order isa AbstractVector ? String[String(k) for k in order if haskey(s, String(k))] :
+         sort!(String[String(k) for k in keys(s)])
+    for k in sort!(String[String(k) for k in keys(s)])
+        k in ks || push!(ks, k)          # anything the recorded order did not name still appears
+    end
+    return NamedTuple{Tuple(Symbol.(ks))}(Tuple(s[k] for k in ks))
 end
+
+# The unit's own return value, as recorded inline in its manifest. Present whenever the value was
+# small enough to carry; `nothing` for a unit whose result only exists as bytes.
+_record_of(m) = _named(get(m, "value", nothing), get(m, "value_keys", nothing))
+
+# The figure the progress chart plots. `summary =` when the author asked for one — which is how a
+# unit whose result is too large to record inline still reports a number — and otherwise the
+# recorded value itself, so a sweep that returns a couple of numbers charts without being told to.
+_summary_of(m) = _named(get(m, "summary", get(m, "value", nothing)))
 
 function _ref(root, m, src = LocalSource(root))
     bs = get(m, "bindings", Any[])
@@ -1812,29 +1948,123 @@ end
 
 # Manifest-only. Every field here is answered by a small TOML read, so watching a sweep — the
 # counters, the tiles, the chart — costs the same whether a unit returned a number or a gigabyte.
-# `value` is a handle; `summary` is the small number a unit recorded for charting.
+#
+# A unit's result appears in two forms, and the difference is the whole economy of this fabric:
+#
+#   record   what it RETURNED, inline — present whenever the value was small enough to carry.
+#            Free to read across every unit, so this is what a results table is built from.
+#   value    a HANDLE on the stored bytes. `row.value[]` fetches; reaching for it across a whole
+#            sweep is what the record exists to make unnecessary.
+#
+# `summary` is the figure the chart plots: `summary =` when the author asked for one, else the
+# record. It is additive — asking for a chart never narrows what the record holds.
+#
+# A row that FAILED carries its message and traceback in `value` — the same slot, because a unit
+# produced one thing or the other and `status` already says which. There is deliberately no second
+# `error` field to check: a reader that forgot it would silently treat a failure as an empty result.
 function _rows(root, params, keys, src = LocalSource(root))
     rows = NamedTuple[]
     for (prm, k) in zip(params, keys)
         m = MemoStore.read_manifest(root, k)
         if m === nothing
-            push!(rows, (; params = prm, status = "", value = nothing, summary = nothing,
-                           artifacts = ArtifactRef[], ran_on = "", ms = 0.0, bytes = 0,
+            push!(rows, (; params = prm, status = "", value = nothing, record = nothing,
+                           summary = nothing,
+                           artifacts = ArtifactRef[], ran_on = "", ms = 0.0, at = 0, bytes = 0,
                            stamp = ""))
             continue
         end
         st = String(get(m, "status", ""))
         val = st == "ok" ? _ref(root, m, src) : get(m, "error", nothing)
         push!(rows, (; params = prm, status = st, value = val,
+                       record = _record_of(m),
                        summary = _summary_of(m),
                        artifacts = _arts(root, m, src),
                        ran_on = String(get(m, "ran_on", "")),
                        ms = Float64(get(m, "ms", 0.0)),
+                       # WHEN this unit finished — the manifest is written the moment it does.
+                       # `ms` said how long it took and nothing said when, so a sweep could not
+                       # answer "is this yesterday's result?" without opening the store by hand.
+                       at = Int(get(m, "created", 0)),
                        bytes = st == "ok" ? Int(get(get(m, "shape", Dict()), "bytes", 0)) : 0,
                        # What this unit holds, for `landed_digest` — free while the manifest is open.
                        stamp = _unit_stamp(m)))
     end
     return rows
+end
+
+# ── The grid, as a table ─────────────────────────────────────────────────────────────────────
+# A sweep runs a body once per point of a grid and gets one thing back each time. The obvious view
+# of that is a table — a row per point, the parameters beside what came back — and it was the one
+# view the fabric did not have. `r.summaries` gave the values with the parameters detached;
+# `r.results` gave handles that cost a blob read each. Neither is the question anyone asks first.
+#
+# Built from `record`, so it is manifest-only: the same cost at four units and four million, and
+# never a route to "fetch everything" by accident.
+
+# A unit that returned a bare number has no field name to use, so its column is called this.
+const _TABLE_SCALAR = :result
+
+_table_cell(rec, k) =
+    rec === nothing ? missing :
+    rec isa NamedTuple ? (hasproperty(rec, k) ? getproperty(rec, k) : missing) :
+    (k === _TABLE_SCALAR ? rec : missing)
+
+# `Any[…]` → the narrowest element type that holds it, so a column of numbers is a numeric column
+# and a plot or a `sum` over it behaves.
+_narrow(col) = identity.(col)
+
+"""
+    table(r) -> NamedTuple of columns   (also `r.table`)
+
+The sweep as one row per grid point: the parameters, then whatever each unit returned, then
+`status`, `ms` and `ran_on`.
+
+The ROWS are the whole grid from the start — a point that has not landed is `missing` in the value
+columns, so the holes are where the work still is. The value COLUMNS cannot appear before the first
+unit reports, because nothing until then knows what they are called; a sweep with nothing landed is
+its parameters and `status`. A sweep whose values are all too large to record inline keeps that
+shape throughout, which is the honest answer rather than a column of nothing.
+
+Read from the manifests alone — asking for it never fetches a result. A unit whose value was too
+large to record inline shows `missing`; `row.value[]` is how that one is fetched, deliberately.
+
+A returned field that collides with a parameter name keeps both: the value column is suffixed
+`_result` rather than overwriting the parameter.
+"""
+function table(r::ShardedResult)
+    rows = getfield(r, :rows)
+    isempty(rows) && return NamedTuple()
+    pk = rows[1].params isa NamedTuple ? Symbol[k for k in keys(rows[1].params)] : Symbol[]
+    # Union over units in first-seen order, not just the first unit's: a body with a branch can
+    # report different fields per point, and dropping the later ones would lose data silently.
+    rk = Symbol[]
+    scalar = false
+    for row in rows
+        row.record === nothing && continue
+        if row.record isa NamedTuple
+            for k in keys(row.record); k in rk || push!(rk, k); end
+        else
+            scalar = true
+        end
+    end
+    scalar && !(_TABLE_SCALAR in rk) && pushfirst!(rk, _TABLE_SCALAR)
+    names = Symbol[]; cols = Any[]
+    for k in pk
+        push!(names, k)
+        push!(cols, _narrow(Any[row.params isa NamedTuple && hasproperty(row.params, k) ?
+                                getproperty(row.params, k) : missing for row in rows]))
+    end
+    for k in rk
+        push!(names, k in pk ? Symbol(k, "_result") : k)
+        push!(cols, _narrow(Any[_table_cell(row.record, k) for row in rows]))
+    end
+    push!(names, :status); push!(cols, String[row.status for row in rows])
+    push!(names, :ms);     push!(cols, Float64[row.ms for row in rows])
+    push!(names, :ran_on); push!(cols, String[row.ran_on for row in rows])
+    # WHEN, not just how long. A unit that has not run has no time rather than a 1970 one.
+    push!(names, :at)
+    push!(cols, _narrow(Any[row.at == 0 ? missing : Dates.unix2datetime(row.at) for row in rows]))
+    return NamedTuple{Tuple(names)}(Tuple(cols))
 end
 
 # What one unit's stored result IS, as a short string: the content hashes of whatever it wrote,
@@ -1999,6 +2229,106 @@ status_channel(run::AbstractString) = "sweep:" * String(run)
 "The channel the card's buttons call. Separate from status so a poll can never be a mutation."
 action_channel(run::AbstractString) = "sweep:" * String(run) * ":do"
 
+# ── What the job itself said ─────────────────────────────────────────────────────────────────
+# A unit's own failure is on its manifest, and `r.errors` reads it. But the failures that cost the
+# most time leave NO manifest: an out-of-memory kill, a walltime cut, a module that would not load,
+# a scheduler refusing the request. The unit never got far enough to record anything, so `r.errors`
+# is empty and the sweep reports `:exhausted` — "these outran their resources" — without being able
+# to show the sentence that says which resource.
+#
+# That sentence is in the scheduler's job output, which every launcher can already tail. Nothing
+# connected it to a sweep, so the one question a stuck run actually raises had no answer here.
+
+"The submissions covering this run, in a stable order. Read from the store's own job index."
+function run_jobs(target::SweepTarget, run::AbstractString)
+    root = store_root(target)
+    want = Set(BatchSweep.sweep_chunks(root, String(run)))
+    return sort!(String[nm for (nm, cs) in BatchSweep.known_submissions(root) if any(in(want), cs)])
+end
+run_jobs(r::ShardedResult) = run_jobs(getfield(r, :target), getfield(r, :run))
+
+"""
+    forget_run!(target, run) -> Int
+
+Release a run from the store — its shard manifests, chunk descriptors, submission records and its
+own descriptor. Returns how many manifests went; `MemoStore.gc` reclaims the blobs afterwards, since
+they are content-addressed and may be shared.
+
+Refuses a run that is ARMED: it may have jobs queued or running, and dropping the descriptors out
+from under them leaves work writing results into a store that no longer expects any. Cancel it
+first.
+"""
+function forget_run!(target::SweepTarget, run::AbstractString)
+    root = store_root(target)
+    BatchSweep.is_armed(root, String(run)) &&
+        error("sweep $(run) is armed — it may have work queued. `Sweep.cancel!` it first, " *
+              "then release it.")
+    n = BatchSweep.forget_sweep!(root, String(run))
+    sync_out!(target)
+    return n
+end
+forget_run!(r::ShardedResult) = forget_run!(getfield(r, :target), getfield(r, :run))
+
+# Every run this CELL minted that was never armed and has nothing landed, except the one just
+# written. Phrased as "every" rather than "the previous one" so it is idempotent and clears a
+# backlog that accumulated before the rule existed, not only the run immediately before this.
+function _forget_stale_runs(root::AbstractString, keep::AbstractString, cell::AbstractString)
+    isempty(cell) && return 0          # a run with no cell behind it is nobody's to collect
+    n = 0
+    # From the cell's own index, not a scan of the store: a store holds one manifest per UNIT, and
+    # this runs on every execution of a sweep cell.
+    for sw in BatchSweep.cell_runs(root, cell)
+        sw == keep && continue
+        try
+            BatchSweep.is_armed(root, sw) && continue
+            # Anything that RAN — even to a failure — has a manifest and is kept.
+            p = BatchSweep.plan(root, sw)
+            p.shards_done == 0 || continue
+            n += BatchSweep.forget_sweep!(root, sw)
+        catch
+            # A store we cannot read is not one to delete from.
+        end
+    end
+    return n
+end
+
+"""
+    logs(r::ShardedResult; lines = 200, job = "") -> String
+
+What the scheduler's job output says for this sweep — the last `lines` of each submission covering
+it, headed by job name. This is where a failure that left no manifest is explained: an OOM kill, a
+walltime cut, a prologue that failed. Empty when there is nothing to show.
+
+A deliberate fetch, not a property: for a cluster it is a round trip to the login node, so it
+happens when asked and never on the card's poll. `job =` narrows to one submission (`run_jobs(r)`
+lists them).
+
+    Sweep.logs(r)             # every job behind this sweep
+    Sweep.logs(r; lines = 20)
+"""
+logs(r::ShardedResult; kw...) = logs(getfield(r, :target), getfield(r, :run); kw...)
+
+function logs(t::SweepTarget, run::AbstractString; lines::Integer = 200,
+              job::AbstractString = "")
+    names = isempty(job) ? run_jobs(t, run) : String[String(job)]
+    isempty(names) && return ""
+    l = launcher_for(t)
+    root = job_root(t)
+    io = IOBuffer()
+    for nm in names
+        txt = try
+            BatchLauncher.logs(l, root, nm; lines = Int(lines))
+        catch e
+            # One unreachable job must not hide the others: a partly-readable answer beats none.
+            "… could not read this job's output: " * first(sprint(showerror, e), 160)
+        end
+        isempty(strip(txt)) && continue
+        println(io, "── ", nm, " ──")
+        println(io, rstrip(txt))
+    end
+    return String(take!(io))
+end
+
 """
     handle_action(target, run, params, keys, action; plot = nothing) -> payload
 
@@ -2021,6 +2351,19 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
     if action == "settled"
         notify === nothing || notify()
         return status_payload(target, run, params, keys; plot, advance = false)
+    end
+    # Also not a mutation — and deliberately only on request. For a cluster this is a round trip to
+    # the login node, so it must never ride the poll: a card left open on a finished sweep would be
+    # tailing files over ssh every thirty seconds for the rest of the session.
+    if action == "logs"
+        out = status_payload(target, run, params, keys; plot, advance = false)
+        txt = try
+            logs(target, run)
+        catch e
+            "could not read the job output: " * first(sprint(showerror, e), 200)
+        end
+        out["logs"] = _logs_html(txt)
+        return out
     end
     if action == "submit"
         BatchSweep.arm!(root, run)
@@ -2109,7 +2452,8 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         "color" => get(_STATE_COLOR, _ds, "var(--dim,#6a7090)"),
         # The controls that apply RIGHT NOW, so the card's buttons track its state instead of
         # freezing at whatever was true when the cell last ran.
-        "actions" => [Any[a, l] for (a, l) in action_list(p, armed)],
+        "actions" => [Any[a, l] for (a, l) in
+                      action_list(p, armed; jobs = !isempty(run_jobs(target, run)))],
         # Why it stopped. Carried on every poll because a sweep that blocks WHILE being watched
         # must explain itself then, not only if someone happens to re-run the cell afterwards.
         "why" => _signin_html(target) * _why_html(p),
@@ -2134,69 +2478,95 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # cannot disagree with the numbers beside it.
     # The failure list rides it too, for the same reason as `why` — and off the same rows the chart
     # already needs, so watching a failing sweep costs no extra manifest reads.
+    # These keys are ALWAYS present, even when the answer is "nothing". A payload that can only ADD
+    # a chart can never take one away: after a Reset the units are gone, the option is `nothing`, the
+    # key was simply omitted — and the card went on showing a chart of results that no longer exist.
+    # `nothing` here is an explicit null on the wire, which the card reads as "clear it".
     if plot !== false || p.shards_failed > 0
         rows = _rows(root, params, keys, source_of(target))
-        if plot !== false
-            opt, err = _plot_option(plot, rows)
-            opt === nothing || (out["chart"] = opt)
-            isempty(err) || (out["charterr"] = err)
-        end
+        opt, err = plot === false ? (nothing, "") : _plot_option(plot, rows)
+        out["chart"] = opt
+        out["charterr"] = err
         out["fails"] = _fails_html(rows)
+    else
+        out["chart"] = nothing
+        out["charterr"] = ""
+        out["fails"] = ""
     end
     return out
 end
 
 # ── The chart you get without asking ─────────────────────────────────────────────────────────
-# A unit that returns a NUMBER over a single varying numeric axis has exactly one sensible plot,
-# and making someone write it out is the ad-hoc wiring this fabric exists to remove.
+# A `paramgrid` is a product of axes, so the shapes a sweep actually produces are few and each has
+# one right picture: a number over ONE varying numeric axis is a line; over TWO it is a heatmap.
+# Making someone write those out is the ad-hoc wiring this fabric exists to remove.
 #
-# Anything less clear-cut draws nothing rather than guessing. A default chart that picks the wrong
-# axis, or silently collapses one of two, is worse than no chart at all: it looks authoritative.
-# `plot = false` turns it off; `plot = f` replaces it.
+# The earlier rule declined at two axes, reasoning that a line would silently project one of them
+# away. True of a line, and the wrong conclusion: the ambiguity was never WHICH axis, it was which
+# CHART, and for two numeric axes and one numeric field there is no ambiguity. Declining there meant
+# the default gave up on the most common shape a grid can have.
+#
+# Three or more varying axes still declines, and that one is real: collapsing an axis means choosing
+# a reduction (a mean over replications, a slice at one value), and which is the author's claim to
+# make. `plot = false` turns it off; `plot = f` replaces it.
 
 # One tile per unit stays flat however large a sweep gets, but a line does not — and neither does
 # the payload carrying it. Past this many units the grid IS the right view.
 const _AUTO_PLOT_MAX = 2000
 
-# The single grid axis that is numeric AND actually varies. Two varying axes mean a line chart would
-# silently project one of them away, so the default declines and the author says what they meant.
-function _auto_axis(rows)
-    isempty(rows) && return nothing
+# The default heatmap's colour scale: one hue, stepped for a DARK chart surface, so low values
+# recede and high ones read brightest. The low end deliberately stops short of the surface rather
+# than fading into it — on a heatmap a blank cell means "not run yet", and a lowest-value cell that
+# recedes to the background would be indistinguishable from one that has not reported.
+# (Validated as a sequential ramp against this surface: monotone lightness, visible step gaps,
+# single hue, low end 2.66:1.)
+const _AUTO_HEAT_COLORS = ["#1c5cab", "#2a78d6", "#5598e7", "#86b6ef", "#b7d3f6"]
+
+# The grid axes that are numeric AND actually vary, in grid order.
+function _auto_axes(rows)
+    isempty(rows) && return Symbol[]
     p1 = rows[1].params
-    p1 isa NamedTuple || return nothing
+    p1 isa NamedTuple || return Symbol[]
     found = Symbol[]
     for k in keys(p1)
         vals = Any[]
         for r in rows
-            hasproperty(r.params, k) || return nothing
+            hasproperty(r.params, k) || return Symbol[]
             push!(vals, getproperty(r.params, k))
         end
         all(v -> v isa Real, vals) || continue
         length(unique(vals)) > 1 && push!(found, k)
     end
-    return length(found) == 1 ? found[1] : nothing
+    return found
+end
+
+# The one numeric field to plot: a bare number is itself; a grouped record plots only when exactly
+# ONE of its fields is numeric, because with several, which one is the author's business.
+function _auto_field(landed)
+    all(r -> r.summary isa Real, landed) && return (true, nothing)
+    s1 = landed[1].summary
+    s1 isa NamedTuple || return (false, nothing)
+    nums = [k for k in keys(s1) if getproperty(s1, k) isa Real]
+    length(nums) == 1 || return (false, nothing)
+    f = nums[1]
+    all(r -> r.summary isa NamedTuple && hasproperty(r.summary, f) &&
+             getproperty(r.summary, f) isa Real, landed) || return (false, nothing)
+    return (true, f)
 end
 
 function _auto_plot(rows)
     (isempty(rows) || length(rows) > _AUTO_PLOT_MAX) && return nothing
-    ax = _auto_axis(rows)
-    ax === nothing && return nothing
+    axes = _auto_axes(rows)
+    length(axes) in (1, 2) || return nothing
     landed = [r for r in rows if r.status == "ok"]
     isempty(landed) && return nothing
-    # A bare number plots as itself. A grouped summary plots only when ONE of its fields is numeric;
-    # with several, which one is the author's business.
-    field = nothing
-    if !all(r -> r.summary isa Real, landed)
-        s1 = landed[1].summary
-        s1 isa NamedTuple || return nothing
-        nums = [k for k in keys(s1) if getproperty(s1, k) isa Real]
-        length(nums) == 1 || return nothing
-        field = nums[1]
-        all(r -> r.summary isa NamedTuple && hasproperty(r.summary, field) &&
-                 getproperty(r.summary, field) isa Real, landed) || return nothing
-    end
-    yof(r) = r.status != "ok" ? nothing :
+    okf, field = _auto_field(landed)
+    okf || return nothing
+    zof(r) = r.status != "ok" ? nothing :
              field === nothing ? r.summary : getproperty(r.summary, field)
+    length(axes) == 2 && return _auto_heatmap(rows, axes, field, zof)
+    ax = axes[1]
+    yof = zof
     # `nothing` for a unit that has not reported: the axis is then fixed from the first frame and the
     # line breaks at the real gaps, so the picture only gains detail instead of changing shape.
     return Dict{String,Any}(
@@ -2215,6 +2585,48 @@ function _auto_plot(rows)
         "series"  => [Dict("type" => "line", "showSymbol" => true, "symbolSize" => 4,
                            "connectNulls" => false,
                            "data" => [[getproperty(r.params, ax), yof(r)] for r in rows])])
+end
+
+# Two varying axes: the grid itself, coloured by the reported figure. Categorical axes over the
+# SORTED DISTINCT values of each, so the cells are evenly spaced however the axis is distributed —
+# a log-spaced sweep is the normal case and a value axis would crowd every point but the last into
+# one corner. A unit that has not reported contributes no cell, so the picture fills in rather than
+# changing shape, and the empty squares are where the work still is.
+function _auto_heatmap(rows, axes, field, zof)
+    xs = sort!(unique(Real[getproperty(r.params, axes[1]) for r in rows]))
+    ys = sort!(unique(Real[getproperty(r.params, axes[2]) for r in rows]))
+    xi = Dict(v => i - 1 for (i, v) in enumerate(xs))
+    yi = Dict(v => i - 1 for (i, v) in enumerate(ys))
+    data = Any[]
+    lo = Inf; hi = -Inf
+    for r in rows
+        z = zof(r)
+        z === nothing && continue
+        push!(data, Any[xi[getproperty(r.params, axes[1])], yi[getproperty(r.params, axes[2])], z])
+        lo = min(lo, z); hi = max(hi, z)
+    end
+    isempty(data) && return nothing
+    # One landed unit gives a degenerate scale; widen it so the single cell is drawn rather than
+    # falling outside a zero-width range.
+    lo == hi && (lo -= 0.5; hi += 0.5)
+    return Dict{String,Any}(
+        "backgroundColor" => "transparent", "animation" => false,
+        "grid"    => Dict("left" => 10, "right" => 64, "top" => 24, "bottom" => 6,
+                          "containLabel" => true),
+        "tooltip" => Dict("position" => "top"),
+        "xAxis"   => Dict("type" => "category", "data" => xs, "name" => String(axes[1]),
+                          "nameLocation" => "middle", "nameGap" => 26,
+                          "splitArea" => Dict("show" => false)),
+        "yAxis"   => Dict("type" => "category", "data" => ys, "name" => String(axes[2]),
+                          "nameLocation" => "middle", "nameGap" => 52,
+                          "splitArea" => Dict("show" => false)),
+        "visualMap" => Dict("min" => lo, "max" => hi, "calculable" => true,
+                            "orient" => "vertical", "right" => 4, "top" => "middle",
+                            "text" => field === nothing ? nothing : [String(field), ""],
+                            "textStyle" => Dict("color" => "#6a7090"),
+                            "inRange" => Dict("color" => _AUTO_HEAT_COLORS)),
+        "series"  => [Dict("type" => "heatmap", "progressive" => 0,
+                           "itemStyle" => Dict("borderWidth" => 0), "data" => data)])
 end
 
 # The author's plot function, applied to EVERY unit in grid order — landed or not, each row
@@ -2442,6 +2854,21 @@ function _why_html(p::BatchSweep.Plan)
     return ""
 end
 
+# The job's own output, fetched on request. Open by default — nobody presses Logs and then wants to
+# press something else to see them — and scrollable, because the interesting line on a killed job is
+# the last one.
+function _logs_html(txt::AbstractString)
+    s = strip(String(txt))
+    isempty(s) && return string("<div style='margin-top:8px;font-size:12px;opacity:.6'>",
+                                "No job output yet. A scheduler writes it when the job starts, and ",
+                                "PBS only copies it back when the job ends.</div>")
+    return string("<details open style='margin-top:8px'><summary style='cursor:pointer;",
+                  "font-size:12px;opacity:.8'>job output</summary>",
+                  "<pre style='max-height:260px;overflow:auto;margin:6px 0 0;font-size:11px;",
+                  "white-space:pre-wrap;opacity:.8;font-family:ui-monospace,monospace'>",
+                  _esc(s), "</pre></details>")
+end
+
 # The failed units, collapsed. The parameters matter more than the traceback at a glance, so they
 # lead: the question is almost always "which corner of the grid breaks?" rather than "how?".
 const _FAILS_SHOWN = 50
@@ -2556,6 +2983,9 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     print(io, "<div data-sw='data'>", _data_html(r.dataset), "</div>")
     println(io, "<div data-sw='why'>", _why_html(p), "</div>")
     println(io, "<div data-sw='fails'>", _fails_html(getfield(r, :rows)), "</div>")
+    # Empty at render and filled only by the Logs button. The poll never carries this key, so what
+    # was fetched stays put instead of being cleared by the next tick.
+    println(io, "<div data-sw='logs'></div>")
 
     _actions(io, r)
     _live_script(io, r)
@@ -2578,7 +3008,7 @@ end
 display_state(p::BatchSweep.Plan, armed::Bool) =
     (!armed && p.state === :pending) ? :ready : p.state
 
-function action_list(p::BatchSweep.Plan, armed::Bool = true)
+function action_list(p::BatchSweep.Plan, armed::Bool = true; jobs::Bool = false)
     st = display_state(p, armed)
     acts = Tuple{String,String}[]
     if st === :ready
@@ -2591,6 +3021,11 @@ function action_list(p::BatchSweep.Plan, armed::Bool = true)
         push!(acts, ("resume", "Resume"))
     end
     p.shards_failed > 0 && push!(acts, ("retry", "Retry $(p.shards_failed) failed"))
+    # What the JOB said, as opposed to what a unit recorded. Offered exactly when a submission is on
+    # record, because that is when an output file exists to read — and it is the ONLY account of a
+    # failure that left no manifest, which is the state (`:exhausted`) where the card otherwise has
+    # nothing to show but a count.
+    jobs && push!(acts, ("logs", "Logs"))
     # Reset is available the moment there is anything to throw away — finished units, submission
     # history, or work in flight. Offering it only once a sweep had settled stranded the case you
     # most want out of: a long run that is half done and going wrong. It is confirmed in the browser
@@ -2608,7 +3043,8 @@ function _actions(io, r::ShardedResult)
     # The container is emitted even when empty: the live script repopulates it, and a card that
     # rendered with nothing to offer must still be able to grow a Retry when a unit fails.
     print(io, "<div data-sw='acts' style='display:flex;gap:6px;margin-top:10px'>")
-    for (act, label) in action_list(r.plan, BatchSweep.is_armed(store_root(r.target), r.run))
+    for (act, label) in action_list(r.plan, BatchSweep.is_armed(store_root(r.target), r.run);
+                                    jobs = !isempty(run_jobs(r)))
         print(io, "<button data-sw-do='", act, "' style='", _BTN_STYLE, "'>", _esc(label), "</button>")
     end
     println(io, "</div>")
@@ -2676,13 +3112,36 @@ function _live_script(io, r::ShardedResult)
       // points already drawn, which is what makes a sweep look like it is FILLING rather than
       // redrawing. Slate's own runtime supplies the themed instance, so it matches every other
       // chart in the notebook and follows a theme switch.
+      var chartSig = "";
+      function sigOf(opt){
+        try { return (opt.series || []).map(function(x){ return x.type || ""; }).join(","); }
+        catch (e) { return ""; }
+      }
       function drawChart(opt){
         var el = root.querySelector('[data-sw="chart"]');
         if (!el || !opt || !window.echarts) return;
+        // Reveal BEFORE init. ECharts measures its container, and an instance created inside a
+        // `display:none` div has zero size and draws nothing — so a card that rendered with no
+        // landed units (hidden, because the automatic plot cannot know its shape until one
+        // reports) stayed blank even once a poll had a chart for it, until the cell was re-run.
+        if (el.style.display === "none") el.style.display = "";
         if (!chart) {
           chart = window.chartRuntime ? window.chartRuntime.init(el) : window.echarts.init(el);
         }
-        try { chart.setOption(opt, { notMerge: false, lazyUpdate: true }); } catch (e) {}
+        // Merge while the SHAPE is unchanged, so a filling sweep animates from the points already
+        // drawn. When the series change kind — a line becoming a heatmap once a second axis starts
+        // varying — merging would leave both on screen, so that case replaces instead.
+        var sig = sigOf(opt);
+        try { chart.setOption(opt, { notMerge: sig !== chartSig, lazyUpdate: true }); } catch (e) {}
+        chartSig = sig;
+      }
+      // Nothing left to draw — after a Reset, most obviously. Said with an explicit null rather
+      // than an absent key, because a payload that can only ADD a chart can never take one away.
+      function clearChart(){
+        var el = root.querySelector('[data-sw="chart"]');
+        if (chart) { try { chart.clear(); } catch (e) {} }
+        if (el) el.style.display = "none";
+        chartSig = "";
       }
       function paint(s){
         last = s;
@@ -2693,13 +3152,16 @@ function _live_script(io, r::ShardedResult)
           window.slateSweeps.report("$(id)", cell ? cell.dataset.cid : "", s);
         }
         if (s.chart) drawChart(s.chart);
+        else if (s.chart === null) clearChart();
         var ce = root.querySelector('[data-sw="charterr"]');
         if (ce) ce.textContent = s.charterr || "";
         syncActions(s.actions);
         // Why it stopped, and which units failed. Rendered by Julia and swapped in whole, so the
         // browser holds no second copy of this markup to drift from the cell's own render. Only on
         // CHANGE, so an open <details> is not collapsed underneath the reader on every poll.
-        ["why", "fails", "data"].forEach(function(k){
+        // `logs` is in the list but never in a POLL payload — only the Logs button's reply carries
+      // it, so a fetched tail stays on screen instead of being wiped by the next tick.
+      ["why", "fails", "data", "logs"].forEach(function(k){
           var el = root.querySelector('[data-sw="' + k + '"]');
           if (!el || s[k] === undefined) return;
           if (el.dataset.h !== s[k]) { el.dataset.h = s[k]; el.innerHTML = s[k]; }
@@ -2874,12 +3336,24 @@ function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
     isempty(hosts) || println(io, "   ran on: ", join(first(hosts, 6), ", "),
                               length(hosts) > 6 ? " (+$(length(hosts) - 6) more)" : "")
 
+    # WHEN, which nothing said before. "4/4 succeeded" reads the same for a run that finished a
+    # minute ago and one from last month, and those call for different things.
+    ats = [row.at for row in getfield(r, :rows) if row.at > 0]
+    if !isempty(ats)
+        lo, hi = extrema(ats)
+        stamp(u) = Dates.format(Dates.unix2datetime(u) + _localoffset(), "yyyy-mm-dd HH:MM:SS")
+        age = _dur(max(0.0, time() - hi))
+        println(io, "   ", lo == hi ? stamp(hi) : string(stamp(lo), " → ", stamp(hi)),
+                "  (", age, " ago)")
+    end
+
     idle = BatchSweep.stalled_for(t)
     idle > 0 && println(io, "   ⚠ nothing has finished in $(_dur(idle)) — it may be stuck.")
 
     if p.state === :blocked
         println(io, "   🛑 $(p.blocked)")
         println(io, "   Nothing further will be submitted. Fix the body, then `Sweep.reset!(r)`.")
+        println(io, "   `Sweep.logs(r)` shows what the job itself printed.")
     elseif p.state === :cancelled
         println(io, "   Stopped at your request. $(p.shards_done) finished units are kept — ",
                     "`Sweep.resume!(r)` continues with the remaining $(p.shards_missing).")
@@ -2888,10 +3362,101 @@ function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
     elseif p.state === :exhausted
         println(io, "   Attempted $(BatchSweep.MAX_ATTEMPTS)× without landing, so these units are ",
                     "outrunning their resources rather than erroring.")
-        println(io, "   Raise the walltime or memory, then `Sweep.reset!(r)`.")
+        # These units left no manifest, so there is no error to read: the kill message exists only
+        # in the job's own output. Pointing at it is the difference between a diagnosis and a guess
+        # about which resource ran out.
+        println(io, "   `Sweep.logs(r)` shows the kill message. Raise the walltime or memory, ",
+                    "then `Sweep.reset!(r)`.")
     elseif p.state !== :succeeded
         println(io, "   re-run this cell to refresh.")
     end
+
+    _text_results(io, r)
+    return nothing
+end
+
+# ── The sweep in words ───────────────────────────────────────────────────────────────────────
+# A sweep cell renders as an HTML card, and in a notebook the richer MIME always wins — so the
+# `text/plain` form, which is what a terminal, a log, a standalone `julia notebook.jl` run and a
+# copy-paste into a message all need, was written and then unreachable.
+#
+# One renderer, two surfaces: `show(::MIME"text/plain")` and `text(r)` are the same function, so
+# there is no second version of the truth to drift.
+
+const _TEXT_ROWS = 12
+
+# The results table, aligned, first rows only. Manifest-only like everything else here.
+function _text_results(io, r::ShardedResult)
+    tb = try; table(r); catch; NamedTuple(); end
+    (isempty(tb) || isempty(first(tb))) && return nothing
+    cols = collect(keys(tb))
+    n = length(first(tb))
+    shown = min(n, _TEXT_ROWS)
+    # A cell is one value, not a place for a paragraph: a unit can record a short string, and one
+    # long one would otherwise set the width of the whole column.
+    cell(v) = v === missing ? "—" :
+              v isa AbstractFloat ? string(round(v; sigdigits = 5)) :
+              (s = string(v); length(s) > 24 ? first(s, 21) * "…" : s)
+    body = [[cell(tb[c][i]) for c in cols] for i in 1:shown]
+    w = [max(length(String(cols[j])), maximum(length(row[j]) for row in body; init = 0))
+         for j in eachindex(cols)]
+    println(io)
+    println(io, "   ", join((rpad(String(cols[j]), w[j]) for j in eachindex(cols)), "  "))
+    for row in body
+        println(io, "   ", join((rpad(row[j], w[j]) for j in eachindex(cols)), "  "))
+    end
+    n > shown && println(io, "   … and ", n - shown, " more rows — `r.table` for all of them")
+    return nothing
+end
+
+"""
+    text(r) -> String
+
+The sweep as plain text: state, progress, timing, and the first rows of `r.table`. The same
+rendering `show` produces, returned as a String — because in a notebook the HTML card wins the MIME
+negotiation, so the text form has no way to reach the screen on its own.
+
+    println(Sweep.text(r))
+
+Useful anywhere HTML is not: a terminal, a log line, a standalone `julia notebook.jl` run, or a
+paste into a message.
+"""
+text(r::ShardedResult) = sprint((io, x) -> show(io, MIME"text/plain"(), x), r)
+
+# The COMPACT form: `@show`, an element of a vector, an interpolation into an error. Julia's default
+# for a struct is a dump of every field, and one of this struct's fields is every ROW — so `@show r`
+# on a real sweep printed the whole grid, parameters and handles and all, because someone wanted one
+# line. `ShardRef` and `Dataset` both define this; the thing holding thousands of them did not.
+# Manifests record unix time, which is UTC. A reader wants the clock on their own wall, and the
+# hub may not be in the same zone as the cluster that wrote the stamp.
+_localoffset() = Dates.Millisecond(round(Int, 1000 * (Dates.datetime2unix(Dates.now()) -
+                                                     Dates.datetime2unix(Dates.now(Dates.UTC)))))
+
+"Where a sweep runs, in one word — `local`, or the scheduler and the login node it goes through."
+_target_label(::LocalTarget) = "local"
+_target_label(t::ClusterTarget) = isempty(t.host) ? String(t.kind) : string(t.kind, "@", t.host)
+
+function Base.show(io::IO, r::ShardedResult)
+    p, tel = getfield(r, :plan), getfield(r, :telemetry)
+    tgt = getfield(r, :target)
+    # `is_armed` is one file check, but `show` is called from places that must never throw — an
+    # error message, a logging call, a store that has gone away underneath.
+    st = try
+        display_state(p, BatchSweep.is_armed(store_root(tgt), getfield(r, :run)))
+    catch
+        p.state
+    end
+    # Everything below is already in the struct — the rows, the plan, the telemetry — so a one-line
+    # form costs no reads. What it says is what someone glancing at a binding wants: how far along,
+    # how much it is holding, where it ran, and when it will be done if it is not.
+    b = sum(row.bytes for row in getfield(r, :rows); init = 0)
+    print(io, "ShardedResult(", first(getfield(r, :key), 12), ", ", st, ", ",
+          p.shards_done, "/", p.shards_total,
+          p.shards_failed > 0 ? " ✗$(p.shards_failed)" : "")
+    b > 0 && print(io, ", ", _bytes(b))
+    print(io, " on ", _target_label(tgt))
+    st === :running && tel.eta_s >= 0 && print(io, ", ~", _dur(tel.eta_s), " left")
+    print(io, ")")
 end
 
 # ── The sweep itself ─────────────────────────────────────────────────────────────────────────
@@ -2949,7 +3514,16 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
                                summary_src = summary_src, lazy = lazy)
         push!(chunks, ck)
     end
-    BatchSweep.write_sweep!(root, run, chunks)
+    BatchSweep.write_sweep!(root, run, chunks; cell = String(cell))
+    # At most ONE unarmed run per cell. A run is keyed by body + setup + captures + grid, so every
+    # edit to any of them mints a new one — and the old one, which nobody ever asked to run, is left
+    # behind holding a blob per parameter point. An afternoon of adjusting a constant leaves a store
+    # full of descriptors for work that was never requested.
+    #
+    # Arming is the line, and it is the right one: an armed run may have jobs queued even with
+    # nothing landed, so it survives. Anything that ran — even to a failure — has a manifest and
+    # survives too. What goes is only ever a run nobody asked for that did nothing.
+    _forget_stale_runs(root, run, String(cell))
     # The job cannot start without its descriptors, so they go over BEFORE anything is submitted.
     sync_out!(target)
 
@@ -3014,8 +3588,10 @@ end
 # Free names in the body that are bound in the calling module and look like DATA. These travel with
 # the sweep as serialized captures.
 #
-# Functions, modules, and types are deliberately excluded: a compute node cannot revive a function
-# value, only source. Helpers therefore belong in `setup=`, which travels as text.
+# Functions, modules and types are excluded HERE because a compute node cannot revive a function
+# value, only source — so they take the other route: `_helper_defs` finds the cell that defined one
+# and ships its text through `setup_src`. Writing them out by hand in `setup =` still works and is
+# what a definition with no notebook cell behind it needs.
 # Lift `using` / `import` out of a body, returning them and what is left. They are legal to WRITE
 # there — the parser accepts them anywhere — but not to run: a closure cannot carry an import, and a
 # module wants loading once per process rather than once per unit.
@@ -3156,6 +3732,99 @@ function _collect_captures(mod::Module, names, param::Symbol)
     return caps
 end
 
+# ── Helpers the notebook defined ─────────────────────────────────────────────────────────────
+# A function or struct cannot travel as a VALUE — a compute node has no way to revive one — so what
+# travels is its SOURCE. `setup =` has always been the manual way to say that. This finds it
+# instead: a name the body calls, which resolves to a function the NOTEBOOK defined, is looked up
+# to the cell that defined it and that definition's text is folded into the setup.
+#
+# Going through `setup_src` rather than some new channel is the whole reason this is safe. The setup
+# is digested into the sweep key, so editing a helper RE-KEYS the sweep — exactly as editing the
+# body does — instead of quietly serving results computed by a version of the code that no longer
+# exists. It also means a definition ships once per chunk rather than once per unit.
+#
+# Two facts make the lookup possible, and neither is new: a cell is evaluated under the filename
+# `cell:<id>`, so a method defined there records that in `Method.file`; and `_eval_cell_source`
+# keeps each cell's top-level statements under that same key (`__slate_cell_stmts`). A function
+# from a package has no `cell:` file and is left alone — it is already installed where the unit runs.
+
+# Does this top-level statement define `name`? `_def_name` already unwraps the forms a definition
+# arrives in (short form, `function`, `where`, return-typed, `struct`, `const`, `macro`, and the
+# docstring / `@inline` macrocall wrappers).
+_stmt_defines(ex, name::Symbol) = _def_name(ex) == String(name)
+
+"""
+    _helper_defs(mod, names, param) -> (src, extra_names)
+
+Source for every notebook-defined function, macro or type the body reaches, transitively, and the
+DATA names those definitions themselves read — which have to travel as captures like any other.
+
+The `using`/`import` lines of any cell a definition came from travel too. A helper is not
+self-contained without them, and the author already wrote them next to it; requiring the sweep body
+to restate the imports its helpers need would make this work only for helpers that need none. Only
+cells actually drawn from are read, so an unrelated cell's plotting import is not shipped — but a
+cell that imports something heavy for its OTHER statements will send that too, which is a reason to
+keep a helper cell to its helpers.
+
+Deterministic by construction: the sweep key digests this text, so an ordering that depended on
+hash iteration would re-key the sweep at random and orphan every result it holds.
+"""
+function _helper_defs(mod::Module, names, param::Symbol)
+    isdefined(mod, :__slate_cell_stmts) || return ("", Symbol[])
+    stmts = try; getfield(mod, :__slate_cell_stmts); catch; return ("", Symbol[]); end
+    found = Tuple{String,String,Int,String}[]      # (name, cell file, position, source)
+    used = Set{String}()                           # cells at least one definition came from
+    extra = Set{Symbol}()
+    done = Set{Symbol}([param])
+    queue = sort!(Symbol[n for n in names]; by = String)
+    while !isempty(queue)
+        n = popfirst!(queue)
+        n in done && continue
+        push!(done, n)
+        isdefined(mod, n) || continue
+        v = try; getfield(mod, n); catch; continue; end
+        (v isa Function || v isa Type) || continue
+        files = try
+            sort!(unique(String[String(m.file) for m in methods(v)]))
+        catch
+            String[]
+        end
+        for file in files
+            startswith(file, "cell:") || continue
+            for (i, s) in enumerate(get(stmts, file, String[]))
+                ex = try; Meta.parse(s); catch; continue; end
+                _stmt_defines(ex, n) || continue
+                # Shipped VERBATIM. The recorded statement is already the author's own text (see
+                # `stmt_texts`), which is both what has to arrive on the compute node and what keeps
+                # the sweep key stable — source carries no line numbers to shift.
+                push!(found, (String(n), file, i, s))
+                push!(used, file)
+                # What the definition itself reads: helpers it calls (chased in turn) and data it
+                # closes over. `_capture_names` binds the definition's own name and parameters, so
+                # only genuinely free names come back.
+                for m in _capture_names(ex, param)
+                    m in done || push!(queue, m)
+                    push!(extra, m)
+                end
+            end
+        end
+        sort!(queue; by = String)
+    end
+    sort!(found)
+    # Imports first: a definition below may need them, and a module wants loading once per chunk.
+    src = String[]
+    for file in sort!(collect(used)), s in get(stmts, file, String[])
+        ex = try; Meta.parse(s); catch; continue; end
+        (ex isa Expr && ex.head in (:using, :import)) || continue
+        s in src || push!(src, s)
+    end
+    for f in found; f[4] in src || push!(src, f[4]); end
+    return (join(src, "\n"), sort!(collect(extra); by = String))
+end
+
+# Imports, then the helpers they may need, then what the author wrote, then a `script =` file.
+_join_setup(parts...) = join(Iterators.filter(!isempty, (strip(String(p)) for p in parts)), "\n")
+
 """
     _script_src(mod, path) -> String
 
@@ -3193,13 +3862,21 @@ The body travels as SOURCE, so it must be self-contained apart from:
 
   * plain data from the notebook, which is captured and serialized automatically;
   * `using` / `import`, written in the body and lifted out to run once per chunk; and
-  * helper definitions, which go in `setup = begin … end` — a function value cannot be revived on a
-    compute node, so helpers travel as code too.
+  * functions, macros and types the NOTEBOOK defines — the cell that defined one is found and its
+    source travels with the sweep, transitively, so an ordinary helper cell just works:
 
-    @sweep(paramgrid(β = 0:0.1:2), hpc) do p
-        using MyPkg
-        MyPkg.simulate(p)
-    end
+        # one cell
+        stress(p) = p.β^2 / (1 + p.β)
+
+        # another
+        @sweep(paramgrid(β = 0:0.1:2), hpc) do p
+            using MyPkg
+            MyPkg.simulate(stress(p))
+        end
+
+    Editing that helper re-keys the sweep, exactly as editing the body does — it is part of what
+    computed the results, so it is part of their identity. `setup = begin … end` still takes
+    definitions written out by hand, which is what something with no cell behind it needs.
 
 Re-running the cell is a reconcile: whatever has landed is kept, only what is missing is submitted.
 Editing the body makes it a different sweep.
@@ -3273,16 +3950,15 @@ macro sweep(args...)
     # What the shard module needs before the body runs: the imports lifted out of the body, then
     # anything `setup` adds. `setup` takes Julia — a `begin … end` of helper definitions — rather
     # than a string, so it is parsed, highlighted and indented like the code it is.
-    setup_lines = [string(im) for im in imports]
+    imports_src = join([string(im) for im in imports], "\n")
+    user_setup = ""
     if haskey(opts, :setup)
         e = opts[:setup]
-        push!(setup_lines,
-              e isa AbstractString ? String(e) :                          # already source
-              (e isa Expr && e.head in (:block, :quote)) ?
-                  string(_strip_lines(e.head === :quote ? e.args[1] : e)) :
-                  string(_strip_lines(e)))
+        user_setup = e isa AbstractString ? String(e) :                   # already source
+                     (e isa Expr && e.head in (:block, :quote)) ?
+                         string(_strip_lines(e.head === :quote ? e.args[1] : e)) :
+                         string(_strip_lines(e))
     end
-    setup = join(setup_lines, "\n")
     # `summary` runs on the COMPUTE NODE, so like the body it travels as source. Given a one-argument
     # function it is stringified whole; given an expression it is wrapped as `v -> …`, so
     # `summary = sum(abs2, v)` reads the way it should.
@@ -3293,8 +3969,12 @@ macro sweep(args...)
     end
 
     quote
-        local _names = $(QuoteNode(collect(names)))
-        local _caps = $(Sweep)._collect_captures(@__MODULE__, _names, $(QuoteNode(param)))
+        local _names = $(QuoteNode(sort!(collect(names); by = String)))
+        # A helper the notebook defined travels as SOURCE, folded into the setup — so it ships AND
+        # re-keys the sweep when it is edited. Its own free data names join the captures.
+        local _helpers = $(Sweep)._helper_defs(@__MODULE__, _names, $(QuoteNode(param)))
+        local _caps = $(Sweep)._collect_captures(@__MODULE__, vcat(_names, _helpers[2]),
+                                                 $(QuoteNode(param)))
         # `slate_on` is injected into a notebook's namespace, so it is reachable from here and
         # nowhere else. Picking it up automatically is what lets a sweep cell be live without the
         # author registering anything.
@@ -3322,8 +4002,9 @@ macro sweep(args...)
                            :($(Sweep)._script_src(@__MODULE__, $(esc(script)))))
         $(Sweep).run_sweep($(Sweep).resolve_target($(esc(target)), _attrs, _clusters),
                            collect($(esc(grid))), $body_src;
-                           setup_src = isempty(_sscript) ? $setup :
-                                       string($setup, "\n", _sscript), captures = _caps,
+                           setup_src = $(Sweep)._join_setup($imports_src, _helpers[1],
+                                                            $user_setup, _sscript),
+                           captures = _caps,
                            cap = $(esc(cap)), submit = $(esc(submit)), register = _reg,
                            resources = $(esc(res)), plot = $(esc(plot)),
                            summary_src = $sumsrc, lazy = $(esc(lazy)),

@@ -71,6 +71,30 @@ function artifact!(path::AbstractString; name::AbstractString = basename(path))
     return h
 end
 
+# ── Where a shard writes files ───────────────────────────────────────────────────────────────
+# A notebook's `datadir()` is `<project>/data`, or whatever `KAIMONSLATE_DATADIR` pins for a region.
+# A batch job has neither: no notebook project, no worker environment. So a shard gets the same two
+# names resolving to the store's sibling `data` directory — on the cluster filesystem the store
+# already lives on, and untouched by `gc`, which walks only `blobs/` and `manifests/`.
+#
+# A unit body written against `datadir()`/`@sfile` therefore runs unchanged whether it executes in
+# the notebook, on a region worker, or as a batch shard. Without this a body that writes its own
+# HDF5 or NetCDF file has nowhere portable to put it.
+function shard_datadir(root::AbstractString)
+    r = strip(get(ENV, "KAIMONSLATE_DATADIR", ""))
+    d = isempty(r) ? joinpath(String(root), "data") : String(r)
+    mkpath(d)
+    return d
+end
+
+# `@sfile "a/b.nc"` → a path under `datadir()` whose parent exists, so it is usable as a write
+# target immediately. Same contract as the notebook macro.
+function shard_dpath(root::AbstractString, name::AbstractString)
+    p = joinpath(shard_datadir(root), String(name))
+    mkpath(dirname(p))
+    return p
+end
+
 # ── Descriptor construction ──────────────────────────────────────────────────────────────────
 
 _put_jls(root, v) = MemoStore.put_blob(io -> Serialization.serialize(io, v), root)
@@ -179,7 +203,10 @@ is_done(root::AbstractString, key::AbstractString) = MemoStore.read_manifest(roo
 # output — and decide whether it wants to fetch any of it — at the cost of a manifest read.
 function _shape_of(v, bytes::Integer)
     d = Dict{String,Any}("type" => string(typeof(v)), "bytes" => Int(bytes))
-    if v isa AbstractArray
+    if v isa AdoptedFile
+        # The type name says nothing a reader wants; the file it came from says everything.
+        d["type"] = length(v.paths) == 1 ? basename(v.paths[1]) : "$(length(v.paths)) files"
+    elseif v isa AbstractArray
         d["dims"] = collect(Int, size(v))
         d["eltype"] = string(eltype(v))
         d["length"] = length(v)
@@ -249,6 +276,16 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
     # a confusing way to learn that a name is missing.
     Core.eval(mod, Expr(:(=), :SlateTask, @__MODULE__))
     Core.eval(mod, Expr(:(=), :artifact!, artifact!))
+    # `artifact!` keeps a file whole and opaque; `adopt` reads it and stores it addressably. Both
+    # start from a path a unit wrote, so both belong to a shard's vocabulary.
+    Core.eval(mod, Expr(:(=), :adopt, adopt))
+    # Closed over this chunk's root rather than read from `_ROOT[]`, so `setup_src` can use them too
+    # — it is evaluated before any shard runs and `_ROOT[]` is only set inside the shard loop.
+    Core.eval(mod, Expr(:(=), :datadir, () -> shard_datadir(root)))
+    Core.eval(mod, Expr(:(=), :__slate_dpath, (name) -> shard_dpath(root, name)))
+    Core.eval(mod, :(macro sfile(parts...)
+        return esc(:(__slate_dpath(joinpath($(parts...)))))
+    end))
     setup_h = String(get(d, "setup", ""))
     if !isempty(setup_h)
         Core.eval(mod, Meta.parseall(_get_txt(root, setup_h)))
@@ -289,6 +326,14 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
             err = sprint(showerror, e, catch_backtrace())
             ok = false
         end
+        # `adopt` only means anything on the addressable path. Without `data=lazy` the value would be
+        # serialized as an inert struct holding a path that does not exist on this machine, which is
+        # a failure the reader would meet much later and much further away.
+        if ok && value isa AdoptedFile && !lazy
+            ok = false
+            err = "adopt() stores a file addressably, which this cell did not ask for — " *
+                  "add `data=lazy` to the cell header."
+        end
         ms = (time() - t0) * 1000
         arts = _ARTIFACTS[]
         _ARTIFACTS[] = nothing
@@ -298,10 +343,34 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
             "chunk" => chunk, "ms" => ms, "ran_on" => _ran_on(),
             "status" => ok ? "ok" : "error", "artifacts" => arts)
         if ok
-            # The summary rides in every manifest read, so it is limited to small TOML-carryable
-            # values; anything else is dropped rather than stringified.
-            sv = _summarize(summarize, value)
-            sv === nothing || (m["summary"] = sv)
+            # Two different questions, recorded separately.
+            #
+            # `value` is WHAT THE UNIT RETURNED, kept inline whenever it is small enough to carry.
+            # That is the sweep's results table, and it must not depend on whether the author also
+            # wanted a chart. `summary` is the DERIVED figure `summary =` computes for the progress
+            # chart. One field served both before, so `summary = v -> v.snr` on a unit returning
+            # `(; snr, sep_px)` silently dropped `sep_px` out of every cheap view of the run: asking
+            # for a chart cost you a column, which is not a trade anyone would make on purpose.
+            #
+            # Both are limited to small TOML-carryable values, and anything larger is dropped rather
+            # than stringified — a half-written value is worse than an absent one. The blob below
+            # stays authoritative: a TOML round trip does not preserve Julia types (a `Float32`
+            # returns as `Float64`), so this is a VIEW of the result, never the result itself.
+            iv = _summarize(nothing, value)
+            if iv !== nothing
+                m["value"] = iv
+                # A manifest is TOML and a `Dict` has no order, so the fields came back in whichever
+                # order hashing produced — `(; snr, sep_px)` reading back as `(sep_px, snr)`, and a
+                # results table whose columns moved between reads. The author's own order is the one
+                # that means something, so it is recorded beside the values.
+                if value isa NamedTuple && iv isa AbstractDict
+                    m["value_keys"] = String[String(k) for k in keys(value) if haskey(iv, String(k))]
+                end
+            end
+            if summarize !== nothing
+                sv = _summarize(summarize, value)
+                sv === nothing || (m["summary"] = sv)
+            end
             # A `data=lazy` cell stores the result ADDRESSABLY: chunked and indexed, so the notebook
             # can slice it without moving it. Falls through to the whole-value path for anything with
             # no addressable form, which keeps the attribute a performance choice rather than a

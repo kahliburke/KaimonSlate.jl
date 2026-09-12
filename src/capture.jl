@@ -118,6 +118,17 @@ function _eval_cell_source(mod::Module, source::AbstractString, filename::Abstra
         end
     end
     task_local_storage(:slate_stmt_srcs, srcs)
+    # Keep the statement sources under this cell's filename too. A method defined by this cell
+    # records that same string in `Method.file`, so a function value can be traced back to the text
+    # that defined it — which is how a sweep ships a helper the notebook declared (sweep.jl
+    # `_helper_defs`). Only for real cells, and only where the namespace provides the registry.
+    #
+    # VERBATIM slices, not the deparsed `srcs` above: this text is re-parsed and executed somewhere
+    # else, and a deparse does not round-trip (see `stmt_texts`). `srcs` stays as it is — the effect
+    # store wants a normalised replay unit, which is the opposite requirement.
+    if startswith(filename, "cell:") && _ns_defined(mod, :__slate_cell_stmts)
+        _ns_read(mod, :__slate_cell_stmts)[String(filename)] = stmt_texts(source, ast)
+    end
     return Core.eval(mod, REPL.softscope(Expr(:toplevel, marked...)))
 end
 

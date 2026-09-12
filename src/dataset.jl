@@ -103,8 +103,223 @@ end
 # here. (Cheap: one dynamic dispatch per CHUNK, not per row.)
 _arrow_call(f, args...; kw...) = Base.invokelatest(f, args...; kw...)
 
-"Can `v` be stored addressably? `:array`, `:table`, or `nothing` (store it whole instead)."
+# ── Adopting a file the unit wrote itself ────────────────────────────────────────────────────
+# Everything above starts from a VALUE. A great deal of scientific output never becomes one: a
+# solver writes NetCDF or HDF5 from somewhere deep inside itself and the sweep body only learns a
+# path. `adopt` is how such a file enters the dataset layer — the unit hands back the path instead
+# of an array, and the file is read WHERE IT WAS WRITTEN and re-emitted as Slate's own chunks.
+#
+# The read happens on the compute node, so the second copy is local disk on the machine that
+# already holds the original; nothing extra crosses the wire. What the notebook receives is an
+# ordinary index, which is the point: `ds[rows]`, `scan`, chunk pruning, the purge handling and
+# the transfer accounting all work with no new read path.
+#
+# The cost is honest and worth stating: the whole variable is read into memory once, on the node.
+# A variable too large for that is the case for slicing on the far side instead, which this
+# deliberately does not do.
+
+"""
+    AdoptedFile
+
+The value `adopt` returns: files a unit produced, offered to the dataset layer. Inert until
+`write_dataset!` reads them, so building one costs nothing.
+"""
+struct AdoptedFile
+    paths::Vector{String}
+end
+
+"""
+    adopt(path) -> AdoptedFile
+    adopt(path1, path2, …) / adopt(paths)
+
+Offer a file the unit wrote as its result. Return it from a `data=lazy` sweep body:
+
+    sweep = @sweep(paramgrid(day = 1:10)) do p
+        using NCDatasets
+        f = @sfile("grid_\$(p.day).nc")
+        NCDataset(f, "c") do ds; …; end
+        adopt(f)
+    end
+
+Several paths adopt as one dataset; a variable name appearing in more than one of them is an error
+rather than a silent overwrite.
+"""
+adopt(path::AbstractString) = AdoptedFile([String(path)])
+adopt(paths::AbstractString...) = AdoptedFile(String[String(p) for p in paths])
+adopt(paths) = AdoptedFile(String[String(p) for p in paths])
+
+# ── Adapters ─────────────────────────────────────────────────────────────────────────────────
+# An adapter answers two questions about a path: do I claim it, and what does it hold. Registered
+# rather than hardcoded, so a format Slate has never heard of is a package away.
+#
+#   claims(path) -> Bool
+#   read(path)   -> (file_attrs::Dict, vars::Vector{NamedTuple{(:name,:dims,:attrs,:data)}})
+#
+# The built-ins below are soft-detected exactly like the codecs: an adapter whose package is not
+# loaded in the task environment simply does not claim anything. That is also why they live here
+# rather than in a package — the batch payload is four stdlib-only files, so a compute node has no
+# way to load Slate code that is not one of them.
+
+const _DS_ADAPTERS = Vector{NamedTuple{(:name, :claims, :read),Tuple{String,Any,Any}}}()
+
+"""
+    register_dataset_adapter!(name, claims, read)
+
+Teach the dataset layer a file format. `claims(path)` decides whether this adapter handles a path;
+`read(path)` returns `(file_attrs, vars)`, each var a `(; name, dims, attrs, data)`.
+"""
+function register_dataset_adapter!(name::AbstractString, claims, read)
+    filter!(a -> a.name != String(name), _DS_ADAPTERS)
+    push!(_DS_ADAPTERS, (; name = String(name), claims, read))
+    return nothing
+end
+
+"The adapter that claims `path`, or `nothing`. Registered adapters win over the built-ins."
+function _ds_adapter(path::AbstractString)
+    for a in _DS_ADAPTERS
+        try; a.claims(path) && return a; catch; end
+    end
+    _ds_ext(path) in (".h5", ".hdf5", ".he5") && _codec_loaded("HDF5") !== nothing &&
+        return (; name = "hdf5", claims = _ -> true, read = _read_hdf5)
+    _ds_ext(path) in (".nc", ".nc4", ".cdf") && _codec_loaded("NCDatasets") !== nothing &&
+        return (; name = "netcdf", claims = _ -> true, read = _read_netcdf)
+    return nothing
+end
+
+_ds_ext(path) = lowercase(splitext(String(path))[2])
+
+# Attribute values ride in the index, which is persisted as TOML so it can outlive the store (see
+# `remember_index!`). Anything TOML cannot hold is stringified rather than dropped: an attribute is
+# documentation, and a readable approximation beats a hole.
+_attr_value(x) = x isa Bool || x isa Integer || x isa AbstractFloat ? x :
+                 x isa AbstractString ? String(x) :
+                 x isa AbstractArray && all(y -> y isa Real || y isa AbstractString, x) ?
+                     [_attr_value(y) for y in x] : string(x)
+
+_attr_dict(pairs) = Dict{String,Any}(String(k) => _attr_value(v) for (k, v) in pairs)
+
+# HDF5 and NCDatasets are imported by the UNIT, so both post-date this file's compilation: every
+# call into them, and every type fetched from them, goes through `invokelatest` (`_late`).
+function _read_hdf5(path::AbstractString)
+    H = _codec_loaded("HDF5")
+    vars = NamedTuple{(:name, :dims, :attrs, :data)}[]
+    fattrs = Dict{String,Any}()
+    h = _latecall(H, :h5open, String(path), "r")
+    try
+        DS = _late(H, :Dataset)
+        fattrs = _attr_dict(_h5_attrs(H, h))
+        # Groups nest, and their contents are as much the file's data as the top level is. A nested
+        # dataset keeps its full path as its name, which is what the file itself calls it.
+        walk = (obj, prefix) -> begin
+            for k in Base.invokelatest(keys, obj)
+                child = Base.invokelatest(getindex, obj, k)
+                name = isempty(prefix) ? String(k) : prefix * "/" * String(k)
+                if child isa DS
+                    push!(vars, (; name, dims = String[],
+                                   attrs = _attr_dict(_h5_attrs(H, child)),
+                                   data = Base.invokelatest(read, child)))
+                else
+                    walk(child, name)
+                end
+            end
+        end
+        walk(h, "")
+    finally
+        Base.invokelatest(close, h)
+    end
+    return (fattrs, vars)
+end
+
+_h5_attrs(H, obj) = begin
+    a = _latecall(H, :attrs, obj)
+    Tuple{String,Any}[(String(k), Base.invokelatest(getindex, a, k))
+                      for k in Base.invokelatest(keys, a)]
+end
+
+function _read_netcdf(path::AbstractString)
+    N = _codec_loaded("NCDatasets")
+    vars = NamedTuple{(:name, :dims, :attrs, :data)}[]
+    fattrs = Dict{String,Any}()
+    ds = _latecall(N, :NCDataset, String(path), "r")
+    try
+        fattrs = _attr_dict(_nc_attrs(N, ds))
+        for k in Base.invokelatest(keys, ds)
+            v = Base.invokelatest(getindex, ds, k)
+            push!(vars, (; name = String(k),
+                           dims = String[String(d) for d in _latecall(N, :dimnames, v)],
+                           attrs = _attr_dict(_nc_attrs(N, v)),
+                           data = Base.invokelatest(Array, v)))
+        end
+    finally
+        Base.invokelatest(close, ds)
+    end
+    return (fattrs, vars)
+end
+
+_nc_attrs(N, obj) = begin
+    a = Base.invokelatest(getproperty, obj, :attrib)
+    Tuple{String,Any}[(String(k), v) for (k, v) in Base.invokelatest(collect, a)]
+end
+
+# ── The group index ──────────────────────────────────────────────────────────────────────────
+# A file is not one shape. A `.nc` holding `sst`, `lon` and `lat` has no single array or table that
+# means "this file", so an adopted file indexes as a GROUP: a namespace whose entries are ordinary
+# array/table indexes, plus the names and attributes the format carried. The notebook's read side
+# then needs one new move — pick a variable — and everything after it is the existing path.
+
+function _write_adopted!(root::AbstractString, a::AdoptedFile; chunk_bytes::Integer)
+    isempty(a.paths) && error("adopt() was given no paths")
+    entries = Dict{String,Any}[]
+    skipped = Dict{String,Any}[]
+    attrs = Dict{String,Any}()
+    seen = Dict{String,String}()
+    total = 0
+    format = ""
+    for path in a.paths
+        isfile(path) || error("adopt(): no such file: $(path)")
+        ad = _ds_adapter(path)
+        ad === nothing &&
+            error("adopt(): nothing here can read $(basename(path)). A format needs its package " *
+                  "loaded in the task environment (HDF5 or NCDatasets are built in) or an adapter " *
+                  "registered with `register_dataset_adapter!`.")
+        fattrs, vars = ad.read(path)
+        # Several files adopt as one dataset, so the format names the FIRST — enough to say what
+        # this came from without claiming a mixed set is all one thing.
+        isempty(format) && (format = ad.name)
+        merge!(attrs, fattrs)
+        for v in vars
+            haskey(seen, v.name) &&
+                error("adopt(): two files both hold a variable named $(v.name) " *
+                      "($(seen[v.name]) and $(basename(path))) — adopt them separately")
+            w = write_dataset!(root, v.data; chunk_bytes)
+            if w === nothing
+                # A variable Slate cannot store addressably is named and skipped rather than
+                # quietly missing: the usual cause is a fill value making the element type a
+                # `Union`, which is a fact about the file the reader needs to see.
+                push!(skipped, Dict{String,Any}("name" => v.name, "why" => string(typeof(v.data))))
+                continue
+            end
+            seen[v.name] = basename(path)
+            idx, n = w
+            total += n
+            push!(entries, Dict{String,Any}(
+                "name" => v.name, "dims" => v.dims, "attrs" => v.attrs, "index" => idx))
+        end
+    end
+    isempty(entries) &&
+        error("adopt(): $(join(basename.(a.paths), ", ")) held nothing storable" *
+              (isempty(skipped) ? "" : " — skipped " *
+               join([string(s["name"], " (", s["why"], ")") for s in skipped], ", ")))
+    idx = Dict{String,Any}(
+        "kind" => "group", "format" => format, "bytes" => total,
+        "rows" => 0, "source" => join(basename.(a.paths), ", "),
+        "attrs" => attrs, "vars" => entries, "skipped" => skipped)
+    return (idx, total)
+end
+
+"Can `v` be stored addressably? `:array`, `:table`, `:group`, or `nothing` (store it whole instead)."
 function dataset_kind(v)
+    v isa AdoptedFile && return :group
     _ds_arrayable(v) && return :array
     # Arrow is what makes a table addressable. If it cannot be loaded at all there is nothing to be
     # gained by pretending, and the ordinary codec path still stores a correct (if whole) result —
@@ -165,6 +380,9 @@ this value has no addressable form (the caller then stores it whole, as before).
 function write_dataset!(root::AbstractString, value; chunk_bytes::Integer = DATASET_CHUNK_BYTES)
     kind = dataset_kind(value)
     kind === nothing && return nothing
+
+    # An adopted file names its own layout, so it is read and re-emitted rather than shape-detected.
+    kind === :group && return _write_adopted!(root, value; chunk_bytes)
 
     if kind === :array
         # The `raw` codec is already an addressable layout: a fixed 64-byte header, then the

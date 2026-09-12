@@ -47,12 +47,108 @@ const KIND_SWEEP = "slate-sweep"
 Record which chunks make up a sweep. The chunk descriptors themselves already list their shards, so
 this is the only extra bookkeeping a sweep needs.
 """
-function write_sweep!(root::AbstractString, sweep::AbstractString, chunks)
-    MemoStore.write_manifest(root, sweep, Dict{String,Any}(
+function write_sweep!(root::AbstractString, sweep::AbstractString, chunks;
+                      cell::AbstractString = "")
+    d = Dict{String,Any}(
         "kind" => KIND_SWEEP,
         "created" => round(Int, time()),
-        "chunks" => String.(collect(chunks))))
+        "chunks" => String.(collect(chunks)))
+    # WHICH CELL minted this run. A run is keyed by body + setup + captures + grid, so editing any
+    # of them mints a new one and orphans the old — and without this there is no way to tell an
+    # orphan of THIS cell from a live run of another. It is also what lets a panel say where a run
+    # in the store came from.
+    isempty(cell) || (d["cell"] = String(cell))
+    MemoStore.write_manifest(root, sweep, d)
+    isempty(cell) || _index_cell_run!(root, String(cell), String(sweep))
     return sweep
+end
+
+# ── Which runs a cell has minted ─────────────────────────────────────────────────────────────
+# A tiny index per cell, so "this cell's other runs" is one small file read. The alternative —
+# scanning the store for sweep descriptors — means parsing every manifest in it, and a store holds
+# one per UNIT: fine for a panel somebody opened, ruinous on every run of a sweep cell.
+
+cells_dir(root) = joinpath(String(root), "cells")
+# A cell id comes from a notebook and is not promised to be a filename. Keep it recognisable where
+# it can be, and never let it escape the directory.
+_cell_file(cell) = replace(String(cell), r"[^A-Za-z0-9_.-]" => "_")
+cell_runs_path(root, cell) = joinpath(cells_dir(root), _cell_file(cell) * ".runs")
+
+"The runs this cell has minted, oldest first. Empty for a cell that has none, or a store without."
+function cell_runs(root::AbstractString, cell::AbstractString)
+    p = cell_runs_path(root, cell)
+    isfile(p) || return String[]
+    return String[l for l in split(read(p, String), '\n') if !isempty(strip(l))]
+end
+
+function _index_cell_run!(root::AbstractString, cell::AbstractString, sweep::AbstractString)
+    try
+        runs = cell_runs(root, cell)
+        sweep in runs && return nothing
+        push!(runs, sweep)
+        mkpath(cells_dir(root))
+        p = cell_runs_path(root, cell)
+        tmp = p * ".tmp"
+        write(tmp, join(runs, "\n") * "\n")
+        mv(tmp, p; force = true)
+    catch
+        # Best effort: the index is an accelerator, never the source of truth. A store that cannot
+        # hold it still works — the collection rule simply has nothing to go on.
+    end
+    return nothing
+end
+
+function _unindex_cell_run!(root::AbstractString, cell::AbstractString, sweep::AbstractString)
+    isempty(cell) && return nothing
+    try
+        runs = filter(!=(String(sweep)), cell_runs(root, cell))
+        p = cell_runs_path(root, cell)
+        isempty(runs) ? rm(p; force = true) : begin
+            tmp = p * ".tmp"; write(tmp, join(runs, "\n") * "\n"); mv(tmp, p; force = true)
+        end
+    catch
+    end
+    return nothing
+end
+
+"The cell that minted this run, or `\"\"` for one recorded before cells were tracked."
+function sweep_cell(root::AbstractString, sweep::AbstractString)
+    d = MemoStore.read_manifest(root, sweep)
+    d === nothing ? "" : String(get(d, "cell", ""))
+end
+
+"""
+    forget_sweep!(root, sweep) -> Int
+
+Drop a run from the store: its shard manifests, its chunk descriptors, its submission records and
+its own descriptor. Returns how many manifests went.
+
+Only the manifests — blobs are content-addressed and shared, so releasing the space they hold is
+`MemoStore.gc`'s job, on its own cap and grace window. This is what makes a run unreferenced so that
+gc CAN reclaim it.
+
+Nothing here asks whether the run is live; callers decide that. `Sweep.forget_run!` is the one with
+the safety check, and the automatic rule only ever passes runs that were never armed.
+"""
+function forget_sweep!(root::AbstractString, sweep::AbstractString)
+    n = 0
+    cell = sweep_cell(root, sweep)          # read BEFORE the descriptor goes
+    chunks = try; sweep_chunks(root, sweep); catch; String[]; end
+    for c in chunks
+        for k in chunk_shards(root, c)
+            MemoStore.drop_manifest(root, k) && (n += 1)
+        end
+        MemoStore.drop_manifest(root, c) && (n += 1)
+    end
+    # The job index would otherwise keep naming chunks that no longer exist, and `plan` reads it.
+    want = Set(chunks)
+    for (name, cs) in known_submissions(root)
+        any(in(want), cs) || continue
+        rm(index_path(root, name); force = true)
+    end
+    MemoStore.drop_manifest(root, sweep) && (n += 1)
+    _unindex_cell_run!(root, cell, sweep)
+    return n
 end
 
 function sweep_chunks(root::AbstractString, sweep::AbstractString)

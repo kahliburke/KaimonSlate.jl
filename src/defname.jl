@@ -39,10 +39,55 @@ end
 findfirst_def(args) = (for a in args; r = _def_name(a); r === nothing || return r; end; nothing)
 
 # LineNumberNode-free copy, so an edit that only shifts line numbers doesn't read as a change
-# (used to body-hash a def for change-granular hot-reload — see worker.jl `_file_defs`).
+# (used to body-hash a def for change-granular hot-reload — see worker.jl `_file_defs`, and to
+# normalise a sweep body before it is stringified — see sweep.jl `@sweep`).
+#
+# A `:macrocall`'s SECOND argument is positional, not decoration: `@f x` parses as
+# `(:macrocall, :@f, <line>, :x)`, and everything that reads or prints one takes args[3:end] as the
+# arguments. Dropping the line node there shifts them left, so `@sfile "x.h5"` deparses to a bare
+# `@sfile` — a macro call silently losing its arguments. `nothing` is the canonical placeholder
+# (it is what hand-built macrocalls use) and carries no line information, so it normalises the same.
 _strip_lines(x) = x
-_strip_lines(ex::Expr) =
-    Expr(ex.head, Any[_strip_lines(a) for a in ex.args if !(a isa LineNumberNode)]...)
+function _strip_lines(ex::Expr)
+    if ex.head === :macrocall && length(ex.args) >= 2
+        return Expr(ex.head, _strip_lines(ex.args[1]), nothing,
+                    Any[_strip_lines(a) for a in ex.args[3:end] if !(a isa LineNumberNode)]...)
+    end
+    return Expr(ex.head, Any[_strip_lines(a) for a in ex.args if !(a isa LineNumberNode)]...)
+end
+
+# VERBATIM source of each top-level statement, sliced by the line spans `Meta.parseall` recorded.
+#
+# Deparsing (`string(expr)`) is not a substitute, and quietly so: it does not round-trip. A
+# comprehension with a filter over several iterators comes back as `$(Expr(:filter, …))`, which no
+# parser will take — so a definition containing one cannot be re-read from its deparse at all. Text
+# that is going to be shipped somewhere and run has to be the text the author wrote.
+#
+# Trailing blank and comment-only lines are dropped, because they belong to whatever comes next: a
+# comment written under a definition would otherwise count as part of it, and anything keyed on this
+# text would change when it was edited.
+function stmt_texts(source::AbstractString, ast)
+    (ast isa Expr && ast.head === :toplevel) || return String[]
+    lines = split(String(source), '\n'; keepempty = true)
+    starts = Int[]
+    at = 0
+    for a in ast.args
+        a isa LineNumberNode ? (at = a.line) : push!(starts, at == 0 ? 1 : at)
+    end
+    out = String[]
+    for (i, s) in enumerate(starts)
+        stop = i < length(starts) ? starts[i + 1] - 1 : length(lines)
+        lo = clamp(s, 1, length(lines))
+        hi = clamp(stop, lo, length(lines))
+        while hi > lo
+            t = strip(lines[hi])
+            (isempty(t) || startswith(t, "#")) || break
+            hi -= 1
+        end
+        push!(out, rstrip(join(lines[lo:hi], "\n")))
+    end
+    return out
+end
 
 # Walk a parsed file (a :toplevel Expr) into (def-name → body-hash), recursing into (sub)modules
 # so a def INSIDE a submodule (e.g. `Sub.greet`) is captured under its leaf name — matching how

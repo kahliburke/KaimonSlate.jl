@@ -964,6 +964,349 @@ end
         end
     end
 
+    @testset "a macro call in the body keeps its arguments" begin
+        # The body is normalised by stripping LineNumberNodes before it is stringified. A
+        # `:macrocall`'s second argument is POSITIONAL, though, so dropping the line node there
+        # shifts the real arguments left: `@sfile "x.h5"` deparsed to a bare `@sfile`, and the unit
+        # ran a macro with no arguments. Every sweep body that calls any macro was affected.
+        ex = Meta.parse("""@sfile("cube_\$(p.t).h5")""")
+        @test string(Sweep._strip_lines(ex)) == "@sfile \"cube_\$(p.t).h5\""
+        nested = Meta.parse("f(@view(x[1:2]), @sprintf(\"%d\", n))")
+        @test occursin("@view", string(Sweep._strip_lines(nested)))
+        @test occursin("x[1:2]", string(Sweep._strip_lines(nested)))
+        @test occursin("\"%d\"", string(Sweep._strip_lines(nested)))
+        # …and the normalisation still does its job: line position is not part of the text.
+        @test Sweep._strip_lines(Meta.parse("\n\n@sfile(\"a\")")) ==
+              Sweep._strip_lines(Meta.parse("@sfile(\"a\")"))
+
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            # End to end with the shard's own `@sfile`, which is where this surfaced.
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false, summary = v -> v) do p
+                write(@sfile("out_$(p.x).txt"), string(p.x))
+                basename(@sfile("out_$(p.x).txt"))
+            end
+            ch = MemoStore.read_manifest(root, first(BS.sweep_chunks(root, r.run)))
+            fn = SlateTask._get_txt(root, String(ch["fn"]))
+            @test occursin("@sfile", fn) && occursin("out_", fn)   # the call AND its argument
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(r).summaries == ["out_1.txt", "out_2.txt"]
+            @test read(joinpath(root, "data", "out_2.txt"), String) == "2"
+        end
+    end
+
+    # A stand-in for a notebook namespace: cells evaluated under `cell:<id>` filenames, with each
+    # cell's top-level statements recorded the way `_eval_cell_source` records them. That pair is
+    # all `_helper_defs` needs — a method knows which cell defined it, and this knows what that
+    # cell said.
+    function _fake_notebook(target, cells)
+        m = Module(:NBHelpers)
+        Core.eval(m, :(const __slate_cell_stmts = Dict{String,Vector{String}}()))
+        Core.eval(m, :(const Sweep = $Sweep))
+        Core.eval(m, :(const T = $target))
+        for (file, src) in cells
+            ast = Meta.parseall(src; filename = file)
+            Core.eval(m, :(__slate_cell_stmts[$file] = $(Sweep.stmt_texts(src, ast))))
+            Core.eval(m, ast)
+        end
+        return m
+    end
+
+    _chunk_setup(root, r) = SlateTask._get_txt(root, String(
+        MemoStore.read_manifest(root, first(BS.sweep_chunks(root, r.run)))["setup"]))
+
+    @testset "a helper the notebook defined travels with the sweep" begin
+        # A function value cannot be revived on a compute node, so a body calling a notebook helper
+        # used to fail there with UndefVarError unless the author restated it in `setup =`. The
+        # defining cell is found instead, and its text travels.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            m = _fake_notebook(t, ["cell:h1" => "stress(x) = x * 3\nscale = 7",
+                                   "cell:h2" => "shifted(x) = stress(x) + scale"])
+            r = Core.eval(m, quote
+                Sweep.@sweep(Sweep.paramgrid(x = 1:2), T; submit = false, summary = v -> v) do p
+                    shifted(p.x)
+                end
+            end)
+            setup = _chunk_setup(root, r)
+            # Transitive: the body calls `shifted`, which calls `stress`. Both travel.
+            @test occursin("shifted(x) = ", setup) && occursin("stress(x) = ", setup)
+            # `scale` is DATA the helper reads, so it travels as a capture, not as source.
+            @test !occursin("scale = 7", setup)
+            ch = MemoStore.read_manifest(root, first(BS.sweep_chunks(root, r.run)))
+            @test "scale" in [String(c["name"]) for c in ch["captures"]]
+
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(r).summaries == [10, 13]      # it genuinely ran on the shard
+        end
+    end
+
+    @testset "a helper's cell brings its imports" begin
+        # A helper is not self-contained without them, and the author wrote them next to it. Without
+        # this, "define a helper in a cell" only works for helpers that need no package — the unit
+        # gets past the helper's own name and dies on the first thing the helper calls.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            m = _fake_notebook(t, ["cell:h1" => "using Statistics\nspread(v) = mean(v) + 0",
+                                   "cell:h2" => "using Dates\nunrelated() = 1"])
+            r = Core.eval(m, quote
+                Sweep.@sweep(Sweep.paramgrid(x = 1:2), T; submit = false, summary = v -> v) do p
+                    spread([p.x, p.x * 3])
+                end
+            end)
+            setup = _chunk_setup(root, r)
+            @test occursin("using Statistics", setup)
+            # …only from the cells actually drawn from.
+            @test !occursin("using Dates", setup)
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(r).failed == 0
+            @test Sweep.refresh!(r).summaries == [2.0, 4.0]
+        end
+    end
+
+    @testset "a helper is shipped as written, not as a deparse" begin
+        # `string(expr)` does not round-trip. A comprehension with a filter over several iterators
+        # comes back as `$(Expr(:filter, …))`, which no parser will take — so a real helper (a
+        # docstring'd, keyword-argument function with such a comprehension in it) failed to re-parse,
+        # was silently skipped, and the unit died with UndefVarError naming it.
+        src = """
+        \"\"\"Docstring, which wraps the definition in a macrocall.\"\"\"
+        function ring(a; lo, hi)
+            c = 3
+            [a[i, j] for i in axes(a, 1), j in axes(a, 2) if lo < abs(i - c) < hi]
+        end
+        """
+        texts = Sweep.stmt_texts(src, Meta.parseall(src; filename = "cell:h1"))
+        @test length(texts) == 1
+        @test occursin("\"\"\"Docstring", texts[1])           # the docstring came along
+        @test Sweep._def_name(Meta.parse(texts[1])) == "ring"  # …and it re-parses to the right name
+        @test !occursin("Expr(:filter", texts[1])
+
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            m = _fake_notebook(t, ["cell:h1" => src])
+            r = Core.eval(m, quote
+                Sweep.@sweep(Sweep.paramgrid(x = 1:2), T; submit = false, summary = v -> v) do p
+                    length(ring(reshape(1:36, 6, 6); lo = 0, hi = p.x + 1))
+                end
+            end)
+            @test occursin("function ring", _chunk_setup(root, r))
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            # It genuinely ran on the shard — a skipped helper would be an UndefVarError here.
+            @test Sweep.refresh!(r).failed == 0
+            @test Sweep.refresh!(r).summaries == [12, 24]
+        end
+    end
+
+    @testset "a trailing comment on a helper's cell does not re-key" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            call = quote
+                Sweep.@sweep(Sweep.paramgrid(x = 1:2), T; submit = false, summary = v -> v) do p
+                    stress(p.x)
+                end
+            end
+            a = Core.eval(_fake_notebook(t, ["cell:h1" => "stress(x) = x * 3\n"]), call)
+            b = Core.eval(_fake_notebook(t, ["cell:h1" => "stress(x) = x * 3\n\n# a note\n"]), call)
+            @test a.key == b.key
+        end
+    end
+
+    @testset "editing a helper re-keys the sweep" begin
+        # The property that makes this safe rather than a footgun. The helper is part of what
+        # computed the results, so it is part of their identity: change it and the old results are
+        # a different sweep's, not this one's.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            call = quote
+                Sweep.@sweep(Sweep.paramgrid(x = 1:2), T; submit = false, summary = v -> v) do p
+                    stress(p.x)
+                end
+            end
+            r1 = Core.eval(_fake_notebook(t, ["cell:h1" => "stress(x) = x * 3"]), call)
+            r2 = Core.eval(_fake_notebook(t, ["cell:h1" => "stress(x) = x * 4"]), call)
+            @test r1.key != r2.key
+            # …and an unrelated edit to the SAME cell does not, so a comment does not orphan a run.
+            r3 = Core.eval(_fake_notebook(t, ["cell:h1" => "unused = 1\nstress(x) = x * 3"]), call)
+            @test r3.key == r1.key
+        end
+    end
+
+    @testset "only what the notebook defined is shipped" begin
+        # A package function is already installed where the unit runs; restating it would be noise
+        # at best and a stale copy at worst. Only a definition with a notebook CELL behind it moves.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            m = _fake_notebook(t, ["cell:h1" => "double(x) = x * 2"])
+            r = Core.eval(m, quote
+                Sweep.@sweep(Sweep.paramgrid(x = 1:2), T; submit = false, summary = v -> v) do p
+                    sum([double(p.x), abs(-1)])
+                end
+            end)
+            setup = _chunk_setup(root, r)
+            @test occursin("double(x) = ", setup)
+            @test !occursin("sum", setup) && !occursin("abs", setup)
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(r).summaries == [3, 5]
+        end
+    end
+
+    @testset "a notebook struct and macro travel too" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            m = _fake_notebook(t, ["cell:h1" => "struct Knob; n::Int; end",
+                                   "cell:h2" => "macro twice(e); esc(:(2 * \$e)); end"])
+            r = Core.eval(m, quote
+                Sweep.@sweep(Sweep.paramgrid(x = 1:2), T; submit = false, summary = v -> v) do p
+                    @twice(Knob(p.x).n)
+                end
+            end)
+            setup = _chunk_setup(root, r)
+            @test occursin("struct Knob", setup) && occursin("macro twice", setup)
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(r).summaries == [2, 4]
+        end
+    end
+
+    @testset "the sweep as one row per grid point" begin
+        # The view a sweep is usually FOR, and the one the fabric did not have: `r.summaries` gave
+        # the values with the parameters detached, `r.results` gave handles costing a blob read
+        # each. Built from the inline records, so asking for it fetches nothing.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(a = 1:2, b = [10, 20]), t; submit = false) do p
+                (; snr = float(p.a * p.b), sep = p.a + p.b)
+            end
+            # Before anything lands the ROWS are already the whole grid. The value columns are not
+            # there yet and cannot be: nothing has said what they are called.
+            t0 = r.table
+            @test keys(t0) == (:a, :b, :status, :ms, :ran_on, :at)
+            @test all(ismissing, t0.at)                     # nothing ran, so nothing has a time
+            @test t0.a == [1, 2, 1, 2] && t0.b == [10, 10, 20, 20]
+            @test all(isempty, t0.status)
+
+            # One unit landing names the columns; the other three are holes, not absences.
+            SlateTask.run_chunk(root, first(BS.sweep_chunks(root, r.run)))
+            t1 = Sweep.refresh!(r).table
+            @test keys(t1) == (:a, :b, :snr, :sep, :status, :ms, :ran_on, :at)
+            @test t1.snr[1:2] == [10.0, 20.0] && all(ismissing, t1.snr[3:4])
+            @test t1.a == [1, 2, 1, 2]                      # the grid never changed shape
+
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            tb = Sweep.refresh!(r).table
+            @test tb.snr == [10.0, 20.0, 20.0, 40.0]
+            @test tb.sep == [11, 12, 21, 22]
+            @test all(==("ok"), tb.status)
+            @test eltype(tb.snr) == Float64      # narrowed, so a plot or a `sum` over it behaves
+
+            # A unit that returned a bare number has no field name, so its column is `result`.
+            r2 = Sweep.@sweep(Sweep.paramgrid(x = 1:3), t; submit = false) do p; p.x * 5; end
+            for c in BS.sweep_chunks(root, r2.run); SlateTask.run_chunk(root, c); end
+            @test Sweep.refresh!(r2).table.result == [5, 10, 15]
+
+            # A returned field colliding with a parameter keeps BOTH rather than overwriting.
+            r3 = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p; (; x = p.x * 100); end
+            for c in BS.sweep_chunks(root, r3.run); SlateTask.run_chunk(root, c); end
+            t3 = Sweep.refresh!(r3).table
+            @test t3.x == [1, 2] && t3.x_result == [100, 200]
+
+            # A value too large to record inline contributes NO value column — the honest answer
+            # rather than a column of nothing — while the run's shape and facts still read.
+            r4 = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p
+                collect(1:500) .* p.x
+            end
+            for c in BS.sweep_chunks(root, r4.run); SlateTask.run_chunk(root, c); end
+            t4 = Sweep.refresh!(r4).table
+            @test keys(t4) == (:x, :status, :ms, :ran_on, :at)
+            @test all(==("ok"), t4.status) && t4.x == [1, 2]
+            @test r4.results[1].value[] == collect(1:500)     # fetching it stays deliberate
+        end
+    end
+
+    @testset "a sweep can be asked what its jobs printed" begin
+        # The failures that cost the most time leave NO manifest — an OOM kill, a walltime cut, a
+        # prologue that failed — so `r.errors` is empty and the only account of what happened is the
+        # scheduler's job output. Every launcher could already tail it; nothing connected it to a
+        # sweep, so the one question a stuck run raises had no answer.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false) do p
+                p.x
+            end
+            @test Sweep.logs(r) == ""                  # nothing submitted, nothing to say
+            mkpath(joinpath(root, "logs"))
+            mkpath(BS.jobs_dir(root))
+            chunks = BS.sweep_chunks(root, r.run)
+            name = BS.submission_name(chunks)
+            write(BS.index_path(root, name), join(chunks, "\n") * "\n")
+            write(joinpath(root, "logs", "$(name).1.log"), "slurmstepd: Exceeded job memory limit\n")
+
+            @test Sweep.run_jobs(r) == [name]
+            out = Sweep.logs(r)
+            @test occursin("Exceeded job memory limit", out)
+            @test occursin(name, out)                  # headed, so several jobs stay tellable apart
+            @test occursin("Exceeded", Sweep.logs(r; job = name))
+            # A job that is not this sweep's is not reported as if it were.
+            write(BS.index_path(root, "slate-elsewhere"), "some-other-chunk\n")
+            write(joinpath(root, "logs", "slate-elsewhere.1.log"), "unrelated\n")
+            @test !occursin("unrelated", Sweep.logs(r))
+
+            # The card asks the same question through its own channel — and only when asked. A poll
+            # must never carry it: for a cluster this is a round trip to the login node, so a card
+            # left open on a finished sweep would tail files over ssh for the rest of the session.
+            poll = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false)
+            @test !haskey(poll, "logs")
+            @test "logs" in [a[1] for a in poll["actions"]]
+            got = Sweep.handle_action(t, r.run, r.params, r.keys, "logs")
+            @test occursin("Exceeded job memory limit", got["logs"])
+            # …and it is a question, not a mutation: nothing about the sweep moved.
+            @test got["done"] == poll["done"] && got["state"] == poll["state"]
+        end
+    end
+
+    @testset "asking for a chart does not narrow what was recorded" begin
+        # `summary` and the unit's own return value answered the same manifest field, so
+        # `summary = v -> v.snr` on a unit returning `(; snr, sep_px)` dropped `sep_px` out of every
+        # cheap view of the run: adding a chart hint cost a column, which is not a trade anyone
+        # makes on purpose. They are separate questions and now separate fields.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false,
+                             summary = v -> v.snr) do p
+                (; snr = float(p.x), sep_px = 10 * p.x)
+            end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            Sweep.refresh!(r)
+            # The chart gets the derived figure…
+            @test r.summaries == [1.0, 2.0]
+            # …and the record still holds everything the unit returned.
+            recs = [row.record for row in r.results]
+            @test [x.snr for x in recs] == [1.0, 2.0]
+            @test [x.sep_px for x in recs] == [10, 20]
+
+            # With no `summary =`, the record IS the chart series — a sweep returning a couple of
+            # numbers needs no wiring at all.
+            r2 = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p
+                (; snr = float(p.x), sep_px = 10 * p.x)
+            end
+            for c in BS.sweep_chunks(root, r2.run); SlateTask.run_chunk(root, c); end
+            Sweep.refresh!(r2)
+            @test [x.snr for x in r2.summaries] == [1.0, 2.0]
+            @test [x.sep_px for x in r2.records] == [10, 20]
+        end
+    end
+
     @testset "three channels: facts, data, artifacts" begin
         # The shape a real run has. A unit that trains something reports FACTS worth watching, may
         # produce no returnable value at all, and leaves its heavy output where it ran. None of the
@@ -998,7 +1341,193 @@ end
 
             # A grouped summary auto-plots only when ONE field is numeric; `loss` and `steps` both
             # are, so it declines rather than choosing for the author.
-            @test !haskey(Sweep.status_payload(t, r.run, r.params, r.keys; advance = false), "chart")
+            # …and it says so with a null rather than an absent key, so the card can tell "no
+            # chart" from "no news" and clear one it had already drawn.
+            @test Sweep.status_payload(t, r.run, r.params, r.keys;
+                                       advance = false)["chart"] === nothing
+        end
+    end
+
+    @testset "at most one unarmed run per cell" begin
+        # A run is keyed by body + setup + captures + grid, so every edit mints a new one and the
+        # old — which nobody ever asked to run — is left behind holding a blob per parameter point.
+        # An afternoon of adjusting a constant filled the store with descriptors for work that was
+        # never requested, and there was no way to get rid of them.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            # A DIFFERENT BODY each time, not a different grid. Shard keys come from the sweep key
+            # (body + setup + captures), so widening a grid inherits the results the narrower one
+            # already computed — those units are landed, and the rule correctly keeps such a run.
+            # Isolating the rule means each run having nothing to inherit.
+            mk(i) = task_local_storage(:slate_cell, "sweepcell") do
+                Sweep.run_sweep(t, Sweep.paramgrid(x = 1:4), "p -> p.x * $i"; cell = "sweepcell")
+            end
+            a = mk(1)
+            @test BS.sweep_cell(root, a.run) == "sweepcell"
+            # Found through the cell's own index, not by parsing every manifest in a store that
+            # holds one per unit — this runs on every execution of a sweep cell.
+            @test BS.cell_runs(root, "sweepcell") == [a.run]
+            b = mk(2)                                  # an edited body ⇒ a different run
+            @test b.run != a.run
+            # …and the one nobody armed is gone rather than left behind.
+            @test MemoStore.read_manifest(root, a.run) === nothing
+            @test MemoStore.read_manifest(root, b.run) !== nothing
+
+            # An ARMED run survives: it may have work queued even with nothing landed.
+            BS.arm!(root, b.run)
+            c = mk(3)
+            @test MemoStore.read_manifest(root, b.run) !== nothing
+            @test MemoStore.read_manifest(root, c.run) !== nothing
+
+            # So does anything that RAN, including a run whose units all failed.
+            for ch in BS.sweep_chunks(root, c.run); SlateTask.run_chunk(root, ch); end
+            d = mk(4)
+            @test MemoStore.read_manifest(root, c.run) !== nothing
+
+            # Another CELL's unarmed runs are never touched.
+            other = task_local_storage(:slate_cell, "othercell") do
+                Sweep.run_sweep(t, Sweep.paramgrid(x = 1:3), "p -> p.x"; cell = "othercell")
+            end
+            mk(5)
+            @test MemoStore.read_manifest(root, other.run) !== nothing
+            @test MemoStore.read_manifest(root, d.run) === nothing
+
+            # Releasing by hand is the same primitive, and refuses a run that may have work out.
+            @test Sweep.forget_run!(t, other.run) > 0
+            @test MemoStore.read_manifest(root, other.run) === nothing
+            e = try; Sweep.forget_run!(t, b.run); "" catch x; sprint(showerror, x); end
+            @test occursin("armed", e) && occursin("cancel", e)
+        end
+    end
+
+    @testset "printing a sweep does not print the grid" begin
+        # `@show r` / `println(r)` go through the 2-arg `show`, and with no method for it Julia
+        # dumps every field — one of which is every ROW. On a real sweep that is the whole grid,
+        # parameters and handles and all, because someone wanted one line.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 8,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:8), t; submit = false) do p; p.x; end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            Sweep.refresh!(r)
+            s = sprint(show, r)
+            @test length(split(s, '\n')) == 1                # one line, whatever the sweep holds
+            @test occursin("8/8", s) && occursin("succeeded", s)
+            # …and what it holds and where it ran, both already in the struct, so no extra reads.
+            @test occursin("on local", s) && occursin("B", s)
+            @test !occursin("ShardRef", s) && !occursin("params", s)
+            @test length(s) < 100
+            # The multi-line form is still the multi-line form.
+            @test occursin("\n", sprint((io, x) -> show(io, MIME"text/plain"(), x), r))
+        end
+    end
+
+    @testset "a unit's fields keep the order it returned them in" begin
+        # The record rides a manifest as TOML, and a Dict has no order — so `(; snr, sep_px)` read
+        # back as `(sep_px, snr)` and a results table's columns moved between reads.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p
+                (; zulu = p.x, alpha = p.x * 2, mike = p.x * 3)
+            end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            Sweep.refresh!(r)
+            @test keys(r.records[1]) == (:zulu, :alpha, :mike)      # not alphabetical — as written
+            @test keys(r.table) == (:x, :zulu, :alpha, :mike, :status, :ms, :ran_on, :at)
+            # WHEN each unit ran, not only how long it took — a manifest records it and nothing
+            # surfaced it, so "is this yesterday's result?" had no answer short of the store.
+            @test all(x -> x isa Sweep.Dates.DateTime, r.table.at)
+            @test occursin(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", Sweep.text(r))
+            @test occursin("ago", Sweep.text(r))
+        end
+    end
+
+    @testset "the sweep in words, not markup" begin
+        # A sweep cell renders as an HTML card and the richer MIME always wins in a notebook, so the
+        # text/plain form existed and had no way to reach the screen. One renderer, two surfaces.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:3), t; submit = false) do p
+                (; sq = p.x^2)
+            end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            Sweep.refresh!(r)
+            txt = Sweep.text(r)
+            @test occursin("succeeded", txt)
+            @test occursin("3/3", txt)
+            # …and it carries the results, which is the part the card had and this did not.
+            @test occursin("sq", txt) && occursin(r"\bx\b", txt)
+            @test occursin("9", txt)
+            # Exactly what `show` produces, so there is no second version of the truth.
+            @test txt == sprint((io, x) -> show(io, MIME"text/plain"(), x), r)
+            @test !occursin("<div", txt)
+        end
+    end
+
+    @testset "a reset takes the chart away with the results" begin
+        # The payload could only ADD a chart: with nothing landed the option is `nothing` and the
+        # key was omitted, so the browser's `if (s.chart)` never fired and the card went on showing
+        # a chart of results that had just been thrown away.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false) do p; p.x * 2; end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            s1 = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false)
+            @test s1["chart"] !== nothing
+
+            Sweep.handle_action(t, r.run, r.params, r.keys, "reset")
+            s2 = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false)
+            # PRESENT and null — the difference between "no chart" and "no news", which is what the
+            # card needs to tell them apart.
+            @test haskey(s2, "chart") && s2["chart"] === nothing
+            @test s2["fails"] == ""
+            # `plot = false` says the same thing, rather than omitting the key.
+            s3 = Sweep.status_payload(t, r.run, r.params, r.keys; plot = false, advance = false)
+            @test haskey(s3, "chart") && s3["chart"] === nothing
+        end
+    end
+
+    @testset "the chart you get without asking covers a grid, not just a line" begin
+        # A `paramgrid` is a product of axes, so TWO varying axes is the most common shape a sweep
+        # can have — and the default used to decline there, on the reasoning that a line would
+        # project one away. True of a line; the ambiguity was which CHART, not which axis.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 9,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(a = 1:3, b = [10, 20, 30]), t; submit = false) do p
+                p.a * p.b
+            end
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            opt = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false)["chart"]
+            @test opt["series"][1]["type"] == "heatmap"
+            # Category axes over the sorted distinct values, so a log-spaced axis stays evenly
+            # spaced instead of crowding into one corner.
+            @test opt["xAxis"]["data"] == [1, 2, 3] && opt["xAxis"]["type"] == "category"
+            @test opt["yAxis"]["data"] == [10, 20, 30] && opt["yAxis"]["name"] == "b"
+            @test opt["visualMap"]["min"] == 10 && opt["visualMap"]["max"] == 90
+            @test length(opt["series"][1]["data"]) == 9
+            # `[xIndex, yIndex, value]` — the corners of the grid, both ends.
+            @test [2, 2, 90] in opt["series"][1]["data"]         # a=3, b=30
+            @test [0, 0, 10] in opt["series"][1]["data"]         # a=1, b=10
+
+            # One axis is still a line.
+            r1 = Sweep.@sweep(Sweep.paramgrid(a = 1:3), t; submit = false) do p; p.a * 2; end
+            for c in BS.sweep_chunks(root, r1.run); SlateTask.run_chunk(root, c); end
+            o1 = Sweep.status_payload(t, r1.run, r1.params, r1.keys; advance = false)["chart"]
+            @test o1["series"][1]["type"] == "line"
+
+            # THREE varying axes still declines, and that one is real: collapsing an axis means
+            # choosing a reduction, which is the author's claim to make.
+            r3 = Sweep.@sweep(Sweep.paramgrid(a = 1:2, b = 1:2, c = 1:2), t; submit = false) do p
+                p.a + p.b + p.c
+            end
+            for c in BS.sweep_chunks(root, r3.run); SlateTask.run_chunk(root, c); end
+            @test Sweep.status_payload(t, r3.run, r3.params, r3.keys;
+                                       advance = false)["chart"] === nothing
         end
     end
 
@@ -1029,14 +1558,14 @@ end
             for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
             s = Sweep.status_payload(t, r.run, r.params, r.keys; plot, advance = false)
             @test s["chart"]["series"][1]["data"] == [1, 2, 3, 4]
-            @test !haskey(s, "charterr")
+            @test s["charterr"] == ""
 
             # A plot that throws says so on the card. A blank chart during a long run reads as a
             # stalled sweep, which is the one thing this whole design is trying to rule out.
             bad = Sweep.status_payload(t, r.run, r.params, r.keys;
                                        plot = _ -> error("no method matching frobnicate"),
                                        advance = false)
-            @test !haskey(bad, "chart")
+            @test bad["chart"] === nothing
             @test occursin("frobnicate", bad["charterr"])
 
             # Wrong return type is a mistake worth naming, not a silent no-chart.
