@@ -675,13 +675,34 @@ See also `save_asset`, `FileUpload`."""),
         Every unit is content-addressed on body + setup + captures + its own parameters, so a pilot
         over four points and the full sweep over four thousand share results; editing the body starts
         a new sweep rather than mixing two versions of the code.
-        The body travels as SOURCE (a compute node cannot revive a closure) — put helper functions in
-        `setup = "using MyPkg"`, and data in ordinary variables, which are captured and shipped.
+        The body travels as SOURCE (a compute node cannot revive a closure). Data in ordinary
+        variables is captured and shipped; a function, macro or struct the NOTEBOOK defines is found
+        in the cell that defined it and its source travels too, transitively — so an ordinary helper
+        cell just works, and editing it re-keys the sweep. `setup = begin … end` still takes
+        definitions written by hand, for anything with no cell behind it.
         `plot = rows -> echart(…)` draws the units that have landed, on the card's own poll, so the
         chart fills as results arrive. See `paramgrid`, `SlurmTarget`, `LocalTarget`, `Sweep`.
         `r = @sweep(paramgrid(β = 0:0.1:2, seed = 1:50), hpc; setup = "using MyPkg") do p
              MyPkg.simulate(p)
          end`"""),
+
+    SlateApiEntry("adopt", "Batch sweep",
+        "Hand back a FILE a unit wrote (HDF5, NetCDF) instead of a value — sliced without moving it.",
+        ["hdf5", "netcdf", "nc", "h5", "file", "adopt", "dataset", "external data", "climate",
+         "solver output", "variables"],
+        "adopt(path)  ·  adopt(path1, path2, …)  ·  adopt(paths)",
+        """For output that never becomes a Julia value: a solver writes a file from deep inside
+        itself and the body only learns a path. Return `adopt(f)` from a `data=lazy` sweep body and
+        the file is read WHERE IT WAS WRITTEN and re-emitted as Slate's own chunks — the read is on
+        the compute node, so nothing extra crosses the wire. Write it under `datadir()`/`@sfile`,
+        which resolve on the node the same way they do in the notebook.
+        What the notebook gets is a GROUP: `keys(ds)` names the file's variables, `ds[:sst]` hands
+        back an ordinary dataset (so slicing, `scan` and chunk pruning are unchanged), and
+        `Sweep.attributes(ds, :sst)` / `Sweep.dimensions(ds, :sst)` carry what the format said.
+        HDF5 and NCDatasets are recognised when loaded in the task environment; any other format is
+        a `SlateTask.register_dataset_adapter!` away. The whole variable is read into memory once on the
+        node, which is the cost of not needing a live process there to slice it later.
+        `adopt(@sfile("grid_\$(p.day).nc"))`"""),
 
     SlateApiEntry("paramgrid", "Batch sweep",
         "The cartesian product of named parameter axes — a sweep's grid.",
@@ -724,12 +745,31 @@ See also `save_asset`, `FileUpload`."""),
         """QUESTIONS are properties of the result, so they cannot collide with your own variables:
         `r.state` (`:pending :running :succeeded :partial :blocked :cancelled :exhausted`),
         `r.total r.done r.ok r.failed r.pending r.fraction r.percent r.settled`,
+        `r.table` — the sweep as ONE ROW PER GRID POINT: the parameters, then whatever each unit
+        returned, then `status`/`ms`/`ran_on`. The view a sweep is usually for, and the one to reach
+        for first. Units that have not landed are `missing`, so the shape is the full grid from the
+        start and the holes show where the work is. Manifest-only: asking never fetches a result, and
+        a value too large to record inline reads `missing` (fetch that one with `row.value[]`).
         `r.rate r.eta r.idle r.stalled_for r.blocked`, `r.results` (rows that succeeded),
-        `r.values` (just their values), `r.errors` (rows that threw, with tracebacks), `r.hosts`.
-        The result also iterates and indexes over ALL rows, `(; params, status, value, ran_on, ms)`.
+        `r.summaries` (the small value each recorded — manifest-only, so the same cost at four units
+        and four million), `r.errors` (rows that threw), `r.hosts`, `r.dataset`.
+        The result iterates and indexes over ALL rows, each
+        `(; params, status, value, record, summary, artifacts, ran_on, ms, bytes, stamp)`.
+        `record` is what the unit RETURNED, kept inline in its manifest whenever it was small enough
+        to carry — free to read across every unit, which is what a results table is built from.
+        `value` is a HANDLE on the stored bytes; `row.value[]` fetches it. On a row that threw,
+        `value` holds the message and traceback and `record` is `nothing`: there is no separate
+        `.error` field, and `r.errors` is the rows, not the messages.
         ACTIONS are qualified calls, because `reset!`/`cancel!` are names your own packages may
         export: `Sweep.refresh!(r)`, `Sweep.retry_failed!(r)`, `Sweep.cancel!(r)`, `Sweep.resume!(r)`,
         `Sweep.reset!(r)`. The card offers the same as buttons.
+        `println(Sweep.text(r))` is the sweep in PLAIN TEXT — state, progress, timing and the first
+        rows of `r.table`. A sweep cell renders as an HTML card and the richer MIME always wins in a
+        notebook, so this is how the text form reaches a terminal, a log, or a message.
+        `Sweep.logs(r)` is what the SCHEDULER's job output says — where an OOM kill, a walltime cut
+        or a failed prologue is explained. Those failures leave no manifest, so `r.errors` is empty
+        for exactly the runs that most need explaining. A deliberate fetch (a round trip to the login
+        node), never on the card's poll; the card's Logs button asks the same question.
         `:partial` means finished WITH failures; `:blocked` means the work is failing and the sweep
         stopped itself; `:exhausted` means units never landed, so they outran their resources."""),
 

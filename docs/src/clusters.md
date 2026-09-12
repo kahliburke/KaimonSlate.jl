@@ -59,6 +59,37 @@ rather than discarding the units that already finished.
 Because it reconciles, the honest thing to do with a sweep cell is run it repeatedly. It tells you
 what is queued, what is running, what landed, and what failed its attempt budget.
 
+The body travels as **source**, because a compute node cannot revive a function value. That is
+invisible in the ordinary case: data in notebook variables is captured and shipped, `using` is
+written in the body and lifted out to run once per job, and a function, macro or struct the notebook
+defines is traced to the cell that defined it and travels too — transitively, so a helper that calls
+a helper works. Editing one **re-keys the sweep**, exactly as editing the body does: it is part of
+what computed the results, so it is part of their identity.
+
+### Output too large to bring back
+
+`data=lazy` on the cell header stores a unit's result **addressably** — chunked and indexed where it
+ran — so the notebook holds an index of kilobytes and a slice moves only the bytes it names.
+
+For output that never becomes a Julia value at all — a solver writing HDF5 or NetCDF from somewhere
+inside itself — return `adopt(path)` instead. The file is read on the compute node that wrote it and
+re-emitted in the same addressable form, so nothing extra crosses the wire:
+
+```julia
+#%% sweep id=runs cluster=hpc data=lazy
+runs = @sweep paramgrid(; day = 1:365) do p
+    using NCDatasets
+    f = @sfile("grid_$(p.day).nc")
+    simulate_into(f, p)
+    adopt(f)
+end
+```
+
+A file holds several named variables, so an adopted one is a **group**: `keys(runs.dataset)` names
+them, `runs.dataset[:sst]` hands back an ordinary dataset to slice, and the dimension names and
+attributes the format carried come with it. Write files under `datadir()` or `@sfile`, which resolve
+on the node the way they do in the notebook — the per-region scratch, beside the job.
+
 ## Working on a compute node
 
 A region whose host is a cluster's front door does not run there. `login` is where you **ask**; the
