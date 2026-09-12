@@ -2238,7 +2238,7 @@ function _make_router(h::Hub)
         tgt = String(get(_body(req), "target", ""))   # per-cell ✨: scope the turn to a cell + its dep cone
         crew = String(get(_body(req), "crew", ""))     # crew label → route to that crew member's agent ("" = solo)
         model = String(get(_body(req), "model", ""))   # agent model ("" = service default = sonnet); binds at spawn
-        perm = String(get(_body(req), "permission", "")) # permission preset (lab/auto/default/bypass); binds at spawn
+        perm = String(get(_body(req), "permission", "")) # preset (notebook/lab/auto/default/bypass); binds at spawn
         ment = _mention_context(nb, text)              # @id cell references → inline those cells' context
         isempty(ment) || (text = ment * "\n\n" * text)
         isempty(tgt) || (text = _cell_context(nb, tgt) * "\n\nUSER REQUEST:\n" * text)
@@ -2966,6 +2966,17 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
     _install_worker_push!(h)   # worker telemetry + log → per-page WebSocket push (no browser polling)
     handle = HTTP.streamhandler(_make_router(h))
+    # Claim the port HERE, before `HTTP.listen!` spawns the accept loop and returns. A port that is
+    # already taken fails inside that task, and HTTP's own startup check races it — so `start_hub`
+    # hands back a hub that looks started while nothing is listening, and every call into it blocks
+    # with no error anywhere. Binding first makes a taken port an error from the caller that asked
+    # for it. (Closed immediately: this is a probe, and `listen!` does the real bind.)
+    try
+        close(Sockets.listen(Sockets.getaddrinfo(String(host)), Int(port)))
+    catch e
+        error("KaimonSlate: cannot start a hub on $host:$port — $(sprint(showerror, e)). " *
+              "Another hub or process is already using that port.")
+    end
     server = HTTP.listen!(host, port) do stream::HTTP.Stream
         # Reject cross-origin / rebinding requests before ANY handler (router or SSE) runs.
         if !_request_allowed(h, stream.message)
