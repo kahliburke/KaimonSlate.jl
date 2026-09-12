@@ -547,13 +547,21 @@ function _lockBadge(c) {
 // a package's registrar). `c.effects` is [{kind,names,stmt}] (see cell_json). e.g. an `:everywhere` op
 // registration Slate re-establishes on every region worker. Compact glyph + the registered names; the
 // hover lists every declaration and the statement that made it — a "what did this cell do to Slate" peek.
+// Declarations that are Slate talking to ITSELF are not a "what did this cell do" fact and do not
+// earn a badge. `value_identity` is a sweep telling the hub what its results currently are, so a
+// reader's memo key moves when they land; it named a mechanism nobody can act on, on every sweep
+// cell. `everywhere` stays, because a package registering an op on every region worker is something
+// the reader's notebook genuinely does.
+const _EFFECT_SILENT = ['value_identity'];
+
 function _effectBadge(c) {
-  if (!c.effects || !c.effects.length) return '';
-  const names = [...new Set([].concat(...c.effects.map(e => e.names || [])))];
-  const everywhere = c.effects.some(e => e.kind === 'everywhere');
-  const label = everywhere ? 'everywhere' : (c.effects[0].kind || 'effect');
+  const eff = (c.effects || []).filter(e => !_EFFECT_SILENT.includes(e.kind));
+  if (!eff.length) return '';
+  const names = [...new Set([].concat(...eff.map(e => e.names || [])))];
+  const everywhere = eff.some(e => e.kind === 'everywhere');
+  const label = everywhere ? 'everywhere' : (eff[0].kind || 'effect');
   const shown = names.length ? ' · ' + names.join(', ') : '';
-  const tip = 'declares to Slate:\n' + c.effects.map(e =>
+  const tip = 'declares to Slate:\n' + eff.map(e =>
     '• ' + (e.kind === 'everywhere' ? 'everywhere' : e.kind) +
     ((e.names && e.names.length) ? ' · ' + e.names.join(', ') : '') +
     (e.stmt ? '\n    ' + e.stmt : '')).join('\n');

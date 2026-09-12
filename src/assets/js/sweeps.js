@@ -44,11 +44,22 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
   // Slate's OWN cell settings — these mean something to the notebook, not to the scheduler, and so
   // are edited as named controls rather than as scheduler options. Mirrors `Sweep._ATTR_OTHER`.
   const OWN = ['cluster', 'data', 'chunk', 'region', 'needs', 'mutates', 'script'];
+  // A field is [key, label, hint] for a free-text override, or [key, label, hint, options] for one
+  // that has a fixed vocabulary — those render as a select, because typing a value the header will
+  // reject is not something a control should let you do.
   const FIELDS = [
+    ['Results', [
+      ['data', 'storage', 'how each unit\'s result is stored. auto reads the shape; arrow chunks ' +
+                          'row output even when it is small; whole hands the value back intact',
+       ['', 'auto', 'arrow', 'whole']],
+    ]],
     ['Batching', [
       ['chunk', 'units per job', 'how many units ride one scheduler job'],
     ]],
   ];
+  // What an unset value means, per key — shown as the select's first row so "blank" is never a
+  // mystery. Everything else in this panel inherits from the cluster; `data` does not.
+  const UNSET = { data: 'auto (default)' };
 
   // The scheduler options the name box suggests — fetched from the server (`/api/sched-options`)
   // rather than listed here, so what the editor offers is the same list Slate types and validates.
@@ -359,10 +370,20 @@ function showOptMenu(row, inp) {
       FIELDS.map(([group, fs]) =>
         `<div class="ctlsub">${group} <span class="swcfg-sub">— override for this cell</span></div>` +
         '<div class="swcfg-grid">' +
-        fs.map(([k, label, hint]) =>
-          `<label title="${esc(hint)}"><span>${esc(label)}</span>` +
-          `<input data-k="${k}" value="${esc(spec[k] || '')}" placeholder="${esc(sel && sel[k] ? sel[k] : 'inherit')}" spellcheck="false"></label>`
-        ).join('') + '</div>').join('') +
+        fs.map(([k, label, hint, opts]) => {
+          const cur = spec[k] || '';
+          if (!opts) {
+            return `<label title="${esc(hint)}"><span>${esc(label)}</span>` +
+              `<input data-k="${k}" value="${esc(cur)}" placeholder="${esc(sel && sel[k] ? sel[k] : 'inherit')}" spellcheck="false"></label>`;
+          }
+          // A value the cell already carries that is not in the list still appears, so opening the
+          // panel can never silently rewrite a header it did not recognise.
+          const list = opts.includes(cur) ? opts : [cur, ...opts];
+          return `<label title="${esc(hint)}"><span>${esc(label)}</span><select data-k="${k}">` +
+            list.map(o => `<option value="${esc(o)}"${o === cur ? ' selected' : ''}>` +
+                          `${esc(o || UNSET[k] || 'inherit')}</option>`).join('') +
+            '</select></label>';
+        }).join('') + '</div>').join('') +
       '<div class="swcfg-note">Blank inherits from the cluster.</div>' +
       '<div class="swcfg-actions"><button class="swcfg-apply">Apply &amp; reconcile</button>' +
       '<button class="swcfg-cancel">Cancel</button></div>';
@@ -464,8 +485,10 @@ function showOptMenu(row, inp) {
     const set = {};
     const csel = pop.querySelector('.swcfg-cluster');
     if (csel && csel.value) set.cluster = csel.value;
-    pop.querySelectorAll('input[data-k]').forEach(inp => {
-      const v = inp.value.trim();
+    // `[data-k]`, not `input[data-k]`: a field with a fixed vocabulary renders as a select, and
+    // scoping this to inputs would read every free-text override and silently drop the others.
+    pop.querySelectorAll('[data-k]').forEach(inp => {
+      const v = (inp.value || '').trim();
       if (v) set[inp.dataset.k] = v;
     });
     // The pair list → the FOOTER, keyed under the header spelling (`mem_per_cpu`) whatever was
