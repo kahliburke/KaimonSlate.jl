@@ -1351,11 +1351,24 @@ function create_tools(GateTool::Type)
             "The agent is asking for shell and file access.\n\n" * strip(why);
             options = [("allow", "Allow file + shell tools for this notebook"),
                        ("deny",  "Keep it to the slate tools")])
-        lowercase(strip(reply)) == "allow" || return "Refused — work with the slate tools."
+        pick, note = _decision(reply)
+        pick == "allow" || return "Refused — work with the slate tools." *
+                                  (isempty(note) ? "" : " They said: " * note)
         # The preset binds when the agent process starts, so this one keeps what it has. Say so
         # rather than letting the agent try `Read` on the next line and be refused.
         NotebookServer.grant_agent_permission!(nb, "lab")
-        return "Allowed. Finish this message. The file tools are there from the next one."
+        return "Allowed. Finish this message. The file tools are there from the next one." *
+               (isempty(note) ? "" : "\n\nThey added: " * note)
+    end
+
+    # An answer that carries a comment: the choice on the first line, anything the person added
+    # after it. Yes/no with no way to qualify it forces a false binary — the useful answer to a
+    # proposal is very often "go ahead, but not that part".
+    function _decision(reply::AbstractString)
+        parts = split(String(reply), '\n'; limit = 2)
+        pick = lowercase(strip(first(parts)))
+        note = length(parts) > 1 ? strip(parts[2]) : ""
+        return (String(pick), String(note))
     end
 
     """
@@ -1420,11 +1433,15 @@ function create_tools(GateTool::Type)
             options = [("go", "Go ahead"), ("no", "Don't")])
         # An unanswered proposal is a refusal. Nobody was there, and a plan nobody approved must not
         # be carried out because the timer ran out rather than because anyone agreed.
-        answer = isempty(strip(reply)) ? "no" : String(strip(reply))
-        NotebookServer.set_decision!(nb, f.id, answer)
-        answer == "no" && return "They said no (or did not answer). Do not carry out the plan."
-        answer == "go" && return "Approved. Carry out the plan."
-        return "They answered in their own words — this is the instruction, not the plan you proposed:\n\n" * answer
+        pick, note = _decision(reply)
+        isempty(pick) && (pick = "no")
+        NotebookServer.set_decision!(nb, f.id, isempty(note) ? pick : pick * " — " * note)
+        aside = isempty(note) ? "" : "\n\nThey added: " * note *
+                "\nThat is part of the instruction, not a remark to acknowledge."
+        pick == "no" && return "They said no (or did not answer). Do not carry out the plan." * aside
+        pick == "go" && return "Approved. Carry out the plan." * aside
+        return "They answered in their own words — this is the instruction, not the plan you " *
+               "proposed:\n\n" * pick * (isempty(note) ? "" : "\n" * note)
     end
 
     """

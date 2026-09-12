@@ -21,13 +21,22 @@ function toggleAgent() {
   document.body.classList.toggle('agent-open', open);   // slide cells left of the panel
   // Sized on OPEN, not only at load: `scrollHeight` is 0 while the panel is hidden, so a draft
   // left in the box would come back the wrong height until the first keystroke.
+  _publishAgentWidth();
   if (open) { document.getElementById('apin').focus(); apAutoGrow(); setWorking(agentWorking); }
 }
+// The panel's real width, as a CSS variable on <body>. Read from the element rather than assumed,
+// so maximizing (or a narrow viewport clamping it) moves everything that sits clear of it.
+function _publishAgentWidth() {
+  const p = document.getElementById('agentpanel'); if (!p) return;
+  document.body.style.setProperty('--agentw', Math.round(p.getBoundingClientRect().width) + 'px');
+}
+window.addEventListener('resize', _publishAgentWidth);
 // Maximize / restore the agent panel — a wide near-fullscreen view for reading detailed replies.
 function toggleAgentMax() {
   const max = document.getElementById('agentpanel').classList.toggle('maximized');
   const b = document.getElementById('apmaxbtn');
   if (b) { b.textContent = max ? '🗗' : '⛶'; b.title = max ? 'restore the panel' : 'maximize the panel'; }
+  _publishAgentWidth();
 }
 window.toggleAgentMax = toggleAgentMax;
 // Show/hide the agent's streamed thinking (.apmsg.think) — a persisted view preference.
@@ -90,11 +99,32 @@ const _safeImgSrc = u => {
 };
 // Deterministic hue per crew label so each agent gets a stable lane color.
 function _crewHue(name) { let h = 0; for (const c of String(name)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
-// A small colored chip naming the speaking crew member (omitted for the solo agent).
+// A small colored chip naming the speaking agent. The notebook's own agent is named too, now that
+// it is not the only voice: with a specialist and a reviewer both talking, the UNLABELLED one is
+// the ambiguous one, and "which of them said this" is the first thing you need to know.
+//
+// It is KAIMON, shown as 開門 — the mark Kaimon already carries in its own TUI, where the same two
+// characters identify a session as Kaimon's. One mark, one meaning, in both places. `debugger` and
+// `checker` stay lowercase Latin because they are JOBS; the difference in script says which of the
+// three is a participant with a name and which two are roles, without anyone explaining it.
+//
+// Not the model it happens to be running on: that changes without it becoming a different
+// participant in the conversation.
+const SOLO_NAME = 'Kaimon';
+const SOLO_MARK = '開門';
+const _crewName = crew => crew || SOLO_NAME;
+const _crewMark = crew => crew || SOLO_MARK;
 function _crewBadge(crew) {
-  if (!crew) return '';
-  const h = _crewHue(crew);
-  return `<span class="crewbadge" style="--ch:${h}">${_esca(crew)}</span>`;
+  return `<span class="crewbadge" style="--ch:${_crewHue(_crewName(crew))}"` +
+         ` title="${_esca(_crewName(crew))}" aria-label="${_esca(_crewName(crew))}">` +
+         `${_esca(_crewMark(crew))}</span>`;
+}
+// The same name as a block heading rather than an inline chip — for a grouped run of actions,
+// where it is said once for the whole block.
+function _crewLabel(crew) {
+  return `<span class="crewlabel" style="--ch:${_crewHue(_crewName(crew))}"` +
+         ` title="${_esca(_crewName(crew))}" aria-label="${_esca(_crewName(crew))}">` +
+         `${_esca(_crewMark(crew))}</span>`;
 }
 // Marks a tool call driven into this notebook from OUTSIDE its chat — an external MCP agent
 // (or one Kaimon spawned for another notebook) reaching the slate.* tools directly.
@@ -221,10 +251,22 @@ function _agentMsgHtml(m) {
       `${hasDetail ? '<span class="toolcaret">▸</span>' : ''}${_esca(m.text)}${cidChip}${codePre}${detail}</div>`;
   }
   if (m.role === 'toolrun') {
-    const inner = m.items.map(_agentMsgHtml).join('');
-    return `<div class="apmsg tool run expandable" ${tag}>${_crewBadge(m.crew)}` +
-      `<span class="toolcaret">▸</span>${_esca(m.text)} <span class="toolrunn">×${m.items.length}</span>` +
-      `<div class="tooldetail">${inner}</div></div>`;
+    // The crew once, at the top, then the calls as a list. Each line keeps its own expandable
+    // args/result — the compaction is of the repeated chrome, not of the detail.
+    const lines = m.items.map(x => {
+      const cid = x.cid ? ` <span class="toolnav" data-cid="${_esca(x.cid)}">→ ${_esca(x.cid)}</span>` : '';
+      const a = x.args != null ? _argsPretty(x.args) : '';
+      const r = x.resultText || x.result || '';
+      const detail = (a || r) ? `<div class="tooldetail">` +
+        (a ? `<div class="tdlabel">args</div><pre class="toolargs">${_esca(a)}</pre>` : '') +
+        (r ? `<div class="tdlabel">result</div><pre class="toolresult${x.resultErr ? ' err' : ''}">${_esca(r)}</pre>` : '') +
+        `</div>` : '';
+      return `<div class="toolline${(a || r) ? ' expandable' : ''}${x.resultErr ? ' err' : ''}">` +
+             `${_extBadge(x.external)}${_esca(x.text)}${cid}${detail}</div>`;
+    }).join('');
+    return `<div class="apmsg toolrun${lane}" ${tag}>` +
+      `<div class="toolrunh">${_crewLabel(m.crew)}<span class="toolrunn">${m.items.length} actions</span></div>` +
+      `<div class="toolrunlist">${lines}</div></div>`;
   }
   if (m.role === 'finding') {
     const f = m.f;
@@ -242,32 +284,36 @@ function _agentMsgHtml(m) {
       gap + why + plan + `</div>`;
   }
   if (m.role === 'ask') {
-    const btns = (m.answered != null)
-      ? `<div class="apaskdone">✓ ${_esca(m.answeredLabel || m.answered)}</div>`
-      : (m.options || []).map(o =>
-          `<button class="apaskb" onclick="agentAnswerAsk('${_esca(m.id)}','${_esca(o.value)}')">${_esca(o.label)}</button>`).join('');
-    return `<div class="apmsg ask"><div class="apaskq">${_esca(m.text)}</div><div class="apaskbtns">${btns}</div></div>`;
+    // Answered only. While it is open the card above the page owns it — the live controls being in
+    // two places at once is how you end up answering the same question twice.
+    if (m.answered == null) return `<div class="apmsg note">… waiting on your answer above</div>`;
+    return `<div class="apmsg ask answered"><div class="apaskq">${_esca(m.text)}</div>` +
+           `<div class="apaskdone">✓ ${_esca(m.answeredLabel || m.answered)}</div></div>`;
   }
   return (
       m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${_safeImgSrc(m.src)}" alt="agent image"></div>`
     : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
     :                     `<div class="apmsg ${m.role}${lane}${m.external ? ' ext' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}${_esca(m.text)}</div>`);
 }
-// A run of the same tool, as one row. Debugging is the case that forced this: reading a value in a
-// frame means four or five `dbg_eval` calls in a row, and as one row each they buried the sentences
-// around them. The run collapses to a count and opens to the individual calls.
-const _RUN_MIN = 3;
+// Consecutive tool calls by the same agent, as ONE block: the crew named once as a heading, then a
+// line per call. They do not have to be the same tool — a debugging specialist's run is watch,
+// breakpoint, step, frame, eval, and as separate rows that is six repetitions of its own name down
+// the left of a 368px panel, with the sentences on either side pushed apart.
+//
+// A call carrying code keeps its own row: the code is the content, and folding it into a list would
+// hide the thing worth reading.
+const _RUN_MIN = 2;
 function _collapseRuns(msgs) {
   const out = [];
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
-    if (m.role !== 'tool' || m.code) { out.push(m); continue; }   // a code-carrying call is worth its own row
+    if (m.role !== 'tool' || m.code) { out.push(m); continue; }
     let j = i;
     while (j + 1 < msgs.length && msgs[j + 1].role === 'tool' && !msgs[j + 1].code &&
-           msgs[j + 1].text === m.text && msgs[j + 1].crew === m.crew) j++;
+           (msgs[j + 1].crew || '') === (m.crew || '')) j++;
     const n = j - i + 1;
     if (n < _RUN_MIN) { for (let k = i; k <= j; k++) out.push(msgs[k]); }
-    else out.push({ role: 'toolrun', text: m.text, crew: m.crew, items: msgs.slice(i, j + 1),
+    else out.push({ role: 'toolrun', crew: m.crew, items: msgs.slice(i, j + 1),
                     done: msgs.slice(i, j + 1).every(x => x.done) });
     i = j;
   }
@@ -312,6 +358,8 @@ function renderAgentMsgs() {
   el.addEventListener('click', e => {
     const nav = e.target.closest('.toolnav');
     if (nav && nav.dataset.cid) { try { window.selectCell && window.selectCell(nav.dataset.cid, true); } catch (_) {} return; }
+    const line = e.target.closest('.toolline.expandable');   // one call inside a grouped run
+    if (line) { line.classList.toggle('expanded'); return; }
     const tool = e.target.closest('.apmsg.tool.expandable'); if (tool) tool.classList.toggle('expanded');   // reveal full args/result
   });
 })();
@@ -357,7 +405,7 @@ async function loadAgentLog() {
     for (const m of agentMsgs) {
       if (m.role === 'ask' && m.answered == null && !live.has(m.id)) { m.answered = 'withdrawn'; m.answeredLabel = 'no longer waiting'; dirty = true; }
     }
-    if (dirty) renderAgentMsgs();
+    if (dirty) { renderAgentMsgs(); renderAsks(); }
   }
 });
 // One finding, updated in place as a verdict and then a decision land on it. Keyed by id rather
@@ -372,17 +420,47 @@ function _agentFinding(f) {
 function _agentAsk(a) {
   if (!a || agentMsgs.some(m => m.role === 'ask' && m.id === a.id)) return;
   agentMsgs.push({ role: 'ask', id: a.id, text: a.text, options: a.options || [] });
-  renderAgentMsgs();
+  renderAgentMsgs(); renderAsks();
 }
 
+// A blocked question, as a card floating over the page rather than a block inside the transcript.
+//
+// It is NOT a modal in the usual sense: no backdrop, nothing dimmed, nothing blocked. A proposal
+// arrives at the end of a long investigation and the first thing you want is to scroll back through
+// what led to it — so the panel behind has to stay readable and scrollable while the question sits
+// there waiting.
+function _askCard() {
+  let el = document.getElementById('apaskcard');
+  if (!el) { el = document.createElement('div'); el.id = 'apaskcard'; document.body.appendChild(el); }
+  return el;
+}
+function renderAsks() {
+  const el = _askCard();
+  const open = agentMsgs.filter(m => m.role === 'ask' && m.answered == null);
+  if (!open.length) { el.innerHTML = ''; el.classList.remove('show'); return; }
+  el.innerHTML = open.map(m => {
+    const opts = (m.options || []).map(o =>
+      `<button class="apaskb" onclick="agentAnswerAsk('${_esca(m.id)}','${_esca(o.value)}')">${_esca(o.label)}</button>`).join('');
+    return `<div class="apaskcardbody" data-id="${_esca(m.id)}">
+      <div class="apaskq">${mdLite(m.text)}</div>
+      <textarea class="apasknote" rows="1" placeholder="add a comment (optional) — it goes with your answer"></textarea>
+      <div class="apaskbtns">${opts}</div></div>`;
+  }).join('');
+  el.classList.add('show');
+  const ta = el.querySelector('.apasknote'); if (ta) ta.focus();
+}
 async function agentAnswerAsk(id, value) {
   const m = agentMsgs.find(x => x.role === 'ask' && x.id === id);
   if (!m || m.answered != null) return;
+  const box = _askCard().querySelector(`.apaskcardbody[data-id="${CSS.escape(id)}"] .apasknote`);
+  const note = box ? box.value.trim() : '';
   const opt = (m.options || []).find(o => o.value === value);
-  m.answered = value; m.answeredLabel = opt ? opt.label : value;
-  renderAgentMsgs();
-  try { await api('POST', '/api/debug/answer', { id, text: value }); }
-  catch (e) { m.answered = null; renderAgentMsgs(); }
+  m.answered = value; m.answeredLabel = (opt ? opt.label : value) + (note ? ' — ' + note : '');
+  renderAsks(); renderAgentMsgs();
+  // The choice on the first line, the comment under it. "Yes, but not that part" is the answer a
+  // person most often wants to give, and a pair of buttons alone cannot express it.
+  try { await api('POST', '/api/debug/answer', { id, text: note ? value + '\n' + note : value }); }
+  catch (e) { m.answered = null; renderAsks(); renderAgentMsgs(); }
 }
 
 const agentStatus = s => { document.getElementById('apstatus').textContent = s || ''; };
@@ -499,13 +577,23 @@ function agentEvent(env) {
     // send only complete blocks → the else branch (back-compat).
     const role = k === 'thought' ? 'think' : 'assistant';
     const txt = (d.content && d.content.text) || '';
-    let last = agentMsgs[agentMsgs.length - 1];
-    const openSame = last && last.role === role && !last.done;
+    // The open block for THIS crew, not whatever is last in the list. Two agents stream at once now
+    // — a specialist working while a reviewer reads — and matching on role alone appended one
+    // agent's sentence into the other's paragraph. Searching back rather than taking the tail also
+    // keeps a block whole when the other agent's tool row lands in the middle of it.
+    let last = null;
+    for (let i = agentMsgs.length - 1; i >= 0; i--) {
+      const m = agentMsgs[i];
+      if (m.role === role && (m.crew || '') === crew && !m.done) { last = m; break; }
+      // Only look past the other agent's rows. This crew's own completed block ends the search:
+      // past it lies an earlier turn, and appending there would rewrite history.
+      if ((m.crew || '') === crew) break;
+    }
     if (d.delta === true) {
       if (!txt) return;
-      if (!openSame) { last = { role, text: '', streamed: true, crew }; agentMsgs.push(last); }
+      if (!last) { last = { role, text: '', streamed: true, crew }; agentMsgs.push(last); }
       last.text += txt; last.streamed = true;
-    } else if (openSame && last.streamed) {
+    } else if (last && last.streamed) {
       last.text = txt; last.done = true;                 // authoritative copy
     } else {
       if (!txt) return;
@@ -555,7 +643,14 @@ function agentEvent(env) {
   } else if (k === 'turn_started') {
     agentStatus('working…'); setWorking(true); return;
   } else if (k === 'result') {
-    const last = agentMsgs[agentMsgs.length - 1]; if (last && last.role === 'assistant') last.done = true;
+    // This crew's open block, not the tail: one agent finishing must not close another's, which
+    // would strand the still-streaming one and make its next chunk start a second bubble.
+    for (let i = agentMsgs.length - 1; i >= 0; i--) {
+      const m = agentMsgs[i];
+      if ((m.crew || '') !== crew) continue;
+      if (m.role === 'assistant') m.done = true;
+      break;
+    }
     agentStatus(''); setWorking(false);
   } else if (k === 'error') {
     agentMsgs.push({ role: 'err', text: d.message || 'error' }); agentStatus(''); setWorking(false);

@@ -43,6 +43,18 @@ const asks = signal([]);
 // nobody can see is a conclusion nobody can argue with — and the verdict in particular exists to be
 // disagreed with.
 const findings = signal([]);
+// Whether the chat panel is open beside the workspace. When it is, this pane's own transcript is a
+// worse rendering of the same conversation, so it gives up its half of the column.
+const chatDocked = signal(false);
+function _syncChatDocked() {
+  try { chatDocked.value = document.body.classList.contains('agent-open'); } catch (e) {}
+}
+_syncChatDocked();
+// The panel is toggled from outside this module (topbar, per-cell ✨, keyboard, palette), so watch
+// the class rather than trying to intercept every entry point.
+try {
+  new MutationObserver(_syncChatDocked).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+} catch (e) {}
 
 const live = computed(() => st.value && !st.value.finished);
 export const debugCell = computed(() => (st.value ? st.value.cell : ''));
@@ -1146,14 +1158,18 @@ function Focus() {
             return clamp(box.right - ev.clientX, 0, box.width - 360);
           })}
           onReset=${() => { paneRight.value = 360; localStorage.setItem('slateDbgRight', '360'); }} />
+        ${/* With the chat panel docked alongside, this column's transcript is the same conversation
+              rendered worse — no markdown, no grouping, no crew colours. So it stands down and the
+              scratchpad takes the whole column, which is where the room was wanted anyway. */''}
         <div class="dbgfright">
-          <div class="dbgconvowrap" style=${'height:' + paneConvo.value + '%'}><${Convo} s=${s} /></div>
-          <${Grip} axis="y"
-            onDrag=${e => drag(e, paneConvo, 'slateDbgConvo', ev => {
-              const box = document.querySelector('.dbgfright').getBoundingClientRect();
-              return clamp((ev.clientY - box.top) / box.height * 100, 0, 100);
-            })}
-            onReset=${() => { paneConvo.value = 58; localStorage.setItem('slateDbgConvo', '58'); }} />
+          ${chatDocked.value ? null : html`
+            <div class="dbgconvowrap" style=${'height:' + paneConvo.value + '%'}><${Convo} s=${s} /></div>
+            <${Grip} axis="y"
+              onDrag=${e => drag(e, paneConvo, 'slateDbgConvo', ev => {
+                const box = document.querySelector('.dbgfright').getBoundingClientRect();
+                return clamp((ev.clientY - box.top) / box.height * 100, 0, 100);
+              })}
+              onReset=${() => { paneConvo.value = 58; localStorage.setItem('slateDbgConvo', '58'); }} />`}
           <${Scratch} s=${s} />
         </div>
       </div>
@@ -1347,6 +1363,10 @@ style.textContent = `
 /* ── focus view ─────────────────────────────────────────────────────────────── */
 .dbgfocusbg { position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.55);
   display:flex; align-items:center; justify-content:center; padding:24px; }
+/* Beside the chat, not over it. Watching an agent debug means reading two things at once — the
+   frame it is stopped on, and what it is saying about it — and a workspace that covered the panel
+   made you pick one. Insetting by the panel's own width is how the editor already behaves. */
+body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
 /* Positioned, so the expanded live view sits over THIS box rather than the viewport: the focus
    view is already a dialog, and an overlay escaping it would cover the page behind. (No backticks
    in here — this whole block is a template literal.) */
