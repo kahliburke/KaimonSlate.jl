@@ -1333,6 +1333,15 @@ input.toggle:checked::after { left:18px; }
 .apmsg.tool .toolnav:hover { background:color-mix(in srgb, var(--accent) 18%, transparent); color:var(--strong); }
 .apmsg.err { align-self:flex-start; color:var(--red); }
 .apmsg.note { align-self:center; background:none; color:var(--dim); font-size:.74rem; padding:2px 6px; max-width:100%; }
+/* A question the agent is BLOCKED on. Accented and full width, because ignoring it stops the turn. */
+.apmsg.ask { align-self:stretch; max-width:100%; background:var(--bg2); border:1px solid var(--bg3);
+             border-left:2px solid var(--accent); border-radius:5px; padding:8px 10px; }
+.apmsg.ask .apaskq { font-size:.82rem; white-space:pre-wrap; }
+.apmsg.ask .apaskbtns { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.apmsg.ask .apaskb { cursor:pointer; font:inherit; font-size:.76rem; padding:3px 9px; border-radius:4px;
+                     background:var(--bg); color:var(--fg); border:1px solid var(--bg3); }
+.apmsg.ask .apaskb:hover { border-color:var(--accent); color:var(--strong); }
+.apmsg.ask .apaskdone { font-size:.76rem; color:var(--dim); }
 .apmsg.think { align-self:flex-start; background:none; color:var(--dim); font-style:italic; font-size:.78rem; border-left:2px solid var(--bg3); border-radius:0; padding:2px 0 2px 9px; }
 /* Show/hide the agent's thinking (💭 toggle in the header). Hidden bubbles are removed from
    layout; the toggle dims to read as "off". */
@@ -2010,6 +2019,14 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
   border-radius:8px; padding:8px 10px; font-family:inherit; font-size:.86rem;
   scrollbar-width:thin; scrollbar-color:var(--bg2) transparent; }
 .apinput textarea:focus { outline:none; border-color:var(--accent); }
+/* Bottom-aligned and fixed size. The row stretches its children by default, so the button grew
+   with the box as you typed — a Send key the height of a paragraph. It sits by the last line
+   instead, where the caret is. */
+.apsend { align-self:flex-end; flex:0 0 auto; width:32px; height:32px; padding:0;
+  display:flex; align-items:center; justify-content:center;
+  border:1px solid var(--border); border-radius:8px; background:var(--bg3); color:var(--text);
+  font-size:1rem; line-height:1; cursor:pointer; }
+.apsend:hover { border-color:var(--accent); color:var(--accent); }
 .apinput textarea::-webkit-scrollbar { width:9px; }
 .apinput textarea::-webkit-scrollbar-track { background:transparent; }
 .apinput textarea::-webkit-scrollbar-thumb { background:var(--bg2); border-radius:5px; border:2px solid var(--bg3); }
@@ -2681,6 +2698,7 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .setrolep { padding:0 5px; border:1px solid var(--border); border-radius:4px;
   color:var(--dim); font-size:.72em; }
 .setrolen { color:var(--dim); font-size:.78em; }
+.setrolem { max-width:190px; font-size:.74em; padding:1px 4px; }
 /* The verbs wrap onto their own line and read small — present so the claim is checkable, not
    because anyone needs to read them every time they open Settings. */
 .setrolev { flex:1 0 100%; text-align:right; line-height:1.7; }

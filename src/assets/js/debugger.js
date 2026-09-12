@@ -485,12 +485,12 @@ async function answerAsk(id, text) {
 // watchable: the strip and the focus view are reading the session, not their own last click.
 // Specialist-framework events arrive on their own channel and name the role they belong to, so a
 // second kind of specialist gets its own pane without either surface knowing about the other.
-window.onSpecialistPush = (p) => {
+(window.slateSpecialistSubs ||= []).push((p) => {
   if (!p || p.role !== DEBUG_ROLE) return;
   if (p.asks !== undefined) asks.value = p.asks || [];
   if (p.ask) asks.value = [...asks.value.filter(a => a.id !== p.ask.id), p.ask];
   if (p.specialist) specialist.value = p.specialist;
-};
+});
 
 window.onDebugPush = (p) => {
   if (!p) return;

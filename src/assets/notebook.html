@@ -252,7 +252,7 @@
   <div class="apinput">
     <div id="chattarget" class="chattarget" style="display:none"></div>
     <textarea id="apin" placeholder="Ask the agent to build/edit cells… (⏎ send · ⇧⏎ newline)"></textarea>
-    <button onclick="agentSend()">Send</button>
+    <button class="apsend" onclick="agentSend()" title="Send (⏎)" aria-label="Send">↑</button>
   </div>
 </aside>
 <aside id="histpanel" class="histpanel">
@@ -455,7 +455,8 @@
     <input id="setmodelcustom" class="settext" type="text" placeholder="e.g. claude-opus-4-8, sonnet[1m], ollama:llama3.1" autocomplete="off" spellcheck="false"/></div>
   <div class="setrow"><label title="Your default permission preset for every notebook. A notebook can override it locally (never written to the file) under “This notebook”.">Agent permissions (global default)</label>
     <select id="setperm">
-      <option value="">Lab (default — slate tools + edits)</option>
+      <option value="">Notebook (default — slate tools, no shell)</option>
+      <option value="lab">Lab (slate tools + files + shell)</option>
       <option value="auto">Auto (model self-governs)</option>
       <option value="default">Default (edits only)</option>
       <option value="bypass">Bypass (no checks — trusted only)</option>

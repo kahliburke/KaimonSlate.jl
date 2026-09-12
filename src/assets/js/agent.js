@@ -202,6 +202,13 @@ function _agentMsgHtml(m) {
     return `<div class="apmsg tool${lane}${m.external ? ' ext' : ''}${hasDetail ? ' expandable' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}` +
       `${hasDetail ? '<span class="toolcaret">▸</span>' : ''}${_esca(m.text)}${cidChip}${codePre}${detail}</div>`;
   }
+  if (m.role === 'ask') {
+    const btns = (m.answered != null)
+      ? `<div class="apaskdone">✓ ${_esca(m.answeredLabel || m.answered)}</div>`
+      : (m.options || []).map(o =>
+          `<button class="apaskb" onclick="agentAnswerAsk('${_esca(m.id)}','${_esca(o.value)}')">${_esca(o.label)}</button>`).join('');
+    return `<div class="apmsg ask"><div class="apaskq">${_esca(m.text)}</div><div class="apaskbtns">${btns}</div></div>`;
+  }
   return (
       m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${_safeImgSrc(m.src)}" alt="agent image"></div>`
     : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
@@ -269,6 +276,39 @@ async function loadAgentLog() {
     renderAgentMsgs();
   } catch (_) {}
 }
+// A blocked question from the notebook's OWN agent (no specialist role), so it belongs in the
+// chat rather than the debugger's pane: its turn is stopped mid-tool-call waiting for the answer,
+// and the transcript is where its last sentence already is.
+(window.slateSpecialistSubs ||= []).push(p => {
+  if (!p || p.role) return;
+  if (p.ask) _agentAsk(p.ask);
+  // The full list arrives when one is cleared. An ask that is gone but still has buttons here was
+  // answered somewhere else, or timed out — either way it is no longer a question.
+  if (p.asks !== undefined) {
+    const live = new Set((p.asks || []).map(a => a.id));
+    let dirty = false;
+    for (const m of agentMsgs) {
+      if (m.role === 'ask' && m.answered == null && !live.has(m.id)) { m.answered = 'withdrawn'; m.answeredLabel = 'no longer waiting'; dirty = true; }
+    }
+    if (dirty) renderAgentMsgs();
+  }
+});
+function _agentAsk(a) {
+  if (!a || agentMsgs.some(m => m.role === 'ask' && m.id === a.id)) return;
+  agentMsgs.push({ role: 'ask', id: a.id, text: a.text, options: a.options || [] });
+  renderAgentMsgs();
+}
+
+async function agentAnswerAsk(id, value) {
+  const m = agentMsgs.find(x => x.role === 'ask' && x.id === id);
+  if (!m || m.answered != null) return;
+  const opt = (m.options || []).find(o => o.value === value);
+  m.answered = value; m.answeredLabel = opt ? opt.label : value;
+  renderAgentMsgs();
+  try { await api('POST', '/api/debug/answer', { id, text: value }); }
+  catch (e) { m.answered = null; renderAgentMsgs(); }
+}
+
 const agentStatus = s => { document.getElementById('apstatus').textContent = s || ''; };
 // A centered, dim system line in the transcript (e.g. "⚙ model → … applies next message").
 function _agentNote(text) { agentMsgs.push({ role: 'note', text }); renderAgentMsgs(); }

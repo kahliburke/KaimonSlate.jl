@@ -32,7 +32,9 @@ tool names it may call; the namespace is applied at summon time, because this ch
 `slate_dbg` and an installed one as `slate`, so a written-down tool name is right in exactly one
 of them. `briefing(nb, subject, task) -> String` builds the opening turn from live context — the
 part that makes a specialist start oriented rather than surveying. `permission` should be a preset
-with no allowances of its own (`default`), or the preset widens the allowlist and undoes it.
+with no allowances of its own — `specialist`, which is also the only one that denies the CLI's own
+shell and file tools. A preset that allows anything is UNIONED with `verbs` on the Claude Code path,
+which widens the allowlist and undoes the narrowness that is the whole reason for the role.
 """
 struct Specialist
     name::String
@@ -42,7 +44,7 @@ struct Specialist
     permission::String
 end
 Specialist(name::AbstractString; brief::AbstractString, verbs::Vector{String}, briefing,
-           permission::AbstractString = "default") =
+           permission::AbstractString = "specialist") =
     Specialist(String(name), String(brief), verbs, briefing, String(permission))
 
 const SPECIALISTS = Dict{String,Specialist}()
@@ -118,14 +120,17 @@ function summon!(nb::LiveNotebook, role::AbstractString; subject::AbstractString
     s = specialist(role)
     s === nothing && return Dict{String,Any}("ok" => false,
         "error" => "no specialist kind '$role' — known: " * join(specialist_names(), ", "))
-    aid = _ensure_agent!(nb; crew = s.name, model = String(model), permission = s.permission,
+    # An explicit model wins; else the role's configured default; else the notebook's own agent
+    # model, which is what `_ensure_agent!` falls back to for an empty string.
+    m = isempty(strip(String(model))) ? specialist_model(s.name) : String(model)
+    aid = _ensure_agent!(nb; crew = s.name, model = m, permission = s.permission,
                          system_prompt = s.brief, allowed_tools = tool_names(s))
     turn = Base.invokelatest(s.briefing, nb, String(subject), String(task))
     lock(_SPEC_LOCK) do; _SPEC_BRIEFING[(nb.id, s.name)] = turn; end
     register_orchestrator!(nb, s.name, orchestrator)
     _agent_call(:agent_send, Dict{String,Any}("agent_id" => aid, "text" => turn))
     broadcast_specialist(nb, s.name, Dict{String,Any}("specialist" => Dict{String,Any}(
-        "agent_id" => aid, "crew" => s.name, "cell" => String(subject), "model" => String(model))))
+        "agent_id" => aid, "crew" => s.name, "cell" => String(subject), "model" => m)))
     return Dict{String,Any}("ok" => true, "agent_id" => aid, "crew" => s.name,
                             "cell" => String(subject))
 end
@@ -264,11 +269,32 @@ asks_json(nb::LiveNotebook) = lock(_SPEC_LOCK) do
     [ask_json(a) for a in values(get(_ASKS, nb.id, Dict{String,Ask}()))]
 end
 
-# Whether only the DEBUG specialist may drive a debug session. Named for the role it gates, not
-# for "specialist" in general: with more than one role registered, a policy about one of them has
-# to say which. Held here as a live ref with a persist
-# hook, the same way RUNON_DEFAULT is: NotebookServer has no business knowing where the config file
-# lives, and KaimonSlate has no business owning a policy the server enforces.
+# A default model per ROLE, so a specialist can be given a different one from the notebook agent
+# without naming it at every summon. Which model suits a role is a property OF the role — a
+# debugger reading traces and a reviewer reading prose are not obviously the same job — and it is
+# not something to re-decide each time you need one.
+const SPECIALIST_MODELS = Dict{String,String}()
+const _SPECIALIST_MODELS_PERSIST = Ref{Any}(nothing)
+
+"The model a role runs on, or `\"\"` to follow the notebook's own agent model."
+specialist_model(role::AbstractString)::String =
+    lock(_SPEC_LOCK) do; String(get(SPECIALIST_MODELS, String(role), "")); end
+
+function set_specialist_model!(role::AbstractString, model::AbstractString)
+    m = String(strip(model))
+    lock(_SPEC_LOCK) do
+        isempty(m) ? delete!(SPECIALIST_MODELS, String(role)) : (SPECIALIST_MODELS[String(role)] = m)
+    end
+    p = _SPECIALIST_MODELS_PERSIST[]
+    p === nothing || (try; p(copy(SPECIALIST_MODELS)); catch e; @warn "slate: could not persist the role model" exception = e; end)
+    return m
+end
+
+# Whether only the DEBUG specialist may drive a debug session. Named for the role it gates rather
+# than for "specialist" in general: with more than one role registered, a policy about one of them
+# has to say which. A live ref with a persist hook, the same way RUNON_DEFAULT is — NotebookServer
+# has no business knowing where the config file lives, and KaimonSlate has no business owning a
+# policy the server enforces.
 const DEBUG_SPECIALIST_ONLY = Ref(false)
 const _DEBUG_SPECIALIST_ONLY_PERSIST = Ref{Any}(nothing)
 
@@ -293,6 +319,7 @@ specialist_roles_json() = lock(_SPEC_LOCK) do
         "name" => s.name,
         "verbs" => copy(s.verbs),
         "permission" => s.permission,
+        "model" => specialist_model(s.name),
         # One line: the full brief is hundreds of words and belongs in `dbg_brief`, not a settings row.
         "summary" => (ls = split(strip(String(s.brief)), '\n'); isempty(ls) ? "" : String(first(ls))),
      ) for s in sort!(collect(values(SPECIALISTS)); by = x -> x.name)]

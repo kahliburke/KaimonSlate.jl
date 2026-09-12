@@ -731,17 +731,22 @@ function _register_debug_routes!(router, h::Hub)
         get(r, "ok", false) === true && @async (try; refresh_live_watches!(nb); catch; end)
         _json(r)
     end))
-    # Agent roles + the policy over them. Global rather than per-notebook: a specialist's verbs and
-    # whether a generalist may step are facts about this installation, not about one document.
-    HTTP.register!(router, "GET", "/api/agent-roles", _ ->
+    # Agent roles + the policy over them. The VALUES are global — a specialist's verbs and whether
+    # a generalist may step are facts about this installation, not about one document — but the
+    # route is notebook-scoped anyway, because every client path rewrites `/api/…` to
+    # `/api/<notebook>/…`. An unscoped route is simply unreachable from the browser.
+    HTTP.register!(router, "GET", "/api/{id}/agent-roles", _ ->
         _json(Dict{String,Any}("roles" => specialist_roles_json(),
                                "debug_specialist_only" => debug_specialist_only(),
                                "checker_on" => checker_on())))
-    HTTP.register!(router, "POST", "/api/agent-roles", req -> begin
+    HTTP.register!(router, "POST", "/api/{id}/agent-roles", req -> begin
         b = _body(req)
         haskey(b, "debug_specialist_only") &&
             set_debug_specialist_only!(get(b, "debug_specialist_only", false) === true)
         haskey(b, "checker_on") && set_checker_on!(get(b, "checker_on", false) === true)
+        # `{role, model}` — an empty model clears the override and the role follows the notebook.
+        haskey(b, "role") &&
+            set_specialist_model!(String(get(b, "role", "")), String(get(b, "model", "")))
         _json(Dict{String,Any}("ok" => true, "roles" => specialist_roles_json(),
                                "debug_specialist_only" => debug_specialist_only(),
                                "checker_on" => checker_on()))
@@ -765,6 +770,10 @@ function _register_debug_routes!(router, h::Hub)
     # What the specialist was told: standing brief, allowed tools, opening turn.
     HTTP.register!(router, "GET", "/api/{id}/debug/brief", req -> _withnb(h, req, nb ->
         _json(brief_of(nb, DEBUG_ROLE))))
+    # Every question currently blocking someone, for a page that has just loaded. The pushes only
+    # reach a page that was already open, so without this a reload hides a blocked agent completely.
+    HTTP.register!(router, "GET", "/api/{id}/asks", req -> _withnb(h, req, nb ->
+        _json(Dict{String,Any}("asks" => asks_json(nb)))))
     # Answer an agent's question or consent request — this is what unblocks its turn.
     HTTP.register!(router, "POST", "/api/{id}/debug/answer", req -> _withnb(h, req, nb -> begin
         b = _body(req)

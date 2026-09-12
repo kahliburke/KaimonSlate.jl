@@ -648,6 +648,16 @@ function _load_slate_config!()
     # the file is where it came from, so a restart has to put it back or the setting looks like it
     # did not stick.
     NotebookServer.DEBUG_SPECIALIST_ONLY[] = get(_slate_config(), "debug_specialist_only", false) === true
+    let saved = get(_slate_config(), "specialist_models", Dict{String,Any}())
+        saved isa AbstractDict && for (k, v) in saved
+            NotebookServer.SPECIALIST_MODELS[String(k)] = String(v)
+        end
+    end
+    NotebookServer._SPECIALIST_MODELS_PERSIST[] = function (models)
+        cfg = _slate_config(); cfg["specialist_models"] = Dict{String,Any}(models)
+        _persist_slate_config!(cfg)
+        return nothing
+    end
     NotebookServer.CHECKER_ON[] = get(_slate_config(), "checker_on", false) === true
     NotebookServer._CHECKER_PERSIST[] = function (on)
         cfg = _slate_config(); cfg["checker_on"] = on
@@ -1310,6 +1320,32 @@ function create_tools(GateTool::Type)
         v = get(r, "value", nothing)
         v === nothing && return "(no value)"
         return string(get(v, "repr", ""), "  ::", get(v, "type", ""), get(v, "size", ""))
+    end
+
+    """
+        request_file_access(notebook, why) -> String
+
+    Ask the user for the shell and file tools, which you do not have by default.
+
+    Say what you need to do and why the slate tools cannot do it. The user decides, so "I would
+    like to look around" is a no. The narrow cases this is for are editing the package's own
+    `src/`, and reading a file the notebook uses that no slate tool exposes.
+
+    Blocks until they answer. Allowed, the tools arrive with your NEXT message, because the preset
+    binds when the agent starts. A refusal is an answer: do not ask again.
+    """
+    function request_file_access(notebook::String, why::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        isempty(strip(why)) && return "⛔ say what you need file access for"
+        reply = NotebookServer.ask_and_wait(nb, "", "choice", _dbg_who(),
+            "The agent is asking for shell and file access.\n\n" * strip(why);
+            options = [("allow", "Allow file + shell tools for this notebook"),
+                       ("deny",  "Keep it to the slate tools")])
+        lowercase(strip(reply)) == "allow" || return "Refused — work with the slate tools."
+        # The preset binds when the agent process starts, so this one keeps what it has. Say so
+        # rather than letting the agent try `Read` on the next line and be refused.
+        NotebookServer.grant_agent_permission!(nb, "lab")
+        return "Allowed. Finish this message. The file tools are there from the next one."
     end
 
     """
@@ -2801,6 +2837,7 @@ function create_tools(GateTool::Type)
         GateTool("dbg_break", dbg_break),
         GateTool("dbg_watch", dbg_watch),
         GateTool("dbg_choose", dbg_choose),
+        GateTool("request_file_access", request_file_access),
         GateTool("check_ok", check_ok),
         GateTool("check_flag", check_flag),
         GateTool("dbg_ask", dbg_ask; timeout_ms = ASK_MS),
