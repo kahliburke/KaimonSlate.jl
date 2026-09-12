@@ -16,6 +16,14 @@ const AGENT = "agent:fake-agent"
 
 include("debug_fake_agent.jl")
 
+# `create_tools` is handed the tool TYPE, so a stand-in records what each tool was registered with
+# without a gate in the process.
+struct ToolSpec
+    name::String
+    timeout_ms::Any
+end
+ToolSpec(name, _f; timeout_ms = nothing) = ToolSpec(String(name), timeout_ms)
+
 @testset "specialist loop" begin
     NS.SlateHistory._ROOT[] = mktempdir()
     # Ask the OS for a free one rather than naming a port. A fixed port is shared with another
@@ -211,6 +219,21 @@ include("debug_fake_agent.jl")
             @test NS.done_warned(nb)
             NS.reset_cells_seen!(nb, ["drive"])                  # a new investigation, a fresh warning
             @test !NS.done_warned(nb)
+        end
+
+        @testset "a tool that waits on a person outlasts the ask" begin
+            # A tool that blocks on `ask_and_wait` gets up to ASK_TIMEOUT for an answer. If its own
+            # call deadline is shorter, the call dies while the question is still on screen — the
+            # person answers into a turn that has already failed. Two tools shipped that way, both
+            # of them the ones that exist to ask a person something.
+            tools = KaimonSlate.create_tools(ToolSpec)
+            by = Dict(t.name => t for t in tools)
+            for v in ("dbg_ask", "dbg_choose", "dbg_propose", "request_file_access", "dbg_wait")
+                @test haskey(by, v)
+                t = by[v]
+                @test t.timeout_ms !== nothing
+                @test t.timeout_ms > NS.ASK_TIMEOUT * 1000      # milliseconds, and with headroom
+            end
         end
 
         @testset "a value carries where it came from" begin

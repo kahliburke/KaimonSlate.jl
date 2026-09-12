@@ -1170,10 +1170,15 @@ function create_tools(GateTool::Type)
         who == "agent:mcp" && return ""                # an MCP client with no agent id: a person
         mine = NotebookServer.specialist_here(nb, NotebookServer.DEBUG_ROLE)
         who == "agent:" * String(mine) && return ""    # the specialist itself
+        # Naming the supervisor's verbs, not the specialist's. This used to say `dbg_ask` and
+        # `dbg_done`, which are the things the SPECIALIST calls — so an orchestrator that followed
+        # it signed off on an investigation it had not run, filing a second finding that said what
+        # the first one already did.
         return "⛔ Stepping is the debugging specialist's. Call `dbg_summon(notebook, cell, task=…)` " *
-               "to put one on it, then supervise with `dbg_wait` / `dbg_tell` / `dbg_ask`, and " *
-               "`dbg_done` when it has answered. (Turn this off with " *
-               "`KaimonSlate.set_debug_specialist_only!(false)`.)"
+               "to put one on it, then supervise: `dbg_wait` blocks until it asks or finishes, " *
+               "`dbg_answer` unblocks a question, `dbg_tell` redirects it. When it has finished, " *
+               "read `dbg_findings` and put a course of action to the person with `dbg_propose`. " *
+               "(Turn this off with `KaimonSlate.set_debug_specialist_only!(false)`.)"
     end
 
     _dbg_who() = (a = _agent_id(); "agent:" * (isempty(a) ? (c = _caller(); isempty(c) ? "mcp" : c) : a))
@@ -3000,8 +3005,8 @@ function create_tools(GateTool::Type)
         GateTool("dbg_eval", dbg_eval; timeout_ms = CELL_RUN_MS),
         GateTool("dbg_break", dbg_break),
         GateTool("dbg_watch", dbg_watch),
-        GateTool("dbg_choose", dbg_choose),
-        GateTool("request_file_access", request_file_access),
+        GateTool("dbg_choose", dbg_choose; timeout_ms = ASK_MS),
+        GateTool("request_file_access", request_file_access; timeout_ms = ASK_MS),
         GateTool("dbg_findings", dbg_findings),
         GateTool("dbg_propose", dbg_propose; timeout_ms = ASK_MS),
         GateTool("check_ok", check_ok),

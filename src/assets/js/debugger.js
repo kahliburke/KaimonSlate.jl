@@ -632,7 +632,11 @@ function Owner({ s }) {
 // the whole workspace, which put agent prose in two places at once — the band and the transcript
 // — and read as two different conversations happening about the same thing.
 function Asks() {
-  const list = asks.value;
+  // This specialist's questions only. `asks_json` is per notebook and unfiltered, and the frame
+  // carries it wholesale — so without this, a question the notebook's own agent asked (a plan to
+  // approve, a request for file access) rendered here AND in the chat, which is the two-places
+  // problem the note above describes, reintroduced by a different route.
+  const list = asks.value.filter(a => a.role === DEBUG_ROLE);
   if (!list.length) return null;
   return html`<div class="dbgasks">${list.map(a => html`<div class=${'dbgask ' + a.kind} key=${a.id}>
     <div class="dbgaskq">${a.text}</div>
@@ -713,7 +717,9 @@ export function DebugStrip({ cell }) {
       <button class="dbgexp" title="end the session"
         onClick=${e => { e.stopPropagation(); stopDebug(); }}>■</button>
     </div>
-    ${asks.value.length ? html`<div class="dbgaskbadge" onClick=${() => focus.value = true}>
+    ${/* The specialist's, not every ask on the notebook — this badge sends you to the workspace,
+          which is the wrong place to answer a question the notebook's own agent asked in chat. */''}
+    ${asks.value.some(a => a.role === DEBUG_ROLE) ? html`<div class="dbgaskbadge" onClick=${() => focus.value = true}>
       ❓ the specialist is waiting on you — open the workspace to answer</div>` : null}
   </div>`;
 }

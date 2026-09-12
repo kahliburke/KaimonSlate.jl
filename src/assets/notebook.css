@@ -1336,6 +1336,22 @@ input.toggle:checked::after { left:18px; }
 /* A collapsed run of the same tool. The count carries the information the repeated rows did. */
 .apmsg.tool.run .toolrunn { color:var(--accent); font-size:.72rem; }
 .apmsg.tool.run .tooldetail > .apmsg.tool { padding-left:14px; }
+/* What an investigation concluded, kept as a record beside the prose version of it. Quiet unless
+   DISPUTED — a located disagreement is the most useful thing in the transcript. */
+.apmsg.finding { align-self:stretch; max-width:100%; background:var(--bg2); border:1px solid var(--bg3);
+                 border-left:2px solid var(--dim); border-radius:5px; padding:7px 10px; font-size:.78rem; }
+.apmsg.finding.confirmed { border-left-color:var(--teal); }
+.apmsg.finding.disputed  { border-left-color:var(--amber,#d9a441); }
+.apfindh { display:flex; align-items:center; gap:7px; }
+.apfindc { font-family:'Cascadia Code',monospace; font-size:.73rem; color:var(--accent); }
+.apfindv { font-size:.64rem; text-transform:uppercase; letter-spacing:.06em; padding:1px 6px; border-radius:9px; }
+.apfindv.confirmed { color:var(--teal); background:color-mix(in srgb, var(--teal) 14%, transparent); }
+.apfindv.disputed { color:var(--amber,#d9a441); background:color-mix(in srgb, var(--amber,#d9a441) 14%, transparent); }
+.apfindclaim { color:var(--strong); margin-top:3px; line-height:1.5; }
+.apfindev, .apfindwhy { color:var(--dim); margin-top:3px; line-height:1.5; }
+.apfindgap { color:var(--dim); font-style:italic; margin-top:3px; }
+.apfindplan { margin-top:5px; }
+.apfinddec { margin-left:7px; color:var(--dim); }
 /* A question the agent is BLOCKED on. Accented and full width, because ignoring it stops the turn. */
 .apmsg.ask { align-self:stretch; max-width:100%; background:var(--bg2); border:1px solid var(--bg3);
              border-left:2px solid var(--accent); border-radius:5px; padding:8px 10px; }

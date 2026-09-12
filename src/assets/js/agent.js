@@ -226,6 +226,21 @@ function _agentMsgHtml(m) {
       `<span class="toolcaret">▸</span>${_esca(m.text)} <span class="toolrunn">×${m.items.length}</span>` +
       `<div class="tooldetail">${inner}</div></div>`;
   }
+  if (m.role === 'finding') {
+    const f = m.f;
+    const v = f.verdict ? `<span class="apfindv ${_esca(f.verdict)}">${_esca(f.verdict)}</span>` : '';
+    const gap = (f.unread_upstream || []).length
+      ? `<div class="apfindgap">never looked at ${_esca(f.unread_upstream.join(', '))} — which produce its inputs</div>` : '';
+    const why = f.verdict_why ? `<div class="apfindwhy">${_esca(f.verdict_why)}</div>` : '';
+    const dec = f.decision ? `<span class="apfinddec">${f.decision === 'go' ? '✓ approved'
+      : f.decision === 'no' ? '✕ declined' : '✎ ' + _esca(f.decision)}</span>` : '';
+    const plan = f.plan ? `<div class="apfindplan">plan: ${_esca(f.plan)}${dec}</div>` : '';
+    return `<div class="apmsg finding ${_esca(f.verdict || 'open')}">` +
+      `<div class="apfindh"><span class="apfindc">${_esca(f.cell || '(no cell named)')}</span>${v}</div>` +
+      `<div class="apfindclaim">${_esca(f.claim)}</div>` +
+      (f.evidence ? `<div class="apfindev">${_esca(f.evidence)}</div>` : '') +
+      gap + why + plan + `</div>`;
+  }
   if (m.role === 'ask') {
     const btns = (m.answered != null)
       ? `<div class="apaskdone">✓ ${_esca(m.answeredLabel || m.answered)}</div>`
@@ -327,7 +342,12 @@ async function loadAgentLog() {
 // chat rather than the debugger's pane: its turn is stopped mid-tool-call waiting for the answer,
 // and the transcript is where its last sentence already is.
 (window.slateSpecialistSubs ||= []).push(p => {
-  if (!p || p.role) return;
+  if (!p) return;
+  // A finding outlives the session that produced it — signing off CLOSES the session, which shuts
+  // the debugging workspace, so the pane that shows findings is gone at the moment one appears.
+  // The chat is where it lasts, and where the proposal about it arrives.
+  if (p.finding) { _agentFinding(p.finding); return; }
+  if (p.role) return;                       // everything below is the notebook agent's own
   if (p.ask) _agentAsk(p.ask);
   // The full list arrives when one is cleared. An ask that is gone but still has buttons here was
   // answered somewhere else, or timed out — either way it is no longer a question.
@@ -340,6 +360,15 @@ async function loadAgentLog() {
     if (dirty) renderAgentMsgs();
   }
 });
+// One finding, updated in place as a verdict and then a decision land on it. Keyed by id rather
+// than appended, or the same conclusion stacks up three times — which is the thing the record
+// exists to stop.
+function _agentFinding(f) {
+  const i = agentMsgs.findIndex(m => m.role === 'finding' && m.id === f.id);
+  if (i < 0) agentMsgs.push({ role: 'finding', id: f.id, f });
+  else agentMsgs[i] = { role: 'finding', id: f.id, f };
+  renderAgentMsgs();
+}
 function _agentAsk(a) {
   if (!a || agentMsgs.some(m => m.role === 'ask' && m.id === a.id)) return;
   agentMsgs.push({ role: 'ask', id: a.id, text: a.text, options: a.options || [] });
