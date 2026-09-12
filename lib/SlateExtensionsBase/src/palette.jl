@@ -18,8 +18,14 @@ The wire spec for one ⌘K command-palette entry. `id` is a stable, namespaced i
 dedup key (let [`auto_palette_command`](@ref) derive it from your type via [`kind_for`](@ref)).
 `label` is the searchable text shown in the list. `tag` is an optional short badge on the right
 (the built-ins use `panel`, `export`, `recipe`, …); it defaults to the package name, so a user can
-type your package's name to see everything it contributes. `key` is a **display-only** shortcut
-hint — registering a command does not bind a key.
+type your package's name to see everything it contributes. `key` is the command's **default keyboard
+shortcut**, in CodeMirror chord notation (`"Mod-Shift-y"`, `"Alt-ArrowUp"`, `"g g"` for a two-stroke
+sequence; `Mod` is ⌘ on macOS and Ctrl elsewhere). Leave it empty and the command is palette-only.
+
+Either way the command gets a row in Settings → Keyboard, where the user can bind, rebind or clear it
+like any built-in — so `key` is a suggestion, not a claim. Pick one that is free: the host refuses
+chords the browser keeps for itself, and a chord already taken by a core command will be flagged as a
+conflict rather than silently winning.
 
 `run` is **raw JavaScript** the extension owns (the same trust boundary as shipping a front-end
 asset): statement(s) executed when the command is chosen, with `selectedId` (the currently selected

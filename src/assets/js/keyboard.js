@@ -1,25 +1,30 @@
-// ── Command/edit mode + Jupyter-style keyboard shortcuts ──────────────────────
-// Command mode: a cell is "selected" (PURPLE ring) and single keys act on it —
-// j/k or ↑/↓ to move, a/b to insert above/below, dd to delete, m/y to set
-// markdown/code, Enter to edit. Edit mode: focus inside the CodeMirror (TEAL
-// ring + a ✎ chip in the header); Esc returns to command mode.
+// ── Command/edit mode: the selection, and what a click does to it ─────────────
+// Command mode: a cell is "selected" (PURPLE ring) and single keys act on it — j/k or ↑/↓ to move,
+// a/b to insert above/below, dd to delete, m/y to set markdown/code, Enter to edit. Edit mode: focus
+// inside the CodeMirror (TEAL ring + a ✎ chip in the header); Esc returns to command mode.
 //
-// Which mode you are in is STATE, not a class on the element: it lives in the
-// store's `editing` signal and <Cell> folds it into the cell's class. The ring
-// used to be poked onto the DOM here, so the first keystroke — which rewrites
-// that class as the cell goes fresh → edited — silently erased it, and the
+// The KEYS themselves are not here any more. Every shortcut in the notebook is a registered command
+// (commands.js) resolved through one keymap (keymap.js), so they are rebindable and the palette's
+// shortcut hints read the live binding. What stays here is the selection model (single-select,
+// range-extend, toggle), the mouse gestures that drive it, and the id-label rename.
+//
+// Which mode you are in is STATE, not a class on the element: it lives in the store's `editing` signal
+// and <Cell> folds it into the cell's class. The ring used to be poked onto the DOM here, so the first
+// keystroke — which rewrites that class as the cell goes fresh → edited — silently erased it, and the
 // chrome then showed command mode while the keyboard was still in the editor.
-let selectedId = null, anchorId = null, _dPending = false, _dTimer = null;
-// `selectedId` is a classic-script `let`, so it is NOT a property of `window` and an ES module
-// island can't read it. Islands that need the selection (the Extensions gallery) call this.
+let selectedId = null, anchorId = null;
+// `selectedId` is a classic-script `let`, so it is NOT a property of `window` and an ES module island
+// can't read it. Everything outside this file — islands, commands.js, the keymap — goes through these.
 window.slateSelectedId = () => selectedId || '';
 const cellIds = () => ((nbState && nbState.cells) || []).map(c => c.id);
+window.slateCellIds = cellIds;
 // The current selection as an ordered (notebook-order) id list; falls back to the active cell.
 function selectedIds() {
   const s = window.slateStore && window.slateStore.selectedSet.value;
   if (!s || !s.size) return selectedId ? [selectedId] : [];
   return cellIds().filter(id => s.has(id));
 }
+window.slateSelectedIds = selectedIds;
 // Single-select: clear to just `id` (also resets the range anchor here).
 function selectCell(id, scroll) {
   selectedId = id; anchorId = id;
@@ -29,6 +34,7 @@ function selectCell(id, scroll) {
   if (el && scroll) el.scrollIntoView({ block: 'nearest' });
 }
 // Extend the selection from the fixed anchor to `id` (shift-click / shift-arrow). `id` becomes active.
+// Published for the selection-extending commands, which compute the target id from the cell list.
 function selectRangeTo(id, scroll) {
   const ids = cellIds();
   let a = ids.indexOf(anchorId); const b = ids.indexOf(id);
@@ -40,6 +46,7 @@ function selectRangeTo(id, scroll) {
   const el = document.getElementById('cell-' + id);
   if (el && scroll) el.scrollIntoView({ block: 'nearest' });
 }
+window.slateSelectRangeTo = selectRangeTo;
 // Toggle `id` in/out of the selection (⌘/ctrl-click); it becomes the active cell + new anchor.
 function toggleSelect(id) {
   selectedId = id; anchorId = id;
@@ -74,12 +81,14 @@ function setEditing(id, on) {
   if (on) selectCell(id);
 }
 // (a global `function` declaration in a classic script IS window.setEditing — notebook.js calls it there)
-// Is this cell showing its raw-source overlay? (md / @bind cells render output by default.)
+// Is this cell showing its raw-source overlay? (md / @bind cells render output by default.) The
+// command-mode Escape asks, so it can close the overlay before collapsing the selection.
 function _srcOpen(id) {
   const cell = document.getElementById('cell-' + id); if (!cell) return false;
   const sed = cell.querySelector('.srcedit');
   return !!(sed && sed.style.display !== 'none');
 }
+window.slateSrcOpen = _srcOpen;
 function enterEdit(id) {
   const c = _cellById(id); if (!c) return;
   // A web cell has an inline editor too (its first pane, registered in editors[id]), so Enter focuses it
@@ -92,67 +101,6 @@ function enterEdit(id) {
   }
   else editSource(id, c.kind === 'md' ? 'markdown' : 'julia');
 }
-document.addEventListener('keydown', e => {
-  if (e.metaKey || e.ctrlKey) return;
-  if (document.getElementById('modalbg').classList.contains('show')) return;
-  const inField = e.target.closest('.cm-editor') || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
-  if (inField) return;                                  // edit mode / typing → leave keys alone
-  const ids = cellIds(); if (!ids.length) return;
-  if (!selectedId || !ids.includes(selectedId)) {
-    if (e.key === 'ArrowDown' || e.key === 'j' || e.key === 'Enter') { selectCell(ids[0], true); e.preventDefault(); }
-    return;
-  }
-  const idx = ids.indexOf(selectedId), k = e.key;
-  // Alt+↑/↓ MOVES the active cell (this was Shift+↑/↓ before multi-select claimed Shift).
-  if (e.altKey) {
-    if (k === 'ArrowUp')        { e.preventDefault(); moveCell(selectedId, 'up'); }
-    else if (k === 'ArrowDown') { e.preventDefault(); moveCell(selectedId, 'down'); }
-    return;                                             // ignore other Alt combos in command mode
-  }
-  // Shift+↑/↓ (or ⇧K/⇧J) EXTEND the selection from the anchor; plain keys navigate (single-select).
-  // The shift branches must precede the plain arrows so the modifier wins.
-  if (e.shiftKey && (k === 'ArrowUp' || k === 'K')) { e.preventDefault(); if (idx > 0) selectRangeTo(ids[idx - 1], true); }
-  else if (e.shiftKey && (k === 'ArrowDown' || k === 'J')) { e.preventDefault(); if (idx < ids.length - 1) selectRangeTo(ids[idx + 1], true); }
-  else if (k === 'Enter' && !e.shiftKey) { e.preventDefault(); enterEdit(selectedId); }   // ⇧⏎ is run, handled below
-  // Escape in COMMAND mode, in order: collapse a raw-source overlay left open by the Escape that
-  // brought you here, then collapse a multi-selection to the active cell. Closing the overlay goes
-  // through toggleSource, so a changed source is COMMITTED rather than dropped — Escape never
-  // destroys work.
-  else if (k === 'Escape') {
-    if (_srcOpen(selectedId)) { e.preventDefault(); const c = _cellById(selectedId); toggleSource(selectedId, c && c.kind === 'md' ? 'markdown' : 'julia'); }
-    else if (selectedIds().length > 1) { e.preventDefault(); selectCell(selectedId); }
-  }
-  else if (k === 'ArrowDown' || k === 'j') { e.preventDefault(); if (idx < ids.length - 1) selectCell(ids[idx + 1], true); }
-  else if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); if (idx > 0) selectCell(ids[idx - 1], true); }
-  else if (k === 'a') { e.preventDefault(); addCell(selectedId, 'code', true); }
-  else if (k === 'b') { e.preventDefault(); addCell(selectedId, 'code', false); }
-  else if (k === 'c') { e.preventDefault(); copyCells(); }              // copy selected cell(s)
-  else if (k === 'x') { e.preventDefault(); cutCells(); }               // cut selected cell(s)
-  else if (k === 'v') { e.preventDefault(); pasteCells(); }             // paste below the active cell
-  else if (k === 'm') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'md') toggleType(selectedId, 'md'); }
-  else if (k === 'y') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'code') toggleType(selectedId, 'code'); }
-  else if (k === 'w') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'web') toggleType(selectedId, 'web'); }   // convert to a web (HTML/CSS/JS) cell
-  else if (k === 'M') { e.preventDefault(); mergeBelow(selectedId); }    // Shift-M: merge with cell below
-  else if (k === 'd') { e.preventDefault();
-    if (_dPending) { _dPending = false; clearTimeout(_dTimer); delCell(selectedId); }   // delCell deletes the whole selection
-    else { _dPending = true; _dTimer = setTimeout(() => _dPending = false, 650); } }
-});
-// Run shortcuts in COMMAND mode (a cell is selected but not being edited) — mirror the
-// in-editor keys: ⇧⏎ runs the cell and moves to the next; ⌘/Ctrl⇧⏎ runs and opens a fresh
-// cell below. (In edit mode CodeMirror's extraKeys handle these, so we bail when in a field.)
-// Only plain code cells have the always-on editor runCell reads; md/@bind cells just advance.
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Enter' || !e.shiftKey || e.altKey) return;
-  if (document.getElementById('modalbg').classList.contains('show')) return;
-  const inField = e.target.closest('.cm-editor') || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
-  if (inField) return;
-  const ids = cellIds(); if (!selectedId || !ids.includes(selectedId)) return;
-  e.preventDefault();
-  const id = selectedId, c = _cellById(id);
-  const ran = (c && c.kind === 'code' && !hasBinds(c)) ? runCell(id) : Promise.resolve();
-  if (e.metaKey || e.ctrlKey) ran.then(() => addCell(id, 'code', false, true));            // run + new cell below (edit it)
-  else ran.then(() => { const a = cellIds(), i = a.indexOf(id); if (i >= 0 && i < a.length - 1) selectCell(a[i + 1], true); });
-});
 // Click selects (mousedown precedes editor focus); double-click the id label renames it.
 // Shift-click extends a range from the anchor; ⌘/Ctrl-click toggles one cell — both suppress
 // the default (text selection / editor focus) so they don't drop you into edit mode.

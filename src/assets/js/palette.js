@@ -117,111 +117,91 @@ async function insertRecipe(code) {
 
 // ── Extension-contributed commands ────────────────────────────────────────────
 // The host global behind SlateExtensionsBase's `register_palette_command!`, mirroring
-// `slateRegisterCellAction`. An extension's injected script calls this once per command; we key by
-// `id` so a re-injection (every run drain re-runs `__slate_frontend`) replaces rather than stacks.
-// Insertion order is preserved so a package's commands stay grouped.
-const _extCmds = new Map();
+// `slateRegisterCellAction`. An extension's injected script calls this once per command; the registry
+// keys by `id` so a re-injection (every run drain re-runs `__slate_frontend`) replaces rather than
+// stacks, and insertion order keeps a package's commands grouped.
+//
+// It registers into the SAME registry as the built-ins, which is what makes an extension's command
+// bindable from the Keyboard panel: it gets a row, it can be given a chord, and a `key:` it declares
+// is honoured as that command's default binding rather than being printed as decoration. The id is
+// namespaced so a package cannot collide with a core command or with another package.
 window.slateRegisterCommand = function (spec) {
   if (!spec || !spec.id || typeof spec.run !== 'function') return;
-  _extCmds.set(spec.id, spec);
+  const ext = spec.ext || spec.tag || 'ext';
+  window.slateCmd.register({
+    id: 'ext/' + ext + '/' + spec.id,
+    label: spec.label || spec.id,
+    group: 'Extension: ' + ext,
+    ctx: spec.ctx && spec.ctx.length ? spec.ctx : ['command'],
+    keys: spec.key ? [spec.key] : [],
+    ext: ext,
+    // An extension's `run` takes the selected cell id, so it can act on a cell without reaching into
+    // our globals. Errors are reported rather than thrown: one bad extension must not take the
+    // keyboard down with it.
+    run: t => spec.run(t.id || ''),
+  });
+  window.slateKeymap && window.slateKeymap.rebuild();   // a declared `key:` has to reach the index
 };
-window.slateUnregisterCommand = function (id) { _extCmds.delete(id); };
+window.slateUnregisterCommand = function (id) {
+  for (const c of window.slateCmd.all()) {
+    if (c.id.startsWith('ext/') && c.id.endsWith('/' + id)) window.slateCmd.unregister(c.id);
+  }
+  window.slateKeymap && window.slateKeymap.rebuild();
+};
 
 // ── Command palette (⌘K) ──────────────────────────────────────────────────────
-// A WORKBOOK gets its own list rather than a filter over the authoring one. Same reasoning as the
-// route allowlist in server_app.jl: a filter has to be remembered every time a command is added,
-// and forgetting is silent. This way a new authoring command is absent from a workbook until
-// someone puts it here on purpose. Everything listed either reads the document or runs the
-// reader's own code — the two things a workbook already permits.
-function readerCommands() {
-  const cmds = [
-    { label: 'Search docs…', key: '⌘⇧K', run: openDocs },
-    // The gear is a small floating target in the corner; the palette is how someone who wants
-    // vim bindings or a different syntax theme actually finds them.
-    { label: 'Settings — theme, width, editor keymap…',
-      run: () => window.appSettingsToggle && window.appSettingsToggle() },
-    { label: 'Scratchpad — try something out', key: '⌘⇧S',
-      run: () => window.openWorkbookScratch && window.openWorkbookScratch() },
-    { label: 'Table of contents', key: '⌘⇧L', run: toggleTOC },
-    { label: 'Run stale cells', key: '⌘↵', run: runAll },
-  ];
-  // Jump-to-cell stays: it is navigation, and an app reader has no other way to move by name.
-  cellIds().forEach(id => cmds.push({ tag: 'cell', label: 'Jump to cell: ' + id, run: () => selectCell(id, true) }));
-  return cmds;
-}
+// The list is DERIVED from the command registry (commands.js), so an action is written down once and
+// its palette row, its shortcut hint and its keybinding cannot disagree. The hint in particular used
+// to be a hand-typed glyph string — `'⌥↑'`, `'d d'` — with nothing tying it to the handler that ran,
+// so the palette went on advertising chords that had been changed or removed.
+//
+// What stays local to this file is everything that is NOT an action on the document: source snippets
+// to insert, and the editor hand-offs. Those have no keybinding and nothing else needs their ids.
+//
+// A WORKBOOK gets a narrow ALLOWLIST rather than a filter over the authoring list. Same reasoning as
+// the route allowlist in server_app.jl: a filter has to be remembered every time a command is added,
+// and forgetting is silent. This way a new authoring command is absent from a workbook until someone
+// puts it here on purpose. Everything listed either reads the document or runs the reader's own code —
+// the two things a workbook already permits.
+const _WORKBOOK_CMDS = ['view.docs', 'view.settings', 'view.keymap', 'view.scratch', 'view.toc',
+                        'nb.runStale', 'cell.run', 'cell.runAdvance'];
+
+// One registry command → one palette row. The hint is asked for at render time, so reopening the
+// palette after a rebind shows the new chord with nothing to invalidate.
+const _row = c => ({
+  label: c.label,
+  key: window.slateCmd.hint(c.id),
+  tag: c.ext || _TAGS[c.id] || '',
+  run: () => window.slateCmd.run(c.id),
+});
+// A few rows carry a badge that groups them visually in the list. Cosmetic, and deliberately sparse.
+const _TAGS = { 'view.packages': 'panel', 'view.workerLog': 'panel', 'view.history': 'panel',
+                'view.extensions': 'panel', 'view.settings': 'panel', 'view.keymap': 'panel',
+                'view.files': 'panel', 'view.zen': 'zen', 'view.present': 'present',
+                'view.presenter': 'present', 'view.export': 'export', 'view.publish': 'publish' };
 
 function paletteCommands() {
-  if (typeof SLATE_IS_WORKBOOK !== 'undefined' && SLATE_IS_WORKBOOK) return readerCommands();
-  // `key` is the shortcut hint shown on the right of each row. Single-letter / ⇧-keys are
-  // command-mode (a cell is selected and you're NOT editing it); ⌘-keys are global.
-  const sel = selectedId;
-  const cmds = [
-    { label: 'Run stale cells', key: '⌘↵', run: runAll },
-    { label: 'Run all cells (whole notebook)', run: rerunAll },
-    { label: 'Run this cell and below', run: () => { if (sel) runCellAndBelow(sel); } },
-    { label: 'Command palette', key: '⌘K', run: openPalette },
-    { label: 'Search docs…', key: '⌘⇧K', run: openDocs },
-    { label: 'Toggle agent panel', key: '⌘⇧A', run: toggleAgent },
-    { label: 'Toggle controls palette', key: '⌘⇧F', run: togglePalette },
-    { label: 'Table of contents', key: '⌘⇧L', run: toggleTOC },
-    { label: 'Pipeline DAG (dataflow graph)', key: '⌘⇧G', run: toggleDag },
-    { label: 'Undo', key: '⌘Z', run: undoNb },
-    { label: 'Redo', key: '⌘⇧Z', run: redoNb },
-    { label: 'Add code cell below', key: 'b', run: () => addCell(sel || '', 'code') },
-    { label: 'Add code cell above', key: 'a', run: () => addCell(sel || '', 'code', true) },
-    { label: 'Add markdown cell', run: () => addCell(sel || '', 'md') },
-    { label: 'Add web cell (HTML/CSS/JS widget)', run: () => addCell(sel || '', 'web') },
-    { label: 'Add tool call cell (invoke a session tool)', run: () => addCell(sel || '', 'tool') },
-    { label: 'Edit selected cell', key: '↵', run: () => { if (sel) enterEdit(sel); } },
-    { label: 'Run selected cell', key: '⇧↵', run: () => { if (sel) runCell(sel); } },
-    { label: 'Delete selected cell(s)', key: 'd d', run: () => { if (sel) delCell(sel); } },
-    { label: 'Copy selected cell(s)', key: 'c', run: () => { if (sel) copyCells(); } },
-    { label: 'Cut selected cell(s)', key: 'x', run: () => { if (sel) cutCells(); } },
-    { label: 'Paste cell(s)', key: 'v', run: () => pasteCells() },
-    { label: 'Move selected cell up', key: '⌥↑', run: () => { if (sel) moveCell(sel, 'up'); } },
-    { label: 'Move selected cell down', key: '⌥↓', run: () => { if (sel) moveCell(sel, 'down'); } },
-    { label: 'Show dependency chain of selected', key: '🔗', run: () => { if (sel) toggleDeps(sel); } },
-    { label: 'Convert selected to markdown', key: 'm', run: () => { if (sel) toggleType(sel, 'md'); } },
-    { label: 'Convert selected to code', key: 'y', run: () => { if (sel) toggleType(sel, 'code'); } },
-    { label: 'Convert selected to web (HTML/CSS/JS)', key: 'w', run: () => { if (sel) toggleType(sel, 'web'); } },
-    { label: 'Convert selected to tool call', run: () => { if (sel) toggleType(sel, 'tool'); } },
-    { label: 'Merge selected cell with below', key: '⇧M', run: () => { if (sel) mergeBelow(sel); } },
-    { label: 'Split selected cell at cursor', run: () => { if (sel && editors[sel]) splitCell(sel); } },
-    { label: 'Rebuild (fresh namespace)', run: resetAll },
-    { label: 'Restart worker', run: restartWorker },
-    { label: 'Reload from disk', run: reload },
-    { label: 'Hide all code (show only output)', run: () => hideAllCode(true) },
-    { label: 'Show all code', run: () => hideAllCode(false) },
-    { label: 'Hide code for all plot cells', run: () => hideAllPlotCode(true) },
-    { label: 'Show code for all plot cells', run: () => hideAllPlotCode(false) },
-    { label: 'Packages…', tag: 'panel', run: togglePackages },
-    { label: 'Worker log', tag: 'panel', run: toggleLog },
-    { label: 'History…', tag: 'panel', run: toggleHistory },
-    { label: 'Zen mode (hide code — reading view)', tag: 'zen', run: () => window.toggleZen && window.toggleZen() },
-    { label: 'Present (slideshow)', tag: 'present', run: () => enterPresent() },
-    { label: 'Open presenter window', tag: 'present', run: () => openPresenter() },
-    { label: 'Export… (HTML · PDF · Markdown · standalone)', tag: 'export', run: () => openExport() },
-    { label: 'Publish… (to GitHub Pages)', tag: 'publish', run: () => openPublish() },
-    { label: 'Export PDF (slides)', tag: 'export', run: () => exportSlidesPdf() },
-    ...BIND_SNIPPETS.map(([name, snip]) => ({ tag: '@bind', label: 'Insert @bind: ' + name, run: () => insertBind(snip) })),
-    ...RECIPES.map(([name, code]) => ({ tag: 'recipe', label: 'Recipe: ' + name, run: () => insertRecipe(code) })),
-    { label: 'Open notebook in VS Code', run: () => { const p = nbState && nbState.path; if (p) location.href = 'vscode://file' + p; } },
-    { label: 'Open project in VS Code', run: () => { const d = nbState && (nbState.project || window.PLATFORM.dirOf(nbState.path || '').replace(/[\/\\]$/, '')); if (d) location.href = 'vscode://file' + d; } },
-    { label: 'Extensions… (browse the Slate extension catalog)', tag: 'panel', run: () => window.openExtensions && window.openExtensions() },
-    { label: 'Settings…', tag: 'panel', run: openSettings },
-    // Same dialog as above, opened on its per-notebook scope. It has no menu entry of its own (one
-    // Settings is enough chrome), so this keeps "notebook config" — what people still call it and
-    // search for — pointing somewhere.
-    { label: 'Settings: this notebook… (config / overrides)', tag: 'panel', run: () => openSettings('notebook') },
-    { label: 'All notebooks', run: () => { location.href = '/'; } },
-  ];
-  // Extension-contributed commands, badged with the owning package (see slateRegisterCommand).
-  // `run` gets the selected cell id so a command can act on it without reaching into our globals.
-  _extCmds.forEach(c => cmds.push({
-    tag: c.tag || 'ext', key: c.key || '', label: c.label,
-    run: () => { try { c.run(selectedId || ''); } catch (e) { window.toast && window.toast('Command failed: ' + e.message, 4000); } },
-  }));
-  cellIds().forEach(id => cmds.push({ tag: 'cell', label: 'Jump to cell: ' + id, run: () => selectCell(id, true) }));
+  const workbook = typeof SLATE_IS_WORKBOOK !== 'undefined' && SLATE_IS_WORKBOOK;
+  const cmds = [];
+  for (const c of window.slateCmd.listed()) {
+    if (workbook && _WORKBOOK_CMDS.indexOf(c.id) < 0) continue;
+    cmds.push(_row(c));
+  }
+  if (!workbook) {
+    // Palette-only rows: they insert source or hand off to another program, so there is nothing to
+    // bind a key to and no id anything else would ask for.
+    cmds.push(
+      { label: 'Settings: this notebook… (config / overrides)', tag: 'panel', run: () => openSettings('notebook') },
+      { label: 'Export PDF (slides)', tag: 'export', run: () => exportSlidesPdf() },
+      ...BIND_SNIPPETS.map(([name, snip]) => ({ tag: '@bind', label: 'Insert @bind: ' + name, run: () => insertBind(snip) })),
+      ...RECIPES.map(([name, code]) => ({ tag: 'recipe', label: 'Recipe: ' + name, run: () => insertRecipe(code) })),
+      { label: 'Open notebook in VS Code', run: () => { const p = nbState && nbState.path; if (p) location.href = 'vscode://file' + p; } },
+      { label: 'Open project in VS Code', run: () => { const d = nbState && (nbState.project || window.PLATFORM.dirOf(nbState.path || '').replace(/[\/\\]$/, '')); if (d) location.href = 'vscode://file' + d; } },
+    );
+  }
+  // Jump-to-cell is generated per cell, and stays even in a workbook: it is navigation, and a reader
+  // has no other way to move to a cell by name.
+  for (const c of window.slateCellCommands()) cmds.push({ label: c.label, tag: 'cell', run: c.run });
   return cmds;
 }
 let _cmd = [], _cmdSel = 0;
@@ -239,6 +219,10 @@ function openPalette() {
   renderPaletteList(''); inp.focus();
 }
 function closePalette() { document.getElementById('cmdbg').classList.remove('show'); }
+// What the `view.palette` command runs: a second press of the chord dismisses the palette rather than
+// reopening it on itself.
+window.slateTogglePalette = () =>
+  document.getElementById('cmdbg').classList.contains('show') ? closePalette() : openPalette();
 function renderPaletteList(filter) {
   const f = filter.trim().toLowerCase();
   const mru = _mruLoad(), rank = c => { const i = mru.indexOf(c.label); return i < 0 ? Infinity : i; };
@@ -746,36 +730,10 @@ document.addEventListener('keydown', e => {
 }, true);
 _restoreDocs();
 
-// Global ⌘/Ctrl shortcuts (work everywhere, including inside the editor — CodeMirror
-// doesn't bind these). Mirrored in the command palette's shortcut hints.
-document.addEventListener('keydown', e => {
-  const mod = e.metaKey || e.ctrlKey;
-  if (mod && (e.key === 'k' || e.key === 'K')) {                          // ⌘K palette · ⌘⇧K docs
-    if (e.shiftKey) {
-      // ⌘⇧K: when a cell editor is focused, the editor's OWN Mod-Shift-k binding already handled this
-      // (it opens the dock, which BLURS the editor — so a focus check here runs too late). That binding
-      // stamps `__docsHotkey`; if it just fired (same keypress), bail so we don't call openDocsAtCursor a
-      // second time and toggle the dock straight back shut. Outside an editor, we own the shortcut.
-      if (window.__docsHotkey && Date.now() - window.__docsHotkey < 250) return;
-      e.preventDefault();
-      openDocsAtCursor();
-    } else {
-      e.preventDefault();
-      // ⌘K toggles: a second press dismisses the palette rather than reopening it.
-      document.getElementById('cmdbg').classList.contains('show') ? closePalette() : openPalette();
-    }
-  }
-  else if (mod && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runAll(); }         // ⌘↵  run stale (⌘⇧↵ is run+add-below, handled elsewhere)
-  else if (mod && e.shiftKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); toggleAgent(); }   // ⌘⇧A agent
-  else if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); togglePalette(); } // ⌘⇧F controls
-  else if (mod && e.shiftKey && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); toggleTOC(); }      // ⌘⇧L table of contents
-  else if (mod && e.shiftKey && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); toggleDag(); }      // ⌘⇧G pipeline DAG
-  // ⌘⇧← / ⌘⇧→ : back/forward through selected-cell history — but ONLY outside an editor, where those
-  // chords are text selection (select-to-line-start/end).
-  else if (mod && e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
-           !(document.activeElement && document.activeElement.closest && document.activeElement.closest('.cm-editor, input, textarea'))) {
-    e.preventDefault();
-    (e.key === 'ArrowLeft' ? window.navBack : window.navFwd)?.();
-  }
-});
+// The global ⌘/Ctrl shortcuts that used to be a hand-written if/else ladder here are registry
+// commands now (commands.js, `ctx: ['global']`), dispatched by keymap.js. The one behaviour worth
+// recording: ⌘⇧K needed a `window.__docsHotkey` timestamp to spot the editor's own binding firing for
+// the same keypress, with a 250ms window in which the right answer depended on handler timing. The
+// keymap resolves it structurally — an event from inside `.cm-editor` skips any command CodeMirror
+// also owns — so both the flag and the race are gone.
 

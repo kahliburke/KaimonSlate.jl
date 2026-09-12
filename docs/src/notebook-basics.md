@@ -29,6 +29,9 @@ KaimonSlate uses a Jupyter-style two-mode model:
 - **Command mode** — the cell has an accent ring and single keys act on it.
 - **Edit mode** — focus is inside the editor (green ring); `Esc` returns to command mode.
 
+Every key in the tables below is the **default** and every one of them can be changed — see
+[Keyboard shortcuts](#Keyboard-shortcuts) at the end of this page.
+
 | Key | Action |
 | --- | --- |
 | `↑`/`k`, `↓`/`j` | move selection |
@@ -84,6 +87,53 @@ Notebook-wide:
 | `⌘⇧G` | dependency graph |
 | `⌘⇧S` | scratchpad |
 | `⌘Z` / `⌘⇧Z` | undo / redo structural changes |
+
+## Keyboard shortcuts
+
+Every shortcut above is a **command** with a stable name, and the chord that runs it is yours to
+change. **Settings → Keyboard → Customise…** opens the full list: search it, click a chord to
+re-record it, `✕` to remove one, `+` to add a second, `↺` to put a row back the way it came.
+
+A whole **keymap preset** switches the lot at once, in the same Settings section:
+
+| Preset | What it follows |
+| --- | --- |
+| **Slate** | the defaults above — Jupyter-style command mode, ⌘-chords for the panels |
+| **VS Code** | ⌘⇧P palette, ⌘⇧O outline, ⌃↵ run cell, ⌥↵ run and insert below, ⌘⇧E files |
+| **Jupyter / Colab** | classic command mode verbatim — ⌃↵ run, ⇧↵ run and advance, `z` undo, `ii` interrupt, `00` restart |
+| **Vim-flavoured** | vim motions over the *cells* — `j`/`k`, `gg`/`⇧G`, `i`/`o`/`⇧O`, `dd`/`yy`/`p`, `u` and `⌃R` |
+
+A preset is a starting point, not a lock: anything you rebind on top of it is kept separately, so
+switching preset moves everything you *haven't* touched and leaves what you have.
+
+Three things the panel does that are worth knowing about:
+
+- **Sequences.** A binding can be more than one keystroke — `dd`, `gg`, `⌘K Z`. Press the strokes in
+  turn while recording and pause to save. When you type the first stroke of one, a chip at the bottom
+  of the window shows what is armed.
+- **Reserved chords.** A browser keeps a handful of combinations for itself — new tab, close window,
+  the devtools — and a page never sees them. Those are refused outright rather than accepted and
+  quietly broken. Ones the browser *will* give up (⌘S, ⌘P, ⌘F) are allowed with a note saying what
+  they shadow. None of the four presets ships a chord from either group.
+- **Clashes are a question, not an outcome.** Record a chord something else already uses and nothing
+  is written: the panel names the command holding it and offers **Reassign…** (take it, then record a
+  replacement for the one you displaced, right there), **Take it** (leave the other unbound),
+  **Keep both** (flagged as a conflict on both rows), or **Cancel** — which changes nothing at all.
+  Only a clash in a context the two actually *share* counts, so `b` in command mode and `b` in the
+  editor are left alone.
+
+Shortcuts are stored per person rather than per notebook, in `keymap.json` under your Slate config
+directory — so they follow you between browsers, and you can read, hand-edit or check in the file.
+**Export** / **Import** move a keymap as JSON.
+
+Text editing *inside* a cell — word motion, indentation, bracket matching, `⌘/` for comments — is a
+separate choice: **Settings → Editing → Editor keymap**, which is `default`, `vim` or `emacs`. Those
+bring complete binding sets of their own, and where one of them claims a chord Slate also uses, the
+editor keymap wins inside the editor. Consequently a row in the panel's **Editor** group adds a chord
+next to whatever that keymap already binds for the same action, rather than replacing it.
+
+An [extension](extensions.md) that contributes a palette command gets a row here too, badged with the
+package that owns it, so its shortcut is as changeable as the built-in ones.
 
 ### Finding across the notebook
 

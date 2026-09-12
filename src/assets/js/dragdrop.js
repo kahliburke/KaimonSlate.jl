@@ -360,14 +360,13 @@ nbEl.addEventListener('click', e => {
   if (del) { e.stopPropagation(); unhostControl(del.dataset.name, del.closest('.cell').dataset.cid); }
 });
 
-// ⌘Z / ⌘⇧Z notebook undo/redo — but defer to CodeMirror's text undo when an editor is focused.
-document.addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
-    if (document.activeElement && document.activeElement.closest('.cm-editor')) return;
-    e.preventDefault();
-    e.shiftKey ? redoNb() : undoNb();
-  }
-});
+// ⌘Z / ⌘⇧Z notebook undo/redo are the `nb.undo` / `nb.redo` commands. They are `global` but NOT
+// `editor`, which is how they keep deferring to CodeMirror's text undo while an editor has focus — a
+// `global` chord is the document's only outside an editor, where CM6 owns the keyboard.
+
+// Cell lookup by id, off the live state. Published because the command registry and the ES-module
+// islands both need it and a classic-script `const` is not a property of `window`.
+window._cellById = _cellById;
 
 // (Live-update debounce now lives in the Settings modal — see openSettings.)
 

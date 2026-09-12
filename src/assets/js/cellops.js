@@ -107,11 +107,28 @@ function hideAddMenu() { document.getElementById('addmenu').classList.remove('sh
 document.addEventListener('mousedown', e => { if (!e.target.closest('#addmenu') && !e.target.closest('.cellgap-add')) hideAddMenu(); });
 document.addEventListener('mousedown', e => { if (!e.target.closest('#ctlpop') && !e.target.closest('.autoctl')) hideControlPicker(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') hideControlPicker(); });
+// A structural edit made FROM an editor changes that cell's source underneath it: a split leaves the
+// cell its `before` half, a merge gives it both halves. The editor still holds what it had, and the
+// cell is still flagged `edited` — which is precisely the shape of an external divergence, so the
+// reconcile flow pops "an external edit (an agent, the file on disk, or another tab) just changed
+// this cell" and reports the user's own keystroke back to them.
+//
+// So tell the editor what it is about to become, before the new state lands. Updating `srcMap` is
+// the part that matters: it is the baseline `onDoc` compares against, so setting it first means the
+// text change does not re-mark the cell edited on its way through.
+function _rebaseline(id, src) {
+  if (typeof srcMap !== 'undefined' && srcMap) srcMap[id] = src;
+  if (editors[id] && window.edSetText) window.edSetText(id, src);
+  const st = window.slateStore;
+  if (st && st.clearEdited) st.clearEdited(id);
+}
 // Split a code cell at the editor cursor into two cells.
 async function splitCell(id, view) {
   const v = view || editors[id]; if (!v) return;
   const idx = v.state.selection.main.head, val = v.state.doc.toString();
-  renderAll(await api('POST', '/api/cell-split/' + id, { before: val.slice(0, idx), after: val.slice(idx) }));
+  const before = val.slice(0, idx), after = val.slice(idx);
+  _rebaseline(id, before);
+  renderAll(await api('POST', '/api/cell-split/' + id, { before, after }));
 }
 // Merge a cell with the one below it (same kind only); sends current editor text.
 // @bind cells ARE mergeable: a cell may hold several @bind statements (they render a combined
@@ -124,7 +141,9 @@ async function mergeBelow(id) {
   if (!a || !b || a.kind !== b.kind) return;
   const sa = editors[id] ? edText(id) : (srcMap[id] || '');
   const sb = editors[ids[i + 1]] ? edText(ids[i + 1]) : (srcMap[ids[i + 1]] || '');
-  renderAll(await api('POST', '/api/cell-merge/' + id, { source: sa.replace(/\s+$/, '') + '\n' + sb.replace(/^\s+/, '') }));
+  const merged = sa.replace(/\s+$/, '') + '\n' + sb.replace(/^\s+/, '');
+  _rebaseline(id, merged);            // same reason as the split: this cell keeps the id
+  renderAll(await api('POST', '/api/cell-merge/' + id, { source: merged }));
   selectCell(id, true);
 }
 // A single cell is named by its id in toasts/labels; multiples are counted ("3 cells").
