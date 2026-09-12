@@ -588,17 +588,30 @@ end
 """
     attr_lazy(attrs) -> Bool
 
-Whether the cell asked for its results to be stored ADDRESSABLY (`data=lazy`) rather than brought
-back whole (`data=eager`, the default). Configuration rather than code: the sweep body is identical
-either way, and the choice is about the size of what comes out, which is a property of the run.
+Whether the cell asked for its results to be stored ADDRESSABLY. Configuration rather than code: the
+sweep body is identical whichever way this goes, and the choice is about the shape and size of what
+comes out, which is a property of the run rather than of the code that produced it.
 """
+# What a cell may say about how its units' results are stored. NOT part of the sweep key: storage is
+# not what computed a result, so changing it must not orphan the units already landed.
+#
+#   auto    the shape decides — addressable when the value has such a form, whole otherwise
+#   arrow   chunk row-shaped output even when it is small enough to ride the manifest
+#   whole   one blob per unit, handed back exactly as returned
+const _DATA_MODES = ("auto", "arrow", "whole")
+
 function attr_lazy(attrs::AbstractDict)
     v = get(attrs, "data", nothing)
     v === nothing && return false
     s = lowercase(strip(String(v)))
-    s in ("lazy", "eager") ||
-        error("@sweep: `data=$v` on the cell header must be `lazy` or `eager`")
-    return s == "lazy"
+    # `lazy`/`eager` were the old spellings and they are GONE rather than aliased. They named a
+    # binary choice about one storage decision, which is the thing this replaced; keeping them
+    # working would keep the idea alive in every notebook that still said it.
+    s == "lazy"  && error("@sweep: `data=lazy` is now `data=auto` — the shape decides.")
+    s == "eager" && error("@sweep: `data=eager` is now `data=whole`.")
+    s in _DATA_MODES ||
+        error("@sweep: `data=$v` on the cell header must be one of " * join(_DATA_MODES, ", "))
+    return s in ("auto", "arrow")
 end
 
 "A `chunk=` header attribute, or `nothing`. How many units ride one scheduler job."
@@ -1451,17 +1464,20 @@ struct Dataset
     types::Vector{String}
     starts::Vector{Int}           # cumulative first global row of each part
     whole::Int                    # landed units stored WHOLE (no index) — not slicable
+    whole_why::String             # …and why: "shape" | "eager" | "arrow" | ""
     label::String                 # the sweep it came from, for transfer accounting
     purged::Bool                  # the index survived, the bytes did not
 end
 
 function Dataset(kind::Symbol, parts::Vector{DatasetPart}, whole::Integer = 0,
-                 label::AbstractString = "", purged::Bool = false)
+                 label::AbstractString = "", purged::Bool = false,
+                 whole_why::AbstractString = "")
     cols = isempty(parts) ? String[] : String[String(c) for c in get(parts[1].index, "columns", String[])]
     typs = isempty(parts) ? String[] : String[String(t) for t in get(parts[1].index, "types", String[])]
     starts = Int[]; at = 1
     for p in parts; push!(starts, at); at += p.rows; end
-    return Dataset(kind, parts, cols, typs, starts, Int(whole), String(label), purged)
+    return Dataset(kind, parts, cols, typs, starts, Int(whole), String(whole_why),
+                   String(label), purged)
 end
 
 # ── Surviving the purge ──────────────────────────────────────────────────────────────────────
@@ -1548,13 +1564,18 @@ function _dataset_of(root, params, keys, label = "", src = LocalSource(root))
     parts = DatasetPart[]
     kind = :table
     whole = 0
+    # Why the whole-stored ones are whole. The unit recorded it; the strongest reason wins, because
+    # a shape with nothing to chunk is not fixed by anything the reader can do, while the other two
+    # are. Empty for a unit that ran before this was recorded.
+    whys = Set{String}()
     for (prm, k) in zip(params, keys)
         m = MemoStore.read_manifest(root, k)
         m === nothing && continue
         String(get(m, "status", "")) == "ok" || continue
         idx = get(m, "dataset", nothing)
         if !(idx isa AbstractDict)
-            whole += 1          # ran before `data=lazy`, or returned something unaddressable
+            whole += 1
+            push!(whys, String(get(m, "whole", "")))
             continue
         end
         d = Dict{String,Any}(String(kk) => vv for (kk, vv) in idx)
@@ -1582,7 +1603,8 @@ function _dataset_of(root, params, keys, label = "", src = LocalSource(root))
         end
     end
     remember_index!(label, root, parts, kind)
-    return Dataset(kind, parts, whole, label)
+    why = "shape" in whys ? "shape" : "arrow" in whys ? "arrow" : "eager" in whys ? "eager" : ""
+    return Dataset(kind, parts, whole, label, false, why)
 end
 
 Base.length(ds::Dataset) = isempty(ds.parts) ? 0 : ds.starts[end] + ds.parts[end].rows - 1
@@ -1597,7 +1619,9 @@ function Base.show(io::IO, ::MIME"text/plain", ds::Dataset)
             "$(length(get(isempty(ds.parts) ? Dict() : ds.parts[1].index, "vars", Any[]))) variables",
             ", ", _bytes(databytes(ds)))
     if isempty(ds.parts)
-        println(io, "   nothing has landed yet")
+        # NOT "nothing has landed yet": units may well have landed and stored whole, which is a
+        # different fact and has a different answer. `ds.whole` says which.
+        ds.whole == 0 && println(io, "   nothing has landed yet")
     elseif ds.kind === :group
         for v in get(ds.parts[1].index, "vars", Any[])
             d = get(v, "dims", String[])
@@ -1626,8 +1650,24 @@ function Base.show(io::IO, ::MIME"text/plain", ds::Dataset)
     # they just cannot be sliced. Saying so beats a dataset that is quietly missing most of itself.
     ds.purged && println(io, "   ⚠ the data is gone — this store was purged. The index is kept, so ",
                          "the schema and counts above are what it HELD; re-run the sweep to rebuild it.")
-    ds.whole == 0 || println(io, "   ⚠ ", ds.whole, " finished unit", ds.whole == 1 ? "" : "s",
-                             " stored whole and not in this view — reset the sweep to re-store")
+    # What to do about it depends entirely on WHY, and the old message gave one answer for three
+    # situations. "Reset to re-store" is right for a unit that ran before the cell asked; for a
+    # value with no addressable form it discards good units and changes nothing.
+    if ds.whole > 0
+        n = string(ds.whole, " finished unit", ds.whole == 1 ? "" : "s")
+        println(io, "   ",
+            ds.whole_why == "shape" ?
+                string("ℹ ", n, " returned ONE ROW each, which is recorded in the manifest ",
+                       "rather than chunked. `r.table` is that view, and it costs no reads. ",
+                       "A dataset is for a unit returning MANY rows or an array.") :
+            ds.whole_why == "arrow" ?
+                string("⚠ ", n, " are column-shaped but Arrow was not available where they ran, ",
+                       "so they stored whole. Add Arrow to the task environment, then reset.") :
+            ds.whole_why == "eager" ?
+                string("⚠ ", n, " could be stored addressably but the cell did not ask — ",
+                       "add `data=auto` to its header, then reset the sweep to re-store.") :
+                string("⚠ ", n, " stored whole and not in this view — reset the sweep to re-store."))
+    end
     # What this session has actually pulled out of it, against what it holds. The ratio is the
     # number the whole design is for, so it belongs where the dataset describes itself.
     got = transferred(ds.label)
@@ -2062,9 +2102,163 @@ function table(r::ShardedResult)
     push!(names, :ms);     push!(cols, Float64[row.ms for row in rows])
     push!(names, :ran_on); push!(cols, String[row.ran_on for row in rows])
     # WHEN, not just how long. A unit that has not run has no time rather than a 1970 one.
+    #
+    # In the READER's clock, like every other time this prints. A manifest records unix time, which
+    # is UTC, and the cluster that wrote it may be in a third zone again — so a raw conversion put
+    # the header and this column hours apart while naming the same event.
     push!(names, :at)
-    push!(cols, _narrow(Any[row.at == 0 ? missing : Dates.unix2datetime(row.at) for row in rows]))
+    push!(cols, _narrow(Any[row.at == 0 ? missing :
+                            Dates.unix2datetime(row.at) + _localoffset() for row in rows]))
     return NamedTuple{Tuple(names)}(Tuple(cols))
+end
+
+# ── PROTOTYPE: one view over everything a sweep produced ─────────────────────────────────────
+# Built over the existing accessors rather than replacing them, so it can be felt and thrown away.
+# If it holds up it replaces both `table` and the row side of `dataset`, and the read path moves
+# into `Dataset` itself — parts that are INLINE (rows from a manifest record) beside parts that are
+# INDEXED (Arrow chunks), so a slice works the same over either.
+#
+# The confusion it exists to remove: today a reader has to know whether their units' output was
+# chunked or inlined before they know which accessor to reach for, and that is a fact about storage
+# that no one should have to carry.
+
+_unified_key(p) = string(p)
+
+# How many ROWS an inline record is, and its columns.
+#
+# The lesson the prototype learned the hard way: SHAPE is not STORAGE. A record rides the manifest
+# because it is small, and `_summarize` carries vectors up to a bounded length — so a unit returning
+# `(; i = collect(1:5), v = …)` is five rows that happen to be stored inline, not one row holding
+# two vectors. Reading the storage as though it named the shape gave a unit's whole output one row.
+function _record_block(rec::NamedTuple)
+    vals = values(rec)
+    if !isempty(vals) && all(v -> v isa AbstractVector, vals)
+        n = length(first(vals))
+        all(v -> length(v) == n, vals) &&
+            return (n, Dict{Symbol,Any}(k => collect(getproperty(rec, k)) for k in keys(rec)))
+    end
+    return (1, Dict{Symbol,Any}(k => Any[getproperty(rec, k)] for k in keys(rec)))
+end
+
+"""
+    BlockColumn
+
+A column that is CONSTANT within each unit's block of rows, stored once per block rather than once
+per row.
+
+The parameters and the unit's facts are exactly that shape: `ratio` changes once per unit and then
+holds for every row that unit produced. Materialising them would store one copy per OUTPUT row, so a
+few hundred units returning thousands of rows each would pay millions of copies of a number that
+took a few hundred values. Reads like an ordinary vector; `collect` gives the flat one if something
+downstream insists.
+"""
+struct BlockColumn{T} <: AbstractVector{T}
+    values::Vector{T}      # one per block
+    stops::Vector{Int}     # cumulative last row index of each block
+end
+Base.size(c::BlockColumn) = (isempty(c.stops) ? 0 : @inbounds(c.stops[end]),)
+Base.IndexStyle(::Type{<:BlockColumn}) = IndexLinear()
+function Base.getindex(c::BlockColumn, i::Int)
+    @boundscheck checkbounds(c, i)
+    return @inbounds c.values[searchsortedfirst(c.stops, i)]
+end
+
+# One value per block + the block lengths → the column. Narrowed, so a column of numbers is numeric.
+function _blockcol(vals::AbstractVector, lens::AbstractVector{Int})
+    v = identity.(vals)
+    stops = Int[]; at = 0
+    for n in lens; at += n; push!(stops, at); end
+    return BlockColumn{eltype(v)}(collect(v), stops)
+end
+
+"""
+    unified(r; max_rows = 10_000, facts = false) -> NamedTuple of columns
+
+PROTOTYPE. The sweep as ONE table: every output row, carrying the parameters that produced it.
+
+A unit that returned one row contributes one; a unit that returned many contributes all of them,
+each with that unit's parameters broadcast onto it. A unit whose output is an array or an adopted
+file contributes one row naming what it holds, since it has no rows of its own.
+
+`facts = true` adds `status`, `ms`, `ran_on` and `at`. They are off by default because on a unit
+that produced many rows they repeat identically down the whole block, and a reader looking at
+`ds[1:10]` wants the science first.
+"""
+function unified(r::ShardedResult; max_rows::Integer = 10_000, facts::Bool = false)
+    rows = getfield(r, :rows)
+    isempty(rows) && return NamedTuple()
+    parts = Dict{String,DatasetPart}()
+    for p in (try; r.dataset.parts; catch; DatasetPart[]; end)
+        parts[_unified_key(p.params)] = p
+    end
+
+    pk = rows[1].params isa NamedTuple ? Symbol[k for k in keys(rows[1].params)] : Symbol[]
+    vnames = Symbol[]                       # value columns, in first-seen order
+    blocks = Vector{Any}()                  # (nrows, params, Dict{Symbol,Vector}, factrow)
+
+    total = 0
+    for row in rows
+        total >= max_rows && break
+        cols = Dict{Symbol,Any}()
+        n = 1
+        if row.record isa NamedTuple
+            n, cols = _record_block(row.record)
+            n = min(n, max_rows - total)
+            # The RECORD's order, not the Dict's — a Dict iterates by hash, which would make the
+            # column order of a results table depend on nothing the author can see.
+            for k in keys(row.record)
+                k in vnames || push!(vnames, k)
+                length(cols[k]) > n && (cols[k] = cols[k][1:n])
+            end
+        elseif row.record !== nothing
+            _TABLE_SCALAR in vnames || push!(vnames, _TABLE_SCALAR)
+            cols[_TABLE_SCALAR] = Any[row.record]
+        else
+            p = get(parts, _unified_key(row.params), nothing)
+            if p !== nothing && _ds_kind(p.index) === :table && p.rows > 0
+                take = min(p.rows, max_rows - total)
+                got = SlateTask.dataset_rows(p.root, p.index, 1:take;
+                                             blobpath = (h, nb) -> blob_file(p.src, h, nb))
+                for k in keys(got)
+                    k in vnames || push!(vnames, k)
+                    cols[k] = collect(got[k])
+                end
+                n = take
+            elseif p !== nothing
+                # An array or an adopted group: no rows of its own, so it names what it holds.
+                _TABLE_SCALAR in vnames || push!(vnames, _TABLE_SCALAR)
+                cols[_TABLE_SCALAR] = Any[sprint(show, p)]
+                n = 1
+            end
+        end
+        push!(blocks, (n, row.params, cols,
+                       (; row.status, row.ms, row.ran_on,
+                          at = row.at == 0 ? missing :
+                               Dates.unix2datetime(row.at) + _localoffset())))
+        total += n
+    end
+
+    lens = Int[b[1] for b in blocks]
+    names = Symbol[]; out = Any[]
+    # Parameters and facts are constant per unit, so they are stored per unit — see `BlockColumn`.
+    for k in pk
+        push!(names, k)
+        push!(out, _blockcol([b[2] isa NamedTuple && hasproperty(b[2], k) ?
+                              getproperty(b[2], k) : missing for b in blocks], lens))
+    end
+    # The VALUES genuinely differ per row, so these are the real ones.
+    for k in vnames
+        push!(names, k in pk ? Symbol(k, "_result") : k)
+        push!(out, _narrow(reduce(vcat, [haskey(b[3], k) ? b[3][k] : fill(missing, b[1])
+                                         for b in blocks]; init = Any[])))
+    end
+    if facts
+        for k in (:status, :ms, :ran_on, :at)
+            push!(names, k)
+            push!(out, _blockcol([getproperty(b[4], k) for b in blocks], lens))
+        end
+    end
+    return NamedTuple{Tuple(names)}(Tuple(out))
 end
 
 # What one unit's stored result IS, as a short string: the content hashes of whatever it wrote,
@@ -2293,17 +2487,64 @@ function _forget_stale_runs(root::AbstractString, keep::AbstractString, cell::Ab
 end
 
 """
+    log_files(r) -> Vector{NamedTuple}
+    log_files(target, run)
+
+The output files behind this sweep, newest first: `(; job, path, bytes, modified)`, one per array
+element of each submission. Listing is separate from reading, so the interesting file — almost
+always the most recent — can be opened without dragging every other one across with it.
+"""
+log_files(r::ShardedResult) = log_files(getfield(r, :target), getfield(r, :run))
+function log_files(t::SweepTarget, run::AbstractString)
+    l = launcher_for(t)
+    root = job_root(t)
+    out = NamedTuple[]
+    for nm in run_jobs(t, run)
+        for e in (try; BatchLauncher.log_files(l, root, nm); catch; []; end)
+            push!(out, (; job = nm, e.path, e.bytes, e.modified))
+        end
+    end
+    sort!(out; by = e -> (-e.modified, e.path))
+    return out
+end
+
+# How much of one file may come back. `tail` bounds the LINES at the source; this bounds the
+# characters after it, because one line of a binary blob written into a log is still one line.
+const LOG_TAIL_LINES = 500
+const LOG_TAIL_CHARS = 200_000
+
+"""
+    log_tail(r, path; lines = LOG_TAIL_LINES) -> String
+
+One output file's last lines. `path` must be one `log_files` reported.
+
+That check is the point, not a formality: the path arrives from a browser and ends up inside a
+command on a login node. Anything not in the listing is refused rather than quoted and hoped for.
+"""
+log_tail(r::ShardedResult, path::AbstractString; kw...) =
+    log_tail(getfield(r, :target), getfield(r, :run), path; kw...)
+function log_tail(t::SweepTarget, run::AbstractString, path::AbstractString;
+                  lines::Integer = LOG_TAIL_LINES)
+    known = Set(String(e.path) for e in log_files(t, run))
+    String(path) in known ||
+        error("no such log for this sweep: $(path)")
+    txt = BatchLauncher.log_tail(launcher_for(t), String(path); lines = Int(lines))
+    return length(txt) > LOG_TAIL_CHARS ?
+           "… truncated to the last $(LOG_TAIL_CHARS) characters …\n" *
+           String(last(txt, LOG_TAIL_CHARS)) : String(txt)
+end
+
+"""
     logs(r::ShardedResult; lines = 200, job = "") -> String
 
-What the scheduler's job output says for this sweep — the last `lines` of each submission covering
-it, headed by job name. This is where a failure that left no manifest is explained: an OOM kill, a
-walltime cut, a prologue that failed. Empty when there is nothing to show.
+Every job behind this sweep, tailed and concatenated. `log_files` + `log_tail` are the finer form
+and what the card uses; this is the one-call version for a terminal.
 
 A deliberate fetch, not a property: for a cluster it is a round trip to the login node, so it
 happens when asked and never on the card's poll. `job =` narrows to one submission (`run_jobs(r)`
 lists them).
 
-    Sweep.logs(r)             # every job behind this sweep
+    Sweep.logs(r)
     Sweep.logs(r; lines = 20)
 """
 logs(r::ShardedResult; kw...) = logs(getfield(r, :target), getfield(r, :run); kw...)
@@ -2340,7 +2581,8 @@ STOPS a sweep and keeps every finished unit, so resuming costs only what is left
 results away.
 """
 function handle_action(target::SweepTarget, run::AbstractString, params, keys,
-                       action::AbstractString; plot = nothing, notify = nothing)
+                       action::AbstractString; plot = nothing, notify = nothing,
+                       arg::AbstractString = "")
     sync_in!(target)
     root = store_root(target)
     l = launcher_for(target)
@@ -2357,12 +2599,17 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
     # tailing files over ssh every thirty seconds for the rest of the session.
     if action == "logs"
         out = status_payload(target, run, params, keys; plot, advance = false)
-        txt = try
-            logs(target, run)
+        out["logs"] = try
+            files = log_files(target, run)
+            # An empty argument lists; a named file opens. Defaulting an empty ask to the NEWEST
+            # file is the one press that is almost always right — a job that died explains itself
+            # in the element that died, and that is the one at the top.
+            want = isempty(arg) ? (isempty(files) ? "" : String(files[1].path)) : String(arg)
+            _logs_html(files, want, isempty(want) ? "" : log_tail(target, run, want))
         catch e
-            "could not read the job output: " * first(sprint(showerror, e), 200)
+            string("<div style='margin-top:8px;font-size:12px;color:var(--red,#e57575)'>",
+                   _esc(first(sprint(showerror, e), 300)), "</div>")
         end
-        out["logs"] = _logs_html(txt)
         return out
     end
     if action == "submit"
@@ -2575,7 +2822,8 @@ function _auto_plot(rows)
         # yet, so no hardcoded left inset can be right for both `0.5` and `200,000` — the wide one
         # gets its first digit clipped. Axis NAMES sit in the middle of their axis for the same
         # reason: at the end, a name runs off the edge of the plot area it labels.
-        "grid"    => Dict("left" => 10, "right" => 18, "top" => 24, "bottom" => 6,
+        # Same reason as the heatmap below: `containLabel` covers labels, not the axis name.
+        "grid"    => Dict("left" => 10, "right" => 18, "top" => 24, "bottom" => 26,
                           "containLabel" => true),
         "tooltip" => Dict("trigger" => "axis"),
         "xAxis"   => Dict("type" => "value", "name" => String(ax),
@@ -2611,7 +2859,10 @@ function _auto_heatmap(rows, axes, field, zof)
     lo == hi && (lo -= 0.5; hi += 0.5)
     return Dict{String,Any}(
         "backgroundColor" => "transparent", "animation" => false,
-        "grid"    => Dict("left" => 10, "right" => 64, "top" => 24, "bottom" => 6,
+        # `containLabel` reserves room for axis LABELS and not for axis NAMES, so a `nameGap` that
+        # clears the labels then runs off the bottom of the container. The gap below is what the
+        # name itself needs, measured from the outside of the labels.
+        "grid"    => Dict("left" => 10, "right" => 64, "top" => 24, "bottom" => 26,
                           "containLabel" => true),
         "tooltip" => Dict("position" => "top"),
         "xAxis"   => Dict("type" => "category", "data" => xs, "name" => String(axes[1]),
@@ -2854,19 +3105,87 @@ function _why_html(p::BatchSweep.Plan)
     return ""
 end
 
-# The job's own output, fetched on request. Open by default — nobody presses Logs and then wants to
-# press something else to see them — and scrollable, because the interesting line on a killed job is
-# the last one.
-function _logs_html(txt::AbstractString)
-    s = strip(String(txt))
-    isempty(s) && return string("<div style='margin-top:8px;font-size:12px;opacity:.6'>",
-                                "No job output yet. A scheduler writes it when the job starts, and ",
-                                "PBS only copies it back when the job ends.</div>")
-    return string("<details open style='margin-top:8px'><summary style='cursor:pointer;",
-                  "font-size:12px;opacity:.8'>job output</summary>",
-                  "<pre style='max-height:260px;overflow:auto;margin:6px 0 0;font-size:11px;",
-                  "white-space:pre-wrap;opacity:.8;font-family:ui-monospace,monospace'>",
-                  _esc(s), "</pre></details>")
+# ── The job's own output ─────────────────────────────────────────────────────────────────────
+# Fetched on request, never on the poll. What a reader wants is almost always the MOST RECENT
+# element of the most recent job, so the files are listed newest first and one is opened at a time.
+
+# The lines worth finding at a glance. A job's output is mostly a package loading; what matters is
+# the sentence that says it died, and on a killed job that sentence is near the end of thousands of
+# uninteresting ones.
+# Words that mean it went wrong on their own. `failed` and `cancelled` are deliberately NOT here:
+# the runner's own success line reads "4 ran, 0 skipped, 0 failed of 4", and colouring that red
+# makes the most common line in a healthy log look like the thing you are hunting for.
+const _LOG_BAD = r"(?i)\b(error|fatal|traceback|exception|segmentation fault|killed|oom|out of memory|exceeded|abort(ed)?)\b"
+# …so a count of failures is matched by its NUMBER instead, and only a non-zero one.
+const _LOG_BAD_COUNT = r"(?i)\b(?!0\b)\d+\s+(failed|failures?|errors?)\b"
+const _LOG_WARN = r"(?i)\b(warn|warning|deprecat)"
+
+_log_severity(line) = (occursin(_LOG_BAD, line) || occursin(_LOG_BAD_COUNT, line)) ? :bad :
+                      occursin(_LOG_WARN, line) ? :warn : :plain
+
+# Colour AFTER escaping. Matching on raw text and then escaping would let a log line's own angle
+# brackets close the span the match had just opened.
+function _log_body_html(txt::AbstractString)
+    io = IOBuffer()
+    print(io, "<pre style='max-height:320px;overflow:auto;margin:6px 0 0;font-size:11px;",
+              "white-space:pre-wrap;font-family:ui-monospace,monospace;line-height:1.45'>")
+    for line in split(String(txt), '\n')
+        sev = _log_severity(line)
+        colour = sev === :bad  ? "var(--red,#e57575)" :
+                 sev === :warn ? "var(--amber,#d9a441)" : ""
+        isempty(colour) ? print(io, "<span style='opacity:.7'>", _esc(line), "</span>\n") :
+                          print(io, "<span style='color:", colour, "'>", _esc(line), "</span>\n")
+    end
+    print(io, "</pre>")
+    return String(take!(io))
+end
+
+_log_when(u::Integer) = u <= 0 ? "" :
+    Dates.format(Dates.unix2datetime(u) + _localoffset(), "yyyy-mm-dd HH:MM:SS")
+
+const _LOG_LIST_SHOWN = 40
+
+"""
+Panel markup: the files newest first, with the opened one's contents under it.
+
+A list rather than a dump. One `tail` over every element of every job could not be sorted, could not
+be opened selectively, and grew without bound as a sweep did — so the file that explained the
+failure was somewhere in the middle of it.
+"""
+function _logs_html(files::AbstractVector, opened::AbstractString, body::AbstractString)
+    isempty(files) && return string(
+        "<div style='margin-top:8px;font-size:12px;opacity:.6'>",
+        "No job output yet. A scheduler writes it once the job starts, and PBS only copies it ",
+        "back when the job ends.</div>")
+    io = IOBuffer()
+    print(io, "<div style='margin-top:8px'>")
+    print(io, "<div style='display:flex;align-items:center;gap:8px;font-size:11px;opacity:.6;",
+              "margin-bottom:4px'><span>", length(files), " log file",
+              length(files) == 1 ? "" : "s", ", newest first</span>",
+              "<button data-sw-log='' style='", _BTN_STYLE, ";margin-left:auto'>Refresh</button>",
+              "</div>")
+    print(io, "<div style='max-height:150px;overflow:auto'>")
+    for f in first(files, _LOG_LIST_SHOWN)
+        on = String(f.path) == String(opened)
+        print(io, "<div data-sw-log='", _esc(String(f.path)),
+                  "' style='display:flex;gap:10px;padding:2px 4px;border-radius:4px;cursor:pointer;",
+                  "font-size:11px;font-family:ui-monospace,monospace",
+                  on ? ";background:color-mix(in srgb, var(--val,#4ec9b0) 14%, transparent)" : "",
+                  "'>",
+                  "<span style='color:var(--val,#4ec9b0)'>", _esc(basename(String(f.path))), "</span>",
+                  "<span style='opacity:.55'>", _log_when(f.modified), "</span>",
+                  "<span style='opacity:.55;margin-left:auto'>", _bytes(f.bytes), "</span></div>")
+    end
+    length(files) > _LOG_LIST_SHOWN &&
+        print(io, "<div style='font-size:11px;opacity:.5;padding:2px 4px'>… and ",
+                  length(files) - _LOG_LIST_SHOWN, " more</div>")
+    print(io, "</div>")
+    isempty(opened) ?
+        print(io, "<div style='font-size:11px;opacity:.5;margin-top:6px'>",
+                  "pick a file to read it</div>") :
+        print(io, _log_body_html(body))
+    print(io, "</div>")
+    return String(take!(io))
 end
 
 # The failed units, collapsed. The parameters matter more than the traceback at a glance, so they
@@ -3256,13 +3575,37 @@ function _live_script(io, r::ShardedResult)
           // fast units on a nearby cluster do exactly that, and the cells reading the sweep then sit
           // stale until someone re-runs them by hand.
           if (act === "submit" || act === "resume" || act === "retry") watching = true;
-          window.slateCall("$(doch)", { action: act }).then(paint).catch(function(e){
+          window.slateCall("$(doch)", { action: act }).then(paint).then(function(){
+            // `syncActions` restores the label by rebuilding the row, and it rebuilds only when the
+            // SET of actions changed. Submit, Cancel and Retry all change it; a read-only action
+            // like Logs does not, so its button kept the "…" and stayed disabled for good.
+            btn.disabled = false;
+            if (btn.textContent === "…") btn.textContent = was;
+          }).catch(function(e){
             btn.disabled = false; btn.textContent = was;
             var n = root.querySelector('[data-sw="note"]');
             if (n) n.textContent = String(e);
           });
         });
       }
+      // The log list is swapped in as markup, so its rows cannot carry handlers of their own —
+      // they would be discarded on the next swap. One listener on the card, matching the row that
+      // was actually clicked, survives every redraw.
+      root.addEventListener("click", function(ev){
+        var el = ev.target.closest ? ev.target.closest('[data-sw-log]') : null;
+        if (!el || !root.contains(el)) return;
+        ev.preventDefault();
+        var host = root.querySelector('[data-sw="logs"]');
+        if (host) host.style.opacity = ".5";      // the fetch crosses to a login node; say so
+        if (!window.slateCall) return;
+        window.slateCall("$(doch)", { action: "logs", arg: el.dataset.swLog || "" })
+          .then(paint)
+          .catch(function(e){
+            if (host) { host.style.opacity = ""; host.textContent = String(e); }
+          })
+          .then(function(){ if (host) host.style.opacity = ""; });
+      });
+
       // Rebuild the control row only when the SET of actions changed, so a click never lands on a
       // button that a poll replaced underneath it mid-press.
       function syncActions(list){
@@ -3410,18 +3753,38 @@ function _text_results(io, r::ShardedResult)
 end
 
 """
-    text(r) -> String
+    SweepReport
 
-The sweep as plain text: state, progress, timing, and the first rows of `r.table`. The same
-rendering `show` produces, returned as a String — because in a notebook the HTML card wins the MIME
-negotiation, so the text form has no way to reach the screen on its own.
+What `text` hands back. Carries the report and nothing else, and prints as itself rather than as a
+quoted string — a `String` returned to a cell renders as its repr, which is the whole report on one
+line with the newlines escaped, and that is the one thing this form exists to avoid.
 
-    println(Sweep.text(r))
-
-Useful anywhere HTML is not: a terminal, a log line, a standalone `julia notebook.jl` run, or a
-paste into a message.
+Converts and prints as text, so it still goes into a log line or a message: `String(rep)`,
+`print(rep)`, `"\$rep"` all give the report.
 """
-text(r::ShardedResult) = sprint((io, x) -> show(io, MIME"text/plain"(), x), r)
+struct SweepReport
+    text::String
+end
+Base.show(io::IO, ::MIME"text/plain", x::SweepReport) = print(io, x.text)
+Base.show(io::IO, x::SweepReport) = print(io, x.text)
+Base.print(io::IO, x::SweepReport) = print(io, x.text)
+Base.String(x::SweepReport) = x.text
+Base.length(x::SweepReport) = length(x.text)
+
+"""
+    text(r) -> SweepReport
+
+The sweep as plain text: state, progress, timing, and the first rows of `r.table`.
+
+The same rendering `show` produces for a REPL, reachable on demand — in a notebook the HTML card
+wins the MIME negotiation, so the text form has no way to the screen on its own.
+
+    Sweep.text(r)          # renders as the report, in a cell or a REPL
+    print(Sweep.text(r))   # …and to a terminal, a log, or a message
+
+One renderer behind both, so the card and the text cannot drift.
+"""
+text(r::ShardedResult) = SweepReport(sprint((io, x) -> show(io, MIME"text/plain"(), x), r))
 
 # The COMPACT form: `@show`, an element of a vector, an interpolation into an error. Julia's default
 # for a struct is a dump of every field, and one of this struct's fields is every ROW — so `@show r`
@@ -3531,9 +3894,14 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # Running the cell RECONCILES; it does not submit. Authoring a sweep means running the cell
     # repeatedly, and every one of those must be free — the work starts when someone asks for it,
     # from the card. `submit = true` is for a standalone script, where there is no card to ask from.
+    #
+    # Keyed on THIS CALL's `submit`, never on whether the run happens to be armed. Reading the armed
+    # marker here meant a cell run resubmitted a sweep somebody had armed at some point — and a
+    # worker restart re-runs every cell, so reopening a notebook could start hundreds of units that
+    # nobody asked for again. Arming says the work was wanted; it does not say this call should
+    # start it. The card's poll advances an armed sweep, which is where watching belongs.
     submit && BatchSweep.arm!(root, run)
-    reconcile_and_sync!(target, run, launcher; cap,
-                        submit = BatchSweep.is_armed(root, run) && _reachable(target))
+    reconcile_and_sync!(target, run, launcher; cap, submit = submit && _reachable(target))
     # The card's live channel. Registered here rather than by the author, so a sweep cell needs no
     # wiring to be watchable. `register` is the notebook's `slate_on`; outside a notebook (a
     # standalone run, a test) it is simply absent and the card renders static.
@@ -3560,7 +3928,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         register(status_channel(run), _args -> status_payload(target, run, ps, ks; plot))
         register(action_channel(run),
                  a -> handle_action(target, run, ps, ks, String(get(a, :action, ""));
-                                    plot, notify = note))
+                                    plot, notify = note, arg = String(get(a, :arg, ""))))
     end
 
     pl = BatchSweep.plan(root, run; launcher)

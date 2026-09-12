@@ -15,7 +15,8 @@ module BatchLauncher
 
 import Dates
 
-export Launcher, ExecLauncher, SlurmLauncher, PbsLauncher, JobSpec, submit!, poll, cancel!, logs
+export Launcher, ExecLauncher, SlurmLauncher, PbsLauncher, JobSpec, submit!, poll, cancel!, logs,
+       log_files, log_tail
 
 """
     JobSpec
@@ -105,20 +106,126 @@ function cancel! end
 "Recent output for a name, best effort. Empty string when there is nothing to show."
 function logs end
 
+"""
+    log_files(launcher, root, name) -> Vector{NamedTuple}
+
+The output files a submission wrote, as `(; path, bytes, modified)` — one per array element.
+
+Listing them is a different question from reading them, and conflating the two is what made a job's
+output a single undifferentiated dump: one `tail` across every element of every job, ordered by
+however the shell expanded a glob. With the files named, a reader can take the most recent one and
+pay for that one only. `modified` is unix time, `0` when the backend could not report it.
+"""
+function log_files end
+
+"""
+    log_tail(launcher, path; lines) -> String
+
+The last `lines` of ONE output file. `path` must be one `log_files` reported: it reaches a shell on
+the far side, so a caller that invents paths is writing a command injection.
+"""
+function log_tail end
+
+# One shell word, whatever it contains. A log path comes back from the browser and is about to be
+# interpolated into a command on the far side, so quoting it is not tidiness: inside single quotes
+# the shell expands nothing, so a path is a path and never a glob, a variable or a second command.
+# (`Sweep.shq` is the same function; this module has no reference to the one that defines it.)
+_shq(s) = "'" * replace(String(s), "'" => "'\\''") * "'"
+
+# One output file's facts, portably. `stat` is GNU on Linux and BSD on macOS with no common flags,
+# so both spellings are tried and the first that answers wins; a `LocalTarget` on a Mac and a
+# cluster login node are the same code path here.
+_STAT_LINE = raw"""for f in %GLOB%; do [ -f "$f" ] || continue;
+  m=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0);
+  b=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null || echo 0);
+  printf '%s\t%s\t%s\n' "$m" "$b" "$f"; done"""
+
+# `<mtime>\t<bytes>\t<path>` lines → entries, newest first.
+function _parse_log_listing(txt::AbstractString)
+    out = NamedTuple{(:path, :bytes, :modified),Tuple{String,Int,Int}}[]
+    for line in split(String(txt), '\n')
+        isempty(strip(line)) && continue
+        parts = split(line, '\t')
+        length(parts) == 3 || continue
+        m = tryparse(Int, strip(parts[1])); b = tryparse(Int, strip(parts[2]))
+        push!(out, (; path = String(parts[3]), bytes = something(b, 0),
+                      modified = something(m, 0)))
+    end
+    sort!(out; by = e -> (-e.modified, e.path))
+    return out
+end
+
+# The last `n` lines of a string, for a backend that hands back a whole file.
+function _last_lines(s::AbstractString, n::Integer)
+    lines = split(String(s), '\n')
+    length(lines) <= n && return String(s)
+    return join(lines[end-n+1:end], "\n")
+end
+
+# 1 MB is far more than `lines` lines of any ordinary log, and a hard bound on what a tail can cost.
+const _TAIL_WINDOW = 1 << 20
+
+"""
+    tail_file(path, lines; window = _TAIL_WINDOW) -> String
+
+The last `lines` of a file, reading only the END of it.
+
+`read(path, String)` and `readlines` pull the WHOLE file into memory to throw nearly all of it away,
+and a job's output has no size bound: a unit printing inside a loop writes until the disk stops it.
+Asking for a tail then costs the file, not the tail — and the caller's character cap is applied
+after the allocation it was meant to prevent.
+"""
+function tail_file(path::AbstractString, lines::Integer; window::Integer = _TAIL_WINDOW)
+    sz = try; filesize(path); catch; return ""; end
+    sz == 0 && return ""
+    return open(String(path), "r") do io
+        n = min(sz, Int(window))
+        seek(io, sz - n)
+        s = read(io, String)
+        # A window that starts mid-line would show half of one — and, worse, half of a multi-byte
+        # character. Dropping to the first newline makes what is left whole on both counts.
+        if n < sz
+            i = findfirst('\n', s)
+            i === nothing ? (s = "") : (s = SubString(s, nextind(s, i)))
+        end
+        return _last_lines(s, lines)
+    end
+end
+
 # The command a task process runs. Written once here so every backend launches identically and a
 # bug in the invocation cannot differ between local and cluster runs.
 #
 # JULIA_PKG_PRECOMPILE_AUTO=0 is not optional: hundreds of tasks starting against an incomplete
 # depot would each try to precompile into it, which is how a shared filesystem gets taken down. A
 # task must load from a ready depot or fail fast.
-function task_command(spec::JobSpec, chunks)
+function task_command(spec::JobSpec, chunks; heap::AbstractString = "")
     pre = isempty(spec.prologue) ? "" : spec.prologue * "\n"
     cs = chunks isa AbstractString ? String(chunks) : join(String.(collect(chunks)), " ")
+    # A task process runs its chunks in SEQUENCE, so it is long-lived and every unit's garbage
+    # passes through one heap. Julia sizes that heap against the machine, which on a workstation
+    # means it may grow for a long time before collecting — and a few hundred units that each churn
+    # a gigabyte then measure in tens of them. The hint makes it collect instead of grow.
+    hh = isempty(heap) ? "" : "--heap-size-hint=" * String(heap) * " "
     return string(pre,
         "export JULIA_PKG_PRECOMPILE_AUTO=0\n",
-        spec.julia, " --project=", spec.project, " --startup-file=no ",
+        spec.julia, " --project=", spec.project, " --startup-file=no ", hh,
         "-e 'include(\"", spec.payload, "\"); exit(SlateTask.main(ARGS))' ",
         spec.root, " ", cs)
+end
+
+# The memory a unit may use, as Julia's `--heap-size-hint` wants it. On a SCHEDULER this mirrors what
+# the job asked for, so Julia collects rather than being killed for exceeding it.
+_heap_hint(spec::JobSpec) = string(get(spec.resources, :mem, ""))
+
+# Locally there is no scheduler and `mem` means nothing: a `LocalTarget` sets no resources, so it
+# carries the JobSpec default — hinting THAT would starve a unit that legitimately needs more and
+# make Julia collect continuously for no reason. A share of the machine is the honest bound: it
+# stops one task process growing into all of memory without pretending to know what a unit needs.
+function _local_heap_hint(nproc::Integer)
+    total = try; Sys.total_memory(); catch; return ""; end
+    total == 0 && return ""
+    per = fld(total * 7, 10 * max(1, nproc))
+    return string(max(1, fld(per, 1 << 30)), "G")
 end
 
 # ── Local execution ──────────────────────────────────────────────────────────────────────────
@@ -162,9 +269,12 @@ function submit!(l::ExecLauncher, spec::JobSpec)
     isempty(spec.chunks) && return ""
     mkpath(_jobdir(spec.root)); mkpath(spec.logdir)
     pids = Int[]
-    for (i, slice) in enumerate(_deal(spec.chunks, l.maxproc))
+    slices = _deal(spec.chunks, l.maxproc)
+    heap = _local_heap_hint(length(slices))
+    for (i, slice) in enumerate(slices)
         logf = joinpath(spec.logdir, "$(spec.name).$(i).log")
-        cmd = pipeline(Cmd(`sh -c $(task_command(spec, slice))`); stdout = logf, stderr = logf)
+        cmd = pipeline(Cmd(`sh -c $(task_command(spec, slice; heap = heap))`);
+                       stdout = logf, stderr = logf)
         p = run(cmd; wait = false)
         push!(pids, getpid(p))
     end
@@ -199,16 +309,34 @@ function cancel!(l::ExecLauncher, root::AbstractString, names)
     return n
 end
 
+function log_files(::ExecLauncher, root::AbstractString, name::AbstractString)
+    dir = joinpath(String(root), "logs")
+    isdir(dir) || return NamedTuple{(:path, :bytes, :modified),Tuple{String,Int,Int}}[]
+    out = NamedTuple{(:path, :bytes, :modified),Tuple{String,Int,Int}}[]
+    for f in readdir(dir; join = true)
+        startswith(basename(f), String(name) * ".") || continue
+        isfile(f) || continue
+        push!(out, (; path = f, bytes = Int(filesize(f)),
+                      modified = try; round(Int, mtime(f)); catch; 0; end))
+    end
+    sort!(out; by = e -> (-e.modified, e.path))
+    return out
+end
+
+log_tail(::ExecLauncher, path::AbstractString; lines::Int = 500) =
+    isfile(path) ? tail_file(path, lines) : ""
+
 function logs(l::ExecLauncher, root::AbstractString, name::AbstractString; lines::Int = 200)
     dir = joinpath(root, "logs")
     isdir(dir) || return ""
     fs = filter(f -> startswith(basename(f), String(name) * "."), readdir(dir; join = true))
     isempty(fs) && return ""
     buf = IOBuffer()
+    per = max(1, lines ÷ length(fs))
     for f in fs
-        ls = try; readlines(f); catch; String[]; end
         println(buf, "== ", basename(f), " ==")
-        for l in last(ls, max(1, lines ÷ length(fs))); println(buf, l); end
+        # `readlines` read the whole file to keep its last few lines — see `tail_file`.
+        println(buf, tail_file(f, per))
     end
     return String(take!(buf))
 end
@@ -400,6 +528,24 @@ function logs(l::SlurmLauncher, root::AbstractString, name::AbstractString; line
         "tail -n $(lines) $(joinpath(root, "logs"))/$(name).*.out 2>/dev/null"))
     return ok ? txt : ""
 end
+
+# Both schedulers list and tail identically: the files are on a filesystem reached through the same
+# session, and which scheduler wrote them does not change how they are read.
+_remote_log_files(runner, root, name) = begin
+    glob = "$(joinpath(String(root), "logs"))/$(name).*.out"
+    ok, txt = runner(replace(_STAT_LINE, "%GLOB%" => glob) * " 2>/dev/null")
+    ok ? _parse_log_listing(txt) :
+         NamedTuple{(:path, :bytes, :modified),Tuple{String,Int,Int}}[]
+end
+_remote_log_tail(runner, path, lines) = begin
+    ok, txt = runner("tail -n $(Int(lines)) " * _shq(String(path)) * " 2>/dev/null")
+    ok ? txt : ""
+end
+
+log_files(l::SlurmLauncher, root::AbstractString, name::AbstractString) =
+    _remote_log_files(sc -> _ssh(l, sc), root, name)
+log_tail(l::SlurmLauncher, path::AbstractString; lines::Int = 500) =
+    _remote_log_tail(sc -> _ssh(l, sc), path, lines)
 
 """
     explain_failure(l::SlurmLauncher, name) -> String
@@ -749,6 +895,11 @@ function logs(l::PbsLauncher, root::AbstractString, name::AbstractString; lines:
         "tail -n $(lines) $(joinpath(root, "logs"))/$(name).*.out 2>/dev/null"))
     return ok ? txt : ""
 end
+
+log_files(l::PbsLauncher, root::AbstractString, name::AbstractString) =
+    _remote_log_files(sc -> _ssh(l, sc), root, name)
+log_tail(l::PbsLauncher, path::AbstractString; lines::Int = 500) =
+    _remote_log_tail(sc -> _ssh(l, sc), path, lines)
 
 """
     explain_failure(l::PbsLauncher, name) -> String

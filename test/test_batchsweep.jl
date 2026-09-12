@@ -1176,6 +1176,73 @@ end
         end
     end
 
+    @testset "PROTOTYPE: one view over everything a sweep produced" begin
+        # The point of the prototype: the SAME call answers a sweep whose units returned one row
+        # each and one whose units returned thousands, with the parameters attached either way. A
+        # reader should not have to know whether their output was chunked or inlined before knowing
+        # which accessor to reach for.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+
+            # One row per unit — the `pilot` shape.
+            one = Sweep.@sweep(Sweep.paramgrid(a = 1:2, b = [10, 20]), t; submit = false) do p
+                (; snr = float(p.a * p.b), sep = p.a)
+            end
+            for c in BS.sweep_chunks(root, one.run); SlateTask.run_chunk(root, c); end
+            u1 = Sweep.unified(Sweep.refresh!(one))
+            @test keys(u1) == (:a, :b, :snr, :sep)
+            @test length(u1.snr) == 4
+            @test u1.snr == [10.0, 20.0, 20.0, 40.0]
+            @test u1.a == [1, 2, 1, 2]                      # the parameters, on every row
+
+            # MANY rows per unit, stored INLINE — small enough to ride the manifest, and still three
+            # rows each. Shape is not storage, and reading one as the other gave a unit's whole
+            # output a single row holding vectors.
+            inl = Sweep.@sweep(Sweep.paramgrid(g = 1:2), t; submit = false) do p
+                (; i = collect(1:3), v = float.(1:3) .* p.g)
+            end
+            for c in BS.sweep_chunks(root, inl.run); SlateTask.run_chunk(root, c); end
+            ui = Sweep.unified(Sweep.refresh!(inl))
+            @test length(ui.i) == 6 && ui.i == [1, 2, 3, 1, 2, 3]
+            @test ui.g == [1, 1, 1, 2, 2, 2]
+            @test ui.v == [1.0, 2.0, 3.0, 2.0, 4.0, 6.0]
+
+            # MANY rows per unit, stored as CHUNKS. Same call, same columns-plus-parameters — which
+            # is the whole point: the backend is not something the reader has to know.
+            many = Sweep.@sweep(Sweep.paramgrid(g = 1:3), t; submit = false, lazy = true) do p
+                n = 5
+                (; i = collect(1:n), v = float.(1:n) .* p.g)
+            end
+            for c in BS.sweep_chunks(root, many.run); SlateTask.run_chunk(root, c); end
+            u2 = Sweep.unified(Sweep.refresh!(many))
+            @test keys(u2) == (:g, :i, :v)
+            @test length(u2.i) == 15                        # 3 units × 5 rows, one row space
+            @test u2.g == [1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3]
+            @test u2.v[6:10] == [2.0, 4.0, 6.0, 8.0, 10.0]  # unit g=2's own rows
+
+            # The unit's facts are available but off the default projection: on a unit with many
+            # rows they repeat identically down the whole block.
+            @test !(:ms in keys(u2))
+            uf = Sweep.unified(many; facts = true)
+            @test :ms in keys(uf) && :at in keys(uf) && length(uf.ms) == 15
+
+            # A cap, because the VALUES materialise. Same guard `load` has.
+            @test length(Sweep.unified(many; max_rows = 7).i) <= 7
+
+            # The parameter column reads like any vector but is stored ONCE PER UNIT, not per row.
+            # Materialising it would keep one copy per output row, so a few hundred units returning
+            # thousands each would hold millions of copies of a number with a few hundred values.
+            @test u2.g isa Sweep.BlockColumn
+            @test length(u2.g) == 15 && length(u2.g.values) == 3
+            @test collect(u2.g) == [1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3]
+            @test u2.g[1] == 1 && u2.g[6] == 2 && u2.g[15] == 3
+            @test_throws BoundsError u2.g[16]
+            @test sum(u2.g) == 30                     # behaves as a vector for ordinary work
+            @test uf.ms isa Sweep.BlockColumn && length(uf.ms.values) == 3
+        end
+    end
+
     @testset "the sweep as one row per grid point" begin
         # The view a sweep is usually FOR, and the one the fabric did not have: `r.summaries` gave
         # the values with the parameters detached, `r.results` gave handles costing a blob read
@@ -1274,6 +1341,70 @@ end
         end
     end
 
+    @testset "job output is a list of files, newest first" begin
+        # One `tail` across every element of every job could not be sorted, opened selectively, or
+        # bounded — so the file that explained a failure sat somewhere in the middle of a dump that
+        # grew with the sweep.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false) do p; p.x; end
+            mkpath(joinpath(root, "logs")); mkpath(BS.jobs_dir(root))
+            chunks = BS.sweep_chunks(root, r.run)
+            name = BS.submission_name(chunks)
+            write(BS.index_path(root, name), join(chunks, "\n") * "\n")
+            old = joinpath(root, "logs", "$(name).1.log")
+            new = joinpath(root, "logs", "$(name).2.log")
+            write(old, "starting\nall fine\n")
+            write(new, "starting\nERROR: LoadError: no method matching\n")
+            touch(old); sleep(1.1); touch(new)          # distinct mtimes to sort on
+
+            fs = Sweep.log_files(t, r.run)
+            @test length(fs) == 2
+            @test fs[1].path == new                      # newest first
+            @test fs[1].bytes > 0 && fs[1].modified > 0
+            @test Sweep.log_tail(t, r.run, new; lines = 10) ==
+                  "starting\nERROR: LoadError: no method matching\n"
+
+            # A path this sweep did not report is refused, not quoted and hoped for: it would reach
+            # a shell on a login node.
+            e = try; Sweep.log_tail(t, r.run, "/etc/passwd"); "" catch x; sprint(showerror, x); end
+            @test occursin("no such log", e)
+            e2 = try; Sweep.log_tail(t, r.run, "$(new); rm -rf /"); "" catch x; sprint(showerror, x); end
+            @test occursin("no such log", e2)
+
+            # The card opens the newest file on the first press, which is where a dead job explains
+            # itself, and marks the severity so it is findable without reading every line.
+            got = Sweep.handle_action(t, r.run, r.params, r.keys, "logs")
+            @test occursin(basename(new), got["logs"])
+            @test occursin(basename(old), got["logs"])    # …and lists the others to pick from
+            @test occursin("no method matching", got["logs"])
+            @test occursin("--red", got["logs"])          # the ERROR line is coloured
+            @test occursin("Refresh", got["logs"])
+            @test !occursin("all fine", got["logs"])      # the unopened file is not dragged along
+
+            # Naming one opens that one instead.
+            pick = Sweep.handle_action(t, r.run, r.params, r.keys, "logs"; arg = old)
+            @test occursin("all fine", pick["logs"])
+        end
+    end
+
+    @testset "a healthy log does not read as a failing one" begin
+        # The runner's own success line is "N ran, 0 skipped, 0 failed of N". Matching the bare word
+        # `failed` painted the most common line in a healthy log the colour of the thing you are
+        # hunting for, which is worse than not colouring at all.
+        @test Sweep._log_severity("chunk sw1_c1: 4 ran, 0 skipped, 0 failed of 4") === :plain
+        @test Sweep._log_severity("0 errors") === :plain
+        @test Sweep._log_severity("Cancelled by user request") === :plain
+        # A real one still lands.
+        @test Sweep._log_severity("chunk sw1_c1: 1 ran, 0 skipped, 3 failed of 4") === :bad
+        @test Sweep._log_severity("ERROR: LoadError: UndefVarError: `trial` not defined") === :bad
+        @test Sweep._log_severity("slurmstepd: error: Exceeded job memory limit") === :bad
+        @test Sweep._log_severity("srun: Job step aborted") === :bad
+        @test Sweep._log_severity("Warning: assignment to `x` in soft scope") === :warn
+        @test Sweep._log_severity("Precompiling MyPkg") === :plain
+    end
+
     @testset "asking for a chart does not narrow what was recorded" begin
         # `summary` and the unit's own return value answered the same manifest field, so
         # `summary = v -> v.snr` on a unit returning `(; snr, sep_px)` dropped `sep_px` out of every
@@ -1348,6 +1479,36 @@ end
         end
     end
 
+    @testset "running the cell never submits" begin
+        # It read the ARMED marker to decide, so a cell run resubmitted a sweep somebody had armed
+        # at some point. A worker restart re-runs every cell, so reopening a notebook could start
+        # hundreds of units nobody had asked for again — and locally there is no scheduler between
+        # that and the machine.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            body = "p -> p.x"
+            r = Sweep.run_sweep(t, Sweep.paramgrid(x = 1:4), body)
+            @test isempty(BS.known_submissions(root))          # nothing submitted, as before
+
+            # ARM it, as the card's Submit does, then run the cell again.
+            BS.arm!(root, r.run)
+            before = length(BS.known_submissions(root))
+            Sweep.run_sweep(t, Sweep.paramgrid(x = 1:4), body)
+            @test length(BS.known_submissions(root)) == before  # …and it still submitted nothing
+
+            # The card's poll is what advances an armed sweep — that is where watching belongs.
+            Sweep.status_payload(t, r.run, r.params, r.keys; advance = true)
+            @test length(BS.known_submissions(root)) > before
+
+            # An explicit `submit = true` — a standalone script, with no card to ask from — still works.
+            r2 = Sweep.run_sweep(t, Sweep.paramgrid(y = 1:2), "p -> p.y"; submit = true)
+            @test BS.is_armed(root, r2.run)
+            @test any(cs -> any(in(Set(BS.sweep_chunks(root, r2.run))), cs),
+                      values(BS.known_submissions(root)))
+        end
+    end
+
     @testset "at most one unarmed run per cell" begin
         # A run is keyed by body + setup + captures + grid, so every edit mints a new one and the
         # old — which nobody ever asked to run — is left behind holding a blob per parameter point.
@@ -1401,6 +1562,32 @@ end
         end
     end
 
+    @testset "the card renders for every state a sweep can be in" begin
+        # A throwing `text/html` method does not surface as an error: the notebook falls back to
+        # the next MIME it can render, so the card silently becomes text and the exception is never
+        # seen. Nothing here rendered the card, so a constructor change that broke it got through.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            card(x) = sprint((io, v) -> show(io, MIME"text/html"(), v), x)
+            # Nothing submitted, part landed, all landed, and one that failed.
+            r = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false) do p; (; y = p.x); end
+            @test occursin("data-sweep", card(r))
+            SlateTask.run_chunk(root, first(BS.sweep_chunks(root, r.run)))
+            @test occursin("data-sweep", card(Sweep.refresh!(r)))
+            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
+            @test occursin("data-sweep", card(Sweep.refresh!(r)))
+
+            bad = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p
+                error("boom")
+            end
+            for c in BS.sweep_chunks(root, bad.run); SlateTask.run_chunk(root, c); end
+            @test occursin("data-sweep", card(Sweep.refresh!(bad)))
+            # The dataset renders too — it is built during the card's own render.
+            @test !isempty(sprint((io, v) -> show(io, MIME"text/plain"(), v), r.dataset))
+        end
+    end
+
     @testset "printing a sweep does not print the grid" begin
         # `@show r` / `println(r)` go through the 2-arg `show`, and with no method for it Julia
         # dumps every field — one of which is every ROW. On a real sweep that is the whole grid,
@@ -1439,8 +1626,11 @@ end
             # WHEN each unit ran, not only how long it took — a manifest records it and nothing
             # surfaced it, so "is this yesterday's result?" had no answer short of the store.
             @test all(x -> x isa Sweep.Dates.DateTime, r.table.at)
-            @test occursin(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", Sweep.text(r))
-            @test occursin("ago", Sweep.text(r))
+            # In the reader's clock, matching the header. A raw UTC conversion here put the two
+            # hours apart while naming the same event.
+            @test abs((r.table.at[1] - Sweep.Dates.now()).value) < 60_000
+            @test occursin(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", String(Sweep.text(r)))
+            @test occursin("ago", String(Sweep.text(r)))
         end
     end
 
@@ -1455,7 +1645,8 @@ end
             end
             for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
             Sweep.refresh!(r)
-            txt = Sweep.text(r)
+            rep = Sweep.text(r)
+            txt = String(rep)
             @test occursin("succeeded", txt)
             @test occursin("3/3", txt)
             # …and it carries the results, which is the part the card had and this did not.
@@ -1464,6 +1655,11 @@ end
             # Exactly what `show` produces, so there is no second version of the truth.
             @test txt == sprint((io, x) -> show(io, MIME"text/plain"(), x), r)
             @test !occursin("<div", txt)
+            # It PRINTS as the report rather than as a quoted string: a String returned to a cell
+            # renders as its repr, which is the whole report on one line with escaped newlines.
+            @test sprint((io, x) -> show(io, MIME"text/plain"(), x), rep) == txt
+            @test sprint(print, rep) == txt
+            @test !occursin("\\n", sprint(show, rep))
         end
     end
 

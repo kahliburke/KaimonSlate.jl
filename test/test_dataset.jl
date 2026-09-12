@@ -213,7 +213,12 @@ const MS = RE.MemoStore
             @test r2.run == r.run                                  # same sweep, not a re-key
             ds = RE.Sweep.refresh!(r2).dataset
             @test RE.Sweep.nparts(ds) == 0 && ds.whole == 2
-            @test occursin("stored whole", sprint(show, MIME"text/plain"(), ds))
+            # These ran under `lazy = false` on a column-shaped value, so they COULD be addressable
+            # and a reset is the answer — which is the one case where the old blanket advice to
+            # reset was right.
+            @test ds.whole_why == "eager"
+            out = sprint(show, MIME"text/plain"(), ds)
+            @test occursin("data=auto", out) && occursin("reset", out)
         end
     end
 
@@ -801,6 +806,46 @@ const MS = RE.MemoStore
         end
     end
 
+    @testset "a whole-stored unit says why it is whole" begin
+        # An empty dataset beside landed units could mean three things and said one: "reset the
+        # sweep to re-store". For a value with nothing to chunk that discards good units and
+        # changes nothing, and it was the most common case of the three.
+        mktempdir() do root
+            t = RE.Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+                                     payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            # ONE ROW per unit. A supported shape is a unit returning MANY rows — a NamedTuple of
+            # vectors, a Vector of NamedTuples, a DataFrame — so a single row has nothing to chunk
+            # on its own, and stacking it per unit would write a one-row Arrow blob per unit to
+            # hold what the manifest already carries for free.
+            r = RE.Sweep.@sweep(RE.Sweep.paramgrid(x = 1:2), t; submit = false, lazy = true) do p
+                (; snr = float(p.x), sep = p.x)
+            end
+            for c in RE.BatchSweep.sweep_chunks(root, r.run); ST.run_chunk(root, c); end
+            ds = RE.Sweep.refresh!(r).dataset
+            @test ds.whole == 2 && RE.Sweep.nparts(ds) == 0
+            @test ds.whole_why == "shape"
+            out = sprint(show, MIME"text/plain"(), ds)
+            @test occursin("ONE ROW", out) && occursin("r.table", out)
+            @test !occursin("reset", out)                      # would discard good units for nothing
+            @test !occursin("nothing has landed yet", out)     # two of them landed
+
+            # Column-shaped, but the cell never asked: reset IS the answer here.
+            r2 = RE.Sweep.@sweep(RE.Sweep.paramgrid(x = 1:2), t; submit = false) do p
+                (; i = collect(1:5) .* p.x)
+            end
+            for c in RE.BatchSweep.sweep_chunks(root, r2.run); ST.run_chunk(root, c); end
+            ds2 = RE.Sweep.refresh!(r2).dataset
+            @test ds2.whole == 2 && ds2.whole_why == "eager"
+            out2 = sprint(show, MIME"text/plain"(), ds2)
+            @test occursin("data=auto", out2) && occursin("reset", out2)
+
+            # And a sweep that genuinely has nothing still says so.
+            r3 = RE.Sweep.@sweep(RE.Sweep.paramgrid(x = 1:2), t; submit = false) do p; p.x; end
+            @test occursin("nothing has landed yet",
+                           sprint(show, MIME"text/plain"(), r3.dataset))
+        end
+    end
+
     @testset "adopt needs the cell to have asked for a dataset" begin
         # Without `data=lazy` the value would be serialized as an inert struct naming a path that
         # does not exist on the reader's machine — a failure met much later and much further away.
@@ -812,7 +857,7 @@ const MS = RE.MemoStore
             r = ST.run_chunk(root, "c1")
             @test (r.ran, r.failed) == (0, 1)
             _, st, err = ST.result(root, "k1")
-            @test st == "error" && occursin("data=lazy", String(err))
+            @test st == "error" && occursin("data=auto", String(err))
         end
     end
 end

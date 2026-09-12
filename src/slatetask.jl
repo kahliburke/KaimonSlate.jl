@@ -326,13 +326,13 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
             err = sprint(showerror, e, catch_backtrace())
             ok = false
         end
-        # `adopt` only means anything on the addressable path. Without `data=lazy` the value would be
+        # `adopt` only means anything on the addressable path. Without `data=auto` the value would be
         # serialized as an inert struct holding a path that does not exist on this machine, which is
         # a failure the reader would meet much later and much further away.
         if ok && value isa AdoptedFile && !lazy
             ok = false
             err = "adopt() stores a file addressably, which this cell did not ask for — " *
-                  "add `data=lazy` to the cell header."
+                  "add `data=auto` to the cell header."
         end
         ms = (time() - t0) * 1000
         arts = _ARTIFACTS[]
@@ -371,7 +371,7 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
                 sv = _summarize(summarize, value)
                 sv === nothing || (m["summary"] = sv)
             end
-            # A `data=lazy` cell stores the result ADDRESSABLY: chunked and indexed, so the notebook
+            # A `data=auto` cell stores the result ADDRESSABLY: chunked and indexed, so the notebook
             # can slice it without moving it. Falls through to the whole-value path for anything with
             # no addressable form, which keeps the attribute a performance choice rather than a
             # constraint on what a unit may return.
@@ -387,6 +387,16 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
                 m["bindings"] = [Dict{String,Any}("name" => "result", "codec" => codec,
                                                   "blob" => h, "bytes" => n)]
                 m["shape"] = _shape_of(value, n)
+                # WHY this one is not addressable, recorded where the answer is known: on the node,
+                # holding the value. The notebook otherwise sees an empty dataset with no way to
+                # tell "the cell did not ask" from "this shape has nothing to chunk" — and advised
+                # a reset for both, which for the second discards good units and changes nothing.
+                #
+                # The structural checks only. `dataset_kind` would consult `_ds_arrow`, which
+                # IMPORTS Arrow on first use, and a unit that stored whole has no business paying
+                # for that to explain itself.
+                could = _ds_arrayable(value) || _ds_columns(value) !== nothing
+                m["whole"] = !could ? "shape" : (lazy ? "arrow" : "eager")
             end
             ran += 1
         else
