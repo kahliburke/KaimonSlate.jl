@@ -876,10 +876,10 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
    rendered panel. It never runs on open, which the badge says so nobody waits for it. */
 .cell.tool { border-left:2px solid color-mix(in srgb, var(--accent) 55%, transparent); }
 .cell.tool > .cellhead .cid::before { content:"⌁ "; opacity:.75; }
-.cell.tool > .cellhead .cid { color:color-mix(in srgb, var(--accent) 80%, var(--fg)); }
+.cell.tool > .cellhead .cid { color:color-mix(in srgb, var(--accent) 80%, var(--text)); }
 .cell.tool.state-stale > .cellhead .cid::after {
   content:"not run"; margin-left:8px; padding:0 6px; border-radius:8px; font-size:10px;
-  color:var(--muted); background:color-mix(in srgb, var(--fg) 8%, transparent); }
+  color:var(--dim); background:color-mix(in srgb, var(--text) 8%, transparent); }
 /* The source is the call; the panel below is the interface. Dim it until hovered/focused so the
    eye lands on the rendered parameters rather than on `@tool start_job(...)`. */
 .cell.tool > .srchost { opacity:.62; transition:opacity .12s ease; }
@@ -890,22 +890,22 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .animplayer { margin-bottom:10px; }
 .animplayer.anim-loading .anim-stage::after {
   content:"loading…"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-  color:var(--muted); font-size:12px; background:var(--bg); }
+  color:var(--dim); font-size:12px; background:var(--bg); }
 .anim-stage { position:relative; display:flex; align-items:flex-start; gap:8px; }
 .anim-canvas-wrap { position:relative; display:block; max-width:min(100%, var(--fig-max, 980px)); }
 .anim-canvas { display:block; border-radius:4px; background:#000; image-rendering:auto; max-width:100%; }
 .anim-overlay { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
 .anim-cbar { width:14px; height:auto; align-self:stretch; border-radius:2px; }
-.anim-axes { margin:4px 2px; font-size:11px; color:var(--muted); }
+.anim-axes { margin:4px 2px; font-size:11px; color:var(--dim); }
 .anim-axes .anim-sep { margin:0 6px; opacity:0.5; }
 .anim-bar { display:flex; align-items:center; gap:8px; margin-top:6px; }
-.anim-bar button { background:var(--panel); color:var(--fg); border:1px solid var(--border);
+.anim-bar button { background:var(--bg2); color:var(--text); border:1px solid var(--border);
   border-radius:4px; padding:2px 8px; cursor:pointer; font-size:13px; line-height:1.4; }
 .anim-bar button:hover { border-color:var(--accent); }
 .anim-loop { opacity:0.45; } .anim-loop.anim-on { opacity:1; }
 .anim-scrub { flex:1; accent-color:var(--accent); }
-.anim-time { font-variant-numeric:tabular-nums; font-size:11px; color:var(--muted); min-width:120px; }
-.anim-speed { background:var(--panel); color:var(--fg); border:1px solid var(--border); border-radius:4px; font-size:12px; }
+.anim-time { font-variant-numeric:tabular-nums; font-size:11px; color:var(--dim); min-width:120px; }
+.anim-speed { background:var(--bg2); color:var(--text); border:1px solid var(--border); border-radius:4px; font-size:12px; }
 /* Interactive data table (slate_table / DataFrame auto-render) */
 .tables:not(:empty) { padding:8px 10px; border-top:1px solid var(--border); }
 .slatetable { margin:4px 0 8px; }
@@ -1386,7 +1386,7 @@ body.agent-open #apaskcard { right:calc(var(--agentw, 380px) + 22px); }
 #apaskcard .apaskcardbody + .apaskcardbody { margin-top:12px; border-top:1px solid var(--bg3); padding-top:12px; }
 /* The plan leads and the argument follows. Prominence by COLOUR, not weight: a plan runs to a
    sentence or three, and setting all of it bold made a slab of heavy type rather than a heading. */
-#apaskcard .apaskq { font-size:.83rem; line-height:1.6; color:var(--fg); }
+#apaskcard .apaskq { font-size:.83rem; line-height:1.6; color:var(--text); }
 #apaskcard .apaskq > :first-child { color:var(--strong); font-size:.88rem; margin-bottom:9px; }
 #apaskcard .apaskq p { margin:0 0 8px; }
 #apaskcard .apaskq p:last-child { margin-bottom:0; }
@@ -1400,11 +1400,11 @@ body.agent-open #apaskcard { right:calc(var(--agentw, 380px) + 22px); }
 #apaskcard .apaskq strong { color:var(--strong); font-weight:600; }
 #apaskcard .apasknote { width:100%; margin-top:10px; box-sizing:border-box; resize:vertical;
   font:inherit; font-size:.8rem; padding:6px 8px; border-radius:5px; min-height:30px;
-  background:var(--bg); color:var(--fg); border:1px solid var(--bg3); }
+  background:var(--bg); color:var(--text); border:1px solid var(--bg3); }
 #apaskcard .apasknote:focus { outline:none; border-color:var(--accent); }
 #apaskcard .apaskbtns { display:flex; flex-wrap:wrap; gap:7px; margin-top:10px; }
 #apaskcard .apaskb { cursor:pointer; font:inherit; font-size:.8rem; padding:5px 13px; border-radius:5px;
-  background:var(--bg); color:var(--fg); border:1px solid var(--bg3); }
+  background:var(--bg); color:var(--text); border:1px solid var(--bg3); }
 #apaskcard .apaskb:hover { border-color:var(--accent); color:var(--strong); }
 #apaskcard .apaskb:first-child { border-color:var(--accent); color:var(--strong); }
 /* A question the agent is BLOCKED on. Accented and full width, because ignoring it stops the turn. */
@@ -1413,7 +1413,7 @@ body.agent-open #apaskcard { right:calc(var(--agentw, 380px) + 22px); }
 .apmsg.ask .apaskq { font-size:.82rem; white-space:pre-wrap; }
 .apmsg.ask .apaskbtns { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
 .apmsg.ask .apaskb { cursor:pointer; font:inherit; font-size:.76rem; padding:3px 9px; border-radius:4px;
-                     background:var(--bg); color:var(--fg); border:1px solid var(--bg3); }
+                     background:var(--bg); color:var(--text); border:1px solid var(--bg3); }
 .apmsg.ask .apaskb:hover { border-color:var(--accent); color:var(--strong); }
 .apmsg.ask .apaskdone { font-size:.76rem; color:var(--teal); }
 /* Answered: the decision first and the question beneath it in one line, the whole thing on click. */
@@ -1423,7 +1423,7 @@ body.agent-open #apaskcard { right:calc(var(--agentw, 380px) + 22px); }
 .apmsg.ask.answered .apaskfull { display:none; }
 .apmsg.ask.answered.expanded .apaskasked { display:none; }
 .apmsg.ask.answered.expanded .apaskfull { display:block; margin-top:5px; font-size:.78rem;
-  line-height:1.55; color:var(--fg); }
+  line-height:1.55; color:var(--text); }
 .apmsg.think { align-self:flex-start; background:none; color:var(--dim); font-style:italic; font-size:.78rem; border-left:2px solid var(--bg3); border-radius:0; padding:2px 0 2px 9px; }
 /* Show/hide the agent's thinking (💭 toggle in the header). Hidden bubbles are removed from
    layout; the toggle dims to read as "off". */
@@ -1527,7 +1527,7 @@ body.modkey .cm-content { cursor: pointer; }
   border-left:1px solid var(--bg3); transform:translateX(100%);
   transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
 .histpanel.open { transform:none; box-shadow:-8px 0 24px #0007; }   /* shadow only when open (see .palette) */
-.hbtn { background:var(--bg3); border:none; color:var(--fg); border-radius:6px; padding:3px 9px; cursor:pointer; font-size:.8rem; }
+.hbtn { background:var(--bg3); border:none; color:var(--text); border-radius:6px; padding:3px 9px; cursor:pointer; font-size:.8rem; }
 .hbtn:hover { background:var(--accent); }
 .hbtn.stop { background:var(--red); }
 .histlist { overflow:auto; padding:6px; display:flex; flex-direction:column; gap:2px; max-height:45%; flex:0 0 auto; border-bottom:1px solid var(--bg3); }
@@ -1868,7 +1868,7 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
   border:1px solid var(--bg3); border-radius:8px; box-shadow:0 10px 28px #0009; padding:4px; z-index:70;
   display:none; flex-direction:column; }
 .topmenu.open { display:flex; }
-.topmenu button, .topmenu a { background:none; border:none; color:var(--fg); text-align:left; padding:7px 12px;
+.topmenu button, .topmenu a { background:none; border:none; color:var(--text); text-align:left; padding:7px 12px;
   border-radius:6px; cursor:pointer; font-size:.84rem; text-decoration:none; display:block; white-space:nowrap; }
 .topmenu button:hover, .topmenu a:hover { background:var(--bg3); color:var(--accent); }
 .topmenu hr { border:none; border-top:1px solid var(--bg3); margin:4px 6px; }
