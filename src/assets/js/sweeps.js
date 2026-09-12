@@ -629,15 +629,17 @@ function showOptMenu(row, inp) {
           ${s.blocked ? `<div class="swprow-note">${s.blocked}</div>` : ''}
         </div>`;
     }).join('') || '<div class="swprow-note">no sweeps</div>';
-    // The session total, at the foot: how much output exists against how much of it is here. A
+    // The session total, at the foot: how much output exists against how much has come back. A
     // question about the notebook rather than any one sweep, so it is stated once.
+    // The share rides the `read` figure rather than taking a stat of its own, where its label had
+    // to name which of the two numbers beside it the percentage was a share of.
     const tot = summary();
     if (tot.dsbytes > 0) {
+      const share = (100 * tot.dsread / tot.dsbytes).toFixed(2);
       el.innerHTML +=
         '<div class="swprow-foot">' +
           `<span><i>output</i>${humBytes(tot.dsbytes)}</span>` +
-          `<span><i>read</i>${humBytes(tot.dsread)}</span>` +
-          `<span><i>of it</i>${(100 * tot.dsread / tot.dsbytes).toFixed(2)}%</span>` +
+          `<span><i>read</i>${humBytes(tot.dsread)} (${share}%)</span>` +
         '</div>';
     }
 
