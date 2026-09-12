@@ -331,6 +331,35 @@ R({ id: 'view.files', label: 'Files… (project browser)', group: 'Panels', ctx:
 R({ id: 'view.notebooks', label: 'All notebooks', group: 'Panels', ctx: ['command'],
     run: () => { location.href = '/'; } });
 
+// ── Debugging ─────────────────────────────────────────────────────────────────
+// Implementations live in debugger.js; these are the bindings. `ctx: ['global']` because stepping
+// has to work with the caret in the scratchpad, which is a real editor, and `isGlobalSafe` admits
+// F-keys unmodified so they need no chord.
+//
+// F5 and F11 are in SLATE_KEYS_DISCOURAGED: the browser yields them on preventDefault, and the
+// Keyboard panel says what taking them costs. `_dbgLive` is what makes that cost conditional, since
+// with no session running the command declines and Reload works as usual.
+const _dbgLive = () => typeof window.slateDebugLive === 'function' && window.slateDebugLive();
+const _dbg = (name, ...args) => () => { _fn(name, ...args); };
+R({ id: 'debug.next', label: 'Debugger: step to the next line', group: 'Debug', ctx: ['global'],
+    keys: ['F10'], inst: true, available: _dbgLive, run: _dbg('slateDebugStep', 'next') });
+R({ id: 'debug.into', label: 'Debugger: step into a call on this line', group: 'Debug', ctx: ['global'],
+    keys: ['F11'], inst: true, available: _dbgLive, run: _dbg('slateDebugInto') });
+R({ id: 'debug.out', label: 'Debugger: finish this frame and stop at the caller', group: 'Debug',
+    ctx: ['global'], keys: ['Shift-F11'], inst: true, available: _dbgLive, run: _dbg('slateDebugStep', 'out') });
+R({ id: 'debug.continue', label: 'Debugger: continue to the next breakpoint', group: 'Debug',
+    ctx: ['global'], keys: ['F5'], inst: true, available: _dbgLive, run: _dbg('slateDebugStep', 'continue') });
+R({ id: 'debug.skip', label: 'Debugger: disable this breakpoint and continue', group: 'Debug',
+    ctx: ['global'], keys: [], inst: true, available: _dbgLive, run: _dbg('slateDebugSkip') });
+R({ id: 'debug.stop', label: 'Debugger: end the session', group: 'Debug', ctx: ['global'],
+    keys: ['Shift-F5'], available: _dbgLive, run: _dbg('slateDebugStop') });
+// Only a binding while the workspace is open. Escape has other claimants, so this DECLINES the key
+// rather than swallowing it when there is nothing to close.
+R({ id: 'debug.closeFocus', label: 'Debugger: close the workspace (the session keeps running)',
+    group: 'Debug', ctx: ['global'], keys: ['Escape'], inst: true, soft: true,
+    available: () => _dbgLive() && typeof window.slateDebugFocused === 'function' && window.slateDebugFocused(),
+    run: () => (typeof window.slateDebugCloseFocus === 'function' ? window.slateDebugCloseFocus() : false) });
+
 // ── Inside the editor ─────────────────────────────────────────────────────────
 // Slate's own in-editor bindings. CM6's text-editing defaults (word motion, indent, bracket matching)
 // are not listed here and are not remappable from this panel. Those come with the editor keymap picked

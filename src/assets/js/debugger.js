@@ -788,23 +788,35 @@ function WatchStrip({ s }) {
 
 // The step controls. One row, in the order you reach for them, with Stop set apart so it is never
 // the button you hit while stepping quickly.
+// The chord a command currently answers to, for a tooltip. Read from the keymap rather than written
+// here, so a rebind shows up and a command left unbound says nothing instead of lying.
+function chordOf(id) {
+  try {
+    const km = window.slateKeymap;
+    const cs = km && km.chordsFor ? km.chordsFor(id) : [];
+    return cs && cs.length ? km.format(cs[0]) : '';
+  } catch (_) { return ''; }
+}
+const _tip = (id, text) => { const c = chordOf(id); return c ? (text ? text + '  (' + c + ')' : c) : text; };
+
 function Controls({ compact }) {
   const d = busy.value || !live.value;
   const B = (mode, glyph, label, tip) => html`<button class=${'dbgb dbgb-' + mode} disabled=${d}
     title=${tip} onClick=${() => step(mode)}><span class="dbgbg">${glyph}</span>${compact ? null : html`<span>${label}</span>`}</button>`;
   return html`<div class="dbgctl">
-    ${B('next', '⤷', 'Next', 'F10')}
-    <button class="dbgb dbgb-into" disabled=${d} title="F11 — asks which call when the line makes more than one"
+    ${B('next', '⤷', 'Next', _tip('debug.next', ''))}
+    <button class="dbgb dbgb-into" disabled=${d}
+      title=${_tip('debug.into', 'asks which call when the line makes more than one')}
       onClick=${stepInto}><span class="dbgbg">⤓</span>${compact ? null : html`<span>Into</span>`}</button>
-    ${B('out', '⤒', 'Out', '⇧F11')}
-    ${B('continue', '▶▶', 'Continue', 'F5')}
+    ${B('out', '⤒', 'Out', _tip('debug.out', ''))}
+    ${B('continue', '▶▶', 'Continue', _tip('debug.continue', ''))}
     ${st.value && st.value.at_breakpoint
       ? html`<button class="dbgb dbgb-past" disabled=${d}
-          title="turn this breakpoint off and carry on. It stays set, hollow, and you can turn it back on"
+          title=${_tip('debug.skip', 'turn this breakpoint off and carry on. It stays set, hollow, and you can turn it back on')}
           onClick=${skipHere}><span class="dbgbg">▶|</span>${compact ? null : html`<span>Skip</span>`}</button>`
       : null}
     <span class="dbgsp"></span>
-    <button class="dbgb dbgb-stop" disabled=${busy.value} title="⇧F5"
+    <button class="dbgb dbgb-stop" disabled=${busy.value} title=${_tip('debug.stop', '')}
       onClick=${stopDebug}><span class="dbgbg">■</span>${compact ? null : html`<span>Stop</span>`}</button>
   </div>
   ${dbgErr.value ? html`<div class="dbgskipnote err">
@@ -1310,7 +1322,8 @@ function Focus() {
         <${Locus} s=${s} big=${true} />
         <span class="dbgsp"></span>
         <span class="dbgsteps">${s.steps} ${s.steps === 1 ? 'step' : 'steps'}</span>
-        <button class="dbgfx" title="close (the session keeps running)" onClick=${() => focus.value = false}>✕</button>
+        <button class="dbgfx" title=${_tip('debug.closeFocus', 'close (the session keeps running)')}
+          onClick=${() => focus.value = false}>✕</button>
       </div>
       <div class="dbgfctl"><${Controls} /></div>
       <div class="dbgfbody"
@@ -1354,18 +1367,19 @@ function Focus() {
 // ── keys ──────────────────────────────────────────────────────────────────────────────────────────
 // The conventional debugger keys, live only while a session is. They are ignored while the focus is
 // in a text field, so the scratchpad and the cell editors keep every key they already had.
-document.addEventListener('keydown', (e) => {
-  if (!live.value) return;
-  const t = e.target;
-  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable ||
-            (t.closest && t.closest('.cm-editor')))) {
-    if (!(e.key === 'Escape' && focus.value)) return;
-  }
-  if (e.key === 'F10') { e.preventDefault(); step('next'); }
-  else if (e.key === 'F11') { e.preventDefault(); e.shiftKey ? step('out') : stepInto(); }
-  else if (e.key === 'F5') { e.preventDefault(); e.shiftKey ? stopDebug() : step('continue'); }
-  else if (e.key === 'Escape' && focus.value) { e.preventDefault(); focus.value = false; }
-});
+// The step verbs, for the `debug.*` commands declared in commands.js. The keys themselves are not
+// bound here: a private `keydown` handler would take them before the keymap saw them, so they would
+// not appear in Settings → Keyboard, could not be rebound, and would not be checked for conflicts.
+//
+// `slateDebugLive` is what keeps the chords out of the way. With no session running the command
+// declines, the keymap offers the key to the next claimant, and F5 reloads the page as usual.
+window.slateDebugLive = () => !!live.value;
+window.slateDebugFocused = () => !!focus.value;
+window.slateDebugStep = (mode) => { step(mode); };
+window.slateDebugInto = () => { stepInto(); };
+window.slateDebugSkip = () => { skipHere(); };
+window.slateDebugStop = () => { stopDebug(); };
+window.slateDebugCloseFocus = () => { if (!focus.value) return false; focus.value = false; return true; };
 
 // ── the cell header button ────────────────────────────────────────────────────────────────────────
 window.slateDebugCell = (id) => (debugCell.value === id ? stopDebug() : startDebug(id));
