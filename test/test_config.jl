@@ -39,6 +39,64 @@ const KS = KaimonSlate
         end
     end
 
+    # The keyboard shortcuts live in their OWN file beside slate.json, so a rebind (frequent, written
+    # on every change) can never race a port or worker-threads write and clobber it. What Julia
+    # validates is the SHAPE only: which chords are legal, which command ids exist and which chords the
+    # browser refuses are all front-end knowledge (test/js/keymap_resolve.mjs), and a second opinion
+    # here would be one more thing to keep in step.
+    @testset "keymap config" begin
+        NS = KaimonSlate.NotebookServer
+        old = get(ENV, "KAIMONSLATE_CONFIG_HOME", nothing)
+        ENV["KAIMONSLATE_CONFIG_HOME"] = mktempdir()
+        try
+            # No file yet: the default keymap, not an error and not an empty dict.
+            fresh = NS.keymap_config()
+            @test fresh["preset"] == "slate"
+            @test isempty(fresh["bindings"])
+
+            stored = NS.keymap_config!(Dict("preset" => "vscode",
+                                            "bindings" => Dict("cell.run" => ["Mod-Enter"],
+                                                               "nb.runStale" => String[])))
+            @test stored["preset"] == "vscode"
+            @test stored["bindings"]["cell.run"] == ["Mod-Enter"]
+            # `[]` is MEANINGFUL — "deliberately unbound", as distinct from an absent key, which means
+            # "inherit the preset". Dropping empties would make an unbind impossible to express.
+            @test haskey(stored["bindings"], "nb.runStale")
+            @test isempty(stored["bindings"]["nb.runStale"])
+            @test NS.keymap_config() == stored              # survives the round trip through disk
+
+            # A save REPLACES rather than merges: the body is the user's whole keymap, and merging
+            # would make a removed binding unremovable.
+            @test isempty(NS.keymap_config!(Dict("preset" => "slate", "bindings" => Dict()))["bindings"])
+
+            # Garbage is coerced, one entry at a time, rather than rejected wholesale — a hand-edited
+            # file is the normal way this gets malformed, and losing one mistyped line beats losing
+            # the other fifty bindings.
+            junk = NS.keymap_config!(Dict("preset" => 42,
+                                          "bindings" => Dict("ok" => ["Mod-k"],
+                                                             "notalist" => "Mod-j",
+                                                             "hasjunk" => ["Mod-m", 7, ""])))
+            @test junk["preset"] == "slate"
+            @test junk["bindings"]["ok"] == ["Mod-k"]
+            @test !haskey(junk["bindings"], "notalist")
+            @test junk["bindings"]["hasjunk"] == ["Mod-m"]
+            @test NS.keymap_config!("not even a dict")["preset"] == "slate"
+
+            # An unreadable file must not take the notebook down with it — the page opens on the
+            # defaults, which is a far better failure than refusing to load.
+            write(NS._keymap_path(), "{ this is not json")
+            @test NS.keymap_config()["preset"] == "slate"
+
+            # Bounded, so a runaway or hostile PUT cannot fill the config directory.
+            big = NS.keymap_config!(Dict("bindings" => Dict("many" => fill("Mod-k", 40),
+                                                            "long" => [repeat("x", 500)])))
+            @test length(big["bindings"]["many"]) <= NS._KEYMAP_MAX_CHORDS
+            @test isempty(big["bindings"]["long"])
+        finally
+            old === nothing ? delete!(ENV, "KAIMONSLATE_CONFIG_HOME") : (ENV["KAIMONSLATE_CONFIG_HOME"] = old)
+        end
+    end
+
     # `--port` arg validation — only the early-return paths (help + bad input); a valid port would
     # fall through to the interactive TUI, which needs a real terminal.
     @testset "--port arg validation" begin

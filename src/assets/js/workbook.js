@@ -124,7 +124,9 @@
     _scratchView = window.mkEditor(host, {
       doc: '',
       cellId: '__wbscratch',
-      keys: [{ key: 'Shift-Enter', run: runScratch }, { key: 'Mod-Enter', run: runScratch }],
+      // "Apply" in the scratchpad means run it; `nb.runStale`'s chord runs it too, since a scratch
+      // buffer has nothing else to reconcile.
+      keys: [{ cmd: 'cell.run', run: runScratch }, { cmd: 'nb.runStale', run: runScratch }],
     });
   }
 
@@ -150,14 +152,9 @@
   function start() {
     sweep();
     addScratchLauncher();
-    // ⌘⇧S / Ctrl+Shift+S. Registered on `window` in the CAPTURE phase for the same reason appmode.js
-    // blocks keys there: Slate's own shortcuts are bubble-phase, and this must not be one of the
-    // things the app-mode blocker swallows.
-    window.addEventListener('keydown', e => {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'S' || e.key === 's')) {
-        e.preventDefault(); e.stopImmediatePropagation(); openScratch();
-      }
-    }, true);
+    // The chord is the `view.scratch` command (commands.js); the keymap's own listener is on
+    // `document` in the capture phase, which is ahead of the app-mode key blocker for the same reason
+    // this handler used to be.
     const nb = document.getElementById('nb');
     if (!nb) return;
     let queued = false;

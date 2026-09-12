@@ -135,12 +135,13 @@ function Editor({ cell }) {
           else clearEdited(cell.id); },
         onFocus: () => window.setEditing(cell.id, true),
         onBlur: () => window.setEditing(cell.id, false),
+        // Command ids, not chords: the keymap supplies the chord (Settings → Keyboard), and what each
+        // command MEANS here — run this cell, split this cell — is supplied by us. `Mod` covers both
+        // the ⌘ and Ctrl spellings these used to list separately.
         keys: [
-          { key: 'Shift-Enter', run: () => window.runCell(cell.id) },
-          { key: 'Shift-Mod-Enter', run: () => window.runAndAddBelow(cell.id) },
-          { key: 'Shift-Ctrl-Enter', run: () => window.runAndAddBelow(cell.id) },
-          { key: 'Shift-Mod--', run: () => window.splitCell(cell.id, view) },
-          { key: 'Shift-Ctrl--', run: () => window.splitCell(cell.id, view) },
+          { cmd: 'cell.run', run: () => window.runCell(cell.id) },
+          { cmd: 'cell.runAndAdd', run: () => window.runAndAddBelow(cell.id) },
+          { cmd: 'cell.split', run: () => window.splitCell(cell.id, view) },
         ],
       });
       setTimeout(() => primed = true, 0);
@@ -259,9 +260,8 @@ function WebEditor({ cell }) {
         onFocus: () => window.setEditing(cell.id, true),
         onBlur: () => window.setEditing(cell.id, false),
         keys: [
-          { key: 'Shift-Enter', run: () => window.runCell(cell.id) },
-          { key: 'Shift-Mod-Enter', run: () => window.runAndAddBelow(cell.id) },
-          { key: 'Shift-Ctrl-Enter', run: () => window.runAndAddBelow(cell.id) },
+          { cmd: 'cell.run', run: () => window.runCell(cell.id) },
+          { cmd: 'cell.runAndAdd', run: () => window.runAndAddBelow(cell.id) },
         ],
       });
       setPrimary(); refreshChips(); onAnyDoc();

@@ -915,6 +915,12 @@ function _make_router(h::Hub)
     end)
     HTTP.register!(router, "GET", "/api/notebooks", _ -> _json(_notebooks_json(h)))
     HTTP.register!(router, "GET", "/api/version", _ -> _json(_version_json()))
+    # The user's keyboard shortcuts (see server_keymap.jl). Hub-level, not per notebook: a keymap is a
+    # property of the person, and a shortcut that changed when you switched tabs would be unusable.
+    # GET is served in app mode too — a reader's own bindings should follow them into an app — while
+    # PUT is not on the app allowlist, so an app-mode reader's changes stay in their browser.
+    HTTP.register!(router, "GET", "/api/keymap", _ -> _json(keymap_config()))
+    HTTP.register!(router, "PUT", "/api/keymap", req -> _json(keymap_config!(_body(req))))
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors
     # `KaimonSlate.create_tools`'s open: creates the file if it doesn't exist.

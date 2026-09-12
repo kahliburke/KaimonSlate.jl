@@ -443,6 +443,10 @@ body.app .appsetpop.open { display:block; position:absolute; top:calc(100% + 8px
 .appsetpop .asrow select { flex:1; background:var(--bg3); color:var(--text); border:1px solid var(--border);
   border-radius:6px; padding:3px 6px; font-size:.82rem; }
 .appsetpop .asrow input[type=range] { flex:1; accent-color:var(--accent); }
+/* A row whose control is a button (Shortcuts → Customise…) rather than an input. */
+.appsetpop .asrow .asbtn { flex:1; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+  border-radius:6px; padding:3px 6px; font:inherit; font-size:.82rem; cursor:pointer; }
+.appsetpop .asrow .asbtn:hover { border-color:var(--accent); }
 .appsetpop .asv { color:var(--dim); font-size:.74rem; min-width:34px; text-align:right;
   font-variant-numeric:tabular-nums; }
 .appsetpop .asnote { color:var(--dim); font-size:.72rem; margin-top:9px; padding-top:8px;
@@ -2091,6 +2095,17 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
                           border-radius:6px; padding:4px 8px; font-size:.84rem; font-family:'Cascadia Code',monospace; }
 .setmodal input.settext:focus { outline:none; border-color:var(--accent); }
 .setmodal .sethint { display:block; color:var(--dim); font-size:.76rem; margin:-6px 0 4px; }
+/* A short status beside a control rather than under it — "3 customised", "none customised". Used by
+   the Keyboard rows, where the number IS the reason to open the dialog. */
+.setmodal .sethintinline { color:var(--dim); font-size:.74rem; }
+.setmodal .sethintinline.warn { color:#f0aa3c; }
+/* Half-typed key sequence (dd, gg, ⌘K Z). A chord that ARMS and waits used to be invisible, which is
+   why `dd` felt like a key that sometimes didn't work — you had no way to see that the first press
+   had registered. Bottom-centre, out of the way of the cell you are about to act on. */
+.kmpending { position:fixed; left:50%; bottom:22px; transform:translateX(-50%); z-index:80;
+  background:var(--bg3); color:var(--text); border:1px solid var(--accent); border-radius:6px;
+  padding:4px 12px; font-family:monospace; font-size:.82rem; letter-spacing:.06em;
+  box-shadow:0 6px 22px rgba(0,0,0,.45); pointer-events:none; }
 /* Settings grew past a comfortable single scroll, so it became a two-column surface: the section
    list on the left, the rows for the selected section on the right, and a filter over the lot. The
    list and the filter stay put; only the rows scroll, so Done is always reachable. The section
