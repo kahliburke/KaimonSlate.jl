@@ -37,9 +37,15 @@ const CMD = () => window.slateCmd;
 // rendered appears the next time the signal changes, with nothing to refresh by hand.
 const CTX_LABEL = { command: 'cell selected', global: 'anywhere', editor: 'in the editor' };
 const CTX_TITLE = {
-  command: 'Fires when a cell is selected and you are NOT editing it — where single keys are safe.',
-  global: 'Fires anywhere outside a cell editor. Needs a ⌘/⌃/⌥ modifier, or Escape or a function key.',
+  command: 'Fires when a cell is selected and you are not editing it. Single keys are safe here.',
+  global: 'Fires anywhere outside a cell editor. Needs a ⌘/⌃/⌥ modifier, or Escape, or a function key.',
   editor: 'Fires inside a cell editor, ahead of CodeMirror’s own text-editing keys.',
+};
+
+// A caveat belongs beside the rows it applies to. Only the Editor group has one: the editor keymap
+// brings its own chords for some of these actions, and a chord added here does not displace them.
+const GROUP_NOTE = {
+  Editor: 'The editor keymap in Settings → Editing keeps its own chords for some of these.',
 };
 
 const rows = computed(() => {
@@ -201,7 +207,7 @@ function apply(r, chord, displaced, reassign) {
     // here, and the recorder would then be armed on a row that is not on screen.
     const nextId = queue[0];
     query.value = _label(nextId);
-    notice.value = `${_label(nextId)} lost ${km.format(chord)} — press a new shortcut for it, or Escape to leave it unbound.`;
+    notice.value = `${_label(nextId)} lost ${km.format(chord)}. Press a new shortcut for it, or Escape to leave it unbound.`;
     setTimeout(() => startRec(nextId, null, queue.slice(1)), 0);
     return;
   }
@@ -269,10 +275,9 @@ function Recorder() {
   return html`<span class="kmrec">
     <span class="kmreck">${chord ? km.format(chord) : 'press a chord…'}</span>
     ${r.warn === 'reserved'
-      ? html`<span class="kmrecbad">the browser keeps this one — try another</span>`
+      ? html`<span class="kmrecbad">the browser keeps this one. Try another</span>`
       : r.warn ? html`<span class="kmrecwarn">${r.warn}</span>` : null}
-    ${r.taken ? html`<span class="kmrecwarn">${'already used by ' + r.taken.map(_label).join(', ') +
-      ' — you’ll be asked'}</span>` : null}
+    ${r.taken ? html`<span class="kmrecwarn">${'used by ' + r.taken.map(_label).join(', ')}</span>` : null}
     <span class="kmrechint">Escape cancels${chord ? ' · pause to save · press again for a sequence' : ''}</span>
   </span>`;
 }
@@ -317,7 +322,7 @@ function Row({ row }) {
                        onClick=${() => startRec(row.id, null)}>+</button>`}
     </div>
     <div class="kmmeta">
-      ${row.conflicts.length ? html`<span class="kmbadge conflict" title="Two commands want the same chord in the same context; the one listed first here gets it and the other never fires.">conflict</span>` : null}
+      ${row.conflicts.length ? html`<span class="kmbadge conflict" title="Another command wants this chord in the same context. Only one of them can fire.">conflict</span>` : null}
       ${row.custom ? html`<button class="kmreset" title="Back to the preset’s binding"
                                   onClick=${() => KM().reset(row.id)}>↺</button>` : null}
       ${row.ext ? html`<span class="kmbadge ext" title="Contributed by a package">${row.ext}</span>` : null}
@@ -337,8 +342,9 @@ function Panel() {
       <div class="kmhdr">
         <h2>Keyboard shortcuts</h2>
         <label class="kmpreset">Keymap
-          <select value=${km.preset()} onChange=${e => { km.setPreset(e.target.value); notice.value = ''; }}>
-            ${presets.map(p => html`<option value=${p.name}>${p.label}</option>`)}
+          <select title=${cur.about}
+                  value=${km.preset()} onChange=${e => { km.setPreset(e.target.value); notice.value = ''; }}>
+            ${presets.map(p => html`<option value=${p.name} title=${p.about}>${p.label}</option>`)}
           </select>
         </label>
         <input class="kmsearch" type="search" placeholder="Search commands and keys…"
@@ -347,7 +353,6 @@ function Panel() {
         <button class="kmx" title="Close" onClick=${close}>✕</button>
       </div>
       <div class="kmsub">
-        <span class="kmabout">${cur.about}</span>
         <span class="kmacts">
           <button onClick=${importKeymap} title="Load a keymap from a JSON file">Import…</button>
           <button onClick=${exportKeymap} title="Save this keymap as JSON">Export</button>
@@ -356,22 +361,19 @@ function Panel() {
       </div>
       ${notice.value ? html`<div class="kmnotice">${notice.value}</div>` : null}
       ${conflictCount.value ? html`<div class="kmnotice warn">${conflictCount.value}
-        ${conflictCount.value === 1 ? 'chord is' : 'chords are'} claimed by more than one command in the
-        same context — the marked rows lose. Remove or re-record one of each pair.</div>` : null}
+        ${conflictCount.value === 1 ? 'chord is' : 'chords are'} claimed by two commands at once.
+        The marked rows never fire. Remove or re-record one of each pair.</div>` : null}
       <div class="kmbody">
         ${groups.value.map(g => html`
           <div class="kmgroup" key=${g.name}>
             <div class="kmgname">${g.name}</div>
+            ${GROUP_NOTE[g.name] ? html`<div class="kmgnote">${GROUP_NOTE[g.name]}</div>` : null}
             ${g.rows.map(r => html`<${Row} row=${r} key=${r.id} />`)}
           </div>`)}
         ${!groups.value.length ? html`<div class="kmempty">No command matches “${query.value}”.</div>` : null}
       </div>
       <div class="kmfoot">
-        <span class="kmdim">Shortcuts are stored per person, not per notebook — in
-          <code>keymap.json</code> under your Slate config directory, so they follow you between
-          browsers. Text editing inside a cell (word motion, indent, brackets, and ⌘/ for comments)
-          comes from the editor keymap in Settings → Editing — default, vim or emacs — so a row in the
-          Editor group below adds a chord alongside that keymap’s own rather than replacing it.</span>
+        <span class="kmdim">Saved in <code>keymap.json</code> under your Slate config directory.</span>
         <button class="primary" onClick=${close}>Done</button>
       </div>
     </div>
@@ -414,10 +416,9 @@ style.textContent = `
 .kmsearch{flex:1 1 auto;min-width:0;}
 .kmx{background:none;border:none;color:var(--dim);font-size:1rem;cursor:pointer;padding:2px 6px;flex:0 0 auto;}
 .kmx:hover{color:var(--text);}
-.kmsub{display:flex;align-items:center;gap:12px;padding:8px 16px;font-size:.76rem;
+.kmsub{display:flex;align-items:center;gap:12px;padding:7px 16px;font-size:.76rem;
   color:var(--dim);border-bottom:1px solid var(--border);}
-.kmabout{flex:1;min-width:0;}
-.kmacts{display:flex;gap:6px;flex:0 0 auto;}
+.kmacts{display:flex;gap:6px;}
 .kmacts button{background:var(--bg3);border:1px solid var(--border);border-radius:6px;
   font-size:.74rem;padding:3px 9px;cursor:pointer;}
 .kmacts button:hover{border-color:var(--accent);}
@@ -428,6 +429,7 @@ style.textContent = `
 .kmgname{position:sticky;top:0;z-index:1;padding:8px 16px 6px;font-size:.68rem;font-weight:600;
   text-transform:uppercase;letter-spacing:.08em;color:var(--dim);
   background:var(--bg2);border-bottom:1px solid var(--border);}
+.kmgnote{padding:6px 16px 2px;font-size:.72rem;color:var(--dim);}
 .kmrow{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;
   padding:5px 16px;border-bottom:1px solid var(--border);}
 .kmrow:hover{background:var(--bg3);}
