@@ -10,7 +10,7 @@
 # the index turns it into a few byte ranges, and only those bytes move.
 #
 # The author writes none of this. They return a table or an array from the sweep body exactly as
-# they would otherwise; the cell's `data=lazy` attribute is what decides that the result is stored
+# they would otherwise; the cell's `data=auto` attribute is what decides that the result is stored
 # addressably instead of whole. Format follows from the value:
 #
 #   array   an isbits `Array` — the `raw` codec's 64-byte header plus the elements. A slice is
@@ -71,7 +71,7 @@ end
 
 # Arrow, loading it if this process has not yet. Everywhere else in the codebase Arrow is SOFT
 # detected — a value that happens to be a DataFrame gets a faster codec if the package is around.
-# Here the situation is different: `data=lazy` is an explicit request for addressable storage, and a
+# Here the situation is different: `data=auto` is an explicit request for addressable storage, and a
 # unit process has no reason to have imported Arrow on its own. Detecting its absence and silently
 # storing whole would answer that request with the one thing it ruled out.
 const _ARROW_TRIED = Ref(false)
@@ -132,7 +132,7 @@ end
     adopt(path) -> AdoptedFile
     adopt(path1, path2, …) / adopt(paths)
 
-Offer a file the unit wrote as its result. Return it from a `data=lazy` sweep body:
+Offer a file the unit wrote as its result. Return it from a `data=auto` sweep body:
 
     sweep = @sweep(paramgrid(day = 1:10)) do p
         using NCDatasets

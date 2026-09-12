@@ -692,7 +692,7 @@ See also `save_asset`, `FileUpload`."""),
          "solver output", "variables"],
         "adopt(path)  ·  adopt(path1, path2, …)  ·  adopt(paths)",
         """For output that never becomes a Julia value: a solver writes a file from deep inside
-        itself and the body only learns a path. Return `adopt(f)` from a `data=lazy` sweep body and
+        itself and the body only learns a path. Return `adopt(f)` from a `data=auto` sweep body and
         the file is read WHERE IT WAS WRITTEN and re-emitted as Slate's own chunks — the read is on
         the compute node, so nothing extra crosses the wire. Write it under `datadir()`/`@sfile`,
         which resolve on the node the same way they do in the notebook.
@@ -763,9 +763,12 @@ See also `save_asset`, `FileUpload`."""),
         ACTIONS are qualified calls, because `reset!`/`cancel!` are names your own packages may
         export: `Sweep.refresh!(r)`, `Sweep.retry_failed!(r)`, `Sweep.cancel!(r)`, `Sweep.resume!(r)`,
         `Sweep.reset!(r)`. The card offers the same as buttons.
-        `println(Sweep.text(r))` is the sweep in PLAIN TEXT — state, progress, timing and the first
-        rows of `r.table`. A sweep cell renders as an HTML card and the richer MIME always wins in a
-        notebook, so this is how the text form reaches a terminal, a log, or a message.
+        `Sweep.text(r)` is the sweep in PLAIN TEXT — state, progress, timing and the first rows of
+        `r.table`. A sweep cell renders as an HTML card and the richer MIME always wins in a
+        notebook, so the text form needs asking for. It renders as the report in a cell and also
+        `print`s, `String`s and interpolates as one, for a terminal, a log or a message.
+        `println(r)` and `@show r` stay on ONE line: they share a method with string interpolation
+        and with printing a vector of sweeps, where a full report would be wrong.
         `Sweep.logs(r)` is what the SCHEDULER's job output says — where an OOM kill, a walltime cut
         or a failed prologue is explained. Those failures leave no manifest, so `r.errors` is empty
         for exactly the runs that most need explaining. A deliberate fetch (a round trip to the login

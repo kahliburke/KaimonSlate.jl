@@ -68,7 +68,7 @@ what computed the results, so it is part of their identity.
 
 ### Output too large to bring back
 
-`data=lazy` on the cell header stores a unit's result **addressably** — chunked and indexed where it
+`data=auto` on the cell header stores a unit's result **addressably** — chunked and indexed where it
 ran — so the notebook holds an index of kilobytes and a slice moves only the bytes it names.
 
 For output that never becomes a Julia value at all — a solver writing HDF5 or NetCDF from somewhere
@@ -76,7 +76,7 @@ inside itself — return `adopt(path)` instead. The file is read on the compute 
 re-emitted in the same addressable form, so nothing extra crosses the wire:
 
 ```julia
-#%% sweep id=runs cluster=hpc data=lazy
+#%% sweep id=runs cluster=hpc data=auto
 runs = @sweep paramgrid(; day = 1:365) do p
     using NCDatasets
     f = @sfile("grid_$(p.day).nc")
@@ -179,7 +179,7 @@ a cluster it has no mount on. So:
 * **Metadata is mirrored.** Manifests and status are copied into a local shadow in one round trip, so
   asking what a sweep is doing costs the new manifests and nothing else.
 * **Data stays put.** A unit's results are read by byte range over the same session.
-  With `data=lazy` a slice costs the bytes it names rather than the whole result.
+  With `data=auto` a slice costs the bytes it names rather than the whole result.
 
 Which is why the last step is unremarkable: a batch result and a value from an interactive worker are
 both just values in the notebook's namespace, and combining them is ordinary Julia.
