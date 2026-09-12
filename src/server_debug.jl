@@ -243,8 +243,11 @@ function may_disturb(nb::LiveNotebook, who::AbstractString)
     isempty(s.cell) && return true
     s.owner == String(who) && return true
     _is_agent(who) || return true
-    # The session's owner is the specialist; this asks whether `who` is the agent that summoned it.
-    return !isempty(s.owner) && orchestrator_of(nb, DEBUG_ROLE) == String(who)
+    # `who` is the agent that summoned the specialist — and this session belongs to an agent, so it
+    # is the specialist's work. Over a PERSON's session that authority does not carry: summoning a
+    # specialist once is not a standing right to close the window someone is reading. There the
+    # answer is no, and `stop_debug!` goes on to ask.
+    return _is_agent(s.owner) && orchestrator_of(nb, DEBUG_ROLE) == String(who)
 end
 
 "The source of the cell a frame's pseudo-file names, or `nothing` when it isn't one."
