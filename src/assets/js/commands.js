@@ -365,6 +365,17 @@ R({ id: 'debug.skip', label: 'Debugger: disable this breakpoint and continue', g
     ctx: ['global'], keys: [], inst: true, soft: true, available: _hasDbg, run: _dbg('slateDebugSkip') });
 R({ id: 'debug.stop', label: 'Debugger: end the session', group: 'Debug', ctx: ['global'],
     keys: ['Shift-F5'], soft: true, available: _hasDbg, run: _dbg('slateDebugStop') });
+// Toggling a breakpoint at the caret, which is F9 in every IDE with a debugger. `ctx: ['editor']`
+// and no `inst`, so the keymap emits it as an editor binding (see `editorSpecs`). It declines in an
+// editor that is showing no cell, which is the scratchpad and the predicate box.
+R({ id: 'debug.toggleBreakpoint', label: 'Debugger: toggle a breakpoint on this line', group: 'Debug',
+    ctx: ['editor'], keys: ['F9'], soft: true, available: _has('slateDebugToggleLine'),
+    run: (t, view) => {
+      if (!view || !view.state || view._noBp) return false;
+      const id = view._cellId || (t && t.id) || '';
+      const line = view.state.doc.lineAt(view.state.selection.main.head).number;
+      return window.slateDebugToggleLine(id, line);
+    } });
 // Declines unless the workspace is actually open, so Escape reaches whatever else wants it.
 R({ id: 'debug.closeFocus', label: 'Debugger: close the workspace (the session keeps running)',
     group: 'Debug', ctx: ['global'], keys: ['Escape'], inst: true, soft: true, available: _hasDbg,

@@ -1380,6 +1380,14 @@ window.slateDebugInto = () => { stepInto(); };
 window.slateDebugSkip = () => { skipHere(); };
 window.slateDebugStop = () => { stopDebug(); };
 window.slateDebugCloseFocus = () => { if (!focus.value) return false; focus.value = false; return true; };
+// Arm or clear a line without reaching for the margin, which is what F9 does in every other
+// debugger. No session is needed: a breakpoint outlives one, and setting the first mounts the
+// gutter, so the dot appears on the line you were standing on.
+window.slateDebugToggleLine = (cellId, line) => {
+  if (!cellId || !(line > 0)) return false;
+  toggleMark(cellId, line);
+  return true;
+};
 
 // ── the cell header button ────────────────────────────────────────────────────────────────────────
 window.slateDebugCell = (id) => (debugCell.value === id ? stopDebug() : startDebug(id));
