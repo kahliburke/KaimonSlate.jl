@@ -2,7 +2,8 @@
 // Command mode: a cell is "selected" (PURPLE ring) and single keys act on it —
 // j/k or ↑/↓ to move, a/b to insert above/below, dd to delete, m/y to set
 // markdown/code, Enter to edit. Edit mode: focus inside the CodeMirror (TEAL
-// ring + a ✎ chip in the header); Esc returns to command mode.
+// ring + a ✎ chip in the header); Esc returns to command mode. The command-mode bindings are a
+// table (`KEY_ACTIONS`, below) that localStorage can override.
 //
 // Which mode you are in is STATE, not a class on the element: it lives in the
 // store's `editing` signal and <Cell> folds it into the cell's class. The ring
@@ -92,50 +93,117 @@ function enterEdit(id) {
   }
   else editSource(id, c.kind === 'md' ? 'markdown' : 'julia');
 }
+// ── The command-mode keymap ───────────────────────────────────────────────────
+// Every command-mode shortcut is a named ACTION with a body and a default key list. The handler
+// resolves the pressed key through this table rather than testing keys inline, so a binding can be
+// moved or dropped without touching the dispatch, and so the bindings can be listed.
+//
+// A key is written as `event.key`, prefixed `Alt-` when Alt is held and `Shift-` when Shift is
+// needed to tell it apart. A printable character already carries Shift ('K' IS shift-k), so only
+// named keys take the `Shift-` prefix: `Shift-ArrowUp`, but plain `K`.
+//
+// Overrides live in localStorage `slateKeymap` as an action → key-list object. There is no UI for
+// them yet; the console is the interface:
+//
+//   slateKeymap()                            list the resolved bindings
+//   slateBindKey('cell-add-above', [])       unbind — the key does nothing
+//   slateBindKey('cell-add-above', 'i')      rebind (taking 'i' off whatever held it)
+//   slateBindKey('cell-add-above')           restore the default
+//   slateKeymapReset()                       drop all overrides
+//
+// An action body gets `{id, ids, idx, e}` and returns `false` to decline the key, which lets the
+// browser default stand; anything else counts as handled and the default is suppressed.
+const KEY_ACTIONS = {
+  'select-next':        { keys: ['ArrowDown', 'j'], run: c => { if (c.idx < c.ids.length - 1) selectCell(c.ids[c.idx + 1], true); } },
+  'select-prev':        { keys: ['ArrowUp', 'k'],   run: c => { if (c.idx > 0) selectCell(c.ids[c.idx - 1], true); } },
+  // Shift+↑/↓ (or ⇧J/⇧K) EXTEND the selection from the anchor; plain keys navigate (single-select).
+  'select-extend-next': { keys: ['Shift-ArrowDown', 'J'], run: c => { if (c.idx < c.ids.length - 1) selectRangeTo(c.ids[c.idx + 1], true); } },
+  'select-extend-prev': { keys: ['Shift-ArrowUp', 'K'],   run: c => { if (c.idx > 0) selectRangeTo(c.ids[c.idx - 1], true); } },
+  // Alt+↑/↓ MOVES the active cell (this was Shift+↑/↓ before multi-select claimed Shift).
+  'cell-move-up':       { keys: ['Alt-ArrowUp'],   run: c => moveCell(c.id, 'up') },
+  'cell-move-down':     { keys: ['Alt-ArrowDown'], run: c => moveCell(c.id, 'down') },
+  'cell-edit':          { keys: ['Enter'], run: c => enterEdit(c.id) },      // ⇧⏎ is run, handled below
+  // Escape in COMMAND mode, in order: collapse a raw-source overlay left open by the Escape that
+  // brought you here, then collapse a multi-selection to the active cell. Closing the overlay goes
+  // through toggleSource, so a changed source is COMMITTED rather than dropped — Escape never
+  // destroys work.
+  'escape':             { keys: ['Escape'], run: c => {
+      if (_srcOpen(c.id)) { const cell = _cellById(c.id); toggleSource(c.id, cell && cell.kind === 'md' ? 'markdown' : 'julia'); }
+      else if (selectedIds().length > 1) selectCell(c.id);
+      else return false;
+    } },
+  'cell-add-above':     { keys: ['a'], run: c => addCell(c.id, 'code', true) },
+  'cell-add-below':     { keys: ['b'], run: c => addCell(c.id, 'code', false) },
+  'cell-copy':          { keys: ['c'], run: () => copyCells() },             // copy selected cell(s)
+  'cell-cut':           { keys: ['x'], run: () => cutCells() },              // cut selected cell(s)
+  'cell-paste':         { keys: ['v'], run: () => pasteCells() },            // paste below the active cell
+  'cell-to-markdown':   { keys: ['m'], run: c => { const cell = _cellById(c.id); if (cell && cell.kind !== 'md') toggleType(c.id, 'md'); } },
+  'cell-to-code':       { keys: ['y'], run: c => { const cell = _cellById(c.id); if (cell && cell.kind !== 'code') toggleType(c.id, 'code'); } },
+  'cell-to-web':        { keys: ['w'], run: c => { const cell = _cellById(c.id); if (cell && cell.kind !== 'web') toggleType(c.id, 'web'); } },
+  'cell-merge-below':   { keys: ['M'], run: c => mergeBelow(c.id) },
+  // dd — press twice inside the window. delCell deletes the whole selection.
+  'cell-delete':        { keys: ['d'], run: c => {
+      if (_dPending) { _dPending = false; clearTimeout(_dTimer); delCell(c.id); }
+      else { _dPending = true; _dTimer = setTimeout(() => _dPending = false, 650); }
+    } },
+};
+let _keymap = {}, _keyToAction = new Map();
+function _storedKeymap() {
+  try { const o = JSON.parse(localStorage.getItem('slateKeymap') || '{}'); return (o && typeof o === 'object') ? o : {}; }
+  catch { return {}; }
+}
+// Defaults with the stored overrides applied, then inverted to key → action. An override that
+// claims a key takes it away from whatever held it by default, so rebinding never leaves two
+// actions racing for one key.
+function _buildKeymap() {
+  const over = _storedKeymap();
+  _keymap = {};
+  for (const a in KEY_ACTIONS) _keymap[a] = KEY_ACTIONS[a].keys.slice();
+  for (const a in over) {
+    if (!(a in KEY_ACTIONS)) continue;
+    const ks = over[a] == null ? [] : (Array.isArray(over[a]) ? over[a] : [over[a]]).map(String);
+    for (const b in _keymap) if (b !== a) _keymap[b] = _keymap[b].filter(k => !ks.includes(k));
+    _keymap[a] = ks;
+  }
+  _keyToAction = new Map();
+  for (const a in _keymap) for (const k of _keymap[a]) if (!_keyToAction.has(k)) _keyToAction.set(k, a);
+  return _keymap;
+}
+_buildKeymap();
+// `undefined` keys restores the default; `[]` or null unbinds.
+window.slateBindKey = (action, keys) => {
+  if (!(action in KEY_ACTIONS)) throw new Error('no such action: ' + action + ' (see slateKeymap())');
+  const over = _storedKeymap();
+  if (keys === undefined) delete over[action];
+  else over[action] = keys == null ? [] : (Array.isArray(keys) ? keys : [keys]);
+  localStorage.setItem('slateKeymap', JSON.stringify(over));
+  return _buildKeymap();
+};
+window.slateKeymap = () => _buildKeymap();
+window.slateKeymapReset = () => { localStorage.removeItem('slateKeymap'); return _buildKeymap(); };
+function _keyToken(e) {
+  let t = e.key;
+  if (e.shiftKey && t.length > 1) t = 'Shift-' + t;
+  if (e.altKey) t = 'Alt-' + t;
+  return t;
+}
 document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey) return;
   if (document.getElementById('modalbg').classList.contains('show')) return;
   const inField = e.target.closest('.cm-editor') || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
   if (inField) return;                                  // edit mode / typing → leave keys alone
   const ids = cellIds(); if (!ids.length) return;
+  const action = _keyToAction.get(_keyToken(e));
   if (!selectedId || !ids.includes(selectedId)) {
-    if (e.key === 'ArrowDown' || e.key === 'j' || e.key === 'Enter') { selectCell(ids[0], true); e.preventDefault(); }
+    // Nothing selected: the first key that would move down or start editing selects the first cell.
+    // Modifiers are ignored here so ⇧⏎ also lands on a cell (the run handler below then takes it).
+    const boot = action || _keyToAction.get(e.key);
+    if (boot === 'select-next' || boot === 'cell-edit') { selectCell(ids[0], true); e.preventDefault(); }
     return;
   }
-  const idx = ids.indexOf(selectedId), k = e.key;
-  // Alt+↑/↓ MOVES the active cell (this was Shift+↑/↓ before multi-select claimed Shift).
-  if (e.altKey) {
-    if (k === 'ArrowUp')        { e.preventDefault(); moveCell(selectedId, 'up'); }
-    else if (k === 'ArrowDown') { e.preventDefault(); moveCell(selectedId, 'down'); }
-    return;                                             // ignore other Alt combos in command mode
-  }
-  // Shift+↑/↓ (or ⇧K/⇧J) EXTEND the selection from the anchor; plain keys navigate (single-select).
-  // The shift branches must precede the plain arrows so the modifier wins.
-  if (e.shiftKey && (k === 'ArrowUp' || k === 'K')) { e.preventDefault(); if (idx > 0) selectRangeTo(ids[idx - 1], true); }
-  else if (e.shiftKey && (k === 'ArrowDown' || k === 'J')) { e.preventDefault(); if (idx < ids.length - 1) selectRangeTo(ids[idx + 1], true); }
-  else if (k === 'Enter' && !e.shiftKey) { e.preventDefault(); enterEdit(selectedId); }   // ⇧⏎ is run, handled below
-  // Escape in COMMAND mode, in order: collapse a raw-source overlay left open by the Escape that
-  // brought you here, then collapse a multi-selection to the active cell. Closing the overlay goes
-  // through toggleSource, so a changed source is COMMITTED rather than dropped — Escape never
-  // destroys work.
-  else if (k === 'Escape') {
-    if (_srcOpen(selectedId)) { e.preventDefault(); const c = _cellById(selectedId); toggleSource(selectedId, c && c.kind === 'md' ? 'markdown' : 'julia'); }
-    else if (selectedIds().length > 1) { e.preventDefault(); selectCell(selectedId); }
-  }
-  else if (k === 'ArrowDown' || k === 'j') { e.preventDefault(); if (idx < ids.length - 1) selectCell(ids[idx + 1], true); }
-  else if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); if (idx > 0) selectCell(ids[idx - 1], true); }
-  else if (k === 'a') { e.preventDefault(); addCell(selectedId, 'code', true); }
-  else if (k === 'b') { e.preventDefault(); addCell(selectedId, 'code', false); }
-  else if (k === 'c') { e.preventDefault(); copyCells(); }              // copy selected cell(s)
-  else if (k === 'x') { e.preventDefault(); cutCells(); }               // cut selected cell(s)
-  else if (k === 'v') { e.preventDefault(); pasteCells(); }             // paste below the active cell
-  else if (k === 'm') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'md') toggleType(selectedId, 'md'); }
-  else if (k === 'y') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'code') toggleType(selectedId, 'code'); }
-  else if (k === 'w') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'web') toggleType(selectedId, 'web'); }   // convert to a web (HTML/CSS/JS) cell
-  else if (k === 'M') { e.preventDefault(); mergeBelow(selectedId); }    // Shift-M: merge with cell below
-  else if (k === 'd') { e.preventDefault();
-    if (_dPending) { _dPending = false; clearTimeout(_dTimer); delCell(selectedId); }   // delCell deletes the whole selection
-    else { _dPending = true; _dTimer = setTimeout(() => _dPending = false, 650); } }
+  if (!action) return;
+  const ran = KEY_ACTIONS[action].run({ id: selectedId, ids, idx: ids.indexOf(selectedId), e });
+  if (ran !== false) e.preventDefault();
 });
 // Run shortcuts in COMMAND mode (a cell is selected but not being edited) — mirror the
 // in-editor keys: ⇧⏎ runs the cell and moves to the next; ⌘/Ctrl⇧⏎ runs and opens a fresh

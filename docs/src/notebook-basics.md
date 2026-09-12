@@ -42,6 +42,18 @@ KaimonSlate uses a Jupyter-style two-mode model:
 | `dd` | delete cell |
 | `⇧M` | merge with the cell below |
 
+These bindings can be changed. There is no settings UI for it yet, so the browser console is the
+interface: `slateKeymap()` lists the actions and the keys they answer to, `slateBindKey(action,
+keys)` rebinds one (`[]` unbinds it, leaving the key inert), and `slateKeymapReset()` puts
+everything back. A key is written as the browser's `event.key` with an `Alt-` or `Shift-` prefix
+where the modifier is what distinguishes it, so `a`, `Shift-ArrowUp` and `Alt-ArrowDown` are all
+valid. Overrides are stored per browser and apply to every notebook.
+
+```js
+slateBindKey('cell-add-above', [])       // stop `a` inserting a cell
+slateBindKey('cell-add-below', 'o')      // add below on `o` instead of `b`
+```
+
 Select several cells with shift-click (a range) or ⌘/Ctrl-click (toggle one), as well as the
 ⇧-arrow keys. Delete, cut, copy and the type-toggle keys then act on the whole selection, and a
 floating chip shows how many are selected. The cell clipboard is shared across notebook tabs.
