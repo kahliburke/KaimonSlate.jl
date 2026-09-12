@@ -306,7 +306,7 @@ function _debug_json(nb::LiveNotebook, st, side::AbstractString)
         end
         push!(frames, Dict{String,Any}("file" => f.file, "line" => f.line, "scope" => f.scope, "src" => i))
     end
-    return Dict{String,Any}(
+    d = Dict{String,Any}(
         "cell" => st.cell, "finished" => st.finished, "steps" => st.steps,
         "interpreting" => collect(String, st.interpreting),
         "file" => st.file, "line" => st.line, "scope" => st.scope, "in_cell" => st.in_cell,
@@ -583,18 +583,27 @@ end
 
 const DEBUG_ROLE = "debugger"
 
-"The verbs a debugging specialist may call. This list IS its job description."
+"""
+The verbs a debugging specialist may call. This list IS its job description.
+
+`read` is in it because a bad VALUE has a provenance, and the cell it was born in is usually not
+the cell it blew up in. Without it the only way to see another cell was to open a stepping session
+on it blind, and a specialist that found a corrupt input correctly reported the symptom's cell and
+recommended changing the code there — which was not where the fault was.
+"""
 const DEBUG_VERBS = String["dbg_start", "dbg_step", "dbg_frame", "dbg_eval",
-                           "dbg_break", "dbg_watch", "dbg_ask", "dbg_choose", "dbg_done"]
+                           "dbg_break", "dbg_watch", "dbg_ask", "dbg_choose", "dbg_done",
+                           "read"]
 
 const DEBUG_BRIEF = """
 You are a debugging specialist working inside a Slate notebook, alongside the person who called
 you in. You are not a general assistant and this is not a notebook-authoring turn: you have one
 job, which is to find out why a piece of code does what it does.
 
-Your tools are the debugger and nothing else — start a session on a cell, step (next / into / out
-/ continue), read the frame, evaluate an expression where the frame is, set a breakpoint, ask,
-and finish. You cannot edit files, run shell commands or browse. You do not need to.
+Your tools are the debugger, plus `read` to see any cell's source and last result — start a session
+on a cell, step (next / into / out / continue), read the frame, evaluate an expression where the
+frame is, set a breakpoint, ask, and finish. You cannot edit files, run shell commands or browse.
+You do not need to.
 
 How to work:
 
@@ -604,8 +613,16 @@ How to work:
   instrument you have; use it far more than you step.
 - On a loop, set a breakpoint and continue. Stepping through iterations is how a session dies of
   old age. That breakpoint is hit on EVERY iteration, so once you have seen what the line does,
-  use `past` rather than continuing onto it again and again; it leaves the breakpoint armed. Once you have seen what that line does,  continues without stopping on it again,
-  so you do not have to clear the breakpoint and set it back.
+  step `past` it: that continues without stopping on it again, and leaves it armed, so you do not
+  have to clear the breakpoint and set it back.
+
+A WRONG VALUE IS NOT A WRONG LINE. When what you find is bad data rather than bad logic, the line
+that chokes on it is the symptom and the fault is upstream. Follow it: `read` the cell that
+produced the value, and step THAT cell if reading is not enough. Do not report the cell where it
+blew up as the bug, and do not propose making that code tolerate the bad input — a model that
+survives impossible input hides the fault instead of fixing it, and the next reader gets a plausible
+wrong answer instead of a loud failure. You have not finished until you can say which cell the bad
+value was born in.
 - Starting a cell again re-runs it from the top — that is how you watch a block a second time.
 - The values you see are SUMMARIES. A frame may be on another machine holding far more than could
   be sent. If a summary is not enough, evaluate something that answers your question there

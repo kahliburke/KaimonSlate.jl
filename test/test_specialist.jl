@@ -46,15 +46,21 @@ include("debug_fake_agent.jl")
             @test get(r, "crew", "") == "debugger"
             fake_agent_settle!()
 
-            # It was OPENED with the seven verbs and nothing else — the restriction is the whole
-            # design, so assert the list that was actually sent rather than the one we meant.
+            # It was OPENED with its verbs and nothing else — the restriction is the whole design,
+            # so assert the list that was actually sent rather than the one we meant. `read` is in
+            # it on purpose: a bad value's provenance is in another cell, and without it the
+            # specialist can only see the cell it is already stepping.
             open_call = only(a for (t, a) in FAKE_CALLS if t === :agent_open)
             allowed = String[String(x) for x in get(open_call, "allowed_tools", String[])]
             @test !isempty(allowed)
             @test all(v -> any(endswith(a, v) for a in allowed),
                       ["dbg_start", "dbg_step", "dbg_frame", "dbg_eval", "dbg_break",
-                       "dbg_ask", "dbg_done"])
-            @test !any(a -> endswith(a, "_read") || endswith(a, "_edit_cell"), allowed)
+                       "dbg_ask", "dbg_done", "read"])
+            # Reading is not editing: nothing here may change the notebook or run it. (`_eval` is
+            # not on this list — the specialist's own `dbg_eval` ends in it, and that one evaluates
+            # in the paused frame rather than in the notebook.)
+            @test !any(a -> any(endswith(a, v) for v in
+                                ["_edit_cell", "_add_cell", "_delete_cell", "_run"]), allowed)
 
             # And BRIEFED with the cell it was handed: an opening turn that does not say which
             # cell leaves the specialist to guess.
