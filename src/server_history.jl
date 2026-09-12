@@ -374,6 +374,10 @@ end
 _json_finite(x) = x
 _json_finite(x::AbstractFloat) = isfinite(x) ? x : nothing
 _json_finite(x::AbstractDict) = Dict{Any,Any}(k => _json_finite(v) for (k, v) in x)
+# String-keyed dicts keep their type. Every JSON payload here is `Dict{String,Any}` and several are
+# passed on to functions typed for it, so widening the key to `Any` on the way through turns a
+# sanitized payload into a MethodError at the next call.
+_json_finite(x::AbstractDict{String}) = Dict{String,Any}(k => _json_finite(v) for (k, v) in x)
 _json_finite(x::NamedTuple) = NamedTuple{keys(x)}(map(_json_finite, values(x)))
 _json_finite(x::Union{AbstractVector,Tuple}) = Any[_json_finite(v) for v in x]
 _json_finite(x::Pair) = _json_finite(x.first) => _json_finite(x.second)

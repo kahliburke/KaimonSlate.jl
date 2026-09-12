@@ -154,6 +154,23 @@ include("debug_fake_agent.jl")
             @test picked[] == "acp:claude:sonnet"
         end
 
+        @testset "a watch that goes non-finite still encodes" begin
+            # A blowing-up field is what people open the debugger FOR, so NaN in a watch series is
+            # the expected case rather than an edge one. JSON has no NaN, so an unsanitized frame
+            # failed to encode and every step — and the button that starts a session — answered 500.
+            NS.start_debug!(nb, "drive"; by = NS.HUMAN)
+            try
+                NS.watch_debug!(nb, "cell:drive", 3; expr = "0/0")
+                NS.step_debug!(nb, "next"); NS.step_debug!(nb, "next")
+                st = NS.frame_debug(nb)
+                @test NS.JSON.json(st) isa String            # would throw on a raw NaN
+                @test NS.JSON.json(NS.traces_debug(nb)) isa String
+            finally
+                NS.watch_debug!(nb, "cell:drive", 3; expr = "")
+                NS.stop_debug!(nb; by = NS.HUMAN)
+            end
+        end
+
         @testset "file access is granted to the notebook's agent, not to a specialist" begin
             # The agent has no shell or file tools until it asks and is told yes. What it asks for
             # is a preset, and the preset binds at spawn — so the grant has to outlive the turn and

@@ -330,6 +330,10 @@ function _debug_json(nb::LiveNotebook, st, side::AbstractString)
                                       "last" => t.last, "min" => t.min, "max" => t.max)
                      for t in (hasproperty(st, :traces) ? st.traces : [])],
     )
+    # JSON has no NaN/±Inf, and a watched value reaching one is not an edge case here — it is the
+    # thing people open the debugger to look at. Unsanitized, the whole frame failed to encode and
+    # every step, and the ▸ button itself, answered 500 the moment the field blew up.
+    return _json_finite(d)
 end
 
 # Stepping is a gate round-trip that runs user code, so it takes the notebook's eval
@@ -532,7 +536,9 @@ function traces_debug(nb::LiveNotebook)
     catch e
         return Dict{String,Any}("ok" => false, "error" => sprint(showerror, e))
     end
-    return Dict{String,Any}("ok" => true, "traces" => tr)
+    # Same reason as the frame: a series that blew up is mostly what a watch is for, and one NaN
+    # sample would otherwise fail the whole fetch. `null` is the gap the chart wants anyway.
+    return _json_finite(Dict{String,Any}("ok" => true, "traces" => tr))
 end
 
 """
