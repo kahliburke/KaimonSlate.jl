@@ -1854,7 +1854,7 @@ function Base.getindex(p::DatasetPart, i::AbstractUnitRange)
             # Remote: the same window as an exact byte range, reinterpreted on arrival. An array's
             # layout is what makes this a single request rather than a search.
             blob, off, nb, _ = SlateTask.array_range(p.index, i)
-            T = Core.eval(Main, Meta.parse(String(p.index["eltype"])))
+            T = SlateTask.eltype_of(String(p.index["eltype"]))
             collect(reinterpret(T, read_range(p.src, blob, off, nb)))
         end
     catch e

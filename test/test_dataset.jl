@@ -8,6 +8,8 @@ using KaimonSlate
 # Loaded so the TABLE path is genuinely exercised: the codecs soft-detect Arrow, so without it here
 # every table assertion below would quietly take the "no addressable form" branch and pass vacuously.
 using Arrow, DataFrames
+# A stdlib that `Main` does not import, which is the point of the eltype-resolution test below.
+import Dates
 const RE = KaimonSlate.ReportEngine
 const ST = RE.SlateTask
 const MS = RE.MemoStore
@@ -804,6 +806,23 @@ const MS = RE.MemoStore
             e2 = try; ds[:nope]; "" catch x; sprint(showerror, x); end
             @test occursin("no variable `nope`", e2) && occursin("sst", e2)
         end
+    end
+
+    @testset "an element type from a package resolves without Main having it" begin
+        # The stored name is whatever `string(eltype(v))` produced WHERE THE UNIT RAN, and that may
+        # be qualified into a module this session never imported. Adoption makes it ordinary rather
+        # than exotic: NCDatasets decodes a CF time axis to `Dates.DateTime`, so reading the `time`
+        # variable of an unremarkable file asked `Main` for a name it had never heard of.
+        @test ST.eltype_of("Float32") === Float32
+        @test ST.eltype_of("Dates.DateTime") === Dates.DateTime
+        mktempdir() do root
+            v = [Dates.DateTime(2020, 1, 1) + Dates.Day(k) for k in 0:9]
+            idx, _ = ST.write_dataset!(root, v)
+            @test idx["kind"] == "array" && idx["eltype"] == "Dates.DateTime"
+            @test ST.dataset_elements(root, idx, 3:5) == v[3:5]
+        end
+        e = try; ST.eltype_of("NoSuchPkg.Nope"); "" catch x; sprint(showerror, x); end
+        @test occursin("nothing in this session provides it", e)
     end
 
     @testset "a whole-stored unit says why it is whole" begin

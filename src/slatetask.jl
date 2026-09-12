@@ -449,7 +449,7 @@ end
 "Elements `i` (linear) of an array dataset. Reads exactly that range's bytes."
 function dataset_elements(root::AbstractString, index::AbstractDict, i::AbstractUnitRange)
     blob, off, _, n = array_range(index, i)
-    T = Core.eval(Main, Meta.parse(String(index["eltype"])))
+    T = eltype_of(String(index["eltype"]))
     path = MemoStore.blob_path(root, blob)
     io = open(path, "r")
     try

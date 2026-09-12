@@ -430,6 +430,39 @@ end
 # channel's ranged pull when the store is not on a visible mount).
 
 """
+    eltype_of(name) -> Type
+
+The element type an array index recorded, resolved back to a `Type`.
+
+`Core.eval(Main, …)` alone is not enough: the name is whatever `string(eltype(v))` produced where the
+unit ran, and that may be qualified into a module `Main` never imported. An adopted file makes this
+ordinary rather than exotic — NCDatasets decodes a CF time axis to `Dates.DateTime`, so reading the
+`time` variable of a perfectly normal file asked `Main` for a name it had never heard of.
+
+So: try `Main`, and otherwise walk the dotted name from whichever loaded module owns its root.
+"""
+function eltype_of(name::AbstractString)
+    s = String(name)
+    try
+        return Core.eval(Main, Meta.parse(s))
+    catch
+    end
+    parts = split(s, '.')
+    root = nothing
+    for (k, m) in Base.loaded_modules
+        k.name == String(parts[1]) && (root = m; break)
+    end
+    root === nothing &&
+        error("this dataset stores `$(s)`, and nothing in this session provides it — load the " *
+              "package that defines it and read again")
+    t = root
+    for p in parts[2:end]
+        t = Base.invokelatest(getfield, t, Symbol(p))
+    end
+    return t
+end
+
+"""
     array_range(index, i) -> (blob, offset, nbytes, count)
 
 The exact bytes backing the LINEAR element range `i` of an array dataset.
