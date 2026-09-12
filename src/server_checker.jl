@@ -13,7 +13,8 @@
 # say WHICH cell is wrong and WHY, it says nothing.
 
 "What the checker may reach: everything needed to read a notebook, and nothing that changes it."
-const CHECKER_VERBS = String["read", "view", "inspect", "api", "search_docs", "check_ok", "check_flag"]
+const CHECKER_VERBS = String["read", "view", "inspect", "api", "search_docs", "check_ok",
+                             "check_flag", "check_verdict"]
 
 const CHECKER_ROLE = "checker"
 
@@ -38,6 +39,17 @@ finding is worse than silence because it costs the reader the time to check it.
 When you do report, `check_flag(cell, what)` — one cell, one sentence on what is wrong, and the
 evidence you saw. The person reads this between their own turns; it has to be worth the
 interruption on its own.
+
+REVIEWING A FINDING is the other thing you are woken for. Another agent has finished an
+investigation and says a named cell is at fault. You are given its CLAIM and the notebook — never
+its reasoning, and that is deliberate: you are the second opinion, and a reviewer shown the
+argument agrees with the argument. Read the cells yourself and answer the question it actually
+turns on: is the named cell where this goes wrong, or is it where it shows up?
+
+Answer with `check_verdict(finding, verdict, why)` — `confirmed` or `disputed`, one sentence.
+Dispute freely; you cost a sentence and a wrong confident finding costs a change to the wrong code.
+Confirm only having checked something yourself, and say what you checked. "Looks right" confirms
+nothing and is worse than saying nothing, because it makes a guess look reviewed.
 """
 
 # ── when it runs ──────────────────────────────────────────────────────────────────────────────────
@@ -162,6 +174,63 @@ function nudge_checker!(nb::LiveNotebook)
         @debug "slate: checker nudge failed" exception = e
     end
     return nothing
+end
+
+"""
+Ask the checker to review a finding — a second read of a claim, by something that did not make it.
+
+Off the caller's thread and swallowed: a review is an optional extra, and a specialist's sign-off
+must not wait on it or fail because of it. The finding is already in the chat by the time this
+runs, so the verdict lands as an annotation on something the person can already see rather than
+holding up the answer.
+
+`CHECKER_MIN_GAP` deliberately does not apply. That floor exists to stop a burst of edits waking
+the reviewer repeatedly; a finding is a single deliberate event and is exactly what it is for.
+"""
+function review_finding!(nb::LiveNotebook, f)
+    checker_on() || return nothing
+    # A finding that names no cell is not a claim anybody can check. "I could not work it out" is a
+    # legitimate answer and paying a second agent to agree with it is how the feature gets muted.
+    isempty(strip(f.cell)) && return nothing
+    @async try
+        task = _verdict_task(nb, f)
+        specialist_here(nb, CHECKER_ROLE) == "" ?
+            summon!(nb, CHECKER_ROLE; subject = f.cell, task = task) :
+            tell!(nb, CHECKER_ROLE, task)
+    catch e
+        @debug "slate: finding review failed" exception = e
+    end
+    return nothing
+end
+
+"""
+The claim, the notebook, and nothing else.
+
+The specialist's reasoning is deliberately absent. Handed the argument, a reviewer reviews the
+argument and agrees with it; handed the conclusion, it has to go and look. The second is the only
+one worth paying for.
+"""
+function _verdict_task(nb::LiveNotebook, f)
+    io = IOBuffer()
+    println(io, "A debugging specialist has finished and says this is the fault. Review the CLAIM.")
+    println(io)
+    println(io, "  finding: ", f.id)
+    println(io, "  cell:    ", f.cell)
+    println(io, "  claim:   ", f.claim)
+    isempty(strip(f.evidence)) || println(io, "  evidence it cites: ", f.evidence)
+    println(io)
+    # The structural answer goes in as a LEAD, not a verdict: it says where nobody looked, which is
+    # a fact, and stops short of saying the finding is wrong, which is not one.
+    if !isempty(f.unread_upstream)
+        println(io, "It did not look at ", join(("`" * c * "`" for c in f.unread_upstream), ", "),
+                ", which produce `", f.cell, "`'s inputs. That is not by itself an error — but if ",
+                "the value it found wrong was produced in one of them, the named cell is where the ",
+                "problem showed up rather than where it is. Worth checking first.")
+        println(io)
+    end
+    println(io, "Read the cells yourself with `read(cells=\"…\")`. Then `check_verdict(finding=\"",
+            f.id, "\", verdict=\"confirmed\"|\"disputed\", why=\"one sentence\")`.")
+    return String(take!(io))
 end
 
 "What changed since it last looked — the whole of what it is asked to review."

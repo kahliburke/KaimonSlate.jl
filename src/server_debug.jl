@@ -323,6 +323,7 @@ function _debug_json(nb::LiveNotebook, st, side::AbstractString)
         # someone else is steering — or one stalled on a question — has to be legible as that.
         "owner" => _debug_session(nb).owner,
         "asks" => asks_json(nb),
+        "findings" => findings_json(nb),
         # Summaries only. The series drives the chart and is fetched separately; putting it here
         # would push a hundred thousand samples through every step.
         "live" => _live_watches(nb),
@@ -440,6 +441,9 @@ function start_debug!(nb::LiveNotebook, cid::AbstractString; source::AbstractStr
     _, side = _region_route(nb, cell)
     mk = _marks_wire(nb)
     wt = _watches_wire(nb)
+    # A new session is a new investigation: what was looked at before it belongs to whatever that
+    # was, and counting it here would let a finding inherit someone else's diligence.
+    reset_cells_seen!(nb, [String(cid)])
     st = _debug_on(nb, side, k ->
         ReportEngine.debug_start!(k, nb.report; cell = String(cid), source = src,
                                   mark_files = mk.files, mark_lines = mk.lines,
@@ -475,7 +479,8 @@ function frame_debug(nb::LiveNotebook)
     s = _debug_session(nb)
     isempty(s.cell) &&
         return Dict{String,Any}("session" => false, "marks" => _marks_json(nb),
-                                "watches" => _watches_json(nb), "asks" => asks_json(nb))
+                                "watches" => _watches_json(nb), "asks" => asks_json(nb),
+                                "findings" => findings_json(nb))
     st = _debug_on(nb, s.side, k -> ReportEngine.debug_frame(k, nb.report))
     j = _debug_json(nb, st, s.side); j["session"] = true
     return j
@@ -643,6 +648,11 @@ When you have an answer, or you have run out of ideas, or going further would no
 say what you found. Deciding you are done is yours to make — and if an orchestrator summoned you,
 it may also decide, since it can see a goal you cannot. Say what is true, including "I could
 not work it out" — a wrong confident answer costs more than an honest empty one.
+
+Finishing NAMES A CELL: `dbg_done(cell=…, summary=…, evidence=…)`. The summary is the claim in a
+sentence, the evidence is what you saw that says so, and the cell is the one you are saying is at
+fault. That is not bookkeeping — your finding is read by someone who did not watch you work, and a
+claim with no cell cannot be checked by anyone. If you have no answer, say so and name no cell.
 
 Be brief in chat. Say what you are about to look at and why, then look.
 """

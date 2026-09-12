@@ -3096,7 +3096,7 @@ function close_notebook!(h::Hub, id::AbstractString)
     # Before the region detaches: a warm worker outlives this notebook, and a live debug
     # session leaves its interpreter scoped to our modules for whoever adopts it next.
     try; stop_debug!(nb; serialize = false, force = true); catch; end
-    forget_debug!(id); forget_specialists!(id)   # ids are reused when the file reopens
+    forget_debug!(id); forget_specialists!(id); forget_findings!(id)   # ids are reused when the file reopens
     try; shutdown!(nb.kernel); catch; end
     _teardown_region!(nb)                  # detach — a remote region idles warm like the main kernel
     lock(_EVAL_MUTEX_LOCK) do; delete!(_EVAL_MUTEX, id); end

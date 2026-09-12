@@ -38,6 +38,11 @@ const selFrame = signal(null);
 // permission to disturb a session it does not own. Its turn is stopped until one of these is
 // answered, so they are shown where the session is, not tucked in a notification.
 const asks = signal([]);
+// What the investigation CONCLUDED, as a record rather than a paragraph: the cell it blames, the
+// claim, a reviewer's verdict once one arrives, and what was decided. Shown because a conclusion
+// nobody can see is a conclusion nobody can argue with — and the verdict in particular exists to be
+// disagreed with.
+const findings = signal([]);
 
 const live = computed(() => st.value && !st.value.finished);
 export const debugCell = computed(() => (st.value ? st.value.cell : ''));
@@ -171,6 +176,7 @@ function apply(next) {
   if (s && s.cell && s.cell !== here) window.clearDebugLine?.(s.cell);
   if (here) window.markDebugLine?.(here, s.line);
   if (s && s.asks !== undefined) asks.value = s.asks || [];
+  if (s && s.findings !== undefined) findings.value = s.findings || [];
   if (s && s.marks) paintMarks(s.marks);
   if (s && s.watches) watches.value = s.watches;
   if (s && s.live) liveW.value = s.live;
@@ -499,6 +505,9 @@ async function answerAsk(id, text) {
   if (p.asks !== undefined) asks.value = p.asks || [];
   if (p.ask) asks.value = [...asks.value.filter(a => a.id !== p.ask.id), p.ask];
   if (p.specialist) specialist.value = p.specialist;
+  // One finding arrives repeatedly as it gains a verdict, a plan, then a decision — replace by id
+  // rather than append, so the record updates in place instead of stacking copies of itself.
+  if (p.finding) findings.value = [...findings.value.filter(f => f.id !== p.finding.id), p.finding];
 });
 
 window.onDebugPush = (p) => {
@@ -644,6 +653,31 @@ function Asks() {
                const v = el.value; el.value = ''; answerAsk(a.id, v); }}>
           <span class="dbgpp">›</span><input autocomplete="off" autofocus placeholder="answer…" /></form>`}
   </div>`)}</div>`;
+}
+
+// What the investigation concluded. Three lines that are deliberately not prose: the cell it
+// blames, the claim, and a reviewer's verdict — so the two can be read AGAINST each other. A
+// disputed finding is the interesting case and is coloured as such; a confirmed one is not a
+// decoration, it means someone went and looked.
+function Findings() {
+  const list = findings.value;
+  if (!list.length) return null;
+  return html`<div class="dbgfinds">${list.map(f => html`
+    <div class=${'dbgfind ' + (f.verdict || 'open')} key=${f.id}>
+      <div class="dbgfindh">
+        <span class="dbgfindc" title="the cell it says is at fault">${f.cell || '(no cell named)'}</span>
+        ${f.verdict ? html`<span class=${'dbgfindv ' + f.verdict}>${f.verdict}</span>` : null}
+      </div>
+      <div class="dbgfindclaim">${f.claim}</div>
+      ${f.evidence ? html`<div class="dbgfindev">${f.evidence}</div>` : null}
+      ${/* Named as a lead, not a verdict: it says where nobody looked, which is a fact. */ ''}
+      ${(f.unread_upstream || []).length ? html`<div class="dbgfindgap">
+        never looked at ${f.unread_upstream.join(', ')} — which produce its inputs</div>` : null}
+      ${f.verdict_why ? html`<div class="dbgfindwhy">${f.verdict_why}</div>` : null}
+      ${f.plan ? html`<div class="dbgfindplan">plan: ${f.plan}
+        ${f.decision ? html`<span class="dbgfinddec">${f.decision === 'go' ? '✓ approved'
+          : f.decision === 'no' ? '✕ declined' : '✎ ' + f.decision}</span>` : null}</div>` : null}
+    </div>`)}</div>`;
 }
 
 // ── the cell strip ────────────────────────────────────────────────────────────────────────────────
@@ -1048,6 +1082,7 @@ function Convo({ s }) {
             } : undefined}>${m.text}
             ${m.held ? html`<span class="dbgheld">waiting for its turn to end</span>` : null}</div>`)}
     </div>
+    <${Findings} />
     <${Asks} />
     <form class="dbgpform" onSubmit=${send}>
       <span class="dbgpp">${'\u{1F4AC}'}</span>
@@ -1232,6 +1267,25 @@ style.textContent = `
 .dbgaskq { color:var(--strong); line-height:1.5; }
 .dbgaskbtns { display:flex; gap:6px; }
 .dbgask .dbgpform { margin-top:0; }
+/* The conclusion, as a record. Quiet by default — a finding is not an alarm — but a DISPUTED one
+   is coloured, because a located disagreement is the most useful thing on this pane. */
+.dbgfinds { flex:0 0 auto; display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+.dbgfind { padding:7px 9px; border-radius:7px; font-size:.76rem; line-height:1.5;
+  border:1px solid var(--bg3); border-left:2px solid var(--dim); background:var(--bg2); }
+.dbgfind.confirmed { border-left-color:var(--teal); }
+.dbgfind.disputed  { border-left-color:var(--amber,#d9a441); }
+.dbgfindh { display:flex; align-items:center; gap:7px; }
+.dbgfindc { font-family:'Cascadia Code',monospace; font-size:.72rem; color:var(--accent); }
+.dbgfindv { font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; padding:1px 6px;
+  border-radius:9px; }
+.dbgfindv.confirmed { color:var(--teal); background:color-mix(in srgb, var(--teal) 14%, transparent); }
+.dbgfindv.disputed { color:var(--amber,#d9a441); background:color-mix(in srgb, var(--amber,#d9a441) 14%, transparent); }
+.dbgfindclaim { color:var(--strong); margin-top:3px; }
+.dbgfindev, .dbgfindwhy { color:var(--dim); margin-top:3px; }
+/* Not styled as an error: it says where nobody looked, which is a fact rather than a fault. */
+.dbgfindgap { color:var(--dim); font-style:italic; margin-top:3px; }
+.dbgfindplan { margin-top:5px; color:var(--fg); }
+.dbgfinddec { margin-left:7px; color:var(--dim); }
 /* In the cell ribbon, when the workspace is shut: a nudge, not the prompt itself. */
 .dbgaskbadge { padding:5px 10px; font-size:.74rem; cursor:pointer; color:var(--teal);
   border-top:1px solid var(--border);

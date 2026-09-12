@@ -5432,8 +5432,9 @@ end
 #
 # Only TOOLS are rewritten. `slate_table`, `slate_query` and the rest of the cheatsheet are Julia
 # functions the notebook calls, and they keep their names whatever the gate is called.
-const _PROMPT_TOOLS = ("add_cell", "api", "dbg_break", "dbg_eval", "dbg_frame", "dbg_start",
-                       "dbg_step", "dbg_summon", "dbg_watch", "delete_cell", "edit_cell", "eval",
+const _PROMPT_TOOLS = ("add_cell", "api", "dbg_answer", "dbg_break", "dbg_eval", "dbg_findings",
+                       "dbg_frame", "dbg_propose", "dbg_start", "dbg_step", "dbg_summon",
+                       "dbg_tell", "dbg_wait", "dbg_watch", "delete_cell", "edit_cell", "eval",
                        "index_docs", "inspect", "pkg", "read", "rename_cell",
                        "request_file_access", "run", "run_on", "search_docs", "set_bind", "view")
 
@@ -5503,7 +5504,20 @@ function _agent_system_prompt_text(nb::LiveNotebook)
     edit the user's cell to add prints, `@infiltrate` or an early `return` — that changes the
     notebook you were asked to investigate, and the debugger answers the same questions without
     touching it. If stepping is refused, the answer says so: summon a debugging specialist with
-    `slate_dbg_summon` and supervise it.
+    `slate_dbg_summon`.
+
+    SUPERVISING ONE is a loop, not a wait: `slate_dbg_wait` blocks until it asks something or
+    finishes, `slate_dbg_answer` replies to a question that is blocking it, and `slate_dbg_tell`
+    redirects it mid-investigation when you can see it going the wrong way. It knows the code in
+    front of it and nothing about what this notebook is FOR, so a redirection from you is worth more
+    than another ten steps from it.
+
+    When it finishes, read `slate_dbg_findings` — the claim, the cell it blames, and a reviewer's
+    verdict if one arrived. Do NOT retell it: the person has already read the specialist's own
+    message, and a second summary of it is noise. Your job is the part neither the specialist nor
+    the reviewer can do — decide what it MEANS here, and put one course of action to the person with
+    `slate_dbg_propose`. If the reviewer disputed the claim, say so and say which of them you think
+    is right; a disagreement you can locate is more use to them than a consensus you smoothed over.
 
     The SLATE HELPERS below (echart, @bind, animate, playhead, reactive/@onclick, slate_table, cell
     tags) are Slate-specific — use them for charts / widgets / animation / tables / live updates. The

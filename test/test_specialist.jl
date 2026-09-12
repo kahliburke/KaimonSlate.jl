@@ -177,6 +177,58 @@ include("debug_fake_agent.jl")
             end
         end
 
+        @testset "a finding knows what its investigation did not look at" begin
+            # The structural half of the review protocol. A specialist that blames the cell where a
+            # bad value SHOWED UP, having never looked at the cell that produced it, is reporting a
+            # symptom — and that is a reachability question with an exact answer, so it is computed
+            # rather than put to a second model.
+            NS.reset_cells_seen!(nb, ["drive"])
+            @test NS.upstream_cells(nb, "drive") == String[]     # nothing feeds it in this notebook
+
+            f = NS.record_finding!(nb, "debugger", AGENT; cell = "drive",
+                                   claim = "the accumulator is off by one",
+                                   evidence = "total == 12502500 at the end")
+            @test f.cell == "drive"
+            @test isempty(f.unread_upstream)                     # no inputs ⇒ nothing was skipped
+            @test NS.latest_finding(nb) === f
+            @test NS.finding_by_id(nb, f.id) === f
+
+            # The chain: a verdict from something that did not make the claim, then a decision.
+            @test NS.set_verdict!(nb, f.id, "disputed", "`drive` only sums; nothing is off by one") !== nothing
+            @test f.verdict == "disputed"
+            @test NS.set_plan!(nb, f.id, "leave it alone") !== nothing
+            @test NS.set_decision!(nb, f.id, "go") !== nothing
+            @test f.decision == "go"
+
+            j = only(x for x in NS.findings_json(nb) if x["id"] == f.id)
+            @test j["claim"] == "the accumulator is off by one"
+            @test j["verdict"] == "disputed"
+            @test NS.JSON.json(j) isa String
+
+            # Warned once, then out of the way: a check with no way past it is a trap, not a check.
+            @test !NS.done_warned(nb)
+            NS.mark_done_warned!(nb)
+            @test NS.done_warned(nb)
+            NS.reset_cells_seen!(nb, ["drive"])                  # a new investigation, a fresh warning
+            @test !NS.done_warned(nb)
+        end
+
+        @testset "a value carries where it came from" begin
+            # The preventive half. The sign-off guard catches a specialist that blamed the cell a
+            # bad value landed in; this stops it forming that belief, by answering "where is this
+            # from" at the moment it is looking at the value rather than in a briefing long gone.
+            @test NS.defining_cell(nb, "total") == "drive"
+            @test NS.defining_cell(nb, "nosuchname") == ""
+            @test occursin("`total`", NS.provenance_note(nb, "total"))
+            @test occursin("`drive`", NS.provenance_note(nb, "total * 2"))
+            # A frame local belongs to no cell, and saying so on every evaluation would be noise on
+            # the majority of them.
+            @test NS.provenance_note(nb, "i + 1") == ""
+            @test NS.provenance_note(nb, "") == ""
+            # Keywords are not identifiers to look up.
+            @test NS.provenance_note(nb, "if true end") == ""
+        end
+
         @testset "file access is granted to the notebook's agent, not to a specialist" begin
             # The agent has no shell or file tools until it asks and is told yes. What it asks for
             # is a preset, and the preset binds at spawn — so the grant has to outlive the turn and

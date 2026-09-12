@@ -1319,7 +1319,12 @@ function create_tools(GateTool::Type)
         get(r, "ok", false) === true || return "⛔ " * string(get(r, "error", "evaluation failed"))
         v = get(r, "value", nothing)
         v === nothing && return "(no value)"
-        return string(get(v, "repr", ""), "  ::", get(v, "type", ""), get(v, "size", ""))
+        out = string(get(v, "repr", ""), "  ::", get(v, "type", ""), get(v, "size", ""))
+        # Where the value came from, attached to the value itself. A wrong number is only half an
+        # answer; the other half is which cell produced it, and that is a fact the notebook holds
+        # and the agent would otherwise have to think to go and ask for.
+        note = NotebookServer.provenance_note(nb, expr)
+        return isempty(note) ? out : out * "\n" * note
     end
 
     """
@@ -1349,6 +1354,75 @@ function create_tools(GateTool::Type)
     end
 
     """
+        dbg_findings(notebook) -> String
+
+    Every finding on this notebook: the claim, the cell it names, the checker's verdict if one has
+    arrived, and what was decided about it.
+
+    This is what you read after `dbg_wait` says a specialist is done. The finding is the record; the
+    specialist's chat message is the same thing in prose, and re-summarising it for the person is
+    work nobody asked for. Read this, judge it against what the notebook is FOR — which the
+    specialist does not know and you do — and then propose what to do with `dbg_propose`.
+    """
+    function dbg_findings(notebook::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        fs = NotebookServer.findings_json(nb)
+        isempty(fs) && return "No findings on this notebook."
+        io = IOBuffer()
+        for f in fs
+            println(io, "[", f["id"], "] ", f["role"], " → cell `", f["cell"], "`")
+            println(io, "  claim: ", f["claim"])
+            isempty(f["evidence"]) || println(io, "  evidence: ", f["evidence"])
+            isempty(f["unread_upstream"]) ||
+                println(io, "  never looked at: ", join(f["unread_upstream"], ", "))
+            isempty(f["verdict"]) ?
+                println(io, "  verdict: (none)") :
+                println(io, "  verdict: ", f["verdict"], " — ", f["verdict_why"])
+            isempty(f["plan"]) || println(io, "  plan: ", f["plan"])
+            isempty(f["decision"]) || println(io, "  decided: ", f["decision"])
+        end
+        return String(take!(io))
+    end
+
+    """
+        dbg_propose(notebook, finding, plan, why) -> String
+
+    Put a plan to the person and block until they answer. Returns what they said.
+
+    This is the end of a debugging session: a specialist found something, a checker read the claim,
+    and you are the only one who knows what this notebook is for. Judge it, then propose ONE course
+    of action.
+
+    Say the plan in `plan` and your reasoning in `why`. If the checker disputed, say so and say why
+    you think what you think — a located disagreement tells the person exactly where their judgement
+    is needed, and presenting a tidy consensus you had to manufacture wastes the one thing they are
+    better at than you. If the plan needs file access you do not have, say that in the plan: this is
+    the question, and asking a second time for the tools to carry it out is one interruption too
+    many.
+
+    They can agree, decline, or say something else entirely — the last is usually the useful one, so
+    do not treat a reply that is not "go ahead" as a refusal. Silence is not agreement: if nobody
+    answers, this returns no and you must not act.
+    """
+    function dbg_propose(notebook::String, finding::String, plan::String, why::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        isempty(strip(plan)) && return "⛔ a proposal needs a plan"
+        f = NotebookServer.finding_by_id(nb, strip(finding))
+        f === nothing && return "⛔ no finding `$(strip(finding))` on this notebook"
+        NotebookServer.set_plan!(nb, f.id, strip(plan))
+        q = string("**", strip(plan), "**\n\n", strip(why))
+        reply = NotebookServer.ask_and_wait(nb, "", "choice", _dbg_who(), q;
+            options = [("go", "Go ahead"), ("no", "Don't")])
+        # An unanswered proposal is a refusal. Nobody was there, and a plan nobody approved must not
+        # be carried out because the timer ran out rather than because anyone agreed.
+        answer = isempty(strip(reply)) ? "no" : String(strip(reply))
+        NotebookServer.set_decision!(nb, f.id, answer)
+        answer == "no" && return "They said no (or did not answer). Do not carry out the plan."
+        answer == "go" && return "Approved. Carry out the plan."
+        return "They answered in their own words — this is the instruction, not the plan you proposed:\n\n" * answer
+    end
+
+    """
         check_ok(notebook; note="") -> String
 
     You reviewed the changes and found nothing wrong. Say so and stop.
@@ -1361,6 +1435,30 @@ function create_tools(GateTool::Type)
         nb, err = _nb(notebook); nb === nothing && return err
         NotebookServer.checker_ok!(nb, note)
         return "✓ recorded: nothing to report."
+    end
+
+    """
+        check_verdict(notebook, finding, verdict, why) -> String
+
+    Your independent read of another agent's finding: `confirmed` or `disputed`.
+
+    You were given its claim and not its reasoning, on purpose — you are the second opinion, and a
+    reviewer shown the argument agrees with the argument. So the only confirmation worth anything is
+    one where you went and looked: say in `why` what you checked. "Looks right" confirms nothing and
+    makes a guess appear reviewed, which is worse than staying quiet.
+
+    Dispute freely. You cost a sentence; a confident wrong finding costs a change to the wrong code.
+    The usual reason to dispute is that the named cell is where a bad value SHOWED UP rather than
+    where it was produced.
+    """
+    function check_verdict(notebook::String, finding::String, verdict::String, why::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        v = lowercase(strip(verdict))
+        v in ("confirmed", "disputed") || return "⛔ verdict must be \"confirmed\" or \"disputed\""
+        isempty(strip(why)) && return "⛔ say what you checked, in a sentence"
+        f = NotebookServer.set_verdict!(nb, strip(finding), v, strip(why))
+        f === nothing && return "⛔ no finding `$(strip(finding))` on this notebook"
+        return "Recorded: $v."
     end
 
     """
@@ -1555,9 +1653,28 @@ function create_tools(GateTool::Type)
             print(io, "Answer with dbg_answer(notebook, id, text). It is blocked until you do.")
             return String(take!(io))
         elseif kind == "done"
-            return "🐞 The specialist finished (mark " * string(get(r, "at", 0)) * "):\n" *
-                   String(get(r, "text", "")) *
-                   "\n\nPass that mark back as `since` if you wait again, or it will re-report this ending."
+            io = IOBuffer()
+            println(io, "🐞 The specialist finished (mark ", string(get(r, "at", 0)), "):")
+            println(io, String(get(r, "text", "")))
+            # The record, not another copy of the prose. The person has already read the sentence
+            # above in the chat; what you do next turns on the cell it names and on whether anyone
+            # has checked it, and neither of those is in the sentence.
+            f = NotebookServer.latest_finding(nb)
+            if f !== nothing
+                println(io)
+                println(io, "As a record — finding `", f.id, "`, cell `",
+                        isempty(f.cell) ? "(none named)" : f.cell, "`",
+                        isempty(f.verdict) ? ", no verdict yet" : ", verdict: " * f.verdict *
+                        (isempty(f.verdict_why) ? "" : " (" * f.verdict_why * ")"), ".")
+                isempty(f.unread_upstream) ||
+                    println(io, "It never looked at ", join(f.unread_upstream, ", "),
+                            ", which produce that cell's inputs.")
+                println(io, "Judge it, then put ONE course of action to the person with ",
+                        "dbg_propose(finding=\"", f.id, "\", plan=…, why=…). Do not retell the ",
+                        "summary above — they have read it.")
+            end
+            print(io, "\nPass that mark back as `since` if you wait again, or it will re-report this ending.")
+            return String(take!(io))
         end
         return "Still working after $(round(Int, get(r, "waited", sec)))s — nothing asked, nothing finished. " *
                "Check dbg_frame for where it has got to, then wait again."
@@ -1601,19 +1718,61 @@ function create_tools(GateTool::Type)
     end
 
     """
-        dbg_done(notebook, summary) -> String
+        dbg_done(notebook, summary; cell="", evidence="") -> String
 
     Finish: say what you found and let go of the session.
 
     Call this when you have an answer, when you have run out of ideas, or when going further would
     not help — deciding you are done is yours to make. The session is closed only if it was yours;
     one a person started stays open for them, and the summary is delivered either way.
+
+    `cell` is the cell you are saying is AT FAULT, and it is what makes your finding reviewable:
+    someone else reads it against the notebook, and a claim with no cell is an opinion. `evidence`
+    is what you saw that says so, kept separate from the claim so a reader can check the one against
+    the other. Omit `cell` when you genuinely have no answer — that is an honest result and better
+    said plainly than dressed up.
+
+    If the cell you name has inputs you never looked at, this asks you once to go and look. Say
+    where the value came from, not only where it landed.
     """
-    function dbg_done(notebook::String, summary::String)::String
+    function dbg_done(notebook::String, summary::String; cell::String = "",
+                      evidence::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         who = _dbg_who()
         owner = NotebookServer._debug_session(nb).owner
+        # A supervising orchestrator signing off after its specialist already did was observed, and
+        # it recorded a second finding saying the same thing. Signing off is reporting what YOU
+        # found; with no session left and someone else's conclusion already on the record, there is
+        # nothing here to report.
+        if isempty(owner)
+            prev = NotebookServer.latest_finding(nb)
+            prev === nothing || prev.from == who ||
+                return "The session is already finished and `$(prev.from)` has recorded its " *
+                       "finding (`$(prev.id)`). Read it with dbg_findings and decide what to do " *
+                       "about it — signing off again would only file a second copy."
+        end
+        # Naming the cell where a bad value was USED, having never looked at the cell that produced
+        # it, is reporting a symptom — and the fix that follows is to the code that received the
+        # value rather than to whatever made it wrong. Asked once, then it is the caller's call:
+        # sometimes the upstream genuinely does not matter, and a gate with no way past it is a
+        # trap rather than a check.
+        if !isempty(strip(cell))
+            unread = NotebookServer.unread_upstream(nb, strip(cell))
+            if !isempty(unread) && !NotebookServer.done_warned(nb)
+                NotebookServer.mark_done_warned!(nb)
+                return "⛔ Not yet. You are naming `$(strip(cell))`, but its inputs come from " *
+                       join(("`" * c * "`" for c in unread), ", ") *
+                       " and you have not looked at any of those. If the value you found wrong " *
+                       "was produced upstream, the fault is there and not in the cell that " *
+                       "consumed it. Read them (`read(cells=…)`) or step them, then sign off " *
+                       "again — calling this a second time goes through."
+            end
+        end
+        f = NotebookServer.record_finding!(nb, NotebookServer.DEBUG_ROLE, who;
+                                           cell = strip(cell), claim = strip(summary),
+                                           evidence = strip(evidence))
         NotebookServer.sign_off!(nb, NotebookServer.DEBUG_ROLE, who, strip(summary))
+        NotebookServer.review_finding!(nb, f)   # the checker, if it is on: a second read of the CLAIM
         # Three outcomes, and they are not the same thing: a cell that ran to the end has already
         # closed its own session, which is not "someone else has it".
         isempty(owner) && return "Signed off. The session had already finished."
@@ -1752,6 +1911,11 @@ function create_tools(GateTool::Type)
     """
     function read_cells(notebook::String; cells::String = "", delta_since::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
+        # Naming cells is looking at them; the outline is not. A debugging finding is checked
+        # against what its investigation actually read, and an outline tells you a cell exists
+        # rather than what it does.
+        isempty(strip(cells)) ||
+            NotebookServer.note_cells_seen!(nb, [strip(c) for c in split(cells, ',') if !isempty(strip(c))])
         return notebook_digest(nb; cells = cells, delta_since = delta_since)
     end
 
@@ -2838,7 +3002,10 @@ function create_tools(GateTool::Type)
         GateTool("dbg_watch", dbg_watch),
         GateTool("dbg_choose", dbg_choose),
         GateTool("request_file_access", request_file_access),
+        GateTool("dbg_findings", dbg_findings),
+        GateTool("dbg_propose", dbg_propose; timeout_ms = ASK_MS),
         GateTool("check_ok", check_ok),
+        GateTool("check_verdict", check_verdict),
         GateTool("check_flag", check_flag),
         GateTool("dbg_ask", dbg_ask; timeout_ms = ASK_MS),
         GateTool("dbg_done", dbg_done),
