@@ -383,18 +383,13 @@
   window.slateSearchReplace = replaceCurrent;
   window.slateSearchReplaceAll = replaceAll;
 
-  // ⌘F / ⌘⌥F outside an editor. Inside one, the editor's own binding already ran and called
-  // preventDefault (a cell opens this bar; the Files-tab editor opens CM6's single-file panel), so
-  // `defaultPrevented` keeps the two from both firing on one keypress.
-  document.addEventListener('keydown', e => {
-    const mod = e.metaKey || e.ctrlKey;
-    if (!mod || e.defaultPrevented) return;
-    if (e.key === 'f' || e.key === 'F') {
-      if (e.shiftKey) return;                             // ⌘⇧F is the controls palette
-      e.preventDefault(); open(e.altKey);
-    } else if (e.key === 'g' || e.key === 'G') {
-      if (!bar || !bar.classList.contains('show')) return;
-      e.preventDefault(); step(e.shiftKey ? -1 : 1);
-    }
-  });
+  // Opening the bar is the `view.search` / `view.replace` command (commands.js); the keymap decides
+  // which chord does it and keeps the editor's binding and the document's from both firing on one
+  // keypress. Stepping between hits stays here, because it only means anything while the bar is up —
+  // it declines the key otherwise, so the browser's own Find Again keeps working when the bar is shut.
+  window.slateSearchStepKey = back => {
+    if (!bar || !bar.classList.contains('show')) return false;
+    step(back ? -1 : 1);
+    return true;
+  };
 })();
