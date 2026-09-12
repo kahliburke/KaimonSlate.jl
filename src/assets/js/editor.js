@@ -803,22 +803,37 @@
   let _bpOn = false;
   let _bpClick = null;   // (cellId, line) — set by the debugger island
 
+  // Filled when the breakpoint is armed, hollow when it is set but disabled. Without the second
+  // state a silenced breakpoint is indistinguishable from one that was never set.
   const _bpMarker = cmView && class extends cmView.GutterMarker {
-    toDOM() { const s = document.createElement('span'); s.className = 'cm-bpdot'; return s; }
+    constructor(off) { super(); this.off = !!off; }
+    eq(o) { return o.off === this.off; }
+    toDOM() {
+      const s = document.createElement('span');
+      s.className = this.off ? 'cm-bpdot off' : 'cm-bpdot';
+      return s;
+    }
   };
-  const _bpExt = () => {
-    if (!cmView || !_bpOn) return [];
+  // The field holds `{line, enabled}`. A bare number still means an armed line, so a caller that
+  // only knows about line numbers keeps working.
+  const _bpAt = (v, list) => {
+    const rs = [];
+    for (const m of list) {
+      const n = typeof m === 'number' ? m : m.line;
+      const off = typeof m === 'number' ? false : m.enabled === false;
+      if (n >= 1 && n <= v.state.doc.lines) rs.push(new _bpMarker(off).range(v.state.doc.line(n).from));
+    }
+    return Decoration.set(rs, true);
+  };
+  // A breakpoint belongs to a line of a cell, so the margin is only for editors showing one. The
+  // scratchpad and the predicate editors are built by the same factory and would otherwise get it
+  // too, and a click there armed a line of a cell that does not exist.
+  const _bpExt = (debuggable = true) => {
+    if (!cmView || !_bpOn || !debuggable) return [];
     return [cmView.gutter({
       class: 'cm-bpgutter',
-      markers(v) {
-        const lines = v.state.field(bpField, false) || [];
-        const rs = [];
-        for (const n of lines) {
-          if (n >= 1 && n <= v.state.doc.lines) rs.push(new _bpMarker().range(v.state.doc.line(n).from));
-        }
-        return Decoration.set(rs, true);
-      },
-      initialSpacer: () => new _bpMarker(),
+      markers: (v) => _bpAt(v, v.state.field(bpField, false) || []),
+      initialSpacer: () => new _bpMarker(false),
       domEventHandlers: {
         mousedown(v, block, ev) {
           ev.preventDefault();
@@ -835,7 +850,7 @@
     if (on === _bpOn) return;
     _bpOn = on;
     for (const v of _allViews()) {
-      try { v.dispatch({ effects: bpComp.reconfigure(_bpExt()) }); } catch (_) {}
+      try { v.dispatch({ effects: bpComp.reconfigure(_bpExt(!v._noBp)) }); } catch (_) {}
     }
   };
   window.onBreakpointClick = (fn) => { _bpClick = fn; };
@@ -866,15 +881,8 @@
     // the caller is told the FILE's line, which is the only number a breakpoint can be set on.
     const bpGutter = (cmView && opts.onToggleLine) ? [cmView.gutter({
       class: 'cm-bpgutter',
-      markers(v) {
-        const lines = v.state.field(bpField, false) || [];
-        const rs = [];
-        for (const n of lines) {
-          if (n >= 1 && n <= v.state.doc.lines) rs.push(new _bpMarker().range(v.state.doc.line(n).from));
-        }
-        return Decoration.set(rs, true);
-      },
-      initialSpacer: () => new _bpMarker(),
+      markers: (v) => _bpAt(v, v.state.field(bpField, false) || []),
+      initialSpacer: () => new _bpMarker(false),
       domEventHandlers: {
         mousedown(v, block, ev) {
           ev.preventDefault();
@@ -906,10 +914,11 @@
           effects: [lnComp.reconfigure(_ln()), setDbg.of(null)],
         });
       },
-      // Paint armed lines. Given in FILE numbers (that is how a breakpoint is expressed); the ones
-      // outside this method's text simply don't appear.
+      // Paint armed lines, as `{line, enabled}` or bare numbers. Lines are FILE numbers (that is
+      // how a breakpoint is expressed); the ones outside this method's text simply don't appear.
       setMarks(absLines) {
-        view.dispatch({ effects: setBps.of((absLines || []).map(n => n - offset + 1)) });
+        view.dispatch({ effects: setBps.of((absLines || []).map(m =>
+          typeof m === 'number' ? m - offset + 1 : { line: m.line - offset + 1, enabled: m.enabled })) });
       },
       // `absLine` is a line of the FILE; the document starts at `offset`.
       setLine(absLine) {
@@ -1274,7 +1283,7 @@
         indentUnit.of(_indent), EditorState.tabSize.of(webLang ? 2 : 4), errField, originField, flashField, dbgField,
         // Breakpoint gutter. Built from the CURRENT mode, so a cell mounted mid-session (lazy
         // hydration, or one you just added) comes up with the margin the others already have.
-        bpField, bpComp.of(_bpExt()),
+        bpField, bpComp.of(_bpExt(!opts.noBreakpoints)),
         matchField,                      // notebook-wide search highlights (painted by search.js)
         wrapComp.of(_wrapExt(!!opts.markdown)),
         ..._multiCursor,
@@ -1415,6 +1424,7 @@
     view._isFile = !!opts.file;       // whole-file editors keep line numbers whatever the toggle says
     view._isMd = !!opts.markdown;     // markdown cells have no grammar, so nothing to fold
     view._cellId = opts.cellId || ''; // a breakpoint-gutter click has to say WHICH cell's line
+    view._noBp = !!opts.noBreakpoints; // scratchpads and predicate editors show no cell's source
     view._mkAcomp = mkAcomp;          // rebuilds THIS editor's completion source on a settings change
     view._edctx = _edctx;             // ctx for reconfiguring registered editor extensions
     // Join the live set (see `_allViews`) and leave it on destroy, whoever destroys it — a pane

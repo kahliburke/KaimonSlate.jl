@@ -47,7 +47,11 @@ const _DEBUG_LOCK = ReentrantLock()
 # Keyed by `(file, line)` with the predicate as the VALUE, not part of the key: a line is one
 # breakpoint whether or not it carries a condition, so editing the predicate changes that mark
 # instead of arming a second one on the same line.
-const _DEBUG_MARKS = Dict{String,Dict{Tuple{String,Int},String}}()   # nb.id → {(file,line) => cond}
+#
+# `enabled` rides along because silencing a breakpoint and clearing it are different acts. A
+# disabled one keeps its line and its predicate and stays in the list.
+const DebugMarkState = @NamedTuple{cond::String, enabled::Bool}
+const _DEBUG_MARKS = Dict{String,Dict{Tuple{String,Int},DebugMarkState}}()   # nb.id → {(file,line) => mark}
 
 # Watches live beside marks and outlive a session the same way: you decide what to plot before you
 # start, and re-running the cell should keep plotting it.
@@ -195,15 +199,15 @@ _watches_json(nb::LiveNotebook) =
     [Dict{String,Any}("file" => f, "line" => l, "expr" => e) for (f, l, e) in _watches(nb)]
 
 _marks(nb::LiveNotebook) = lock(_DEBUG_LOCK) do
-    d = get(_DEBUG_MARKS, nb.id, Dict{Tuple{String,Int},String}())
-    [(k[1], k[2], v) for (k, v) in sort!(collect(d); by = first)]
+    d = get(_DEBUG_MARKS, nb.id, Dict{Tuple{String,Int},DebugMarkState}())
+    [(k[1], k[2], v.cond, v.enabled) for (k, v) in sort!(collect(d); by = first)]
 end
 
 # Split for the wire: parallel scalar vectors ride the gate with the least ceremony.
 function _marks_wire(nb::LiveNotebook)
     ms = _marks(nb)
     return (files = String[m[1] for m in ms], lines = Int[m[2] for m in ms],
-            conds = String[m[3] for m in ms])
+            conds = String[m[3] for m in ms], enabled = Bool[m[4] for m in ms])
 end
 
 const _NO_SESSION = DebugSession("", "", "")
@@ -308,6 +312,7 @@ function _debug_json(nb::LiveNotebook, st, side::AbstractString)
     end
     d = Dict{String,Any}(
         "cell" => st.cell, "finished" => st.finished, "steps" => st.steps,
+        "ns" => hasproperty(st, :ns) ? st.ns : "",
         "interpreting" => collect(String, st.interpreting),
         "file" => st.file, "line" => st.line, "scope" => st.scope, "in_cell" => st.in_cell,
         "at_breakpoint" => st.at_breakpoint,
@@ -328,7 +333,9 @@ function _debug_json(nb::LiveNotebook, st, side::AbstractString)
         # would push a hundred thousand samples through every step.
         "live" => _live_watches(nb),
         "traces" => [Dict{String,Any}("expr" => t.expr, "n" => t.n, "first" => t.first,
-                                      "last" => t.last, "min" => t.min, "max" => t.max)
+                                      "last" => t.last, "min" => t.min, "max" => t.max,
+                                      "hits" => hasproperty(t, :hits) ? t.hits : t.n,
+                                      "type" => hasproperty(t, :type) ? t.type : "")
                      for t in (hasproperty(st, :traces) ? st.traces : [])],
     )
     # JSON has no NaN/±Inf, and a watched value reaching one is not an edge case here — it is the
@@ -416,7 +423,8 @@ end
 # specialist and a reader cannot end up with different semantics for `step`.
 
 _marks_json(nb::LiveNotebook) =
-    [Dict{String,Any}("file" => f, "line" => l, "cond" => c) for (f, l, c) in _marks(nb)]
+    [Dict{String,Any}("file" => f, "line" => l, "cond" => c, "enabled" => e)
+     for (f, l, c, e) in _marks(nb)]
 
 """
     start_debug!(nb, cell; source) -> Dict
@@ -449,7 +457,7 @@ function start_debug!(nb::LiveNotebook, cid::AbstractString; source::AbstractStr
     st = _debug_on(nb, side, k ->
         ReportEngine.debug_start!(k, nb.report; cell = String(cid), source = src,
                                   mark_files = mk.files, mark_lines = mk.lines,
-                                  mark_conds = mk.conds,
+                                  mark_conds = mk.conds, mark_enabled = mk.enabled,
                                   watch_files = wt.files, watch_lines = wt.lines,
                                   watch_exprs = wt.exprs))
     st.error === nothing && _debug_remember!(nb, cid, side, by)
@@ -474,6 +482,50 @@ function step_debug!(nb::LiveNotebook, mode::AbstractString = "next")
     # Detached for the same reason — nothing about stepping waits on a watch.
     @async try; refresh_live_watches!(nb); catch; end
     return r
+end
+
+"""
+The calls the paused line still has to make, so `into` can be told which one is meant.
+
+Every call is reported, library ones included, each saying whether the session interprets its
+module. Which to OFFER is the viewer's decision; the browser hides library calls by default.
+"""
+function into_targets_debug(nb::LiveNotebook)
+    s = _debug_session(nb)
+    isempty(s.cell) && return Dict{String,Any}("session" => false, "targets" => [])
+    ts = _debug_on(nb, s.side, k -> ReportEngine.debug_into_targets(k, nb.report))
+    return Dict{String,Any}("session" => true,
+        "targets" => [Dict{String,Any}("pc" => t.pc, "name" => t.name, "mod" => t.mod,
+                                       "interpreted" => t.interpreted) for t in ts])
+end
+
+"""
+Step into the call at lowered statement `pc`, admitting `admit` to the interpret set first.
+
+Ungated like every other step, for the reason given on `step_debug!`.
+"""
+function into_debug!(nb::LiveNotebook; pc::Integer = 0, admit::AbstractString = "")
+    s = _debug_session(nb)
+    isempty(s.cell) && return _debug_json(nb, ReportEngine._error_state("", "this notebook has no debug session"), "")
+    st = _debug_on(nb, s.side, k -> ReportEngine.debug_into!(k, nb.report; pc = pc, admit = admit))
+    st.finished && _debug_forget!(nb)
+    r = _pushed(nb, _debug_json(nb, st, s.side))
+    @async try; refresh_live_watches!(nb); catch; end
+    return r
+end
+
+"""
+Add or drop a module from the set this session steps rather than runs compiled.
+
+Dropping is the counterpart to admitting. Every line steps while a module is in the set, so
+leaving a library in after the question is answered slows the rest of the session.
+"""
+function interpret_debug!(nb::LiveNotebook; admit::AbstractString = "", drop::AbstractString = "")
+    s = _debug_session(nb)
+    isempty(s.cell) && return _debug_json(nb, ReportEngine._error_state("", "this notebook has no debug session"), "")
+    st = _debug_on(nb, s.side, k ->
+        ReportEngine.debug_interpret!(k, nb.report; admit = admit, drop = drop))
+    return _pushed(nb, _debug_json(nb, st, s.side))
 end
 
 "The current frame without advancing. `session` says whether there is one at all."
@@ -549,23 +601,32 @@ function traces_debug(nb::LiveNotebook)
 end
 
 """
-    mark_debug!(nb, file, line; on, cond) -> Dict
+    mark_debug!(nb, file, line; on, cond, enabled) -> Dict
 
 Arm or clear a breakpoint. `on === nothing` toggles, which is what a gutter click wants. Allowed
 with no session running: marking a line and then starting is the normal order of the work.
+
+`enabled` silences a breakpoint without clearing it. The line stays listed and drawn hollow, with
+its predicate intact. Passing it alone changes only that flag.
 """
 function mark_debug!(nb::LiveNotebook, file::AbstractString, line::Integer;
-                     on::Union{Bool,Nothing} = nothing, cond::Union{String,Nothing} = nothing)
+                     on::Union{Bool,Nothing} = nothing, cond::Union{String,Nothing} = nothing,
+                     enabled::Union{Bool,Nothing} = nothing)
     (isempty(file) || line <= 0) && return Dict{String,Any}("ok" => false,
                                                             "error" => "a breakpoint needs a file and a line",
                                                             "marks" => _marks_json(nb))
     armed = lock(_DEBUG_LOCK) do
-        d = get!(() -> Dict{Tuple{String,Int},String}(), _DEBUG_MARKS, nb.id)
+        d = get!(() -> Dict{Tuple{String,Int},DebugMarkState}(), _DEBUG_MARKS, nb.id)
         key = (String(file), Int(line))
-        # Setting a condition arms the line if it was not armed: asking for a predicate is asking
-        # to stop there, and a predicate on a line nobody is watching would do nothing.
-        want = on !== nothing ? on : cond !== nothing ? true : !haskey(d, key)
-        want ? (d[key] = cond === nothing ? get(d, key, "") : String(cond)) : delete!(d, key)
+        was = get(d, key, (cond = "", enabled = true))
+        # Setting a condition arms the line if it was not armed, since a predicate on a line
+        # nobody is watching would do nothing. Enabling works the same way. Disabling does NOT:
+        # it applies to a mark that exists, and otherwise leaves the line alone.
+        want = on !== nothing ? on :
+               cond !== nothing ? true :
+               enabled !== nothing ? (enabled || haskey(d, key)) : !haskey(d, key)
+        want ? (d[key] = (cond = cond === nothing ? was.cond : String(cond),
+                          enabled = enabled === nothing ? was.enabled : enabled)) : delete!(d, key)
         want
     end
     s = _debug_session(nb)
@@ -573,7 +634,7 @@ function mark_debug!(nb::LiveNotebook, file::AbstractString, line::Integer;
         mk = _marks_wire(nb)
         _debug_on(nb, s.side, k ->
             ReportEngine.debug_marks!(k, nb.report; mark_files = mk.files, mark_lines = mk.lines,
-                                      mark_conds = mk.conds))
+                                      mark_conds = mk.conds, mark_enabled = mk.enabled))
     end
     r = Dict{String,Any}("ok" => true, "on" => armed, "file" => String(file), "line" => Int(line),
                          "marks" => _marks_json(nb))
@@ -598,7 +659,7 @@ the cell it blew up in. Without it the only way to see another cell was to open 
 on it blind, and a specialist that found a corrupt input correctly reported the symptom's cell and
 recommended changing the code there — which was not where the fault was.
 """
-const DEBUG_VERBS = String["dbg_start", "dbg_step", "dbg_frame", "dbg_eval",
+const DEBUG_VERBS = String["dbg_start", "dbg_step", "dbg_into", "dbg_frame", "dbg_eval",
                            "dbg_break", "dbg_watch", "dbg_ask", "dbg_choose", "dbg_done",
                            "read"]
 
@@ -620,8 +681,11 @@ How to work:
   instrument you have; use it far more than you step.
 - On a loop, set a breakpoint and continue. Stepping through iterations is how a session dies of
   old age. That breakpoint is hit on EVERY iteration, so once you have seen what the line does,
-  step `past` it: that continues without stopping on it again, and leaves it armed, so you do not
-  have to clear the breakpoint and set it back.
+  disable it and continue: the line and its condition stay, and you can turn it back on.
+- A line usually makes more than one call, and `dbg_step(mode="into")` takes whichever comes
+  first. `dbg_into` lists them and steps into the one you name. Library code runs compiled and
+  cannot be stepped until `dbg_into(admit=...)` says so; do that when you have a reason to
+  disbelieve a library, not by habit.
 
 A WRONG VALUE IS NOT A WRONG LINE. When what you find is bad data rather than bad logic, the line
 that chokes on it is the symptom and the fault is upstream. Follow it: `read` the cell that
@@ -748,8 +812,9 @@ function debug_briefing(nb::LiveNotebook, cid::AbstractString, task::AbstractStr
     end
     ms = _marks(nb)
     isempty(ms) || println(io, "\nBreakpoints already set: ",
-                           join([isempty(c) ? string(f, ":", l) : string(f, ":", l, " when ", c)
-                                 for (f, l, c) in ms], ", "))
+                           join([string(f, ":", l, isempty(c) ? "" : " when " * c,
+                                        e ? "" : " (disabled)")
+                                 for (f, l, c, e) in ms], ", "))
     print(io, _prior_findings(nb, cid))
     println(io)
     println(io, isempty(strip(task)) ?
@@ -770,6 +835,17 @@ function _register_debug_routes!(router, h::Hub)
     end))
     HTTP.register!(router, "POST", "/api/{id}/debug/step", req -> _withnb(h, req, nb ->
         _json(step_debug!(nb, String(get(_body(req), "mode", "next"))))))
+    HTTP.register!(router, "GET", "/api/{id}/debug/into-targets", req -> _withnb(h, req, nb ->
+        _json(into_targets_debug(nb))))
+    HTTP.register!(router, "POST", "/api/{id}/debug/into", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        _json(into_debug!(nb; pc = Int(get(b, "pc", 0)), admit = String(get(b, "admit", ""))))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/debug/interpret", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        _json(interpret_debug!(nb; admit = String(get(b, "admit", "")),
+                                   drop = String(get(b, "drop", ""))))
+    end))
     # Read-only, so it answers the asker without telling everyone.
     HTTP.register!(router, "GET", "/api/{id}/debug/frame", req -> _withnb(h, req, nb -> _json(frame_debug(nb))))
     HTTP.register!(router, "POST", "/api/{id}/debug/eval", req -> _withnb(h, req, nb ->
@@ -780,7 +856,9 @@ function _register_debug_routes!(router, h::Hub)
         b = _body(req)
         on = haskey(b, "on") ? (get(b, "on", true) === true) : nothing
         cond = haskey(b, "cond") ? String(get(b, "cond", "")) : nothing
-        _json(mark_debug!(nb, String(get(b, "file", "")), Int(get(b, "line", 0)); on = on, cond = cond))
+        en = haskey(b, "enabled") ? (get(b, "enabled", true) === true) : nothing
+        _json(mark_debug!(nb, String(get(b, "file", "")), Int(get(b, "line", 0));
+                          on = on, cond = cond, enabled = en))
     end))
     HTTP.register!(router, "POST", "/api/{id}/debug/watch", req -> _withnb(h, req, nb -> begin
         b = _body(req)

@@ -458,16 +458,18 @@ pkg_op(k::PendingKernel, report::Report, op::AbstractString, name::AbstractStrin
 registry_add(k::PendingKernel, report::Report, url::AbstractString) = registry_add(_await_real(k), report, url)
 debug_start!(k::PendingKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
              mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
-             mark_conds::Vector{String} = String[],
+             mark_conds::Vector{String} = String[], mark_enabled::Vector{Bool} = Bool[],
              watch_files::Vector{String} = String[], watch_lines::Vector{Int} = Int[],
              watch_exprs::Vector{String} = String[]) =
     debug_start!(_await_real(k), report; cell = cell, source = source,
                  mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds,
+                 mark_enabled = mark_enabled,
                  watch_files = watch_files, watch_lines = watch_lines, watch_exprs = watch_exprs)
 debug_marks!(k::PendingKernel, report::Report; mark_files::Vector{String} = String[],
-             mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[]) =
+             mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[],
+             mark_enabled::Vector{Bool} = Bool[]) =
     debug_marks!(_await_real(k), report; mark_files = mark_files, mark_lines = mark_lines,
-                 mark_conds = mark_conds)
+                 mark_conds = mark_conds, mark_enabled = mark_enabled)
 debug_watch!(k::PendingKernel, report::Report; watch_files::Vector{String} = String[],
              watch_lines::Vector{Int} = Int[], watch_exprs::Vector{String} = String[]) =
     debug_watch!(_await_real(k), report; watch_files = watch_files, watch_lines = watch_lines,
@@ -476,6 +478,11 @@ debug_traces(k::PendingKernel, report::Report) = debug_traces(_await_real(k), re
 debug_frame_locals!(k::PendingKernel, report::Report) = debug_frame_locals!(_await_real(k), report)
 debug_step!(k::PendingKernel, report::Report; mode::AbstractString = "next") =
     debug_step!(_await_real(k), report; mode = mode)
+debug_into_targets(k::PendingKernel, report::Report) = debug_into_targets(_await_real(k), report)
+debug_into!(k::PendingKernel, report::Report; pc::Integer = 0, admit::AbstractString = "") =
+    debug_into!(_await_real(k), report; pc = pc, admit = admit)
+debug_interpret!(k::PendingKernel, report::Report; admit::AbstractString = "", drop::AbstractString = "") =
+    debug_interpret!(_await_real(k), report; admit = admit, drop = drop)
 debug_frame(k::PendingKernel, report::Report) = debug_frame(_await_real(k), report)
 debug_eval_expr(k::PendingKernel, report::Report; expr::AbstractString = "") =
     debug_eval_expr(_await_real(k), report; expr = expr)
@@ -543,22 +550,26 @@ Returns the state BEFORE the first line runs.
 """
 debug_start!(::InProcessKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
              mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
-             mark_conds::Vector{String} = String[],
+             mark_conds::Vector{String} = String[], mark_enabled::Vector{Bool} = Bool[],
              watch_files::Vector{String} = String[], watch_lines::Vector{Int} = Int[],
              watch_exprs::Vector{String} = String[]) =
     debug_start!(report_module(report); cell = String(cell), source = String(source),
                  mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds,
+                 mark_enabled = mark_enabled,
                  watch_files = watch_files, watch_lines = watch_lines, watch_exprs = watch_exprs)
 
 """
-    debug_marks!(kernel, report; mark_files, mark_lines, mark_conds) -> DebugState
+    debug_marks!(kernel, report; mark_files, mark_lines, mark_conds, mark_enabled) -> DebugState
 
 Arm exactly these `file:line` breakpoints on the session, replacing whatever was set. A non-empty
-`mark_conds[i]` makes that one fire only when the expression holds in the frame.
+`mark_conds[i]` makes that one fire only when the expression holds in the frame, and a false
+`mark_enabled[i]` keeps it in the set without arming it.
 """
 debug_marks!(::InProcessKernel, ::Report; mark_files::Vector{String} = String[],
-             mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[]) =
-    debug_marks!(; mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds)
+             mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[],
+             mark_enabled::Vector{Bool} = Bool[]) =
+    debug_marks!(; mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds,
+                   mark_enabled = mark_enabled)
 
 """
     debug_watch!(kernel, report; watch_files, watch_lines, watch_exprs) -> DebugState
@@ -588,6 +599,22 @@ Advance the session: `next` | `into` | `out` | `continue`.
 """
 debug_step!(::InProcessKernel, ::Report; mode::AbstractString = "next") =
     debug_step!(; mode = String(mode))
+
+"The calls the current line still has to make, each with the module it would step into."
+debug_into_targets(::InProcessKernel, ::Report) = debug_into_targets()
+
+"""
+    debug_into!(kernel, report; pc, admit) -> DebugState
+
+Step into the call at lowered statement `pc`, admitting module `admit` to the interpret set first
+if it is named. `pc = 0` is a plain `into`.
+"""
+debug_into!(::InProcessKernel, ::Report; pc::Integer = 0, admit::AbstractString = "") =
+    debug_into!(; pc = Int(pc), admit = String(admit))
+
+"Add or remove a module from the set the session steps rather than runs compiled."
+debug_interpret!(::InProcessKernel, ::Report; admit::AbstractString = "", drop::AbstractString = "") =
+    debug_interpret!(; admit = String(admit), drop = String(drop))
 
 "The current state without advancing."
 debug_frame(::InProcessKernel, ::Report) = debug_frame()

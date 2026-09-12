@@ -67,12 +67,18 @@ mutable struct _DebugSession
     # expression → the values it took, in execution order. A watch answers a question the stepper
     # cannot: not "what is it now" but "what has it been", which is the shape of a divergence.
     traces::Dict{String,Vector{Float64}}
+    # Passes of the line, and the type the expression last had there. A trace holds numbers, so a
+    # watch on anything else collects no samples. Without a pass count that is indistinguishable
+    # from a line the run has not reached.
+    trace_hits::Dict{String,Base.RefValue{Int}}
+    trace_type::Dict{String,Base.RefValue{Any}}
     # Which of `writes` this session has actually executed. Tracked per top-level statement, so
     # "fresh" is a fact about what has run rather than a guess from whether a value changed —
     # re-running a cell and getting the same answer must not read as stale.
     thunk_writes::Vector{Vector{Symbol}}   # writes of each REMAINING statement, parallel to `rest`
     current_writes::Vector{Symbol}         # writes of the statement being stepped now
     assigned::Set{Symbol}                  # writes whose statement has completed
+    entered::Bool                          # the current frame's first statement has been tested (`_advance!`)
 end
 
 const _DEBUG = Ref{Union{Nothing,_DebugSession}}(nothing)
@@ -199,9 +205,23 @@ What one watch has seen so far, small enough to ride in every state payload.
 
 The series itself can be a hundred thousand samples; that belongs in a chart, and is fetched with
 `debug_traces`. These are what a reader decides on — still climbing, or turned, and how far.
+
+`hits` is passes of the line and `n` is samples kept. They differ when the expression is not a
+number, which collects nothing. `type` is what it last was, so a viewer can say which case it is.
 """
 const DebugTrace = @NamedTuple{expr::String, n::Int, first::Float64, last::Float64,
-                               min::Float64, max::Float64}
+                               min::Float64, max::Float64, hits::Int, type::String}
+
+"""
+One call the current line makes, and whether stepping into it would land anywhere.
+
+`pc` is the statement index in the frame's lowered code, and is what the caller picks by. A name
+cannot identify one: `f(g(x), g(y))` calls the same function twice.
+
+`interpreted` is false for a module the session runs compiled, such as Base or a registered
+package. Those are still listed; `debug_into!` admits the module when one is chosen.
+"""
+const DebugTarget = @NamedTuple{pc::Int, name::String, mod::String, interpreted::Bool}
 
 """
 Everything needed to render a paused frame.
@@ -218,6 +238,9 @@ to have been told the notebook's text.
 """
 const DebugState = @NamedTuple{
     cell::String,
+    # The namespace the cell runs in. Reported because it is the one interpreted module that
+    # cannot be dropped, which a viewer has to know to draw the list.
+    ns::String,
     finished::Bool,
     steps::Int,
     interpreting::Vector{String},
@@ -411,10 +434,17 @@ function _toplevel_writes(ex)::Vector{Symbol}
     return unique!(out)
 end
 
-"The parser's complaint about an unfinished expression anywhere in `ex`, or `nothing`."
+"The parser's complaint about code it could not read anywhere in `ex`, or `nothing`."
 function _incomplete(ex)
     ex isa Expr || return nothing
     ex.head === :incomplete && return isempty(ex.args) ? "the cell is unfinished" : string(ex.args[1])
+    # `parseall` does not throw on a cell it cannot read. It returns a node describing the
+    # complaint, and which node depends on the Julia version, so both are refused the same way.
+    if ex.head === :error
+        isempty(ex.args) && return "the cell does not parse"
+        a = ex.args[1]
+        return a isa Exception ? sprint(showerror, a) : string(a)
+    end
     for a in ex.args
         m = _incomplete(a)
         m === nothing || return m
@@ -511,7 +541,7 @@ function _state(s::_DebugSession)::DebugState
     interp = sort!([string(nameof(m)) for m in s.interpret])
     err = s.error === nothing ? nothing : sprint(showerror, s.error)
     if s.finished || s.frame === nothing
-        return (cell = s.cell, finished = true, steps = s.steps, interpreting = interp,
+        return (cell = s.cell, ns = string(nameof(s.ns)), finished = true, steps = s.steps, interpreting = interp,
                 file = "", line = 0, scope = "", in_cell = false, at_breakpoint = false,
                 source = "", srcfirst = 0, sources = DebugSource[],
                 locals = DebugLocal[], bindings = _module_bindings(s), stack = DebugFrame[],
@@ -521,7 +551,7 @@ function _state(s::_DebugSession)::DebugState
     file, line = _frame_position(s.frame)
     src, srcfirst = _frame_source(s.frame)
     st = _frame_stack(s.frame)
-    return (cell = s.cell, finished = false, steps = s.steps, interpreting = interp,
+    return (cell = s.cell, ns = string(nameof(s.ns)), finished = false, steps = s.steps, interpreting = interp,
             file = file, line = line, scope = _frame_scope(s.frame),
             # Specifically the cell being stepped, not merely "some cell": a function
             # defined in another cell reports `cell:<that one>`, and treating that as
@@ -557,8 +587,11 @@ predicate that has to hold for it to fire (`""` = fire every time).
 The predicate is what makes a long run reachable. Instability that starts at step 4,700 cannot be
 found by stepping 4,700 times, and a line breakpoint inside the loop stops on the first
 iteration — which is the one that is fine. `maximum(abs, du) > 1e3` stops on the one that is not.
+
+`enabled` is separate from whether the mark exists. Silencing one is not the same act as clearing
+it, so a disabled mark keeps its line and its predicate, stays listed, and is drawn hollow.
 """
-const DebugMark = @NamedTuple{file::String, line::Int, cond::String}
+const DebugMark = @NamedTuple{file::String, line::Int, cond::String, enabled::Bool}
 
 """
 Is the frame sitting on a breakpoint someone armed?
@@ -574,6 +607,23 @@ function _on_breakpoint(fr)
         pc = fr.pc
         (pc >= 1 && pc <= length(bps) && isassigned(bps, pc)) || return false
         return bps[pc].isactive
+    catch
+        return false
+    end
+end
+
+"""
+Should the run stop where this frame is standing, right now?
+
+`_on_breakpoint` reads the armed flag of a position already reached, which is enough once
+`debug_command` has answered. This is asked before anything runs, so it goes through
+JuliaInterpreter and evaluates the condition. Evaluating it is also what records the watches
+armed on that line.
+"""
+function _breaks_now(fr)
+    fr === nothing && return false
+    try
+        return _ji().shouldbreak(fr, fr.pc)::Bool
     catch
         return false
     end
@@ -639,8 +689,15 @@ the function object sidesteps the question entirely.
 Non-numbers are skipped rather than stored: a trace is for plotting, and the question a watch
 answers ("what has this been") is a numeric one. Anything that throws is skipped too — a watch
 must never be able to break the run it is observing.
+
+The pass is counted and the type recorded either way, so an empty trace can be reported as the
+wrong kind of value rather than as a line the run has not reached. Only the type is kept. Holding
+the value would pin an array the run has finished with.
 """
-function _watch_push!(store::Vector{Float64}, v)
+function _watch_push!(store::Vector{Float64}, hits::Base.RefValue{Int},
+                      ty::Base.RefValue{Any}, v)
+    hits[] += 1
+    ty[] = typeof(v)
     try
         x = Float64(v)
         length(store) < WATCH_CAP && push!(store, x)
@@ -687,19 +744,24 @@ function _arm!(s::_DebugSession)
         ex = try; Meta.parse(strip(w.expr)); catch; continue; end
         (ex isa Expr && ex.head === :incomplete) && continue
         store = get!(() -> Float64[], s.traces, String(w.expr))
+        hits = get!(() -> Ref(0), s.trace_hits, String(w.expr))
+        ty = get!(() -> Ref{Any}(nothing), s.trace_type, String(w.expr))
         # The expression is evaluated INSIDE the try, not passed as an argument to a function that
         # catches: an argument is evaluated at the call site, so a watch on a name that does not
         # exist yet threw out of the condition and took the run down with it.
         push!(get!(() -> Expr[], recs, (String(w.file), Int(w.line))),
-              :(try; $(_watch_push!)($store, $ex); catch; end))
+              :(try; $(_watch_push!)($store, $hits, $ty, $ex); catch; end))
     end
 
+    # A disabled mark is armed nowhere, rather than armed with a `false` predicate. A predicate
+    # would still be evaluated on every pass of the line.
+    armed_marks = [m for m in s.want_marks if m.enabled]
     lines = Set{Tuple{String,Int}}(keys(recs))
-    for m in s.want_marks
+    for m in armed_marks
         m.line > 0 && !isempty(m.file) || continue
         push!(lines, (String(m.file), Int(m.line)))
     end
-    markcond = Dict((String(m.file), Int(m.line)) => m.cond for m in s.want_marks)
+    markcond = Dict((String(m.file), Int(m.line)) => m.cond for m in armed_marks)
 
     for key in sort!(collect(lines))
         file, line = key
@@ -750,10 +812,14 @@ debug_traces() = (s = _DEBUG[]; s === nothing ? Dict{String,Vector{Float64}}() :
 function _trace_summaries(s::_DebugSession)
     out = DebugTrace[]
     for (k, xs) in sort!(collect(s.traces); by = first)
+        hits = haskey(s.trace_hits, k) ? s.trace_hits[k][] : 0
+        t = haskey(s.trace_type, k) ? s.trace_type[k][] : nothing
+        ty = t === nothing ? "" : string(t)
         isempty(xs) ?
-            push!(out, (expr = k, n = 0, first = NaN, last = NaN, min = NaN, max = NaN)) :
+            push!(out, (expr = k, n = 0, first = NaN, last = NaN, min = NaN, max = NaN,
+                        hits = hits, type = ty)) :
             push!(out, (expr = k, n = length(xs), first = xs[1], last = xs[end],
-                        min = minimum(xs), max = maximum(xs)))
+                        min = minimum(xs), max = maximum(xs), hits = hits, type = ty))
     end
     return out
 end
@@ -770,11 +836,15 @@ function _mark_cond_error(cond::AbstractString)
     return ""
 end
 
-# The wire form is two parallel vectors of scalars rather than a vector of pairs: it
+# The wire form is parallel vectors of scalars rather than a vector of tuples: it
 # is what survives the gate with the least ceremony (the `table_page` convention).
-_marks_from(files::Vector{String}, lines::Vector{Int}, conds::Vector{String} = String[]) =
+# A short `enabled` means the marks past its end are on, so an older caller that sends none
+# arms everything it sends, which is what it meant.
+_marks_from(files::Vector{String}, lines::Vector{Int}, conds::Vector{String} = String[],
+            enabled::Vector{Bool} = Bool[]) =
     DebugMark[(file = files[i], line = lines[i],
-               cond = i <= length(conds) ? conds[i] : "")
+               cond = i <= length(conds) ? conds[i] : "",
+               enabled = i <= length(enabled) ? enabled[i] : true)
               for i in 1:min(length(files), length(lines))]
 
 # ── stepping ──────────────────────────────────────────────────────────────────
@@ -782,13 +852,26 @@ _marks_from(files::Vector{String}, lines::Vector{Int}, conds::Vector{String} = S
 # `debug_command` advances one lowered expression, so several consecutive steps
 # can sit on one source line. A step the user asked for should move somewhere
 # visible, so advance until the position changes or the frame does.
-function _advance!(s::_DebugSession, cmd::Symbol; max_micro::Int = 500,
-                   skip::Union{Nothing,Tuple{String,Int}} = nothing)
+function _advance!(s::_DebugSession, cmd::Symbol; max_micro::Int = 500)
     ji = _ji()
     start = (_frame_position(s.frame)..., objectid(s.frame))
     micro = 0
     s.at_breakpoint = false
     while true
+        # A cell is split into one top-level statement per frame, and a frame is created standing
+        # on its first line. `debug_command` tests breakpoints only after running a statement, so
+        # that line has already executed by the time it makes its first test. Test it here, once,
+        # while the frame is untouched.
+        if !s.entered
+            s.entered = true
+            # Asked whatever the command is, since this is also where a watch on the line records.
+            # Only `continue` stops on the answer. A step is about to show this line anyway.
+            brk = _breaks_now(s.frame)
+            if cmd === :c && brk
+                s.at_breakpoint = true
+                return
+            end
+        end
         ret = try
             ji.debug_command(s.frame, cmd, true)
         catch e
@@ -812,15 +895,6 @@ function _advance!(s::_DebugSession, cmd::Symbol; max_micro::Int = 500,
         # `continue` walks straight through every one it hits.
         now = (_frame_position(s.frame)..., objectid(s.frame))
         s.at_breakpoint = _on_breakpoint(s.frame)
-        # `skip` is the position the caller has already seen and wants to get past. A breakpoint
-        # inside a loop is hit once per iteration, so plain `continue` lands on the same line over
-        # and over; this walks through those without disarming anything, and still stops at a
-        # DIFFERENT breakpoint or at the end.
-        if s.at_breakpoint && skip !== nothing && (now[1], now[2]) == skip
-            s.at_breakpoint = false
-            micro >= max_micro && return
-            continue
-        end
         s.at_breakpoint && return
         (now != start || micro >= max_micro) && return
     end
@@ -837,6 +911,7 @@ function _next_thunk!(s::_DebugSession)
         # A statement with no frame to build (a bare LineNumberNode) still counts as passed.
         fr === nothing && (union!(s.assigned, s.current_writes); continue)
         s.frame = fr
+        s.entered = false
         return
     end
     s.current_writes = Symbol[]
@@ -850,7 +925,7 @@ end
 "A terminal state carrying only an explanation — same shape as any other, so a
 viewer renders it without a special case."
 _error_state(cell::AbstractString, msg::AbstractString)::DebugState =
-    (cell = String(cell), finished = true, steps = 0, interpreting = String[],
+    (cell = String(cell), ns = "", finished = true, steps = 0, interpreting = String[],
      file = "", line = 0, scope = "", in_cell = false, at_breakpoint = false,
      source = "", srcfirst = 0, sources = DebugSource[],
      locals = DebugLocal[], bindings = DebugLocal[], stack = DebugFrame[],
@@ -868,6 +943,7 @@ function debug_start!(ns::Module; cell::String = "", source::String = "",
                       mark_files::Vector{String} = String[],
                       mark_lines::Vector{Int} = Int[],
                       mark_conds::Vector{String} = String[],
+                      mark_enabled::Vector{Bool} = Bool[],
                       watch_files::Vector{String} = String[],
                       watch_lines::Vector{Int} = Int[],
                       watch_exprs::Vector{String} = String[])::DebugState
@@ -901,9 +977,10 @@ function debug_start!(ns::Module; cell::String = "", source::String = "",
     s = _DebugSession(cell, nothing, pairs, ns, saved, interpret, false, nothing, nothing, 0,
                       _toplevel_writes(ex), before, false, Any[], Any[], Any[], Any[],
                       Dict{String,Vector{Float64}}(),
-                      per_thunk, Symbol[], Set{Symbol}())
+                      Dict{String,Base.RefValue{Int}}(), Dict{String,Base.RefValue{Any}}(),
+                      per_thunk, Symbol[], Set{Symbol}(), false)
     # Armed before the first frame is built, so `continue` from the very first step honors them.
-    _set_marks!(s, _marks_from(mark_files, mark_lines, mark_conds))
+    _set_marks!(s, _marks_from(mark_files, mark_lines, mark_conds, mark_enabled))
     _set_watches!(s, _watches_from(watch_files, watch_lines, watch_exprs))
     _next_thunk!(s)
     _DEBUG[] = s
@@ -925,28 +1002,206 @@ function debug_step!(; mode::String = "next")::DebugState
     cmd = mode == "next"     ? :n      :
           mode == "into"     ? :s      :
           mode == "out"      ? :finish :
-          mode == "continue" ? :c      :
-          mode == "past"     ? :c      : nothing
+          mode == "continue" ? :c      : nothing
     # Checked here rather than left to the interpreter: `_advance!` treats a throw as the run
     # ending, so an unrecognized verb would tear down a live session. Answer with the state as it
     # stands instead — nothing moved, and `steps` says so.
     cmd === nothing && return _state(s)
     if cmd === :c
-        # `past` means "I have seen this one" — the line being stood on is skipped for the rest of
-        # this step, so a breakpoint inside a loop does not stop on every iteration. The mark is
-        # not disarmed: it still catches the next run, and a different breakpoint still stops this
-        # one. Without it, getting out of a loop meant clearing the breakpoint and setting it again.
-        skip = mode == "past" && s.frame !== nothing ? _frame_position(s.frame) : nothing
         # Run to the end of the cell — but each top-level statement is its own frame, so
         # "continue" has to walk from one to the next rather than stopping at the first
         # boundary. A breakpoint ends the walk: that is the whole point of setting one.
         while !s.finished
-            _advance!(s, :c; skip = skip)
+            _advance!(s, :c)
             s.at_breakpoint && break
         end
     else
         _advance!(s, cmd)
     end
+    return _state(s)
+end
+
+# ── stepping into a chosen call ───────────────────────────────────────────────
+#
+# `into` on its own takes whichever call the lowered code reaches first, which on a line making
+# several calls is not a choice anyone made. These two verbs list what the line calls, then step
+# into the one named by its statement index.
+
+"An SSA reference's statement index, whoever's `SSAValue` type it is, or `nothing`."
+_ssa_id(x) = (nameof(typeof(x)) === :SSAValue && hasproperty(x, :id)) ? Int(getfield(x, :id)) : nothing
+
+"""
+The function a lowered value refers to, or `nothing` if it cannot be known without running.
+
+`code` is the statement list, because the callee is often not written in the call. Lowering a
+top-level statement resolves each global in a statement of its own and then calls the result, so
+`f(x, a)` becomes a `GlobalRef` statement followed by `(%4)(%5, a)`. Reading only the call gives
+an SSA reference to a statement that has not run yet. Calls that lowering generates for itself
+keep their `GlobalRef` inline, so those resolve directly.
+"""
+function _resolve_callee(fr, x, code, depth::Int = 0)
+    depth > 3 && return nothing
+    x isa GlobalRef && return isdefined(x.mod, x.name) ? getfield(x.mod, x.name) : nothing
+    x isa Function && return x
+    x isa QuoteNode && return x.value isa Function ? x.value : nothing
+    if x isa Symbol
+        m = try; _ji().moduleof(fr); catch; nothing; end
+        return (m isa Module && isdefined(m, x)) ? getfield(m, x) : nothing
+    end
+    id = _ssa_id(x)
+    (id !== nothing && 1 <= id <= length(code)) && return _resolve_callee(fr, code[id], code, depth + 1)
+    # A slot, or an SSA value pointing at something computed: knowable only once it has been.
+    v = try; _ji().lookup(fr, x); catch; nothing; end
+    return v isa Function ? v : nothing
+end
+
+"The function a lowered statement calls, or `nothing` if it is not a call or cannot be resolved."
+function _stmt_callee(fr, st, code)
+    st isa Expr || return nothing
+    args = st.head === :call ? st.args :
+           (st.head === :invoke && length(st.args) >= 2) ? st.args[2:end] : nothing
+    (args === nothing || isempty(args)) && return nothing
+    return _resolve_callee(fr, args[1], code)
+end
+
+_callee_name(f) = try; string(nameof(f)); catch; string(f); end
+
+"""
+    debug_into_targets() -> Vector{DebugTarget}
+
+The calls the line under the cursor still has to make, in the order it will make them.
+
+Only the statements from the current position on, since a call already evaluated cannot be
+stepped into. `Core` and the builtins are left out; a lowered line is full of them.
+"""
+function debug_into_targets()::Vector{DebugTarget}
+    s = _DEBUG[]
+    (s === nothing || s.frame === nothing) && return DebugTarget[]
+    ji = _ji()
+    fr = s.frame
+    out = DebugTarget[]
+    try
+        src = fr.framecode.src
+        here = ji.linenumber(fr.framecode, fr.pc)
+        for pc in fr.pc:length(src.code)
+            # Compared within one framecode, so a method's line offset cancels out.
+            ln = try; ji.linenumber(fr.framecode, pc); catch; nothing; end
+            ln === nothing && continue
+            ln == here || break                      # off the line: the rest is the next statement
+            f = _stmt_callee(fr, src.code[pc], src.code)
+            f === nothing && continue
+            f isa Core.Builtin && continue
+            m = try; parentmodule(f); catch; nothing; end
+            (m === nothing || m === Core) && continue
+            push!(out, (pc = pc, name = _callee_name(f), mod = string(m),
+                        interpreted = m in s.interpret))
+        end
+    catch
+    end
+    return out
+end
+
+"A loaded module by its printed name (`Base`, `MyPkg`, `Main.NB`), or `nothing`."
+function _module_by_name(name::AbstractString)
+    n = strip(String(name))
+    isempty(n) && return nothing
+    for m in values(Base.loaded_modules)
+        string(m) == n && return m
+    end
+    # A module defined in a cell is not a loaded module; walk from Main by path.
+    cur = Main
+    for part in split(n, '.')
+        part == "Main" && continue
+        sym = Symbol(part)
+        (cur isa Module && isdefined(cur, sym)) || return nothing
+        cur = getfield(cur, sym)
+    end
+    return cur isa Module ? cur : nothing
+end
+
+"""
+    debug_into!(; pc, admit) -> DebugState
+
+Step into the call at lowered statement `pc`. `pc <= 0` is a plain `into`.
+
+`admit` names a module to start interpreting first, which is how to get inside a library the
+session was running compiled. It holds until `debug_interpret!` drops it, and the state's
+`interpreting` list reports it.
+
+Reaching the chosen call means running the ones before it. Those run COMPILED whatever the
+interpret set says, or picking the second call on a line would land in the first.
+"""
+function debug_into!(; pc::Int = 0, admit::String = "")::DebugState
+    s = _DEBUG[]
+    s === nothing && return _error_state("", "no debug session")
+    s.finished && return _state(s)
+    s.frame === nothing && return _state(s)
+    if !isempty(strip(admit))
+        m = _module_by_name(admit)
+        m === nothing && return _error_state(s.cell, "no module named $(strip(admit)) is loaded")
+        push!(s.interpret, m)
+        _scope_interpreter!(s.interpret)   # the pre-session set is still held in `saved_compiled`
+    end
+    if pc > 0 && s.frame.pc < pc
+        ji = _ji()
+        fr = s.frame
+        istop = fr.framecode.scope isa Module
+        # Nothing interpreted while skipping, so an earlier call on the line cannot capture the
+        # step. Restored before descending, or the chosen call would run compiled too.
+        _scope_interpreter!(Set{Module}())
+        try
+            guard = 0
+            while fr.pc < pc && guard < 10_000
+                guard += 1
+                ji.step_expr!(fr, istop) === nothing && break
+            end
+        catch e
+            s.error = e; s.finished = true; s.frame = nothing
+        finally
+            _scope_interpreter!(s.interpret)
+        end
+        s.frame === nothing && return _state(s)
+        s.steps += 1
+    end
+    _advance!(s, :s)
+    return _state(s)
+end
+
+"A module already in this session's interpret set, matched by short or full name."
+function _interpret_find(s::_DebugSession, name::AbstractString)
+    n = strip(String(name))
+    isempty(n) && return nothing
+    for m in s.interpret
+        (string(nameof(m)) == n || string(m) == n) && return m
+    end
+    return nothing
+end
+
+"""
+    debug_interpret!(; admit, drop) -> DebugState
+
+Add or remove a module from the set this session steps rather than runs compiled.
+
+Admitting a module is how to get inside a library. Dropping it again matters because every line
+steps while it is in the set, which is slow and fills the call stack with that module's internals.
+
+The cell's own namespace cannot be dropped. It is the code being stepped.
+"""
+function debug_interpret!(; admit::String = "", drop::String = "")::DebugState
+    s = _DEBUG[]
+    s === nothing && return _error_state("", "no debug session")
+    if !isempty(strip(drop))
+        m = _interpret_find(s, drop)
+        m === nothing && return _error_state(s.cell, "$(strip(drop)) is not being interpreted")
+        m === s.ns && return _error_state(s.cell, "the cell's own namespace has to stay interpreted")
+        delete!(s.interpret, m)
+    end
+    if !isempty(strip(admit))
+        m = _module_by_name(admit)
+        m === nothing && return _error_state(s.cell, "no module named $(strip(admit)) is loaded")
+        push!(s.interpret, m)
+    end
+    _scope_interpreter!(s.interpret)
     return _state(s)
 end
 
@@ -983,13 +1238,14 @@ with the current state so a caller gets one shape back from every verb.
 """
 function debug_marks!(; mark_files::Vector{String} = String[],
                         mark_lines::Vector{Int} = Int[],
-                        mark_conds::Vector{String} = String[])::DebugState
+                        mark_conds::Vector{String} = String[],
+                        mark_enabled::Vector{Bool} = Bool[])::DebugState
     s = _DEBUG[]
     s === nothing && return _error_state("", "no debug session")
     bad = findfirst(c -> !isempty(_mark_cond_error(c)), mark_conds)
     bad === nothing || return _error_state("",
         "breakpoint condition does not parse: $(_mark_cond_error(mark_conds[bad]))")
-    _set_marks!(s, _marks_from(mark_files, mark_lines, mark_conds))
+    _set_marks!(s, _marks_from(mark_files, mark_lines, mark_conds, mark_enabled))
     return _state(s)
 end
 

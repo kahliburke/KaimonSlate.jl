@@ -38,9 +38,6 @@ const selFrame = signal(null);
 // permission to disturb a session it does not own. Its turn is stopped until one of these is
 // answered, so they are shown where the session is, not tucked in a notification.
 const asks = signal([]);
-// What the investigation concluded: the cell it blames, the claim, a reviewer's verdict, and what
-// was decided.
-const findings = signal([]);
 
 const live = computed(() => st.value && !st.value.finished);
 export const debugCell = computed(() => (st.value ? st.value.cell : ''));
@@ -72,7 +69,7 @@ function paintMarks(ms) {
     if (!m.file || m.file.indexOf('cell:') !== 0) continue;
     const id = m.file.slice(5);
     if (!byCell.has(id)) byCell.set(id, []);
-    byCell.get(id).push(m.line);
+    byCell.get(id).push({ line: m.line, enabled: m.enabled !== false });
   }
   for (const id of _painted) if (!byCell.has(id)) window.setBreakpointLines?.(id, []);
   for (const [id, lines] of byCell) window.setBreakpointLines?.(id, lines);
@@ -85,10 +82,11 @@ function syncGutter() {
   window.setDebugGutter?.(!!st.value || marks.value.length > 0);
 }
 
-async function setMark(file, line, on, cond) {
+async function setMark(file, line, on, cond, enabled) {
   const body = { file, line };
   if (on !== undefined) body.on = on;
   if (cond !== undefined) body.cond = cond;
+  if (enabled !== undefined) body.enabled = enabled;
   try {
     const r = await A('POST', '/api/debug/mark', body);
     if (r && r.ok === false) { probes.value = [...probes.value, { expr: cond, ok: false, error: r.error }]; return; }
@@ -113,6 +111,24 @@ const condEdit = signal(null);
 const watches = signal([]);
 const traces = signal({});          // expr → the samples it has collected
 const watchEdit = signal(null);     // "file:line" being edited, or "" for the new-watch row
+
+// Stepping INTO a chosen call.
+//
+// A line usually makes several calls, and `into` on its own takes whichever the lowered code
+// reaches first. So the server is asked what the line calls, and anything with a choice in it asks.
+//
+// `intoLib` is whether calls into code the session runs compiled are offered at all. Off by
+// default, since stepping into `getindex` is usually an accident. It is a browser preference
+// rather than session state: the server reports every target, and this picks which to show.
+const intoTargets = signal(null);   // [{pc, name, mod, interpreted}] while the picker is open
+const intoSkipped = signal(null);   // names Into passed over because they were library calls
+const dbgErr = signal(null);        // a verb that failed, shown under the controls rather than swallowed
+const intoLib = signal((() => { try { return localStorage.getItem('slateDbgIntoLib') === '1'; }
+                                catch (_) { return false; } })());
+function setIntoLib(v) {
+  intoLib.value = !!v;
+  try { localStorage.setItem('slateDbgIntoLib', v ? '1' : '0'); } catch (_) {}
+}
 
 // Live watches: a piece of the notebook re-evaluated at every stop. `spec` is either Julia text or
 // `cell:<id>`. Each carries its own status, because "this does not evaluate here" is the ordinary
@@ -183,7 +199,6 @@ function apply(next) {
   if (s && s.cell && s.cell !== here) window.clearDebugLine?.(s.cell);
   if (here) window.markDebugLine?.(here, s.line);
   if (s && s.asks !== undefined) asks.value = s.asks || [];
-  if (s && s.findings !== undefined) findings.value = s.findings || [];
   if (s && s.marks) paintMarks(s.marks);
   if (s && s.watches) watches.value = s.watches;
   if (s && s.live) liveW.value = s.live;
@@ -212,9 +227,73 @@ export async function startDebug(cellId) {
 }
 export async function step(mode) {
   if (busy.value || !live.value) return;
+  intoSkipped.value = null;   // the note is about the step you just took, not the next one
   busy.value = true;
   try { apply(await A('POST', '/api/debug/step', { mode })); }
   catch (e) { apply(null); } finally { busy.value = false; }
+}
+// `into`, which asks first when the line gives it a choice.
+//
+// Straight in when there is exactly one candidate and it is the notebook's own code, since there
+// is nothing to decide there. Several candidates ask which. A lone library call also asks, because
+// entering one starts interpreting its whole module.
+export async function stepInto() {
+  if (busy.value || !live.value) return;
+  busy.value = true;
+  let ts = [];
+  try {
+    const r = await A('GET', '/api/debug/into-targets');
+    ts = (r && r.targets) || [];
+  } catch (e) {}
+  busy.value = false;
+  const shown = intoLib.value ? ts : ts.filter(t => t.interpreted);
+  if (!shown.length) {
+    // Everything this line calls is library code and the switch is off, so `into` is about to
+    // behave exactly like `next`. Name the calls it passed over rather than appearing to do
+    // nothing. Set after the step, because stepping clears it.
+    await step('into');
+    if (ts.length) intoSkipped.value = ts.map(t => t.name);
+    return;
+  }
+  if (shown.length === 1 && shown[0].interpreted) return intoTarget(shown[0]);
+  intoTargets.value = shown;
+}
+
+// Commit to one. A target the session runs compiled needs its module admitted first, which the
+// `interpreting` strip then lists (and offers to drop again).
+export async function intoTarget(t) {
+  intoTargets.value = null;
+  if (busy.value || !live.value || !t) return;
+  busy.value = true;
+  try { apply(await A('POST', '/api/debug/into',
+                      { pc: t.pc, admit: t.interpreted ? '' : t.mod })); }
+  catch (e) { apply(null); } finally { busy.value = false; }
+}
+
+// Hand a module back, so it runs compiled again. Every line steps while it is in the set, so a
+// library admitted to answer one question slows the rest of the session if it stays.
+export async function dropModule(name) {
+  if (busy.value || !live.value) return;
+  busy.value = true;
+  dbgErr.value = null;
+  try {
+    const r = await A('POST', '/api/debug/interpret', { drop: name });
+    if (r && r.error) dbgErr.value = String(r.error);
+    else apply(r);
+  } catch (e) {
+    // A request that does not arrive is the one case worth naming: the route is registered at
+    // startup, so a hub running older code answers 404 and the click looks like it did nothing.
+    dbgErr.value = 'could not reach /api/debug/interpret (restart the hub if it was added since)';
+  } finally { busy.value = false; }
+}
+
+// Turn off the breakpoint under the cursor, then carry on. A breakpoint inside a loop fires on
+// every iteration, and this is how to leave one. The mark stays set, hollow, with its predicate.
+export async function skipHere() {
+  const s = st.value;
+  if (busy.value || !live.value || !s || !s.file) return;
+  await setMark(s.file, s.line, undefined, undefined, false);
+  await step('continue');
 }
 export async function stopDebug() {
   const cell = debugCell.value;
@@ -512,9 +591,6 @@ async function answerAsk(id, text) {
   if (p.asks !== undefined) asks.value = p.asks || [];
   if (p.ask) asks.value = [...asks.value.filter(a => a.id !== p.ask.id), p.ask];
   if (p.specialist) specialist.value = p.specialist;
-  // One finding arrives repeatedly as it gains a verdict, a plan, then a decision — replace by id
-  // rather than append, so the record updates in place instead of stacking copies of itself.
-  if (p.finding) findings.value = [...findings.value.filter(f => f.id !== p.finding.id), p.finding];
 });
 
 window.onDebugPush = (p) => {
@@ -616,7 +692,8 @@ function Spark({ xs }) {
   const pts = xs.filter(v => v !== null && v !== undefined && isFinite(v));
   if (pts.length < 2) return null;
   const lo = Math.min(...pts), hi = Math.max(...pts);
-  const span = (hi - lo) || 1;
+  if (hi === lo) return null;          // a flat line says less than the words beside it
+  const span = hi - lo;
   const W = 132, H = 26;
   // Non-finite samples break the line rather than being drawn as zero: a gap is what happened.
   let d = '', pen = false;
@@ -632,6 +709,41 @@ function Spark({ xs }) {
   </svg>`;
 }
 
+// Which watch is opened out, as "file:line", or null. Click rather than hover: the plot is worth
+// studying across several steps, and a hover panel goes away the moment you reach for Next.
+const watchOpen = signal(null);
+
+// The series against evaluation count. Bigger than the row it came from, with the bounds labelled,
+// because the question a watch answers is what the value has been DOING.
+function WatchPlot({ xs, t }) {
+  const W = 300, H = 120, PAD = 4;
+  const fin = xs.filter(v => v !== null && v !== undefined && isFinite(v));
+  if (fin.length < 2) return html`<div class="dbgwpempty">not enough samples to plot yet</div>`;
+  const lo = Math.min(...fin), hi = Math.max(...fin);
+  const span = (hi - lo) || 1;
+  const y = v => PAD + (1 - (v - lo) / span) * (H - 2 * PAD);
+  let d = '', pen = false, gaps = 0;
+  xs.forEach((v, i) => {
+    const x = (i / (xs.length - 1)) * W;
+    if (v === null || v === undefined || !isFinite(v)) { pen = false; gaps++; return; }
+    d += (pen ? 'L' : 'M') + x.toFixed(1) + ' ' + y(v).toFixed(1) + ' ';
+    pen = true;
+  });
+  return html`<div class="dbgwplot">
+    <svg viewBox=${'0 0 ' + W + ' ' + H} preserveAspectRatio="none">
+      <line x1="0" y1=${y(hi)} x2=${W} y2=${y(hi)} class="dbgwpgrid" />
+      <line x1="0" y1=${y(lo)} x2=${W} y2=${y(lo)} class="dbgwpgrid" />
+      ${lo < 0 && hi > 0 ? html`<line x1="0" y1=${y(0)} x2=${W} y2=${y(0)} class="dbgwpzero" />` : null}
+      <path d=${d.trim()} fill="none" stroke="currentColor" stroke-width="1.4" />
+    </svg>
+    <div class="dbgwpax"><span>${_fmtN(hi)}</span><span>${_fmtN(lo)}</span></div>
+    <div class="dbgwpfoot">
+      ${xs.length} evaluations${gaps ? ' · ' + gaps + ' non-finite' : ''}
+      <span class="dbgsp"></span>now ${_fmtN(t ? t.last : fin[fin.length - 1])}
+    </div>
+  </div>`;
+}
+
 function WatchStrip({ s }) {
   const ws = watches.value;
   const here = s && s.line ? s.file + ':' + s.line : '';
@@ -643,20 +755,29 @@ function WatchStrip({ s }) {
     <div class="dbgwatches">
       ${!ws.length && watchEdit.value === null
         ? html`<div class="dbgwempty">none</div>` : null}
-      ${ws.map(w => { const t = _traceOf(w), xs = traces.value[w.expr] || [];
-        return html`<div class="dbgwatch" key=${w.file + ':' + w.line}>
-          <div class="dbgwtop">
-            <span class="dbgwx" title=${w.expr}>${w.expr}</span>
-            <button class="dbgwrm" title="stop sampling" onClick=${() => setWatch(w.file, w.line, '')}>✕</button>
+      ${ws.map(w => { const key = w.file + ':' + w.line, t = _traceOf(w), xs = traces.value[w.expr] || [];
+        const n = t ? t.n : 0;
+        const open = watchOpen.value === key;
+        return html`<div class=${'dbgwatch' + (open ? ' open' : '')} key=${key}>
+          <div class="dbgwtop" title=${n > 1 ? 'show what it has been' : w.expr}
+               onClick=${() => watchOpen.value = open ? null : key}>
+            <span class="dbgwx">${w.expr}</span>
+            ${n > 0 ? html`<span class="dbgwnow">${_fmtN(t.last)}</span>` : null}
+            <button class="dbgwrm" title="stop sampling"
+              onClick=${e => { e.stopPropagation(); setWatch(w.file, w.line, ''); }}>✕</button>
           </div>
-          <${Spark} xs=${xs} />
-          <div class="dbgwrange">
-            ${t ? html`<span class="dbgwnow">${_fmtN(t.last)}</span> ${t.n}× · ${_fmtN(t.min)} … ${_fmtN(t.max)}`
-                : html`<span title=${w.file}>waiting for ${shortFile(w.file)}:${w.line}</span>`}
-          </div>
+          ${n === 0 ? (t && t.hits > 0
+            // The line has run and kept nothing. A trace is a curve, so a value that is not a
+            // number is counted and dropped. Reporting that as "waiting" reads as a line the run
+            // has not reached.
+            ? html`<div class="dbgwrange nonum" title=${'sampled ' + t.hits + ' time(s); a watch plots numbers'}>
+                ${t.type || 'not a number'} · ${t.hits}× not plotted</div>`
+            : html`<div class="dbgwrange" title=${w.file}>
+                waiting for ${shortFile(w.file)}:${w.line}</div>`) : null}
+          ${open ? html`<${WatchPlot} xs=${xs} t=${t} />` : null}
         </div>`; })}
       ${watchEdit.value !== null
-        ? html`<${CondEditor} file="" line=${0} initial="" label="sample"
+        ? html`<${CondEditor} file="" line=${0} initial="" label=""
                  onDone=${t => { const at = watchEdit.value; watchEdit.value = null;
                                  if (t === null || !t.trim() || !at) return;
                                  const i = at.lastIndexOf(':');
@@ -673,15 +794,29 @@ function Controls({ compact }) {
     title=${tip} onClick=${() => step(mode)}><span class="dbgbg">${glyph}</span>${compact ? null : html`<span>${label}</span>`}</button>`;
   return html`<div class="dbgctl">
     ${B('next', '⤷', 'Next', 'F10')}
-    ${B('into', '⤓', 'Into', 'F11')}
+    <button class="dbgb dbgb-into" disabled=${d} title="F11 — asks which call when the line makes more than one"
+      onClick=${stepInto}><span class="dbgbg">⤓</span>${compact ? null : html`<span>Into</span>`}</button>
     ${B('out', '⤒', 'Out', '⇧F11')}
     ${B('continue', '▶▶', 'Continue', 'F5')}
     ${st.value && st.value.at_breakpoint
-      ? B('past', '▶|', 'Past', 'continue without stopping here again  (⇧F5 is Stop)') : null}
+      ? html`<button class="dbgb dbgb-past" disabled=${d}
+          title="turn this breakpoint off and carry on. It stays set, hollow, and you can turn it back on"
+          onClick=${skipHere}><span class="dbgbg">▶|</span>${compact ? null : html`<span>Skip</span>`}</button>`
+      : null}
     <span class="dbgsp"></span>
     <button class="dbgb dbgb-stop" disabled=${busy.value} title="⇧F5"
       onClick=${stopDebug}><span class="dbgbg">■</span>${compact ? null : html`<span>Stop</span>`}</button>
-  </div>`;
+  </div>
+  ${dbgErr.value ? html`<div class="dbgskipnote err">
+    ${dbgErr.value}
+    <button class="dbgskipx" title="dismiss" onClick=${() => dbgErr.value = null}>✕</button>
+  </div>` : null}
+  ${intoSkipped.value ? html`<div class="dbgskipnote">
+    Into passed over ${intoSkipped.value.join(', ')} — library code, which this session runs compiled.
+    <button class="dbgskipgo" onClick=${() => { setIntoLib(true); intoSkipped.value = null; stepInto(); }}>
+      step inside anyway</button>
+    <button class="dbgskipx" title="dismiss" onClick=${() => intoSkipped.value = null}>✕</button>
+  </div>` : null}`;
 }
 
 // Who is driving. Absent for your own session — the common case shouldn't carry a label.
@@ -725,41 +860,18 @@ function Asks() {
   </div>`)}</div>`;
 }
 
-// What the investigation concluded. Three lines that are deliberately not prose: the cell it
-// blames, the claim, and a reviewer's verdict — so the two can be read AGAINST each other. A
-// disputed finding is the interesting case and is coloured as such; a confirmed one is not a
-// decoration, it means someone went and looked.
-function Findings() {
-  const list = findings.value;
-  if (!list.length) return null;
-  return html`<div class="dbgfinds">${list.map(f => html`
-    <div class=${'dbgfind ' + (f.verdict || 'open')} key=${f.id}>
-      <div class="dbgfindh">
-        <span class="dbgfindc" title="the cell it says is at fault">${f.cell || '(no cell named)'}</span>
-        ${f.verdict ? html`<span class=${'dbgfindv ' + f.verdict}>${f.verdict}</span>` : null}
-      </div>
-      <div class="dbgfindclaim">${f.claim}</div>
-      ${f.evidence ? html`<div class="dbgfindev">${f.evidence}</div>` : null}
-      ${/* Named as a lead, not a verdict: it says where nobody looked, which is a fact. */ ''}
-      ${(f.unread_upstream || []).length ? html`<div class="dbgfindgap">
-        never looked at ${f.unread_upstream.join(', ')} — which produce its inputs</div>` : null}
-      ${f.verdict_why ? html`<div class="dbgfindwhy">${f.verdict_why}</div>` : null}
-      ${f.plan ? html`<div class="dbgfindplan">plan: ${f.plan}
-        ${f.decision ? html`<span class="dbgfinddec">${f.decision === 'go' ? '✓ approved'
-          : f.decision === 'no' ? '✕ declined' : '✎ ' + f.decision}</span>` : null}</div>` : null}
-    </div>`)}</div>`;
-}
-
 // ── the cell strip ────────────────────────────────────────────────────────────────────────────────
 
 export function DebugStrip({ cell }) {
   const s = st.value;
   if (!s || s.cell !== cell.id) return null;
-  const done = s.finished;
-  if (done) {
+  // A clean finish leaves nothing to say: the cell ran, and it renders its own output right below.
+  // Only an ERROR earns a banner, because that is the one outcome the cell will not show you.
+  // After the render, not during it: `stopDebug` writes the signal this component is reading.
+  if (s.finished && !s.error) { queueMicrotask(stopDebug); return null; }
+  if (s.finished) {
     return html`<div class="dbgstrip done"><div class="dbgbar">
-      <span class=${'dbgdone' + (s.error ? ' err' : '')}>
-        ${s.error ? '⚠ ' + s.error : '✓ finished' + (s.result ? ' — ' + s.result.repr : '')}</span>
+      <span class="dbgdone err">⚠ ${s.error}</span>
       <span class="dbgsp"></span>
       <button class="dbgb dbgb-stop" onClick=${stopDebug}><span class="dbgbg">✕</span><span>Close</span></button>
     </div></div>`;
@@ -829,7 +941,8 @@ function Source({ s: raw }) {
   // are only the ones belonging to the source on screen.
   useEffect(() => {
     const v = vw.current; if (!v) return;
-    v.setMarks(marks.value.filter(m => m.file === s.file).map(m => m.line));
+    v.setMarks(marks.value.filter(m => m.file === s.file)
+                          .map(m => ({ line: m.line, enabled: m.enabled !== false })));
   }, [marks.value, s.file, s.source]);
   return html`<div class=${'dbgsrc' + (s.caller ? ' caller' : '')}>
     <div class="dbgsrchead"><span class="dbgfile" title=${s.file}>${shortFile(s.file)}</span>
@@ -859,7 +972,11 @@ function Stack({ s }) {
       <span class="dbgfile" title=${f.file}>${shortFile(f.file)}:${f.line}</span>
     </div>`; })}</div>
     ${marks.value.length ? html`<div class="dbgrhead dbgrhead2">breakpoints</div>
-      <div class="dbgmarks">${marks.value.map(m => html`<div class="dbgmark" key=${m.file + ':' + m.line}>
+      <div class="dbgmarks">${marks.value.map(m => html`<div
+          class=${'dbgmark' + (m.enabled === false ? ' off' : '')} key=${m.file + ':' + m.line}>
+        <button class="dbgmarko" title=${m.enabled === false ? 'set but disabled: turn it back on' : 'disable without clearing'}
+                onClick=${() => setMark(m.file, m.line, undefined, undefined, m.enabled === false)}
+        >${m.enabled === false ? '○' : '●'}</button>
         <span class="dbgfile" title=${m.file}>${shortFile(m.file)}:${m.line}</span>
         <button class=${'dbgmarkc' + (m.cond ? ' on' : '')}
                 title=${m.cond ? 'stops only when: ' + m.cond : 'stop only when an expression holds'}
@@ -874,7 +991,14 @@ function Stack({ s }) {
                           onClick=${() => condEdit.value = m.file + ':' + m.line}>${m.cond}</div>` : null)}`)}</div>` : null}
     <${WatchStrip} s=${s} />
     <div class="dbgrhead dbgrhead2" title="modules stepped rather than run compiled">interpreting</div>
-    <div class="dbginterp">${(s.interpreting || []).map(m => html`<span class="dbgmod" key=${m}>${m}</span>`)}</div>
+    <div class="dbginterp">${(s.interpreting || []).map(m => {
+      // The cell's namespace is the code being stepped, so it is the one chip that cannot go.
+      const fixed = m === s.ns;
+      return html`<span class=${'dbgmod' + (fixed ? '' : ' drop')} key=${m}
+        title=${fixed ? 'the namespace the cell runs in' : 'stop interpreting ' + m + ', so it runs compiled again'}>
+        ${m}${fixed ? null : html`<button class="dbgmodx" onClick=${() => dropModule(m)}>✕</button>`}</span>`;
+    })}</div>
+    <${LibSwitch} />
   </div>`;
 }
 
@@ -920,6 +1044,7 @@ function Scratch({ s }) {
     view.current = window.mkEditor(host.current, {
       doc: '',
       cellId: '__dbgscratch',
+      noBreakpoints: true,   // not a cell's source: a breakpoint here has no line to be on
       keys: [{ key: 'Enter', run }, { key: 'Mod-Enter', run },
              { key: 'ArrowUp', run: recall(-1) }, { key: 'ArrowDown', run: recall(1) }],
     });
@@ -957,6 +1082,7 @@ function CondEditor({ file, line, initial, onDone, label }) {
     view.current = window.mkEditor(host.current, {
       doc: initial || '',
       cellId: '__dbgcond',            // shares the scratchpad's frame-local completion source
+      noBreakpoints: true,
       keys: [{ key: 'Enter', run: commit }, { key: 'Mod-Enter', run: commit },
              { key: 'Escape', run: () => { onDone(null); return true; } }],
     });
@@ -964,7 +1090,7 @@ function CondEditor({ file, line, initial, onDone, label }) {
     return () => { try { view.current && view.current.destroy(); } catch (e) {} view.current = null; };
   }, []);
   return html`<div class="dbgcondedit">
-    <span class="dbgcondwhen">${label || 'when'}</span>
+    ${label === '' ? null : html`<span class="dbgcondwhen">${label || 'when'}</span>`}
     <div class="dbgcondhost" ref=${host}></div>
     <button class="dbgcondok" title="set (enter)" onClick=${commit}>✓</button>
     <button class="dbgcondx" title="cancel (esc)" onClick=${() => onDone(null)}>✕</button>
@@ -1108,47 +1234,65 @@ function Grip({ axis, onDrag, onReset }) {
 
 // The specialist, working, beside the frame it is working on. Deliberately not the chat panel:
 // this is a debugging transcript — what it thought, what it did, where that landed.
+// Nothing unless something needs you.
+//
+// This was a header, an empty state, a brief viewer, a summon button and a disabled text box whose
+// placeholder told you to press the summon button. Only one of those had a claim on the screen: an
+// unanswered question means a stopped turn.
+//
+// The brief documented a choice nobody can make. Summoning offered one option, and belongs where
+// the conversation is. Talking to the specialist directly routed around the orchestrator that is
+// supposed to be running it.
 function Convo({ s }) {
-  const inp = useRef(null), log = useRef(null);
-  useEffect(() => { const el = log.current; if (el) el.scrollTop = el.scrollHeight; }, [convo.value.length]);
-  const send = (e) => {
-    e.preventDefault();
-    const el = inp.current; if (!el) return;
-    const v = el.value; el.value = '';
-    sayToSpecialist(v);
-  };
   const here = !!specialist.value;
+  if (!here && !asks.value.some(a => a.role === DEBUG_ROLE)) return null;
   return html`<div class="dbgconvo">
-    <div class="dbgrhead">specialist
+    ${here ? html`<div class="dbgrhead">specialist
       ${working.value ? html`<span class="hydspin"></span>` : null}
       <span class="dbgsp"></span>
-      ${here ? html`<span class="dbgcrew">${bareModel(specialist.value.model || 'default')}</span>` : null}
+      <span class="dbgcrew">${bareModel(specialist.value.model || 'default')}</span>
       ${working.value ? html`<button class="dbgclear" title="stop its turn so it reads you now"
         onClick=${interruptSpecialist}>interrupt</button>` : null}
-      <button class=${'dbgclear' + (briefOpen.value ? ' on' : '')}
-        title="what this specialist was told: standing instructions and the tools it may call"
-        onClick=${loadBrief}>brief</button>
-      ${convo.value.length ? html`<button class="dbgclear" title="clear this transcript (the specialist keeps working)"
-        onClick=${clearConvo}>clear</button>` : null}
-      ${here ? null : html`<${Summon} />`}
-    </div>
-    ${briefOpen.value ? html`<div class="dbgbrief">
-      ${brief.value === null ? html`<div class="dbgcempty">loading…</div>` : html`
-        <div class="dbgbriefhead">may call</div>
-        <div class="dbginterp">${(brief.value.tools || []).map(t => html`<span class="dbgmod" key=${t}>${t}</span>`)}</div>
-        <div class="dbgbriefhead">standing instructions</div>
-        <pre class="dbgbrieftxt">${brief.value.system || ''}</pre>`}
     </div>` : null}
-    ${!here ? html`<div class="dbgcempty">No specialist here yet.<${Summon} /></div>` : null}
-    <${Findings} />
     <${Asks} />
-    <form class="dbgpform" onSubmit=${send}>
-      <span class="dbgpp">${'\u{1F4AC}'}</span>
-      <input ref=${inp} autocomplete="off" disabled=${!here}
-        placeholder=${!here ? 'summon a specialist first'
-                    : working.value ? 'it is working — this goes in when the turn ends'
-                    : 'tell it what you know…'} />
-    </form>
+  </div>`;
+}
+
+// Whether Into offers library calls. A labelled switch at readable size, since nothing else on
+// screen says what it controls.
+function LibSwitch() {
+  const on = intoLib.value;
+  return html`<button class=${'dbglibsw' + (on ? ' on' : '')} role="switch" aria-checked=${on}
+    title=${on ? 'Into offers calls into Base, stdlibs and packages. Picking one starts interpreting that whole module'
+               : 'Into only offers calls into your own code, which is the usual thing to want'}
+    onClick=${() => setIntoLib(!on)}>
+    <span class="dbglibtrack"><span class="dbglibknob"></span></span>
+    <span class="dbgliblabel">step into library code</span>
+  </button>`;
+}
+
+// Which call to step into. Body-level, so it floats over the strip and the focus view alike.
+//
+// A library row names its module, because picking one starts interpreting that whole module.
+// Everything in it steps from then on, which is worth knowing before choosing.
+function IntoPicker() {
+  const ts = intoTargets.value;
+  if (!ts || !ts.length) return null;
+  const close = () => intoTargets.value = null;
+  return html`<div class="dbgintobg" onClick=${e => { if (e.target.classList.contains('dbgintobg')) close(); }}>
+    <div class="dbginto">
+      <div class="dbgintohead">step into<span class="dbgsp"></span>
+        <button class="dbgfx" title="cancel" onClick=${close}>✕</button></div>
+      ${ts.map(t => html`<div class=${'dbgintorow' + (t.interpreted ? '' : ' lib')} key=${t.pc}
+          onClick=${() => intoTarget(t)}>
+        <span class="dbgintoname">${t.name}</span>
+        <span class="dbgintomod">${t.mod}</span>
+        <span class="dbgintogo">${t.interpreted ? '▸' : 'go in anyway'}</span>
+      </div>`)}
+      ${ts.some(t => !t.interpreted)
+        ? html`<div class="dbgintonote">going into a library starts interpreting its whole module
+            for this session</div>` : null}
+    </div>
   </div>`;
 }
 
@@ -1218,7 +1362,7 @@ document.addEventListener('keydown', (e) => {
     if (!(e.key === 'Escape' && focus.value)) return;
   }
   if (e.key === 'F10') { e.preventDefault(); step('next'); }
-  else if (e.key === 'F11') { e.preventDefault(); step(e.shiftKey ? 'out' : 'into'); }
+  else if (e.key === 'F11') { e.preventDefault(); e.shiftKey ? step('out') : stepInto(); }
   else if (e.key === 'F5') { e.preventDefault(); e.shiftKey ? stopDebug() : step('continue'); }
   else if (e.key === 'Escape' && focus.value) { e.preventDefault(); focus.value = false; }
 });
@@ -1319,25 +1463,6 @@ style.textContent = `
 .dbgaskq { color:var(--strong); line-height:1.5; }
 .dbgaskbtns { display:flex; gap:6px; }
 .dbgask .dbgpform { margin-top:0; }
-/* The conclusion, as a record. Quiet by default — a finding is not an alarm — but a DISPUTED one
-   is coloured, because a located disagreement is the most useful thing on this pane. */
-.dbgfinds { flex:0 0 auto; display:flex; flex-direction:column; gap:6px; margin-top:8px; }
-.dbgfind { padding:7px 9px; border-radius:7px; font-size:.76rem; line-height:1.5;
-  border:1px solid var(--bg3); border-left:2px solid var(--dim); background:var(--bg2); }
-.dbgfind.confirmed { border-left-color:var(--teal); }
-.dbgfind.disputed  { border-left-color:var(--amber,#d9a441); }
-.dbgfindh { display:flex; align-items:center; gap:7px; }
-.dbgfindc { font-family:'Cascadia Code',monospace; font-size:.72rem; color:var(--accent); }
-.dbgfindv { font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; padding:1px 6px;
-  border-radius:9px; }
-.dbgfindv.confirmed { color:var(--teal); background:color-mix(in srgb, var(--teal) 14%, transparent); }
-.dbgfindv.disputed { color:var(--amber,#d9a441); background:color-mix(in srgb, var(--amber,#d9a441) 14%, transparent); }
-.dbgfindclaim { color:var(--strong); margin-top:3px; }
-.dbgfindev, .dbgfindwhy { color:var(--dim); margin-top:3px; }
-/* Not styled as an error: it says where nobody looked, which is a fact rather than a fault. */
-.dbgfindgap { color:var(--dim); font-style:italic; margin-top:3px; }
-.dbgfindplan { margin-top:5px; color:var(--fg); }
-.dbgfinddec { margin-left:7px; color:var(--dim); }
 /* In the cell ribbon, when the workspace is shut: a nudge, not the prompt itself. */
 .dbgaskbadge { padding:5px 10px; font-size:.74rem; cursor:pointer; color:var(--teal);
   border-top:1px solid var(--border);
@@ -1391,6 +1516,50 @@ style.textContent = `
 .dbgval.stale .dbgvn::after { content:'·'; margin-left:5px; color:var(--gold); }
 
 /* ── focus view ─────────────────────────────────────────────────────────────── */
+/* Step-into picker. Above the focus view (70), which is what asked the question. Undimmed, so
+   the line being chosen from stays readable. */
+.dbgintobg { position:fixed; inset:0; z-index:90; display:flex; align-items:center; justify-content:center; }
+.dbginto { min-width:320px; max-width:min(560px,92vw); max-height:70vh; overflow:auto;
+  background:var(--bg2); border:1px solid var(--border); border-radius:9px;
+  box-shadow:0 18px 48px rgba(0,0,0,.55); padding:6px; }
+.dbgintohead { display:flex; align-items:center; gap:6px; padding:2px 6px 6px;
+  font-size:.7rem; letter-spacing:.05em; text-transform:uppercase; color:var(--dim); }
+.dbgintorow { display:flex; align-items:baseline; gap:8px; padding:5px 8px; border-radius:6px;
+  cursor:pointer; font-family:var(--mono,ui-monospace,monospace); font-size:.78rem; }
+.dbgintorow:hover { background:color-mix(in srgb, var(--teal) 14%, transparent); }
+.dbgintoname { flex:0 0 auto; color:var(--text); }
+.dbgintomod { flex:1 1 auto; color:var(--dim); font-size:.7rem; }
+.dbgintogo { flex:0 0 auto; color:var(--teal); font-size:.7rem; }
+/* A library row sits in the same list, quieter, with an action that says what it does. */
+.dbgintorow.lib .dbgintoname { color:var(--dim); }
+.dbgintorow.lib .dbgintogo { color:var(--gold); }
+.dbgintonote { padding:6px 8px 2px; color:var(--dim); font-size:.68rem; }
+/* The library switch, at readable size with its label spelled out. Nothing else on screen says
+   what it controls. */
+.dbglibsw { display:flex; align-items:center; gap:8px; width:100%; margin-top:7px; padding:6px 7px;
+  background:transparent; border:1px solid var(--border); border-radius:7px; cursor:pointer;
+  color:var(--dim); font-size:.72rem; text-align:left; }
+.dbglibsw:hover { border-color:var(--teal); color:var(--text); }
+.dbglibsw.on { border-color:var(--teal); color:var(--text);
+  background:color-mix(in srgb, var(--teal) 10%, transparent); }
+/* The track carries its own inset border. On a dark theme a flat fill close to the panel colour
+   disappears, and the knob alone reads as a stray dot. */
+.dbglibtrack { flex:0 0 auto; width:26px; height:14px; border-radius:7px; position:relative;
+  background:var(--bg3); box-shadow:inset 0 0 0 1px var(--border); transition:background .12s; }
+.dbglibsw.on .dbglibtrack { background:var(--teal); box-shadow:none; }
+.dbglibknob { position:absolute; top:2px; left:2px; width:10px; height:10px; border-radius:50%;
+  background:var(--dim); transition:transform .12s, background .12s; }
+.dbglibsw.on .dbglibknob { transform:translateX(12px); background:var(--bg); }
+.dbgliblabel { flex:1 1 auto; }
+/* Shown where the step happened rather than in the rail, which is where the switch is wanted. */
+.dbgskipnote { display:flex; align-items:center; gap:7px; margin:5px 0 0; padding:5px 8px;
+  border-radius:6px; border:1px solid var(--border); color:var(--dim); font-size:.7rem; }
+.dbgskipgo { padding:1px 7px; background:transparent; border:1px solid var(--teal); border-radius:4px;
+  color:var(--teal); cursor:pointer; font-size:.68rem; white-space:nowrap; }
+.dbgskipgo:hover { background:color-mix(in srgb, var(--teal) 16%, transparent); }
+.dbgskipx { margin-left:auto; padding:0 3px; background:transparent; border:none; color:var(--dim);
+  cursor:pointer; }
+.dbgskipnote.err { border-color:var(--red); color:var(--red); }
 .dbgfocusbg { position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.55);
   display:flex; align-items:center; justify-content:center; padding:24px; }
 /* Beside the chat, not over it. Watching an agent debug means reading two things at once — the
@@ -1446,7 +1615,7 @@ body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
 .dbgfr.cur { background:color-mix(in srgb, var(--gold) 12%, transparent); border-left-color:var(--gold); }
 .dbgfrm { color:var(--gold); }
 .dbgfr { cursor:pointer; }
-.dbgfr:hover { background:color-mix(in srgb, var(--fg) 6%, transparent); }
+.dbgfr:hover { background:color-mix(in srgb, var(--text) 6%, transparent); }
 /* The pinned frame reads as teal, the frame execution is actually stopped in stays gold — they
    are different claims and the eye should not have to check which is which. */
 .dbgfr.sel:not(.cur) { background:color-mix(in srgb, var(--teal) 14%, transparent);
@@ -1461,7 +1630,15 @@ body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
   font-family:var(--mono,ui-monospace,monospace); font-size:.72rem;
   border-left:2px solid var(--red); background:color-mix(in srgb, var(--red) 8%, transparent); }
 .dbgmark .dbgfile { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.dbgmarkc { padding:0 5px; background:transparent; border:1px solid var(--line); border-radius:4px;
+/* Disabled: the row stays, without the colour that marks a live breakpoint. */
+.dbgmark.off { border-left-color:var(--dim); background:transparent; opacity:.6; }
+.dbgmarko { padding:0; background:transparent; border:none; cursor:pointer; font-size:.7rem;
+  line-height:1; color:var(--red); }
+.dbgmark.off .dbgmarko { color:var(--dim); }
+/* A watch whose expression is not a number. It samples, it just has no curve to draw. */
+.dbgwrange.nonum { color:var(--dim); font-style:italic; }
+.dbgmarko:hover { opacity:.75; }
+.dbgmarkc { padding:0 5px; background:transparent; border:1px solid var(--border); border-radius:4px;
   color:var(--dim); cursor:pointer; font-size:.68rem; font-family:var(--mono,ui-monospace,monospace); }
 .dbgmarkc:hover { color:var(--teal); border-color:var(--teal); }
 .dbgmarkc.on { color:var(--teal); border-color:var(--teal); }
@@ -1505,7 +1682,7 @@ body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
 .dbgtilenote.err { color:var(--red); }
 .dbgtilebtn { padding:0 3px; background:transparent; border:none; color:var(--dim);
   cursor:pointer; font-size:.7rem; }
-.dbgtilebtn:hover { color:var(--fg); }
+.dbgtilebtn:hover { color:var(--text); }
 .dbgtilechart { width:100%; height:130px; }
 .dbgtile.big .dbgtilechart { height:calc(100% - 10px); min-height:320px; }
 .dbgtileout img, .dbgtileout svg { max-width:100%; height:auto; }
@@ -1544,8 +1721,16 @@ body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
 .dbgmarkx { padding:0 4px; background:transparent; border:none; color:var(--dim); cursor:pointer; font-size:.8rem; }
 .dbgmarkx:hover { color:var(--red); }
 .dbginterp { display:flex; flex-wrap:wrap; gap:4px; }
-.dbgmod { padding:1px 7px; border-radius:9px; background:var(--bg3); border:1px solid var(--border);
+.dbgmod { display:inline-flex; align-items:center; gap:3px; padding:1px 7px; border-radius:9px;
+  background:var(--bg3); border:1px solid var(--border);
   color:var(--teal); font-size:.7rem; font-family:var(--mono,ui-monospace,monospace); }
+/* The ✕ appears on hover. This list is read far more often than it is edited, and a standing
+   column of delete buttons reads as a warning. */
+.dbgmod.drop { padding-right:3px; }
+.dbgmodx { padding:0 2px; background:transparent; border:none; color:var(--dim); cursor:pointer;
+  font-size:.62rem; line-height:1; opacity:0; transition:opacity .1s; }
+.dbgmod.drop:hover .dbgmodx { opacity:1; }
+.dbgmodx:hover { color:var(--red); }
 
 .dbgsrc { display:flex; flex-direction:column; min-width:0; min-height:0; }
 .dbgsrchead { display:flex; align-items:baseline; gap:10px; padding:6px 12px;
@@ -1651,3 +1836,9 @@ document.head.appendChild(style);
 const host = document.createElement('div');
 document.body.appendChild(host);
 render(html`<${Focus} />`, host);
+
+// Its own root: the picker has to outrank the focus view, and rendering it inside would put it
+// under the same stacking context.
+const intoHost = document.createElement('div');
+document.body.appendChild(intoHost);
+render(html`<${IntoPicker} />`, intoHost);

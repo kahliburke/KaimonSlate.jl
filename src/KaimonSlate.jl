@@ -1165,11 +1165,13 @@ function create_tools(GateTool::Type)
     # not an agent that can wander, and blocking them would break the manual path the UI is.
     function _dbg_refusal(nb)
         debug_specialist_only() || return ""
-        who = _dbg_who()
-        startswith(who, "agent:") || return ""
-        who == "agent:mcp" && return ""                # an MCP client with no agent id: a person
-        mine = NotebookServer.specialist_here(nb, NotebookServer.DEBUG_ROLE)
-        who == "agent:" * String(mine) && return ""    # the specialist itself
+        # Gate on the AGENT id, not on `_dbg_who`. `_dbg_who` falls back to the raw session id when
+        # no Kaimon agent owns the call, so an external MCP client came out as `agent:<session>` and
+        # was refused — the setting is about the notebook's own agent, and a person driving the
+        # tools from outside is not it.
+        a = _agent_id()
+        isempty(a) && return ""                                     # nobody's agent: a person
+        a == String(NotebookServer.specialist_here(nb, NotebookServer.DEBUG_ROLE)) && return ""  # itself
         # Naming the supervisor's verbs, not the specialist's. This used to say `dbg_ask` and
         # `dbg_done`, which are the things the SPECIALIST calls — so an orchestrator that followed
         # it signed off on an investigation it had not run, filing a second finding that said what
@@ -1284,18 +1286,58 @@ function create_tools(GateTool::Type)
 
     Advance the session. `next` runs the line and stops on the next one in this frame; `into`
     descends into the call on this line when its module is being interpreted; `out` finishes this
-    frame and stops at the caller; `continue` runs on until a breakpoint or the end of the cell;
-    `past` does the same but ignores the breakpoint it is standing on.
+    frame and stops at the caller; `continue` runs on until a breakpoint or the end of the cell.
 
     On a loop, a breakpoint plus `continue` is the tool — stepping 10,000 iterations is not. But a
     breakpoint inside a loop is hit on every iteration, so once you have seen what that line does,
-    `past` carries on without stopping there again. It does not disarm anything: a DIFFERENT
-    breakpoint still stops you, and this one still catches the next run.
+    turn it off with `dbg_break(enabled=false)` and continue. The line and its condition stay set,
+    so you can turn it back on without retyping either.
     """
     function dbg_step(notebook::String; mode::String = "next")::String
         nb, err = _nb(notebook); nb === nothing && return err
         r = _dbg_refusal(nb); isempty(r) || return r
         return _dbg_render(NotebookServer.step_debug!(nb, strip(mode)))
+    end
+
+    """
+        dbg_into(notebook; call="", admit="") -> String
+
+    Step into a NAMED call on the current line, rather than whichever one comes first.
+
+    Called with no `call`, this lists what the line calls and steps nowhere: each entry is a name,
+    the module it would land in, and whether that module is being interpreted. `push!(xs, f(y))`
+    offers `f` and `push!`, and a plain `dbg_step(mode="into")` would have picked for you.
+
+    A module the session runs compiled (Base, a stdlib, a registered package) cannot be stepped
+    into until it is interpreted. `admit` names one to start interpreting; `drop` hands one back.
+    Admit when you have a reason to disbelieve a library, not by habit, and drop it once you have
+    your answer: everything in an interpreted module steps, which is slow and fills the stack.
+
+    Names the same function twice on one line? The list is in call order and the first match wins,
+    so step to the one you want with `next` first.
+    """
+    function dbg_into(notebook::String; call::String = "", admit::String = "",
+                      drop::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
+        # Handing a module back is its own act: it does not need a call to step into.
+        isempty(strip(drop)) ||
+            return _dbg_render(NotebookServer.interpret_debug!(nb; drop = strip(drop)))
+        ts = get(NotebookServer.into_targets_debug(nb), "targets", [])
+        if isempty(strip(call))
+            isempty(ts) && return "this line calls nothing you can step into"
+            return "this line calls:\n" * join(
+                [string("  ", get(t, "name", ""), "  in ", get(t, "mod", ""),
+                        get(t, "interpreted", false) === true ? "" :
+                        "  (compiled — pass admit=\"" * String(get(t, "mod", "")) * "\" to step in)")
+                 for t in ts], "\n")
+        end
+        want = strip(call)
+        i = findfirst(t -> String(get(t, "name", "")) == want, ts)
+        i === nothing && return "⛔ this line does not call `$want`. It calls: " *
+            join([String(get(t, "name", "")) for t in ts], ", ")
+        t = ts[i]
+        return _dbg_render(NotebookServer.into_debug!(nb; pc = Int(get(t, "pc", 0)), admit = admit))
     end
 
     """
@@ -1572,11 +1614,16 @@ function create_tools(GateTool::Type)
     end
 
     """
-        dbg_break(notebook, file, line; on="toggle", cond="") -> String
+        dbg_break(notebook, file, line; on="toggle", cond="", enabled="") -> String
 
     Arm or clear a breakpoint. `file` is what a frame reports — `cell:<id>` for notebook code, a
     path for a package — so copy it from `dbg_frame`. Breakpoints may be set before a session
     exists and survive one, which is the order the work usually happens in.
+
+    `enabled="false"` silences one without clearing it, which is what you want after a breakpoint
+    in a loop has shown you what it had to show: the line and its condition stay, and the person
+    watching can see it is set but off. `enabled="true"` brings it back. Silencing costs nothing
+    per pass, because a disabled breakpoint is not armed in the interpreter at all.
 
     `cond` is a Julia expression that has to hold, in that frame, for the line to stop: pass
     `cond="maximum(abs, du) > 1e3"` and `dbg_step(mode="continue")` lands on the first iteration
@@ -1588,18 +1635,22 @@ function create_tools(GateTool::Type)
     misspelled name reads as a breakpoint that never fires.
     """
     function dbg_break(notebook::String, file::String, line::Int; on::String = "toggle",
-                       cond::String = "")::String
+                       cond::String = "", enabled::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         r = _dbg_refusal(nb); isempty(r) || return r
-        want = on == "toggle" ? nothing : (on in ("1", "true", "on", "yes"))
+        yes(v) = v in ("1", "true", "on", "yes")
+        want = on == "toggle" ? nothing : yes(on)
+        en = isempty(enabled) ? nothing : yes(enabled)
         r = NotebookServer.mark_debug!(nb, strip(file), line; on = want,
-                                       cond = isempty(cond) ? nothing : cond)
+                                       cond = isempty(cond) ? nothing : cond, enabled = en)
         get(r, "ok", false) === true || return "⛔ " * string(get(r, "error", "could not set that"))
         ms = get(r, "marks", [])
         shown(m) = string(get(m, "file", ""), ":", get(m, "line", 0),
-                          isempty(String(get(m, "cond", ""))) ? "" : " when " * String(get(m, "cond", "")))
-        return (get(r, "on", false) === true ? "● armed " : "○ cleared ") * "$file:$line" *
-               (isempty(cond) ? "" : " when $cond") * "\n" *
+                          isempty(String(get(m, "cond", ""))) ? "" : " when " * String(get(m, "cond", "")),
+                          get(m, "enabled", true) === true ? "" : " (off)")
+        head = get(r, "on", false) !== true ? "○ cleared " :
+               en === false ? "○ disabled " : en === true ? "● enabled " : "● armed "
+        return head * "$file:$line" * (isempty(cond) ? "" : " when $cond") * "\n" *
                (isempty(ms) ? "no breakpoints set" : "breakpoints: " * join(shown.(ms), ", "))
     end
 
@@ -3022,6 +3073,7 @@ function create_tools(GateTool::Type)
         # `dbg_step` only runs user code, so the cell-run one fits it.
         GateTool("dbg_start", dbg_start; timeout_ms = ASK_MS),
         GateTool("dbg_step", dbg_step; timeout_ms = CELL_RUN_MS),
+        GateTool("dbg_into", dbg_into; timeout_ms = CELL_RUN_MS),
         GateTool("dbg_frame", dbg_frame),
         GateTool("dbg_eval", dbg_eval; timeout_ms = CELL_RUN_MS),
         GateTool("dbg_break", dbg_break),

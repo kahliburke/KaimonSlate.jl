@@ -1372,23 +1372,24 @@ _debug_tool(k::GateKernel, cell::AbstractString, name::String, args::Dict{String
 
 function debug_start!(k::GateKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
                       mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
-                      mark_conds::Vector{String} = String[],
+                      mark_conds::Vector{String} = String[], mark_enabled::Vector{Bool} = Bool[],
                       watch_files::Vector{String} = String[], watch_lines::Vector{Int} = Int[],
                       watch_exprs::Vector{String} = String[])
     prepare!(k, report)
     return _debug_tool(k, cell, "__slate_debug_start",
                        Dict{String,Any}("cell" => String(cell), "source" => String(source),
                                         "mark_files" => mark_files, "mark_lines" => mark_lines,
-                                        "mark_conds" => mark_conds,
+                                        "mark_conds" => mark_conds, "mark_enabled" => mark_enabled,
                                         "watch_files" => watch_files, "watch_lines" => watch_lines,
                                         "watch_exprs" => watch_exprs))
 end
 
 debug_marks!(k::GateKernel, ::Report; mark_files::Vector{String} = String[],
-             mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[]) =
+             mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[],
+             mark_enabled::Vector{Bool} = Bool[]) =
     _debug_tool(k, "", "__slate_debug_marks",
                 Dict{String,Any}("mark_files" => mark_files, "mark_lines" => mark_lines,
-                                 "mark_conds" => mark_conds))
+                                 "mark_conds" => mark_conds, "mark_enabled" => mark_enabled))
 
 debug_watch!(k::GateKernel, ::Report; watch_files::Vector{String} = String[],
              watch_lines::Vector{Int} = Int[], watch_exprs::Vector{String} = String[]) =
@@ -1416,6 +1417,22 @@ debug_traces(k::GateKernel, ::Report) =
 
 debug_step!(k::GateKernel, ::Report; mode::AbstractString = "next") =
     _debug_tool(k, "", "__slate_debug_step", Dict{String,Any}("mode" => String(mode)))
+
+debug_into_targets(k::GateKernel, ::Report) =
+    try
+        t = _tool(k, "__slate_debug_into_targets", Dict{String,Any}(); timeout = _DEBUG_TIMEOUT)
+        t === nothing ? [] : t
+    catch
+        []
+    end
+
+debug_into!(k::GateKernel, ::Report; pc::Integer = 0, admit::AbstractString = "") =
+    _debug_tool(k, "", "__slate_debug_into",
+                Dict{String,Any}("pc" => Int(pc), "admit" => String(admit)))
+
+debug_interpret!(k::GateKernel, ::Report; admit::AbstractString = "", drop::AbstractString = "") =
+    _debug_tool(k, "", "__slate_debug_interpret",
+                Dict{String,Any}("admit" => String(admit), "drop" => String(drop)))
 
 debug_frame(k::GateKernel, ::Report) =
     _debug_tool(k, "", "__slate_debug_frame", Dict{String,Any}())

@@ -144,6 +144,29 @@ current_agent_id() = nothing
             @test isempty(NS._debug_session(nb).cell)
         end
 
+        @testset "a breakpoint can be silenced without being cleared" begin
+            # Leaving a loop you have seen enough of. The mark keeps its line and its predicate,
+            # so it is still on screen and still one click from coming back.
+            NS.mark_debug!(nb, "cell:drive", 3; on = true, cond = "i == 4200")
+            NS.start_debug!(nb, "drive"; by = AGENT)
+            NS.step_debug!(nb, "continue")
+            @test get(NS.frame_debug(nb), "at_breakpoint", false) === true
+
+            r = NS.mark_debug!(nb, "cell:drive", 3; enabled = false)
+            m = only(get(r, "marks", []))
+            @test get(m, "enabled", true) === false
+            @test get(m, "cond", "") == "i == 4200"       # kept, not thrown away
+
+            # Disarmed in the kernel too, so the run goes to the end instead of stopping again.
+            st = NS.step_debug!(nb, "continue")
+            @test get(st, "finished", false) === true
+
+            # Disabling a line nobody marked leaves nothing behind.
+            NS.mark_debug!(nb, "cell:drive", 9; enabled = false)
+            @test length(get(NS.frame_debug(nb), "marks", [])) == 1
+            NS.mark_debug!(nb, "cell:drive", 3; on = false)
+        end
+
         @testset "a choice is answered by picking, not by typing" begin
             picked = Ref("")
             fake_agent_reset!((args, text) -> begin

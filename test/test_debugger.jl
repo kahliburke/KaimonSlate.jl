@@ -200,6 +200,154 @@ end
         @test isempty([bp for bp in ji.breakpoints() if occursin("cell:bp", string(bp))])
     end
 
+    @testset "marks on top-level statements" begin
+        # A cell is split into one frame per top-level statement, and `debug_command` only
+        # consults breakpoints AFTER running a statement. A mark on the first line of such a
+        # statement is therefore on the line the fresh frame is already standing on, and every
+        # one of these was stepped straight over.
+        src = "t = 0\nfor i in 1:5\n  global t += i\nend\nu = t * 2\nv = u + 1\n"
+        st = RE.debug_start!(Sandbox; cell = "tl", source = src,
+                             mark_files = ["cell:tl", "cell:tl"], mark_lines = [5, 6])
+        try
+            st = step!("continue")
+            @test st.at_breakpoint
+            @test st.line == 5
+            # The loop before it ran to completion, so the mark was reached rather than missed.
+            @test RE.debug_eval_expr(; expr = "t").value.repr == "15"
+
+            st = step!("continue")
+            @test st.at_breakpoint
+            @test st.line == 6
+            @test RE.debug_eval_expr(; expr = "u").value.repr == "30"
+
+            st = step!("continue")
+            @test st.finished
+            @test only(b.repr for b in st.bindings if b.name == "v") == "31"
+        finally
+            RE.debug_stop!()
+        end
+
+        # The last statement of a cell is a frame of its own too, and a mark on it is the one a
+        # `continue` from anywhere earlier has to land on.
+        st = RE.debug_start!(Sandbox; cell = "tl2", source = "p = 1\nq = 2\nr = p + q\n",
+                             mark_files = ["cell:tl2"], mark_lines = [3])
+        try
+            st = step!("continue")
+            @test st.at_breakpoint
+            @test st.line == 3
+        finally
+            RE.debug_stop!()
+        end
+    end
+
+    @testset "choosing what to step into" begin
+        # One line, two calls. `into` on its own takes whichever the lowered code reaches first,
+        # which is not a choice anyone made.
+        RE.debug_start!(Sandbox; cell = "into1", source = "z = outer(smooth([1.0, 2.0], 0.5)[1])\n")
+        try
+            ts = RE.debug_into_targets()
+            names = [t.name for t in ts]
+            @test "outer" in names
+            @test "smooth" in names
+            # Both live in the stepped namespace, so both are somewhere the run can actually go.
+            @test all(t.interpreted for t in ts if t.name in ("outer", "smooth"))
+            # Distinct statements, which is what makes them separately reachable.
+            @test length(unique(t.pc for t in ts)) == length(ts)
+
+            # The SECOND call by name, which a plain `into` would not have given.
+            tgt = only(t for t in ts if t.name == "outer")
+            st = RE.debug_into!(; pc = tgt.pc)
+            @test !st.finished
+            @test occursin("outer", st.scope)
+        finally
+            RE.debug_stop!()
+        end
+
+        # A library call is reported, and reported as not interpreted — it is offered, not hidden.
+        RE.debug_start!(Sandbox; cell = "into2", source = "q = sum([1.0, 2.0])\n")
+        try
+            ts = RE.debug_into_targets()
+            lib = [t for t in ts if t.name == "sum"]
+            @test length(lib) == 1
+            @test !only(lib).interpreted
+            @test only(lib).mod == "Base"
+
+            # Admitting the module is what makes it steppable, and it holds for the session.
+            st = RE.debug_into!(; pc = only(lib).pc, admit = "Base")
+            @test "Base" in st.interpreting
+        finally
+            RE.debug_stop!()
+        end
+
+        # Admitting a library is reversible. It has to be: every line steps while it is in, so
+        # staying inside Base after the question is answered costs you the rest of the session.
+        RE.debug_start!(Sandbox; cell = "into4", source = "w = 1\nw2 = w + 1\n")
+        try
+            st = RE.debug_interpret!(; admit = "Base")
+            @test "Base" in st.interpreting
+            st = RE.debug_interpret!(; drop = "Base")
+            @test !("Base" in st.interpreting)
+            @test st.ns in st.interpreting          # the cell's own namespace is still stepped
+
+            # The namespace the cell runs in is the code being stepped, so it cannot go.
+            bad = RE.debug_interpret!(; drop = st.ns)
+            @test bad.error !== nothing
+            @test occursin("namespace", bad.error)
+            @test RE.debug_frame().ns in RE.debug_frame().interpreting
+
+            # Dropping something that was never in is a refusal, not a silent no-op.
+            bad = RE.debug_interpret!(; drop = "Base")
+            @test bad.error !== nothing
+        finally
+            RE.debug_stop!()
+        end
+
+        # A module nobody loaded is refused rather than silently ignored.
+        RE.debug_start!(Sandbox; cell = "into3", source = "r = 1 + 1\n")
+        try
+            st = RE.debug_into!(; pc = 0, admit = "NoSuchModuleHere")
+            @test st.error !== nothing
+            @test occursin("NoSuchModuleHere", st.error)
+        finally
+            RE.debug_stop!()
+        end
+    end
+
+    @testset "disabled marks" begin
+        # Silencing a breakpoint is not clearing it: the line and its predicate stay, and it is
+        # armed nowhere in the interpreter, so it costs nothing per pass of the line.
+        src = "t = 0\nfor i in 1:5\n  global t += i\nend\nu = t * 2\n"
+        st = RE.debug_start!(Sandbox; cell = "dis", source = src,
+                             mark_files = ["cell:dis", "cell:dis"], mark_lines = [3, 5],
+                             mark_enabled = [false, true])
+        try
+            # The loop's mark is off, so the run goes past all five iterations and stops at the
+            # other one instead of on the first pass.
+            st = step!("continue")
+            @test st.at_breakpoint
+            @test st.line == 5
+            @test RE.debug_eval_expr(; expr = "t").value.repr == "15"
+        finally
+            RE.debug_stop!()
+        end
+
+        # Turned off mid-run, which is how you leave a loop you have seen enough of.
+        st = RE.debug_start!(Sandbox; cell = "dis2", source = src,
+                             mark_files = ["cell:dis2"], mark_lines = [3])
+        try
+            st = step!("continue")
+            @test st.at_breakpoint
+            @test st.line == 3
+            RE.debug_marks!(; mark_files = ["cell:dis2"], mark_lines = [3],
+                              mark_conds = [""], mark_enabled = [false])
+            st = step!("continue")
+            @test st.finished
+            @test only(b.repr for b in st.bindings if b.name == "u") == "30"
+        finally
+            RE.debug_stop!()
+        end
+    end
+
     @testset "conditional breakpoints" begin
         # The point of a predicate: reach an iteration you could not step to. A plain mark on
         # line 3 stops on i=1, which is the pass that is fine.

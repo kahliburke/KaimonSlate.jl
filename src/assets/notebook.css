@@ -822,6 +822,9 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .cm-editor .cm-bpgutter .cm-gutterElement { display:flex; align-items:center; justify-content:center; }
 .cm-bpdot { width:9px; height:9px; border-radius:50%; background:var(--red);
   box-shadow:0 0 0 1px color-mix(in srgb, var(--red) 45%, transparent); }
+/* Set but disabled, drawn hollow. Distinct from no breakpoint, and from the hover ghost above,
+   which is filled and fainter. */
+.cm-bpdot.off { background:transparent; box-shadow:inset 0 0 0 1.5px var(--red); opacity:.65; }
 .cm-editor .cm-bpgutter .cm-gutterElement:not(:has(.cm-bpdot)):hover::after {
   content:''; width:9px; height:9px; border-radius:50%;
   background:color-mix(in srgb, var(--red) 32%, transparent); }
