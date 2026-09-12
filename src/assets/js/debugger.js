@@ -43,18 +43,6 @@ const asks = signal([]);
 // nobody can see is a conclusion nobody can argue with — and the verdict in particular exists to be
 // disagreed with.
 const findings = signal([]);
-// Whether the chat panel is open beside the workspace. When it is, this pane's own transcript is a
-// worse rendering of the same conversation, so it gives up its half of the column.
-const chatDocked = signal(false);
-function _syncChatDocked() {
-  try { chatDocked.value = document.body.classList.contains('agent-open'); } catch (e) {}
-}
-_syncChatDocked();
-// The panel is toggled from outside this module (topbar, per-cell ✨, keyboard, palette), so watch
-// the class rather than trying to intercept every entry point.
-try {
-  new MutationObserver(_syncChatDocked).observe(document.body, { attributes: true, attributeFilter: ['class'] });
-} catch (e) {}
 
 const live = computed(() => st.value && !st.value.finished);
 export const debugCell = computed(() => (st.value ? st.value.cell : ''));
@@ -1096,7 +1084,6 @@ const _lsNum = (k, d) => { const v = parseFloat(localStorage.getItem(k)); return
 const paneRail = signal(_lsNum('slateDbgRail', 220));    // px
 const paneRight = signal(_lsNum('slateDbgRight', 360));  // px
 const paneVals = signal(_lsNum('slateDbgVals', 34));     // % of the middle column
-const paneConvo = signal(_lsNum('slateDbgConvo', 58));   // % of the right column
 
 // One drag handler for all four. `apply` turns a pointer position into the new size; the store
 // is written on release rather than per-frame, so a drag is one localStorage write.
@@ -1154,21 +1141,7 @@ function Convo({ s }) {
         <div class="dbgbriefhead">standing instructions</div>
         <pre class="dbgbrieftxt">${brief.value.system || ''}</pre>`}
     </div>` : null}
-    <div class="dbgclog" ref=${log}>
-      ${!here && !convo.value.length
-        ? html`<div class="dbgcempty">No specialist here yet.<${Summon} /></div>` : null}
-      ${convo.value.map((m, i) => m.role === 'act'
-        ? html`<div class=${'dbgcact' + (m.failed ? ' err' : '') + (m.done ? '' : ' live')} key=${i}>
-            <span class="dbgcverb">${m.verb}</span>
-            ${m.arg ? html`<span class="dbgcarg">${m.arg}</span>` : null}
-            ${m.detail ? html`<span class="dbgcgist">${m.detail}</span>` : null}
-          </div>`
-        : html`<div class=${'dbgcmsg ' + m.role + (m.held ? ' held' : '') + (m.open ? ' open' : '')} key=${i}
-            onClick=${m.role === 'brief' ? () => {
-              convo.value = convo.value.map((x, j) => (j === i ? { ...x, open: !x.open } : x));
-            } : undefined}>${m.text}
-            ${m.held ? html`<span class="dbgheld">waiting for its turn to end</span>` : null}</div>`)}
-    </div>
+    ${!here ? html`<div class="dbgcempty">No specialist here yet.<${Summon} /></div>` : null}
     <${Findings} />
     <${Asks} />
     <form class="dbgpform" onSubmit=${send}>
@@ -1227,18 +1200,8 @@ function Focus() {
             return clamp(box.right - ev.clientX, 0, box.width - 360);
           })}
           onReset=${() => { paneRight.value = 360; localStorage.setItem('slateDbgRight', '360'); }} />
-        ${/* With the chat panel docked alongside, this column's transcript is the same conversation
-              rendered worse — no markdown, no grouping, no crew colours. So it stands down and the
-              scratchpad takes the whole column, which is where the room was wanted anyway. */''}
         <div class="dbgfright">
-          ${chatDocked.value ? null : html`
-            <div class="dbgconvowrap" style=${'height:' + paneConvo.value + '%'}><${Convo} s=${s} /></div>
-            <${Grip} axis="y"
-              onDrag=${e => drag(e, paneConvo, 'slateDbgConvo', ev => {
-                const box = document.querySelector('.dbgfright').getBoundingClientRect();
-                return clamp((ev.clientY - box.top) / box.height * 100, 0, 100);
-              })}
-              onReset=${() => { paneConvo.value = 58; localStorage.setItem('slateDbgConvo', '58'); }} />`}
+          <div class="dbgconvowrap"><${Convo} s=${s} /></div>
           <${Scratch} s=${s} />
         </div>
       </div>
@@ -1612,11 +1575,9 @@ body.agent-open .dbgfocusbg { right:var(--agentw, 380px); }
 .dbgfvals .dbgvhead { padding-bottom:2px; }
 
 /* ── the specialist pane ─────────────────────────────────────────────────────── */
-.dbgconvo { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding:8px 12px 6px; }
+.dbgconvo { flex:0 0 auto; display:flex; flex-direction:column; padding:8px 12px 6px; }
 .dbgcrew { color:var(--teal); font-family:var(--mono,ui-monospace,monospace);
   font-size:.68rem; text-transform:none; letter-spacing:0; }
-.dbgclog { flex:1 1 auto; min-height:60px; overflow:auto; display:flex; flex-direction:column; gap:5px;
-  padding-right:2px; }
 .dbgcempty { color:var(--dim); font-size:.76rem; display:flex; flex-direction:column;
   align-items:flex-start; gap:8px; padding:6px 0; }
 .dbgcmsg { font-size:.78rem; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
