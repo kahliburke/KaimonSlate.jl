@@ -181,6 +181,56 @@ readers (see [Reactive Cells](reactivity.md)). While you drag, updates are rate-
 coalesced so the kernel isn't flooded; releasing flushes the final value. Every widget bound
 to the same variable — strip copies included — stays in lockstep.
 
+## Updating without recomputing
+
+Reading a bound variable makes a cell a *reader*, so every change reruns it. For a cheap cell that
+is exactly right. For an expensive one — or a figure whose whole point is that it persists, like an
+interactive WebGL scene with a camera you have positioned — rebuilding on every tick is the wrong
+shape: the work is redone and the state is lost.
+
+`bind_observable(:name)` gives you the control's value as an `Observable` instead. The name is
+quoted, so it is data rather than a read and the cell never restales; the value is pushed into the
+Observable and whatever is listening updates in place.
+
+```julia
+@bind decay Slider(0.0:0.05:1.5; default = 0.35)
+
+let                                   # runs once — `decay` appears only as a quoted name
+    d = bind_observable(:decay)
+    t = range(0, 4π; length = 400)
+    fig = Figure()
+    lines(fig[1, 1], t, lift(v -> @.(exp(-v * t) * sin(4t)), d))
+    fig
+end
+```
+
+The Observable is **cell-local**: a fresh one per run, released when the cell reruns. That is what
+makes an ordinary `lift` on top of it safe — it dies with the cell, so nothing accumulates across
+reruns. An Observable you create yourself and keep alive across runs does not have that property,
+and listeners on it will stack.
+
+Because the name is quoted there is no dependency edge, and cells in a batch evaluate in parallel —
+so a control declared in a *different* cell may not exist yet when the observing cell runs. Declare
+the `@bind` in the same cell as the figure to remove the race. It does not reintroduce the rerun: a
+control reruns its declaring cell only when the changed name is among that cell's reads, and a
+quoted name is not a read.
+
+## Controls drawn somewhere else
+
+`hidden(…)` wraps a widget to say the notebook should not draw it: no row in its `@bind` cell, no
+entry in a surfaced strip, and it is not offered by the 🎛 palette.
+
+```julia
+@bind phase hidden(Slider(0.0:0.1:6.3))
+```
+
+It is otherwise an ordinary control. It holds a value, coerces it, fires `@onchange`, feeds
+`bind_observable`, and remains a parameter in a static export. Only the chrome is suppressed.
+
+This is for when something else is drawing the control — a widget inside a figure, a custom panel —
+and you want one control rather than two copies of it that can drift apart. Extensions reach the
+same controls through the execution context; see [Writing an Extension](extensions.md).
+
 ## In a static export
 
 An exported HTML page has no Julia behind it, so by default a control renders as real markup and

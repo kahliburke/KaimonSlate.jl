@@ -28,12 +28,21 @@ module BonitoSlate
 import Bonito
 import Base64
 import Makie
+import Observables
 using SlateExtensionsBase
+
+# Composing a figure with its own controls means writing an `App` returning a `DOM` node, so a
+# notebook that has BonitoSlate should not also have to add Bonito as a direct dependency just to
+# name them. Re-exported here rather than left to `import Bonito`, which a notebook cannot do
+# unless Bonito is in its own Project.
+using Bonito: App, DOM, Session
+export bonito_controls, App, DOM
 
 include("connection.jl")
 include("assetserver.jl")
 include("app.jl")
 include("figure.jl")
+include("controls.jl")
 
 """
     enable!()

@@ -93,6 +93,70 @@ global config) registered by the current statement so Slate re-establishes it on
 """
 slate_everywhere(names::Symbol...) = slate_effect(:everywhere; names = collect(names))
 
+# ── Controls (`@bind`) ────────────────────────────────────────────────────────────────────────────
+#
+# For an extension that DRAWS a control itself — a Bonito widget inside a WGLMakie figure, a custom
+# canvas — rather than leaving it to Slate's own chrome. It gets the capability, never the notebook
+# namespace: reading `__slate_bind_registry` directly would work and would tie every extension to a
+# private name, which is the drift this module exists to prevent.
+#
+# Every one of these is a no-op outside a Slate cell, so package code can call them unconditionally.
+
+"""
+    slate_bind_widget(name) -> Widget | Nothing
+
+The declared control behind a bound name — its kind, params and default — or `nothing` if the
+notebook declares no such control.
+
+Use it to build an equivalent native control from the SAME declared domain, so the drawn widget and
+the Slate control cannot disagree about which values are legal.
+"""
+slate_bind_widget(name) = (f = _ctx_field(:bind_widget); f === nothing ? nothing : f(Symbol(name)))
+
+"""
+    slate_bind_value(name) -> Any
+
+A control's CURRENT value, so a freshly built widget opens where the reader left it instead of
+snapping back to the declared default on every re-render. `nothing` if undeclared.
+"""
+slate_bind_value(name) = (f = _ctx_field(:bind_value); f === nothing ? nothing : f(Symbol(name)))
+
+"""
+    slate_bind_names() -> Vector{Symbol}
+
+Every control the notebook declares, in name order (empty outside a cell).
+"""
+slate_bind_names() = (f = _ctx_field(:bind_names); f === nothing ? Symbol[] : collect(f()))
+
+"""
+    slate_on_bind(name, f) -> unregister
+
+Run `f(value)` on every change of a control, and get back a thunk that removes the listener.
+
+Dispatched INLINE by Slate, in the same turn the notebook global is assigned, and not cancellable —
+distinct from an `@onchange` body, which is spawned and superseded by a fresher change. That is the
+right split: propagating a value is a write that must not be dropped, while a user body may run
+long. Pair the returned thunk with [`slate_on_cleanup`](@ref) so a re-run does not stack listeners.
+"""
+function slate_on_bind(name, f)
+    on = _ctx_field(:on_bind)
+    on === nothing && return () -> nothing
+    return on(Symbol(name), f)
+end
+
+"""
+    slate_bind_observable(name) -> Observable | Nothing
+
+A control's value as a live `Observable`, for a figure that should update IN PLACE rather than be
+rebuilt when the control moves.
+
+The Observable is CELL-LOCAL — a fresh one per run, released when the cell re-runs — which is what
+makes an ordinary `lift`/`map` on top of it safe: it dies with the cell, so nothing accumulates
+across the re-renders a session-bound output does on every browser connect.
+"""
+slate_bind_observable(name) =
+    (f = _ctx_field(:bind_observable); f === nothing ? nothing : f(Symbol(name)))
+
 """
     slate_on(channel, f) -> nothing
 

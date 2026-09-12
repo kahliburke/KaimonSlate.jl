@@ -140,6 +140,37 @@ For a script that is not tied to a widget at all, use [`provide_frontend!`](@ref
 own, as the `__slate_frontend` example below does. For a plain `<script>` that calls
 `window.slateRegisterWidget` itself, use [`register_widget!`](@ref).
 
+### Drawing a control yourself
+
+The sections above are about adding a *kind* of control for Slate to draw. The other direction is
+drawing an existing control yourself — a knob inside a figure, a custom panel — while the `@bind`
+variable stays the single source of truth.
+
+Five accessors read the notebook's controls off the execution context:
+
+| | |
+| --- | --- |
+| [`slate_bind_widget(name)`](@ref) | the declared `Widget` — build your control from the same domain, so the two cannot disagree about which values are legal |
+| [`slate_bind_value(name)`](@ref) | the current value, so a rebuilt control opens where the reader left it |
+| [`slate_bind_names()`](@ref) | every control the notebook declares |
+| [`slate_on_bind(name, f)`](@ref) | run `f(value)` on every change; returns a thunk that removes the listener |
+| [`slate_bind_observable(name)`](@ref) | the value as a cell-local `Observable`, for updating in place |
+
+All five are no-ops outside a Slate cell, so package code can call them unconditionally. Write a
+change back the same way a native control does, through `window.slateSetBind(name, value)` — that
+keeps the registry, the global, `@onchange`, the notebook's own chrome and the persisted value in
+step. If you reflect Slate's value back into your control, guard the echo by comparing against
+`window.slateBindValue(name)` and writing only on a genuine difference.
+
+Pair this with `hidden(…)` at the `@bind` site so the notebook draws no second copy. See
+[Widgets & @bind](widgets.md#Controls-drawn-somewhere-else).
+
+They are *additive*, so they are available from `SlateExtensionsBase` 0.10.5 without any other
+extension having to move. The compat bound gets you the accessors but cannot force a Slate core new
+enough to populate them — an older core returns `nothing` from every one, which looks just like a
+control that was never declared. Check for the capability once, up front, and name the core version
+you need.
+
 ## Rich output
 
 To render one of your types richly when a cell *returns* it, define [`slate_render`](@ref). It

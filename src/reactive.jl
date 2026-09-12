@@ -203,7 +203,12 @@ function __on_fire!(tokens, name::Symbol, f, value, ctx = nothing)
         # streaming from an @onclick/@onchange body is a silent no-op (its `_ctx_field(:emit)` is unset).
         ctx === nothing || task_local_storage(:slate_ctx, ctx)
         try
-            f(value)
+            # `invokelatest`: the handler is a closure captured when its cell last ran, which can be
+            # newer than the world this task inherited from the fire path (`@async` takes the world
+            # age at spawn). A direct call then fails with "method may be too new", which the catch
+            # below turns into a logged error — so the control moves and its handler silently never
+            # runs. Same reason the bind value-listeners dispatch through invokelatest.
+            Base.invokelatest(f, value)
         catch e
             # Runs in an unawaited `@async`, so a rethrow would just vanish — LOG the handler error
             # (an @onclick/@onchange body that threw) instead. Cancellation is expected and ignored.
