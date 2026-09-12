@@ -98,6 +98,11 @@ window.SLATE_KEYMAP_PRESETS = [
       'cell.merge':      ['Shift-j'],         // ⇧J joins, as in vim
       'cell.extendNext': ['Shift-ArrowDown'],
       'cell.extendPrev': ['Shift-ArrowUp'],
+      // Vimspector's "human mode" is F5 continue, F10 step over, F11 step into, F12 step out and
+      // F3 stop. Only the last two differ from the declared defaults, and F12 is reserved by the
+      // browser for the devtools, so step-out keeps ⇧F11. ⇧F5 is kept alongside F3 so a user who
+      // learned the default set does not lose it.
+      'debug.stop': ['F3', 'Shift-F5'],
     },
   },
 ];
@@ -154,6 +159,7 @@ window.SLATE_KEYS_DISCOURAGED = {
   'Mod-Shift-a': 'Search Tabs (Chrome, macOS)',
   'Mod-Shift-o': 'the Bookmark Manager',
   'F1': 'browser help',
+  'F3': 'Find Again',        // Windows/Linux browsers; the vim preset puts debug.stop here
   'F5': 'Reload',
   'F11': 'Full Screen',
 };

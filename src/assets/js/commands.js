@@ -339,6 +339,11 @@ R({ id: 'view.notebooks', label: 'All notebooks', group: 'Panels', ctx: ['comman
 // F5 and F11 are in SLATE_KEYS_DISCOURAGED: the browser yields them on preventDefault, and the
 // Keyboard panel says what taking them costs. `_dbgLive` is what makes that cost conditional, since
 // with no session running the command declines and Reload works as usual.
+// The declared chords are the set VS Code, Visual Studio and the JetBrains IDEs all share, so the
+// vscode preset needs no overlay for them. JupyterLab's debugger ships no stepping chords of its
+// own, so that preset inherits these rather than unbinding into nothing. Vim differs and says so in
+// keymaps.js.
+//
 // `available` asks whether this PAGE has the feature, and the Keyboard panel lists only what is
 // available. A debugger you could rebind only while stopped at a line would be no use, so these are
 // available whenever the island loaded, and being between sessions is handled by DECLINING the key.
