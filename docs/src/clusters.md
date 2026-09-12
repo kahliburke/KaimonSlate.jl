@@ -181,6 +181,24 @@ a cluster it has no mount on. So:
 * **Data stays put.** A unit's results are read by byte range over the same session.
   With `data=auto` a slice costs the bytes it names rather than the whole result.
 
+### One view of the output
+
+`results.dataset` is what you read, whatever the units returned. Every grid point is in it: a unit
+that returned one row contributes one, a unit that returned many contributes all of them, and a unit
+that has not landed contributes a row of `missing`, so the holes sit where the work still is.
+
+```julia
+results.dataset                            # schema, rows, size; reads no data
+results.dataset[1:1000]                    # a bounded slice, parameters attached
+results.dataset[1:1000, (:snr, :status)]   # ...and only these columns
+Sweep.scan(results.dataset; between = (:snr, 3, Inf), where = row -> row.seed != 7, limit = 10_000)
+Sweep.query_cost(results.dataset)          # what a read would cost, before making it
+```
+
+Whether a unit's rows were chunked into the store or carried inline in its manifest is a storage
+decision, and none of the above changes with it. `status`, `ms`, `ran_on` and `at` are left out of
+the default columns because they repeat down a unit's whole block; name them to get them.
+
 Which is why the last step is unremarkable: a batch result and a value from an interactive worker are
 both just values in the notebook's namespace, and combining them is ordinary Julia.
 

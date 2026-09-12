@@ -749,14 +749,22 @@ See also `save_asset`, `FileUpload`."""),
         """QUESTIONS are properties of the result, so they cannot collide with your own variables:
         `r.state` (`:pending :running :succeeded :partial :blocked :cancelled :exhausted`),
         `r.total r.done r.ok r.failed r.pending r.fraction r.percent r.settled`,
-        `r.table` — the sweep as ONE ROW PER GRID POINT: the parameters, then whatever each unit
-        returned, then `status`/`ms`/`ran_on`. The view a sweep is usually for, and the one to reach
-        for first. Units that have not landed are `missing`, so the shape is the full grid from the
-        start and the holes show where the work is. Manifest-only: asking never fetches a result, and
-        a value too large to record inline reads `missing` (fetch that one with `row.value[]`).
+        `r.dataset` — THE view of what the sweep produced, and the one to reach for first: every
+        grid point, its parameters beside its output. A unit that returned one row contributes one,
+        a unit that returned many contributes all of them, a unit that has not landed contributes a
+        row of `missing` — so the shape is the full grid from the start and the holes show where the
+        work is. Whether the rows were chunked into the store or carried inline in the manifest is
+        storage and never reaches you. `ds[1:1000]` slices, `ds[1:1000, (:t, :e)]` projects,
+        `Sweep.scan(ds; between, where, limit)` filters with the range pushed into the index, and
+        `Sweep.query_cost(ds)` prices a read before making it. `status`/`ms`/`ran_on`/`at` are off the
+        default projection (they repeat down a unit's whole block) — name them in the column list to
+        get them. Asking for the dataset, its schema or its size reads none of the data it describes.
+        An adopted file is a `:group`: `keys(ds)` names the variables and `ds[:sst]` gives an
+        ordinary dataset. A unit whose value has no row or array form is a hole; `row.value[]`
+        fetches that one.
         `r.rate r.eta r.idle r.stalled_for r.blocked`, `r.results` (rows that succeeded),
         `r.summaries` (the small value each recorded — manifest-only, so the same cost at four units
-        and four million), `r.errors` (rows that threw), `r.hosts`, `r.dataset`.
+        and four million), `r.errors` (rows that threw), `r.hosts`.
         The result iterates and indexes over ALL rows, each
         `(; params, status, value, record, summary, artifacts, ran_on, ms, bytes, stamp)`.
         `record` is what the unit RETURNED, kept inline in its manifest whenever it was small enough
@@ -768,7 +776,7 @@ See also `save_asset`, `FileUpload`."""),
         export: `Sweep.refresh!(r)`, `Sweep.retry_failed!(r)`, `Sweep.cancel!(r)`, `Sweep.resume!(r)`,
         `Sweep.reset!(r)`. The card offers the same as buttons.
         `Sweep.text(r)` is the sweep in PLAIN TEXT — state, progress, timing and the first rows of
-        `r.table`. A sweep cell renders as an HTML card and the richer MIME always wins in a
+        `r.dataset`. A sweep cell renders as an HTML card and the richer MIME always wins in a
         notebook, so the text form needs asking for. It renders as the report in a cell and also
         `print`s, `String`s and interpolates as one, for a terminal, a log or a message.
         `println(r)` and `@show r` stay on ONE line: they share a method with string interpolation

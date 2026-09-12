@@ -1176,25 +1176,55 @@ end
         end
     end
 
-    @testset "PROTOTYPE: one view over everything a sweep produced" begin
-        # The point of the prototype: the SAME call answers a sweep whose units returned one row
-        # each and one whose units returned thousands, with the parameters attached either way. A
-        # reader should not have to know whether their output was chunked or inlined before knowing
-        # which accessor to reach for.
+    @testset "one view over everything a sweep produced" begin
+        # The SAME call answers a sweep whose units returned one row each and one whose units
+        # returned thousands, with the parameters attached either way. Whether a unit's rows were
+        # chunked into the store or carried inline in its manifest is storage, and a reader never
+        # has to pick an accessor by it.
         mktempdir() do root
-            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
                                   payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
 
-            # One row per unit — the `pilot` shape.
             one = Sweep.@sweep(Sweep.paramgrid(a = 1:2, b = [10, 20]), t; submit = false) do p
                 (; snr = float(p.a * p.b), sep = p.a)
             end
+            # Before anything lands the ROWS are already the whole grid. The value columns are not
+            # there yet and cannot be: nothing has said what they are called.
+            d0 = one.dataset
+            @test length(d0) == 4 && isempty(d0.columns) && d0.pnames == [:a, :b]
+            g0 = d0[1:4]
+            @test keys(g0) == (:a, :b)
+            @test g0.a == [1, 2, 1, 2] && g0.b == [10, 10, 20, 20]
+            @test all(isempty, d0[1:4, (:status,)].status)   # nothing ran, so nothing has a status
+
+            # One unit landing names the columns; the rest are holes, not absences.
+            SlateTask.run_chunk(root, first(BS.sweep_chunks(root, one.run)))
+            d1 = Sweep.refresh!(one).dataset
+            @test Symbol.(d1.columns) == [:snr, :sep]
+            g1 = d1[1:4]
+            @test keys(g1) == (:a, :b, :snr, :sep)
+            @test g1.snr[1:2] == [10.0, 20.0] && all(ismissing, g1.snr[3:4])
+            @test g1.a == [1, 2, 1, 2]                       # the grid never changed shape
+            # A hole survives both predicates rather than throwing on one: comparing against
+            # `missing` is not a match, and a `where` that comes back `missing` is not a pass.
+            @test Sweep.scan(d1; between = (:snr, 0.0, 100.0)).snr == [10.0, 20.0]
+            @test Sweep.scan(d1; where = row -> row.snr > 5).snr == [10.0, 20.0]
+
             for c in BS.sweep_chunks(root, one.run); SlateTask.run_chunk(root, c); end
-            u1 = Sweep.unified(Sweep.refresh!(one))
-            @test keys(u1) == (:a, :b, :snr, :sep)
-            @test length(u1.snr) == 4
-            @test u1.snr == [10.0, 20.0, 20.0, 40.0]
-            @test u1.a == [1, 2, 1, 2]                      # the parameters, on every row
+            g = Sweep.refresh!(one).dataset[1:4]
+            @test g.snr == [10.0, 20.0, 20.0, 40.0] && g.sep == [1, 2, 1, 2]
+            @test eltype(g.snr) == Float64      # narrowed, so a plot or a `sum` over it behaves
+
+            # The facts are off the default projection — on a unit with many rows they repeat
+            # identically down the whole block — and come back when named.
+            @test !(:status in keys(g))
+            gf = one.dataset[1:4, (:snr, :status, :ms)]
+            @test keys(gf) == (:snr, :status, :ms) && all(==("ok"), gf.status)
+            @test all(x -> x isa Sweep.Dates.DateTime, one.dataset[1:4, (:at,)].at)
+            # In the READER's clock, matching every other time a sweep prints. A raw UTC conversion
+            # put two views hours apart while naming one event.
+            @test abs((one.dataset[1:1, (:at,)].at[1] - Sweep.Dates.now()).value) < 60_000
+            @test_throws ErrorException one.dataset[1:4, (:nope,)]
 
             # MANY rows per unit, stored INLINE — small enough to ride the manifest, and still three
             # rows each. Shape is not storage, and reading one as the other gave a unit's whole
@@ -1203,98 +1233,64 @@ end
                 (; i = collect(1:3), v = float.(1:3) .* p.g)
             end
             for c in BS.sweep_chunks(root, inl.run); SlateTask.run_chunk(root, c); end
-            ui = Sweep.unified(Sweep.refresh!(inl))
-            @test length(ui.i) == 6 && ui.i == [1, 2, 3, 1, 2, 3]
-            @test ui.g == [1, 1, 1, 2, 2, 2]
-            @test ui.v == [1.0, 2.0, 3.0, 2.0, 4.0, 6.0]
+            di = Sweep.refresh!(inl).dataset
+            @test length(di) == 6
+            gi = di[1:6]
+            @test gi.i == [1, 2, 3, 1, 2, 3]
+            @test gi.g == [1, 1, 1, 2, 2, 2]
+            @test gi.v == [1.0, 2.0, 3.0, 2.0, 4.0, 6.0]
+            # `scan` walks the ROW SPACE, not the chunk list, so inline rows are not invisible to it.
+            s = Sweep.scan(di; where = r -> r.v > 2.0)
+            @test s.v == [3.0, 4.0, 6.0] && s.g == [1, 2, 2]
 
-            # MANY rows per unit, stored as CHUNKS. Same call, same columns-plus-parameters — which
-            # is the whole point: the backend is not something the reader has to know.
+            # MANY rows per unit, stored as CHUNKS. Same call, same columns beside the same
+            # parameters — the backend is the one thing the reader never has to know.
             many = Sweep.@sweep(Sweep.paramgrid(g = 1:3), t; submit = false, lazy = true) do p
                 n = 5
                 (; i = collect(1:n), v = float.(1:n) .* p.g)
             end
             for c in BS.sweep_chunks(root, many.run); SlateTask.run_chunk(root, c); end
-            u2 = Sweep.unified(Sweep.refresh!(many))
-            @test keys(u2) == (:g, :i, :v)
-            @test length(u2.i) == 15                        # 3 units × 5 rows, one row space
-            @test u2.g == [1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3]
-            @test u2.v[6:10] == [2.0, 4.0, 6.0, 8.0, 10.0]  # unit g=2's own rows
-
-            # The unit's facts are available but off the default projection: on a unit with many
-            # rows they repeat identically down the whole block.
-            @test !(:ms in keys(u2))
-            uf = Sweep.unified(many; facts = true)
-            @test :ms in keys(uf) && :at in keys(uf) && length(uf.ms) == 15
-
-            # A cap, because the VALUES materialise. Same guard `load` has.
-            @test length(Sweep.unified(many; max_rows = 7).i) <= 7
+            dm = Sweep.refresh!(many).dataset
+            @test length(dm) == 15                           # 3 units × 5 rows, one row space
+            gm = dm[1:15]
+            @test keys(gm) == (:g, :i, :v)
+            @test gm.g == [1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3]
+            @test gm.v[6:10] == [2.0, 4.0, 6.0, 8.0, 10.0]   # unit g=2's own rows
+            @test all(p -> p.backend === :indexed, dm.parts)
+            @test all(p -> p.backend === :inline, di.parts)
 
             # The parameter column reads like any vector but is stored ONCE PER UNIT, not per row.
             # Materialising it would keep one copy per output row, so a few hundred units returning
             # thousands each would hold millions of copies of a number with a few hundred values.
-            @test u2.g isa Sweep.BlockColumn
-            @test length(u2.g) == 15 && length(u2.g.values) == 3
-            @test collect(u2.g) == [1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3]
-            @test u2.g[1] == 1 && u2.g[6] == 2 && u2.g[15] == 3
-            @test_throws BoundsError u2.g[16]
-            @test sum(u2.g) == 30                     # behaves as a vector for ordinary work
-            @test uf.ms isa Sweep.BlockColumn && length(uf.ms.values) == 3
-        end
-    end
-
-    @testset "the sweep as one row per grid point" begin
-        # The view a sweep is usually FOR, and the one the fabric did not have: `r.summaries` gave
-        # the values with the parameters detached, `r.results` gave handles costing a blob read
-        # each. Built from the inline records, so asking for it fetches nothing.
-        mktempdir() do root
-            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
-                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
-            r = Sweep.@sweep(Sweep.paramgrid(a = 1:2, b = [10, 20]), t; submit = false) do p
-                (; snr = float(p.a * p.b), sep = p.a + p.b)
-            end
-            # Before anything lands the ROWS are already the whole grid. The value columns are not
-            # there yet and cannot be: nothing has said what they are called.
-            t0 = r.table
-            @test keys(t0) == (:a, :b, :status, :ms, :ran_on, :at)
-            @test all(ismissing, t0.at)                     # nothing ran, so nothing has a time
-            @test t0.a == [1, 2, 1, 2] && t0.b == [10, 10, 20, 20]
-            @test all(isempty, t0.status)
-
-            # One unit landing names the columns; the other three are holes, not absences.
-            SlateTask.run_chunk(root, first(BS.sweep_chunks(root, r.run)))
-            t1 = Sweep.refresh!(r).table
-            @test keys(t1) == (:a, :b, :snr, :sep, :status, :ms, :ran_on, :at)
-            @test t1.snr[1:2] == [10.0, 20.0] && all(ismissing, t1.snr[3:4])
-            @test t1.a == [1, 2, 1, 2]                      # the grid never changed shape
-
-            for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
-            tb = Sweep.refresh!(r).table
-            @test tb.snr == [10.0, 20.0, 20.0, 40.0]
-            @test tb.sep == [11, 12, 21, 22]
-            @test all(==("ok"), tb.status)
-            @test eltype(tb.snr) == Float64      # narrowed, so a plot or a `sum` over it behaves
+            @test gm.g isa Sweep.BlockColumn
+            @test length(gm.g) == 15 && length(gm.g.values) == 3
+            @test collect(gm.g) == [1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3]
+            @test gm.g[1] == 1 && gm.g[6] == 2 && gm.g[15] == 3
+            @test_throws BoundsError gm.g[16]
+            @test sum(gm.g) == 30                     # behaves as a vector for ordinary work
 
             # A unit that returned a bare number has no field name, so its column is `result`.
             r2 = Sweep.@sweep(Sweep.paramgrid(x = 1:3), t; submit = false) do p; p.x * 5; end
             for c in BS.sweep_chunks(root, r2.run); SlateTask.run_chunk(root, c); end
-            @test Sweep.refresh!(r2).table.result == [5, 10, 15]
+            @test Sweep.refresh!(r2).dataset[1:3].result == [5, 10, 15]
 
             # A returned field colliding with a parameter keeps BOTH rather than overwriting.
             r3 = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p; (; x = p.x * 100); end
             for c in BS.sweep_chunks(root, r3.run); SlateTask.run_chunk(root, c); end
-            t3 = Sweep.refresh!(r3).table
-            @test t3.x == [1, 2] && t3.x_result == [100, 200]
+            g3 = Sweep.refresh!(r3).dataset[1:2]
+            @test g3.x == [1, 2] && g3.x_result == [100, 200]
 
-            # A value too large to record inline contributes NO value column — the honest answer
-            # rather than a column of nothing — while the run's shape and facts still read.
+            # A value with no addressable form and too large to record inline is a HOLE: the grid
+            # keeps its shape, and fetching that unit stays deliberate.
             r4 = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p
                 collect(1:500) .* p.x
             end
             for c in BS.sweep_chunks(root, r4.run); SlateTask.run_chunk(root, c); end
-            t4 = Sweep.refresh!(r4).table
-            @test keys(t4) == (:x, :status, :ms, :ran_on, :at)
-            @test all(==("ok"), t4.status) && t4.x == [1, 2]
+            d4 = Sweep.refresh!(r4).dataset
+            @test isempty(d4.columns) && d4.whole == 2
+            @test all(p -> p.backend === :none, d4.parts)
+            g4 = d4[1:2, (:x, :status)]
+            @test g4.x == [1, 2] && all(==("ok"), g4.status)
             @test r4.results[1].value[] == collect(1:500)     # fetching it stays deliberate
         end
     end
@@ -1622,13 +1618,10 @@ end
             for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
             Sweep.refresh!(r)
             @test keys(r.records[1]) == (:zulu, :alpha, :mike)      # not alphabetical — as written
-            @test keys(r.table) == (:x, :zulu, :alpha, :mike, :status, :ms, :ran_on, :at)
+            @test keys(r.dataset[1:2]) == (:x, :zulu, :alpha, :mike)
             # WHEN each unit ran, not only how long it took — a manifest records it and nothing
             # surfaced it, so "is this yesterday's result?" had no answer short of the store.
-            @test all(x -> x isa Sweep.Dates.DateTime, r.table.at)
-            # In the reader's clock, matching the header. A raw UTC conversion here put the two
-            # hours apart while naming the same event.
-            @test abs((r.table.at[1] - Sweep.Dates.now()).value) < 60_000
+            @test all(x -> x isa Sweep.Dates.DateTime, r.dataset[1:2, (:at,)].at)
             @test occursin(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", String(Sweep.text(r)))
             @test occursin("ago", String(Sweep.text(r)))
         end

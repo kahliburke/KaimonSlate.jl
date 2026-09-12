@@ -207,14 +207,16 @@ const MS = RE.MemoStore
         mktempdir() do root
             t = RE.Sweep.LocalTarget(; root, project = tempdir(), chunk = 1,
                                      payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
-            body = "p -> (; i = collect(1:10))"
+            # Long enough that it cannot ride the manifest — a short vector is recorded inline and
+            # is then addressable whatever the cell asked for, which is not the case under test.
+            body = "p -> (; i = collect(1:500))"
             grid = [(; part = 1), (; part = 2)]
             r = RE.Sweep.run_sweep(t, grid, body; lazy = false)
             for c in RE.BatchSweep.sweep_chunks(root, r.run); ST.run_chunk(root, c); end
             r2 = RE.Sweep.run_sweep(t, grid, body; lazy = true)
             @test r2.run == r.run                                  # same sweep, not a re-key
             ds = RE.Sweep.refresh!(r2).dataset
-            @test RE.Sweep.nparts(ds) == 0 && ds.whole == 2
+            @test all(p -> p.backend === :none, ds.parts) && ds.whole == 2
             # These ran under `lazy = false` on a column-shaped value, so they COULD be addressable
             # and a reset is the answer — which is the one case where the old blanket advice to
             # reset was right.
@@ -825,32 +827,42 @@ const MS = RE.MemoStore
         @test occursin("nothing in this session provides it", e)
     end
 
-    @testset "a whole-stored unit says why it is whole" begin
-        # An empty dataset beside landed units could mean three things and said one: "reset the
-        # sweep to re-store". For a value with nothing to chunk that discards good units and
-        # changes nothing, and it was the most common case of the three.
+    @testset "a unit with no addressable rows says why" begin
+        # A dataset missing landed units could mean three things and said one: "reset the sweep to
+        # re-store". For a value with nothing to chunk that discards good units and changes nothing,
+        # and it was the most common case of the three.
         mktempdir() do root
             t = RE.Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
                                      payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
-            # ONE ROW per unit. A supported shape is a unit returning MANY rows — a NamedTuple of
-            # vectors, a Vector of NamedTuples, a DataFrame — so a single row has nothing to chunk
-            # on its own, and stacking it per unit would write a one-row Arrow blob per unit to
-            # hold what the manifest already carries for free.
-            r = RE.Sweep.@sweep(RE.Sweep.paramgrid(x = 1:2), t; submit = false, lazy = true) do p
+            # ONE ROW per unit is not a hole: it rides the manifest, so it is in the dataset for
+            # free and stacking it would write a one-row Arrow blob per unit to hold the same thing.
+            r0 = RE.Sweep.@sweep(RE.Sweep.paramgrid(x = 1:2), t; submit = false, lazy = true) do p
                 (; snr = float(p.x), sep = p.x)
+            end
+            for c in RE.BatchSweep.sweep_chunks(root, r0.run); ST.run_chunk(root, c); end
+            ds0 = RE.Sweep.refresh!(r0).dataset
+            @test ds0.whole == 0 && length(ds0) == 2
+            @test ds0[1:2].snr == [1.0, 2.0]
+            @test all(p -> p.backend === :inline, ds0.parts)
+
+            # A value with no row or array form, too large to record inline: nothing the reader can
+            # do fixes it, so the message does not suggest one.
+            r = RE.Sweep.@sweep(RE.Sweep.paramgrid(x = 1:2), t; submit = false, lazy = true) do p
+                Set(collect(1:500) .* p.x)
             end
             for c in RE.BatchSweep.sweep_chunks(root, r.run); ST.run_chunk(root, c); end
             ds = RE.Sweep.refresh!(r).dataset
-            @test ds.whole == 2 && RE.Sweep.nparts(ds) == 0
-            @test ds.whole_why == "shape"
+            @test ds.whole == 2 && ds.whole_why == "shape"
+            @test all(p -> p.backend === :none, ds.parts)
             out = sprint(show, MIME"text/plain"(), ds)
-            @test occursin("ONE ROW", out) && occursin("r.table", out)
+            @test occursin("no row or array form", out) && occursin("row.value[]", out)
             @test !occursin("reset", out)                      # would discard good units for nothing
             @test !occursin("nothing has landed yet", out)     # two of them landed
 
-            # Column-shaped, but the cell never asked: reset IS the answer here.
+            # Column-shaped, too large to ride the manifest, and the cell never asked to chunk it:
+            # reset IS the answer here.
             r2 = RE.Sweep.@sweep(RE.Sweep.paramgrid(x = 1:2), t; submit = false) do p
-                (; i = collect(1:5) .* p.x)
+                (; i = collect(1:500) .* p.x)
             end
             for c in RE.BatchSweep.sweep_chunks(root, r2.run); ST.run_chunk(root, c); end
             ds2 = RE.Sweep.refresh!(r2).dataset

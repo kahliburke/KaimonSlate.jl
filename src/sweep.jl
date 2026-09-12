@@ -773,7 +773,7 @@ Base.eltype(::Type{ShardedResult}) = NamedTuple
 # property that mutates on read is a trap.
 const _DERIVED = (:state, :total, :done, :ok, :failed, :pending, :fraction, :percent,
                   :eta, :rate, :idle, :stalled_for, :blocked, :settled,
-                  :results, :records, :summaries, :table, :errors, :hosts, :bytes, :armed, :dataset)
+                  :results, :records, :summaries, :errors, :hosts, :bytes, :armed, :dataset)
 
 function Base.getproperty(r::ShardedResult, s::Symbol)
     s in fieldnames(ShardedResult) && return getfield(r, s)
@@ -798,9 +798,10 @@ function Base.getproperty(r::ShardedResult, s::Symbol)
     s === :stalled_for && return BatchSweep.stalled_for(t)
     # Why nothing more will be submitted ("" = not blocked).
     s === :blocked    && return p.blocked
-    # The addressable output of a `data=lazy` sweep, spanning every unit that has landed. Built
-    # from manifests alone, so asking for it — and asking it for its schema and size — reads none
-    # of the data it describes.
+    # THE view of what the sweep produced: every grid point, its parameters beside its output,
+    # whether that output was chunked into the store or carried inline in the manifest. Built from
+    # manifests alone, so asking for it — and asking it for its schema and size — reads none of the
+    # data it describes.
     s === :dataset    && return _dataset_of(store_root(getfield(r, :target)),
                                             getfield(r, :params), getfield(r, :keys),
                                             getfield(r, :run), source_of(getfield(r, :target)))
@@ -811,8 +812,6 @@ function Base.getproperty(r::ShardedResult, s::Symbol)
     s === :records    && return [row.record for row in rows if row.status == "ok"]
     # The charting figure — the same thing unless `summary =` derived one.
     s === :summaries  && return [row.summary for row in rows if row.status == "ok"]
-    # The grid as one row per point. The view a sweep is usually FOR, and manifest-only like the rest.
-    s === :table      && return table(r)
     s === :errors     && return [row for row in rows if row.status == "error"]
     s === :bytes      && return sum(row.bytes for row in rows; init = 0)
     s === :hosts      && return unique([row.ran_on for row in rows if !isempty(row.ran_on)])
@@ -1426,29 +1425,60 @@ function blob_file(s::SshSource, blob, nbytes::Integer)
     return p
 end
 
-"One unit's contribution to a dataset: its index, and the parameters that produced it."
+# What a unit's facts are before it has run. Its own once it has.
+const _NOFACTS = (; status = "", ms = 0.0, ran_on = "", at = missing)
+
+"""
+    DatasetPart
+
+One unit's contribution to a dataset: its rows, and the parameters and facts that produced them.
+
+`backend` is where the rows come from, and it is the ONLY thing the read path branches on — in one
+place, `part_rows`:
+
+  - `:indexed` — chunked Arrow, a raw array, or an adopted file's group, read through the stored index
+  - `:inline` — the rows rode the manifest record, because they were small enough to
+  - `:none` — no addressable rows: the value was stored whole, the unit failed, or it has not run
+
+That split is about STORAGE. A reader never has to know which one they got, and never has to pick an
+accessor by it.
+"""
 struct DatasetPart
     root::String
+    backend::Symbol
     index::Dict{String,Any}
     params::Any
+    facts::NamedTuple   # status, ms, ran_on, at — one per UNIT, however many rows it produced
     rows::Int
     bytes::Int
     label::String
     src::Any            # LocalSource | SshSource — where this part's bytes are read from
 end
-DatasetPart(root, index, params, rows, bytes, label = "") =
-    DatasetPart(root, index, params, rows, bytes, label, LocalSource(root))
+DatasetPart(root, index, params, rows, bytes, label = "", src = LocalSource(root)) =
+    DatasetPart(root, :indexed, index, params, _NOFACTS, rows, bytes, label, src)
 
 """
     Dataset
 
-A sweep's output, addressable and unmoved. Tables concatenate across units into one row space;
-arrays stay separate parts, since output of differing shape has no single meaning stacked.
+A sweep's output, addressable and unmoved, and the one view of it. Every grid point is a part:
+whatever it returned, carrying the parameters that produced it. Rows concatenate across units into
+one row space; arrays stay separate parts, since output of differing shape has no single meaning
+stacked.
 
     ds                      # schema, parts, rows, size — no I/O
     ds[1:1000]              # a bounded slice
     ds[1:1000, (:t, :e)]    # …and only these columns
     scan(ds; between = (:e, 3, Inf), where = r -> r.ok, limit = 10_000)
+
+A unit that returned one row contributes one; a unit that returned many contributes all of them; a
+unit that has not landed contributes one row of `missing`, so the holes are where the work still is.
+Whether the rows were chunked into the store or carried inline in the manifest is storage, and it
+does not reach the reader.
+
+`status`, `ms`, `ran_on` and `at` are off the default projection, because on a unit that produced
+many rows they repeat identically down the whole block. Name them in `select` to get them:
+
+    ds[1:10, (:snr, :status, :ms)]
 
 A sweep of ADOPTED FILES is a `:group` — a namespace rather than one shape, because a NetCDF or
 HDF5 file holds several named variables. Picking one gives back an ordinary dataset, so nothing
@@ -1460,23 +1490,41 @@ past that point is special:
 struct Dataset
     kind::Symbol                  # :table | :array | :group
     parts::Vector{DatasetPart}
-    columns::Vector{String}
+    pnames::Vector{Symbol}        # parameter columns — constant within each part
+    columns::Vector{String}       # value columns, union over parts in first-seen order
     types::Vector{String}
     starts::Vector{Int}           # cumulative first global row of each part
-    whole::Int                    # landed units stored WHOLE (no index) — not slicable
+    whole::Int                    # landed units with no addressable rows at all
     whole_why::String             # …and why: "shape" | "eager" | "arrow" | ""
     label::String                 # the sweep it came from, for transfer accounting
     purged::Bool                  # the index survived, the bytes did not
 end
 
+# The per-unit facts, as columns. Off the default projection; `select` reaches them by name.
+const _FACT_NAMES = (:status, :ms, :ran_on, :at)
+
+# The name a value column comes back under. A returned field that collides with a parameter keeps
+# BOTH rather than overwriting, so it is suffixed. One rule, in one place, because `scan` has to
+# name the same columns `load` produces.
+_value_name(ds, c) = Symbol(c) in ds.pnames ? Symbol(String(c), "_result") : Symbol(c)
+
 function Dataset(kind::Symbol, parts::Vector{DatasetPart}, whole::Integer = 0,
                  label::AbstractString = "", purged::Bool = false,
                  whole_why::AbstractString = "")
-    cols = isempty(parts) ? String[] : String[String(c) for c in get(parts[1].index, "columns", String[])]
-    typs = isempty(parts) ? String[] : String[String(t) for t in get(parts[1].index, "types", String[])]
+    pnames = Symbol[]
+    for p in parts
+        p.params isa NamedTuple || continue
+        for k in keys(p.params); k in pnames || push!(pnames, k); end
+    end
+    # The union over parts in first-seen order, not the first part's alone: a body with a branch can
+    # report different fields per point, and taking one part's schema would drop the rest silently.
+    cols = String[]; typs = String[]
+    for p in parts, (c, t) in zip(get(p.index, "columns", String[]), get(p.index, "types", String[]))
+        String(c) in cols || (push!(cols, String(c)); push!(typs, String(t)))
+    end
     starts = Int[]; at = 1
     for p in parts; push!(starts, at); at += p.rows; end
-    return Dataset(kind, parts, cols, typs, starts, Int(whole), String(whole_why),
+    return Dataset(kind, parts, pnames, cols, typs, starts, Int(whole), String(whole_why),
                    String(label), purged)
 end
 
@@ -1557,39 +1605,86 @@ function _blob_there(s::SshSource, b)
     return ok && occursin("y", out)
 end
 
-# Assembled from the shard manifests: one part per unit that has landed WITH a dataset index, in
-# grid order. A partial sweep gives a partial dataset rather than an error — the same property that
+# A unit that returned a bare number has no field name to use, so its column is called this.
+const _TABLE_SCALAR = :result
+
+# A record small enough to ride the manifest IS rows, and `_summarize` carries whole vectors — so a
+# unit returning `(; i = 1:5, v = …)` is five rows that happened to be stored inline, not one row
+# holding two vectors. Reading the storage as though it named the shape gave that unit's entire
+# output a single row.
+#
+# `nothing` when there is nothing to make rows out of, which is what puts a unit on the `:none` path.
+function _inline_index(rec)
+    rec === nothing && return nothing
+    nt = rec isa NamedTuple ? rec : NamedTuple{(_TABLE_SCALAR,)}((rec,))
+    isempty(nt) && return nothing
+    vals = values(nt)
+    n = all(v -> v isa AbstractVector, vals) ? length(first(vals)) : 0
+    (n > 0 && all(v -> length(v) == n, vals)) || (n = 0)
+    names = String[String(k) for k in Base.keys(nt)]
+    # Narrowed, so a one-row-per-unit sweep's schema reads `Float64` rather than `Any`.
+    cols = Dict{String,Any}(nm => identity.(n > 0 ? collect(getproperty(nt, Symbol(nm))) :
+                                                    Any[getproperty(nt, Symbol(nm))])
+                            for nm in names)
+    return Dict{String,Any}("kind" => "table", "rows" => max(n, 1), "bytes" => 0,
+                            "columns" => names,
+                            "types" => String[string(eltype(cols[nm])) for nm in names],
+                            "cols" => cols)
+end
+
+# Assembled from the shard manifests: one part per GRID POINT, in grid order, whatever that point
+# produced. A partial sweep gives a partial dataset rather than an error — the same property that
 # lets the rest of the fabric be watched while it runs.
 function _dataset_of(root, params, keys, label = "", src = LocalSource(root))
     parts = DatasetPart[]
     kind = :table
     whole = 0
-    # Why the whole-stored ones are whole. The unit recorded it; the strongest reason wins, because
+    # Why the ones with no rows have none. The unit recorded it; the strongest reason wins, because
     # a shape with nothing to chunk is not fixed by anything the reader can do, while the other two
     # are. Empty for a unit that ran before this was recorded.
     whys = Set{String}()
     for (prm, k) in zip(params, keys)
         m = MemoStore.read_manifest(root, k)
-        m === nothing && continue
-        String(get(m, "status", "")) == "ok" || continue
-        idx = get(m, "dataset", nothing)
-        if !(idx isa AbstractDict)
-            whole += 1
-            push!(whys, String(get(m, "whole", "")))
-            continue
+        facts = m === nothing ? _NOFACTS :
+                (; status = String(get(m, "status", "")),
+                   ms = Float64(get(m, "ms", 0.0)),
+                   ran_on = String(get(m, "ran_on", "")),
+                   # In the READER's clock, like every other time a sweep prints. A manifest records
+                   # unix time, which is UTC, and the cluster that wrote it may be in a third zone
+                   # again — a raw conversion put two views hours apart while naming one event.
+                   at = (t = Int(get(m, "created", 0));
+                         t == 0 ? missing : Dates.unix2datetime(t) + _localoffset()))
+        ok = m !== nothing && facts.status == "ok"
+        idx = ok ? get(m, "dataset", nothing) : nothing
+        if idx isa AbstractDict
+            d = Dict{String,Any}(String(kk) => vv for (kk, vv) in idx)
+            kind = _ds_kind(d)
+            push!(parts, DatasetPart(String(root), :indexed, d, prm, facts,
+                                     Int(get(d, "rows", 0)), Int(get(d, "bytes", 0)),
+                                     String(label), src))
+        elseif (inl = ok ? _inline_index(_record_of(m)) : nothing) !== nothing
+            push!(parts, DatasetPart(String(root), :inline, inl, prm, facts,
+                                     Int(inl["rows"]), 0, String(label), src))
+        else
+            # No addressable rows: stored whole, failed, or not run. Still a part, so the grid keeps
+            # its shape and a hole sits exactly where the work is.
+            ok && (whole += 1; push!(whys, String(get(m, "whole", ""))))
+            push!(parts, DatasetPart(String(root), :none, Dict{String,Any}(), prm, facts,
+                                     1, 0, String(label), src))
         end
-        d = Dict{String,Any}(String(kk) => vv for (kk, vv) in idx)
-        kind = _ds_kind(d)
-        push!(parts, DatasetPart(String(root), d, prm, Int(get(d, "rows", 0)),
-                                 Int(get(d, "bytes", 0)), String(label), src))
     end
+    # An array, or an adopted file's namespace, has no row space — so the placeholders that keep a
+    # table's holes visible mean nothing there. Those datasets are their landed parts and no more.
+    kind === :table || filter!(p -> p.backend === :indexed, parts)
     # The store had nothing to say. Either this sweep never ran, or its scratch has been purged and
     # the manifests went with it — and the difference matters, because in the second case we still
     # know exactly what the dataset was.
-    if isempty(parts) && whole == 0 && !isempty(label)
+    if !any(p -> p.backend !== :none, parts) && whole == 0 && !isempty(label)
         remembered = recall_index(label)
         if remembered !== nothing
             kind = _ds_kind(remembered)
+            # What the run HELD, in place of the placeholders standing in for it.
+            empty!(parts)
             for pd in get(remembered, "parts", Any[])
                 pd isa AbstractDict || continue
                 idx = Dict{String,Any}(String(k) => v for (k, v) in get(pd, "index", Dict()))
@@ -1602,7 +1697,9 @@ function _dataset_of(root, params, keys, label = "", src = LocalSource(root))
             return Dataset(kind, parts, whole, label, gone)
         end
     end
-    remember_index!(label, root, parts, kind)
+    # Only the INDEXED parts are worth outliving the store: inline rows live in the manifests, which
+    # the purge takes with the blobs, and a placeholder describes nothing.
+    remember_index!(label, root, filter(p -> p.backend === :indexed, parts), kind)
     why = "shape" in whys ? "shape" : "arrow" in whys ? "arrow" : "eager" in whys ? "eager" : ""
     return Dataset(kind, parts, whole, label, false, why)
 end
@@ -1613,14 +1710,19 @@ databytes(ds::Dataset) = sum(p -> p.bytes, ds.parts; init = 0)
 
 function Base.show(io::IO, ::MIME"text/plain", ds::Dataset)
     n = length(ds)
+    # Two different absences: a part with nothing to SHOW (it landed, but its value has no rows) is
+    # not a part that has not RUN, and calling both "not landed" reported finished work as missing.
+    shown = count(p -> p.backend !== :none, ds.parts)
+    pending = ds.purged ? 0 : count(p -> isempty(p.facts.status), ds.parts)
     println(io, "Dataset — ", nparts(ds), " part", nparts(ds) == 1 ? "" : "s", ", ",
             ds.kind === :table ? "$(n) rows" :
             ds.kind === :array ? "$(n) elements" :
             "$(length(get(isempty(ds.parts) ? Dict() : ds.parts[1].index, "vars", Any[]))) variables",
-            ", ", _bytes(databytes(ds)))
-    if isempty(ds.parts)
-        # NOT "nothing has landed yet": units may well have landed and stored whole, which is a
-        # different fact and has a different answer. `ds.whole` says which.
+            ", ", _bytes(databytes(ds)),
+            (ds.kind === :table && pending > 0) ? " · $(pending) still to run" : "")
+    if shown == 0
+        # NOT unconditionally "nothing has landed yet": units may well have landed with nothing
+        # addressable to show, which is a different fact with a different answer. `ds.whole` says so.
         ds.whole == 0 && println(io, "   nothing has landed yet")
     elseif ds.kind === :group
         for v in get(ds.parts[1].index, "vars", Any[])
@@ -1637,9 +1739,16 @@ function Base.show(io::IO, ::MIME"text/plain", ds::Dataset)
         println(io, "   from ", String(get(ds.parts[1].index, "source", "")),
                 " · keys(ds) for the names · ds[:name] for one variable")
     elseif ds.kind === :table
+        for p in ds.pnames
+            println(io, "   ", rpad(String(p), 18), "parameter")
+        end
         for (c, t) in zip(ds.columns, ds.types)
             println(io, "   ", rpad(c, 18), t)
         end
+        # The value columns cannot appear before the first unit reports: nothing until then knows
+        # what they are called. Saying so beats a dataset that looks like it holds only parameters.
+        isempty(ds.columns) &&
+            println(io, "   (no value columns yet — no unit has said what they are called)")
         println(io, "   ds[1:1000] for rows · scan(ds; …) to filter · query_cost(ds) to price it")
     else
         d = get(ds.parts[1].index, "dims", Int[])
@@ -1650,16 +1759,15 @@ function Base.show(io::IO, ::MIME"text/plain", ds::Dataset)
     # they just cannot be sliced. Saying so beats a dataset that is quietly missing most of itself.
     ds.purged && println(io, "   ⚠ the data is gone — this store was purged. The index is kept, so ",
                          "the schema and counts above are what it HELD; re-run the sweep to rebuild it.")
-    # What to do about it depends entirely on WHY, and the old message gave one answer for three
-    # situations. "Reset to re-store" is right for a unit that ran before the cell asked; for a
-    # value with no addressable form it discards good units and changes nothing.
+    # What to do about it depends entirely on WHY, and one message for three situations gave the
+    # wrong answer twice. "Reset to re-store" is right for a unit that ran before the cell asked;
+    # for a value with no addressable form it discards good units and changes nothing.
     if ds.whole > 0
         n = string(ds.whole, " finished unit", ds.whole == 1 ? "" : "s")
         println(io, "   ",
             ds.whole_why == "shape" ?
-                string("ℹ ", n, " returned ONE ROW each, which is recorded in the manifest ",
-                       "rather than chunked. `r.table` is that view, and it costs no reads. ",
-                       "A dataset is for a unit returning MANY rows or an array.") :
+                string("ℹ ", n, " returned something with no row or array form, too large to ",
+                       "record inline — so it is here as a hole. `row.value[]` fetches one.") :
             ds.whole_why == "arrow" ?
                 string("⚠ ", n, " are column-shaped but Arrow was not available where they ran, ",
                        "so they stored whole. Add Arrow to the task environment, then reset.") :
@@ -1706,13 +1814,30 @@ Read a bounded row range. Only the chunks covering `rows` are opened, and only t
 Base.getindex(ds::Dataset, rows::AbstractUnitRange, cols = nothing) = load(ds, rows; select = cols)
 
 """
+    part_rows(p, rows; select = nothing) -> NamedTuple of columns
+
+One part's own rows. The ONLY place a dataset's storage backend is visible — everything above this
+works in rows and column names.
+"""
+function part_rows(p::DatasetPart, rows::AbstractUnitRange; select = nothing)
+    p.backend === :indexed &&
+        return SlateTask.dataset_rows(p.root, p.index, rows; select = select,
+                                      blobpath = (h, n) -> blob_file(p.src, h, n))
+    p.backend === :inline || return NamedTuple()
+    cols = p.index["cols"]
+    want = select === nothing ? String[String(c) for c in p.index["columns"]] :
+           String[String(s) for s in select if haskey(cols, String(s))]
+    return NamedTuple{Tuple(Symbol.(want))}(Tuple(cols[c][rows] for c in want))
+end
+
+"""
     load(ds, rows; select = nothing, max_rows = DATASET_ROW_CAP) -> NamedTuple of columns
 
 The read behind `ds[rows]`, with the cap exposed. Raising `max_rows` is how you ask for more than a
 look — deliberately, at one call site, with the number written down.
 """
 function load(ds::Dataset, rows::AbstractUnitRange; select = nothing,
-              max_rows::Integer = DATASET_ROW_CAP)
+              max_rows::Integer = DATASET_ROW_CAP, record::Bool = true)
     ds.purged && error("this dataset's data has been purged from the store — the index survived, " *
                        "so the schema and counts are still readable, but the bytes are gone. " *
                        "Re-run the sweep to rebuild it.")
@@ -1728,24 +1853,61 @@ function load(ds::Dataset, rows::AbstractUnitRange; select = nothing,
         error("$(length(rows)) rows is over the $(max_rows)-row slice cap — narrow the range, " *
               "use `scan(ds; limit = …)` to stream a filtered subset, or raise it deliberately " *
               "with `Sweep.load(ds, rows; max_rows = …)`")
-    cols = select
-    acc = nothing
+    want = select === nothing ? nothing : Symbol[Symbol(s) for s in select]
+    if want !== nothing
+        known = Set{Symbol}([ds.pnames; Symbol.(ds.columns); collect(_FACT_NAMES)])
+        bad = Symbol[w for w in want if !(w in known)]
+        isempty(bad) ||
+            error("no column " * join(bad, ", ") * " here — this dataset has " *
+                  join([String.(ds.pnames); ds.columns], ", ") *
+                  ", and the facts " * join(String.(_FACT_NAMES), ", "))
+    end
+    pwant = want === nothing ? ds.pnames : Symbol[k for k in ds.pnames if k in want]
+    vwant = want === nothing ? Symbol.(ds.columns) :
+            Symbol[Symbol(c) for c in ds.columns if Symbol(c) in want]
+    # The facts repeat down a unit's whole block, so they are off the projection until named.
+    fwant = want === nothing ? Symbol[] : Symbol[k for k in _FACT_NAMES if k in want]
+
+    blocks = Any[]
     bytes = 0; opened = 0; t0 = time()
     for (i, local_rows) in _ds_span(ds, rows)
         p = ds.parts[i]
         # Charged BEFORE the read, off the index: these are the chunks the slice resolves to, so
         # the figure is what the query costs whether the bytes come off a mmap or a wire.
-        for (pos, _, _, _) in SlateTask.table_chunks(p.index, local_rows)
-            opened += 1; bytes += Int(p.index["chunks"][pos]["bytes"])
+        if p.backend === :indexed
+            for (pos, _, _, _) in SlateTask.table_chunks(p.index, local_rows)
+                opened += 1; bytes += Int(p.index["chunks"][pos]["bytes"])
+            end
         end
-        part = SlateTask.dataset_rows(p.root, p.index, local_rows; select = cols,
-                                      blobpath = (h, n) -> blob_file(p.src, h, n))
-        acc = acc === nothing ? map(collect, part) :
-              NamedTuple{keys(acc)}(Tuple(append!(acc[k], part[k]) for k in keys(acc)))
+        push!(blocks, (length(local_rows), p,
+                       part_rows(p, local_rows; select = want === nothing ? nothing : String.(vwant))))
     end
-    _record!(ds.label, isempty(ds.parts) ? "" : ds.parts[1].root, :rows, bytes, opened,
-             (time() - t0) * 1000)
-    return acc === nothing ? NamedTuple() : acc
+    # `scan` calls this per block and keeps its own totals, so it would otherwise charge a sweep
+    # one accounting entry per chunk.
+    record && _record!(ds.label, isempty(ds.parts) ? "" : ds.parts[1].root, :rows, bytes, opened,
+                       (time() - t0) * 1000)
+
+    lens = Int[b[1] for b in blocks]
+    names = Symbol[]; out = Any[]
+    # Parameters and facts are constant within a unit, so they are stored once per unit — a few
+    # hundred units returning thousands of rows each would otherwise pay millions of copies of a
+    # number that took a few hundred values. See `BlockColumn`.
+    for k in pwant
+        push!(names, k)
+        push!(out, _blockcol(Any[b[2].params isa NamedTuple && hasproperty(b[2].params, k) ?
+                                 getproperty(b[2].params, k) : missing for b in blocks], lens))
+    end
+    # The values genuinely differ per row. A unit that produced none is `missing` across its block.
+    for c in vwant
+        push!(names, _value_name(ds, c))
+        push!(out, _narrow(reduce(vcat, Any[haskey(b[3], c) ? collect(b[3][c]) :
+                                            fill(missing, b[1]) for b in blocks]; init = Any[])))
+    end
+    for k in fwant
+        push!(names, k)
+        push!(out, _blockcol(Any[getproperty(b[2].facts, k) for b in blocks], lens))
+    end
+    return NamedTuple{Tuple(names)}(Tuple(out))
 end
 Base.getindex(ds::Dataset, rows::AbstractUnitRange, col::Symbol) = getindex(ds, rows, (col,))[col]
 
@@ -1788,8 +1950,9 @@ function Base.getindex(ds::Dataset, var::Symbol)
         v = _group_var(p.index, name)
         v === nothing && continue
         idx = Dict{String,Any}(String(k) => vv for (k, vv) in v["index"])
-        push!(parts, DatasetPart(p.root, idx, p.params, Int(get(idx, "rows", 0)),
-                                 Int(get(idx, "bytes", 0)), p.label, p.src))
+        push!(parts, DatasetPart(p.root, :indexed, idx, p.params, p.facts,
+                                 Int(get(idx, "rows", 0)), Int(get(idx, "bytes", 0)),
+                                 p.label, p.src))
     end
     isempty(parts) && error("no variable `$(name)` here — this dataset holds " *
                             (isempty(keys(ds)) ? "none" : join(keys(ds), ", ")))
@@ -1879,7 +2042,11 @@ numbers, that the reader asks before it opens anything.
 function query_cost(ds::Dataset; between = nothing)
     total = 0; kept = 0; bytes = 0
     for p in ds.parts
+        # Only stored parts have anything to open: inline rows came with the manifest, and a hole
+        # has nothing behind it.
+        p.backend === :indexed || continue
         cs = get(p.index, "chunks", Any[])
+        isempty(cs) && continue
         total += length(cs)
         keep = between === nothing ? (1:length(cs)) :
                SlateTask.prune_chunks(p.index, String(between[1]),
@@ -1901,47 +2068,71 @@ Stream a dataset and keep the rows that match, stopping at `limit`.
 cannot contain a match are never opened. `where` is an ordinary predicate over a row NamedTuple,
 applied to what survives — it cannot be pushed down, so it costs a read of the chunks that reach it.
 """
+# The row ranges a scan walks, and what opening each one costs: one per chunk for an indexed part,
+# pruned by `between` wherever the index can answer it, and one whole block for any other part.
+function _scan_blocks(ds::Dataset, between)
+    out = Tuple{UnitRange{Int},Int,Int}[]
+    for (i, p) in enumerate(ds.parts)
+        base = ds.starts[i]
+        if p.backend !== :indexed || !haskey(p.index, "chunks")
+            p.rows > 0 && push!(out, (base:(base + p.rows - 1), 0, 0))
+            continue
+        end
+        keepset = between === nothing ? nothing :
+                  Set(SlateTask.prune_chunks(p.index, String(between[1]),
+                                             Float64(between[2]), Float64(between[3])))
+        at = 0
+        for (pos, c) in enumerate(p.index["chunks"])
+            nrows = Int(c["rows"])
+            (keepset === nothing || pos in keepset) &&
+                push!(out, ((base + at):(base + at + nrows - 1), Int(c["bytes"]), 1))
+            at += nrows
+        end
+    end
+    return out
+end
+
 function scan(ds::Dataset; select = nothing, between = nothing, where = nothing,
               limit::Integer = 10_000)
     ds.kind === :table || error("scan works on table datasets")
-    want = select === nothing ? ds.columns : String[String(s) for s in select]
+    # The names a row comes back under, which is what `load` produces — so a value column colliding
+    # with a parameter is `x_result` here too, rather than `x` twice.
+    want = if select === nothing
+        ns = copy(ds.pnames)
+        for c in ds.columns; push!(ns, _value_name(ds, c)); end
+        ns
+    else
+        Symbol[Symbol(s) for s in select]
+    end
     # A `where` needs every column it might look at, so a projection is only safe alongside one
-    # when the caller has said which columns matter.
-    readcols = where === nothing ? want : ds.columns
+    # when the caller has said which columns matter. A `between` needs its own column either way.
+    readcols = (select === nothing || where !== nothing) ? nothing :
+               unique(Symbol[want; between === nothing ? Symbol[] : Symbol[Symbol(between[1])]])
     keep = [Any[] for _ in want]
     got = 0
     bytes = 0; opened = 0; t0 = time()
-    for p in ds.parts
-        chunks = between === nothing ? nothing :
-                 Set(SlateTask.prune_chunks(p.index, String(between[1]),
-                                            Float64(between[2]), Float64(between[3])))
-        at = 1
-        for (pos, c) in enumerate(get(p.index, "chunks", Any[]))
-            nrows = Int(c["rows"])
-            if chunks === nothing || pos in chunks
-                opened += 1; bytes += Int(c["bytes"])
-                blk = SlateTask.dataset_rows(p.root, p.index, at:(at + nrows - 1);
-                                             select = readcols,
-                                             blobpath = (h, n) -> blob_file(p.src, h, n))
-                syms = keys(blk)
-                for r in 1:nrows
-                    row = NamedTuple{syms}(Tuple(blk[s][r] for s in syms))
-                    between === nothing || let v = row[Symbol(between[1])]
-                        (v >= between[2] && v <= between[3]) || continue
-                    end
-                    where === nothing || Base.invokelatest(where, row) || continue
-                    for (j, nm) in enumerate(want); push!(keep[j], row[Symbol(nm)]); end
-                    got += 1
-                    got >= limit && @goto done
-                end
+    for (rng, b, o) in _scan_blocks(ds, between)
+        bytes += b; opened += o
+        blk = load(ds, rng; select = readcols, record = false)
+        isempty(blk) && continue
+        syms = keys(blk)
+        for r in 1:length(rng)
+            row = NamedTuple{syms}(Tuple(blk[s][r] for s in syms))
+            # A hole is a row whose values are all `missing`, so both predicates have to survive one:
+            # comparing against `missing` gives `missing`, which is neither a match nor a boolean.
+            between === nothing || let v = row[Symbol(between[1])]
+                (v !== missing && v >= between[2] && v <= between[3]) || continue
             end
-            at += nrows
+            where === nothing || Base.invokelatest(where, row) === true || continue
+            for (j, nm) in enumerate(want); push!(keep[j], row[nm]); end
+            got += 1
+            got >= limit && @goto done
         end
     end
     @label done
     _record!(ds.label, isempty(ds.parts) ? "" : ds.parts[1].root, :rows, bytes, opened,
              (time() - t0) * 1000)
-    return NamedTuple{Tuple(Symbol.(want))}(Tuple(isempty(k) ? k : identity.(k) for k in keep))
+    return NamedTuple{Tuple(want)}(Tuple(isempty(k) ? k : identity.(k) for k in keep))
 end
 
 _bytes(n::Integer) = n < 1024 ? "$(n) B" :
@@ -2032,113 +2223,11 @@ function _rows(root, params, keys, src = LocalSource(root))
     return rows
 end
 
-# ── The grid, as a table ─────────────────────────────────────────────────────────────────────
-# A sweep runs a body once per point of a grid and gets one thing back each time. The obvious view
-# of that is a table — a row per point, the parameters beside what came back — and it was the one
-# view the fabric did not have. `r.summaries` gave the values with the parameters detached;
-# `r.results` gave handles that cost a blob read each. Neither is the question anyone asks first.
-#
-# Built from `record`, so it is manifest-only: the same cost at four units and four million, and
-# never a route to "fetch everything" by accident.
-
-# A unit that returned a bare number has no field name to use, so its column is called this.
-const _TABLE_SCALAR = :result
-
-_table_cell(rec, k) =
-    rec === nothing ? missing :
-    rec isa NamedTuple ? (hasproperty(rec, k) ? getproperty(rec, k) : missing) :
-    (k === _TABLE_SCALAR ? rec : missing)
+# ── Columns ──────────────────────────────────────────────────────────────────────────────────
 
 # `Any[…]` → the narrowest element type that holds it, so a column of numbers is a numeric column
 # and a plot or a `sum` over it behaves.
 _narrow(col) = identity.(col)
-
-"""
-    table(r) -> NamedTuple of columns   (also `r.table`)
-
-The sweep as one row per grid point: the parameters, then whatever each unit returned, then
-`status`, `ms` and `ran_on`.
-
-The ROWS are the whole grid from the start — a point that has not landed is `missing` in the value
-columns, so the holes are where the work still is. The value COLUMNS cannot appear before the first
-unit reports, because nothing until then knows what they are called; a sweep with nothing landed is
-its parameters and `status`. A sweep whose values are all too large to record inline keeps that
-shape throughout, which is the honest answer rather than a column of nothing.
-
-Read from the manifests alone — asking for it never fetches a result. A unit whose value was too
-large to record inline shows `missing`; `row.value[]` is how that one is fetched, deliberately.
-
-A returned field that collides with a parameter name keeps both: the value column is suffixed
-`_result` rather than overwriting the parameter.
-"""
-function table(r::ShardedResult)
-    rows = getfield(r, :rows)
-    isempty(rows) && return NamedTuple()
-    pk = rows[1].params isa NamedTuple ? Symbol[k for k in keys(rows[1].params)] : Symbol[]
-    # Union over units in first-seen order, not just the first unit's: a body with a branch can
-    # report different fields per point, and dropping the later ones would lose data silently.
-    rk = Symbol[]
-    scalar = false
-    for row in rows
-        row.record === nothing && continue
-        if row.record isa NamedTuple
-            for k in keys(row.record); k in rk || push!(rk, k); end
-        else
-            scalar = true
-        end
-    end
-    scalar && !(_TABLE_SCALAR in rk) && pushfirst!(rk, _TABLE_SCALAR)
-    names = Symbol[]; cols = Any[]
-    for k in pk
-        push!(names, k)
-        push!(cols, _narrow(Any[row.params isa NamedTuple && hasproperty(row.params, k) ?
-                                getproperty(row.params, k) : missing for row in rows]))
-    end
-    for k in rk
-        push!(names, k in pk ? Symbol(k, "_result") : k)
-        push!(cols, _narrow(Any[_table_cell(row.record, k) for row in rows]))
-    end
-    push!(names, :status); push!(cols, String[row.status for row in rows])
-    push!(names, :ms);     push!(cols, Float64[row.ms for row in rows])
-    push!(names, :ran_on); push!(cols, String[row.ran_on for row in rows])
-    # WHEN, not just how long. A unit that has not run has no time rather than a 1970 one.
-    #
-    # In the READER's clock, like every other time this prints. A manifest records unix time, which
-    # is UTC, and the cluster that wrote it may be in a third zone again — so a raw conversion put
-    # the header and this column hours apart while naming the same event.
-    push!(names, :at)
-    push!(cols, _narrow(Any[row.at == 0 ? missing :
-                            Dates.unix2datetime(row.at) + _localoffset() for row in rows]))
-    return NamedTuple{Tuple(names)}(Tuple(cols))
-end
-
-# ── PROTOTYPE: one view over everything a sweep produced ─────────────────────────────────────
-# Built over the existing accessors rather than replacing them, so it can be felt and thrown away.
-# If it holds up it replaces both `table` and the row side of `dataset`, and the read path moves
-# into `Dataset` itself — parts that are INLINE (rows from a manifest record) beside parts that are
-# INDEXED (Arrow chunks), so a slice works the same over either.
-#
-# The confusion it exists to remove: today a reader has to know whether their units' output was
-# chunked or inlined before they know which accessor to reach for, and that is a fact about storage
-# that no one should have to carry.
-
-_unified_key(p) = string(p)
-
-# How many ROWS an inline record is, and its columns.
-#
-# The lesson the prototype learned the hard way: SHAPE is not STORAGE. A record rides the manifest
-# because it is small, and `_summarize` carries vectors up to a bounded length — so a unit returning
-# `(; i = collect(1:5), v = …)` is five rows that happen to be stored inline, not one row holding
-# two vectors. Reading the storage as though it named the shape gave a unit's whole output one row.
-function _record_block(rec::NamedTuple)
-    vals = values(rec)
-    if !isempty(vals) && all(v -> v isa AbstractVector, vals)
-        n = length(first(vals))
-        all(v -> length(v) == n, vals) &&
-            return (n, Dict{Symbol,Any}(k => collect(getproperty(rec, k)) for k in keys(rec)))
-    end
-    return (1, Dict{Symbol,Any}(k => Any[getproperty(rec, k)] for k in keys(rec)))
-end
 
 """
     BlockColumn
@@ -2169,96 +2258,6 @@ function _blockcol(vals::AbstractVector, lens::AbstractVector{Int})
     stops = Int[]; at = 0
     for n in lens; at += n; push!(stops, at); end
     return BlockColumn{eltype(v)}(collect(v), stops)
-end
-
-"""
-    unified(r; max_rows = 10_000, facts = false) -> NamedTuple of columns
-
-PROTOTYPE. The sweep as ONE table: every output row, carrying the parameters that produced it.
-
-A unit that returned one row contributes one; a unit that returned many contributes all of them,
-each with that unit's parameters broadcast onto it. A unit whose output is an array or an adopted
-file contributes one row naming what it holds, since it has no rows of its own.
-
-`facts = true` adds `status`, `ms`, `ran_on` and `at`. They are off by default because on a unit
-that produced many rows they repeat identically down the whole block, and a reader looking at
-`ds[1:10]` wants the science first.
-"""
-function unified(r::ShardedResult; max_rows::Integer = 10_000, facts::Bool = false)
-    rows = getfield(r, :rows)
-    isempty(rows) && return NamedTuple()
-    parts = Dict{String,DatasetPart}()
-    for p in (try; r.dataset.parts; catch; DatasetPart[]; end)
-        parts[_unified_key(p.params)] = p
-    end
-
-    pk = rows[1].params isa NamedTuple ? Symbol[k for k in keys(rows[1].params)] : Symbol[]
-    vnames = Symbol[]                       # value columns, in first-seen order
-    blocks = Vector{Any}()                  # (nrows, params, Dict{Symbol,Vector}, factrow)
-
-    total = 0
-    for row in rows
-        total >= max_rows && break
-        cols = Dict{Symbol,Any}()
-        n = 1
-        if row.record isa NamedTuple
-            n, cols = _record_block(row.record)
-            n = min(n, max_rows - total)
-            # The RECORD's order, not the Dict's — a Dict iterates by hash, which would make the
-            # column order of a results table depend on nothing the author can see.
-            for k in keys(row.record)
-                k in vnames || push!(vnames, k)
-                length(cols[k]) > n && (cols[k] = cols[k][1:n])
-            end
-        elseif row.record !== nothing
-            _TABLE_SCALAR in vnames || push!(vnames, _TABLE_SCALAR)
-            cols[_TABLE_SCALAR] = Any[row.record]
-        else
-            p = get(parts, _unified_key(row.params), nothing)
-            if p !== nothing && _ds_kind(p.index) === :table && p.rows > 0
-                take = min(p.rows, max_rows - total)
-                got = SlateTask.dataset_rows(p.root, p.index, 1:take;
-                                             blobpath = (h, nb) -> blob_file(p.src, h, nb))
-                for k in keys(got)
-                    k in vnames || push!(vnames, k)
-                    cols[k] = collect(got[k])
-                end
-                n = take
-            elseif p !== nothing
-                # An array or an adopted group: no rows of its own, so it names what it holds.
-                _TABLE_SCALAR in vnames || push!(vnames, _TABLE_SCALAR)
-                cols[_TABLE_SCALAR] = Any[sprint(show, p)]
-                n = 1
-            end
-        end
-        push!(blocks, (n, row.params, cols,
-                       (; row.status, row.ms, row.ran_on,
-                          at = row.at == 0 ? missing :
-                               Dates.unix2datetime(row.at) + _localoffset())))
-        total += n
-    end
-
-    lens = Int[b[1] for b in blocks]
-    names = Symbol[]; out = Any[]
-    # Parameters and facts are constant per unit, so they are stored per unit — see `BlockColumn`.
-    for k in pk
-        push!(names, k)
-        push!(out, _blockcol([b[2] isa NamedTuple && hasproperty(b[2], k) ?
-                              getproperty(b[2], k) : missing for b in blocks], lens))
-    end
-    # The VALUES genuinely differ per row, so these are the real ones.
-    for k in vnames
-        push!(names, k in pk ? Symbol(k, "_result") : k)
-        push!(out, _narrow(reduce(vcat, [haskey(b[3], k) ? b[3][k] : fill(missing, b[1])
-                                         for b in blocks]; init = Any[])))
-    end
-    if facts
-        for k in (:status, :ms, :ran_on, :at)
-            push!(names, k)
-            push!(out, _blockcol([getproperty(b[4], k) for b in blocks], lens))
-        end
-    end
-    return NamedTuple{Tuple(names)}(Tuple(out))
 end
 
 # What one unit's stored result IS, as a short string: the content hashes of whatever it wrote,
@@ -2715,7 +2714,7 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     out["data"] = _data_html(ds)
     # …and the same two figures as NUMBERS, for the notebook-level pill. The card can render HTML;
     # the topbar panel aggregates across sweeps and needs to add them up.
-    if nparts(ds) > 0
+    if any(p -> p.backend === :indexed, ds.parts)
         out["dsbytes"] = databytes(ds)
         out["dsread"] = transferred(run)
         out["dskind"] = String(ds.kind)
@@ -3054,15 +3053,16 @@ function _unit_grid(io, r::ShardedResult)
                            "each tile ≈ ", per, " units</div>")
 end
 
-# For a `data=lazy` sweep: how much output is sitting out there, and how much of it this session has
-# actually pulled in. "" for an ordinary sweep, where the result came back whole and there is
-# nothing to distinguish. Built from the indices, so showing it reads none of the data.
+# How much output is sitting out there, and how much of it this session has actually pulled in.
+# Only for output that LIVES IN THE STORE: a sweep whose rows ride the manifests has no transfer to
+# account for, so there is nothing here to say. Built from the indices, so showing it reads no data.
 function _data_html(ds::Dataset)
-    nparts(ds) == 0 && return ""
+    stored = count(p -> p.backend === :indexed, ds.parts)
+    stored == 0 && return ""
     tot = databytes(ds)
     got = transferred(ds.label)
     x = transfers(; label = ds.label)
-    bits = [string(nparts(ds), " part", nparts(ds) == 1 ? "" : "s"),
+    bits = [string(stored, " part", stored == 1 ? "" : "s"),
             ds.kind === :table ? string(length(ds), " rows") : string(length(ds), " elements"),
             _bytes(tot) * " stored"]
     push!(bits, got == 0 ? "nothing read yet" :
@@ -3730,11 +3730,26 @@ const _TEXT_ROWS = 12
 
 # The results table, aligned, first rows only. Manifest-only like everything else here.
 function _text_results(io, r::ShardedResult)
-    tb = try; table(r); catch; NamedTuple(); end
+    # The row space can be enormous and this prints a dozen rows, so the head is bounded at the call
+    # rather than materialised and then cut.
+    ds = try; r.dataset; catch; nothing; end
+    ds === nothing && return nothing
+    n = ds.kind === :table ? length(ds) : nparts(ds)
+    n == 0 && return nothing
+    shown = min(n, _TEXT_ROWS)
+    tb = if ds.kind === :table
+        try; ds[1:shown, (ds.pnames..., Symbol.(ds.columns)..., :status)]; catch; NamedTuple(); end
+    else
+        # No row space — each unit is an array or an adopted file. The grid still reads: the
+        # parameters beside how that unit went.
+        ps = ds.parts[1:shown]
+        cs = Any[_narrow(Any[p.params isa NamedTuple && hasproperty(p.params, k) ?
+                             getproperty(p.params, k) : missing for p in ps]) for k in ds.pnames]
+        push!(cs, String[p.facts.status for p in ps])
+        NamedTuple{(ds.pnames..., :status)}(Tuple(cs))
+    end
     (isempty(tb) || isempty(first(tb))) && return nothing
     cols = collect(keys(tb))
-    n = length(first(tb))
-    shown = min(n, _TEXT_ROWS)
     # A cell is one value, not a place for a paragraph: a unit can record a short string, and one
     # long one would otherwise set the width of the whole column.
     cell(v) = v === missing ? "—" :
@@ -3748,7 +3763,7 @@ function _text_results(io, r::ShardedResult)
     for row in body
         println(io, "   ", join((rpad(row[j], w[j]) for j in eachindex(cols)), "  "))
     end
-    n > shown && println(io, "   … and ", n - shown, " more rows — `r.table` for all of them")
+    n > shown && println(io, "   … and ", n - shown, " more rows — `r.dataset[1:", n, "]` for them")
     return nothing
 end
 
@@ -3774,7 +3789,7 @@ Base.length(x::SweepReport) = length(x.text)
 """
     text(r) -> SweepReport
 
-The sweep as plain text: state, progress, timing, and the first rows of `r.table`.
+The sweep as plain text: state, progress, timing, and the first rows of `r.dataset`.
 
 The same rendering `show` produces for a REPL, reachable on demand — in a notebook the HTML card
 wins the MIME negotiation, so the text form has no way to the screen on its own.
