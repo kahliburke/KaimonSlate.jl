@@ -234,7 +234,59 @@ hitting that is usually not the author. In a static HTML export, where there is 
         with `slate.surface(notebook, plotcell, \"a,b\")` (layout grammar: `a,b`=row, `[a,b],c`=columns;
         `\"\"` clears). Presentation only — no re-eval. Prefer surfacing so a reader tweaks the knobs
         next to the figure they drive."""),
-    SlateApiEntry("Slider", "Widgets", "A range slider.", ["number", "range", "drag"],
+    SlateApiEntry("bind_observable", "Widgets",
+"A control as a live Observable — update a figure IN PLACE instead of rebuilding it.",
+["makie", "observable", "live", "no flash", "in place", "lift", "wglmakie", "figure", "recompute"],
+"bind_observable(:name) -> Observable",
+"""A control's value as an `Observable`, for a cell that wants to CONSUME the control rather than
+be recomputed by it.
+
+Reading `decay` makes a cell a READER: every change restales it, so the whole cell runs again and
+its figure is rebuilt — for a WGLMakie figure that means re-inlining the scene and taking a fresh
+Bonito session, which is the visible flash. Reading `bind_observable(:decay)` instead names the
+control as quoted DATA, so the cell is not a reader and never restales; the control pushes the new
+value in and Makie updates the scene in place, exactly as a native `SliderGrid` would.
+
+```julia
+@bind decay Slider(0.0:0.05:1.5)
+
+let                                    # never restales — no @bind variable appears here
+    d = bind_observable(:decay)
+    lines!(ax, t, lift(v -> @.(exp(-v * t)), d))
+    fig
+end
+```
+
+The Observable is CELL-LOCAL: a fresh one per run, dropped when the cell re-runs. That is what
+makes an ordinary `lift` on top of it safe — it dies with the cell, so nothing accumulates. A
+notebook-lifetime Observable would keep every derived value its readers ever attached, and a
+figure cell re-runs on every browser connect, so those pile up holding whole Figures.
+
+Note the cell no longer re-prints either: its text output is a snapshot of the one run it did. The
+live value is visible in something that re-renders on change — a figure — not in a printed value.
+See also `hidden` for drawing the control somewhere other than the notebook."""),
+
+SlateApiEntry("hidden", "Widgets",
+"Mark a control as drawn ELSEWHERE — no widget in the notebook.",
+["hide", "no widget", "chrome", "native", "in figure", "bonito", "suppress", "duplicate"],
+"@bind name hidden(Widget(…))",
+"""Mark a control as rendered outside the notebook, so Slate draws no chrome for it — no row in
+its `@bind` cell, no entry in a surfaced strip, and the 🎛 picker does not offer it.
+
+It stays a completely normal control otherwise: it holds a value, coerces it, fires `@onchange`,
+feeds `bind_observable`, and is still a parameter in a static export and in `@replay` sweeps.
+Only the notebook's own widget is suppressed.
+
+```julia
+@bind decay hidden(Slider(0.0:0.05:1.5))    # drawn inside the figure instead
+```
+
+For a control drawn natively in a figure — a Bonito widget in a WGLMakie scene — where a second
+copy in the notebook would be a confusing duplicate that can drift from the one the reader is
+actually dragging. It wraps the widget rather than being a keyword on each constructor, so it
+works for every widget kind including a third-party one an extension registered."""),
+
+SlateApiEntry("Slider", "Widgets", "A range slider.", ["number", "range", "drag"],
         "Slider(range; default, label) | Slider(lo, hi, default; step, label)",
         """A range slider. `@bind n Slider(1:100; label=\"n\")` or `@bind x Slider(0.0, 1.0, 0.5; step=0.01)`."""),
     SlateApiEntry("NumberField", "Widgets", "A numeric input box.", ["number", "spinner", "entry"],

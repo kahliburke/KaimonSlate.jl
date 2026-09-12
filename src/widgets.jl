@@ -573,7 +573,10 @@ custom_widget(kind::AbstractString, default = ""; kwargs...) =
 const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :TextArea,
                        :Select, :Radio, :MultiSelect, :MultiCheckBox, :ColorPicker, :DateField,
                        :TimeField, :Button, :FileUpload, :RangeSlider, :playhead, :TableSelect,
-                       :custom_widget)
+                       :custom_widget,
+                       # Not a widget but a modifier over one — injected alongside so
+                       # `@bind x hidden(Slider(…))` needs no import.
+                       :hidden)
 
 # ── Value lifecycle ───────────────────────────────────────────────────────────
 # `coerce_bind` (browser value → Julia value), `reconcile_bind` (persistence across a bind-cell
@@ -801,6 +804,80 @@ function _do_set_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLoc
         reg[name] = (w, cv)
         return cv
     end
+end
+
+# ── Drawing a control somewhere other than the notebook ───────────────────────
+
+"""
+    hidden(w::Widget) -> Widget
+
+Mark a control as drawn ELSEWHERE, so Slate renders no chrome for it — no row in its `@bind`
+cell, no entry in a surfaced control strip. The control is otherwise completely normal: it holds
+a value, coerces it, fires `@onchange`, feeds `bind_observable`, and appears in a static export's
+parameters. Only the notebook's own widget is suppressed.
+
+This exists for a control rendered natively inside a figure — a Bonito widget in a WGLMakie
+scene, say — where a second copy in the notebook would be a confusing duplicate that can drift
+from the one the reader is actually dragging.
+
+It wraps the widget rather than being a keyword on each constructor, so it works for every widget
+kind, including third-party ones registered by an extension:
+
+```julia
+@bind decay hidden(Slider(0.0:0.05:1.5))
+```
+
+Marking it at BIND time is deliberate: the widget's params travel to the browser when the `@bind`
+cell runs, so a later call could not retract chrome that has already been drawn.
+"""
+hidden(w::Widget) = Widget(w.kind, merge(w.params, Dict{String,Any}("display" => "none")), w.default)
+
+"Is this control drawn outside the notebook (see [`hidden`](@ref))?"
+is_hidden_bind(params) = String(get(params, "display", "")) == "none"
+
+# ── Bind VALUE listeners, and a control as a live Observable ──────────────────
+#
+# Distinct from the `@onclick`/`@onchange` handler slot in two ways that both matter. A handler is
+# ONE per control, fired on its own task and cancelled by the next change — right for a user body
+# that might run a simulation. A listener is one of MANY, fired INLINE by `__slate_set_bind` in the
+# same turn the global is assigned — right for propagating a value, which is a pointer write that
+# must not be dropped by a fast drag and must not disagree with the global a sibling cell reads.
+
+"""
+    _do_on_bind(listeners, name, f) -> unregister
+
+Register `f` to run with the control's new value on every change. Returns a thunk that removes it.
+"""
+function _do_on_bind(listeners::Dict{Symbol,Vector{Any}}, name::Symbol, f)
+    push!(get!(Vector{Any}, listeners, name), f)
+    # `!==` has no curried form, so compare in a closure rather than `filter!(!==(f), v)`.
+    return () -> (v = get(listeners, name, nothing);
+                  v === nothing || filter!(g -> g !== f, v); nothing)
+end
+
+"""
+    _do_bind_observable(reg, reglock, listeners, cleanup, name) -> Observable
+
+A control's value as an `Observable`, for a cell that wants to CONSUME the control reactively
+rather than be recomputed by it — a Makie figure that should update in place instead of being
+rebuilt on every drag.
+
+The Observable is deliberately **cell-local**: a fresh one per run, seeded from the registry and
+fed by a listener that `slate_on_cleanup` drops when the cell re-runs. That is what makes the
+usual `lift`/`map` on top of it safe. A notebook-lifetime Observable would keep every derived
+value its readers ever attached — and a session-bound figure cell re-runs on every browser
+connect, so those accumulate without bound, holding a whole Figure and its GPU buffers each time.
+Handing back something that dies with the cell makes that leak unwritable rather than documented.
+"""
+function _do_bind_observable(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
+                             listeners::Dict{Symbol,Vector{Any}}, cleanup, name::Symbol)
+    haskey(reg, name) ||
+        error("bind_observable(:$name): no such control — declare it first with `@bind $name …`")
+    w, cv = lock(reglock) do; reg[name]; end
+    o = Observables.Observable{Any}(wrap_value(w, cv))
+    unregister = _do_on_bind(listeners, name, v -> (o[] = v; nothing))
+    cleanup(unregister)
+    return o
 end
 
 # ── `@replay`: marking an expression as answerable without a kernel ───────────
@@ -1498,6 +1575,30 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     bind_ctx = (; region = nothing, notebook = "", side = "", emit = slate_emit,
                   regions = Symbol[], effect = _slate_effect,
                   on = Base.invokelatest(getfield, m, :slate_on))
+    # Value LISTENERS — a second, deliberately different dispatch from `handlers` above.
+    #
+    # `handlers` holds ONE @onclick/@onchange body per control and fires it through `__on_fire!`:
+    # spawned on its own task and cooperatively cancelled by the next change. That is right for a
+    # user body, which may run a simulation and should be superseded by a fresher drag.
+    #
+    # It is wrong for propagating a VALUE. Pushing a number into an Observable is a pointer write:
+    # it must land in the same turn the global is assigned, so a cell reading the Observable and a
+    # cell reading the global never disagree, and it must not be cancellable, or a fast drag can
+    # silently drop the update that was meant to be final. Hence a plain list, dispatched INLINE.
+    # Many listeners per control, so a control can drive several figures at once and still carry a
+    # user's @onchange.
+    bind_listeners = Dict{Symbol,Vector{Any}}()
+    Core.eval(m, :(const __slate_bind_listeners = $bind_listeners))
+    Core.eval(m, :(const __slate_on_bind = $((name::Symbol, f) -> _do_on_bind(bind_listeners, name, f))))
+    # A control as a live Observable, for a cell that consumes it reactively instead of being
+    # recomputed by it. `slate_on_cleanup` is read LAZILY (it is `Core.eval`'d into `m` above, i.e.
+    # bound in a newer world than this method — reading it eagerly trips Julia 1.12's global
+    # world-age warning, the same reason `bind_ctx` defers `slate_on`).
+    Core.eval(m, :(const bind_observable = $((name::Symbol) -> _do_bind_observable(
+        reg, reglock, bind_listeners,
+        f -> Base.invokelatest(getfield(m, :slate_on_cleanup), f),
+        name))))
+
     Core.eval(m, :(const __slate_bind_registry = $reg))
     Core.eval(m, :(const __slate_bind = $((name, w) -> _do_bind(reg, reglock, name, w))))
     # Browser value change: coerce + update registry, set the global so readers see it, then
@@ -1508,6 +1609,16 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
         w = lock(reglock) do; reg[name][1]; end
         wv = wrap_value(w, cv)
         Core.eval(m, Expr(:(=), name, wv))                    # user var is a Choice (labeled); host gets bare cv
+        # Inline, before the async handler: a listener must observe the same value the global just
+        # took, in the same turn. A throwing listener must not strand the rest or the handler, so
+        # each is isolated — one bad figure cannot wedge the control.
+        for f in get(bind_listeners, name, ())
+            try
+                Base.invokelatest(f, wv)
+            catch e
+                @warn "bind listener failed" control = name exception = (e, catch_backtrace())
+            end
+        end
         h = get(handlers, name, nothing)
         h === nothing || __on_fire!(tokens, name, h, wv, bind_ctx)   # dispatch @onclick/@onchange (streaming-capable)
         cv

@@ -207,8 +207,11 @@ const _hasResult = c => !!(c && (c.output || (c.echarts && c.echarts.length) || 
 // binds. This is the picker's/🎛's source list — own + external in one arrangeable strip.
 function surfaceableNames(c) {
   if (!c) return [];
-  const own = _hasResult(c) ? (c.binds || []).map(b => b.name) : [];
-  const ext = transBinduses(c).filter(n => !own.includes(n));
+  // A `hidden(…)` control is drawn outside the notebook, so it is not offered here — surfacing it
+  // would only produce a strip entry the renderer then skips, i.e. a picker that appears to do
+  // nothing.
+  const own = _hasResult(c) ? (c.binds || []).filter(b => !window.isHiddenBind(b)).map(b => b.name) : [];
+  const ext = transBinduses(c).filter(n => !own.includes(n) && !window.isHiddenBindName(n));
   return [...own, ...ext];
 }
 // Every @bind control declared anywhere in the notebook (unique, notebook order).

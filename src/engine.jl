@@ -14,6 +14,10 @@ module ReportEngine
 
 import JSON   # durable `using`-export cache file (deps.jl)
 import Pkg    # in-process package add/remove (eval.jl)
+# Observables backs `bind_observable` (widgets.jl): a control's value as a live cell-local
+# Observable. It is a ~200-line package with no dependencies beyond Base, and it is NOT Makie —
+# the rule that Makie stays a user dependency is untouched.
+import Observables
 import Serialization   # decode base64'd slate_emit values off the gate stream (gate_kernel.jl)
 import Base64
 # Path homes and the ssh prompt bridge. Provided by the parent when loaded as part of KaimonSlate;

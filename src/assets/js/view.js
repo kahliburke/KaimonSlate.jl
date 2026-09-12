@@ -231,11 +231,27 @@ const bindRow = (cellId, b) => {
     `<span class="hint">— surfaced in ${where}</span></div>`;
 };
 
-// The body of a bind/group cell: one row per bound variable it defines.
-const bindsInner = c => (c.binds || []).map(b => bindRow(c.id, b)).join('');
+// A control marked `hidden(…)` in Julia is drawn somewhere else — natively inside a figure, say —
+// so the notebook renders no chrome for it. It is otherwise entirely normal: it holds a value,
+// fires @onchange, feeds bind_observable, and is still a parameter in a static export. Only the
+// widget is suppressed, and only here in the view.
+const isHiddenBind = b => (b.params || {}).display === 'none';
+const visibleBinds = c => (c.binds || []).filter(b => !isHiddenBind(b));
+
+// Same question asked by NAME, for callers holding only a variable name (the surface picker).
+// Scans the current state's bind declarations; unknown names are treated as visible, so a control
+// that has not been declared yet is never silently dropped from a picker.
+const isHiddenBindName = n => ((nbState && nbState.cells) || [])
+  .some(c => (c.binds || []).some(b => b.name === n && isHiddenBind(b)));
+
+// The body of a bind/group cell: one row per VISIBLE bound variable it defines.
+const bindsInner = c => visibleBinds(c).map(b => bindRow(c.id, b)).join('');
 const bindsHTML = c => `<div class="binds">${bindsInner(c)}</div>`;
 
-const hasBinds = c => c.binds && c.binds.length;
+// Counts only visible controls, so a cell whose every control is drawn elsewhere behaves like the
+// plain code cell it now looks like — its editor shows, it gets a run button, and Enter edits it
+// rather than being swallowed by absent widget chrome.
+const hasBinds = c => visibleBinds(c).length > 0;
 
 // The control strip for a code cell: each surfaced bound control, wired to its
 // own defining bind cell. Rendered OUTSIDE `.output` so value-only updates
@@ -243,7 +259,11 @@ const hasBinds = c => c.binds && c.binds.length;
 // (even empty) so any code cell is a drop target for the palette. Each control
 // carries a drag grip (move/reorder) and a ✕ (un-host).
 function controlStripInner(c) {
-  const cols = c.controls || [];                 // array of columns; each column an array of specs
+  // Hidden controls are skipped here too: `hidden(…)` means "drawn outside the notebook", and a
+  // surfaced strip is still the notebook. Surfacing one is a contradiction rather than an error,
+  // and hiding wins — otherwise a control the author deliberately moved into a figure reappears
+  // as a second, drifting copy the moment anyone surfaces it.
+  const cols = (c.controls || []).map(col => col.filter(s => !isHiddenBind(s)));
   const ctrl = s => `<div class="control" data-cname="${s.name}">` +
     `<span class="cgrip" draggable="true" data-name="${s.name}" title="drag to move / reorder">⠿</span>` +
     controlMarkup(s.id, s) +
@@ -256,7 +276,7 @@ function controlStripInner(c) {
   cols.forEach((col, i) => { inner += `<div class="ccol" data-colindex="${i}">${col.map(ctrl).join('')}</div>` + dz(i + 1); });
   return inner;
 }
-const _ctrlEmpty = c => (c.controls || []).length ? '' : ' empty';
+const _ctrlEmpty = c => (c.controls || []).flat().some(s => !isHiddenBind(s)) ? '' : ' empty';
 function controlStrip(c) {
   return `<div class="controls${_ctrlEmpty(c)}" data-cell="${c.id}">${controlStripInner(c)}</div>`;
 }
@@ -1181,8 +1201,8 @@ function markBlank(el, c) {
         || (c.echarts || []).length
         || (c.tables || []).length
         || (c.animations || []).length
-        || (c.controls || []).flat().length
-        || (c.binds || []).some(b => !b.hosted))
+        || (c.controls || []).flat().some(s => !isHiddenBind(s))
+        || (c.binds || []).some(b => !b.hosted && !isHiddenBind(b)))
     // No payload in hand (a caller that only has the element): fall back to the DOM, which is right
     // for everything already painted.
     : !(el.classList.contains('workbook') || has('.md') || has('.output *') || has('.tables *')
@@ -1785,5 +1805,6 @@ async function runScripts(root) {
 // properties. So ONLY the consts go here (the functions are already on window). `editors`/
 // `charts`/`srcMap` are shared by reference, so the module's mutations stay in sync. (All of
 // these are defined in core.js or earlier in view.js, so they exist when this runs.)
-Object.assign(window, { editors, charts, srcMap, mdHtml, srcEditInner, bindsInner, hasBinds });
+Object.assign(window, { editors, charts, srcMap, mdHtml, srcEditInner, bindsInner, hasBinds,
+                        isHiddenBind, isHiddenBindName });
 

@@ -153,17 +153,29 @@ end
     items = RE.slate_completions(m, code, ncodeunits(code)).items
     texts = first.(items)
 
+    # Julia 1.13 narrowed REPLCompletions: completing `M.` offers only what M itself binds, where
+    # 1.12 also enumerated everything M reaches through `using Base` (1120 items for a bare module
+    # against 1). The demotion below exists to keep a module's own names ahead of that inherited
+    # crowd, so it has work to do only on the versions that still produce a crowd — 1.13 does
+    # upstream what it was compensating for. Both orderings are correct; assert the intent, and
+    # check the demotion itself only where there is something to demote.
+    inherited = "sin" in texts
+
     @testset "nothing is removed" begin
+        @test "shown" in texts && "hidden" in texts
         # Base is reachable as `_ApiFixture.sin` and stays offered, just not in the way.
-        @test "sin" in texts
-        @test length(items) > 100
+        if inherited
+            @test length(items) > 100
+        end
     end
 
     @testset "its own bindings come first" begin
         lead = texts[1:min(8, end)]
         @test "shown" in lead && "hidden" in lead     # exported and unexported alike: both are ITS names
-        @test findfirst(==("shown"), texts) < findfirst(==("sin"), texts)
-        @test findfirst(==("hidden"), texts) < findfirst(==("sin"), texts)
+        if inherited
+            @test findfirst(==("shown"), texts) < findfirst(==("sin"), texts)
+            @test findfirst(==("hidden"), texts) < findfirst(==("sin"), texts)
+        end
     end
 
     @testset "a bare identifier is untouched" begin

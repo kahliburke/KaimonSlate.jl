@@ -969,6 +969,40 @@ function _bindOwner(name) {
   return null;
 }
 
+// ── Driving a control from outside Slate's own widgets ────────────────────────────────────────
+//
+// The one authoritative way for an EXTENSION's control — a Bonito slider inside a WGLMakie figure,
+// a custom canvas widget — to set a `@bind` value. It goes through exactly the path a native Slate
+// widget uses, so the registry, the global, `@onchange`, `bind_observable`, the notebook's own
+// chrome and the persisted value all stay in agreement. Writing to the worker directly would move
+// the value without the host ever learning, and the two copies would drift silently.
+//
+// Coalesced per control, like the native widget path: a dragged control fires far faster than a
+// round trip completes, and without this the queue grows for as long as the drag lasts and the
+// figure keeps animating after the reader lets go. Only the LAST value of a burst matters.
+const _extBindQueue = new Map();   // name → { inflight, pending }
+
+function slateSetBind(name, value) {
+  const own = _bindOwner(name);
+  if (!own) return Promise.resolve(null);          // not declared (yet) — nothing to drive
+  let q = _extBindQueue.get(name);
+  if (!q) { q = { inflight: false, pending: null }; _extBindQueue.set(name, q); }
+  if (q.inflight) { q.pending = value; return Promise.resolve(null); }
+  q.inflight = true;
+  const send = v => api('POST', '/api/bind/' + own.cell, { name, value: v })
+    .then(s => { (window.slateApplyAck || window.updateStates)(s); return s; })
+    .catch(() => null)
+    .finally(() => {
+      q.inflight = false;
+      if (q.pending !== null) { const nv = q.pending; q.pending = null; slateSetBind(name, nv); }
+    });
+  return send(value);
+}
+window.slateSetBind = slateSetBind;
+
+// The current value of a control, for an extension seeding its own widget on first render.
+window.slateBindValue = name => { const o = _bindOwner(name); return o ? o.value : undefined; };
+
 function _wireEchartSelect(inst, spec) {
   const sel = spec && spec.__select;
   if (!inst || !sel || !sel.name) return;

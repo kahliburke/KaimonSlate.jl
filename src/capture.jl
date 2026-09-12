@@ -481,7 +481,12 @@ function _asset_base(name::AbstractString)
     safe == stem && return safe
     return string(safe, "-", string(hash(stem) % UInt16; base = 36))
 end
-_asset_hash(x) = string(hash(x) % UInt32; base = 16, pad = 8)   # short id → cache-bust + dedup
+# Short id → cache-bust + dedup. `slate_fingerprint`, not `hash`: this ends up in the FILENAME of an
+# exported asset, so it has to mean the same thing everywhere. `hash` is not stable across Julia
+# versions (1.12 and 1.13 disagree on the same bytes), which would rename every asset in a published
+# site on a Julia upgrade and give two collaborators different names for identical content — exactly
+# the dedup this is for. It also leaks Dict iteration order, which the JSON branch below passes in.
+_asset_hash(x) = slate_fingerprint(x)[1:8]
 
 function _asset_push!(rec)
     rec = merge(rec, (; created = time()))   # stamp when the cell produced it (survives memo restore)
@@ -602,7 +607,18 @@ function _run_cell_cleanups!(reg::AbstractDict, cid::AbstractString)
     cbs = pop!(reg, cid, nothing)
     cbs === nothing && return nothing
     for cb in cbs
-        try; cb(); catch e; @warn "slate: cell cleanup failed" cell = cid exception = e; end
+        # `invokelatest`, not a bare `cb()`. A cleanup callback is a closure built while the CELL
+        # ran — often inside a package method that Revise had just redefined — so its method can be
+        # newer than the world this loop is running in. A direct call then throws
+        # "MethodError … method may be too new", which the `catch` swallows into a warning: the
+        # resource is never released, and the leak the callback exists to prevent happens anyway,
+        # silently. Seen with a Bonito session teardown, which leaks a session, an inbox task and a
+        # browser subscription per re-run.
+        try
+            Base.invokelatest(cb)
+        catch e
+            @warn "slate: cell cleanup failed" cell = cid exception = (e, catch_backtrace())
+        end
     end
     return nothing
 end
@@ -629,6 +645,13 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
     # Register a per-cell cleanup callback (see the namespace's `__slate_cleanups`) — attributed to the
     # cell currently evaluating (task-local `:slate_cell`, seeded by run_capture).
     cleanup = _ns_defined(mod, :slate_on_cleanup) ? _ns_read(mod, :slate_on_cleanup) : (f) -> nothing
+    # The `@bind` surface, for an extension that DRAWS a control itself — a Bonito widget inside a
+    # WGLMakie figure, a custom canvas. It gets the capability, not the namespace: read a control's
+    # declared spec and current value, observe changes, or take it as an Observable. Handing over
+    # `__slate_bind_registry` would work equally well today and couple every extension to the
+    # namespace's private names.
+    reg = _ns_defined(mod, :__slate_bind_registry) ? _ns_read(mod, :__slate_bind_registry) : nothing
+    _entry(name) = (reg === nothing || !haskey(reg, Symbol(name))) ? nothing : reg[Symbol(name)]
     return (; region   = isempty(region) ? nothing : Symbol(region),
               notebook = String(notebook),
               side     = String(region),
@@ -638,6 +661,15 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
               on       = on,
               off      = off,
               cleanup  = cleanup,
+              # A control's declared widget (kind/params/default) and its current value.
+              bind_widget = (name) -> (e = _entry(name); e === nothing ? nothing : e[1]),
+              bind_value  = (name) -> (e = _entry(name); e === nothing ? nothing : e[2]),
+              # Value listeners + the Observable view (see widgets.jl `_do_on_bind`).
+              on_bind = _ns_defined(mod, :__slate_on_bind) ?
+                        _ns_read(mod, :__slate_on_bind) : (name, f) -> (() -> nothing),
+              bind_observable = _ns_defined(mod, :bind_observable) ?
+                                _ns_read(mod, :bind_observable) : (name) -> nothing,
+              bind_names = () -> (reg === nothing ? Symbol[] : sort!(collect(keys(reg)))),
               # This cell's own `key=value` header attributes (engine.jl `cell_attrs`): settings that
               # belong to the cell rather than to its code, and are therefore editable in the UI
               # without touching Julia source. A batch sweep reads its walltime/partition/memory

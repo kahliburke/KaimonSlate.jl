@@ -58,7 +58,15 @@ function slate_theme_attrs(p::NamedTuple = SLATE_PALETTE)
         size = (680, 340),                          # aligns Makie's default figure height with the ECharts cell
         palette = (color = slate_series_cycle(p), patchcolor = slate_series_cycle(p)),
         Axis = (
-            backgroundcolor = :transparent,
+            # The PANEL is painted with the page colour rather than left transparent, while the
+            # FIGURE above stays transparent. Visually this is the same result — the panel matches
+            # whatever surface the figure sits on — but it avoids a WGLMakie bug that only appears
+            # when BOTH are transparent: line primitives (`lines!`, `linesegments!`, and the axis's
+            # own gridlines and spines) silently do not render, while scatter/band/text still do.
+            # Nothing is thrown, so a themed WGLMakie notebook just comes out with its lines missing.
+            # Either one opaque is enough, and the panel is the one that can carry a colour without
+            # changing how the figure sits on the page.
+            backgroundcolor = p.bg,
             xgridcolor = (p.border, 0.5), ygridcolor = (p.border, 0.5),
             xgridwidth = 0.8, ygridwidth = 0.8,
             topspinevisible = false, rightspinevisible = false,

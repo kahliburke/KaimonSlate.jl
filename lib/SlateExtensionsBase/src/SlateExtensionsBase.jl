@@ -20,6 +20,10 @@ the `Widget` struct itself never crosses a process boundary.
   (live and in exports).
 - **Execution context** — [`slate_context`](@ref) and its accessors ([`slate_region`](@ref),
   [`slate_emit`](@ref), [`slate_effect`](@ref), …) read Slate's per-cell context.
+- **Reading the notebook's controls** — [`slate_bind_widget`](@ref), [`slate_bind_value`](@ref),
+  [`slate_bind_names`](@ref), [`slate_on_bind`](@ref) and [`slate_bind_observable`](@ref), for an
+  extension that DRAWS a `@bind` control itself rather than leaving it to Slate's chrome. Pair with
+  `hidden(…)` at the `@bind` site so the notebook does not draw a second copy.
 
 ## Front-end contract (JS globals; no Julia dependency)
 
@@ -70,6 +74,8 @@ on_worker_reset, run_worker_resets,
 # Execution context
 export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
        slate_emit, slate_effect, slate_everywhere, slate_on, slate_off, slate_on_cleanup
+# Controls — for an extension that draws a `@bind` control itself
+export slate_bind_widget, slate_bind_value, slate_bind_names, slate_on_bind, slate_bind_observable
 # Rich output (Slate display MIMEs)
 export slate_render, component, html_fragment, SlateComponentMIME, SlateHtmlMIME
 # Markdown fenced blocks claimed by an extension (```mermaid → that package's value)

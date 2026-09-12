@@ -1321,6 +1321,21 @@ function get_served_asset(k::GateKernel, report::Report, hash::AbstractString)
 end
 get_served_asset(::Kernel, ::Report, ::AbstractString) = nothing
 
+# In-process: the extension registered its bytes in THIS process, so the registry is a direct read
+# rather than a round-trip. Without this the hub could not answer `/n/<id>/served/<hash>` at all in
+# standalone, and an extension that serves its front-end runtime that way — BonitoSlate emits
+# `<script src="/n/<id>/served/<hash>" type="module">` for the Bonito runtime — had its script tag
+# 404, so no figure could boot. Nothing errors; the page just never paints.
+function get_served_asset(::InProcessKernel, ::Report, hash::AbstractString)
+    a = try
+        Base.invokelatest(SlateExtensionsBase.served_asset, String(hash))
+    catch
+        return nothing
+    end
+    a === nothing && return nothing
+    return (String(a.mime), Vector{UInt8}(a.bytes))
+end
+
 # Fire extensions' worker-reset hooks IN the worker (SEB `on_worker_reset`) — the Julia half of the
 # notification; the hub separately tells the PAGE (`workerreset:`).
 function notify_worker_reset(k::GateKernel, ::Report)
@@ -1328,6 +1343,19 @@ function notify_worker_reset(k::GateKernel, ::Report)
     return nothing
 end
 notify_worker_reset(::Kernel, ::Report) = nothing
+
+# In-process there is no worker to restart, but the extensions' hooks are registered in THIS
+# process and a namespace rebuild is the same event from their point of view — an extension holding
+# per-namespace state (BonitoSlate's page root, a channel registry) needs to drop it either way.
+# Skipping the notification leaves that state pointing at a namespace that no longer exists.
+function notify_worker_reset(::InProcessKernel, ::Report)
+    try
+        Base.invokelatest(SlateExtensionsBase.run_worker_resets)
+    catch e
+        @debug "KaimonSlate: in-process worker-reset hooks failed" exception = (e, catch_backtrace())
+    end
+    return nothing
+end
 
 # Ask the worker to re-render its retained LIVE (session-bound) outputs — WGLMakie figures — for a browser
 # page that just connected, the way a Bonito server serves a fresh session per page. Returns `[(cid, wire),
@@ -1354,6 +1382,28 @@ function rerender_live(k::GateKernel, report::Report)
     return out
 end
 rerender_live(::Kernel, ::Report) = Tuple{String,Any}[]
+
+# The in-process peer of the above. Without it, standalone Slate (`dev/hub.jl`, `run.jl` — anything
+# with no gate) fell through to the generic no-op, so a SESSION-BOUND output was stored as its
+# non-booting placeholder and then never replaced: the connect hook fired, got nothing back, and
+# every WGLMakie figure sat on "⟳ interactive output — connecting…" forever. The cells themselves
+# report `fresh`, which is what makes it read as a rendering failure rather than a missing method.
+#
+# There is no worker to ask, so this calls the same `rerender_live_outputs` the worker's
+# `__slate_rerender_live` tool calls, directly on the report's own module, and wraps each result in
+# the wire shape `_wire_to_output` expects — identical to the GateKernel branch above.
+function rerender_live(::InProcessKernel, report::Report)
+    report.mod === nothing && return Tuple{String,Any}[]
+    out = Tuple{String,Any}[]
+    for (cid, chunks) in rerender_live_outputs(report_module(report))
+        wire = (stdout = "", mime = chunks, echarts = Any[], tables = Any[],
+                binds = NamedTuple[], value_repr = "", exception = nothing, backtrace = nothing,
+                duration_ms = 0.0, trace = Any[], stderr = "", overflow = NamedTuple[],
+                animations = Any[], effects = Any[], assets = Any[], live = true)
+        push!(out, (String(cid), wire))
+    end
+    return out
+end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString, memo;
                       region::AbstractString = "", regions::AbstractVector = String[])
