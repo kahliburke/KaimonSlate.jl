@@ -533,11 +533,15 @@ No-op if nothing declares `name`, and inert on a standalone run. Distinct from t
         "The notebook's portable data dir; `@sfile \"f.csv\"` is a PATH into it (read AND write).",
         ["path", "csv", "read", "write", "portable", "data file", "duckdb"],
         "datadir() -> String   ·   @sfile \"name\" -> String (path)",
-        """The notebook's canonical DATA directory and portable references into it. `datadir()` returns
-        `<project>/data` (created on demand) — a stable place to read AND write data files WITHOUT
-        hardcoding a machine path, so the notebook stays portable between machines. `@sfile "flights.csv"`
-        is sugar for `joinpath(datadir(), "flights.csv")` — it returns a PATH (contrast `@asset`, which
-        reads a file's CONTENTS), so it suits big files and read/write data:
+        """The notebook's canonical DATA directory and portable references into it. `@sfile "f.csv"`
+        returns a PATH under `datadir()` with the parent directory already created, so it is usable as
+        a write target straight away. (Contrast `@asset`, which reads a file's CONTENTS; `@sfile` suits
+        big files you read and write.)
+        The point is that it resolves PER SITE, so a cell that uses it is not tied to a machine:
+        `<project>/data` in a notebook · a region's pinned scratch (`KAIMONSLATE_DATADIR`) on a remote
+        worker · `<store>/data` beside the manifests in a BATCH SHARD. The same body therefore runs
+        unchanged here, on a region, or as a unit on a cluster — which is what lets a sweep body write
+        its own HDF5 or NetCDF and hand it back with `adopt`.
         ```julia
         df = CSV.read(@sfile("flights.csv"), DataFrame)     # read a data file by portable path
         CSV.write(@sfile("summary.csv"), result)            # write output to the same portable place
