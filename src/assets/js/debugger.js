@@ -38,10 +38,8 @@ const selFrame = signal(null);
 // permission to disturb a session it does not own. Its turn is stopped until one of these is
 // answered, so they are shown where the session is, not tucked in a notification.
 const asks = signal([]);
-// What the investigation CONCLUDED, as a record rather than a paragraph: the cell it blames, the
-// claim, a reviewer's verdict once one arrives, and what was decided. Shown because a conclusion
-// nobody can see is a conclusion nobody can argue with — and the verdict in particular exists to be
-// disagreed with.
+// What the investigation concluded: the cell it blames, the claim, a reviewer's verdict, and what
+// was decided.
 const findings = signal([]);
 
 const live = computed(() => st.value && !st.value.finished);

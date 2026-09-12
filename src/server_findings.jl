@@ -3,14 +3,12 @@
 # A sign-off used to be a sentence in a slot: one per notebook, overwritten by the next, readable
 # only as prose. That is enough to tell a person what was found, and nothing else.
 #
-# The review protocol needs three parties to reason about the SAME claim — the specialist that made
-# it, a checker that did not watch it being made, and the orchestrator that knows what the notebook
-# is for. Prose is what makes them restate one another instead of building on each other: a
-# reviewer handed a paragraph re-reads a paragraph, and an orchestrator handed two paragraphs
-# summarises them for a third time. Observed, on the first session that ran this way end to end.
+# Three parties reason about the same claim: the specialist, a checker, and the orchestrator. Given
+# prose, each one restates the last. The first session that ran this way produced the same root
+# cause three times.
 #
-# So a finding names a CELL, states a claim in one sentence, and carries its evidence separately.
-# The cell is what makes the graph check below possible at all.
+# A finding names a cell, states a claim in one sentence, and carries its evidence separately. The
+# graph check below needs the cell.
 
 mutable struct Finding
     id::String
@@ -25,8 +23,7 @@ mutable struct Finding
     # spending a language model on it would be both slower and less certain.
     unread_upstream::Vector{String}
     # The checker's read of the CLAIM — never of the transcript. A reviewer shown the reasoning
-    # inherits it, and a confirmation from an anchored reviewer is worse than no review, because it
-    # launders a wrong answer as a checked one.
+    # inherits it. A confirmation from an anchored reviewer launders a wrong answer as a checked one.
     verdict::String       # "" | "confirmed" | "disputed"
     verdict_why::String
     verdict_at::Float64
@@ -53,8 +50,8 @@ const _FINDINGS_LOADED = Set{String}()
 
 # `nbdoc`, not `SlateHistory.Doc(path)`. The latter is the legacy identity and hashes the absolute
 # path, so findings would be stranded by a rename or a move while the document's own revisions
-# followed it. `nbdoc` keys off the file-carried `docid`, which is what makes them the DOCUMENT's
-# findings rather than this filename's.
+# followed it. `nbdoc` keys off the file-carried `docid`, so they belong to the document rather
+# than to the filename.
 _finding_doc(nb::LiveNotebook) = nbdoc(nb)
 
 function _finding_from(d::AbstractDict)

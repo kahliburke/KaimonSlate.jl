@@ -709,7 +709,7 @@ What has already been concluded about this cell and the cells feeding it.
 
 Findings were recorded and then never handed to anybody. A specialist investigated a notebook where
 the cause had already been found, reviewed and fixed, and worked it out again from nothing —
-because nothing told it that had happened. A conclusion nobody is given is a conclusion nobody has.
+because nothing told it that had happened.
 
 Scoped to the subject's own dependency cone: a finding about an unrelated corner of the notebook is
 someone else's answer to someone else's question, and pasting all of them in would bury the one that
