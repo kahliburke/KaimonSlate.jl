@@ -16,9 +16,15 @@
 # a chunk is free, a requeued or preempted job resumes rather than repeats, and re-submitting a
 # whole sweep costs nothing for the shards that already landed.
 
-# `Base.include(@__MODULE__, …)` rather than a bare `include`: this file is loaded into a notebook's
-# module as well as into Main, and a module built programmatically (as a notebook's is) has no
+# `Base.include(@__MODULE__, …)` rather than a bare `include`: THIS call runs in whatever module is
+# including this file, which may be a notebook's — and a module built programmatically has no
 # `include` of its own.
+#
+# That is true here and only here. A `module … end` block always gets an `include` of its own, even
+# inside a file loaded this way, so the includes within `module SlateTask` below are ordinary ones.
+# They were `Base.include` too, which is invisible to Revise: it finds a package's files by walking
+# recognisable `include("file.jl")` calls, so every file reached that way stopped hot-reloading and
+# an edit to it needed a worker restart to take effect.
 if !isdefined(@__MODULE__, :MemoStore)
     Base.include(@__MODULE__, joinpath(@__DIR__, "memostore.jl"))
 end
@@ -35,11 +41,11 @@ const MemoStore = parentmodule(@__MODULE__).MemoStore
 # self-describing header plus its bytes: the blob mmaps, so a slice reads only the pages it touches,
 # and the header answers "what is in here?" without opening the data at all. Stdlib-only (`Mmap`;
 # Arrow is soft-detected), so it loads in a runner that carries no dependencies.
-Base.include(@__MODULE__, joinpath(@__DIR__, "memocodecs.jl"))
+include("memocodecs.jl")
 
 # Storing a result ADDRESSABLY rather than whole — the layouts and the index that lets a notebook
 # slice a dataset without moving it. Uses the codecs above, so it comes after them.
-Base.include(@__MODULE__, joinpath(@__DIR__, "dataset.jl"))
+include("dataset.jl")
 
 # Everything a task process needs beside it. Declared here, next to the includes it mirrors, so
 # provisioning a cluster cannot silently ship a runner without one of its own parts.
