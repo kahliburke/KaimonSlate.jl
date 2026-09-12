@@ -1,7 +1,7 @@
 name = "BonitoSlate"
 uuid = "9172b072-6bcf-488b-b185-96c3319d1521"
 authors = ["Kahli Burke <kahli@kahliburke.com>"]
-version = "0.1.1"
+version = "0.2.0"
 
 # A Slate extension bringing first-class Bonito.jl support — and with it WGLMakie's interactive
 # WebGL figures and the wider Bonito widget ecosystem — into KaimonSlate's reactive notebook.
@@ -19,7 +19,20 @@ SlateExtensionsBase = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
 WGLMakie = "276b4fcb-3e11-5398-bf8b-a0c2d153d008"
 
 [compat]
-SlateExtensionsBase = "0.10"
+# Bonito 5, not 4: `root_announce_html` builds its placeholder app with `App(nothing;
+# loading_page = nothing)`, and `loading_page` does not exist before 5. Without this bound an
+# environment built around WGLMakie 0.13.6 (which pins `Bonito = "4.0.12"`) resolves to Bonito 4
+# and every figure on a freshly-connected page renders as a MethodError box, while the cells
+# themselves all report success. Requiring 5 here forces WGLMakie >= 0.13.13, the first release
+# that accepts it.
+Bonito = "5"
+# 0.10.5 for the control accessors (`slate_bind_widget`/`_value`/`_names`) that `bonito_controls`
+# builds a native widget from. The accessors are additive, so this stays inside 0.10 rather than
+# forcing every other extension pinned at "0.10" to re-release for a change that breaks none of
+# them. The cost is that the bound no longer implies a Slate new enough to POPULATE them — core
+# supplies them through the execution context — so `bonito_controls` checks for the capability
+# itself and names the version it needs. See `_require_bind_surface` in src/controls.jl.
+SlateExtensionsBase = "0.10.5"
 julia = "1.10"
 
 [extras]

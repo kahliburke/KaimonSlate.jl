@@ -9,12 +9,18 @@
   margin: 0.35rem 0;
 }
 
-/* The card: dark panel, hairline border, rounded corners — matches Slate's dark surfaces. It
-   shrink-wraps the figure (inline-block) and centers via the flex wrap above. */
+/* The card: hairline border, rounded corners, delineated by its border and shadow rather than by a
+   contrasting fill. It shrink-wraps the figure (inline-block) and centers via the flex wrap above.
+
+   The colours are Slate's theme VARIABLES, not fixed hexes. Two reasons. The card follows whatever
+   UI theme is active, so it is no longer a dark panel sitting in a light "daylight" notebook. And it
+   now agrees with the Makie side: `slate_theme_attrs` paints the axis panel `--bg`, so the panel,
+   the card and the page are one surface, which is what lets the figure background stay transparent
+   without the panel reading as a differently-coloured rectangle. */
 .bonito-fig-card {
   display: inline-block;
-  background: #1b1e24;
-  border: 1px solid #2b303a;
+  background: var(--bg);
+  border: 1px solid var(--border);
   border-radius: 12px;
   padding: 12px;
   max-width: 100%;
@@ -25,5 +31,5 @@
 /* Subtle edge highlight when the figure has focus — the WGLMakie canvas is focusable (tabindex=0),
    so clicking into the figure lifts the border, a quiet signal its live controls are engaged. */
 .bonito-fig-card:focus-within {
-  border-color: #3c4a63;
+  border-color: var(--accent);
 }
