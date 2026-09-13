@@ -583,7 +583,11 @@ function apAutoGrow() {
 async function agentSend() {
   const inp = document.getElementById('apin'), text = inp.value.trim(); if (!text) return;
   inp.value = ''; apAutoGrow();     // back to one line, or a sent paragraph leaves a hole
-  _stopArmed = false; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
+  // Shown straight away rather than waiting for the server to echo it back, so typing feels
+  // answered. `local` marks it as the one the `user_text` event should adopt instead of appending
+  // its own copy — see the handler.
+  _stopArmed = false; agentMsgs.push({ role: 'user', text, local: true });
+  agentStatus('thinking…'); setWorking(true);
   try {
     const r = await api('POST', '/api/chat', { text, target: _chatTarget || '', model: effectiveAgentModel(), permission: effectiveAgentPerm(), dark: _uiThemeDark() });
     if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); agentStatus(''); setWorking(false); }
@@ -630,7 +634,16 @@ function agentEvent(env) {
   const d = env.data || {};
   const k = env.kind;
   const crew = env.crew || '';   // crew label of the speaking agent ('' = solo/default)
-  if (k === 'assistant_text' || k === 'thought') {
+  if (k === 'user_text') {
+    // Your own turn. It is in the log, so a reload has to rebuild it — without this the transcript
+    // came back as the agent answering nothing. Live, `agentSend` has already shown it, so the
+    // event adopts that copy rather than appending a second one.
+    const txt = (d.content && d.content.text) || '';
+    if (!txt) return;
+    const mine = agentMsgs.find(m => m.role === 'user' && m.local && m.text === txt);
+    if (mine) delete mine.local;
+    else agentMsgs.push({ role: 'user', text: txt });
+  } else if (k === 'assistant_text' || k === 'thought') {
     // Streaming: delta:true chunks APPEND live; the final delta:false copy REPLACES
     // the streamed block (self-healing any dropped delta). Non-streaming services
     // send only complete blocks → the else branch (back-compat).
@@ -643,10 +656,13 @@ function agentEvent(env) {
     let last = null;
     for (let i = agentMsgs.length - 1; i >= 0; i--) {
       const m = agentMsgs[i];
-      if (m.role === role && (m.crew || '') === crew && !m.done) { last = m; break; }
-      // Only look past the other agent's rows. This crew's own completed block ends the search:
-      // past it lies an earlier turn, and appending there would rewrite history.
-      if ((m.crew || '') === crew) break;
+      // Only this crew's blocks OF THIS ROLE are candidates; everything else is looked past, which
+      // keeps a block whole when another agent's rows — or this agent's own thinking — land in the
+      // middle of it. The first one found ends the search either way: open, it is the block being
+      // streamed; done, it belongs to an earlier turn and appending there would rewrite history.
+      if (m.role !== role || (m.crew || '') !== crew) continue;
+      if (!m.done) last = m;
+      break;
     }
     if (d.delta === true) {
       if (!txt) return;
