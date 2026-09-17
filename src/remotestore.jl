@@ -151,8 +151,11 @@ end
 connected(host::AbstractString) = (_declare_volatile(); isempty(host) ||
     _via(() -> SshTransport.connected(String(host)), :connected, (; host = String(host))) === true)
 
-const _CONNECT_BACKOFF = 20.0
-const _CONNECT_FAILED = Dict{String,Float64}()
+const _CONNECT_BACKOFF = 20.0          # a transient failure: the host may be back shortly, so retry soon
+const _CONNECT_BACKOFF_SIGNIN = 300.0  # a host that needs INTERACTIVE sign-in cannot come back without a
+                                       # person, so a poller retrying every 20s only churns the transport
+                                       # (and races the eventual interactive sign-in) - back off hard.
+const _CONNECT_FAILED = Dict{String,Tuple{Float64,Bool}}()   # host → (last-failure time, needs-interactive-sign-in)
 const _CONNECT_LOCK = ReentrantLock()
 
 """
@@ -173,9 +176,12 @@ function connect!(host::AbstractString; interactive::Bool = false)
     # for a poller — so a poller reports "not connected" and comes back once it has landed.
     !interactive && SshTransport.opening(String(host)) && return false
     # The backoff exists to stop pollers hammering a host; someone who just pressed a button is not
-    # a poller, and making them wait it out is the wrong answer.
+    # a poller, and making them wait it out is the wrong answer. A host that needs interactive sign-in
+    # gets the LONG backoff - no non-interactive retry can bring it back, so polling it sooner only
+    # burns the transport that the interactive sign-in itself needs.
     interactive || lock(_CONNECT_LOCK) do
-        time() - get(_CONNECT_FAILED, String(host), 0.0) < _CONNECT_BACKOFF
+        fc = get(_CONNECT_FAILED, String(host), nothing)
+        fc !== nothing && time() - fc[1] < (fc[2] ? _CONNECT_BACKOFF_SIGNIN : _CONNECT_BACKOFF)
     end && return false
     interactive && SshTransport.disconnect!(String(host))   # clear a half-open session first
     # `session` only STARTS the connection — the handshake and any prompt happen on its owner task.
@@ -188,7 +194,16 @@ function connect!(host::AbstractString; interactive::Bool = false)
         (false, first(sprint(showerror, e), 200))
     end
     lock(_CONNECT_LOCK) do
-        ok ? delete!(_CONNECT_FAILED, String(host)) : (_CONNECT_FAILED[String(host)] = time())
+        if ok
+            delete!(_CONNECT_FAILED, String(host))
+        else
+            # A host that offers only interactive auth declines a non-interactive attempt with a
+            # message libssh2 states plainly; recognize it so the next non-interactive attempt waits
+            # the long backoff instead of coming straight back to fail the same way.
+            w = lowercase(why)
+            _CONNECT_FAILED[String(host)] =
+                (time(), occursin("declined or cancelled", w) || occursin("keyboard-interactive", w))
+        end
     end
     # Only for a login someone asked for: they are the one waiting on an answer, and a poller's
     # silent failure is not news.
