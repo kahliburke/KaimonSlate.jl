@@ -1585,11 +1585,14 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
             # A NODE JUST ARRIVED, so the idle clock starts now. Without this it carries over the
             # wait that preceded the grant — time when nothing was held and nothing could be idle —
             # and a region that queued longer than its own timeout is released the moment it lands.
-            ReportEngine.region_host(r) == r.host || _region_used!(String(name))
+            # Whether a node is held is asked of the placement itself, never inferred from the node
+            # name: a single-node cluster grants a node named like the front door (`clima`), so
+            # `region_host(r) == r.host` would read "unplaced" even with a node in hand.
+            ReportEngine._region_holds_node(r) && _region_used!(String(name))
             # Queue waits are measured in minutes on a real cluster, so the cell that asked must not
             # be left saying "run me again" — nobody should have to poll a notebook by hand. The
             # node landing is the event; re-arm the runner and the waiting cells run themselves.
-            if nb !== nothing && ReportEngine.region_host(r) != r.host
+            if nb !== nothing && ReportEngine._region_holds_node(r)
                 ReportEngine._rlog("region[$name]: node granted ($(ReportEngine.region_host(r))) — re-running the cells that were waiting")
                 _restale_region_cells!(nb, String(name))
                 _ensure_runner!(nb)
@@ -1621,10 +1624,16 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         if k !== nothing
             tgt = k.target
             if !(tgt isa ReportEngine.RemoteTarget) || tgt.ssh_host == ReportEngine.region_host(r)
-                return k
+                # The host still matches - but a scheduler region's cached kernel is only good while a
+                # node is actually HELD. On a single-node cluster the node name equals the front door,
+                # so the host match above cannot tell a live placement from a released one; reusing then
+                # would spawn OUTSIDE the allocation (no `srun`, so no GPU binding). When nothing is held,
+                # fall through to the placement block below, which asks for a node.
+                (r.scheduler === :none || ReportEngine._region_holds_node(r)) && return k
+            else
+                ReportEngine._rlog("region: '$name' moved off $(tgt.ssh_host) — rebuilding its kernel")
+                delete!(_REGION_KERNELS, (nb.id, name))
             end
-            ReportEngine._rlog("region: '$name' moved off $(tgt.ssh_host) — rebuilding its kernel")
-            delete!(_REGION_KERNELS, (nb.id, name))
         end
         proj = Base.current_project(dirname(abspath(nb.path)))
         parent = proj === nothing ? "" : dirname(proj)   # notebook's own /src synced for hot-reload provenance
@@ -1643,7 +1652,9 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         host = r.host
         if r.scheduler !== :none
             host = ReportEngine.region_host(r)
-            if host == r.host                      # nothing placed yet
+            # Placed-or-not is asked of the placement, never inferred from the node name: a single-node
+            # cluster grants a node named like the front door, so `region_host(r) == r.host` misreads.
+            if !ReportEngine._region_holds_node(r)   # nothing placed yet
                 # Asking for a node needs the cluster, and reaching the cluster may need a password
                 # that only a person can supply — which background work is not allowed to ask for.
                 # So say which of the two is missing, because they need different things from you.
@@ -2281,7 +2292,7 @@ function _reconcile_blocked_regions!(nb::LiveNotebook)
         r = ReportEngine.region_get(name)
         (r === nothing || r.scheduler === :none) && continue
         key = (nb.id, name)
-        if ReportEngine.region_host(r) == r.host
+        if !ReportEngine._region_holds_node(r)
             # Nothing placed. Resume asking the cluster — this is the only branch here that costs a
             # round trip, so it runs on a cadence sized for a shared login node, not for the sweep.
             time() - get(_REPLACE_AT, key, 0.0) < _REPLACE_EVERY && continue

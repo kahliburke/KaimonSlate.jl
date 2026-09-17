@@ -518,7 +518,11 @@ _put_dir(host, localdir, dest; kw...) = Sweep.put_dir(_host_for_files(String(hos
 
 function _ssh_capture(host, argv::Cmd)
     ok, out = _run_on(String(host), _cmdstr(argv))
-    ok || _rlog("ssh $host FAILED\n    cmd: $(_cmdstr(argv))\n    out: $(first(strip(out), 800))")
+    # A failure while the host is SIGNED OUT is the offline rejection, not a command failure - the drop
+    # is logged once where it happens, and logging it again on every poll that follows only buries the
+    # log. Report a failure only on a LIVE session, where the command genuinely ran and failed.
+    (ok || !Sweep.connected(String(host))) ||
+        _rlog("ssh $host FAILED\n    cmd: $(_cmdstr(argv))\n    out: $(first(strip(out), 800))")
     return (ok, out)
 end
 
@@ -1488,13 +1492,40 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
   # nowhere else. The allocation's own job body only sleeps, so shell put there would exit without
   # touching anything, and `_run_on` carries every poll and status command too — a `module load` on
   # each of those would be paid hundreds of times to configure a shell that then exits.
-  pro = _region_prologue(region)
-  launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && $pro$siresolve && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
+    pro = _region_prologue(region)
+    # Everything set up before the worker boots: cwd, PATH to the remote juliaup, the self-identifying
+    # tag, the region prologue, and the sysimage resolve. Shared by both launch forms below.
+    setup = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && $pro$siresolve"
     _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
-    # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
-    # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
-    _ssh_ok(host, `$launch`) ||
-        _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
+    v = via(host)
+    if v === nothing || isempty(v.job)
+        # A plain ssh target (or a routed node that is not a scheduler job): launch the worker DETACHED
+        # on the host itself so it outlives the ssh channel. `setsid` is Linux-only (absent on macOS), so
+        # fall back to plain `nohup … &`, which with stdio to the log file also survives the channel
+        # closing. Pass the whole line as ONE ssh arg so the remote login shell parses `&&`/`>`/`&`/`$HOME`
+        # intact (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed).
+        launch = "$setup && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
+        _ssh_ok(host, `$launch`) ||
+            _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
+    else
+        # A routed scheduler node. A worker launched DETACHED inside the `srun --overlap` step (`… & fi`)
+        # dies the instant the step exits: the node runs `proctrack/cgroup`, so the step's cgroup is torn
+        # down with every process in it, and `setsid` escapes the process GROUP but not the cgroup. So the
+        # worker runs in the FOREGROUND of the step - the step, and its cgroup, then live exactly as long as
+        # the worker does - and the DETACH is moved one level out, to the LOGIN node, which is under no such
+        # cgroup. `setsid nohup` there reparents the step launcher (`srun`, or PBS's `ssh node`) to init, so
+        # it survives the ssh channel closing and even a full session drop; the worker is re-attached over
+        # the forward on reconnect. `_in_allocation` builds the same in-allocation launcher every poll uses.
+        worker = "$setup && exec $jl"
+        inner = _in_allocation(v, host, worker)
+        launch = "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $inner > $logf 2>&1 & else nohup $inner > $logf 2>&1 & fi"
+        # Run the detach on the RAW login session (`run_there`), NOT `_ssh_ok`/`_run_on`: on a single-node
+        # cluster the login host IS the routed node (`via(v.host)` is set), so `_run_on(v.host, …)` would
+        # wrap this in ANOTHER `srun --overlap` step and the detached launcher would die with THAT step's
+        # cgroup - the very failure this fix exists to avoid. `run_there` reaches the login node directly.
+        first(Sweep.run_there(v.host, launch)) ||
+            _rlog("spawn: worker launch returned nonzero via $(v.host) (it may still be starting)")
+    end
     # Record who/what this worker serves so it's self-describing (list/reconnect/reap/adopt all read
     # this). `project` (the worker's --project env dir) is what pool adoption matches on.
     fields = ["notebook" => String(label), "parent" => String(parent), "hub" => gethostname(),
@@ -1601,8 +1632,14 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             ip = ""
             lport, lstream = _free_local_port(), _free_local_port()
             v = via(host)
+            # For a routed worker the login node reaches the compute node over the cluster's own network,
+            # so the forward targets the node BY NAME. On a SINGLE-NODE cluster the node IS the login host:
+            # the SSH server then commonly refuses `direct_tcpip` to its own external name (PermitOpen is
+            # loopback-only), while the worker - bound 0.0.0.0 - is still reachable on loopback. Target
+            # 127.0.0.1 there, which is also the address the CURVE key is then pinned against.
             tunnel = v === nothing ? open_tunnel(host, [(lport, port), (lstream, stream_port)]) :
-                     open_tunnel(v.host, [(lport, port), (lstream, stream_port)]; remote = host)
+                     open_tunnel(v.host, [(lport, port), (lstream, stream_port)];
+                                 remote = host == v.host ? "127.0.0.1" : host)
             connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
             # The key is pinned against the LOCAL end of the forward, which is the address this hub
             # actually dials. Every forward carries CURVE, routed or not — see `_remote_worker_script`.
@@ -3929,7 +3966,7 @@ deleted — and not only when someone remembers.
 # cgroup usually catches this; where it does not, the worker is squatting.
 function _reap_region_workers!(r::Region)
     h = region_host(r)
-    (isempty(h) || h == r.host) && return 0      # nothing placed — no node, so nothing on it
+    (isempty(h) || !_region_holds_node(r)) && return 0      # nothing placed — no node, so nothing on it
     n = 0
     try
         for w in list_remote_workers(h)
