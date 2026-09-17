@@ -2360,7 +2360,7 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
    a `+N ▾` overflow (same bounding as the topbar pill), so an unwell worker always holds a tab. */
 .workerpop-tabs { display:flex; align-items:stretch; gap:3px; flex-wrap:nowrap; min-width:0; }
 .wptab { font-size:.74rem; padding:3px 9px; border-radius:6px 6px 0 0; cursor:pointer; white-space:nowrap;
-  overflow:hidden; text-overflow:ellipsis; max-width:14ch;
+  overflow:hidden; text-overflow:ellipsis; min-width:0; max-width:22ch;
   background:transparent; color:var(--dim); border:1px solid transparent; border-bottom:none; }
 .wptab:hover { color:var(--text); background:var(--bg3); }
 .wptab.on { color:var(--text); background:var(--bg); border-color:var(--border);

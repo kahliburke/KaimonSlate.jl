@@ -50,17 +50,67 @@ const _REMOTE_LOG = joinpath(_slate_cache_dir(), "remote.log")
 # via `KAIMONSLATE_REMOTE_LOG` — otherwise a test process shares the running hub's real remote.log.
 _remote_log_path() = get(ENV, "KAIMONSLATE_REMOTE_LOG", _REMOTE_LOG)
 
+# ── Per-region acquisition trace ───────────────────────────────────────────────────────────────
+# The worker panel wants to show a region's bring-up while it happens - queued, node granted,
+# provisioned, spawned, connected - during the one window the worker has no log of its own yet. The
+# durable `remote.log` holds all of it, but as ONE global stream: recovering a single region's lines
+# from it means matching host and name substrings, which bleeds across regions that share a front
+# door and drags in any line that merely mentions the host (a notebook named after it, say).
+#
+# So the association is made at the SOURCE instead. Code that is bringing a region up marks its
+# dynamic extent with `with_rlog_region`, and every `_rlog` emitted inside that extent - on the same
+# task, however deep the call - is mirrored into that region's own bounded buffer. No matching, no
+# bleed: a line belongs to the region whose bring-up was running when it was written, or to none.
+const _REGION_TRACE = Dict{String,Vector{String}}()
+const _REGION_TRACE_LOCK = ReentrantLock()
+const _REGION_TRACE_MAX = 120        # bounded ring; a bring-up is ~15 lines, so this keeps a few of them
+
+# The region whose bring-up is running on THIS task, or "" for anything not inside one. Task-local so
+# it is exact and needs no matching; not inherited by spawned children, which is why the marks sit on
+# the two functions that do the work synchronously (placement, and provision+spawn+connect).
+_current_rlog_region()::String = get(task_local_storage(), :slate_rlog_region, "")
+
+"Run `f` with `_rlog` lines mirrored into region `name`'s acquisition trace. Empty name ⇒ no marking."
+function with_rlog_region(f, name::AbstractString)
+    isempty(name) && return f()
+    task_local_storage(f, :slate_rlog_region, String(name))
+end
+
+# Tag every `_rlog` on the CURRENT task with region `name`, without restoring afterward. The scoped
+# `with_rlog_region` is the general form; use this only on a task that exists solely to bring `name`
+# up and ends with it (the placement task), where there is nothing to restore to.
+set_rlog_region!(name::AbstractString) = (isempty(name) || task_local_storage(:slate_rlog_region, String(name)); nothing)
+
+function _region_trace_append!(name::AbstractString, line::AbstractString)
+    lock(_REGION_TRACE_LOCK) do
+        buf = get!(() -> String[], _REGION_TRACE, String(name))
+        push!(buf, String(line))
+        extra = length(buf) - _REGION_TRACE_MAX
+        extra > 0 && deleteat!(buf, 1:extra)
+    end
+    return nothing
+end
+
+"Drop a region's acquisition trace, so the next bring-up starts clean rather than trailing the last one."
+region_trace_reset!(name::AbstractString) =
+    lock(_REGION_TRACE_LOCK) do; delete!(_REGION_TRACE, String(name)); nothing; end
+
 function _rlog(msg::AbstractString)
     path = _remote_log_path()
+    t = Dates.now()
     try
         mkpath(dirname(path))
         open(path, "a") do io
             # ms resolution: the reattach path is timed in tens of ms now — whole-second
             # timestamps couldn't distinguish "instant" from "1.9s" (both printed as :01→:02).
-            println(io, "[", Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS.sss"), "] ", msg)
+            println(io, "[", Dates.format(t, "yyyy-mm-dd HH:MM:SS.sss"), "] ", msg)
         end
     catch
     end
+    # Mirror into the current region's trace, if this line was emitted while bringing one up. Stamped
+    # with a bare HH:MM:SS so the panel renders it the way a worker's own log lines read.
+    reg = _current_rlog_region()
+    isempty(reg) || _region_trace_append!(reg, Dates.format(t, "HH:MM:SS") * "  " * String(msg))
     @info "slate remote: $msg"   # also to the host logger (message string survives kwarg-stripping)
     return nothing
 end
@@ -1603,7 +1653,16 @@ CURVE-pinned (direct) or over a supervised SSH tunnel. `k` is the GateKernel (it
 is the REMOTE project path; `.port`/`.stream_port` are set here). Returns the REPLConnection
 and the Tunnel (or nothing). Also starts the continuous /src sync.
 """
-function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractString)
+# Bring a worker up and attach to it. The public entry marks the whole bring-up with the region it
+# serves (if any), so every `_rlog` it emits - provision, spawn, connect - lands in that region's
+# acquisition trace for the panel. A worker with no region (a notebook's own remote main kernel)
+# marks nothing.
+spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractString) =
+    with_rlog_region(t.region) do
+        _spawn_and_connect_remote!(k, t, parent_project)
+    end
+
+function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractString)
     K = _kaimon()
     host = t.ssh_host
     _rlog("═══ REMOTE SPAWN requested: notebook worker → $host (transport=$(t.transport)) ═══")
@@ -3870,6 +3929,27 @@ function region_host(r::Region)
     r.scheduler === :none && return r.host
     p = _placement(r)
     return p === nothing ? r.host : p.host
+end
+
+"""
+    region_acquire_trace(r; maxlines = 60) -> String
+
+The orchestration lines for bringing up `r`'s worker: queued for a node, node granted, the
+provisioning steps, spawn, and connect. Read from the region's own trace buffer, which `_rlog`
+fills while the bring-up runs (see `with_rlog_region`), so the worker panel can show live progress
+during the one window a worker has no log of its own yet. Empty when nothing has been recorded, so
+the caller keeps its own placeholder text.
+
+The buffer is per process: it holds this hub's bring-ups, not a previous instance's, which is what a
+reader watching a live acquisition wants.
+"""
+function region_acquire_trace(r::Region; maxlines::Int = 60)
+    buf = lock(_REGION_TRACE_LOCK) do
+        b = get(_REGION_TRACE, r.name, nothing)
+        b === nothing ? String[] : copy(b)
+    end
+    isempty(buf) && return ""
+    return join(length(buf) > maxlines ? last(buf, maxlines) : buf, "\n")
 end
 
 # A scheduler time in seconds. Defined where the allocation layer needs it too — PBS reports what is

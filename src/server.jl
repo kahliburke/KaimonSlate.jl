@@ -1575,8 +1575,16 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
         push!(_PLACING, String(name)); true
     end || return nothing
     Threads.@spawn try
+        # This task exists only to bring `name` up, so tag every _rlog it emits into that region's
+        # acquisition trace, and clear any trace from a previous bring-up so this one reads clean.
+        ReportEngine.region_trace_reset!(name)
+        ReportEngine.set_rlog_region!(name)
         r = ReportEngine.region_get(name)
         if r !== nothing
+            # Anchor the acquisition trace at the queue start. The queue wait itself is otherwise
+            # silent until a node lands, so without this line the worker panel would show nothing for
+            # the minutes a busy cluster can take to grant one.
+            ReportEngine._rlog("region[$name]: queued for a node on $(r.host) - waiting for the scheduler to grant one")
             if nb !== nothing
                 try; _broadcast(nb, "bringup:region '$name': queued for a node on $(r.host)…"); catch; end
                 try; _workers_push!(nb); catch; end   # the pill says "queued" NOW, not once it lands
