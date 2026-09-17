@@ -546,7 +546,7 @@ async function setAgentRole(patch) {
 window.loadAgentRoles = loadAgentRoles;
 
 // ── Settings modal ────────────────────────────────────────────────────────────
-function openSettings(scope) {
+function openSettings(scope, section) {
   const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
   deb.value = updateMs; v.textContent = updateMs;
   deb.oninput = () => { updateMs = parseInt(deb.value, 10) || 0; v.textContent = updateMs; localStorage.setItem('slateUpdateMs', updateMs); };
@@ -752,6 +752,10 @@ function openSettings(scope) {
   // panel. `scope` lets a caller open straight onto the notebook's overrides (the top menu and the
   // palette both do); anything else means the global scope.
   _setNavFor('global').forced(['setmodelcustomrow', 'setmodelhint']);
+  // `section` opens straight onto one group, for a panel that has a settings button of its own (the
+  // Agent panel's ⚙). Set before the scope switch, which is what rebuilds the list; a name no
+  // section matches falls back to the first, so a renamed heading degrades to opening normally.
+  if (section) _setNavFor(scope === 'notebook' ? 'notebook' : 'global').tab = section;
   document.getElementById('setbg').classList.add('show');
   // Search-first: `setSettingsScope` clears the filter and puts the caret in it, so opening and
   // typing finds a setting without a click. Has to follow `show` — focus doesn't take on a

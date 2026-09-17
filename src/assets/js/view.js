@@ -442,8 +442,9 @@ function cellHeaderInner(c) {
       (isCode ? `<button class="hidecode${c.codeHidden ? ' on' : ''}" onclick="toggleHideCode('${c.id}')" title="${c.codeHidden ? 'show code' : 'hide code — show only the output'}">${c.codeHidden ? '🙈' : '👁'}</button>` : '') +
       `<button class="tagbtn${(c.tags && c.tags.length) ? ' on' : ''}" onclick="openTagEditor('${c.id}', event)" title="cell tags${(c.tags && c.tags.length) ? ': ' + c.tags.join(', ') : ''}">🏷</button>` +
       editSrc +
-      `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
-      `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
+      // Move up / down are NOT here — they live on the reorder rail out in the page margin beside
+      // the cell (notebook.js `renderCell`), where they cover no content and sit at the end the cell
+      // moves towards rather than among a dozen buttons at the opposite corner.
       // Kind switch: show the TWO kinds this cell ISN'T, each converting on click. Markdown is always
       // last (code · web · md), so the prose toggle sits in a consistent spot.
       ['code', 'web', 'tool', 'md'].filter(k => k !== c.kind).map(k =>
@@ -709,11 +710,27 @@ function cancelSource(id) {
 // effects. The old full-wipe rebuild and the in-place patch collapse into one publish.
 function renderAll(state)    { _publishState(state); window.loadScratch && window.loadScratch(state && state.scratch); }
 function updateStates(state) { _publishState(state); window.loadScratch && window.loadScratch(state && state.scratch); }
-// Targeted live refresh (SSE `refresh:` event): merge ONLY the changed cells into nbState and
-// patch THOSE cells imperatively — charts `setOption`, tables refill, output swap, control values
-// — with NO full-state GET and NO all-cells re-render. nbState.cells is mutated in place so the
-// signal identity is unchanged (Preact doesn't re-render); a structural change (kind / bind-ness)
-// falls back to a full publish.
+// Targeted live refresh (SSE `refresh:` / `celldone:`): merge ONLY the changed cells into the state
+// and publish, with no full-state GET.
+//
+// This used to mutate `nbState.cells` in place SPECIFICALLY so the signal identity was unchanged and
+// Preact would not re-render, and then patch the DOM itself. That bought a narrower render at the cost
+// of a second copy of the model and a second copy of the reconcile decision, and the two drifted:
+//
+//   · `srcHash` was only ever written by the Preact effect, so after a live push the other path's
+//     change detection compared against a stale hash;
+//   · this path's reconcile had a fast-forward but NO conflict case, so an external edit landing on a
+//     cell with unsaved work raised nothing at all;
+//   · it advanced `srcMap` without moving the editor, so the next full render saw editor ≠ baseline
+//     and offered to reconcile a change the user never made.
+//
+// One publish now. The per-cell work this did — output swap, charts, tables, control values, the
+// blank-cell mark, rev stamping — is all done by the <Cell> effect, which additionally handles
+// animations, the error-line tint, the missing-package banner and rebuilding the control strip. The
+// narrowing that motivated the in-place mutation is still there: `_shareUnchanged` (store.js) keeps
+// the object identity of every cell that did not change, and `MemoCell.shouldComponentUpdate` skips
+// them, so a one-cell push re-renders one cell.
+//
 // Payload recency, per cell. The same cell reaches the browser over TWO transports — the live
 // `celldone:`/`refresh:` push and the full state every mutating request answers with — and until each
 // payload carried a `rev` the client could only apply whichever arrived last: a redundant re-render
@@ -805,60 +822,21 @@ window.slateApplyAck = applyAck;
 
 function patchCells(cells) {
   if (!cells || !cells.length || !nbState) return;
-  cells = cells.filter(revIsNew);           // drop anything not newer than what's already applied
+  // Recency is still filtered here, so a superseded payload costs no publish at all. The <Cell>
+  // effect asks again per cell, because a payload can arrive for a cell that isn't mounted yet and
+  // the stamp is spent only where it actually reaches the DOM.
+  cells = cells.filter(revIsNew);
   if (!cells.length) return;
-  const list = nbState.cells || [];
+  const list = (nbState.cells || []).slice();
   const idx = {}; list.forEach((c, i) => idx[c.id] = i);
-  let structural = false;
-  cells.forEach(nc => {
-    const i = idx[nc.id];
-    if (i == null) { structural = true; return; }
-    const old = list[i];
-    if (old.kind !== nc.kind || hasBinds(old) !== hasBinds(nc)) structural = true;
-    list[i] = nc;
-  });
-  if (structural) { _publishState({ ...nbState, cells: list.slice() }); return; }
-  cells.forEach(nc => {
-    // Keep a CLEAN editor in lockstep with the saved source. This path advances srcMap but does NO
-    // Preact re-render, so an untouched editor would be left showing the OLD source while its
-    // baseline jumped ahead — then the next full render (notebook.js) reads the advanced srcMap as
-    // `_prevSrc`, sees editor ≠ baseline, and pops a phantom "a change just landed while you were
-    // editing" conflict for a cell you never touched. Mirror notebook.js: fast-forward only when
-    // there are no local edits; a genuine divergence is left for the reconcile flow.
-    // store.js is a module, so it lands after this classic script — fall back until it does. Same
-    // comparison, not a second opinion: two divergent copies of this were the whitespace bug.
-    const _store = window.slateStore || {};
-    const _eqw = _store.srcEq || ((a, b) => (a || '').replace(/\s+$/, '') === (b || '').replace(/\s+$/, ''));
-    const _prevSrc = srcMap[nc.id];
-    srcMap[nc.id] = nc.source;
-    if (editors[nc.id]) {
-      const _mine = edText(nc.id);
-      if (_eqw(_mine, _prevSrc) && !_eqw(_mine, nc.source)) edSetText(nc.id, nc.source);
-    }
-    // A cell you're actively editing is YOURS until you resolve: if YOUR unapplied typing still
-    // diverges from the incoming source (a live conflict), freeze its source/output/charts — don't
-    // let the external run replace what you're looking at. Same rule as notebook.js; the reconcile
-    // flow re-applies on accept. An editor merely left open over an agent's edit is NOT a conflict.
-    const _conflicted = !!(_store.isDirty && _store.isDirty(nc.id, nc.source));
-    const cell = document.getElementById('cell-' + nc.id);
-    if (cell) {
-      cell.className = cell.className.replace(/\bstate-\S+/, 'state-' + (_conflicted ? 'edited' : nc.state));
-      const badge = cell.querySelector('.badge'); if (badge) badge.textContent = _conflicted ? 'edited' : nc.state;
-      if (!_conflicted) {
-        if (nc.kind === 'md') { const md = cell.querySelector('.md'); if (md) _swapOutput(md, mdHtml(nc), '', () => typeset(md)); }
-        else { const out = cell.querySelector('.output'); if (out) _swapOutput(out, nc.output, nc.live, () => typeset(out)); }
-      }
-    }
-    if (!_conflicted) { renderCharts(nc); renderTables(nc); syncControlValuesSoon(nc); }
-    // Spend the stamp only now, and only if the cell was actually on the page — see `revIsNew`.
-    // Not for a CONFLICTED cell: every write above was skipped for it, so nothing was drawn, and
-    // stamping anyway records a payload as applied that never reached the DOM. The reconcile flow's
-    // "use the incoming change" re-applies through `patchCells` (restore.js), which `revIsNew` would
-    // then reject as stale — leaving the cell showing your old text with no way back.
-    if (cell && !_conflicted) { revMark(nc); markBlank(cell, nc); }
-  });
+  let hit = false;
+  cells.forEach(nc => { const i = idx[nc.id]; if (i != null) { list[i] = nc; hit = true; } });
+  // An id we don't hold yet belongs to a cell this page has not been told about. It arrives with
+  // `cellpre:` or the next full state; publishing a list that doesn't contain it would re-render the
+  // document to no effect.
+  if (!hit) return;
+  _publishState({ ...nbState, cells: list });                  // one model, one render path
   window.onCellsPatched && window.onCellsPatched(cells);       // states/durations moved (DAG panel)
-  window.renderRunPill && window.renderRunPill();              // a cell just changed state → refresh the error pill
 }
 // `cellpre:` — an agent add/edit, shown BEFORE its eval finishes. Upsert by id: replace an
 // existing cell in place (edit → the new source renders now), or splice a new one at `index`
@@ -1130,8 +1108,11 @@ function renderPalette() {
   if (!chips.length) { list.innerHTML = '<div class="phint">No <code>@bind</code> controls declared yet.</div>'; return; }
   list.innerHTML = chips.map(c => {
     const host = c.hosts.length ? '→ ' + c.hosts.join(', ') : '';
+    // The value is ellipsised in a 300px drawer, so carry it in the tooltip — otherwise a long one
+    // (a URL, a path) is truncated with no way to read the rest.
+    const vt = String(c.value == null ? '' : c.value);
     return `<div class="chip${c.hosts.length ? ' hosted' : ''}" draggable="true" data-pname="${c.name}" data-def="${c.def}"` +
-      ` title="drag into a cell to surface it · click to jump to ‘${c.def}’${c.hosts.length ? ' · surfaced in ' + c.hosts.map(h => '‘' + h + '’').join(', ') : ''}">` +
+      ` title="${window.slateEscHtml(c.name + ' = ' + vt)}&#10;drag into a cell to surface it · click to jump to ‘${c.def}’${c.hosts.length ? ' · surfaced in ' + c.hosts.map(h => '‘' + h + '’').join(', ') : ''}">` +
       `<span class="cname">${c.name}</span><span class="ctype">${c.widget}</span>` +
       `<span class="cright">${host ? `<span class="chost">${host}</span>` : ''}` +
       `<span class="pval" data-pname="${c.name}">${c.value}</span></span></div>`;

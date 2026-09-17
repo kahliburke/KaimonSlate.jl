@@ -45,6 +45,10 @@ const eq = (label, got, want) => { if (got !== want) fails.push(`${label}: ${got
 eq('body', isPageBackground(body), true);
 eq('#nb', isPageBackground(new Element('nb')), true);
 eq('.page', isPageBackground(new Element('', ['page'])), true);
+// The reorder rail is an invisible zone lying on that margin; a click landing on it rather than on
+// one of its buttons is a click on the page, not a dead spot.
+eq('the reorder rail', isPageBackground(new Element('', ['cellmove'])), true);
+eq('a rail button', isPageBackground(new Element('', ['mvbtn'])), false);
 
 // Everything drawn ON the background is a real click and must be left alone. A false positive here
 // makes the element unclickable, so this is the half that matters.

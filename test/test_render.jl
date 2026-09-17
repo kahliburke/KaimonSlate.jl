@@ -1,6 +1,7 @@
 # Renderer tests. Needs OteraEngine + CommonMark, so run against the dev env:
 #   julia --startup-file=no --project=/tmp/report-devenv test/report/test_render.jl
 using ReTest
+import JSON
 
 const HERE = @__DIR__
 include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine
@@ -195,5 +196,28 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         @test occursin("class=\"cellref\" data-cid=\"b\" data-line=\"3\"", lt)
         # legacy `string:N` still links (to this cell, no data-cid).
         @test occursin("data-line=\"5\"", ReportRender._linkify_trace("oops @ string:5"))
+    end
+
+    @testset "ANSI colour → spans" begin
+        # The corpus in test/js/ansi_cases.json is shared with ansi_html.mjs, which asserts the
+        # BROWSER renderer against the same expected HTML. Two renderers exist because a finished
+        # cell is coloured in Julia and a running one is coloured in the browser, and one palette in
+        # the stylesheet has to serve both — so they have to agree character for character. Neither
+        # file forces that; this fixture is what does.
+        cases = JSON.parsefile(joinpath(HERE, "js", "ansi_cases.json"))
+        bad = [c["in"] for c in cases if ReportRender._ansi_html(c["in"]) != c["html"]]
+        @test isempty(bad)
+
+        # Escaping is done by the `inner` function, per plain run — so it stays correct inside a
+        # coloured span, and a caller that linkifies (the warnings block) keeps working there too.
+        @test ReportRender._ansi_html("\e[31m<script>\e[0m") ==
+              "<span class=\"ansi-fg-1\">&lt;script&gt;</span>"
+        @test occursin("class=\"srcref\"",
+                       ReportRender._ansi_html("\e[90m@ Main $(@__FILE__):3\e[0m",
+                                               ReportRender._linkify_trace))
+
+        # Cooking leaves only SGR, but output stored before cooking existed has not been through it.
+        # A cursor move reaching the renderer must be consumed, never printed.
+        @test !occursin('\e', ReportRender._ansi_html("a\e[2Jb\e]0;title\a c"))
     end
 end

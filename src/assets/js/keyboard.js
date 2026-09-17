@@ -61,9 +61,13 @@ function toggleSelect(id) {
 //
 // Deliberately narrow: the target must BE a layout container, not something drawn on one, so a
 // click on output text, a button or the editor is left alone.
+// The reorder rail counts: it is an invisible hover zone lying ON the page margin beside each cell
+// (`.cellmove`), so without this there is a dead strip down the left of every cell where clicking
+// stops meaning "nothing". Its BUTTONS are separate targets and are unaffected.
 function _isPageBackground(t) {
   return t === document.body ||
-         (t instanceof Element && (t.id === 'nb' || t.classList.contains('page')));
+         (t instanceof Element && (t.id === 'nb' || t.classList.contains('page') ||
+                                   t.classList.contains('cellmove')));
 }
 document.addEventListener('mousedown', e => {
   if (e.button !== 0 || !_isPageBackground(e.target)) return;

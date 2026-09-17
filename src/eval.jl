@@ -11,6 +11,7 @@ export Kernel, InProcessKernel, PendingKernel, run_capture, shutdown!
 export register_refresh!, unregister_refresh!, register_srcchange!, unregister_srcchange!, revise_apply!
 export register_progress!, unregister_progress!, register_runbatch!, unregister_runbatch!
 export register_userprog!, unregister_userprog!
+export register_cellout!, unregister_cellout!
 export register_prepare!, unregister_prepare!
 export register_emit!, unregister_emit!, register_bin_emit!, unregister_bin_emit!
 export register_celldone!, unregister_celldone!
@@ -104,6 +105,20 @@ function _do_userprog(report_id::AbstractString, frac, msg, id = "", done = fals
     cb === nothing && return nothing
     f = try; clamp(Float64(frac), 0.0, 1.0); catch; 0.0; end
     try; cb(f, String(msg), String(id), done === true); catch e; @debug "eval: user-progress callback failed" report_id exception = e; end
+    return nothing
+end
+
+# Live cell OUTPUT: while a cell runs, what it has printed so far (cooked — see termcook.jl — so a
+# progress bar is one settled line rather than a cascade of redraw frames). Sampled on a timer by the
+# capture layer and pushed here, latest-frame-wins; the final authoritative output still arrives with
+# the cell result, so a dropped frame costs nothing. The callback takes (cid, stdout, stderr).
+const _CELLOUT_REGISTRY = Dict{String,Any}()
+register_cellout!(report_id::AbstractString, cb) = _reg_set!(_CELLOUT_REGISTRY, report_id, cb)
+unregister_cellout!(report_id::AbstractString) = _reg_del!(_CELLOUT_REGISTRY, report_id)
+function _do_cellout(report_id::AbstractString, cid, out, err)
+    cb = _reg_get(_CELLOUT_REGISTRY, report_id)
+    cb === nothing && return nothing
+    try; cb(String(cid), String(out), String(err)); catch e; @debug "eval: cell-output callback failed" report_id exception = e; end
     return nothing
 end
 
@@ -256,6 +271,7 @@ function _new_module(report::Report)
             _do_emit(rid, channel, data),
         # In-process: no wire to cross, so it goes straight to the same callback the worker's
         # published message ends up at.
+        slate_cellout = (cid, out, err) -> _do_cellout(rid, cid, out, err),
         set_bind = (name, value) -> _do_setbind(rid, string(name), value),
         assetbase = () -> String(get(report.meta, "assetbase", "")))   # `@asset` base (notebook project dir)
     return m

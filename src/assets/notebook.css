@@ -130,14 +130,40 @@ button, a.btnlink { background:var(--bg3); color:var(--text); border:1px solid v
 button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent); }
 .page { max-width:var(--page-max, 980px); margin:0 auto; padding:var(--page-pad) var(--page-pad) 160px; transition:margin-right .18s ease, margin-left .18s ease; }
 body.fullwidth .page { max-width:none; }   /* Full page width overrides the column-width slider */
-/* When the agent chat is open, slide the notebook column left of the panel so cells
-   and the chat never overlap (the panel is a fixed 380px drawer on the right). */
-body.agent-open .page { margin-right:392px; }
-@media (max-width:900px) { body.agent-open .page { margin-right:0; } }
+/* An open dock reserves its width so cells and the drawer never overlap. Take the LARGER of that
+   reservation and the margin the column would have had anyway: `.page` is `margin:0 auto`, so
+   pinning one side to a length leaves the opposite `auto` to swallow every remaining pixel, which
+   dragged the column hard against the dock. On a wide monitor there is slack to swallow and the
+   column visibly left the centre; on a narrow one there was none, which is why this never showed.
+   Now it holds still until the dock would actually reach it, then gives way. */
+body.agent-open .page { margin-right:max(392px, calc((100% - var(--page-max, 980px)) / 2)); }
 /* The TOC drawer mirrors the agent panel but on the LEFT: shift the notebook column right so the
-   outline and the cells never overlap (fixed 300px drawer). Falls back to overlay when narrow. */
-body.toc-open .page { margin-left:312px; }
-@media (max-width:900px) { body.toc-open .page { margin-left:0; } }
+   outline and the cells never overlap (fixed 300px drawer). Falls back to overlay when narrow.
+   312 is the drawer's 300 plus the same 12px clearance the agent side reserves (392 for a 380
+   panel) — the MINIMUMS match, though with slack to hold still in, the narrower drawer naturally
+   leaves the wider gap. The reorder rail needs nothing extra: it lives inside `.page`'s own 20px
+   padding, which is there whether a drawer is open or not, and reserving room for it here as well
+   made this gap read as three times the one opposite. */
+body.toc-open .page { margin-left:max(312px, calc((100% - var(--page-max, 980px)) / 2)); }
+/* BOTH docks open: the column is pinned on both sides, so there is no holding-still left to do —
+   and the centring term, taken on one side while the other sits at its minimum, is precisely what
+   made the two gaps unequal (the wider one read as half again the other). Reserve each dock's own
+   width and the column sits the same distance from either. Full width has always done this; the
+   two cases now agree rather than one of them being the special one. */
+body.toc-open.agent-open .page { margin-left:312px; margin-right:392px; }
+/* Narrow: a drawer stops pushing and OVERLAYS the column, so there is nothing to reserve — and the
+   margin the reorder rail sits in is underneath the TOC, so it stands down here and only here.
+   Spelled out for the both-open case too: a media query adds no specificity, so the plain selectors
+   alone would lose to the rule above. */
+@media (max-width:900px) {
+  body.agent-open .page, body.toc-open.agent-open .page { margin-right:0; }
+  body.toc-open .page, body.toc-open.agent-open .page { margin-left:0; }
+  body.toc-open .cellmove { display:none; }
+}
+/* Full width has no slack by definition — the column always runs up to the dock — and `--page-max`
+   is not its width there, so the centring term above would be meaningless. Reserve outright. */
+body.fullwidth.agent-open .page { margin-right:392px; }
+body.fullwidth.toc-open .page { margin-left:312px; }
 /* Banner while a self-contained notebook's env reconstructs in the background; the cells below
    show the embedded frozen render until live cells are pushed in. */
 .hydbanner { position:sticky; top:var(--topbar-h,49px); z-index:9; display:flex; align-items:center; gap:10px;
@@ -188,12 +214,42 @@ body.hyd-preview #runstale, body.hyd-preview #addcellbtn { opacity:.7; }
 .depflag { position:absolute; top:-9px; left:10px; z-index:6; background:var(--gold); color:#1a1400;
   font-size:.62rem; font-weight:700; padding:1px 6px; border-radius:6px; letter-spacing:.03em; cursor:pointer;
   box-shadow:0 1px 4px #0007; }
-/* While the dependency cone is shown, let the flagged cells' tab protrude past the
-   cell box (cells normally clip to their rounded corners via overflow:hidden). */
-.cell.dep-up, .cell.dep-focus { overflow:visible; }
+/* (The flagged cells' tab protrudes past the cell box; cells no longer clip — see `.cell` below.) */
 .cell { border:1px solid var(--border); border-left:3px solid var(--border); border-radius:8px;
-        margin:14px 0; background:var(--bg2); overflow:hidden;
+        margin:14px 0; background:var(--bg2); overflow:visible;
         scroll-margin-top:68px; }   /* jumps (DAG/TOC/nav) land the cell HEADER below the sticky topbar, with breathing room */
+/* The cell does NOT clip: the reorder rail below is positioned against it and has to reach outside
+   the box. Nothing else ever overflowed one — the header is the only child that paints a background,
+   every other child is transparent and shows the cell's own rounded fill — so the clip was there to
+   keep the header's top corners honest, and the header can do that itself. */
+.cellhead { border-radius:5px 7px 0 0; }   /* inner radius: 8px less the 3px left / 1px top border */
+/* Reorder rail. Move up/down used to sit in the header's action strip, a dozen buttons along at the
+   far right, which is nowhere near the end of the cell they move. Out in the page margin they cover
+   no cell content and read as what they are. The rail IS the hover zone — its padding extends the
+   target well past the two glyphs, so reaching the cell's top-left corner takes no precision — and
+   it lives inside `--page-pad`, the one horizontal space the column always has. */
+/* `right:100%` lands on the cell's PADDING box, which is inside its 3px left border — hence 5px of
+   padding-right: 3 to clear the border, 2 for the gap. The rest of the padding is pure hit area,
+   which costs nothing here: the rail is absolutely positioned, so its box pushes on nothing. */
+.cellmove { position:absolute; top:0; right:100%; z-index:7; display:flex; flex-direction:column;
+  gap:3px; padding:6px 5px 20px 14px; }
+.cellmove > button { width:18px; height:16px; padding:0; display:flex; align-items:center;
+  justify-content:center; font-size:.7rem; line-height:1; border-radius:5px;
+  background:var(--bg2); border:1px solid var(--border); color:var(--dim);
+  opacity:0; transition:opacity .12s, color .12s, border-color .12s; }
+.cellmove:hover > button, .cellmove:focus-within > button { opacity:1; }
+.cellmove > button:hover { color:var(--accent); border-color:var(--accent); }
+/* Gone in the reading postures, where the cell chrome is not on show at all — and for the second
+   cell of a `column=N` row, whose left is not the page margin but its neighbour. The TOC is NOT
+   here: it pushes the column right and the reservation above keeps the rail's margin clear, so the
+   two coexist. Only a drawer that OVERLAYS the column takes the rail down. */
+body.zen .cellmove, body.app .cellmove,
+.cell-row > .cell:not(:first-child) .cellmove { display:none; }
+/* The Files drawer is that case — up to 80vw, straight over the column. It signals `open` on itself
+   and nothing else needed to know, which is not a good enough reason to make it start announcing to
+   the body. Its own rule: one invalid selector voids the whole list, so `:has` does not get to take
+   the plain selectors above down with it. */
+body:has(.filespanel.open) .cellmove { display:none; }
 /* Side-by-side cells: a `column=N` (N≥2) tag rows a cell beside its predecessor (grouping in notebook.js).
    Equal-width flex columns so paired figures (e.g. an ECharts + a Makie plot) render at the same size. */
 .cell-row { display:flex; gap:16px; align-items:flex-start; }
@@ -738,6 +794,51 @@ body.resizing { cursor:col-resize; user-select:none; }
 .fileedit { flex:1; overflow:auto; min-height:0; }
 .fileedit .cm-editor { height:100%; }
 .filespanel .pfoot { padding:6px 12px; border-top:1px solid var(--border); line-height:1.4; }
+/* ANSI colour in captured output. A cell's stdout/stderr is cooked (termcook.jl) so SGR is the only
+   escape family left, and render.jl turns each colour run into one of these spans. The eight base
+   colours reuse the theme's own accents where there is a natural match, so coloured output belongs to
+   the theme instead of fighting it; the rest are fixed but chosen to sit on both light and dark
+   backgrounds. 256-colour and truecolour arrive as inline styles and need no rules here. */
+:root {
+  --ansi-0:var(--dim);    --ansi-1:var(--red);   --ansi-2:var(--green); --ansi-3:var(--gold);
+  --ansi-4:var(--accent); --ansi-5:#c678dd;      --ansi-6:#56b6c2;      --ansi-7:var(--text);
+  --ansi-8:var(--dim);    --ansi-9:var(--red);   --ansi-10:var(--green);--ansi-11:var(--gold);
+  --ansi-12:var(--accent);--ansi-13:#d19aeb;     --ansi-14:#7fd4de;     --ansi-15:var(--text);
+}
+.ansi-fg-0{color:var(--ansi-0)}    .ansi-fg-1{color:var(--ansi-1)}
+.ansi-fg-2{color:var(--ansi-2)}    .ansi-fg-3{color:var(--ansi-3)}
+.ansi-fg-4{color:var(--ansi-4)}    .ansi-fg-5{color:var(--ansi-5)}
+.ansi-fg-6{color:var(--ansi-6)}    .ansi-fg-7{color:var(--ansi-7)}
+.ansi-fg-8{color:var(--ansi-8)}    .ansi-fg-9{color:var(--ansi-9)}
+.ansi-fg-10{color:var(--ansi-10)}  .ansi-fg-11{color:var(--ansi-11)}
+.ansi-fg-12{color:var(--ansi-12)}  .ansi-fg-13{color:var(--ansi-13)}
+.ansi-fg-14{color:var(--ansi-14)}  .ansi-fg-15{color:var(--ansi-15)}
+.ansi-bg-0{background:var(--ansi-0)}   .ansi-bg-1{background:var(--ansi-1)}
+.ansi-bg-2{background:var(--ansi-2)}   .ansi-bg-3{background:var(--ansi-3)}
+.ansi-bg-4{background:var(--ansi-4)}   .ansi-bg-5{background:var(--ansi-5)}
+.ansi-bg-6{background:var(--ansi-6)}   .ansi-bg-7{background:var(--ansi-7)}
+.ansi-bg-8{background:var(--ansi-8)}   .ansi-bg-9{background:var(--ansi-9)}
+.ansi-bg-10{background:var(--ansi-10)} .ansi-bg-11{background:var(--ansi-11)}
+.ansi-bg-12{background:var(--ansi-12)} .ansi-bg-13{background:var(--ansi-13)}
+.ansi-bg-14{background:var(--ansi-14)} .ansi-bg-15{background:var(--ansi-15)}
+.ansi-bold { font-weight:600; }
+/* Julia leans on dim for secondary detail (`@info` bodies, stacktrace paths); keep it legible
+   rather than literally faint. */
+.ansi-dim { opacity:.72; }
+.ansi-italic { font-style:italic; }
+.ansi-underline { text-decoration:underline; }
+.ansi-strike { text-decoration:line-through; }
+.ansi-reverse { filter:invert(1); }
+/* Live output from a RUNNING cell (runstatus.js `onCellOutput`). While it's up, the previous run's
+   output is hidden rather than removed: the streamed text is this run's output, and stacking the two
+   leaves the reader guessing which is current. The block is dropped when the real result patches in.
+   Keyed off `:has(> .outlive)` rather than a class we add and remove: a run that ends without a
+   `celldone:` (cancelled, worker lost) would leave a stale class behind, and a class that hides
+   output is the worst one to leak. Removing the block restores the cell by construction. */
+.output:has(> .outlive) > .out, .output:has(> .outlive) > .warn,
+.output:has(> .outlive) > .val, .output:has(> .outlive) > .dispwrap,
+.output:has(> .outlive) > .outexpand { display:none; }
+.outlive > .out, .outlive > .warn { opacity:.9; }
 /* Jupyter-style scrolled output: clamp tall text blocks with an in-place scroll + Expand toggle.
    (Markdown is authored prose — intentionally NOT clamped.) */
 .out.clamped, .val.clamped, .warn.clamped { max-height:30em; }
@@ -1292,14 +1393,22 @@ input.toggle:checked::after { left:18px; }
 /* A bound control surfaced in a strip elsewhere collapses to this slim chip. */
 .hostedph { display:flex; align-items:center; gap:8px; padding:6px 14px; color:var(--dim); font-size:.78rem; }
 .hostedph .wname { min-width:auto; }
-/* Controls palette — a side drawer listing every declared @bind across the notebook. */
-.palette { position:fixed; top:0; right:0; height:100vh; width:300px; background:var(--bg2);
-  border-left:1px solid var(--border); transform:translateX(100%); transition:transform .18s ease;
-  z-index:20; display:flex; flex-direction:column; }
+/* ── Right-edge slide-in drawer ──────────────────────────────────────────────────────────────────
+   The shared shell for every full-height panel docked to the right: controls, history, worker log,
+   scratchpad. Panel classes below add ONLY their width.
+   Copied per panel, these properties drifted: the controls drawer sat at z-index 20 while its three
+   siblings were at 60, so opening the agent panel (25) buried the controls you had just opened. It
+   also carried a different border colour, a different shadow, and no max-width. */
+.drawer { position:fixed; top:0; right:0; height:100vh; max-width:96vw; background:var(--bg2);
+  border-left:1px solid var(--bg3); transform:translateX(100%); transition:transform .18s ease;
+  z-index:60; display:flex; flex-direction:column; }
 /* Shadow only when open — a closed panel is parked off-screen-right (translateX 100%) and its
    shadow would otherwise bleed back onto the viewport's right edge (stacking with the other panels
    into a dark "fade"). */
-.palette.open { transform:none; box-shadow:-8px 0 24px rgba(0,0,0,.3); }
+.drawer.open { transform:none; box-shadow:-8px 0 24px #0007; }
+
+/* Controls palette — a side drawer listing every declared @bind across the notebook. */
+.palette { width:300px; }
 /* Agent chat panel (consumer of Kaimon's agent service) */
 /* The drawer's top is aligned to the first content cell (--agent-top, measured in JS) so it
    sits below the menu bar and lines up with the notebook. The topbar-height + page-gutter
@@ -1530,10 +1639,7 @@ body.modkey .cm-content { cursor: pointer; }
 .cm-completionInfo .docmd > :first-child { margin-top:0; }
 .cm-completionInfo .docmd > :last-child { margin-bottom:0; }
 /* History panel (time machine) */
-.histpanel { position:fixed; top:0; right:0; height:100vh; width:420px; max-width:94vw; background:var(--bg2);
-  border-left:1px solid var(--bg3); transform:translateX(100%);
-  transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
-.histpanel.open { transform:none; box-shadow:-8px 0 24px #0007; }   /* shadow only when open (see .palette) */
+.histpanel { width:420px; max-width:94vw; }
 .hbtn { background:var(--bg3); border:none; color:var(--text); border-radius:6px; padding:3px 9px; cursor:pointer; font-size:.8rem; }
 .hbtn:hover { background:var(--accent); }
 .hbtn.stop { background:var(--red); }
@@ -1555,10 +1661,9 @@ body.modkey .cm-content { cursor: pointer; }
 .histprev .dl.ctx { color:var(--dim); }
 .histprev .dl.gap { color:var(--dim); text-align:center; font-style:italic; opacity:.7; padding:2px 4px; }
 /* Worker log panel */
-.logpanel { position:fixed; top:0; right:0; height:100vh; width:480px; max-width:96vw; background:var(--bg2);
-  border-left:1px solid var(--bg3); transform:translateX(100%);
-  transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
-.logpanel.open { transform:none; box-shadow:-8px 0 24px #0007; }   /* shadow only when open (see .palette) */
+/* Shared by the worker log, the activity monitor and the package panel (#logpanel, #actpanel,
+   #pkgpanel) — three drawers that differ only in content. */
+.logpanel { width:480px; }
 /* Pipeline DAG split pane — the live dataflow graph (dag.js) docked on the right, the
    notebook reflowing to the left half: click a node to navigate the code, watch the graph
    recompute while you edit. The divider is mouse-resizable (--dagw, persisted). */
@@ -1757,10 +1862,7 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 .logbox::-webkit-scrollbar-thumb { background:var(--border); border:2px solid transparent; background-clip:content-box; border-radius:7px; }
 .logbox::-webkit-scrollbar-thumb:hover { background:var(--dim); background-clip:content-box; }
 /* Scratchpad panel — slate.eval diagnostics, surfaced but kept out of the document */
-.scratchpanel { position:fixed; top:0; right:0; height:100vh; width:520px; max-width:96vw; background:var(--bg2);
-  border-left:1px solid var(--bg3); transform:translateX(100%);
-  transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
-.scratchpanel.open { transform:none; box-shadow:-8px 0 24px #0007; }
+.scratchpanel { width:520px; }
 .scratchbody { flex:1 1 0; min-height:0; overflow-y:auto; padding:10px 12px; display:flex; flex-direction:column; gap:10px;
   scrollbar-width:thin; scrollbar-color:var(--border) transparent; }
 .scratchbody::-webkit-scrollbar { width:10px; }
@@ -2127,15 +2229,21 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-size:.72rem; text-align:center; padding:6px; }
 .phint { color:var(--dim); font-size:.8rem; padding:10px; }
 .pfoot { padding:10px 14px; border-top:1px solid var(--border); font-size:.72rem; }
+/* A flex item refuses to shrink below its content by default (min-width:auto), so a long value — a
+   URL in a text control, say — pushed straight out through the card's right edge. `min-width:0` lets
+   the name and the value both give way, and shrink is proportional to content, so the value yields
+   first. Truncated text stays readable from the chip's tooltip. */
 .chip { display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--bg3);
   border:1px solid var(--border); border-left:3px solid var(--purple); border-radius:6px;
-  cursor:pointer; font-size:.82rem; }
+  cursor:pointer; font-size:.82rem; overflow:hidden; }
 .chip:hover { border-color:var(--accent); }
-.chip .cname { font-family:'Cascadia Code',monospace; color:var(--accent); }
-.chip .ctype { color:var(--dim); font-size:.72rem; }
-.chip .cright { margin-left:auto; display:flex; align-items:center; gap:8px; }
-.chip .chost { color:var(--gold); font-size:.72rem; }
-.chip .pval { color:var(--val); font-family:'Cascadia Code',monospace; }
+.chip .cname { font-family:'Cascadia Code',monospace; color:var(--accent);
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chip .ctype { color:var(--dim); font-size:.72rem; flex:0 0 auto; }
+.chip .cright { margin-left:auto; display:flex; align-items:center; gap:8px; min-width:0; }
+.chip .chost { color:var(--gold); font-size:.72rem; flex:0 0 auto; }
+.chip .pval { color:var(--val); font-family:'Cascadia Code',monospace;
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .chip.hosted { opacity:.7; }
 /* Blurred like every other full-screen overlay (disconnect, run-cell, package install) — this was
    the one that dimmed without it, so a busy notebook stayed legible enough behind a dialog to

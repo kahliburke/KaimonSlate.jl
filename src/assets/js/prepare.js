@@ -46,9 +46,13 @@
     // Surface the latest raw line right on the collapsed summary — live activity at a glance without
     // expanding (dim, truncated). Hidden while open, where the full log below already shows it.
     const last = document.getElementById('hydrawlast');
-    if (last) last.textContent = det.open ? '' : raw[raw.length - 1];
+    // The summary line is plain text (it sits inside a <summary>, where markup would fight the
+    // chrome) — so strip the styling rather than render it.
+    if (last) last.textContent = det.open ? '' : window.slateAnsiText(raw[raw.length - 1]);
     // Keep the last ~120 lines in view — the build log is a debugging aid, not the headline.
-    pre.textContent = raw.slice(-120).join('\n');
+    // Rendered as HTML so Pkg's colour survives: its ✓/✗ marks and package names are much easier to
+    // scan in colour, which is most of the point of this panel.
+    pre.innerHTML = raw.slice(-120).map(window.slateAnsiHtml).join('\n');
     if (det.open) pre.scrollTop = pre.scrollHeight;
   }
 

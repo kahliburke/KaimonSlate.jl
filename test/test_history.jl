@@ -132,6 +132,25 @@ const H = SlateHistory
         @test (length(H.entries(dst)), length(H.entries(src))) == (3, 2)    # …and diverge from here
     end
 
+    # A launcher opens the downloaded bundle, then re-homes the notebook to its install dir. The bundle
+    # is a real `.jl` that stays on disk, so unless its path is dropped the installed notebook reads as
+    # one document in two places and the reader is asked to split a copy they never made.
+    @testset "rehome_path! replaces a transport path" begin
+        bundle = abspath("/tmp/__slate_bundle__.standalone.jl")
+        install = abspath("/tmp/__slate_install__.jl")
+        one = H.Doc("transport-doc", bundle)
+        two = H.Doc("transport-doc", install)
+        H.record!(one, "b\n"; cells = [("b", "code", "b\n")])
+        @test H.known_paths(one) == [bundle]                # the bundle is the ONLY path at re-home time
+
+        @test H.rehome_path!(two, bundle, install)
+        @test H.known_paths(two) == [install]               # moved, not accumulated
+        @test !H.rehome_path!(two, bundle, install)         # already moved → no change
+        # Recording under the install path afterwards must not re-add the bundle.
+        H.record!(two, "b\nc\n"; cells = [("b", "code", "b\n"), ("c", "code", "c\n")])
+        @test H.known_paths(two) == [install]
+    end
+
     # "Don't ask again" is answered per PATH, not per document — one copy going quiet must not
     # silence the notice for the other.
     @testset "silence! is per path" begin

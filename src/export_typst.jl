@@ -774,18 +774,23 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
     o = c.output
     (o === nothing || !_outputs_any(outputs)) && return
     texts = _outputs_text_ok(outputs)
+    # Captured text carries colour (the page renders it as spans). Typst typesets these sidecar
+    # files literally, so the escape codes have to come off or they print as visible garbage. Every
+    # text field, not just stdout: a package whose `show`/`showerror` colours unconditionally
+    # (ignoring the stream's `:color`) puts it in the value repr and the error too.
+    plain = ReportEngine.strip_sgr
     if o.exception !== nothing
         texts || return                                # figures-only: skip error text
-        write(joinpath(dir, base * ".err"), rstrip(o.exception))
+        write(joinpath(dir, base * ".err"), rstrip(plain(o.exception)))
         print(io, "#errblock(read(\"", base, ".err\"))\n")
         return
     end
     if texts && !isempty(strip(o.stdout))
-        write(joinpath(dir, base * ".out"), rstrip(o.stdout))
+        write(joinpath(dir, base * ".out"), rstrip(plain(o.stdout)))
         print(io, "#outblock(read(\"", base, ".out\"))\n")
     end
     if texts && isempty(o.display) && !isempty(o.value_repr)
-        write(joinpath(dir, base * ".val"), o.value_repr)
+        write(joinpath(dir, base * ".val"), plain(o.value_repr))
         print(io, "#valblock(read(\"", base, ".val\"))\n")
     end
     fig = _figure_for_export(nb, c; theme = _chart_theme(charttheme, theme), override = override,

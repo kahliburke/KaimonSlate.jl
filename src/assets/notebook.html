@@ -201,7 +201,7 @@
   <div id="toclist" class="toclist"></div>
 </aside>
 <div class="page"><div id="nb"></div></div>
-<aside id="palette" class="palette">
+<aside id="palette" class="drawer palette">
   <div class="phead"><strong>Controls</strong><span id="palette-count" class="hint"></span>
     <button class="pclose" onclick="togglePalette()" title="close">✕</button></div>
   <div id="palette-list" class="plist"></div>
@@ -224,7 +224,10 @@
         <span id="filescount" class="hint"></span>
       </div>
       <div id="filesnbs" class="filesnbs"></div>
-      <div id="filestree" class="filestree" tabindex="0" onkeydown="_filesTreeKey(event)"></div>
+      <!-- `data-slate-keys`: this tree navigates with the arrow keys, Enter and F2, so the notebook's
+           command-mode shortcuts must not fire behind it. Its own stopPropagation cannot achieve that
+           alone — the keymap listens on `document` in the capture phase, ahead of this handler. -->
+      <div id="filestree" class="filestree" tabindex="0" data-slate-keys="own" onkeydown="_filesTreeKey(event)"></div>
     </div>
     <div id="filesgrip" class="filesgrip" title="drag to resize"></div>
     <div class="filesedit-wrap">
@@ -246,6 +249,9 @@
   <div class="aphead"><strong>🤖 Agent</strong><span id="apstatus" class="hint"></span>
     <button id="thinkbtn" onclick="toggleThink()" title="show/hide the agent's thinking" style="margin-left:auto">💭</button>
     <button onclick="clearChat()" title="clear chat history" style="margin-left:6px">🧹</button>
+    <!-- Model and permissions are settings, but they are read from HERE — so the panel that raises
+         the question carries the way to answer it, opened straight onto its own section. -->
+    <button onclick="openSettings('global', 'Agent')" title="Agent settings — model and permissions" style="margin-left:6px">⚙</button>
     <button id="apmaxbtn" onclick="toggleAgentMax()" title="maximize / restore the panel" style="margin-left:6px">⛶</button>
     <button class="pclose" onclick="toggleAgent()" title="close" style="margin-left:6px">✕</button></div>
   <div id="apmsgs" class="apmsgs"></div>
@@ -255,26 +261,26 @@
     <button class="apsend" onclick="agentSend()" title="Send (⏎)" aria-label="Send">↑</button>
   </div>
 </aside>
-<aside id="histpanel" class="histpanel">
+<aside id="histpanel" class="drawer histpanel">
   <div class="aphead"><strong>🕘 History</strong><span id="histcount" class="hint"></span>
     <button id="histplay" class="hbtn" onclick="histReplay()" title="replay the buildup">▶ Replay</button>
     <button class="pclose" onclick="toggleHistory()" title="close">✕</button></div>
   <div id="histlist" class="histlist"></div>
   <div id="histprev" class="histprev"></div>
 </aside>
-<aside id="scratchpanel" class="scratchpanel">
+<aside id="scratchpanel" class="drawer scratchpanel">
   <div class="aphead"><strong>🧪 Scratchpad</strong>
     <button class="hbtn" onclick="clearScratch()" title="clear the scratchpad">🧹 Clear</button>
     <button class="pclose" onclick="toggleScratch()" title="close">✕</button></div>
   <div id="scratchbody" class="scratchbody"></div>
 </aside>
-<aside id="logpanel" class="logpanel">
+<aside id="logpanel" class="drawer logpanel">
   <div class="aphead"><strong>🪵 Worker log</strong><span id="logstatus" class="hint"></span>
     <button id="logtail" class="hbtn" onclick="toggleTail()" title="auto-scroll to newest">⤓ tail</button>
     <button class="pclose" onclick="toggleLog()" title="close">✕</button></div>
   <pre id="logbox" class="logbox"></pre>
 </aside>
-<aside id="actpanel" class="logpanel">
+<aside id="actpanel" class="drawer logpanel">
   <div class="aphead"><strong>📋 Activity</strong><span class="hint">live run feed</span>
     <button class="hbtn" onclick="document.getElementById('actlog').innerHTML=''" title="clear">⌫ clear</button>
     <button class="pclose" onclick="toggleAct()" title="close">✕</button></div>
@@ -369,7 +375,7 @@
     <button class="pclose" onclick="toggleDag()" title="close (Esc)">✕</button></div>
   <div id="dagcanvas" class="dagcanvas"></div>
 </aside>
-<aside id="pkgpanel" class="logpanel">
+<aside id="pkgpanel" class="drawer logpanel">
   <div class="aphead"><strong>📦 Packages</strong><span id="pkgstatus" class="hint"></span>
     <button class="pclose" onclick="togglePackages()" title="close">✕</button></div>
   <div class="pkgadd">
@@ -507,7 +513,7 @@
         <label title="URL path for THIS document under the site (/<path>/). Blank = auto from the title. Re-publishing the same path updates it in place.">Document path <input type="text" id="pubopt_slug" class="pubinp" placeholder="auto from title" autocomplete="off" spellcheck="false" style="font-family:monospace"/></label>
       </div>
       <div id="pubsitesprog" class="publog" style="display:none;margin-top:8px"></div>
-      <div class="pubdim" style="margin-top:8px;font-size:.74rem">Tick a site to add this notebook; ★ makes it the site's front page; ☁ builds &amp; deploys it with the options above. New site or targets? <a class="publink" href="/#publishing" target="_blank" rel="noopener">Publishing manager</a> · <a class="publink" href="#" onclick="closePublishing();openWebsiteExport();return false">More export options…</a></div>
+      <div class="pubdim" style="margin-top:8px;font-size:.74rem">Tick a site to add this notebook; ★ makes it the site's front page; ⇪ builds it into the site's local copy with the options above. Nothing goes live here — deploy with Sync in the <a class="publink" href="/#publishing" target="_blank" rel="noopener">Publishing manager</a> · <a class="publink" href="#" onclick="closePublishing();openWebsiteExport();return false">More export options…</a></div>
     </div>
     <div class="pubcol">
       <div class="setsec">Already published</div>
@@ -743,6 +749,7 @@
 <!-- App modules — ordered classic scripts sharing one global scope (load order matters). -->
 <script src="/assets/js/dtypes.js"></script>   <!-- generated from SlateExtensionsBase.DTYPES; must precede its readers -->
 <script src="/assets/js/core.js"></script>
+<script src="/assets/js/ansi.js"></script>     <!-- window.slateAnsiHtml: SGR → spans (needs core.js's slateEscHtml) -->
 <script src="/assets/js/wscall.js"></script>   <!-- window.slateCall: JS→Julia calls over the page WebSocket -->
 <!-- Keyboard, in dependency order and BEFORE editor.js: the command registry, the keymap presets,
      then the resolver. keymap.js builds its lookup index at load from the registered commands, and

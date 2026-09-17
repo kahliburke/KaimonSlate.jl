@@ -906,4 +906,70 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test "q" in r6.meta["multidef"] && !("baz" in r6.meta["multidef"])
     end
 
+    @testset "`global x` is a write, even where EE reads it as a local" begin
+        # Reported against the BonitoSlate example: a cell assigning its result with `global` from
+        # inside a `let`, and a reader that never got an edge to it. ExpressionExplorer sees the
+        # name bound EARLIER in the same scope and calls it a local, reporting no definition at all
+        # — but one `global v` makes every `v` in that scope the global, so the cell does bind it.
+        # A missing edge is not a missing optimisation: the reader shows a stale value with no
+        # error, or on a first run reaches a binding that does not exist yet (world age).
+        shadow = "#%% code id=w\nlet\n  s = ([1,2,3,4], nothing)\n  sx, _ = s\n  global sx = sum(sx)\nend\n" *
+                 "#%% code id=r\nsx * 10"
+        r = parse_report(shadow); build_dependencies!(r)
+        @test :sx in findcell(r, "w").writes
+        @test "w" in findcell(r, "r").deps
+
+        # The same shape without destructuring — a plain local, then `global`.
+        r2 = parse_report("#%% code id=w\nlet\n  v = 1\n  global v = 2\nend\n#%% code id=r\nv")
+        build_dependencies!(r2)
+        @test :v in findcell(r2, "w").writes && "w" in findcell(r2, "r").deps
+
+        # Every spelling of the declaration binds, including bare, typed and multiple.
+        for (src, want) in ("let\n  global a\n  a = 1\nend" => [:a],
+                            "let\n  global b::Int = 1\nend" => [:b],
+                            "let\n  global c, d = (1, 2)\nend" => [:c, :d],
+                            "for i in 1:1\n  global e = i\nend" => [:e],
+                            "if true\n  global f = 1\nend" => [:f])
+            got = ReportEngine._collect_global_decls!(Set{Symbol}(), Meta.parse(src))
+            @test sort(collect(got)) == want
+        end
+        # `_` is a discard, not a binding.
+        @test isempty(ReportEngine._collect_global_decls!(Set{Symbol}(), Meta.parse("let\n  global _, g = (1,2)\nend")) ∩ Set([:_]))
+
+        # A `global` in a function BODY binds when the function is CALLED, not when the defining
+        # cell runs — so this pass abstains rather than wiring an edge from every helper.
+        @test isempty(ReportEngine._collect_global_decls!(Set{Symbol}(), Meta.parse("function h()\n  global hv = 1\nend")))
+        @test isempty(ReportEngine._collect_global_decls!(Set{Symbol}(), Meta.parse("k() = (global kv = 1)")))
+        # …and a cell with no `global` at all is untouched.
+        @test isempty(ReportEngine._collect_global_decls!(Set{Symbol}(), Meta.parse("let\n  v = 1\n  v + 1\nend")))
+    end
+
+    @testset "`eval` is a barrier, like `include`" begin
+        # `@eval x = 1` / `eval(:(x = 1))` / `Core.eval(m, ex)` bind a global that no macro-aware
+        # pass can see, because the expression is assembled at RUN time — macroexpand.jl resolves
+        # `@enum` and `Base.@kwdef` precisely and can say nothing about these. Unmarked, the reader
+        # kept a stale value with no error, which is how this was found.
+        for src in ("@eval ev = 1", "eval(:(ev = 1))", "Core.eval(@__MODULE__, :(ev = 1))",
+                    "Base.eval(Main, :(ev = 1))")
+            r = parse_report("#%% code id=w\n$src\n\n#%% code id=r\nev")
+            build_dependencies!(r)
+            @test :opaque in findcell(r, "w").flags
+            @test "w" in findcell(r, "r").deps
+        end
+        # …and the blast radius stays where it was: an ordinary cell keeps a PRECISE edge rather
+        # than becoming a barrier, and an unrelated macro wires nothing at all.
+        r = parse_report("#%% code id=w\npv = 1\n\n#%% code id=r\npv")
+        build_dependencies!(r)
+        @test !(:opaque in findcell(r, "w").flags) && "w" in findcell(r, "r").deps
+        r2 = parse_report("#%% code id=w\n@show 1 + 1\n\n#%% code id=r\nqq")
+        build_dependencies!(r2)
+        @test !(:opaque in findcell(r2, "w").flags) && isempty(findcell(r2, "r").deps)
+        # `include` is untouched by the widened callee test, dotted form included.
+        for src in ("include(\"x.jl\")", "Main.include(\"x.jl\")")
+            r3 = parse_report("#%% code id=w\n$src\n\n#%% code id=r\nzz")
+            build_dependencies!(r3)
+            @test :opaque in findcell(r3, "w").flags
+        end
+    end
+
 end

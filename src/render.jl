@@ -23,6 +23,89 @@ const _TEMPLATE = joinpath(@__DIR__, "templates", "report.html.tmpl")
 
 _esc(s) = replace(String(s), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;")
 
+# ── ANSI colour → spans ──────────────────────────────────────────────────────
+# Captured output is cooked by `ReportEngine.cook_terminal` before it gets here, which replays and
+# consumes every cursor/erase sequence and leaves SGR (`\e[…m`) as the ONLY escape family in the
+# text. So this is the whole of the ANSI handling the page needs — and anything the cooker doesn't
+# model can't reach us as visible garbage. The attribute model is the cooker's (`_tc_sgr`/`TAttr`),
+# shared rather than reimplemented so the two can't drift.
+
+# xterm-256 palette entry → "#rrggbb". 16–231 is a 6×6×6 cube, 232–255 a grey ramp. 0–15 are
+# themeable and handled by class instead, so they never reach here.
+function _xterm_rgb(n::Integer)
+    if n >= 232
+        v = 8 + (n - 232) * 10
+        return string("#", lpad(string(v; base = 16), 2, '0')^3)
+    end
+    lvl = (0, 95, 135, 175, 215, 255)
+    i = n - 16
+    r, g, b = lvl[(i ÷ 36) + 1], lvl[((i % 36) ÷ 6) + 1], lvl[(i % 6) + 1]
+    return string("#", join(lpad(string(c; base = 16), 2, '0') for c in (r, g, b)))
+end
+
+# A colour field (see `TAttr`): -1 default, 0..15 themed palette, 16..255 xterm palette, ≥256 a
+# packed 24-bit colour. Returns (class, css-colour) — exactly one of the two is non-empty.
+function _ansi_color(v::Integer, which::AbstractString)
+    v < 0   && return ("", "")
+    v < 16  && return (string("ansi-", which, "-", v), "")
+    v < 256 && return ("", _xterm_rgb(v))
+    rgb = v - 256
+    return ("", string("#", lpad(string(rgb; base = 16), 6, '0')))
+end
+
+function _ansi_attrs(a)
+    RE = ReportEngine
+    classes = String[]
+    styles = String[]
+    for (bit, name) in ((RE.TC_BOLD, "bold"), (RE.TC_DIM, "dim"), (RE.TC_ITALIC, "italic"),
+                        (RE.TC_UNDERLINE, "underline"), (RE.TC_REVERSE, "reverse"),
+                        (RE.TC_STRIKE, "strike"))
+        (a.flags & bit) != 0 && push!(classes, "ansi-" * name)
+    end
+    for (v, which, prop) in ((a.fg, "fg", "color"), (a.bg, "bg", "background-color"))
+        cls, css = _ansi_color(v, which)
+        isempty(cls) || push!(classes, cls)
+        isempty(css) || push!(styles, string(prop, ":", css))
+    end
+    return (join(classes, ' '), join(styles, ';'))
+end
+
+"""
+Cooked text → HTML, turning SGR runs into spans. `inner` escapes each plain run (and, for a
+backtrace, linkifies it), so escaping stays correct by construction.
+"""
+function _ansi_html(text::AbstractString, inner::Function = _esc)
+    s = String(text)
+    occursin('\e', s) || return inner(s)          # the common case: no colour, no work
+    # Cooked text has only SGR in it, but output stored before cooking existed — or produced by a
+    # remote worker on an older build — has not been through the cooker at all. Dropping the rest
+    # here rather than trusting the contract costs one pass over text that already contains an ESC.
+    s = ReportEngine.keep_sgr_only(s)
+    io = IOBuffer()
+    attr = ReportEngine._TC_PLAIN
+    pos = firstindex(s)
+    for m in eachmatch(r"\e\[[0-9;:]*m", s)
+        m.offset > pos && _ansi_run(io, SubString(s, pos, prevind(s, m.offset)), attr, inner)
+        attr = ReportEngine._tc_sgr(attr, SubString(m.match, 3, lastindex(m.match) - 1))
+        pos = m.offset + ncodeunits(m.match)
+    end
+    pos <= ncodeunits(s) && _ansi_run(io, SubString(s, pos, lastindex(s)), attr, inner)
+    return String(take!(io))
+end
+
+function _ansi_run(io::IO, run::AbstractString, attr, inner::Function)
+    isempty(run) && return nothing
+    cls, style = _ansi_attrs(attr)
+    if isempty(cls) && isempty(style)
+        print(io, inner(run))
+    else
+        print(io, "<span",
+              isempty(cls) ? "" : string(" class=\"", cls, "\""),
+              isempty(style) ? "" : string(" style=\"", style, "\""), ">", inner(run), "</span>")
+    end
+    return nothing
+end
+
 """
 Markdown source → HTML (live notebook + md cells). `interps` are the captured
 outputs of the cell's `{{ expr }}` blocks, spliced in document order.
@@ -43,12 +126,15 @@ function output_html(cell::Cell)
     o = cell.output
     o === nothing && return ""
     io = IOBuffer()
-    isempty(o.stdout) || print(io, "<div class=\"out\"><pre>", _esc(o.stdout), "</pre></div>")
+    isempty(o.stdout) || print(io, "<div class=\"out\"><pre>", _ansi_html(o.stdout), "</pre></div>")
     # Captured stderr / `@warn` output — a distinct warnings block (not an error: the cell may
     # still have succeeded). VS Code source links in any `@ file:line` notices are made clickable.
-    isempty(o.stderr) || print(io, "<div class=\"warn\"><pre>", _linkify_trace(o.stderr), "</pre></div>")
+    isempty(o.stderr) || print(io, "<div class=\"warn\"><pre>", _ansi_html(o.stderr, _linkify_trace), "</pre></div>")
     if isempty(o.display) && !isempty(o.value_repr)
-        print(io, "<div class=\"val\"><pre>", _esc(o.value_repr), "</pre></div>")
+        # Same treatment as stdout. The capture layer renders a value repr without colour, but a
+        # package whose `show` colours unconditionally — ignoring the stream's `:color` — reaches
+        # here anyway, and `_esc` would print its escape codes.
+        print(io, "<div class=\"val\"><pre>", _ansi_html(o.value_repr), "</pre></div>")
     end
     isempty(o.display) || print(io, "<div class=\"dispwrap\">", _render_chunks(o.display), "</div>")
     if o.exception !== nothing
@@ -57,18 +143,23 @@ function output_html(cell::Cell)
         # in-notebook frame (closest to where it actually fired, possibly another cell); the
         # backtrace's `cell:<id>:N` frames (`cellref`) each jump to their own cell (errors.js).
         org = _error_origin(o)
+        # Both of these renderers style the text THEMSELVES, so colour arriving in it (from a
+        # package whose `showerror` colours unconditionally) is redundant and would interleave with
+        # their markup. Dropped rather than converted to spans, unlike stdout.
+        exc = ReportEngine.strip_ansi(o.exception)
         print(io, "<div class=\"err\"><pre>")
         if org === nothing
-            print(io, _render_exc_html(o.exception))
+            print(io, _render_exc_html(exc))
         else
             cid, ln = org
             print(io, "<span class=\"err-msg errjump\"",
                   (isempty(cid) ? "" : " data-cid=\"" * cid * "\""), " data-line=\"", ln,
                   "\" title=\"jump to the error origin (line ", ln, isempty(cid) ? "" : " in cell " * cid, ")\">",
-                  _render_exc_html(o.exception), "</span>")
+                  _render_exc_html(exc), "</span>")
         end
         (o.backtrace === nothing || isempty(o.backtrace)) ||
-            print(io, "<span class=\"err-bt\">\n", _linkify_trace(o.backtrace), "</span>")
+            print(io, "<span class=\"err-bt\">\n",
+                  _linkify_trace(ReportEngine.strip_ansi(o.backtrace)), "</span>")
         print(io, "</pre></div>")
     end
     return String(take!(io))

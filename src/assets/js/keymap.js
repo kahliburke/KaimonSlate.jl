@@ -409,8 +409,36 @@
     el.textContent = format(_pending) + ' …';
   }
 
-  const _isField = t => !!(t && t.closest && (t.closest('.cm-editor') ||
-    /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || t.isContentEditable));
+  // Does this keystroke belong to whatever has focus, or to the notebook?
+  //
+  // Command mode puts whole commands on BARE letters, so answering wrongly restructures the document
+  // while someone is typing or navigating. The tag name alone cannot answer it: a `@bind` widget is
+  // not always an `<input>` (MultiSelect is a focusable `div[role=listbox]`), and a widget contributed
+  // by a package can render anything at all.
+  //
+  // Three ways an element claims its keys:
+  //
+  //   · it IS a form control, or is contenteditable
+  //   · it sits inside a control region — a cell's bind area, a surfaced strip, a custom widget, an
+  //     editor
+  //   · it SAYS SO, with `data-slate-keys`
+  //
+  // The third exists because the second does not generalise. The Files tree is a focusable `div` with
+  // its own arrow-key navigation, in no control region, so ↑/↓ moved the notebook's cell selection
+  // behind it and Enter opened a cell editor. Its own `stopPropagation` could not prevent that: this
+  // listener is on `document` in the CAPTURE phase and the tree's is an inline `onkeydown` on the
+  // element, which runs later. Marking the element is the fix that keeps working for the next panel
+  // with keyboard navigation, including one a package brings.
+  //
+  // Deliberately NOT a test for focusability: an interactive chart is given `tabindex="-1"` and
+  // focused on click (settings.js), and command-mode keys have to keep working after you click a plot.
+  const _FIELD_TAGS = /^(INPUT|TEXTAREA|SELECT|BUTTON)$/;
+  const _CONTROL_REGION = '.cm-editor, .binds, .controls, .widget, .control, .customwidget, [data-slate-keys]';
+  function _ownsKeys(t) {
+    if (!t || !t.closest) return false;
+    if (_FIELD_TAGS.test(t.tagName || '') || t.isContentEditable) return true;
+    return !!t.closest(_CONTROL_REGION);
+  }
   const _inEditor = t => !!(t && t.closest && t.closest('.cm-editor'));
   // Any open dialog owns the keyboard: its own handlers drive it, and a command-mode key firing
   // behind it would act on a cell the reader can't see. Global chords still work — ⌘K has to be able
@@ -456,7 +484,7 @@
     // Command mode: no field focused and no dialog over the page. Tried before `global` because it is
     // the more specific context; in practice the two barely overlap, since a global chord carries a
     // modifier and a command-mode key usually does not.
-    if (!_isField(t) && !_modalOpen() && tryContext('command', cands, e)) return;
+    if (!_ownsKeys(t) && !_modalOpen() && tryContext('command', cands, e)) return;
     if (tryContext('global', cands, e)) return;
     // Nothing matched, so a half-typed sequence is over (`armPending` returns above, so reaching here
     // means this keystroke did not extend one).

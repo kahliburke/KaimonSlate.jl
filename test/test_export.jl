@@ -221,6 +221,63 @@ end
     @test occursin("#align(center)[", typ)                 # tables centered on the page
 end
 
+@testset "captured colour never leaves as an escape code" begin
+    # Cell output carries SGR: the worker's streams report `:color => true` so `printstyled`, `@warn`
+    # and Pkg reach the reader looking the way they were written. The LIVE page renders that as
+    # spans — but every exporter is a separate renderer, and one that escapes the text instead puts
+    # `\e[1;31m` in front of the reader. Typst typesets it literally into the PDF; a fenced markdown
+    # block shows it verbatim. So each export target is pinned here, on the same input.
+    RE = KaimonSlate.ReportEngine
+    coloured = "\e[1;31mbold red\e[0m\n\e[38;5;208m256-colour\e[0m\nplain"
+    warned = "\e[1;33m┌ Warning: \e[0mlook out\n\e[1;33m└ \e[0;90m@ Main none:1\e[0m"
+    rep = RE.parse_report("#%% md id=t title\n# Colour\n\n#%% code id=c\nprintstyled(\"x\")\n")
+    rep.cells[end].output = RE.CellOutput(coloured, RE.MimeChunk[], Any[], Any[], RE.BindSpec[],
+                                          "\e[36m:value\e[0m", nothing, nothing, 1.0, Any[], warned)
+    nb = NS.LiveNotebook("colour", "/tmp/colourtest.jl", rep, RE.InProcessKernel(), 1, String[],
+                         String[], ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                         Dict{String,String}())
+
+    md = NS.export_markdown(nb)
+    @test !occursin('\e', md) && occursin("bold red", md)
+
+    html = NS.export_html(nb)
+    @test !occursin('\e', html)
+    # ...and colour survives as markup, with the rules to style it — a sheet without them would show
+    # base-16 colour as plain text while 256-colour (an inline style) still came through.
+    @test occursin("ansi-fg-1", html) && occursin("color:#ff8700", html)
+    @test occursin(".ansi-fg-1", html) && occursin(".ansi-bold", html)
+
+    # The Typst side writes the text to a sidecar file that `#outblock` reads verbatim.
+    dir = mktempdir()
+    io = IOBuffer()
+    NS._emit_output!(io, dir, "c1", nb, rep.cells[end])
+    written = join([read(f, String) for f in readdir(dir; join = true)], "\n")
+    @test !occursin('\e', written) && occursin("bold red", written)
+    @test !occursin('\e', String(take!(io)))
+
+    # The text-only variant is used when a themed figure is supplied separately. It mirrors
+    # `output_html`'s text blocks, so it has to mirror this too.
+    @test !occursin('\e', NS._output_text_only_html(rep.cells[end]))
+
+    # An ERRORED cell takes a different path: the message is syntax-coloured and the backtrace
+    # dimmed by renderers of our own, so colour arriving in the text is dropped rather than spanned.
+    erep = RE.parse_report("#%% md id=t title\n# Err\n\n#%% code id=c\nboom()\n")
+    erep.cells[end].output = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "",
+                                           "\e[31mArgumentError: \e[0mbad", "\e[90m[1] f() @ Main cell:c:1\e[0m",
+                                           1.0, Any[], "")
+    enb = NS.LiveNotebook("err", "/tmp/errtest.jl", erep, RE.InProcessKernel(), 1, String[], String[],
+                          ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                          Dict{String,String}())
+    eh = KaimonSlate.ReportRender.output_html(erep.cells[end])
+    @test !occursin('\e', eh) && occursin("ArgumentError", eh)
+    @test occursin("cellref", eh)                       # the backtrace still linkifies
+    @test !occursin('\e', NS.export_markdown(enb))
+    @test !occursin('\e', NS.export_html(enb))
+    edir = mktempdir(); eio = IOBuffer()
+    NS._emit_output!(eio, edir, "e1", enb, erep.cells[end])
+    @test !occursin('\e', join([read(f, String) for f in readdir(edir; join = true)], "\n"))
+end
+
 @testset "table export — in-cell viz + export_rows cap" begin
     spec = Dict{String,Any}(
         "columns" => Any[

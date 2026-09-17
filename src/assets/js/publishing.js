@@ -54,6 +54,40 @@
     const wEl = el('pubopt_width');
     if (wEl) { const w = g('slate_htmlwidth'); if (w != null) wEl.value = w; if (typeof _htmlWidthSync === 'function') _htmlWidthSync(wEl); }
   }
+  // Paint the options row from a doc's RECORDED build (its manifest entry) — the inverse of
+  // `pubBuildOpts`. Once a notebook is a member of a site, that record is where its settings live, so
+  // the row has to show it; localStorage only seeds a notebook no site knows yet. Without this the row
+  // displays a browser preference that the build may not share, which is how a ticked "Run live" sat
+  // above a page published without one.
+  function pubApplyBuild(b) {
+    if (!b) return false;
+    const set = (id, v) => { const e = el(id); if (e) e.checked = v === true; };
+    const sel = (id, v) => { const e = el(id); if (e && v != null) e.value = v; };
+    set('pubopt_runnable', b.bundle); set('pubopt_source', b.source); set('pubopt_history', b.history);
+    sel('pubopt_outputs', b.outputs || 'all'); sel('pubopt_renderer', b.renderer || '');
+    // Theme resolves back to the picker: `_resolveExportTheme` sets override only for a forced theme,
+    // so no override means the page was built As-is.
+    sel('pubopt_theme', b.override !== true ? 'asis' : (b.theme === 'light' ? 'light' : 'dark'));
+    const wEl = el('pubopt_width');
+    if (wEl) {   // 0 = full width (the slider's far end); anything else is a px value
+      wEl.value = (b.width === 0) ? wEl.max : String(b.width || 900);
+      if (typeof _htmlWidthSync === 'function') _htmlWidthSync(wEl);
+    }
+    return true;
+  }
+  // A front page is a site's index, never a page a visitor runs, so it carries no runnable bundle
+  // however this is set (see `_assemble_site!`). Say so on the control instead of letting it read as a
+  // promise the build won't keep.
+  function pubSyncRunnableAvail(isHome) {
+    const e = el('pubopt_runnable'); if (!e) return;
+    e.disabled = !!isHome;
+    const lbl = e.closest('label');
+    if (lbl) {
+      lbl.style.opacity = isHome ? '.45' : '';
+      lbl.title = isHome ? 'A site’s front page is its index — it never carries a runnable bundle'
+                         : 'Embed the reproducible bundle + a launch script so a visitor can run this notebook live (with the AI agent) on their machine';
+    }
+  }
 
   // ── Sites: this notebook's membership + front-page state across every site ───────────────────────
   async function loadSites() {
@@ -61,6 +95,13 @@
     try { d = await api('GET', '/api/publish/sites'); } catch (e) {}
     _sitesData = (d && d.sites) || [];
     const slugIn = el('pubopt_slug'); if (slugIn && d && d.slug) slugIn.placeholder = d.slug;   // show the auto path
+    // Show the settings this notebook is actually built with. A member site's recorded `build` wins
+    // over the browser preference; with several member sites the first is shown (they're edited per doc
+    // in the publishing manager). A notebook no site knows yet keeps the localStorage seed.
+    const mem = _sitesData.filter(s => s.member);
+    const withBuild = mem.filter(s => s.build)[0];
+    if (withBuild) pubApplyBuild(withBuild.build);
+    pubSyncRunnableAvail(mem.some(s => s.isHome));
     renderSites(d);
   }
   function renderSites(d) {
@@ -85,13 +126,16 @@
         + '<input type="checkbox" ' + (s.isHome ? 'checked' : '') + (s.member ? '' : ' disabled')
         + ' onchange="pubToggleHome(\'' + nm + '\', this.checked)"/> ★ front page</label>'
         + (otherHome ? '<span class="pubdim" style="font-size:.72rem" title="Current front page">↩ ' + esc(otherHome) + '</span>' : '')
-        + (s.member ? '<button class="pubmini" onclick="pubPublishSite(\'' + nm + '\')">☁ Publish</button>' : '')
+        + (s.member ? '<button class="pubmini" title="Build this notebook into the site\'s local copy. Deploying is Sync, in the Publishing manager." onclick="pubPublishSite(\'' + nm + '\')">⇪ Stage</button>' : '')
         + (s.url ? ' <a class="publink" href="' + esc(s.url) + '" target="_blank" rel="noopener">open ↗</a>' : '')
         + '</div>';
     }).join('');
   }
+  // Adding a notebook to a site BUILDS it into that site, so the options row has to travel with the
+  // request — otherwise the build invents its own defaults and the settings shown here never apply.
+  // The server ignores them once the site already knows this doc (its recorded settings win).
   window.pubToggleMember = async function (site, on) {
-    try { await api('POST', '/api/publish/site-membership', { site: site, member: on }); }
+    try { await api('POST', '/api/publish/site-membership', { site: site, member: on, build: pubBuildOpts() }); }
     catch (e) { toast('Could not update membership', 4000, 'warn'); }
     loadSites();
   };
@@ -103,7 +147,7 @@
         loadSites(); return;
       }
     }
-    try { await api('POST', '/api/publish/site-home', { site: site, home: on }); }
+    try { await api('POST', '/api/publish/site-home', { site: site, home: on, build: pubBuildOpts() }); }
     catch (e) { toast('Could not update front page', 4000, 'warn'); }
     loadSites();
   };
@@ -112,10 +156,12 @@
     const log = el('pubsitesprog'); if (!log) return;
     log.style.display = 'block'; log.innerHTML = '';
     const line = (t, c) => { const n = document.createElement('div'); n.className = 'publogln ' + (c || ''); n.textContent = t; log.appendChild(n); log.scrollTop = log.scrollHeight; return n; };
-    line('Publishing into ' + site + '…', 'st');
+    line('Staging into ' + site + '…', 'st');
     const o = pubBuildOpts();
+    // STAGE only. Deploying to a site's live targets is the Publishing manager's Sync — one deliberate
+    // place where content goes public, rather than a button inside a notebook that ships on click.
     const q = new URLSearchParams({ site: site, theme: o.theme, source: o.source, bundle: o.bundle,
-                                    history: o.history, outputs: o.outputs });
+                                    history: o.history, outputs: o.outputs, deploy: '0' });
     if (o.charttheme) q.set('charttheme', o.charttheme);
     if (o.override === '1') q.set('override', '1');
     if (o.width) q.set('width', o.width);
@@ -123,7 +169,15 @@
     const es = new EventSource(_apipath('/api/site-publish') + '?' + q.toString());
     es.addEventListener('status', e => line(e.data, 'st'));
     es.addEventListener('log', e => line(e.data));
-    es.addEventListener('done', e => { es.close(); let d = {}; try { d = JSON.parse(e.data); } catch (_) {} line(d.ok !== false ? '✓ Published' : '✗ Failed', d.ok !== false ? 'ok' : 'err'); loadSites(); });
+    es.addEventListener('done', e => {
+      es.close(); let d = {}; try { d = JSON.parse(e.data); } catch (_) {}
+      if (d.ok === false) { line('✗ Failed', 'err'); }
+      else {
+        line('✓ Staged into ' + site, 'ok');
+        line('Nothing is live yet — Sync it from the Publishing manager to deploy.');
+      }
+      loadSites();
+    });
     es.addEventListener('failed', e => { es.close(); line('✗ ' + e.data, 'err'); });
     es.onerror = () => { try { es.close(); } catch (_) {} };
   };

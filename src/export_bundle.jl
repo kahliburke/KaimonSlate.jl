@@ -643,6 +643,16 @@ function export_standalone(nb::LiveNotebook; include_preview::Bool = true, histo
         let envf = ReportEngine._render_env_footer(get(nb.report.meta, "env", Dict{String,Any}[]))
             isempty(envf) || (out *= "\n" * envf)
         end
+        # The document's own identity, so a bundle someone downloads and runs is recognisably the SAME
+        # document that was published rather than an anonymous copy with a fresh id. `docid` ONLY: the
+        # rest of the config footer describes the author's machine (`runon` names their ssh host,
+        # `regions` their local registry, `publishrepo`/`publishslug` their destinations) and would be
+        # both meaningless and misleading to a reader. Config footer follows the env one, as in
+        # `serialize_report`.
+        let did = strip(String(get(nb.report.meta, "docid", "")))
+            isempty(did) ||
+                (out *= "\n" * ReportEngine._render_config_footer(Dict{String,Any}("docid" => did)))
+        end
         out *= "\n" * _bundle_footer(b64)
         (include_preview && preview_budget > 0) && try
             # Re-inline blob URLs → data URIs so the frozen render travels self-contained (capped).

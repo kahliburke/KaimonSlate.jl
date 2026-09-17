@@ -31,7 +31,7 @@ mutable struct PrepareTracker
 end
 PrepareTracker(t0::Float64 = time()) = PrepareTracker("", "", -1, 0, "", String[], 0, "", false, t0)
 
-# A completion line, color OFF (non-TTY), is `<12-char timing>  ✓ Name` (✓ ok, ✗ failed,
+# A completion line, once `prepare_feed!` has stripped colour, is `<12-char timing>  ✓ Name` (✓ ok, ✗ failed,
 # ? not-precompilable). ✗ pads with spaces instead of a timing token — the optional timing
 # group covers both. The name tail may carry `describe_pkg` annotations; keep it as-is.
 const _PREP_DONE_RE = r"^\s*(?:[\d.]+\s*\w{1,3}\s+)?(✓|✗|\?)\s+(.+?)\s*$"
@@ -41,7 +41,11 @@ const _PREP_RESOLVE_RE = r"^\s*\[?[0-9a-f]{6,}\]?\s*[+~\-↑↓]\s"
 # Feed one raw output line. Returns true if the STRUCTURED state changed (caller should emit a
 # snapshot); false for noise (which the caller may still tuck into the raw "details" log).
 function prepare_feed!(tr::PrepareTracker, raw::AbstractString)
-    s = strip(String(raw))
+    # Pkg's output is COLOURED (the worker's streams report `:color => true` so cell output renders
+    # styled) and it redraws its spinner in place. Neither is addressed to the classifier, and both
+    # would stop the regexes below matching — so replay the redraws and drop the colour before
+    # looking at the text. Both are no-ops on a line that carries neither.
+    s = strip(strip_sgr(cook_terminal(String(raw))))
     isempty(s) && return false
 
     # ── control markers from our own producer ────────────────────────────────────────────────

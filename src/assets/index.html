@@ -380,6 +380,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .pdbtn.danger:hover{background:rgba(229,117,117,.12);border-color:#e57575;color:#e57575;}
 /* Pressed feedback: async buttons disable + spin until the work settles. */
 .pdbtn:disabled{opacity:.5;cursor:default;pointer-events:none;}
+/* Dulled, NOT disabled: the action is probably unnecessary, but we can't prove it (a dev checkout, or
+   anything that changes the output without touching the source), so it stays available. */
+.pdbtn.pddull{opacity:.55;} .pdbtn.pddull:hover{opacity:1;}
 /* Detail view: breadcrumb back-nav + a readable content width inside the wide modal. */
 .pdcrumb{cursor:pointer;color:#9aa3c0;} .pdcrumb:hover{color:#569cd6;text-decoration:underline;}
 .pdnarrow{max-width:680px;}
@@ -935,24 +938,40 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   var pubdashBg=document.getElementById('pubdashbg');
   var _pdView={documents:[],targets:[],secretRefs:[],availableKinds:[],ghUser:''};
   var _pdOpenNbs=[];   // open notebooks (path+title) — lets the UI tell when Stage would re-export something
-  // True if Stage would actually change the build: an OPEN member (or the home page) whose SOURCE .jl is
-  // newer than its staged build — i.e. real unstaged edits. Re-staging identical content only bumps mtimes
-  // (→ a pointless "unsynced"), so when nothing is newer we disable Stage as "already current".
+  // True if Stage is WORTH doing: an OPEN member (or the home page) whose source .jl is newer than its
+  // staged build, or whose build was made by an older Slate — the generator decides the output as much as
+  // the source does, so a Slate upgrade makes every page out of date even with nothing edited.
+  // This is a HINT, not a gate: Stage stays clickable either way (see `_pdStageHint`). It can't see a dev
+  // checkout whose version hasn't moved, and being unable to re-stage on a wrong guess is worse than a
+  // re-stage that only bumps mtimes.
   function _pdStageable(s){
     var nbs=_pdOpenNbs||[]; if(!nbs.length||!s||!s.hasLocal) return false;
     var paths={}, titles={};
     nbs.forEach(function(n){ if(n.path)paths[String(n.path).toLowerCase()]=1; if(n.title)titles[String(n.title).toLowerCase()]=1; });
     var open=function(src,title){ return !!((src&&paths[String(src).toLowerCase()]) || (title&&titles[String(title).toLowerCase()])); };
-    if(s.hasHome && open(s.homePath, s.homeTitle) && (s.homeMtime||0) > (s.homeBuilt||0)) return true;
-    return (s.docs||[]).some(function(d){ return open(d.source, d.title) && (d.sourceMtime||0) > (d.builtAt||0); });
+    var cur=String((_pdView&&_pdView.slate)||'');
+    // "" = built before the version was recorded; unknowable, so don't claim it's stale on that alone.
+    var oldGen=function(b){ var v=String((b&&b.slate)||''); return !!cur && !!v && v!==cur; };
+    if(s.hasHome && open(s.homePath, s.homeTitle) &&
+       ((s.homeMtime||0) > (s.homeBuilt||0) || oldGen(s.homeBuild))) return true;
+    return (s.docs||[]).some(function(d){
+      return open(d.source, d.title) && ((d.sourceMtime||0) > (d.builtAt||0) || oldGen(d.build)); });
+  }
+  // Why Stage is or isn't worth pressing — shown as the button's tooltip instead of disabling it.
+  function _pdStageHint(s){
+    if(!s||!s.hasLocal) return 'Build this site’s local copy from its open notebooks';
+    if(!(_pdOpenNbs||[]).length) return 'No notebooks are open — Stage rebuilds only members whose notebook is open';
+    return _pdStageable(s) ? 'Rebuild the local copy — a member has changed since it was last staged'
+                           : 'Already current as far as we can tell — Stage anyway to force a rebuild';
   }
   var _pdSel=null;          // open target detail (name), or null
   var _pdSite=null;         // open site editor: null = none, '' = the New-site form, else the site name
   var _pdDocs=null;         // open a site's Documents drill-down (site name), or null
   var _pdPane=null;         // 'add' (new target) | 'secrets' | null — other focused sub-pages
+  var _pdDoc=null;          // open a document's build-settings page: {site, slug}, or null
   var _abs=function(p){return /^([A-Za-z]:[\\/]|\/)/.test(p||'');};
   function openPubDash(){
-    _pdSel=null;_pdSite=null;_pdPane=null;_pdDocs=null;   // always reopen on the OVERVIEW — no stale sub-page
+    _pdSel=null;_pdSite=null;_pdPane=null;_pdDocs=null;_pdDoc=null;   // always reopen on the OVERVIEW — no stale sub-page
     showLoading('Loading publishing…');
     loadPubDash(function(){ hideLoading(); pubdashBg.classList.add('show'); },
                function(){ hideLoading(); alertDark('Could not load the publishing ledger.'); });
@@ -975,9 +994,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function pdRender(){
     // The wide modal fits the overview's tile grid; every focused sub-page (target, site,
     // add-target, secrets) is a single narrow column — shrink the modal, no dead space.
-    var focused=_pdSel||_pdSite!==null||_pdPane||_pdDocs;
+    var focused=_pdSel||_pdSite!==null||_pdPane||_pdDocs||_pdDoc;
     var m=document.querySelector('#pubdashbg .pubdash'); if(m)m.classList.toggle('pdslim',!!focused);
-    if(_pdDocs)pdRenderSiteDocs();
+    if(_pdDoc)pdRenderDocBuild();
+    else if(_pdDocs)pdRenderSiteDocs();
     else if(_pdSel)pdRenderDetail();
     else if(_pdSite!==null)pdRenderSiteDetail();
     else if(_pdPane==='add')pdRenderAdd();
@@ -1061,9 +1081,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       return '<div class="pdtile" onclick="pdEditSite(\''+esc(s.name)+'\')">'+
         '<div class="pdrow"><span class="pl">🌐 '+esc(s.name)+'</span>'+dirty+
           '<span style="margin-left:auto;display:flex;gap:6px" onclick="event.stopPropagation()">'+
-          (s.hasLocal?(_pdStageable(s)
-            ?'<button class="pdbtn pdmini" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Re-export the open member notebook(s) into the local deploy copy — no deploy">⤒ Stage</button>'
-            :'<span title="Already current — open a member notebook to re-export its latest content"><button class="pdbtn pdmini" disabled>⤒ Stage</button></span>'):'')+
+          (s.hasLocal?('<button class="pdbtn pdmini'+(_pdStageable(s)?'':' pddull')+'" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="'+esc(_pdStageHint(s))+'">⤒ Stage</button>'):'')+
           '<button class="pdbtn pdmini primary" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Copy the staged build to all destinations">▶ Sync</button></span></div>'+
         '<div class="pdrow" style="margin-top:6px;flex-wrap:wrap;gap:4px">'+pdSiteChips(s)+'</div>'+
         '<div class="pddim" style="margin-top:6px">'+nd+' doc'+(nd===1?'':'s')+'</div></div>';
@@ -1137,6 +1155,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       '<span class="pdarr-grip">⠿</span>'+
       '<span style="flex:1;min-width:0"><span style="color:#e6ebf7">'+esc(d.title||d.slug)+'</span> '+chips+
         '<span class="pddim" style="'+mono+';color:#8a90b0">'+meta.join(' · ')+(meta.length?' · ':'')+src+'</span></span>'+
+      '<button class="pdbtn pdmini" onmousedown="event.stopPropagation()" onclick="pdOpenDocBuild(\''+esc(_pdDocs)+'\',\''+esc(d.slug||'')+'\')" title="how this page is built — Run live, source, theme, width">settings</button>'+
       '<button class="pdbtn pdmini danger" onmousedown="event.stopPropagation()" onclick="pdRemoveSiteDoc(this,\''+esc(_pdDocs)+'\',\''+esc(d.slug||d.title)+'\')" title="remove from this site\'s build">remove</button></div>';
   }
   function pdRenderSiteDocs(){
@@ -1147,7 +1166,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var fp=s.hasHome
       ? ('<div class="pddim" style="margin:2px 0 12px">Front page: <b style="color:#cdd3e6">'+esc(s.homeTitle||'home')+'</b> <span class="pdchip">home</span>'+
           (s.homePath?(' — <a class="pdlink" onclick="pdOpenPath(\''+esc(s.homePath)+'\')" title="'+esc(s.homePath)+'">'+esc((s.homePath.split(/[\\/]/).pop())||'notebook')+' ↗</a>')
-                     :' <span style="opacity:.65">(source not recorded — republish it once to link it)</span>')+'</div>')
+                     :' <span style="opacity:.65">(source not recorded — republish it once to link it)</span>')+
+          ' <button class="pdbtn pdmini" onclick="pdOpenDocBuild(\''+esc(s.name)+'\',\'\')" title="how the front page is built — source, theme, width">settings</button>'+
+          '</div>')
       : '<div class="pddim" style="margin:2px 0 12px">No front page yet — tag a cell <code>home</code> in a notebook and publish it here.</div>';
     document.getElementById('pdbody').innerHTML='<div class="pdnarrow">'+
       '<div class="pdsec" style="margin-top:0">Front page</div>'+fp+
@@ -1164,6 +1185,89 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     if(docs.length)renderArrangeInto(document.getElementById('pddocsbody'),docs,_docsArrRow);
   }
   window.pdRenderSiteDocs=pdRenderSiteDocs;
+
+  // ── One document's build settings ───────────────────────────────────────────────────────────────
+  // These live on the doc's manifest entry (`build`) and nowhere else — Sync rebuilds the page from
+  // them — so this page edits the store directly and a notebook never has to be open to change how its
+  // page is built.
+  function pdOpenDocBuild(site,slug){_pdDoc={site:site,slug:slug};_pdSel=null;_pdPane=null;pdRender();}
+  window.pdOpenDocBuild=pdOpenDocBuild;
+  function pdDocBuildBack(){_pdDoc=null;pdRender();} window.pdDocBuildBack=pdDocBuildBack;
+  function pdDocBuildEntry(){
+    var s=pdSiteByName(_pdDoc&&_pdDoc.site); if(!s)return null;
+    var want=String(_pdDoc.slug||'');
+    // The front page lives in the manifest's `homeDoc`, not `docs[]` — an empty slug means it.
+    if(want==='')return s.hasHome?{slug:'',title:s.homeTitle||'front page',build:s.homeBuild||{}}:null;
+    var d=(s.docs||[]).filter(function(x){return String(x.slug||'')===want;})[0];
+    return d||null;
+  }
+  function pdRenderDocBuild(){
+    var s=pdSiteByName(_pdDoc.site), d=pdDocBuildEntry();
+    if(!s||!d){_pdDoc=null;pdRender();return;}
+    var b=d.build||{};
+    var ck=function(id,on,lbl,tip){return '<label class="pdrow" style="gap:8px;align-items:center;margin:6px 0" title="'+esc(tip||'')+'">'+
+      '<input type="checkbox" id="'+id+'"'+(on===true?' checked':'')+'/> <span>'+lbl+'</span></label>';};
+    var opt=function(v,cur,lbl){return '<option value="'+esc(v)+'"'+(String(cur)===v?' selected':'')+'>'+esc(lbl)+'</option>';};
+    var isHome=(String(_pdDoc.slug||'')==='');
+    var w=(b.width===0)?1620:(+b.width||900);
+    var themePick=(b.override!==true)?'asis':(b.theme==='light'?'light':'dark');
+    document.getElementById('pdtitle').innerHTML='<span class="pdcrumb" onclick="pdBack()" title="back to Publishing">Publishing</span> › '+
+      '<span class="pdcrumb" onclick="pdDocBuildBack()" title="back to Documents">'+esc(s.name)+'</span> › '+esc(d.title||d.slug||'front page');
+    document.getElementById('pdbody').innerHTML='<div class="pdnarrow">'+
+      '<div class="pdsec" style="margin-top:0">How this page is built</div>'+
+      '<div class="pddim" style="margin-bottom:10px">Stored with the document. Sync rebuilds the page from these, so a change applies wherever this doc is deployed.</div>'+
+      (isHome?'<div class="pddim" style="margin-bottom:10px">This is the site’s front page — its index, so it never carries a runnable bundle.</div>'
+             :ck('pdb_bundle',b.bundle,'▶ Run live (runnable bundle)','Embed the reproducible bundle + a launch script so a visitor can run this notebook on their machine'))+
+      ck('pdb_source',b.source!==false,'Include source','Cell source on the page; off for a clean reading page')+
+      (isHome?'':ck('pdb_history',b.history,'Git history','Ship the project’s full history in the runnable bundle (off = source-only snapshot)'))+
+      '<div class="pdrow" style="gap:14px;align-items:center;margin-top:12px;flex-wrap:wrap">'+
+        '<label>Outputs <select id="pdb_outputs">'+opt('all',b.outputs||'all','All')+opt('figures',b.outputs||'all','Figures only')+opt('none',b.outputs||'all','None')+'</select></label>'+
+        '<label>Theme <select id="pdb_theme">'+opt('asis',themePick,'As-is')+opt('light',themePick,'Light')+opt('dark',themePick,'Dark')+'</select></label>'+
+        '<label>Renderer <select id="pdb_renderer">'+opt('',b.renderer||'','Auto')+opt('canvas',b.renderer||'','Canvas')+opt('svg',b.renderer||'','SVG')+'</select></label>'+
+      '</div>'+
+      '<div class="pdrow" style="gap:10px;align-items:center;margin-top:12px">'+
+        '<label>Width <input type="range" id="pdb_width" min="620" max="1620" step="20" value="'+w+'" oninput="pdDocWidthOut()" style="vertical-align:middle;width:160px"/></label>'+
+        '<span class="pddim" id="pdb_widthout"></span></div>'+
+      '<div class="pdrow" style="margin-top:18px;gap:8px;align-items:center;flex-wrap:wrap">'+
+        '<button class="pdbtn primary" onclick="pdSaveDocBuild(this)">Save settings</button>'+
+        '<button class="pdbtn" onclick="pdDocBuildBack()">Back</button>'+
+        '<span class="pddim" style="font-size:.72rem">Rebuilds the page now if its notebook is open, then Sync to deploy. Sync never re-renders — a closed notebook keeps its last build until you open it and Stage.</span></div>'+
+      '</div>';
+    pdDocWidthOut();
+  }
+  window.pdRenderDocBuild=pdRenderDocBuild;
+  function pdDocWidthOut(){
+    var el=document.getElementById('pdb_width'),out=document.getElementById('pdb_widthout');
+    if(!el||!out)return; var w=+el.value||900;
+    out.textContent=(w>=+el.max)?'Full width':(w+'px');
+  }
+  window.pdDocWidthOut=pdDocWidthOut;
+  function pdSaveDocBuild(btn){
+    var ck=function(id){var e=document.getElementById(id);return !!(e&&e.checked);};
+    var val=function(id){var e=document.getElementById(id);return e?e.value:'';};
+    var wEl=document.getElementById('pdb_width'), w=wEl?(+wEl.value||900):900;
+    var pick=val('pdb_theme')||'asis';
+    var build={bundle:ck('pdb_bundle'),source:ck('pdb_source'),history:ck('pdb_history'),
+               outputs:val('pdb_outputs')||'all',renderer:val('pdb_renderer')||'',
+               // Same resolution the notebook panel uses: As-is keeps the page's own palette, and only a
+               // forced Light/Dark sets `override`.
+               theme:pick==='light'?'light':'dark', charttheme:pick==='light'?'daylight':(pick==='dark'?'midnight':''),
+               override:pick!=='asis',
+               width:(wEl&&w>=+wEl.max)?0:w};
+    var done=pdBusy(btn), site=_pdDoc.site;
+    fetch('/api/publish/doc-build',{method:'POST',headers:{'Content-Type':'application/json'},
+                                    body:JSON.stringify({site:site,slug:_pdDoc.slug,build:build})})
+      .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+      .then(function(res){
+        // Say which of the two things happened — an open notebook is rebuilt here and now, a closed one
+        // only has its settings recorded, and the difference decides whether a Sync is enough.
+        toast(res.rebuilt?'Saved — page rebuilt. Sync to deploy.'
+                         :'Saved, but its notebook isn’t open, so the page still has its old build. Open it and Stage.');
+        loadPubDash(function(){ _pdDoc=null; _pdDocs=site; pdRender(); });   // back to the site's Documents list
+      })
+      .catch(function(e){ done(); alertDark('Could not save: '+String(e)); });
+  }
+  window.pdSaveDocBuild=pdSaveDocBuild;
   function pdSaveSiteDocs(btn){
     var body=document.getElementById('pddocsbody'); if(!body)return;
     var ordering=_collectOrdering(body);
@@ -1225,9 +1329,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       (s
         ? ('<div class="pdrow" style="margin-top:14px;gap:8px;align-items:center;flex-wrap:wrap">'+
              '<button class="pdbtn primary" onclick="pdSaveSite(this,\''+esc(s.name)+'\')" title="Store this site’s settings — no deploy">Save settings</button>'+
-             (s.hasLocal?(_pdStageable(s)
-               ?'<button class="pdbtn" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Re-export the open member notebook(s) into the local deploy copy — no deploy">⤒ Stage</button>'
-               :'<span title="Already current — open a member notebook to re-export its latest content"><button class="pdbtn" disabled>⤒ Stage</button></span>'):'')+
+             (s.hasLocal?('<button class="pdbtn'+(_pdStageable(s)?'':' pddull')+'" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="'+esc(_pdStageHint(s))+'">⤒ Stage</button>'):'')+
              (s.hasLocal&&s.previewUrl?'<button class="pdbtn" onclick="window.open(\''+esc(s.previewUrl)+'\',\'_blank\',\'noopener\')" title="open the staged local copy in a new tab">View ↗</button>':'')+
              '<button class="pdbtn" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Copy the staged build to all destinations">▶ Sync</button>'+
            '</div>'+

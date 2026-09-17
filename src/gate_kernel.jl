@@ -568,6 +568,9 @@ function _ensure_poller!()
                 prog = Dict{Tuple{String,String},Tuple{Float64,String,Bool}}()   # (notebook, bar id) → LATEST (frac,msg,done)
                 emits = Tuple{String,String,Any}[]   # ordered slate_emit pushes (rid, channel, deserialized VALUE) — NOT coalesced; each event matters
                 binemits = Tuple{String,Vector{UInt8}}[]   # ordered slate_emit_bin frames (rid, raw binary frame) — forwarded to the page WS as-is
+                # (notebook, cell) → LATEST cooked (stdout, stderr) while that cell runs. Coalesced like
+                # `prog`: each frame is a full snapshot of the cell's output, so an older one is pure waste.
+                cellouts = Dict{Tuple{String,String},Tuple{String,String}}()
                 prepares = Dict{String,String}()     # notebook → LATEST env-prep status JSON (coalesced per wake; a burst collapses harmlessly)
                 toolcalls = Tuple{String,Any}[]      # ordered agent tool calls (rid, payload) — each one becomes a cell, so never coalesced
                 setbinds = Tuple{String,String,Any}[]  # ordered `set_bind` calls (rid, bind name, value) — see `_do_setbind`
@@ -606,6 +609,10 @@ function _ensure_poller!()
                             prog[(rid, String(parts[1]))] =
                                 (something(tryparse(Float64, parts[2]), 0.0), String(parts[4]), parts[3] == "1")
                         end
+                    elseif m.channel == "slate_cellout"       # "cid\x1fstdout\x1fstderr" — a running cell's output so far
+                        parts = split(String(m.data), '\x1f'; limit = 3)
+                        length(parts) == 3 &&
+                            (cellouts[(rid, String(parts[1]))] = (String(parts[2]), String(parts[3])))
                     elseif m.channel == "slate_emit"          # "channel\x1fb64" — base64(Serialization-serialized VALUE)
                         parts = split(String(m.data), '\x1f'; limit = 2)
                         if length(parts) == 2
@@ -648,6 +655,9 @@ function _ensure_poller!()
                 end
                 for (rid, msg) in srcerr
                     _do_src_error(rid, msg)
+                end
+                for ((rid, cid), (out, err)) in cellouts
+                    _do_cellout(rid, cid, out, err)
                 end
                 for ((rid, bid), (frac, msg, done)) in prog
                     _do_userprog(rid, frac, msg, bid, done)

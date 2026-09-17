@@ -24,7 +24,11 @@ Base.iswritable(::DemuxIO) = true
 Base.isreadable(::DemuxIO) = false
 Base.displaysize(::DemuxIO) = (24, 80)
 # `print`/`show` sometimes probe color/limit context off the stream — keep them sane for captured output.
-Base.get(d::DemuxIO, key::Symbol, default) = key === :color ? false : default
+# Colour is ON: a cell's output is rendered as HTML, where SGR becomes spans (render.jl `_ansi_html`),
+# so `printstyled`, `@warn`, stacktraces and Pkg all reach the reader looking the way they were
+# written rather than flattened to grey. Everything captured is cooked first (termcook.jl), which is
+# what makes that safe — the escape codes can't leak into the page as literal text.
+Base.get(d::DemuxIO, key::Symbol, default) = key === :color ? true : default
 
 # Install the demux as the process stdout/stderr. `redirect_stdout` is process-global AND only accepts
 # a Pipe (not a custom IO), so we rebind `Base.stdout`/`Base.stderr` directly (they're non-const). The

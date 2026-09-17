@@ -1760,6 +1760,23 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-src $(t.hl)
 .exp-out{font-size:.86rem;} .exp-out .out,.exp-out .val,.exp-out .err{padding:8px 14px;}
 .exp-out .out{color:var(--dim);} .exp-out .val{color:var(--green);} .exp-out .err{color:var(--red);}
+/* ANSI colour in captured output — the same class names `_ansi_html` emits for the live page. This
+   sheet is separate from notebook.css, so without these an exported page would show base-16 colour
+   as plain text while 256/truecolour (inline styles) still came through: colour that half works.
+   The eight base colours map onto the export palette so they follow the chosen theme. */
+.ansi-fg-0,.ansi-fg-8{color:var(--dim);}      .ansi-bg-0,.ansi-bg-8{background:var(--dim);}
+.ansi-fg-1,.ansi-fg-9{color:var(--red);}      .ansi-bg-1,.ansi-bg-9{background:var(--red);}
+.ansi-fg-2,.ansi-fg-10{color:var(--green);}   .ansi-bg-2,.ansi-bg-10{background:var(--green);}
+.ansi-fg-3,.ansi-fg-11{color:var(--gold);}    .ansi-bg-3,.ansi-bg-11{background:var(--gold);}
+.ansi-fg-4,.ansi-fg-12{color:var(--accent);}  .ansi-bg-4,.ansi-bg-12{background:var(--accent);}
+.ansi-fg-5{color:#c678dd;} .ansi-fg-13{color:#d19aeb;}
+.ansi-bg-5{background:#c678dd;} .ansi-bg-13{background:#d19aeb;}
+.ansi-fg-6{color:#56b6c2;} .ansi-fg-14{color:#7fd4de;}
+.ansi-bg-6{background:#56b6c2;} .ansi-bg-14{background:#7fd4de;}
+.ansi-fg-7,.ansi-fg-15{color:var(--text);}    .ansi-bg-7,.ansi-bg-15{background:var(--text);}
+.ansi-bold{font-weight:600;} .ansi-dim{opacity:.72;} .ansi-italic{font-style:italic;}
+.ansi-underline{text-decoration:underline;} .ansi-strike{text-decoration:line-through;}
+.ansi-reverse{filter:invert(1);}
 .exp-out pre{margin:0;white-space:pre-wrap;} .exp-out .dispwrap,.disp.img{padding:10px 14px;}
 .disp.img img{max-width:100%;height:auto;border-radius:4px;display:block;}
 .disp.latex{padding:6px 14px;overflow-x:auto;} .katex{font-size:1.1em;}
@@ -1867,10 +1884,12 @@ end
 function _output_text_only_html(c::Cell)
     o = c.output; o === nothing && return ""
     io = IOBuffer()
-    isempty(o.stdout) || print(io, "<div class=\"out\"><pre>", _esc(o.stdout), "</pre></div>")
-    isempty(o.stderr) || print(io, "<div class=\"warn\"><pre>", _esc(o.stderr), "</pre></div>")
+    # Colour goes through `_ansi_html`, exactly as in `output_html` — this mirrors those blocks, and
+    # rendering them with a plain escaper here would put raw escape codes in the exported page.
+    isempty(o.stdout) || print(io, "<div class=\"out\"><pre>", ReportRender._ansi_html(o.stdout), "</pre></div>")
+    isempty(o.stderr) || print(io, "<div class=\"warn\"><pre>", ReportRender._ansi_html(o.stderr), "</pre></div>")
     (isempty(o.display) && !isempty(o.value_repr)) &&
-        print(io, "<div class=\"val\"><pre>", _esc(o.value_repr), "</pre></div>")
+        print(io, "<div class=\"val\"><pre>", ReportRender._ansi_html(o.value_repr), "</pre></div>")
     return String(take!(io))
 end
 
@@ -3326,7 +3345,15 @@ $(app ? _run_app_help(apptitle, port > 0 ? port : _APP_DEFAULT_PORT) : "")
                 @info "Using a local \$name checkout" path = src
                 Pkg.develop(path = expanduser(String(src)))
             elseif registered
-                Pkg.add(Pkg.PackageSpec(name = name, uuid = uuid))     # registered → latest release
+                spec = Pkg.PackageSpec(name = name, uuid = uuid)
+                Pkg.add(spec)                                           # registered → latest release
+                # …but ENVDIR persists across runs, and `add` on a package the env already holds at an
+                # OLDER release is "already satisfied" — the same no-op documented above for `rev`. So a
+                # visitor who ran an earlier bundle keeps that first resolve forever, dependencies and
+                # all, long after the package has dropped or changed them. `update` advances it.
+                try; Pkg.update(spec); catch e
+                    @warn "Could not update \$name to the latest release — continuing with the installed version" exception = e
+                end
             else
                 Pkg.add(url = url, rev = "main")                        # unregistered → track the branch tip
             end
@@ -3351,7 +3378,11 @@ $(app ? _run_app_help(apptitle, port > 0 ? port : _APP_DEFAULT_PORT) : "")
         startswith(BUNDLE_URL, "http") ||
             error("Bundle \$BUNDLE_NAME not found next to run.jl, and no download URL is set. " *
                   "Put \$BUNDLE_NAME in this folder (download it from the page) and re-run.")
-        dst = joinpath(pwd(), BUNDLE_NAME)
+        # A TEMP dir, never `pwd()`. The download is a transient input that gets expanded into the
+        # install directory — leaving it in whatever folder the one-liner was run from drops a second
+        # real notebook `.jl` there, and the expanded copy inherits its document id, so the two read as
+        # one document in two places and the reader is asked to split a copy they never made.
+        dst = joinpath(mktempdir(; prefix = "slate-bundle-"), BUNDLE_NAME)
         @info "Downloading the notebook bundle" BUNDLE_URL
         Downloads.download(BUNDLE_URL, dst)
         return dst
@@ -4168,6 +4199,25 @@ function _doc_meta(nb::LiveNotebook)
     return (; title = String(title), description = String(desc))
 end
 
+# The build options recorded on a manifest entry. This record IS where a doc's publish settings live —
+# there is no copy in the ledger — and Sync rebuilds from it, so every option the page depends on has to
+# be here: one that is honoured at publish but left unrecorded silently reverts on the next Sync.
+#
+# `slate` is the version that BUILT the page, not an option. A doc is out of date when its source is
+# newer than its build OR when the generator has moved on — and only the source half was ever visible,
+# so a Slate upgrade left every page looking current while `run.jl`, the page chrome and the export
+# would all come out different.
+_build_record(bundle::Bool, history::Bool, bkw) =
+    Dict{String,Any}("slate" => (try; string(pkgversion(@__MODULE__)); catch; ""; end),
+                     "bundle" => bundle, "history" => history,
+                     "theme" => String(get(bkw, :theme, "dark")),
+                     "charttheme" => String(get(bkw, :charttheme, "")),
+                     "override" => get(bkw, :override, false) === true,
+                     "outputs" => String(get(bkw, :outputs, "all")),
+                     "renderer" => String(get(bkw, :renderer, "")),
+                     "width" => Int(get(bkw, :width, 900)),
+                     "source" => get(bkw, :include_source, true) === true)
+
 # Build ONE document's directory under `docdir` (index.html + og-image + optional runnable bundle),
 # returning its manifest entry. `base_url` is the doc's eventual URL (…/<slug>/) so run.jl's bundle
 # fetch is absolute. `date` seeds the entry (a re-publish keeps the original via `_upsert_doc!`).
@@ -4221,13 +4271,7 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
     # last published with, so a re-sync reproduces it faithfully instead of shipping the frozen artifact.
     entry["id"] = notebook_docid(nb).docId      # the notebook's stable file-carried identity — Sync matches on this
     entry["source"] = abspath(nb.path)
-    bkw = (; kwargs...)
-    entry["build"] = Dict{String,Any}("bundle" => bundle, "history" => history,
-                                      "theme" => String(get(bkw, :theme, "dark")),
-                                      "charttheme" => String(get(bkw, :charttheme, "")),
-                                      "override" => get(bkw, :override, false) === true,
-                                      "outputs" => String(get(bkw, :outputs, "all")),
-                                      "source" => get(bkw, :include_source, true) === true)
+    entry["build"] = _build_record(bundle, history, (; kwargs...))
     return entry
 end
 
@@ -4477,6 +4521,9 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
         end
         _write_page_assets!(dir, nb; imports = _site_import_mode(kwargs))   # referenced assets → page-local siblings (home page IS at `dir`)
         hsink = Dict{String,Vector{UInt8}}()   # …plus the siblings only the export can produce
+        # A front page is a site's index, not something a visitor runs, so it deliberately carries NO
+        # runnable bundle however the option is set — `runnable=false` here is the decision, not an
+        # oversight. Its `build` record below says `bundle=false` to match what was actually built.
         hhtml = export_html(nb; runnable = false, og_image = hogpath, inline_assets = false,
                             asset_sink = hsink, og_url = su, og_type = "website", kwargs...)  # carries `docindex`
         _write_sibling_assets!(dir, hsink)
@@ -4494,11 +4541,9 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
             # its own site, and Stage silently skipped it — so front-page edits never shipped.
             "id" => notebook_docid(nb).docId,
             "source" => abspath(nb.path),
-            "build" => Dict{String,Any}("bundle" => bundle,
-                                        "history" => get(hkw, :history, false) === true,
-                                        "theme" => String(get(hkw, :theme, "dark")),
-                                        "outputs" => String(get(hkw, :outputs, "all")),
-                                        "source" => get(hkw, :include_source, true) === true))
+            # `bundle=false`, not the caller's `bundle`: the front page is built without a runnable
+            # bundle (see above), and a record claiming otherwise would have Sync rebuild it as runnable.
+            "build" => _build_record(false, get(hkw, :history, false) === true, hkw))
         commit_title = "front page — $(isempty(strip(fm.title)) ? nb.id : strip(fm.title))"
         docUrl = su
     else
@@ -5318,8 +5363,13 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
             end
             o = c.output
             (o === nothing || !anyout) && continue
-            texts && o.exception !== nothing && println(io, "```\n", rstrip(o.exception), "\n```\n")
-            texts && !isempty(strip(o.stdout)) && println(io, "```\n", rstrip(o.stdout), "\n```\n")
+            # Markdown has no place to put colour, so it comes off rather than printing literally.
+            # Every captured text field, not just stdout: a package whose `show` or `showerror`
+            # colours unconditionally (ignoring the stream's `:color`) puts it in the others too.
+            plain = ReportEngine.strip_sgr
+            texts && o.exception !== nothing && println(io, "```\n", rstrip(plain(o.exception)), "\n```\n")
+            texts && !isempty(strip(o.stdout)) &&
+                println(io, "```\n", rstrip(plain(o.stdout)), "\n```\n")
             alt = haskey(fignum_of, c.id) ? string("Figure ", fignum_of[c.id]) : "figure"   # meaningful alt when a data-URI won't render
             imgs = 0
             for ch in o.display
@@ -5330,7 +5380,7 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
                 end
             end
             (texts && imgs == 0 && isempty(o.display) && !isempty(strip(o.value_repr))) &&
-                println(io, "```\n", rstrip(o.value_repr), "\n```\n")
+                println(io, "```\n", rstrip(plain(o.value_repr)), "\n```\n")
             if !isempty(_echarts_specs(c))
                 png = _snapshot(nb.id, c.id)
                 png === nothing ? println(io, "*[chart — open in a browser and re-export to capture]*\n") :

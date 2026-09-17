@@ -1,0 +1,114 @@
+[
+ {
+  "html": "plain text",
+  "in": "plain text"
+ },
+ {
+  "html": "<span class=\"ansi-fg-1\">red</span>",
+  "in": "\u001b[31mred\u001b[0m"
+ },
+ {
+  "html": "<span class=\"ansi-bold ansi-fg-3\">bold yellow</span> tail",
+  "in": "\u001b[1;33mbold yellow\u001b[0m tail"
+ },
+ {
+  "html": "<span class=\"ansi-fg-2\">green</span> then <span class=\"ansi-fg-4\">blue</span>",
+  "in": "\u001b[32mgreen\u001b[39m then \u001b[34mblue\u001b[39m"
+ },
+ {
+  "html": "<span style=\"color:#ff0000\">x256</span>",
+  "in": "\u001b[38;5;196mx256\u001b[39m"
+ },
+ {
+  "html": "<span style=\"color:#0ac81e\">truecolor</span>",
+  "in": "\u001b[38;2;10;200;30mtruecolor\u001b[0m"
+ },
+ {
+  "html": "<span style=\"background-color:#00005f\">bg256</span>",
+  "in": "\u001b[48;5;17mbg256\u001b[49m"
+ },
+ {
+  "html": "<span style=\"background-color:#ff0000\">redbg</span>",
+  "in": "\u001b[48;2;255;0;0mredbg\u001b[0m"
+ },
+ {
+  "html": "<span class=\"ansi-fg-8\">bright fg</span>",
+  "in": "\u001b[90mbright fg\u001b[0m"
+ },
+ {
+  "html": "<span class=\"ansi-bg-8\">bright bg</span>",
+  "in": "\u001b[100mbright bg\u001b[0m"
+ },
+ {
+  "html": "<span class=\"ansi-italic ansi-underline ansi-strike\">under strike italic</span>",
+  "in": "\u001b[4;9;3munder strike italic\u001b[0m"
+ },
+ {
+  "html": "<span class=\"ansi-bold\">bold</span>plain",
+  "in": "\u001b[1mbold\u001b[22mplain"
+ },
+ {
+  "html": "<span class=\"ansi-dim\">dim</span>norm",
+  "in": "\u001b[2mdim\u001b[22mnorm"
+ },
+ {
+  "html": "<span class=\"ansi-reverse\">reverse</span>off",
+  "in": "\u001b[7mreverse\u001b[27moff"
+ },
+ {
+  "html": "a&lt;b&gt;&amp;&quot;q<span class=\"ansi-fg-1\">&lt;i&gt;&amp;amp;</span>",
+  "in": "a<b>&\"q\u001b[31m<i>&amp;\u001b[0m"
+ },
+ {
+  "html": "empty param",
+  "in": "\u001b[mempty param"
+ },
+ {
+  "html": "truncated ext",
+  "in": "\u001b[38;5mtruncated ext"
+ },
+ {
+  "html": "<span class=\"ansi-bold ansi-dim\">short truecolor</span>",
+  "in": "\u001b[38;2;1;2mshort truecolor"
+ },
+ {
+  "html": "unknown param",
+  "in": "\u001b[999munknown param"
+ },
+ {
+  "html": "<span class=\"ansi-fg-8\">@ Main f.jl:1</span>",
+  "in": "\u001b[0;90m@ Main f.jl:1\u001b[0m"
+ },
+ {
+  "html": "<span style=\"color:#000000\">cube low</span>",
+  "in": "\u001b[38;5;16mcube low\u001b[0m"
+ },
+ {
+  "html": "<span style=\"color:#ffffff\">cube high</span>",
+  "in": "\u001b[38;5;231mcube high\u001b[0m"
+ },
+ {
+  "html": "<span style=\"color:#bcbcbc\">grey ramp</span>",
+  "in": "\u001b[38;5;250mgrey ramp\u001b[0m"
+ },
+ {
+  "html": "<span style=\"color:#eeeeee\">grey top</span>",
+  "in": "\u001b[38;5;255mgrey top\u001b[0m"
+ },
+ {
+  "html": "multi\nline <span class=\"ansi-fg-1\">red</span>\nrest",
+  "in": "multi\nline \u001b[31mred\u001b[0m\nrest"
+ },
+ {
+  "html": "<span class=\"ansi-fg-1\">red cursor move consumed </span>",
+  "in": "\u001b[31mred\u001b[1B cursor move consumed \u001b[0m"
+ },
+ {
+  "html": "osc link after",
+  "in": "\u001b]8;;http://example.com\u001b\\osc link\u001b]8;;\u001b\\ after"
+ },
+ {
+  "html": "<span class=\"ansi-fg-1\">unterminated colour to the end</span>",
+  "in": "\u001b[31munterminated colour to the end"
+ }
+]

@@ -249,32 +249,88 @@ end
 # identical, so all the value/MIME/binds/trace/overflow logic is shared.
 abstract type OutputCapture end
 
+# A capture buffer that can be READ WHILE IT IS BEING WRITTEN. Cell output used to reach the page
+# only when the cell finished, so a loop printing a progress bar showed nothing until it was over —
+# precisely when the progress stopped being useful. `run_capture` samples these on a timer to stream
+# a live frame, and the cell's own `print` runs on a different task, so both sides take the lock.
+# Uncontended that is tens of nanoseconds against the cost of the print itself.
+mutable struct StreamBuf <: IO
+    buf::IOBuffer
+    lk::ReentrantLock
+end
+StreamBuf() = StreamBuf(IOBuffer(), ReentrantLock())
+
+Base.unsafe_write(s::StreamBuf, p::Ptr{UInt8}, n::UInt) = lock(() -> unsafe_write(s.buf, p, n), s.lk)
+Base.write(s::StreamBuf, b::UInt8) = lock(() -> write(s.buf, b), s.lk)
+Base.flush(::StreamBuf) = nothing
+Base.isopen(::StreamBuf) = true
+Base.iswritable(::StreamBuf) = true
+Base.isreadable(::StreamBuf) = false
+Base.displaysize(::StreamBuf) = (24, 80)
+
+"""
+Bytes appended since offset `from`, as `(text, new_offset)`, WITHOUT consuming them (the cell keeps
+writing after this returns). Slicing at a byte offset can split a multi-byte character; that is safe
+here because the only consumer is `feed!`, which holds a partial character back until it completes.
+"""
+function _since(s::StreamBuf, from::Int)
+    lock(s.lk) do
+        n = s.buf.size
+        n <= from && return ("", from)
+        return (String(s.buf.data[(from + 1):n]), n)
+    end
+end
+"The final contents, consumed."
+_takeall!(s::StreamBuf) = lock(() -> String(take!(s.buf)), s.lk)
+
+# Drain `io` into `sb` until it closes. Replaces a single blocking `read(io, String)`, which by
+# definition couldn't hand anything over until the cell was done.
+function _pump!(io, sb::StreamBuf)
+    try
+        while !eof(io)
+            chunk = readavailable(io)
+            isempty(chunk) || lock(() -> write(sb.buf, chunk), sb.lk)
+        end
+    catch                                     # the pipe closing under us is the normal exit
+    end
+    return nothing
+end
+
 # Process-global redirect + pushdisplay — one cell at a time (in-process kernel, and the worker's
 # serial lane). Exactly the original behaviour.
 mutable struct RedirectCapture <: OutputCapture
     disp::Any; orig_out::Any; rd::Any; wr::Any; reader::Any; orig_err::Any; rde::Any; wre::Any; ereader::Any
-    RedirectCapture() = new(ntuple(_ -> nothing, 9)...)
+    sout::StreamBuf; serr::StreamBuf
+    RedirectCapture() = new(ntuple(_ -> nothing, 9)..., StreamBuf(), StreamBuf())
 end
 function _begin_capture!(c::RedirectCapture, chunks)
     c.disp = _CaptureDisplay(chunks); pushdisplay(c.disp)
-    c.orig_out = stdout; (c.rd, c.wr) = redirect_stdout(); c.reader = @async read(c.rd, String)
-    c.orig_err = stderr; (c.rde, c.wre) = redirect_stderr(); c.ereader = @async read(c.rde, String)
+    c.orig_out = stdout; (c.rd, c.wr) = redirect_stdout(); c.reader = @async _pump!(c.rd, c.sout)
+    c.orig_err = stderr; (c.rde, c.wre) = redirect_stderr(); c.ereader = @async _pump!(c.rde, c.serr)
     return nothing
 end
-_logio(c::RedirectCapture) = stderr        # the (now redirected) stderr
+# The (now redirected) stderr, declared colour-capable so `@warn`/`@info` come through styled. The
+# wrapper is needed because `redirect_stderr` binds a raw Pipe, which answers `:color => false`.
+# Only the LOGGER can be wrapped this way: `printstyled` from cell code consults `Base.stdout`
+# itself, and making that report colour means rebinding it — which demux.jl does once at worker
+# startup, and which would be far too expensive to do per capture. So on this (in-process) strategy
+# logging is coloured and `printstyled` is not; the gate worker, where notebooks actually run, gets
+# both via DemuxIO.
+_logio(c::RedirectCapture) = IOContext(stderr, :color => true)
 function _finish_capture!(c::RedirectCapture)
     redirect_stdout(c.orig_out); redirect_stderr(c.orig_err)
     close(c.wr); close(c.wre)
     try; popdisplay(c.disp); catch; end
-    return (fetch(c.reader), fetch(c.ereader))
+    wait(c.reader); wait(c.ereader)           # let the pumps drain what's left in the pipes
+    return (_takeall!(c.sout), _takeall!(c.serr))
 end
 
 # Task-local capture via the worker's installed DemuxIO + _DemuxDisplay (see demux.jl). Concurrency-
 # safe: every key lives in THIS task's storage, so parallel evaluators never share a buffer. Requires
 # the demux to be installed as Base.stdout/stderr and a `_DemuxDisplay` on the stack (worker start).
 mutable struct DemuxCapture <: OutputCapture
-    out::IOBuffer; err::IOBuffer
-    DemuxCapture() = new(IOBuffer(), IOBuffer())
+    out::StreamBuf; err::StreamBuf
+    DemuxCapture() = new(StreamBuf(), StreamBuf())
 end
 function _begin_capture!(c::DemuxCapture, chunks)
     tls = task_local_storage()
@@ -285,7 +341,7 @@ _logio(::DemuxCapture) = stderr            # stderr IS the demux → routes to t
 function _finish_capture!(c::DemuxCapture)
     tls = task_local_storage()
     for k in (:slate_out, :slate_err, :slate_chunks); haskey(tls, k) && delete!(tls, k); end
-    return (String(take!(c.out)), String(take!(c.err)))
+    return (_takeall!(c.out), _takeall!(c.err))
 end
 
 # Drop a trailing `# …` line comment, ignoring `#` inside a "…" string (so
@@ -319,28 +375,46 @@ function _is_quiet_cell(source::AbstractString)
     return false
 end
 
-# ── Progress protocol bridge ─────────────────────────────────────────────────
-# Julia's de-facto progress standard (ProgressLogging.jl, consumed by Pluto / VS Code /
-# Juno / TerminalLoggers) is a LOG RECORD carrying a `progress` value (a Float 0..1,
-# `nothing`, or "done") at `LogLevel(-1)`, identified by its log `id`. We wrap the cell's
-# eval logger to intercept those records and funnel them into the SAME sink as a manual
-# `slate_progress(frac; msg)` call — so a plain `@progress for …` loop, or any library that
-# speaks the protocol, drives the cell meter with ZERO extra work. Everything else passes
-# through to the parent (console) logger untouched. No dep on ProgressLogging: we match the
-# `:progress` kwarg, which IS the wire protocol.
-struct _ProgressLogger <: Logging.AbstractLogger
+# ── The cell's logger ────────────────────────────────────────────────────────
+# Wraps the ConsoleLogger a cell's `@info`/`@warn` print through, to do two things the console
+# can't. Everything it doesn't claim passes to the parent untouched.
+#
+# 1. PROGRESS. Julia's de-facto progress standard (ProgressLogging.jl, consumed by Pluto / VS Code /
+#    Juno / TerminalLoggers) is a LOG RECORD carrying a `progress` value (a Float 0..1, `nothing`,
+#    or "done") at `LogLevel(-1)`, identified by its log `id`. Those records are funnelled into the
+#    SAME sink as a manual `slate_progress(frac; msg)` call — so a plain `@progress for …` loop, or
+#    any library that speaks the protocol, drives the cell meter with ZERO extra work. No dep on
+#    ProgressLogging: we match the `:progress` kwarg, which IS the wire protocol.
+#
+# 2. RE-RUN NOISE. A warning that only fires because a cell ran twice is not telling the reader
+#    anything — re-running is the normal operation here, not a mistake. See `_rerun_noise`.
+struct _CellLogger <: Logging.AbstractLogger
     parent::Logging.AbstractLogger
     sink                       # (id, frac::Float64, msg::String, done::Bool) -> Any  (cell progress channel)
 end
-Logging.shouldlog(::_ProgressLogger, _...) = true                          # filter in handle_message
-Logging.min_enabled_level(l::_ProgressLogger) = min(Logging.LogLevel(-1), Logging.min_enabled_level(l.parent))
-Logging.catch_exceptions(l::_ProgressLogger) = Logging.catch_exceptions(l.parent)
+Logging.shouldlog(::_CellLogger, _...) = true                          # filter in handle_message
+Logging.min_enabled_level(l::_CellLogger) = min(Logging.LogLevel(-1), Logging.min_enabled_level(l.parent))
+Logging.catch_exceptions(l::_CellLogger) = Logging.catch_exceptions(l.parent)
 
 _progress_frac(p) = p === nothing                  ? 0.0 :
                     p isa AbstractString           ? (p == "done" ? 1.0 : 0.0) :
                     p isa Real                     ? (isnan(p) ? 0.0 : clamp(Float64(p), 0.0, 1.0)) : 0.0
 
-function Logging.handle_message(l::_ProgressLogger, level, message, _module, group, id, file, line; kwargs...)
+# Warnings that a notebook provokes by construction, not by anything the reader did wrong.
+#
+# `@doc` warns when a docstring lands on a signature that already has one. A cell that defines a
+# documented function does exactly that on every re-run, so the warning fires on the ordinary case
+# and there is no version of the cell that avoids it. The one thing it could genuinely flag — the
+# SAME function documented in two different cells — the cell header already reports, as the
+# `dupdefs` badge, where the reader can see both cells rather than a message about neither.
+#
+# Matched on the message rather than the log `id`, which is a hash of the source position and so
+# changes between Julia versions. If Base rewords it the warning comes back, which is the right way
+# for this to fail: noise returns, nothing gets hidden that shouldn't be.
+_rerun_noise(_module, message) =
+    _module === Base.Docs && startswith(string(message), "Replacing docs for")
+
+function Logging.handle_message(l::_CellLogger, level, message, _module, group, id, file, line; kwargs...)
     if haskey(kwargs, :progress)                                            # a progress record → cell meter
         p = kwargs[:progress]
         # The log `id` keys the bar — each `@withprogress` scope (nested loops, parallel tasks) has
@@ -350,9 +424,89 @@ function Logging.handle_message(l::_ProgressLogger, level, message, _module, gro
         try; l.sink(bid, _progress_frac(p), message === nothing ? "" : string(message), p === "done"); catch; end
         return nothing                                                      # consume (don't echo to stderr)
     end
+    _rerun_noise(_module, message) && return nothing
     Logging.shouldlog(l.parent, level, _module, group, id) &&
         Logging.handle_message(l.parent, level, message, _module, group, id, file, line; kwargs...)
     return nothing
+end
+
+# ── Live output streaming ────────────────────────────────────────────────────
+# A cell's stdout/stderr only ever reached the page when the cell FINISHED, so a loop printing a
+# progress bar showed nothing for its whole run and then dumped the result — useless exactly while
+# the progress mattered. A watchdog task samples the capture buffers on a timer, cooks them
+# (termcook.jl) and pushes a frame when the text CHANGED.
+#
+# Sampling rather than write-triggered notification is the point: a cell printing in a tight loop
+# produces frames at its own rate, not the browser's, and cooking already collapses a thousand
+# redraws into one line. So the cost is fixed per second regardless of how noisy the cell is. Frames
+# are advisory — the authoritative output still rides with the cell result, so dropping one costs
+# nothing and no acknowledgement is needed.
+const _CELLOUT_HZ = 10                  # frames/second: reads as live, too cheap to notice
+const _CELLOUT_MAX = 20_000             # chars per stream per frame — a live view only needs the tail
+const _CELLOUT_ROWS = 400               # ...and only the last few hundred LINES of it (see below)
+
+_stream_bufs(c::DemuxCapture) = (c.out, c.err)
+_stream_bufs(c::RedirectCapture) = (c.sout, c.serr)
+_stream_bufs(::OutputCapture) = nothing          # a strategy that can't be sampled simply doesn't stream
+
+_stream_tail(s::AbstractString) =
+    length(s) <= _CELLOUT_MAX ? s : string("…\n", last(s, _CELLOUT_MAX))
+
+# Start sampling; returns a handle to stop it (or `nothing` when there's nowhere to send frames).
+function _start_cellout(capture::OutputCapture, sink, cid::AbstractString)
+    (sink === nothing || isempty(cid)) && return nothing
+    bufs = _stream_bufs(capture)
+    bufs === nothing && return nothing
+    stop = Threads.Atomic{Bool}(false)
+    task = @async begin
+        # ONE screen per stream, fed only the bytes that are new since the last tick. Re-cooking the
+        # whole buffer every frame would be quadratic over a chatty cell; `feed!` is incremental and
+        # carries a split escape sequence or character across the tick boundary, so this is both
+        # cheaper and exactly the path the chunk-splitting tests cover.
+        screens = (TermScreen(), TermScreen())
+        offs = [0, 0]
+        prev_out = ""; prev_err = ""
+        try
+            while !stop[]
+                sleep(1 / _CELLOUT_HZ)
+                stop[] && break
+                fresh = false
+                for i in 1:2
+                    (text, off) = _since(bufs[i], offs[i])
+                    isempty(text) && continue
+                    offs[i] = off
+                    feed!(screens[i], text)
+                    fresh = true
+                end
+                fresh || continue
+                # Only the tail is rendered. `feed!` is incremental but `screen_text` walks the grid,
+                # so asking for the whole transcript ten times a second would grow with the output
+                # and undo what the incremental feed just bought.
+                o = _stream_tail(screen_text(screens[1]; last_rows = _CELLOUT_ROWS))
+                e = _stream_tail(screen_text(screens[2]; last_rows = _CELLOUT_ROWS))
+                if o != prev_out || e != prev_err
+                    prev_out = o; prev_err = e
+                    sink(cid, o, e)
+                end
+            end
+        catch                              # a sampling failure must never touch the cell's own run
+        end
+    end
+    return (stop, task)
+end
+
+function _stop_cellout(handle)
+    handle === nothing && return nothing
+    handle[1][] = true
+    return nothing
+end
+
+# Where a streamed frame goes: the namespace's injected `__slate_cellout` (worker → PUB on the gate
+# stream; in-process → straight to the server callback), or nowhere on a bare module (tests).
+function _cellout_sink(mod::Module)
+    _ns_defined(mod, :__slate_cellout) || return nothing
+    f = _ns_read(mod, :__slate_cellout)
+    return (cid, o, e) -> (try; Base.invokelatest(f, cid, o, e); catch; end)
 end
 
 # Read a notebook-namespace binding (`slate_emit`, `slate_on`, `slate_progress`, …) that was
@@ -706,12 +860,16 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     err = nothing
     btrace = nothing
     raw_out = ""; raw_err = ""
+    # Stream what the cell prints while it prints it (see `_start_cellout`). Stopped in the `finally`
+    # BEFORE the buffers are consumed, so the last thing the page sees is the real result, never a
+    # half-sampled frame that arrived after it.
+    outwatch = _start_cellout(capture, _cellout_sink(mod), cid)
     t0 = time_ns()
     try
         # ConsoleLogger on the captured stderr (`_logio`), so @warn/@info/@error land in this cell's
-        # stream. Non-colored (not a color tty), wrapped so ProgressLogging `@progress` records drive
-        # the cell meter instead of printing.
-        _logger = _ProgressLogger(Logging.ConsoleLogger(_logio(capture)), _progress_sink(mod))
+        # stream — coloured, since the stream reports `:color => true` and the renderer turns SGR into
+        # spans. Wrapped so ProgressLogging `@progress` records drive the cell meter instead of printing.
+        _logger = _CellLogger(Logging.ConsoleLogger(_logio(capture)), _progress_sink(mod))
         Logging.with_logger(_logger) do
             value = _eval_cell_source(mod, source, filename)
         end
@@ -719,6 +877,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         err = e
         btrace = catch_backtrace()
     finally
+        _stop_cellout(outwatch)
         raw_out, raw_err = _finish_capture!(capture)
         slate_ctx === nothing || delete!(task_local_storage(), :slate_ctx)   # never outlive this eval
         delete!(task_local_storage(), :slate_cell)
@@ -740,8 +899,13 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     trace = (tracesink === nothing || tracesink[] === nothing) ? Any[] : _trace_wire(tracesink[])
     tracesink === nothing || (tracesink[] = nothing)
     overflow = NamedTuple[]                       # full results saved to disk for "open full output"
-    stdout_str = _cap_keep!(overflow, "stdout", raw_out, "txt")
-    stderr_str = _cap_keep!(overflow, "stderr", raw_err, "txt")
+    # Replay in-place redraws (`\r`, backspace, cursor moves) BEFORE capping, so a progress bar reads
+    # as the one line it was drawn as instead of a cascade of frames — and so those frames don't eat
+    # the character budget. Cooking happens here, once, at the point the streams become the wire form,
+    # which is what puts every consumer (live page, memo, export, PDF, the agent tools) on the cooked
+    # text. Output that never redraws is returned unchanged. See termcook.jl.
+    stdout_str = _cap_keep!(overflow, "stdout", cook_terminal(raw_out), "txt")
+    stderr_str = _cap_keep!(overflow, "stderr", cook_terminal(raw_err), "txt")
     dur_ms = (time_ns() - t0) / 1e6
 
     # Capture the return value: an ECharts spec / a table are kept raw (reduced to

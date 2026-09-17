@@ -3,9 +3,26 @@
 # banner narrates (phase, precompile k/N, current package). Pure string logic, so it stands alone.
 using ReTest
 
+include(joinpath(@__DIR__, "..", "src", "termcook.jl"))   # prepare_feed! strips colour/redraws first
 include(joinpath(@__DIR__, "..", "src", "prepare.jl"))
 
 @testset "prepare" begin
+    @testset "coloured Pkg output classifies the same as plain" begin
+        # Cell streams report `:color => true`, so Pkg now emits SGR and redraws its spinner in
+        # place. The classifier matches on TEXT: colour and cursor movement must not reach a regex.
+        tr = PrepareTracker(0.0)
+        prepare_feed!(tr, "@@SLATE_PREP total=2")
+        @test prepare_feed!(tr, "     12.3 ms  \e[32m✓\e[0m \e[1mColorTypes\e[0m")
+        @test tr.done == 1
+        @test tr.pkg == "ColorTypes"                     # not "\e[1mColorTypes\e[0m"
+        # A spinner redraw: only the final frame is the real line.
+        @test prepare_feed!(tr, "\e[2K\r  spinning...\r   999.9 ms  \e[32m✓\e[0m Colors")
+        @test tr.done == 2
+        @test tr.pkg == "Colors"
+        # Colour must not turn resolver churn into a visible line either.
+        @test !prepare_feed!(tr, "  \e[90m[8bf52ea8]\e[0m \e[32m+\e[0m CRC32c v1.11.0")
+    end
+
     @testset "precompile stream → structured k/N + package" begin
         tr = PrepareTracker(0.0)   # fixed t0 → deterministic-ish (secs derived from wall clock, not asserted)
         # The real non-TTY format: a `Precompiling` header, then `<timing>  ✓ Name` per package, then a summary.

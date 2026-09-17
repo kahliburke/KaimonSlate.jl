@@ -236,9 +236,15 @@ end
 # pixels here, but knows it worked); tables are rendered as text so their data IS visible.
 _cell_result_text(c::Cell) = (o = c.output; o === nothing ? "(not run)" : _output_result_text(o))
 # The agent-facing text for a captured eval result — shared by cells and out-of-band (scratch) evals.
+#
+# Colour is STRIPPED here and only here. Captured output carries SGR now (the page renders it as
+# spans), but an agent reading a tool result gets nothing from `\e[1;31m` except tokens spent on it —
+# and a coloured stacktrace is markedly harder to read as plain text. Escape codes never survive into
+# an agent's view; the browser's copy is untouched.
 function _output_result_text(o)
     o.exception === nothing ||
-        return "ERROR: " * o.exception * (o.backtrace === nothing ? "" : "\n" * first(o.backtrace, 800))
+        return ReportEngine.strip_sgr("ERROR: " * o.exception *
+                                      (o.backtrace === nothing ? "" : "\n" * first(o.backtrace, 800)))
     parts = String[]
     isempty(rstrip(o.stdout)) || push!(parts, rstrip(o.stdout))
     isempty(o.value_repr) || push!(parts, o.value_repr)
@@ -249,7 +255,7 @@ function _output_result_text(o)
     for t in o.tables      # a table's DATA is text-renderable — show it (the agent can't see the widget)
         push!(parts, _table_text(t))
     end
-    txt = rstrip(join(parts, "\n"))
+    txt = rstrip(ReportEngine.strip_sgr(join(parts, "\n")))
     return isempty(txt) ? "(ok — no value)" : txt
 end
 
@@ -1218,9 +1224,18 @@ function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString; s
         # Converting OUT of a web cell: the browser sends the reassembled `@web(...)` skin as `source`, and a
         # plain code/markdown cell shouldn't inherit that wrapper — unwrap it so `code → web → code` round-trips
         # back to the original text instead of accumulating a `@web(...)` skin.
+        #
+        # Converting IN is the mirror, and skipping it left the cell diverging from itself: the source stayed
+        # plain text while the browser mounted a web editor whose panes reassemble a `@web(...)` skin, so
+        # `edText` and the stored source disagreed from the moment of the convert. The cell then showed
+        # `edited` with nothing typed, and the next external edit had an editor matching neither side. The
+        # body goes to the HTML pane, which is where `_web_sections` folds untagged source anyway, so this
+        # stores what the editor was going to reassemble regardless.
         newkind = _cellkind(kind)
         if old.kind == WEB && newkind != WEB
             src = ReportEngine._web_unwrap(src)
+        elseif newkind == WEB && old.kind != WEB
+            src = ReportEngine._web_skin(; html = src)
         end
         cells[i] = Cell(old.id, newkind, src)
         build_dependencies!(nb.report)

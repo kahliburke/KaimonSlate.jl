@@ -22,13 +22,25 @@ function _has_parse_error(ex)
     return any(_has_parse_error, ex.args)
 end
 
-# `include(...)` runs external code whose definitions aren't visible to static analysis,
-# so a cell containing one is a barrier (downstream cells conservatively depend on it).
+# `include(...)` runs external code whose definitions aren't visible to static analysis, so a cell
+# containing one is a barrier (downstream cells conservatively depend on it).
+#
+# `eval` is the same problem arriving by a different road. `@eval x = 1`, `eval(:(x = 1))` and
+# `Core.eval(m, ex)` all bind a global that no amount of macro expansion can reveal, because the
+# expression is assembled at RUN time — the notebook's macro-aware pass (macroexpand.jl) resolves
+# `@enum` and `Base.@kwdef` precisely, and can say nothing at all about these. Left unmarked, the
+# reader of such a global keeps a stale value with no error and no stale marker.
+#
 # (`using`/`import` are handled precisely in the statement loop — see `_import_names` — so
 # a self-contained `import X` no longer chains every cell below it.)
+_is_barrier_callee(f) =
+    f === :include || f === :eval ||
+    (f isa Expr && f.head === :. && length(f.args) == 2 && f.args[2] isa QuoteNode &&
+     f.args[2].value in (:include, :eval))          # Core.eval / Base.eval / M.include
 function _is_barrier_expr(ex)
     ex isa Expr || return false
-    ex.head === :call && !isempty(ex.args) && ex.args[1] === :include && return true
+    ex.head === :call && !isempty(ex.args) && _is_barrier_callee(ex.args[1]) && return true
+    ex.head === :macrocall && !isempty(ex.args) && ex.args[1] === Symbol("@eval") && return true
     return any(_is_barrier_expr, ex.args)
 end
 
@@ -283,6 +295,48 @@ function _record_global_mutations!(cell::Cell, ex, globals)
     end
     for s in mr; s in globals && push!(cell.reads, s); end
     return nothing
+end
+
+# `global x` declarations, recorded as writes.
+#
+# ExpressionExplorer reads `let v = 1; global v = 2; end` as introducing a LOCAL `v` and reports no
+# definition at all. Julia disagrees: one `global v` anywhere in a scope makes EVERY `v` in that
+# scope the global, so both lines assign it. The cell genuinely binds `v` while the analysis says it
+# binds nothing — which costs the reactive edge, and a missing edge is not a missing optimisation.
+# Its reader keeps showing a stale value with no error, or on a first run reaches a binding that has
+# not been created yet and fails on world age.
+#
+# Unlike the mutation scan above this is EXACT, not a heuristic: `global x` is a declaration of
+# intent to bind the global, so there is no `globals` set to filter against and no false positive to
+# guard. Scope-blind for the same reason — the declaration means the same thing wherever it sits.
+#
+# Deferred definitions are skipped: a `global` in a function BODY binds when the function is called,
+# not when the cell defining it runs, and counting it would wire an edge from every helper.
+function _collect_global_decls!(names::Set{Symbol}, ex)
+    ex isa Expr || return names
+    _is_deferred_def(ex) && return names
+    if ex.head === :global
+        for a in ex.args
+            _global_decl_name!(names, a)
+        end
+    end
+    for a in ex.args
+        _collect_global_decls!(names, a)
+    end
+    return names
+end
+# The bound name(s) in one `global` argument: `x`, `x = v`, `x::T = v`, `x, y = f()`.
+function _global_decl_name!(names::Set{Symbol}, a)
+    if a isa Symbol
+        a === :_ || push!(names, a)          # `_` is a discard, never a binding
+    elseif a isa Expr
+        if a.head === :(=) || a.head === :(::)
+            _global_decl_name!(names, a.args[1])
+        elseif a.head === :tuple
+            for x in a.args; _global_decl_name!(names, x); end
+        end
+    end
+    return names
 end
 
 # Statically collect the file paths a cell references via `@asset "path"` (or `@asset bytes
@@ -561,6 +615,7 @@ function _infer_bindings_uncached!(cell::Cell)
             union!(cell.reads, _macrocall_arg_refs!(Set{Symbol}(), blk))   # see through unknown macros (reads only)
             union!(cell.writes, _strip_anon(node.definitions))
             union!(cell.writes, _strip_anon(node.funcdefs_without_signatures))
+            union!(cell.writes, _collect_global_decls!(Set{Symbol}(), blk))
             _record_global_mutations!(cell, blk, node.references)
             # Top-level reads (backref diagnostic): re-analyze only the NON-deferred statements —
             # a reference inside a function/macro body resolves at call time and must not count.

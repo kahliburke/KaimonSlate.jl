@@ -373,6 +373,35 @@ function EChartHost({ cell }) {
   }</div>`;
 }
 
+// Rebuild a control host without taking the control the user is working in away from them.
+//
+// A rebuild replaces the host's innerHTML wholesale, which destroys the focused node. Focus then falls
+// to <body>, and command mode binds bare letters — so the REST of what someone types gets read as
+// commands. Typing a filter into a `@bind TextField` converted the cell to a web cell on the `w`,
+// because the first keystroke rebuilt the row out from under the caret.
+//
+// It rebuilds on a genuine structural change, and the option list of a `Select` fed by another bind IS
+// one, so this fires on every keystroke for exactly the notebooks that wire controls together. The
+// control is found again by `data-name` (widgets carry it) and the caret is put back where it was.
+function _keepFocus(host, rebuild) {
+  const a = document.activeElement;
+  const held = a && host.contains(a) && a !== host
+    ? { name: a.getAttribute && a.getAttribute('data-name'),
+        // Only text-ish inputs expose a selection; reading it elsewhere throws.
+        start: (() => { try { return a.selectionStart; } catch (_) { return null; } })(),
+        end: (() => { try { return a.selectionEnd; } catch (_) { return null; } })() }
+    : null;
+  rebuild();
+  if (!held || !held.name) return;
+  let next = null;
+  try { next = host.querySelector('[data-name="' + (window.CSS && CSS.escape ? CSS.escape(held.name) : held.name) + '"]'); } catch (_) {}
+  if (!next) return;
+  try {
+    next.focus({ preventScroll: true });
+    if (held.start != null && next.setSelectionRange) next.setSelectionRange(held.start, held.end);
+  } catch (_) {}
+}
+
 function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed }) {
   const c = cell;
   const ref = useRef(null);
@@ -428,13 +457,19 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     const _eq = srcEq;
     // The server's per-cell content hash is the authoritative "did THIS cell change" signal — immune to
     // browser-side srcMap drift. Fall back to a string compare only if an older state carries no hash.
-    const _serverMoved = (c.hash != null && _prevHash != null) ? c.hash !== _prevHash : !_eq(c.source, _prevSrc);
-    if (window.editors[c.id] && _serverMoved) {
-      const _mine = window.edText(c.id);
-      if (_eq(_mine, _prevSrc)) window.edSetText(c.id, c.source);                       // no local edits → fast-forward to the new source
-      else if (!_eq(_mine, c.source) && window.slateLiveConflict) window.slateLiveConflict(c.id, _mine, c.source);   // both changed → reconcile modal
-    } else if (!window.editors[c.id] && _serverMoved) {
-      const ph = el.querySelector('.cm-placeholder'); if (ph) ph.textContent = c.source || '';   // not yet hydrated → keep placeholder current
+    // The verdict itself is `slateReconcileVerdict` (cellops.js), kept pure and out of this effect so
+    // it can be unit-tested — see test/js/reconcile_verdict.mjs.
+    const _hasEd = !!window.editors[c.id];
+    const _mine = _hasEd ? window.edText(c.id) : null;
+    switch (window.slateReconcileVerdict({ prevSrc: _prevSrc, prevHash: _prevHash,
+                                           source: c.source, hash: c.hash,
+                                           mine: _mine, hasEditor: _hasEd, eq: _eq })) {
+      case 'forward':  window.edSetText(c.id, c.source); break;                          // no local edits → adopt it
+      case 'conflict': window.slateLiveConflict && window.slateLiveConflict(c.id, _mine, c.source); break;
+      case 'placeholder': {
+        const ph = el.querySelector('.cm-placeholder'); if (ph) ph.textContent = c.source || '';   // not yet hydrated
+        break;
+      }
     }
     const badge = el.querySelector('.badge');     // header renders c.state; reflect the live state
     if (badge && badge.textContent !== state) badge.textContent = state;
@@ -472,12 +507,12 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
       last.current.bindKey = bindKey;
       const host = el.querySelector('.binds');
       // Let any custom widgets clean up before the swap orphans their nodes (mirrors the .ichart dispose above).
-      if (host) { window.teardownCustomWidgets(host); host.innerHTML = window.bindsInner(c); rebuilt = true; }
+      if (host) { _keepFocus(host, () => { window.teardownCustomWidgets(host); host.innerHTML = window.bindsInner(c); }); rebuilt = true; }
     }
     if (ctrlKey !== last.current.ctrlKey) {
       last.current.ctrlKey = ctrlKey;
       const host = el.querySelector('.controls');
-      if (host) { window.teardownCustomWidgets(host); host.innerHTML = window.controlStripInner(c); rebuilt = true; }
+      if (host) { _keepFocus(host, () => { window.teardownCustomWidgets(host); host.innerHTML = window.controlStripInner(c); }); rebuilt = true; }
     }
     if (rebuilt) window.mountControls(c);             // wire the freshly-built controls
 
@@ -578,7 +613,20 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // because while a session is running that is what it is.
     body = html`<${Editor} cell=${c} /><${DebugStrip} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><${EChartHost} cell=${c} /><div class="anim"></div>`;
   }
-  return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
+  // Reorder rail: move up / down, out on the page margin to the LEFT of the cell rather than in the
+  // header's action strip at the opposite corner. Placement, hover zone and when it stands down are
+  // all `.cellmove` in notebook.css.
+  //
+  // A click moves the cell out from under the pointer, so the button has to let go of focus — the
+  // rail also shows on `:focus-within`, which left the arrows lit on a cell the pointer had left.
+  // Pointer clicks only: `detail` is 0 when the keyboard activates a button, and focus is the whole
+  // of what makes the rail reachable that way.
+  const step = dir => (e) => { if (e.detail) e.currentTarget.blur(); window.moveCell(c.id, dir); };
+  const moverail = html`<div class="cellmove">
+    <button title="move this cell up" onclick=${step('up')}>↑</button>
+    <button title="move this cell down" onclick=${step('down')}>↓</button>
+  </div>`;
+  return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${moverail}${header}${body}</div>`;
 }
 
 // Inter-cell insert affordance: a thin hover zone in the gap between rows (and above the first / below

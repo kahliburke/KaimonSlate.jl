@@ -198,6 +198,14 @@ function _enrich_site_doc(dir, d)
     return e
 end
 
+# The `build` record on a site's `homeDoc` manifest entry, or `nothing` when the site has no front page
+# (or was built before build records existed).
+function _home_build_record(dir)
+    (dir === nothing || !isdir(dir)) && return nothing
+    hd = get(_read_site_manifest(dir), "homeDoc", nothing)
+    return hd isa AbstractDict ? get(hd, "build", nothing) : nothing
+end
+
 function _site_view(s)
     fp = site_frontpage(s.name)
     dir = _site_dir(s.name)
@@ -219,6 +227,9 @@ function _site_view(s)
         # source path recorded at build time, so the manager can name it and link back to it.
         "hasHome" => fp.home, "homeTitle" => fp.homeTitle, "homePath" => fp.homePath,
         "homeMtime" => homeMtime, "homeBuilt" => homeBuilt,
+        # The front page's recorded build settings — `docs[]` never carries it, so the manager's per-doc
+        # settings page would have nothing to paint for the home notebook without this.
+        "homeBuild" => _home_build_record(dir),
         # Local-mirror ⇄ deploy state for the Save/Preview/Sync UI. `dirty` flags DRIFT after a known
         # deploy only (needs a stamp baseline, `synced > 0`), so legacy/never-synced sites don't all
         # light up as "unsynced" — the cue appears once you've Synced and then changed the build.
@@ -275,6 +286,9 @@ end
 function publish_ledger_view()
     store = PublishLedger.default_store()
     view = _ledger_view(PublishLedger.load(store))
+    # The RUNNING version, to compare against each doc's recorded `build.slate` — that comparison is
+    # what tells the manager a page predates the current generator and is worth re-staging.
+    view["slate"] = try; string(pkgversion(@__MODULE__)); catch; ""; end
     view["backend"] = store isa PublishLedger.GistStore ? "gist" : "local"
     # The gist is the cross-machine ledger — link it so "— gist" is inspectable, not a mystery.
     store isa PublishLedger.GistStore && store.id !== nothing &&
@@ -418,6 +432,9 @@ function publish_sites_info(nb::LiveNotebook)
         push!(sites, Dict{String,Any}("name" => s.name,
             "title" => isempty(strip(s.title)) ? s.name : s.title,
             "targets" => copy(s.targets), "member" => member, "isHome" => isHome,
+            # This doc's recorded build settings in THIS site — the store the panel shows, so its
+            # options row reflects how the page is actually built rather than a browser preference.
+            "build" => (member ? _recorded_build(s.name, nb) : nothing),
             # Whether the site ALREADY has a front page, and which notebook — so the UI can warn that
             # ticking ★ here will replace it (a site has exactly one front page).
             "hasHome" => fp.home, "homeTitle" => isHome ? "" : String(fp.homeTitle),
@@ -450,11 +467,19 @@ function _set_notebook_home!(nb::LiveNotebook, on::Bool)
     return changed
 end
 
-"Associate (build into) or disassociate (remove from) this notebook and a site's canonical local build.
-Local only — a subsequent Publish/Sync deploys. Returns the refreshed `publish_sites_info`."
-function publish_set_membership!(nb::LiveNotebook, site::AbstractString, member::Bool)
+"""
+Associate (build into) or disassociate (remove from) this notebook and a site's canonical local build.
+Local only — a subsequent Publish/Sync deploys. Returns the refreshed `publish_sites_info`.
+
+`build` is the publish panel's options, used only when the site doesn't know this doc yet: adding a
+notebook with "Run live" ticked has to build it that way, which is what this argument is for. Once the
+site HAS the doc, its recorded settings win, so re-ticking a site (or toggling ★) can't overwrite
+settings edited in the publishing manager.
+"""
+function publish_set_membership!(nb::LiveNotebook, site::AbstractString, member::Bool; build = nothing)
     if member
-        export_to_site(nb, String(site))                   # build into the site → membership
+        b = something(_recorded_build(site, nb), build, Dict{String,Any}())
+        export_to_site(nb, String(site); _build_kwargs(b)...)   # build into the site → membership
     else
         unexport_from_site(String(site), doc_slug(nb))     # drop its subdir + manifest entry
     end
@@ -464,11 +489,49 @@ end
 "Set/clear whether this notebook is `site`'s front page. Front page is driven by the `home` tag (model
 A): this toggles the tag and rebuilds the notebook into the site so its home reflects the change. Setting
 it as home for one site clears it as home elsewhere it's built (the tag is notebook-global for now)."
-function publish_set_home!(nb::LiveNotebook, site::AbstractString, home::Bool)
+function publish_set_home!(nb::LiveNotebook, site::AbstractString, home::Bool; build = nothing)
     _set_notebook_home!(nb, home)
     home || clear_site_home_if!(String(site), abspath(nb.path))   # drop the stale home pointer + template
-    export_to_site(nb, String(site))                       # rebuild so the site's home page reflects it
+    # Same rule as membership: the doc's recorded settings win, so toggling ★ rebuilds the page without
+    # silently changing how it's built (see `publish_set_membership!`).
+    b = something(_recorded_build(site, nb), build, Dict{String,Any}())
+    export_to_site(nb, String(site); _build_kwargs(b)...)   # rebuild so the site's home page reflects it
     return publish_sites_info(nb)
+end
+
+"""
+Set the build settings recorded for one document of `site` — the publishing manager's per-doc editor,
+so a page's settings can be changed without opening its notebook.
+
+When the notebook is open the doc is rebuilt straight away, so the local build matches what was just
+recorded. When it isn't, only the record changes: `Sync` deploys the staged copy verbatim and never
+re-renders, so the page keeps its old build until the notebook is opened and the site Staged. Returns
+whether it rebuilt, so the caller can tell the user which of the two happened.
+"""
+function publish_set_doc_build!(site::AbstractString, slug::AbstractString, build, hub)
+    dir = _site_dir(String(site))
+    (dir === nothing || !isdir(dir)) && error("site \"$site\" has no local build")
+    man = _read_site_manifest(dir)
+    rec = _build_from_request(build)
+    entry = nothing
+    for d in get(man, "docs", Any[])
+        (d isa AbstractDict && String(get(d, "slug", "")) == String(slug)) || continue
+        d["build"] = rec; entry = d; break
+    end
+    if entry === nothing
+        hd = get(man, "homeDoc", nothing)
+        # The front page is built without a runnable bundle whatever is asked for, so record it that
+        # way rather than storing a setting its page will never honour.
+        (hd isa AbstractDict && isempty(strip(String(slug)))) || error("no document \"$slug\" in site \"$site\"")
+        rec["bundle"] = false
+        hd["build"] = rec; entry = hd
+    end
+    write(joinpath(dir, _SITE_MANIFEST), JSON.json(man, 2))
+    nbs = hub === nothing ? LiveNotebook[] : lock(hub.lock) do; collect(values(hub.notebooks)); end
+    idx = findfirst(nb -> _doc_entry_is(nb, entry), nbs)
+    idx === nothing && return Dict{String,Any}("ok" => true, "rebuilt" => false, "build" => rec)
+    export_to_site(nbs[idx], String(site); slug = String(slug), _build_kwargs(rec)...)
+    return Dict{String,Any}("ok" => true, "rebuilt" => true, "build" => rec)
 end
 
 # A site deploys to a LOCATION = (target, normalized subpath). Two sites writing the same location
@@ -538,6 +601,63 @@ function publish_site_delete!(name::AbstractString; purge::Bool = false)
     return view
 end
 
+# ── A doc's publish settings ─────────────────────────────────────────────────────────────────────────
+# These live in ONE place: the `build` record on the doc's manifest entry (`_build_record`). The two
+# functions below are the only reader and the only writer of that shape, so a doc staged by a membership
+# toggle, rebuilt by Sync, or edited in the publishing manager all resolve to the same options. Before
+# this, each path defaulted on its own and a doc could be built with settings nobody chose.
+
+_truthy(v) = v === true || v == "1" || v == 1
+
+# Content column width: an Int (0 = full width), or "full"/"" from a query string or request body.
+function _width_int(v)
+    v isa Integer && return Int(v)
+    s = strip(string(v))
+    (isempty(s) || s == "auto") && return 900
+    s == "full" && return 0
+    w = tryparse(Int, s)
+    return w === nothing ? 900 : w
+end
+
+"A recorded manifest `build` → the kwargs every build path hands `export_to_site`."
+function _build_kwargs(b)
+    b isa AbstractDict || (b = Dict{String,Any}())
+    return (; bundle = _truthy(get(b, "bundle", false)),
+              history = _truthy(get(b, "history", false)),
+              theme = String(get(b, "theme", "dark")),
+              charttheme = String(get(b, "charttheme", "")),
+              renderer = String(get(b, "renderer", "")),
+              override = _truthy(get(b, "override", false)),
+              outputs = String(get(b, "outputs", "all")),
+              width = _width_int(get(b, "width", 900)),
+              include_source = _truthy(get(b, "source", true)))
+end
+
+"The publish panel's options as posted by the client → a manifest `build` record."
+_build_from_request(b) =
+    Dict{String,Any}("bundle" => _truthy(get(b, "bundle", false)),
+                     "history" => _truthy(get(b, "history", false)),
+                     "theme" => String(get(b, "theme", "dark")),
+                     "charttheme" => String(get(b, "charttheme", "")),
+                     "override" => _truthy(get(b, "override", false)),
+                     "outputs" => String(get(b, "outputs", "all")),
+                     "renderer" => String(get(b, "renderer", "")),
+                     "width" => _width_int(get(b, "width", 900)),
+                     "source" => _truthy(get(b, "source", true)))
+
+"This notebook's `build` record in `site`'s manifest, or `nothing` if the site doesn't know it yet."
+function _recorded_build(site::AbstractString, nb::LiveNotebook)
+    dir = _site_dir(String(site))
+    (dir === nothing || !isdir(dir)) && return nothing
+    man = _read_site_manifest(dir)
+    for d in get(man, "docs", Any[])
+        _doc_entry_is(nb, d) && return get(d, "build", nothing)
+    end
+    hd = get(man, "homeDoc", nothing)
+    (hd isa AbstractDict && _doc_entry_is(nb, hd)) && return get(hd, "build", nothing)
+    return nothing
+end
+
 # Rebuild every LIVE member of the site (matched to an open notebook by source path) from its current
 # source, using the build options recorded in the manifest at its last publish. Non-live members are
 # reported and left untouched. Emits per-member `:status` lines so the publish stream names exactly which
@@ -565,18 +685,9 @@ function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; o
             note("• $title — no open notebook to rebuild from, keeping last build")
             continue
         end
-        b = get(m.entry, "build", Dict{String,Any}()); b isa AbstractDict || (b = Dict{String,Any}())
         say("Exporting $title …")
         try
-            export_to_site(nb, name; slug = m.slug,
-                           bundle = get(b, "bundle", false) === true,
-                           history = get(b, "history", false) === true,
-                           theme = String(get(b, "theme", "dark")),
-                           charttheme = String(get(b, "charttheme", "")),
-                           renderer = String(get(b, "renderer", "")),
-                           override = get(b, "override", false) === true,
-                           outputs = String(get(b, "outputs", "all")),
-                           include_source = get(b, "source", true) === true)
+            export_to_site(nb, name; slug = m.slug, _build_kwargs(get(m.entry, "build", nothing))...)
         catch e
             @warn "slate: sync rebuild of member failed" site = name member = title exception = (e, catch_backtrace())
             note("✗ $title — rebuild failed: $(sprint(showerror, e))")
@@ -981,15 +1092,29 @@ function _register_publish_routes!(router, h::Hub)
         b = _body(req)
         site = strip(String(get(b, "site", "")))
         isempty(site) && return HTTP.Response(400, "missing site")
-        _json(publish_set_membership!(nb, site, get(b, "member", true) === true))
+        _json(publish_set_membership!(nb, site, get(b, "member", true) === true;
+                                      build = _build_from_request(get(b, "build", Dict{String,Any}()))))
     end))
     # Set/clear this notebook as a site's front page (home:true|false).
     HTTP.register!(router, "POST", "/api/{id}/publish/site-home", req -> _withnb(h, req, nb -> begin
         b = _body(req)
         site = strip(String(get(b, "site", "")))
         isempty(site) && return HTTP.Response(400, "missing site")
-        _json(publish_set_home!(nb, site, get(b, "home", true) === true))
+        _json(publish_set_home!(nb, site, get(b, "home", true) === true;
+                                build = _build_from_request(get(b, "build", Dict{String,Any}()))))
     end))
+    # Set one document's recorded build settings (the manager's per-doc editor — no notebook needed).
+    HTTP.register!(router, "POST", "/api/publish/doc-build", req -> begin
+        b = _body(req)
+        site = strip(String(get(b, "site", "")))
+        isempty(site) && return HTTP.Response(400, "missing site")
+        haskey(b, "slug") || return HTTP.Response(400, "missing slug")
+        try
+            _json(publish_set_doc_build!(site, String(get(b, "slug", "")), get(b, "build", Dict{String,Any}()), h))
+        catch e
+            return HTTP.Response(400, sprint(showerror, e))
+        end
+    end)
     # Add/update a target config (global).
     HTTP.register!(router, "POST", "/api/publish/target", req -> begin
         b = _body(req)

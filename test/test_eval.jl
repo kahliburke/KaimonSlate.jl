@@ -483,6 +483,39 @@ end
         @test isempty(r2.meta["imports"])
     end
 
+    @testset "run_capture streams output while the cell runs" begin
+        # Output used to arrive only when the cell FINISHED, which is the one moment a progress bar
+        # is useless. A cell that prints for ~1s must produce several frames along the way, each one
+        # cooked — the redraws collapse mid-run exactly as they do in the final result.
+        frames = Tuple{String,String,String}[]
+        lk = ReentrantLock()
+        m = Module(:StreamTest)
+        Core.eval(m, :(const __slate_cellout =
+            $((cid, o, e) -> lock(() -> push!(frames, (String(cid), String(o), String(e))), lk))))
+
+        r = run_capture(m, """
+        for i in 1:12
+            print("\\rstep ", i, "/12")
+            sleep(0.08)
+        end
+        println()
+        :done
+        """, "cell:streamer")
+        @test r.value_repr == ":done"
+
+        got = lock(() -> copy(frames), lk)
+        @test length(got) >= 2                             # it streamed DURING the run, not once at the end
+        @test all(f -> f[1] == "streamer", got)            # attributed to the cell that printed
+        @test all(f -> !occursin('\r', f[2]), got)         # every frame is cooked...
+        @test all(f -> !occursin('\e', f[2]), got)
+        @test all(f -> count(==('\n'), f[2]) == 0, got)    # ...so the bar is ONE line, not a cascade
+        @test any(f -> occursin("step ", f[2]), got)
+        @test first(got)[2] != last(got)[2]                # and it actually advanced between frames
+        # The final result is still the authoritative one, and agrees with the last frame.
+        @test occursin("step 12/12", r.stdout)
+        @test !occursin('\r', r.stdout)
+    end
+
     @testset "run_capture wire form" begin
         # The wire form is the contract the gate worker returns and the server
         # deserializes — primitives only, no MimeChunk/CellOutput struct identity.

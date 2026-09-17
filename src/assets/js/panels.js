@@ -246,7 +246,12 @@ async function histSelect(hash) {
 }
 async function histRestore(hash) {
   const st = await api('POST', '/api/history/restore', { hash });
-  if (st && st.cells) { renderAll(st); lastVersion = st.version; }
+  // Rebaseline before rendering: restoring a version is this tab rewriting its own cells, so an
+  // open editor over one of them has nothing to reconcile — see `slateRebaselineAll`.
+  if (st && st.cells) {
+    window.slateRebaselineAll && window.slateRebaselineAll(st);
+    renderAll(st); lastVersion = st.version;
+  }
   await loadHistory(); histSelect(histCurrent);
 }
 async function histReplay() {
@@ -517,6 +522,7 @@ function connectLive() {
     if (e.data.startsWith('cellrun:')) { window.onCellRun && window.onCellRun(e.data.slice(8)); return; }   // a cell started running (live status)
     if (e.data.startsWith('celldone:')) { try { const c = JSON.parse(e.data.slice(9)); patchCells([c]); window.onCellDone && window.onCellDone(c); } catch (_) {} return; }   // a cell finished — patch + status
     if (e.data.startsWith('cellprog:')) { try { const p = JSON.parse(e.data.slice(9)); window.onCellProgress && window.onCellProgress(p); } catch (_) {} return; }   // {frac,msg,id,done} — one bar per id
+    if (e.data.startsWith('cellout:')) { try { const p = JSON.parse(e.data.slice(8)); window.onCellOutput && window.onCellOutput(p); } catch (_) {} return; }   // {cid,out,err} — a RUNNING cell's output so far (cooked text)
     if (e.data.startsWith('cellstream:')) { try { const p = JSON.parse(e.data.slice(11)); window.onCellStream && window.onCellStream(p.channel, p.data); } catch (_) {} return; }   // slate_emit(channel,data) → a cell's custom JS renderer
     if (e.data.startsWith('debug:')) { try { window.onDebugPush && window.onDebugPush(JSON.parse(e.data.slice(6))); } catch (_) {} return; }   // the debug session moved — by anyone's hand, including an agent's
     // Any specialist: asked, arrived, signed off (carries `role`). Fanned out to every subscriber

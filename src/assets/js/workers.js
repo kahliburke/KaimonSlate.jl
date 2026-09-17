@@ -53,7 +53,13 @@ const _WARN_CONT = /^(\s|To make this|Hint:|!!!|Stacktrace|caused by|@ |\[\d)/;
 function _wpParseRecords(lines) {
   const recs = [];
   let cur = null, mode = null;                             // mode: 'box' (┌│└) | 'warn' (WARNING/ERROR block) | null
-  for (const raw of lines) {
+  for (const styled of lines) {
+    // Structure first, colour second. The worker's streams are colour-enabled, so a `@warn` box line
+    // now begins with an SGR sequence rather than `┌` — every test below has to run on the STRIPPED
+    // text or the log stops parsing into records at all. Nothing is lost inside a record: the panel
+    // already colours those by LEVEL, and Julia's own colours would only fight that. An unparsed
+    // `plain` line keeps its styling, which is where the colour actually earns its place.
+    const raw = window.slateAnsiText(styled);
     const c0 = raw.charAt(0);
     if (c0 === '┌') { cur = { head: raw.slice(1).trim(), cont: [] }; mode = 'box'; recs.push(cur); }
     else if (mode === 'box' && (c0 === '│' || c0 === '└') && cur) {
@@ -64,14 +70,19 @@ function _wpParseRecords(lines) {
       cur = { head: (m[1] === 'ERROR' ? 'Error' : 'Warning') + ': ' + m[2], cont: [] }; mode = 'warn'; recs.push(cur);
     } else if (mode === 'warn' && cur && _WARN_CONT.test(raw)) {
       const body = raw.trim(); if (body) cur.cont.push(body);
-    } else { cur = null; mode = null; if (raw.length) recs.push({ plain: raw }); }
+    } else { cur = null; mode = null; if (raw.length) recs.push({ plain: styled }); }
   }
   return recs;
 }
 // Collapse consecutive IDENTICAL records into one with a ×N count — tames repetitive spam (e.g. a world-age
 // warning firing every tick) without hiding anything. Only merges adjacent equal records, so ordering and
 // distinct messages are untouched. Re-run on every render, so the count grows live as duplicates stream in.
-function _wpRecKey(r) { return r.plain !== undefined ? 'P\x00' + r.plain : 'R\x00' + r.head + '\x00' + r.cont.join('\x00'); }
+// Keyed on the STRIPPED text: a plain record keeps its colour for rendering, and two repeats of the
+// same line that a library happened to style differently are still the same line to a reader.
+function _wpRecKey(r) {
+  return r.plain !== undefined ? 'P\x00' + window.slateAnsiText(r.plain)
+                               : 'R\x00' + r.head + '\x00' + r.cont.join('\x00');
+}
 function _wpCollapse(recs) {
   const out = [];
   for (const r of recs) {
@@ -84,7 +95,9 @@ function _wpCollapse(recs) {
 const _WLVL = { Info: 'info', Warning: 'warn', Error: 'error', Debug: 'debug' };
 function _wpFmtRecord(rec) {
   const badge = rec.count > 1 ? '<span class="wlog-x">×' + rec.count + '</span>' : '';
-  if (rec.plain !== undefined) return '<div class="wlog-rec wlog-plain">' + _wpEsc(rec.plain) + badge + '</div>';
+  // A plain line is whatever the worker printed — Pkg output, `printstyled`, a bare println. It has no
+  // level to colour by, so render its OWN colour.
+  if (rec.plain !== undefined) return '<div class="wlog-rec wlog-plain">' + window.slateAnsiHtml(rec.plain) + badge + '</div>';
   let h = rec.head, ts = '';
   const mt = h.match(/^(\d{2}:\d{2}:\d{2})\s+/); if (mt) { ts = mt[1]; h = h.slice(mt[0].length); }
   let lvl = '', msg = h;

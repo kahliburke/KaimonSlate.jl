@@ -116,6 +116,30 @@ end
 
 ![A cell mid-run with its progress bar filled part way, labelled "reducing 23/40 · 57%", and the cell badged RUNNING](./assets/progress-bar.png)
 
+## Printed output, while it is printed
+
+Anything a cell prints appears **as it runs**, with no API to call — `println`, a logger, or a
+terminal progress bar from a package that knows nothing about Slate. The text is replayed the way a
+terminal would replay it, so a library that redraws in place (ProgressMeter, `Pkg`, a spinner) shows
+**one line that updates** rather than a new line per redraw:
+
+```julia
+using ProgressMeter
+@showprogress for i in 1:100
+    heavy(i)
+end
+```
+
+ANSI colour survives: `printstyled`, `@warn`, stacktraces and `Pkg` output keep their colours,
+rendered against the notebook's own theme. Cursor-movement and erase codes are consumed during the
+replay, so no escape sequence reaches the page as literal text.
+
+Exports follow. An HTML export carries the colour and styles it from its own theme; PDF and Markdown
+have nowhere to put it, so they take the plain text.
+
+The live text is a *preview* — the cell's real output replaces it when the run finishes, so a
+dropped frame costs nothing.
+
 ## Reacting to files — `@asset`
 
 `@asset "path"` reads a file **relative to the notebook's project directory**, and — because the

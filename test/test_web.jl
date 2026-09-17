@@ -112,14 +112,45 @@ end
     end
 
     @testset "_web_unwrap (code↔web kind round-trip)" begin
-        # code→web stores the code plain; the browser reassembles it into a single-section skin on the
-        # way back to code. Unwrapping that skin must return the ORIGINAL code, not a `@web(...)` wrapper.
+        # A kind change into web wraps the body into the HTML pane (`set_kind!`), and the way back
+        # unwraps it. Unwrapping must return the ORIGINAL code, not a `@web(...)` wrapper.
         code = "x = 5\ny = x + 1"
         @test RE._web_unwrap(RE._web_skin(html = code)) == code
         @test RE._web_unwrap(code) == code                       # already-plain source passes through
         # A genuine MULTI-pane web cell has no clean plain form → keep the runnable `@web(...)` intact.
         multi = RE._web_skin(html = "<b>hi</b>", js = "a = 1")
         @test RE._web_unwrap(multi) == multi
+    end
+
+    # What a cell converted INTO a web cell must satisfy the instant the convert lands, before anything
+    # is typed or run.
+    #
+    # The browser mounts a pane editor per section and `edText` reports the panes REASSEMBLED. If the
+    # stored source is not already in that form, the editor and the source disagree from the start: the
+    # cell shows `edited` with nothing typed, and the next external edit arrives at an editor matching
+    # neither its baseline nor the incoming text, which is how a spurious reconcile modal appeared.
+    # Storing the code plain used to do exactly that, since `_web_sections` folds untagged source into
+    # the HTML pane and the reassembly then carries a wrapper the source lacked.
+    @testset "a kind change into web stores what the panes reassemble" begin
+        reassembles(src) = RE._web_skin(; RE._web_sections(src)...) == src
+        for code in ("x = 5\ny = x + 1",            # ordinary Julia
+                     "<p>hi</p>",                   # already markup
+                     "a = 1\n\n\nb = 2",            # blank runs preserved
+                     "  indented = true",           # leading whitespace
+                     "s = \"quoted\"",              # quotes
+                     "α = 1  # unicode")            # non-ASCII
+            stored = RE._web_skin(; html = code)    # what `set_kind!` now writes
+            @test reassembles(stored)               # editor == source, so the cell is not born `edited`
+            @test RE._web_unwrap(stored) == code    # and web → code still returns the original
+        end
+        # An empty cell still has to parse and still has to round-trip.
+        empty_skin = RE._web_skin(; html = "")
+        @test reassembles(empty_skin)
+        @test Base.Meta.parse(empty_skin) isa Expr
+        # Idempotent: converting a cell that is ALREADY a canonical skin must not double-wrap it.
+        multi = RE._web_skin(html = "<b>hi</b>", js = "a = 1")
+        @test reassembles(multi)
+        @test RE._web_skin(; html = RE._web_unwrap(multi)) != multi || reassembles(multi)
     end
 
     @testset "reactive deps + staleness (interpolating-md semantics, always evals)" begin

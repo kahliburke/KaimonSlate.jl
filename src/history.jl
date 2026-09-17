@@ -186,6 +186,34 @@ function relocate!(from::Doc, to::Doc)
     return true
 end
 
+"""
+Rewrite `from` to `to` in this document's recorded locations — the document did not gain a location,
+it MOVED to one.
+
+For a launcher opening a downloaded standalone bundle and then re-homing the notebook to its install
+directory. The bundle is a real `.jl` that stays on disk for the run, so recorded alongside the
+install it makes the notebook read as one document in two places and the reader is asked to split a
+copy they never made. Replacing rather than adding keeps `paths` meaning what it says: somewhere this
+document actually lived.
+
+A REPLACE, not an add-then-remove, because at this point the bundle is usually the document's only
+recorded path — there is nothing yet to fall back to, so a removal would have to either strand the
+store with no location or be deferred until the new one is recorded, which is too late: the browser
+has been told by then. Returns whether anything changed.
+"""
+function rehome_path!(doc::Doc, from::AbstractString, to::AbstractString)
+    m = _meta(doc); m === nothing && return false
+    f, t = string(from), string(to)
+    f == t && return false
+    ps = String[string(p) for p in get(m, "paths", Any[])]
+    f in ps || return false
+    ps = unique!(String[p == f ? t : p for p in ps])   # in place: same slot in the lineage, new location
+    m["paths"] = ps
+    string(get(m, "path", "")) == f && (m["path"] = t)
+    try; write(joinpath(_dir(doc), "meta.json"), JSON.json(m)); catch; return false; end
+    return true
+end
+
 "Copy a document's store to a new key, so a fork keeps its lineage up to the split."
 function fork!(from::Doc, to::Doc)
     from.key == to.key && return false

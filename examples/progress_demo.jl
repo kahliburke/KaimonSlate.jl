@@ -1,4 +1,7 @@
+try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+
 #%% md id=intro
+@md"""
 # ⏳ Progress reporting
 
 Long-running cells can report progress to the cell's bar + the floating run chip. Several
@@ -11,6 +14,7 @@ ways, all ending up in the same meter:
 
 Run the cells below and watch the bar. `frac` is `0..1`; `NaN`/`nothing` = indeterminate;
 `"done"` closes the bar.
+"""
 
 #%% code id=setup
 # Precise imports (not `using`) so this cell binds just these names without becoming a
@@ -19,9 +23,11 @@ import Logging
 import ProgressLogging: @progress, @withprogress, @logprogress
 
 #%% md id=h_manual
+@md"""
 ## 1 · Manual — `slate_progress(frac; msg)`
 
 The lightweight explicit API: a fraction plus a message, on every call. A no-op outside Slate.
+"""
 
 #%% code id=manual
 for i in 1:50
@@ -31,10 +37,12 @@ end
 "done — manual slate_progress"
 
 #%% md id=h_protocol
+@md"""
 ## 2 · The standard protocol
 
 A `progress = frac` log record at `LogLevel(-1)` IS the wire protocol; Slate consumes it.
 Emitted here with stdlib `Logging` — exactly what `@progress`/`@logprogress` produce.
+"""
 
 #%% code id=protocol
 for i in 1:40
@@ -45,10 +53,12 @@ Logging.@logmsg Logging.LogLevel(-1) "crunching" progress = "done"
 "done — standard Progress log records"
 
 #%% md id=h_macro
+@md"""
 ## 2b · The `@progress` macro
 
 The ergonomic sugar: wrap any loop and the bar fills automatically — no manual fraction, no
 Slate-specific call.
+"""
 
 #%% code id=macro
 @progress for i in 1:30
@@ -57,12 +67,14 @@ end
 "done — @progress macro"
 
 #%% md id=h_withprogress
+@md"""
 ## 2c · `@withprogress` / `@logprogress` — the full API
 
 `@withprogress` opens a progress scope; `@logprogress` reports into it — with a **per-step
 message**, an **indeterminate** phase, or `"done"`. Any control flow, not just a loop.
 
 `@logprogress [name] progress` — one arg is the fraction; two are `name` (message) then fraction.
+"""
 
 #%% code id=withprogress
 @withprogress name = "training" begin
@@ -75,10 +87,12 @@ end
 "done — @withprogress with per-step messages"
 
 #%% md id=h_indeterminate
+@md"""
 ## 3 · Indeterminate / status-only
 
 `NaN` (or `nothing`) is progress with no known total — a spinner + message. Via the macro
 (`@logprogress "msg" NaN`) or the lightweight API (`slate_progress(0; msg=…)`).
+"""
 
 #%% code id=indeterminate
 @withprogress name = "scanning" begin
@@ -97,11 +111,13 @@ end
 "done — status updates (slate_progress)"
 
 #%% md id=h_nested
+@md"""
 ## 4 · Nested scopes
 
 Each `@withprogress` is its own scope (its own id, linked to the parent). In the REPL/VS Code
 these render as a tree of bars; in Slate today they **collapse to one bar** (the latest) until
 per-id multi-bar rendering lands.
+"""
 
 #%% code id=nested
 @withprogress name = "outer" begin
@@ -117,6 +133,6 @@ per-id multi-bar rendering lands.
 end
 "done — nested @withprogress"
 
-# ╔═╡ Slate.env · notebook packages (auto-maintained — manage via the package panel)
-#   ProgressLogging 0.1.6 33c8b6b6-d38a-422a-b730-caa89a2f386c
+# ╔═╡ Slate.config · per-notebook settings (Settings panel)
+#   docid = 16798b96-60f0-4bfd-8582-0f97a8344e06
 # ╚═╡

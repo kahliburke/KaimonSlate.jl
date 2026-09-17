@@ -161,6 +161,11 @@ function _wire_callbacks!(nb::LiveNotebook)
         end
         try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end
     end)
+    # A running cell's output so far (already cooked worker-side). Sent as TEXT, not HTML: the page
+    # renders it with the same `slateAnsiHtml` it uses for the build log and the worker log, and a
+    # frame at 10 Hz has no business round-tripping through the report renderer.
+    register_cellout!(nb.report.id, (cid, out, err) ->
+        (try; _broadcast(nb, "cellout:" * JSON.json(Dict("cid" => cid, "out" => out, "err" => err))); catch; end))
     register_prepare!(nb.report.id, json -> (try; _broadcast(nb, "prepare:" * json); catch; end))   # env precompile progress → "Preparing packages" banner
     register_emit!(nb.report.id, (channel, payload) -> (try; _ws_emit!(nb, channel, payload); catch; end))   # slate_emit → push over the page WebSocket (NOT the coalescing SSE); payload is a Julia value, JSON-encoded in _ws_emit!
     register_bin_emit!(nb.report.id, frame -> (try; _ws_broadcast_bin!(nb, frame); catch; end))   # slate_emit_bin → forward the raw binary frame over the page WebSocket as-is
@@ -183,6 +188,7 @@ function _unwire_callbacks!(nb::LiveNotebook)
     unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id)
     unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
     unregister_userprog!(nb.report.id); unregister_emit!(nb.report.id); unregister_celldone!(nb.report.id)
+    unregister_cellout!(nb.report.id)
     unregister_toolcall!(nb.report.id); unregister_setbind!(nb.report.id)
     unregister_prepare!(nb.report.id); unregister_bin_emit!(nb.report.id); unregister_cleanup_cells!(nb.report.id)
     return nb
@@ -598,12 +604,25 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
         end
         kernel = GateKernel(rc.envdir; parent = rc.parent, envdir = rc.envdir, label = basename(abspath(path)),
                             online = online)
+        rehomed = ""
         lock(nb.lock) do
             nb.kernel = kernel
             # A durable INSTALL (SLATE_INSTALL_DIR) → serve the notebook FROM the installed project, so
             # edits save there (and land in its git checkout), not into the throwaway downloaded `.jl`.
-            (rc.install && !isempty(rc.notebook) && isfile(rc.notebook)) && (nb.path = rc.notebook)
+            if rc.install && !isempty(rc.notebook) && isfile(rc.notebook)
+                rehomed = abspath(String(nb.path)); nb.path = rc.notebook
+            end
             delete!(nb.report.meta, "preview")       # live cells supersede the frozen render
+        end
+        # The downloaded bundle was this document's TRANSPORT, not a place it lived: it stays on disk
+        # for the run, so left in the store the notebook we just installed reads as one document in two
+        # places and the reader is asked to split a copy they never made. Re-point the store at the
+        # install BEFORE `_drain!` — the first state push carries `sharedWith`, the client latches the
+        # notice on first sight, and anything done after that is too late to unsay it.
+        if !isempty(rehomed) && rehomed != abspath(String(nb.path))
+            try; SlateHistory.rehome_path!(nbdoc(nb), rehomed, abspath(String(nb.path))); catch e
+                @warn "KaimonSlate: could not re-point the history store at the install" exception = e
+            end
         end
         pending isa PendingKernel && ReportEngine._resolve!(pending, kernel)   # unblock anyone who raced the boot window
         _drain!(nb)                                  # run everything + WAIT, so `hydrating` stays up for it

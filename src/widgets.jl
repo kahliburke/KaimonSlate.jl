@@ -855,6 +855,45 @@ function _do_on_bind(listeners::Dict{Symbol,Vector{Any}}, name::Symbol, f)
                   v === nothing || filter!(g -> g !== f, v); nothing)
 end
 
+# Observables — imported here, conditionally, because this file has two homes.
+#
+# widgets.jl is included into `ReportEngine` (the in-process kernel) and into the worker's
+# `SlateWorker`, and an `import` written in one of them does nothing for the other. Only the engine
+# had it, so `bind_observable` worked standalone and threw `UndefVarError` on the gate worker, which
+# is where notebooks actually run (issue #34).
+#
+# It cannot be an unconditional import either. The worker's LOAD_PATH is the KaimonGate env, the
+# NOTEBOOK's own project, and the slate infra env — Slate's own environment is not on it. A plain
+# `import Observables` there fails to resolve and takes worker STARTUP down with it, for every
+# notebook rather than only the ones using this.
+#
+# Nor can it be loaded on demand. Loading a package mid-cell puts its methods in a newer world than
+# the cell that triggered the load, so that cell cannot use the Observable it just asked for —
+# `invokelatest` fixes the construction here and the caller's own `obs[]` fails instead.
+#
+# So: resolve it once, at include time, and let it be absent. The notebook's manifest is what
+# decides, which costs nothing to a notebook that doesn't have it and is always satisfied for the
+# readers this feature is FOR — it exists to drive a Makie figure, and Makie brings Observables.
+#
+# By UUID rather than `import`, because `import` only sees a project's DIRECT dependencies. A
+# notebook that has Makie has Observables in its manifest without naming it, and that notebook
+# should work; `Base.require` resolves it, `import` would tell them to add a package they already
+# have. The cell that later builds the Observable is unaffected either way, since this runs at
+# worker boot rather than mid-cell.
+const _OBSERVABLES = Ref{Any}(nothing)   # the module — or the error that explains its absence
+try
+    _OBSERVABLES[] = Base.require(
+        Base.PkgId(Base.UUID("510215fc-4207-5dde-b226-833fc4488ee2"), "Observables"))
+catch e
+    _OBSERVABLES[] = e                   # absent is fine; `bind_observable` is what reports it
+end
+_observables() =
+    _OBSERVABLES[] isa Module ? _OBSERVABLES[]::Module :
+    error("bind_observable needs the Observables package, which this notebook's environment " *
+          "cannot resolve. Add it to the notebook (the Packages panel, or `Pkg.add(\"Observables\")`) " *
+          "and run the cell again.\n  (resolving it reported: " *
+          sprint(showerror, _OBSERVABLES[]) * ")")
+
 """
     _do_bind_observable(reg, reglock, listeners, cleanup, name) -> Observable
 
@@ -874,7 +913,7 @@ function _do_bind_observable(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::Reent
     haskey(reg, name) ||
         error("bind_observable(:$name): no such control — declare it first with `@bind $name …`")
     w, cv = lock(reglock) do; reg[name]; end
-    o = Observables.Observable{Any}(wrap_value(w, cv))
+    o = _observables().Observable{Any}(wrap_value(w, cv))
     unregister = _do_on_bind(listeners, name, v -> (o[] = v; nothing))
     cleanup(unregister)
     return o
@@ -1410,6 +1449,7 @@ _invoke_slate_handler(f, sargs, progress) =
 function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTable,
                                 slate_query, slate_refresh, slate_progress = (frac; msg = "", id = "", done = false) -> nothing,
                                 slate_emit = (channel, data) -> nothing,
+                                slate_cellout = (cid, out, err) -> nothing,
                                 set_bind = (name, value) -> nothing,
                                 assetbase = () -> "")
     Core.eval(m, :(const echart = $echart))
@@ -1427,6 +1467,9 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const slate_refresh = $slate_refresh))
     Core.eval(m, :(const slate_progress = $slate_progress))   # slate_progress(frac; msg) → live cell progress
     Core.eval(m, :(const slate_emit = $slate_emit))           # slate_emit(channel, data) → live push to a cell's custom JS (cellstream:)
+    # INTERNAL (underscored — not part of the authoring surface): capture.jl's output-streaming
+    # watchdog pushes a cooked frame of what the running cell has printed so far through here.
+    Core.eval(m, :(const __slate_cellout = $slate_cellout))
     # `set_bind(:name, value)` — the notebook driving one of its OWN controls. Takes the same path a
     # browser change takes (coerce → restale readers → sync the widget → persist), so a value set
     # from a cell is indistinguishable from one the reader typed. Without it a control can be left

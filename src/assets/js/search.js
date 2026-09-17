@@ -263,7 +263,13 @@
     // Bare `lastVersion`, not `window.lastVersion`: core.js declares it with `let`, so it is a global
     // LEXICAL binding and never a property of `window` — assigning through `window` would set a
     // shadow and leave the real one stale. Same idiom as `histRestore` in panels.js.
-    if (st && st.cells) { renderAll(st); if (st.version != null) lastVersion = st.version; }
+    // …and rebaseline first: a replacement THIS tab asked for is not an external edit, and an open
+    // editor whose cell was rewritten would otherwise be offered the reconcile modal.
+    if (st && st.cells) {
+      window.slateRebaselineAll && window.slateRebaselineAll(st);
+      renderAll(st);
+      if (st.version != null) lastVersion = st.version;
+    }
     cur = -1;
     recompute(null);
     status(n + (n === 1 ? ' replacement' : ' replacements') + ' · ⌘Z to undo');

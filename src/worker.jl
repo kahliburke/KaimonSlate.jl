@@ -84,6 +84,7 @@ include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs wh
 include(joinpath(@__DIR__, "demux.jl"))     # task-demux output capture (parallel evaluator I/O isolation)
 include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_scheduled — parallel batch scheduler
 include(joinpath(@__DIR__, "macroexpand.jl")) # _expand_cell_source — macro-aware deps (engine + worker)
+include(joinpath(@__DIR__, "termcook.jl"))  # cook_terminal — replay \r/cursor redraws (used by capture.jl)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
 include(joinpath(@__DIR__, "prepare.jl"))   # PrepareTracker — classify precompile output into structured status (shared w/ engine)
@@ -102,6 +103,10 @@ function _new_ns()
         # wire: "id|frac|done|msg" (id/frac/done are |-free; msg is the rest — split limit=4)
         slate_progress = (frac; msg = "", id = "", done = false) ->
             KaimonGate._publish_stream("slate_progress", string(id, "|", Float64(frac), "|", done === true ? 1 : 0, "|", msg)),
+        # Live cell output (capture.jl's streaming watchdog). Wire: "cid\x1fstdout\x1fstderr" — the
+        # unit separator, as elsewhere, because the payload is arbitrary text and `|` is not.
+        slate_cellout = (cid, out, err) ->
+            KaimonGate._publish_stream("slate_cellout", string(cid, "\x1f", out, "\x1f", err)),
         # slate_emit(channel, value): push ANY Julia value to a browser handler (slateOnStream) — no
         # hand-built JSON. The gate stream frames are strings, so the value is Serialization-serialized
         # then base64'd and wired as `channel\x1fb64` (unit separator — absent from identifiers and from

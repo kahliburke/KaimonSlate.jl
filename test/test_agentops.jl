@@ -25,6 +25,18 @@ const NS = KaimonSlate.NotebookServer
             @test length(nb.report.cells) == 5                            # intro + 4
         end
 
+        @testset "colour never reaches an agent" begin
+            # Cell streams are colour-enabled so the PAGE can render spans. A tool result is plain
+            # text, where an escape code is noise the agent pays tokens for — so it's stripped.
+            r = NS.agent_add_cell!(nb, "printstyled(\"loud\\n\"; color = :red, bold = true); :done")
+            @test occursin("loud", r)
+            @test !occursin('\e', r)
+            @test !occursin("[31m", r)
+            # Including a stacktrace, which colours too.
+            e = NS.agent_add_cell!(nb, "error(\"boom\")")
+            @test occursin("boom", e) && !occursin('\e', e)
+        end
+
         @testset "edit + reactive recompute" begin
             cid_x = match(r"id=(\w+)", NS.agent_add_cell!(nb, "y = 2"))[1]
             cid_d = match(r"id=(\w+)", NS.agent_add_cell!(nb, "y * 10"))[1]
@@ -625,7 +637,10 @@ end
     else
         for script in ("agent_md.mjs", "click_background.mjs", "worker_tabs.mjs", "vim_escape.mjs",
                        "editor_reconfigure.mjs", "esc_html.mjs", "keymap_resolve.mjs",
-                       "bytes_fmt.mjs", "dag_spline.mjs")
+                       "bytes_fmt.mjs", "dag_spline.mjs", "rebaseline_all.mjs",
+                       "rebaseline_callsites.mjs", "reconcile_verdict.mjs",
+                       "keymap_key_owner.mjs", "keep_focus.mjs", "ansi_html.mjs",
+                       "settings_section_links.mjs")
             io = IOBuffer()
             ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", script))`; stdout = io, stderr = io))
             ok || print(String(take!(io)))
