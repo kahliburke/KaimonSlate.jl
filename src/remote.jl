@@ -1950,9 +1950,23 @@ function _remote_ip(host::AbstractString)
 end
 
 # Fetch the remote gate's CURVE server pubkey over SSH and pin it in Kaimon's trust store.
+# A CURVE public key is one Z85 word: exactly 40 characters with no whitespace. `_ssh_capture`
+# returns the command's stdout and stderr interleaved (see `SshTransport._exec`), and a PBS compute
+# node greets a routed `ssh` with a login banner on stderr ("Found PBS job ... attaching to it now").
+# The key is therefore not always the whole output: take the first line that is a Z85 key and ignore
+# any banner lines around it.
+_is_curve_key(l::AbstractString) = length(l) == 40 && !occursin(r"\s", l)
+function _curve_key_from(out::AbstractString)
+    for line in eachline(IOBuffer(String(out)))
+        l = strip(line)
+        _is_curve_key(l) && return String(l)
+    end
+    return ""
+end
+
 function _fetch_and_pin_curve!(t::RemoteTarget, connect_host::AbstractString, port::Int)
     ok, out = _ssh_capture(t.ssh_host, `head -n1 $_REMOTE_KEY_PATH`)
-    pub = ok ? strip(out) : ""
+    pub = ok ? _curve_key_from(out) : ""
     isempty(pub) && error("slate remote: no CURVE server key on $(t.ssh_host) at $_REMOTE_KEY_PATH")
     # Pin via KaimonGate's trust store when reachable through Kaimon; harmless if absent.
     try
