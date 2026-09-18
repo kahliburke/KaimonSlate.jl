@@ -639,6 +639,36 @@ end
         end
     end
 
+    @testset "a settled run can be released; one with work in flight cannot" begin
+        # The guard exists so descriptors are never dropped out from under queued work. `started`
+        # is a poor proxy for that: every run that ever ran was started, so refusing those made
+        # releasing results impossible — which is the whole point of the button.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false) do p
+                (; g = p.g, v = p.g * 2)
+            end
+            # Never started: nothing can be queued, so it goes.
+            @test Sweep.forget_run!(t, r.run) > 0
+            @test !haskey(Dict(Sweep.store_sweeps(root)), r.run)
+        end
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false) do p
+                (; g = p.g, v = p.g * 2)
+            end
+            BS.start!(root, r.run)
+            # Started with nothing landed: refused, and the message says what is outstanding.
+            @test_throws ErrorException Sweep.forget_run!(t, r.run)
+            @test occursin("in flight", try; Sweep.forget_run!(t, r.run); catch e; e.msg; end)
+            # …and once every unit has landed there is nothing to wait for.
+            for c in BS.sweep_chunks(root, r.run); Sweep.SlateTask.run_chunk(root, c); end
+            @test Sweep.forget_run!(t, r.run) > 0
+        end
+    end
+
     @testset "what is LEFT of an allocation" begin
         # SLURM reports it (`squeue %L`); PBS does not, so it is the walltime asked for minus the
         # walltime used — and both sides of that subtraction are scheduler times.
@@ -2043,11 +2073,12 @@ end
             @test MemoStore.read_manifest(root, other.run) !== nothing
             @test MemoStore.read_manifest(root, d.run) === nothing
 
-            # Releasing by hand is the same primitive, and refuses a run that may have work out.
+            # Releasing by hand is the same primitive, and refuses a run with work still out —
+            # counted, not inferred from the run having been started at all.
             @test Sweep.forget_run!(t, other.run) > 0
             @test MemoStore.read_manifest(root, other.run) === nothing
             e = try; Sweep.forget_run!(t, b.run); "" catch x; sprint(showerror, x); end
-            @test occursin("started", e) && occursin("cancel", e)
+            @test occursin("in flight", e) && occursin("Cancel it first", e)
         end
     end
 

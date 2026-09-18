@@ -2757,9 +2757,15 @@ first.
 """
 function forget_run!(target::SweepTarget, run::AbstractString)
     root = store_root(target)
-    BatchSweep.is_started(root, String(run)) &&
-        error("sweep $(run) was started — it may have work queued. `Sweep.cancel!` it first, " *
-              "then release it.")
+    # Started is not the question. What must not happen is dropping the descriptors out from under
+    # work that is still queued, and a sweep whose units have all landed has none — refusing those
+    # made the feature useless, since every run that ever ran was started.
+    if BatchSweep.is_started(root, String(run))
+        p = BatchSweep.plan(root, String(run); launcher = launcher_for(target))
+        BatchSweep.is_settled(p) ||
+            error("sweep $(run) still has work in flight — $(p.shards_done) of $(p.shards_total) " *
+                  "units have landed. Cancel it first, then release it.")
+    end
     n = BatchSweep.forget_sweep!(root, String(run))
     sync_out!(target)
     return n

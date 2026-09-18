@@ -187,6 +187,10 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
   // list ordered by a hash. Held on the module rather than in the row markup so a repaint — this
   // panel reloads on a timer — does not throw the reader's ordering away.
   let SWSORT = { key: 'created', dir: -1 };
+  // What the last release did, shown under the table until it is stale. Held here rather than in the
+  // markup because the panel repaints on a timer and would throw it away mid-read.
+  let SWNOTE = null;
+  const SWNOTE_MS = 8000;
 
   const swAge = u => {
     if (!u) return '—';
@@ -243,11 +247,12 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
         (show.has('took') ? `<td class="num swst-dim">${esc(swSpan(r))}</td>` : '') +
         `<td class="num">${humBytes(r.stored)}</td>` +
         (show.has('read') ? `<td class="num">${r.read ? humBytes(r.read) : '—'}</td>` : '') +
-        // A started sweep may still have work queued, so releasing one is refused on the worker.
-        // The button says so rather than offering an action that will only come back as an error.
-        `<td class="swst-act">${r.started && r.state !== 'succeeded' && r.state !== 'failed'
-          ? '<span class="swst-dim" title="cancel it before releasing">—</span>'
-          : `<button class="swst-free" data-sweep="${esc(r.sweep)}" title="release this run's results">✕</button>`}</td>` +
+        // What the worker refuses is releasing a run with work still queued, so the button is
+        // offered on exactly that rule rather than a near-enough one — an offer the server then
+        // declines is worse than no offer.
+        `<td class="swst-act">${r.started && !(r.total > 0 && r.done >= r.total)
+          ? '<span class="swst-dim" title="still has units in flight — cancel it first">—</span>'
+          : `<button class="swst-free" data-sweep="${esc(r.sweep)}" data-stored="${r.stored || 0}" title="release this run's results">✕</button>`}</td>` +
         '</tr>').join('') +
       '</table>';
   }
@@ -269,24 +274,28 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
       // The app's own dialog, not the browser's: `confirmDark` puts the first line as the question
       // and the rest as small print, which is the shape a destructive confirm wants — and it is what
       // every other one in Slate uses. `danger` colours the button that does the thing.
+      // Name what goes and how much comes back — reclaiming the space is the reason to do this at
+      // all, so the figure belongs in the question rather than a row the dialog covers up.
+      const held = Number(b.dataset.stored || 0);
       const ask = window.confirmDark
         ? window.confirmDark(`Release sweep ${sweep.slice(2, 12)}?\n` +
-                             'Its results, the blobs behind them and the run itself are removed from ' +
-                             'the store. Nothing about this can be undone.', 'Release', 'danger')
+                             (held > 0 ? `Its results are deleted and the ${humBytes(held)} they hold is freed. `
+                                       : 'Its results are deleted. ') +
+                             'This cannot be undone.', 'Release', 'danger')
         : Promise.resolve(true);
       if (!(await ask)) return;
       b.disabled = true; b.textContent = '…';
-      const fail = m => {
-        window.alertDark ? window.alertDark(String(m)) : null;
-        b.disabled = false; b.textContent = '✕';
-      };
+      // The outcome goes in the PANEL, not another dialog. The confirm already said what would
+      // happen; a second modal repeating it is a click that tells the reader nothing, and an error
+      // belongs beside the table it is about rather than on top of it.
+      const done = (msg, bad) => { SWNOTE = { msg, bad, at: Date.now() }; loadStatus(pop, name); };
       try {
         const r = await window.api('POST', '/api/cluster-forget', { name, sweep });
-        if (r && r.error) return fail(r.error);
+        if (r && r.error) return done(r.error, true);
+        done(`released ${sweep.slice(2, 12)}` + (held > 0 ? ` · ${humBytes(held)} freed` : ''));
       } catch (e) {
-        return fail(e);
+        done(String(e), true);
       }
-      loadStatus(pop, name);
     });
   }
 
@@ -356,7 +365,9 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
           `<div class="swst-path swst-dim" title="${esc(s.root || '')}">mirror ${esc(s.root || '')}</div>`
         : `<div class="swst-path" title="${esc(s.root || '')}">${esc(s.root || '')}</div>`) +
       (s.err ? `<div class="swst-none">⚠ ${esc(s.err)}</div>` : '') +
-      (sw.length ? sweepTable(sw, name) : '<div class="swst-none">no sweeps in this store</div>');
+      (sw.length ? sweepTable(sw, name) : '<div class="swst-none">no sweeps in this store</div>') +
+      (SWNOTE && Date.now() - SWNOTE.at < SWNOTE_MS
+        ? `<div class="swst-note${SWNOTE.bad ? ' bad' : ''}">${esc(SWNOTE.msg)}</div>` : '');
     wireSweepTable(host, pop, name);
     // The config pane against the live one. Which you want more of depends on what you came for —
     // reading a table of runs, or changing a walltime — so it is dragged rather than chosen here.

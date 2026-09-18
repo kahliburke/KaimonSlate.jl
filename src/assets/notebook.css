@@ -1150,6 +1150,10 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .swst-free:hover { color:var(--red,#e57575); opacity:1; }
 .swst-free:disabled { cursor:default; opacity:.5; }
 .swst-none { color:var(--dim); font-size:.75rem; padding:6px 0; }
+/* What the last release did. Under the table, where the thing it happened to was — the confirm
+   already said what would happen, so this reports the outcome rather than repeating the warning. */
+.swst-note { margin-top:8px; font-size:.72rem; color:var(--val); }
+.swst-note.bad { color:var(--red,#e57575); }
 .swcfgpop .swcfg-sub { text-transform:none; letter-spacing:0; font-weight:400; opacity:.75; }
 .swcfg-grid { display:grid; grid-template-columns:1fr 1fr; gap:7px 10px; }
 .swcfg-grid label { display:flex; flex-direction:column; gap:3px; min-width:0; }
