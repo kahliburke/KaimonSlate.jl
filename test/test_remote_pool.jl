@@ -80,6 +80,19 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         p, _ = RE._next_ports(reserve = 2)
         @test RE._next_ports(floor = p + 2, reserve = 2, taken = Set([p + 3]))[1] > p + 3
 
+        # A spawn in FLIGHT is invisible to both guards: nothing is listening yet, and the roster
+        # entry is written only after a successful dial — across a remote julia boot, which
+        # `_dial_deadline_cold` sizes in tens of seconds. Two hubs on one login node would both see
+        # the block as free. The worker's script is written as `worker-<port>.jl` before its julia
+        # starts, so on a shared home that file is the reservation.
+        sp = RE._spawning_ports("/h/.cache/kaimonslate/worker/worker-9148.jl\n" *
+                                "/h/.cache/kaimonslate/worker/worker-9200.jl")
+        @test sort(collect(sp)) == [9148, 9149, 9150, 9200, 9201, 9202]   # the BLOCK, not one port
+        @test isempty(RE._spawning_ports(""))
+        @test isempty(RE._spawning_ports("/h/worker-notaport.jl"))
+        # The two halves of the probe are read apart, so a path never reads as a listening port.
+        @test isempty(RE._listen_ports("/h/.cache/kaimonslate/worker/worker-9148.jl"))
+
         # For a worker that binds on ANOTHER machine, this one's loopback is not the question.
         # Holding a port here must not make the allocator skip it over there.
         q, _ = RE._next_ports(reserve = 2)
@@ -92,6 +105,27 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         finally
             close(squat)
         end
+    end
+
+    @testset "a spawn that loses the port race picks another block" begin
+        # The window between picking a port and the worker binding it is a remote julia boot, which
+        # no amount of probing closes. So the answer is to notice and pick again — but only for the
+        # one cause retrying can fix. The worker logs the bind failure before it exits; anything
+        # else means retrying would just be a slower way to fail.
+        @test RE._bind_conflict(sc -> (true, "ERROR: Address already in use (EADDRINUSE)"), 9100)
+        @test !RE._bind_conflict(sc -> (true, "ERROR: LoadError: UndefVarError: `foo`"), 9100)
+        @test !RE._bind_conflict(sc -> (false, ""), 9100)          # host unreachable ≠ port taken
+        @test !RE._bind_conflict(sc -> error("boom"), 9100)        # …nor does the probe itself throw
+        # It reads THAT worker's log, so a busy neighbour's is not mistaken for ours.
+        seen = String[]
+        RE._bind_conflict(sc -> (push!(seen, sc); (true, "")), 9137)
+        @test occursin("worker-9137.log", seen[1]) && occursin("tail", seen[1])
+
+        # A port the target NAMES was opened in a firewall for this worker, so moving it silently
+        # would trade a loud failure for a quiet one. `:direct`'s port is the base of a stride.
+        @test RE._port_movable(RE.RemoteTarget("h"))                                   # auto
+        @test RE._port_movable(RE.RemoteTarget("h"; transport = :direct, port = 9400))  # a hint
+        @test !RE._port_movable(RE.RemoteTarget("h"; transport = :tunnel, port = 9400)) # a pin
     end
 
     @testset "_port_floor: above every live worker's 3-port block; dead ports are free" begin

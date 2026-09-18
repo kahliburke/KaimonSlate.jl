@@ -1663,7 +1663,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         start_sync!(t, parent_project)
         # Remote ports (loopback for :tunnel, 0.0.0.0 for :direct). Pinned when the target names them
         # (needed for :direct behind a firewall); else auto from _next_ports (9100+), floored above the roster.
-        port, stream_port =
+        pick_ports() =
             (t.transport === :direct && t.port != 0) ?
                 # :direct region: t.port is the base_port HINT — take a FREE slot in its stride (roster-aware)
                 # so we land in the firewall-opened range, never colliding with warm workers / another notebook.
@@ -1675,10 +1675,27 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
                           _next_ports(floor = try; _port_floor(host); catch; 0; end,
                                       reserve = t.transport === :direct ? 3 : 2,
                                       taken = try; busy_ports(host); catch; nothing; end, probe = isempty(host))   # :tunnel blob = worker-chosen free port
-        k.port = port; k.stream_port = stream_port
-        _prep_stage("Starting worker process on $host")
-        _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, extra_flags = k.extra_flags, region = t.region)
-        r = dial(port, stream_port; deadline = _dial_deadline_cold())   # covers remote Julia boot + KaimonGate load (~90s)
+        # A port is picked from what the far side reports, and bound a remote Julia boot later. In
+        # between another hub on that machine can take it, and no amount of probing closes a window
+        # that long — so the answer is to notice and pick again rather than to reserve harder.
+        # A port the TARGET names is not ours to move (it was opened in a firewall for this), so
+        # that one reports instead. `:direct`'s `t.port` is a hint into a stride, not a pin.
+        movable = _port_movable(t)
+        local r, port, stream_port
+        for attempt in 1:_SPAWN_TRIES
+            port, stream_port = pick_ports()
+            k.port = port; k.stream_port = stream_port
+            _prep_stage("Starting worker process on $host")
+            _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, extra_flags = k.extra_flags, region = t.region)
+            r = dial(port, stream_port; deadline = _dial_deadline_cold())   # covers remote Julia boot + KaimonGate load (~90s)
+            r.conn === nothing || break      # connected: done
+            # The worker never answered. Retry only for the one cause retrying can fix: anything
+            # else would just be a slower way to fail, with the real reason three attempts back.
+            (attempt < _SPAWN_TRIES && movable && _bind_conflict(host, port)) ||
+                error("slate remote: could not reach worker on $host:$port ($(r.err))")
+            _rlog("spawn: $host:$port was taken before the worker could bind — picking another block " *
+                  "(attempt $attempt of $_SPAWN_TRIES)")
+        end
         r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
         k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
         _attach_record!(host, k.label; port = port, stream_port = stream_port,
@@ -2917,6 +2934,29 @@ function _peer_host_ip(host)
     lock(_HOST_IP_LOCK) do; _HOST_IP_CACHE[h] = ip; end
     return ip
 end
+
+# How many blocks a cold spawn will try before it reports. Three: one for the picked block, and two
+# for the case where a co-tenant is churning through ports at the same moment.
+const _SPAWN_TRIES = 3
+
+# Did the worker die because something already held its port? It logs the bind failure before it
+# exits, and that is the only way to tell a race with another hub from a host that cannot run a
+# worker at all. The same string the worker's own blob-port retry matches on.
+function _bind_conflict(runner, port::Int)
+    ok, txt = try
+        runner("tail -c 4000 " * Sweep.shq("$_REMOTE_WORKER/worker-$port.log") * " 2>/dev/null")
+    catch
+        (false, "")
+    end
+    return ok && occursin("Address already in use", String(txt))
+end
+_bind_conflict(host::AbstractString, port::Int) =
+    _bind_conflict(sc -> _run_on(String(host), sc), port)
+
+# Is this port Slate's to move? One the TARGET names was opened in a firewall for exactly this and
+# moving it silently would trade a loud failure for a quiet one. `:direct`'s `t.port` is the base of
+# a stride rather than a pin, so a different slot in it is still inside what was opened.
+_port_movable(t::RemoteTarget) = t.port == 0 || t.transport === :direct
 
 # The address a PEER dials to reach `region`'s blob port. Prefer the region's explicit `peer` advertise
 # address — its PUBLIC IP when peers live on a different network than the hub (§5.6: the hub-facing IP is
@@ -4243,11 +4283,37 @@ end
 function busy_ports(host::AbstractString)
     isempty(host) && return Set{Int}()
     ok, txt = try
-        _run_on(String(host), "ss -ltnH 2>/dev/null || netstat -ltn 2>/dev/null")
+        _run_on(String(host),
+                "ss -ltnH 2>/dev/null || netstat -ltn 2>/dev/null; echo '" * _SPAWNING * "'; " *
+                "find " * Sweep.shq(_REMOTE_WORKER) * " -maxdepth 1 -name 'worker-*.jl' -mmin -2 2>/dev/null")
     catch
         (false, "")
     end
-    ok ? _listen_ports(String(txt)) : Set{Int}()
+    ok || return Set{Int}()
+    i = findfirst(_SPAWNING, String(txt))
+    i === nothing && return _listen_ports(String(txt))
+    return union(_listen_ports(SubString(String(txt), 1, first(i) - 1)),
+                 _spawning_ports(SubString(String(txt), last(i) + 1)))
+end
+
+const _SPAWNING = "--- spawning ---"
+
+# Ports a spawn has CLAIMED but not yet bound. A worker's script is written as `worker-<port>.jl`
+# before its julia is started, so the file exists from the instant of the launch — while the port
+# itself stays invisible for the whole remote boot, which `_dial_deadline_cold` sizes in tens of
+# seconds. Two hubs on one login node would otherwise both see the block as free and pick it, and
+# the loser dies on bind. Where homes are shared (the usual NFS cluster), this is visible to both.
+#
+# Bounded by AGE rather than cleaned up: a script file outlives its worker, so an old one says
+# nothing — by then the worker is either listening, and `ss` has it, or it is gone and the port is
+# free. The whole block goes, since a reservation is a block and not one port.
+function _spawning_ports(txt::AbstractString)
+    out = Set{Int}()
+    for m in eachmatch(r"worker-(\d{2,5})\.jl\b", txt)
+        p = tryparse(Int, m.captures[1])
+        p === nothing || union!(out, p:(p + 2))
+    end
+    return out
 end
 
 # The local address column of `ss`/`netstat`, the only one followed by whitespace. `:` separates
