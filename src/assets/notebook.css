@@ -1090,9 +1090,11 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   color:var(--dim); background:none; border:none; }
 .swcfg-x:hover { color:var(--red); }
 .swcfg-body { display:flex; min-height:0; flex:1; }
-.swcfg-main { flex:1 1 52%; padding:14px 18px; overflow:auto; min-width:0;
+/* The dragged pane sizes by WIDTH, so its flex-basis has to be `auto` — a basis of `52%` wins over
+   any width set on it, and the drag then moves nothing. The other side takes what is left. */
+.swcfg-main { flex:0 0 auto; width:52%; padding:14px 18px; overflow:auto; min-width:0;
   overscroll-behavior:contain; }
-.swcfg-side { flex:1 1 48%; padding:14px 18px; overflow:auto; min-width:0;
+.swcfg-side { flex:1 1 auto; padding:14px 18px; overflow:auto; min-width:0;
   background:var(--bg3); overscroll-behavior:contain; }
 /* The handle IS the border between the panes, widened to something a mouse can find. */
 .swcfg-split { flex:0 0 auto; width:5px; cursor:col-resize; background:var(--border);

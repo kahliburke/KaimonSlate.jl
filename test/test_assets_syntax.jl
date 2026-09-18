@@ -113,3 +113,18 @@ end
         @test ok
     end
 end
+
+# Releasing a sweep's results is destructive and it asks first — through the APP's dialog, not the
+# browser's. `window.confirm` cannot be themed, cannot separate the question from its small print,
+# and announces the origin ("127.0.0.1:8901 says") above whatever you wrote. Slate has `confirmDark`
+# for exactly this, and every other destructive action in the app already goes through it.
+#
+# A grep rather than a render, because what regresses here is someone reaching for the builtin, and
+# that is visible in the source. Fallbacks behind `confirmDark ? … : …` are what the older callers
+# do and are fine; this file simply has none.
+@testset "the cluster panel asks with the app's own dialog" begin
+    src = read(joinpath(@__DIR__, "..", "src", "assets", "js", "sweeps.js"), String)
+    @test occursin("confirmDark", src)
+    @test !occursin(r"(?<!Dark)\bwindow\.confirm\(", src)
+    @test !occursin(r"(?<!Dark)\bwindow\.alert\(", src)
+end

@@ -266,14 +266,25 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
     });
     host.querySelectorAll('.swst-free').forEach(b => b.onclick = async () => {
       const sweep = b.dataset.sweep;
-      if (!window.confirm(`Release ${sweep.slice(2, 12)}?\n\n` +
-                          'Its results, their blobs and the run itself go. This cannot be undone.')) return;
+      // The app's own dialog, not the browser's: `confirmDark` puts the first line as the question
+      // and the rest as small print, which is the shape a destructive confirm wants — and it is what
+      // every other one in Slate uses. `danger` colours the button that does the thing.
+      const ask = window.confirmDark
+        ? window.confirmDark(`Release sweep ${sweep.slice(2, 12)}?\n` +
+                             'Its results, the blobs behind them and the run itself are removed from ' +
+                             'the store. Nothing about this can be undone.', 'Release', 'danger')
+        : Promise.resolve(true);
+      if (!(await ask)) return;
       b.disabled = true; b.textContent = '…';
+      const fail = m => {
+        window.alertDark ? window.alertDark(String(m)) : null;
+        b.disabled = false; b.textContent = '✕';
+      };
       try {
         const r = await window.api('POST', '/api/cluster-forget', { name, sweep });
-        if (r && r.error) { window.alert(r.error); b.disabled = false; b.textContent = '✕'; return; }
+        if (r && r.error) return fail(r.error);
       } catch (e) {
-        window.alert(String(e)); b.disabled = false; b.textContent = '✕'; return;
+        return fail(e);
       }
       loadStatus(pop, name);
     });

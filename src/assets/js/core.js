@@ -1010,11 +1010,14 @@ window.slateSplit = function (bar, pane, opts) {
   const o = opts || {};
   const min = o.min || 220, keep = o.keep || 320, key = o.key || '';
   const outer = () => (o.outer && o.outer()) || pane.parentElement;
-  if (key) { const w = parseInt(localStorage.getItem(key) || '', 10); if (w > 0) pane.style.width = w + 'px'; }
+  // Width AND flex-basis: `pane` is a flex item, and a basis of anything but `auto` wins over a
+  // width set on it — the drag then moves nothing at all, which is how this first shipped.
+  const put = w => { pane.style.width = w + 'px'; pane.style.flexBasis = 'auto'; };
+  if (key) { const w = parseInt(localStorage.getItem(key) || '', 10); if (w > 0) put(w); }
   let from = 0, w0 = 0;
   const move = e => {
     const room = outer().clientWidth - keep;
-    pane.style.width = Math.round(Math.max(min, Math.min(w0 + (e.clientX - from) * (o.rtl ? -1 : 1), room))) + 'px';
+    put(Math.round(Math.max(min, Math.min(w0 + (e.clientX - from) * (o.rtl ? -1 : 1), room))));
   };
   const up = () => {
     document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
@@ -1027,7 +1030,8 @@ window.slateSplit = function (bar, pane, opts) {
     document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
   });
   bar.addEventListener('dblclick', () => {
-    pane.style.width = ''; if (key) { try { localStorage.removeItem(key); } catch (e) {} }
+    pane.style.width = ''; pane.style.flexBasis = '';
+    if (key) { try { localStorage.removeItem(key); } catch (e) {} }
   });
 };
 
