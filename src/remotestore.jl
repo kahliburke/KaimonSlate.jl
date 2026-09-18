@@ -957,7 +957,10 @@ end
 "Make sure the store's directories exist on the far side, before anything is pushed into them."
 function ensure_root!(s::RemoteStore)
     isempty(s.host) && return true
-    dirs = join((shq(joinpath(s.root, d)) for d in (META_DIRS..., "blobs")), " ")
+    # `logs` and `procs` belong to the launcher rather than to the mirror, so they are not in
+    # META_DIRS — but they are in the store, they hold job output and pids, and a directory that
+    # already exists keeps its old mode through `mkdir -p`. Named here so the mode reaches them too.
+    dirs = join((shq(joinpath(s.root, d)) for d in (META_DIRS..., "blobs", "logs", "procs")), " ")
     # `chmod` as well as `umask`, because the root may already exist from a run made before the
     # store had a mode — and the mode is the whole point on a machine with other accounts on it.
     mode = isempty(s.umask) ? "" :
