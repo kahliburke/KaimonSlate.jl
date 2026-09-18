@@ -695,6 +695,32 @@ function results(root::AbstractString, sweep::AbstractString)
     return out
 end
 
+"""
+    spans(root, sweep) -> (; started, finished, hosts)
+
+When a sweep's units ran, and where, from their MANIFESTS alone — unix seconds over the units that
+have LANDED, both 0 when none has.
+
+`results` answers a similar question but materialises every value on the way, which for a status
+panel is a blob read per unit to learn a hostname. On a sweep that stored anything large that is the
+whole store, read to render a table.
+"""
+function spans(root::AbstractString, sweep::AbstractString)
+    lo = 0; hi = 0; hosts = String[]
+    for c in sweep_chunks(root, sweep), k in chunk_shards(root, c)
+        m = MemoStore.read_manifest(root, k)
+        m === nothing && continue
+        t = Int(get(m, "created", 0))
+        if t > 0
+            lo = lo == 0 ? t : min(lo, t)
+            hi = max(hi, t)
+        end
+        h = String(get(m, "ran_on", ""))
+        (isempty(h) || h in hosts) || push!(hosts, h)
+    end
+    return (; started = lo, finished = hi, hosts)
+end
+
 "Shards that failed, with their error text: the answer to \"which of my 10,000 jobs broke\"."
 failures(root::AbstractString, sweep::AbstractString) =
     [(; r.key, error = r.value) for r in results(root, sweep) if r.status == "error"]

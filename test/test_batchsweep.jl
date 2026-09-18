@@ -617,6 +617,28 @@ end
                                                             project = "/p", payload = "/t.jl"), ["c1"]))
     end
 
+    @testset "when a sweep's units ran, without reading any of them" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false) do p
+                (; g = p.g, v = p.g * 2)
+            end
+            # Nothing has landed: a span over no units is 0, not a guess at `now`.
+            sp0 = BS.spans(root, r.run)
+            @test sp0.started == 0 && sp0.finished == 0 && isempty(sp0.hosts)
+
+            for c in BS.sweep_chunks(root, r.run); Sweep.SlateTask.run_chunk(root, c); end
+            sp = BS.spans(root, r.run)
+            @test sp.started > 0 && sp.finished >= sp.started
+            @test !isempty(sp.hosts) && sp.hosts == unique(sp.hosts)   # where, not how many times
+            # The panel used to get `hosts` from `results`, which materialises every unit's VALUE to
+            # read a hostname off its manifest. Same answer, without the store passing through memory.
+            @test Set(sp.hosts) ==
+                  Set(String[x.ran_on for x in BS.results(root, r.run) if !isempty(String(x.ran_on))])
+        end
+    end
+
     @testset "what is LEFT of an allocation" begin
         # SLURM reports it (`squeue %L`); PBS does not, so it is the walltime asked for minus the
         # walltime used — and both sides of that subtraction are scheduler times.

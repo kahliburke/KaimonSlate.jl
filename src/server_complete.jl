@@ -2106,6 +2106,26 @@ function _make_router(h::Hub)
         end
         return _json(r isa AbstractDict ? r : Dict("error" => "unexpected reply"))
     end))
+    # Release one sweep's results. The only WRITE this panel has, and it is destructive: the units,
+    # their blobs and the run's own descriptors go. Deliberately not in the app-mode allowlist — a
+    # reader of a published notebook has no business emptying its store, and the allowlist refuses
+    # anything it does not name, so leaving it out is the whole control.
+    HTTP.register!(router, "POST", "/api/{id}/cluster-forget", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        name = String(get(b, "name", "")); sweep = String(get(b, "sweep", ""))
+        spec = ReportEngine.cluster_get(name)
+        spec === nothing &&
+            return _json(Dict("error" => "no compute target named `$name` on this machine"))
+        ReportEngine.kernel_connected(nb.kernel) ||
+            return _json(Dict("error" => "this notebook's worker is not connected right now"))
+        r = try
+            ReportEngine._tool(nb.kernel, "__slate_cluster_forget",
+                               Dict{String,Any}("name" => name, "sweep" => sweep, "spec" => spec))
+        catch e
+            return _json(Dict("error" => first(sprint(showerror, e), 200)))
+        end
+        return _json(r isa AbstractDict ? r : Dict("error" => "unexpected reply"))
+    end))
     # ── Consent-gated region introduction (PEER_TUNNEL_PLAN §5.1) ──────────────────────────────────
     # GET the pending mesh consent (a fresh tab checks this on load; live tabs also get an SSE
     # `mesh-consent:` push). POST introduce ARMS the whole-group mesh (installs SSH keys/grants — the one

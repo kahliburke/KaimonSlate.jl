@@ -46,6 +46,12 @@ end
     # The card still polls. Status and action are separate names for exactly this reason.
     @test ok(KaimonSlate.ReportEngine.Sweep.status_channel("sw1_r2"))
     @test ok("sweep:sw1_r2")
+    # Releasing a sweep's results is the cluster panel's only WRITE, and it is destructive. The
+    # allowlist refuses what it does not name, so leaving it out is the whole control — asserted
+    # because "we simply didn't add it" is exactly the kind of guarantee that decays silently.
+    @test !NS._app_route_allowed("POST", "/api/demo/cluster-forget")
+    @test !NS._app_route_allowed("GET", "/api/demo/cluster-status")
+
     # An author's own controls are what app mode exists to serve, so nothing else is refused.
     @test all(ok, ["bind:slider", "onclick:run", "mychannel", "table-page", "do", "x:do"])
 

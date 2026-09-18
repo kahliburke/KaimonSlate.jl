@@ -998,6 +998,39 @@ function slateSetBind(name, value) {
     });
   return send(value);
 }
+// ── A draggable split between two panes ──────────────────────────────────────────────────────
+// `bar` is the handle, `pane` the side whose WIDTH the drag sets — the other side is whatever
+// flexes into what is left. `key` remembers it, because a width you set every time you open a panel
+// is a width nobody sets. Double-click gives the default back, which is the way out of any width.
+//
+// Bounded at both ends: a pane dragged to nothing is a control the reader cannot get back without
+// knowing the key it was stored under. The listeners go on `document` so a fast drag that leaves
+// the bar behind keeps working, and the whole body takes the resize cursor while it is down.
+window.slateSplit = function (bar, pane, opts) {
+  const o = opts || {};
+  const min = o.min || 220, keep = o.keep || 320, key = o.key || '';
+  const outer = () => (o.outer && o.outer()) || pane.parentElement;
+  if (key) { const w = parseInt(localStorage.getItem(key) || '', 10); if (w > 0) pane.style.width = w + 'px'; }
+  let from = 0, w0 = 0;
+  const move = e => {
+    const room = outer().clientWidth - keep;
+    pane.style.width = Math.round(Math.max(min, Math.min(w0 + (e.clientX - from) * (o.rtl ? -1 : 1), room))) + 'px';
+  };
+  const up = () => {
+    document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+    document.body.classList.remove('slate-dragging');
+    if (key) { try { localStorage.setItem(key, String(pane.clientWidth)); } catch (e) {} }
+  };
+  bar.addEventListener('mousedown', e => {
+    e.preventDefault(); from = e.clientX; w0 = pane.clientWidth;
+    document.body.classList.add('slate-dragging');
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+  });
+  bar.addEventListener('dblclick', () => {
+    pane.style.width = ''; if (key) { try { localStorage.removeItem(key); } catch (e) {} }
+  });
+};
+
 window.slateSetBind = slateSetBind;
 
 // The current value of a control, for an extension seeding its own widget on first render.

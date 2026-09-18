@@ -193,35 +193,10 @@
       runSearch();
     });
     // The file list against the file. Which one you want more of depends on the sweep — three
-    // chunks and a huge log, or six hundred array tasks — so it is dragged rather than chosen here,
-    // and remembered, because a width you set every time you open a pane is a width nobody sets.
-    (() => {
-      const side = q('.logv-side'), bar = q('.logv-split');
-      const put = w => { side.style.width = Math.round(w) + 'px'; };
-      const saved = parseInt(localStorage.getItem('slate.logv.side') || '', 10);
-      if (saved > 0) put(saved);
-      let from = 0, w0 = 0;
-      const move = e => {
-        // Bounded so neither pane can be dragged away entirely: a zero-width side is a control the
-        // reader cannot get back without knowing the key it was stored under.
-        const w = Math.max(220, Math.min(w0 + (e.clientX - from), el.querySelector('.logv').clientWidth - 320));
-        put(w);
-      };
-      const up = () => {
-        document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
-        document.body.classList.remove('logv-dragging');
-        try { localStorage.setItem('slate.logv.side', String(side.clientWidth)); } catch (e) {}
-      };
-      bar.addEventListener('mousedown', e => {
-        e.preventDefault(); from = e.clientX; w0 = side.clientWidth;
-        document.body.classList.add('logv-dragging');
-        document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
-      });
-      // Double-click restores the default, which is the way back from any width.
-      bar.addEventListener('dblclick', () => {
-        side.style.width = ''; try { localStorage.removeItem('slate.logv.side'); } catch (e) {}
-      });
-    })();
+    // chunks and a huge log, or six hundred array tasks — so it is dragged rather than chosen here.
+    window.slateSplit(q('.logv-split'), q('.logv-side'),
+                      { key: 'slate.logv.side', min: 220, keep: 320,
+                        outer: () => el.querySelector('.logv') });
     q('.logv-order').onclick = () => {
       S.order = S.order === 'new' ? 'old' : 'new';
       reload();

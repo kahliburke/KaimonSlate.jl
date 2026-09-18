@@ -1187,6 +1187,7 @@ function cluster_status(name::AbstractString = "";
     try
         for (sw, created) in store_sweeps(root)
             p = BatchSweep.plan(root, sw; launcher = l)
+            sp = BatchSweep.spans(root, sw)
             # NOT `t`: that is the target, and everything after this loop still needs it.
             tel = BatchSweep.telemetry(root, sw; launcher = l, plan = p)
             push!(rows, (; sweep = sw, created,
@@ -1197,8 +1198,9 @@ function cluster_status(name::AbstractString = "";
                            started = BatchSweep.is_started(root, sw),
                            rate = tel.rate_per_s, eta = tel.eta_s,
                            idle = BatchSweep.stalled_for(tel),
-                           hosts = unique(String[r.ran_on for r in BatchSweep.results(root, sw)
-                                                 if !isempty(String(r.ran_on))]),
+                           # One pass over the manifests for where it ran and when. `results` would
+                           # answer the same and read every unit's VALUE to do it.
+                           sp.hosts, started_at = sp.started, finished_at = sp.finished,
                            stored = sweep_bytes(root, sw),
                            read = transferred(sw)))
         end

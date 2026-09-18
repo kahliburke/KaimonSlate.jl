@@ -2493,6 +2493,23 @@ end
 # transfer ledger belongs to the process that did the reading, and cells read in this one. The hub
 # owns the cluster DEFINITION (the notebook footer) and passes it in, so neither side has to know
 # the other's half.
+# Release one sweep's results back to the store's free space. Refuses a STARTED sweep, because the
+# work may still be queued and dropping the descriptors would leave jobs running against a run
+# nothing remembers — `Sweep.forget_run!` makes that call, not this.
+function __slate_cluster_forget(; name::AbstractString = "", sweep::AbstractString = "",
+                                spec::Dict = Dict{String,Any}())
+    try
+        isempty(sweep) && return Dict{String,Any}("error" => "name the sweep to release")
+        clusters = Dict{String,Dict{String,String}}(
+            String(name) => Dict{String,String}(String(k) => String(v) for (k, v) in spec))
+        t = Sweep.cluster(clusters[String(name)])
+        n = Sweep.forget_run!(t, String(sweep))
+        return Dict{String,Any}("ok" => true, "dropped" => n)
+    catch e
+        return Dict{String,Any}("error" => first(sprint(showerror, e), 300))
+    end
+end
+
 function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{String,Any}())
     try
         clusters = Dict(String(name) =>
@@ -2524,7 +2541,10 @@ function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{S
                 "done" => r.done, "ok" => r.ok, "failed" => r.failed,
                 "missing" => r.missing, "started" => r.started, "blocked" => r.blocked,
                 "rate" => r.rate, "eta" => r.eta, "idle" => r.idle,
-                "hosts" => r.hosts, "stored" => r.stored, "read" => r.read)
+                "hosts" => r.hosts, "stored" => r.stored, "read" => r.read,
+                # When it was minted, and the span its units actually ran over.
+                "created" => r.created, "started_at" => r.started_at,
+                "finished_at" => r.finished_at)
                 for r in s.sweeps],
             "err" => s.err)
     catch e
@@ -2594,6 +2614,7 @@ end
 function tools()
     return KaimonGate.GateTool[
         KaimonGate.GateTool("__slate_cluster_status", __slate_cluster_status),
+        KaimonGate.GateTool("__slate_cluster_forget", __slate_cluster_forget),
         KaimonGate.GateTool("__slate_eval", __slate_eval),
         KaimonGate.GateTool("__slate_rerender_fig", __slate_rerender_fig),
         KaimonGate.GateTool("__slate_eval_batch", __slate_eval_batch),

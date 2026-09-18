@@ -181,6 +181,104 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
     return bits.join(' · ');
   }
 
+  // ── The sweeps in a store ───────────────────────────────────────────────────────────────────
+  // Sorted the way the log file list is, for the same reason: the interesting row is the one that
+  // failed or the one that has been sitting there since last week, and neither is findable in a
+  // list ordered by a hash. Held on the module rather than in the row markup so a repaint — this
+  // panel reloads on a timer — does not throw the reader's ordering away.
+  let SWSORT = { key: 'created', dir: -1 };
+
+  const swAge = u => {
+    if (!u) return '—';
+    const d = new Date(u * 1000), now = Date.now() / 1000;
+    // Inside a day the clock is what you want; past that, the date is.
+    const p2 = n => String(n).padStart(2, '0');
+    return (now - u) < 86400
+      ? `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+      : `${d.toLocaleString(undefined, { month: 'short' })} ${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  };
+  // How long the units took, end to end. Blank until at least one has landed.
+  const swSpan = r => {
+    if (!r.started_at || !r.finished_at || r.finished_at < r.started_at) return '—';
+    const s = r.finished_at - r.started_at;
+    return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
+  };
+
+  const SWCOLS = [
+    ['sweep',   'id',      r => r.sweep,                      _ => true],
+    ['state',   'state',   r => r.state,                      _ => true],
+    ['units',   'units',   r => (r.total ? r.done / r.total : 0), _ => true],
+    ['started', 'started', r => r.started_at || 0,            _ => true],
+    ['ended',   'ended',   r => r.finished_at || 0,           _ => true],
+    // A column earns its place only when it says something — the same rule the log file list uses.
+    // `took` is blank until something has finished, and most stores have read nothing back.
+    ['took',    'took',    r => (r.started_at && r.finished_at) ? r.finished_at - r.started_at : -1,
+                           sw => sw.some(r => r.started_at && r.finished_at)],
+    ['stored',  'stored',  r => r.stored || 0,                _ => true],
+    ['read',    'read',    r => r.read || 0,                  sw => sw.some(r => r.read > 0)],
+  ];
+
+  function sweepTable(sw, name) {
+    const cols = SWCOLS.filter(c => c[3](sw));
+    const col = cols.find(c => c[0] === SWSORT.key) || cols.find(c => c[0] === 'started') || cols[0];
+    const get = col[2], dir = SWSORT.dir;
+    const rows = sw.slice().sort((a, b) => {
+      const x = get(a), y = get(b);
+      const c = (typeof x === 'string') ? x.localeCompare(y) : (x - y);
+      return (c || String(a.sweep).localeCompare(String(b.sweep))) * dir;   // total order; no reshuffle
+    });
+    const arrow = k => SWSORT.key !== k ? '' : (SWSORT.dir < 0 ? ' ▾' : ' ▴');
+    const show = new Set(cols.map(c => c[0]));
+    const head = cols.map(([k, label]) =>
+      `<th data-sk="${k}" class="swst-h${SWSORT.key === k ? ' on' : ''}${k === 'sweep' || k === 'state' ? '' : ' num'}">` +
+      `${esc(label)}${arrow(k)}</th>`).join('');
+    return '<div class="swst-grp">sweeps</div>' +
+      `<table class="swst-tbl" data-cluster="${esc(name)}"><tr>${head}<th></th></tr>` +
+      rows.map(r =>
+        `<tr><td title="${esc(r.sweep)}">${esc(r.sweep.slice(2, 12))}</td>` +
+        `<td>${esc(r.state)}</td>` +
+        `<td class="num">${r.done}/${r.total}${r.failed ? '<b class="bad"> ✗' + r.failed + '</b>' : ''}</td>` +
+        `<td class="num swst-dim">${esc(swAge(r.started_at))}</td>` +
+        `<td class="num swst-dim">${esc(swAge(r.finished_at))}</td>` +
+        (show.has('took') ? `<td class="num swst-dim">${esc(swSpan(r))}</td>` : '') +
+        `<td class="num">${humBytes(r.stored)}</td>` +
+        (show.has('read') ? `<td class="num">${r.read ? humBytes(r.read) : '—'}</td>` : '') +
+        // A started sweep may still have work queued, so releasing one is refused on the worker.
+        // The button says so rather than offering an action that will only come back as an error.
+        `<td class="swst-act">${r.started && r.state !== 'succeeded' && r.state !== 'failed'
+          ? '<span class="swst-dim" title="cancel it before releasing">—</span>'
+          : `<button class="swst-free" data-sweep="${esc(r.sweep)}" title="release this run's results">✕</button>`}</td>` +
+        '</tr>').join('') +
+      '</table>';
+  }
+
+  // Sorting repaints from the rows already in hand — no round trip, because the ordering is a
+  // question about what is on screen. Releasing is the one that goes to the worker, and it asks
+  // first: the units, their blobs and the run's descriptors all go, and none of it comes back.
+  function wireSweepTable(host, pop, name) {
+    host.querySelectorAll('th[data-sk]').forEach(th => th.onclick = () => {
+      const k = th.dataset.sk;
+      // Same column flips direction; a new one starts the way that column is usually read — newest
+      // and largest first, names and states A to Z.
+      SWSORT = SWSORT.key === k ? { key: k, dir: -SWSORT.dir }
+                                : { key: k, dir: (k === 'sweep' || k === 'state') ? 1 : -1 };
+      loadStatus(pop, name);
+    });
+    host.querySelectorAll('.swst-free').forEach(b => b.onclick = async () => {
+      const sweep = b.dataset.sweep;
+      if (!window.confirm(`Release ${sweep.slice(2, 12)}?\n\n` +
+                          'Its results, their blobs and the run itself go. This cannot be undone.')) return;
+      b.disabled = true; b.textContent = '…';
+      try {
+        const r = await window.api('POST', '/api/cluster-forget', { name, sweep });
+        if (r && r.error) { window.alert(r.error); b.disabled = false; b.textContent = '✕'; return; }
+      } catch (e) {
+        window.alert(String(e)); b.disabled = false; b.textContent = '✕'; return;
+      }
+      loadStatus(pop, name);
+    });
+  }
+
   // What the cluster is DOING, opposite what it is configured to be. The two belong side by side:
   // a walltime you are about to raise means something different next to "3 units never landed".
   async function loadStatus(pop, name) {
@@ -247,19 +345,16 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
           `<div class="swst-path swst-dim" title="${esc(s.root || '')}">mirror ${esc(s.root || '')}</div>`
         : `<div class="swst-path" title="${esc(s.root || '')}">${esc(s.root || '')}</div>`) +
       (s.err ? `<div class="swst-none">⚠ ${esc(s.err)}</div>` : '') +
-      (sw.length
-        ? '<div class="swst-grp">sweeps</div>' +
-          '<table class="swst-tbl"><tr><th>id</th><th>state</th><th class="num">units</th>' +
-          '<th class="num">stored</th><th class="num">read</th></tr>' +
-          sw.slice(0, 12).map(r =>
-            `<tr><td title="${esc(r.sweep)}">${esc(r.sweep.slice(2, 12))}</td>` +
-            `<td>${esc(r.state)}</td>` +
-            `<td class="num">${r.done}/${r.total}${r.failed ? '<b class="bad"> ✗' + r.failed + '</b>' : ''}</td>` +
-            `<td class="num">${humBytes(r.stored)}</td>` +
-            `<td class="num">${r.read ? humBytes(r.read) : '—'}</td></tr>`).join('') +
-          '</table>' +
-          (sw.length > 12 ? `<div class="swst-none">+${sw.length - 12} more</div>` : '')
-        : '<div class="swst-none">no sweeps in this store</div>');
+      (sw.length ? sweepTable(sw, name) : '<div class="swst-none">no sweeps in this store</div>');
+    wireSweepTable(host, pop, name);
+    // The config pane against the live one. Which you want more of depends on what you came for —
+    // reading a table of runs, or changing a walltime — so it is dragged rather than chosen here.
+    const bar = pop.querySelector('.swcfg-split'), main = pop.querySelector('.swcfg-main');
+    if (bar && main && !bar.dataset.wired) {
+      bar.dataset.wired = '1';
+      window.slateSplit(bar, main, { key: 'slate.swcfg.main', min: 260, keep: 340,
+                                     outer: () => pop.querySelector('.swcfg-body') });
+    }
   }
 
   // One `name  value  ✕` row. The name box autocompletes over the catalogue and is checked on every
@@ -396,6 +491,7 @@ function showOptMenu(row, inp) {
           '<button class="swcfg-x" title="close">✕</button></div>' +
         '<div class="swcfg-body">' +
           `<div class="swcfg-main">${settings}</div>` +
+          '<div class="swcfg-split" title="drag to resize"></div>' +
           '<div class="swcfg-side"><div class="ctlsub">Live</div>' +
             '<div class="swst"><div class="swst-none">…</div></div></div>' +
         '</div>' +

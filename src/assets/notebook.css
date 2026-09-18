@@ -1079,7 +1079,7 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   justify-content:center; padding:24px; box-sizing:border-box;
   background:color-mix(in srgb, var(--bg) 60%, transparent); backdrop-filter:blur(2px); }
 .swcfgpop.show { display:flex; }
-.swcfg-panel { width:min(900px,94vw); max-height:88vh; display:flex; flex-direction:column;
+.swcfg-panel { width:min(1180px,94vw); max-height:88vh; display:flex; flex-direction:column;
   border:1px solid var(--border); border-radius:12px; background:var(--bg2); color:var(--text);
   box-shadow:0 20px 60px rgba(0,0,0,.55); font-size:.8rem; overflow:hidden; }
 .swcfg-head { display:flex; align-items:baseline; gap:10px; flex:none;
@@ -1093,7 +1093,11 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .swcfg-main { flex:1 1 52%; padding:14px 18px; overflow:auto; min-width:0;
   overscroll-behavior:contain; }
 .swcfg-side { flex:1 1 48%; padding:14px 18px; overflow:auto; min-width:0;
-  border-left:1px solid var(--border); background:var(--bg3); overscroll-behavior:contain; }
+  background:var(--bg3); overscroll-behavior:contain; }
+/* The handle IS the border between the panes, widened to something a mouse can find. */
+.swcfg-split { flex:0 0 auto; width:5px; cursor:col-resize; background:var(--border);
+  background-clip:content-box; border-left:2px solid transparent; border-right:2px solid transparent; }
+.swcfg-split:hover, body.slate-dragging .swcfg-split { background-color:var(--val); }
 .swcfgpop .ctlsub { margin:12px 0 6px; color:var(--dim); font-size:.68rem; font-weight:600;
   text-transform:uppercase; letter-spacing:.06em; }
 .swcfgpop .ctlsub:first-child { margin-top:0; }
@@ -1129,6 +1133,20 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   letter-spacing:.05em; }
 .swst-tbl td { padding:4px 8px 4px 0; border-bottom:1px solid color-mix(in srgb,var(--border) 45%,transparent); }
 .swst-tbl td.num { text-align:right; }
+/* Sortable, like the log file list: the interesting run is the one that failed or the one that has
+   been sitting there since last week, and a list ordered by a hash finds neither. */
+.swst-tbl th.num { text-align:right; }
+.swst-tbl th.swst-h { cursor:pointer; user-select:none; white-space:nowrap; }
+.swst-tbl th.swst-h:hover { color:var(--text); }
+.swst-tbl th.swst-h.on { color:var(--val); }
+.swst-tbl td.swst-dim { color:var(--dim); white-space:nowrap; }
+.swst-tbl td.swst-act { text-align:right; width:1.6em; }
+/* Destructive and quiet with it: visible on the row you are pointing at, red when you reach it. */
+.swst-free { background:none; border:0; color:var(--dim); cursor:pointer; opacity:0;
+  padding:0 2px; font-size:.8rem; transition:opacity .12s, color .12s; }
+.swst-tbl tr:hover .swst-free { opacity:.75; }
+.swst-free:hover { color:var(--red,#e57575); opacity:1; }
+.swst-free:disabled { cursor:default; opacity:.5; }
 .swst-none { color:var(--dim); font-size:.75rem; padding:6px 0; }
 .swcfgpop .swcfg-sub { text-transform:none; letter-spacing:0; font-weight:400; opacity:.75; }
 .swcfg-grid { display:grid; grid-template-columns:1fr 1fr; gap:7px 10px; }
@@ -3206,10 +3224,10 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 /* The drag handle IS the border between the panes, widened to something a mouse can find. */
 .logv-split { flex:0 0 auto; width:5px; cursor:col-resize; background:var(--border);
   background-clip:content-box; border-left:2px solid transparent; border-right:2px solid transparent; }
-.logv-split:hover, body.logv-dragging .logv-split { background-color:var(--val); }
+.logv-split:hover, body.slate-dragging .logv-split { background-color:var(--val); }
 /* While dragging, nothing else takes the pointer — a selection started mid-drag fights the resize. */
-body.logv-dragging { cursor:col-resize; user-select:none; }
-body.logv-dragging .logv-body * { pointer-events:none; }
+body.slate-dragging { cursor:col-resize; user-select:none; }
+body.slate-dragging .logv-body *, body.slate-dragging .swcfg-body * { pointer-events:none; }
 .logv-ffilter { margin:8px; background:var(--bg); color:var(--text); border:1px solid var(--border);
   border-radius:5px; padding:4px 7px; font-size:.8rem; }
 .logv-levels button, .logv-order, .logv-pause, .logv-icase, .logv-rx,
