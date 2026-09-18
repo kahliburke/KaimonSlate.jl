@@ -1741,6 +1741,29 @@ end
             # …and the sources are the ones Julia itself matches with, not a restatement.
             @test Regex(sev["error"][1], "i") == Sweep._LOG_BAD
 
+            # Counting a whole file goes by DECLARED level. The word lists are the fallback for
+            # output that declares nothing, and over a file they say 122 where a reader sees 2: a
+            # body logging a field called `deprecated_option` matches `deprecat` on every line it
+            # writes. The reader does not make that mistake, because a line that names its level is
+            # believed — so the count has to ask the question ripgrep can answer exactly.
+            io2 = IOBuffer()
+            Logging.with_logger(SlateTask._task_logger(IOContext(io2, :color => true))) do
+                for i in 1:20; @info "iterating" residual = 1/i deprecated_option = false; end
+                @warn "slow read, retrying" attempt = 3
+                @error "it died"
+            end
+            lines = split(rstrip(String(take!(io2))), "\n")
+            nwarn = count(l -> occursin(Regex(sev["dwarn"]), l), lines)
+            nbad = count(l -> occursin(Regex(sev["derror"]), l), lines)
+            @test nwarn == 1 && nbad == 1
+            # …which is what the word list would have said instead.
+            @test count(l -> occursin(Regex(sev["warn"][1], "i"), l), lines) > 10
+            # The declared patterns are per level and do not catch each other.
+            @test !any(l -> occursin(Regex(sev["dwarn"]), l) && occursin(Regex(sev["derror"]), l), lines)
+            # A file that declares nothing has to fall back, or it would count zero of everything.
+            @test !occursin(Regex(sev["declared"]), "WARNING: something bad")
+            @test occursin(Regex(sev["warn"][1], "i"), "WARNING: something bad")
+
             # The record grammar travels with it, so the viewer can show a record as a record.
             # Generated from the runner's OWN logger rather than from a hand-written fixture: these
             # patterns are a claim about what `_task_logger` emits, and a fixture would let the two

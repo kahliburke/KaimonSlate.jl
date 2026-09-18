@@ -3077,6 +3077,10 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
         out["logsev"] = Dict{String,Any}("declared" => _LOG_LEVEL_SRC,
                                          "error" => [_LOG_BAD_SRC, _LOG_BAD_COUNT_SRC],
                                          "warn" => [_LOG_WARN_SRC],
+                                         # Counting a whole file goes by DECLARED level when the
+                                         # file has any; the word lists are for output that has none.
+                                         "dwarn" => _LOG_DECL_WARN_SRC,
+                                         "derror" => _LOG_DECL_BAD_SRC,
                                          # …and the shape of a record, so it can be shown as one.
                                          "head" => _LOG_HEAD_SRC, "field" => _LOG_FIELD_SRC,
                                          "fcont" => _LOG_FCONT_SRC, "mcont" => _LOG_MCONT_SRC,
@@ -3649,8 +3653,17 @@ const _LOG_WARN_SRC = _ANSI_B * raw"(warn|warning|deprecat)"
 # contains the word `error` and is not one; the patterns above are for output that declares nothing
 # — a bare `println`, a C library, a scheduler's own messages. This is the shape Julia's logger
 # writes, which is what the task runner installs and what a sweep body is meant to use.
-const _LOG_LEVEL_SRC = "^(?:" * _ANSI_SGR_SRC * raw"|\s)*[┌\[](?:" * _ANSI_SGR_SRC *
-                       raw"|\s)*(Error|Warning|Info|Debug)\b"
+_log_level_src(lvl::AbstractString) =
+    "^(?:" * _ANSI_SGR_SRC * raw"|\s)*[┌\[](?:" * _ANSI_SGR_SRC * raw"|\s)*" * lvl * raw"\b"
+const _LOG_LEVEL_SRC = _log_level_src(raw"(Error|Warning|Info|Debug)")
+# One level at a time, for COUNTING. The word patterns above are the fallback for output that
+# declares nothing, and counting a whole file with them says 122 where a reader sees 2: a body
+# logging `@info … deprecated_option=false` matches `deprecat` on every line it writes. The reader
+# does not make that mistake, because a line that names its level is believed — but that rule needs
+# to look at the rest of the line, and the count runs in ripgrep, which has no look-around. So the
+# count asks the question ripgrep CAN answer exactly: how many records declare this level.
+const _LOG_DECL_WARN_SRC = _log_level_src("Warning")
+const _LOG_DECL_BAD_SRC = _log_level_src("Error")
 # The SHAPE of one record, for a reader that wants to show it as a record rather than as five
 # lines of box drawing. `Logging.ConsoleLogger` writes
 #

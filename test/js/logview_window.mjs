@@ -30,7 +30,7 @@ try { (0, eval)(src); LV = globalThis.slateLogs; } catch (e) {
 }
 if (!LV || !LV._test) { console.error('logview: logview.js exposed no test surface'); process.exit(2); }
 
-const { S, cut, visible, sevOf, setSev, paintLine, recordHtml, fileStatus } = LV._test;
+const { S, cut, visible, sevOf, setSev, paintLine, recordHtml, fileStatus, levelPattern } = LV._test;
 const fails = [];
 const ok = (cond, what) => { if (!cond) fails.push(what); };
 const eq = (got, want, what) => {
@@ -49,6 +49,10 @@ setSev({
   error: [B + '(error|fatal|traceback|exception|segmentation fault|killed|oom|out of memory|exceeded|abort(ed)?)\\b',
           B + '[1-9][0-9]*\\s+(failed|failures?|errors?)\\b'],
   warn: [B + '(warn|warning|deprecat)'],
+  // Per level, for counting a whole file: the word lists are the fallback for output
+  // that declares nothing, and over a file they count every line that merely says `warn`.
+  dwarn: '^(?:' + SGR + '|\\s)*[┌\\[](?:' + SGR + '|\\s)*Warning\\b',
+  derror: '^(?:' + SGR + '|\\s)*[┌\\[](?:' + SGR + '|\\s)*Error\\b',
 });
 
 eq(sevOf('ERROR: LoadError'), 'error', 'an error line');
@@ -109,6 +113,8 @@ eq(cut(recs, 0).map(l => l.head), [true, false, false, false, true, false, false
 setSev({
   declared: '^(?:' + SGR + '|\\s)*[┌\\[](?:' + SGR + '|\\s)*(Error|Warning|Info|Debug)\\b',
   error: [B + '(error|fatal)\\b'], warn: [B + '(warn|warning|deprecat)'],
+  dwarn: '^(?:' + SGR + '|\\s)*[┌\\[](?:' + SGR + '|\\s)*Warning\\b',
+  derror: '^(?:' + SGR + '|\\s)*[┌\\[](?:' + SGR + '|\\s)*Error\\b',
   head: '^[┌\\[] (Error|Warning|Info|Debug)(?: ([0-9:.]+))?: ?(.*)$',
   field: '^│ {3}([^ =][^=]*?) = ?(.*)$',
   fcont: '^│ {4,}(.*)$',
@@ -179,6 +185,18 @@ eq(cut('plain println\nslurmstepd: error: killed', 0).map(l => l.r), [null, null
     ok(!/<img|<script|<svg|onerror\s*=[^a-z]/i.test(flat), `${what} escapes its content`);
   }
 }
+
+// ── A level chip reaches the whole file ─────────────────────────────────────────────────────
+// A window is 64 KB of a file that may be megabytes, so filtering it can only hide what is already
+// loaded: a chip reading `warn 122` sat above two visible warnings, and nothing said why. Picking a
+// level now searches, using the SAME pattern the count uses — so the number and the hit list are
+// one question asked once, and cannot disagree.
+eq(levelPattern('warn'), '^(?:' + SGR + '|\\s)*[┌\\[](?:' + SGR + '|\\s)*Warning\\b',
+   'warn searches for declared warnings');
+eq(levelPattern('error'), '^(?:' + SGR + '|\\s)*[┌\\[](?:' + SGR + '|\\s)*Error\\b',
+   'error likewise');
+eq(levelPattern('all'), '', 'all is not a search');
+eq(levelPattern('info'), '', 'neither is info — it is what is left over, not a thing to match');
 
 // ── How a chunk ended ───────────────────────────────────────────────────────────────────────
 // Worst first, because a run of hundreds of tasks is read by looking for the ones that went wrong,

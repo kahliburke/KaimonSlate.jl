@@ -37,7 +37,9 @@
     const one = src => { try { return new RegExp(src); } catch (e) { return null; } };
     const build = a => (a || []).map(src => { try { return new RegExp(src, 'i'); } catch (e) { return null; } })
                                 .filter(Boolean);
-    SEV = { declared: one(spec.declared), error: build(spec.error), warn: build(spec.warn) };
+    SEV = { declared: one(spec.declared), error: build(spec.error), warn: build(spec.warn),
+            // Kept as SOURCE, not compiled: the whole-file counts run on the far side.
+            src: { declared: spec.declared, warn: spec.dwarn, error: spec.derror } };
     // The record grammar, served alongside. Absent (an older hub) leaves REC null and every line
     // renders the way it always did, which is the plain text of the file.
     REC = spec.head ? { head: one(spec.head), field: one(spec.field), fcont: one(spec.fcont),
@@ -186,7 +188,9 @@
     q('.logv-levels').addEventListener('click', e => {
       const b = e.target.closest('[data-lv]');
       if (!b) return;
-      S.filter = b.dataset.lv; refilterHits(); paintBar(); paintPre();
+      S.filter = b.dataset.lv;
+      // Re-runs the search, because with no needle the level itself is the search.
+      runSearch();
     });
     // The file list against the file. Which one you want more of depends on the sweep — three
     // chunks and a huge log, or six hundred array tasks — so it is dragged rather than chosen here,
@@ -621,16 +625,32 @@
     // One search per level, not per pattern: a level's patterns are alternatives, so a line
     // matching either is one line. Counting them separately and taking the larger would under-count
     // a file where different lines matched different patterns.
-    const one = lv => {
-      const src = lv === 'error' ? SEV.error : SEV.warn;
-      if (!src.length) return Promise.resolve(0);
-      const pat = src.map(re => '(?:' + re.source + ')').join('|');
-      // `limit: 0` asks for the count and no hit list, which is one pass over the file and one
-      // integer back. A chip is a number; fetching the matches to arrive at it would move the file.
-      return call('log_search', path, { pattern: pat, regex: true, ignorecase: true, limit: 0 })
+    // `limit: 0` asks for the count and no hit list, which is one pass over the file and one
+    // integer back. A chip is a number; fetching the matches to arrive at it would move the file.
+    const tally = (pat, fold) =>
+      call('log_search', path, { pattern: pat, regex: true, ignorecase: fold, limit: 0 })
         .then(r => r.total).catch(() => 0);
+    const words = lv => {
+      const src = lv === 'error' ? SEV.error : SEV.warn;
+      return src.length ? tally(src.map(re => '(?:' + re.source + ')').join('|'), true)
+                        : Promise.resolve(0);
     };
-    Promise.all([one('error'), one('warn')]).then(([e, w]) => {
+    // Which question to ask depends on the file. Where records NAME their level the reader believes
+    // that and nothing else, so the count has to as well — the word lists would report every line
+    // that merely contains `warn`, which for a body logging a field called `deprecated_option` is
+    // every line it writes. Where nothing declares a level the words are all there is.
+    //
+    // A file that mixes the two counts its records and not its loose lines. That is the direction to
+    // be wrong in: a number a reader can reconcile with what the filter shows, rather than one they
+    // cannot.
+    const declaredSrc = SEV.src && SEV.src.declared;
+    const structured = declaredSrc ? tally(declaredSrc, false) : Promise.resolve(0);
+    structured.then(n => {
+      const useDeclared = n > 0 && SEV.src.warn && SEV.src.error;
+      const one = lv => useDeclared ? tally(lv === 'error' ? SEV.src.error : SEV.src.warn, false)
+                                    : words(lv);
+      return Promise.all([one('error'), one('warn')]);
+    }).then(([e, w]) => {
       if (S.path !== path) return;                 // the reader moved on while this was in flight
       S.counts = { error: e, warn: w };
       paintBar();
@@ -641,11 +661,27 @@
   // Over the WHOLE file, on the side it lives on — which is the only way a match past the window
   // can be found at all. `total` counts every line even when the hit list stops, because "3 of 412"
   // is the number a reader needs and quietly meaning "3 of the first 2000" would be a lie.
+  // What the level chips search for, so picking one reaches the WHOLE file. The same patterns the
+  // counts use, so the chip's number and the hit list are the same question asked once.
+  function levelPattern(lv) {
+    if (lv === 'all' || lv === 'info' || !SEV) return '';
+    if (SEV.src && SEV.src.declared && SEV.src[lv]) return SEV.src[lv];
+    const src = lv === 'error' ? SEV.error : SEV.warn;
+    return src.length ? src.map(re => '(?:' + re.source + ')').join('|') : '';
+  }
+
+  // A window is 64 KB of a file that may be megabytes, so a level FILTER can only ever hide lines
+  // that are already loaded — which is how a chip reading 122 sat above two visible warnings. When
+  // nothing is typed, the chosen level IS the search: the hits come from the whole file, and ▲▼
+  // walks every one of them. A typed needle still wins, and the level narrows it as before.
   function runSearch() {
     const needle = (q('.logv-search').value || '').trim();
     S.needle = needle;
-    if (!needle || !S.path) { S.hits = null; S.rawHits = null; S.hitAt = -1; paintBar(); paintPre(); return; }
-    call('log_search', S.path, { pattern: needle, ignorecase: S.icase, regex: S.rx, limit: HIT_LIMIT })
+    const lvlPat = needle ? '' : levelPattern(S.filter);
+    const pat = needle || lvlPat;
+    if (!pat || !S.path) { S.hits = null; S.rawHits = null; S.hitAt = -1; paintBar(); paintPre(); return; }
+    call('log_search', S.path, { pattern: pat, ignorecase: needle ? S.icase : false,
+                                 regex: needle ? S.rx : true, limit: HIT_LIMIT })
       .then(r => {
         S.total = r.total; S.capped = r.capped;
         S.rawHits = r.hits || [];
@@ -709,5 +745,5 @@
   // The addressing is the part that has to be right and the part a browser cannot show you is
   // wrong: an off-by-one in a byte offset looks like a highlight on the neighbouring line. Exposed
   // so `test/js/logview_window.mjs` can pin it without a DOM.
-  window.slateLogs = { open, close, _test: { S, cut, visible, sevOf, setSev, paintLine, roleOf, recordHtml, fileStatus } };
+  window.slateLogs = { open, close, _test: { S, cut, visible, sevOf, setSev, paintLine, roleOf, recordHtml, fileStatus, levelPattern } };
 })();
