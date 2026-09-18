@@ -228,6 +228,14 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
     ['read',    'read',    r => r.read || 0,                  sw => sw.some(r => r.read > 0)],
   ];
 
+  // Whose run this is. Unknown on anything written before the store recorded it, and that reads as
+  // ours rather than as a stranger's — an old run of this notebook's is the likelier of the two.
+  // This notebook's docid. A store belongs to the CLUSTER, so it holds every notebook's runs; this
+  // panel is one notebook's view of them. A run carrying no docid is one written before the store
+  // recorded it, and it is simply not this notebook's to show.
+  let SWNB = '';
+  const mine = r => r.notebook === SWNB;
+
   function sweepTable(sw, name) {
     const cols = SWCOLS.filter(c => c[3](sw));
     const col = cols.find(c => c[0] === SWSORT.key) || cols.find(c => c[0] === 'started') || cols[0];
@@ -246,6 +254,9 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
       `<table class="swst-tbl" data-cluster="${esc(name)}"><tr>${head}<th></th></tr>` +
       rows.map(r =>
         `<tr><td title="${esc(r.sweep)}">${esc(r.sweep.slice(2, 12))}</td>` +
+        // A store belongs to the CLUSTER, so a run in it may be another document's. Marked rather
+        // than hidden: it is still occupying the disk this panel is accounting for, and the button
+        // beside it would still release it.
         (show.has('cell') ? `<td class="swst-cell">${esc(r.cell || '—')}</td>` : '') +
         `<td>${esc(r.state)}</td>` +
         `<td class="num">${r.done}/${r.total}${r.failed ? '<b class="bad"> ✗' + r.failed + '</b>' : ''}</td>` +
@@ -322,7 +333,8 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
     if (!host.isConnected) return;                     // panel closed while the round trip was out
     if (s.error) { host.innerHTML = `<div class="swst-none">${esc(s.error)}</div>`; return; }
 
-    const sw = s.sweeps || [];
+    SWNB = s.notebook || '';
+    const sw = (s.sweeps || []).filter(mine);
     const jobs = s.jobs || {}, store = s.store || {}, xf = s.xfer || {};
     const sum = k => sw.reduce((a, r) => a + (r[k] || 0), 0);
     const stored = sum('stored'), units = sum('total'), done = sum('done');

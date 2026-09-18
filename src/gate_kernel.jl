@@ -1260,6 +1260,9 @@ _ctx_args(report::Report, region::AbstractString, regions::AbstractVector,
           filename::AbstractString = "") = (
     "ctx_region"   => String(region),
     "ctx_notebook" => String(report.id),
+    # The notebook's stable, file-carried identity (`Slate.config` docid) — what a run in a shared
+    # store is attributed to. `report.id` is a session handle; this survives a move or a rename.
+    "ctx_docid"    => String(get(report.meta, "docid", "")),
     "ctx_regions"  => String[String(r) for r in regions],
     # The evaluating cell's own `key=value` header attributes (see `cell_attrs`) — a batch sweep's
     # walltime/partition/memory, which belong to the cell rather than to its code. Wired as

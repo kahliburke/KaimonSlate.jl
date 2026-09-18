@@ -2100,7 +2100,8 @@ function _make_router(h::Hub)
                 "right now. It fills in once the worker is up.", "waiting" => true))
         r = try
             ReportEngine._tool(nb.kernel, "__slate_cluster_status",
-                               Dict{String,Any}("name" => name, "spec" => spec))
+                               Dict{String,Any}("name" => name, "spec" => spec,
+                                                "notebook" => notebook_docid(nb).docId))
         catch e
             return _json(Dict("error" => first(sprint(showerror, e), 200)))
         end

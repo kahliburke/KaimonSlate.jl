@@ -901,7 +901,7 @@ function __slate_eval(source::String; filename::String = "string",
                      memo_threshold::Float64 = 0.0, memo_force::Bool = false,
                      memo_always::Bool = false, memo_unread::Vector{String} = String[],
                      memo_safe::Vector{String} = String[],
-                     ctx_region::String = "", ctx_notebook::String = "",
+                     ctx_region::String = "", ctx_notebook::String = "", ctx_docid::String = "",
                      ctx_regions::Vector{String} = String[],
                      ctx_attrs::Vector{String} = String[],
                      ctx_clusters::Vector{String} = String[])
@@ -911,7 +911,8 @@ function __slate_eval(source::String; filename::String = "string",
     lock(_CANCEL_LOCK) do; _RUNNING_TASKS[cid] = current_task(); end
     # Rebuild the Slate execution context from the hub's `ctx_*` args, adding this worker's own
     # `slate_emit` (which PUBs on the gate stream) — cell code reads it via `slate_context()`.
-    ctx = _build_slate_ctx(_NS[], ctx_notebook, ctx_region, ctx_regions, ctx_attrs, ctx_clusters)
+    ctx = _build_slate_ctx(_NS[], ctx_notebook, ctx_region, ctx_regions, ctx_attrs, ctx_clusters,
+                           ctx_docid)
     try
         return _eval_one(source, filename, memo_key, memo_names, memo_threshold, memo_force,
                          memo_always, memo_unread, memo_safe; slate_ctx = ctx)
@@ -2510,7 +2511,8 @@ function __slate_cluster_forget(; name::AbstractString = "", sweep::AbstractStri
     end
 end
 
-function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{String,Any}())
+function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{String,Any}(),
+                                notebook::AbstractString = "")
     try
         clusters = Dict(String(name) =>
             Dict{String,String}(String(k) => string(v) for (k, v) in spec))
@@ -2543,10 +2545,11 @@ function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{S
                 "rate" => r.rate, "eta" => r.eta, "idle" => r.idle,
                 "hosts" => r.hosts, "stored" => r.stored, "read" => r.read,
                 # When it was minted, and the span its units actually ran over.
-                "cell" => r.cell,
+                "cell" => r.cell, "notebook" => r.notebook,
                 "created" => r.created, "started_at" => r.started_at,
                 "finished_at" => r.finished_at)
                 for r in s.sweeps],
+            "notebook" => String(notebook),
             "err" => s.err)
     catch e
         return Dict{String,Any}("error" => first(sprint(showerror, e), 200))

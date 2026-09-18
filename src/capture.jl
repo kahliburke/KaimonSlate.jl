@@ -790,7 +790,7 @@ end
 
 function _build_slate_ctx(mod::Module, notebook::AbstractString, region::AbstractString,
                           regions::AbstractVector, attrs::AbstractVector = String[],
-                          clusters::AbstractVector = String[])
+                          clusters::AbstractVector = String[], docid::AbstractString = "")
     emit = _ns_defined(mod, :slate_emit) ? _ns_read(mod, :slate_emit) : (channel, value) -> nothing
     # The notebook's injected `slate_on` (registers a JS→Julia handler into `__slate_handlers`), so package
     # code can wire an interactive widget's handlers via SEB's `slate_on` accessor — mirrors `emit`.
@@ -808,6 +808,7 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
     _entry(name) = (reg === nothing || !haskey(reg, Symbol(name))) ? nothing : reg[Symbol(name)]
     return (; region   = isempty(region) ? nothing : Symbol(region),
               notebook = String(notebook),
+              docid    = String(docid),
               side     = String(region),
               emit     = emit,
               regions  = Symbol[Symbol(r) for r in regions],

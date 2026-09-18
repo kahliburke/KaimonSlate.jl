@@ -639,6 +639,24 @@ end
         end
     end
 
+    @testset "a run says which notebook and cell minted it" begin
+        # A store belongs to the CLUSTER, so every notebook naming it writes runs into the same one.
+        # A cell id is notebook-local, which leaves two documents with a cell called `fit`
+        # indistinguishable — beside a button that releases a run, that is the hazard.
+        mktempdir() do root
+            BS.write_sweep!(root, "sw_a", ["c1"]; cell = "fit", notebook = "nb-one")
+            BS.write_sweep!(root, "sw_b", ["c1"]; cell = "fit", notebook = "nb-two")
+            BS.write_sweep!(root, "sw_c", ["c1"]; cell = "fit")          # before the store recorded it
+            @test BS.sweep_cell(root, "sw_a") == BS.sweep_cell(root, "sw_b") == "fit"
+            @test BS.sweep_notebook(root, "sw_a") == "nb-one"
+            @test BS.sweep_notebook(root, "sw_b") == "nb-two"
+            # A run written before the store recorded this carries nothing, and the panel simply
+            # does not show it: a notebook view lists what it can attribute, not what it guesses.
+            @test BS.sweep_notebook(root, "sw_c") == ""
+            @test BS.sweep_notebook(root, "sw_missing") == ""
+        end
+    end
+
     @testset "a settled run can be released; one with work in flight cannot" begin
         # The guard exists so descriptors are never dropped out from under queued work. `started`
         # is a poor proxy for that: every run that ever ran was started, so refusing those made

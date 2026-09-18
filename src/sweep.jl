@@ -1194,6 +1194,7 @@ function cluster_status(name::AbstractString = "";
                            # A store is shared: every cell that names this cluster writes runs into
                            # it, and so does every notebook pointing at the same root.
                            cell = BatchSweep.sweep_cell(root, sw),
+                           notebook = BatchSweep.sweep_notebook(root, sw),
                            state = display_state(p, BatchSweep.is_started(root, sw)),
                            total = p.shards_total, done = p.shards_done,
                            ok = p.shards_ok, failed = p.shards_failed,
@@ -1219,6 +1220,15 @@ function cluster_status(name::AbstractString = "";
 end
 
 # The notebook's cluster definitions, from the evaluating cell's context. Empty outside a cell.
+# Which notebook is evaluating, for attributing a run in a store several of them share. The DOCID,
+# which is file-carried and survives a move or a rename — a session id would orphan every run the
+# moment the notebook reopened. Empty outside a notebook, which is what a script or a test is.
+function _ctx_docid()
+    sctx = get(task_local_storage(), :slate_ctx, nothing)
+    (sctx !== nothing && hasproperty(sctx, :docid)) && return String(sctx.docid)
+    return ""
+end
+
 function _ctx_clusters()
     sctx = get(task_local_storage(), :slate_ctx, nothing)
     (sctx !== nothing && hasproperty(sctx, :clusters)) && return sctx.clusters
@@ -4429,7 +4439,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
                                summary_src = summary_src, lazy = lazy)
         push!(chunks, ck)
     end
-    BatchSweep.write_sweep!(root, run, chunks; cell = String(cell))
+    BatchSweep.write_sweep!(root, run, chunks; cell = String(cell), notebook = _ctx_docid())
     # At most ONE unstarted run per cell. A run is keyed by body + setup + captures + grid, so every
     # edit to any of them mints a new one — and the old one, which nobody ever asked to run, is left
     # behind holding a blob per parameter point. An afternoon of adjusting a constant leaves a store

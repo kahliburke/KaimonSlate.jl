@@ -48,7 +48,7 @@ Record which chunks make up a sweep. The chunk descriptors themselves already li
 this is the only extra bookkeeping a sweep needs.
 """
 function write_sweep!(root::AbstractString, sweep::AbstractString, chunks;
-                      cell::AbstractString = "")
+                      cell::AbstractString = "", notebook::AbstractString = "")
     d = Dict{String,Any}(
         "kind" => KIND_SWEEP,
         "created" => round(Int, time()),
@@ -58,6 +58,11 @@ function write_sweep!(root::AbstractString, sweep::AbstractString, chunks;
     # orphan of THIS cell from a live run of another. It is also what lets a panel say where a run
     # in the store came from.
     isempty(cell) || (d["cell"] = String(cell))
+    # …and which NOTEBOOK. A store belongs to the cluster, not to a document: every notebook naming
+    # that cluster writes runs into the same one. A cell id is notebook-local, so two documents with
+    # a cell called `fit` are indistinguishable without this — which matters most beside a button
+    # that releases a run.
+    isempty(notebook) || (d["notebook"] = String(notebook))
     MemoStore.write_manifest(root, sweep, d)
     isempty(cell) || _index_cell_run!(root, String(cell), String(sweep))
     return sweep
@@ -115,6 +120,12 @@ end
 function sweep_cell(root::AbstractString, sweep::AbstractString)
     d = MemoStore.read_manifest(root, sweep)
     d === nothing ? "" : String(get(d, "cell", ""))
+end
+
+"Which notebook minted a run. Empty for one written before the store recorded it."
+function sweep_notebook(root::AbstractString, sweep::AbstractString)
+    d = MemoStore.read_manifest(root, sweep)
+    d === nothing ? "" : String(get(d, "notebook", ""))
 end
 
 """
