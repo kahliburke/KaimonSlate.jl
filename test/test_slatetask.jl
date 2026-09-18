@@ -17,6 +17,36 @@ end
 
 blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs")); init = 0)
 
+@testset "a chunk where nothing worked exits nonzero" begin
+    # Individual failures are a STORE fact — a sweep is expected to have some, and the manifests
+    # carry them. A chunk where everything attempted failed is different: it is a failed chunk, and
+    # an exit status is the only thing a scheduler can read. That is what lets the rest of a sweep
+    # be queued behind the first chunk with `--dependency=afterok`, so nothing local is needed
+    # between the waves.
+    #
+    # `ran` counts the units that SUCCEEDED and `failed` those that did not, so what was attempted
+    # is their sum. A chunk that skipped its units attempted nothing and proves nothing either way.
+    run1(root, chunk) = redirect_stderr(devnull) do; SlateTask.main([root, chunk]); end
+
+    mktempdir() do root
+        chunk, _ = mkchunk(root, 4)
+        @test run1(root, chunk) == 0
+        @test run1(root, chunk) == 0          # re-run: every unit skipped, nothing attempted
+    end
+    mktempdir() do root
+        chunk, _ = mkchunk(root, 4; fn_src = "p -> error(\"always\")")
+        @test run1(root, chunk) == 1
+        r = SlateTask.run_chunk(root, chunk)
+        @test r.ran == 0 && r.failed == 0     # …and a re-run attempts nothing: they are recorded
+    end
+    mktempdir() do root
+        # Some failures are still a sweep that ran. Exiting nonzero here would stop the rest of a
+        # grid over one bad parameter point, which is the opposite of what a sweep is for.
+        chunk, _ = mkchunk(root, 4; fn_src = "p -> (p == 1 ? error(\"one\") : p * 2)")
+        @test run1(root, chunk) == 0
+    end
+end
+
 @testset "slatetask" begin
     @testset "round trip: a chunk runs and its shards read back" begin
         mktempdir() do root

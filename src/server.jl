@@ -2683,6 +2683,12 @@ function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, in
     try; _sweep_stale_conn_state!(h)          # drop the series of workers that are gone
     catch e; ReportEngine._rlog("supervisor: conn-state sweep error: " * first(sprint(showerror, e), 120))
     end
+    # Release the next wave of any started sweep, for every cluster this MACHINE knows — not just
+    # the notebooks that happen to be open. A sweep's second wave used to wait on a sweep card
+    # polling, so closing the tab left the rest of a grid unsubmitted until someone came back.
+    try; ReportEngine.Sweep.advance_started!()
+    catch e; ReportEngine._rlog("supervisor: sweep advance error: " * first(sprint(showerror, e), 120))
+    end
     try                                       # a leak is only visible as a series, so write one
         line = SlateDiag.diag_log_line()
         line === nothing || ReportEngine._rlog(line)

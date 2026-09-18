@@ -639,6 +639,55 @@ end
         end
     end
 
+    @testset "probe= decides how much goes out before anything has reported" begin
+        # The default releases ONE chunk and waits for a unit to land, so a body that throws for
+        # every point fails on a handful instead of the whole grid. The cost is that something has
+        # to be running to release the rest. `probe=0` sends everything at once, which is what a
+        # re-run of a body already watched working wants — and what makes a sweep need nothing
+        # local once it is submitted.
+        @test Sweep.cluster_args(Dict("kind" => "exec", "host" => "h",
+                                      "root_remote" => "/s")).probe == 1
+        @test Sweep.cluster_args(Dict("kind" => "exec", "host" => "h", "root_remote" => "/s",
+                                      "probe" => "0")).probe == 0
+        @test_throws ErrorException Sweep.cluster_args(
+            Dict("kind" => "exec", "host" => "h", "root_remote" => "/s", "probe" => "-1"))
+        # A cell header overrides the cluster, the way `chunk=` does — and is Slate's own setting,
+        # so it must never reach the scheduler as a job option.
+        @test Sweep.attr_probe(Dict("probe" => "0")) == 0
+        @test Sweep.attr_probe(Dict{String,String}()) === nothing
+        @test_throws ErrorException Sweep.attr_probe(Dict("probe" => "lots"))
+        @test !Sweep.is_sched_attr("probe")
+
+        run_one(probe) = mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 1, probe = probe,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false) do p; (; g = p.g); end
+            BS.start!(root, r.run)
+            p = Sweep.reconcile_and_sync!(t, r.run, Sweep.launcher_for(t);
+                                          submit = true, failure_policy = Sweep.sweep_policy(t))
+            (length(p.to_submit), length(BS.read_attempts(root)))
+        end
+        @test run_one(0) == (0, 4)      # everything in one wave; nothing left to release
+        @test first(run_one(1)) > 0     # …against one chunk, with the rest still waiting
+    end
+
+    @testset "a started run is visible to the hub without a notebook" begin
+        # The second wave used to wait on an open sweep card, so closing the tab left the rest of a
+        # grid unsubmitted. The supervisor releases it instead — and to do that it has to find the
+        # live runs with nothing open, from the markers rather than by parsing the store.
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 1,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false) do p; (; g = p.g); end
+            @test isempty(Sweep.started_runs(root))        # prepared is not started
+            BS.start!(root, r.run)
+            @test Sweep.started_runs(root) == [r.run]
+            # …and it costs one directory read, so a store with nothing going on is free to ask.
+            @test isempty(Sweep.started_runs(mktempdir()))
+            @test isempty(Sweep.started_runs(joinpath(root, "no-such-store")))
+        end
+    end
+
     @testset "a run says which notebook and cell minted it" begin
         # A store belongs to the CLUSTER, so every notebook naming it writes runs into the same one.
         # A cell id is notebook-local, which leaves two documents with a cell called `fit`

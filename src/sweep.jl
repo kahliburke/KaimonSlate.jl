@@ -259,6 +259,7 @@ struct LocalTarget <: SweepTarget
     payload::String
     chunk::Int
     procs::Int                   # concurrent task processes; 0 = follow `local_procs()`
+    probe::Int                   # chunks released before any unit has finished; 0 = all at once
 end
 #
 # The task environment is PREPARED here, at construction: seeded from `parent` and instantiated once
@@ -271,10 +272,11 @@ end
 function LocalTarget(; root = joinpath(homedir(), ".cache", "kaimonslate", "sweeps"),
                      parent = dirname(Base.active_project()), env = :parent,
                      project = nothing,
-                     payload = joinpath(@__DIR__, "slatetask.jl"), chunk = 8, procs = 0)
+                     payload = joinpath(@__DIR__, "slatetask.jl"), chunk = 8, procs = 0,
+                     probe = 1)
     mkpath(String(root))
     proj = project === nothing ? task_env!(String(root), String(parent), env) : String(project)
-    LocalTarget(String(root), proj, String(payload), Int(chunk), Int(procs))
+    LocalTarget(String(root), proj, String(payload), Int(chunk), Int(procs), Int(probe))
 end
 
 # ── How much of this machine a local sweep may take ──────────────────────────────────────────
@@ -335,6 +337,7 @@ struct ClusterTarget <: SweepTarget
     # whatever a home directory protects — and holds results, job output, and the SOURCE of the body
     # that produced them. Empty follows the site's own umask, which is routinely world-readable.
     mode::String
+    probe::Int          # chunks released before any unit has finished; 0 = all at once
 end
 #
 # A target DESCRIBES a cluster; it does not reach one. `parent` and an empty `project`/`payload` mean
@@ -348,11 +351,12 @@ function ClusterTarget(host = ""; kind = :slurm, root = "", root_remote = root, 
                        parent = "", project = nothing,
                        resources = (; cpus = 1, mem = "2G", walltime = "01:00:00", partition = ""),
                        chunk = 16, account = "", qos = "", prologue = "", directives = "",
-                       julia = "julia", procs = 0, mode = "0700")
+                       julia = "julia", procs = 0, mode = "0700", probe = 1)
     ClusterTarget(Symbol(kind), String(host), String(root), String(root_remote),
                   project === nothing ? "" : String(project), String(payload),
                   resources, Int(chunk), String(account), String(qos), String(prologue),
-                  String(directives), String(parent), String(julia), Int(procs), String(mode))
+                  String(directives), String(parent), String(julia), Int(procs), String(mode),
+                  Int(probe))
 end
 
 "A `ClusterTarget` on SLURM. The spelling notebooks and the docs use."
@@ -380,7 +384,7 @@ function provision!(t::ClusterTarget)
     pay = isempty(t.payload) ? provision_payload!(t.host, t.root_remote) : t.payload
     return ClusterTarget(t.kind, t.host, t.root, t.root_remote, proj, pay, t.resources, t.chunk,
                          t.account, t.qos, t.prologue, t.directives, t.parent, t.julia, t.procs,
-                         t.mode)
+                         t.mode, t.probe)
 end
 
 # Resources belong to the TARGET (a site's account, its partitions) but walltime, memory and cores
@@ -391,7 +395,7 @@ with_resources(t::ClusterTarget, res) =
     res === nothing ? t :
     ClusterTarget(t.kind, t.host, t.root, t.root_remote, t.project, t.payload,
                   merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue, t.directives,
-                  t.parent, t.julia, t.procs, t.mode)
+                  t.parent, t.julia, t.procs, t.mode, t.probe)
 
 # The scheduler settings a `#%% sweep` cell may carry on its header (engine.jl `cell_attrs`), e.g.
 #
@@ -428,7 +432,7 @@ const _ATTR_COUNTS = (:cpus, :gpus, :nodes, :ntasks, :ntasks_per_node)
 # Slate's OWN cell settings — the `key=value` tokens that mean something to the notebook rather than
 # to the scheduler, and so must never be forwarded as a job option.
 const _ATTR_OTHER = ("cluster", "data", "chunk", "id", "controls", "needs", "mutates", "region",
-                     "script")
+                     "script", "probe")
 
 "Is this header key a scheduler option (rather than one of Slate's own cell settings)?"
 is_sched_attr(k::AbstractString) = !(String(k) in _ATTR_OTHER)
@@ -499,10 +503,10 @@ function cluster(spec::AbstractDict)
     # No scheduler AND no host is this machine, which has a target of its own — it needs no ssh
     # session and prepares its environment directly.
     (a.kind == "exec" && isempty(a.host)) &&
-        return LocalTarget(; a.root, a.parent, a.chunk, a.procs)
+        return LocalTarget(; a.root, a.parent, a.chunk, a.procs, a.probe)
     return ClusterTarget(a.host; kind = Symbol(a.kind), a.root, a.root_remote, a.parent, a.payload,
                          a.chunk, a.account, a.qos, a.prologue, a.directives, a.resources, a.procs,
-                         a.mode)
+                         a.mode, a.probe)
 end
 
 """
@@ -551,11 +555,14 @@ function cluster_args(spec::AbstractDict)
     parent = get_("project")
     isempty(parent) && (parent = dirname(Base.active_project()))
     chunk = something(tryparse(Int, get_("chunk", "8")), 8)
+    # Chunks released before any unit has finished. See `attr_probe`; a cell header overrides it.
+    probe = something(tryparse(Int, get_("probe", "1")), 1)
+    probe < 0 && error("cluster `$name` has probe `$(get_("probe"))`; it must be 0 or more")
     # The task runner is Slate's own code and is shipped during provisioning, so naming a path is
     # only for a site that stages it itself.
     payload = get_("payload")
     res = cluster_resources(spec)
-    return (; kind, name, root, parent, chunk, payload, procs, mode,
+    return (; kind, name, root, parent, chunk, payload, procs, mode, probe,
               root_remote = isempty(root_remote) ? root : root_remote,
               host, account = get_("account"), qos = get_("qos"),
               prologue = get_("prologue"), directives = get_("directives"),
@@ -665,6 +672,22 @@ function attr_lazy(attrs::AbstractDict)
     return s in ("auto", "arrow")
 end
 
+"""
+A `probe=` header attribute, or `nothing`. How many chunks go out BEFORE any unit has finished.
+
+The default of one is there so a body that throws for every point fails on a handful of units
+instead of on the whole grid. `probe=0` sends everything in one wave, which is what a re-run of a
+body you have already watched work wants — and it is also what makes a sweep independent of
+anything local, since there is no second wave for something to have to release.
+"""
+function attr_probe(attrs::AbstractDict)
+    v = get(attrs, "probe", nothing)
+    v === nothing && return nothing
+    n = tryparse(Int, v)
+    (n === nothing || n < 0) && error("@sweep: `probe=$v` on the cell header must be 0 or more")
+    return n
+end
+
 "A `chunk=` header attribute, or `nothing`. How many units ride one scheduler job."
 function attr_chunk(attrs::AbstractDict)
     v = get(attrs, "chunk", nothing)
@@ -674,12 +697,23 @@ function attr_chunk(attrs::AbstractDict)
     return n
 end
 
+# How much of a sweep goes out before any of it has reported. A target's own setting, so a cluster
+# whose bodies are long-settled can say `probe=0` and stop needing anything local between waves.
+sweep_policy(t::SweepTarget) = BatchSweep.FailurePolicy(; probe_chunks = t.probe)
+
+# `probe=` on the cell header beats the cluster's own, the same way `chunk=` does.
+with_probe(t::LocalTarget, n) = n === nothing ? t :
+    LocalTarget(t.root, t.project, t.payload, t.chunk, t.procs, n)
+with_probe(t::ClusterTarget, n) = n === nothing ? t :
+    ClusterTarget(t.kind, t.host, t.root, t.root_remote, t.project, t.payload, t.resources, t.chunk,
+                  t.account, t.qos, t.prologue, t.directives, t.parent, t.julia, t.procs, t.mode, n)
+
 with_chunk(t::LocalTarget, n) = n === nothing ? t :
-    LocalTarget(t.root, t.project, t.payload, n, t.procs)
+    LocalTarget(t.root, t.project, t.payload, n, t.procs, t.probe)
 with_chunk(t::ClusterTarget, n) = n === nothing ? t :
     ClusterTarget(t.kind, t.host, t.root, t.root_remote, t.project, t.payload,
                   t.resources, n, t.account, t.qos, t.prologue, t.directives, t.parent, t.julia,
-                  t.procs, t.mode)
+                  t.procs, t.mode, t.probe)
 
 "The host a target authenticates to; empty for one that runs here."
 target_host(::LocalTarget) = ""
@@ -1340,6 +1374,66 @@ sync_in!(t::ClusterTarget) = isempty(t.host) ? true : pull_meta!(remote_store(t)
 # WAITS rather than failing: submitting is the only thing a sign-in gates, and the card already says
 # what is missing. It goes out on the next poll after someone signs in.
 _reachable(t::SweepTarget) = (h = target_host(t); isempty(h) || connected(h))
+
+"""
+    started_runs(root) -> Vector{String}
+
+Runs in this store that were STARTED, from the markers alone. One directory read, no manifest
+parsing — which is what lets a supervisor ask every store on the machine and pay nothing for the
+ones with nothing going on.
+"""
+function started_runs(root::AbstractString)
+    d = BatchSweep.jobs_dir(String(root))
+    isdir(d) || return String[]
+    return String[basename(f)[1:end-8] for f in readdir(d) if endswith(f, ".started")]
+end
+
+# When each cluster was last advanced, so a slow store cannot be asked again while the answer to the
+# last question is still in the post.
+const _ADVANCE_AT = Dict{String,Float64}()
+
+"""
+    advance_started!(; every = 30.0) -> Int
+
+Release the next wave of every started, unsettled sweep this machine knows about, and return how
+many were advanced.
+
+A sweep goes out in waves: one chunk, then the rest once a unit has landed and the body is known to
+work. Something has to release that second wave, and until now the only thing that did was an open
+sweep card — so closing the tab left the rest of a grid unsubmitted, indefinitely. Clusters are
+registered per MACHINE rather than per notebook, which is what lets this run with nothing open.
+
+Throttled per cluster, and skipped entirely for a store with no started run: an idle machine costs
+one `readdir` per cluster per tick and never touches the network.
+"""
+function advance_started!(; every::Real = 30.0)
+    n = 0
+    for c in clusters_all()
+        name = String(get(c, "name", ""))
+        isempty(name) && continue
+        spec = Dict{String,String}(String(k) => String(v) for (k, v) in c)
+        t = try; cluster(spec); catch; continue; end      # a definition we cannot build is not ours to fix
+        root = store_root(t)
+        runs = started_runs(root)
+        isempty(runs) && continue
+        time() - get(_ADVANCE_AT, name, 0.0) < every && continue
+        _ADVANCE_AT[name] = time()
+        # A cluster nobody has signed in to WAITS, exactly as the card's poll does — submitting is
+        # the only thing a sign-in gates, and it goes out on the next tick after one lands.
+        _reachable(t) || continue
+        try; sync_in!(t); catch; continue; end
+        l = launcher_for(t)
+        for run in runs
+            try
+                p = reconcile_and_sync!(t, run, l; submit = true, failure_policy = sweep_policy(t))
+                BatchSweep.is_settled(p) || (n += 1)
+            catch e
+                _rlog("supervisor: advancing $(name)/$(run) failed: " * first(sprint(showerror, e), 160))
+            end
+        end
+    end
+    return n
+end
 
 function reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher; kw...)
     root = store_root(target)
@@ -3188,7 +3282,8 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # …and it only submits for a sweep that has been ARMED, so a card left open on a sweep nobody
     # asked to run cannot start it.
     started = BatchSweep.is_started(root, run)
-    p = advance ? reconcile_and_sync!(target, run, l; submit = started && _reachable(target)) :
+    p = advance ? reconcile_and_sync!(target, run, l; submit = started && _reachable(target),
+                                      failure_policy = sweep_policy(target)) :
                   BatchSweep.plan(root, run; launcher = l)
     t = BatchSweep.telemetry(root, run; launcher = l, plan = p)
     _ds = display_state(p, started)
@@ -4412,7 +4507,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # header is the one a person edits from the UI while watching a job, and a control that silently
     # loses to the source would be a control that appears broken.
     target = with_resources(with_resources(target, resources), attr_resources(attrs))
-    target = with_chunk(target, attr_chunk(attrs))
+    target = with_probe(with_chunk(target, attr_chunk(attrs)), attr_probe(attrs))
     # Storage FORM, not identity: a unit's value is the same either way, so flipping `data=` must
     # not re-key and throw away finished work. Units already stored whole simply have no index and
     # cannot be sliced; the dataset says how many, rather than quietly omitting them.
@@ -4463,7 +4558,8 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # nobody asked for again. Starting says the work was wanted; it does not say this call should
     # start it. The card's poll advances a started sweep, which is where watching belongs.
     submit && BatchSweep.start!(root, run)
-    reconcile_and_sync!(target, run, launcher; cap, submit = submit && _reachable(target))
+    reconcile_and_sync!(target, run, launcher; cap, submit = submit && _reachable(target),
+                        failure_policy = sweep_policy(target))
     # Filled with the result below, so the card's settle report can bring the OBJECT level with what
     # the card already knows. A Ref because the channel is registered before the result exists.
     rref = Ref{Any}(nothing)

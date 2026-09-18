@@ -563,6 +563,10 @@ function main(args = ARGS)
         (println(stderr, "usage: slatetask.jl <cas-root> <chunk-key>..."); return 2)
     root = String(args[1])
     # Slate's own lines go through the same logger as the body's, so one log has one shape.
+    # Did anything this process attempted actually work? `ran` counts the units that SUCCEEDED and
+    # `failed` the ones that did not, so what was attempted is their sum — a chunk that skipped its
+    # units (they were already in the store) attempted nothing and proves nothing either way.
+    tried = 0; worked = 0
     Logging.with_logger(_task_logger()) do
         @info "task starting" at = Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS") host = gethostname() julia = string(VERSION) chunks = length(args) - 1
         # Several chunks per process, run one after another. A process is expensive (a whole Julia
@@ -570,6 +574,7 @@ function main(args = ARGS)
         # run locally, a fast route to exhausting memory.
         for chunk in args[2:end]
             r = run_chunk(root, String(chunk))
+            tried += r.ran + r.failed; worked += r.ran
             # The failure count leads when it is non-zero: it is the number a reader is looking for,
             # and the level makes the line findable by the viewer's filter without reading it.
             if r.failed > 0
@@ -579,7 +584,11 @@ function main(args = ARGS)
             end
         end
     end
-    return 0
+    # Nonzero when everything this process RAN failed. Individual failures stay a store fact — a
+    # sweep is expected to have some — but a chunk where nothing worked is a failed chunk, and that
+    # has to be visible as an exit status: it is the only thing a scheduler can read, and what lets
+    # the rest of a sweep be queued behind the first chunk with `--dependency=afterok`.
+    return (tried > 0 && worked == 0) ? 1 : 0
 end
 
 end # module SlateTask
