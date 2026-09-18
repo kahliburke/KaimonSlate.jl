@@ -186,7 +186,7 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
   // failed or the one that has been sitting there since last week, and neither is findable in a
   // list ordered by a hash. Held on the module rather than in the row markup so a repaint — this
   // panel reloads on a timer — does not throw the reader's ordering away.
-  let SWSORT = { key: 'created', dir: -1 };
+  let SWSORT = { key: 'started', dir: -1 };
   // What the last release did, shown under the table until it is stale. Held here rather than in the
   // markup because the panel repaints on a timer and would throw it away mid-read.
   let SWNOTE = null;
@@ -208,12 +208,18 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
     return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
   };
 
+  // A run that has not started yet has no start time, and 0 would bury it at the bottom of a
+  // newest-first sort when it is the newest thing in the table. It sorts as though it were about to
+  // run, which puts it first reading down and last reading up — the same answer either way.
+  const PENDING = Number.MAX_SAFE_INTEGER;
+
   const SWCOLS = [
     ['sweep',   'id',      r => r.sweep,                      _ => true],
+    ['cell',    'cell',    r => r.cell || '',                 sw => sw.some(r => r.cell)],
     ['state',   'state',   r => r.state,                      _ => true],
     ['units',   'units',   r => (r.total ? r.done / r.total : 0), _ => true],
-    ['started', 'started', r => r.started_at || 0,            _ => true],
-    ['ended',   'ended',   r => r.finished_at || 0,           _ => true],
+    ['started', 'started', r => r.started_at || PENDING,      _ => true],
+    ['ended',   'ended',   r => r.finished_at || PENDING,     _ => true],
     // A column earns its place only when it says something — the same rule the log file list uses.
     // `took` is blank until something has finished, and most stores have read nothing back.
     ['took',    'took',    r => (r.started_at && r.finished_at) ? r.finished_at - r.started_at : -1,
@@ -234,12 +240,13 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
     const arrow = k => SWSORT.key !== k ? '' : (SWSORT.dir < 0 ? ' ▾' : ' ▴');
     const show = new Set(cols.map(c => c[0]));
     const head = cols.map(([k, label]) =>
-      `<th data-sk="${k}" class="swst-h${SWSORT.key === k ? ' on' : ''}${k === 'sweep' || k === 'state' ? '' : ' num'}">` +
+      `<th data-sk="${k}" class="swst-h${SWSORT.key === k ? ' on' : ''}${['sweep', 'cell', 'state'].includes(k) ? '' : ' num'}">` +
       `${esc(label)}${arrow(k)}</th>`).join('');
     return '<div class="swst-grp">sweeps</div>' +
       `<table class="swst-tbl" data-cluster="${esc(name)}"><tr>${head}<th></th></tr>` +
       rows.map(r =>
         `<tr><td title="${esc(r.sweep)}">${esc(r.sweep.slice(2, 12))}</td>` +
+        (show.has('cell') ? `<td class="swst-cell">${esc(r.cell || '—')}</td>` : '') +
         `<td>${esc(r.state)}</td>` +
         `<td class="num">${r.done}/${r.total}${r.failed ? '<b class="bad"> ✗' + r.failed + '</b>' : ''}</td>` +
         `<td class="num swst-dim">${esc(swAge(r.started_at))}</td>` +
@@ -266,7 +273,7 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
       // Same column flips direction; a new one starts the way that column is usually read — newest
       // and largest first, names and states A to Z.
       SWSORT = SWSORT.key === k ? { key: k, dir: -SWSORT.dir }
-                                : { key: k, dir: (k === 'sweep' || k === 'state') ? 1 : -1 };
+                                : { key: k, dir: ['sweep', 'cell', 'state'].includes(k) ? 1 : -1 };
       loadStatus(pop, name);
     });
     host.querySelectorAll('.swst-free').forEach(b => b.onclick = async () => {

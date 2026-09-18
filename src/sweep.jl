@@ -1191,6 +1191,9 @@ function cluster_status(name::AbstractString = "";
             # NOT `t`: that is the target, and everything after this loop still needs it.
             tel = BatchSweep.telemetry(root, sw; launcher = l, plan = p)
             push!(rows, (; sweep = sw, created,
+                           # A store is shared: every cell that names this cluster writes runs into
+                           # it, and so does every notebook pointing at the same root.
+                           cell = BatchSweep.sweep_cell(root, sw),
                            state = display_state(p, BatchSweep.is_started(root, sw)),
                            total = p.shards_total, done = p.shards_done,
                            ok = p.shards_ok, failed = p.shards_failed,

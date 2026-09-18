@@ -726,6 +726,12 @@ const MS = RE.MemoStore
             @test row.sweep == r.run && row.done == 4 && row.total == 4
             @test row.stored > 0                          # output IS sitting in the store…
             @test row.read == 0                           # …and none of it has been pulled
+            # A store is shared by every cell naming this cluster, so a row has to say whose run it
+            # is — the panel lists the STORE, not the cell the panel was opened from.
+            @test row.cell == RE.BatchSweep.sweep_cell(root, r.run)
+            # When its units ran, from their own manifests. A run with nothing landed says 0 rather
+            # than guessing, which is what lets the table sort those as the newest thing in it.
+            @test row.started_at > 0 && row.finished_at >= row.started_at
             @test s.store.bytes >= row.stored
             @test isempty(s.err)
 

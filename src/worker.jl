@@ -2543,6 +2543,7 @@ function __slate_cluster_status(; name::AbstractString = "", spec::Dict = Dict{S
                 "rate" => r.rate, "eta" => r.eta, "idle" => r.idle,
                 "hosts" => r.hosts, "stored" => r.stored, "read" => r.read,
                 # When it was minted, and the span its units actually ran over.
+                "cell" => r.cell,
                 "created" => r.created, "started_at" => r.started_at,
                 "finished_at" => r.finished_at)
                 for r in s.sweeps],
