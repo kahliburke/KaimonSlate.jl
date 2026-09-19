@@ -314,6 +314,44 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         @test RE._manifest_get(s, "missing") == ""
     end
 
+    @testset "worker ownership: a hub only sees its own workers and attach records" begin
+        # Two hubs on one machine: same hostname, different state home / port ⇒ different owner tags.
+        env_a = ("KAIMONSLATE_HOME" => "/tmp/hub-a", "KAIMONSLATE_PORT" => "8765")
+        env_b = ("KAIMONSLATE_HOME" => "/tmp/hub-b", "KAIMONSLATE_PORT" => "8902")
+        tag_a = withenv(() -> RE.worker_owner_tag(), env_a...)
+        tag_b = withenv(() -> RE.worker_owner_tag(), env_b...)
+        @test tag_a != tag_b
+        host = gethostname()
+        mf(owner) = RE._flat_json(["notebook" => "nb", "parent" => "/p", "hub" => host, "owner" => owner, "port" => "9100"])
+        withenv(env_a...) do
+            @test RE._manifest_ours(mf(tag_a))
+            @test !RE._manifest_ours(mf(tag_b))                       # the other hub's worker on this machine
+            @test !RE._manifest_ours(mf(""))                          # written by a hub on older code: foreign
+            @test !RE._manifest_ours(RE._flat_json(["hub" => "elsewhere", "owner" => tag_a]))   # another machine
+        end
+        # Attach records are keyed by owner too, and a record read back under a different owner is
+        # rejected even if it were found — the record is tried BEFORE any probe.
+        dir = mktempdir()
+        withenv("KAIMONSLATE_HOME" => dir, "KAIMONSLATE_PORT" => "8765") do
+            pa = RE._attach_path("h", "nb")
+            pb = withenv(() -> RE._attach_path("h", "nb"), "KAIMONSLATE_HOME" => dir, "KAIMONSLATE_PORT" => "8902")
+            @test pa != pb
+            RE._attach_record!("h", "nb"; port = 9100, stream_port = 9101, transport = :tunnel)
+            r = RE._attach_lookup("h", "nb")
+            @test r !== nothing && r.port == 9100
+            # Same file, other hub: unreadable as ours. (Force the path so the owner field is the gate.)
+            other = read(RE._attach_path("h", "nb"), String)
+            withenv("KAIMONSLATE_PORT" => "8902") do
+                write(RE._attach_path("h", "nb"), other)
+                @test RE._attach_lookup("h", "nb") === nothing
+                RE._attach_clear_port!("h", 9100)                     # must not touch the other hub's record
+            end
+            @test RE._attach_lookup("h", "nb") !== nothing
+            RE._attach_clear_port!("h", 9100)
+            @test RE._attach_lookup("h", "nb") === nothing
+        end
+    end
+
     @testset "_dev_deps: path deps detected; registry deps excluded" begin
         dir = mktempdir()
         write(joinpath(dir, "Manifest.toml"), """

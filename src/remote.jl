@@ -1784,6 +1784,7 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     # Record who/what this worker serves so it's self-describing (list/reconnect/reap/adopt all read
     # this). `project` (the worker's --project env dir) is what pool adoption matches on.
     fields = ["notebook" => String(label), "parent" => String(parent), "hub" => gethostname(),
+              "owner" => worker_owner_tag(),     # which hub on that host — see `_manifest_ours`
               "transport" => string(t.transport), "project" => t.project,
               "port" => string(port), "stream_port" => string(stream_port),
               "client_pubkey" => hubkey, "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS")]
@@ -2172,6 +2173,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
                 try
                     _write_worker_manifest!(host, port, [
                         "notebook" => k.label, "parent" => k.parent, "hub" => gethostname(),
+                        "owner" => worker_owner_tag(),
                         "transport" => string(t.transport), "project" => t.project,
                         "port" => string(port), "stream_port" => string(sp),
                         "client_pubkey" => _hub_client_pubkey(), "region" => t.region,
@@ -3679,12 +3681,17 @@ end
 # ReportEngine deliberately has no JSON dep), keyed by hash(host, label).
 const _ATTACH_DIR = joinpath(_slate_cache_dir(), "attach")
 
+# Keyed by the OWNING hub as well: the attach dir lives under a state home that two hubs on one
+# machine can share (an `--ai` host pins its Slate homes to the user's own), and a record is tried
+# FIRST, before any probe — so without the owner in the key, hub B dials the worker hub A recorded
+# for the same notebook and captures it. Same identity as the manifests (`_manifest_ours`).
 _attach_path(host, label) =
-    joinpath(_ATTACH_DIR, string(hash((String(host), String(label))); base = 16) * ".json")
+    joinpath(_ATTACH_DIR, string(hash((String(host), String(label), worker_owner_tag())); base = 16) * ".json")
 
 function _attach_record!(host, label; port::Int, stream_port::Int, transport::Symbol,
                          server_key::AbstractString = "", remote_ip::AbstractString = "")
-    fields = ["host" => String(host), "label" => String(label), "port" => string(port),
+    fields = ["host" => String(host), "label" => String(label), "owner" => worker_owner_tag(),
+              "port" => string(port),
               "stream_port" => string(stream_port), "transport" => string(transport),
               "server_key" => String(server_key), "remote_ip" => String(remote_ip),
               "ts" => string(round(Int, time()))]
@@ -3704,6 +3711,7 @@ function _attach_lookup(host, label)
     isfile(p) || return nothing
     s = try; read(p, String); catch; return nothing; end
     g(k) = _manifest_get(s, k)
+    g("owner") == worker_owner_tag() || return nothing   # belt and braces beside the keyed path
     port = tryparse(Int, g("port")); sp = tryparse(Int, g("stream_port"))
     (port === nothing || sp === nothing || port == 0) && return nothing
     tr = g("transport")
@@ -3725,6 +3733,7 @@ function _attach_clear_port!(host, port::Int)
         endswith(f, ".json") || continue
         p = joinpath(_ATTACH_DIR, f)
         s = try; read(p, String); catch; continue; end
+        _manifest_get(s, "owner") == worker_owner_tag() || continue   # another hub's record is not ours to drop
         (_manifest_get(s, "host") == h && tryparse(Int, _manifest_get(s, "port")) == port) &&
             (try; rm(p; force = true); catch; end)
     end
@@ -4342,7 +4351,7 @@ function _reap_region_workers!(r::Region)
         for w in list_remote_workers(h)
             w["alive"] === true || continue
             _manifest_get(w["manifest"], "region") == r.name || continue
-            _manifest_get(w["manifest"], "hub") == gethostname() || continue
+            _manifest_ours(w["manifest"]) || continue
             try; reap_remote_worker(h, w["port"]); n += 1; catch; end
         end
     catch e
@@ -4438,7 +4447,7 @@ _release_region_claim!(host, port::Int) =
 _region_warm_worker(w, name::AbstractString) =
     w["alive"] === true && get(w, "state", "") == "idle" &&
     _manifest_get(w["manifest"], "region") == String(name) &&
-    _manifest_get(w["manifest"], "hub") == gethostname()
+    _manifest_ours(w["manifest"])
 
 # Does warm worker `w` hold the ENV the adopting notebook needs? Adoption re-points PARENT_PROJECT but
 # does NOT re-instantiate, so its loaded packages must already be the notebook's — i.e. it was built
@@ -4506,7 +4515,7 @@ function _region_has_live_workers(r::Region)
     isempty(h) && return false
     return any(list_remote_workers(h)) do w
         w["alive"] === true && _manifest_get(w["manifest"], "region") == r.name &&
-            _manifest_get(w["manifest"], "hub") == gethostname()
+            _manifest_ours(w["manifest"])
     end
 end
 
@@ -4539,8 +4548,7 @@ function _region_reconcile_impl!(r::Region)
     t = _region_target(r; at = (host, alloc === nothing ? "" : alloc.id))
     roster = list_remote_workers(host)
     mine = [w for w in roster
-            if _manifest_get(w["manifest"], "region") == r.name &&
-               _manifest_get(w["manifest"], "hub") == gethostname()]
+            if _manifest_get(w["manifest"], "region") == r.name && _manifest_ours(w["manifest"])]
     # A region's def can change (new preload/transport) — its old idle workers still carry the region tag
     # but the wrong env dir/transport, so they can't serve it. `fits` distinguishes usable warm from stale.
     fits(w) = _worker_env_fits(w, t.project, string(r.transport))
@@ -4755,6 +4763,16 @@ function _manifest_get(json::AbstractString, key::AbstractString)
     m === nothing ? "" : replace(replace(m.captures[1], "\\\"" => "\""), "\\\\" => "\\")
 end
 
+# Is this manifest's worker OURS — spawned by this hub, not merely by this machine? `hub` is the
+# hostname, and two hubs on one laptop (the installed extension beside a worktree's, or an `--ai`
+# host beside either) share the per-user worker directory and the attach records, so a hostname
+# match let one hub reattach to, adopt, and reap the other's workers for the same notebook. The
+# owner tag is the reaper's identity (`worker_owner_tag`: state home + hub port). A manifest with
+# no owner at all is treated as foreign: a hub running older code keeps writing them, and adopting
+# those is exactly the cross-hub capture this exists to stop.
+_manifest_ours(json::AbstractString) =
+    _manifest_get(json, "hub") == gethostname() && _manifest_get(json, "owner") == worker_owner_tag()
+
 # Every port listening on `host`, whoever owns it. `ss` on Linux, `netstat` where there is none.
 # An unreadable answer is an empty set, which leaves allocation where it was rather than refusing.
 function busy_ports(host::AbstractString)
@@ -4869,7 +4887,7 @@ function _find_live_worker(host, label, parent; workers = nothing)
         mf = w["manifest"]
         (_manifest_get(mf, "notebook") == String(label) &&
          _manifest_get(mf, "parent") == String(parent) &&
-         _manifest_get(mf, "hub") == gethostname()) || continue
+         _manifest_ours(mf)) || continue
         sp = tryparse(Int, _manifest_get(mf, "stream_port")); sp === nothing && continue
         push!(matches, (w["port"], sp))
     end
