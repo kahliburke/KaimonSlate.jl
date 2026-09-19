@@ -202,7 +202,10 @@ end
         NS._reconcile_blocked_regions!(nb)
         @test NS._REARM_AT[(nb.id, "ghost")] == stamp     # the sweep declined to act again
     finally
-        try; close(hub); catch; end
+        # `stop_hub`, not `close`: a Hub has no `close` method, so the old call raised a MethodError
+        # into a bare `catch` and the hub outlived the run. It kept port 8874, and the NEXT full
+        # suite then failed to bind it — a green run that poisoned the one after it.
+        NS.stop_hub(hub)
         # The region registry is REAL config, not test scratch: `region_set!` persists to
         # ~/.config/kaimonslate/regions.json, so a region invented here outlives the run and shows
         # up in the user's Remotes list. Take it back out, along with the placement and route.
