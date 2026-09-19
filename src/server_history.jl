@@ -1272,22 +1272,36 @@ function _workers_json(nb::LiveNotebook)
         placing = lock(_PLACING_LOCK) do; side in _PLACING; end
         host = r === nothing ? "" : String(r.host)
         sched = r !== nothing && r.scheduler !== :none
+        # A scheduler region can only queue while its front door is signed in. If that session has
+        # dropped (an idle timeout, a lost network, the host wanting a fresh second factor), the
+        # placement cannot move, and a "queued" pill is a wait the user sits out for nothing. Surface
+        # the sign-in the way a live kernel does, so the padlock is the obvious next step instead of
+        # an indicator that says the scheduler is working when nothing is reaching it.
+        signedout = sched && !isempty(host) && !ReportEngine.Sweep.connected(host)
         # The SAME record shape as a real worker's, short a process. A placeholder that answered
         # `alive`/`state`/`held` differently — or not at all — would put the reader back to guessing
         # from missing fields, which is the whole thing this vocabulary exists to stop. A queued
         # region genuinely has an allocation pending, so it carries those facts like any other.
-        push!(out, merge!(Dict{String,Any}(
+        entry = Dict{String,Any}(
             "side" => side, "host" => host, "kind" => "gate", "port" => 0, "connected" => false,
             "alive" => false, "state" => "none",
-            "status" => placing ? "connecting" : "disconnected",
+            "status" => (placing && !signedout) ? "connecting" : "disconnected",
             # What the pill SAYS. "connecting" describes a dial; a scheduler queue is a wait of a
             # different kind and length, and the difference is the whole reason to look at the pill.
-            "face" => placing ? (sched ? "queued" : "starting…") : "no worker",
-            "note" => placing ? (sched ? "queued for a node on $host — starts by itself when the scheduler grants one"
+            "face" => signedout ? "signed out" :
+                      placing ? (sched ? "queued" : "starting…") : "no worker",
+            "note" => signedout ? "not signed in to $host - use the padlock at the top of the page" :
+                      placing ? (sched ? "queued for a node on $host — starts by itself when the scheduler grants one"
                                        : "starting a worker on $host") :
                       r === nothing ? "no region '$side' in the registry" :
-                      "no worker yet — a cell tagged region=$side will start one"),
-            _region_alloc_facts(side)))
+                      "no worker yet — a cell tagged region=$side will start one")
+        if signedout
+            # The same code a live kernel uses, so the front end renders the identical "use the
+            # padlock" guidance and the pill is ranked as needing attention.
+            entry["noteCode"] = "not_signed_in"
+            entry["noteHost"] = host
+        end
+        push!(out, merge!(entry, _region_alloc_facts(side)))
     end
     return out
 end
@@ -1296,13 +1310,45 @@ end
 _region_kernel_if_active(nb::LiveNotebook, side::AbstractString) =
     lock(_REGION_LOCK) do; get(_REGION_KERNELS, (nb.id, String(side)), nothing); end
 
+# The orchestration trace for acquiring a region's worker. Empty for the main kernel and for a region
+# with nothing on record. This is the progress the panel shows while a region has a request in flight
+# but no worker log of its own yet - it is being queued, provisioned, and booted.
+function _region_acquire_log(side::AbstractString)
+    isempty(side) && return ""
+    r = try; ReportEngine.region_get(String(side)); catch; nothing; end
+    r === nothing && return ""
+    return try; ReportEngine.region_acquire_trace(r); catch; ""; end
+end
+
+# A worker log carrying no worker output yet: the remote process has not written one. `worker_log_tail`
+# returns empty before a worker is up (a `worker-<port>.log` that does not exist), so the panel can
+# fall back to the acquisition trace instead of a blank pane. The parenthesised forms are the
+# sentinels the other log readers use, matched by shape so this stays correct if the caller changes.
+_worker_log_pending(log::AbstractString) =
+    isempty(strip(log)) || (startswith(strip(log), "(") &&
+        (occursin("not spawned yet", log) || occursin("no remote log yet", log) ||
+         occursin("still booting", log) || occursin("may not have started", log)))
+
 # The tail of a worker's log (+ latest telemetry) for the worker/region status popup. `side==""` = main.
 function _worker_log(nb::LiveNotebook, side::AbstractString, lines::Int)
     k = isempty(side) ? nb.kernel : _region_kernel_if_active(nb, side)
-    k === nothing && return Dict{String,Any}("side" => side, "log" => "", "connected" => false,
-                                             "note" => "no active worker for this region")
+    if k === nothing
+        # No kernel object yet: the region is queued, or nothing has asked for it. Show the acquisition
+        # trace when a request is in flight; otherwise keep the placeholder note.
+        trace = _region_acquire_log(side)
+        return Dict{String,Any}("side" => side, "log" => trace, "connected" => false,
+                                "note" => isempty(trace) ? "no active worker for this region" :
+                                          "This region is acquiring a worker. The progress is shown below.")
+    end
     log = try; ReportEngine.worker_log_tail(k; lines = lines)
           catch e; "log unavailable: " * first(sprint(showerror, e), 160); end
+    # A region worker that has not begun writing its own log yet (provisioning, booting) has no
+    # per-process record. The orchestration trace IS the progress in that window, so fall back to it
+    # rather than leaving the pane blank.
+    if !isempty(side) && _worker_log_pending(log)
+        trace = _region_acquire_log(side)
+        isempty(trace) || (log = trace)
+    end
     return merge(_worker_entry(nb, side, k), _worker_provenance(k), Dict{String,Any}("log" => log))
 end
 

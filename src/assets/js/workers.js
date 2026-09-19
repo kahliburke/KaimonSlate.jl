@@ -340,9 +340,11 @@ function _wpPaintTabs() {
   }
   const rest = ranked.filter(w => !shown.includes(w));
   const tab = w => {
-    const side = w.side || '';
-    return '<button class="wptab' + (side === _wpSide ? ' on' : '') + '" data-wptab="' + _wpEsc(side) + '">' +
-      _wpOverflowDot(w) + ' ' + _wpEsc(_wpLabel(side, w.host)) + '</button>';
+    const side = w.side || '', lbl = _wpLabel(side, w.host);
+    // A narrow tab ellipsizes the label, so carry the full name in the title - the tab is a picker,
+    // and you should be able to read which worker it is even when the strip is crowded.
+    return '<button class="wptab' + (side === _wpSide ? ' on' : '') + '" data-wptab="' + _wpEsc(side) +
+      '" title="' + _wpEsc(lbl) + '">' + _wpOverflowDot(w) + ' ' + _wpEsc(lbl) + '</button>';
   };
   const more = rest.length ? '<span class="wptab-more"><button class="wptab wptab-morebtn">+' + rest.length +
     ' ▾</button><div class="wptab-menu" hidden>' +

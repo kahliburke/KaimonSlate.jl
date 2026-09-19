@@ -50,17 +50,67 @@ const _REMOTE_LOG = joinpath(_slate_cache_dir(), "remote.log")
 # via `KAIMONSLATE_REMOTE_LOG` — otherwise a test process shares the running hub's real remote.log.
 _remote_log_path() = get(ENV, "KAIMONSLATE_REMOTE_LOG", _REMOTE_LOG)
 
+# ── Per-region acquisition trace ───────────────────────────────────────────────────────────────
+# The worker panel wants to show a region's bring-up while it happens - queued, node granted,
+# provisioned, spawned, connected - during the one window the worker has no log of its own yet. The
+# durable `remote.log` holds all of it, but as ONE global stream: recovering a single region's lines
+# from it means matching host and name substrings, which bleeds across regions that share a front
+# door and drags in any line that merely mentions the host (a notebook named after it, say).
+#
+# So the association is made at the SOURCE instead. Code that is bringing a region up marks its
+# dynamic extent with `with_rlog_region`, and every `_rlog` emitted inside that extent - on the same
+# task, however deep the call - is mirrored into that region's own bounded buffer. No matching, no
+# bleed: a line belongs to the region whose bring-up was running when it was written, or to none.
+const _REGION_TRACE = Dict{String,Vector{String}}()
+const _REGION_TRACE_LOCK = ReentrantLock()
+const _REGION_TRACE_MAX = 120        # bounded ring; a bring-up is ~15 lines, so this keeps a few of them
+
+# The region whose bring-up is running on THIS task, or "" for anything not inside one. Task-local so
+# it is exact and needs no matching; not inherited by spawned children, which is why the marks sit on
+# the two functions that do the work synchronously (placement, and provision+spawn+connect).
+_current_rlog_region()::String = get(task_local_storage(), :slate_rlog_region, "")
+
+"Run `f` with `_rlog` lines mirrored into region `name`'s acquisition trace. Empty name ⇒ no marking."
+function with_rlog_region(f, name::AbstractString)
+    isempty(name) && return f()
+    task_local_storage(f, :slate_rlog_region, String(name))
+end
+
+# Tag every `_rlog` on the CURRENT task with region `name`, without restoring afterward. The scoped
+# `with_rlog_region` is the general form; use this only on a task that exists solely to bring `name`
+# up and ends with it (the placement task), where there is nothing to restore to.
+set_rlog_region!(name::AbstractString) = (isempty(name) || task_local_storage(:slate_rlog_region, String(name)); nothing)
+
+function _region_trace_append!(name::AbstractString, line::AbstractString)
+    lock(_REGION_TRACE_LOCK) do
+        buf = get!(() -> String[], _REGION_TRACE, String(name))
+        push!(buf, String(line))
+        extra = length(buf) - _REGION_TRACE_MAX
+        extra > 0 && deleteat!(buf, 1:extra)
+    end
+    return nothing
+end
+
+"Drop a region's acquisition trace, so the next bring-up starts clean rather than trailing the last one."
+region_trace_reset!(name::AbstractString) =
+    lock(_REGION_TRACE_LOCK) do; delete!(_REGION_TRACE, String(name)); nothing; end
+
 function _rlog(msg::AbstractString)
     path = _remote_log_path()
+    t = Dates.now()
     try
         mkpath(dirname(path))
         open(path, "a") do io
             # ms resolution: the reattach path is timed in tens of ms now — whole-second
             # timestamps couldn't distinguish "instant" from "1.9s" (both printed as :01→:02).
-            println(io, "[", Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS.sss"), "] ", msg)
+            println(io, "[", Dates.format(t, "yyyy-mm-dd HH:MM:SS.sss"), "] ", msg)
         end
     catch
     end
+    # Mirror into the current region's trace, if this line was emitted while bringing one up. Stamped
+    # with a bare HH:MM:SS so the panel renders it the way a worker's own log lines read.
+    reg = _current_rlog_region()
+    isempty(reg) || _region_trace_append!(reg, Dates.format(t, "HH:MM:SS") * "  " * String(msg))
     @info "slate remote: $msg"   # also to the host logger (message string survives kwarg-stripping)
     return nothing
 end
@@ -518,7 +568,11 @@ _put_dir(host, localdir, dest; kw...) = Sweep.put_dir(_host_for_files(String(hos
 
 function _ssh_capture(host, argv::Cmd)
     ok, out = _run_on(String(host), _cmdstr(argv))
-    ok || _rlog("ssh $host FAILED\n    cmd: $(_cmdstr(argv))\n    out: $(first(strip(out), 800))")
+    # A failure while the host is SIGNED OUT is the offline rejection, not a command failure - the drop
+    # is logged once where it happens, and logging it again on every poll that follows only buries the
+    # log. Report a failure only on a LIVE session, where the command genuinely ran and failed.
+    (ok || !Sweep.connected(String(host))) ||
+        _rlog("ssh $host FAILED\n    cmd: $(_cmdstr(argv))\n    out: $(first(strip(out), 800))")
     return (ok, out)
 end
 
@@ -1456,13 +1510,40 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
   # nowhere else. The allocation's own job body only sleeps, so shell put there would exit without
   # touching anything, and `_run_on` carries every poll and status command too — a `module load` on
   # each of those would be paid hundreds of times to configure a shell that then exits.
-  pro = _region_prologue(region)
-  launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && $pro$siresolve && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
+    pro = _region_prologue(region)
+    # Everything set up before the worker boots: cwd, PATH to the remote juliaup, the self-identifying
+    # tag, the region prologue, and the sysimage resolve. Shared by both launch forms below.
+    setup = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && $pro$siresolve"
     _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
-    # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
-    # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
-    _ssh_ok(host, `$launch`) ||
-        _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
+    v = via(host)
+    if v === nothing || isempty(v.job)
+        # A plain ssh target (or a routed node that is not a scheduler job): launch the worker DETACHED
+        # on the host itself so it outlives the ssh channel. `setsid` is Linux-only (absent on macOS), so
+        # fall back to plain `nohup … &`, which with stdio to the log file also survives the channel
+        # closing. Pass the whole line as ONE ssh arg so the remote login shell parses `&&`/`>`/`&`/`$HOME`
+        # intact (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed).
+        launch = "$setup && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
+        _ssh_ok(host, `$launch`) ||
+            _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
+    else
+        # A routed scheduler node. A worker launched DETACHED inside the `srun --overlap` step (`… & fi`)
+        # dies the instant the step exits: the node runs `proctrack/cgroup`, so the step's cgroup is torn
+        # down with every process in it, and `setsid` escapes the process GROUP but not the cgroup. So the
+        # worker runs in the FOREGROUND of the step - the step, and its cgroup, then live exactly as long as
+        # the worker does - and the DETACH is moved one level out, to the LOGIN node, which is under no such
+        # cgroup. `setsid nohup` there reparents the step launcher (`srun`, or PBS's `ssh node`) to init, so
+        # it survives the ssh channel closing and even a full session drop; the worker is re-attached over
+        # the forward on reconnect. `_in_allocation` builds the same in-allocation launcher every poll uses.
+        worker = "$setup && exec $jl"
+        inner = _in_allocation(v, host, worker)
+        launch = "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $inner > $logf 2>&1 & else nohup $inner > $logf 2>&1 & fi"
+        # Run the detach on the RAW login session (`run_there`), NOT `_ssh_ok`/`_run_on`: on a single-node
+        # cluster the login host IS the routed node (`via(v.host)` is set), so `_run_on(v.host, …)` would
+        # wrap this in ANOTHER `srun --overlap` step and the detached launcher would die with THAT step's
+        # cgroup - the very failure this fix exists to avoid. `run_there` reaches the login node directly.
+        first(Sweep.run_there(v.host, launch)) ||
+            _rlog("spawn: worker launch returned nonzero via $(v.host) (it may still be starting)")
+    end
     # Record who/what this worker serves so it's self-describing (list/reconnect/reap/adopt all read
     # this). `project` (the worker's --project env dir) is what pool adoption matches on.
     fields = ["notebook" => String(label), "parent" => String(parent), "hub" => gethostname(),
@@ -1540,7 +1621,16 @@ CURVE-pinned (direct) or over a supervised SSH tunnel. `k` is the GateKernel (it
 is the REMOTE project path; `.port`/`.stream_port` are set here). Returns the REPLConnection
 and the Tunnel (or nothing). Also starts the continuous /src sync.
 """
-function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractString)
+# Bring a worker up and attach to it. The public entry marks the whole bring-up with the region it
+# serves (if any), so every `_rlog` it emits - provision, spawn, connect - lands in that region's
+# acquisition trace for the panel. A worker with no region (a notebook's own remote main kernel)
+# marks nothing.
+spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractString) =
+    with_rlog_region(t.region) do
+        _spawn_and_connect_remote!(k, t, parent_project)
+    end
+
+function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractString)
     K = _kaimon()
     host = t.ssh_host
     _rlog("═══ REMOTE SPAWN requested: notebook worker → $host (transport=$(t.transport)) ═══")
@@ -1569,8 +1659,14 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             ip = ""
             lport, lstream = _free_local_port(), _free_local_port()
             v = via(host)
+            # For a routed worker the login node reaches the compute node over the cluster's own network,
+            # so the forward targets the node BY NAME. On a SINGLE-NODE cluster the node IS the login host:
+            # the SSH server then commonly refuses `direct_tcpip` to its own external name (PermitOpen is
+            # loopback-only), while the worker - bound 0.0.0.0 - is still reachable on loopback. Target
+            # 127.0.0.1 there, which is also the address the CURVE key is then pinned against.
             tunnel = v === nothing ? open_tunnel(host, [(lport, port), (lstream, stream_port)]) :
-                     open_tunnel(v.host, [(lport, port), (lstream, stream_port)]; remote = host)
+                     open_tunnel(v.host, [(lport, port), (lstream, stream_port)];
+                                 remote = host == v.host ? "127.0.0.1" : host)
             connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
             # The key is pinned against the LOCAL end of the forward, which is the address this hub
             # actually dials. Every forward carries CURVE, routed or not — see `_remote_worker_script`.
@@ -1881,9 +1977,23 @@ function _remote_ip(host::AbstractString)
 end
 
 # Fetch the remote gate's CURVE server pubkey over SSH and pin it in Kaimon's trust store.
+# A CURVE public key is one Z85 word: exactly 40 characters with no whitespace. `_ssh_capture`
+# returns the command's stdout and stderr interleaved (see `SshTransport._exec`), and a PBS compute
+# node greets a routed `ssh` with a login banner on stderr ("Found PBS job ... attaching to it now").
+# The key is therefore not always the whole output: take the first line that is a Z85 key and ignore
+# any banner lines around it.
+_is_curve_key(l::AbstractString) = length(l) == 40 && !occursin(r"\s", l)
+function _curve_key_from(out::AbstractString)
+    for line in eachline(IOBuffer(String(out)))
+        l = strip(line)
+        _is_curve_key(l) && return String(l)
+    end
+    return ""
+end
+
 function _fetch_and_pin_curve!(t::RemoteTarget, connect_host::AbstractString, port::Int)
     ok, out = _ssh_capture(t.ssh_host, `head -n1 $_REMOTE_KEY_PATH`)
-    pub = ok ? strip(out) : ""
+    pub = ok ? _curve_key_from(out) : ""
     isempty(pub) && error("slate remote: no CURVE server key on $(t.ssh_host) at $_REMOTE_KEY_PATH")
     # Pin via KaimonGate's trust store when reachable through Kaimon; harmless if absent.
     try
@@ -3757,6 +3867,27 @@ function region_host(r::Region)
     return p === nothing ? r.host : p.host
 end
 
+"""
+    region_acquire_trace(r; maxlines = 60) -> String
+
+The orchestration lines for bringing up `r`'s worker: queued for a node, node granted, the
+provisioning steps, spawn, and connect. Read from the region's own trace buffer, which `_rlog`
+fills while the bring-up runs (see `with_rlog_region`), so the worker panel can show live progress
+during the one window a worker has no log of its own yet. Empty when nothing has been recorded, so
+the caller keeps its own placeholder text.
+
+The buffer is per process: it holds this hub's bring-ups, not a previous instance's, which is what a
+reader watching a live acquisition wants.
+"""
+function region_acquire_trace(r::Region; maxlines::Int = 60)
+    buf = lock(_REGION_TRACE_LOCK) do
+        b = get(_REGION_TRACE, r.name, nothing)
+        b === nothing ? String[] : copy(b)
+    end
+    isempty(buf) && return ""
+    return join(length(buf) > maxlines ? last(buf, maxlines) : buf, "\n")
+end
+
 # A scheduler time in seconds. Defined where the allocation layer needs it too — PBS reports what is
 # LEFT as the difference of two of these, so one parser serves both.
 const _sched_seconds = Sweep.sched_seconds
@@ -3865,7 +3996,7 @@ deleted — and not only when someone remembers.
 # cgroup usually catches this; where it does not, the worker is squatting.
 function _reap_region_workers!(r::Region)
     h = region_host(r)
-    (isempty(h) || h == r.host) && return 0      # nothing placed — no node, so nothing on it
+    (isempty(h) || !_region_holds_node(r)) && return 0      # nothing placed — no node, so nothing on it
     n = 0
     try
         for w in list_remote_workers(h)
