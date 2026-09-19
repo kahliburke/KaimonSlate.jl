@@ -392,4 +392,29 @@ const NS = KaimonSlate.NotebookServer
             end
         end
     end
+
+    # `Base.expanduser` is a no-op on Windows, so a `~` path arrived unresolved, was read as
+    # relative, and opening a notebook by it failed with an empty error. Each module that
+    # handles paths defines its own (src/expanduser_fix.jl); check every one of them, since
+    # the failure was a single module silently falling back to Base.
+    @testset "expanduser resolves ~ on every platform" begin
+        home = homedir()
+        for M in (KaimonSlate, KaimonSlate.ReportEngine, KaimonSlate.NotebookServer,
+                  KaimonSlate.SlateHome)
+            @test M.expanduser("~") == home
+            @test M.expanduser("~/notebook.jl") == joinpath(home, "notebook.jl")
+            @test M.expanduser("~/a/b.jl") == joinpath(home, "a", "b.jl")
+            # Windows types the other separator, so it resolves there. On unix a backslash
+            # is a legal filename character and must NOT be treated as one.
+            if Sys.iswindows()
+                @test M.expanduser("~\\notebook.jl") == joinpath(home, "notebook.jl")
+            end
+            # Paths without a leading tilde are untouched.
+            @test M.expanduser("") == ""
+            @test isabspath(M.expanduser("~/x.jl"))
+            nontilde = Sys.iswindows() ? "C:\\tmp\\x.jl" : "/tmp/x.jl"
+            @test M.expanduser(nontilde) == nontilde
+        end
+    end
+
 end

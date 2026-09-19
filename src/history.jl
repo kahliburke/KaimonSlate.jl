@@ -26,6 +26,9 @@
 # per-cell change index: the entries that touched cell X ARE its version timeline, so
 # per-cell recovery / undo is a log scan, no full-snapshot re-parse.
 module SlateHistory
+# Base.expanduser is a no-op on Windows; this defines a working one for this module.
+include(joinpath(@__DIR__, "expanduser_fix.jl"))
+
 
 using SHA, JSON, CodecZstd
 

@@ -8,6 +8,9 @@ cell reconciles → reactively recomputes only stale cells → persists back to 
 the engine (`ReportEngine`) and per-cell renderer (`ReportRender`).
 """
 module NotebookServer
+# Base.expanduser is a no-op on Windows; this defines a working one for this module.
+include(joinpath(@__DIR__, "expanduser_fix.jl"))
+
 
 using HTTP, JSON, FileWatching, CodecZlib, CodecZstd
 import Base64

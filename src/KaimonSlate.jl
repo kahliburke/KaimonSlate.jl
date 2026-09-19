@@ -23,6 +23,9 @@ As a Kaimon extension, `create_tools` exposes `slate.open` / `slate.list` /
 `slate.close` to the agent, and Kaimon manages the subprocess lifecycle.
 """
 module KaimonSlate
+# Base.expanduser is a no-op on Windows; this defines a working one for this module.
+include(joinpath(@__DIR__, "expanduser_fix.jl"))
+
 
 import JSON
 
