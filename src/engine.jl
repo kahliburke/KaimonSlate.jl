@@ -11,6 +11,9 @@ This first slice implements just the model + parse/serialize round-trip — no
 evaluation yet — so it is testable with `Base` alone.
 """
 module ReportEngine
+# Base.expanduser is a no-op on Windows; this defines a working one for this module.
+include(joinpath(@__DIR__, "expanduser_fix.jl"))
+
 
 import JSON   # durable `using`-export cache file (deps.jl)
 import Pkg    # in-process package add/remove (eval.jl)

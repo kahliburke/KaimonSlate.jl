@@ -19,7 +19,7 @@ const KS = KaimonSlate
         old = get(ENV, "KAIMONSLATE_CONFIG_HOME", nothing)
         ENV["KAIMONSLATE_CONFIG_HOME"] = mktempdir()
         try
-            @test KS.configured_port() == 0                   # fresh config: unset
+            @test KS.configured_port() == 0           # fresh config: unset
             @test KS.set_configured_port!(8080) == 8080
             @test KS.configured_port() == 8080
             @test isfile(KS._slate_config_path())             # written to disk
@@ -230,7 +230,8 @@ end
 @testset "orphan reaping spares live hubs' workers" begin
     @testset "a process with a live parent is never an orphan" begin
         @test KS._is_orphan_worker(getpid()) == false      # we have a live parent
-        c = run(`sleep 30`; wait = false)
+        # `sleep` is a unix binary; Julia itself is the portable long-running child.
+        c = run(`$(Base.julia_cmd()) --startup-file=no -e "sleep(30)"`; wait = false)
         try
             sleep(0.5)
             @test KS._ppid(getpid(c)) == getpid()          # our child, parent alive

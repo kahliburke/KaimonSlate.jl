@@ -1037,6 +1037,18 @@ end
 # name => absolute-local-path. Registry deps have no path; git deps have a `repo-url` (they clone on the
 # remote straight from the Manifest, so need no special handling). Paths may be relative to the env dir.
 # A line-scan of the stable `[[deps.Name]]` … `path = "…"` format — no TOML dep needed on the hub side.
+# `path = "."` resolves to the env dir itself, and on Windows `abspath` keeps the trailing
+# separator there (`C:\...\proj\`) while on unix it does not. These paths are compared against
+# env dirs to skip the project itself and handed to rsync, where a trailing separator changes
+# what gets copied, so normalise it away. A bare root (`C:\`, `/`) is left alone.
+function _strip_trailing_sep(p::AbstractString)
+    s = String(p)
+    q = rstrip(s, ('/', '\\'))
+    isempty(q) && return s                                    # "/" — a unix root
+    (Sys.iswindows() && length(q) == 2 && q[2] == ':') && return s   # "C:\" — a drive root
+    return q
+end
+
 function _dev_deps(manifest::AbstractString, envdir::AbstractString)
     out = Pair{String,String}[]
     isfile(manifest) || return out
@@ -1049,7 +1061,7 @@ function _dev_deps(manifest::AbstractString, envdir::AbstractString)
         pm = match(r"^\s*path\s*=\s*\"(.*)\"\s*$", line)
         pm === nothing && continue
         p = String(pm.captures[1])
-        push!(out, curname => (isabspath(p) ? p : abspath(joinpath(envdir, p))))
+        push!(out, curname => _strip_trailing_sep(isabspath(p) ? p : abspath(joinpath(envdir, p))))
         curname = ""
     end
     return out

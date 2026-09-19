@@ -93,7 +93,7 @@ const H = SlateHistory
         @test length(H.entries(moved)) == 2
         @test H.latest_hash(moved) == H.latest_hash(a)         # one store, reached by either path
         @test H.known_paths(moved) ==                          # oldest first → head is the origin
-              [abspath("/tmp/__slate_ident_a__.jl"), abspath("/tmp/__slate_ident_b__.jl")]
+              ["/tmp/__slate_ident_a__.jl", "/tmp/__slate_ident_b__.jl"]
 
         # A different key is a different document, even at a path the store already knows.
         @test isempty(H.entries(H.Doc("doc-other", "/tmp/__slate_ident_a__.jl")))
@@ -126,7 +126,7 @@ const H = SlateHistory
         @test H.fork!(src, dst)
         @test length(H.entries(dst)) == 2                                   # lineage came along
         @test length(H.entries(src)) == 2                                   # original untouched
-        @test H.known_paths(dst) == [abspath("/tmp/__slate_fork_b__.jl")]   # the copy owns its path
+        @test H.known_paths(dst) == ["/tmp/__slate_fork_b__.jl"]   # the copy owns its path
 
         H.record!(dst, "3\n"; cells = [("a", "code", "3\n")])
         @test (length(H.entries(dst)), length(H.entries(src))) == (3, 2)    # …and diverge from here
@@ -161,7 +161,7 @@ const H = SlateHistory
         @test isempty(H.quiet_paths(one))
 
         @test H.silence!(one)
-        @test H.quiet_paths(two) == [abspath("/tmp/__slate_quiet_a__.jl")]   # only that path is quiet
+        @test H.quiet_paths(two) == ["/tmp/__slate_quiet_a__.jl"]   # only that path is quiet
         @test H.silence!(one)                                                # idempotent
         @test length(H.quiet_paths(one)) == 1
     end

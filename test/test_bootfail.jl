@@ -71,14 +71,17 @@ const RE = KaimonSlate.ReportEngine
 
     @testset "a live process is not reported as dead, an exited one is" begin
         k = RE.GateKernel(mktempdir())
-        k.proc = run(`sleep 30`; wait = false)
+        # `sleep` is a unix binary; Julia itself is the portable long-running child.
+        k.proc = run(`$(Base.julia_cmd()) --startup-file=no -e "sleep(30)"`; wait = false)
         try
             @test RE._worker_died(k) == false
         finally
             kill(k.proc)
         end
         dead = RE.GateKernel(mktempdir())
-        dead.proc = run(pipeline(`false`; stdout = devnull, stderr = devnull); wait = false)
+        # `false` is a unix binary too; a Julia child that exits nonzero is portable.
+        dead.proc = run(pipeline(`$(Base.julia_cmd()) --startup-file=no -e "exit(1)"`;
+                                 stdout = devnull, stderr = devnull); wait = false)
         wait(dead.proc)
         @test RE._worker_died(dead) == true
     end

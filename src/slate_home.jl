@@ -26,6 +26,9 @@ Resolution precedence, most-specific first, for each home:
 Every entry is a *function* (not a const) so it re-reads `ENV` — tests point the vars at a tempdir.
 """
 module SlateHome
+# Base.expanduser is a no-op on Windows; this defines a working one for this module.
+include(joinpath(@__DIR__, "expanduser_fix.jl"))
+
 
 const _NS = "kaimonslate"
 

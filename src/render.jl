@@ -193,9 +193,16 @@ end
 # cell (`cellid`); if the error is purely inside another cell's code the call site here still names
 # this cell. Falls back to any `cell:…:N` / legacy `string:N` when `cellid` is unknown. `nothing`
 # when the error has no in-cell location (surfaced deep inside a package).
+# A cell is evaluated under the pseudo-filename `cell:<id>`, and Windows' stacktrace printer
+# takes that for a path and prints it normalised: a frame for a function DEFINED in another
+# cell reads `cell:\a:1`. The cell-ref regexes below would miss it, so those frames would lose
+# their jump-to-source link, and the link text would show the separator. Undo it once, here.
+_unmangle_cellrefs(s::AbstractString) = replace(s, r"\bcell:[\\/]+" => "cell:")
+
 function _cell_error_line(o::CellOutput, cellid::AbstractString = "")
-    for s in (o.backtrace, o.exception)
-        s === nothing && continue
+    for s0 in (o.backtrace, o.exception)
+        s0 === nothing && continue
+        s = _unmangle_cellrefs(s0)
         for m in eachmatch(r"\bcell:([\w\-]+):(\d+)", s)
             (isempty(cellid) || m.captures[1] == cellid) && return parse(Int, m.captures[2])
         end
@@ -211,8 +218,9 @@ end
 # called in (the nearest editable edge). Returns `(cellid, line)`, `("", line)` for a legacy
 # `string:N` frame (no cell), or `nothing`. Used for the error-message jump target.
 function _error_origin(o::CellOutput)
-    for s in (o.backtrace, o.exception)
-        s === nothing && continue
+    for s0 in (o.backtrace, o.exception)
+        s0 === nothing && continue
+        s = _unmangle_cellrefs(s0)
         m = match(r"\bcell:([\w\-]+):(\d+)", s)
         m === nothing || return (String(m.captures[1]), parse(Int, m.captures[2]))
         m = match(r"\bstring:(\d+)", s)
@@ -223,18 +231,26 @@ end
 
 # Make source locations in a backtrace clickable: `path.jl:line` → open in VS Code; `string:N`
 # (our cell eval `filename`) → jump to that line IN THIS CELL (errors.js wires `.cellref`).
-function _linkify_trace(bt::AbstractString)
+function _linkify_trace(bt0::AbstractString)
     home = homedir()
+    bt = _unmangle_cellrefs(bt0)
+    # `~/…` and `/…` are the unix forms; `C:\…` (or `C:/…`) is what a Windows backtrace carries,
+    # and without it no source frame is clickable there.
+    #
     # `+` and `@` are ordinary in a path (a git worktree, a versioned directory). Leaving them out
     # does not fail to match — it matches a SHORTER tail that is not a real file, so the frame
     # silently stops being clickable for everyone whose checkout contains one.
-    s = replace(_esc(bt), r"((?:~|/)[\w./ +@\-]*\.jl):(\d+)" => function (m)
+    s = replace(_esc(bt), r"((?:~|/|[A-Za-z]:[\\/])[\w./\\ +@\-]*\.jl):(\d+)" => function (m)
         p = match(r"^(.*\.jl):(\d+)$", m)
         p === nothing && return m
         path, line = String(p.captures[1]), String(p.captures[2])
         ap = startswith(path, "~") ? home * path[2:end] : path
         isabspath(ap) && isfile(ap) || return m   # skip Base's relative ./foo.jl etc. — only real files
-        "<a class=\"srcref\" href=\"vscode://file" * ap * ":" * line * "\" title=\"open in VS Code\">" * m * "</a>"
+        # vscode://file wants an absolute path with forward slashes; a Windows one needs its
+        # separators flipped and the leading slash added (`vscode://file/C:/…`).
+        uri = replace(ap, '\\' => '/')
+        startswith(uri, "/") || (uri = "/" * uri)
+        "<a class=\"srcref\" href=\"vscode://file" * uri * ":" * line * "\" title=\"open in VS Code\">" * m * "</a>"
     end)
     # `cell:<id>:N` → jump to line N IN CELL <id> (cross-cell: the frame names its own source cell).
     s = replace(s, r"\bcell:([\w\-]+):(\d+)\b" => function (m)

@@ -321,11 +321,18 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
                                                  ("NotDeclared", "devsrc/NotDeclared")])
         jl = Base.julia_cmd()[1]
         io = IOBuffer()
-        run(pipeline(ignorestatus(addenv(`$jl --startup-file=no -e $s`, "HOME" => home)),
+        # `homedir()` reads USERPROFILE on Windows and HOME elsewhere, so pinning only HOME
+        # would let the script rewrite the real home instead of the fixture.
+        homeenv = Sys.iswindows() ? ["USERPROFILE" => home, "HOME" => home] : ["HOME" => home]
+        run(pipeline(ignorestatus(addenv(`$jl --startup-file=no -e $s`, homeenv...)),
                      stdout = io, stderr = io))
         p = Pkg.TOML.parsefile(joinpath(home, "proj", "Project.toml"))
-        @test get(get(p, "sources", Dict()), "NeuroDSL", Dict())["path"] ==
-              joinpath(home, "devsrc", "NeuroDSL")
+        # The script targets a remote unix host, so the dev-path tail it writes stays
+        # forward-slashed. Running it locally on Windows prefixes a backslashed homedir,
+        # giving a mixed path that is still the right answer — compare separator-agnostically.
+        _sep(x) = replace(String(x), '\\' => '/')
+        @test _sep(get(get(p, "sources", Dict()), "NeuroDSL", Dict())["path"]) ==
+              _sep(joinpath(home, "devsrc", "NeuroDSL"))
         # Pkg REJECTS a source naming a package the project doesn't list, which an indirect
         # (manifest-only) path dep would be — so an undeclared name must not be inserted.
         @test !haskey(get(p, "sources", Dict()), "NotDeclared")
@@ -349,7 +356,10 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         s = RE._rewrite_devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL")])
         jl = Base.julia_cmd()[1]
         io = IOBuffer()
-        run(pipeline(ignorestatus(addenv(`$jl --startup-file=no -e $s`, "HOME" => home)),
+        # `homedir()` reads USERPROFILE on Windows and HOME elsewhere, so pinning only HOME
+        # would let the script rewrite the real home instead of the fixture.
+        homeenv = Sys.iswindows() ? ["USERPROFILE" => home, "HOME" => home] : ["HOME" => home]
+        run(pipeline(ignorestatus(addenv(`$jl --startup-file=no -e $s`, homeenv...)),
                      stdout = io, stderr = io))
         src = Pkg.TOML.parsefile(joinpath(home, "proj", "Project.toml"))["sources"]["NeuroDSL"]
         @test src["url"] == "https://example.invalid/NeuroDSL.jl"
@@ -432,10 +442,13 @@ end
         end
     end
     # …and the specific precedence, so a future edit to either side has to state its intent.
+    # Both sides run through `abspath`, which rewrites the separator on Windows, so the
+    # comparison is on the resolved path rather than a posix literal.
+    _sep(x) = replace(String(x), '\\' => '/')
     withenv("KAIMONSLATE_CACHE_HOME" => "/tmp/a", "KAIMONSLATE_HOME" => "/tmp/b", "XDG_CACHE_HOME" => "/tmp/c") do
-        @test hub_memo() == "/tmp/a/memo"          # dedicated cache home wins
+        @test _sep(hub_memo()) == _sep(joinpath(abspath("/tmp/a"), "memo"))          # dedicated cache home wins
     end
     withenv("KAIMONSLATE_CACHE_HOME" => nothing, "KAIMONSLATE_HOME" => "/tmp/b", "XDG_CACHE_HOME" => "/tmp/c") do
-        @test hub_memo() == "/tmp/b/cache/memo"    # then the HOME shortcut — NOT XDG
+        @test _sep(hub_memo()) == _sep(joinpath(abspath("/tmp/b"), "cache", "memo"))  # then the HOME shortcut, NOT XDG
     end
 end
