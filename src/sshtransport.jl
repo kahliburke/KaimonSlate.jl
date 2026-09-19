@@ -757,6 +757,7 @@ answer for each server prompt; returning `nothing` cancels.
 function session(host::AbstractString; ask)
     key = String(host)
     replaced = Ref(false)
+    dead = Ref{Union{Session,Nothing}}(nothing)
     s = lock(_REG_LOCK) do
         s = get(_SESSIONS, key, nothing)
         # Alive, or still opening. `alive` is only set once authentication has finished, and on a
@@ -764,15 +765,30 @@ function session(host::AbstractString; ask)
         # request arriving in that window must QUEUE on the session being opened, not start a second
         # one. Replacing it orphans a login the far side has already accepted, and asks the person
         # to answer a fresh set of prompts for a connection they just made.
+        #
+        # `isempty(s.err)` is what actually means "still opening": `_serve` catches a failed `_open!`
+        # and then runs forever answering requests with that cached error, so its owner task is NEVER
+        # `istaskdone`. Without this check every later call, non-interactive ones included, would
+        # replay the first failure verbatim instead of trying again, with no way back short of an
+        # interactive sign-in (which is the only caller that currently clears a session).
         if s !== nothing
-            (s.alive || (s.owner !== nothing && !istaskdone(s.owner))) && return s
+            (s.alive || (isempty(s.err) && s.owner !== nothing && !istaskdone(s.owner))) && return s
             delete!(_SESSIONS, key); replaced[] = true
+            s.owner !== nothing && !istaskdone(s.owner) && (dead[] = s)   # still looping on its own error - tell it to stop
         end
         ep = resolve(key)
         s = Session(ep, Cint(-1), C_NULL, Channel{Any}(32), nothing, Prompter(key), false, "", Fwd[])
         s.owner = Threads.@spawn _serve(s, ask)
         _SESSIONS[key] = s
         return s
+    end
+    # Outside the lock, same as `disconnect!`: a session left here would otherwise idle forever,
+    # since only a `:close` request ever ends `_serve`'s loop. Fire-and-forget — the replacement
+    # session above is already live, so nothing needs to wait on this one's own shutdown.
+    if (o = dead[]) !== nothing
+        o.prompter.cancelled = true
+        try; put!(o.req, (:close, "", Channel{Any}(1))); catch; end
+        try; close(o.req); catch; end
     end
     replaced[] && _announce_drop(key)   # outside the lock: the listener reaches back into transport
     return s
