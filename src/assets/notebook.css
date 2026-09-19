@@ -69,8 +69,36 @@ html[data-slate-theme="solarized-light"] {
 body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,sans-serif;
        margin:0; line-height:1.6; }
 .topbar { position:sticky; top:0; z-index:30; background:var(--bg2); border-bottom:1px solid var(--border);
-          padding:10px 20px; display:flex; align-items:center; gap:12px; }
-.topbar h1 { font-size:1.1rem; margin:0; color:var(--strong); flex:1; }
+          padding:10px 20px; display:flex; flex-wrap:wrap; align-items:center; gap:12px; row-gap:8px; }
+.topbar h1 { font-size:1.1rem; margin:0; color:var(--strong); flex:0 1 auto; min-width:0;
+             white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* The bar is two flex groups: a lead (brand, title, run-status) and the action group. With flex-wrap
+   on the bar, the actions sit inline while they fit and drop to their own right-aligned row the moment
+   the full title plus the buttons no longer fit - the browser decides from real content, so there is no
+   width breakpoint to tune and nothing to flicker at. The title keeps its own row when wrapped, and
+   ellipsizes rather than growing the bar taller. `max-width:100%` lets the action group wrap its buttons
+   onto further rows when even its own row cannot hold them all, so nothing is ever clipped. */
+.topbar-lead { display:flex; align-items:center; gap:12px; flex:0 1 auto; min-width:0; }
+.topbar-actions { display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end;
+                  gap:12px; row-gap:8px; flex:0 0 auto; max-width:100%; margin-left:auto; }
+/* At the narrowest widths the action buttons drop their labels to icons and the brand drops its
+   wordmark to the logo (set by fitTopbarActions in core.js from measured fit), so the buttons stay on
+   one row instead of spilling onto a third. */
+.topbar[data-actions="icons"] .topbar-actions .tb-label,
+.topbar[data-actions="icons"] .brand-label { display:none; }
+/* Staged pill collapse. The level is set by fitTopbarPills (core.js) from measured fit rather than a
+   fixed width, so the pills keep their text while the row has room. Stage 1 drops the worker's live
+   status and the restart qualifier; stage 2 leaves icons and the essential count (the error mark and
+   number, the worker icon, the restart arrow). Collapse hides these structural spans, never matched
+   words, so reworded or localized text still collapses. */
+.topbar[data-pills="1"] #workerpills .wstat, .topbar[data-pills="2"] #workerpills .wstat,
+.topbar[data-pills="1"] .healthbadge .hb-detail, .topbar[data-pills="2"] .healthbadge .hb-detail { display:none; }
+.topbar[data-pills="2"] .runpill .rp-detail,
+.topbar[data-pills="2"] #workerpills .wtoplabel, .topbar[data-pills="2"] #workerpills .wpill-caret,
+.topbar[data-pills="2"] .healthbadge .hb-key { display:none; }
+/* Once collapsed to an icon, the pill's reserved width would leave the icon rattling in a half-empty
+   chip, so drop the reservation at that stage only. */
+.topbar[data-pills="2"] .runpill, .topbar[data-pills="2"] .wpill-top { min-width:0; }
 .wdot { width:9px; height:9px; border-radius:50%; background:var(--dim); display:inline-block; flex:0 0 auto; }
 .wdot.up { background:var(--green); } .wdot.inproc { background:var(--accent); } .wdot.down { background:var(--red); }
 .brand { display:flex; align-items:center; gap:7px; flex:0 0 auto; text-decoration:none;
@@ -280,9 +308,27 @@ body:has(.filespanel.open) .cellmove { display:none; }
 .cellhead { display:flex; flex-wrap:nowrap; align-items:center; gap:8px; padding:3px 10px; background:var(--bg3);
             border-bottom:1px solid var(--border); font-size:.82rem; min-height:27px; }
 .cellhead .run { padding:0 7px; font-size:.80rem; }
-.cellhead .hspace { flex:1; }
-.cellacts { display:flex; gap:3px; align-items:center; opacity:0; transition:opacity .12s; }
-.cell:hover .cellacts, .cell.selected .cellacts { opacity:1; }
+/* Lead takes the slack and truncates its rightmost chips (dup-warnings first, then the region name)
+   when the row is tight; trail is fixed so the action buttons and the state badge never leave. */
+.cellhdr-lead { display:flex; align-items:center; gap:8px; flex:1 1 auto; min-width:0; overflow:hidden; }
+.cellhdr-trail { position:relative; display:flex; align-items:center; gap:8px; flex:0 0 auto; }
+.cellhdr-info { display:flex; align-items:center; gap:8px; transition:opacity .12s; }
+/* The action buttons are laid over the run-info (they share the right-hand space, so the two never
+   add up and clip on a narrow cell). Hidden and out of flow at rest, they fade in over the run-info
+   on hover or selection, and the run-info fades out under them. */
+.cellacts { position:absolute; right:0; top:0; bottom:0; display:flex; gap:3px; align-items:center;
+            background:var(--bg3); padding-left:12px; opacity:0; pointer-events:none; transition:opacity .12s; }
+.cell:hover .cellacts, .cell.selected .cellacts { opacity:1; pointer-events:auto; }
+/* The hidden run-info must also stop taking pointer events: opacity:0 still hit-tests and, being a
+   stacking context, would sit over the overlaid buttons and swallow their clicks (e.g. delete). */
+.cell:hover .cellhdr-info, .cell.selected .cellhdr-info { opacity:0; pointer-events:none; }
+/* Each header is its own query container: when the cell is wide enough for both, the buttons sit
+   beside the run-info in flow and both stay visible; a narrow cell keeps the overlay above. */
+.cellhead { container-type: inline-size; }
+@container (min-width:560px) {
+  .cellacts { position:static; background:none; padding-left:0; }
+  .cell:hover .cellhdr-info, .cell.selected .cellhdr-info { opacity:1; pointer-events:auto; }
+}
 .cellacts button { padding:0 6px; font-size:.78rem; }
 .cellhead .drag { cursor:grab; color:var(--dim); padding:0 4px 0 0; user-select:none; font-size:.98rem; }
 .cellhead .drag:active { cursor:grabbing; } .cell:hover .cellhead .drag { color:var(--text); }
@@ -1825,8 +1871,12 @@ body.modkey .cm-content { cursor: pointer; }
   border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; }
 .dagpane.dock-bottom { left:0; right:0; bottom:0; height:var(--dagh, 42vh);
   border-top:1px solid var(--bg3); box-shadow:0 -8px 24px #0007; }
-.dagpane .aphead { flex:0 0 auto; }
+.dagpane .aphead { flex:0 0 auto; flex-wrap:wrap; row-gap:8px; }
 .dagpane .aphead .hbtn { font-size:.95rem; padding:4px 11px; }   /* match the rest of the UI's control weight */
+/* The stat line ("N cells · M edges") stays on one line and ellipsizes instead of wrapping to several,
+   giving way before the tools; the tools wrap to a second row rather than overflowing a narrow panel. */
+.dagpane .aphead > strong { flex:0 0 auto; }
+.dagpane #dagcount { flex:0 1 auto; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .daggrip { position:absolute; z-index:2; }
 .dagpane.dock-right .daggrip { left:-5px; top:0; bottom:0; width:10px; cursor:ew-resize; }
 .dagpane.dock-bottom .daggrip { top:-5px; left:0; right:0; height:10px; cursor:ns-resize; }

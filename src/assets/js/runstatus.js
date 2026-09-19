@@ -84,14 +84,16 @@
       const par = running.size > 1 ? ` · ⇉ ${running.size} parallel` : '';
       const rest = restored > 0 ? ` · ♻ ${restored} restored` : '';
       pill.className = 'runpill running';
-      pill.innerHTML = `<span class="rring" style="--rp:${frac}"></span>Running ${k}/${n}${par}${rest} · ${fmt(mx)}`;
+      // rp-detail marks the descriptive text that the topbar drops on narrow screens (notebook.css),
+      // leaving the ring and the k/N progress. Keep whatever wording goes here inside these spans.
+      pill.innerHTML = `<span class="rring" style="--rp:${frac}"></span><span class="rp-detail">Running </span>${k}/${n}<span class="rp-detail">${par}${rest} · ${fmt(mx)}</span>`;
       pill.style.display = '';
     } else {
       // At rest: reflect the notebook's CURRENT error state, DERIVED from live cell states — so the
       // pill clears the instant the offending cell is fixed or removed. Runs even when not `revealed`
       // (a delete/fix never revealed a run), so `window.renderRunPill` can refresh it on any edit.
       const nerr = liveErroredIds().length;
-      if (nerr) { pill.className = 'runpill err'; pill.style.display = ''; pill.textContent = `⚠ ${nerr} errored`; }
+      if (nerr) { pill.className = 'runpill err'; pill.style.display = ''; pill.innerHTML = `⚠ ${nerr}<span class="rp-detail"> errored</span>`; }
       else { pill.style.display = 'none'; pill.textContent = ''; }
     }
   }
