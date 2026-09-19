@@ -1123,11 +1123,30 @@ How much output one sweep has PRODUCED, from its manifests — the number that s
 it back is reasonable. Counts a unit's stored result whichever form it took, so an addressable
 dataset and a whole value are comparable.
 """
+# Every unit the STORE has, keyed by shard key, from one directory listing.
+#
+# Store-wide rather than per-run on purpose. A shard key is a hash of the body and the parameter
+# point and carries no chunk or run in it, so a pilot over four points and the full sweep over four
+# thousand share keys and the second reuses the first's results. Folding only the run's own chunks
+# made that reuse invisible and the full sweep recomputed what the pilot had already done.
+# The results table needs the RECORDS, and it is store-wide because reuse is: a unit landed by a
+# pilot belongs in the full sweep's table too. That makes it O(units) in memory, which is inherent
+# to materialising a table of every unit, and it is why the poll path uses the status fold instead.
+function store_rows(root::AbstractString)
+    out = Dict{String,Any}()
+    for (_, paths) in SlateTask.events_by_chunk(root)
+        merge!(out, SlateTask.rows_of(root, paths))
+    end
+    return out
+end
+
 function sweep_bytes(root::AbstractString, sweep::AbstractString)
     total = 0
+    evs = SlateTask.events_by_chunk(root)
     for c in (try; BatchSweep.sweep_chunks(root, sweep); catch; String[]; end)
+        rows = SlateTask.rows_of(root, get(evs, c, String[]))
         for k in BatchSweep.chunk_shards(root, c)
-            m = MemoStore.read_manifest(root, k)
+            m = get(rows, k, nothing)
             m === nothing && continue
             d = get(m, "dataset", nothing)
             if d isa AbstractDict
@@ -1410,6 +1429,10 @@ function advance_started!(; every::Real = 30.0)
         # the only thing a sign-in gates, and it goes out on the next tick after one lands.
         _reachable(t) || continue
         try; sync_in!(t); catch; continue; end
+        # Fold the MIRROR's log. A pull merges and never deletes, so a store compacted over there
+        # leaves this side holding the originals; folding here is what keeps the mirror from growing
+        # for the life of the store. Local files only, and never required for correctness.
+        try; SlateTask.compact_events!(root); BatchSweep.forget_fold!(root); catch; end
         l = launcher_for(t)
         for run in runs
             # Clear markers with no run behind them; the store was synced in above.
@@ -1483,12 +1506,27 @@ Drop these units' results for good — from the hub's view AND from the store. D
 would be undone by the next sync, which reads the store as the truth; that is right for everything
 except a deletion someone asked for.
 """
+# Forgetting a unit has to reach the LOG, not just the mirror. The log is immutable, so removal is
+# said in a new event per chunk rather than by editing the events that recorded the unit. A removal
+# that only dropped the local record brought the result back on the next sync, which is how a reset
+# came to report four units done out of three.
 function forget_results!(t::SweepTarget, keys)
     root = store_root(t)
+    want = Set(String.(keys))
+    isempty(want) && return 0
+    evs = SlateTask.events_by_chunk(root)
     n = 0
-    for k in keys; MemoStore.drop_manifest(root, k) && (n += 1); end
-    t isa ClusterTarget && !isempty(t.host) &&
-        forget!(remote_store(t), ["manifests/" * String(k) * ".toml" for k in keys])
+    written = String[]
+    for (c, paths) in evs
+        gone = String[k for k in Base.keys(SlateTask.rows_of(root, paths)) if k in want]
+        isempty(gone) && continue
+        push!(written, SlateTask.write_event!(root, c, Dict{String,Any}[]; dropped = gone))
+        n += length(gone)
+    end
+    # The tombstones are the hub's and have to cross, or the store keeps answering with the units
+    # this just forgot.
+    t isa ClusterTarget && !isempty(t.host) && !isempty(written) &&
+        sync_out!(t; dirs = ("events",))
     return n
 end
 
@@ -1854,8 +1892,9 @@ function _dataset_of(root, params, keys, label = "", src = LocalSource(root); li
     # a shape with nothing to chunk is not fixed by anything the reader can do, while the other two
     # are. Empty for a unit that ran before this was recorded.
     whys = Set{String}()
+    rows_ = store_rows(root)
     for (prm, k) in zip(params, keys)
-        m = MemoStore.read_manifest(root, k)
+        m = get(rows_, k, nothing)
         facts = m === nothing ? _NOFACTS :
                 (; status = String(get(m, "status", "")),
                    ms = Float64(get(m, "ms", 0.0)),
@@ -2625,10 +2664,11 @@ end
 # A row that FAILED carries its message and traceback in `value` — the same slot, because a unit
 # produced one thing or the other and `status` already says which. There is deliberately no second
 # `error` field to check: a reader that forgot it would silently treat a failure as an empty result.
-function _rows(root, params, keys, src = LocalSource(root))
+function _rows(root, params, keys, run, src = LocalSource(root))
     rows = NamedTuple[]
+    have = store_rows(root)
     for (prm, k) in zip(params, keys)
-        m = MemoStore.read_manifest(root, k)
+        m = get(have, k, nothing)
         if m === nothing
             push!(rows, (; params = prm, status = "", value = nothing, record = nothing,
                            summary = nothing,
@@ -2742,7 +2782,7 @@ function refresh!(r::ShardedResult)
     root = store_root(r.target)
     l = launcher_for(r.target)
     r.plan = BatchSweep.plan(root, r.run; launcher = l)
-    r.rows = _rows(root, r.params, r.keys, source_of(r.target))
+    r.rows = _rows(root, r.params, r.keys, r.run, source_of(r.target))
     r.telemetry = BatchSweep.telemetry(root, r.run; launcher = l, plan = r.plan)
     return r
 end
@@ -2772,9 +2812,8 @@ end
 "Clear the failed shards so the next run of the sweep cell retries exactly those."
 function retry_failed!(r::ShardedResult)
     root = store_root(r.target)
-    failed = [k for k in r.keys
-              if (m = MemoStore.read_manifest(root, k);
-                  m !== nothing && String(get(m, "status", "")) == "error")]
+    st = BatchSweep.fold(root).status          # status alone: no record is read to find a failure
+    failed = [k for k in r.keys if get(st, k, "") == "error"]
     return forget_results!(r.target, failed)
 end
 
@@ -2893,6 +2932,7 @@ function forget_run!(target::SweepTarget, run::AbstractString)
     # Started is not the question. What must not happen is dropping the descriptors out from under
     # work that is still queued, and a sweep whose units have all landed has none — refusing those
     # made the feature useless, since every run that ever ran was started.
+    gone = _run_event_rels(root, String(run))
     if BatchSweep.is_started(root, String(run))
         p = BatchSweep.plan(root, String(run); launcher = launcher_for(target))
         BatchSweep.is_settled(p) ||
@@ -2900,10 +2940,24 @@ function forget_run!(target::SweepTarget, run::AbstractString)
                   "units have landed. Cancel it first, then release it.")
     end
     n = BatchSweep.forget_sweep!(root, String(run))
+    _forget_events_there!(target, gone)
     sync_out!(target)
     return n
 end
 forget_run!(r::ShardedResult) = forget_run!(getfield(r, :target), getfield(r, :run))
+
+# Deleting a run's events in the MIRROR is half the job. A pull merges and never deletes, so the
+# store's copies come straight back on the next sync and the run reappears — the same way a
+# `.started` marker removed only here used to undo a reset. Removal has to be asked for at the
+# store, which is what `forget!` is for.
+function _forget_events_there!(t::SweepTarget, rel::Vector{String})
+    (t isa ClusterTarget && !isempty(t.host) && !isempty(rel)) || return false
+    return forget!(remote_store(t), rel)
+end
+
+# The relative paths of a run's events, taken BEFORE they are deleted locally.
+_run_event_rels(root::AbstractString, run::AbstractString) =
+    String["events/" * basename(f) for f in BatchSweep._run_events(root, String(run))]
 
 # Every run this CELL minted that was never started and has nothing landed, except the one just
 # written. Phrased as "every" rather than "the previous one" so it is idempotent and clears a
@@ -2948,17 +3002,12 @@ function _log_step(path::AbstractString)
     return m === nothing ? 0 : parse(Int, m.captures[1])
 end
 
-# What the chunk's own status file says. Written per chunk by the task runner and synced back with
-# everything else, so this costs one read and needs nothing from the scheduler.
+# What the chunk last reported about itself, from the newest event it wrote. One read, and nothing
+# from the scheduler.
 function _chunk_facts(root::AbstractString, chunk::AbstractString)
-    blank = (; node = "", ran = 0, failed = 0, done = 0, total = 0)
-    isempty(chunk) && return blank
-    f = joinpath(SlateTask.status_dir(root), chunk * ".toml")
-    isfile(f) || return blank
-    d = try; TOML.parsefile(f); catch; return blank; end
-    return (; node = String(get(d, "ran_on", "")), ran = Int(get(d, "ran", 0)),
-              failed = Int(get(d, "failed", 0)), done = Int(get(d, "done", 0)),
-              total = Int(get(d, "total", 0)))
+    isempty(chunk) && return (; node = "", ran = 0, failed = 0, done = 0, total = 0)
+    pr = SlateTask.chunk_progress(root, SlateTask.chunk_events(root, String(chunk)))
+    return (; pr.node, pr.ran, pr.failed, pr.done, pr.total)
 end
 
 # Just the paths. This is all a membership check needs, and it is what `log_stat` reaches for every
@@ -3260,9 +3309,8 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
     elseif action == "retry"
         # Same reason as reset: dropping a failed unit's manifest only in the mirror leaves it on
         # the cluster, and the next sync brings the failure straight back.
-        failed = [k for k in keys
-                  if (m = MemoStore.read_manifest(root, k);
-                      m !== nothing && String(get(m, "status", "")) == "error")]
+        st = BatchSweep.fold(root).status      # status alone: no record is read to find a failure
+        failed = [k for k in keys if get(st, k, "") == "error"]
         forget_results!(target, failed)
     elseif action == "reset"
         # Kill anything live FIRST. `clear_attempts!` forgets the submission records, and with them
@@ -3322,8 +3370,7 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # `plan` already read every one of these. At a few thousand units a second pass over the store
     # was the bulk of a poll, and the poll has a deadline.
     st = length(p.unit_status) == length(keys) ? p.unit_status :
-         [(m = MemoStore.read_manifest(root, k);
-           m === nothing ? "" : String(get(m, "status", ""))) for k in keys]
+         (landed = BatchSweep.fold(root).status; [get(landed, k, "") for k in keys])
     rings = _tile_rings(p, BatchSweep.sweep_chunks(root, run), length(st))
     sched = _sched_counts(p)
     tiles = String[]
@@ -3386,7 +3433,7 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # key was simply omitted — and the card went on showing a chart of results that no longer exist.
     # `nothing` here is an explicit null on the wire, which the card reads as "clear it".
     if plot !== false || p.shards_failed > 0
-        rows = _rows(root, params, keys, source_of(target))
+        rows = _rows(root, params, keys, run, source_of(target))
         opt, err = plot === false ? (nothing, "") : _plot_option(plot, rows)
         out["chart"] = opt
         out["charterr"] = err
@@ -4655,13 +4702,17 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # blobs already exist and only ~1 KB of manifests is rewritten.
     per = max(1, chunk_size(target))
     chunks = String[]
+    # What the store already holds, decided ONCE here rather than per unit on a compute node. A
+    # shard key names a body and a parameter point and no run, so a pilot's results are this
+    # sweep's results; the descriptor carries the answer so the node needs no lookup at all.
+    landed = Set(k for (k, _) in BatchSweep.fold(root).status)
     for (ci, lo) in enumerate(1:per:length(params))
         hi = min(lo + per - 1, length(params))
         ck = chunk_key(run, ci)
         SlateTask.write_chunk!(root, ck; fn_src = body_src, setup_src = setup_src,
                                captures = Dict(String(k) => v for (k, v) in captures),
                                params = params[lo:hi], keys = keys[lo:hi],
-                               summary_src = summary_src, lazy = lazy)
+                               summary_src = summary_src, lazy = lazy, landed = landed)
         push!(chunks, ck)
     end
     BatchSweep.write_sweep!(root, run, chunks; cell = String(cell), notebook = _ctx_docid())
@@ -4739,7 +4790,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
 
     pl = BatchSweep.plan(root, run; launcher)
     tl = BatchSweep.telemetry(root, run; launcher, plan = pl)
-    rows = _rows(root, params, keys, source_of(target))
+    rows = _rows(root, params, keys, run, source_of(target))
 
     # The same identity, for THIS run — declared rather than pushed, and computed from the rows just
     # read rather than a second pass over the store. The cell-effects channel is harvested with the

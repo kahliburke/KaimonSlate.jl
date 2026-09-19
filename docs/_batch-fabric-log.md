@@ -42,7 +42,7 @@ catalog service, which compute nodes cannot reach. The part nobody provides is t
     blobs/sha256/xx/<hash>          result values, content addressed
     manifests/<sweep>.toml          sweep descriptor
     manifests/<chunk>.toml          chunk descriptor
-    events/<ts>-<jobid>-<chunk>     immutable, written once by rename
+    events/<ts>-<jobid>.<seq>-<chunk>   immutable, written once by rename
     jobs/                           hub-owned markers
 
 Gone: `manifests/<shard>.toml`, one per unit, and `status/<chunk>.toml`.
@@ -51,6 +51,11 @@ Gone: `manifests/<shard>.toml`, one per unit, and `status/<chunk>.toml`.
 thing unavailable. It is not needed: each event names one chunk, events for different chunks
 commute, and within a chunk the later timestamp wins. The reader's watermark is `find -newer`
 against a stamp file on the store, so only the store's clock matters and node skew is irrelevant.
+
+The `<seq>` in the name is PRIVATE to a writer, not global. Two events from one job for one chunk
+can land in the same millisecond, and a name built from time and job alone then collides: the second
+write replaces the first and takes its rows with it. A per-writer counter is the only tie-break that
+needs no coordination, and the move that places an event never forces.
 
 **An event carries the unit rows this job completed since its last event.** The fold is then a plain
 union, with no special final event. A chunk emits one event per cadence tick plus one at the end, so
@@ -80,7 +85,7 @@ which keeps one mental model rather than forking into files over there and a dat
 
 ## Resolutions
 
-**Unit reuse moves to plan time.** `shard_key(sweep, param)` hashes the sweep key and the parameter
+**Unit reuse moves to plan time** (implemented: `write_chunk!` takes `landed`). `shard_key(sweep, param)` hashes the sweep key and the parameter
 point; the chunk index is not in it, so the same body and point give the same key whatever the
 chunking, and cross-run reuse is what the pilot-then-full-sweep pattern depends on. The hub folds
 the store, knows which keys already have blobs, and omits those units when writing chunk
@@ -100,9 +105,19 @@ four done out of three. Events have the same hazard and cannot be edited in plac
 resetting a run deletes that run's events outright. That is the right meaning for reset, which is
 "start this run over", and it keeps the log's only mutation a whole-run delete.
 
-**Compaction is the hub's, opportunistically.** Write `snapshot-<ts>` by atomic rename, then delete
-events older than it past a grace window, reusing the pattern the CAS already has. Snapshot first,
-delete second, so snapshot plus surviving events is the complete state at every instant. A reader
-takes the newest snapshot then events newer than it. Compute nodes never read another chunk's
-events, so deletion cannot disturb a running job. Never required for correctness, only for directory
-size.
+**Compaction folds a chunk's log into one event.** No separate snapshot kind: the fold IS an event,
+written by rename and carrying the rows the ones it replaces held, so a reader needs no special
+case. Written first, the old ones deleted second, and only past a grace window, which is the pattern
+the CAS already uses around a blob.
+
+Counts come from the rows, never from the newest event's header. The newest may be a tombstone,
+which carries none, and inheriting it made a compacted chunk report nothing done.
+
+A job folds its own chunk when it finishes: bounded work on files it wrote, no coordination. The hub
+folds its MIRROR on the supervisor tick, because a pull merges and never deletes, so a store
+compacted over there leaves this side holding the originals. Neither is required for correctness; a
+store that is never compacted is correct, only larger.
+
+One consequence for any reader that caches: events only ever appear, so one VANISHING means the log
+was rewritten underneath it. The fold treats that as a signal to start again, which is what makes
+compaction and a released run safe for it.

@@ -134,7 +134,8 @@ function write_chunk!(root::AbstractString, chunk::AbstractString;
                       fn_src::AbstractString, params::AbstractVector,
                       keys::AbstractVector, setup_src::AbstractString = "",
                       captures::AbstractDict = Dict{String,Any}(),
-                      summary_src::AbstractString = "", lazy::Bool = false)
+                      summary_src::AbstractString = "", lazy::Bool = false,
+                      landed = nothing)
     length(params) == length(keys) ||
         throw(ArgumentError("params and keys must be the same length"))
     fn_h, _ = _put_txt(root, fn_src)
@@ -146,10 +147,16 @@ function write_chunk!(root::AbstractString, chunk::AbstractString;
         h, n = _put_jls(root, v)
         push!(caps, Dict{String,Any}("name" => String(name), "blob" => h, "bytes" => n))
     end
+    # Which of these the store ALREADY has. A shard key is a hash of the body and the parameter
+    # point and names no run, so a unit landed by a pilot is the same unit here. Deciding that once,
+    # on the hub, is what keeps a compute node from having to ask the store per unit: the node reads
+    # its own descriptor and skips what is marked.
     shards = Dict{String,Any}[]
     for (k, p) in zip(keys, params)
         h, _ = _put_jls(root, p)
-        push!(shards, Dict{String,Any}("key" => String(k), "arg" => h))
+        d = Dict{String,Any}("key" => String(k), "arg" => h)
+        (landed !== nothing && String(k) in landed) && (d["have"] = true)
+        push!(shards, d)
     end
     MemoStore.write_manifest(root, chunk, Dict{String,Any}(
         "kind" => KIND_CHUNK,
@@ -164,31 +171,183 @@ function write_chunk!(root::AbstractString, chunk::AbstractString;
     return chunk
 end
 
-# ── Status ───────────────────────────────────────────────────────────────────────────────────
-# One small file per chunk, written by temp-plus-rename. The hub lists ONE directory to learn the
-# state of a whole sweep, which is a single metadata operation regardless of shard count. Appending
-# to a log instead would be invisible to a reader under NFS close-to-open consistency, and one file
-# per shard would put a metadata storm on a filesystem shared by the whole site.
-status_dir(root::AbstractString) = joinpath(root, "status")
-status_path(root::AbstractString, chunk::AbstractString) =
-    joinpath(status_dir(root), chunk * ".toml")
+# ── The event log ────────────────────────────────────────────────────────────────────────────
+# A chunk reports by CREATING files, never by rewriting one. That is the only shape safe for
+# uncoordinated writers on a shared filesystem: `rename` into place is atomic, appends are not
+# atomic across NFS clients, and byte-range locks want a lock manager that is often absent. The
+# writer's job id is in the name, so two writers cannot collide and nothing has to be locked to
+# make that true.
+#
+# No global sequence number. One would need coordination between writers, which is the thing this
+# environment cannot give; and it is not needed, because an event names a single chunk, events for
+# different chunks commute, and within a chunk the later timestamp wins.
+#
+# One file per UNIT is the alternative, and it is the metadata storm the store is laid out to
+# avoid: a grid of ten million points is ten million files whatever the chunking.
+events_dir(root::AbstractString) = joinpath(root, "events")
 
-function write_status!(root::AbstractString, chunk::AbstractString, d::AbstractDict)
-    dir = status_dir(root)
+# How much a chunk accumulates before it reports. Whichever comes first, so a fast chunk reports by
+# volume and a slow one by time, and neither writes a file per unit.
+#
+# Measured, not guessed: a row carrying a small inline value costs about 0.4 KB and 3.6 us to parse,
+# flat from 200 rows to 2000. Parse cost is therefore linear in UNITS whatever the cadence, so the
+# figure below buys file count and progress granularity rather than speed. 500 rows is ~200 KB per
+# event, which is a comfortable size on a parallel filesystem, and puts a ten million unit sweep at
+# twenty thousand events rather than ten million files.
+const EVENT_ROWS = 500
+const EVENT_SECS = 30.0
+
+# Sortable by name and unique without asking anyone: the writer's clock, then its job id, then a
+# counter private to this writer. Padded so lexical order is chronological order.
+#
+# The counter is not decoration. Two events from one job for one chunk can fall in the same
+# millisecond, and a name built from time and job alone then collides: the second write replaces the
+# first and takes its rows with it. An immutable log must never overwrite, and a per-writer counter
+# is the only tie-break available that needs no coordination.
+const _EVENT_SEQ = Ref(0)
+
+event_name(chunk::AbstractString, jobid::AbstractString, at::Real, seq::Integer) =
+    string(lpad(round(Int, at * 1000), 15, '0'), "-", jobid, ".", lpad(seq, 6, '0'), "-", chunk)
+
+# What identifies this writer. A scheduler job and array element where there is one, otherwise the
+# process, which is enough to keep two local runners apart.
+function job_tag()
+    jid = get(ENV, "SLURM_JOB_ID", get(ENV, "PBS_JOBID", ""))
+    aid = get(ENV, "SLURM_ARRAY_TASK_ID", "")
+    isempty(jid) && return string("p", getpid())
+    return isempty(aid) ? jid : string(jid, "_", aid)
+end
+
+"""
+    write_event!(root, chunk, rows; counts...) -> String
+
+Record what this job has finished. `rows` are the unit records completed since this job's last
+event, so a reader's fold is a plain union and there is no final event to wait for.
+"""
+function write_event!(root::AbstractString, chunk::AbstractString, rows::AbstractVector;
+                      jobid::AbstractString = job_tag(), at::Real = time(), counts...)
+    dir = events_dir(root)
     mkpath(dir)
+    d = Dict{String,Any}("chunk" => String(chunk), "jobid" => String(jobid),
+                         "ts" => round(Int, at), "ran_on" => _ran_on(),
+                         "units" => collect(rows))
+    for (k, v) in counts; d[String(k)] = v; end
+    dest = joinpath(dir, event_name(chunk, jobid, at, (_EVENT_SEQ[] += 1)))
     tmp = tempname(dir)
     try
-        open(io -> TOML.print(io, Dict{String,Any}(String(k) => v for (k, v) in d)), tmp, "w")
-        mv(tmp, status_path(root, chunk); force = true)
+        open(io -> TOML.print(io, d), tmp, "w")
+        mv(tmp, dest)          # never `force`: an event that would replace another is a lost record
     catch
         try; rm(tmp; force = true); catch; end
         rethrow()
     end
-    return nothing
+    return dest
 end
 
-read_status(root::AbstractString, chunk::AbstractString) =
-    (p = status_path(root, chunk); isfile(p) ? (try; TOML.parsefile(p); catch; nothing; end) : nothing)
+"Every event this store holds for `chunk`, oldest first. Names sort chronologically by construction."
+function chunk_events(root::AbstractString, chunk::AbstractString)
+    dir = events_dir(root)
+    isdir(dir) || return String[]
+    suf = "-" * String(chunk)
+    return sort!(String[joinpath(dir, f) for f in readdir(dir) if endswith(f, suf)])
+end
+
+"""
+    compact_events!(root; grace = 900.0) -> Int
+
+Fold a chunk's settled events into one and delete the rest, so a store's log does not grow for the
+life of the store. `only` restricts it to one chunk. Returns how many files went.
+
+Snapshot first, delete second, so the chunk's rows are complete at every instant. Only events older
+than `grace` are removed, because a reader that listed the directory a moment ago may still be
+reading them, which is the same window the CAS already leaves around a blob.
+
+Nobody has to run this and nothing waits for it: a store that is never compacted is correct, only
+larger. Compute nodes never read another chunk's events, so it cannot disturb a running job.
+"""
+function compact_events!(root::AbstractString; grace::Real = 900.0, only::AbstractString = "")
+    dropped = 0
+    now = time()
+    for (chunk, paths) in events_by_chunk(root)
+        (isempty(only) || chunk == only) || continue
+        length(paths) > 1 || continue
+        old = String[p for p in paths if now - mtime(p) > grace]
+        length(old) > 1 || continue           # nothing to gain from folding one file into one
+        rows = collect(values(rows_of(root, old)))
+        # Counts come from the ROWS, not from the last event's header. The newest event may be a
+        # tombstone, which carries no counts at all, and inheriting those turned a compacted chunk
+        # into one that reported nothing done.
+        tot = 0
+        for p in old
+            d = try; TOML.parsefile(p); catch; continue; end
+            tot = max(tot, Int(get(d, "total", 0)))
+        end
+        nfail = count(r -> String(get(r, "status", "")) == "error", rows)
+        write_event!(root, chunk, rows; total = max(tot, length(rows)), done = length(rows),
+                     ran = length(rows) - nfail, skipped = 0, failed = nfail, at = now)
+        for p in old
+            try; rm(p; force = true); dropped += 1; catch; end
+        end
+    end
+    return dropped
+end
+
+"""
+    events_by_chunk(root) -> Dict{String,Vector{String}}
+
+Every event in the store, grouped by chunk, oldest first. ONE directory listing: a caller walking a
+whole sweep would otherwise list the directory once per chunk, which is quadratic in the number of
+chunks and is the cost this layout exists to avoid.
+"""
+function events_by_chunk(root::AbstractString)
+    dir = events_dir(root)
+    out = Dict{String,Vector{String}}()
+    isdir(dir) || return out
+    for f in sort!(readdir(dir))
+        i = findfirst('-', f); i === nothing && continue
+        j = findnext(==('-'), f, i + 1); j === nothing && continue
+        push!(get!(out, f[(j + 1):end], String[]), joinpath(dir, f))
+    end
+    return out
+end
+
+"Fold a chunk's events, oldest first, into its unit rows. Upserts apply, then removals."
+function rows_of(root::AbstractString, paths)
+    out = Dict{String,Any}()
+    for p in paths
+        d = try; TOML.parsefile(p); catch; continue; end
+        for u in get(d, "units", Any[])
+            u isa AbstractDict || continue
+            k = String(get(u, "key", ""))
+            isempty(k) || (out[k] = u)
+        end
+        for k in get(d, "dropped", Any[])
+            delete!(out, String(k))
+        end
+    end
+    return out
+end
+
+"The counts the chunk's job last reported: `(; node, ran, failed, skipped, done, total)`."
+function chunk_progress(root::AbstractString, paths)
+    blank = (; node = "", ran = 0, failed = 0, skipped = 0, done = 0, total = 0)
+    isempty(paths) && return blank
+    d = try; TOML.parsefile(last(paths)); catch; return blank; end
+    return (; node = String(get(d, "ran_on", "")), ran = Int(get(d, "ran", 0)),
+              failed = Int(get(d, "failed", 0)), skipped = Int(get(d, "skipped", 0)),
+              done = Int(get(d, "done", 0)), total = Int(get(d, "total", 0)))
+end
+
+"""
+    chunk_rows(root, chunk) -> Dict{String,Any}
+
+This chunk's unit records keyed by shard key, latest event winning. A retried chunk re-emits the
+units it re-ran, so reading in name order and overwriting is the whole merge rule.
+"""
+# An event is a set of upserts AND a set of removals. Clearing a failed unit for retry has to be
+# expressible, and the log is immutable, so it is said in a later event rather than by editing an
+# earlier one.
+chunk_rows(root::AbstractString, chunk::AbstractString) = rows_of(root, chunk_events(root, chunk))
 
 # Where this task is running, for the DAG's provenance badges. SLURM exports the job and array
 # element; without them (a local ExecLauncher run) the hostname alone is the answer.
@@ -203,7 +362,7 @@ end
 # ── Running ──────────────────────────────────────────────────────────────────────────────────
 
 "A shard is done when its manifest is present. The store is the source of truth, not a job record."
-is_done(root::AbstractString, key::AbstractString) = MemoStore.read_manifest(root, key) !== nothing
+is_done(root::AbstractString, key::AbstractString) = first(result(root, key))
 
 # What a result IS, recorded beside it so the question can be answered without reading it: the
 # concrete type, the dimensions, and the stored size. This is what lets a notebook describe a sweep's
@@ -264,13 +423,36 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
     ran = 0; skipped = 0; failed = 0
     started = round(Int, time())
 
-    status(cur) = write_status!(root, chunk, Dict{String,Any}(
-        "chunk" => chunk, "total" => total, "done" => ran + skipped + failed,
-        "ran" => ran, "skipped" => skipped, "failed" => failed,
-        "current" => cur, "ran_on" => _ran_on(), "started" => started,
-        "ts" => round(Int, time())))
+    # What this chunk has already recorded. A job that died part way through is retried as the same
+    # chunk, and its own events are how it knows what not to redo. Nothing global is consulted:
+    # reuse ACROSS runs is the hub's to decide when it writes the descriptor, because a compute node
+    # cannot afford a lookup per unit and would have no cheap way to do one.
+    have = force ? Dict{String,Any}() : chunk_rows(root, chunk)
+    # …and what the hub already knew was in the store when it wrote this descriptor. Without it a
+    # full sweep recomputes every unit a pilot had already landed, which is the case the sharing
+    # exists for.
+    if !force
+        for sh in shards
+            sh isa AbstractDict && get(sh, "have", false) === true &&
+                (have[String(get(sh, "key", ""))] = sh)
+        end
+    end
+    jobid = job_tag()
+    pending = Dict{String,Any}[]
+    last_at = Ref(time())
 
-    status("")
+    # Emitting costs a file, so it is paced: often enough that a watcher sees a long chunk moving,
+    # rarely enough that a long chunk does not litter the log. Rows accumulate between emissions.
+    emit!() = begin
+        write_event!(root, chunk, pending; jobid = jobid, total = total,
+                     done = ran + skipped + failed, ran = ran, skipped = skipped,
+                     failed = failed, started = started)
+        empty!(pending)
+        last_at[] = time()
+    end
+    maybe_emit!() = (length(pending) >= EVENT_ROWS || time() - last_at[] >= EVENT_SECS) && emit!()
+
+    emit!()     # the chunk has started, and this is where `ran_on` and `started` are recorded
 
     # One fresh module per chunk holds the setup and the closure. Shards share it, so a `using` or
     # an expensive constant is paid once per chunk rather than once per shard, which is much of the
@@ -314,9 +496,8 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
         s isa AbstractDict || continue
         key = String(get(s, "key", ""))
         isempty(key) && continue
-        if !force && is_done(root, key)
+        if haskey(have, key)
             skipped += 1
-            status(key)
             continue
         end
         arg = _get_jls(root, String(s["arg"]))
@@ -411,21 +592,40 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
             m["error"] = err
             failed += 1
         end
-        MemoStore.write_manifest(root, key, m)
-        status(key)
+        m["key"] = key
+        push!(pending, m)
+        maybe_emit!()
     end
 
-    status("")
+    emit!()
+    # Fold this chunk's own log now that it is finished. Bounded work on files this job wrote, no
+    # coordination with anyone, and it keeps a chunk that was retried a few times from leaving a
+    # pile behind. The grace window protects a reader that listed the directory a moment ago.
+    try; compact_events!(root; only = chunk); catch; end
     return (; total, ran, skipped, failed)
 end
 
 """
     result(root, key) -> (found, status, value)
 
-Read one shard back. `status` is "ok", "error", or "" when the shard has not run.
+One unit's outcome by key. Folds the store to find it, so it is for asking about a unit or two; a
+caller walking many should fold once itself (`events_by_chunk` + `rows_of`) and use `row_result`.
 """
 function result(root::AbstractString, key::AbstractString)
-    d = MemoStore.read_manifest(root, key)
+    for (_, paths) in events_by_chunk(root)
+        r = get(rows_of(root, paths), String(key), nothing)
+        r === nothing || return row_result(root, r)
+    end
+    return (false, "", nothing)
+end
+
+"""
+    row_result(root, row) -> (found, status, value)
+
+Read one unit's outcome out of its event row. `status` is "ok", "error", or "" when it has not run.
+The row is the record the chunk's job wrote; the value still comes from the CAS.
+"""
+function row_result(root::AbstractString, d)
     d === nothing && return (false, "", nothing)
     st = String(get(d, "status", ""))
     st == "ok" || return (true, st, get(d, "error", nothing))
@@ -514,9 +714,27 @@ end
 
 "Every artifact a shard registered, as `(name, blob, bytes)` rows. Blobs stay where they are."
 function artifacts(root::AbstractString, key::AbstractString)
-    d = MemoStore.read_manifest(root, key)
-    d === nothing && return Dict{String,Any}[]
-    return [x for x in get(d, "artifacts", Any[]) if x isa AbstractDict]
+    for (_, paths) in events_by_chunk(root)
+        d = get(rows_of(root, paths), String(key), nothing)
+        d === nothing && continue
+        return [x for x in get(d, "artifacts", Any[]) if x isa AbstractDict]
+    end
+    return Dict{String,Any}[]
+end
+
+"""
+    row_bytes(root, row) -> Int
+
+What a unit costs the store: the blobs its row names. There is no per-unit manifest to charge for,
+so unlike `MemoStore.entry_bytes` this is the blobs alone.
+"""
+function row_bytes(root::AbstractString, d)
+    d === nothing && return 0
+    b = 0
+    for h in MemoStore._manifest_blobs(d)
+        p = MemoStore.blob_path(root, h); isfile(p) && (b += Int(filesize(p)))
+    end
+    return b
 end
 
 # ── What a job's output looks like ───────────────────────────────────────────────────────────

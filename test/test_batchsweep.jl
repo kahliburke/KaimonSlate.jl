@@ -138,7 +138,10 @@ end
         mktempdir() do root
             sweep, chunks = mksweep(root; nchunk = 1, per = 4)
             SlateTask.run_chunk(root, chunks[1])
-            MemoStore.drop_manifest(root, "$(sweep)_s2")             # pretend one shard never landed
+            # Pretend one unit never landed. The log is immutable, so forgetting a unit is SAID in a
+            # later event rather than by deleting the record that reported it.
+            SlateTask.write_event!(root, chunks[1], Dict{String,Any}[];
+                                   dropped = ["$(sweep)_s2"])
             p = BS.plan(root, sweep)
             @test p.chunk_state[chunks[1]] === :missing     # partial counts as missing
             @test p.shards_done == 3
@@ -189,14 +192,17 @@ end
         end
     end
 
-    @testset "progress aggregates one status file per chunk" begin
+    @testset "progress reads each chunk's newest event" begin
         mktempdir() do root
             sweep, chunks = mksweep(root; nchunk = 2, per = 3)
             for c in chunks; SlateTask.run_chunk(root, c); end
             pr = BS.progress(root, sweep)
             @test (pr.total, pr.done, pr.ran, pr.failed) == (6, 6, 6, 0)
             @test pr.chunks == 2
-            @test length(readdir(SlateTask.status_dir(root))) == 2
+            # Six units, and the store holds a handful of events rather than a file per unit. That
+            # ratio is the whole point: a ten million point grid must not be ten million files.
+            @test length(readdir(SlateTask.events_dir(root))) < 6
+            @test isempty(filter(f -> occursin("_s", f), readdir(joinpath(root, "manifests"))))
         end
     end
 
@@ -700,6 +706,32 @@ end
         @test Sweep._tile_rings(p, cs, 0) == ""
     end
 
+    @testset "a full sweep reuses a pilot's units instead of recomputing them" begin
+        # A shard key hashes the body and the parameter point and names no run, so a pilot over a
+        # few points and the full sweep over thousands share keys. The hub decides what is already
+        # in the store when it writes the descriptors: a compute node cannot afford a lookup per
+        # unit, so it is told, and it reads the answer out of its own chunk.
+        mktempdir() do root
+            payload = joinpath(@__DIR__, "..", "src", "slatetask.jl")
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2, payload)
+            pilot = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p; p.x * 10; end
+            for c in BS.sweep_chunks(root, pilot.run); SlateTask.run_chunk(root, c); end
+            @test BS.plan(root, pilot.run).shards_done == 2
+
+            full = Sweep.@sweep(Sweep.paramgrid(x = 1:6), t; submit = false) do p; p.x * 10; end
+            @test full.run != pilot.run                       # a different request…
+            @test BS.plan(root, full.run).shards_done == 2    # …over results it already shares
+
+            ran = skipped = 0
+            for c in BS.sweep_chunks(root, full.run)
+                r = SlateTask.run_chunk(root, c)
+                ran += r.ran; skipped += r.skipped
+            end
+            @test (ran, skipped) == (4, 2)                    # the pilot's two are not redone
+            @test BS.plan(root, full.run).shards_done == 6
+        end
+    end
+
     @testset "a run says when, not which" begin
         # The card used to name the run by its key, which is a hash: it told a reader nothing, and
         # it changed silently when they edited the cell. A time answers what they actually ask.
@@ -884,9 +916,10 @@ end
 
             # Losing a result moves it again, with no count consulted — which is what lets a retry
             # that replaces one value with another at the same tally re-key its readers.
-            ok = [k for k in r.keys if (mm = MemoStore.read_manifest(root, k);
+            have = Sweep.store_rows(root)
+            ok = [k for k in r.keys if (mm = get(have, k, nothing);
                                         mm !== nothing && String(get(mm, "status", "")) == "ok")]
-            MemoStore.drop_manifest(root, first(ok))
+            Sweep.forget_results!(r.target, [first(ok)])
             @test dig() != full
         end
     end
@@ -2303,22 +2336,26 @@ end
         # and nothing else. Without the guard the card degrades to plain text with no error
         # anywhere, which reads as "the card is broken" and points at nothing.
         #
-        # The failure is injected by handing it an unusable shard key, since the store itself is
-        # careful: a missing root yields no manifests and a corrupt one parses to `nothing`, so
-        # neither throws. It stands in for the unforeseen, which is the category that matters here —
-        # a purged scratch, a dropped mount, a process holding a stale version of a type.
+        # The failure is injected by handing the card a dataset that cannot be assembled. It stands
+        # in for the unforeseen, which is the category that matters here: a purged scratch, a
+        # dropped mount, a process holding a stale version of a type.
+        #
+        # An unusable KEY no longer injects anything. Records live in the event log rather than in a
+        # file named by the key, so a key that names nothing simply is not in the fold and reads as
+        # a unit that has not run. The traversal guard below still matters for the blob paths.
         mktempdir() do root
             t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2,
                                   payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
             r = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p; (; y = p.x); end
             for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end
             Sweep.refresh!(r)
-            @test_throws ArgumentError MemoStore.read_manifest(root, "../not a key")  # the injection
+            @test_throws ArgumentError MemoStore.read_manifest(root, "../not a key")
+            @test !haskey(Sweep.store_rows(root), "../not a key")   # names nothing, invents nothing
             stranded = Sweep.ShardedResult(getfield(r, :key), getfield(r, :run), t,
-                                           getfield(r, :params), ["../not a key", "../nor this"],
+                                           getfield(r, :params), getfield(r, :keys),
                                            getfield(r, :plan), getfield(r, :rows),
                                            getfield(r, :telemetry), getfield(r, :plot))
-            @test_throws Exception stranded.dataset      # the dataset really is unreachable
+            stranded.read_limit = -1                     # the dataset really is unassemblable
             html = sprint((io, v) -> show(io, MIME"text/html"(), v), stranded)
             @test occursin("data-sweep", html)           # …and the card is still a card
             @test occursin("2 / 2", html)                # still reporting what it does know

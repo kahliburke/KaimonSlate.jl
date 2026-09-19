@@ -76,9 +76,9 @@ end
             chunk, keys = mkchunk(root, 5)
             @test !any(SlateTask.is_done(root, k) for k in keys)
             SlateTask.run_chunk(root, chunk)
-            for k in keys[1:2]
-                MemoStore.drop_manifest(root, k)   # pretend these never finished
-            end
+            # Pretend these never finished. The log is immutable, so a unit is forgotten by saying
+            # so in a later event rather than by deleting the one that recorded it.
+            SlateTask.write_event!(root, chunk, Dict{String,Any}[]; dropped = keys[1:2])
             r = SlateTask.run_chunk(root, chunk)
             @test (r.ran, r.skipped) == (2, 3)
         end
@@ -108,16 +108,42 @@ end
         end
     end
 
-    @testset "status file tracks progress and is one file per chunk" begin
+    @testset "the event log tracks progress without a file per unit" begin
         mktempdir() do root
             chunk, _ = mkchunk(root, 6)
             SlateTask.run_chunk(root, chunk)
-            s = SlateTask.read_status(root, chunk)
-            @test s !== nothing
-            @test (s["total"], s["ran"], s["failed"]) == (6, 6, 0)
-            @test s["done"] == 6
-            @test !isempty(s["ran_on"])
-            @test length(readdir(SlateTask.status_dir(root))) == 1
+            evs = SlateTask.chunk_events(root, chunk)
+            pr = SlateTask.chunk_progress(root, evs)
+            @test (pr.total, pr.ran, pr.failed) == (6, 6, 0)
+            @test pr.done == 6
+            @test !isempty(pr.node)
+            # Six units, a couple of events, and no manifest per unit. That ratio is the point.
+            @test length(evs) < 6
+            @test length(SlateTask.chunk_rows(root, chunk)) == 6
+        end
+    end
+
+    @testset "compaction folds a chunk's log without changing what it says" begin
+        # A store's log would otherwise grow for its whole life. Folding is optional: a store that
+        # is never compacted is correct, only larger.
+        mktempdir() do root
+            chunk, keys = mkchunk(root, 4)
+            SlateTask.run_chunk(root, chunk)
+            SlateTask.write_event!(root, chunk, Dict{String,Any}[]; dropped = [keys[2]])
+            before = SlateTask.chunk_rows(root, chunk)
+            @test length(SlateTask.chunk_events(root, chunk)) > 1
+
+            n = SlateTask.compact_events!(root; grace = -1.0)
+            @test n > 0
+            @test length(SlateTask.chunk_events(root, chunk)) == 1
+            # Same answer, fewer files — including the removal, which must survive folding.
+            @test sort(collect(keys2 for keys2 in Base.keys(SlateTask.chunk_rows(root, chunk)))) ==
+                  sort(collect(Base.keys(before)))
+            @test !haskey(SlateTask.chunk_rows(root, chunk), keys[2])
+            # Counts come from the rows: the newest event folded was a tombstone carrying none, and
+            # inheriting its header made a compacted chunk report nothing done.
+            pr = SlateTask.chunk_progress(root, SlateTask.chunk_events(root, chunk))
+            @test (pr.done, pr.failed, pr.total) == (3, 0, 4)
         end
     end
 
@@ -143,7 +169,8 @@ end
             @test ok && payload == "payload-1"
             # entry_bytes walks the same edge set gc does, so an artifact that gc can see is also
             # an artifact the entry is charged for.
-            @test MemoStore.entry_bytes(root, keys[1]) > arts[1]["bytes"]
+            row = SlateTask.chunk_rows(root, chunk)[keys[1]]
+            @test SlateTask.row_bytes(root, row) > arts[1]["bytes"]
         end
     end
 

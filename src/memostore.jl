@@ -446,6 +446,18 @@ function gc(root::AbstractString; cap::Integer, grace::Real = 900.0)
     # itself is excluded from the eviction list below.
     refs = Dict{String,Int}()
     msets = Dict{String,Vector{String}}()             # manifest path → its blob hashes
+    # A sweep's unit records live in the EVENT LOG, not in a manifest per unit, so the log is a root
+    # set too. Without this every result blob in a sweep store refcounts to zero and is deleted past
+    # the grace window, which is silent data loss rather than a cache miss. Events are roots and are
+    # never evicted: the eviction list below is manifests only.
+    edir = joinpath(root, "events")
+    isdir(edir) && for f in readdir(edir; join = true)
+        d = try; TOML.parsefile(f); catch; continue; end
+        for u in get(d, "units", Any[])
+            u isa AbstractDict || continue
+            for h in _manifest_blobs(u); refs[h] = get(refs, h, 0) + 1; end
+        end
+    end
     for p in Iterators.flatten((first.(manifests), pinned_paths))
         hs = (d = try; TOML.parsefile(p); catch; nothing; end) === nothing ? String[] : _manifest_blobs(d)
         msets[p] = hs

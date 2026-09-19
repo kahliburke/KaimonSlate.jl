@@ -785,13 +785,13 @@ const MS = RE.MemoStore
 
     @testset "a lazy sweep stores an index, not a result blob" begin
         # End to end through the runner: the manifest carries the dataset index and NO binding, so
-        # reading the manifest tells the notebook the shape without reading a byte of the data.
+        # reading the unit's record tells the notebook the shape without reading a byte of the data.
         mktempdir() do root
             key = "k1"
             ST.write_chunk!(root, "c1"; fn_src = "p -> collect(Float32(1):Float32(p.n))",
                             params = [(; n = 500)], keys = [key], lazy = true)
             ST.run_chunk(root, "c1")
-            m = MS.read_manifest(root, key)
+            m = ST.chunk_rows(root, "c1")[key]           # the unit's record, from the event log
             @test String(get(m, "status", "")) == "ok"
             @test haskey(m, "dataset")
             @test isempty(get(m, "bindings", Any[]))     # nothing stored whole
@@ -803,7 +803,7 @@ const MS = RE.MemoStore
             ST.write_chunk!(root, "c2"; fn_src = "p -> collect(Float32(1):Float32(p.n))",
                             params = [(; n = 500)], keys = ["k2"])
             ST.run_chunk(root, "c2")
-            m2 = MS.read_manifest(root, "k2")
+            m2 = ST.chunk_rows(root, "c2")["k2"]
             @test !haskey(m2, "dataset")
             @test length(get(m2, "bindings", Any[])) == 1
         end

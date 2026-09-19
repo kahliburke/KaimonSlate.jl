@@ -25,7 +25,7 @@ import Tar          # archiving is ours, not a shell's — see "Packing bytes fo
 
 # The directories that hold METADATA, relative to a store root. `blobs/` is deliberately absent:
 # pulling it would mean pulling the results, which is the one thing this design exists to avoid.
-const META_DIRS = ("manifests", "status", "jobs")
+const META_DIRS = ("manifests", "events", "jobs")
 
 """
     RemoteStore(host, root)

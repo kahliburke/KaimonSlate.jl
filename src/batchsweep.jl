@@ -159,20 +159,23 @@ function forget_sweep!(root::AbstractString, sweep::AbstractString)
     end
     MemoStore.drop_manifest(root, sweep) && (n += 1)
     _unindex_cell_run!(root, cell, sweep)
-    # Drop the run's marker and status files too, or the supervisor keeps trying to advance it.
+    # Drop the run's marker and its events too, or the supervisor keeps trying to advance it and the
+    # fold keeps counting units whose results have just been deleted. The log is immutable, so a
+    # run's removal is a removal of its events rather than an amendment to them.
     stop!(root, sweep)
-    for f in _status_files(root, sweep)
+    for f in _run_events(root, sweep)
         rm(f; force = true)
     end
     return n
 end
 
-# Per-chunk status files are named `<sweep>_c<n>.toml`, so a run's are found by prefix.
-function _status_files(root::AbstractString, sweep::AbstractString)
-    d = SlateTask.status_dir(root)
+# A run's events, by the chunk names in them. Event names end in the chunk, and a chunk name starts
+# with its run, so one directory listing finds them.
+function _run_events(root::AbstractString, sweep::AbstractString)
+    d = SlateTask.events_dir(root)
     isdir(d) || return String[]
-    pre = sweep * "_"
-    return String[joinpath(d, f) for f in readdir(d) if startswith(f, pre)]
+    pre = "-" * String(sweep) * "_c"
+    return String[joinpath(d, f) for f in readdir(d) if occursin(pre, f)]
 end
 
 function sweep_chunks(root::AbstractString, sweep::AbstractString)
@@ -393,6 +396,68 @@ struct Plan
     blocked::String            # why nothing more will be submitted ("" = not blocked)
 end
 
+# The store's fold: which units have landed and how. STATUS ONLY, because that is all planning asks
+# and it is what has to stay affordable — a row per unit held resident would be the memory version of
+# the metadata storm the log exists to avoid.
+#
+# Advanced by the events that appeared since last time, so a poll costs O(new events) rather than a
+# re-read of the whole log. Events for a chunk are applied in name order; if an event turns up that
+# sorts BEFORE one already folded for that chunk (a node whose clock lags), that chunk is folded
+# again from scratch, since applying it late would resurrect what a later event had dropped.
+mutable struct Fold
+    status::Dict{String,String}          # shard key → "ok" | "error"
+    seen::Set{String}                    # event file names already applied
+    high::Dict{String,String}            # chunk → highest event name applied
+end
+Fold() = Fold(Dict{String,String}(), Set{String}(), Dict{String,String}())
+
+const _FOLDS = Dict{String,Fold}()
+const _FOLD_LOCK = ReentrantLock()
+
+"Drop a store's cached fold. For a caller that has changed the log behind it."
+forget_fold!(root::AbstractString) = lock(_FOLD_LOCK) do; delete!(_FOLDS, String(root)); end
+
+function _apply_event!(f::Fold, root::AbstractString, path::AbstractString)
+    d = try; TOML.parsefile(path); catch; return; end
+    for u in get(d, "units", Any[])
+        u isa AbstractDict || continue
+        k = String(get(u, "key", ""))
+        isempty(k) || (f.status[k] = String(get(u, "status", "")))
+    end
+    for k in get(d, "dropped", Any[])
+        delete!(f.status, String(k))
+    end
+end
+
+function fold(root::AbstractString)
+    evs = SlateTask.events_by_chunk(root)
+    lock(_FOLD_LOCK) do
+        f = get!(Fold, _FOLDS, String(root))
+        here = Set{String}()
+        for (_, paths) in evs, p in paths; push!(here, basename(p)); end
+        # Events only ever appear. When one GOES, the log has been rewritten underneath us:
+        # compaction folding a chunk, a run released, or the whole store purged. The fold cannot be
+        # advanced past that, so it starts again. Without this a purged store kept reporting the
+        # units it used to hold, and compaction would have done the same.
+        vanished = !issubset(f.seen, here)
+        # An event that sorts BEFORE one already applied for its chunk (a node whose clock lags)
+        # would resurrect what a later event dropped, so that chunk is replayed too.
+        late = any(any(p -> !(basename(p) in f.seen) && basename(p) < get(f.high, c, ""), paths)
+                   for (c, paths) in evs)
+        if vanished || late
+            empty!(f.status); empty!(f.seen); empty!(f.high)
+        end
+        for (c, paths) in evs, p in paths
+            n = basename(p)
+            n in f.seen && continue
+            _apply_event!(f, root, p)
+            push!(f.seen, n)
+            f.high[c] = max(get(f.high, c, ""), n)
+        end
+        return f
+    end
+end
+
 # Early-failure circuit breaker. The failure this exists to prevent is submitting thousands of units
 # of work, waiting a day, and finding out the body was broken all along — so a run that is failing
 # early stops itself rather than spending the rest of the allocation proving the same point.
@@ -463,21 +528,26 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
 
     total = 0; done = 0; ok = 0; failed = 0
     chunk_done = Dict{String,Bool}()
+    # Store-wide: a shard key names a body and a point, not a run, so a unit landed by another run
+    # counts for this one too. That sharing is what a pilot run is for.
+    landed = fold(root).status
     spans = UnitRange{Int}[]
     ustatus = String[]
     for c in chunks
         shards = chunk_shards(root, c)
         push!(spans, (total + 1):(total + length(shards)))
         total += length(shards)
+        # The chunk's events, from the listing taken once above, not one manifest per unit. That
+        # walk was the metadata storm the store is laid out to avoid, and on a sweep of a few
+        # thousand units it was most of what a poll cost.
         ndone = 0
         for k in shards
-            m = MemoStore.read_manifest(root, k)
-            if m === nothing
+            st = get(landed, k, nothing)
+            if st === nothing
                 push!(ustatus, "")
                 continue
             end
             ndone += 1
-            st = String(get(m, "status", ""))
             push!(ustatus, st)
             st == "error" ? (failed += 1) : (ok += 1)
         end
@@ -625,24 +695,19 @@ One directory listing, then a read of the files that belong to this sweep. Polli
 put a metadata storm on a filesystem shared with the rest of the site.
 """
 function progress(root::AbstractString, sweep::AbstractString)
-    want = Set(sweep_chunks(root, sweep))
-    dir = SlateTask.status_dir(root)
+    evs = SlateTask.events_by_chunk(root)
     total = 0; done = 0; ran = 0; skipped = 0; failed = 0
     seen = 0; hosts = String[]
-    if isdir(dir)
-        for f in readdir(dir; join = true)
-            endswith(f, ".toml") || continue
-            chunk = basename(f)[1:end-length(".toml")]
-            chunk in want || continue
-            d = try; TOML.parsefile(f); catch; continue; end
-            seen += 1
-            total   += Int(get(d, "total", 0))
-            done    += Int(get(d, "done", 0))
-            ran     += Int(get(d, "ran", 0))
-            skipped += Int(get(d, "skipped", 0))
-            failed  += Int(get(d, "failed", 0))
-            h = String(get(d, "ran_on", "")); isempty(h) || push!(hosts, h)
-        end
+    for c in sweep_chunks(root, sweep)
+        paths = get(evs, c, String[])
+        isempty(paths) && continue
+        # The chunk's LAST event carries its running totals, so this is one read per chunk that has
+        # started rather than a fold over everything it ever wrote.
+        pr = SlateTask.chunk_progress(root, paths)
+        seen += 1
+        total += pr.total; done += pr.done; ran += pr.ran
+        skipped += pr.skipped; failed += pr.failed
+        isempty(pr.node) || push!(hosts, pr.node)
     end
     return (; total, done, ran, skipped, failed, chunks = seen, ran_on = unique(hosts))
 end
@@ -687,12 +752,16 @@ function telemetry(root::AbstractString, sweep::AbstractString;
                    launcher = nothing, plan = nothing)
     p = plan === nothing ? BatchSweep.plan(root, sweep; launcher) : plan
     created = Float64[]; comp_ms = Float64[]; hosts = String[]
-    for c in sweep_chunks(root, sweep), k in chunk_shards(root, c)
-        m = MemoStore.read_manifest(root, k)
-        m === nothing && continue
-        push!(created, Float64(get(m, "created", 0)))
-        push!(comp_ms, Float64(get(m, "ms", 0.0)))
-        h = String(get(m, "ran_on", "")); isempty(h) || push!(hosts, h)
+    evs = SlateTask.events_by_chunk(root)
+    for c in sweep_chunks(root, sweep)
+        rows = SlateTask.rows_of(root, get(evs, c, String[]))
+        for k in chunk_shards(root, c)
+            m = get(rows, k, nothing)
+            m === nothing && continue
+            push!(created, Float64(get(m, "created", 0)))
+            push!(comp_ms, Float64(get(m, "ms", 0.0)))
+            h = String(get(m, "ran_on", "")); isempty(h) || push!(hosts, h)
+        end
     end
 
     now = time()
@@ -743,15 +812,19 @@ without deciding what "missing" looks like.
 """
 function results(root::AbstractString, sweep::AbstractString)
     out = NamedTuple[]
-    for c in sweep_chunks(root, sweep), k in chunk_shards(root, c)
-        m = MemoStore.read_manifest(root, k)
+    evs = SlateTask.events_by_chunk(root)
+    for c in sweep_chunks(root, sweep)
+        rows = SlateTask.rows_of(root, get(evs, c, String[]))
+        for k in chunk_shards(root, c)
+        m = get(rows, k, nothing)
         if m === nothing
             push!(out, (; key = k, status = "", value = nothing, ran_on = "", ms = 0.0))
             continue
         end
-        _, st, v = SlateTask.result(root, k)
+        _, st, v = SlateTask.row_result(root, m)
         push!(out, (; key = k, status = st, value = v,
                     ran_on = String(get(m, "ran_on", "")), ms = Float64(get(m, "ms", 0.0))))
+        end
     end
     return out
 end
@@ -759,7 +832,7 @@ end
 """
     spans(root, sweep) -> (; started, finished, hosts)
 
-When a sweep's units ran, and where, from their MANIFESTS alone — unix seconds over the units that
+When a sweep's units ran, and where, from the event log alone — unix seconds over the units that
 have LANDED, both 0 when none has.
 
 `results` answers a similar question but materialises every value on the way, which for a status
@@ -768,8 +841,11 @@ whole store, read to render a table.
 """
 function spans(root::AbstractString, sweep::AbstractString)
     lo = 0; hi = 0; hosts = String[]
-    for c in sweep_chunks(root, sweep), k in chunk_shards(root, c)
-        m = MemoStore.read_manifest(root, k)
+    evs = SlateTask.events_by_chunk(root)
+    for c in sweep_chunks(root, sweep)
+        rows = SlateTask.rows_of(root, get(evs, c, String[]))
+        for k in chunk_shards(root, c)
+        m = get(rows, k, nothing)
         m === nothing && continue
         t = Int(get(m, "created", 0))
         if t > 0
@@ -778,6 +854,7 @@ function spans(root::AbstractString, sweep::AbstractString)
         end
         h = String(get(m, "ran_on", ""))
         (isempty(h) || h in hosts) || push!(hosts, h)
+        end
     end
     return (; started = lo, finished = hi, hosts)
 end
@@ -797,11 +874,15 @@ re-running thousands of them wastes an allocation on a deterministic bug.
 """
 function retry_failed!(root::AbstractString, sweep::AbstractString)
     n = 0
-    for c in sweep_chunks(root, sweep), k in chunk_shards(root, c)
-        m = MemoStore.read_manifest(root, k)
-        m === nothing && continue
-        String(get(m, "status", "")) == "error" || continue
-        MemoStore.drop_manifest(root, k) && (n += 1)
+    # The log is immutable, so clearing a failure is SAID rather than edited: one event per chunk
+    # naming the units to forget, and the fold drops them. A later event always wins.
+    evs = SlateTask.events_by_chunk(root)
+    for c in sweep_chunks(root, sweep)
+        rows = SlateTask.rows_of(root, get(evs, c, String[]))
+        gone = String[k for (k, m) in rows if String(get(m, "status", "")) == "error"]
+        isempty(gone) && continue
+        SlateTask.write_event!(root, c, Dict{String,Any}[]; dropped = gone)
+        n += length(gone)
     end
     return n
 end
