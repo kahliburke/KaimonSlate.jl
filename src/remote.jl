@@ -2650,18 +2650,49 @@ function _blob_data_port!(t::RemoteTarget, k)
     ck = (String(t.ssh_host), Int(k.port))
     hit = lock(_BLOB_DPORT_LOCK) do; get(_BLOB_DPORT_CACHE, ck, 0); end
     hit > 0 && return hit
-    p = try
+    ask() = try
         r = _tool(k, "__slate_ports", Dict{String,Any}(); timeout = 15.0)
         e = try; getproperty(r, :error); catch; nothing; end
         e === nothing ? Int(r.blob) : 0
     catch
         0
     end
-    p > 0 || return default                             # not bound yet / pre-tool worker → gate+2, re-query next call
+    # The worker defers its blob server to stay out of the handshake window, so the first ask after a
+    # boot lands before it has bound. On :tunnel the fallback is never right — the worker always picks
+    # its own port — so waiting briefly beats dialing `gate+2` and discovering it is dead on a
+    # 20s transfer timeout. Four tries covers the deferral; past that the worker has no blob channel.
+    p = ask()
+    for _ in 1:3
+        p > 0 && break
+        sleep(2.0)
+        p = ask()
+    end
+    p > 0 || return default                             # pre-tool worker / no blob channel → gate+2
     lock(_BLOB_DPORT_LOCK) do; _BLOB_DPORT_CACHE[ck] = p; end
     p == default || _rlog("data channel: $(t.ssh_host) worker-$(k.port) blob bound free port $p (not gate+2=$default)")
     return p
 end
+# What to SHOW for the blob port. The panel renders far more often than the hub dials the blob
+# channel, and a worker that has not transferred yet is a port the hub has never had to ask about —
+# so the cache is cold and `gate+2` would be a number nothing is listening on. Report 0 (the panel
+# drops it) and warm the cache once in the background, so the next poll has the real one.
+const _BLOB_DPORT_WARMING = Set{Tuple{String,Int}}()
+function _blob_data_port_display(t::RemoteTarget, k)
+    t.transport === :tunnel || return k.port + 2      # :direct is firewall-pinned
+    ck = (String(t.ssh_host), Int(k.port))
+    hit = lock(_BLOB_DPORT_LOCK) do; get(_BLOB_DPORT_CACHE, ck, 0); end
+    hit > 0 && return hit
+    warm = lock(_BLOB_DPORT_LOCK) do
+        ck in _BLOB_DPORT_WARMING && return false
+        push!(_BLOB_DPORT_WARMING, ck); true
+    end
+    warm && Threads.@spawn begin
+        try; _blob_data_port!(t, k); catch; end
+        lock(_BLOB_DPORT_LOCK) do; delete!(_BLOB_DPORT_WARMING, ck); end
+    end
+    return 0
+end
+
 # Cached-only lookup for teardown/reap, where the worker may already be dead (no gate call). `gate+2` when
 # unknown — harmless, since a worker that never bound / never transferred opened no data tunnel to evict.
 _blob_data_port_cached(host, gate_port) = lock(_BLOB_DPORT_LOCK) do
@@ -3271,7 +3302,8 @@ function _sync_memo_boot!(k, report)
     k.target isa RemoteTarget || return nothing
     try
         r = push_notebook_memo!(k, report; boot = true)
-        _rlog("memo carry (boot window) → $(k.target.ssh_host):$(k.port + 2) — $r")
+        dport = _blob_data_port_cached(k.target.ssh_host, k.port)
+        _rlog("memo carry (boot window) → $(k.target.ssh_host):$dport — $r")
     catch e
         _rlog("memo carry failed — cells recompute remotely instead ($(first(sprint(showerror, e), 200)))")
     end

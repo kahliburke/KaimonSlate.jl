@@ -837,7 +837,7 @@ function create_tools(GateTool::Type)
         sync_memo(notebook::String) -> String
 
     Push this notebook's LOCAL durable-cache entries (manifests + content-addressed blobs) to its
-    remote worker over the blob data channel (gate port + 2) — so the remote RESTORES cached
+    remote worker over the blob data channel — so the remote RESTORES cached
     results instead of recomputing them ("your session follows you"). Dedup-aware: blobs the
     remote already has don't move. Runs automatically in the boot window on every remote
     (re)attach; this tool is the MID-SESSION push. Both transports: `direct` dials the CURVE-
@@ -852,7 +852,8 @@ function create_tools(GateTool::Type)
             return "Notebook isn't on a remote worker — nothing to sync."
         k.port == 0 && return "Remote worker not up yet — run a cell first."
         r = ReportEngine.push_notebook_memo!(k, nb.report)
-        return "✅ memo sync → $(k.target.ssh_host):$(k.port + 2) — $r"
+        dport = ReportEngine._blob_data_port_cached(String(k.target.ssh_host), k.port)
+        return "✅ memo sync → $(k.target.ssh_host):$dport — $r"
     end
 
     """
@@ -1271,7 +1272,9 @@ function create_tools(GateTool::Type)
         t = k.target
         if t isa ReportEngine.RemoteTarget
             println(io, "'$notebook' runs REMOTELY on '$(t.ssh_host)' (transport=$(t.transport))")
-            println(io, "  ports: main $(k.port) · stream $(k.stream_port) · data $(k.port + 2)  (remote env: $(t.project))")
+            dp = ReportEngine._blob_data_port_display(t, k)
+            println(io, "  ports: main $(k.port) · stream $(k.stream_port) · data " *
+                        (dp > 0 ? string(dp) : "not asked yet") * "  (remote env: $(t.project))")
             println(io, "  connection: ", k.conn === nothing ? "not connected (connects on next run)" :
                         "live" * (k.tunnel === nothing ? " (direct CURVE)" : " (ssh tunnel)"))
             # one ssh probe for the worker's own view: lifecycle state, pool provenance, telemetry

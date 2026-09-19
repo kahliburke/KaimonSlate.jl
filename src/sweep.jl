@@ -259,7 +259,7 @@ struct LocalTarget <: SweepTarget
     payload::String
     chunk::Int
     procs::Int                   # concurrent task processes; 0 = follow `local_procs()`
-    probe::Int                   # chunks released before any unit has finished; 0 = all at once
+    probe::Int                   # chunks released before any unit has finished (`@sweep(probe=)`)
 end
 #
 # The task environment is PREPARED here, at construction: seeded from `parent` and instantiated once
@@ -337,7 +337,7 @@ struct ClusterTarget <: SweepTarget
     # whatever a home directory protects — and holds results, job output, and the SOURCE of the body
     # that produced them. Empty follows the site's own umask, which is routinely world-readable.
     mode::String
-    probe::Int          # chunks released before any unit has finished; 0 = all at once
+    probe::Int          # chunks released before any unit has finished (`@sweep(probe=)`)
 end
 #
 # A target DESCRIBES a cluster; it does not reach one. `parent` and an empty `project`/`payload` mean
@@ -432,7 +432,7 @@ const _ATTR_COUNTS = (:cpus, :gpus, :nodes, :ntasks, :ntasks_per_node)
 # Slate's OWN cell settings — the `key=value` tokens that mean something to the notebook rather than
 # to the scheduler, and so must never be forwarded as a job option.
 const _ATTR_OTHER = ("cluster", "data", "chunk", "id", "controls", "needs", "mutates", "region",
-                     "script", "probe")
+                     "script")
 
 "Is this header key a scheduler option (rather than one of Slate's own cell settings)?"
 is_sched_attr(k::AbstractString) = !(String(k) in _ATTR_OTHER)
@@ -503,10 +503,10 @@ function cluster(spec::AbstractDict)
     # No scheduler AND no host is this machine, which has a target of its own — it needs no ssh
     # session and prepares its environment directly.
     (a.kind == "exec" && isempty(a.host)) &&
-        return LocalTarget(; a.root, a.parent, a.chunk, a.procs, a.probe)
+        return LocalTarget(; a.root, a.parent, a.chunk, a.procs)
     return ClusterTarget(a.host; kind = Symbol(a.kind), a.root, a.root_remote, a.parent, a.payload,
                          a.chunk, a.account, a.qos, a.prologue, a.directives, a.resources, a.procs,
-                         a.mode, a.probe)
+                         a.mode)
 end
 
 """
@@ -555,14 +555,12 @@ function cluster_args(spec::AbstractDict)
     parent = get_("project")
     isempty(parent) && (parent = dirname(Base.active_project()))
     chunk = something(tryparse(Int, get_("chunk", "8")), 8)
-    # Chunks released before any unit has finished. See `attr_probe`; a cell header overrides it.
-    probe = something(tryparse(Int, get_("probe", "1")), 1)
-    probe < 0 && error("cluster `$name` has probe `$(get_("probe"))`; it must be 0 or more")
+
     # The task runner is Slate's own code and is shipped during provisioning, so naming a path is
     # only for a site that stages it itself.
     payload = get_("payload")
     res = cluster_resources(spec)
-    return (; kind, name, root, parent, chunk, payload, procs, mode, probe,
+    return (; kind, name, root, parent, chunk, payload, procs, mode,
               root_remote = isempty(root_remote) ? root : root_remote,
               host, account = get_("account"), qos = get_("qos"),
               prologue = get_("prologue"), directives = get_("directives"),
@@ -672,22 +670,6 @@ function attr_lazy(attrs::AbstractDict)
     return s in ("auto", "arrow")
 end
 
-"""
-A `probe=` header attribute, or `nothing`. How many chunks go out BEFORE any unit has finished.
-
-The default of one is there so a body that throws for every point fails on a handful of units
-instead of on the whole grid. `probe=0` sends everything in one wave, which is what a re-run of a
-body you have already watched work wants — and it is also what makes a sweep independent of
-anything local, since there is no second wave for something to have to release.
-"""
-function attr_probe(attrs::AbstractDict)
-    v = get(attrs, "probe", nothing)
-    v === nothing && return nothing
-    n = tryparse(Int, v)
-    (n === nothing || n < 0) && error("@sweep: `probe=$v` on the cell header must be 0 or more")
-    return n
-end
-
 "A `chunk=` header attribute, or `nothing`. How many units ride one scheduler job."
 function attr_chunk(attrs::AbstractDict)
     v = get(attrs, "chunk", nothing)
@@ -697,11 +679,12 @@ function attr_chunk(attrs::AbstractDict)
     return n
 end
 
-# How much of a sweep goes out before any of it has reported. A target's own setting, so a cluster
-# whose bodies are long-settled can say `probe=0` and stop needing anything local between waves.
+# How much of a sweep goes out before any of it has reported. Carried on the target because the
+# card's poll reconciles without going back through `@sweep`, which is where the sweep set it.
 sweep_policy(t::SweepTarget) = BatchSweep.FailurePolicy(; probe_chunks = t.probe)
 
-# `probe=` on the cell header beats the cluster's own, the same way `chunk=` does.
+# `probe=` is the SWEEP's call, not the cluster's: a header option describes the machine the work
+# runs on, and how much of a grid to risk before checking is a property of the body.
 with_probe(t::LocalTarget, n) = n === nothing ? t :
     LocalTarget(t.root, t.project, t.payload, t.chunk, t.procs, n)
 with_probe(t::ClusterTarget, n) = n === nothing ? t :
@@ -1406,9 +1389,14 @@ registered per MACHINE rather than per notebook, which is what lets this run wit
 Throttled per cluster, and skipped entirely for a store with no started run: an idle machine costs
 one `readdir` per cluster per tick and never touches the network.
 """
+# The cluster registry and the remote log live in the hub's module. Looked up at call time because
+# this file also loads on a worker, which has neither.
+_hub_clusters() = isdefined(P, :clusters_all) ? P.clusters_all() : Dict{String,Any}[]
+_hub_log(msg::AbstractString) = (isdefined(P, :_rlog) && P._rlog(msg); nothing)
+
 function advance_started!(; every::Real = 30.0)
     n = 0
-    for c in clusters_all()
+    for c in _hub_clusters()
         name = String(get(c, "name", ""))
         isempty(name) && continue
         spec = Dict{String,String}(String(k) => String(v) for (k, v) in c)
@@ -1424,24 +1412,62 @@ function advance_started!(; every::Real = 30.0)
         try; sync_in!(t); catch; continue; end
         l = launcher_for(t)
         for run in runs
+            # Clear markers with no run behind them; the store was synced in above.
+            if MemoStore.read_manifest(root, run) === nothing
+                BatchSweep.stop!(root, run)
+                _hub_log("supervisor: $(name)/$(run) has no descriptor — dropped its started marker")
+                continue
+            end
             try
                 p = reconcile_and_sync!(t, run, l; submit = true, failure_policy = sweep_policy(t))
                 BatchSweep.is_settled(p) || (n += 1)
             catch e
-                _rlog("supervisor: advancing $(name)/$(run) failed: " * first(sprint(showerror, e), 160))
+                _hub_log("supervisor: advancing $(name)/$(run) failed: " * first(sprint(showerror, e), 160))
             end
         end
     end
     return n
 end
 
-function reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher; kw...)
+# Runs whose descriptors this process has sent. The cell pushes them, but a cluster that wants a
+# sign-in is unreachable until someone signs in, and that is usually AFTER the cell has run: the
+# push is a no-op, nothing is submitted, and the card submits later against a store that never got
+# them. The job then starts and dies on the far side looking for its own chunk.
+const _DESC_SENT = Set{Tuple{String,String}}()
+const _DESC_LOCK = ReentrantLock()
+
+# Idempotent and content-addressed, so the repeat costs a manifest rewrite and no blob movement.
+function _ensure_descriptors!(t::SweepTarget, run::AbstractString)
+    isempty(target_host(t)) && return true
+    k = (store_root(t), String(run))
+    lock(_DESC_LOCK) do; k in _DESC_SENT; end && return true
+    sync_out!(t) || return false
+    lock(_DESC_LOCK) do; push!(_DESC_SENT, k); end
+    return true
+end
+
+_descriptors_sent!(t::SweepTarget, run::AbstractString) =
+    lock(_DESC_LOCK) do; push!(_DESC_SENT, (store_root(t), String(run))); end
+
+function reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher;
+                             submit::Bool = false, kw...)
+    if submit && !_ensure_descriptors!(target, run)
+        error("could not send sweep $(run)'s descriptors to " *
+              "$(target_host(target)):$(job_root(target)) — nothing was submitted")
+    end
     root = store_root(target)
     before = BatchSweep.read_attempts(root)
-    p = BatchSweep.reconcile!(root, run, launcher, specfn_for(target); kw...)
+    p = BatchSweep.reconcile!(root, run, launcher, specfn_for(target); submit, kw...)
     BatchSweep.read_attempts(root) == before || sync_out!(target; dirs = ("jobs",))
     return p
 end
+
+# A change to `jobs/` is only real once it has been pushed. `sync_in!` REPLACES the mirror's copy
+# from the store, so a poll landing between the change and the push restores what was just removed,
+# and the push then sends it back. Holding the store's sync lock across both keeps them together.
+_with_store_lock(f, ::LocalTarget) = f()
+_with_store_lock(f, t::ClusterTarget) =
+    isempty(t.host) ? f() : with_store_lock(f, remote_store(t).mirror)
 
 "Send what the hub has written — descriptors, their blobs, markers — to the store. `dirs` narrows
 it to part of that, for the callers that have just touched one thing."
@@ -3222,6 +3248,7 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
                                 "hits" => [Dict{String,Any}("offset" => h.offset, "line" => h.line,
                                                             "text" => h.text) for h in r.hits])
     end
+    _with_store_lock(target) do
     if action == "submit"
         BatchSweep.start!(root, run)
     elseif action == "cancel"
@@ -3263,6 +3290,7 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
         error("sweep $(action): the store was not updated (host unreachable?) — " *
               "the cluster still holds this sweep's markers, so retry once it is reachable")
     end
+    end     # _with_store_lock
     return status_payload(target, run, params, keys; plot)
 end
 
@@ -4495,7 +4523,7 @@ pill carry the rest.
 """
 function run_sweep(target::SweepTarget, params::AbstractVector, body_src::AbstractString;
                    setup_src::AbstractString = "", captures::AbstractDict = Dict{Symbol,Any}(),
-                   submit::Bool = false, cap::Integer = 0, register = nothing,
+                   submit::Bool = false, cap::Integer = 0, register = nothing, probe::Bool = true,
                    resources = nothing, plot = nothing, refresh = nothing, cell = "",
                    summary_src::AbstractString = "", lazy::Bool = false,
                    attrs::AbstractDict = Dict{String,String}())
@@ -4507,7 +4535,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # header is the one a person edits from the UI while watching a job, and a control that silently
     # loses to the source would be a control that appears broken.
     target = with_resources(with_resources(target, resources), attr_resources(attrs))
-    target = with_probe(with_chunk(target, attr_chunk(attrs)), attr_probe(attrs))
+    target = with_probe(with_chunk(target, attr_chunk(attrs)), probe ? 1 : 0)
     # Storage FORM, not identity: a unit's value is the same either way, so flipping `data=` must
     # not re-key and throw away finished work. Units already stored whole simply have no index and
     # cannot be sliced; the dataset says how many, rather than quietly omitting them.
@@ -4545,7 +4573,15 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # survives too. What goes is only ever a run nobody asked for that did nothing.
     _forget_stale_runs(root, run, String(cell))
     # The job cannot start without its descriptors, so they go over BEFORE anything is submitted.
-    sync_out!(target)
+    # Unchecked, a failed push submits work the far side cannot run: the chunk starts, finds no
+    # descriptor for its key and dies there. An unreachable target pushes nothing and submits
+    # nothing, which is how authoring against a cluster you are not signed in to keeps working.
+    if sync_out!(target)
+        _descriptors_sent!(target, run)
+    elseif _reachable(target)
+        error("could not send the sweep's descriptors to " *
+              "$(target_host(target)):$(job_root(target)) — nothing was submitted")
+    end
 
     launcher = launcher_for(target)
     # Running the cell RECONCILES; it does not submit. Authoring a sweep means running the cell
@@ -5000,13 +5036,18 @@ macro sweep(args...)
     res    = get(opts, :resources, nothing)
     plot   = get(opts, :plot, nothing)
     lazy   = get(opts, :lazy, false)
+    # Hold the rest of the grid back until a unit has landed. `false` sends every chunk in the first
+    # reconcile, which is what a re-run of a body you have already watched work wants — and it is
+    # also what makes a sweep need nothing local once it is submitted, since there is no second wave
+    # for anything to have to release.
+    probe  = get(opts, :probe, true)
     # An unknown option is an error rather than a silent no-op: `@sweep(…, wallclock = "2h")` that
     # quietly does nothing is worse than one that says so.
     script = get(opts, :script, nothing)
     for k in keys(opts)
-        k in (:setup, :cap, :submit, :resources, :plot, :summary, :lazy, :script) ||
+        k in (:setup, :cap, :submit, :resources, :plot, :summary, :lazy, :script, :probe) ||
             error("@sweep: unknown option `$k` " *
-                  "(accepted: setup, cap, submit, resources, plot, summary, lazy, script)")
+                  "(accepted: setup, cap, submit, resources, plot, summary, lazy, script, probe)")
     end
 
     # What the shard module needs before the body runs: the imports lifted out of the body, then
@@ -5068,6 +5109,7 @@ macro sweep(args...)
                                                             $user_setup, _sscript),
                            captures = _caps,
                            cap = $(esc(cap)), submit = $(esc(submit)), register = _reg,
+                           probe = $(esc(probe)),
                            resources = $(esc(res)), plot = $(esc(plot)),
                            summary_src = $sumsrc, lazy = $(esc(lazy)),
                            refresh = _refresh, cell = String(_cell), attrs = _attrs)

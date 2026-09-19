@@ -569,11 +569,18 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     const out = el.querySelector('.output');
     if (!_conflicted && !_stale && c.output !== last.current.out) {
       if (out) {
-        last.current.out = c.output;
         // Typeset and clamp AFTER the swap has decoded, not beside it (main): doing them inline ran
         // them against the outgoing content.
-        window._swapOutput(out, c.output, c.live,
-                           () => { window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); });
+        //
+        // Record it as applied only if the swap took. A swap can decline (a live output outranking
+        // a placeholder), and calling it is not the same as landing: treating the two as one spent
+        // the cell's stamp on a DOM that still held the previous output, and every payload after
+        // that read as stale. The cell then froze — a sweep card kept showing a superseded run, and
+        // acting on it drove the wrong one.
+        if (window._swapOutput(out, c.output, c.live,
+                               () => { window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }))
+          last.current.out = c.output;
+        else _landed = false;
       } else _landed = false;                     // host not committed yet — retry on the next pass
     }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line

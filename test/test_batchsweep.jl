@@ -13,6 +13,13 @@ include(joinpath(@__DIR__, "..", "src", "sweep.jl"))
 const BL = BatchLauncher
 const BS = BatchSweep
 
+# The supervisor reads the cluster registry and writes the remote log through its parent module,
+# which is the hub in production and this one in the suite.
+const HUB_CLUSTERS = Dict{String,Any}[]
+const HUB_LOG = String[]
+clusters_all() = HUB_CLUSTERS
+_rlog(msg) = push!(HUB_LOG, String(msg))
+
 # A launcher that reports whatever the test tells it to, and records what was submitted.
 mutable struct FakeLauncher <: BL.Launcher
     live::Dict{String,Symbol}          # name => :pending | :running
@@ -642,33 +649,74 @@ end
     @testset "probe= decides how much goes out before anything has reported" begin
         # The default releases ONE chunk and waits for a unit to land, so a body that throws for
         # every point fails on a handful instead of the whole grid. The cost is that something has
-        # to be running to release the rest. `probe=0` sends everything at once, which is what a
-        # re-run of a body already watched working wants — and what makes a sweep need nothing
+        # to be running to release the rest. `probe = false` sends everything at once, which is what
+        # a re-run of a body already watched working wants, and what makes a sweep need nothing
         # local once it is submitted.
-        @test Sweep.cluster_args(Dict("kind" => "exec", "host" => "h",
-                                      "root_remote" => "/s")).probe == 1
-        @test Sweep.cluster_args(Dict("kind" => "exec", "host" => "h", "root_remote" => "/s",
-                                      "probe" => "0")).probe == 0
-        @test_throws ErrorException Sweep.cluster_args(
-            Dict("kind" => "exec", "host" => "h", "root_remote" => "/s", "probe" => "-1"))
-        # A cell header overrides the cluster, the way `chunk=` does — and is Slate's own setting,
-        # so it must never reach the scheduler as a job option.
-        @test Sweep.attr_probe(Dict("probe" => "0")) == 0
-        @test Sweep.attr_probe(Dict{String,String}()) === nothing
-        @test_throws ErrorException Sweep.attr_probe(Dict("probe" => "lots"))
-        @test !Sweep.is_sched_attr("probe")
+        #
+        # It belongs to the sweep, not the cluster, so it is a `@sweep` keyword. A cell header
+        # carries cluster parameters, and every name there is forwarded to the scheduler.
+        @test Sweep.is_sched_attr("probe")
 
         run_one(probe) = mktempdir() do root
-            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 1, probe = probe,
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 1,
                                   payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
-            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false) do p; (; g = p.g); end
+            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false,
+                             probe = probe) do p; (; g = p.g); end
+            @test Sweep.sweep_policy(r.target).probe_chunks == (probe ? 1 : 0)
             BS.start!(root, r.run)
-            p = Sweep.reconcile_and_sync!(t, r.run, Sweep.launcher_for(t);
-                                          submit = true, failure_policy = Sweep.sweep_policy(t))
+            p = Sweep.reconcile_and_sync!(r.target, r.run, Sweep.launcher_for(r.target);
+                                          submit = true, failure_policy = Sweep.sweep_policy(r.target))
             (length(p.to_submit), length(BS.read_attempts(root)))
         end
-        @test run_one(0) == (0, 4)      # everything in one wave; nothing left to release
-        @test first(run_one(1)) > 0     # …against one chunk, with the rest still waiting
+        @test run_one(false) == (0, 4)   # everything in one wave; nothing left to release
+        @test first(run_one(true)) > 0   # …against one chunk, with the rest still waiting
+    end
+
+    @testset "the supervisor submits for a cluster with nothing open" begin
+        # Both names the supervisor needs come from the parent module, so only calling it shows
+        # whether it reaches them.
+        empty!(HUB_CLUSTERS); empty!(HUB_LOG)
+        mktempdir() do root
+            payload = joinpath(@__DIR__, "..", "src", "slatetask.jl")
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2, payload)
+            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false) do p; (; g = p.g); end
+            @test Sweep.advance_started!(every = 0.0) == 0       # prepared is not started
+            BS.start!(root, r.run)
+            push!(HUB_CLUSTERS, Dict{String,Any}("name" => "t1", "kind" => "exec", "host" => "",
+                                                 "root_remote" => root, "project" => tempdir(),
+                                                 "payload" => payload))
+            @test Sweep.advance_started!(every = 0.0) == 1       # one run still has work
+            @test length(BS.read_attempts(root)) == 1            # …the probe wave, and only that
+            @test isempty(HUB_LOG)
+        end
+        empty!(HUB_CLUSTERS)
+    end
+
+    @testset "releasing a run takes its marker with it" begin
+        # A marker outliving its descriptor leaves the supervisor with a run it cannot advance and
+        # cannot stop asking about, once per tick for as long as the hub runs.
+        empty!(HUB_CLUSTERS); empty!(HUB_LOG)
+        mktempdir() do root
+            payload = joinpath(@__DIR__, "..", "src", "slatetask.jl")
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2, payload)
+            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false) do p; (; g = p.g); end
+            BS.start!(root, r.run)
+            @test BS.is_started(root, r.run)
+            BS.forget_sweep!(root, r.run)
+            @test !BS.is_started(root, r.run)
+            @test r.run ∉ Sweep.started_runs(root)
+
+            # …and a marker already stranded is cleared by the supervisor rather than retried.
+            BS.start!(root, r.run)
+            @test Sweep.started_runs(root) == [r.run]
+            push!(HUB_CLUSTERS, Dict{String,Any}("name" => "t1", "kind" => "exec", "host" => "",
+                                                 "root_remote" => root, "project" => tempdir(),
+                                                 "payload" => payload))
+            @test Sweep.advance_started!(every = 0.0) == 0
+            @test isempty(Sweep.started_runs(root))
+            @test any(occursin("no descriptor", m) for m in HUB_LOG)
+        end
+        empty!(HUB_CLUSTERS); empty!(HUB_LOG)
     end
 
     @testset "a started run is visible to the hub without a notebook" begin

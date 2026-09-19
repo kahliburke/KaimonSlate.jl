@@ -648,7 +648,7 @@ sent deleted every manifest written here since the last push — a sweep descrip
 earlier among them. This said "merging" and replaced, which is the worst combination: the contract
 a caller relies on is the one the code does not keep.
 """
-function _unarchive(data::Vector{UInt8}, dest::AbstractString)
+function _unarchive(data::Vector{UInt8}, dest::AbstractString; skip = _ -> false)
     isempty(data) && return true
     tmp = ""
     try
@@ -661,6 +661,7 @@ function _unarchive(data::Vector{UInt8}, dest::AbstractString)
             mkpath(out)
             for f in files
                 # File by file, overwriting what the store also has and leaving everything else.
+                skip(replace(rel == "." ? f : joinpath(rel, f), '\\' => '/')) && continue
                 cp(joinpath(dir, f), joinpath(out, f); force = true, follow_symlinks = false)
             end
         end
@@ -760,6 +761,29 @@ end
 # authenticating a second time. Metadata is kilobytes of text, so moving all of it costs less than
 # the round trips rsync would spend deciding what changed.
 
+# Inside `jobs/` the hub and the store BOTH write. The hub owns a run's STATE — the started and
+# cancelled markers and the attempt counts. The launcher writes the submission index and the batch
+# script on the far side at submit time (`batchlauncher.jl`), and they never pass through here.
+#
+# Treating the directory as one unit made a hub-side deletion unrepresentable: the pull copies the
+# store's copy back over the top, so removing a marker only stuck if a push wiped the whole
+# directory first, which also took the launcher's files. Reset lost that race silently, because the
+# push then re-sent what the pull had just restored.
+const _HUB_OWNED_SUFFIXES = (".started", ".cancelled", ".armed")
+const _HUB_OWNED_FILES = ("attempts.toml",)
+
+function hub_owned(rel::AbstractString)
+    p = String(rel)
+    startswith(p, "jobs/") || return false
+    name = p[(ncodeunits("jobs/") + 1):end]
+    '/' in name && return false
+    return any(endswith(name, x) for x in _HUB_OWNED_SUFFIXES) || name in _HUB_OWNED_FILES
+end
+
+# The same set as shell globs under a directory the caller has already quoted.
+_hub_owned_globs(dir) = vcat(String[dir * "/*" * x for x in _HUB_OWNED_SUFFIXES],
+                             String[dir * "/" * f for f in _HUB_OWNED_FILES])
+
 """
     sync_flags(dir, direction) -> Bool
 
@@ -778,9 +802,11 @@ wipe uniquely covered was a manifest removed at the STORE by something else enti
 scratch purge. That now leaves a stale entry here until something reads it and finds no blob, which
 is a worse diagnostic but a far better failure than deleting work nobody has pushed yet.
 
-  `jobs/`   written by the HUB — the submission index, the started and cancelled markers, the attempt
-            counts. Deleted on the way OUT, which is how disarming and clearing attempts take
-            effect. The pull exists only so a FRESH hub can recover a submission it did not make.
+  `jobs/`   TWO writers, so ownership is per file, not per directory (`hub_owned`). The hub owns the
+            markers and the attempt counts, and those are the only ones a push deletes — which is how
+            disarming and clearing attempts take effect, and why a pull will not put them back. The
+            launcher writes the submission index and the batch script on the far side, so the pull is
+            how this hub learns of a submission, including one it did not make.
 
   `blobs/`  content-addressed, so a blob the store already has is byte-identical.
 """
@@ -901,10 +927,16 @@ function pull_meta!(s::RemoteStore; dirs = META_DIRS)
         ok || return false
         # Merged, never replaced. `_unarchive` copies over the top, so what the store has wins
         # per file and what only exists here survives to be pushed.
+        #
+        # Except the hub's own files under `jobs/`: there the mirror is the authority and the
+        # store's copy is a replica, so copying it back would undo a marker this hub just removed.
+        # A mirror with no `jobs/` yet is the one case the pull exists for — a fresh hub recovering
+        # a submission it did not make — and then the replica is all there is.
+        fresh = !isdir(joinpath(s.mirror, "jobs"))
         for d in dirs
             mkpath(joinpath(s.mirror, String(d)))
         end
-        return _unarchive(data, s.mirror)
+        return _unarchive(data, s.mirror; skip = fresh ? (_ -> false) : hub_owned)
     end
 end
 
@@ -923,16 +955,28 @@ function push_meta!(s::RemoteStore; dirs = (META_DIRS..., "blobs"))
         pres = String[String(d) for d in dirs if isdir(joinpath(s.mirror, String(d)))]
         isempty(pres) && return (pres, nothing)
         keep = Set(pres)
-        (pres, _archive(s.mirror, p -> first(split(String(p), '/'; keepempty = false)) in keep))
+        # Under `jobs/`, send only what this hub owns. The launcher's index and batch script live on
+        # the far side; the mirror holds them only because a pull brought them over, and re-sending
+        # that copy would overwrite a newer one with a stale one.
+        (pres, _archive(s.mirror, p -> (t = first(split(String(p), '/'; keepempty = false));
+                                        t in keep && (t != "jobs" || hub_owned(p)))))
     end
     isempty(present) && return true
-    wipe = String[shq_path(joinpath(s.root, d)) for d in present if sync_flags(d, :out)]
+    # Delete only the hub's own files, by name. `rm -rf jobs/` took the launcher's files with it,
+    # which then had to survive by round-tripping through the mirror.
+    wipe = String[g for d in present if sync_flags(d, :out)
+                    for g in _hub_owned_globs(shq_path(joinpath(s.root, d)))]
     # `tar x` creates with the ambient umask, so it is set for this shell rather than fixed up after.
     script = (isempty(s.umask) ? "" : "umask " * s.umask * "; ") *
              "mkdir -p " * shq_path(s.root) *
-             (isempty(wipe) ? "" : "; rm -rf " * join(wipe, " ")) *
+             (isempty(wipe) ? "" : "; rm -f " * join(wipe, " ")) *
              "; cd " * shq_path(s.root) * " && tar xf -"
-    return first(run_io(String(s.host), script, data))
+    ok, out = run_io(String(s.host), script, data)
+    # Say what the far side said. Callers get a Bool, and a push that fails silently here surfaces
+    # much later as a job that cannot find its own descriptors.
+    ok || @warn "slate: could not push to $(s.host):$(s.root)" dirs = present output =
+        first(String(copy(out)), 400)
+    return ok
 end
 
 """

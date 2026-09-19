@@ -1155,7 +1155,9 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
             t = k.target
             if t isa ReportEngine.RemoteTarget
                 d["transport"] = String(t.transport)
-                d["dataPort"] = k.port + 2                 # the blob channel rides gate+2
+                # A :tunnel worker picks its own free port, so gate+2 is only the :direct answer.
+                # 0 until the hub has asked it; the panel leaves the slot out rather than guessing.
+                d["dataPort"] = ReportEngine._blob_data_port_display(t, k)
                 isempty(String(t.datadir)) || (d["dataRoot"] = String(t.datadir))
             else
                 d["transport"] = k.remote ? "attached" : "local"

@@ -41,14 +41,21 @@ struct JobSpec
     # world-readable on a machine shared with everyone else who has an account. Empty leaves the
     # site's own default, for a store that is meant to be shared.
     umask::String
+    # A submission this one waits for, and how many elements that one had. The second wave of a
+    # sweep is queued behind the probe rather than released by something watching from a laptop —
+    # the scheduler already knows how to hold a job until another succeeds, and it does not stop
+    # knowing when the hub goes away. Empty = nothing to wait for.
+    after::String
+    after_n::Int
 end
 
 JobSpec(name, chunks; root, project, payload, julia = "julia",
         resources = (; cpus = 1, mem = "1G", walltime = "00:30:00", partition = ""),
-        logdir = joinpath(root, "logs"), prologue = "", directives = "", umask = "") =
+        logdir = joinpath(root, "logs"), prologue = "", directives = "", umask = "",
+        after = "", after_n = 0) =
     JobSpec(String(name), String.(collect(chunks)), String(root), String(project),
             String(payload), String(julia), resources, String(logdir), String(prologue),
-            String(directives), String(umask))
+            String(directives), String(umask), String(after), Int(after_n))
 
 """
     directive_lines(text; prefix = "#SBATCH", example = "--constraint=avx512") -> Vector{String}
@@ -774,13 +781,19 @@ function _sbatch_script(l::SlurmLauncher, spec::JobSpec, indexfile::AbstractStri
     lines = ["#!/bin/bash",
              "#SBATCH --job-name=$(spec.name)",
              "#SBATCH --array=1-$(length(spec.chunks))",
+
              "#SBATCH --output=$(spec.logdir)/$(spec.name).%A_%a.out",
              "#SBATCH --cpus-per-task=$(get(r, :cpus, _SBATCH_ALWAYS.cpus))",
              "#SBATCH --mem=$(get(r, :mem, _SBATCH_ALWAYS.mem))",
              "#SBATCH --time=$(get(r, :walltime, _SBATCH_ALWAYS.walltime))",
-             # Duplicate submission across a hub restart is prevented by the cluster itself: only
-             # one job of this name per user can run, and the name is content-derived.
-             "#SBATCH --dependency=singleton"]
+             # ONE `--dependency`, because SLURM keeps only the last one it is given. Two lines
+             # would silently drop the first, which is the wave-ordering this exists for.
+             #
+             # `singleton` prevents a duplicate submission across a hub restart: only one job of
+             # this name per user runs, and the name is content-derived. `afterok` on an array job
+             # waits for every element, so the probe's own size changes nothing. Comma is AND.
+             "#SBATCH --dependency=" *
+                 (isempty(spec.after) ? "singleton" : "afterok:$(spec.after),singleton")]
     # Everything else the spec carries, sorted so two identical sweeps produce identical scripts.
     # A key absent from the spec emits no line at all: writing `--nodes=1` where the author asked
     # for nothing would override the partition's own configuration with a guess.
@@ -1201,6 +1214,12 @@ function _pbs_script(l::PbsLauncher, spec::JobSpec, indexfile::AbstractString)
              "#PBS -N $(spec.name)",
              # One file, not two: PBS spools stdout and stderr separately otherwise.
              "#PBS -j oe"]
+    # Waiting on an ARRAY is a different keyword here than waiting on a job (`afterokarray`, and the
+    # id carries a `[]`), and a one-element submission is not an array — PBS rejects the degenerate
+    # range, so the probe is normally a plain job on this side. SLURM spells both the same way.
+    isempty(spec.after) || push!(lines,
+        spec.after_n > 1 ? "#PBS -W depend=afterokarray:$(spec.after)[]" :
+                           "#PBS -W depend=afterok:$(spec.after)")
     # Naming the output is three-way, and only one of them is right. Measured on OpenPBS 23.06:
     #
     #   -o <dir>/                          PBS names the file after the JOB ID, which is the one

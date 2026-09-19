@@ -1672,6 +1672,10 @@ function setState(id, s) { window.slateStore && window.slateStore.setLiveState(i
 // `live` is the cell's session-boundness marker ('render' | 'placeholder' | '') — see `_live_output_placeholder`.
 // `after` is the caller's post-swap work (typesetting, clamping) on the NEW content. It is a
 // callback rather than the next statement because a figure swap finishes asynchronously below.
+// Returns whether the HTML is now the cell's output — mounted, already mounted, or committed to
+// mount. A `false` means the DOM still holds something else, and the caller must not record the
+// payload as applied: `revMark` would spend the cell's stamp and every later payload would look
+// stale, freezing the cell until a reload.
 function _swapOutput(out, html, live, after) {
   const finish = () => { if (after) after(); };
   // A SESSION-BOUND output the page has already booted outranks the placeholder that stands in for it.
@@ -1680,13 +1684,13 @@ function _swapOutput(out, html, live, after) {
   // the next run of ANY cell blanks a working live output back to "connecting…", permanently: nothing
   // re-renders it until the next SSE connect. Keep the mounted one (and its `__slateOut`, so the matching
   // `celldone` re-render stays a no-op). Extension-agnostic: no markup is inspected, only the flag.
-  if (live === 'placeholder' && out.__slateLive) return finish();
+  if (live === 'placeholder' && out.__slateLive) { finish(); return false; }
   // A single run swaps the output TWICE — the `celldone:` push (patchCells) AND the run's HTTP-response
   // render (the Preact <Cell> effect) both carry the SAME output. Re-running its <script> twice re-boots a
   // figure needlessly and, for a side-effecting web-cell fragment, fires its effect twice (a double
   // `alert`, a double append). Skip a swap whose output already matches what's mounted: identical output
   // never needs to re-render or re-run. A genuinely new output (or a real change on re-run) still swaps.
-  if (out.__slateOut === html) return finish();
+  if (out.__slateOut === html) { finish(); return true; }   // already mounted: applied
   out.__slateOut = html;
   out.__slateLive = live === 'render';
 
@@ -1719,7 +1723,7 @@ function _swapOutput(out, html, live, after) {
     }
     finish();
   };
-  if (!imgs.length) return commit();   // text, markdown, tables: nothing to wait for
+  if (!imgs.length) { commit(); return true; }   // text, markdown, tables: nothing to wait for
 
   // A broken image is not what this guards: a 404 rejects fast and commits right away. It guards a
   // fetch that stalls, where the alternative to waiting is showing the reader a hole. Holding the
@@ -1729,6 +1733,7 @@ function _swapOutput(out, html, live, after) {
   const deadline = setTimeout(go, 1000);
   Promise.all(imgs.map(im => im.decode ? im.decode().catch(() => {})
                                        : new Promise(r => { im.onload = im.onerror = r; }))).then(go);
+  return true;        // committed to commit; a newer swap superseding it will mark its own payload
 }
 
 // A <script> assigned via innerHTML is parsed but never executed. Rich output

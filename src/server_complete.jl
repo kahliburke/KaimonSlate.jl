@@ -3498,7 +3498,32 @@ end
 # notebook, and answering once clears it for all of them.
 const _SSHAUTH_SEEN = Set{String}()
 
+# What each host's login asks for, kept between runs. Learning it again costs a login that fails on
+# purpose, and a cluster that issues its second factor with the prompt rather than on the answer
+# charges the user a code for that failure — so a hub restart would otherwise mean two codes for the
+# first connection to every host. Not secret: it is the text the cluster shows everyone who logs in.
+# It does name hosts and accounts, hence 0600.
+_ssh_prompts_file() = joinpath(SlateHome.config_home(), "ssh-prompts.json")
+
+function _save_ssh_prompts(prompts)
+    f = _ssh_prompts_file()
+    mkpath(dirname(f))
+    tmp = f * ".tmp"
+    open(io -> JSON.print(io, Dict(h => Any[Any[t, e] for (t, e) in v] for (h, v) in prompts)),
+         tmp, "w")
+    chmod(tmp, 0o600)
+    mv(tmp, f; force = true)
+    return nothing
+end
+
 function _install_sshauth_watch!(h)
+    ReportEngine.Sweep.SshTransport.set_prompt_store!(_save_ssh_prompts)
+    try
+        isfile(_ssh_prompts_file()) &&
+            ReportEngine.Sweep.SshTransport.adopt_prompts!(JSON.parsefile(_ssh_prompts_file()))
+    catch e
+        @debug "kept ssh prompts unreadable; they will be learned again" exception = e
+    end
     # How a login ended, to every page — the dialog is showing "working…" and has no other way to
     # learn. Reaches here from this process directly, or from a worker over the prompt relay.
     SshAuth.set_reporter!() do host, ok, err

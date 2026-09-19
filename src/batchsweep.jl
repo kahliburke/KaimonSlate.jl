@@ -159,7 +159,20 @@ function forget_sweep!(root::AbstractString, sweep::AbstractString)
     end
     MemoStore.drop_manifest(root, sweep) && (n += 1)
     _unindex_cell_run!(root, cell, sweep)
+    # Drop the run's marker and status files too, or the supervisor keeps trying to advance it.
+    stop!(root, sweep)
+    for f in _status_files(root, sweep)
+        rm(f; force = true)
+    end
     return n
+end
+
+# Per-chunk status files are named `<sweep>_c<n>.toml`, so a run's are found by prefix.
+function _status_files(root::AbstractString, sweep::AbstractString)
+    d = SlateTask.status_dir(root)
+    isdir(d) || return String[]
+    pre = sweep * "_"
+    return String[joinpath(d, f) for f in readdir(d) if startswith(f, pre)]
 end
 
 function sweep_chunks(root::AbstractString, sweep::AbstractString)

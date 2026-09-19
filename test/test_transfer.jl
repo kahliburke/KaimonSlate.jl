@@ -354,8 +354,8 @@ end
         for d in ("manifests", "status", "jobs", "blobs")
             @test SW.sync_flags(d, :in) == false
         end
-        # Outbound is unchanged: `jobs/` is hub-owned, and deleting there is how disarming and
-        # clearing attempts take effect.
+        # Outbound, `jobs/` is the one directory a push may delete in — but only the hub's own
+        # files there (`hub_owned`), not the launcher's.
         @test SW.sync_flags("jobs", :out)
         @test !SW.sync_flags("manifests", :out)
     end
@@ -380,6 +380,62 @@ end
             @test isfile(joinpath(mirror, "manifests", "written_here.toml"))   # survived
             @test isfile(joinpath(mirror, "manifests", "from_store.toml"))     # and the store's landed
         end
+    end
+end
+
+@testset "jobs/ has two writers, so ownership is per file" begin
+    # The hub owns a run's state; the launcher writes the submission index and the batch script on
+    # the far side. Syncing the directory as a unit made a hub-side deletion impossible to express:
+    # the pull copied the store's marker back, and only a wipe of the whole directory removed it —
+    # taking the launcher's files along. Reset lost that race every time, and reported success.
+    @testset "the predicate splits them" begin
+        @test SW.hub_owned("jobs/sw1_r2.started")
+        @test SW.hub_owned("jobs/sw1_r2.cancelled")
+        @test SW.hub_owned("jobs/sw1_r2.armed")
+        @test SW.hub_owned("jobs/attempts.toml")
+        @test !SW.hub_owned("jobs/slate-ab.index")          # the launcher's, written over ssh
+        @test !SW.hub_owned("jobs/slate-ab.index.sbatch")
+        @test !SW.hub_owned("manifests/x.toml")
+        @test !SW.hub_owned("jobs/nested/x.started")        # never escapes the directory
+    end
+
+    @testset "a pull does not put back a marker the hub removed" begin
+        mktempdir() do mirror
+            for d in ("manifests", "status", "jobs"); mkpath(joinpath(mirror, d)); end
+            # The store's copy of jobs/: a marker this hub has since deleted, and an index only the
+            # far side ever had.
+            data = mktempdir() do remote
+                mkpath(joinpath(remote, "jobs"))
+                write(joinpath(remote, "jobs", "sw1_r2.cancelled"), "1")
+                write(joinpath(remote, "jobs", "slate-ab.index"), "chunk1")
+                SW._archive(remote)
+            end
+            @test SW._unarchive(data, mirror; skip = SW.hub_owned)
+            @test !isfile(joinpath(mirror, "jobs", "sw1_r2.cancelled"))   # stayed deleted
+            @test isfile(joinpath(mirror, "jobs", "slate-ab.index"))      # the launcher's arrived
+        end
+    end
+
+    @testset "a fresh hub takes the lot" begin
+        # The one case the inbound copy exists for: no local jobs/ at all, so the store's replica is
+        # the only record of a submission this hub did not make.
+        mktempdir() do mirror
+            data = mktempdir() do remote
+                mkpath(joinpath(remote, "jobs"))
+                write(joinpath(remote, "jobs", "sw1_r2.started"), "1")
+                SW._archive(remote)
+            end
+            @test SW._unarchive(data, mirror)                             # no skip
+            @test isfile(joinpath(mirror, "jobs", "sw1_r2.started"))
+        end
+    end
+
+    @testset "a push deletes only the hub's own files" begin
+        g = SW._hub_owned_globs("'/s/jobs'")
+        @test "'/s/jobs'/*.started" in g
+        @test "'/s/jobs'/*.cancelled" in g
+        @test "'/s/jobs'/attempts.toml" in g
+        @test !any(occursin("index", x) for x in g)      # the launcher's files are never swept
     end
 end
 

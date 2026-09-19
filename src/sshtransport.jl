@@ -247,6 +247,78 @@ const _PROMPTS_LOCK = ReentrantLock()
 
 remembered_prompts(host) = lock(_PROMPTS_LOCK) do; get(_PROMPTS, String(host), Tuple{String,Bool}[]); end
 
+# Learning what a host asks costs a deliberately-failed login (`_discover_prompts!`). Where a cluster
+# issues its second factor with the prompt rather than on the answer, that failed login spends one of
+# the user's codes and the real login spends another. Keeping what was learned across restarts is
+# what makes that a one-off per host instead of a toll on every hub start.
+#
+# Safe to keep across restarts only because `_try_kbdint` rewrites the entry from what the server
+# actually asked on every attempt, pass or fail: a login that changes shape corrects the store the
+# next time it is used rather than wedging against it.
+#
+# WHERE they are kept is the caller's business, not this module's. Every file here also ships to a
+# cluster as part of the worker payload and is loaded there against whatever environment the remote
+# has, so this module imports nothing beyond libssh2 and the Base networking it needs. Choosing a
+# directory and a file format would mean a serialization dependency, and a worker that cannot load
+# it loses the whole batch fabric.
+const _PROMPT_SAVE = Ref{Any}(nothing)
+
+# A pair is whatever the caller's store round-trips to: a `Tuple` straight back from `save`, a
+# two-element array once it has been through a file. Both, or the two calls do not compose.
+function _parse_prompts(rows)
+    rows isa AbstractVector || return nothing
+    out = Tuple{String,Bool}[]
+    for r in rows
+        (r isa Union{AbstractVector,Tuple} && length(r) == 2 &&
+         r[1] isa AbstractString && r[2] isa Bool) || return nothing
+        push!(out, (String(r[1]), r[2]))
+    end
+    return isempty(out) ? nothing : out
+end
+
+"""
+    set_prompt_store!(save)
+
+Call `save(prompts)` whenever what a host asks changes, so the shapes outlive the process. `prompts`
+maps a host to its `(text, echo)` list. Unset, which is the default, they last only as long as this
+process does.
+"""
+set_prompt_store!(save) = (_PROMPT_SAVE[] = save; nothing)
+
+"""
+    adopt_prompts!(entries)
+
+Seed from what a previous run kept. Anything this process has already learned wins, having come from
+a live conversation with the server, and an entry that is not a list of `(text, echo)` pairs is
+dropped rather than trusted.
+"""
+function adopt_prompts!(entries)
+    entries isa AbstractDict || return nothing
+    lock(_PROMPTS_LOCK) do
+        for (host, rows) in entries
+            haskey(_PROMPTS, String(host)) && continue
+            got = _parse_prompts(rows)
+            got === nothing || (_PROMPTS[String(host)] = got)
+        end
+    end
+    return nothing
+end
+
+# Record what `host` asked. No-op when it has not changed, so an ordinary login does not rewrite the
+# store; the snapshot is taken under the lock and handed over outside it, since keeping it is IO.
+function _remember_prompts!(host::AbstractString, seen::Vector{Tuple{String,Bool}})
+    isempty(seen) && return nothing
+    snap = lock(_PROMPTS_LOCK) do
+        get(_PROMPTS, String(host), nothing) == seen && return nothing
+        _PROMPTS[String(host)] = copy(seen)
+        return Dict(h => copy(v) for (h, v) in _PROMPTS)
+    end
+    snap === nothing && return nothing
+    save = _PROMPT_SAVE[]
+    save === nothing || (try; save(snap); catch; end)   # a store we cannot write costs a
+    return nothing                                      # discovery round, not a login
+end
+
 # Learn what a host asks WITHOUT answering: run keyboard-interactive with the callback pre-cancelled
 # so it returns empty immediately. Authentication fails by design — no secret is sent and no
 # one-time code is spent — and `pr.seen` now holds the prompts, with the server's own echo flags.
@@ -260,7 +332,7 @@ function _discover_prompts!(s::Session)
                           (Ptr{Cvoid}, Cstring, Cuint, Ptr{Cvoid}),
                           s.ptr, s.ep.user, length(s.ep.user), cb); timeout = 30.0)
     isempty(pr.seen) && return false
-    lock(_PROMPTS_LOCK) do; _PROMPTS[s.ep.alias] = copy(pr.seen); end
+    _remember_prompts!(s.ep.alias, pr.seen)
     return true
 end
 
@@ -290,8 +362,12 @@ function _try_kbdint(s::Session, ask)
     rc = _again(s, () -> ccall((:libssh2_userauth_keyboard_interactive_ex, LIB), Cint,
                                (Ptr{Cvoid}, Cstring, Cuint, Ptr{Cvoid}),
                                s.ptr, s.ep.user, length(s.ep.user), cb); timeout = 60.0)
-    rc == 0 && !isempty(pr.seen) &&
-        lock(_PROMPTS_LOCK) do; _PROMPTS[s.ep.alias] = copy(pr.seen); end
+    # `pr.seen` is what the server asked THIS time, recorded by the callback whether or not the
+    # answers were accepted. A mistyped password leaves it matching what was remembered; a login
+    # that has since gained or lost a factor leaves it different. Keeping it either way is what
+    # stops a changed login wedging the host: the remembered list is never allowed to outlive the
+    # conversation it came from, so the next attempt asks for what the server now wants.
+    _remember_prompts!(s.ep.alias, pr.seen)
     return rc == 0
 end
 
