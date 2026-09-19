@@ -12,12 +12,13 @@ const RE = ReportEngine
 
 # A roster entry as `list_remote_workers` returns it. Region/hub default to an adoptable-by-us shape.
 mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostname(),
+         owner = RE.worker_owner_tag(),   # spawned by THIS hub — the ownership testset varies it
          transport = "tunnel", project = "~/.cache/kaimonslate/remote/examples",
          stream_port = port + 1) = Dict{String,Any}(
     "port" => port, "alive" => alive, "state" => state, "lastActivity" => 0, "logBytes" => 0,
     "stateSince" => 0, "stats" => "",
-    "manifest" => "{\"notebook\":\"\",\"region\":\"$region\",\"hub\":\"$hub\",\"transport\":\"$transport\"," *
-                  "\"project\":\"$project\",\"stream_port\":\"$stream_port\"}")
+    "manifest" => "{\"notebook\":\"\",\"region\":\"$region\",\"hub\":\"$hub\",\"owner\":\"$owner\"," *
+                  "\"transport\":\"$transport\",\"project\":\"$project\",\"stream_port\":\"$stream_port\"}")
 
 @testset "remote pool + park bookkeeping" begin
 
