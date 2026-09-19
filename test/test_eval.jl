@@ -155,8 +155,11 @@ end
         eval_report!(r)
         bt = r.cells[2].output.backtrace
         @test bt !== nothing
-        @test occursin("cell:a:", bt)                 # the frame where f errors (defining cell)
-        @test occursin("cell:b:", bt)                 # the call site (this cell)
+        # Windows' stacktrace printer takes the pseudo-filename for a path, so the DEFINING frame
+        # prints as `cell:\a:1` while the top-level one stays `cell:b:1`. Both still name their
+        # cell, and `_unmangle_cellrefs` is what the cell-ref regexes rely on to see either form.
+        @test occursin(r"\bcell:[\\/]*a:", bt)        # the frame where f errors (defining cell)
+        @test occursin(r"\bcell:[\\/]*b:", bt)        # the call site (this cell)
     end
 
     @testset "markdown cells are inert" begin

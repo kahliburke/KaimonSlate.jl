@@ -220,4 +220,29 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         # A cursor move reaching the renderer must be consumed, never printed.
         @test !occursin('\e', ReportRender._ansi_html("a\e[2Jb\e]0;title\a c"))
     end
+
+    @testset "cell refs survive Windows path normalisation" begin
+        # A cell evaluates under the pseudo-filename `cell:<id>`. Windows' stacktrace printer
+        # takes that for a path, so a frame for a function DEFINED in another cell prints as
+        # `cell:\\a:1`. Unmangled first, the cell-ref regexes match either form and the
+        # rendered link shows the plain name.
+        @test ReportRender._unmangle_cellrefs("@ Main .cell:\\a:1") == "@ Main .cell:a:1"
+        @test ReportRender._unmangle_cellrefs("@ cell:/a:1") == "@ cell:a:1"
+        @test ReportRender._unmangle_cellrefs("@ cell:b:1") == "@ cell:b:1"   # untouched
+        # …so a mangled frame still linkifies, with the separator gone from the link text.
+        h = ReportRender._linkify_trace("[2] f()\n   @ Main .cell:\\a:1")
+        @test occursin("class=\"cellref\"", h)
+        @test occursin("data-cid=\"a\"", h)
+        @test !occursin("cell:\\\\a", h)
+
+        # A source frame must linkify on every platform: unix paths start `/` or `~`, a Windows
+        # one starts with a drive letter and uses backslashes. The vscode URI always carries
+        # forward slashes and a leading one.
+        f = @__FILE__
+        h2 = ReportRender._linkify_trace("   @ Main $f:3")
+        @test occursin("class=\"srcref\"", h2)
+        @test occursin("vscode://file/", h2)
+        @test !occursin("vscode://file\\\\", h2)
+    end
+
 end

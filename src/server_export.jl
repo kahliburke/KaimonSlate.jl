@@ -1199,8 +1199,11 @@ function _package_asset_files(nb::LiveNotebook)
         isdir(dir) || continue
         for (root, _, fnames) in walkdir(dir), f in fnames
             src = joinpath(root, f)
-            rel = relpath(src, dir)
-            push!(out, joinpath("ext-assets", pkg, rel) => src)
+            # The key is the page-relative URL the exported HTML references, so it stays
+            # forward-slashed. `joinpath` would emit backslashes on Windows and the published
+            # page would not find its vendored assets.
+            rel = replace(relpath(src, dir), '\\' => '/')
+            push!(out, "ext-assets/" * pkg * "/" * rel => src)
         end
     end
     return out

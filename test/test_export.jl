@@ -508,7 +508,7 @@ end
     # Whole vendored tree → page-local siblings under ext-assets/<pkg>/.
     rels = Dict(NS._package_asset_files(nb))
     @test rels["ext-assets/GlobeSlate/echarts-gl.min.js"] == joinpath(pkgdir, "echarts-gl.min.js")
-    @test rels[joinpath("ext-assets", "GlobeSlate", "sub", "extra.js")] == joinpath(pkgdir, "sub", "extra.js")
+    @test rels["ext-assets/GlobeSlate/sub/extra.js"] == joinpath(pkgdir, "sub", "extra.js")   # URL key, not a path
 
     # Site rewrite → page-relative (no leading slash); standalone → inline data: URL of the bytes.
     site = NS._rewrite_requirescripts!(_gl_spec(), nb; inline = false)
