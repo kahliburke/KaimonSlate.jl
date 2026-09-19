@@ -19,30 +19,34 @@ _clear() = Dict("KAIMONSLATE_HOME" => nothing, "KAIMONSLATE_CONFIG_HOME" => noth
                 "KAIMONSLATE_LEDGER_BACKEND" => "local")
 _env(pairs...) = merge(_clear(), Dict(pairs...))
 
+# The homes resolve through `abspath`, which rewrites the separator on Windows. These assertions
+# are about WHICH home is chosen, not how the platform spells it, so they compare normalised.
+_p(x) = replace(String(x), '\\' => '/')
+
 @testset "SlateHome — XDG home resolution" begin
     @testset "KAIMONSLATE_HOME shortcut → config/data/cache subdirs" begin
         withenv(_env("KAIMONSLATE_HOME" => "/tmp/ks")...) do
-            @test SH.config_home() == "/tmp/ks/config"
-            @test SH.data_home() == "/tmp/ks/data"
-            @test SH.cache_home() == "/tmp/ks/cache"
-            @test SH.sites_dir() == "/tmp/ks/cache/sites"          # under cache home by default
+            @test _p(SH.config_home()) == "/tmp/ks/config"
+            @test _p(SH.data_home()) == "/tmp/ks/data"
+            @test _p(SH.cache_home()) == "/tmp/ks/cache"
+            @test _p(SH.sites_dir()) == "/tmp/ks/cache/sites"          # under cache home by default
         end
     end
 
     @testset "per-home override beats KAIMONSLATE_HOME" begin
         withenv(_env("KAIMONSLATE_HOME" => "/tmp/ks",
                      "KAIMONSLATE_CONFIG_HOME" => "/elsewhere/cfg")...) do
-            @test SH.config_home() == "/elsewhere/cfg"             # override wins
-            @test SH.data_home() == "/tmp/ks/data"                 # others still from the shortcut
+            @test _p(SH.config_home()) == "/elsewhere/cfg"             # override wins
+            @test _p(SH.data_home()) == "/tmp/ks/data"                 # others still from the shortcut
         end
     end
 
     @testset "XDG vars → kaimonslate namespace subdir" begin
         withenv(_env("XDG_CONFIG_HOME" => "/xc", "XDG_DATA_HOME" => "/xd",
                      "XDG_CACHE_HOME" => "/xk")...) do
-            @test SH.config_home() == "/xc/kaimonslate"
-            @test SH.data_home() == "/xd/kaimonslate"
-            @test SH.cache_home() == "/xk/kaimonslate"
+            @test _p(SH.config_home()) == "/xc/kaimonslate"
+            @test _p(SH.data_home()) == "/xd/kaimonslate"
+            @test _p(SH.cache_home()) == "/xk/kaimonslate"
         end
     end
 
@@ -57,15 +61,15 @@ _env(pairs...) = merge(_clear(), Dict(pairs...))
 
     @testset "KAIMONSLATE_SITES_DIR is the most-specific sites override" begin
         withenv(_env("KAIMONSLATE_HOME" => "/tmp/ks", "KAIMONSLATE_SITES_DIR" => "/custom/sites")...) do
-            @test SH.sites_dir() == "/custom/sites"
+            @test _p(SH.sites_dir()) == "/custom/sites"
         end
     end
 
     @testset "named locations hang off the homes" begin
         withenv(_env("KAIMONSLATE_HOME" => "/tmp/ks")...) do
-            @test SH.config_file() == "/tmp/ks/config/slate.json"
-            @test SH.secrets_file() == "/tmp/ks/config/secrets.json"
-            @test SH.ledger_dir() == "/tmp/ks/data/ledger"
+            @test _p(SH.config_file()) == "/tmp/ks/config/slate.json"
+            @test _p(SH.secrets_file()) == "/tmp/ks/config/secrets.json"
+            @test _p(SH.ledger_dir()) == "/tmp/ks/data/ledger"
         end
     end
 end
