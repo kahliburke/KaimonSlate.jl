@@ -92,3 +92,13 @@
 .sshauth-good { color:#7fd18f; font-size:.78rem; padding:6px 0 2px; }
 .sshauth-bad { color:#e88; font-size:.78rem; padding:6px 0 2px; line-height:1.45;
   word-break:break-word; }
+
+/* Custom tooltip (tooltip.js). Stands in for the native `title`, which the page cannot speed up or
+   style and which never appears on the small hover-revealed toolbar buttons. Lives in shared.css so
+   the notebook and the home page both style it. Sits above every panel and dialog (their z-index
+   tops out at 200) and takes no pointer events, so it cannot break a hover. */
+.uitip { position:fixed; z-index:400; top:0; left:0; max-width:320px; pointer-events:none;
+  background:var(--bg2); color:var(--text); border:1px solid var(--border); border-radius:7px;
+  padding:5px 9px; font-size:.74rem; line-height:1.5; box-shadow:0 8px 24px #0009; white-space:normal;
+  opacity:0; transform:translateY(-2px); transition:opacity .09s, transform .09s; }
+.uitip.on { opacity:1; transform:none; }

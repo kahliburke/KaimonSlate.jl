@@ -61,9 +61,10 @@
       const next = kbd(n.nodeValue);
       if (next !== n.nodeValue) n.nodeValue = next;
     });
-    // title / placeholder are always UI chrome, so rewrite them everywhere.
-    root.querySelectorAll('[title],[placeholder]').forEach(el => {
-      for (const a of ['title', 'placeholder']) {
+    // title / placeholder / data-tip are always UI chrome, so rewrite them everywhere. tooltip.js
+    // promotes a `title` to `data-tip` on hover, so the chord glyphs must follow it there too.
+    root.querySelectorAll('[title],[placeholder],[data-tip]').forEach(el => {
+      for (const a of ['title', 'placeholder', 'data-tip']) {
         const v = el.getAttribute(a);
         if (v && GLYPH.test(v)) {
           const next = kbd(v);
