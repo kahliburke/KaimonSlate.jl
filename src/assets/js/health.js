@@ -108,7 +108,9 @@ effect(() => {
     b.textContent = (crit ? '⛔' : '⚠') + ' ' + a.length + (h.src_stale ? ' ↻' : '');
   } else {                                               // only "server source changed" — a passive info nudge
     b.className = 'healthbadge info';
-    b.textContent = '↻ restart to apply';
+    // The arrow always shows; the topbar drops the qualifier (hb-detail) then the verb (hb-key) as it
+    // narrows (notebook.css). Keep any reworded/localized text inside these spans so it still collapses.
+    b.innerHTML = '↻<span class="hb-key"> restart</span><span class="hb-detail"> to apply</span>';
   }
   b.style.display = 'inline-flex';
 });

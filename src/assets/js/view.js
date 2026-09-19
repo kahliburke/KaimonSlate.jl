@@ -606,7 +606,10 @@ function cellHeaderInner(c) {
     .filter(a => { try { return a.show ? !!a.show(c) : true; } catch (e) { return false; } })
     .map(a => `<button class="cellact cellact-${_esc(a.id)}" onclick="_slateRunCellAction('${_esc(a.id)}','${c.id}',event)" title="${_esc(a.title || '')}">${a.icon || '•'}</button>`)
     .join('');
-  return '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
+  // Two groups: a flexible lead that truncates when the row runs out of room, and a fixed trail (the
+  // action buttons plus the run-info) that stays right-pinned at any width.
+  return '<span class="cellhdr-lead">' +
+    '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
     `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
     // Mode marker. Always emitted, shown by CSS only while the cell carries `.editing`, so it costs
@@ -629,7 +632,8 @@ function cellHeaderInner(c) {
       return bad.length
         ? `<span class="dupwarn" title="needs= names no earlier code cell (deleted, moved below, or markdown) — this manual edge is inert">🔗⚠ ${bad.map(_esc).join(', ')}</span>` : '';
     })()) +
-    '<span class="hspace"></span>' +
+    '</span>' +   /* end .cellhdr-lead */
+    '<span class="cellhdr-trail">' +
     '<span class="cellacts">' +
       `<button class="askai" onclick="askCell('${c.id}')" title="ask the AI about this cell">✨</button>` +
       (c.kind === 'code' ? `<button onclick="toggleDeps('${c.id}')" title="focus: show only this cell's dependency chain (Esc to exit)">🔗</button>` : '') + autoctl +
@@ -650,12 +654,16 @@ function cellHeaderInner(c) {
       cellActions +
       `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
     '</span>' +
-    // Run-info cluster, right-aligned and contiguous (buttons sit to its left): run time (reserved
-    // width) · cache verdict (fixed slot) · state badge (fixed width) — so nothing floats mid-header.
+    // Run-info cluster: run time (reserved width) · cache verdict (fixed slot) · state badge (fixed
+    // width). The action buttons overlay it while the cell is hovered or selected (notebook.css), so
+    // the two share the same right-hand space instead of adding up and clipping on a narrow cell.
+    '<span class="cellhdr-info">' +
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
     `<span class="previewslot">${_previewBadge(c)}</span>` +
     `<span class="memoslot">${_memoBadge(c)}</span>` +
-    `<span class="badge">${c.state}</span>`;
+    `<span class="badge">${c.state}</span>` +
+    '</span>' +   /* end .cellhdr-info */
+    '</span>';   /* end .cellhdr-trail */
 }
 // A cell that cannot run YET says so in its header, not in its output. The output area keeps
 // whatever the last run produced — a cell waiting on a cluster node has not lost the value it had,
