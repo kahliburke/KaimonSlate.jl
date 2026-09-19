@@ -328,9 +328,9 @@ function slateSectionNav(opt) {
   // wholesale on every render, so the cache expires with them.
   function rowText(r) {
     if (r._navText != null) return r._navText;
-    const attrs = Array.from(r.querySelectorAll('[title],[placeholder]'))
-      .map(n => (n.getAttribute('title') || '') + ' ' + (n.getAttribute('placeholder') || '')).join(' ');
-    r._navText = (r.textContent + ' ' + attrs + ' ' + (r.getAttribute('title') || ''))
+    const attrs = Array.from(r.querySelectorAll('[title],[data-tip],[placeholder]'))
+      .map(n => (n.getAttribute('title') || n.getAttribute('data-tip') || '') + ' ' + (n.getAttribute('placeholder') || '')).join(' ');
+    r._navText = (r.textContent + ' ' + attrs + ' ' + (r.getAttribute('title') || r.getAttribute('data-tip') || ''))
       .toLowerCase().replace(/\s+/g, ' ');
     return r._navText;
   }
