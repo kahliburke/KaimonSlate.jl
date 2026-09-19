@@ -298,6 +298,22 @@ function start!(root::AbstractString, sweep::AbstractString)
     return true
 end
 
+# WHEN, for a reader deciding whether a card is showing their current code. A run is keyed by its
+# body, so `created_at` is when this version of it first existed; `started_at` is when someone
+# approved spending on it, which `start!` writes into the marker.
+created_at(root::AbstractString, sweep::AbstractString) =
+    (m = MemoStore.read_manifest(root, sweep); m === nothing ? 0 : Int(get(m, "created", 0)))
+
+function started_at(root::AbstractString, sweep::AbstractString)
+    for p in (started_path(root, sweep), _legacy_started_path(root, sweep))
+        isfile(p) || continue
+        t = tryparse(Int, strip(read(p, String)))
+        t === nothing || return t
+        return round(Int, mtime(p))        # a marker from before the stamp was written
+    end
+    return 0
+end
+
 "Put a sweep back to ready-but-not-submitting. Returns whether it was started."
 function stop!(root::AbstractString, sweep::AbstractString)
     was = is_started(root, sweep)
@@ -366,6 +382,12 @@ struct Plan
     shards_missing::Int
     chunk_state::Dict{String,Symbol}
     chunk_attempts::Dict{String,Int}
+    # The unit indices each chunk covers, in `chunks` order, so a caller can say what the SCHEDULER
+    # is doing with any given unit. Computed here because the walk that finds it is already made.
+    chunk_spans::Vector{UnitRange{Int}}
+    # Each unit's status, in the same order, so a caller rendering the grid does not read every
+    # manifest a second time. At a few thousand units that second pass was the poll's cost.
+    unit_status::Vector{String}
     to_submit::Vector{String}
     state::Symbol
     blocked::String            # why nothing more will be submitted ("" = not blocked)
@@ -441,15 +463,23 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
 
     total = 0; done = 0; ok = 0; failed = 0
     chunk_done = Dict{String,Bool}()
+    spans = UnitRange{Int}[]
+    ustatus = String[]
     for c in chunks
         shards = chunk_shards(root, c)
+        push!(spans, (total + 1):(total + length(shards)))
         total += length(shards)
         ndone = 0
         for k in shards
             m = MemoStore.read_manifest(root, k)
-            m === nothing && continue
+            if m === nothing
+                push!(ustatus, "")
+                continue
+            end
             ndone += 1
-            String(get(m, "status", "")) == "error" ? (failed += 1) : (ok += 1)
+            st = String(get(m, "status", ""))
+            push!(ustatus, st)
+            st == "error" ? (failed += 1) : (ok += 1)
         end
         done += ndone
         chunk_done[c] = !isempty(shards) && ndone == length(shards)
@@ -525,7 +555,7 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
     end
 
     return Plan(String(sweep), total, done, ok, failed, missing_shards,
-                cstate, tries, to_submit, sweep_state, blocked)
+                cstate, tries, spans, ustatus, to_submit, sweep_state, blocked)
 end
 
 """
@@ -552,11 +582,18 @@ function reconcile!(root::AbstractString, sweep::AbstractString, launcher, specf
         error("sweep $sweep wants to submit $(length(p.to_submit)) chunks, over the cap of $cap")
 
     # Probe wave: with nothing finished yet there is no evidence the body works, so release only a
-    # few chunks. The next reconcile either trips the breaker or sends the rest.
+    # few chunks and WAIT for them. The next reconcile either trips the breaker or sends the rest.
+    #
+    # The limit is on how much is OUT, not on how much this pass may add. `to_submit` excludes what
+    # is already live, so capping the pass let every poll release one more chunk: a sweep that had
+    # reported nothing at all still queued a job every few seconds, which is the spend the probe
+    # exists to prevent.
     outgoing = p.to_submit
-    if failure_policy.probe_chunks > 0 && p.shards_done == 0 &&
-       length(outgoing) > failure_policy.probe_chunks
-        outgoing = first(outgoing, failure_policy.probe_chunks)
+    if failure_policy.probe_chunks > 0 && p.shards_done == 0
+        inflight = count(s -> s === :running || s === :pending, values(p.chunk_state))
+        room = failure_policy.probe_chunks - inflight
+        room <= 0 && return p                      # a probe is already out; nothing to do but wait
+        length(outgoing) > room && (outgoing = first(outgoing, room))
     end
 
     name = submission_name(outgoing)

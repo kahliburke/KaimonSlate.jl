@@ -3315,16 +3315,22 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
                   BatchSweep.plan(root, run; launcher = l)
     t = BatchSweep.telemetry(root, run; launcher = l, plan = p)
     _ds = display_state(p, started)
+    _w = _when_stamp(root, run, started)
     # Tile COLOURS, not per-unit statuses: the browser patches tiles by index, and computing the
     # colour here is what keeps the live grid identical to the one the cell rendered. It also keeps
     # the payload flat — a few hundred short strings whatever the sweep's size.
-    st = [(m = MemoStore.read_manifest(root, k);
+    # `plan` already read every one of these. At a few thousand units a second pass over the store
+    # was the bulk of a poll, and the poll has a deadline.
+    st = length(p.unit_status) == length(keys) ? p.unit_status :
+         [(m = MemoStore.read_manifest(root, k);
            m === nothing ? "" : String(get(m, "status", ""))) for k in keys]
+    rings = _tile_rings(p, BatchSweep.sweep_chunks(root, run), length(st))
+    sched = _sched_counts(p)
     tiles = String[]
-    for (lo, hi) in _tile_spans(length(st))
+    for (ti, (lo, hi)) in enumerate(_tile_spans(length(st)))
         ok = count(==("ok"), @view st[lo:hi])
         err = count(==("error"), @view st[lo:hi])
-        push!(tiles, _tile_color(ok, err, hi - lo + 1))
+        push!(tiles, _tile_color(ok, err, hi - lo + 1, ti <= length(rings) ? rings[ti] : '.'))
     end
 
     out = Dict{String,Any}(
@@ -3334,7 +3340,8 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         "frac" => BatchSweep.fraction(p),
         "rate" => t.rate_per_s, "eta" => t.eta_s, "idle" => t.idle_s,
         "stuck" => BatchSweep.stalled_for(t), "blocked" => p.blocked,
-        "settled" => BatchSweep.is_settled(p), "tiles" => tiles,
+        "settled" => BatchSweep.is_settled(p), "tiles" => tiles, "rings" => rings,
+        "queued" => sched.queued, "running_jobs" => sched.running,
         "color" => get(_STATE_COLOR, _ds, "var(--dim,#6a7090)"),
         # The controls that apply RIGHT NOW, so the card's buttons track its state instead of
         # freezing at whatever was true when the cell last ran.
@@ -3347,6 +3354,7 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         # read nothing and submit nothing, and that is worth saying on the card rather than leaving
         # it to be discovered as a provisioning failure on the next Submit.
         "host" => target_host(target),
+        "when" => _w.at, "when_kind" => _w.kind,
         "signed_in" => connected(target_host(target)))
     # The data line grows as units land, so it rides the poll too. Off the indices, so a sweep
     # writing terabytes still costs manifest reads to watch.
@@ -3612,6 +3620,22 @@ const _STATE_COLOR = Dict(
 
 # The three ways of stopping short read differently on purpose: one is the work's fault, one is
 # yours, and one is the resources'.
+# WHEN, rather than WHICH. A run is named by a hash of its body, which tells a reader nothing and
+# changes silently when they edit the cell — so a card showing a superseded run looked identical to
+# one showing theirs. A time answers the question they actually have: is this my current code?
+#
+# Before submission that is when this version of the body first existed; after it, when someone
+# approved spending on it. Both read as past participles so the chip is a sentence about the run
+# rather than a label with a number after it. The hub renders a fallback and the browser restates it
+# in the reader's own timezone, the way the ETA clock already does.
+function _when_stamp(root::AbstractString, run::AbstractString, started::Bool)
+    t = started ? BatchSweep.started_at(root, run) : BatchSweep.created_at(root, run)
+    return (kind = started ? "submitted" : "written", at = t)
+end
+
+_when_text(w) = w.at <= 0 ? "" :
+    string(w.kind, " ", Dates.format(Dates.unix2datetime(w.at) + _localoffset(), "HH:MM"))
+
 _state_label(s) = s === :succeeded ? "complete" :
                   s === :partial   ? "finished, with failures" :
                   s === :blocked   ? "stopped — the work is failing" :
@@ -3629,6 +3653,41 @@ _state_label(s) = s === :succeeded ? "complete" :
 # show as a red band — while the DOM cost stays flat from ten units to ten million.
 const _TILE_BUDGET = 600
 
+# What the SCHEDULER is doing with each tile's units, as one character per tile. The fill says how a
+# unit ENDED; without this, "nothing yet" covered three unlike situations — not submitted, queued,
+# and running on a node — so a sweep waiting on an allocation looked the same as one doing nothing.
+#
+# Most advanced state wins within a tile: the grid answers "is anything happening here?", and a tile
+# spanning a running chunk and a queued one is a place where something is happening.
+_ring_tip(c::AbstractChar) =
+    c == 'r' ? " · running" : c == 'q' ? " · queued" : c == 'x' ? " · stopped" : ""
+
+const _RING_RANK = Dict(:running => 3, :pending => 2, :blocked => 1, :exhausted => 1)
+
+function _tile_rings(p, chunks, nunits::Integer)
+    nunits <= 0 && return ""
+    best = zeros(Int, nunits)
+    for (i, c) in enumerate(chunks)
+        i <= length(p.chunk_spans) || break
+        r = get(_RING_RANK, get(p.chunk_state, c, :missing), 0)
+        r == 0 && continue
+        for u in p.chunk_spans[i]
+            u <= nunits && (best[u] = max(best[u], r))
+        end
+    end
+    io = IOBuffer()
+    for (lo, hi) in _tile_spans(nunits)
+        m = maximum(@view best[lo:hi])
+        print(io, m == 3 ? 'r' : m == 2 ? 'q' : m == 1 ? 'x' : '.')
+    end
+    return String(take!(io))
+end
+
+# How many chunks the scheduler is holding, for the line beside the counts. A ring shows the shape;
+# a number survives the grid being binned.
+_sched_counts(p) = (queued  = count(==(:pending), values(p.chunk_state)),
+                    running = count(==(:running), values(p.chunk_state)))
+
 # The one definition of how units map onto tiles. The renderer and the live payload MUST agree: the
 # browser patches tiles by index, so if the two binned differently the grid would either stop
 # updating or repaint the wrong cells — and only on large sweeps, which are the ones worth watching.
@@ -3638,11 +3697,20 @@ function _tile_spans(n::Integer)
     return [((t - 1) * per + 1, min(t * per, n)) for t in 1:cld(n, per)]
 end
 
+# A tile with NOTHING landed is where the scheduler's answer belongs. Flat grey said "not
+# submitted", "queued" and "running on a node" all the same way, which is the ambiguity that had a
+# sweep waiting on an allocation looking like one doing nothing.
+#
+# Fill rather than a ring: at five pixels a two-pixel border is most of the tile, and a green ring on
+# a green fill is a slightly darker dot. Dim and desaturated so finished work stays the loudest thing
+# in the grid, and BLUE for running, which green would have read as "ok".
+const _PENDING_FILL = Dict('q' => "#6b5a1f", 'r' => "#1f4f73", 'x' => "#5c2b2b")
+
 # Green for completed, blended toward red by the bucket's failure fraction, so a region that is
-# merely slow and a region that is failing do not look alike. Grey is "nothing here has run".
-function _tile_color(ok::Int, err::Int, total::Int)
+# merely slow and a region that is failing do not look alike.
+function _tile_color(ok::Int, err::Int, total::Int, sched::AbstractChar = '.')
     done = ok + err
-    done == 0 && return "#30363d"
+    done == 0 && return get(_PENDING_FILL, sched, "#30363d")
     f = err / done                                   # failure share of what has finished
     base = done / total                              # how much of the bucket has landed
     r = round(Int, 63 + f * (248 - 63))
@@ -3681,8 +3749,11 @@ function _unit_grid(io, r::ShardedResult)
     per = n == 0 ? 1 : max(1, cld(n, _TILE_BUDGET))
     side = length(spans) <= 100 ? 12 : length(spans) <= 400 ? 8 : 5
 
+    # What the scheduler is holding, per tile. Drawn as a ring so it reads independently of the
+    # fill, which answers a different question (how the unit ended).
+    rings = _tile_rings(r.plan, BatchSweep.sweep_chunks(store_root(r.target), r.run), n)
     print(io, "<div data-sw='grid' style='display:flex;flex-wrap:wrap;gap:2px;margin-top:8px'>")
-    for (lo, hi) in spans
+    for (ti, (lo, hi)) in enumerate(spans)
         ok = err = 0
         for i in lo:hi
             s = r.rows[i].status
@@ -3696,8 +3767,9 @@ function _unit_grid(io, r::ShardedResult)
         else
             "units $(lo)-$(hi) · $(ok) ok, $(err) failed, $(hi - lo + 1 - ok - err) pending"
         end
-        print(io, "<div title=\"", tip, "\" style='width:", side, "px;height:", side,
-                  "px;border-radius:2px;background:", _tile_color(ok, err, hi - lo + 1), "'></div>")
+        ring = ti <= length(rings) ? rings[ti] : '.'
+        print(io, "<div title=\"", tip, _ring_tip(ring), "\" style='width:", side, "px;height:", side,
+                  "px;border-radius:2px;background:", _tile_color(ok, err, hi - lo + 1, ring), "'></div>")
     end
     println(io, "</div>")
     per > 1 && println(io, "<div style='font-size:10px;opacity:.45;margin-top:3px'>",
@@ -3884,6 +3956,7 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     p, t = r.plan, r.telemetry
     frac = BatchSweep.fraction(p)
     started = BatchSweep.is_started(store_root(r.target), r.run)
+    _when = _when_stamp(store_root(r.target), r.run, started)
     st = display_state(p, started)
     col = get(_STATE_COLOR, st, "var(--dim,#6a7090)")
 
@@ -3903,7 +3976,8 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
               "<span data-sw='dot' style='display:inline-block;width:8px;height:8px;",
               "border-radius:50%;background:", col, "'></span>",
               "<strong data-sw='label' style='color:", col, "'>", _state_label(st), "</strong>",
-              "<span style='opacity:.5;font-size:12px'>", _esc(r.key), "</span>",
+              "<span data-sw='when' data-ts='", _when.at, "' data-kind='", _when.kind,
+              "' style='opacity:.5;font-size:12px'>", _esc(_when_text(_when)), "</span>",
               "<span style='margin-left:auto;font-variant-numeric:tabular-nums'>",
               "<span data-sw='count'>", p.shards_done, " / ", p.shards_total, "</span> ",
               "<span data-sw='pct' style='opacity:.6'>(", round(100 * frac; digits = 1),
@@ -3921,6 +3995,13 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
               p.shards_failed > 0 ? "$(p.shards_failed) failed" : "", "</span>")
     print(io, "<span data-sw='missing' style='opacity:.6'>",
               p.shards_missing > 0 ? "$(p.shards_missing) remaining" : "", "</span>")
+    # What the scheduler is holding. Without it, a sweep whose every job is queued reads as one
+    # doing nothing at all, and the only way to tell was to go and ask the cluster.
+    _sc = _sched_counts(p)
+    print(io, "<span data-sw='sched' style='opacity:.7'>",
+              _esc(join(filter(!isempty, [_sc.running > 0 ? "$(_sc.running) running" : "",
+                                          _sc.queued > 0 ? "$(_sc.queued) queued" : ""]), " · ")),
+              "</span>")
     print(io, "<span data-sw='rate' style='margin-left:auto;opacity:.7'>",
               (t.done > 0 && !BatchSweep.is_settled(p) && !BatchSweep.is_stuck(p) &&
                t.rate_per_s > 0) ? "$(round(t.rate_per_s; digits = 2))/s" : "", "</span>")
@@ -4076,6 +4157,13 @@ function _live_script(io, r::ShardedResult)
                        String(Math.round((s % 3600) / 60)).padStart(2, "0") + "m";
         return "~" + (s / 86400).toFixed(1) + "d";
       }
+      // An ABSOLUTE unix time as the reader's wall clock, with the date once it is not today.
+      function at(u){
+        var t = new Date(u * 1000), now = new Date();
+        var hhmm = String(t.getHours()).padStart(2, "0") + ":" + String(t.getMinutes()).padStart(2, "0");
+        if (t.toDateString() === now.toDateString()) return hhmm;
+        return t.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + hhmm;
+      }
       function clock(s){
         var t = new Date(Date.now() + s * 1000), now = new Date();
         var hhmm = String(t.getHours()).padStart(2, "0") + ":" + String(t.getMinutes()).padStart(2, "0");
@@ -4167,17 +4255,31 @@ function _live_script(io, r::ShardedResult)
         set("ok", s.ok + " ok");
         set("failed", s.failed > 0 ? s.failed + " failed" : "");
         set("missing", s.missing > 0 ? s.missing + " remaining" : "");
+        // What the scheduler is holding right now. The ring shows where; this says how much, which
+        // the grid cannot once it is binned.
+        set("sched", s.running_jobs > 0 || s.queued > 0
+              ? [s.running_jobs > 0 ? s.running_jobs + " running" : "",
+                 s.queued > 0 ? s.queued + " queued" : ""].filter(Boolean).join(" · ") : "");
         set("rate", s.rate > 0 && !s.settled ? s.rate.toFixed(2) + "/s" : "");
         // How much longer, and WHEN that is. Computed in the browser so the clock time is the
         // reader's own — a hub in another timezone would otherwise quote a finish time in its.
         set("eta", (s.eta >= 0 && !s.settled && !s.stuck) ? dur(s.eta) + " left · done ~" + clock(s.eta) : "");
         set("label", s.label);
+        // WHEN this card's code was written, or when it was submitted. Formatted here so the time
+        // is the reader's own, like the ETA clock above.
+        var w = root.querySelector('[data-sw="when"]');
+        if (w && s.when !== undefined) {
+          w.dataset.ts = s.when; w.dataset.kind = s.when_kind || "";
+          w.textContent = s.when > 0 ? (s.when_kind + " " + at(s.when)) : "";
+        }
         var lab = root.querySelector('[data-sw="label"]');
         if (lab) lab.style.color = s.color;
         var dot = root.querySelector('[data-sw="dot"]');
         if (dot) dot.style.background = s.color;
         var g = root.querySelector('[data-sw="grid"]');
         if (g && s.tiles && g.children.length === s.tiles.length){
+          // One channel, the fill: how the units ended once any have, and what the scheduler is
+          // holding until then. Julia has already folded the two together.
           for (var i = 0; i < s.tiles.length; i++){
             if (g.children[i].style.background !== s.tiles[i])
               g.children[i].style.background = s.tiles[i];

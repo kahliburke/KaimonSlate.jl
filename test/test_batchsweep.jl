@@ -672,6 +672,59 @@ end
         @test first(run_one(true)) > 0   # …against one chunk, with the rest still waiting
     end
 
+    @testset "the grid says what the scheduler is holding" begin
+        # Fill says how a unit ended. Without a second channel, "nothing yet" covered not submitted,
+        # queued, and running alike — so a sweep waiting on an allocation looked like an idle one.
+        span(n) = [((i - 1) * 4 + 1):(i * 4) for i in 1:n]
+        mk(states) = BS.Plan("sw", 12, 0, 0, 0, 12, states, Dict{String,Int}(),
+                             span(3), fill("", 12), String[], :running, "")
+        cs = ["c1", "c2", "c3"]
+
+        p = mk(Dict("c1" => :running, "c2" => :pending, "c3" => :missing))
+        @test Sweep._tile_rings(p, cs, 12) == "rrrrqqqq...."
+        @test Sweep._sched_counts(p) == (queued = 1, running = 1)
+
+        # Binned tiles take the most advanced state: the grid answers "is anything happening here?"
+        p2 = mk(Dict("c1" => :pending, "c2" => :running, "c3" => :blocked))
+        @test Sweep._tile_rings(p2, cs, 12) == "qqqqrrrrxxxx"
+
+        # The scheduler's answer rides the FILL, not a border: at five pixels a two-pixel ring is
+        # most of the tile, and a green ring on a green fill is a slightly darker dot.
+        @test Sweep._tile_color(0, 0, 4, '.') == "#30363d"            # nothing submitted
+        @test Sweep._tile_color(0, 0, 4, 'q') != Sweep._tile_color(0, 0, 4, '.')
+        @test Sweep._tile_color(0, 0, 4, 'r') != Sweep._tile_color(0, 0, 4, 'q')
+
+        # …and only while nothing has landed. A tile with results keeps its outcome colour whatever
+        # the chunk is doing, so a green tile cannot flash amber as its siblings finish.
+        @test Sweep._tile_color(4, 0, 4, 'q') == Sweep._tile_color(4, 0, 4, '.')
+        @test Sweep._tile_rings(p, cs, 0) == ""
+    end
+
+    @testset "a run says when, not which" begin
+        # The card used to name the run by its key, which is a hash: it told a reader nothing, and
+        # it changed silently when they edited the cell. A time answers what they actually ask.
+        mktempdir() do root
+            payload = joinpath(@__DIR__, "..", "src", "slatetask.jl")
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2, payload)
+            r = Sweep.@sweep(Sweep.paramgrid(g = 1:4), t; submit = false) do p; (; g = p.g); end
+            run = getfield(r, :run)
+            @test BS.created_at(root, run) > 0              # when this body first existed
+            @test BS.started_at(root, run) == 0             # nobody has approved spending on it
+            before = Sweep._when_stamp(root, run, false)
+            @test before.kind == "written" && before.at == BS.created_at(root, run)
+
+            BS.start!(root, run)
+            @test BS.started_at(root, run) > 0
+            after = Sweep._when_stamp(root, run, true)
+            @test after.kind == "submitted" && after.at == BS.started_at(root, run)
+            @test !isempty(Sweep._when_text(after))
+
+            # A run with no descriptor has no time to show, and saying so beats inventing one.
+            @test Sweep._when_text((kind = "written", at = 0)) == ""
+            @test BS.created_at(root, "never-existed") == 0
+        end
+    end
+
     @testset "the supervisor submits for a cluster with nothing open" begin
         # Both names the supervisor needs come from the parent module, so only calling it shows
         # whether it reaches them.
@@ -3037,6 +3090,52 @@ end
             BS.reconcile!(root, sweep, l, specfn(root))
             @test length(l.submitted) == 2
             @test sort(l.submitted[2].chunks) == sort(chunks[2:end])
+        end
+    end
+
+    @testset "the probe holds while it is in flight" begin
+        # The limit is on how much is OUT. Capping each PASS instead let every poll release one more
+        # chunk while nothing had reported: a sweep with no results yet still queued a job every few
+        # seconds, which is the spend the probe exists to prevent.
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 10, per = 4)
+            l = FakeLauncher()
+            pol = BS.FailurePolicy(; probe_chunks = 1)
+            BS.reconcile!(root, sweep, l, specfn(root); failure_policy = pol)
+            @test length(l.submitted) == 1
+            @test length(l.submitted[1].chunks) == 1
+            for _ in 1:5                                  # the card polling, nothing landed yet
+                BS.reconcile!(root, sweep, l, specfn(root); failure_policy = pol)
+            end
+            @test length(l.submitted) == 1                # still just the probe
+
+            SlateTask.run_chunk(root, chunks[1])          # it reports, and the rest follows
+            BS.reconcile!(root, sweep, l, specfn(root); failure_policy = pol)
+            @test length(l.submitted) == 2
+            @test length(l.submitted[2].chunks) == 9
+        end
+    end
+
+    @testset "the probe holds while it is in flight" begin
+        # The limit is on how much is OUT. Capping each pass instead let every poll release one more
+        # chunk while nothing had reported, so a sweep with no results yet still queued a job every
+        # few seconds.
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 10, per = 4)
+            l = FakeLauncher()
+            pol = BS.FailurePolicy(; probe_chunks = 1)
+            BS.reconcile!(root, sweep, l, specfn(root); failure_policy = pol)
+            @test length(l.submitted) == 1
+            @test length(l.submitted[1].chunks) == 1
+            for _ in 1:5                                  # the card polling, nothing landed yet
+                BS.reconcile!(root, sweep, l, specfn(root); failure_policy = pol)
+            end
+            @test length(l.submitted) == 1                # still just the probe
+
+            SlateTask.run_chunk(root, chunks[1])          # it reports, and the rest follows
+            BS.reconcile!(root, sweep, l, specfn(root); failure_policy = pol)
+            @test length(l.submitted) == 2
+            @test length(l.submitted[2].chunks) == 9
         end
     end
 

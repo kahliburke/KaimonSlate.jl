@@ -921,7 +921,27 @@ function pull_meta!(s::RemoteStore; dirs = META_DIRS)
     isempty(s.host) && return true          # same machine: the mirror IS the store
     connected(s.host) || return false
     names = _dirlist(dirs)
-    script = "cd " * shq_path(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; tar cf - " * names
+    # INCREMENTAL. A sweep's `manifests/` holds one file per UNIT, so a poll that tars the whole
+    # tree moves tens of megabytes to learn that a handful of results landed — which is what put the
+    # card's poll past its deadline on a sweep of a few thousand units.
+    #
+    # The watermark is the STORE's own clock, never this machine's: a stamp file over there, and
+    # `find -newer` against it. The new stamp is laid down BEFORE the walk and promoted after, so a
+    # file written during the transfer is newer than the stamp it will be compared to next time and
+    # cannot fall through the gap. No stamp yet means take everything, which is also the recovery
+    # path for a mirror that has lost its copy.
+    # The HUB decides whether it needs everything. The stamp lives on the store, so a mirror that
+    # has been wiped while the stamp survived would otherwise ask for "what changed" and be told
+    # nothing, leaving it empty for good.
+    full = any(d -> (p = joinpath(s.mirror, String(d)); !isdir(p) || isempty(readdir(p))), dirs)
+    script = "cd " * shq_path(s.root) * " 2>/dev/null || exit 0; mkdir -p " * names * "; " *
+             "touch .pullstamp.new; " *
+             (full ? "tar cf - " * names * "; " :
+              "if [ -f .pullstamp ]; then " *
+                  "find " * names * " -type f -newer .pullstamp > .pulllist 2>/dev/null || true; " *
+                  "if [ -s .pulllist ]; then tar cf - -T .pulllist; fi; rm -f .pulllist; " *
+              "else tar cf - " * names * "; fi; ") *
+             "mv .pullstamp.new .pullstamp"
     with_store_lock(s.mirror) do
         ok, data = run_io(String(s.host), script, nothing)
         ok || return false

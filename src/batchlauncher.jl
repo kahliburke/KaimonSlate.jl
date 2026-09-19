@@ -859,26 +859,36 @@ function submit!(l::SlurmLauncher, spec::JobSpec)
     return strip(split(strip(out), '\n')[end])
 end
 
+# How many job names go into one scheduler query. Long enough that an ordinary sweep is one call,
+# short enough that a failure loses a slice of the answer rather than all of it.
+const _POLL_NAMES = 50
+
 function poll(l::SlurmLauncher, root::AbstractString, names)
     ns = String.(collect(names))
     isempty(ns) && return Dict{String,Symbol}()
     out = Dict{String,Symbol}(n => :unknown for n in ns)
-    # One call for every name. squeue lists only live jobs, so anything absent stays :unknown and
-    # the store decides whether that means finished or lost.
-    ok, txt = (_ssh(l, "squeue -h -o '%j %T' --name=$(join(ns, ','))"))
-    ok || return out
-    for line in split(txt, '\n'; keepempty = false)
-        parts = split(strip(line))
-        length(parts) >= 2 || continue
-        name, state = String(parts[1]), uppercase(String(parts[2]))
-        haskey(out, name) || continue
-        # A name with several elements in flight reports RUNNING as soon as any element runs.
-        if state == "RUNNING" || out[name] === :running
-            out[name] = :running
-        elseif state in ("PENDING", "CONFIGURING", "REQUEUED", "RESIZING", "SUSPENDED")
-            out[name] === :running || (out[name] = :pending)
-        else
-            out[name] === :running || (out[name] = :pending)
+    # squeue lists only live jobs, so anything absent stays :unknown and the store decides whether
+    # that means finished or lost.
+    #
+    # BATCHED, and a failed batch costs only its own names. One call naming every job put the whole
+    # sweep's liveness on a single command: a slow or refused `squeue` dropped every chunk to
+    # :unknown at once, and the next poll brought them all back, so the grid flashed in blocks.
+    for part in Iterators.partition(ns, _POLL_NAMES)
+        ok, txt = (_ssh(l, "squeue -h -o '%j %T' --name=$(join(part, ','))"))
+        ok || continue
+        for line in split(txt, '\n'; keepempty = false)
+            parts = split(strip(line))
+            length(parts) >= 2 || continue
+            name, state = String(parts[1]), uppercase(String(parts[2]))
+            haskey(out, name) || continue
+            # A name with several elements in flight reports RUNNING as soon as any element runs.
+            if state == "RUNNING" || out[name] === :running
+                out[name] = :running
+            elseif state in ("PENDING", "CONFIGURING", "REQUEUED", "RESIZING", "SUSPENDED")
+                out[name] === :running || (out[name] = :pending)
+            else
+                out[name] === :running || (out[name] = :pending)
+            end
         end
     end
     return out
