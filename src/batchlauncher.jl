@@ -594,6 +594,7 @@ end
 # `rg --json` emits one object per event; a `match` carries `absolute_offset` and the line's text,
 # which is exactly the pair the viewer needs and avoids parsing a `grep -bn` prefix out of content
 # that may itself contain colons. `--count-matches` is a second, cheap pass for the true total.
+# A hit's text is the matched line and the ones after it, joined by newlines: see `_SEARCH_AFTER`.
 function log_search(l::ExecLauncher, path::AbstractString, pattern::AbstractString;
                     ignorecase::Bool = false, regex::Bool = false, limit::Integer = 1000)
     _remote(l) && return _remote_log_search((sc) -> _there(l, sc), path, pattern,
@@ -626,6 +627,10 @@ function _rg_message(err::AbstractString)
     return isempty(best) ? "the search pattern was rejected" : first(best, 200)
 end
 
+# How many lines after a match travel with it. A log record is a head and its fields, and the
+# fields are what make the hit worth reading; more than this and the list is the file again.
+const _SEARCH_AFTER = 8
+
 function _rg_search(rg, path, pattern, ignorecase, regex, limit)
     flags = String[]
     ignorecase && push!(flags, "-i")
@@ -648,13 +653,26 @@ function _rg_search(rg, path, pattern, ignorecase, regex, limit)
     hits = NamedTuple{(:offset, :line, :text),Tuple{Int,Int,String}}[]
     n = max(0, Int(limit))
     if n > 0 && total > 0
-        for ln in eachsplit(run_rg(["--json", "-m", string(n)]), '\n'; keepempty = false)
+        for ln in eachsplit(run_rg(["--json", "-m", string(n), "-A", string(_SEARCH_AFTER)]),
+                            '\n'; keepempty = false)
             # Deliberately not a JSON parse: these lines are machine-written, one per event, and the
             # three fields wanted are flat. Pulling them out directly keeps this free of a JSON
             # dependency in a file that is included into the worker.
-            occursin("\"type\":\"match\"", ln) || continue
-            push!(hits, (; offset = _json_int(ln, "absolute_offset"),
-                           line = _json_int(ln, "line_number"), text = _json_text(ln)))
+            if occursin("\"type\":\"match\"", ln)
+                # `-m` alone stops bounding the list once context is asked for: a trailing context
+                # line that matches is reported as a match, so a term on most lines of the file runs
+                # past the cap. The count is a separate pass and is unaffected.
+                length(hits) >= n && break
+                push!(hits, (; offset = _json_int(ln, "absolute_offset"),
+                               line = _json_int(ln, "line_number"), text = _json_text(ln)))
+            elseif occursin("\"type\":\"context\"", ln) && !isempty(hits)
+                # The lines AFTER a match, carried with it. A match is one line, and a log record is
+                # a head plus the fields under it — so a hit list built from matches alone showed
+                # `chunk finished with failures` and dropped the counts that say what failed. Which
+                # of these belong to the record is the reader's grammar to decide, not this file's.
+                h = pop!(hits)
+                push!(hits, (; h.offset, h.line, text = h.text * "\n" * _json_text(ln)))
+            end
         end
     end
     return (; total, hits, capped = total > length(hits))
@@ -1004,6 +1022,9 @@ function _remote_log_search(runner, path, pattern, ignorecase, regex, limit)
             length(hits) < limit &&
                 push!(hits, (; offset = _json_int(ln, "absolute_offset"),
                                line = _json_int(ln, "line_number"), text = _json_text(ln)))
+        elseif occursin("\"type\":\"context\"", ln) && !isempty(hits) && total <= limit
+            h = pop!(hits)
+            push!(hits, (; h.offset, h.line, text = h.text * "\n" * _json_text(ln)))
         elseif !startswith(ln, "{")
             # grep: `<byteoffset>:<lineno>:<text>`
             a = findfirst(':', ln); a === nothing && continue

@@ -1774,7 +1774,7 @@ end
             h = first(e.hits)
             @test h.line == 5_000
             at = Sweep.log_slice(r, path; offset = h.offset, nbytes = 200)
-            @test first(split(at.text, '\n')) == h.text
+            @test first(split(at.text, '\n')) == first(split(h.text, '\n'))
             @test occursin("ERROR", h.text) && occursin("unit 5000 ", h.text)
 
             # `limit` bounds what comes back without touching what is reported.
@@ -1785,6 +1785,9 @@ end
             # object per match, several times the size of the file itself, so a limit applied after
             # the bytes have crossed is not a limit. The count stays exact either way: it is one
             # integer however many times the pattern occurs.
+            # A term on most lines is also where the LINES-AFTER a hit stop being free: ripgrep
+            # reports a trailing context line that matches as a match of its own, so its own cap
+            # stops bounding the list and the reader has to.
             many = Sweep.log_search(r, path, "INFO"; limit = 5)
             @test many.total == 59_880 && length(many.hits) == 5 && many.capped
             @test Sweep.log_search(r, path, "INFO"; limit = 0).total == 59_880
@@ -1834,6 +1837,24 @@ end
                 @test hit.total == 1 && occursin("3 failed", hit.hits[1].text)
                 @test Sweep._log_severity("chunk b: 1 ran, 0 skipped, 3 failed of 4") === :bad
                 @test Sweep._log_severity("chunk a: 4 ran, 0 skipped, 0 failed of 4") === :plain
+            end
+
+            # A hit carries the lines under it, because a match is one line and a log record is a
+            # head plus its fields: a list built from matched lines alone showed the sentence and
+            # dropped the counts that say what happened. The reader decides where the record ends,
+            # so what has to arrive is simply the lines that follow.
+            let p3 = joinpath(root, "logs", "$(name).8.log")
+                write(p3, "\u250c Error: chunk finished with failures\n" *
+                          "\u2502   chunk = \"sw65da\"\n" *
+                          "\u2502   ran = 2\n" *
+                          "\u2502   failed = 1\n" *
+                          "\u2514 @ Slate batch.jl:12\n" *
+                          "\u250c Info: next chunk\n" *
+                          "\u2514 @ Slate batch.jl:20\n")
+                hit = only(Sweep.log_search(r, p3, "chunk finished").hits)
+                @test occursin("failed = 1", hit.text) && occursin("batch.jl:12", hit.text)
+                # The offset still points at the matched line, not at what came with it.
+                @test hit.offset == 0 && hit.line == 1
             end
 
             # And a path the listing never named is refused, because it would reach a shell.

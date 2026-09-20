@@ -117,7 +117,9 @@
     key: '', ch: '', files: [], path: '', size: 0,
     pages: [], order: 'new', filter: 'all', paused: false,
     sort: { key: 'modified', dir: -1 }, needle: '', icase: true, rx: false,
-    hits: null, rawHits: null, hitAt: -1, total: 0, capped: false, counts: null, loading: false, timer: 0, behind: 0,
+    hits: null, rawHits: null, hitAt: -1, total: 0, capped: false, counts: null, declaredFile: null,
+    declared: null, mark: -1,
+    loading: false, timer: 0, behind: 0,
   };
 
   const call = (action, arg, opts) =>
@@ -203,8 +205,11 @@
       const row = e.target.closest('[data-seek]');
       if (!row) return;
       const off = Number(row.dataset.seek);
+      // The line stays marked after the jump. Landing in the middle of a file with nothing on it
+      // reads as the click having done nothing: the window moved, and the reason it moved is the one
+      // line the reader can no longer pick out.
       S.filter = 'all'; S.needle = ''; q('.logv-search').value = '';
-      S.hits = null; S.rawHits = null; S.hitAt = -1;
+      S.hits = null; S.rawHits = null; S.hitAt = -1; S.mark = off;
       paintBar(); seek(off);
     });
     q('.logv-order').onclick = () => {
@@ -381,10 +386,15 @@
 
   function selectFile(path) {
     S.path = path; S.hits = null; S.rawHits = null; S.hitAt = -1; S.counts = null; S.needle = '';
+    S.mark = -1;
     q('.logv-search').value = '';
     paintFiles();
     reload();
     countLevels();
+    // With a level chosen, the level IS the search, and a new file has to be asked the same
+    // question. Without this the pane fell back to filtering the loaded window, so a chip counting
+    // the file sat above the subset of it that happened to be on screen.
+    runSearch();
   }
 
   // ── The window ─────────────────────────────────────────────────────────────────────────────
@@ -503,10 +513,20 @@
     return (S.hits && S.hits.length) ? S.hits : [];
   }
 
-  // A hit carries its line and its offset, which is everything a row needs; `sevOf` and `roleOf`
-  // then make it the same shape the window's lines have, so one renderer serves both.
-  const hitLine = h => { const t = h.text || ''; return { t, o: h.offset, sev: sevOf(t),
-                                                          head: true, r: roleOf(t) }; };
+  // A hit arrives with the lines that FOLLOW its match, because a match is one line and a record is
+  // a head plus the fields under it: a row built from the matched line alone said `chunk finished
+  // with failures` and dropped the counts saying what failed. Which of those lines belong is decided
+  // here rather than by the search, with the same `cut` the window uses, and the ones past the
+  // record are dropped. `cut` also walks the offsets forward, so every row still seeks to its line.
+  function hitLines(h) {
+    const ls = cut(h.text || '', h.offset);
+    let n = 1;
+    while (n < ls.length && !ls[n].head) n++;
+    while (n > 1 && ls[n - 1].t === '') n--;
+    const out = ls.slice(0, n);
+    out[0].head = true;                        // the match starts the row, whatever it is in the file
+    return out;
+  }
 
   function paintHits(pre, hits) {
     const mark = S.needle && !S.rx ? S.needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
@@ -517,9 +537,13 @@
     }
     const at = S.hitAt >= 0 && S.hits[S.hitAt] ? S.hits[S.hitAt].offset : -1;
     pre.innerHTML = hits.map(h => {
-        const l = hitLine(h);
-        return `<div class="logv-hitrow" data-seek="${h.offset}">` +
-               (l.r ? recordHtml([l], mark, at) : lineHtml(l, mark, at)) + `</div>`;
+        const ls = hitLines(h);
+        // A record renders as a record. A match on something else — a field, a bare line and its
+        // stacktrace — has no head to hang fields on, so its lines render as lines.
+        const body = ls[0].r && ls[0].r.role === 'head'
+          ? recordHtml(ls, mark, at)
+          : ls.map(l => lineHtml(l, mark, at)).join('');
+        return `<div class="logv-hitrow" data-seek="${h.offset}">` + body + `</div>`;
       }).join('') +
       (S.capped ? `<div class="logv-empty">showing the first ${hits.length} of ${S.total}</div>` : '');
   }
@@ -530,7 +554,7 @@
     const hl = hitList();
     if (hl) return paintHits(pre, hl);
     const mark = S.hits && S.needle && !S.rx ? S.needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
-    const at = S.hits && S.hitAt >= 0 ? S.hits[S.hitAt].offset : -1;
+    const at = S.hits && S.hitAt >= 0 ? S.hits[S.hitAt].offset : S.mark;
     // No separator between the spans: each is a block and already takes its own line, and a `\n`
     // inside `white-space:pre-wrap` would add a second one. Gaps go BETWEEN messages instead, via
     // the head class — the `│` continuations under a `┌` belong to it and read as one block.
@@ -638,7 +662,7 @@
   function countLevels() {
     if (!SEV || !S.path) return;
     const path = S.path;
-    S.counts = null; paintBar();
+    S.counts = null; S.declaredFile = null; paintBar();
     // One search per level, not per pattern: a level's patterns are alternatives, so a line
     // matching either is one line. Counting them separately and taking the larger would under-count
     // a file where different lines matched different patterns.
@@ -662,8 +686,15 @@
     // cannot.
     const declaredSrc = SEV.src && SEV.src.declared;
     const structured = declaredSrc ? tally(declaredSrc, false) : Promise.resolve(0);
-    structured.then(n => {
-      const useDeclared = n > 0 && SEV.src.warn && SEV.src.error;
+    // Held as a promise, because the level FILTER asks the same question and must not answer
+    // differently. It is answered by a round trip, so a filter that read the flag on the way past
+    // read `null` and took the declared branch, searching a file the counts had gone on to count by
+    // words. The chip and the list then disagreed until the chip was clicked a second time.
+    S.declared = structured.then(n => {
+      S.declaredFile = !!(n > 0 && SEV.src.warn && SEV.src.error);
+      return S.declaredFile;
+    });
+    S.declared.then(useDeclared => {
       const one = lv => useDeclared ? tally(lv === 'error' ? SEV.src.error : SEV.src.warn, false)
                                     : words(lv);
       return Promise.all([one('error'), one('warn')]);
@@ -680,9 +711,13 @@
   // is the number a reader needs and quietly meaning "3 of the first 2000" would be a lie.
   // What the level chips search for, so picking one reaches the WHOLE file. The same patterns the
   // counts use, so the chip's number and the hit list are the same question asked once.
+  // The SAME question the counts ask, which means the same answer to "does this file declare its
+  // levels?". Asking the hub whether it sent a declared pattern is not that question: it always
+  // sends one. A file with no declared records was counted by words and searched by the declared
+  // pattern, so a chip reading 1 opened onto "no error in this file".
   function levelPattern(lv) {
     if (lv === 'all' || lv === 'info' || !SEV) return '';
-    if (SEV.src && SEV.src.declared && SEV.src[lv]) return SEV.src[lv];
+    if (S.declaredFile !== false && SEV.src && SEV.src[lv]) return SEV.src[lv];
     const src = lv === 'error' ? SEV.error : SEV.warn;
     return src.length ? src.map(re => '(?:' + re.source + ')').join('|') : '';
   }
@@ -691,13 +726,29 @@
   // that are already loaded — which is how a chip reading 122 sat above two visible warnings. When
   // nothing is typed, the chosen level IS the search: the hits come from the whole file, and ▲▼
   // walks every one of them. A typed needle still wins, and the level narrows it as before.
+  // A level search waits for that answer; a typed needle does not need it.
   function runSearch() {
+    const needle = (q('.logv-search').value || '').trim();
+    if (!needle && S.filter !== 'all' && S.declared) {
+      const p = S.declared;
+      p.then(() => { S.declared === p && runSearchNow(); }).catch(() => {});
+      return;
+    }
+    runSearchNow();
+  }
+
+  function runSearchNow() {
+    S.mark = -1;
     const needle = (q('.logv-search').value || '').trim();
     S.needle = needle;
     const lvlPat = needle ? '' : levelPattern(S.filter);
     const pat = needle || lvlPat;
     if (!pat || !S.path) { S.hits = null; S.rawHits = null; S.hitAt = -1; paintBar(); paintPre(); return; }
-    call('log_search', S.path, { pattern: pat, ignorecase: needle ? S.icase : false,
+    // Folded exactly when the COUNT folds. The word patterns are counted case-insensitively, so a
+    // file writing `ERROR` counted one and then searched case-sensitively for `error` and found
+    // none. The declared patterns name their level exactly and are not folded, then or now.
+    call('log_search', S.path, { pattern: pat,
+                                 ignorecase: needle ? S.icase : S.declaredFile === false,
                                  regex: needle ? S.rx : true, limit: HIT_LIMIT })
       .then(r => {
         S.total = r.total; S.capped = r.capped;
@@ -712,7 +763,10 @@
   // as the raw list plus a derived one so switching levels does not cost another scan of the file.
   function refilterHits() {
     if (!S.rawHits) { S.hits = null; return; }
-    S.hits = S.rawHits.filter(h => S.filter === 'all' || sevOf(h.text) === S.filter);
+    // The MATCHED line decides the level, not the lines carried with it: a record under an ordinary
+    // hit can be an error, and reading the whole block would file the hit under that error's level.
+    S.hits = S.rawHits.filter(h => S.filter === 'all' ||
+                                   sevOf((h.text || '').split('\n', 1)[0]) === S.filter);
     S.hitAt = S.hits.length ? 0 : -1;
   }
 
@@ -762,5 +816,5 @@
   // The addressing is the part that has to be right and the part a browser cannot show you is
   // wrong: an off-by-one in a byte offset looks like a highlight on the neighbouring line. Exposed
   // so `test/js/logview_window.mjs` can pin it without a DOM.
-  window.slateLogs = { open, close, _test: { S, cut, visible, sevOf, setSev, paintLine, roleOf, recordHtml, fileStatus, levelPattern } };
+  window.slateLogs = { open, close, _test: { S, cut, visible, sevOf, setSev, paintLine, roleOf, recordHtml, hitLines, fileStatus, levelPattern } };
 })();

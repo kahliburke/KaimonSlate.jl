@@ -30,7 +30,8 @@ try { (0, eval)(src); LV = globalThis.slateLogs; } catch (e) {
 }
 if (!LV || !LV._test) { console.error('logview: logview.js exposed no test surface'); process.exit(2); }
 
-const { S, cut, visible, sevOf, setSev, paintLine, recordHtml, fileStatus, levelPattern } = LV._test;
+const { S, cut, visible, sevOf, setSev, paintLine, recordHtml, hitLines, fileStatus,
+        levelPattern } = LV._test;
 const fails = [];
 const ok = (cond, what) => { if (!cond) fails.push(what); };
 const eq = (got, want, what) => {
@@ -299,6 +300,29 @@ if (painted.indexOf('\x1b') >= 0) fails.push('paintLine left a raw escape code i
 // from ripgrep, which reads the bytes on disk and knows nothing about what renders.
 const coloured = cut(red + '\nnext', 0);
 eq(coloured.map(l => l.o), [0, red.length + 1], 'offsets span the escape codes');
+
+// ── A hit is a record, not a line ───────────────────────────────────────────────────────────
+// The search matches one line, and the match is the head of a record whose fields say what actually
+// happened. So a hit arrives with the lines after it and the trim happens here: keep what continues
+// the record, drop what starts the next one, and leave the offsets alone so the row still seeks.
+const withCtx = [
+  '\u250c Error: chunk finished with failures',
+  '\u2502   chunk = "sw65da"',
+  '\u2502   ran = 2',
+  '\u2514 @ Slate batch.jl:12',
+  '\u250c Info: next chunk',
+  '\u2514 @ Slate batch.jl:20',
+].join('\n');
+const hl = hitLines({ offset: 40, line: 9, text: withCtx });
+eq(hl.length, 4, 'a hit keeps its record and stops at the next one');
+eq(hl.map(l => l.o), [40, 80, 103, 117], 'carried lines keep their own offsets');
+ok(hl.every(l => l.sev === 'error'), 'the fields inherit the record\'s level');
+
+// A match on a plain line keeps what is indented under it — a stacktrace is the answer, not noise —
+// and stops at the next line that stands on its own.
+const plain = hitLines({ offset: 0, line: 1,
+                         text: 'ERROR: LoadError: it died\nStacktrace:\n [1] top\nnext thing' });
+eq(plain.length, 3, 'a bare error keeps its stacktrace');
 
 if (fails.length) { fails.forEach(f => console.error('logview:', f)); process.exit(1); }
 console.log('logview: ok');
