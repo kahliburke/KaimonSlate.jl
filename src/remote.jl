@@ -750,8 +750,8 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     # remote host it needs to reach the worker's env as well (registry add or shipped source — see below).
     rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
     infra = _local_has_revise() ?
-        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"Revise\")]" :
-        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\")]"
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"ripgrep_jll\"), Pkg.PackageSpec(name=\"Revise\")]" :
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"ripgrep_jll\")]"
     build_env! = function ()
         if !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml"))
             _replicate_env!(t)                                # notebook env + worker infra
@@ -793,6 +793,12 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
         _ssh_ok(host, `rm -f $rel/Project.toml $rel/Manifest.toml`)
         build_env!()
     end
+    # WHERE rg is, written down once. `ripgrep_jll` is provisioned into the worker env, but a JLL
+    # installs its binary into an artifact directory and never onto PATH — so `command -v rg` fails
+    # on a host that has it, the log search falls through to `grep -E`, and POSIX ERE cannot parse
+    # the patterns it is handed. That failure was silent: the counts beside a remote log all read
+    # zero while the records they counted were on screen.
+    _record_rg_path!(host, rel)
     _rlog("provision DONE host=$host")
     _kickoff_sysimage_build!(t, rel)   # detached + idempotent — fast workers once it lands, plain boot until then
     return nothing
@@ -1211,6 +1217,20 @@ catch
 end
 """
 const _PREP_DONE_SNIPPET = "try; println(stderr, \"@@SLATE_PREP done\"); flush(stderr); catch; end"
+
+# Resolve the env's ripgrep once and leave the path in a file the log search can read, so a search
+# costs no Julia start. Best-effort: a host without it falls back as before, which is slower and
+# noisier but not wrong.
+_RG_PATH_FILE = "$_REMOTE_ROOT/rg-path"
+
+function _record_rg_path!(host::AbstractString, projrel::AbstractString)
+    code = "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$projrel\")); " *
+           "p = try; (@eval using ripgrep_jll); string(ripgrep_jll.rg_path); catch; \"\"; end; " *
+           "isempty(p) || (mkpath(joinpath(homedir(), raw\"$_REMOTE_ROOT\")); " *
+           "write(joinpath(homedir(), raw\"$_RG_PATH_FILE\"), p))"
+    try; _ssh_julia!(host, code, "record ripgrep path on $host"); catch; end
+    return nothing
+end
 
 # The remote script: rewrite each dev dep's Manifest `path` to its shipped remote source, then instantiate
 # the project. Uses the TOML stdlib on the remote (always available); homedir() resolves the absolute paths.

@@ -690,6 +690,20 @@ end
 
 # A match's line text lives at `"lines":{"text":"…"}`. Binary or invalid UTF-8 comes back as
 # `{"bytes":"<base64>"}` instead, which is reported as such rather than guessed at.
+# The four hex digits after a `\u`, and the index of the last one.
+function _json_u16(s::AbstractString, jU::Int)
+    v = UInt16(0); j = jU
+    for _ in 1:4
+        j = nextind(s, j); j > lastindex(s) && return (v, j)
+        d = s[j]
+        n = '0' <= d <= '9' ? UInt16(d - '0') :
+            'a' <= d <= 'f' ? UInt16(d - 'a' + 10) :
+            'A' <= d <= 'F' ? UInt16(d - 'A' + 10) : return (v, j)
+        v = UInt16(v << 4) | n
+    end
+    return (v, j)
+end
+
 function _json_text(s::AbstractString)
     i = findfirst("\"lines\":{\"text\":\"", s)
     i === nothing && return "(binary)"
@@ -700,8 +714,32 @@ function _json_text(s::AbstractString)
         if c == '\\'
             j = nextind(s, j); j > lastindex(s) && break
             d = s[j]
-            print(io, d == 'n' ? '\n' : d == 't' ? '\t' : d == 'r' ? '\r' :
-                      d == '"' ? '"' : d == '\\' ? '\\' : d)
+            if d == 'u'
+                # `\uXXXX`, which is how ripgrep writes every byte it will not put in a string
+                # literal — including the ESC that starts an ANSI colour run. Dropping the backslash
+                # and keeping the letters turned `\u001b[31m` into the text `u001b[31m`, so the
+                # reader's classifier saw a line that began with a letter rather than an escape: it
+                # could not strip the colour, the record no longer started with `┌`, and a level the
+                # search had just found was filed as ordinary output.
+                cp, j = _json_u16(s, j)
+                if 0xD800 <= cp <= 0xDBFF && j < lastindex(s)   # a surrogate pair, past the BMP
+                    k = nextind(s, j)
+                    if s[k] == '\\' && nextind(s, k) <= lastindex(s) && s[nextind(s, k)] == 'u'
+                        lo, j2 = _json_u16(s, nextind(s, k))
+                        if 0xDC00 <= lo <= 0xDFFF
+                            print(io, Char(0x10000 + (UInt32(cp - 0xD800) << 10) + (lo - 0xDC00)))
+                            j = j2
+                            @goto advanced
+                        end
+                    end
+                end
+                print(io, Char(cp))
+                @label advanced
+            else
+                print(io, d == 'n' ? '\n' : d == 't' ? '\t' : d == 'r' ? '\r' :
+                          d == 'b' ? '\b' : d == 'f' ? '\f' :
+                          d == '"' ? '"' : d == '\\' ? '\\' : d)
+            end
         elseif c == '"'
             break
         else
@@ -1010,8 +1048,13 @@ function _remote_log_search(runner, path, pattern, ignorecase, regex, limit)
     q = _shq(String(path)); pq = _shq(String(pattern))
     ic = ignorecase ? " -i" : ""
     fixed = regex ? "" : " -F"
-    ok, txt = runner("if command -v rg >/dev/null 2>&1; then " *
-                     "rg$(ic)$(fixed) --json -- $pq $q; else " *
+    # The provisioned ripgrep first, by the path recorded at provision time: a JLL puts its binary in
+    # an artifact directory, never on PATH, so looking only at PATH missed the rg we installed and
+    # fell through to `grep -E`. POSIX ERE has no `(?:`, no `\x1b`, no `\s`; the pattern was rejected,
+    # `2>/dev/null` ate the complaint, and an empty result read as "no matches".
+    ok, txt = runner("RG=\"\$(cat \"\$HOME/.cache/kaimonslate/rg-path\" 2>/dev/null)\"; " *
+                     "[ -x \"\$RG\" ] || RG=\"\$(command -v rg 2>/dev/null)\"; " *
+                     "if [ -x \"\$RG\" ]; then \"\$RG\"$(ic)$(fixed) --json -A $_SEARCH_AFTER -- $pq $q; else " *
                      "grep -b -n$(ic)$(regex ? " -E" : " -F") -- $pq $q; fi 2>/dev/null")
     hits = NamedTuple{(:offset, :line, :text),Tuple{Int,Int,String}}[]
     total = 0
