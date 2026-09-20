@@ -3237,13 +3237,19 @@ _bundle_filename(nb::LiveNotebook) =
 # checkout anywhere else is something someone is editing, and an app exported from it should run
 # against it. Returns "" for an installed package.
 function _dev_checkout_path(srcdir::AbstractString)
-    # `normpath` can leave a trailing separator here; strip it so the path compares and reads cleanly.
-    root = try; rstrip(abspath(normpath(joinpath(srcdir, ".."))), '/'); catch; return ""; end
+    # `normpath` can leave a trailing separator here; strip it so the path compares and reads
+    # cleanly. Both separators, since Windows leaves a backslash.
+    root = try; rstrip(abspath(normpath(joinpath(srcdir, ".."))), ('/', '\\')); catch; return ""; end
     isempty(root) && return ""
     isfile(joinpath(root, "Project.toml")) || return ""
+    # Is this inside a depot's `packages`? Compare with a trailing separator so `packages` cannot
+    # match `packages-evil`, and on a common spelling: a native-separator path compared against a
+    # `/`-suffixed prefix never matches on Windows, which would pass a depot package off as a
+    # dev checkout.
+    _cmp(x) = replace(rstrip(String(x), ('/', '\\')), '\\' => '/') * "/"
     for d in DEPOT_PATH
         p = try; abspath(joinpath(String(d), "packages")); catch; continue; end
-        startswith(root * "/", p * "/") && return ""
+        startswith(_cmp(root), _cmp(p)) && return ""
     end
     return root
 end
@@ -3998,16 +4004,20 @@ function _unshipped_includes(root::AbstractString, shipped::AbstractSet{String})
     missing_files = String[]
     srcdir = joinpath(root, "src")
     isdir(srcdir) || return missing_files
+    # `shipped` comes from `git ls-files`, which emits forward slashes on every platform, while
+    # `relpath` returns the native separator. Without this nothing matches on Windows, every file
+    # is skipped, and the check reports no gaps at all.
+    _slash(p) = replace(String(p), '\\' => '/')
     for f in readdir(srcdir; join = true)
         (isfile(f) && endswith(f, ".jl")) || continue
         # Only inspect files that ship — an unshipped file's own includes are moot.
-        rel = relpath(f, root)
+        rel = _slash(relpath(f, root))
         rel in shipped || continue
         body = try; read(f, String); catch; continue; end
         for m in eachmatch(_INCLUDE_LITERAL, body)
             inc = String(m.captures[1])
             endswith(inc, ".jl") || (inc *= ".jl")
-            target = relpath(normpath(joinpath(dirname(f), inc)), root)
+            target = _slash(relpath(normpath(joinpath(dirname(f), inc)), root))
             (target in shipped || isabspath(inc)) && continue
             isfile(joinpath(root, target)) || continue      # already broken in the source; not ours to report
             push!(missing_files, target)
