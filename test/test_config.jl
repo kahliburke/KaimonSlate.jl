@@ -132,9 +132,15 @@ end
             # is that a socket fits, which is what actually broke: the extension bound its hub, then
             # died creating the socket, and crash-looped.
             cache = vars["XDG_CACHE_HOME"]
-            sock = joinpath(cache, "kaimon", "sock", "0f9ced16-c229-1f86-df1b-cfc60879d5f4-stream.sock")
-            @test length(sock) < (Sys.islinux() ? 108 : 104)
-            @test cache == joinpath(root, "cache") || startswith(cache, "/tmp/ks-ai-")
+            if Sys.iswindows()
+                # `sun_path` is a POSIX limit. Windows coerces IPC to TCP and never creates the
+                # socket file, so nothing can bust it and the tidy location is always used.
+                @test cache == joinpath(root, "cache")
+            else
+                sock = joinpath(cache, "kaimon", "sock", "0f9ced16-c229-1f86-df1b-cfc60879d5f4-stream.sock")
+                @test length(sock) < (Sys.islinux() ? 108 : 104)
+                @test cache == joinpath(root, "cache") || startswith(cache, "/tmp/ks-ai-")
+            end
         end
         @testset "Slate is pinned back to the user's real homes" begin
             # These must NOT follow XDG into the private dir — that is the whole trap.

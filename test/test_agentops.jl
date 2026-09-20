@@ -418,9 +418,13 @@ end
     hub = NS.start_hub(; port = 8862)
     try
         nbp = tempname() * ".jl"
-        # `slow` sleeps generously (3s) so the "fast restored WHILE slow is still running" window stays
+        # `slow` sleeps generously so the "fast restored WHILE slow is still running" window stays
         # open long enough to observe reliably on a loaded CI runner — a fixed sleep here was flaky.
-        write(nbp, "#%% code id=slow\nsleep(3.0); slowval = 1\n#%% code id=fast\nfastval = 5 * 2\n")
+        # The Windows box this is exercised on runs x86-64 Julia under emulation, where the restore
+        # is far from instant, so the whole fixture is scaled rather than just the bound: the margin
+        # between "fast is back" and "slow is still going" stays the same proportion everywhere.
+        slack = Sys.iswindows() ? 3 : 1
+        write(nbp, "#%% code id=slow\nsleep($(3.0 * slack)); slowval = 1\n#%% code id=fast\nfastval = 5 * 2\n")
         nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
         NS._eval!(nb; wait_all = true)
         NS.set_cell_tags!(nb, "fast", ["locked"])
@@ -431,16 +435,16 @@ end
 
         NS.restart_kernel!(nb)
         # POLL for the locked cell to restore instead of a fixed sleep, which expires before the restore
-        # completes on a loaded CI run. It self-heals out of document order (a memo-key restore, near
-        # instant), so it lands FRESH well within the slow cell's 3s sleep — proving it did NOT queue
-        # behind `slow`. The poll is bounded far below 3s so `slow` is guaranteed still running.
-        @test timedwait(1.5; pollint = 0.02) do
+        # completes on a loaded CI run. It self-heals out of document order (a memo-key restore), so it
+        # lands FRESH well within the slow cell's sleep — proving it did NOT queue behind `slow`. The
+        # poll stays at half that sleep, so `slow` is guaranteed still running when it returns.
+        @test timedwait(1.5 * slack; pollint = 0.02) do
             fastcell().state == KaimonSlate.ReportEngine.FRESH
         end === :ok
         @test fastcell().state == KaimonSlate.ReportEngine.FRESH   # restored already — did NOT wait on `slow`
         @test slowcell().state in (KaimonSlate.ReportEngine.STALE, KaimonSlate.ReportEngine.RUNNING)   # still queued/running
         # Wait for the slow cell to finish before teardown so `stop_hub` isn't racing a live eval task.
-        timedwait(6.0; pollint = 0.05) do; slowcell().state == KaimonSlate.ReportEngine.FRESH; end
+        timedwait(6.0 * slack; pollint = 0.05) do; slowcell().state == KaimonSlate.ReportEngine.FRESH; end
     finally
         NS.stop_hub(hub)
     end
