@@ -72,7 +72,16 @@ host — same reasoning as the `KAIMONSLATE_NO_AUTOINDEX` the exported-app runne
 """
 function _embedded_env_vars(port::Integer)
     real = SlateHome                                   # the user's own homes, resolved BEFORE we repoint XDG
+    # Kaimon resolves its homes from APPDATA/LOCALAPPDATA on Windows and ignores XDG there, so the
+    # private location has to be named in BOTH vocabularies. With only the XDG pair set, the
+    # embedded host on Windows quietly uses the user's real `%APPDATA%\\Kaimon` — and writes its own
+    # lax loopback config.json into it — which is the trap this function exists to avoid.
+    windows_homes = Sys.iswindows() ?
+        Pair{String,Any}["APPDATA" => _embedded_config_home(),
+                         "LOCALAPPDATA" => _embedded_cache_home()] :
+        Pair{String,Any}[]
     return [
+        windows_homes...,
         "XDG_CONFIG_HOME" => _embedded_config_home(),
         "XDG_CACHE_HOME"  => _embedded_cache_home(),
         "KAIMONSLATE_CONFIG_HOME" => real.config_home(),
