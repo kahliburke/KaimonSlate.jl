@@ -428,13 +428,29 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
     # reuse ACROSS runs is the hub's to decide when it writes the descriptor, because a compute node
     # cannot afford a lookup per unit and would have no cheap way to do one.
     have = force ? Dict{String,Any}() : chunk_rows(root, chunk)
-    # …and what the hub already knew was in the store when it wrote this descriptor. Without it a
+    # …and what the hub believed was already in the store when it wrote this descriptor. Without it a
     # full sweep recomputes every unit a pilot had already landed, which is the case the sharing
     # exists for.
+    #
+    # ADVISORY, not trusted. The mark is a reference to another run's results and nothing protects
+    # them: releasing that run, retrying its failures or collecting it as stale all remove them
+    # after the mark was written. A mark taken on faith then skips a unit that no longer exists
+    # anywhere, and nothing will ever run it — the sweep stops with units that can never land.
+    # So a marked unit is confirmed against the store before it is skipped. That costs one fold per
+    # JOB, not per unit, and only when there is a mark to check.
     if !force
-        for sh in shards
-            sh isa AbstractDict && get(sh, "have", false) === true &&
-                (have[String(get(sh, "key", ""))] = sh)
+        marked = String[String(get(sh, "key", "")) for sh in shards
+                        if sh isa AbstractDict && get(sh, "have", false) === true]
+        filter!(k -> !isempty(k) && !haskey(have, k), marked)
+        if !isempty(marked)
+            elsewhere = Set{String}()
+            for (c, paths) in events_by_chunk(root)
+                c == chunk && continue
+                for k in Base.keys(rows_of(root, paths)); k in marked && push!(elsewhere, k); end
+            end
+            for k in marked
+                k in elsewhere && (have[k] = Dict{String,Any}("key" => k, "have" => true))
+            end
         end
     end
     jobid = job_tag()

@@ -732,6 +732,36 @@ end
         end
     end
 
+    @testset "a reuse mark is confirmed, never taken on faith" begin
+        # The mark is a reference to ANOTHER run's results, and nothing protects them: releasing
+        # that run, retrying its failures or collecting it as stale all remove them after the mark
+        # was written. Skipping on the mark alone then leaves units that no longer exist anywhere
+        # and that nothing will ever run, and the sweep stops with them missing.
+        mktempdir() do root
+            payload = joinpath(@__DIR__, "..", "src", "slatetask.jl")
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2, payload)
+            pilot = Sweep.@sweep(Sweep.paramgrid(x = 1:2), t; submit = false) do p; p.x * 10; end
+            for c in BS.sweep_chunks(root, pilot.run); SlateTask.run_chunk(root, c); end
+
+            full = Sweep.@sweep(Sweep.paramgrid(x = 1:4), t; submit = false) do p; p.x * 10; end
+            marked = sum(count(sh -> get(sh, "have", false) === true,
+                               get(MemoStore.read_manifest(root, c), "shards", Any[]))
+                         for c in BS.sweep_chunks(root, full.run))
+            @test marked == 2                       # the hub did mark them
+
+            Sweep.forget_run!(t, pilot.run)         # …and then they were released
+            @test isempty(BS.fold(root).status)
+
+            ran = skipped = 0
+            for c in BS.sweep_chunks(root, full.run)
+                r = SlateTask.run_chunk(root, c)
+                ran += r.ran; skipped += r.skipped
+            end
+            @test (ran, skipped) == (4, 0)          # nothing is skipped on a mark that lies
+            @test BS.plan(root, full.run).state === :succeeded
+        end
+    end
+
     @testset "a run says when, not which" begin
         # The card used to name the run by its key, which is a hash: it told a reader nothing, and
         # it changed silently when they edited the cell. A time answers what they actually ask.

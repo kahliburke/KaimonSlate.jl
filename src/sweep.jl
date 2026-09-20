@@ -3680,8 +3680,18 @@ function _when_stamp(root::AbstractString, run::AbstractString, started::Bool)
     return (kind = started ? "submitted" : "written", at = t)
 end
 
-_when_text(w) = w.at <= 0 ? "" :
-    string(w.kind, " ", Dates.format(Dates.unix2datetime(w.at) + _localoffset(), "HH:MM"))
+# A bare "15:51" is only unambiguous on the day it happened, and a sweep card outlives the day. So
+# the day is always said: named while it is recent enough to be worth naming, dated after that.
+function _when_text(w)
+    w.at <= 0 && return ""
+    t = Dates.unix2datetime(w.at) + _localoffset()
+    now = Dates.now()
+    days = Dates.value(Dates.Date(now) - Dates.Date(t))
+    day = days == 0 ? "today" : days == 1 ? "yesterday" :
+          Dates.year(t) == Dates.year(now) ? Dates.format(t, "u d") :
+          Dates.format(t, "u d yyyy")
+    return string(w.kind, " ", day, " ", Dates.format(t, "HH:MM"))
+end
 
 _state_label(s) = s === :succeeded ? "complete" :
                   s === :partial   ? "finished, with failures" :
@@ -4204,12 +4214,19 @@ function _live_script(io, r::ShardedResult)
                        String(Math.round((s % 3600) / 60)).padStart(2, "0") + "m";
         return "~" + (s / 86400).toFixed(1) + "d";
       }
-      // An ABSOLUTE unix time as the reader's wall clock, with the date once it is not today.
+      // An ABSOLUTE unix time as the reader's wall clock. The DAY is always said: a bare "15:51"
+      // is only unambiguous on the day it happened, and a card outlives the day.
       function at(u){
         var t = new Date(u * 1000), now = new Date();
         var hhmm = String(t.getHours()).padStart(2, "0") + ":" + String(t.getMinutes()).padStart(2, "0");
-        if (t.toDateString() === now.toDateString()) return hhmm;
-        return t.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + hhmm;
+        var d0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        var d1 = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+        var days = Math.round((d0 - d1) / 86400000);
+        var day = days === 0 ? "today" : days === 1 ? "yesterday"
+                : t.toLocaleDateString(undefined, t.getFullYear() === now.getFullYear()
+                    ? { month: "short", day: "numeric" }
+                    : { year: "numeric", month: "short", day: "numeric" });
+        return day + " " + hhmm;
       }
       function clock(s){
         var t = new Date(Date.now() + s * 1000), now = new Date();
