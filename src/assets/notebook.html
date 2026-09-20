@@ -752,8 +752,9 @@
 <script src="/assets/js/model.js"></script>   <!-- one worker/allocation model; must precede every reader -->
 <script src="/assets/js/schedopts.js"></script>   <!-- scheduler-option catalogue; sweeps.js reads it -->
 <script src="/assets/js/dtypes.js"></script>   <!-- generated from SlateExtensionsBase.DTYPES; must precede its readers -->
+<script src="/assets/js/esc.js"></script>     <!-- window.slateEscHtml, needed by both of the below -->
 <script src="/assets/js/core.js"></script>
-<script src="/assets/js/ansi.js"></script>     <!-- window.slateAnsiHtml: SGR → spans (needs core.js's slateEscHtml) -->
+<script src="/assets/js/ansi.js"></script>     <!-- window.slateAnsiHtml: SGR → spans -->
 <script src="/assets/js/wscall.js"></script>   <!-- window.slateCall: JS→Julia calls over the page WebSocket -->
 <!-- Keyboard, in dependency order and BEFORE editor.js: the command registry, the keymap presets,
      then the resolver. keymap.js builds its lookup index at load from the registered commands, and

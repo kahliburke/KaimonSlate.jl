@@ -42,6 +42,10 @@ export cell_image, set_snapshot!
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")
 const _INDEX_ASSET = joinpath(@__DIR__, "assets", "index.html")
 const _CSS_ASSET = joinpath(@__DIR__, "assets", "notebook.css")   # extracted from notebook.html
+# The ANSI spans `ansi.js` emits. Its own file because TWO pages render captured output and they do
+# not share a stylesheet: the notebook (which appends this to its own) and the operator status page,
+# which is standalone and links it directly.
+const _ANSI_CSS_ASSET = joinpath(@__DIR__, "assets", "ansi.css")
 # What both pages need. They carry different stylesheets, so anything shared lives here.
 const _SHARED_CSS = joinpath(@__DIR__, "assets", "shared.css")
 const _JS_DIR = joinpath(@__DIR__, "assets", "js")                # notebook UI, split into modules

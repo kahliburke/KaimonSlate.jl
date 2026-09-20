@@ -874,7 +874,11 @@ function _make_router(h::Hub)
         return _json(Dict("ok" => ok))
     end)
 
-    HTTP.register!(router, "GET", "/assets/notebook.css", _ -> _asset(read(_CSS_ASSET, String), "text/css; charset=utf-8"))
+    HTTP.register!(router, "GET", "/assets/notebook.css",
+                   _ -> _asset(read(_CSS_ASSET, String) * "\n" * read(_ANSI_CSS_ASSET, String),
+                               "text/css; charset=utf-8"))
+    HTTP.register!(router, "GET", "/assets/ansi.css",
+                   _ -> _asset(read(_ANSI_CSS_ASSET, String), "text/css; charset=utf-8"))
     HTTP.register!(router, "GET", "/assets/shared.css", _ -> _asset(read(_SHARED_CSS, String), "text/css; charset=utf-8"))
     # Vendored third-party assets (offline cache, pinned in vendor.json). Greedy `**` so
     # nested paths work (CodeMirror modes/addons, KaTeX fonts). First hit fetches+caches.

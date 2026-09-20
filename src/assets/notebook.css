@@ -861,41 +861,7 @@ body.resizing { cursor:col-resize; user-select:none; }
 .fileedit { flex:1; overflow:auto; min-height:0; }
 .fileedit .cm-editor { height:100%; }
 .filespanel .pfoot { padding:6px 12px; border-top:1px solid var(--border); line-height:1.4; }
-/* ANSI colour in captured output. A cell's stdout/stderr is cooked (termcook.jl) so SGR is the only
-   escape family left, and render.jl turns each colour run into one of these spans. The eight base
-   colours reuse the theme's own accents where there is a natural match, so coloured output belongs to
-   the theme instead of fighting it; the rest are fixed but chosen to sit on both light and dark
-   backgrounds. 256-colour and truecolour arrive as inline styles and need no rules here. */
-:root {
-  --ansi-0:var(--dim);    --ansi-1:var(--red);   --ansi-2:var(--green); --ansi-3:var(--gold);
-  --ansi-4:var(--accent); --ansi-5:#c678dd;      --ansi-6:#56b6c2;      --ansi-7:var(--text);
-  --ansi-8:var(--dim);    --ansi-9:var(--red);   --ansi-10:var(--green);--ansi-11:var(--gold);
-  --ansi-12:var(--accent);--ansi-13:#d19aeb;     --ansi-14:#7fd4de;     --ansi-15:var(--text);
-}
-.ansi-fg-0{color:var(--ansi-0)}    .ansi-fg-1{color:var(--ansi-1)}
-.ansi-fg-2{color:var(--ansi-2)}    .ansi-fg-3{color:var(--ansi-3)}
-.ansi-fg-4{color:var(--ansi-4)}    .ansi-fg-5{color:var(--ansi-5)}
-.ansi-fg-6{color:var(--ansi-6)}    .ansi-fg-7{color:var(--ansi-7)}
-.ansi-fg-8{color:var(--ansi-8)}    .ansi-fg-9{color:var(--ansi-9)}
-.ansi-fg-10{color:var(--ansi-10)}  .ansi-fg-11{color:var(--ansi-11)}
-.ansi-fg-12{color:var(--ansi-12)}  .ansi-fg-13{color:var(--ansi-13)}
-.ansi-fg-14{color:var(--ansi-14)}  .ansi-fg-15{color:var(--ansi-15)}
-.ansi-bg-0{background:var(--ansi-0)}   .ansi-bg-1{background:var(--ansi-1)}
-.ansi-bg-2{background:var(--ansi-2)}   .ansi-bg-3{background:var(--ansi-3)}
-.ansi-bg-4{background:var(--ansi-4)}   .ansi-bg-5{background:var(--ansi-5)}
-.ansi-bg-6{background:var(--ansi-6)}   .ansi-bg-7{background:var(--ansi-7)}
-.ansi-bg-8{background:var(--ansi-8)}   .ansi-bg-9{background:var(--ansi-9)}
-.ansi-bg-10{background:var(--ansi-10)} .ansi-bg-11{background:var(--ansi-11)}
-.ansi-bg-12{background:var(--ansi-12)} .ansi-bg-13{background:var(--ansi-13)}
-.ansi-bg-14{background:var(--ansi-14)} .ansi-bg-15{background:var(--ansi-15)}
-.ansi-bold { font-weight:600; }
-/* Julia leans on dim for secondary detail (`@info` bodies, stacktrace paths); keep it legible
-   rather than literally faint. */
-.ansi-dim { opacity:.72; }
-.ansi-italic { font-style:italic; }
-.ansi-underline { text-decoration:underline; }
-.ansi-strike { text-decoration:line-through; }
-.ansi-reverse { filter:invert(1); }
+/* ANSI colour in captured output lives in ansi.css, which the operator page loads too. */
 /* Live output from a RUNNING cell (runstatus.js `onCellOutput`). While it's up, the previous run's
    output is hidden rather than removed: the streamed text is this run's output, and stacking the two
    leaves the reader guessing which is current. The block is dropped when the real result patches in.

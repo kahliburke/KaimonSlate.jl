@@ -684,6 +684,13 @@ function _status_html()
   background:transparent; color:var(--dim); border:1px solid var(--border); }
 .logpick button.on { color:var(--fg); background:var(--bg2); border-color:var(--dim); }
 </style>
+<!-- The worker log is a Julia log: SGR colour runs, the same shape a notebook cell's output has.
+     Rendering it as text put the escape through HTML, which shows nothing for the ESC and leaves
+     `[36m` on screen. These two are the SAME pieces the notebook uses, so there is one converter
+     and one palette rather than a second of each living here. -->
+<link rel="stylesheet" href="/assets/ansi.css">
+<script src="/assets/js/esc.js"></script>
+<script src="/assets/js/ansi.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -810,7 +817,8 @@ async function tick() {
                   '&side=' + encodeURIComponent(logSide);
         const r = await (await fetch(q)).json();
         const el = \$('#log'); const bottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
-        el.textContent = r.log || r.error || '(no worker log yet)';
+        const txt = r.log || r.error || '(no worker log yet)';
+        el.innerHTML = window.slateAnsiHtml ? window.slateAnsiHtml(txt) : esc(txt);
         if (bottom) el.scrollTop = el.scrollHeight;
   } catch (e) {}
 }

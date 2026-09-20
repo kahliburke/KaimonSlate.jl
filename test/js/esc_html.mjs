@@ -22,15 +22,15 @@ const fail = m => { console.error('esc_html: ' + m); bad++; };
 // An escaper is recognisable by the entity it produces: nothing else in these files emits `&amp;`
 // from a `replace`. cm6.bundle.js is vendored and not ours to police.
 // Matched over the whole file, not line by line: a definition is routinely wrapped across two lines,
-// and core.js's own is — a per-line test sees neither half and reports a clean sweep either way.
+// and esc.js's own is — a per-line test sees neither half and reports a clean sweep either way.
 const DEFN = /replace\s*\([^;]{0,400}&amp;/;
 const owners = [];
 for (const f of readdirSync(jsdir).filter(f => f.endsWith('.js') && f !== 'cm6.bundle.js')) {
   if (DEFN.test(readFileSync(join(jsdir, f), 'utf8'))) owners.push(f);
 }
 const uniq = [...new Set(owners)];
-if (uniq.length !== 1 || uniq[0] !== 'core.js') {
-  fail(`HTML escaping is defined in ${JSON.stringify(uniq)}; it belongs only in core.js `
+if (uniq.length !== 1 || uniq[0] !== 'esc.js') {
+  fail(`HTML escaping is defined in ${JSON.stringify(uniq)}; it belongs only in esc.js `
      + `(use window.slateEscHtml — see the note on its definition)`);
 }
 

@@ -10,7 +10,10 @@
 // Anything else that slips through is dropped rather than shown, so a log written by a process we
 // don't control can't spray escape codes into the panel.
 (function () {
-  const esc = s => window.slateEscHtml(s);
+  // esc.js, which every page carrying this file loads first. A page that skipped it used to fail
+  // silently: the converter still defined itself and threw on first use, inside the caller's try,
+  // leaving the page on its placeholder forever.
+  const esc = window.slateEscHtml;
 
   const hex2 = v => v.toString(16).padStart(2, '0');
   const rgbHex = (r, g, b) => '#' + hex2(r) + hex2(g) + hex2(b);
