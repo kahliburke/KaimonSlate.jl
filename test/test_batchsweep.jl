@@ -678,6 +678,27 @@ end
         @test first(run_one(true)) > 0   # …against one chunk, with the rest still waiting
     end
 
+    @testset "a tile's tooltip follows its unit" begin
+        # The tooltip had two definitions: one the renderer wrote into `title`, one the live patch
+        # implied by only ever setting the fill. So a tile went green while its tooltip still read
+        # "not run" from the moment of first render. One definition now, and the poll carries it.
+        mktempdir() do root
+            payload = joinpath(@__DIR__, "..", "src", "slatetask.jl")
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2, payload)
+            r = Sweep.@sweep(Sweep.paramgrid(n = 1:6), t; submit = false) do p; p.n; end
+            args = (t, r.run, getfield(r, :params), getfield(r, :keys))
+            s0 = Sweep.status_payload(args...; advance = false)
+            @test occursin("not run", s0["tips"][1])
+
+            for c in BS.sweep_chunks(root, r.run)[1:2]; SlateTask.run_chunk(root, c); end
+            s1 = Sweep.status_payload(args...; advance = false)
+            @test occursin("ok", s1["tips"][1]) && !occursin("not run", s1["tips"][1])
+            @test occursin("not run", s1["tips"][6])        # one that really has not run
+            @test s1["tiles"][1] != s0["tiles"][1]          # and the fill moved with it
+            @test length(s1["tips"]) == length(s1["tiles"])
+        end
+    end
+
     @testset "the grid says what the scheduler is holding" begin
         # Fill says how a unit ended. Without a second channel, "nothing yet" covered not submitted,
         # queued, and running alike — so a sweep waiting on an allocation looked like an idle one.

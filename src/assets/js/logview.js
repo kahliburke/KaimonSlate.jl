@@ -197,6 +197,16 @@
     window.slateSplit(q('.logv-split'), q('.logv-side'),
                       { key: 'slate.logv.side', min: 220, keep: 320,
                         outer: () => el.querySelector('.logv') });
+    // Opening a result: back to the file, positioned on the line. A list answers "where are they",
+    // and the next question is always "what was around it".
+    q('.logv-pre').addEventListener('click', e => {
+      const row = e.target.closest('[data-seek]');
+      if (!row) return;
+      const off = Number(row.dataset.seek);
+      S.filter = 'all'; S.needle = ''; q('.logv-search').value = '';
+      S.hits = null; S.rawHits = null; S.hitAt = -1;
+      paintBar(); seek(off);
+    });
     q('.logv-order').onclick = () => {
       S.order = S.order === 'new' ? 'old' : 'new';
       reload();
@@ -484,9 +494,41 @@
     return out;
   }
 
+  // Filtering means "show me these", and the window holds only the bytes it holds — so when a level
+  // or a needle is active the pane lists the HITS, which came from the whole file. Filtering the
+  // window instead is how a chip reading 24 sat above one record: the other 23 were in bytes nobody
+  // had fetched, and only ▲▼ could reach them.
+  function hitList() {
+    if (!S.rawHits || (S.filter === 'all' && !S.needle)) return null;
+    return (S.hits && S.hits.length) ? S.hits : [];
+  }
+
+  // A hit carries its line and its offset, which is everything a row needs; `sevOf` and `roleOf`
+  // then make it the same shape the window's lines have, so one renderer serves both.
+  const hitLine = h => { const t = h.text || ''; return { t, o: h.offset, sev: sevOf(t),
+                                                          head: true, r: roleOf(t) }; };
+
+  function paintHits(pre, hits) {
+    const mark = S.needle && !S.rx ? S.needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
+    if (!hits.length) {
+      pre.innerHTML = `<div class="logv-empty">no ${esc(S.filter === 'all' ? 'match' : S.filter)}` +
+                      ` in this file</div>`;
+      return;
+    }
+    const at = S.hitAt >= 0 && S.hits[S.hitAt] ? S.hits[S.hitAt].offset : -1;
+    pre.innerHTML = hits.map(h => {
+        const l = hitLine(h);
+        return `<div class="logv-hitrow" data-seek="${h.offset}">` +
+               (l.r ? recordHtml([l], mark, at) : lineHtml(l, mark, at)) + `</div>`;
+      }).join('') +
+      (S.capped ? `<div class="logv-empty">showing the first ${hits.length} of ${S.total}</div>` : '');
+  }
+
   function paintPre() {
     const pre = q('.logv-pre');
     if (!S.path) { pre.innerHTML = ''; return; }
+    const hl = hitList();
+    if (hl) return paintHits(pre, hl);
     const mark = S.hits && S.needle && !S.rx ? S.needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
     const at = S.hits && S.hitAt >= 0 ? S.hits[S.hitAt].offset : -1;
     // No separator between the spans: each is a block and already takes its own line, and a `\n`

@@ -3373,11 +3373,18 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
          (landed = BatchSweep.fold(root).status; [get(landed, k, "") for k in keys])
     rings = _tile_rings(p, BatchSweep.sweep_chunks(root, run), length(st))
     sched = _sched_counts(p)
-    tiles = String[]
-    for (ti, (lo, hi)) in enumerate(_tile_spans(length(st)))
+    spans = _tile_spans(length(st))
+    # One tile per unit means the tooltip names the unit, which needs its record. Only ever true
+    # below the tile budget, so this reads a few hundred rows at most and never scales with the grid.
+    tiprows = (length(spans) == length(st) && !isempty(st)) ?
+              _rows(root, params, keys, run, source_of(target)) : ()
+    tiles = String[]; tips = String[]
+    for (ti, (lo, hi)) in enumerate(spans)
         ok = count(==("ok"), @view st[lo:hi])
         err = count(==("error"), @view st[lo:hi])
-        push!(tiles, _tile_color(ok, err, hi - lo + 1, ti <= length(rings) ? rings[ti] : '.'))
+        ring = ti <= length(rings) ? rings[ti] : '.'
+        push!(tiles, _tile_color(ok, err, hi - lo + 1, ring))
+        push!(tips, _tile_tip(tiprows, lo, hi, isempty(tiprows) ? 2 : 1, ok, err, ring))
     end
 
     out = Dict{String,Any}(
@@ -3387,7 +3394,7 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         "frac" => BatchSweep.fraction(p),
         "rate" => t.rate_per_s, "eta" => t.eta_s, "idle" => t.idle_s,
         "stuck" => BatchSweep.stalled_for(t), "blocked" => p.blocked,
-        "settled" => BatchSweep.is_settled(p), "tiles" => tiles, "rings" => rings,
+        "settled" => BatchSweep.is_settled(p), "tiles" => tiles, "tips" => tips, "rings" => rings,
         "queued" => sched.queued, "running_jobs" => sched.running,
         "color" => get(_STATE_COLOR, _ds, "var(--dim,#6a7090)"),
         # The controls that apply RIGHT NOW, so the card's buttons track its state instead of
@@ -3754,6 +3761,21 @@ function _tile_spans(n::Integer)
     return [((t - 1) * per + 1, min(t * per, n)) for t in 1:cld(n, per)]
 end
 
+# What a tile SAYS, in one place. The renderer writes it into `title` and the poll sends it back;
+# computing it twice let the two drift, and the drift was silent — the live patch only ever set the
+# fill, so a tile went green while its tooltip still read "not run" from the moment of first render.
+function _tile_tip(rows, lo::Int, hi::Int, per::Int, ok::Int, err::Int, ring::AbstractChar)
+    body = if per == 1 && lo <= length(rows)
+        row = rows[lo]
+        string(row.params) *
+            (isempty(String(row.ran_on)) ? "" : " · " * String(row.ran_on)) *
+            (String(row.status) == "" ? " · not run" : " · " * String(row.status))
+    else
+        "units $(lo)-$(hi) · $(ok) ok, $(err) failed, $(hi - lo + 1 - ok - err) pending"
+    end
+    return body * _ring_tip(ring)
+end
+
 # A tile with NOTHING landed is where the scheduler's answer belongs. Flat grey said "not
 # submitted", "queued" and "running on a node" all the same way, which is the ambiguity that had a
 # sweep waiting on an allocation looking like one doing nothing.
@@ -3816,16 +3838,9 @@ function _unit_grid(io, r::ShardedResult)
             s = r.rows[i].status
             s == "ok" ? (ok += 1) : s == "error" ? (err += 1) : nothing
         end
-        tip = if per == 1
-            row = r.rows[lo]
-            _esc(string(row.params)) *
-                (isempty(row.ran_on) ? "" : " · " * _esc(row.ran_on)) *
-                (row.status == "" ? " · not run" : " · " * row.status)
-        else
-            "units $(lo)-$(hi) · $(ok) ok, $(err) failed, $(hi - lo + 1 - ok - err) pending"
-        end
         ring = ti <= length(rings) ? rings[ti] : '.'
-        print(io, "<div title=\"", tip, _ring_tip(ring), "\" style='width:", side, "px;height:", side,
+        tip = _esc(_tile_tip(r.rows, lo, hi, per, ok, err, ring))
+        print(io, "<div title=\"", tip, "\" style='width:", side, "px;height:", side,
                   "px;border-radius:2px;background:", _tile_color(ok, err, hi - lo + 1, ring), "'></div>")
     end
     println(io, "</div>")
@@ -3935,8 +3950,15 @@ const _LOG_LEVEL_SRC = _log_level_src(raw"(Error|Warning|Info|Debug)")
 # does not make that mistake, because a line that names its level is believed — but that rule needs
 # to look at the rest of the line, and the count runs in ripgrep, which has no look-around. So the
 # count asks the question ripgrep CAN answer exactly: how many records declare this level.
-const _LOG_DECL_WARN_SRC = _log_level_src("Warning")
-const _LOG_DECL_BAD_SRC = _log_level_src("Error")
+# A job that CRASHES does not write a record. Julia prints `ERROR: LoadError: …` at column zero,
+# with no `┌` and no level word for the declared pattern to find, so a log holding one `@info` and
+# one crash counted zero errors while the reader plainly saw one. Union it in: anchored at column
+# zero it cannot collide with a record head (those are indented under `┌`/`[`) nor with a field
+# value (those sit on `│` continuations), so it adds the crash without the word list's noise.
+const _LOG_CRASH_BAD_SRC = raw"^ERROR\b"
+const _LOG_CRASH_WARN_SRC = raw"^WARNING\b"
+const _LOG_DECL_WARN_SRC = "(?:" * _log_level_src("Warning") * ")|(?:" * _LOG_CRASH_WARN_SRC * ")"
+const _LOG_DECL_BAD_SRC = "(?:" * _log_level_src("Error") * ")|(?:" * _LOG_CRASH_BAD_SRC * ")"
 # The SHAPE of one record, for a reader that wants to show it as a record rather than as five
 # lines of box drawing. `Logging.ConsoleLogger` writes
 #
@@ -4345,8 +4367,12 @@ function _live_script(io, r::ShardedResult)
           // One channel, the fill: how the units ended once any have, and what the scheduler is
           // holding until then. Julia has already folded the two together.
           for (var i = 0; i < s.tiles.length; i++){
-            if (g.children[i].style.background !== s.tiles[i])
-              g.children[i].style.background = s.tiles[i];
+            var td = g.children[i];
+            if (td.style.background !== s.tiles[i]) td.style.background = s.tiles[i];
+            // The TOOLTIP moves too. Patching only the fill left a green tile still saying
+            // "not run", which is the render from before anything had landed.
+            var tip = s.tips && s.tips[i];
+            if (tip !== undefined && td.title !== tip) td.title = tip;
           }
         }
         // Submitting turns a card that had nothing to watch into a live one, so the timer starts

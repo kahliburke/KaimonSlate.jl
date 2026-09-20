@@ -3328,6 +3328,12 @@ body.slate-dragging .logv-body *, body.slate-dragging .swcfg-body * { pointer-ev
 /* …except one that is long or carries a stacktrace, which gets its own block. */
 .logv-f.wide { display:block; margin-right:0; }
 .logv-f.wide > .logv-l { display:block; padding-left:1.2em; opacity:.9; }
+/* The match list. A row is one hit from the whole file, and clicking it opens that spot in the
+   file view — so it has to look reachable rather than like more log text. */
+.logv-hitrow { cursor:pointer; border-radius:3px; padding:1px 4px; margin:0 -4px; }
+.logv-hitrow:hover { background:color-mix(in srgb, var(--fg, #d4d8e8) 8%, transparent); }
+.logv-empty { opacity:.55; padding:6px 2px; font-style:italic; }
+
 .logv-rec.rechit { background:color-mix(in srgb, var(--val) 18%, transparent); border-radius:3px; }
 .logv-info { color:var(--text); opacity:.72; }
 /* A line carrying its own SGR colour is rendered by ansi.js into .ansi-* spans, which
