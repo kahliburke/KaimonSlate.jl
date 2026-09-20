@@ -15,17 +15,16 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { loadEscHtml } from './_esc_src.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 
 globalThis.window = globalThis;
-// The real helper, read from core.js rather than restated — this test compares ESCAPED output, so a
-// stand-in that escaped differently would report a mismatch that does not exist.
-const core = readFileSync(join(root, 'src', 'assets', 'js', 'core.js'), 'utf8');
-const escSrc = /window\.slateEscHtml\s*=[\s\S]*?;\n/.exec(core);
-if (!escSrc) { console.error('ansi_html: could not read slateEscHtml from core.js'); process.exit(2); }
-(0, eval)(escSrc[0]);
+// The real helper, not restated: this test compares ESCAPED output, so a stand-in that escaped
+// differently would report a mismatch that does not exist. Where it lives is the loader's business,
+// and knowing that here is how this file broke when it moved.
+window.slateEscHtml = loadEscHtml();
 (0, eval)(readFileSync(join(root, 'src', 'assets', 'js', 'ansi.js'), 'utf8'));
 
 if (typeof window.slateAnsiHtml !== 'function') {

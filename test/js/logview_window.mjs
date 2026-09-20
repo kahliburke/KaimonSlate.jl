@@ -9,6 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { loadEscHtml } from './_esc_src.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(here, '..', '..', 'src', 'assets', 'js', 'logview.js'), 'utf8');
@@ -16,11 +17,10 @@ const src = readFileSync(join(here, '..', '..', 'src', 'assets', 'js', 'logview.
 globalThis.window = globalThis;
 globalThis.document = { createElement: () => ({ style: {} }), body: { appendChild() {} },
                         addEventListener() {} };
-// The page's shared escaper (core.js). Stood in rather than re-implemented: `esc_html.mjs` exists
-// to keep exactly one definition of it in the tree, and a second one here would be the thing it
-// forbids, in the file that is meant to know better.
-globalThis.slateEscHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g,
-  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// The page's shared escaper, loaded rather than re-implemented: `esc_html.mjs` exists to keep
+// exactly one definition of it in the tree, and a second one here would be the thing it forbids, in
+// the file that is meant to know better.
+globalThis.slateEscHtml = loadEscHtml();
 // The REAL ansi.js, not a stand-in: a job's output arrives coloured, and what has to hold is that
 // the viewer's classifier reads through the escape codes while its renderer keeps them.
 (0, eval)(readFileSync(join(here, '..', '..', 'src', 'assets', 'js', 'ansi.js'), 'utf8'));
