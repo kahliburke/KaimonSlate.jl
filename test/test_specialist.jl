@@ -144,6 +144,70 @@ current_agent_id() = nothing
             @test isempty(NS._debug_session(nb).cell)
         end
 
+        @testset "a refused tool asks, and 'always' is granted to the role" begin
+            # Kaimon refuses a tool its preset does not allow and asks this first. The grant has to
+            # outlive the agent: a specialist dismissed and re-summoned is a new agent id, and a
+            # person who said "always allow the debugger" did not mean that one process.
+            role = "debugger"
+            aid1, aid2 = "agent-one", "agent-two"
+            lock(NS._AGENT_LOCK) do
+                NS._AGENT_ROUTES[aid1] = nb; NS._AGENT_CREW[aid1] = role
+                NS._AGENT_ROUTES[aid2] = nb; NS._AGENT_CREW[aid2] = role
+            end
+            # Ask on a task, answer it from here, and report both the decision and what the person
+            # was shown. `asked = false` means nobody was prompted — the standing grant answered.
+            function decide(aid, tool, reply)
+                t = @async NS._permission_ask(aid, tool, "denied by policy"; timeout = 10.0)
+                shown = ""
+                for _ in 1:150
+                    as = NS.asks_json(nb)
+                    if !isempty(as)
+                        a = first(as)
+                        shown = String(get(a, "text", ""))
+                        NS.answer_ask!(nb, String(get(a, "id", "")), reply)
+                        break
+                    end
+                    istaskdone(t) && break
+                    sleep(0.02)
+                end
+                (fetch(t), shown)
+            end
+            try
+                NS.forget_consents!(nb)
+                d, shown = decide(aid1, "WebFetch", "deny")
+                @test d === :deny
+                # What the person sees names the tool and who wants it, or the prompt is unanswerable.
+                @test occursin("WebFetch", shown) && occursin(role, shown)
+
+                @test decide(aid1, "WebFetch", "once")[1] === :allow
+                # "Once" grants nothing standing: the next call asks again.
+                @test decide(aid1, "WebFetch", "deny")[1] === :deny
+
+                # "Always" answers this call and every later one for the ROLE — including from a
+                # different agent id, which is the re-summon case.
+                @test decide(aid1, "WebFetch", "always")[1] === :allow
+                d2, shown2 = decide(aid2, "WebFetch", "deny")
+                @test d2 === :allow && isempty(shown2)      # granted without troubling anyone
+
+                # The grant is per tool, not a blanket yes.
+                @test decide(aid2, "WebSearch", "deny")[1] === :deny
+
+                # An agent nobody is watching cannot be granted anything, and is not asked about.
+                @test NS._permission_ask("no-such-agent", "WebFetch", "why"; timeout = 1.0) === :deny
+
+                # Nobody answers: the call is refused, not parked. A tool call is held open for the
+                # whole wait, so silence has to end it.
+                NS.forget_consents!(nb)
+                @test NS._permission_ask(aid1, "WebSearch", "why"; timeout = 1.0) === :deny
+            finally
+                lock(NS._AGENT_LOCK) do
+                    delete!(NS._AGENT_ROUTES, aid1); delete!(NS._AGENT_CREW, aid1)
+                    delete!(NS._AGENT_ROUTES, aid2); delete!(NS._AGENT_CREW, aid2)
+                end
+                NS.forget_consents!(nb)
+            end
+        end
+
         @testset "a breakpoint can be silenced without being cleared" begin
             # Leaving a loop you have seen enough of. The mark keeps its line and its predicate,
             # so it is still on screen and still one click from coming back.

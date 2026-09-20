@@ -162,3 +162,85 @@ function _agent_call(tool::Symbol, args::Dict{String,Any})
     return parsed
 end
 
+
+# ── permission prompts ────────────────────────────────────────────────────────
+#
+# Kaimon refuses a tool its policy does not allow, and calls this to ask first. A policy that can
+# only refuse teaches people to route around it; one that asks is the same policy with a door.
+#
+# Consent is remembered against the ROLE, not the agent. An agent id belongs to one summoning: a
+# debugger dismissed and called back is a new id, so consent kept against it would be forgotten
+# exactly when someone wanted it and inherited by a stranger when they did not. The role is the
+# durable thing a person means by "always" — they are granting it to the debugger, not to `baf6314e`.
+#
+# In memory and per notebook, so it lasts as long as the work does and no longer. Nothing here
+# writes to disk: a standing grant that outlives the session is a bigger decision than this.
+const _TOOL_CONSENT = Dict{Tuple{String,String},Set{String}}()   # (nb.id, role) → tools
+
+_consent_key(nb::LiveNotebook, role::AbstractString) = (nb.id, String(role))
+_has_consent(nb, role, tool) = lock(_AGENT_LOCK) do
+    String(tool) in get(_TOOL_CONSENT, _consent_key(nb, role), Set{String}())
+end
+_grant_consent!(nb, role, tool) = lock(_AGENT_LOCK) do
+    push!(get!(() -> Set{String}(), _TOOL_CONSENT, _consent_key(nb, role)), String(tool))
+end
+"Drop every standing grant for a notebook — its work is over."
+forget_consents!(nb::LiveNotebook) = lock(_AGENT_LOCK) do
+    filter!(p -> first(p.first) != nb.id, _TOOL_CONSENT)
+end
+
+"""
+How long a tool call waits for someone to allow it.
+
+Much shorter than `ASK_TIMEOUT`. That one is a specialist asking a question and then getting on
+with its turn; this one HOLDS a tool call open, so the agent is stalled for the whole wait and
+whatever it was doing is stalled with it. Long enough to answer a prompt you can see, short enough
+that walking away ends the call rather than parking it.
+"""
+const PERMISSION_TIMEOUT = 120.0
+
+"""
+Answer Kaimon's question about one tool call: `:allow`, or anything else to refuse.
+
+Registered with `Kaimon.set_permission_ask!` at startup. Kaimon has no notebooks and no roles, so
+it asks every time and this decides whether a person needs to see it.
+"""
+function _permission_ask(agent_id::AbstractString, tool::AbstractString, why::AbstractString;
+                         timeout::Float64 = PERMISSION_TIMEOUT)
+    nb = lock(_AGENT_LOCK) do; get(_AGENT_ROUTES, String(agent_id), nothing); end
+    nb === nothing && return :deny          # an agent nobody is watching gets no grant
+    role = lock(_AGENT_LOCK) do; get(_AGENT_CREW, String(agent_id), ""); end
+    who = isempty(role) ? "The notebook agent" : "The $role"
+    _has_consent(nb, role, tool) && return :allow
+    reply = ask_and_wait(nb, role, "permission", String(agent_id),
+                         "$who wants to use `$tool`, which this notebook's permission preset does " *
+                         "not allow.\n\n$why";
+                         options = [("once",   "Allow once"),
+                                    ("always", isempty(role) ? "Always allow `$tool`" :
+                                                               "Always allow `$tool` for the $role"),
+                                    ("deny",   "Deny")],
+                         timeout = timeout)
+    reply == "always" && (_grant_consent!(nb, role, tool); return :allow)
+    return reply == "once" ? :allow : :deny
+end
+
+"""
+Hand Kaimon the prompt it should use before refusing a tool call.
+
+Kaimon is not a dependency — it loads this package as an extension, so it is reached through `Main`
+the way `_agent_call` does. An older Kaimon without the hook keeps refusing outright, which is the
+behaviour this replaces, so a missing function is not an error.
+"""
+function _register_permission_ask!()
+    try
+        isdefined(Main, :Kaimon) || return false
+        K = getfield(Main, :Kaimon)
+        isdefined(K, :set_permission_ask!) || return false
+        Base.invokelatest(getfield(K, :set_permission_ask!), _permission_ask)
+        @info "KaimonSlate: tool refusals will ask before refusing"
+        return true
+    catch e
+        @warn "KaimonSlate: could not register the permission prompt" exception = e
+        return false
+    end
+end

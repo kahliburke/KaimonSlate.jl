@@ -3028,6 +3028,7 @@ function create_tools(GateTool::Type)
         ReportEngine._reap_orphan_ssh!()   # …and any ssh tunnel/master procs a hard-killed prior hub orphaned
         atexit(on_shutdown)
         _hub()
+        _register_permission_ask!()
         @info "KaimonSlate hub auto-started" url = _base()
     catch e
         @warn "KaimonSlate hub auto-start failed" exception = (e, catch_backtrace())
