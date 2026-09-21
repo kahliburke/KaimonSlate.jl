@@ -30,8 +30,8 @@ try { (0, eval)(src); LV = globalThis.slateLogs; } catch (e) {
 }
 if (!LV || !LV._test) { console.error('logview: logview.js exposed no test surface'); process.exit(2); }
 
-const { S, cut, visible, sevOf, setSev, paintLine, recordHtml, hitLines, fileStatus,
-        levelPattern } = LV._test;
+const { S, cut, visible, sevOf, setSev, paintLine, recordHtml, hitLines, refilterHits,
+        fileStatus, levelPattern } = LV._test;
 const fails = [];
 const ok = (cond, what) => { if (!cond) fails.push(what); };
 const eq = (got, want, what) => {
@@ -323,6 +323,22 @@ ok(hl.every(l => l.sev === 'error'), 'the fields inherit the record\'s level');
 const plain = hitLines({ offset: 0, line: 1,
                          text: 'ERROR: LoadError: it died\nStacktrace:\n [1] top\nnext thing' });
 eq(plain.length, 3, 'a bare error keeps its stacktrace');
+
+// ── A level search is not classified twice ──────────────────────────────────────────────────
+// With nothing typed, the chosen level is the pattern the file was searched with, so the results
+// are the level by construction. Running the word lists over them again can only disagree with the
+// chip that counted them, and a head naming both levels is where it does.
+// Loose output, not records: a declared head names its own level and both readings agree on it.
+S.rawHits = [{ offset: 0, line: 1, text: 'Warning: error rate high' },
+             { offset: 90, line: 9, text: 'Warning: slow' }];
+S.needle = ''; S.filter = 'warn';
+refilterHits();
+eq(S.hits.length, 2, 'a level search keeps every hit it found');
+
+// A typed needle is a different question, and there the level narrows what came back.
+S.needle = 'rate';
+refilterHits();
+eq(S.hits.length, 1, 'a needle is still narrowed by the level');
 
 if (fails.length) { fails.forEach(f => console.error('logview:', f)); process.exit(1); }
 console.log('logview: ok');

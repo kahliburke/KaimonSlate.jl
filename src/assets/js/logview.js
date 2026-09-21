@@ -763,10 +763,14 @@
   // as the raw list plus a derived one so switching levels does not cost another scan of the file.
   function refilterHits() {
     if (!S.rawHits) { S.hits = null; return; }
+    // With nothing typed, the level IS what was searched for, and classifying the results again here
+    // can only disagree with the chip that counted them: a record whose head reads `Warning: error
+    // rate high` is counted as a warning by the pattern that found it and read as an error by the
+    // word lists. A typed needle is different, and the level narrows it.
     // The MATCHED line decides the level, not the lines carried with it: a record under an ordinary
     // hit can be an error, and reading the whole block would file the hit under that error's level.
-    S.hits = S.rawHits.filter(h => S.filter === 'all' ||
-                                   sevOf((h.text || '').split('\n', 1)[0]) === S.filter);
+    S.hits = (!S.needle || S.filter === 'all') ? S.rawHits.slice()
+           : S.rawHits.filter(h => sevOf((h.text || '').split('\n', 1)[0]) === S.filter);
     S.hitAt = S.hits.length ? 0 : -1;
   }
 
@@ -816,5 +820,5 @@
   // The addressing is the part that has to be right and the part a browser cannot show you is
   // wrong: an off-by-one in a byte offset looks like a highlight on the neighbouring line. Exposed
   // so `test/js/logview_window.mjs` can pin it without a DOM.
-  window.slateLogs = { open, close, _test: { S, cut, visible, sevOf, setSev, paintLine, roleOf, recordHtml, hitLines, fileStatus, levelPattern } };
+  window.slateLogs = { open, close, _test: { S, cut, visible, sevOf, setSev, paintLine, roleOf, recordHtml, hitLines, refilterHits, fileStatus, levelPattern } };
 })();
