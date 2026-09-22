@@ -125,6 +125,17 @@
     if (m.mod || m.meta || m.ctrl || m.alt) return true;
     return m.base === 'Escape' || /^F\d+$/.test(m.base);
   }
+  // Does this chord TYPE something? A printable key with no modifier but Shift inserts that character
+  // in an editor, so a binding on it takes the character away: `/` on find left a vim user unable to
+  // type a slash in a cell. The test is deliberately narrower than `isGlobalSafe` — ⏎, ⇥, ⌫ and the
+  // arrows are named keys, editing ACTIONS rather than characters, and a keymap may claim them
+  // (⇧⏎ runs the cell). Judged on the first stroke, which is what the editor sees.
+  function typesText(spec) {
+    const first = String(spec || '').trim().split(/\s+/)[0];
+    const m = parseChord(first);
+    if (!m || m.mod || m.meta || m.ctrl || m.alt) return false;
+    return m.base === 'Space' || Array.from(String(m.base || '')).length === 1;
+  }
 
   // ── Display ────────────────────────────────────────────────────────────────
   const GLYPH_MAC = { Enter: '⏎', Escape: '⎋', Tab: '⇥', Space: '␣', Backspace: '⌫', Delete: '⌦',
@@ -311,14 +322,20 @@
     return 'default';
   }
 
-  // Which of a command's contexts may actually use this chord. A bare key is legal in `command` (no
-  // editor has focus there) and in `editor` (CodeMirror owns the keystroke anyway), but never in
-  // `global`, where it would swallow ordinary typing. Filtering here rather than refusing the binding
-  // means `nb.undo` can hold ⌘Z globally AND a bare `z` in command mode — which is exactly what the
-  // Jupyter preset wants.
+  // Which of a command's contexts may actually use this chord. `command` takes anything — nothing has
+  // focus there. `global` needs a modifier (or Escape / a function key), or a bare key would swallow
+  // ordinary typing anywhere on the page. `editor` needs a chord that does not TYPE: CM6 runs the
+  // binding instead of inserting the character, so a bare `/` on find left a vim user unable to type
+  // a slash in a cell.
+  //
+  // Filtering here rather than refusing the binding is what lets a preset put a bare key on a command
+  // that also holds a chord: `nb.undo` keeps ⌘Z globally and takes `z` in command mode (the Jupyter
+  // preset), and `view.search` takes `/` in command mode while ⌘F goes on reaching the editor (the vim
+  // preset, where `/` in a cell is vim's own search in normal mode and a plain slash in insert mode —
+  // neither of which is Slate's to claim).
   function contextsFor(cmd, chord) {
-    const safe = isGlobalSafe(chord);
-    return cmd.ctx.filter(c => c !== 'global' || safe);
+    const globalOk = isGlobalSafe(chord), editorOk = !typesText(chord);
+    return cmd.ctx.filter(c => c === 'command' || (c === 'global' ? globalOk : editorOk));
   }
 
   // ── The lookup index ───────────────────────────────────────────────────────
@@ -440,6 +457,15 @@
     return !!t.closest(_CONTROL_REGION);
   }
   const _inEditor = t => !!(t && t.closest && t.closest('.cm-editor'));
+  // Should a notebook-level keydown listener stay out of this event? True when something further IN
+  // owns the keystroke — a cell editor, a field, a control region — or when a handler has already
+  // acted on it. The dispatcher below applies the same rule inline; this is for the view-state
+  // listeners that are NOT commands (dep-focus, zen), so one rule decides for all of them.
+  //
+  // Escape is what makes this matter. In an editor it means "leave the editor", and under vim it
+  // means "leave insert mode" — in neither case does it also mean "leave the view you are in", which
+  // is what a listener testing only `e.key` does. Each press dismisses one layer.
+  const ownsKeyEvent = e => !!e && (e.defaultPrevented || _ownsKeys(e.target));
   // Any open dialog owns the keyboard: its own handlers drive it, and a command-mode key firing
   // behind it would act on a cell the reader can't see. Global chords still work — ⌘K has to be able
   // to dismiss the palette it opened.
@@ -505,6 +531,10 @@
       if (cmd.inst) continue;
       if (!window.slateCmd.available(cmd)) continue;
       for (const chord of chordsFor(cmd.id)) {
+        // `contextsFor` decides per CHORD, not per command: a text-producing key belongs to typing,
+        // whatever it is bound to. Without this the vim preset's `/` on find was installed into every
+        // editor, where CM6 ran the command instead of inserting the character.
+        if (contextsFor(cmd, chord).indexOf('editor') < 0) continue;
         out.push({ key: chord, id: cmd.id, run: view => window.slateCmd.run(cmd.id, view) });
       }
     }
@@ -567,8 +597,8 @@
   // ── Public API ─────────────────────────────────────────────────────────────
   window.slateKeymap = {
     // Chord helpers — also the unit-testable surface (test/js/keymap_resolve.mjs).
-    canon, match, format, formatChord, eventChords, chordFromEvent, isGlobalSafe,
-    chordWarning, isReserved, parseChord,
+    canon, match, format, formatChord, eventChords, chordFromEvent, isGlobalSafe, typesText,
+    chordWarning, isReserved, parseChord, ownsKeyEvent,
 
     presets: () => PRESETS.map(p => ({ name: p.name, label: p.label, about: p.about || '' })),
     preset: () => _preset,

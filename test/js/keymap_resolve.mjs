@@ -188,6 +188,19 @@ ok('F5 is global-safe', M.isGlobalSafe('F5'));
 ok('bare j is NOT global-safe', !M.isGlobalSafe('j'));
 ok('Shift-m is NOT global-safe', !M.isGlobalSafe('Shift-m'));
 ok('sequence judged on its first stroke', !M.isGlobalSafe('d d'));
+// The editor asks a narrower question: does the chord TYPE a character? Named keys do not, which is
+// why ⇧⏎ can mean "run the cell" while `/` cannot mean "find" inside a cell.
+ok('/ types', M.typesText('/'));
+ok('j types', M.typesText('j'));
+ok('⇧M types (it is M)', M.typesText('Shift-m'));
+ok('Space types', M.typesText('Space'));
+ok('⇧⏎ does not type', !M.typesText('Shift-Enter'));
+ok('Tab does not type', !M.typesText('Tab'));
+ok('Backspace does not type', !M.typesText('Backspace'));
+ok('an arrow does not type', !M.typesText('ArrowDown'));
+ok('Escape does not type', !M.typesText('Escape'));
+ok('a modified key does not type', !M.typesText('Mod-f'));
+ok('a sequence is judged on its first stroke', M.typesText('d d'));
 
 // ── Reserved and discouraged ─────────────────────────────────────────────────
 // Reserved = the browser or OS takes it and `preventDefault` cannot get it back, so the panel refuses
@@ -261,6 +274,13 @@ const undo = mac.slateCmd.get('nb.undo');
 eq('undo contexts', undo.ctx, ['global', 'command']);
 eq('Mod-z serves both', M.contextsFor(undo, 'Mod-z'), ['global', 'command']);
 eq('bare z is command-only', M.contextsFor(undo, 'z'), ['command']);
+// The same filter applies to `editor`, and for the sharper reason: in an editor a text-producing key
+// IS the text. `view.search` is bound in `global` and `editor`, and the vim preset puts `/` on it —
+// which in a cell has to stay a slash (insert mode) or vim's own search (normal mode).
+const search = mac.slateCmd.get('view.search');
+eq('search contexts', search.ctx, ['global', 'command', 'editor']);
+eq('⌘F reaches the editor', M.contextsFor(search, 'Mod-f'), ['global', 'command', 'editor']);
+eq('bare / is command-only', M.contextsFor(search, '/'), ['command']);
 
 // ── Conflicts, and deliberate sharing ────────────────────────────────────────
 // Two UNCONDITIONAL commands on one chord in one context is reported, not silently resolved, and the
@@ -298,6 +318,16 @@ ok('editor specs include comment toggle', specs.some(s => s.id === 'editor.comme
 ok('editor specs exclude command-only', !specs.some(s => s.id === 'cell.copy'));
 ok('editor specs exclude inst commands', !specs.some(s => s.id === 'cell.run'));
 ok('every spec carries a runner', specs.every(s => typeof s.run === 'function'));
+// A text-producing chord never goes into an editor, whatever it is bound to: CM6 would run the
+// command instead of inserting the character. The vim preset is the case — `/` on find made `/`
+// untypeable in a cell (issue #36), while ⌘F has to go on working there.
+M.setPreset('vim');
+const vimSpecs = M.editorSpecs();
+ok('the vim preset binds / to find', M.chordsFor('view.search').includes('/'));
+ok('bare / is not installed in editors', !vimSpecs.some(s => s.key === '/'));
+ok('⌘F still is', vimSpecs.some(s => s.id === 'view.search' && s.key === 'Mod-f'));
+ok('no editor spec is a bare text key', vimSpecs.every(s => M.isGlobalSafe(s.key)));
+M.setPreset('slate');
 
 // ── Round trip through JSON ──────────────────────────────────────────────────
 // What `keymap.json` holds. It has to survive the trip unchanged, since the file is also meant to be
@@ -327,10 +357,12 @@ for (const w of [mac, pc]) {
       for (const chord of km.chordsFor(c.id)) {
         if (km.isReserved(chord)) fails.push(`preset ${p.name} binds ${c.id} to the reserved ${chord}`);
         if (!km.canon(chord)) fails.push(`preset ${p.name} binds ${c.id} to the unparseable ${chord}`);
-        // A `global` command with a bare chord would be filtered out of its own context and silently
-        // never fire, which reads exactly like a broken keymap.
-        if (c.ctx.length === 1 && c.ctx[0] === 'global' && !km.isGlobalSafe(chord)) {
-          fails.push(`preset ${p.name} gives the global-only ${c.id} the bare chord ${chord}`);
+        // A chord no context can use is a binding that silently never fires, which reads exactly like
+        // a broken keymap. That is what a text-producing key is on a command with no command-mode
+        // home: it is filtered out of `global` (it would swallow typing) and out of `editor` (it would
+        // swallow the character), leaving nothing.
+        if (km.contextsFor(c, chord).length === 0) {
+          fails.push(`preset ${p.name} gives ${c.id} the chord ${chord}, which no context can use`);
         }
       }
     }

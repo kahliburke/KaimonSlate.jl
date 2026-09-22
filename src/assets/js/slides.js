@@ -453,9 +453,11 @@
   // of a document the server will refuse to change. Same reason `body.app .zenexit` is hidden — this
   // is the keyboard half of that. Escape still propagates, so dismissing a panel or a completion
   // popup keeps working.
+  // Same rule as the dep-focus view: an Escape that belongs to a cell editor or a control is not a
+  // request to leave zen — it leaves that layer first, and the next press leaves zen.
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && document.body.classList.contains('zen')
-        && !document.body.classList.contains('app')) toggleZen(false);
+    if (e.key !== 'Escape' || (window.slateKeymap && window.slateKeymap.ownsKeyEvent(e))) return;
+    if (document.body.classList.contains('zen') && !document.body.classList.contains('app')) toggleZen(false);
   });
   window.toggleZen = toggleZen;
   window.exitZen = () => toggleZen(false);
