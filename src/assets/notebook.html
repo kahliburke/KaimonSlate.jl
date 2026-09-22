@@ -475,6 +475,8 @@
     <span class="rt"><input type="range" id="setdeb" min="0" max="1000" step="25"/><span id="setdebv"></span> ms</span></div>
   <div class="setrow"><label title="How long to pause typing before the autocomplete popup opens on its own — cuts the flicker of it appearing/vanishing mid-word. Manual Tab / Ctrl-Space are always instant. Applies to newly opened editors.">Autocomplete delay</label>
     <span class="rt"><input type="range" id="setcompdelay" min="0" max="1000" step="25"/><span id="setcompdelayv"></span> ms</span></div>
+  <div class="setrow"><label title="How long the pointer rests on a control before its tooltip appears. The default matches the pace of the browser's own tooltips, which this replaces so they can be styled and can reach the small controls a native tooltip skips. 0 shows them immediately; the far end of the slider turns them off. Moving along a row of controls stays fast either way — once one tooltip has shown, its neighbours appear without the wait.">Tooltip delay</label>
+    <span class="rt"><input type="range" id="settipdelay" min="0" max="2000" step="50"/><span id="settipdelayv"></span></span></div>
   <div class="setrow"><label title="What Tab does when the autocomplete popup is open. Accept: Tab (and Enter) accept the highlighted item — the standard IDE convention. Navigate: Tab moves down the list, Shift-Tab up; only Enter accepts.">Tab in autocomplete</label>
     <span class="rt"><select id="setcomptab"><option value="accept">Accept (standard)</option><option value="navigate">Navigate list</option></select></span></div>
   <div class="setsec">Agent</div>

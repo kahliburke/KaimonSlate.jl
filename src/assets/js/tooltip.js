@@ -1,7 +1,7 @@
-// A styled tooltip that stands in for the browser's native `title`. The native one waits out a
-// delay the page cannot shorten, restarts that delay on the smallest pointer movement, and shows
-// nothing at all when the target is a few pixels wide inside a strip that only fades in on hover,
-// which describes every button in a cell header. The first time the pointer reaches an element
+// A styled tooltip that stands in for the browser's native `title`. The native one cannot be styled
+// or positioned, restarts its delay on the smallest pointer movement, and shows nothing at all when
+// the target is a few pixels wide inside a strip that only fades in on hover, which describes every
+// button in a cell header. Its TIMING is fine and is matched here. The first time the pointer reaches an element
 // carrying a `title`, this reads the text, moves it to `data-tip` so the native tooltip stops
 // competing, mirrors it to `aria-label` for screen readers, and shows one shared popover after a
 // short, fixed delay.
@@ -10,7 +10,15 @@
 // including the ones Preact renders after load, with nothing to attach per button.
 
 (() => {
-  const SHOW_DELAY = 180;    // ms the pointer rests on a fresh target before the tip appears
+  // Paced like the native tooltip this replaces, because that is what a reader's hands expect: a tip
+  // that appears while the pointer is still travelling reads as the page twitching at it. The point
+  // of replacing the native one was never that it is slow — it was that it cannot be styled, cannot
+  // be positioned, and never fires at all on a control a few pixels wide inside a strip that fades
+  // in on hover.
+  const SHOW_DELAY = 700;    // ms the pointer rests on a fresh target before the tip appears
+  const OFF_AT = 2000;       // the setting's top of range, which reads "off" rather than "eventually"
+  // Moving ALONG a row of controls is one gesture, and making each button serve out the full delay
+  // turns reading a toolbar into a wait per button. The native tooltip does the same thing.
   const WARM_DELAY = 40;     // ms once a tip was just visible, so a neighboring control reads fast
   const WARM_WINDOW = 400;   // ms after a tip hides during which the next one counts as a neighbor
   const GAP = 8;             // px between the control and the tip
@@ -76,6 +84,15 @@
     if (tip) tip.classList.remove('on');
   };
 
+  // Read per hover, not at load: Settings writes this as you drag the slider, and a tooltip delay
+  // you cannot feel change while adjusting it is a control you have to guess at.
+  function coldDelay() {
+    const n = parseInt(localStorage.getItem('slateTipDelay'), 10);
+    return Number.isFinite(n) && n >= 0 ? n : SHOW_DELAY;
+  }
+  // What the setting shows when it has never been set.
+  window.slateTipDefaultDelay = () => SHOW_DELAY;
+
   // One handler drives both arming and dismissal: entering a titled control arms the timer, and
   // entering anything else (a gap, a panel, the page) clears it. The tip never receives events of
   // its own, because it is `pointer-events:none`.
@@ -91,8 +108,10 @@
     armedFor = node;
     // A tip already up, or one just dismissed, means the reader is moving among controls: show the
     // next one at once rather than making them wait out the cold delay over each button.
+    const cold = coldDelay();
+    if (cold >= OFF_AT) { armedFor = null; return; }        // turned off in Settings
     const warm = current !== null || performance.now() - lastHidden < WARM_WINDOW;
-    showTimer = setTimeout(() => { showTimer = 0; show(node, text); }, warm ? WARM_DELAY : SHOW_DELAY);
+    showTimer = setTimeout(() => { showTimer = 0; show(node, text); }, warm ? Math.min(WARM_DELAY, cold) : cold);
   });
 
   // A tip pinned to a control that scrolls away, is clicked, or loses the window goes stale, so

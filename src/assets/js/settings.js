@@ -487,6 +487,22 @@ function openSettings(scope, section) {
     // Live across every open editor via setCompleteDelay (reconfigures the autocompletion compartment).
     cd.oninput = () => { cdv.textContent = cd.value; window.setCompleteDelay ? window.setCompleteDelay(cd.value) : localStorage.setItem('slateCompleteDelay', cd.value); };
   }
+  // Tooltip delay. Live: `tooltip.js` reads the stored value per hover rather than at load, so a
+  // change applies to the next tooltip without a reload. The top of the range is OFF rather than a
+  // two-second wait, because a slider whose far end is "almost never" is a worse control than one
+  // that says what it does.
+  const td = document.getElementById('settipdelay'), tdv = document.getElementById('settipdelayv');
+  if (td) {
+    const dflt = window.slateTipDefaultDelay ? window.slateTipDefaultDelay() : 700;
+    const cur = () => { const n = parseInt(localStorage.getItem('slateTipDelay'), 10);
+                        return Number.isFinite(n) ? n : dflt; };
+    const label = n => n >= Number(td.max) ? 'off' : (n === 0 ? 'instant' : n + ' ms');
+    td.value = cur(); tdv.textContent = label(cur());
+    td.oninput = () => {
+      tdv.textContent = label(parseInt(td.value, 10));
+      localStorage.setItem('slateTipDelay', td.value);
+    };
+  }
   // Editor keymap (default / vim / emacs). Live across every open editor — the alternative keymap
   // sits in its own compartment, so switching reconfigures the views in place rather than rebuilding
   // them. Options a build didn't bundle are dropped, so the menu can't offer a mode that won't apply.
