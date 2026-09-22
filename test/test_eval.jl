@@ -355,12 +355,21 @@ end
         # refinement does) must not change it, or carried entries would never match.
         delete!(us.cells[1].flags, :opaque)
         @test ReportEngine._memo_key(us, us.cells[2]) == kw
-        # a MIXED opaque cell (using + arbitrary code) still poisons downstream
-        mx = parse_report("#%% code id=inc\nusing LinearAlgebra; include(\"setup.jl\")\n\n#%% code id=work2\nw = 1 + 1")
+        # a MIXED opaque cell (using + a barrier nothing can see through) still poisons downstream
+        mx = parse_report("#%% code id=inc\nusing LinearAlgebra; eval(:(z = 1))\n\n#%% code id=work2\nw = 1 + 1")
         build_dependencies!(mx)
         if :opaque in mx.cells[1].flags
             @test ReportEngine._memo_key(mx, mx.cells[2]) == ""
         end
+        # …but a LITERAL `include` is tracked — the file is a cell input whose content hash is already
+        # in the key — so it is the one other barrier shape that leaves the cells below it cacheable.
+        li = parse_report("#%% code id=inc2\ninclude(\"setup.jl\")\n\n#%% code id=work3\nw = 1 + 1")
+        build_dependencies!(li)
+        @test :opaque in li.cells[1].flags                            # still a barrier: it always re-runs
+        @test !isempty(ReportEngine._memo_key(li, li.cells[2]))       # but the notebook below it caches
+        @test !ReportEngine._is_tracked_include("include(f)")                     # computed path
+        @test !ReportEngine._is_tracked_include("include(\"a.jl\"); eval(:(x=1))") # another barrier beside it
+        @test ReportEngine._is_tracked_include("using A\ninclude(\"a.jl\")")
         @test !ReportEngine._is_pure_using("using A; f()")
         @test !ReportEngine._is_pure_using("f()")
         @test !ReportEngine._is_pure_using("")
@@ -483,6 +492,61 @@ end
         # absolute paths bypass the base
         abspath_js = joinpath(dir, "x.js")
         @test Base.invokelatest(Core.eval, m, :(@asset $abspath_js)) == "HELLO"
+    end
+
+    @testset "include: notebook namespace, resolution, tracking" begin
+        # A cell namespace is a runtime-built `Module`, which Julia gives NO `include`/`eval` — both
+        # are injected (widgets.jl). The point of the injected one is where the code LANDS (the
+        # notebook namespace, so every cell sees it) and how the path resolves (the project dir).
+        dir = mktempdir()
+        mkpath(joinpath(dir, "src"))
+        write(joinpath(dir, "src", "helpers.jl"), """
+        include("deeper.jl")          # resolves against THIS file's dir, not the project dir
+        transform(x) = x * SCALE
+        struct Params; n::Int; end
+        """)
+        write(joinpath(dir, "src", "deeper.jl"), "const SCALE = 3\n")
+        r = parse_report("#%% code id=a\ninclude(\"src/helpers.jl\")\n\n#%% code id=b\ny = transform(4)")
+        r.meta["assetbase"] = dir
+        m = ReportEngine.report_module(r)
+        # The `include` a cell sees is the INJECTED one (not Base's, which would resolve against
+        # whatever file is being included at the time) and it anchors on the notebook's project dir.
+        @test Base.invokelatest(Core.eval, m, :(string(parentmodule(include)))) == string(m)
+        # Built at RUNTIME on purpose: ReTest rewrites a literal `include(…)` call in a testset body
+        # (repointing the path at the test file's directory), which would rewrite this out from under
+        # the test — the call under test must reach the notebook namespace with the path as written.
+        Base.invokelatest(Core.eval, m, Expr(:call, :include, "src/helpers.jl"))
+        @test Base.invokelatest(Core.eval, m, :(transform(4))) == 12    # nested include ran too (SCALE=3)
+        @test Base.invokelatest(Core.eval, m, :(Params(1).n)) == 1      # landed IN the namespace, not Main
+        @test Base.invokelatest(Core.eval, m, :(eval(:(1 + 1)))) == 2   # `eval` injected as well
+
+        # Static side: a literal path is a tracked cell input (watcher + memo key), exactly like
+        # `@asset`, and the cell is flagged for expansion so the FILE's definitions become its writes.
+        build_dependencies!(r)
+        ca, cb = r.byid["a"], r.byid["b"]
+        @test ca.inputs == ["src/helpers.jl"]
+        @test :macrocall in ca.flags                       # expansion candidate (an include, no macro)
+        @test !(:transform in ca.writes)                   # static pass alone can't see into the file
+
+        # Expansion recovery: the file's statements are spliced in and re-analyzed, so `transform`
+        # becomes cell a's WRITE and cell b (which calls it) depends on cell a.
+        @test ReportEngine.prewarm_macros!(r)
+        @test :transform in ca.writes
+        @test "a" in cb.deps                               # cell b calls transform → real edge
+
+        # The include cell stays a barrier: it always re-runs, because a memo restore would skip the
+        # definitions it exists to make. What it must NOT do is poison the notebook below it — cells
+        # downstream stay keyable, on a key that folds the included file's CONTENT.
+        @test :opaque in ca.flags
+        @test ReportEngine._memo_key(r, ca) == ""          # the include cell itself is never cached
+        kb = ReportEngine._memo_key(r, cb)
+        @test !isempty(kb)
+        write(joinpath(dir, "src", "helpers.jl"), "transform(x) = x * 4\n")
+        @test ReportEngine._memo_key(r, cb) != kb          # editing the included file invalidates it
+        # A computed path is invisible to all of it — the documented dynamic caveat.
+        rd = parse_report("#%% code id=d\nf = \"src/helpers.jl\"\ninclude(f)")
+        build_dependencies!(rd)
+        @test isempty(rd.cells[1].inputs)
     end
 
     @testset "WebPage renders self-contained HTML" begin

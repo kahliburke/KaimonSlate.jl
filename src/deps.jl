@@ -340,10 +340,13 @@ function _global_decl_name!(names::Set{Symbol}, a)
 end
 
 # Statically collect the file paths a cell references via `@asset "path"` (or `@asset bytes
-# "path"`) — a STRING-LITERAL arg to an `@asset` macrocall, anywhere in the AST. Because the
+# "path"`) — a STRING-LITERAL arg to an `@asset` macrocall, anywhere in the AST — and via
+# `include("path")`, which the notebook namespace resolves the same way (widgets.jl). Because the
 # path is a literal in the source, this is known WITHOUT running the cell, so the file becomes
 # a first-class reactive/memo input (the watcher arms on open; the memo key folds its hash).
-# A computed path (`readfile(x)`) is invisible here — that's the documented dynamic caveat.
+# A computed path (`readfile(x)`, `include(f)`) is invisible here — the documented dynamic caveat.
+# Only paths written IN THE CELL are collected: a file included by an included file is analyzed for
+# what it defines (`_splice_includes`) but is not itself a watched input.
 function _collect_asset_paths!(paths::Vector{String}, ex)
     if ex isa Expr
         if ex.head === :macrocall && !isempty(ex.args) && ex.args[1] === Symbol("@asset")
@@ -351,11 +354,23 @@ function _collect_asset_paths!(paths::Vector{String}, ex)
                 a isa AbstractString && push!(paths, String(a))
             end
         end
+        let ip = _literal_include_path(ex)
+            ip === nothing || push!(paths, ip)
+        end
         for a in ex.args
             _collect_asset_paths!(paths, a)
         end
     end
     return paths
+end
+
+# Does the cell include a file by literal path? Such a cell gets the same expansion round-trip as an
+# unknown-macro cell: the statements of what it includes are spliced in worker-side and re-analyzed,
+# which is the only way the names the FILE defines can become this cell's writes (`_splice_includes`).
+function _has_literal_include(ex)
+    ex isa Expr || return false
+    _literal_include_path(ex) === nothing || return true
+    return any(_has_literal_include, ex.args)
 end
 
 # Statically collect notebook-level ES-module import-map entries declared via
@@ -567,10 +582,12 @@ function _infer_bindings_uncached!(cell::Cell)
     if _has_parse_error(top)
         push!(cell.flags, :opaque); return cell
     end
-    # An unknown macro hides its true bindings from the static pass (see `_macrocall_arg_refs!`);
-    # flag the cell so the expansion refinement can recover them once the macro is resolvable.
-    _has_unknown_macrocall(top) && push!(cell.flags, :macrocall)
-    # `@asset "path"` file deps — literal paths anywhere in the cell (sorted+unique for a stable key).
+    # An unknown macro hides its true bindings from the static pass (see `_macrocall_arg_refs!`), and
+    # so does `include("file.jl")` (the definitions are in the FILE); flag the cell so the expansion
+    # refinement recovers them — for a macro, once it's resolvable; for an include, from the file.
+    (_has_unknown_macrocall(top) || _has_literal_include(top)) && push!(cell.flags, :macrocall)
+    # `@asset "path"` / `include "path"` file deps — literal paths anywhere in the cell (sorted+unique
+    # for a stable key).
     let ap = _collect_asset_paths!(String[], top)
         isempty(ap) || append!(cell.inputs, sort!(unique!(ap)))
     end
@@ -1418,6 +1435,27 @@ function pending_macro_cells(report::Report)
         end
     end
     return out
+end
+
+"""
+    forget_expansions!(report, cells) -> nothing
+
+Drop the cached expansion bindings of `cells` so the next graph build re-expands them. The cache is
+keyed by cell SOURCE, which is the right key for a macro — but an `include`d file's contents are an
+input the source hash can't see, so a file that gains a definition would keep the old write-set (and
+the cell using that new name would keep no edge) until the cell itself was edited. The asset watcher
+calls this for the cells that read a changed file.
+"""
+function forget_expansions!(report::Report, cells)
+    lock(_MACRO_LOCK) do
+        binds = get(_MACRO_BINDS, report.id, nothing)
+        tried = get(_MACRO_TRIED, report.id, nothing)
+        for c in cells
+            binds === nothing || delete!(binds, c.src_hash)
+            tried === nothing || delete!(tried, c.src_hash)
+        end
+    end
+    return nothing
 end
 
 """

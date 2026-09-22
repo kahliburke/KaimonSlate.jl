@@ -1791,6 +1791,42 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
         path === nothing && error("@asset needs a path, e.g. @asset \"file.js\" (or @asset bytes \"logo.png\")")
         return esc(:(__slate_readfile($(path); bytes = $(bytes))))
     end))
+    # ── `include` / `eval` ────────────────────────────────────────────────────────
+    # A cell namespace is a `Module(:NB)` built at RUNTIME, and Julia only auto-defines `include`/
+    # `eval` for a module written with the `module` keyword — `using Base` brings neither (Main gets
+    # them from `Base.MainInclude`). So without these, `include("helpers.jl")` in a cell throws
+    # `UndefVarError: include not defined in Main.NB`, and the obvious workaround (`Main.include`)
+    # silently evaluates the file into `Main`, where no cell can see what it defined.
+    # Path resolution mirrors `@asset`: relative to the notebook's project dir — except while a file
+    # is being included, where it's relative to THAT file's directory, so a helper's own nested
+    # `include` behaves as it would anywhere else in Julia. The including file comes from OUR OWN
+    # stack, kept in task-local storage (task-local because cells can run concurrently, and a stack
+    # because includes nest). Base's ambient `SOURCE_PATH` is the wrong signal here: a notebook
+    # evaluated from inside some other file's `include` would inherit THAT file's directory.
+    # A literal path is statically tracked (deps.jl), so editing the file re-runs the cell, and the
+    # file's definitions are recovered as the cell's writes via the expansion pass (macroexpand.jl) —
+    # the include joins the reactive graph. Both are skipped when the module already has them
+    # (`standalone!(Main)`), where Base's bindings already resolve against the running script and
+    # cannot be redefined anyway.
+    if !isdefined(m, :include)
+        Core.eval(m, :(__slate_include_stack() = get(task_local_storage(), :__slate_includes, String[])))
+        Core.eval(m, :(function __slate_include_path(p::AbstractString)
+            isabspath(p) && return expanduser(String(p))
+            st = __slate_include_stack()
+            base = isempty(st) ? __slate_assetbase() : dirname(st[end])
+            return expanduser(joinpath(isempty(base) ? pwd() : base, String(p)))
+        end))
+        Core.eval(m, :(function __slate_include(mapexpr, p::AbstractString)
+            ap = __slate_include_path(p)
+            task_local_storage(:__slate_includes, push!(copy(__slate_include_stack()), ap)) do
+                mapexpr === nothing ? Base.include(@__MODULE__, ap) :
+                                      Base.include(mapexpr, @__MODULE__, ap)
+            end
+        end))
+        Core.eval(m, :(include(p::AbstractString) = __slate_include(nothing, p)))
+        Core.eval(m, :(include(mapexpr::Function, p::AbstractString) = __slate_include(mapexpr, p)))
+    end
+    isdefined(m, :eval) || Core.eval(m, :(eval(x) = Core.eval(@__MODULE__, x)))
     # ── Portable data storage (`datadir()` / `@sfile`) ────────────────────────────
     # `datadir()` is the notebook's canonical DATA directory — `<project>/data`, created on demand.
     # A stable place to read AND write data files without hardcoding a machine path, so the notebook

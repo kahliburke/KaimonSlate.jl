@@ -581,6 +581,26 @@ No-op if nothing declares `name`, and inert on a standalone run. Distinct from t
         DYNAMIC caveat: a COMPUTED path can't be tracked statically — use `readfile(path)` for that
         (an escape hatch with no memo-invalidation and no watcher). Prefer `@asset "literal"` whenever
         the path is known at author time. See also `readfile`, `@use`, `WebPage`, `datadir`."""),
+    SlateApiEntry("include", "Assets & front-end",
+        "Run a sibling `.jl` file's code IN the notebook namespace, as a TRACKED cell input.",
+        ["file", "source", "helpers", "library", "split", "reuse", "script"],
+        "include(\"path.jl\") -> the file's last value",
+        """Evaluate a `.jl` file's top-level code in the notebook's namespace: its functions, structs
+        and constants are then available to EVERY cell, exactly as if written in this one. Paths
+        resolve like `@asset`'s — relative to the notebook's PROJECT dir, or absolute (and inside an
+        included file, relative to THAT file, so a helper's own `include` works).
+
+        A LITERAL path is tracked like `@asset`: the file is a cell INPUT, so the watcher re-runs the
+        cell when it changes on disk, and its content hash folds into the memo keys of the cells
+        BELOW (an include cell itself always re-runs — a cache restore would skip the definitions it
+        exists to make). The file's DEFINITIONS are also recovered into this cell's write-set, so
+        cells calling those functions get real dependency edges.
+        ```julia
+        include("src/helpers.jl")      # transform(), Params, … for the whole notebook
+        ```
+        A COMPUTED path still runs, but is invisible to the analyzer — no watcher, no memo
+        invalidation, no edges (the `readfile` caveat). Once a helper file stops changing, prefer
+        making it a package and `using` it. See also `@asset`, `readfile`, `standalone!`."""),
     SlateApiEntry("datadir", "Assets & front-end",
         "The notebook's portable data dir; `@sfile \"f.csv\"` is a PATH into it (read AND write).",
         ["path", "csv", "read", "write", "portable", "data file", "duckdb"],
