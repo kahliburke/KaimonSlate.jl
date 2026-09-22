@@ -678,24 +678,42 @@ end
         @test first(run_one(true)) > 0   # …against one chunk, with the rest still waiting
     end
 
-    @testset "a tile's tooltip follows its unit" begin
-        # The tooltip had two definitions: one the renderer wrote into `title`, one the live patch
-        # implied by only ever setting the fill. So a tile went green while its tooltip still read
-        # "not run" from the moment of first render. One definition now, and the poll carries it.
+    @testset "a tile's detail is fetched, not broadcast" begin
+        # A tile used to carry a `title`, built for all six hundred of them on every poll — per-unit
+        # work on a path with a deadline, for text describing the one tile nobody was pointing at.
+        # The poll now carries the colours and the chunk map, both O(chunks), and what is behind a
+        # tile is read when a reader asks for it.
         mktempdir() do root
             payload = joinpath(@__DIR__, "..", "src", "slatetask.jl")
             t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 2, payload)
             r = Sweep.@sweep(Sweep.paramgrid(n = 1:6), t; submit = false) do p; p.n; end
             args = (t, r.run, getfield(r, :params), getfield(r, :keys))
+            tile(i) = Sweep.handle_action(args..., "tile"; opts = (; i))
+
             s0 = Sweep.status_payload(args...; advance = false)
-            @test occursin("not run", s0["tips"][1])
+            @test !haskey(s0, "tips")
+            # Three chunks of two units each, and each entry says what it covers and its state.
+            @test length(s0["chunks"]) == 3
+            @test all(c -> length(c) == 4 && c[2] <= c[3], s0["chunks"])
+            @test [Int(c[2]) for c in s0["chunks"]] == [1, 3, 5]
+            @test only(tile(0)["units"])["status"] == ""
 
             for c in BS.sweep_chunks(root, r.run)[1:2]; SlateTask.run_chunk(root, c); end
             s1 = Sweep.status_payload(args...; advance = false)
-            @test occursin("ok", s1["tips"][1]) && !occursin("not run", s1["tips"][1])
-            @test occursin("not run", s1["tips"][6])        # one that really has not run
-            @test s1["tiles"][1] != s0["tiles"][1]          # and the fill moved with it
-            @test length(s1["tips"]) == length(s1["tiles"])
+            @test s1["tiles"][1] != s0["tiles"][1]          # the fill moved
+            u = only(tile(0)["units"])
+            @test u["status"] == "ok" && u["ms"] >= 0 && u["i"] == 1 && occursin("n", u["params"])
+            @test only(tile(5)["units"])["status"] == ""    # one that really has not run
+            # A parameter point is a LABEL here, so it is rounded the way Julia rounds a value
+            # inside a container. Full precision is right for a stored copy and wrong for a panel:
+            # `(x = 0.41025641025641024,)` is a grid step shown as an obstacle.
+            @test Sweep._param_text((x = 0.41025641025641024,)) == "x = 0.410256"
+            @test Sweep._param_text((x = 1 / 3, n = 7)) == "x = 0.333333 · n = 7"
+            @test Sweep._param_text((s = "fast",)) == "s = \"fast\""      # a string still reads as one
+            @test Sweep._param_text(NamedTuple()) == ""
+
+            # A tile index the grid could not have sent is an empty answer, not an exception.
+            @test isempty(tile(999)["units"]) && isempty(tile(-1)["units"])
         end
     end
 
@@ -1033,7 +1051,7 @@ end
                                   payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
             r = Sweep.@sweep(Sweep.paramgrid(x = 1:2000), t; submit = false) do p; p.x; end
             html = sprint(show, MIME"text/html"(), r)
-            rendered = length(collect(eachmatch(r"<div title=\"units ", html)))
+            rendered = length(collect(eachmatch(r"<div data-i='", html)))
             payload = length(Sweep.status_payload(t, r.run, r.params, r.keys;
                                                   advance = false)["tiles"])
             @test rendered == payload

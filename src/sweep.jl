@@ -3216,7 +3216,7 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
     # `sync_in!` brings the store's metadata across, a transfer that grows with the sweep. The three
     # reads below want a FILE on the cluster and nothing out of the store, and `log_stat` is polled
     # every few seconds for as long as someone watches a log grow — so they do not pay for it.
-    action in ("log_stat", "log_slice", "log_search") || sync_in!(target)
+    action in ("log_stat", "log_slice", "log_search", "tile") || sync_in!(target)
     root = store_root(target)
     l = launcher_for(target)
     # Not a mutation: the card reporting, once, that the work is over. A sweep finishes minutes or
@@ -3276,6 +3276,31 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
                                          "fcont" => _LOG_FCONT_SRC, "mcont" => _LOG_MCONT_SRC,
                                          "tail" => _LOG_TAIL_SRC)
         return out
+    end
+    # What is behind one tile of the grid, asked for when a reader points at it. Per-unit detail is
+    # O(units) and only ever wanted for the handful under the pointer, so it is fetched rather than
+    # broadcast: the poll carries colours and the chunk map, both O(chunks).
+    #
+    # Reads what the last poll brought across, like the log reads above. A hover that synced the
+    # store first would be a transfer per pointer movement, and the panel would then disagree with
+    # the tile it is describing — which came from that same poll.
+    if action == "tile"
+        spans = _tile_spans(length(keys))
+        i = _opt_int(opts, :i, -1) + 1                    # the grid counts tiles from zero
+        (i < 1 || i > length(spans)) && return Dict{String,Any}("units" => Dict{String,Any}[])
+        lo, hi = spans[i]
+        rows = _rows(root, @view(params[lo:hi]), @view(keys[lo:hi]), run, source_of(target))
+        return Dict{String,Any}("lo" => lo, "hi" => hi,
+            "units" => [Dict{String,Any}(
+                "i" => lo + j - 1,
+                "params" => _param_text(row.params),
+                "status" => String(row.status),
+                "ms" => row.ms, "at" => row.at, "bytes" => row.bytes,
+                "node" => String(row.ran_on),
+                # The failure itself. A tile is red because of this string, and hunting for it in a
+                # log is the step the panel exists to remove.
+                "err" => String(row.status) == "error" ? first(string(row.value), 400) : "")
+                        for (j, row) in enumerate(rows)])
     end
     # The three reads, each a bare reply rather than a status payload: a viewer polling a growing
     # file must not drag a manifest scan along behind every tick.
@@ -3371,20 +3396,16 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # was the bulk of a poll, and the poll has a deadline.
     st = length(p.unit_status) == length(keys) ? p.unit_status :
          (landed = BatchSweep.fold(root).status; [get(landed, k, "") for k in keys])
-    rings = _tile_rings(p, BatchSweep.sweep_chunks(root, run), length(st))
+    chunks = BatchSweep.sweep_chunks(root, run)
+    rings = _tile_rings(p, chunks, length(st))
     sched = _sched_counts(p)
     spans = _tile_spans(length(st))
-    # One tile per unit means the tooltip names the unit, which needs its record. Only ever true
-    # below the tile budget, so this reads a few hundred rows at most and never scales with the grid.
-    tiprows = (length(spans) == length(st) && !isempty(st)) ?
-              _rows(root, params, keys, run, source_of(target)) : ()
-    tiles = String[]; tips = String[]
+    tiles = String[]
     for (ti, (lo, hi)) in enumerate(spans)
         ok = count(==("ok"), @view st[lo:hi])
         err = count(==("error"), @view st[lo:hi])
         ring = ti <= length(rings) ? rings[ti] : '.'
         push!(tiles, _tile_color(ok, err, hi - lo + 1, ring))
-        push!(tips, _tile_tip(tiprows, lo, hi, isempty(tiprows) ? 2 : 1, ok, err, ring))
     end
 
     out = Dict{String,Any}(
@@ -3394,7 +3415,12 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         "frac" => BatchSweep.fraction(p),
         "rate" => t.rate_per_s, "eta" => t.eta_s, "idle" => t.idle_s,
         "stuck" => BatchSweep.stalled_for(t), "blocked" => p.blocked,
-        "settled" => BatchSweep.is_settled(p), "tiles" => tiles, "tips" => tips, "rings" => rings,
+        "settled" => BatchSweep.is_settled(p), "tiles" => tiles, "rings" => rings,
+        # Which units each chunk holds and what the scheduler is doing with it. O(chunks), so it
+        # rides the poll; the per-unit detail behind a tile is O(units) and is fetched on hover.
+        # With this the reader's pointer needs no round trip to be told which chunk it is over, and
+        # a click knows which log to open.
+        "chunks" => _chunks_payload(p, chunks),
         "queued" => sched.queued, "running_jobs" => sched.running,
         "color" => get(_STATE_COLOR, _ds, "var(--dim,#6a7090)"),
         # The controls that apply RIGHT NOW, so the card's buttons track its state instead of
@@ -3723,9 +3749,6 @@ const _TILE_BUDGET = 600
 #
 # Most advanced state wins within a tile: the grid answers "is anything happening here?", and a tile
 # spanning a running chunk and a queued one is a place where something is happening.
-_ring_tip(c::AbstractChar) =
-    c == 'r' ? " · running" : c == 'q' ? " · queued" : c == 'x' ? " · stopped" : ""
-
 const _RING_RANK = Dict(:running => 3, :pending => 2, :blocked => 1, :exhausted => 1)
 
 function _tile_rings(p, chunks, nunits::Integer)
@@ -3747,6 +3770,18 @@ function _tile_rings(p, chunks, nunits::Integer)
     return String(take!(io))
 end
 
+# One entry per chunk: what it covers and what the scheduler is doing with it. Positional, like the
+# action list, because it is sent on every poll and the names would be most of it.
+function _chunks_payload(p, chunks)
+    out = Vector{Any}()
+    for (i, c) in enumerate(chunks)
+        i <= length(p.chunk_spans) || break
+        r = p.chunk_spans[i]
+        push!(out, Any[String(c), first(r), last(r), String(get(p.chunk_state, c, :missing))])
+    end
+    return out
+end
+
 # How many chunks the scheduler is holding, for the line beside the counts. A ring shows the shape;
 # a number survives the grid being binned.
 _sched_counts(p) = (queued  = count(==(:pending), values(p.chunk_state)),
@@ -3761,19 +3796,20 @@ function _tile_spans(n::Integer)
     return [((t - 1) * per + 1, min(t * per, n)) for t in 1:cld(n, per)]
 end
 
-# What a tile SAYS, in one place. The renderer writes it into `title` and the poll sends it back;
-# computing it twice let the two drift, and the drift was silent — the live patch only ever set the
-# fill, so a tile went green while its tooltip still read "not run" from the moment of first render.
-function _tile_tip(rows, lo::Int, hi::Int, per::Int, ok::Int, err::Int, ring::AbstractChar)
-    body = if per == 1 && lo <= length(rows)
-        row = rows[lo]
-        string(row.params) *
-            (isempty(String(row.ran_on)) ? "" : " · " * String(row.ran_on)) *
-            (String(row.status) == "" ? " · not run" : " · " * String(row.status))
-    else
-        "units $(lo)-$(hi) · $(ok) ok, $(err) failed, $(hi - lo + 1 - ok - err) pending"
-    end
-    return body * _ring_tip(ring)
+# A parameter point as a READER sees it. `string` on a NamedTuple gives Julia's round-tripping form,
+# `(x = 0.41025641025641024,)`, which is the right answer for code and the wrong one for a label: the
+# trailing comma of a one-element tuple is noise, and seventeen digits of a grid step are an obstacle
+# rather than precision.
+#
+# The digit count is `:compact`, which is Julia's own rule for a value shown inside a container — an
+# array prints this way — so what survives is what Julia considers enough to identify a number at a
+# glance instead of a number of places invented here. A sweep whose points differ below that would be
+# indistinguishable in the REPL too. Stored copies keep the round-tripping form; this is for display.
+function _param_text(p)
+    p isa NamedTuple || return sprint(show, p; context = :compact => true)
+    isempty(p) && return ""
+    return join((string(k, " = ", sprint(show, v; context = :compact => true))
+                 for (k, v) in pairs(p)), " · ")
 end
 
 # A tile with NOTHING landed is where the scheduler's answer belongs. Flat grey said "not
@@ -3831,7 +3867,10 @@ function _unit_grid(io, r::ShardedResult)
     # What the scheduler is holding, per tile. Drawn as a ring so it reads independently of the
     # fill, which answers a different question (how the unit ended).
     rings = _tile_rings(r.plan, BatchSweep.sweep_chunks(store_root(r.target), r.run), n)
-    print(io, "<div data-sw='grid' style='display:flex;flex-wrap:wrap;gap:2px;margin-top:8px'>")
+    # No `title`. What a reader wants off a tile is the unit, how long it took, where it ran and why
+    # it failed, which is a panel rather than a line of text — and reaching for it on hover means the
+    # detail is read out of the store once, when asked for, instead of on every poll.
+    print(io, "<div data-sw='grid' class='swgrid' style='display:flex;flex-wrap:wrap;gap:2px;margin-top:8px'>")
     for (ti, (lo, hi)) in enumerate(spans)
         ok = err = 0
         for i in lo:hi
@@ -3839,8 +3878,7 @@ function _unit_grid(io, r::ShardedResult)
             s == "ok" ? (ok += 1) : s == "error" ? (err += 1) : nothing
         end
         ring = ti <= length(rings) ? rings[ti] : '.'
-        tip = _esc(_tile_tip(r.rows, lo, hi, per, ok, err, ring))
-        print(io, "<div title=\"", tip, "\" style='width:", side, "px;height:", side,
+        print(io, "<div data-i='", ti - 1, "' style='width:", side, "px;height:", side,
                   "px;border-radius:2px;background:", _tile_color(ok, err, hi - lo + 1, ring), "'></div>")
     end
     println(io, "</div>")
@@ -4020,7 +4058,7 @@ function _fails_html(rows)
               "<div style='max-height:220px;overflow:auto;margin-top:6px'>")
     for f in first(fails, _FAILS_SHOWN)
         print(io, "<div style='margin-bottom:6px;font-size:11px'>",
-                  "<code style='color:var(--gold,#ffd700)'>", _esc(string(f.params)), "</code>",
+                  "<code style='color:var(--gold,#ffd700)'>", _esc(_param_text(f.params)), "</code>",
                   "<pre style='margin:2px 0 0;white-space:pre-wrap;opacity:.75'>",
                   _esc(first(String(f.value), 400)), "</pre></div>")
     end
@@ -4369,12 +4407,11 @@ function _live_script(io, r::ShardedResult)
           for (var i = 0; i < s.tiles.length; i++){
             var td = g.children[i];
             if (td.style.background !== s.tiles[i]) td.style.background = s.tiles[i];
-            // The TOOLTIP moves too. Patching only the fill left a green tile still saying
-            // "not run", which is the render from before anything had landed.
-            var tip = s.tips && s.tips[i];
-            if (tip !== undefined && td.title !== tip) td.title = tip;
           }
         }
+        // What a tile SAYS is a panel, fetched for the one under the pointer. Handed the poll's
+        // colours and chunk map so hovering costs no round trip to know where it is.
+        if (window.slateSweepTip) window.slateSweepTip.attach(root, "$(id)", "$(doch)", s);
         // Submitting turns a card that had nothing to watch into a live one, so the timer starts
         // here rather than only at render.
         if (!s.settled && !s.blocked && s.state !== "ready" && !timer) {

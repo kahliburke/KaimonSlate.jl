@@ -687,7 +687,8 @@ end
                        "keymap_resolve.mjs", "bytes_fmt.mjs", "dag_spline.mjs", "sched_opts.mjs",
                        "rebaseline_all.mjs", "rebaseline_callsites.mjs", "reconcile_verdict.mjs",
                        "keymap_key_owner.mjs", "keep_focus.mjs", "ansi_html.mjs",
-                       "settings_section_links.mjs", "logview_window.mjs")
+                       "settings_section_links.mjs", "logview_window.mjs",
+                       "sweep_tile_panel.mjs")
             io = IOBuffer()
             ok = success(pipeline(`$node $(joinpath(@__DIR__, "js", script))`; stdout = io, stderr = io))
             ok || print(String(take!(io)))

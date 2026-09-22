@@ -1078,6 +1078,38 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   border-bottom:1px solid var(--border); }
 .swst-grp:first-child { margin-top:0; }
 .swst-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(88px,1fr)); gap:10px 12px; }
+/* The sweep grid's hover panel. Fixed, because the grid sits inside a cell's output and an
+   absolutely-positioned panel would be clipped by the output's own scroll box. Pointer-events off:
+   the panel is anchored below the tile and must never come between the pointer and the grid. */
+.swtip { position:fixed; z-index:64; display:none; pointer-events:none;
+  min-width:210px; max-width:min(420px, calc(100vw - 24px));
+  padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:var(--bg2);
+  box-shadow:0 10px 30px rgba(0,0,0,.45); font-size:.78rem; line-height:1.45; color:var(--text); }
+.swtip.show { display:block; }
+.swtip-h { display:flex; align-items:center; gap:6px; margin-bottom:3px; }
+.swtip-h b { color:var(--strong); font-weight:600; }
+.swtip-chip { font-size:.6rem; text-transform:uppercase; letter-spacing:.06em; padding:1px 5px;
+  border-radius:8px; background:color-mix(in srgb, var(--dim) 22%, transparent); color:var(--dim); }
+.swtip-chip.run { background:color-mix(in srgb, #1f4f73 55%, transparent); color:#8fc7ee; }
+.swtip-chip.pend { background:color-mix(in srgb, #6b5a1f 45%, transparent); color:#dfc37a; }
+/* The parameter point, which is the tile's identity: monospace so a grid of numbers lines up. */
+.swtip-p { font-family:'Cascadia Code',ui-monospace,monospace; font-size:.74rem;
+  color:var(--val,#4ec9b0); word-break:break-word; }
+.swtip-f { color:var(--text); opacity:.8; font-variant-numeric:tabular-nums; }
+.swtip-dim { color:var(--dim); font-style:italic; }
+/* The failure. Wraps and is capped in height: a stacktrace should say what it is without pushing
+   the panel off the screen, and the log is one click away. */
+.swtip-err { margin-top:5px; padding:4px 6px; border-radius:5px; max-height:8.5em; overflow:hidden;
+  background:color-mix(in srgb, var(--red,#e57575) 12%, transparent);
+  color:var(--red,#e57575); font-family:'Cascadia Code',ui-monospace,monospace; font-size:.72rem;
+  white-space:pre-wrap; word-break:break-word; }
+.swtip-err i { display:block; font-style:normal; opacity:.65; font-size:.66rem; }
+.swtip-foot { display:flex; gap:8px; justify-content:space-between; margin-top:6px;
+  padding-top:5px; border-top:1px solid var(--border); color:var(--dim); font-size:.7rem; }
+.swtip-foot span { opacity:.7; white-space:nowrap; }
+/* A tile is a link to its chunk's log. */
+.swgrid > div { cursor:pointer; }
+
 .swst-stat { display:flex; flex-direction:column; gap:1px; min-width:0; }
 .swst-k { color:var(--dim); font-size:.62rem; text-transform:uppercase; letter-spacing:.06em; }
 .swst-v { font-family:'Cascadia Code',ui-monospace,monospace; font-size:1rem; line-height:1.25;

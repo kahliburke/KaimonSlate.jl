@@ -19,6 +19,7 @@
   const PAGE = 1 << 16;        // bytes per window; a few hundred lines, one round trip
   const MAXPAGES = 24;         // ~1.5MB of DOM before the far end is dropped
   const POLL_MS = 3000;        // how often a live file is re-stated (not re-read)
+  const FILES_MS = 5000;        // the listing, while a sweep is still adding to it
   const NEAR = 600;            // px from the scroll edge that counts as "asking for more"
   const HIT_LIMIT = 2000;      // hits carried back; `total` still counts the whole file
 
@@ -118,7 +119,7 @@
     pages: [], order: 'new', filter: 'all', paused: false,
     sort: { key: 'modified', dir: -1 }, needle: '', icase: true, rx: false,
     hits: null, rawHits: null, hitAt: -1, total: 0, capped: false, counts: null, declaredFile: null,
-    declared: null, mark: -1,
+    declared: null, mark: -1, wantChunk: '', filesSig: '', filesTimer: 0, lastPass: false,
     loading: false, timer: 0, behind: 0,
   };
 
@@ -235,19 +236,25 @@
 
   function close() {
     if (S.timer) { clearInterval(S.timer); S.timer = 0; }
+    if (S.filesTimer) { clearInterval(S.filesTimer); S.filesTimer = 0; }
     if (el) el.classList.remove('show');
   }
 
   function fail(e) { q('.logv-err').textContent = e ? String(e && e.message || e).slice(0, 200) : ''; }
 
   // ── Opening ────────────────────────────────────────────────────────────────────────────────
-  function open(key, ch) {
+  // `opts.chunk` names the chunk to land on, for a caller that already knows which one it is about:
+  // the grid's tiles open the log of the chunk that ran them. Without it the newest file wins, which
+  // is the right guess when the reader is arriving from the card with no particular unit in mind.
+  function open(key, ch, opts) {
     build();
     el.classList.add('show');
     S.key = key; S.ch = ch || chanOf(key);
+    S.wantChunk = (opts && opts.chunk) || '';
     paintSweeps();
     loadFiles();
     if (!S.timer) S.timer = setInterval(poll, POLL_MS);
+    if (!S.filesTimer) S.filesTimer = setInterval(listing, FILES_MS);
   }
 
   // Every sweep in the notebook, from the registry each card reports into. A sweep with no channel
@@ -279,11 +286,15 @@
     call('logs').then(s => {
       setSev(s.logsev);
       S.files = s.loglist || [];
+      S.filesSig = sigOf(S.files); S.lastPass = false;
       if (s.logerr) fail(s.logerr);
       paintFiles();
       // The newest file is the one press that is almost always right: a job that died explains
-      // itself in the element that died, and that is the one at the top.
-      const want = S.files.find(f => f.path === S.path) || S.files[0];
+      // itself in the element that died, and that is the one at the top. A caller that named a
+      // chunk is more specific than either, and is honoured once — the reader then moves freely.
+      const asked = S.wantChunk && S.files.find(f => f.chunk === S.wantChunk);
+      S.wantChunk = '';
+      const want = asked || S.files.find(f => f.path === S.path) || S.files[0];
       if (want) selectFile(want.path); else paintPre();
     }).catch(fail);
   }
@@ -799,6 +810,37 @@
   // ── Following a live file ──────────────────────────────────────────────────────────────────
   // A stat, not a read. Re-reading only matters once the file has grown, and a viewer left open on
   // a running job would otherwise pull a window over ssh every few seconds for the rest of the day.
+  // The LISTING, again. A sweep writes a new file per array task, so a list fetched once when the
+  // panel opened stops describing the run about a second later: tasks that started since are absent,
+  // and the ran/failed columns of the ones on screen are frozen at that moment.
+  //
+  // Paced well below the file stat above it, because this is a directory listing on the far side
+  // rather than one stat, and stopped once the sweep is over — with one final pass, so the counts
+  // a reader is left looking at are the run's real ones.
+  const sweepLive = () => {
+    const st = (entries().find(e => e.key === S.key) || {}).status;
+    return !!st && !st.settled && (st.state === 'running' || st.state === 'pending');
+  };
+  const sigOf = fs => fs.map(f => [f.path, f.bytes, f.done, f.failed, f.running].join(':')).join('|');
+
+  function listing() {
+    if (!open_() || S.paused || !S.key) return;
+    const live = sweepLive();
+    if (!live && S.lastPass) return;
+    S.lastPass = !live;
+    call('logs').then(s => {
+      if (!open_()) return;
+      const fs = s.loglist || [];
+      const sig = sigOf(fs);
+      if (sig === S.filesSig) return;       // nothing moved; leave the table alone
+      S.filesSig = sig;
+      S.files = fs;
+      // The SELECTION is the reader's. `loadFiles` picks one because nothing is open yet; a refresh
+      // that re-picked would drag them off the file they are reading every few seconds.
+      paintFiles();
+    }).catch(() => {});
+  }
+
   function poll() {
     if (!open_() || S.paused || !S.path || S.loading) return;
     call('log_stat', S.path).then(st => {
