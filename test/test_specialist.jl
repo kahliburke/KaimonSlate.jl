@@ -6,6 +6,7 @@
 # session back. That layer had no tests at all, because exercising it meant spawning an agent.
 
 using ReTest
+include(joinpath(@__DIR__, "freeport.jl"))
 using Sockets
 using KaimonSlate
 const NS = KaimonSlate.NotebookServer
@@ -35,10 +36,7 @@ current_agent_id() = nothing
     # Ask the OS for a free one rather than naming a port. A fixed port is shared with another
     # suite in this same run, and a hub that cannot bind used to be indistinguishable from one that
     # could — the suite hung instead of failing, and left the port held for the next run too.
-    port = let s = Sockets.listen(Sockets.localhost, 0)
-        p = Int(Sockets.getsockname(s)[2]); close(s); p
-    end
-    hub = NS.start_hub(; port = port)
+    hub = NS.start_hub(; port = freeport())
     try
         nbp = tempname() * ".jl"
         # A loop long enough that stepping to the interesting iteration is not an option — which

@@ -5,12 +5,12 @@
 # real cross-worker pull is exercised end-to-end by KaimonGate's own test_curve.jl and verified live
 # against these functions; it needs KaimonGate, deliberately kept out of Slate's test deps.)
 using ReTest
+include(joinpath(@__DIR__, "freeport.jl"))
 import ZMQ
 using Sockets
 include(joinpath(@__DIR__, "..", "src", "memostore.jl"))
 include(joinpath(@__DIR__, "..", "src", "blobchannel.jl"))
 
-freeport() = (s = Sockets.listen(Sockets.IPv4(0), 0); p = Int(Sockets.getsockname(s)[2]); close(s); p)
 
 # Stand up a plaintext blob server over `root` on a loopback port; returns (port, stop). Waits for the
 # bind (via on_ready) so a pull can't race it.

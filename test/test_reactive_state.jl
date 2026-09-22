@@ -14,6 +14,7 @@
 # the cell's OUTPUT. A unit test over `Cell` state transitions cannot see this: every transition is
 # correct. The cell restales, runs, and reports; it's the VALUE that's stale.
 using ReTest
+include(joinpath(@__DIR__, "freeport.jl"))
 using KaimonSlate
 using Serialization
 const NS = KaimonSlate.NotebookServer
@@ -136,7 +137,7 @@ end
     # it with it. Either way the queue then grants a node with nobody left to notice, and the cell
     # sits on "queued" against an allocation it already holds. The supervisor is the backstop.
     NS.SlateHistory._ROOT[] = mktempdir()
-    hub = NS.start_hub(; port = 8874)      # unique across the suite — a shared port collides in a full run
+    hub = NS.start_hub(; port = freeport())      # unique across the suite — a shared port collides in a full run
     # Drive the sweep BY HAND. Left running, the hub's own 5 s supervisor races every assertion
     # below — it would re-arm the cell before the test could observe it not being re-armed.
     let t = NS._RUN_SUPERVISOR[]; t === nothing || close(t); NS._RUN_SUPERVISOR[] = nothing; end
@@ -320,7 +321,7 @@ end
     NS.SlateHistory._ROOT[] = mktempdir()
     # Never write to the developer's real memo store — the notebook below deliberately caches.
     ENV["KAIMONSLATE_CACHE_HOME"] = mktempdir()
-    hub = NS.start_hub(; port = 8871)
+    hub = NS.start_hub(; port = freeport())
     try
         nbp = tempname() * ".jl"
         write(nbp, """

@@ -10,14 +10,12 @@
 # knowledge while the recall code kept running and finding nothing.
 
 using ReTest
+include(joinpath(@__DIR__, "freeport.jl"))
 using Sockets
 using KaimonSlate
 const NS = KaimonSlate.NotebookServer
 const RE = KaimonSlate.ReportEngine
 
-_freeport() = let s = Sockets.listen(Sockets.localhost, 0)
-    p = Int(Sockets.getsockname(s)[2]); close(s); p
-end
 
 # A hub, a notebook, and a clean slate of module-level caches. Each block gets its own history root
 # so one test's store can never be read by another's.
@@ -25,7 +23,7 @@ function _with_notebook(f, source::AbstractString; path::AbstractString = "")
     NS.SlateHistory._ROOT[] = mktempdir()
     p = isempty(path) ? tempname() * ".jl" : path
     isfile(p) || write(p, source)
-    hub = NS.start_hub(; port = _freeport())
+    hub = NS.start_hub(; port = freeport())
     try
         # `autorun=false`: none of this needs the cells to have RUN. The dependency graph these
         # tests lean on is derived when the file is parsed, and booting a worker per block is most
@@ -58,7 +56,7 @@ const _CELLS = """
         root = mktempdir()
         p = tempname() * ".jl"; write(p, _CELLS)
         NS.SlateHistory._ROOT[] = root
-        hub = NS.start_hub(; port = _freeport())
+        hub = NS.start_hub(; port = freeport())
         id = ""
         try
             nb = hub.notebooks[NS.open_notebook!(hub, p; autorun = false)]
@@ -73,7 +71,7 @@ const _CELLS = """
 
         _forget_everything!()
         NS.SlateHistory._ROOT[] = root          # same machine, same store
-        hub2 = NS.start_hub(; port = _freeport())
+        hub2 = NS.start_hub(; port = freeport())
         try
             nb = hub2.notebooks[NS.open_notebook!(hub2, p; autorun = false)]
             fs = NS.findings_json(nb)

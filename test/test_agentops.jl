@@ -2,12 +2,13 @@
 # hub (so the file-watcher is active) to guard the watcher-vs-rapid-write race that
 # was deleting just-added cells.
 using ReTest
+include(joinpath(@__DIR__, "freeport.jl"))
 using KaimonSlate
 const NS = KaimonSlate.NotebookServer
 
 @testset "agent cell ops" begin
     NS.SlateHistory._ROOT[] = mktempdir()
-    hub = NS.start_hub(; port = 8859)
+    hub = NS.start_hub(; port = freeport())
     try
         nbp = tempname() * ".jl"
         write(nbp, "#%% md id=intro\n# T\n")
@@ -365,7 +366,7 @@ const NS = KaimonSlate.NotebookServer
 end
 
 @testset "open with autorun=false: cells land STALE, untouched" begin
-    hub = NS.start_hub(; port = 8860)
+    hub = NS.start_hub(; port = freeport())
     try
         nbp = tempname() * ".jl"
         write(nbp, "#%% code id=a\nbase = 10\n#%% code id=b\nderived = base * 2\n")
@@ -390,7 +391,7 @@ end
 end
 
 @testset "close stops the notebook's watcher loops (a reopen must not leave a zombie snapshotting)" begin
-    hub = NS.start_hub(; port = 8867)
+    hub = NS.start_hub(; port = freeport())
     try
         nbp = tempname() * ".jl"
         write(nbp, "#%% code id=a\nbase = 10\n")
@@ -419,7 +420,7 @@ end
 end
 
 @testset "locked cell self-heals on a fresh autorun=false open (a cold reopen has nothing in memory)" begin
-    hub = NS.start_hub(; port = 8861)
+    hub = NS.start_hub(; port = freeport())
     try
         # `b` is deliberately SELF-CONTAINED (doesn't read `a`'s `base`): InProcessKernel (this test
         # has no gate worker) has no durable memo store, so its `eval_capture` ignores `memo` and just
@@ -458,7 +459,7 @@ end
 end
 
 @testset "restart_kernel!: a locked cell restores ahead of a slow preceding cell, not queued behind it" begin
-    hub = NS.start_hub(; port = 8862)
+    hub = NS.start_hub(; port = freeport())
     try
         nbp = tempname() * ".jl"
         # `slow` sleeps generously so the "fast restored WHILE slow is still running" window stays
@@ -494,7 +495,7 @@ end
 end
 
 @testset "▶ force-run on an upstream cell does not restale a locked FRESH dependent" begin
-    hub = NS.start_hub(; port = 8863)
+    hub = NS.start_hub(; port = freeport())
     try
         nbp = tempname() * ".jl"
         write(nbp, "#%% code id=a\nbase = 10\n#%% code id=b\nderived = base * 2\n")
@@ -526,7 +527,7 @@ end
 # ⌘Z presses in nine editors and a web cell could not be reversed from the cell at all.
 @testset "bulk replace rewrites many cells as one undoable operation" begin
     NS.SlateHistory._ROOT[] = mktempdir()
-    hub = NS.start_hub(; port = 8864)
+    hub = NS.start_hub(; port = freeport())
     try
         nbp = tempname() * ".jl"
         write(nbp, "#%% md id=intro\n@md\"\"\"\nthreshold prose\n\"\"\"\n" *
@@ -571,7 +572,7 @@ end
 # directly, or a rename/typo here (it reaches across into ReportEngine) ships silently.
 @testset "agent run progress line" begin
     NS.SlateHistory._ROOT[] = mktempdir()
-    hub = NS.start_hub(; port = 8861)
+    hub = NS.start_hub(; port = freeport())
     try
         nbp = tempname() * ".jl"
         write(nbp, "#%% md id=intro\n# T\n")
@@ -612,7 +613,7 @@ end
 # without it a poll can't tell "70% through" from "wedged".
 @testset "check_eval surfaces in-cell progress" begin
     NS.SlateHistory._ROOT[] = mktempdir()
-    hub = NS.start_hub(; port = 8863)
+    hub = NS.start_hub(; port = freeport())
     try
         nbp = tempname() * ".jl"
         write(nbp, "#%% md id=intro\n# T\n")
