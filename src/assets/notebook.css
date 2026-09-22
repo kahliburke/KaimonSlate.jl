@@ -173,12 +173,16 @@ body.agent-open .page { margin-right:max(392px, calc((100% - var(--page-max, 980
    padding, which is there whether a drawer is open or not, and reserving room for it here as well
    made this gap read as three times the one opposite. */
 body.toc-open .page { margin-left:max(312px, calc((100% - var(--page-max, 980px)) / 2)); }
-/* BOTH docks open: the column is pinned on both sides, so there is no holding-still left to do —
-   and the centring term, taken on one side while the other sits at its minimum, is precisely what
-   made the two gaps unequal (the wider one read as half again the other). Reserve each dock's own
-   width and the column sits the same distance from either. Full width has always done this; the
-   two cases now agree rather than one of them being the special one. */
-body.toc-open.agent-open .page { margin-left:312px; margin-right:392px; }
+/* BOTH docks open: each dock's own width is reserved, and whatever is left over is split between
+   them so the column sits centred in the gap rather than against one side.
+   Reserving alone is not enough. Two fixed margins with a column narrower than the space between
+   them over-constrains the box, and the browser resolves that by keeping the left margin and giving
+   every spare pixel to the right — so on a wide window the cells sat against the TOC. The slack
+   term is clamped at zero, which is the full-width case and the narrow one, where there is none. */
+body.toc-open.agent-open .page {
+  margin-left:calc(312px + max(0px, (100% - 312px - 392px - var(--page-max, 980px)) / 2));
+  margin-right:392px;
+}
 /* Narrow: a drawer stops pushing and OVERLAYS the column, so there is nothing to reserve — and the
    margin the reorder rail sits in is underneath the TOC, so it stands down here and only here.
    Spelled out for the both-open case too: a media query adds no specificity, so the plain selectors
