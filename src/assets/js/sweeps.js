@@ -327,7 +327,11 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
   // still moves is how much of the output has been read back. Re-armed after each read, so a slow
   // login node delays the next one instead of stacking a queue of them.
   let SWST_TIMER = 0, SWST_HTML = '';
-  const swstLive = () => [...sweeps.values()].some(e => RUNNING((e.status || {}).state));
+  // Through the registry, not the module below's own Map: the cards report into `slateSweeps` and
+  // this is a different scope in the same file, which is how `sweeps` and `RUNNING` read as defined
+  // here and were not.
+  const swstLive = () => (window.slateSweeps ? window.slateSweeps.all() : [])
+    .some(e => { const st = (e.status || {}).state; return st === 'running' || st === 'pending'; });
   function stopStatus() { clearTimeout(SWST_TIMER); SWST_TIMER = 0; SWST_HTML = ''; }
   function watchStatus(pop, name) {
     clearTimeout(SWST_TIMER);
