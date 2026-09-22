@@ -356,6 +356,8 @@ and re-seeding. Lazily spawns + connects on first use (`prepare!`).
 mutable struct GateKernel <: Kernel
     project::String  # the single active environment (== parent in base mode, == envdir when forked)
     parent::String   # enclosing project dir ("" = detached) — base + provenance source
+    nbdir::String    # the notebook file's own directory, when the worker is on the same machine ("" for
+                     # a remote one) — the fallback base for a relative read (`__slate_read_path`)
     envdir::String   # this notebook's own env dir (fork target); active once forked
     pending::Vector{Any}  # footer packages to reconstruct on first use (env dir absent on disk)
     port::Int
@@ -385,9 +387,10 @@ mutable struct GateKernel <: Kernel
                      # so a slow first-run precompile narrates itself into the UI instead of looking hung.
                      # `nothing` (the default) skips the callback entirely; the log file write is unaffected.
     GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
+               nbdir::AbstractString = "",
                pending::Vector = Any[], threads::AbstractString = "", extra_flags::AbstractString = "",
                label::AbstractString = "", target = nothing, online = nothing) =
-        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), String(extra_flags), false, String(label), target, nothing, 0, false, online)
+        new(String(project), String(parent), String(nbdir), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), String(extra_flags), false, String(label), target, nothing, 0, false, online)
 end
 
 """
@@ -687,7 +690,8 @@ end
 
 # Worker boot: put KaimonGate on LOAD_PATH (via the slate-owned env), load the SlateWorker
 # capture payload, and serve its tools over TCP. Pinned to the notebook's project.
-function _worker_script(port::Int, stream_port::Int, parent::AbstractString = "")
+function _worker_script(port::Int, stream_port::Int, parent::AbstractString = "",
+                        nbdir::AbstractString = "")
     # Put ONLY KaimonGate (the ZMQ bridge) on the worker's LOAD_PATH — from its own
     # minimal project (ZMQ/Serialization/…, no HTTP), NOT Kaimon's full env. Kaimon's
     # Manifest pins the custom HTTP 2.0 (Reseau); prepending it would shadow a notebook
@@ -709,6 +713,7 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     try; @eval using Revise; catch e; @warn "slate: Revise unavailable in worker (hot-reload off)" exception=e; end
     include($(repr(_WORKER_JL)))
     SlateWorker.PARENT_PROJECT[] = $(repr(String(parent)))
+    SlateWorker.NOTEBOOK_DIR[] = $(repr(String(nbdir)))
     SlateWorker.start(; host = "127.0.0.1", port = $port, stream_port = $stream_port)
     """
 end
@@ -810,7 +815,7 @@ function _spawn_worker!(k::GateKernel)
     # entries (a raw string interpolated into a backtick would land as ONE mangled argument). Must
     # precede `-e` — Julia stops parsing its own flags there.
     extra_args = Base.shell_split(effective_worker_extra_flags(k.extra_flags))
-    cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads $extra_args -e $(_worker_script(port, stream_port, k.parent))`
+    cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads $extra_args -e $(_worker_script(port, stream_port, k.parent, k.nbdir))`
     cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas,
                  "KAIMON_SESSION_LABEL" => k.label,   # worker reports this as its gate-session name (notebook filename)
                  # Self-identifying process tag (see the remote path) — in `ps e` / /proc/<pid>/environ.

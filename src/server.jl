@@ -292,6 +292,11 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
     proj = Base.current_project(dirname(abspath(path)))
     enclosing = proj === nothing ? "" : dirname(proj)
     report.meta["assetbase"] = isempty(enclosing) ? ReportEngine.notebook_env_dir(path) : enclosing
+    # Where the `.jl` itself lives — the fallback for a relative read the asset base doesn't have
+    # (`resolve_input_path`). It matters for a DETACHED notebook, whose asset base is the env dir
+    # while `helpers.jl` sits next to the notebook. Runtime-derived, so meta only: the config footer
+    # writes a fixed whitelist (`_CONFIG_KEYS`) and this is not on it.
+    report.meta["notebookdir"] = dirname(abspath(path))
     if ReportEngine.gate_available()
         ReportEngine._rlog("_select_kernel nb=$(basename(String(path))) runon=[$(get(report.meta, "runon", ""))] remoteworker=[$(get(report.meta, "remoteworker", ""))]")
         # Remote-worker opt-in: run this notebook's cells on an ALREADY-RUNNING worker reached at
@@ -361,17 +366,18 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
         # (meta["juliaflags"]); "" → the kernel falls back to the global (panel/slate.json) / env.
         ef = String(get(report.meta, "juliaflags", ""))
         lbl = basename(abspath(path))   # gate-session display label: the notebook's filename
+        nbdir = dirname(abspath(path))  # local worker: the read fallback for a detached notebook
         if !env_exists && !isempty(delta)
             # The `.jl` records package adds but the env dir is gone (e.g. a fresh git clone):
             # reconstruct it from the footer on first use (pending). Only `mkdir` here — the
             # Project.toml is written by the reconstruction itself, so a worker that never ran
             # leaves the env "absent" and reconstruction retries on the next open.
             mkpath(envdir)
-            return GateKernel(envdir; parent = parent, envdir = envdir, pending = delta, threads = th, extra_flags = ef, label = lbl, online = online)
+            return GateKernel(envdir; parent = parent, envdir = envdir, nbdir = nbdir, pending = delta, threads = th, extra_flags = ef, label = lbl, online = online)
         elseif parent == ""
             # Detached: the notebook env IS the whole world (everything is a "notebook add").
             ReportEngine.ensure_notebook_env!(envdir)
-            return GateKernel(envdir; parent = "", envdir = envdir, threads = th, extra_flags = ef, label = lbl, online = online)
+            return GateKernel(envdir; parent = "", envdir = envdir, nbdir = nbdir, threads = th, extra_flags = ef, label = lbl, online = online)
         elseif env_exists
             # Already has its own packages → run in the forked env (extends the parent). But first, if
             # the PARENT changed since this fork was seeded (a dep added, a re-resolve — e.g. an
@@ -383,10 +389,10 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
                 # what this notebook added, so its own packages have to be put back.
                 _rebuild_notebook_env!(envdir, parent; online = online, delta = delta)
             end
-            return GateKernel(envdir; parent = parent, envdir = envdir, threads = th, extra_flags = ef, label = lbl, online = online)
+            return GateKernel(envdir; parent = parent, envdir = envdir, nbdir = nbdir, threads = th, extra_flags = ef, label = lbl, online = online)
         else
             # Base mode: no notebook-specific packages yet → run directly in the parent.
-            return GateKernel(parent; parent = parent, envdir = envdir, threads = th, extra_flags = ef, label = lbl, online = online)
+            return GateKernel(parent; parent = parent, envdir = envdir, nbdir = nbdir, threads = th, extra_flags = ef, label = lbl, online = online)
         end
     end
     # Asked to run somewhere else, with no gate to do it with. Every remote path — `remoteworker`,
@@ -614,6 +620,11 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
             if rc.install && !isempty(rc.notebook) && isfile(rc.notebook)
                 rehomed = abspath(String(nb.path)); nb.path = rc.notebook
             end
+            # Read fallback (`resolve_input_path`), set from the path the notebook is SERVED from —
+            # after any rehome, so a file beside the installed `.jl` resolves rather than one beside
+            # the downloaded bundle. The worker is spawned lazily, so setting it here still reaches it.
+            kernel.nbdir = dirname(abspath(String(nb.path)))
+            nb.report.meta["notebookdir"] = kernel.nbdir
             delete!(nb.report.meta, "preview")       # live cells supersede the frozen render
         end
         # The downloaded bundle was this document's TRANSPORT, not a place it lived: it stays on disk
@@ -708,15 +719,13 @@ function server_refresh(nb::LiveNotebook, vars)
     return _reactive_refresh!(nb, c -> !isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms))
 end
 
-# Reactive push triggered by the asset watcher (`_start_asset_watcher!`): one or more `@asset`
-# files a cell READS changed on disk → restale those cells + their dependents, recompute, and push
-# the same lightweight `refresh:` patch as a `@bind` change. `changed` are absolute paths; a cell's
-# `inputs` are notebook-relative (or absolute), resolved against `assetbase` (its project dir).
+# Reactive push triggered by the asset watcher (`_start_asset_watcher!`): one or more `@asset` or
+# `include` files a cell READS changed on disk → restale those cells + their dependents, recompute,
+# and push the same lightweight `refresh:` patch as a `@bind` change. `changed` are absolute paths; a
+# cell's `inputs` are notebook-relative (or absolute) and resolve by `resolve_input_path`.
 function server_asset_changed(nb::LiveNotebook, changed::Vector{String})
-    base = String(get(nb.report.meta, "assetbase", ""))
     chset = Set{String}(changed)
-    _resolve(rel) = isabspath(rel) ? String(rel) : (isempty(base) ? String(rel) : joinpath(base, rel))
-    reads_changed(c) = any(rel -> _resolve(rel) in chset, c.inputs)
+    reads_changed(c) = any(rel -> ReportEngine.resolve_input_path(nb.report.meta, rel) in chset, c.inputs)
     # An `include`d file is an input whose CONTENTS decide the cell's writes, so a change there
     # invalidates more than the cell's result: forget its cached expansion too, or a definition the
     # file just gained never reaches the graph.

@@ -1451,7 +1451,8 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
                                 slate_emit = (channel, data) -> nothing,
                                 slate_cellout = (cid, out, err) -> nothing,
                                 set_bind = (name, value) -> nothing,
-                                assetbase = () -> "")
+                                assetbase = () -> "",
+                                notebookdir = () -> "")
     Core.eval(m, :(const echart = $echart))
     Core.eval(m, :(const EChart = $EChart))
     Core.eval(m, :(const WebPage = $WebPage))     # compose a self-contained HTML page (CSS/HTML/JS)
@@ -1694,16 +1695,34 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     end))
     # ── Asset inclusion (`@asset` / `readfile`) ───────────────────────────────────
     # `@asset "portfolio.js"` reads a file (resolved relative to the notebook's PROJECT dir via
-    # `assetbase`, or an absolute path) and returns its contents. Because the path is a source
-    # LITERAL, the dependency analyzer records it statically (deps.jl `_collect_asset_paths!`), so
-    # editing the file invalidates the cell's memo entry (and, with the watcher, re-runs the cell).
+    # `assetbase`, else the notebook's own dir, or an absolute path) and returns its contents.
+    # Because the path is a source LITERAL, the dependency analyzer records it statically (deps.jl
+    # `_collect_asset_paths!`), so editing the file invalidates the cell's memo entry (and, with the
+    # watcher, re-runs the cell).
     # `@asset bytes "logo.png"` → `Vector{UInt8}`. `readfile(path)` is the runtime escape hatch for a
     # COMPUTED path — not statically tracked (the documented dynamic caveat).
     Core.eval(m, :(const __slate_assetbase = $assetbase))
-    Core.eval(m, :(function __slate_readfile(p::AbstractString; bytes::Bool = false)
+    Core.eval(m, :(const __slate_nbdir = $notebookdir))
+    # Where a relative read path resolves. Primary: the asset base (the notebook's project dir).
+    # Fallback: the directory the `.jl` itself sits in, used only when the primary has no such file.
+    # A DETACHED notebook (no enclosing project) takes its asset base from the per-notebook env dir,
+    # which is where pasted media lands and what a region worker can also resolve — but a file the
+    # author put NEXT TO the notebook is the one they mean, and it is where the same notebook run as
+    # a plain script (`standalone!`) would look. The hub resolves cell inputs by the same two-step
+    # rule (`resolve_input_path`), so what a cell reads is what gets watched and hashed.
+    Core.eval(m, :(function __slate_read_path(p::AbstractString)
+        isabspath(p) && return expanduser(String(p))
         base = __slate_assetbase()
-        ap = isabspath(p) ? String(p) : joinpath(isempty(base) ? pwd() : base, String(p))
-        ap = expanduser(ap)   # a remote worker's asset base is `~/.cache/…` (tilde) — `read`/`open` don't expand it
+        # a remote worker's asset base is `~/.cache/…` (tilde) — `read`/`open` don't expand it
+        ap = expanduser(joinpath(isempty(base) ? pwd() : base, String(p)))
+        isfile(ap) && return ap
+        nb = __slate_nbdir()
+        isempty(nb) && return ap
+        alt = expanduser(joinpath(nb, String(p)))
+        return isfile(alt) ? alt : ap     # neither exists ⇒ report the primary path in the error
+    end))
+    Core.eval(m, :(function __slate_readfile(p::AbstractString; bytes::Bool = false)
+        ap = __slate_read_path(p)
         return bytes ? read(ap) : read(ap, String)
     end))
     Core.eval(m, :(const readfile = __slate_readfile))
@@ -1737,8 +1756,10 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
         Core.eval(m, :(function __slate_include_path(p::AbstractString)
             isabspath(p) && return expanduser(String(p))
             st = __slate_include_stack()
-            base = isempty(st) ? __slate_assetbase() : dirname(st[end])
-            return expanduser(joinpath(isempty(base) ? pwd() : base, String(p)))
+            # Inside an included file, a path is relative to THAT file and nothing else; at cell level
+            # it takes the same base (and notebook-dir fallback) as `@asset`.
+            isempty(st) || return expanduser(joinpath(dirname(st[end]), String(p)))
+            return __slate_read_path(p)
         end))
         Core.eval(m, :(function __slate_include(mapexpr, p::AbstractString)
             ap = __slate_include_path(p)
@@ -1937,7 +1958,8 @@ function standalone!(m::Module = Main; dir::Union{Nothing,AbstractString} = noth
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
         slate_query = slate_query,
         slate_refresh = (vars...) -> nothing,        # reactive recompute is the engine's job — inert here
-        assetbase = () -> base)                       # asset/data paths anchor on the notebook's dir
+        assetbase = () -> base,                       # asset/data paths anchor on the notebook's dir
+        notebookdir = () -> base)                     # same dir, so the read fallback is a no-op here
     Core.eval(m, :(const __slate_standalone = true))
     return m
 end

@@ -158,7 +158,9 @@ rows = @asset "data/measurements.csv"    # re-reads + recomputes when the file c
 - The path must be a **string literal** to be tracked (a computed path — `readfile(x)` — is
   invisible to the watcher; that's the dynamic caveat).
 - Paths resolve against the notebook's project dir, so an exported [self-contained
-  `.jl`](export.md#Self-contained-single-source-.jl) or a published page carries them.
+  `.jl`](export.md#Self-contained-single-source-.jl) or a published page carries them. A notebook
+  with no enclosing project also looks in the directory the `.jl` itself sits in, so a file dropped
+  beside a loose notebook is found.
 - The [Files panel](project-files.md) is where you browse and edit those files without leaving the
   browser.
 
@@ -173,8 +175,9 @@ include("src/helpers.jl")      # transform(), Params, … available to every cel
 ```
 
 The file's top-level code runs **in the notebook's namespace**, so every cell sees what it defines.
-Paths resolve exactly as `@asset`'s do (relative to the project directory, or absolute), and inside
-an included file a further `include` resolves relative to *that* file, as it would anywhere else in
+Paths resolve exactly as `@asset`'s do — relative to the project directory, or absolute, and for a
+notebook outside any project, relative to the directory the notebook file sits in. Inside an
+included file a further `include` resolves relative to *that* file, as it would anywhere else in
 Julia.
 
 A **literal** path gets the full reactive treatment:

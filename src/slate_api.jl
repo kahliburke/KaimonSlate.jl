@@ -562,7 +562,8 @@ No-op if nothing declares `name`, and inert on a standalone run. Distinct from t
         ["file", "include", "css", "js", "html", "watch", "source"],
         "@asset \"path\" -> String   ·   @asset bytes \"path\" -> Vector{UInt8}",
         """Read a sibling file's contents into the cell. The path resolves relative to the notebook's
-        PROJECT dir (or an absolute path). Because the path is a SOURCE LITERAL, Slate can see the
+        PROJECT dir (or an absolute path; a notebook outside any project also looks in the directory
+        the `.jl` sits in). Because the path is a SOURCE LITERAL, Slate can see the
         dependency WITHOUT running the cell and treats the file as a first-class cell INPUT — this is
         what makes the asset system reactive:
         - the cell's durable memo folds the file's content hash, so editing the file invalidates the
@@ -588,7 +589,8 @@ No-op if nothing declares `name`, and inert on a standalone run. Distinct from t
         """Evaluate a `.jl` file's top-level code in the notebook's namespace: its functions, structs
         and constants are then available to EVERY cell, exactly as if written in this one. Paths
         resolve like `@asset`'s — relative to the notebook's PROJECT dir, or absolute (and inside an
-        included file, relative to THAT file, so a helper's own `include` works).
+        included file, relative to THAT file, so a helper's own `include` works). A notebook outside
+        any project also looks in the directory the `.jl` itself sits in.
 
         A LITERAL path is tracked like `@asset`: the file is a cell INPUT, so the watcher re-runs the
         cell when it changes on disk, and its content hash folds into the memo keys of the cells
