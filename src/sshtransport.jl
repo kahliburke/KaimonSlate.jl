@@ -247,6 +247,17 @@ const _PROMPTS_LOCK = ReentrantLock()
 
 remembered_prompts(host) = lock(_PROMPTS_LOCK) do; get(_PROMPTS, String(host), Tuple{String,Bool}[]); end
 
+# Drop what a host asked, for a login the server has just refused: the shape it was refused with is
+# the one thing known to be wrong, so the next attempt rediscovers rather than replaying it. Goes
+# through the same store as every other change, so a hub keeping them sees the removal too.
+function _forget_prompts!(host)
+    had = lock(_PROMPTS_LOCK) do
+        pop!(_PROMPTS, String(host), nothing) !== nothing
+    end
+    had && _save_prompts()
+    return nothing
+end
+
 # Learning what a host asks costs a deliberately-failed login (`_discover_prompts!`). Where a cluster
 # issues its second factor with the prompt rather than on the answer, that failed login spends one of
 # the user's codes and the real login spends another. Keeping what was learned across restarts is
@@ -308,15 +319,24 @@ end
 # store; the snapshot is taken under the lock and handed over outside it, since keeping it is IO.
 function _remember_prompts!(host::AbstractString, seen::Vector{Tuple{String,Bool}})
     isempty(seen) && return nothing
-    snap = lock(_PROMPTS_LOCK) do
-        get(_PROMPTS, String(host), nothing) == seen && return nothing
+    changed = lock(_PROMPTS_LOCK) do
+        get(_PROMPTS, String(host), nothing) == seen && return false
         _PROMPTS[String(host)] = copy(seen)
-        return Dict(h => copy(v) for (h, v) in _PROMPTS)
+        return true
     end
-    snap === nothing && return nothing
+    changed && _save_prompts()
+    return nothing
+end
+
+# Hand the current shapes to whatever the caller keeps them in. Snapshot under the lock and save
+# outside it, since keeping them is IO. A store that cannot be written costs a discovery round on
+# the next start, never a login.
+function _save_prompts()
     save = _PROMPT_SAVE[]
-    save === nothing || (try; save(snap); catch; end)   # a store we cannot write costs a
-    return nothing                                      # discovery round, not a login
+    save === nothing && return nothing
+    snap = lock(_PROMPTS_LOCK) do; Dict(h => copy(v) for (h, v) in _PROMPTS); end
+    try; save(snap); catch; end
+    return nothing
 end
 
 # Learn what a host asks WITHOUT answering: run keyboard-interactive with the callback pre-cancelled
@@ -339,8 +359,12 @@ end
 # Authenticate with every answer already in hand. The callback runs inside a C stack frame, and a
 # task cannot be parked with C frames on its stack — so anything it has to wait for pins a thread.
 # It waits for nothing: the answers are queued before the call.
-function _try_kbdint(s::Session, ask)
-    isempty(remembered_prompts(s.ep.alias)) && return false      # caller discovers first
+# Returns `:ok` on success, `:dismissed` if the person cancelled the dialog (answered nothing), or
+# `:rejected` if answers were sent and the server refused them. The caller uses that distinction to
+# tell a real rejection - worth forgetting stale remembered prompts over - from a dismissal, which
+# must leave the prompts alone.
+function _try_kbdint(s::Session, ask)::Symbol
+    isempty(remembered_prompts(s.ep.alias)) && return :rejected      # caller discovers first
     cb = @cfunction(_kbd_callback, Cvoid,
         (Ptr{UInt8}, Cint, Ptr{UInt8}, Cint, Cint, Ptr{KbdPrompt}, Ptr{KbdResponse}, Ptr{Ptr{Cvoid}}))
     pr = s.prompter
@@ -355,7 +379,7 @@ function _try_kbdint(s::Session, ask)
             error("$(s.ep.alias): could not ask for \"$(strip(text))\" — " *
                   first(sprint(showerror, e), 200))
         end
-        a === nothing && return false
+        a === nothing && return :dismissed
         push!(pr.answers, String(a))
     end
     pr.cancelled = true                       # anything unexpected returns empty rather than waiting
@@ -368,7 +392,7 @@ function _try_kbdint(s::Session, ask)
     # stops a changed login wedging the host: the remembered list is never allowed to outlive the
     # conversation it came from, so the next attempt asks for what the server now wants.
     _remember_prompts!(s.ep.alias, pr.seen)
-    return rc == 0
+    return rc == 0 ? :ok : :rejected
 end
 
 # ── running things ───────────────────────────────────────────────────────────────────────────
@@ -650,19 +674,54 @@ function _open!(s::Session, ask)
     if "publickey" in ms && _try_pubkey(s)
         # nothing more to do
     elseif "keyboard-interactive" in ms
-        # A host we have not met yet: find out what it asks, then start again with the answers.
-        # Discovery burns an authentication attempt and nothing else — it sends no secret.
+        # Discover the host's prompts only when we do not already remember them - from this run, or a
+        # persisted earlier one. Discovery burns an authentication attempt on its OWN connection (it
+        # sends no secret), and that extra connection is what makes the first sign-in of a fresh
+        # process fail on a second-factor host. Remembering the prompts lets the common case, a
+        # restart against a known host, answer on ONE connection, so the first click succeeds.
+        discovered = false
         if isempty(remembered_prompts(s.ep.alias))
             _discover_prompts!(s) || error("$(s.ep.alias): the server asked nothing we could answer")
-            _reconnect!(s)
+            _reconnect!(s); discovered = true
         end
-        _try_kbdint(s, ask) || error("$(s.ep.alias): authentication was declined or cancelled")
+        was = remembered_prompts(s.ep.alias)
+        st = _try_kbdint(s, ask)
+        if st === :rejected && !discovered
+            # We answered from REMEMBERED prompts and the server refused their shape: they may be
+            # stale, the host's auth reconfigured since we learned them. A dismissal does not reach
+            # here, so cancelling the dialog leaves the remembered prompts intact.
+            #
+            # `_try_kbdint` records what the server asked THIS time, pass or fail. So when the shape
+            # has changed under us, the corrected one is already in hand and the retry uses it:
+            # discovery is another connection, and on a second-factor host another connection is
+            # another code sent to the person waiting. Only when the shape came back unchanged is
+            # there something left to learn, and then the stale list is dropped and rediscovered so
+            # it can never wedge sign-in.
+            if remembered_prompts(s.ep.alias) != was
+                _reconnect!(s)
+            else
+                _forget_prompts!(s.ep.alias)
+                _reconnect!(s)
+                _discover_prompts!(s) || error("$(s.ep.alias): the server asked nothing we could answer")
+                _reconnect!(s)
+            end
+            st = _try_kbdint(s, ask)
+        end
+        st === :ok || error("$(s.ep.alias): authentication was declined or cancelled")
     else
         error(isempty(ms) ? "$(s.ep.alias): no authentication method succeeded" :
               "$(s.ep.alias): could not authenticate (server offers " * join(ms, ", ") * ")")
     end
     _authed(s) || error("$(s.ep.alias): authentication did not complete")
     s.alive = true
+    # Keep the session warm. Between runs a region holds nothing but an idle control session, and an
+    # idle session dies to the server's own timeout or a NAT dropping the flow - after which the only
+    # way back is an interactive second factor. Configuring an interval here and sending on a timer
+    # (see `_keepalive_sweep`) resets those timers with no user action. `want_reply=0`: the outbound
+    # request alone counts as activity for the server's idle clock and the NAT, and an idle session's
+    # owner never reads the socket - so asking for a reply would only buffer answers nobody drains. A
+    # peer that has actually gone still surfaces, at the next channel open (`_channel_dead!`).
+    ccall((:libssh2_keepalive_config, LIB), Cvoid, (Ptr{Cvoid}, Cint, Cuint), s.ptr, 0, _KEEPALIVE_S)
     return s
 end
 
@@ -729,6 +788,14 @@ function _serve(s::Session, ask)
             s.alive ? _attach_conn!(s, f, sock) : (try; close(sock); catch; end)
         end
         kind, arg, reply = item
+        # A keepalive is fire-and-forget: no reply is expected, and a failed send is not fatal (the
+        # next sweep tries again, and a truly dead peer surfaces at the next channel open). Handled
+        # here, on the owner, because libssh2 is not thread-safe and every call on a session is
+        # serialized through this loop.
+        if kind === :keepalive
+            s.alive && (try; _keepalive_send(s); catch; end)
+            continue
+        end
         result = try
             !s.alive ? (kind === :io ? (false, UInt8[], s.err) : (false, s.err)) :
             kind === :exec ? _exec(s, arg) :
@@ -748,6 +815,53 @@ function _serve(s::Session, ask)
     return nothing
 end
 
+# ── Keepalive ────────────────────────────────────────────────────────────────────────────────────
+# Seconds between keepalives. Chosen well under the idle timeouts that bite in practice - a login
+# node's `ClientAliveInterval`, and the ~1-5 minute idle drop of a home or campus NAT - so a quiet
+# session is refreshed several times before either could fire. Overridable for a host that wants it
+# tighter or looser.
+const _KEEPALIVE_S = Cuint(something(tryparse(Int, get(ENV, "KAIMONSLATE_SSH_KEEPALIVE_S", "")), 30))
+
+# Send a keepalive if one is due (libssh2 tracks the interval set by `keepalive_config`). Non-blocking:
+# an EAGAIN or any other return is left for the next sweep rather than waited on, so this never parks
+# the owner task. Runs ONLY on the session's owner - the caller guarantees that.
+function _keepalive_send(s::Session)
+    secs = Ref{Cint}(0)
+    ccall((:libssh2_keepalive_send, LIB), Cint, (Ptr{Cvoid}, Ptr{Cint}), s.ptr, secs)
+    return nothing
+end
+
+# One sweep for every session: enqueue a keepalive onto each live owner so the send runs where every
+# other call on that session runs. Fire-and-forget with no reply channel; a session whose request
+# queue is backed up is skipped rather than waited on, so a wedged owner cannot stall the sweep or
+# the others. Started once, lazily, when the first session opens.
+const _KEEPALIVE_STARTED = Ref(false)
+function _keepalive_sweep()
+    gap = max(3, Int(_KEEPALIVE_S) ÷ 3)     # ping often enough that each session is refreshed on time
+    while true
+        try
+            sleep(gap)
+            snapshot = lock(_REG_LOCK) do; collect(values(_SESSIONS)); end
+            for s in snapshot
+                (s.alive && s.owner !== nothing && !istaskdone(s.owner)) || continue
+                # A real request already queued resets the timers just as well, and a backed-up queue
+                # means the owner is busy - either way, do not pile another item on.
+                (isready(s.req) || Base.n_avail(s.req) >= 4) && continue
+                try; put!(s.req, (:keepalive, nothing, nothing)); catch; end
+            end
+        catch
+            # A sweep must outlive any single error - a transiently bad session must not end keepalives
+            # for every other one.
+        end
+    end
+end
+_ensure_keepalive_sweep() = lock(_REG_LOCK) do
+    _KEEPALIVE_STARTED[] && return
+    _KEEPALIVE_STARTED[] = true
+    errormonitor(Threads.@spawn _keepalive_sweep())
+    return
+end
+
 """
     session(host; ask) -> Session
 
@@ -755,6 +869,7 @@ The live session for `host`, opening one if needed. `ask(host, prompt, echo) -> 
 answer for each server prompt; returning `nothing` cancels.
 """
 function session(host::AbstractString; ask)
+    _ensure_keepalive_sweep()      # idempotent; the sweep exists for the life of the process once any session has
     key = String(host)
     replaced = Ref(false)
     dead = Ref{Union{Session,Nothing}}(nothing)
