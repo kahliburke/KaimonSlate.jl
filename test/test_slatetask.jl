@@ -67,6 +67,31 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
     end
 end
 
+@testset "an event written by the hub does not claim to be the node" begin
+    # `ran_on` is where the WORK ran, and `write_event!` stamps whoever writes — right for a compute
+    # node reporting on itself, wrong for the hub. Both of the hub's writes land NEWEST: a tombstone
+    # when a failed unit is dropped for a retry, and the fold that compacts a chunk's log. Reading
+    # the newest event's `ran_on` therefore reported the laptop as the node a cluster chunk ran on.
+    mktempdir() do root
+        mkchunk(root, 2; chunk = "c1")
+        SlateTask.write_event!(root, "c1",
+            [Dict{String,Any}("key" => "k1", "status" => "ok"),
+             Dict{String,Any}("key" => "k2", "status" => "error")];
+            ran_on = "c1/1309", total = 2, done = 2, ran = 1, failed = 1)
+        node() = SlateTask.chunk_progress(root, SlateTask.chunk_events(root, "c1")).node
+        @test node() == "c1/1309"
+
+        sleep(0.01)                       # a later event, so it is the one a reader would take
+        SlateTask.write_event!(root, "c1", Dict{String,Any}[]; dropped = ["k2"], ran_on = "")
+        @test node() == "c1/1309"
+
+        SlateTask.compact_events!(root; only = "c1", grace = -1.0)
+        @test length(SlateTask.chunk_events(root, "c1")) == 1      # it really did fold
+        @test node() == "c1/1309"
+        @test node() != gethostname()
+    end
+end
+
 @testset "slatetask" begin
     @testset "round trip: a chunk runs and its shards read back" begin
         mktempdir() do root

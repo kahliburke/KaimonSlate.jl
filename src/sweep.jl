@@ -1545,7 +1545,9 @@ function forget_results!(t::SweepTarget, keys)
     for (c, paths) in evs
         gone = String[k for k in Base.keys(SlateTask.rows_of(root, paths)) if k in want]
         isempty(gone) && continue
-        push!(written, SlateTask.write_event!(root, c, Dict{String,Any}[]; dropped = gone))
+        # `ran_on = ""`: written by the hub, and a removal says nothing about where anything ran.
+        push!(written, SlateTask.write_event!(root, c, Dict{String,Any}[]; dropped = gone,
+                                              ran_on = ""))
         n += length(gone)
     end
     # The tombstones are the hub's and have to cross, or the store keeps answering with the units

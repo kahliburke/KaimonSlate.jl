@@ -887,7 +887,9 @@ function retry_failed!(root::AbstractString, sweep::AbstractString)
         rows = SlateTask.rows_of(root, get(evs, c, String[]))
         gone = String[k for (k, m) in rows if String(get(m, "status", "")) == "error"]
         isempty(gone) && continue
-        SlateTask.write_event!(root, c, Dict{String,Any}[]; dropped = gone)
+        # `ran_on = ""`: a removal is written by the hub and says nothing about where anything ran,
+        # so it must not be read as this chunk's node.
+        SlateTask.write_event!(root, c, Dict{String,Any}[]; dropped = gone, ran_on = "")
         n += length(gone)
     end
     return n

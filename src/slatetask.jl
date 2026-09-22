@@ -224,12 +224,21 @@ end
 Record what this job has finished. `rows` are the unit records completed since this job's last
 event, so a reader's fold is a plain union and there is no final event to wait for.
 """
+# `ran_on` is WHERE THE WORK RAN, so the writer's own hostname is the right default only because the
+# writer is normally the compute node reporting on itself. A fold is the exception: it is written by
+# whoever is compacting, and the hub compacting its mirror would otherwise restamp a chunk with the
+# laptop's name and report that as the node the units ran on.
 function write_event!(root::AbstractString, chunk::AbstractString, rows::AbstractVector;
-                      jobid::AbstractString = job_tag(), at::Real = time(), counts...)
+                      jobid::AbstractString = job_tag(), at::Real = time(),
+                      ran_on::Union{Nothing,AbstractString} = nothing, counts...)
     dir = events_dir(root)
     mkpath(dir)
     d = Dict{String,Any}("chunk" => String(chunk), "jobid" => String(jobid),
-                         "ts" => round(Int, at), "ran_on" => _ran_on(),
+                         "ts" => round(Int, at),
+                         # `nothing` means "whoever is writing", which is the compute node in the
+                         # ordinary case. An explicit empty string means "this event says nothing
+                         # about where anything ran", which a removal does not.
+                         "ran_on" => ran_on === nothing ? _ran_on() : String(ran_on),
                          "units" => collect(rows))
     for (k, v) in counts; d[String(k)] = v; end
     dest = joinpath(dir, event_name(chunk, jobid, at, (_EVENT_SEQ[] += 1)))
@@ -277,14 +286,20 @@ function compact_events!(root::AbstractString; grace::Real = 900.0, only::Abstra
         # Counts come from the ROWS, not from the last event's header. The newest event may be a
         # tombstone, which carries no counts at all, and inheriting those turned a compacted chunk
         # into one that reported nothing done.
-        tot = 0
+        # …and the node comes from the events being folded, for the same reason: the fold describes
+        # the work, and the machine doing the folding is not the machine that did the work.
+        tot = 0; node = ""; newest = 0.0
         for p in old
             d = try; TOML.parsefile(p); catch; continue; end
             tot = max(tot, Int(get(d, "total", 0)))
+            v = String(get(d, "ran_on", ""))
+            mt = try; mtime(p); catch; 0.0; end
+            if !isempty(v) && mt >= newest; node = v; newest = mt; end
         end
         nfail = count(r -> String(get(r, "status", "")) == "error", rows)
         write_event!(root, chunk, rows; total = max(tot, length(rows)), done = length(rows),
-                     ran = length(rows) - nfail, skipped = 0, failed = nfail, at = now)
+                     ran = length(rows) - nfail, skipped = 0, failed = nfail, at = now,
+                     ran_on = node)
         for p in old
             try; rm(p; force = true); dropped += 1; catch; end
         end
@@ -333,7 +348,18 @@ function chunk_progress(root::AbstractString, paths)
     blank = (; node = "", ran = 0, failed = 0, skipped = 0, done = 0, total = 0)
     isempty(paths) && return blank
     d = try; TOML.parsefile(last(paths)); catch; return blank; end
-    return (; node = String(get(d, "ran_on", "")), ran = Int(get(d, "ran", 0)),
+    # The counts come from the newest event. The NODE does not: not every event is written by the
+    # machine that did the work. A tombstone is written by the hub when a failed unit is dropped for
+    # a retry, and it is newest by definition, so reading its `ran_on` reported the laptop as the
+    # node a cluster chunk ran on. The newest event that actually names one is the answer.
+    node = String(get(d, "ran_on", ""))
+    if isempty(node)
+        for p in Iterators.reverse(collect(paths))
+            v = try; String(get(TOML.parsefile(p), "ran_on", "")); catch; ""; end
+            isempty(v) || (node = v; break)
+        end
+    end
+    return (; node, ran = Int(get(d, "ran", 0)),
               failed = Int(get(d, "failed", 0)), skipped = Int(get(d, "skipped", 0)),
               done = Int(get(d, "done", 0)), total = Int(get(d, "total", 0)))
 end
