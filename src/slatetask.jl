@@ -413,6 +413,11 @@ Run every shard in `chunk` that is not already in the store. Returns
 A shard that throws is recorded as a failed entry and the chunk continues: with thousands of
 shards, some failing is the normal case, and one bad parameter must not cost the whole chunk.
 """
+# Which unit failed, in the form its author wrote it. `:compact` because a parameter point is a
+# label here, and bounded because an argument can be anything a closure was handed — including the
+# captured array a log has no business restating.
+_arg_label(arg) = first(sprint(show, arg; context = :compact => true), 200)
+
 function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = false)
     d = MemoStore.read_manifest(root, chunk)
     d === nothing && error("no chunk descriptor for key $chunk under $root")
@@ -607,6 +612,17 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
             m["bindings"] = Any[]
             m["error"] = err
             failed += 1
+            # The failure in the LOG, not only in the unit's row. A reader opening the log — which is
+            # the first place anyone looks — found a line saying the chunk had failures and no way to
+            # learn what they were.
+            #
+            # In the MESSAGE rather than a field: a field value is shown with `show`, so the
+            # traceback arrives as one line with its newlines escaped. A multi-line message is
+            # rendered across `│` continuations, which is a record the viewer can already read.
+            #
+            # One per failed unit, which is bounded by the breaker rather than by the grid: a sweep
+            # failing wholesale is stopped long before every unit has had a turn.
+            @error "unit failed: " * err unit = _arg_label(arg)
         end
         m["key"] = key
         push!(pending, m)

@@ -3,6 +3,7 @@
 # in-process against a fresh mktempdir, which is exactly the point of the runner being stateless.
 using ReTest
 import Serialization
+import Logging
 include(joinpath(@__DIR__, "..", "src", "memostore.jl"))
 include(joinpath(@__DIR__, "..", "src", "slatetask.jl"))
 
@@ -44,6 +45,25 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
         # grid over one bad parameter point, which is the opposite of what a sweep is for.
         chunk, _ = mkchunk(root, 4; fn_src = "p -> (p == 1 ? error(\"one\") : p * 2)")
         @test run1(root, chunk) == 0
+    end
+    # …and the failure reaches the LOG, which is where a reader looks first. It used to be recorded
+    # in the unit's row and nowhere else, so the log said a chunk had failures and stopped there.
+    mktempdir() do root
+        chunk, _ = mkchunk(root, 3; fn_src = "p -> (p == 2 ? error(\"rigged\") : p)")
+        io = IOBuffer()
+        Logging.with_logger(Logging.ConsoleLogger(io, Logging.Debug)) do
+            SlateTask.run_chunk(root, chunk)
+        end
+        out = String(take!(io))
+        @test occursin("unit failed", out) && occursin("rigged", out)
+        # The traceback travels with it, across continuation lines rather than escaped into one.
+        @test occursin("Stacktrace", out) && occursin("\n\u2502", out)
+        # And the unit is named by its parameter point, since the key is a hash. Quoted, because
+        # the label is rendered here and handed over as text rather than as the argument itself —
+        # an argument can be the whole captured array a closure was given.
+        @test occursin("unit = \"2\"", out)
+        # Only the one that failed.
+        @test length(collect(eachmatch(r"unit failed", out))) == 1
     end
 end
 
