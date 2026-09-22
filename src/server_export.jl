@@ -5500,7 +5500,34 @@ end
 # reference), `slate_api_records()` (fed to semantic search), and `_SLATE_CHEATSHEET` (inlined in the
 # agent prompt below) all come from the one registry there, so they can never drift.
 
-function _agent_system_prompt(nb::LiveNotebook)
+# Tool names below are written under the default `slate` namespace, but a checkout can be serving
+# under another one (`slate_dbg`), and then every one of them is a tool that does not exist. An
+# agent told to call `slate_dbg_start` when the tool is `slate_dbg_dbg_start` does not report a
+# missing tool — it concludes there is no debugger and edits the cell to add `@infiltrate`.
+#
+# Only TOOLS are rewritten. `slate_table`, `slate_query` and the rest of the cheatsheet are Julia
+# functions the notebook calls, and they keep their names whatever the gate is called.
+const _PROMPT_TOOLS = ("add_cell", "api", "dbg_answer", "dbg_break", "dbg_eval", "dbg_findings",
+                       "dbg_frame", "dbg_propose", "dbg_start", "dbg_step", "dbg_summon",
+                       "dbg_tell", "dbg_wait", "dbg_watch", "delete_cell", "edit_cell", "eval",
+                       "index_docs", "inspect", "pkg", "read", "rename_cell",
+                       "request_file_access", "run", "run_on", "search_docs", "set_bind", "view")
+
+# One alternation in one pass, longest name first (PCRE alternation is leftmost-first, so `eval`
+# would otherwise win over `dbg_eval`). A name per pass would rewrite its own output: under
+# `slate_dbg`, `slate_eval` becomes `slate_dbg_eval`, which the `dbg_eval` pass then matches again.
+const _PROMPT_TOOL_RE = Regex("\\bslate_(" *
+    join(sort(collect(_PROMPT_TOOLS); by = length, rev = true), "|") * ")\\b")
+
+function _namespace_prompt_tools(s::AbstractString)
+    ns = gate_namespace()
+    ns == "slate" && return String(s)
+    return replace(String(s), _PROMPT_TOOL_RE => m -> ns * m[6:end])   # "slate" is 5 chars
+end
+
+_agent_system_prompt(nb::LiveNotebook) = _namespace_prompt_tools(_agent_system_prompt_text(nb))
+
+function _agent_system_prompt_text(nb::LiveNotebook)
     # Match the user's UI theme for plots (sent from the browser on chat → nb.report.meta["ui_dark"]).
     dark = get(nb.report.meta, "ui_dark", nothing)
     themehint = dark === true  ? "The UI is DARK — `using CairoMakie; set_theme!(theme_dark())`, then return the figure." :
@@ -5519,14 +5546,21 @@ function _agent_system_prompt(nb::LiveNotebook)
     records it in the reproducible footer. Do NOT edit the project's `Project.toml` or use `pkg_add` for
     a notebook dependency (that pollutes the shared/parent project). `slate_pkg(op="list")` shows them.
 
+    YOU HAVE NO SHELL AND NO FILE TOOLS by default. Bash/Read/Write/Edit/Grep/Glob are off, because
+    everything in this notebook has a better answer through the slate tools: `slate_read` gives you a
+    cell's live source AND its current output, where a file read gives you whatever was last written
+    to disk. Navigate code with `search_code` / `goto_definition`, which work without them.
+
     ITERATING ON THE PACKAGE'S OWN CODE: the notebook's worker is a LIVE Julia session in this project's
     env with Revise active — it IS your REPL and test harness, so you don't need a separate session.
-      1. Edit the package's `src/` with your file tools (function bodies, struct changes, and new files
-         are all hot-reloaded). Add a dependency with the `pkg_add` tool.
+    Editing the package's `src/` DOES need file tools, so ask for them once and explain why:
+    `slate_request_file_access(notebook="$(nb.id)", why="…")`. The user answers in the notebook; if
+    they allow it, the tools are there from your next message. Do not ask in order to read something
+    a slate tool can already tell you — that is the case this is not for.
+      1. With access: edit `src/` (function bodies, struct changes and new files all hot-reload).
       2. Re-run the cell(s) that exercise the change (slate_run) to see new results live; if nothing
          exercises it yet, add a small cell that calls it.
-    Use the wider Kaimon tools (search_code, goto_definition, run_tests, pkg_add, …) to navigate and
-    manage the project. (If a change genuinely doesn't take, ↻ Restart worker.)
+    (If a change genuinely doesn't take, ↻ Restart worker.)
 
     ORIENT: `slate_read(notebook="$(nb.id)")` maps the notebook — a compact OUTLINE (each cell's id,
     kind, what it DEFINES, a one-line result) plus a STATE TOKEN. It is NOT the full notebook; read the
@@ -5538,6 +5572,27 @@ function _agent_system_prompt(nb::LiveNotebook)
     before moving on; pick the next step from what you saw. Cells are REACTIVE — a cell re-runs when an
     upstream value it reads changes, so define once and read elsewhere. Give cells meaningful ids (the
     `id` arg on add, or slate_rename_cell) so the notebook reads well.
+
+    DEBUGGING: there is a line-by-line debugger for a cell — `slate_dbg_start`, then `slate_dbg_step`,
+    `slate_dbg_frame`, `slate_dbg_eval`, plus `slate_dbg_break(cond=…)` to stop only when an
+    expression holds and `slate_dbg_watch` to sample a value every pass and plot it. Use it. Do NOT
+    edit the user's cell to add prints, `@infiltrate` or an early `return` — that changes the
+    notebook you were asked to investigate, and the debugger answers the same questions without
+    touching it. If stepping is refused, the answer says so: summon a debugging specialist with
+    `slate_dbg_summon`.
+
+    SUPERVISING ONE is a loop, not a wait: `slate_dbg_wait` blocks until it asks something or
+    finishes, `slate_dbg_answer` replies to a question that is blocking it, and `slate_dbg_tell`
+    redirects it mid-investigation when you can see it going the wrong way. It knows the code in
+    front of it and nothing about what this notebook is FOR, so a redirection from you is worth more
+    than another ten steps from it.
+
+    When it finishes, read `slate_dbg_findings` — the claim, the cell it blames, and a reviewer's
+    verdict if one arrived. Do NOT retell it: the person has already read the specialist's own
+    message, and a second summary of it is noise. Your job is the part neither the specialist nor
+    the reviewer can do — decide what it MEANS here, and put one course of action to the person with
+    `slate_dbg_propose`. If the reviewer disputed the claim, say so and say which of them you think
+    is right; a disagreement you can locate is more use to them than a consensus you smoothed over.
 
     The SLATE HELPERS below (echart, @bind, animate, playhead, reactive/@onclick, slate_table, cell
     tags) are Slate-specific — use them for charts / widgets / animation / tables / live updates. The
@@ -5568,8 +5623,9 @@ end
 # `crew` is a crew label ("" = the default/solo agent — id stays `slate-<id>` for
 # back-compat so a re-adopted agent matches across an extension restart). Multiple
 # crew agents share one notebook; `_AGENT_ROUTES` already maps each id → this nb.
-# `model` ("" = service default = sonnet) binds at spawn only — an already-running
-# crew agent keeps its model until reaped (the UI kills it on a model-setting change).
+# `model` ("" = service default = sonnet). An ACP agent can be repointed at another
+# model on its live session, so a model change keeps the conversation; every other
+# backend binds it to the process at spawn and the agent is reaped and reopened.
 # The agent's working dir = the notebook's PROJECT ROOT (the dir holding the active Project.toml),
 # NOT the notebook file's own directory. The `lab` preset runs Claude Code in `acceptEdits` mode,
 # which only auto-accepts edits inside the workspace (cwd); rooting at the project lets the agent
@@ -5581,38 +5637,104 @@ function _agent_cwd(path::AbstractString)
     proj = Base.current_project(d)
     return proj === nothing ? d : dirname(proj)
 end
+
+# A permission preset granted to one notebook's agent for the rest of this hub's run, by answering
+# the agent's request for file access.
+#
+# Kept here rather than in the notebook's persisted settings for two reasons. The browser holds the
+# permission picker's value and sends it with every message, so a persisted setting would be
+# overwritten by the next thing the user typed. And a grant is an answer to one request, not a
+# preference: a restart should ask again rather than silently keep the wider preset.
+const _PERM_GRANT = Dict{String,String}()
+const _AGENT_PERM = Dict{String,String}()   # agent id → the preset it actually spawned with
+
+# The preset a fresh agent for this notebook would get. A grant outranks the picker, because the
+# picker is a default and the grant is an answer to a specific request. It applies to the
+# notebook's own agent only: a specialist's preset comes from its role, and widening that would
+# undo the narrowness that is the reason to summon one.
+_effective_perm(nb::LiveNotebook, permission::AbstractString, label::AbstractString) =
+    (g = isempty(label) ? get(_PERM_GRANT, nb.id, "") : ""; !isempty(g) ? g :
+     isempty(permission) ? "notebook" : String(permission))
+
+"""
+Grant this notebook's agent a permission preset, from its next message on.
+
+A preset is fixed when the agent process spawns, so the running agent keeps the one it has. It is
+not reaped here: the agent asking for this is blocked inside a tool call, and killing it now would
+throw away the answer it is waiting for. The next message finds a preset that no longer matches
+what the live agent spawned with, and respawns it.
+"""
+function grant_agent_permission!(nb::LiveNotebook, preset::AbstractString)
+    _PERM_GRANT[nb.id] = String(preset)
+    return String(preset)
+end
+
 function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::AbstractString = "",
-                        permission::AbstractString = "")
+                        permission::AbstractString = "",
+                        system_prompt::AbstractString = "", allowed_tools::Vector{String} = String[])
     label = String(crew)
+    perm = _effective_perm(nb, permission, label)
     existing = get(nb.agents, label, "")
     if !isempty(existing)
         # Reuse the bound agent ONLY if it's still alive. A dead session — its `claude` exited, or
         # Kaimon's agent service restarted under us — must not be sent into (that's the "endpoint not
         # available" / silent failure); close + forget it here so we spawn a fresh one below and chat
         # self-heals. If we can't even check the status (service hiccup), assume it's gone and respawn.
-        alive = try
-            String(get(_agent_call(:agent_status, Dict{String,Any}("agent_id" => existing)), "status", "")) != "dead"
+        st = try
+            _agent_call(:agent_status, Dict{String,Any}("agent_id" => existing))
         catch
-            false
+            Dict{String,Any}()
         end
-        alive && return existing
+        alive = String(get(st, "status", "")) != "dead" && !isempty(st)
+        # A preset binds at spawn, so an agent running under a narrower one than it should have is
+        # replaced here rather than reused. This is how a granted request for file access lands.
+        alive && get(_AGENT_PERM, existing, perm) != perm && (alive = false)
+        if alive
+            # A model change used to mean killing the agent and losing the chat.
+            # ACP carries a model method, so try to repoint the live session first
+            # and only fall through to the reap below when the backend can't.
+            want = String(model)
+            if !isempty(want) && want != String(get(st, "model", ""))
+                switched = try
+                    get(_agent_call(:agent_set_model,
+                                    Dict{String,Any}("agent_id" => existing, "model" => want)),
+                        "switched", false) === true
+                catch
+                    false
+                end
+                switched && return existing
+            else
+                return existing
+            end
+        end
         try; _agent_call(:agent_close, Dict{String,Any}("agent_id" => existing)); catch; end   # free the id
         lock(_AGENT_LOCK) do
-            delete!(_AGENT_ROUTES, existing); delete!(_AGENT_CREW, existing); delete!(nb.agents, label)
+            delete!(_AGENT_ROUTES, existing); delete!(_AGENT_CREW, existing)
+            delete!(_AGENT_PERM, existing); delete!(nb.agents, label)
         end
     end
     aid = isempty(label) ? "slate-$(nb.id)" : "slate-$(nb.id)-$(label)"
     open_args = Dict{String,Any}(
             "cwd" => _agent_cwd(nb.path),
             "id"  => aid,
-            # Kaimon M4 permission preset. "lab" (the default) allows the agent the Kaimon
-            # MCP tools (slate.*/ex/qdrant) + file edits — enough to drive + introspect the
-            # notebook, without arbitrary shell/web. Runs unattended (no prompt to stall a
-            # headless agent); the agent_* recursion guard is always applied. The user can
-            # pick another preset in Settings ("auto"/"default"/"bypass"); it binds at spawn,
-            # so a change reaps the agent (chat-kill) and the next turn respawns on it.
-            "permission" => (isempty(permission) ? "lab" : String(permission)),
-            "system_prompt" => _agent_system_prompt(nb))
+            # Kaimon M4 permission preset. It runs unattended (no prompt to stall a headless
+            # agent), and the agent_* recursion guard is always applied. The user picks the
+            # preset in Settings; it binds at spawn, so a change reaps the agent (chat-kill)
+            # and the next turn respawns on it.
+            #
+            # The default is `notebook`: Kaimon's MCP tools, and NOT the CLI's own shell and file
+            # tools. Those duplicate the slate tools badly — `grep` reads the text last written to
+            # disk where `slate_read` sees the live cell and its output — and an agent asked to
+            # debug one cell was observed grepping the repository instead. An agent that needs them
+            # asks for them (`slate_request_file_access`), and the answer is a grant that outranks
+            # the picker until the hub restarts.
+            "permission" => perm,
+            # A crew member with its own brief is a SPECIALIST: it gets that brief instead of the
+            # notebook-authoring one, and an allowlist that is the whole of its world. The
+            # narrowness is the point, not a safety rail — an agent that can only step, look and
+            # evaluate has nothing to do but debug, and that is what makes it good at it.
+            "system_prompt" => (isempty(system_prompt) ? _agent_system_prompt(nb) : String(system_prompt)))
+    isempty(allowed_tools) || (open_args["allowed_tools"] = allowed_tools)
     isempty(model) || (open_args["model"] = model)   # omit → Kaimon's default (sonnet)
     res = try
         _agent_call(:agent_open, open_args)
@@ -5627,6 +5749,7 @@ function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::Abst
     lock(_AGENT_LOCK) do
         _AGENT_ROUTES[aid] = nb
         _AGENT_CREW[aid] = label
+        _AGENT_PERM[aid] = perm
         nb.agents[label] = aid
     end
     isempty(label) && (nb.agent_id = aid)   # keep the back-compat alias in sync
@@ -5640,7 +5763,7 @@ function _reap_agents!(nb::LiveNotebook; keep_log::Bool = false)
     aids = lock(_AGENT_LOCK) do
         ids = collect(values(nb.agents))
         for aid in ids
-            delete!(_AGENT_ROUTES, aid); delete!(_AGENT_CREW, aid)
+            delete!(_AGENT_ROUTES, aid); delete!(_AGENT_CREW, aid); delete!(_AGENT_PERM, aid)
         end
         empty!(nb.agents)
         keep_log || delete!(_AGENT_LOG, nb.id)
@@ -5695,6 +5818,9 @@ function relay_agent_event(channel::AbstractString, data)
         # meanwhile (else a stale timer would wrongly un-busy the new turn → edits mislabeled).
         t = time()
         @async (sleep(8.0); get(_AGENT_TURN, nb.id, 0.0) <= t && (nb.agent_busy = false))
+        # A turn ending is what the checker watches. Only the NOTEBOOK agent's, not a specialist's:
+        # a reviewer reviewing the reviewer is a loop, and the checker's own sign-off would wake it.
+        isempty(crew) && (try; nudge_checker!(nb); catch; end)
     end
     # Always push live (token + tool-input deltas stream to the pane). Buffer for
     # reload-replay, but SKIP the liveness chunks (`data.delta == true` and

@@ -375,6 +375,56 @@ R({ id: 'view.files', label: 'Files… (project browser)', group: 'Panels', ctx:
 R({ id: 'view.notebooks', label: 'All notebooks', group: 'Panels', ctx: ['command'],
     run: () => { location.href = '/'; } });
 
+// ── Debugging ─────────────────────────────────────────────────────────────────
+// Implementations live in debugger.js; these are the bindings. `ctx: ['global']` because stepping
+// has to work with the caret in the scratchpad, which is a real editor, and `isGlobalSafe` admits
+// F-keys unmodified so they need no chord.
+//
+// F5 and F11 are in SLATE_KEYS_DISCOURAGED: the browser yields them on preventDefault, and the
+// Keyboard panel says what taking them costs. `_dbgLive` is what makes that cost conditional, since
+// with no session running the command declines and Reload works as usual.
+// The declared chords are the set VS Code, Visual Studio and the JetBrains IDEs all share, so the
+// vscode preset needs no overlay for them. JupyterLab's debugger ships no stepping chords of its
+// own, so that preset inherits these rather than unbinding into nothing. Vim differs and says so in
+// keymaps.js.
+//
+// `available` asks whether this PAGE has the feature, and the Keyboard panel lists only what is
+// available. A debugger you could rebind only while stopped at a line would be no use, so these are
+// available whenever the island loaded, and being between sessions is handled by DECLINING the key.
+// That also leaves F5 as Reload and Escape to its other claimants while nothing is being stepped.
+const _hasDbg = _has('slateDebugStep');
+const _dbgLive = () => typeof window.slateDebugLive === 'function' && window.slateDebugLive();
+const _dbg = (name, ...args) => () => (_dbgLive() ? (_fn(name, ...args), true) : false);
+R({ id: 'debug.next', label: 'Debugger: step to the next line', group: 'Debug', ctx: ['global'],
+    keys: ['F10'], inst: true, soft: true, available: _hasDbg, run: _dbg('slateDebugStep', 'next') });
+R({ id: 'debug.into', label: 'Debugger: step into a call on this line', group: 'Debug', ctx: ['global'],
+    keys: ['F11'], inst: true, soft: true, available: _hasDbg, run: _dbg('slateDebugInto') });
+R({ id: 'debug.out', label: 'Debugger: finish this frame and stop at the caller', group: 'Debug',
+    ctx: ['global'], keys: ['Shift-F11'], inst: true, soft: true, available: _hasDbg,
+    run: _dbg('slateDebugStep', 'out') });
+R({ id: 'debug.continue', label: 'Debugger: continue to the next breakpoint', group: 'Debug',
+    ctx: ['global'], keys: ['F5'], inst: true, soft: true, available: _hasDbg,
+    run: _dbg('slateDebugStep', 'continue') });
+R({ id: 'debug.skip', label: 'Debugger: disable this breakpoint and continue', group: 'Debug',
+    ctx: ['global'], keys: [], inst: true, soft: true, available: _hasDbg, run: _dbg('slateDebugSkip') });
+R({ id: 'debug.stop', label: 'Debugger: end the session', group: 'Debug', ctx: ['global'],
+    keys: ['Shift-F5'], soft: true, available: _hasDbg, run: _dbg('slateDebugStop') });
+// Toggling a breakpoint at the caret, which is F9 in every IDE with a debugger. `ctx: ['editor']`
+// and no `inst`, so the keymap emits it as an editor binding (see `editorSpecs`). It declines in an
+// editor that is showing no cell, which is the scratchpad and the predicate box.
+R({ id: 'debug.toggleBreakpoint', label: 'Debugger: toggle a breakpoint on this line', group: 'Debug',
+    ctx: ['editor'], keys: ['F9'], soft: true, available: _has('slateDebugToggleLine'),
+    run: (t, view) => {
+      if (!view || !view.state || view._noBp) return false;
+      const id = view._cellId || (t && t.id) || '';
+      const line = view.state.doc.lineAt(view.state.selection.main.head).number;
+      return window.slateDebugToggleLine(id, line);
+    } });
+// Declines unless the workspace is actually open, so Escape reaches whatever else wants it.
+R({ id: 'debug.closeFocus', label: 'Debugger: close the workspace (the session keeps running)',
+    group: 'Debug', ctx: ['global'], keys: ['Escape'], inst: true, soft: true, available: _hasDbg,
+    run: () => (typeof window.slateDebugCloseFocus === 'function' ? window.slateDebugCloseFocus() : false) });
+
 // ── Inside the editor ─────────────────────────────────────────────────────────
 // Slate's own in-editor bindings. CM6's text-editing defaults (word motion, indent, bracket matching)
 // are not listed here and are not remappable from this panel. Those come with the editor keymap picked

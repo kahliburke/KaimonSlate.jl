@@ -473,11 +473,88 @@ function applyDisplaySettings() {
 }
 window.applyDisplaySettings = applyDisplaySettings;
 
+// ── Specialists ───────────────────────────────────────────────────────────────
+// Loaded when the dialog opens rather than at startup: it is a round trip nobody needs until they
+// are looking at it, and the roles are registered by extensions so the answer can change.
+async function loadAgentRoles() {
+  const box = document.getElementById('setroles');
+  if (!box) return;
+  try {
+    const r = await api('GET', '/api/agent-roles');
+    _agentRolesApply(r);
+    const roles = (r && r.roles) || [];
+    const opts = await _roleModelOptions();
+    box.innerHTML = roles.length ? roles.map(x => {
+      const verbs = (x.verbs || []).map(v => '<code>' + window.slateEscHtml(v) + '</code>').join(' ');
+      // Which model suits a role is a property OF the role — reading traces and reading prose are
+      // not obviously the same job — so it is set here rather than at each summon.
+      const sel = opts.map(o =>
+        '<option value="' + window.slateEscHtml(o.v) + '"' +
+        (String(x.model || '') === o.v ? ' selected' : '') + '>' +
+        window.slateEscHtml(o.label) + '</option>').join('');
+      // The COUNT is the point — nine verbs against a hundred-odd tools is what "narrow" means
+      // here, and it is not obvious from a list you have to measure by eye.
+      return '<span class="setrole"><b>' + window.slateEscHtml(x.name) + '</b>' +
+             '<span class="setrolep" title="permission preset it spawns under">' +
+             window.slateEscHtml(x.permission || 'default') + '</span>' +
+             '<span class="setrolen">' + (x.verbs || []).length + ' verbs</span>' +
+             '<select class="setrolem" data-role="' + window.slateEscHtml(x.name) + '">' + sel + '</select>' +
+             '<span class="setrolev">' + verbs + '</span></span>';
+    }).join('') : '<span class="setrolenone">none registered</span>';
+    box.querySelectorAll('.setrolem').forEach(el => {
+      el.onchange = () => setAgentRole({ role: el.dataset.role, model: el.value });
+    });
+  } catch (e) {
+    box.textContent = 'unavailable';
+  }
+}
+// What a role may be set to: the notebook's own model, the Claude aliases, and whatever ACP agents
+// are installed. Fetched once per dialog — the ACP list shells out, and the answer rarely moves.
+let _roleModelCache = null;
+async function _roleModelOptions() {
+  if (_roleModelCache) return _roleModelCache;
+  const base = [{ v: '', label: 'follow notebook agent' },
+                { v: 'sonnet', label: 'Sonnet' },
+                { v: 'opus', label: 'Opus' },
+                { v: 'haiku', label: 'Haiku' }];
+  try {
+    const r = await api('GET', '/api/acp-models');
+    for (const m of ((r && r.models) || [])) base.push({ v: m, label: m.replace(/^acp:/, '') });
+  } catch (e) {}
+  _roleModelCache = base;
+  return base;
+}
+
+// Put the checkboxes back to what the SERVER says. A toggle that stays flipped after a failed save
+// is the worst outcome: the setting reads as on and is off, which is exactly how the first version
+// of this shipped — the route was unreachable and nothing said so.
+function _agentRolesApply(r) {
+  const a = document.getElementById('setspeconly'), b = document.getElementById('setcheckeron');
+  if (a) a.checked = !!(r && r.debug_specialist_only);
+  if (b) b.checked = !!(r && r.checker_on);
+}
+async function setAgentRole(patch) {
+  try {
+    const r = await api('POST', '/api/agent-roles', patch);
+    if (!r || r.ok === false) throw new Error('rejected');
+    _agentRolesApply(r);
+  } catch (e) {
+    loadAgentRoles();                       // snap back to the truth rather than the click
+    try { _agentNote('⚙ could not save that setting'); } catch (_) {}
+  }
+}
+window.loadAgentRoles = loadAgentRoles;
+
 // ── Settings modal ────────────────────────────────────────────────────────────
 function openSettings(scope, section) {
   const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
   deb.value = updateMs; v.textContent = updateMs;
   deb.oninput = () => { updateMs = parseInt(deb.value, 10) || 0; v.textContent = updateMs; localStorage.setItem('slateUpdateMs', updateMs); };
+  const spec = document.getElementById('setspeconly');
+  if (spec) spec.onchange = () => setAgentRole({ debug_specialist_only: spec.checked });
+  const chkr = document.getElementById('setcheckeron');
+  if (chkr) chkr.onchange = () => setAgentRole({ checker_on: chkr.checked });
+  loadAgentRoles();
   // Autocomplete: typing delay before the popup auto-opens (applies to newly opened editors), and what
   // Tab does when the popup is open (applies live). Defaults: 250ms, Accept (the standard convention).
   const cd = document.getElementById('setcompdelay'), cdv = document.getElementById('setcompdelayv');
@@ -663,6 +740,24 @@ function openSettings(scope, section) {
   };
   addLocalModels('/api/ollama-models', 'ollama', 'Ollama');
   addLocalModels('/api/vmlx-models', 'vmlx', 'vmlx');
+  // Agents reached over the Agent Client Protocol (opencode, …). Unlike the local
+  // servers above these ids arrive fully assembled — `acp:<agent>:<model>`, where
+  // the model half may itself contain colons — so they're used verbatim rather
+  // than built from a prefix.
+  const addAcpModels = () => {
+    [...mdl.querySelectorAll('option[value^="acp:"]')].forEach(o => o.remove());
+    return api('GET', '/api/acp-models').then(r => {
+      (r && r.models || []).forEach(id => {
+        const parts = id.split(':');
+        const o = document.createElement('option');
+        o.value = id;
+        o.textContent = (parts[1] || 'acp') + ' · ' + parts.slice(2).join(':');
+        mdl.appendChild(o);
+      });
+      reflectModel();
+    }).catch(() => {});
+  };
+  addAcpModels();
   const perm = document.getElementById('setperm');
   perm.value = agentPerm();
   perm.onchange = () => switchSetting(perm, 'slateAgentPerm', 'change permissions', 'permissions');
@@ -685,7 +780,7 @@ function openSettings(scope, section) {
 }
 // Your GLOBAL agent-model default ('' = server default = sonnet).
 function agentModel() { return localStorage.getItem('slateAgentModel') || ''; }
-// Your GLOBAL permission preset ('' = lab default).
+// Your GLOBAL permission preset ('' = the server's default, `notebook`).
 function agentPerm() { return localStorage.getItem('slateAgentPerm') || ''; }
 // Per-notebook agent-permission memory. Kept LOCAL (localStorage keyed by notebook id) and never
 // written to the .jl — a `bypass` preset must never ride a shared notebook. Empty → follow global.

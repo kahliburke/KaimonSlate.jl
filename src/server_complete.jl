@@ -152,6 +152,7 @@ function restart_kernel!(nb::LiveNotebook)
     # Interrupt any in-flight eval first so `shutdown!` doesn't block behind it (the deadlock this fixes:
     # holding nb.lock across `shutdown!` while the runner needs nb.lock to finish → hub wedges).
     _interrupt_inflight!(nb)
+    try; stop_debug!(nb; serialize = false, force = true); catch; end   # the frame lives in the worker about to die
     try; ReportEngine.shutdown!(nb.kernel; kill_remote = true); catch; end
     _teardown_region!(nb; kill = true)       # region kernels restart fresh too (+ sync state reset)
     with_report(nb) do report                # lock only for the report reset/mutate (no round-trip)
@@ -394,6 +395,54 @@ function _tags_models(host::AbstractString)
 end
 _ollama_models() = _tags_models(get(ENV, "OLLAMA_HOST", "http://127.0.0.1:11434"))
 _vmlx_models()   = _tags_models(get(ENV, "VMLX_HOST", "http://127.0.0.1:8000"))
+
+"Run a command for its stdout, giving up after `secs` rather than blocking a request handler."
+function _capture(cmd::Cmd, secs::Real)
+    out = Ref("")
+    t = @async try; out[] = read(cmd, String); catch; end
+    timedwait(() -> istaskdone(t), float(secs)) === :ok ? out[] : ""
+end
+
+# Models reachable through an ACP agent, for the same Settings dropdown. Kaimon's
+# ACPClientBackend routes an `acp:<agent>:<model>` id to anything speaking the
+# Agent Client Protocol, so these ids are returned ready to use rather than
+# needing the browser to know the scheme. Listing shells out and the dropdown
+# asks every time it opens, hence the cache; best-effort, [] if not installed.
+const _ACP_MODEL_CACHE = Ref{Tuple{Float64,Vector{String}}}((0.0, String[]))
+const _ACP_MODEL_TTL = 300.0
+
+"""
+Per-agent model enumeration: the ACP agent name, the executable that has to be on PATH, and how
+to list its models.
+
+`list` returns bare ids; `_acp_models` adds the `acp:<agent>:` prefix. Agents differ in whether
+they can be asked: opencode prints its catalogue, while `claude-agent-acp` only offers a list
+inside a live session, so its ids are named here. `agent` must match Kaimon's `ACP_AGENTS`.
+
+The claude ids are the `value` fields of the `model` entry in that agent's `configOptions`, and
+nothing else is accepted — `default` is its name for the most capable model, not a placeholder to
+be replaced with `opus`.
+"""
+const _ACP_MODEL_SOURCES = [
+    (agent = "opencode", exe = "opencode",
+     list = () -> (String(strip(l)) for l in split(_capture(`opencode models`, 8), '\n'))),
+    (agent = "claude", exe = "claude-agent-acp",
+     list = () -> ["default", "sonnet", "haiku"]),
+]
+
+function _acp_models()
+    at, cached = _ACP_MODEL_CACHE[]
+    (time() - at) < _ACP_MODEL_TTL && return cached
+    models = String[]
+    for src in _ACP_MODEL_SOURCES
+        Sys.which(src.exe) === nothing && continue
+        for id in src.list()
+            isempty(id) || push!(models, "acp:$(src.agent):$id")
+        end
+    end
+    _ACP_MODEL_CACHE[] = (time(), models)
+    models
+end
 
 include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Typst (uses types defined above)
 include("memostore.jl")      # MemoStore (server-side copy — stateless, root passed explicitly): pack/unpack
@@ -2891,7 +2940,7 @@ function _make_router(h::Hub)
         tgt = String(get(_body(req), "target", ""))   # per-cell ✨: scope the turn to a cell + its dep cone
         crew = String(get(_body(req), "crew", ""))     # crew label → route to that crew member's agent ("" = solo)
         model = String(get(_body(req), "model", ""))   # agent model ("" = service default = sonnet); binds at spawn
-        perm = String(get(_body(req), "permission", "")) # permission preset (lab/auto/default/bypass); binds at spawn
+        perm = String(get(_body(req), "permission", "")) # preset (notebook/lab/auto/default/bypass); binds at spawn
         ment = _mention_context(nb, text)              # @id cell references → inline those cells' context
         isempty(ment) || (text = ment * "\n\n" * text)
         isempty(tgt) || (text = _cell_context(nb, tgt) * "\n\nUSER REQUEST:\n" * text)
@@ -2950,6 +2999,9 @@ function _make_router(h::Hub)
         _json(Dict("models" => _ollama_models()))))
     HTTP.register!(router, "GET", "/api/{id}/vmlx-models", req -> _withnb(h, req, _ ->
         _json(Dict("models" => _vmlx_models()))))
+    # ACP agents (opencode, …) — ids arrive fully prefixed, ready for agent_open.
+    HTTP.register!(router, "GET", "/api/{id}/acp-models", req -> _withnb(h, req, _ ->
+        _json(Dict("models" => _acp_models()))))
     # Semantic docs search (docs v2) — for the UI palette; the agent uses slate.search_docs.
     HTTP.register!(router, "GET", "/api/{id}/docsearch", req -> _withnb(h, req, nb -> begin
         q = strip(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))
@@ -3105,6 +3157,8 @@ function _make_router(h::Hub)
     end))
     # Publishing manager: ledger view, target/secret config, per-notebook doc info (see server_publish.jl).
     _register_publish_routes!(router, h)
+    # Cell debugger: start/step/frame/eval/stop, routed to the cell's own kernel (see server_debug.jl).
+    _register_debug_routes!(router, h)
     return router
 end
 
@@ -3757,6 +3811,17 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
     _register_diag_gauges!(h)  # what the hub KEEPS — watched for unbounded growth (SlateDiag)
     _install_worker_push!(h)   # worker telemetry + log → per-page WebSocket push (no browser polling)
+    # Claim the port HERE, before `HTTP.listen!` spawns the accept loop and returns. A port that is
+    # already taken fails inside that task, and HTTP's own startup check races it — so `start_hub`
+    # hands back a hub that looks started while nothing is listening, and every call into it blocks
+    # with no error anywhere. Binding first makes a taken port an error from the caller that asked
+    # for it. (Closed immediately: this is a probe, and `listen!` does the real bind.)
+    try
+        close(Sockets.listen(Sockets.getaddrinfo(String(host)), Int(port)))
+    catch e
+        error("KaimonSlate: cannot start a hub on $host:$port — $(sprint(showerror, e)). " *
+              "Another hub or process is already using that port.")
+    end
     _install_sshauth_watch!(h) # a cluster asking for a password / second factor → a dialog in the notebook
     _install_session_drop!(h)  # a session going away drops the worker wires it was carrying, at once
     routed = _make_router(h)
@@ -3870,6 +3935,9 @@ function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = 
     _persist_registry!(h)        # remember id→path so a restart can lazily re-open it
     nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
     nb === nothing || _ensure_docid!(nb)     # silent lazy upgrade: stamp the stable `docid` if the file has none
+    # Findings the FILE brought with it. After the docid, because the local store is keyed by it —
+    # adopting first would file them under the wrong document.
+    nb === nothing || (try; adopt_findings!(nb); catch e; @debug "slate: findings not adopted" exception = e; end)
     return id
 end
 
@@ -3910,6 +3978,10 @@ function close_notebook!(h::Hub, id::AbstractString)
     # exist (see `_STATE_DIGESTS`).
     ReportEngine.forget_state_writes!(id)
     _interrupt_inflight!(nb)               # stop an in-flight eval so `shutdown!` doesn't block behind it
+    # Before the region detaches: a warm worker outlives this notebook, and a live debug
+    # session leaves its interpreter scoped to our modules for whoever adopts it next.
+    try; stop_debug!(nb; serialize = false, force = true); catch; end
+    forget_debug!(id); forget_specialists!(id); forget_findings!(id)   # ids are reused when the file reopens
     try; shutdown!(nb.kernel); catch; end
     _teardown_region!(nb)                  # detach — a remote region idles warm like the main kernel
     lock(_EVAL_MUTEX_LOCK) do; delete!(_EVAL_MUTEX, id); end
@@ -3929,6 +4001,7 @@ function stop_hub(h::Hub)
     for nb in nbs
         _close_listeners(nb); _stop_live_rerender!(nb); _stop_watchers!(nb); _unwire_callbacks!(nb)
         _interrupt_inflight!(nb)
+        try; stop_debug!(nb; serialize = false, force = true); catch; end
         try; shutdown!(nb.kernel); catch; end
         _teardown_region!(nb)
     end

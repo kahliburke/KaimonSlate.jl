@@ -128,6 +128,12 @@ _is_server_write(report_id, h::UInt64) =
 # Persist the notebook to its `.jl` AND record a durable checkpoint. The single
 # write+capture chokepoint for in-app mutations (replaces bare `write(...)`).
 function _persist!(nb::LiveNotebook; source::AbstractString = "browser", label::AbstractString = "")
+    # Every mutation lands here, whoever made it — so this is where the checker learns there is
+    # work to review. Swallowed: a reviewer is an optional extra and must not be able to fail a save.
+    try; note_persist!(nb); catch; end
+    # Only when the notebook says to carry them; otherwise this clears any stale copy so turning the
+    # option off actually removes them from the file rather than freezing the last set written.
+    try; stage_findings!(nb); catch; end
     s = serialize_report(nb.report)
     # What `sync_from_file!` will re-derive from disk when it sees this write: it re-parses and
     # re-serializes, so it recovers THIS text and not the carried footers appended below. The ring is
@@ -250,6 +256,11 @@ end
 const _CONFIG_UI = (
     (key = "agentmodel", group = "Agent", label = "Agent model", type = :string, default = "",
      choices = String[], global_default = nothing, restart = false),
+    # Off by default: a finding's evidence runs to paragraphs, and carrying that in the document on
+    # every save is diff noise. On, the notebook takes its own conclusions with it — which is what
+    # someone opening it on another machine has no other way to get.
+    (key = "sharefindings", group = "Agent", label = "Carry findings in the file", type = :bool,
+     default = false, choices = String[], global_default = nothing, restart = false),
     (key = "threads", group = "Execution", label = "Worker threads", type = :string, default = "",
      choices = String[], global_default = () -> ReportEngine.WORKER_THREADS[], restart = true),
     (key = "juliaflags", group = "Execution", label = "Extra Julia flags", type = :string, default = "",
@@ -371,6 +382,10 @@ end
 _json_finite(x) = x
 _json_finite(x::AbstractFloat) = isfinite(x) ? x : nothing
 _json_finite(x::AbstractDict) = Dict{Any,Any}(k => _json_finite(v) for (k, v) in x)
+# String-keyed dicts keep their type. Every JSON payload here is `Dict{String,Any}` and several are
+# passed on to functions typed for it, so widening the key to `Any` on the way through turns a
+# sanitized payload into a MethodError at the next call.
+_json_finite(x::AbstractDict{String}) = Dict{String,Any}(k => _json_finite(v) for (k, v) in x)
 _json_finite(x::NamedTuple) = NamedTuple{keys(x)}(map(_json_finite, values(x)))
 _json_finite(x::Union{AbstractVector,Tuple}) = Any[_json_finite(v) for v in x]
 _json_finite(x::Pair) = _json_finite(x.first) => _json_finite(x.second)

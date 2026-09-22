@@ -51,6 +51,34 @@ include(joinpath(@__DIR__, "slate_matrix.jl")) # slate_matrix — auto-render fo
 include(joinpath(@__DIR__, "trace.jl"))     # @trace / SlateTrace inline value tracing (engine + worker)
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query (provider registry)
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
+include(joinpath(@__DIR__, "worker_debug.jl")) # step a cell line by line (shared with the engine)
+
+# Gate-tool wrappers: the stepper is namespace-agnostic, the worker supplies its own.
+__slate_debug_start(; cell::String = "", source::String = "",
+                      mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
+                      mark_conds::Vector{String} = String[], mark_enabled::Vector{Bool} = Bool[],
+                      watch_files::Vector{String} = String[], watch_lines::Vector{Int} = Int[],
+                      watch_exprs::Vector{String} = String[]) =
+    debug_start!(_NS[]; cell = cell, source = source, mark_files = mark_files,
+                 mark_lines = mark_lines, mark_conds = mark_conds, mark_enabled = mark_enabled,
+                 watch_files = watch_files, watch_lines = watch_lines, watch_exprs = watch_exprs)
+__slate_debug_step(; mode::String = "next") = debug_step!(; mode = mode)
+__slate_debug_into_targets() = debug_into_targets()
+__slate_debug_into(; pc::Int = 0, admit::String = "") = debug_into!(; pc = pc, admit = admit)
+__slate_debug_interpret(; admit::String = "", drop::String = "") =
+    debug_interpret!(; admit = admit, drop = drop)
+__slate_debug_frame() = debug_frame()
+__slate_debug_eval(; expr::String = "") = debug_eval_expr(; expr = expr)
+__slate_debug_marks(; mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
+                      mark_conds::Vector{String} = String[], mark_enabled::Vector{Bool} = Bool[]) =
+    debug_marks!(; mark_files = mark_files, mark_lines = mark_lines, mark_conds = mark_conds,
+                   mark_enabled = mark_enabled)
+__slate_debug_watch(; watch_files::Vector{String} = String[], watch_lines::Vector{Int} = Int[],
+                      watch_exprs::Vector{String} = String[]) =
+    debug_watch!(; watch_files = watch_files, watch_lines = watch_lines, watch_exprs = watch_exprs)
+__slate_debug_traces() = debug_traces()
+__slate_debug_frame_locals() = debug_frame_locals!()
+__slate_debug_stop() = debug_stop!()
 include(joinpath(@__DIR__, "envprep.jl"))   # shared notebook-env prep policy (seed/dev-path/staleness; engine + worker + remote)
 include(joinpath(@__DIR__, "gateauth.jl"))  # how the gate's auth switches are read (pure; unit-tested on its own)
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs where the deps are loaded)
@@ -2632,6 +2660,20 @@ function tools()
         KaimonGate.GateTool("__slate_cleanup_cells", __slate_cleanup_cells),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
+        # Cell debugger. Verbs ride this same RPC path, so they reach a remote
+        # region worker with no extra transport.
+        KaimonGate.GateTool("__slate_debug_start", __slate_debug_start),
+        KaimonGate.GateTool("__slate_debug_step", __slate_debug_step),
+        KaimonGate.GateTool("__slate_debug_into_targets", __slate_debug_into_targets),
+        KaimonGate.GateTool("__slate_debug_into", __slate_debug_into),
+        KaimonGate.GateTool("__slate_debug_interpret", __slate_debug_interpret),
+        KaimonGate.GateTool("__slate_debug_frame", __slate_debug_frame),
+        KaimonGate.GateTool("__slate_debug_eval", __slate_debug_eval),
+        KaimonGate.GateTool("__slate_debug_marks", __slate_debug_marks),
+        KaimonGate.GateTool("__slate_debug_watch", __slate_debug_watch),
+        KaimonGate.GateTool("__slate_debug_traces", __slate_debug_traces),
+        KaimonGate.GateTool("__slate_debug_frame_locals", __slate_debug_frame_locals),
+        KaimonGate.GateTool("__slate_debug_stop", __slate_debug_stop),
     KaimonGate.GateTool("__slate_memo_snapshot", __slate_memo_snapshot),
         # `@replay`: what the marks would cost, and running them. Export-only — an ordinary run touches
         # neither, because the macro is a pass-through while a notebook is being edited.

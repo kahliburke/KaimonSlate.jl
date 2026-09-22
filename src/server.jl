@@ -15,6 +15,7 @@ include(joinpath(@__DIR__, "expanduser_fix.jl"))
 using HTTP, JSON, FileWatching, CodecZlib, CodecZstd
 import Base64
 import Serialization                          # a worker's cluster-operation results, back over the gate
+import Sockets                                # claim the hub's port before HTTP's accept loop does
 import SlateExtensionsBase                    # the dtype table the page's decoders are generated from
 import Dates                                  # publish dates for the multi-doc site manifest
 import Logging                                # standalone serve: route hub log detail to a file
@@ -4293,6 +4294,10 @@ include("server_hub.jl")
 include("server_app.jl")       # app mode (served-as-an-application posture) + the /status page
 include("server_keymap.jl")    # the user's keyboard shortcuts, in their own config file
 include("server_publish.jl")   # Publishing manager service layer (ledger view, targets, secrets, SSE publish)
+include("server_specialists.jl") # narrow agents summoned into a notebook: roles, briefs, the ask channel
+include("server_debug.jl")     # cell debugger: route the stepping verbs to the kernel the cell runs on
+include("server_findings.jl")  # a specialist's conclusion as a record: claim, cell, verdict, disposition
+include("server_checker.jl")   # the checker: a specialist nobody summons — triggered, unsupervised, read-only
 include("server_complete.jl")
 
 # ── Standalone convenience (one notebook) ─────────────────────────────────────

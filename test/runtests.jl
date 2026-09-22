@@ -55,6 +55,11 @@ module LiveOutput; include("test_live_output.jl"); end
 module Tables;    include("test_tables.jl");    end
 module Trace;     include("test_trace.jl");     end
 module Complete;  include("test_complete.jl");  end
+module Debugger;  include("test_debugger.jl");  end
+module Specialist;include("test_specialist.jl");end
+module Findings;  include("test_findings.jl");  end
+module ToolDocs;  include("test_tool_docs.jl"); end
+module AppRender; include("test_app_render.jl");end
 module History;   include("test_history.jl");   end
 module SlateApi;  include("test_slate_api.jl"); end
 module Agentops;  include("test_agentops.jl");  end
@@ -79,9 +84,12 @@ module BindObs;   include("test_bind_observable.jl"); end
 # Every module above belongs here. A file that is `include`d but left out of this tuple is still
 # COMPILED, so it never looks broken — it is simply never run, and its testsets pass silently by
 # not existing.
-const _TESTMODS = (Defname, Prepare, Demux, Termcook, SharedInc, Parsched, Memostore, Slatetask, Batchsweep, Transfer, SyncDictT, Dataset, TablesInc, Sweepcell, Effectstore, Blobchannel, RemotePool, Regions, SlateDiagT, Parallel, Animation, Echarts, SlateLook, Engine, Eval, Deps,
-                   Envprep, Gateauth, SshTransportT, Tools, Registry, Toolcell,
-                   Web, Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi, Agentops, Repro, Slides,
+const _TESTMODS = (Defname, Prepare, Demux, Termcook, SharedInc, Parsched, Memostore, Slatetask,
+                   Batchsweep, Transfer, SyncDictT, Dataset, TablesInc, Sweepcell, Effectstore,
+                   Blobchannel, RemotePool, Regions, SlateDiagT, Parallel, Animation, Echarts, SlateLook,
+                   Engine, Eval, Deps, Envprep, Gateauth, SshTransportT, Tools, Registry, Toolcell, Web,
+                   Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi,
+                   Agentops, Repro, Slides, Debugger, Specialist, Findings, ToolDocs, AppRender,
                    Frontmatter, Export, Bootfail, Publishing, App, AppMode, Workbook, Extensions, CatalogT, AssetsSyntax, Files, Config, WscallBinary, WsOrder, BindObs)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.

@@ -773,6 +773,12 @@ function _initChart(el, spec) {
   return echarts.init(el, 'slate', { renderer: _rendererFor(spec) });
 }
 
+// A chart for something that is not a cell's output — the debugger's watch traces are the first.
+// Exported rather than duplicated so those charts get the notebook's theme, which is registered
+// lazily here: an island calling `echarts.init(el, 'slate')` before any cell has drawn would ask
+// for a theme that does not exist yet and silently fall back to the default palette.
+window.slateInitChart = function (el) { return _initChart(el, null); };
+
 // ── The imperative half of a code cell's charts ──────────────────────────────────────────────────
 // Preact owns the container and the LIFECYCLE (see `EChartHost` in notebook.js); everything that
 // actually touches ECharts stays here, where the rest of the chart knowledge already lives. The

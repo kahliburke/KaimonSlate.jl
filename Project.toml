@@ -82,6 +82,7 @@ ripgrep_jll = "13"
 [extras]
 Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+JuliaInterpreter = "aa1ae85d-cabe-5617-a682-6adf51b2e16a"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 ReTest = "e0db7c4e-2690-44b9-bad6-7687da720f89"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
@@ -90,4 +91,4 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 ZMQ = "c2297ded-f4af-51ae-bb23-16f91089e4e1"
 
 [targets]
-test = ["Arrow", "DataFrames", "Random", "ReTest", "Statistics", "Tables", "Test", "ZMQ"]
+test = ["Arrow", "DataFrames", "JuliaInterpreter", "Random", "ReTest", "Statistics", "Tables", "Test", "ZMQ"]

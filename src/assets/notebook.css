@@ -644,6 +644,8 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
 .fuprog .fulabel { color:var(--dim); font-size:.75rem; }
 
 .cellhead .trace.on { color:var(--accent); }
+/* 🐞 while this cell holds the debug session — the strip below it is the rest of the story. */
+.cellhead .dbgcell.on { color:var(--gold); }
 
 /* Trace inspector modal: source lines with captured values shown beneath each line. */
 .tracemodal { max-width:820px; width:92%; padding:0; overflow:hidden; }
@@ -1002,6 +1004,24 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   100% { background:rgba(255,110,70,0); }
 }
 .cm-editor .cm-line.cm-errorline-flash { animation:cm-errorflash 1.2s ease-out; }
+/* The line the debugger is stopped on. Gold rather than the error red — the cell is not in trouble,
+   it is waiting — and the same left-bar idiom as the error marks so a reader already knows how to
+   read it. The wash is slightly stronger than `errorline`'s: this one is where you are looking. */
+.cm-editor .cm-line.cm-dbgline { background:color-mix(in srgb, var(--gold) 16%, transparent);
+  box-shadow:inset 3px 0 0 var(--gold); transition:background .18s ease; }
+/* Breakpoint margin. Mounted only while the notebook is debugging (editor.js `setDebugGutter`), so
+   an ordinary notebook keeps its full width. A faint dot follows the pointer down the column, the
+   way every debugger does it, and an armed line shows a solid one. */
+.cm-editor .cm-bpgutter { width:15px; cursor:pointer; }
+.cm-editor .cm-bpgutter .cm-gutterElement { display:flex; align-items:center; justify-content:center; }
+.cm-bpdot { width:9px; height:9px; border-radius:50%; background:var(--red);
+  box-shadow:0 0 0 1px color-mix(in srgb, var(--red) 45%, transparent); }
+/* Set but disabled, drawn hollow. Distinct from no breakpoint, and from the hover ghost above,
+   which is filled and fainter. */
+.cm-bpdot.off { background:transparent; box-shadow:inset 0 0 0 1.5px var(--red); opacity:.65; }
+.cm-editor .cm-bpgutter .cm-gutterElement:not(:has(.cm-bpdot)):hover::after {
+  content:''; width:9px; height:9px; border-radius:50%;
+  background:color-mix(in srgb, var(--red) 32%, transparent); }
 /* Vim normal-mode block cursor. @replit/codemirror-vim draws it in a hard salmon (#ff9696) that
    reads as an error next to the real error highlights right above — and leaves it behind as an
    empty outlined box in every editor that ISN'T focused, so a notebook full of cells looked like it
@@ -1053,10 +1073,10 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
    rendered panel. It never runs on open, which the badge says so nobody waits for it. */
 .cell.tool { border-left:2px solid color-mix(in srgb, var(--accent) 55%, transparent); }
 .cell.tool > .cellhead .cid::before { content:"⌁ "; opacity:.75; }
-.cell.tool > .cellhead .cid { color:color-mix(in srgb, var(--accent) 80%, var(--fg)); }
+.cell.tool > .cellhead .cid { color:color-mix(in srgb, var(--accent) 80%, var(--text)); }
 .cell.tool.state-stale > .cellhead .cid::after {
   content:"not run"; margin-left:8px; padding:0 6px; border-radius:8px; font-size:10px;
-  color:var(--muted); background:color-mix(in srgb, var(--fg) 8%, transparent); }
+  color:var(--dim); background:color-mix(in srgb, var(--text) 8%, transparent); }
 /* The source is the call; the panel below is the interface. Dim it until hovered/focused so the
    eye lands on the rendered parameters rather than on `@tool start_job(...)`. */
 .cell.tool > .srchost { opacity:.62; transition:opacity .12s ease; }
@@ -1276,22 +1296,22 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .animplayer { margin-bottom:10px; }
 .animplayer.anim-loading .anim-stage::after {
   content:"loading…"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-  color:var(--muted); font-size:12px; background:var(--bg); }
+  color:var(--dim); font-size:12px; background:var(--bg); }
 .anim-stage { position:relative; display:flex; align-items:flex-start; gap:8px; }
 .anim-canvas-wrap { position:relative; display:block; max-width:min(100%, var(--fig-max, 980px)); }
 .anim-canvas { display:block; border-radius:4px; background:#000; image-rendering:auto; max-width:100%; }
 .anim-overlay { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
 .anim-cbar { width:14px; height:auto; align-self:stretch; border-radius:2px; }
-.anim-axes { margin:4px 2px; font-size:11px; color:var(--muted); }
+.anim-axes { margin:4px 2px; font-size:11px; color:var(--dim); }
 .anim-axes .anim-sep { margin:0 6px; opacity:0.5; }
 .anim-bar { display:flex; align-items:center; gap:8px; margin-top:6px; }
-.anim-bar button { background:var(--panel); color:var(--fg); border:1px solid var(--border);
+.anim-bar button { background:var(--bg2); color:var(--text); border:1px solid var(--border);
   border-radius:4px; padding:2px 8px; cursor:pointer; font-size:13px; line-height:1.4; }
 .anim-bar button:hover { border-color:var(--accent); }
 .anim-loop { opacity:0.45; } .anim-loop.anim-on { opacity:1; }
 .anim-scrub { flex:1; accent-color:var(--accent); }
-.anim-time { font-variant-numeric:tabular-nums; font-size:11px; color:var(--muted); min-width:120px; }
-.anim-speed { background:var(--panel); color:var(--fg); border:1px solid var(--border); border-radius:4px; font-size:12px; }
+.anim-time { font-variant-numeric:tabular-nums; font-size:11px; color:var(--dim); min-width:120px; }
+.anim-speed { background:var(--bg2); color:var(--text); border:1px solid var(--border); border-radius:4px; font-size:12px; }
 /* Interactive data table (slate_table / DataFrame auto-render) */
 .tables:not(:empty) { padding:8px 10px; border-top:1px solid var(--border); }
 .slatetable { margin:4px 0 8px; }
@@ -1760,6 +1780,97 @@ input.toggle:checked::after { left:18px; }
 .apmsg.tool .toolnav:hover { background:color-mix(in srgb, var(--accent) 18%, transparent); color:var(--strong); }
 .apmsg.err { align-self:flex-start; color:var(--red); }
 .apmsg.note { align-self:center; background:none; color:var(--dim); font-size:.74rem; padding:2px 6px; max-width:100%; }
+/* Consecutive actions by one agent, as a block: the name once at the top, then a line per call.
+   As separate rows this was the agent's name repeated down the left of a narrow panel, with the
+   sentences on either side pushed apart by the repetition. */
+.apmsg.toolrun { align-self:stretch; max-width:100%; background:none; padding:2px 0 2px 4px;
+                 border-left:2px solid var(--bg3); }
+.apmsg.toolrun .toolrunh { display:flex; align-items:baseline; gap:7px; margin-bottom:2px; }
+.apmsg.toolrun .toolrunn { color:var(--dim); font-size:.68rem; }
+.apmsg.toolrun .toolrunlist { display:flex; flex-direction:column; }
+.apmsg.toolrun .toolline { color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.74rem;
+                           padding:1px 0 1px 8px; }
+.apmsg.toolrun .toolline.expandable { cursor:pointer; }
+.apmsg.toolrun .toolline.err { color:var(--red,#e57575); }
+.apmsg.toolrun .toolline .tooldetail { display:none; }
+.apmsg.toolrun .toolline.expanded .tooldetail { display:block; }
+/* The block heading's name — the inline badge's palette, on a heading line rather than in a run of
+   prose, so a grouped block is labelled once instead of once per action. */
+.crewlabel { display:inline-block; padding:0 6px; border-radius:5px; font-size:.66rem;
+  font-weight:600; letter-spacing:.02em;
+  color:hsl(var(--ch,210) 70% 82%); background:hsl(var(--ch,210) 55% 22%); }
+/* What an investigation concluded, kept as a record beside the prose version of it. Quiet unless
+   DISPUTED — a located disagreement is the most useful thing in the transcript. */
+.apmsg.finding { align-self:stretch; max-width:100%; background:var(--bg2); border:1px solid var(--bg3);
+                 border-left:2px solid var(--dim); border-radius:5px; padding:7px 10px; font-size:.78rem; }
+.apmsg.finding.confirmed { border-left-color:var(--teal); }
+.apmsg.finding.disputed  { border-left-color:var(--amber,#d9a441); }
+.apfindh { display:flex; align-items:center; gap:7px; }
+.apfindc { font-family:'Cascadia Code',monospace; font-size:.73rem; color:var(--accent); }
+.apfindv { font-size:.64rem; text-transform:uppercase; letter-spacing:.06em; padding:1px 6px; border-radius:9px; }
+.apfindv.confirmed { color:var(--teal); background:color-mix(in srgb, var(--teal) 14%, transparent); }
+.apfindv.disputed { color:var(--amber,#d9a441); background:color-mix(in srgb, var(--amber,#d9a441) 14%, transparent); }
+.apfindclaim { color:var(--strong); margin-top:3px; line-height:1.5; }
+.apfindev, .apfindwhy { color:var(--dim); margin-top:2px; line-height:1.5; white-space:pre-wrap; }
+.apmsg.finding.expandable { cursor:pointer; }
+.apmsg.finding .apfinddetail { display:none; }
+.apmsg.finding.expanded .apfinddetail { display:block; margin-top:6px; }
+.apmsg.finding .toolcaret { display:inline-block; color:var(--dim); font-size:.7em; transition:transform .12s; }
+.apmsg.finding.expanded .toolcaret { transform:rotate(90deg); }
+.apfindgap { color:var(--dim); font-style:italic; margin-top:3px; }
+.apfindplan { margin-top:5px; }
+.apfinddec { margin-left:7px; color:var(--dim); }
+/* A blocked question, floating over the page. Deliberately NOT a modal: no backdrop, nothing
+   dimmed, nothing else disabled. A proposal lands at the end of a long investigation and the first
+   thing you want is to scroll back through what led to it, so everything behind stays live. */
+#apaskcard { display:none; position:fixed; z-index:80; right:22px; bottom:22px; width:min(520px, calc(100vw - 44px));
+  background:var(--bg2); border:1px solid var(--accent); border-radius:9px;
+  box-shadow:0 12px 34px rgba(0,0,0,.45); padding:13px 15px; }
+#apaskcard.show { display:block; }
+/* Clear of the agent panel rather than on top of it — the transcript is the context for the
+   question, so covering it would hide the reason you are being asked. */
+body.agent-open #apaskcard { right:calc(var(--agentw, 380px) + 22px); }
+#apaskcard .apaskcardbody + .apaskcardbody { margin-top:12px; border-top:1px solid var(--bg3); padding-top:12px; }
+/* The plan leads and the argument follows. Prominence by COLOUR, not weight: a plan runs to a
+   sentence or three, and setting all of it bold made a slab of heavy type rather than a heading. */
+#apaskcard .apaskq { font-size:.83rem; line-height:1.6; color:var(--text); }
+#apaskcard .apaskq > :first-child { color:var(--strong); font-size:.88rem; margin-bottom:9px; }
+#apaskcard .apaskq p { margin:0 0 8px; }
+#apaskcard .apaskq p:last-child { margin-bottom:0; }
+#apaskcard .apaskq code { font-family:'Cascadia Code',monospace; font-size:.78rem; padding:1px 4px;
+  border-radius:3px; background:var(--bg); border:1px solid var(--bg3); }
+#apaskcard .apaskq pre { margin:0 0 8px; padding:7px 9px; border-radius:5px; overflow:auto;
+  max-height:210px; background:var(--bg); border:1px solid var(--bg3); font-size:.76rem; }
+#apaskcard .apaskq pre code { border:none; background:none; padding:0; }
+#apaskcard .apaskq ul, #apaskcard .apaskq ol { margin:0 0 8px; padding-left:20px; }
+#apaskcard .apaskq li { margin:2px 0; }
+#apaskcard .apaskq strong { color:var(--strong); font-weight:600; }
+#apaskcard .apasknote { width:100%; margin-top:10px; box-sizing:border-box; resize:vertical;
+  font:inherit; font-size:.8rem; padding:6px 8px; border-radius:5px; min-height:30px;
+  background:var(--bg); color:var(--text); border:1px solid var(--bg3); }
+#apaskcard .apasknote:focus { outline:none; border-color:var(--accent); }
+#apaskcard .apaskbtns { display:flex; flex-wrap:wrap; gap:7px; margin-top:10px; }
+#apaskcard .apaskb { cursor:pointer; font:inherit; font-size:.8rem; padding:5px 13px; border-radius:5px;
+  background:var(--bg); color:var(--text); border:1px solid var(--bg3); }
+#apaskcard .apaskb:hover { border-color:var(--accent); color:var(--strong); }
+#apaskcard .apaskb:first-child { border-color:var(--accent); color:var(--strong); }
+/* A question the agent is BLOCKED on. Accented and full width, because ignoring it stops the turn. */
+.apmsg.ask { align-self:stretch; max-width:100%; background:var(--bg2); border:1px solid var(--bg3);
+             border-left:2px solid var(--accent); border-radius:5px; padding:8px 10px; }
+.apmsg.ask .apaskq { font-size:.82rem; white-space:pre-wrap; }
+.apmsg.ask .apaskbtns { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.apmsg.ask .apaskb { cursor:pointer; font:inherit; font-size:.76rem; padding:3px 9px; border-radius:4px;
+                     background:var(--bg); color:var(--text); border:1px solid var(--bg3); }
+.apmsg.ask .apaskb:hover { border-color:var(--accent); color:var(--strong); }
+.apmsg.ask .apaskdone { font-size:.76rem; color:var(--teal); }
+/* Answered: the decision first and the question beneath it in one line, the whole thing on click. */
+.apmsg.ask.answered { cursor:pointer; }
+.apmsg.ask.answered .apaskasked { font-size:.74rem; color:var(--dim); margin-top:2px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.apmsg.ask.answered .apaskfull { display:none; }
+.apmsg.ask.answered.expanded .apaskasked { display:none; }
+.apmsg.ask.answered.expanded .apaskfull { display:block; margin-top:5px; font-size:.78rem;
+  line-height:1.55; color:var(--text); }
 .apmsg.think { align-self:flex-start; background:none; color:var(--dim); font-style:italic; font-size:.78rem; border-left:2px solid var(--bg3); border-radius:0; padding:2px 0 2px 9px; }
 /* Show/hide the agent's thinking (💭 toggle in the header). Hidden bubbles are removed from
    layout; the toggle dims to read as "off". */
@@ -1860,7 +1971,7 @@ body.modkey .cm-content { cursor: pointer; }
 .cm-completionInfo .docmd > :last-child { margin-bottom:0; }
 /* History panel (time machine) */
 .histpanel { width:420px; max-width:94vw; }
-.hbtn { background:var(--bg3); border:none; color:var(--fg); border-radius:6px; padding:3px 9px; cursor:pointer; font-size:.8rem; }
+.hbtn { background:var(--bg3); border:none; color:var(--text); border-radius:6px; padding:3px 9px; cursor:pointer; font-size:.8rem; }
 .hbtn:hover { background:var(--accent); }
 .hbtn.stop { background:var(--red); }
 .histlist { overflow:auto; padding:6px; display:flex; flex-direction:column; gap:2px; max-height:45%; flex:0 0 auto; border-bottom:1px solid var(--bg3); }
@@ -2262,7 +2373,7 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
   border:1px solid var(--bg3); border-radius:8px; box-shadow:0 10px 28px #0009; padding:4px; z-index:70;
   display:none; flex-direction:column; }
 .topmenu.open { display:flex; }
-.topmenu button, .topmenu a { background:none; border:none; color:var(--fg); text-align:left; padding:7px 12px;
+.topmenu button, .topmenu a { background:none; border:none; color:var(--text); text-align:left; padding:7px 12px;
   border-radius:6px; cursor:pointer; font-size:.84rem; text-decoration:none; display:block; white-space:nowrap; }
 .topmenu button:hover, .topmenu a:hover { background:var(--bg3); color:var(--accent); }
 .topmenu hr { border:none; border-top:1px solid var(--bg3); margin:4px 6px; }
@@ -2490,10 +2601,22 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
   background:var(--bg3); color:var(--red); border:1px solid color-mix(in srgb, var(--red) 40%, var(--border)); }
 .rlreap:hover { background:color-mix(in srgb, var(--red) 16%, var(--bg3)); }
 .apinput { display:flex; flex-wrap:wrap; gap:8px; padding:14px 18px; border-top:1px solid var(--border); }
-.apinput textarea { flex:1; min-width:0; resize:none; height:54px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+/* `min-height`, not `height`: the box grows with what you type (see apAutoGrow), and a fixed
+   height made it something you typed past instead of into. The cap lives in the JS, which is also
+   where the scrollbar is turned on — past the cap it scrolls, below it a scrollbar over empty
+   space is just noise. */
+.apinput textarea { flex:1; min-width:0; resize:none; min-height:54px; overflow-y:hidden; background:var(--bg3); color:var(--text); border:1px solid var(--border);
   border-radius:8px; padding:8px 10px; font-family:inherit; font-size:.86rem;
   scrollbar-width:thin; scrollbar-color:var(--bg2) transparent; }
 .apinput textarea:focus { outline:none; border-color:var(--accent); }
+/* Bottom-aligned and fixed size. The row stretches its children by default, so the button grew
+   with the box as you typed — a Send key the height of a paragraph. It sits by the last line
+   instead, where the caret is. */
+.apsend { align-self:flex-end; flex:0 0 auto; width:32px; height:32px; padding:0;
+  display:flex; align-items:center; justify-content:center;
+  border:1px solid var(--border); border-radius:8px; background:var(--bg3); color:var(--text);
+  font-size:1rem; line-height:1; cursor:pointer; }
+.apsend:hover { border-color:var(--accent); color:var(--accent); }
 .apinput textarea::-webkit-scrollbar { width:9px; }
 .apinput textarea::-webkit-scrollbar-track { background:transparent; }
 .apinput textarea::-webkit-scrollbar-thumb { background:var(--bg2); border-radius:5px; border:2px solid var(--bg3); }
@@ -3267,6 +3390,22 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .nbfind-opt[data-opt="word"] { text-decoration:underline; }
 .nbfind-opt.on { color:var(--accent); border-color:var(--accent); background:var(--ovl); }
 .nbfind-x { margin-left:2px; }
+
+/* ── Settings › Specialists ───────────────────────────────────────────────────
+   A role is shown with its verb COUNT as well as the list: nine against a hundred-odd tools is
+   what narrowness means here, and it is not something you should have to measure by eye. */
+.setroleslist { display:flex; flex-direction:column; gap:6px; align-items:flex-end; max-width:420px; }
+.setrole { display:flex; flex-wrap:wrap; gap:5px; align-items:baseline; justify-content:flex-end; }
+.setrole b { color:var(--accent); }
+.setrolep { padding:0 5px; border:1px solid var(--border); border-radius:4px;
+  color:var(--dim); font-size:.72em; }
+.setrolen { color:var(--dim); font-size:.78em; }
+.setrolem { max-width:190px; font-size:.74em; padding:1px 4px; }
+/* The verbs wrap onto their own line and read small — present so the claim is checkable, not
+   because anyone needs to read them every time they open Settings. */
+.setrolev { flex:1 0 100%; text-align:right; line-height:1.7; }
+.setrolev code { padding:1px 4px; background:var(--bg3); border-radius:3px; font-size:.72em; }
+.setrolenone { color:var(--dim); }
 
 /* ── Log viewer ──────────────────────────────────────────────────────────────────────────────
    A reader, not a dialog: it is sized to the window rather than to its content, because the

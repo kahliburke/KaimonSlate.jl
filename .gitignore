@@ -36,3 +36,5 @@ build/cm6/package-lock.json
 # Deploy-tool working state left in the repo root by publish-target dry runs
 /.netlify/
 /.wrangler/
+dev/node_modules/
+dev/package-lock.json

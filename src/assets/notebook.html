@@ -273,7 +273,7 @@
   <div class="apinput">
     <div id="chattarget" class="chattarget" style="display:none"></div>
     <textarea id="apin" placeholder="Ask the agent to build/edit cells… (⏎ send · ⇧⏎ newline)"></textarea>
-    <button onclick="agentSend()">Send</button>
+    <button class="apsend" onclick="agentSend()" title="Send (⏎)" aria-label="Send">↑</button>
   </div>
 </aside>
 <aside id="histpanel" class="drawer histpanel">
@@ -491,12 +491,21 @@
     <input id="setmodelcustom" class="settext" type="text" placeholder="e.g. claude-opus-4-8, sonnet[1m], ollama:llama3.1" autocomplete="off" spellcheck="false"/></div>
   <div class="setrow"><label title="Your default permission preset for every notebook. A notebook can override it locally (never written to the file) under “This notebook”.">Agent permissions (global default)</label>
     <select id="setperm">
-      <option value="">Lab (default — slate tools + edits)</option>
+      <option value="">Notebook (default — slate tools, no shell)</option>
+      <option value="lab">Lab (slate tools + files + shell)</option>
       <option value="auto">Auto (model self-governs)</option>
       <option value="default">Default (edits only)</option>
       <option value="bypass">Bypass (no checks — trusted only)</option>
     </select></div>
   <div class="setrow sethint" id="setmodelhint" style="display:none"><span></span>↻ restarts the agent on your next message (chat history kept).</div>
+
+  <div class="setsec">Specialists</div>
+  <div class="setrow"><label title="The general agent must summon the debug specialist to step code, rather than doing it itself. Your own stepping is unaffected.">Only the debug specialist may step code</label>
+    <span class="rt"><input type="checkbox" id="setspeconly"/></span></div>
+  <div class="setrow"><label title="A read-only reviewer that looks at changed cells once the notebook goes quiet, and says something only when it finds a problem it can point at.">Background checker</label>
+    <span class="rt"><input type="checkbox" id="setcheckeron"/></span></div>
+  <div class="setrow setroles"><label title="What each role can call.">Registered roles</label>
+    <span class="rt"><span id="setroles" class="setroleslist">—</span></span></div>
   </div>
   </div>
   <div class="setempty" id="setempty" style="display:none">No settings match.</div>

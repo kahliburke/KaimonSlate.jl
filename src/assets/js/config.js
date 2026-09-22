@@ -94,9 +94,10 @@ function _cfgRow(it) {
 // Agent permission — CLIENT-ONLY, remembered per notebook (never in the file).
 function _cfgPermRow() {
   const nb = nbAgentPerm();                          // '' = follow global
-  const eff = nb || agentPerm() || 'lab';
+  const eff = nb || agentPerm() || 'notebook';
   const src = nb ? { cls: 'override', txt: 'notebook' } : (agentPerm() ? { cls: 'global', txt: 'global' } : { cls: 'default', txt: 'default' });
-  const opts = [['', 'Follow global'], ['lab', 'Lab (slate tools + edits)'], ['auto', 'Auto (self-governs)'],
+  const opts = [['', 'Follow global'], ['notebook', 'Notebook (slate tools, no shell)'],
+                ['lab', 'Lab (slate tools + files + shell)'], ['auto', 'Auto (self-governs)'],
                 ['default', 'Default (edits only)'], ['bypass', 'Bypass (no checks)']];
   const sel = `<select onchange="cfgSetPerm(this.value)">` +
     opts.map(([v, t]) => `<option value="${v}" ${nb === v ? 'selected' : ''}>${_cfgEsc(t)}</option>`).join('') + `</select>`;
@@ -138,7 +139,7 @@ async function cfgClear(key) {
 }
 // Set the per-notebook permission (local only). '' clears → follow global.
 async function cfgSetPerm(v) {
-  const label = v || ('global default (' + (agentPerm() || 'lab') + ')');
+  const label = v || ('global default (' + (agentPerm() || 'notebook') + ')');
   if (!await _cfgReapAgent('permission', label)) { loadConfig(); return; }
   if (v) localStorage.setItem(nbAgentPermKey(), v); else localStorage.removeItem(nbAgentPermKey());
   loadConfig();

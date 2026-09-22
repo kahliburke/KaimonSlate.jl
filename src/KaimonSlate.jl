@@ -435,6 +435,25 @@ end
 worker_threads()::String = String(get(_slate_config(), "worker_threads", ""))
 
 """
+    debug_specialist_only() -> Bool
+
+May only the debugging specialist drive a session, or may any agent?
+
+The point of a specialist is an agent that cannot wander: eight verbs and no way to read another
+cell, refactor something on the way past, or decide the real problem is elsewhere. A generalist
+holding the same verbs has the whole toolset too, so it does the work itself — reasonably, and
+then keeps going.
+
+On, a generalist that reaches for a stepping verb is told to summon one instead. Off, it drives
+directly, which is fewer hops for a narrow bug. A setting rather than a rule because which is
+better depends on the bug, and that is worth finding out by using both.
+"""
+debug_specialist_only()::Bool = NotebookServer.debug_specialist_only()
+
+"Turn the specialist-only rule on or off, and remember it."
+set_debug_specialist_only!(on::Bool) = NotebookServer.set_debug_specialist_only!(on)
+
+"""
     set_worker_threads!(spec; respawn=true) -> String
 
 Persist the worker Julia-thread spec (e.g. `"4,1"` or `"auto"`), apply it to future worker spawns,
@@ -696,6 +715,33 @@ function _load_slate_config!()
     NotebookServer._RUNON_PERSIST[] = function (spec)
         cfg = _slate_config(); cfg["run_location"] = String(spec)
         _persist_slate_config!(cfg)
+        return nothing
+    end
+    # Same shape for the specialist-only rule, and loaded here too: the ref is the live value and
+    # the file is where it came from, so a restart has to put it back or the setting looks like it
+    # did not stick.
+    NotebookServer.DEBUG_SPECIALIST_ONLY[] = get(_slate_config(), "debug_specialist_only", false) === true
+    let saved = get(_slate_config(), "specialist_models", Dict{String,Any}())
+        saved isa AbstractDict && for (k, v) in saved
+            NotebookServer.SPECIALIST_MODELS[String(k)] = String(v)
+        end
+    end
+    NotebookServer._SPECIALIST_MODELS_PERSIST[] = function (models)
+        cfg = _slate_config(); cfg["specialist_models"] = Dict{String,Any}(models)
+        _persist_slate_config!(cfg)
+        return nothing
+    end
+    NotebookServer.CHECKER_ON[] = get(_slate_config(), "checker_on", false) === true
+    NotebookServer._CHECKER_PERSIST[] = function (on)
+        cfg = _slate_config(); cfg["checker_on"] = on
+        _persist_slate_config!(cfg)
+        @info "slate: the checker is now $(on ? "on" : "off")"
+        return nothing
+    end
+    NotebookServer._DEBUG_SPECIALIST_ONLY_PERSIST[] = function (on)
+        cfg = _slate_config(); cfg["debug_specialist_only"] = on
+        _persist_slate_config!(cfg)
+        @info "slate: debug driving is now $(on ? "specialist-only" : "open to any agent")"
         return nothing
     end
     return nothing
@@ -1187,6 +1233,718 @@ function create_tools(GateTool::Type)
                ". Tag cells with `region=<name>` ($n tagged now)."
     end
 
+    # ── cell debugger ─────────────────────────────────────────────────────────────────────────
+    #
+    # The stepping verbs, for an agent rather than a browser. They call the same functions the
+    # HTTP routes do (server_debug.jl), so a specialist and a reader cannot end up with different
+    # semantics — and every call broadcasts, so a person watching sees the agent work in the
+    # notebook's own debugger rather than reading about it afterwards.
+    #
+    # Every call here is an AGENT: the browser reaches the session over HTTP, not MCP. That
+    # identity is what the ownership rule turns on — a session a person started is not one of
+    # these tools' to end or take over without asking (see `may_disturb`).
+    # Why a generalist is turned away from the stepping verbs (see `debug_specialist_only`), or
+    # "" when it may proceed.
+    #
+    # Refused rather than hidden: a tool that is simply absent sends an agent looking for another
+    # way to do the same thing, while a refusal naming `dbg_summon` tells it what the right move
+    # is. Only KAIMON AGENTS are judged — a person driving from the browser or an MCP client is
+    # not an agent that can wander, and blocking them would break the manual path the UI is.
+    function _dbg_refusal(nb)
+        debug_specialist_only() || return ""
+        # Gate on the AGENT id, not on `_dbg_who`. `_dbg_who` falls back to the raw session id when
+        # no Kaimon agent owns the call, so an external MCP client came out as `agent:<session>` and
+        # was refused — the setting is about the notebook's own agent, and a person driving the
+        # tools from outside is not it.
+        a = _agent_id()
+        isempty(a) && return ""                                     # nobody's agent: a person
+        a == String(NotebookServer.specialist_here(nb, NotebookServer.DEBUG_ROLE)) && return ""  # itself
+        # Naming the supervisor's verbs, not the specialist's. This used to say `dbg_ask` and
+        # `dbg_done`, which are the things the SPECIALIST calls — so an orchestrator that followed
+        # it signed off on an investigation it had not run, filing a second finding that said what
+        # the first one already did.
+        return "⛔ Stepping is the debugging specialist's. Call `dbg_summon(notebook, cell, task=…)` " *
+               "to put one on it, then supervise: `dbg_wait` blocks until it asks or finishes, " *
+               "`dbg_answer` unblocks a question, `dbg_tell` redirects it. When it has finished, " *
+               "read `dbg_findings` and put a course of action to the person with `dbg_propose`. " *
+               "(Turn this off with `KaimonSlate.set_debug_specialist_only!(false)`.)"
+    end
+
+    _dbg_who() = (a = _agent_id(); "agent:" * (isempty(a) ? (c = _caller(); isempty(c) ? "mcp" : c) : a))
+
+    # A frame, rendered for reading rather than for a renderer. Values are summaries — type, size,
+    # a clipped repr — because the frame may be on a compute node and the point is to decide what
+    # to ask for next, not to haul it here.
+    # A blocked question comes FIRST, above the frame. A specialist waiting on an answer is not
+    # doing anything else, so it is the most important fact about the session.
+    function _dbg_asks(j::Dict{String,Any})::String
+        as = get(j, "asks", [])
+        isempty(as) && return ""
+        io = IOBuffer()
+        for a in as
+            println(io, get(a, "kind", "question") == "consent" ? "🔔 " : "❓ ",
+                    get(a, "from", ""), " is WAITING — id ", get(a, "id", ""))
+            println(io, "   ", get(a, "text", ""))
+        end
+        println(io, "   (answer with dbg_answer)")
+        return String(take!(io))
+    end
+
+    function _dbg_render(j::Dict{String,Any})::String
+        pending = _dbg_asks(j)
+        get(j, "session", true) === false &&
+            return pending * (isempty(pending) ? "" : "\n") * "No debug session. Start one with dbg_start."
+        err = get(j, "error", nothing)
+        io = IOBuffer()
+        isempty(pending) || print(io, pending)
+        cell = get(j, "cell", "")
+        if get(j, "finished", false) === true
+            r = get(j, "result", nothing)
+            println(io, err === nothing ? "✅ cell '$cell' ran to the end." : "⛔ cell '$cell' stopped: $err")
+            r === nothing || println(io, "   result: ", get(r, "repr", ""), "  ::", get(r, "type", ""))
+        else
+            bp = get(j, "at_breakpoint", false) === true ? "  ● breakpoint" : ""
+            println(io, "⏸ ", get(j, "scope", ""), "  ", get(j, "file", ""), ":", get(j, "line", 0), bp)
+            println(io, "   on ", get(j, "where", "local"), " · step ", get(j, "steps", 0),
+                    " · owner ", get(j, "owner", ""))
+            err === nothing || println(io, "   ⚠ ", err)
+        end
+        # A binding whose line hasn't run yet still holds the PREVIOUS run's value. Said plainly:
+        # a reader who mistakes one for the current state debugs the wrong number for a while.
+        show_vals(label, vs) = begin
+            isempty(vs) && return
+            println(io, label, ":")
+            for v in vs
+                t = get(v, "type", "")
+                stale = !isempty(t) && get(v, "fresh", true) === false
+                println(io, "   ", rpad(get(v, "name", ""), 14), " ",
+                        isempty(t) ? "(not assigned yet)" :
+                        t * get(v, "size", "") * "  " * get(v, "repr", "") *
+                        (stale ? "   ← previous run; this line has not run yet" : ""))
+            end
+        end
+        # THE CODE. The state carries it — fetched through CodeTracking on whichever machine the
+        # frame is on, or filled from the notebook for a cell — and it used to be dropped right
+        # here, leaving a specialist to reason about `kit:7` without ever seeing line 7. The human
+        # looking at the same session had it on screen, which made the two of them unequal for no
+        # reason. Windowed, because a method can be long and the lines around the stop are what
+        # the question is about.
+        src, first = String(get(j, "source", "")), Int(get(j, "srcfirst", 0))
+        line = Int(get(j, "line", 0))
+        if !isempty(src) && first > 0
+            lines = split(src, '\n')
+            lo = max(1, line - first + 1 - 8)
+            hi = min(length(lines), line - first + 1 + 8)
+            println(io, "source  ", get(j, "file", ""), " (", get(j, "scope", ""), "):")
+            for k in lo:hi
+                n = k + first - 1
+                println(io, n == line ? " ▸ " : "   ", lpad(n, 4), "  ", lines[k])
+            end
+        end
+        show_vals("locals", get(j, "locals", []))
+        show_vals("cell bindings", get(j, "bindings", []))
+        stk = get(j, "stack", [])
+        length(stk) > 1 && println(io, "stack: ",
+            join([string(get(f, "scope", ""), ":", get(f, "line", 0)) for f in reverse(stk)], "  ←  "))
+        ms = get(j, "marks", [])
+        isempty(ms) || println(io, "breakpoints: ",
+            join([string(get(m, "file", ""), ":", get(m, "line", 0)) for m in ms], ", "))
+        return String(take!(io))
+    end
+
+    """
+        dbg_start(notebook, cell) -> String
+
+    Begin stepping `cell` line by line, on whichever kernel it runs on — a `region=` cell steps on
+    that region's worker, with its locals and evaluations staying there. Returns the frame BEFORE
+    the first line runs.
+
+    Re-starting the same cell is how you watch a block again. If someone else is using the
+    session, this BLOCKS while they are asked whether you may take it.
+    """
+    function dbg_start(notebook::String, cell::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
+        return _dbg_render(NotebookServer.start_debug!(nb, strip(cell); by = _dbg_who()))
+    end
+
+    """
+        dbg_step(notebook; mode="next") -> String
+
+    Advance the session. `next` runs the line and stops on the next one in this frame; `into`
+    descends into the call on this line when its module is being interpreted; `out` finishes this
+    frame and stops at the caller; `continue` runs on until a breakpoint or the end of the cell.
+
+    On a loop, a breakpoint plus `continue` is the tool — stepping 10,000 iterations is not. But a
+    breakpoint inside a loop is hit on every iteration, so once you have seen what that line does,
+    turn it off with `dbg_break(enabled=false)` and continue. The line and its condition stay set,
+    so you can turn it back on without retyping either.
+    """
+    function dbg_step(notebook::String; mode::String = "next")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
+        return _dbg_render(NotebookServer.step_debug!(nb, strip(mode)))
+    end
+
+    """
+        dbg_into(notebook; call="", admit="") -> String
+
+    Step into a NAMED call on the current line, rather than whichever one comes first.
+
+    Called with no `call`, this lists what the line calls and steps nowhere: each entry is a name,
+    the module it would land in, and whether that module is being interpreted. `push!(xs, f(y))`
+    offers `f` and `push!`, and a plain `dbg_step(mode="into")` would have picked for you.
+
+    A module the session runs compiled (Base, a stdlib, a registered package) cannot be stepped
+    into until it is interpreted. `admit` names one to start interpreting; `drop` hands one back.
+    Admit when you have a reason to disbelieve a library, not by habit, and drop it once you have
+    your answer: everything in an interpreted module steps, which is slow and fills the stack.
+
+    Names the same function twice on one line? The list is in call order and the first match wins,
+    so step to the one you want with `next` first.
+    """
+    function dbg_into(notebook::String; call::String = "", admit::String = "",
+                      drop::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
+        # Handing a module back is its own act: it does not need a call to step into.
+        isempty(strip(drop)) ||
+            return _dbg_render(NotebookServer.interpret_debug!(nb; drop = strip(drop)))
+        ts = get(NotebookServer.into_targets_debug(nb), "targets", [])
+        if isempty(strip(call))
+            isempty(ts) && return "this line calls nothing you can step into"
+            return "this line calls:\n" * join(
+                [string("  ", get(t, "name", ""), "  in ", get(t, "mod", ""),
+                        get(t, "interpreted", false) === true ? "" :
+                        "  (compiled — pass admit=\"" * String(get(t, "mod", "")) * "\" to step in)")
+                 for t in ts], "\n")
+        end
+        want = strip(call)
+        i = findfirst(t -> String(get(t, "name", "")) == want, ts)
+        i === nothing && return "⛔ this line does not call `$want`. It calls: " *
+            join([String(get(t, "name", "")) for t in ts], ", ")
+        t = ts[i]
+        return _dbg_render(NotebookServer.into_debug!(nb; pc = Int(get(t, "pc", 0)), admit = admit))
+    end
+
+    """
+        dbg_frame(notebook) -> String
+
+    Where the session is now, without advancing: the line, the call stack, every local in the
+    paused frame, and the cell's own module-level bindings.
+    """
+    function dbg_frame(notebook::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
+        return _dbg_render(NotebookServer.frame_debug(nb))
+    end
+
+    """
+        dbg_eval(notebook, expr) -> String
+
+    Evaluate `expr` in the paused frame's scope — the frame's locals are bound first, so a probe
+    sees exactly what the code sees at that line. This is how you test a hypothesis: the value may
+    live on another machine, and this asks it there rather than moving it.
+    """
+    function dbg_eval(notebook::String, expr::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
+        r = NotebookServer.eval_debug(nb, expr)
+        get(r, "ok", false) === true || return "⛔ " * string(get(r, "error", "evaluation failed"))
+        v = get(r, "value", nothing)
+        v === nothing && return "(no value)"
+        out = string(get(v, "repr", ""), "  ::", get(v, "type", ""), get(v, "size", ""))
+        # Where the value came from, attached to the value itself. A wrong number is only half an
+        # answer; the other half is which cell produced it, and that is a fact the notebook holds
+        # and the agent would otherwise have to think to go and ask for.
+        note = NotebookServer.provenance_note(nb, expr)
+        return isempty(note) ? out : out * "\n" * note
+    end
+
+    """
+        request_file_access(notebook, why) -> String
+
+    Ask the user for the shell and file tools, which you do not have by default.
+
+    Say what you need to do and why the slate tools cannot do it. The user decides, so "I would
+    like to look around" is a no. The narrow cases this is for are editing the package's own
+    `src/`, and reading a file the notebook uses that no slate tool exposes.
+
+    Blocks until they answer. Allowed, the tools arrive with your NEXT message, because the preset
+    binds when the agent starts. A refusal is an answer: do not ask again.
+    """
+    function request_file_access(notebook::String, why::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        isempty(strip(why)) && return "⛔ say what you need file access for"
+        reply = NotebookServer.ask_and_wait(nb, "", "choice", _dbg_who(),
+            "The agent is asking for shell and file access.\n\n" * strip(why);
+            options = [("allow", "Allow file + shell tools for this notebook"),
+                       ("deny",  "Keep it to the slate tools")])
+        pick, note = _decision(reply)
+        pick == "allow" || return "Refused — work with the slate tools." *
+                                  (isempty(note) ? "" : " They said: " * note)
+        # The preset binds when the agent process starts, so this one keeps what it has. Say so
+        # rather than letting the agent try `Read` on the next line and be refused.
+        NotebookServer.grant_agent_permission!(nb, "lab")
+        return "Allowed. Finish this message. The file tools are there from the next one." *
+               (isempty(note) ? "" : "\n\nThey added: " * note)
+    end
+
+    # An answer that carries a comment: the choice on the first line, anything the person added
+    # after it. Yes/no with no way to qualify it forces a false binary — the useful answer to a
+    # proposal is very often "go ahead, but not that part".
+    function _decision(reply::AbstractString)
+        parts = split(String(reply), '\n'; limit = 2)
+        pick = lowercase(strip(first(parts)))
+        note = length(parts) > 1 ? strip(parts[2]) : ""
+        return (String(pick), String(note))
+    end
+
+    """
+        dbg_findings(notebook) -> String
+
+    Every finding on this notebook: the claim, the cell it names, the checker's verdict if one has
+    arrived, and what was decided about it.
+
+    This is what you read after `dbg_wait` says a specialist is done. The finding is the record; the
+    specialist's chat message is the same thing in prose, and re-summarising it for the person is
+    work nobody asked for. Read this, judge it against what the notebook is FOR — which the
+    specialist does not know and you do — and then propose what to do with `dbg_propose`.
+    """
+    function dbg_findings(notebook::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        fs = NotebookServer.findings_json(nb)
+        isempty(fs) && return "No findings on this notebook."
+        io = IOBuffer()
+        for f in fs
+            println(io, "[", f["id"], "] ", f["role"], " → cell `", f["cell"], "`")
+            println(io, "  claim: ", f["claim"])
+            isempty(f["evidence"]) || println(io, "  evidence: ", f["evidence"])
+            isempty(f["unread_upstream"]) ||
+                println(io, "  never looked at: ", join(f["unread_upstream"], ", "))
+            isempty(f["verdict"]) ?
+                println(io, "  verdict: (none)") :
+                println(io, "  verdict: ", f["verdict"], " — ", f["verdict_why"])
+            isempty(f["plan"]) || println(io, "  plan: ", f["plan"])
+            isempty(f["decision"]) || println(io, "  decided: ", f["decision"])
+        end
+        return String(take!(io))
+    end
+
+    """
+        dbg_propose(notebook, finding, plan, why) -> String
+
+    Put a plan to the person and block until they answer. Returns what they said.
+
+    This is the end of a debugging session: a specialist found something, a checker read the claim,
+    and you are the only one who knows what this notebook is for. Judge it, then propose ONE course
+    of action.
+
+    Say the plan in `plan` — ONE sentence, imperative, the thing you would do. Put the argument in
+    `why`, which is where there is room for it. A plan that runs to a paragraph is a plan the person
+    has to parse before they can agree with it. If the checker disputed, say so and say why
+    you think what you think — a located disagreement tells the person exactly where their judgement
+    is needed, and presenting a tidy consensus you had to manufacture wastes the one thing they are
+    better at than you. If the plan needs file access you do not have, say that in the plan: this is
+    the question, and asking a second time for the tools to carry it out is one interruption too
+    many.
+
+    They can agree, decline, or say something else entirely — the last is usually the useful one, so
+    do not treat a reply that is not "go ahead" as a refusal. Silence is not agreement: if nobody
+    answers, this returns no and you must not act.
+    """
+    function dbg_propose(notebook::String, finding::String, plan::String, why::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        isempty(strip(plan)) && return "⛔ a proposal needs a plan"
+        f = NotebookServer.finding_by_id(nb, strip(finding))
+        f === nothing && return "⛔ no finding `$(strip(finding))` on this notebook"
+        NotebookServer.set_plan!(nb, f.id, strip(plan))
+        # Not emphasised: a plan runs to a few sentences and bolding the lot makes a wall of heavy
+        # type rather than a heading. The card gives the first paragraph its prominence.
+        q = string(strip(plan), "\n\n", strip(why))
+        reply = NotebookServer.ask_and_wait(nb, "", "choice", _dbg_who(), q;
+            options = [("go", "Go ahead"), ("no", "Don't")])
+        # An unanswered proposal is a refusal. Nobody was there, and a plan nobody approved must not
+        # be carried out because the timer ran out rather than because anyone agreed.
+        pick, note = _decision(reply)
+        isempty(pick) && (pick = "no")
+        NotebookServer.set_decision!(nb, f.id, isempty(note) ? pick : pick * " — " * note)
+        aside = isempty(note) ? "" : "\n\nThey added: " * note *
+                "\nThat is part of the instruction, not a remark to acknowledge."
+        pick == "no" && return "They said no (or did not answer). Do not carry out the plan." * aside
+        pick == "go" && return "Approved. Carry out the plan." * aside
+        return "They answered in their own words — this is the instruction, not the plan you " *
+               "proposed:\n\n" * pick * (isempty(note) ? "" : "\n" * note)
+    end
+
+    """
+        check_ok(notebook; note="") -> String
+
+    You reviewed the changes and found nothing wrong. Say so and stop.
+
+    Recorded rather than discarded. "Looked, clean" is information: without it, silence is
+    indistinguishable from a crash, a stall, or a model that lost the thread, and a reviewer you
+    cannot tell from a dead one gets ignored either way.
+    """
+    function check_ok(notebook::String; note::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        NotebookServer.checker_ok!(nb, note)
+        return "✓ recorded: nothing to report."
+    end
+
+    """
+        check_verdict(notebook, finding, verdict, why) -> String
+
+    Your independent read of another agent's finding: `confirmed` or `disputed`.
+
+    You were given its claim and not its reasoning, on purpose — you are the second opinion, and a
+    reviewer shown the argument agrees with the argument. So the only confirmation worth anything is
+    one where you went and looked: say in `why` what you checked. "Looks right" confirms nothing and
+    makes a guess appear reviewed, which is worse than staying quiet.
+
+    Dispute freely. You cost a sentence; a confident wrong finding costs a change to the wrong code.
+    The usual reason to dispute is that the named cell is where a bad value SHOWED UP rather than
+    where it was produced.
+    """
+    function check_verdict(notebook::String, finding::String, verdict::String, why::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        v = lowercase(strip(verdict))
+        v in ("confirmed", "disputed") || return "⛔ verdict must be \"confirmed\" or \"disputed\""
+        isempty(strip(why)) && return "⛔ say what you checked, in a sentence"
+        f = NotebookServer.set_verdict!(nb, strip(finding), v, strip(why))
+        f === nothing && return "⛔ no finding `$(strip(finding))` on this notebook"
+        return "Recorded: $v."
+    end
+
+    """
+        check_flag(notebook, cell, what) -> String
+
+    Report one thing that is wrong, in one cell.
+
+    `cell` is required. A finding that cannot point at a cell is an opinion, and the reader has no
+    way to act on it. Say what is wrong and what you saw that says so — this is read between
+    someone else's turns, so it has to be worth the interruption on its own.
+
+    One call per finding. Two unrelated problems are two flags, not one paragraph.
+    """
+    function check_flag(notebook::String, cell::String, what::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = NotebookServer.checker_flag!(nb, strip(cell), what)
+        get(r, "ok", true) === false && return "⛔ " * String(get(r, "error", "could not record that"))
+        return "⚑ flagged $(strip(cell))."
+    end
+
+    """
+        dbg_choose(notebook, question, options) -> String
+
+    Put a choice to the person and block until they pick one. Returns the chosen VALUE.
+
+    `options` is `value=label` pairs separated by `|`, e.g.
+
+        dbg_choose(notebook="nb", question="Which model should the debugging specialist use?",
+                   options="acp:claude:sonnet=Sonnet — fast, good at traces|" *
+                           "acp:claude:default=Opus — slower, better at subtle coupling")
+
+    Use this instead of asking in prose whenever you already know the alternatives. You have done
+    the work of finding them; making someone retype one is both slower and a way to get a typo you
+    will not notice until the call fails. It is also how you propose a fix: the options are what
+    you would do, and the answer is whether to do it.
+
+    Blocks like `dbg_ask`, so the same rules apply — the person may be away, and the call can be
+    abandoned before they answer. The notebook shows the question with a button per option.
+    """
+    function dbg_choose(notebook::String, question::String, options::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        isempty(strip(question)) && return "⛔ a choice needs a question"
+        opts = Tuple{String,String}[]
+        for part in split(options, '|')
+            isempty(strip(part)) && continue
+            i = findfirst('=', part)
+            v = i === nothing ? strip(part) : strip(part[1:i-1])
+            l = i === nothing ? strip(part) : strip(part[i+1:end])
+            isempty(v) || push!(opts, (String(v), String(isempty(l) ? v : l)))
+        end
+        length(opts) < 2 && return "⛔ a choice needs at least two options (value=label|value=label)"
+        reply = NotebookServer.ask_and_wait(nb, NotebookServer.DEBUG_ROLE, "choice", _dbg_who(),
+                                            strip(question); options = opts)
+        isempty(strip(reply)) && return "No answer — the question is still open, or it timed out."
+        return String(strip(reply))
+    end
+
+    """
+        dbg_watch(notebook, file, line; expr) -> String
+
+    Sample an expression every time a line runs, without stopping, and keep the series.
+
+    This answers a question stepping cannot: not what a value is now, but what it has been.
+    `dbg_watch(file="cell:step", line=7, expr="maximum(abs, u)")` then `dbg_step(mode="continue")`
+    gives you the whole trajectory — which is how you see that something fell for fifty iterations
+    before it turned, and where it turned. A number at one breakpoint cannot show that.
+
+    `dbg_frame` reports each watch with how many samples it has and its first, last, smallest and
+    largest — enough to see a turn without moving a hundred thousand numbers through a tool result.
+    The full series goes to the notebook's chart. Pair a watch with `dbg_break(cond=…)` on the same
+    line: sample every pass, stop on the pass that matters.
+
+    Non-numeric values are skipped, since a trace is a curve. An empty `expr` clears the watch.
+    """
+    function dbg_watch(notebook::String, file::String, line::Int; expr::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
+        r = NotebookServer.watch_debug!(nb, strip(file), line; expr = expr)
+        get(r, "ok", false) === true || return "⛔ " * string(get(r, "error", "could not set that"))
+        ws = get(r, "watches", [])
+        isempty(strip(expr)) && return "○ cleared the watch on $file:$line"
+        return "◉ watching `$(strip(expr))` at $file:$line\n" *
+               "watches: " * join([string(get(w, "file", ""), ":", get(w, "line", 0),
+                                          " → ", get(w, "expr", "")) for w in ws], ", ")
+    end
+
+    """
+        dbg_break(notebook, file, line; on="toggle", cond="", enabled="") -> String
+
+    Arm or clear a breakpoint. `file` is what a frame reports — `cell:<id>` for notebook code, a
+    path for a package — so copy it from `dbg_frame`. Breakpoints may be set before a session
+    exists and survive one, which is the order the work usually happens in.
+
+    `enabled="false"` silences one without clearing it, which is what you want after a breakpoint
+    in a loop has shown you what it had to show: the line and its condition stay, and the person
+    watching can see it is set but off. `enabled="true"` brings it back. Silencing costs nothing
+    per pass, because a disabled breakpoint is not armed in the interpreter at all.
+
+    `cond` is a Julia expression that has to hold, in that frame, for the line to stop: pass
+    `cond="maximum(abs, du) > 1e3"` and `dbg_step(mode="continue")` lands on the first iteration
+    where it does. This is how a long run is reached at all — a plain breakpoint inside a loop
+    stops on the first pass, which is usually the one that is fine, and stepping to iteration
+    4,700 is not something you can do. Write it in terms of the locals `dbg_frame` reports.
+
+    A predicate that errors while running does not stop and does not abort the run, so a
+    misspelled name reads as a breakpoint that never fires.
+    """
+    function dbg_break(notebook::String, file::String, line::Int; on::String = "toggle",
+                       cond::String = "", enabled::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = _dbg_refusal(nb); isempty(r) || return r
+        yes(v) = v in ("1", "true", "on", "yes")
+        want = on == "toggle" ? nothing : yes(on)
+        en = isempty(enabled) ? nothing : yes(enabled)
+        r = NotebookServer.mark_debug!(nb, strip(file), line; on = want,
+                                       cond = isempty(cond) ? nothing : cond, enabled = en)
+        get(r, "ok", false) === true || return "⛔ " * string(get(r, "error", "could not set that"))
+        ms = get(r, "marks", [])
+        shown(m) = string(get(m, "file", ""), ":", get(m, "line", 0),
+                          isempty(String(get(m, "cond", ""))) ? "" : " when " * String(get(m, "cond", "")),
+                          get(m, "enabled", true) === true ? "" : " (off)")
+        head = get(r, "on", false) !== true ? "○ cleared " :
+               en === false ? "○ disabled " : en === true ? "● enabled " : "● armed "
+        return head * "$file:$line" * (isempty(cond) ? "" : " when $cond") * "\n" *
+               (isempty(ms) ? "no breakpoints set" : "breakpoints: " * join(shown.(ms), ", "))
+    end
+
+    """
+        dbg_ask(notebook, question) -> String
+
+    Ask the person watching — or whoever started you — and WAIT for the reply.
+
+    You know the frame in front of you and nothing about why this notebook exists. When what to do
+    next turns on that, ask instead of guessing. This blocks your turn until an answer arrives, so
+    ask a specific question and expect a real answer.
+    """
+    function dbg_ask(notebook::String, question::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        reply = NotebookServer.ask_and_wait(nb, NotebookServer.DEBUG_ROLE, "question", _dbg_who(), strip(question))
+        return isempty(strip(reply)) ? "No answer came back. Decide for yourself and say what you assumed." : reply
+    end
+
+    """
+        dbg_summon(notebook, cell; task="", model="") -> String
+
+    Bring a debugging SPECIALIST into the notebook and hand it `cell`.
+
+    It is a narrow agent: seven debugger verbs and nothing else — no file edits, no shell, no
+    browsing. That narrowness is why the brief matters. You know what this notebook is for and
+    what "wrong" would mean here; it does not, and cannot find out on its own. Put that in `task`:
+    what you suspect, what you have already ruled out, what a correct answer would look like.
+
+    `model` picks the backend — an `acp:<agent>:<model>` id runs it over ACP. Empty uses the
+    notebook's default. It works in the open: its reasoning and every tool call stream into the
+    notebook's chat while it goes, and it can call `dbg_ask` to come back to YOU for detail —
+    answer with `dbg_answer`.
+    """
+    function dbg_summon(notebook::String, cell::String; task::String = "", model::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = try
+            NotebookServer.summon!(nb, NotebookServer.DEBUG_ROLE; subject = strip(cell), model = strip(model),
+                                   task = task, orchestrator = _agent_id())
+        catch e
+            # With the top frames: summoning threads a briefing through cell analysis, the agent
+            # service and the chat bus, and "it failed" names none of those.
+            bt = first(sprint(Base.show_backtrace, catch_backtrace()), 900)
+            return "Could not summon a debugger: $(first(sprint(showerror, e), 300))\n$bt"
+        end
+        return "🐞 Debugging specialist $(get(r, "agent_id", "")) is on cell '$(strip(cell))'. " *
+               "It works in the chat pane; watch it there, answer its questions with dbg_answer, " *
+               "and read the session with dbg_frame."
+    end
+
+    """
+        dbg_wait(notebook; timeout=300, since=0) -> String
+
+    WAIT for the specialist to need you, or to finish. This is how it pages you.
+
+    You reach this notebook over MCP, which is request/response — nothing can be pushed at you, so
+    a question it asks would otherwise block for its full timeout while you, the only one who can
+    answer, never learn it was asked. Call this after `dbg_summon` and you are genuinely in the
+    loop: it returns the moment a question is posted (answer with `dbg_answer`) or a sign-off lands.
+
+    The normal shape is a loop — summon, wait, answer, wait, until it is done. A timeout means it
+    is still working; check `dbg_frame` to see where it has got to, and wait again.
+    """
+    function dbg_wait(notebook::String; timeout::Int = 300, since::String = "0")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        sec = clamp(timeout, 5, 900)
+        r = NotebookServer.wait_for_specialist(nb; timeout = sec,
+                                               since = something(tryparse(Float64, since), 0.0))
+        kind = String(get(r, "kind", ""))
+        if kind == "ask"
+            io = IOBuffer()
+            println(io, "The specialist is WAITING on you:")
+            for a in get(r, "asks", [])
+                println(io, "  ", get(a, "kind", "question") == "consent" ? "🔔" : "❓",
+                        " id ", get(a, "id", ""), "  (from ", get(a, "from", ""), ")")
+                println(io, "     ", get(a, "text", ""))
+            end
+            print(io, "Answer with dbg_answer(notebook, id, text). It is blocked until you do.")
+            return String(take!(io))
+        elseif kind == "done"
+            io = IOBuffer()
+            println(io, "🐞 The specialist finished (mark ", string(get(r, "at", 0)), "):")
+            println(io, String(get(r, "text", "")))
+            # The record, not another copy of the prose. The person has already read the sentence
+            # above in the chat; what you do next turns on the cell it names and on whether anyone
+            # has checked it, and neither of those is in the sentence.
+            f = NotebookServer.latest_finding(nb)
+            if f !== nothing
+                println(io)
+                println(io, "As a record — finding `", f.id, "`, cell `",
+                        isempty(f.cell) ? "(none named)" : f.cell, "`",
+                        isempty(f.verdict) ? ", no verdict yet" : ", verdict: " * f.verdict *
+                        (isempty(f.verdict_why) ? "" : " (" * f.verdict_why * ")"), ".")
+                isempty(f.unread_upstream) ||
+                    println(io, "It never looked at ", join(f.unread_upstream, ", "),
+                            ", which produce that cell's inputs.")
+                println(io, "Judge it, then put ONE course of action to the person with ",
+                        "dbg_propose(finding=\"", f.id, "\", plan=…, why=…). Do not retell the ",
+                        "summary above — they have read it.")
+            end
+            print(io, "\nPass that mark back as `since` if you wait again, or it will re-report this ending.")
+            return String(take!(io))
+        end
+        return "Still working after $(round(Int, get(r, "waited", sec)))s — nothing asked, nothing finished. " *
+               "Check dbg_frame for where it has got to, then wait again."
+    end
+
+    """
+        dbg_tell(notebook, text) -> String
+
+    Say something to the specialist while it works — a correction, a constraint, something you have
+    just learned that changes what it should look at.
+
+    This is the half of the conversation `dbg_ask` does not cover: it can stop and ask YOU, and this
+    is how you reach IT without being asked. Refused while it is mid-turn, because a second message
+    into a live turn destroys the reply in progress — wait for it, or interrupt it in the notebook.
+    """
+    function dbg_tell(notebook::String, text::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        r = try
+            NotebookServer.tell!(nb, NotebookServer.DEBUG_ROLE, text)
+        catch e
+            return "Could not reach the specialist: $(first(sprint(showerror, e), 200))"
+        end
+        get(r, "ok", false) === true && return "Delivered. Watch its reply with dbg_frame / the notebook chat."
+        return "⛔ " * string(get(r, "error", "could not deliver"))
+    end
+
+    """
+        dbg_answer(notebook, id, text) -> String
+
+    Answer a question the specialist is BLOCKED on (its id comes from `dbg_frame`).
+
+    It stopped because the next move depends on something only you know — the goal, the data, what
+    counts as correct. Answer the question that was asked, concretely. A person can answer in the
+    notebook too, so check `dbg_frame` before replying to something already handled.
+    """
+    function dbg_answer(notebook::String, id::String, text::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        ok = NotebookServer.answer_ask!(nb, strip(id), text)
+        return ok ? "Answered $(strip(id)); the specialist is unblocked." :
+                    "No pending question with id '$(strip(id))' — it may have been answered already."
+    end
+
+    """
+        dbg_done(notebook, summary; cell="", evidence="") -> String
+
+    Finish: say what you found and let go of the session.
+
+    Call this when you have an answer, when you have run out of ideas, or when going further would
+    not help — deciding you are done is yours to make. The session is closed only if it was yours;
+    one a person started stays open for them, and the summary is delivered either way.
+
+    `cell` is the cell you are saying is AT FAULT, and it is what makes your finding reviewable:
+    someone else reads it against the notebook, and a claim with no cell is an opinion. `evidence`
+    is what you saw that says so, kept separate from the claim so a reader can check the one against
+    the other. Omit `cell` when you genuinely have no answer — that is an honest result and better
+    said plainly than dressed up.
+
+    If the cell you name has inputs you never looked at, this asks you once to go and look. Say
+    where the value came from, not only where it landed.
+    """
+    function dbg_done(notebook::String, summary::String; cell::String = "",
+                      evidence::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        who = _dbg_who()
+        owner = NotebookServer._debug_session(nb).owner
+        # A supervising orchestrator signing off after its specialist already did was observed, and
+        # it recorded a second finding saying the same thing. Signing off is reporting what YOU
+        # found; with no session left and someone else's conclusion already on the record, there is
+        # nothing here to report.
+        if isempty(owner)
+            prev = NotebookServer.latest_finding(nb)
+            prev === nothing || prev.from == who ||
+                return "The session is already finished and `$(prev.from)` has recorded its " *
+                       "finding (`$(prev.id)`). Read it with dbg_findings and decide what to do " *
+                       "about it — signing off again would only file a second copy."
+        end
+        # Naming the cell where a bad value was USED, having never looked at the cell that produced
+        # it, is reporting a symptom — and the fix that follows is to the code that received the
+        # value rather than to whatever made it wrong. Asked once, then it is the caller's call:
+        # sometimes the upstream genuinely does not matter, and a gate with no way past it is a
+        # trap rather than a check.
+        if !isempty(strip(cell))
+            unread = NotebookServer.unread_upstream(nb, strip(cell))
+            if !isempty(unread) && !NotebookServer.done_warned(nb)
+                NotebookServer.mark_done_warned!(nb)
+                return "⛔ Not yet. You are naming `$(strip(cell))`, but its inputs come from " *
+                       join(("`" * c * "`" for c in unread), ", ") *
+                       " and you have not looked at any of those. If the value you found wrong " *
+                       "was produced upstream, the fault is there and not in the cell that " *
+                       "consumed it. Read them (`read(cells=…)`) or step them, then sign off " *
+                       "again — calling this a second time goes through."
+            end
+        end
+        f = NotebookServer.record_finding!(nb, NotebookServer.DEBUG_ROLE, who;
+                                           cell = strip(cell), claim = strip(summary),
+                                           evidence = strip(evidence))
+        NotebookServer.sign_off!(nb, NotebookServer.DEBUG_ROLE, who, strip(summary))
+        NotebookServer.review_finding!(nb, f)   # the checker, if it is on: a second read of the CLAIM
+        # Three outcomes, and they are not the same thing: a cell that ran to the end has already
+        # closed its own session, which is not "someone else has it".
+        isempty(owner) && return "Signed off. The session had already finished."
+        owner == who || return "Signed off. The session belongs to $owner, so it was left running."
+        NotebookServer.stop_debug!(nb; by = who)
+        return "Signed off; the session is closed."
+    end
+
     """
         memo_trace(notebook; cell="") -> String
 
@@ -1319,6 +2077,11 @@ function create_tools(GateTool::Type)
     """
     function read_cells(notebook::String; cells::String = "", delta_since::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
+        # Naming cells is looking at them; the outline is not. A debugging finding is checked
+        # against what its investigation actually read, and an outline tells you a cell exists
+        # rather than what it does.
+        isempty(strip(cells)) ||
+            NotebookServer.note_cells_seen!(nb, [strip(c) for c in split(cells, ',') if !isempty(strip(c))])
         return notebook_digest(nb; cells = cells, delta_since = delta_since)
     end
 
@@ -2357,8 +3120,10 @@ function create_tools(GateTool::Type)
         try
             _load_slate_config!()            # apply the persisted worker-thread spec before any worker spawns
             _reap_orphan_workers!()
-                    atexit(on_shutdown)
+            ReportEngine._reap_orphan_ssh!()   # …and any ssh tunnel/master procs a hard-killed prior hub orphaned
+            atexit(on_shutdown)
             _hub()
+            _register_permission_ask!()
             @info "KaimonSlate hub auto-started" url = _base()
         catch e
             @warn "KaimonSlate hub auto-start failed" exception = (e, catch_backtrace())
@@ -2377,9 +3142,13 @@ function create_tools(GateTool::Type)
     # silently push the blocking path past a budget that stayed put.
     CELL_RUN_MS = round(Int, (NotebookServer._scratch_grace() + 120) * 1000)
     DEPLOY_MS   = 1_800_000   # package precompile / a build + deploy round-trip
+    # `dbg_ask` blocks on a PERSON answering, so its budget is theirs, not a machine's. A little
+    # over the server-side wait (`_ASK_TIMEOUT`), so the answer that times out is the one with the
+    # explanation rather than a bare tool timeout.
+    ASK_MS      =   960_000
     RENDER_MS   =   900_000   # Typst render + figure warm, doc harvest — one silent round-trip
 
-    return [
+    tools = [
         GateTool("api", api),
         GateTool("open", nb_open),
         GateTool("list", nb_list),
@@ -2396,6 +3165,34 @@ function create_tools(GateTool::Type)
         GateTool("peer_plan", peer_plan_tool),
         GateTool("transfers", transfers),
         GateTool("memo_trace", memo_trace),
+        # Cell debugger. `dbg_start` and `dbg_ask` can both block on a PERSON — one asking to take
+        # a session, the other asking a question — so they get a person's budget, not a machine's.
+        # `dbg_step` only runs user code, so the cell-run one fits it.
+        GateTool("dbg_start", dbg_start; timeout_ms = ASK_MS),
+        GateTool("dbg_step", dbg_step; timeout_ms = CELL_RUN_MS),
+        GateTool("dbg_into", dbg_into; timeout_ms = CELL_RUN_MS),
+        GateTool("dbg_frame", dbg_frame),
+        GateTool("dbg_eval", dbg_eval; timeout_ms = CELL_RUN_MS),
+        GateTool("dbg_break", dbg_break),
+        GateTool("dbg_watch", dbg_watch),
+        GateTool("dbg_choose", dbg_choose; timeout_ms = ASK_MS),
+        GateTool("request_file_access", request_file_access; timeout_ms = ASK_MS),
+        GateTool("dbg_findings", dbg_findings),
+        GateTool("dbg_propose", dbg_propose; timeout_ms = ASK_MS),
+        GateTool("check_ok", check_ok),
+        GateTool("check_verdict", check_verdict),
+        GateTool("check_flag", check_flag),
+        GateTool("dbg_ask", dbg_ask; timeout_ms = ASK_MS),
+        GateTool("dbg_done", dbg_done),
+        # The orchestrator's half of the pair: summon a specialist with a brief only you can
+        # write, and answer what it comes back to ask. NOT in `DEBUG_TOOLS` — a specialist
+        # summoning specialists is a recursion, and answering its own questions is a loop.
+        GateTool("dbg_summon", dbg_summon; timeout_ms = CELL_RUN_MS),
+        GateTool("dbg_answer", dbg_answer),
+        GateTool("dbg_tell", dbg_tell),
+        # A long poll: it BLOCKS on the specialist, so its budget is the specialist's, not a
+        # control message's — that is the whole point of it.
+        GateTool("dbg_wait", dbg_wait; timeout_ms = ASK_MS),
         GateTool("read", read_cells),
         GateTool("add_cell", add_cell; timeout_ms = CELL_RUN_MS),
         GateTool("edit_cell", edit_cell; timeout_ms = CELL_RUN_MS),
@@ -2425,6 +3222,40 @@ function create_tools(GateTool::Type)
         GateTool("site_membership", site_membership_tool),
         GateTool("site_publish", site_publish_tool),
     ]
+    _warn_undocumented_tools(GateTool, tools)
+    return tools
+end
+
+"""
+Say so, now, if any tool would reach a client with no description.
+
+A bare tool is silent in every other way: it registers, dispatches and works, and the only symptom
+is a model that never calls it because it cannot tell what it does. `test_tool_docs.jl` is the
+durable guard; this is for whoever is running right now, since that is who can still fix it.
+
+Descriptions are recovered by scanning the source file UP from each closure's definition line, so
+the usual cause is something placed between a docstring and its `function` line — a comment is
+enough. It also reads empty when the file has been EDITED under a running host: the line numbers
+come from the compiled method and the text from disk, so they stop agreeing. That case is not a
+defect and clears on restart, which is why this warns rather than throws.
+"""
+function _warn_undocumented_tools(GateTool::Type, tools)
+    bare = String[]
+    try
+        KG = parentmodule(GateTool)
+        isdefined(KG, :_source_docstring) || return nothing
+        for t in tools
+            d = try; strip(String(KG._source_docstring(t.handler))); catch; ""; end
+            isempty(d) && push!(bare, t.name)
+        end
+    catch
+        return nothing          # never let a diagnostic stop the extension from loading
+    end
+    isempty(bare) && return nothing
+    @warn """slate: $(length(bare)) tool(s) will reach agents with NO description — they will \
+             mostly go uncalled. Check for a comment between the docstring and the `function` \
+             line; if the source was edited while this host was running, restart it.""" tools = bare
+    return nothing
 end
 
 """

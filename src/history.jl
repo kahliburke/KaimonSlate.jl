@@ -128,6 +128,31 @@ function _meta(doc::Doc)
     return try; JSON.parse(read(mp, String)); catch; nothing; end
 end
 
+# ── sidecars ──────────────────────────────────────────────────────────────────────────────────────
+#
+# State that belongs to a DOCUMENT but not in its file: it has to survive a restart and follow the
+# notebook when it moves, and it must not land in the .jl, where it would be diff noise on every
+# save. The revision store already answers exactly that description, and is keyed the same way.
+
+"Read a per-document JSON sidecar, or `nothing` when there is none."
+function read_side(doc::Doc, name::AbstractString)
+    p = joinpath(_dir(doc), String(name) * ".json")
+    isfile(p) || return nothing
+    return try; JSON.parse(read(p, String)); catch; nothing; end
+end
+
+"Write a per-document JSON sidecar. Best effort — losing one must never fail the work that made it."
+function write_side!(doc::Doc, name::AbstractString, data)
+    try
+        _ensure_dir(doc)
+        write(joinpath(_dir(doc), String(name) * ".json"), JSON.json(data))
+        return true
+    catch e
+        @debug "slate history: could not write sidecar" name exception = e
+        return false
+    end
+end
+
 """
 Paths that have chosen to stop being told this document is shared. Recorded PER PATH, not per
 document, so one copy going quiet never silences the notice for another.

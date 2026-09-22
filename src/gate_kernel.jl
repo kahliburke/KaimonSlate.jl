@@ -1501,6 +1501,115 @@ function table_page(k::GateKernel, report::Report, table_id::AbstractString, req
     return (rows = collect(wire.rows), total = Int(wire.total))
 end
 
+# ── cell debugger ─────────────────────────────────────────────────────────────
+#
+# Forward each stepping verb to the worker, where the frame lives. The payloads are
+# NamedTuples whose type comes from Base, so they ride the wire unchanged in both
+# directions — a struct would be `SlateWorker.DebugState` there and
+# `ReportEngine.DebugState` here, two types with the same name, and fail to
+# deserialize. This is also the whole of the remote story: a region kernel is a
+# GateKernel over a different transport, so it steps by this same path.
+#
+# A failed round-trip answers with a terminal state rather than throwing: the viewer
+# renders it the way it renders any other ending, and the session is already gone.
+#
+# A step runs user code, so it inherits the cell-eval budget rather than the short
+# control-message one — `continue` on a slow cell is an ordinary step, not a hang.
+const _DEBUG_TIMEOUT = 600.0
+
+_debug_tool(k::GateKernel, cell::AbstractString, name::String, args::Dict{String,Any}) =
+    try
+        w = _tool(k, name, args; timeout = _DEBUG_TIMEOUT)
+        w === nothing ? _error_state(cell, "the worker returned nothing") : w
+    catch e
+        _error_state(cell, first(sprint(showerror, e), 300))
+    end
+
+function debug_start!(k::GateKernel, report::Report; cell::AbstractString = "", source::AbstractString = "",
+                      mark_files::Vector{String} = String[], mark_lines::Vector{Int} = Int[],
+                      mark_conds::Vector{String} = String[], mark_enabled::Vector{Bool} = Bool[],
+                      watch_files::Vector{String} = String[], watch_lines::Vector{Int} = Int[],
+                      watch_exprs::Vector{String} = String[])
+    prepare!(k, report)
+    return _debug_tool(k, cell, "__slate_debug_start",
+                       Dict{String,Any}("cell" => String(cell), "source" => String(source),
+                                        "mark_files" => mark_files, "mark_lines" => mark_lines,
+                                        "mark_conds" => mark_conds, "mark_enabled" => mark_enabled,
+                                        "watch_files" => watch_files, "watch_lines" => watch_lines,
+                                        "watch_exprs" => watch_exprs))
+end
+
+debug_marks!(k::GateKernel, ::Report; mark_files::Vector{String} = String[],
+             mark_lines::Vector{Int} = Int[], mark_conds::Vector{String} = String[],
+             mark_enabled::Vector{Bool} = Bool[]) =
+    _debug_tool(k, "", "__slate_debug_marks",
+                Dict{String,Any}("mark_files" => mark_files, "mark_lines" => mark_lines,
+                                 "mark_conds" => mark_conds, "mark_enabled" => mark_enabled))
+
+debug_watch!(k::GateKernel, ::Report; watch_files::Vector{String} = String[],
+             watch_lines::Vector{Int} = Int[], watch_exprs::Vector{String} = String[]) =
+    _debug_tool(k, "", "__slate_debug_watch",
+                Dict{String,Any}("watch_files" => watch_files, "watch_lines" => watch_lines,
+                                 "watch_exprs" => watch_exprs))
+
+# Traces are the one debug payload that is a plain Dict rather than a DebugState, so it does not
+# go through `_debug_tool` (which normalises into that shape).
+debug_frame_locals!(k::GateKernel, ::Report) =
+    try
+        v = _tool(k, "__slate_debug_frame_locals", Dict{String,Any}(); timeout = _DEBUG_TIMEOUT)
+        v === nothing ? String[] : String[String(x) for x in v]
+    catch
+        String[]
+    end
+
+debug_traces(k::GateKernel, ::Report) =
+    try
+        t = _tool(k, "__slate_debug_traces", Dict{String,Any}(); timeout = _DEBUG_TIMEOUT)
+        t === nothing ? Dict{String,Any}() : t
+    catch
+        Dict{String,Any}()
+    end
+
+debug_step!(k::GateKernel, ::Report; mode::AbstractString = "next") =
+    _debug_tool(k, "", "__slate_debug_step", Dict{String,Any}("mode" => String(mode)))
+
+debug_into_targets(k::GateKernel, ::Report) =
+    try
+        t = _tool(k, "__slate_debug_into_targets", Dict{String,Any}(); timeout = _DEBUG_TIMEOUT)
+        t === nothing ? [] : t
+    catch
+        []
+    end
+
+debug_into!(k::GateKernel, ::Report; pc::Integer = 0, admit::AbstractString = "") =
+    _debug_tool(k, "", "__slate_debug_into",
+                Dict{String,Any}("pc" => Int(pc), "admit" => String(admit)))
+
+debug_interpret!(k::GateKernel, ::Report; admit::AbstractString = "", drop::AbstractString = "") =
+    _debug_tool(k, "", "__slate_debug_interpret",
+                Dict{String,Any}("admit" => String(admit), "drop" => String(drop)))
+
+debug_frame(k::GateKernel, ::Report) =
+    _debug_tool(k, "", "__slate_debug_frame", Dict{String,Any}())
+
+function debug_eval_expr(k::GateKernel, ::Report; expr::AbstractString = "")
+    try
+        w = _tool(k, "__slate_debug_eval", Dict{String,Any}("expr" => String(expr)); timeout = _DEBUG_TIMEOUT)
+        w === nothing ? (ok = false, value = nothing, error = "the worker returned nothing") : w
+    catch e
+        return (ok = false, value = nothing, error = first(sprint(showerror, e), 300))
+    end
+end
+
+# Stopping must not fail loudly: it is called on teardown paths where the worker may
+# already be gone, and the point is only to leave nothing behind.
+debug_stop!(k::GateKernel, ::Report) =
+    try
+        _tool(k, "__slate_debug_stop", Dict{String,Any}(); timeout = 30.0)
+    catch
+        (stopped = false, steps = 0)
+    end
+
 # Capture markdown interpolation expressions in the worker (rich, one each).
 function interpolate(k::GateKernel, report::Report, exprs::Vector{String})
     prepare!(k, report)

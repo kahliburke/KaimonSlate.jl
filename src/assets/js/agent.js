@@ -19,13 +19,24 @@ function toggleAgent() {
   p.classList.toggle('open');
   const open = p.classList.contains('open');
   document.body.classList.toggle('agent-open', open);   // slide cells left of the panel
-  if (open) { document.getElementById('apin').focus(); setWorking(agentWorking); }
+  // Sized on OPEN, not only at load: `scrollHeight` is 0 while the panel is hidden, so a draft
+  // left in the box would come back the wrong height until the first keystroke.
+  _publishAgentWidth();
+  if (open) { document.getElementById('apin').focus(); apAutoGrow(); setWorking(agentWorking); }
 }
+// The panel's real width, as a CSS variable on <body>. Read from the element rather than assumed,
+// so maximizing (or a narrow viewport clamping it) moves everything that sits clear of it.
+function _publishAgentWidth() {
+  const p = document.getElementById('agentpanel'); if (!p) return;
+  document.body.style.setProperty('--agentw', Math.round(p.getBoundingClientRect().width) + 'px');
+}
+window.addEventListener('resize', _publishAgentWidth);
 // Maximize / restore the agent panel — a wide near-fullscreen view for reading detailed replies.
 function toggleAgentMax() {
   const max = document.getElementById('agentpanel').classList.toggle('maximized');
   const b = document.getElementById('apmaxbtn');
   if (b) { b.textContent = max ? '🗗' : '⛶'; b.title = max ? 'restore the panel' : 'maximize the panel'; }
+  _publishAgentWidth();
 }
 window.toggleAgentMax = toggleAgentMax;
 // Show/hide the agent's streamed thinking (.apmsg.think) — a persisted view preference.
@@ -88,11 +99,37 @@ const _safeImgSrc = u => {
 };
 // Deterministic hue per crew label so each agent gets a stable lane color.
 function _crewHue(name) { let h = 0; for (const c of String(name)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
-// A small colored chip naming the speaking crew member (omitted for the solo agent).
+// A small colored chip naming the speaking agent. The notebook's own agent is named too, now that
+// it is not the only voice: with a specialist and a reviewer both talking, the UNLABELLED one is
+// the ambiguous one, and "which of them said this" is the first thing you need to know.
+//
+// It is KAIMON, shown as 開門 — the mark Kaimon already carries in its own TUI, where the same two
+// characters identify a session as Kaimon's. One mark, one meaning, in both places. `debugger` and
+// `checker` stay lowercase Latin because they are JOBS; the difference in script says which of the
+// three is a participant with a name and which two are roles, without anyone explaining it.
+//
+// Not the model it happens to be running on: that changes without it becoming a different
+// participant in the conversation.
+const SOLO_NAME = 'Kaimon';
+const SOLO_MARK = '開門';
+const _crewName = crew => crew || SOLO_NAME;
+const _crewMark = crew => crew || SOLO_MARK;
 function _crewBadge(crew) {
-  if (!crew) return '';
-  const h = _crewHue(crew);
-  return `<span class="crewbadge" style="--ch:${h}">${_esca(crew)}</span>`;
+  return `<span class="crewbadge" style="--ch:${_crewHue(_crewName(crew))}"` +
+         ` title="${_esca(_crewName(crew))}" aria-label="${_esca(_crewName(crew))}">` +
+         `${_esca(_crewMark(crew))}</span>`;
+}
+// Only an AGENT gets named. What you typed is yours, and a system line belongs to the app — an
+// empty `crew` means "the notebook's agent" on a message the agent produced and nothing of the
+// sort on one you did, so the badge has to read the role rather than the crew alone.
+const _NOT_AN_AGENT = new Set(['user', 'note', 'searching']);
+const _speakerBadge = m => (_NOT_AN_AGENT.has(m.role) ? '' : _crewBadge(m.crew));
+// The same name as a block heading rather than an inline chip — for a grouped run of actions,
+// where it is said once for the whole block.
+function _crewLabel(crew) {
+  return `<span class="crewlabel" style="--ch:${_crewHue(_crewName(crew))}"` +
+         ` title="${_esca(_crewName(crew))}" aria-label="${_esca(_crewName(crew))}">` +
+         `${_esca(_crewMark(crew))}</span>`;
 }
 // Marks a tool call driven into this notebook from OUTSIDE its chat — an external MCP agent
 // (or one Kaimon spawned for another notebook) reaching the slate.* tools directly.
@@ -102,20 +139,38 @@ function _extBadge(on) {
 // Turn a raw tool identifier (e.g. "mcp__kaimon__slate_add_cell") into a friendly,
 // icon-prefixed label for the chat. Known tools get a hand-picked icon + name; any
 // other tool falls back to its prefix-stripped, de-underscored form.
+// Keyed on the BARE verb, not the full tool name: a gate serves under a namespace, so the same
+// verb arrives as `slate_read` in one install and `slate_dbg_read` in another. Keying on the full
+// name meant every tool from a non-default namespace missed and rendered as "slate dbg dbg eval".
 const _TOOL_LABEL = {
-  slate_read:'📖 read notebook', slate_add_cell:'➕ add cell', slate_edit_cell:'✏️ edit cell',
-  slate_run:'▶ run cell', slate_delete_cell:'🗑 delete cell', slate_view:'🖼 view figure', slate_surface:'🎛 surface controls',
-  slate_search_docs:'🔎 search docs', slate_index_docs:'📇 index docs',
-  slate_acquire_floor:'🔒 acquire floor', slate_release_floor:'🔓 release floor',
-  slate_inspect:'🔬 inspect cell', slate_diag:'🩺 diagnostics', slate_eval:'λ scratch eval', slate_eval_js:'🧩 eval JS', slate_export_pdf:'📄 export PDF',
-  slate_list:'📚 list notebooks', slate_open:'📂 open notebook', slate_close:'📕 close notebook',
-  ex:'λ eval', qdrant_search_code:'🔎 search code', goto_definition:'↪ goto def',
+  read:'📖 read notebook', add_cell:'➕ add cell', edit_cell:'✏️ edit cell',
+  run:'▶ run cell', delete_cell:'🗑 delete cell', view:'🖼 view figure', surface:'🎛 surface controls',
+  search_docs:'🔎 search docs', index_docs:'📇 index docs',
+  acquire_floor:'🔒 acquire floor', release_floor:'🔓 release floor',
+  inspect:'🔬 inspect cell', diag:'🩺 diagnostics', eval:'λ scratch eval', eval_js:'🧩 eval JS', export_pdf:'📄 export PDF',
+  list:'📚 list notebooks', open:'📂 open notebook', close:'📕 close notebook',
+  rename_cell:'🏷 rename cell', pkg:'📦 packages', request_file_access:'🔑 ask for file access',
+  dbg_start:'🐞 start debugging', dbg_step:'👣 step', dbg_frame:'🧾 frame',
+  dbg_eval:'🔬 look at a value', dbg_break:'⏹ breakpoint', dbg_watch:'📈 watch',
+  dbg_summon:'🐞 summon debugger', dbg_wait:'⏳ wait for specialist', dbg_tell:'💬 tell specialist',
+  dbg_ask:'❓ ask', dbg_choose:'❓ offer a choice', dbg_answer:'✔ answer', dbg_done:'✓ finish debugging',
+  check_ok:'✔ checked', check_flag:'⚑ flagged',
+  ex:'λ eval', qdrant_search_code:'🔎 search code', search_code:'🔎 search code', goto_definition:'↪ goto def',
   search_methods:'🔎 search methods', format_code:'✨ format', run_tests:'✅ run tests',
   Read:'📄 read file', Edit:'✏️ edit file', Write:'📝 write file', Bash:'⌨ shell',
   Grep:'🔎 grep', Glob:'🔎 glob', TodoWrite:'📋 todo', WebFetch:'🌐 fetch', WebSearch:'🌐 web',
 };
-function _prettyTool(name) {
+// The bare verb behind a namespaced tool name, or the name itself when it isn't one.
+function _bareTool(name) {
   let s = String(name || 'tool').replace(/^mcp__[a-z0-9_]+__/i, '');   // drop the MCP server prefix
+  // Drop leading segments until one is a verb we know. `slate_dbg_dbg_eval` → `dbg_eval`, which
+  // stops there rather than going on to `eval` and calling a frame probe a scratch eval.
+  let t = s;
+  while (!_TOOL_LABEL[t] && t.includes('_')) t = t.slice(t.indexOf('_') + 1);
+  return _TOOL_LABEL[t] ? t : s;
+}
+function _prettyTool(name) {
+  const s = _bareTool(name);
   if (_TOOL_LABEL[s]) return _TOOL_LABEL[s];
   // Already-friendly title (has a space / capital) → keep as-is; else de-snake_case it.
   if (/[ A-Z]/.test(s) && !s.includes('_')) return s;
@@ -200,10 +255,109 @@ function _agentMsgHtml(m) {
     return `<div class="apmsg tool${lane}${m.external ? ' ext' : ''}${hasDetail ? ' expandable' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}` +
       `${hasDetail ? '<span class="toolcaret">▸</span>' : ''}${_esca(m.text)}${cidChip}${codePre}${detail}</div>`;
   }
+  if (m.role === 'searching') {
+    return `<div class="apmsg note searching">${_esca(m.text)}</div>`;
+  }
+  if (m.role === 'toolrun') {
+    // The crew once, at the top, then the calls as a list. Each line keeps its own expandable
+    // args/result — the compaction is of the repeated chrome, not of the detail.
+    const lines = m.items.map(x => {
+      const cid = x.cid ? ` <span class="toolnav" data-cid="${_esca(x.cid)}">→ ${_esca(x.cid)}</span>` : '';
+      const a = x.args != null ? _argsPretty(x.args) : '';
+      const r = x.resultText || x.result || '';
+      const detail = (a || r) ? `<div class="tooldetail">` +
+        (a ? `<div class="tdlabel">args</div><pre class="toolargs">${_esca(a)}</pre>` : '') +
+        (r ? `<div class="tdlabel">result</div><pre class="toolresult${x.resultErr ? ' err' : ''}">${_esca(r)}</pre>` : '') +
+        `</div>` : '';
+      return `<div class="toolline${(a || r) ? ' expandable' : ''}${x.resultErr ? ' err' : ''}">` +
+             `${_extBadge(x.external)}${_esca(x.text)}${cid}${detail}</div>`;
+    }).join('');
+    return `<div class="apmsg toolrun${lane}" ${tag}>` +
+      `<div class="toolrunh">${_crewLabel(m.crew)}<span class="toolrunn">${m.items.length} actions</span></div>` +
+      `<div class="toolrunlist">${lines}</div></div>`;
+  }
+  if (m.role === 'finding') {
+    const f = m.f;
+    const v = f.verdict ? `<span class="apfindv ${_esca(f.verdict)}">${_esca(f.verdict)}</span>` : '';
+    const gap = (f.unread_upstream || []).length
+      ? `<div class="apfindgap">never looked at ${_esca(f.unread_upstream.join(', '))} — which produce its inputs</div>` : '';
+    const dec = f.decision ? `<span class="apfinddec">${f.decision === 'go' ? '✓ approved'
+      : f.decision === 'no' ? '✕ declined' : '✎ ' + _esca(f.decision)}</span>` : '';
+    const plan = f.plan ? `<div class="apfindplan">plan: ${_esca(f.plan)}${dec}</div>` : '';
+    // The claim is the headline and stays; the evidence and the reviewer's working are what make
+    // this a record rather than a sentence, and they run to paragraphs. Two findings rendered in
+    // full were most of a screen, so they fold — the claim is what you read, the rest is what you
+    // check it against when you want to.
+    const detail = (f.evidence || f.verdict_why)
+      ? `<div class="apfinddetail">` +
+        (f.evidence ? `<div class="tdlabel">evidence</div><div class="apfindev">${_esca(f.evidence)}</div>` : '') +
+        (f.verdict_why ? `<div class="tdlabel">verdict</div><div class="apfindwhy">${_esca(f.verdict_why)}</div>` : '') +
+        `</div>` : '';
+    return `<div class="apmsg finding ${_esca(f.verdict || 'open')}${detail ? ' expandable' : ''}">` +
+      `<div class="apfindh">${detail ? '<span class="toolcaret">▸</span>' : ''}` +
+      `<span class="apfindc">${_esca(f.cell || '(no cell named)')}</span>${v}</div>` +
+      `<div class="apfindclaim">${_esca(f.claim)}</div>` +
+      gap + plan + detail + `</div>`;
+  }
+  if (m.role === 'ask') {
+    // Answered only. While it is open the card above the page owns it — the live controls being in
+    // two places at once is how you end up answering the same question twice.
+    if (m.answered == null) return `<div class="apmsg note">… waiting on your answer above</div>`;
+    // Once answered it is a record, not a question: what you were asked, in a line, and what you
+    // said. Re-rendering the whole proposal made the answer the smallest thing on screen.
+    const asked = String(m.text || '').split('\n')[0];
+    return `<div class="apmsg ask answered expandable">` +
+           `<div class="apaskdone">✓ ${_esca(m.answeredLabel || m.answered)}</div>` +
+           `<div class="apaskasked">${_esca(asked)}</div>` +
+           `<div class="apaskfull">${mdLite(m.text)}</div></div>`;
+  }
   return (
       m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${_safeImgSrc(m.src)}" alt="agent image"></div>`
     : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
-    :                     `<div class="apmsg ${m.role}${lane}${m.external ? ' ext' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}${_esca(m.text)}</div>`);
+    :                     `<div class="apmsg ${m.role}${lane}${m.external ? ' ext' : ''}" ${tag}>` +
+                          `${_speakerBadge(m)}${_extBadge(m.external)}${_esca(m.text)}</div>`);
+}
+// Consecutive tool calls by the same agent, as ONE block: the crew named once as a heading, then a
+// line per call. They do not have to be the same tool — a debugging specialist's run is watch,
+// breakpoint, step, frame, eval, and as separate rows that is six repetitions of its own name down
+// the left of a 368px panel, with the sentences on either side pushed apart.
+//
+// A call carrying code keeps its own row: the code is the content, and folding it into a list would
+// hide the thing worth reading.
+// Calls that change nothing and show YOU nothing — the agent reaching for its own tools, or
+// waiting. Recording each one permanently was like logging an import: it pushed the actual work
+// apart, and an agent that searches twice in a row got two rows saying so.
+//
+// While one is in flight it becomes a transient line, because the pause is worth explaining. Then
+// it goes. The value is that line's caption; a kind with no caption disappears silently.
+const _PLUMBING = {
+  ToolSearch: '⋯ discovering tools',
+  dbg_wait: '⋯ waiting for the specialist',
+  TodoWrite: '',
+};
+const _plumbingOf = m => (m.role === 'tool' ? _PLUMBING[m.raw || m.text] : undefined);
+const _isPlumbing = m => _plumbingOf(m) !== undefined;
+
+const _RUN_MIN = 2;
+function _collapseRuns(msgs) {
+  const out = [];
+  let searching = null;   // the caption of a plumbing call still in flight, or null
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (_isPlumbing(m)) { searching = m.done ? null : (_plumbingOf(m) || null); continue; }
+    searching = null;
+    if (m.role !== 'tool' || m.code) { out.push(m); continue; }
+    let j = i;
+    while (j + 1 < msgs.length && msgs[j + 1].role === 'tool' && !msgs[j + 1].code &&
+           (msgs[j + 1].crew || '') === (m.crew || '')) j++;
+    const n = j - i + 1;
+    if (n < _RUN_MIN) { for (let k = i; k <= j; k++) out.push(msgs[k]); }
+    else out.push({ role: 'toolrun', crew: m.crew, items: msgs.slice(i, j + 1),
+                    done: msgs.slice(i, j + 1).every(x => x.done) });
+    i = j;
+  }
+  if (searching) out.push({ role: 'searching', text: searching });
+  return out;
 }
 const _nodeFromHtml = h => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content.firstChild; };
 function renderAgentMsgs() {
@@ -216,16 +370,19 @@ function renderAgentMsgs() {
   // keep their live DOM — and the scroll position inside a tool-output/code block isn't reset to the
   // top every streaming delta. Completed-and-rendered messages are skipped entirely (cheap streaming).
   el.querySelectorAll(':scope > .apworking').forEach(n => n.remove());   // drop indicator → indices align
+  // Reconcile against the COLLAPSED list, not agentMsgs: a run of repeated calls is one node, so
+  // the index a node sits at is its position here rather than in the raw transcript.
+  const view = _collapseRuns(agentMsgs);
   const changed = [];
-  for (let i = 0; i < agentMsgs.length; i++) {
-    const m = agentMsgs[i], node = el.children[i];
+  for (let i = 0; i < view.length; i++) {
+    const m = view[i], node = el.children[i];
     if (node && m.done && node.dataset.done === '1') continue;          // immutable completed msg → leave it
     const html = _agentMsgHtml(m);
     if (!node) { const n = _nodeFromHtml(html); n.dataset.h = html; n.dataset.done = m.done ? '1' : '0'; el.appendChild(n); changed.push(n); }
     else if (node.dataset.h !== html) { const n = _nodeFromHtml(html); n.dataset.h = html; n.dataset.done = m.done ? '1' : '0'; el.replaceChild(n, node); changed.push(n); }
     else node.dataset.done = m.done ? '1' : '0';
   }
-  while (el.children.length > agentMsgs.length) el.removeChild(el.lastChild);   // drop trailing extras
+  while (el.children.length > view.length) el.removeChild(el.lastChild);   // drop trailing extras
   if (agentWorking) {
     const s = Math.max(0, Math.floor((Date.now() - agentT0) / 1000));
     const w = _nodeFromHtml(`<div class="apworking"><span class="dots"><i></i><i></i><i></i></span>working… ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}` +
@@ -241,6 +398,12 @@ function renderAgentMsgs() {
   el.addEventListener('click', e => {
     const nav = e.target.closest('.toolnav');
     if (nav && nav.dataset.cid) { try { window.selectCell && window.selectCell(nav.dataset.cid, true); } catch (_) {} return; }
+    const line = e.target.closest('.toolline.expandable');   // one call inside a grouped run
+    if (line) { line.classList.toggle('expanded'); return; }
+    const find = e.target.closest('.apmsg.finding.expandable');
+    if (find) { find.classList.toggle('expanded'); return; }
+    const ask = e.target.closest('.apmsg.ask.answered.expandable');
+    if (ask) { ask.classList.toggle('expanded'); return; }
     const tool = e.target.closest('.apmsg.tool.expandable'); if (tool) tool.classList.toggle('expanded');   // reveal full args/result
   });
 })();
@@ -266,7 +429,99 @@ async function loadAgentLog() {
     if (agentWorking && !Object.keys(r.agents || {}).length) setWorking(false);
     renderAgentMsgs();
   } catch (_) {}
+  await loadAsksAndFindings();
 }
+
+// Findings and blocked questions are pushed, and a push only reaches a page that was already open.
+// After a reload the transcript replayed but these did not: a question blocking an agent was
+// invisible, and a finding from before the reload appeared only if something later re-broadcast it
+// — arriving at the bottom, out of order, when it did.
+async function loadAsksAndFindings() {
+  try {
+    const r = await api('GET', '/api/asks');
+    if (!r) return;
+    for (const f of (r.findings || [])) _agentFinding(f);
+    for (const a of (r.asks || [])) if (!a.role) _agentAsk(a);
+    renderAsks();
+  } catch (_) {}
+}
+// A blocked question from the notebook's OWN agent (no specialist role), so it belongs in the
+// chat rather than the debugger's pane: its turn is stopped mid-tool-call waiting for the answer,
+// and the transcript is where its last sentence already is.
+(window.slateSpecialistSubs ||= []).push(p => {
+  if (!p) return;
+  // A finding outlives the session that produced it — signing off CLOSES the session, which shuts
+  // the debugging workspace, so the pane that shows findings is gone at the moment one appears.
+  // The chat is where it lasts, and where the proposal about it arrives.
+  if (p.finding) { _agentFinding(p.finding); return; }
+  if (p.role) return;                       // everything below is the notebook agent's own
+  if (p.ask) _agentAsk(p.ask);
+  // The full list arrives when one is cleared. An ask that is gone but still has buttons here was
+  // answered somewhere else, or timed out — either way it is no longer a question.
+  if (p.asks !== undefined) {
+    const live = new Set((p.asks || []).map(a => a.id));
+    let dirty = false;
+    for (const m of agentMsgs) {
+      if (m.role === 'ask' && m.answered == null && !live.has(m.id)) { m.answered = 'withdrawn'; m.answeredLabel = 'no longer waiting'; dirty = true; }
+    }
+    if (dirty) { renderAgentMsgs(); renderAsks(); }
+  }
+});
+// One finding, updated in place as a verdict and then a decision land on it. Keyed by id rather
+// than appended, or the same conclusion stacks up three times — which is the thing the record
+// exists to stop.
+function _agentFinding(f) {
+  const i = agentMsgs.findIndex(m => m.role === 'finding' && m.id === f.id);
+  if (i < 0) agentMsgs.push({ role: 'finding', id: f.id, f });
+  else agentMsgs[i] = { role: 'finding', id: f.id, f };
+  renderAgentMsgs();
+}
+function _agentAsk(a) {
+  if (!a || agentMsgs.some(m => m.role === 'ask' && m.id === a.id)) return;
+  agentMsgs.push({ role: 'ask', id: a.id, text: a.text, options: a.options || [] });
+  renderAgentMsgs(); renderAsks();
+}
+
+// A blocked question, as a card floating over the page rather than a block inside the transcript.
+//
+// It is NOT a modal in the usual sense: no backdrop, nothing dimmed, nothing blocked. A proposal
+// arrives at the end of a long investigation and the first thing you want is to scroll back through
+// what led to it — so the panel behind has to stay readable and scrollable while the question sits
+// there waiting.
+function _askCard() {
+  let el = document.getElementById('apaskcard');
+  if (!el) { el = document.createElement('div'); el.id = 'apaskcard'; document.body.appendChild(el); }
+  return el;
+}
+function renderAsks() {
+  const el = _askCard();
+  const open = agentMsgs.filter(m => m.role === 'ask' && m.answered == null);
+  if (!open.length) { el.innerHTML = ''; el.classList.remove('show'); return; }
+  el.innerHTML = open.map(m => {
+    const opts = (m.options || []).map(o =>
+      `<button class="apaskb" onclick="agentAnswerAsk('${_esca(m.id)}','${_esca(o.value)}')">${_esca(o.label)}</button>`).join('');
+    return `<div class="apaskcardbody" data-id="${_esca(m.id)}">
+      <div class="apaskq">${mdLite(m.text)}</div>
+      <textarea class="apasknote" rows="1" placeholder="add a comment (optional) — it goes with your answer"></textarea>
+      <div class="apaskbtns">${opts}</div></div>`;
+  }).join('');
+  el.classList.add('show');
+  const ta = el.querySelector('.apasknote'); if (ta) ta.focus();
+}
+async function agentAnswerAsk(id, value) {
+  const m = agentMsgs.find(x => x.role === 'ask' && x.id === id);
+  if (!m || m.answered != null) return;
+  const box = _askCard().querySelector(`.apaskcardbody[data-id="${CSS.escape(id)}"] .apasknote`);
+  const note = box ? box.value.trim() : '';
+  const opt = (m.options || []).find(o => o.value === value);
+  m.answered = value; m.answeredLabel = (opt ? opt.label : value) + (note ? ' — ' + note : '');
+  renderAsks(); renderAgentMsgs();
+  // The choice on the first line, the comment under it. "Yes, but not that part" is the answer a
+  // person most often wants to give, and a pair of buttons alone cannot express it.
+  try { await api('POST', '/api/debug/answer', { id, text: note ? value + '\n' + note : value }); }
+  catch (e) { m.answered = null; renderAsks(); renderAgentMsgs(); }
+}
+
 const agentStatus = s => { document.getElementById('apstatus').textContent = s || ''; };
 // A centered, dim system line in the transcript (e.g. "⚙ model → … applies next message").
 function _agentNote(text) { agentMsgs.push({ role: 'note', text }); renderAgentMsgs(); }
@@ -309,9 +564,30 @@ function _uiThemeDark() {
     return t ? !!t.dark : true;
   } catch (_) { return true; }
 }
+// Grow the box to fit what is in it, up to a cap.
+//
+// A textarea cannot do this from CSS: its height is a fixed number of rows, so a fixed height was
+// a box you type past rather than into. Measuring needs the height reset to `auto` first —
+// `scrollHeight` reports the CONTENT height only when the element is not already constraining it,
+// so reading it without that returns whatever it was last set to and the box never shrinks again.
+const AP_MAX_H = 320;
+function apAutoGrow() {
+  const el = document.getElementById('apin'); if (!el) return;
+  el.style.height = 'auto';
+  const want = Math.min(el.scrollHeight, AP_MAX_H);
+  el.style.height = want + 'px';
+  // Past the cap it scrolls; below it, a scrollbar over empty space is noise.
+  el.style.overflowY = el.scrollHeight > AP_MAX_H ? 'auto' : 'hidden';
+}
+
 async function agentSend() {
   const inp = document.getElementById('apin'), text = inp.value.trim(); if (!text) return;
-  inp.value = ''; _stopArmed = false; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
+  inp.value = ''; apAutoGrow();     // back to one line, or a sent paragraph leaves a hole
+  // Shown straight away rather than waiting for the server to echo it back, so typing feels
+  // answered. `local` marks it as the one the `user_text` event should adopt instead of appending
+  // its own copy — see the handler.
+  _stopArmed = false; agentMsgs.push({ role: 'user', text, local: true });
+  agentStatus('thinking…'); setWorking(true);
   try {
     const r = await api('POST', '/api/chat', { text, target: _chatTarget || '', model: effectiveAgentModel(), permission: effectiveAgentPerm(), dark: _uiThemeDark() });
     if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); agentStatus(''); setWorking(false); }
@@ -351,22 +627,48 @@ function _argCid(args) {
 }
 function agentEvent(env) {
   if (!env) return;
+  // The debugger's focus view keeps its OWN transcript of the specialist working, rendered for a
+  // debugging session rather than for chat. It reads the same envelopes; the panel below is
+  // unaffected either way, so a crew member appears in both places without either owning it.
+  try { window.onDebugAgentEvent && window.onDebugAgentEvent(env); } catch (e) {}
   const d = env.data || {};
   const k = env.kind;
   const crew = env.crew || '';   // crew label of the speaking agent ('' = solo/default)
-  if (k === 'assistant_text' || k === 'thought') {
+  if (k === 'user_text') {
+    // Your own turn. It is in the log, so a reload has to rebuild it — without this the transcript
+    // came back as the agent answering nothing. Live, `agentSend` has already shown it, so the
+    // event adopts that copy rather than appending a second one.
+    const txt = (d.content && d.content.text) || '';
+    if (!txt) return;
+    const mine = agentMsgs.find(m => m.role === 'user' && m.local && m.text === txt);
+    if (mine) delete mine.local;
+    else agentMsgs.push({ role: 'user', text: txt });
+  } else if (k === 'assistant_text' || k === 'thought') {
     // Streaming: delta:true chunks APPEND live; the final delta:false copy REPLACES
     // the streamed block (self-healing any dropped delta). Non-streaming services
     // send only complete blocks → the else branch (back-compat).
     const role = k === 'thought' ? 'think' : 'assistant';
     const txt = (d.content && d.content.text) || '';
-    let last = agentMsgs[agentMsgs.length - 1];
-    const openSame = last && last.role === role && !last.done;
+    // The open block for THIS crew, not whatever is last in the list. Two agents stream at once now
+    // — a specialist working while a reviewer reads — and matching on role alone appended one
+    // agent's sentence into the other's paragraph. Searching back rather than taking the tail also
+    // keeps a block whole when the other agent's tool row lands in the middle of it.
+    let last = null;
+    for (let i = agentMsgs.length - 1; i >= 0; i--) {
+      const m = agentMsgs[i];
+      // Only this crew's blocks OF THIS ROLE are candidates; everything else is looked past, which
+      // keeps a block whole when another agent's rows — or this agent's own thinking — land in the
+      // middle of it. The first one found ends the search either way: open, it is the block being
+      // streamed; done, it belongs to an earlier turn and appending there would rewrite history.
+      if (m.role !== role || (m.crew || '') !== crew) continue;
+      if (!m.done) last = m;
+      break;
+    }
     if (d.delta === true) {
       if (!txt) return;
-      if (!openSame) { last = { role, text: '', streamed: true, crew }; agentMsgs.push(last); }
+      if (!last) { last = { role, text: '', streamed: true, crew }; agentMsgs.push(last); }
       last.text += txt; last.streamed = true;
-    } else if (openSame && last.streamed) {
+    } else if (last && last.streamed) {
       last.text = txt; last.done = true;                 // authoritative copy
     } else {
       if (!txt) return;
@@ -379,6 +681,7 @@ function agentEvent(env) {
     let tm = agentMsgs.find(m => m.role === 'tool' && m.id === c.toolCallId);
     if (!tm) { tm = { role: 'tool', id: c.toolCallId, title: '', inputBuf: '', code: '', done: false, crew }; agentMsgs.push(tm); }
     if (env.external) tm.external = true;   // a tool call from OUTSIDE this notebook's chat (an external agent)
+    tm.raw = _bareTool(c.title || c.kind || tm.raw || 'tool');
     tm.title = _prettyTool(c.title || c.kind || tm.title || 'tool');
     tm.text = tm.title;
     if (c.rawInput) { tm.code = _extractCode(JSON.stringify(c.rawInput)) || tm.code; tm.args = c.rawInput; const cc = _argCid(c.rawInput); cc && (tm.cid = cc); }
@@ -416,7 +719,14 @@ function agentEvent(env) {
   } else if (k === 'turn_started') {
     agentStatus('working…'); setWorking(true); return;
   } else if (k === 'result') {
-    const last = agentMsgs[agentMsgs.length - 1]; if (last && last.role === 'assistant') last.done = true;
+    // This crew's open block, not the tail: one agent finishing must not close another's, which
+    // would strand the still-streaming one and make its next chunk start a second bubble.
+    for (let i = agentMsgs.length - 1; i >= 0; i--) {
+      const m = agentMsgs[i];
+      if ((m.crew || '') !== crew) continue;
+      if (m.role === 'assistant') m.done = true;
+      break;
+    }
     agentStatus(''); setWorking(false);
   } else if (k === 'error') {
     agentMsgs.push({ role: 'err', text: d.message || 'error' }); agentStatus(''); setWorking(false);
@@ -465,6 +775,10 @@ function _insertMention(i) {
   _closeMention(); ta.focus(); ta.setSelectionRange(np, np);
 }
 document.getElementById('apin').addEventListener('input', updateMention);
+document.getElementById('apin').addEventListener('input', apAutoGrow);
+// Pasting fires `input`, but a programmatic set (a draft restored, a template inserted) does not —
+// so size it once at load too, rather than leaving a prefilled box the wrong height.
+apAutoGrow();
 document.getElementById('apin').addEventListener('blur', () => setTimeout(_closeMention, 150));
 document.getElementById('apin').addEventListener('keydown', e => {
   if (_mention.open) {                                  // mention menu intercepts nav keys

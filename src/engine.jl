@@ -553,6 +553,8 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
     if fi !== nothing
         env = _parse_env_footer(@view lines[fi:end])   # picks up the Slate.env block if present
         isempty(env) || (report.meta["env"] = env)
+        fnd = _parse_findings_footer(@view lines[fi:end])        # Slate.findings: shared conclusions
+        isempty(fnd) || (report.meta["findings_incoming"] = fnd)
         for (k, v) in _parse_config_footer(@view lines[fi:end])   # Slate.config: per-notebook settings
             report.meta[k] = v
         end
@@ -668,7 +670,7 @@ const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # carries its presentation style with it. `publishrepo`/`publishslug` remember WHERE this notebook
 # was last published (owner/name + slug), so the dialog pre-fills and a CI action can read the
 # target — authored intent that travels with the file (see the git-noise/sidecar discussion).
-const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "macroexpand", "agentmodel", "runon",
+const _CONFIG_KEYS = ("sharefindings", "parallel", "threads", "hotreload", "macroexpand", "agentmodel", "runon",
                       "regions",
                       # `juliaflags` = extra flags for THIS notebook's worker process. Registered in
                       # the settings UI and pushed to a live kernel, so leaving it out here made it a
@@ -680,7 +682,7 @@ const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "macroexpand", "agentm
                       "replaystrides",
                       "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle",
                       "publishrepo", "publishslug", "series", "docid")
-const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
+const _CONFIG_TYPES = Dict("sharefindings" => :bool, "parallel" => :bool, "threads" => :string, "hotreload" => :bool,
                            # `macroexpand` = macro-aware dependency analysis (expand unknown macros in
                            # the kernel to recover their true reads/writes). Off = conservative static
                            # analysis only, for the rare macro with expansion-time side effects.
@@ -702,7 +704,48 @@ const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload
                            "docid" => :string)
 
 
+# ── findings footer ───────────────────────────────────────────────────────────────────────────────
+#
+# What past investigations established about this notebook, carried IN THE FILE so it reaches
+# whoever opens it next — including someone on another machine, who has none of the local history.
+#
+# Off by default. A finding's evidence runs to paragraphs, and writing that into the document on
+# every save is diff noise on a scale nobody asked for. Turned on (`sharefindings`) it becomes part
+# of what the notebook is: "we established this, it was reviewed, here is what was decided".
+#
+# One JSON object per comment line. JSON escapes its own newlines, so a record cannot break out of
+# its line, and the whole block is inert to Julia like the rest of the footer.
+const _FIND_MARK_OPEN = "# ╔═╡ Slate.findings"
 
+function _render_findings_footer(meta)::String
+    get(meta, "sharefindings", false) === true || return ""
+    fs = get(meta, "findings", nothing)
+    (fs isa AbstractVector && !isempty(fs)) || return ""
+    io = IOBuffer()
+    println(io, _FIND_MARK_OPEN, " · what past investigations established")
+    for f in fs
+        line = try; JSON.json(f); catch; ""; end
+        isempty(line) && continue
+        println(io, "#   ", replace(line, "\n" => " "))
+    end
+    print(io, _ENV_MARK_CLOSE)
+    return String(take!(io))
+end
+
+function _parse_findings_footer(lines)::Vector{Any}
+    out = Any[]
+    infind = false
+    for l in lines
+        startswith(l, _FIND_MARK_OPEN) && (infind = true; continue)
+        infind || continue
+        startswith(l, _ENV_MARK_CLOSE) && break
+        m = match(r"^#\s+(\{.*\})\s*$", l)
+        m === nothing && continue
+        v = try; JSON.parse(String(m.captures[1])); catch; nothing; end
+        v === nothing || push!(out, v)
+    end
+    return out
+end
 
 function _render_config_footer(meta)::String
     items = Tuple{String,String}[]
@@ -881,7 +924,8 @@ function serialize_report(report::Report)
     # so the order here only has to be stable — not any particular one.
     parts = filter(!isempty, [_render_env_footer(get(report.meta, "env", Dict{String,Any}[])),
                               _render_config_footer(report.meta),
-                              _render_sweep_footer(get(report.meta, "sweepopts", nothing))])
+                              _render_sweep_footer(get(report.meta, "sweepopts", nothing)),
+                              _render_findings_footer(report.meta)])
     isempty(parts) && return body
     return body * "\n" * join(parts, "\n") * "\n"
 end
@@ -894,6 +938,7 @@ include(joinpath(@__DIR__, "echarts_dsl.jl")) # echart(:line,…)/series DSL (sh
 include(joinpath(@__DIR__, "slate_look.jl")) # slate_theme()/use_slate_theme! — shared ECharts/Makie palette
 include(joinpath(@__DIR__, "animation.jl")) # animate(frames;…) → Animation (used by capture.jl; shared)
 include(joinpath(@__DIR__, "reactive.jl"))  # reactive/@onclick/pause async primitives (shared)
+include(joinpath(@__DIR__, "worker_debug.jl")) # cell stepper (shared with the worker)
 include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table (used by capture.jl)
 include(joinpath(@__DIR__, "tools.jl"))     # slate_tool / @tool / slate_tools — gate tool calls as cell values
 include(joinpath(@__DIR__, "slate_matrix.jl")) # slate_matrix — auto-render for AbstractMatrix (used by capture.jl)
