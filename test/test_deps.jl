@@ -393,8 +393,9 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
     end
 
     @testset "wildcard using / include are barriers" begin
-        # A plain `using X` pulls in unknowable exports, and `include` runs unseen code →
-        # both must stay barriers (downstream conservatively depends).
+        # A plain `using X` pulls in unknowable exports, and `include` evaluates a whole file →
+        # both must stay barriers (downstream conservatively depends). A literal include's file IS
+        # read for what it defines (the expansion pass), which adds edges; the barrier is the floor.
         for src in ("using Statistics", "include(\"x.jl\")")
             c = Cell("c", CODE, src); infer_bindings!(c)
             @test :opaque in c.flags

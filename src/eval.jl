@@ -866,6 +866,30 @@ function _is_pure_using(src::AbstractString)
     return seen
 end
 
+# Is every barrier in this source an `include("literal")`? Such a cell is `:opaque` — it always
+# re-runs, which is what a cell that DEFINES things by evaluating a file should do — but it is not
+# IMPURE: its effect is a function of its source and the file it reads, and that file's content hash
+# is already folded into every downstream key (the literal path is a tracked input, deps.jl). So it
+# is the second :opaque shape that is safe to digest into a downstream key, alongside a pure `using`.
+# A computed `include(f)` or any `eval` is not: nothing hub-side can see what it did.
+function _is_tracked_include(src::AbstractString)
+    ex = try; Meta.parseall(String(src)); catch; return false; end
+    (ex isa Expr && !_has_parse_error(ex)) || return false
+    seen = Ref(false)
+    walk(e) = begin
+        e isa Expr || return true
+        if e.head === :macrocall && !isempty(e.args) && e.args[1] === Symbol("@eval")
+            return false
+        elseif e.head === :call && !isempty(e.args) && _is_barrier_callee(e.args[1])
+            _literal_include_path(e) === nothing && return false
+            seen[] = true
+            return true                                  # a literal path: no need to look inside
+        end
+        return all(walk, e.args)
+    end
+    return walk(ex) && seen[]
+end
+
 # A top-level statement that DEFINES something rather than computing it: a function (long or short
 # form), a type, a macro, or a `const` bound to a literal. Such a statement is self-sufficient — it
 # establishes a name without consuming another cell's data — so it belongs on every side alongside the
@@ -943,17 +967,20 @@ end
 # upstream SOURCES, so it's only total if every upstream value is a function of its source. A
 # `nocache`/`volatile` upstream (re-runs produce fresh values from the same source) or an :opaque
 # barrier (include(): effects from outside the source) breaks that — restoring downstream against a
-# re-run impure producer would silently resurrect the PREVIOUS run's values. EXCEPTION: an :opaque
+# re-run impure producer would silently resurrect the PREVIOUS run's values. EXCEPTIONS: an :opaque
 # upstream that is PURELY `using`/`import` — its effect is a function of (source, resolved env), both
-# already in the key. `:resource` is DETERMINISTIC-external (key-transparent: its source is still
-# digested, so an edit invalidates dependents). Shared cheap check (no I/O) for `_memo_key` (→
-# unkeyable) and `_memo_status` (→ the badge reason), so the two can't drift.
+# already in the key — and one whose only barrier is `include("literal")`, whose effect is a function
+# of (source, file content), the file being a tracked input the key already digests. Without the
+# second, a single `include` near the top of a notebook made every cell below it unkeyable.
+# `:resource` is DETERMINISTIC-external (key-transparent: its source is still digested, so an edit
+# invalidates dependents). Shared cheap check (no I/O) for `_memo_key` (→ unkeyable) and
+# `_memo_status` (→ the badge reason), so the two can't drift.
 function _key_poisoned(byid, closure)
     for id in closure
-        f = byid[id].flags
-        :resource in f && continue
-        (:nocache in f || :volatile in f) && return true
-        (:opaque in f && !_is_pure_using(byid[id].source)) && return true
+        c = byid[id]
+        :resource in c.flags && continue
+        (:nocache in c.flags || :volatile in c.flags) && return true
+        (:opaque in c.flags && !_is_pure_using(c.source) && !_is_tracked_include(c.source)) && return true
     end
     return false
 end

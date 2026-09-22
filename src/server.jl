@@ -716,7 +716,14 @@ function server_asset_changed(nb::LiveNotebook, changed::Vector{String})
     base = String(get(nb.report.meta, "assetbase", ""))
     chset = Set{String}(changed)
     _resolve(rel) = isabspath(rel) ? String(rel) : (isempty(base) ? String(rel) : joinpath(base, rel))
-    return _reactive_refresh!(nb, c -> any(rel -> _resolve(rel) in chset, c.inputs))
+    reads_changed(c) = any(rel -> _resolve(rel) in chset, c.inputs)
+    # An `include`d file is an input whose CONTENTS decide the cell's writes, so a change there
+    # invalidates more than the cell's result: forget its cached expansion too, or a definition the
+    # file just gained never reaches the graph.
+    ReportEngine.forget_expansions!(nb.report, lock(nb.lock) do
+        Cell[c for c in nb.report.cells if reads_changed(c)]
+    end)
+    return _reactive_refresh!(nb, reads_changed)
 end
 
 # Live per-cell run status (registered via `register_progress!` per notebook): `eval_cell!` calls

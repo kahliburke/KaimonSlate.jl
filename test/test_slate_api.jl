@@ -45,7 +45,9 @@ const UNDOCUMENTED_BY_DESIGN = Dict(
 
 # Every name a cell can see, from the ONE place they are injected — a fresh standalone namespace is
 # exactly the contract `_populate_notebook_ns!` installs. Filtered to the helpers: internals start
-# with `__`, and a module's own name plus Base's `eval`/`include` come free with any module.
+# with `__`, plus the module's own name and `eval` (injected for parity with a `module` block, which
+# gets it free — plain `Core.eval`, nothing Slate-specific to document). `include` IS injected AND
+# documented, because its path resolution and tracking are Slate behaviour.
 #
 # `names` MUST go through `invokelatest`: the helpers are installed with `Core.eval` during this same
 # call, so on Julia ≥1.12 they belong to a NEWER world age than this frame — a direct `names(m)` then
@@ -54,7 +56,7 @@ const UNDOCUMENTED_BY_DESIGN = Dict(
 function injected_names()
     m = Module(:DriftProbe)
     RE.standalone!(m; dir = mktempdir())
-    skip = (:eval, :include, :__slate_standalone, nameof(m))
+    skip = (:eval, :__slate_standalone, nameof(m))
     return String[String(n) for n in Base.invokelatest(names, m; all = true)
                   if !startswith(String(n), "__") && !(n in skip) && !startswith(String(n), "#")]
 end
