@@ -518,7 +518,11 @@ unfinished chunk looks `:missing`, which is the correct answer when there is no 
 A partially finished chunk counts as missing. Resubmitting it is cheap and safe because the runner
 skips shards that are already in the store, so a chunk killed at 90% resumes rather than repeats.
 """
+# `job_state` is the scheduler's answer when the caller already has it. One query covers every
+# submission in a store, so a page watching four sweeps asked the same question four times; the
+# caller that holds a shared answer passes it here instead. `nothing` means ask.
 function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
+              job_state::Union{Nothing,AbstractDict} = nothing,
               max_attempts::Integer = MAX_ATTEMPTS,
               failure_policy::FailurePolicy = FailurePolicy())
     chunks = sweep_chunks(root, sweep)
@@ -557,10 +561,11 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
 
     # Which chunks are covered by something the scheduler still has. One poll for the whole sweep.
     live = Dict{String,Symbol}()
-    if launcher !== nothing
+    if launcher !== nothing || job_state !== nothing
         names = collect(keys(subs))
         if !isempty(names)
-            states = BatchLauncher.poll(launcher, root, names)
+            states = job_state !== nothing ? job_state :
+                     BatchLauncher.poll(launcher, root, names)
             for (name, st) in states
                 st === :unknown && continue
                 for c in get(subs, name, String[])
@@ -640,8 +645,9 @@ Firing thousands of jobs should take an explicit decision, not happen because a 
 """
 function reconcile!(root::AbstractString, sweep::AbstractString, launcher, specfn;
                     submit::Bool = true, cap::Integer = 0,
+                    job_state::Union{Nothing,AbstractDict} = nothing,
                     failure_policy::FailurePolicy = FailurePolicy())
-    p = plan(root, sweep; launcher, failure_policy)
+    p = plan(root, sweep; launcher, job_state, failure_policy)
     # A tripped breaker produces an empty submit list, so this is belt and braces; being explicit
     # keeps it true if the plan's ordering ever changes.
     # A cancelled sweep must not be resurrected by the next reconcile — that is the whole point of

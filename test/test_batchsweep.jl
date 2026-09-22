@@ -40,6 +40,13 @@ BL.poll(l::FakeLauncher, root::AbstractString, names) =
 BL.cancel!(l::FakeLauncher, root::AbstractString, names) =
     (n = 0; for x in names; haskey(l.live, String(x)) && (delete!(l.live, String(x)); n += 1); end; n)
 
+# Polling this one is the failure. It stands in for the cluster in the tests about a caller that
+# already holds the scheduler's answer: the property is not "the same states come back", it is that
+# the question is never asked.
+struct NoPollLauncher <: BL.Launcher end
+BL.poll(::NoPollLauncher, root::AbstractString, names) =
+    error("the scheduler was asked, and the caller already had the answer")
+
 specfn(root, project = tempdir()) =
     (name, chunks) -> BL.JobSpec(name, chunks; root,
                                  project, payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
@@ -714,6 +721,31 @@ end
 
             # A tile index the grid could not have sent is an empty answer, not an exception.
             @test isempty(tile(999)["units"]) && isempty(tile(-1)["units"])
+        end
+    end
+
+    @testset "one scheduler query serves every sweep on the page" begin
+        # A store's submissions are covered by ONE query, so a page watching four sweeps asked the
+        # same question four times a tick and the cluster panel asked it again per sweep on top.
+        # A caller holding the answer hands it over, and the plan must then not ask at all — which
+        # is what this launcher checks, by refusing.
+        mktempdir() do root
+            sweep, _ = mksweep(root)
+            BS.reconcile!(root, sweep, FakeLauncher(), specfn(root); failure_policy = NOPROBE)
+            @test !isempty(BS.known_submissions(root))       # there IS something to ask about
+
+            name = first(keys(BS.known_submissions(root)))
+            p = BS.plan(root, sweep; launcher = NoPollLauncher(),
+                        job_state = Dict(name => :running))
+            @test all(==(:running), values(p.chunk_state))   # …and the answer given is the one used
+
+            # Without it, the same plan goes to the scheduler.
+            @test_throws ErrorException BS.plan(root, sweep; launcher = NoPollLauncher())
+
+            # `reconcile!` passes it through rather than re-asking underneath.
+            p2 = BS.reconcile!(root, sweep, NoPollLauncher(), specfn(root);
+                               submit = false, job_state = Dict(name => :pending))
+            @test all(==(:pending), values(p2.chunk_state))
         end
     end
 

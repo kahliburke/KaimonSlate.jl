@@ -1221,8 +1221,9 @@ function cluster_status(name::AbstractString = "";
     live = Dict{String,Symbol}()
     l = launcher_for(t)
     try
+        js = isempty(target_host(t)) ? nothing : collect_jobs(t)
         for (sw, created) in store_sweeps(root)
-            p = BatchSweep.plan(root, sw; launcher = l)
+            p = BatchSweep.plan(root, sw; launcher = l, job_state = js)
             sp = BatchSweep.spans(root, sw)
             # NOT `t`: that is the target, and everything after this loop still needs it.
             tel = BatchSweep.telemetry(root, sw; launcher = l, plan = p)
@@ -1247,11 +1248,21 @@ function cluster_status(name::AbstractString = "";
         # What the SCHEDULER says, not what we last wrote down — the difference between the two is
         # exactly the failure this answers ("the store says running, squeue has never heard of it").
         subs = BatchSweep.known_submissions(root)
-        isempty(subs) || (live = BatchLauncher.poll(l, root, collect(keys(subs))))
+        isempty(subs) || (live = js !== nothing ? js :
+                                 BatchLauncher.poll(l, root, collect(keys(subs))))
     catch e
         err = first(sprint(showerror, e), 200)
     end
-    return ClusterStatus(nm, spec, root, rows, live, store_size(source_of(t)),
+    # A shared read keeps serving its last answer when the cluster refuses one, which is right for a
+    # card and wrong for the panel that is meant to say what is going on. So a failure it swallowed
+    # is reported here, where there is somewhere to put it.
+    if isempty(err) && !isempty(target_host(t))
+        err = collect_state(t).err
+    end
+    # The store's size on its own slow clock: this walks every blob over there, and the panel
+    # asking for it repaints far more often than the number moves.
+    sz = isempty(target_host(t)) ? store_size(source_of(t)) : collect_size(t)
+    return ClusterStatus(nm, spec, root, rows, live, sz,
                          transfers(; label = "root:" * root), err)
 end
 
@@ -1364,8 +1375,18 @@ plan_root(t::LocalTarget) = t.root
 plan_root(t::ClusterTarget) = isempty(t.host) ? t.root : remote_store(t).mirror
 
 "Refresh the hub's view of a store before planning against it. No-op when the store is local."
-sync_in!(::LocalTarget) = true
-sync_in!(t::ClusterTarget) = isempty(t.host) ? true : pull_meta!(remote_store(t))
+# One poller per cluster rather than one per card: the cache in front of the three questions every
+# watcher asks. Included HERE rather than at the top because its methods are typed on
+# `ClusterTarget`, and a signature is resolved where it is written.
+Base.include(@__MODULE__, joinpath(@__DIR__, "clustercollect.jl"))
+
+# The mirror IS the store for a local target, so there is nothing to bring across and `force` has
+# nothing to force. Accepted rather than refused: the callers that write pass it for every target.
+sync_in!(::LocalTarget; force::Bool = false) = true
+# `force` for a caller about to write: a submission is decided from what the mirror says, so it
+# reads the store rather than a copy taken a moment ago on someone else's behalf.
+sync_in!(t::ClusterTarget; force::Bool = false) =
+    isempty(t.host) ? true : collect_pull!(t; force)
 
 # Reconcile, and send back what it wrote IF it submitted. `jobs/` is hub-owned — the submission
 # index and the attempt counts — and the store has to end up holding it: a fresh hub reads it to
@@ -1474,6 +1495,10 @@ _descriptors_sent!(t::SweepTarget, run::AbstractString) =
 
 function reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher;
                              submit::Bool = false, kw...)
+    # About to decide what to submit, so the mirror is read fresh rather than shared: a cached copy
+    # taken on a reader's behalf a moment ago could miss a chunk that has since landed, and the
+    # decision this makes is the one that must not be taken twice.
+    submit && sync_in!(target; force = true)
     if submit && !_ensure_descriptors!(target, run)
         error("could not send sweep $(run)'s descriptors to " *
               "$(target_host(target)):$(job_root(target)) — nothing was submitted")
@@ -3364,6 +3389,10 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
               "the cluster still holds this sweep's markers, so retry once it is reachable")
     end
     end     # _with_store_lock
+    # This action CHANGED what the cluster holds, so the shared answers describing it are dropped
+    # rather than served for another few seconds. The payload built below is the first thing to ask
+    # again, and a reset that still reported its old jobs would read as the reset not having worked.
+    collect_invalidate!(target)
     return status_payload(target, run, params, keys; plot)
 end
 
@@ -3383,9 +3412,13 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # …and it only submits for a sweep that has been ARMED, so a card left open on a sweep nobody
     # asked to run cannot start it.
     started = BatchSweep.is_started(root, run)
+    # The scheduler's answer covers every submission in the store, so it is asked once per cluster
+    # and handed to the plan rather than asked again per sweep on the page.
+    js = target isa ClusterTarget && !isempty(target.host) ? collect_jobs(target) : nothing
     p = advance ? reconcile_and_sync!(target, run, l; submit = started && _reachable(target),
+                                      job_state = js,
                                       failure_policy = sweep_policy(target)) :
-                  BatchSweep.plan(root, run; launcher = l)
+                  BatchSweep.plan(root, run; launcher = l, job_state = js)
     t = BatchSweep.telemetry(root, run; launcher = l, plan = p)
     _ds = display_state(p, started)
     _w = _when_stamp(root, run, started)
