@@ -52,7 +52,8 @@
 </head>
 <body>
 <div class="topbar">
-  <a class="brand" href="/" title="all notebooks"><svg class="brandmark" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2.5" y="2.5" width="43" height="43" rx="12" fill="#141828" stroke="#2a2e40" stroke-width="1.5"/><path d="M16 15 L33 20 M33 20 L22 34 M16 15 L22 34" stroke="#566089" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="15" r="4" fill="#7cc0ff"/><circle cx="33" cy="20" r="4" fill="#c586c0"/><circle cx="22" cy="34" r="4" fill="#56d364"/></svg>Slate</a>
+  <div class="topbar-lead">
+  <a class="brand" href="/" title="all notebooks"><svg class="brandmark" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2.5" y="2.5" width="43" height="43" rx="12" fill="#141828" stroke="#2a2e40" stroke-width="1.5"/><path d="M16 15 L33 20 M33 20 L22 34 M16 15 L22 34" stroke="#566089" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="15" r="4" fill="#7cc0ff"/><circle cx="33" cy="20" r="4" fill="#c586c0"/><circle cx="22" cy="34" r="4" fill="#56d364"/></svg><span class="brand-label">Slate</span></a>
   <span id="wdot" class="wdot" title=""></span>
   <h1 id="title" onclick="toggleFiles()" title="open Files — edit this notebook's package source" style="cursor:pointer">Notebook</h1>
   <span id="runpill" class="runpill" style="display:none" onclick="onPillClick()" title="run status — click for the activity log (or to jump through errors)"></span>
@@ -67,13 +68,17 @@
   <!-- Sign-in state for the hosts this notebook's sweeps and regions use. Rendered by
        js/sessions.js; absent entirely when no host is involved, amber when one wants a sign-in. -->
   <span id="sessions-btn-mount"></span>
+  </div><!-- end .topbar-lead -->
+  <!-- Action controls, grouped so the bar can wrap the whole set to a second row (and wrap within
+       itself when very narrow) instead of running them off the edge. See .topbar-actions in notebook.css. -->
+  <div class="topbar-actions">
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
-  <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
-  <button data-panel="tocpanel" onclick="toggleTOC()" title="table of contents — jump to a heading (⌘⇧L)">📑 Contents</button>
-  <button data-panel="dagpane" onclick="toggleDag()" title="pipeline graph — the notebook's dataflow DAG, live (⌘⇧G)">🕸 DAG</button>
-  <button data-panel="filespanel" onclick="toggleFiles()" title="edit this notebook's package source (src/ + notebooks/) — save reloads via Revise">📁 Files</button>
-  <button data-panel="palette" onclick="togglePalette()" title="controls palette — all @bind widgets">🎛 Controls</button>
-  <button id="agentbtn" data-panel="agentpanel" onclick="toggleAgent()" title="agent chat">💬 Agent</button>
+  <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋<span class="tb-label"> cell</span></button>
+  <button data-panel="tocpanel" onclick="toggleTOC()" title="table of contents — jump to a heading (⌘⇧L)">📑<span class="tb-label"> Contents</span></button>
+  <button data-panel="dagpane" onclick="toggleDag()" title="pipeline graph — the notebook's dataflow DAG, live (⌘⇧G)">🕸<span class="tb-label"> DAG</span></button>
+  <button data-panel="filespanel" onclick="toggleFiles()" title="edit this notebook's package source (src/ + notebooks/) — save reloads via Revise">📁<span class="tb-label"> Files</span></button>
+  <button data-panel="palette" onclick="togglePalette()" title="controls palette — all @bind widgets">🎛<span class="tb-label"> Controls</span></button>
+  <button id="agentbtn" data-panel="agentpanel" onclick="toggleAgent()" title="agent chat">💬<span class="tb-label"> Agent</span></button>
   <div class="menuwrap">
     <button onclick="toggleTopMenu(event)" title="more actions">☰</button>
     <div id="topmenu" class="topmenu">
@@ -103,6 +108,7 @@
       <a id="vscode" href="#" title="Open the .jl in VS Code" onclick="closeTopMenu()">⧉ Open in VS Code</a>
     </div>
   </div>
+  </div><!-- end .topbar-actions -->
 </div>
 <div id="workerpopbg" class="workerpop workerpop-panel">
   <div class="workerpop-head">
@@ -805,6 +811,7 @@
 <!-- toc.js migrated to a Preact/ESM island — imported by app.js, not a classic script -->
 <script src="/assets/js/slides.js"></script>
 <script src="/assets/js/animate.js"></script>
+<script src="/assets/js/tooltip.js"></script>  <!-- styled, fast tooltips in place of the native `title` -->
 <!-- Preact app (ESM module). Strangler-fig: coexists with the classic scripts above
      and takes over the UI island by island until the vanilla code is retired. -->
 <script type="module" src="/assets/js/app.js"></script>

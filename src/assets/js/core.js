@@ -1561,9 +1561,70 @@ function syncAgentTop() {
     document.documentElement.style.setProperty('--agent-top', top + 'px');
   }
 }
-window.addEventListener('load', syncAgentTop);
-window.addEventListener('resize', syncAgentTop);
-syncAgentTop();
+// Laid-out width of an element's visible direct children, gaps included. Measured this way rather than
+// from scrollWidth, which would count a pill's absolutely-positioned popup menu as phantom content.
+function _rowWidth(el) {
+  const gap = parseFloat(getComputedStyle(el).columnGap || getComputedStyle(el).gap) || 0;
+  const kids = [...el.children].filter(c => c.getBoundingClientRect().width > 0);
+  let w = gap * Math.max(0, kids.length - 1);
+  for (const c of kids) w += c.getBoundingClientRect().width;
+  return w;
+}
+// Collapse the status pills in stages, but only as much as the row truly needs - measured, not pinned
+// to fixed widths. The pills give way before the title does, and only as far as needed, so the change
+// is monotonic: narrowing the row never makes the title grow back. The measurement holds the title at
+// full width and the pills rigid, then picks the lowest collapse level whose content still fits; once
+// the pills are icons and it still does not fit, the title truncates on its own. `data-pills` drives
+// notebook.css. This shrinks nothing on screen - the trial sizing runs synchronously with no paint.
+function fitTopbarPills() {
+  const tb = document.querySelector('.topbar');
+  const lead = tb && tb.querySelector('.topbar-lead');
+  const title = document.getElementById('title');
+  if (!tb || !lead || !tb.clientWidth) return;
+  const cs = getComputedStyle(tb);
+  const avail = tb.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const tFlex = title ? title.style.flex : '';
+  if (title) title.style.flex = '0 0 auto';   // measure with the whole title present and rigid
+  let level = '2';
+  for (const lv of ['0', '1', '2']) {
+    tb.dataset.pills = lv;
+    if (_rowWidth(lead) <= avail) { level = lv; break; }
+  }
+  if (title) title.style.flex = tFlex;
+  tb.dataset.pills = level;
+}
+// Drop the action-button labels to icons (and the brand wordmark to its logo, via notebook.css) when
+// the buttons with their labels would not fit on one row, so a narrow bar stays two rows rather than
+// spilling onto a third. Measured, like the pills: `data-actions` reflects the full-label width.
+function fitTopbarActions() {
+  const tb = document.querySelector('.topbar');
+  const actions = tb && tb.querySelector('.topbar-actions');
+  if (!tb || !actions || !tb.clientWidth) return;
+  const cs = getComputedStyle(tb);
+  const avail = tb.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  tb.dataset.actions = 'full';   // measure the buttons with their labels present
+  tb.dataset.actions = _rowWidth(actions) > avail ? 'icons' : 'full';
+}
+// One relayout pass: set the collapse for the current width, then re-measure the drawer offsets against
+// the resulting bar height. Actions first (dropping the wordmark changes the lead), then the pills.
+// Coalesced into an animation frame so a drag-resize does not force a synchronous measure inside every
+// resize or ResizeObserver callback.
+function relayoutTopbar() { fitTopbarActions(); fitTopbarPills(); syncAgentTop(); }
+let _tbRaf = 0;
+function scheduleTopbar() { if (_tbRaf) return; _tbRaf = requestAnimationFrame(() => { _tbRaf = 0; relayoutTopbar(); }); }
+window.addEventListener('load', relayoutTopbar);
+window.addEventListener('resize', scheduleTopbar);
+(() => {
+  const tb = document.querySelector('.topbar');
+  if (!tb) return;
+  // Width changes (window or the DAG panel) and content changes (a pill appearing, disappearing or
+  // rewording) both change what fits. The collapse only hides text - it never mutates the DOM or the
+  // topbar's own width - so it cannot feed back into either observer.
+  if (window.ResizeObserver) new ResizeObserver(scheduleTopbar).observe(tb);
+  if (window.MutationObserver) new MutationObserver(scheduleTopbar).observe(tb,
+    { childList: true, subtree: true, characterData: true });
+})();
+relayoutTopbar();
 
 // Julia indexes source by UTF-8 *byte* offset (REPLCompletions), but CodeMirror
 // works in UTF-16 char positions. Convert both ways so completion stays correct
