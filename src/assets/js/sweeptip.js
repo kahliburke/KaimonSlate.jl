@@ -65,16 +65,13 @@
   }
 
   // Anchored to the TILE, not the pointer: a panel that follows the cursor inside a five-pixel tile
-  // jitters, and the reader is looking at the tile. Flipped rather than clamped at the edges, so it
-  // never covers the grid it is describing.
+  // jitters, and the reader is looking at the tile. Placed by `slatePlaceAt` (tooltip.js), which
+  // every hovering surface shares — this had its own copy, and the two disagreed about when to flip.
+  // Shown before measuring and made visible after, since a `display:none` panel has no size.
   function place(tile) {
-    const p = panel(), r = tile.getBoundingClientRect();
+    const p = panel();
     p.style.visibility = 'hidden'; p.classList.add('show');
-    const w = p.offsetWidth, h = p.offsetHeight, m = 8;
-    let x = r.left, y = r.bottom + 6;
-    if (x + w > window.innerWidth - m) x = Math.max(m, window.innerWidth - w - m);
-    if (y + h > window.innerHeight - m) y = Math.max(m, r.top - h - 6);
-    p.style.left = x + 'px'; p.style.top = y + 'px';
+    window.slatePlaceAt(p, tile, { gap: 6, align: 'start' });
     p.style.visibility = '';
   }
 

@@ -53,18 +53,36 @@
     return node.getAttribute('data-tip') || '';
   };
 
+  // Where a hovering surface goes: below its anchor when it fits, flipped above when it does not,
+  // and clamped inside the viewport either way. Shared, because this is not only the tooltip's
+  // problem — the sweep grid's tile panel and the region popup hang off an anchor too, and three
+  // copies of it had already drifted on which edge each one respected and when it flipped.
+  //
+  // The caller positions its own element and owns its own visibility: a surface that is
+  // `display:none` has no size to measure, so it must be showing before this is called.
+  //
+  //   align  'center' points at the middle of a small control, which is what a tooltip wants.
+  //          'start'  lines a panel's left edge up with its anchor, which is what a panel wants
+  //                   when it is many times wider than the thing it describes.
+  function placeAt(node, anchor, opts) {
+    const o = opts || {};
+    const gap = o.gap != null ? o.gap : GAP;
+    const r = anchor.getBoundingClientRect();
+    const w = node.offsetWidth, h = node.offsetHeight;
+    let top = r.bottom + gap;
+    if (top + h + MARGIN > window.innerHeight) top = r.top - gap - h;   // flip above when it would spill
+    top = Math.max(MARGIN, Math.min(top, window.innerHeight - h - MARGIN));
+    let left = o.align === 'start' ? r.left : r.left + r.width / 2 - w / 2;
+    left = Math.max(MARGIN, Math.min(left, window.innerWidth - w - MARGIN));
+    node.style.top = Math.round(top) + 'px';
+    node.style.left = Math.round(left) + 'px';
+  }
+  window.slatePlaceAt = placeAt;
+
   const place = (node) => {
     const t = el();
     t.style.maxWidth = Math.min(MAX_WIDTH, window.innerWidth - 2 * MARGIN) + 'px';
-    const r = node.getBoundingClientRect();
-    const w = t.offsetWidth, h = t.offsetHeight;
-    let top = r.bottom + GAP;
-    if (top + h + MARGIN > window.innerHeight) top = r.top - GAP - h;   // flip above when it would spill
-    top = Math.max(MARGIN, Math.min(top, window.innerHeight - h - MARGIN));
-    let left = r.left + r.width / 2 - w / 2;
-    left = Math.max(MARGIN, Math.min(left, window.innerWidth - w - MARGIN));
-    t.style.top = Math.round(top) + 'px';
-    t.style.left = Math.round(left) + 'px';
+    placeAt(t, node);
   };
 
   const show = (node, text) => {

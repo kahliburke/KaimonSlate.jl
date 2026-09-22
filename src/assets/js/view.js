@@ -912,17 +912,12 @@ window.openRegionPanel = function (id, ev) {
   window.slateModel.refreshAllocation(reg).then(j => { A = j; paint(L, A); })
     .catch(() => { A = null; paint(L, A); });
 };
-// Below the anchor where it fits, above where it does not, and clamped to the viewport when it fits
-// neither — which is what `max-height` on the panel makes reachable rather than merely clipped.
+// Placed by `slatePlaceAt` (tooltip.js), the one rule every hovering surface follows: below the
+// anchor where it fits, above where it does not, clamped inside the viewport either way — which the
+// panel's `max-height` makes reachable rather than merely clipped.
 function _regPlace(anchor) {
-  if (!_regPanel || !anchor) return;
-  const r = anchor.getBoundingClientRect();
-  const w = _regPanel.offsetWidth, h = _regPanel.offsetHeight, m = 8;
-  _regPanel.style.left = Math.max(m, Math.min(r.left, window.innerWidth - w - m)) + 'px';
-  const below = window.innerHeight - r.bottom - m, above = r.top - m;
-  let top = r.bottom + 6;
-  if (h > below && above > below) top = r.top - 6 - h;
-  _regPanel.style.top = Math.max(m, Math.min(top, window.innerHeight - h - m)) + 'px';
+  if (!_regPanel || !anchor || !window.slatePlaceAt) return;
+  window.slatePlaceAt(_regPanel, anchor, { gap: 6, align: 'start' });
 }
 
 addEventListener('mousedown', e => {
