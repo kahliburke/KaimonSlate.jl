@@ -158,6 +158,7 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
   function close() {
     const pop = document.getElementById('swcfgpop');
     if (pop) pop.classList.remove('show');
+    stopStatus();
   }
 
   // The machine's compute targets, mirrored into page state (same as `regions`). They are configured
@@ -317,6 +318,29 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
     });
   }
 
+  // This column is headed "live", so it has to be. It was read once when the panel opened, which
+  // meant the jobs, the nodes and the store figures were a snapshot of that moment while a sweep
+  // carried on underneath them.
+  //
+  // Paced by what is actually moving rather than on a fixed tick: while any of this notebook's
+  // sweeps is in flight the counts change every few seconds, and once none is, the only figure that
+  // still moves is how much of the output has been read back. Re-armed after each read, so a slow
+  // login node delays the next one instead of stacking a queue of them.
+  let SWST_TIMER = 0, SWST_HTML = '';
+  const swstLive = () => [...sweeps.values()].some(e => RUNNING((e.status || {}).state));
+  function stopStatus() { clearTimeout(SWST_TIMER); SWST_TIMER = 0; SWST_HTML = ''; }
+  function watchStatus(pop, name) {
+    clearTimeout(SWST_TIMER);
+    const step = () => {
+      // Closing HIDES this panel rather than removing it, so being on the page is not enough.
+      if (!pop.isConnected || !pop.classList.contains('show')) return stopStatus();
+      Promise.resolve(loadStatus(pop, name)).then(() => {
+        if (pop.isConnected) SWST_TIMER = setTimeout(step, swstLive() ? 4000 : 20000);
+      });
+    };
+    SWST_TIMER = setTimeout(step, swstLive() ? 4000 : 20000);
+  }
+
   // What the cluster is DOING, opposite what it is configured to be. The two belong side by side:
   // a walltime you are about to raise means something different next to "3 units never landed".
   async function loadStatus(pop, name) {
@@ -351,7 +375,7 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
       (sub ? `<span class="swst-sub">${sub}</span>` : '') + '</div>';
     const pct = (a, b) => b > 0 ? (100 * a / b).toFixed(a / b < 0.01 ? 2 : 1) + '%' : '—';
 
-    host.innerHTML =
+    const html =
       '<div class="swst-grp">compute</div><div class="swst-stats">' +
         stat('jobs', `${jobs.running || 0}<span class="swst-u">run</span>` +
                      `${jobs.pending || 0}<span class="swst-u">queue</span>`,
@@ -387,6 +411,11 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
       (sw.length ? sweepTable(sw, name) : '<div class="swst-none">no sweeps in this store</div>') +
       (SWNOTE && Date.now() - SWNOTE.at < SWNOTE_MS
         ? `<div class="swst-note${SWNOTE.bad ? ' bad' : ''}">${esc(SWNOTE.msg)}</div>` : '');
+    // Only on CHANGE. This column is re-read while it is open, and rewriting identical markup every
+    // few seconds would drop the sweep table's scroll and cancel whatever the pointer was over.
+    if (SWST_HTML === html) return;
+    SWST_HTML = html;
+    host.innerHTML = html;
     wireSweepTable(host, pop, name);
     // The config pane against the live one. Which you want more of depends on what you came for —
     // reading a table of runs, or changing a walltime — so it is dragged rather than chosen here.
@@ -538,10 +567,12 @@ function showOptMenu(row, inp) {
         '</div>' +
       '</div>';
 
-    // The cluster's live state, fetched once per open. A round trip to the worker (which owns the
-    // store view and the transfer ledger), so it is never on the path of opening the panel: the
-    // settings are usable immediately and this column fills in.
+    // The cluster's live state. A round trip to the worker (which owns the store view and the
+    // transfer ledger), so it is never on the path of opening the panel: the settings are usable
+    // immediately and this column fills in, then keeps up.
+    SWST_HTML = '';
     loadStatus(pop, cur);
+    watchStatus(pop, cur);
 
     pop.querySelector('.swcfg-x').onclick = close;
     pop.querySelector('.swcfg-cancel').onclick = close;
