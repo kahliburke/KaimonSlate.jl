@@ -888,15 +888,19 @@ window.openRegionPanel = function (id, ev) {
   const cached = reg ? _blkLoad.get(reg) : null, fresh = cached && (Date.now() - cached.at < 15000);
   _regPanel.innerHTML = _regRender(c, reg, fresh ? cached.data : undefined, undefined);
   const anchor = (ev && ev.currentTarget) || document.querySelector(`#cell-${id} .cregion`);
-  const r = anchor.getBoundingClientRect();
   _regPanel.classList.add('on');
-  const w = _regPanel.offsetWidth, hh = _regPanel.offsetHeight;
-  _regPanel.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
-  _regPanel.style.top = Math.min(r.bottom + 6, window.innerHeight - hh - 8) + 'px';
+  _regPlace(anchor);
   // Only a scheduler region has an allocation or a queue to report, and each answer costs a command
   // on its login node — so an ordinary host and the main kernel ask for nothing.
   if (!_regIsCluster(reg)) return;
-  const paint = (l, a) => { if (_regFor === id) _regPanel.innerHTML = _regRender(c, reg, l, a); };
+  // Re-placed on every repaint, not only at open: the panel is opened with what is already known and
+  // GROWS as the allocation and the cluster's queues arrive, so a position measured against its first
+  // height put the rest of it off the bottom of the window.
+  const paint = (l, a) => {
+    if (_regFor !== id) return;
+    _regPanel.innerHTML = _regRender(c, reg, l, a);
+    _regPlace(anchor);
+  };
   let L = fresh ? cached.data : undefined, A;
   if (!fresh) fetch('/api/region-load?region=' + encodeURIComponent(reg)).then(r => r.json())
     .then(j => { L = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [] };
@@ -908,6 +912,19 @@ window.openRegionPanel = function (id, ev) {
   window.slateModel.refreshAllocation(reg).then(j => { A = j; paint(L, A); })
     .catch(() => { A = null; paint(L, A); });
 };
+// Below the anchor where it fits, above where it does not, and clamped to the viewport when it fits
+// neither — which is what `max-height` on the panel makes reachable rather than merely clipped.
+function _regPlace(anchor) {
+  if (!_regPanel || !anchor) return;
+  const r = anchor.getBoundingClientRect();
+  const w = _regPanel.offsetWidth, h = _regPanel.offsetHeight, m = 8;
+  _regPanel.style.left = Math.max(m, Math.min(r.left, window.innerWidth - w - m)) + 'px';
+  const below = window.innerHeight - r.bottom - m, above = r.top - m;
+  let top = r.bottom + 6;
+  if (h > below && above > below) top = r.top - 6 - h;
+  _regPanel.style.top = Math.max(m, Math.min(top, window.innerHeight - h - m)) + 'px';
+}
+
 addEventListener('mousedown', e => {
   if (!_regFor) return;
   if (!e.target.closest('.regpanel') && !e.target.closest('.cregion')) _regClose();

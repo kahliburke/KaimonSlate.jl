@@ -735,7 +735,11 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
 
 /* The region panel, opened by clicking the chip. Same rows as the hover panel, but interactive, so
    unlike that one it takes pointer events and stays until dismissed. */
+/* Taller than the window is a real case — a cluster with several queues, each with its own line —
+   so the panel scrolls rather than running off the bottom. `overscroll-behavior` keeps that scroll
+   from becoming the page's once it reaches the end. */
 .regpanel { position:fixed; z-index:61; min-width:280px; max-width:360px; padding:10px 12px;
+  max-height:calc(100vh - 16px); overflow-y:auto; overscroll-behavior:contain;
   background:var(--panel, #171a21); border:1px solid var(--line, #2a2f3a); border-radius:8px;
   box-shadow:0 10px 28px rgba(0,0,0,.5); font-size:.78rem; line-height:1.55; color:var(--fg, #d7dae1);
   display:none; }
