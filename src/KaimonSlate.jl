@@ -3120,10 +3120,11 @@ function create_tools(GateTool::Type)
         try
             _load_slate_config!()            # apply the persisted worker-thread spec before any worker spawns
             _reap_orphan_workers!()
-            ReportEngine._reap_orphan_ssh!()   # …and any ssh tunnel/master procs a hard-killed prior hub orphaned
+            # No ssh processes to reap beside them: the transport is libssh2 in this process, which
+            # multiplexes natively, so a hard-killed hub leaves no `ssh -N` forwards behind.
             atexit(on_shutdown)
             _hub()
-            _register_permission_ask!()
+            NotebookServer._register_permission_ask!()
             @info "KaimonSlate hub auto-started" url = _base()
         catch e
             @warn "KaimonSlate hub auto-start failed" exception = (e, catch_backtrace())
