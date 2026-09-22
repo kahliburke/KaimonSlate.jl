@@ -49,6 +49,15 @@ const ownsKeys = new Function(`
   ${sliceFn('_ownsKeys')}
   return _ownsKeys;
 `)();
+// The event-level form, which the view-state listeners (dep-focus, zen) use — same predicate plus
+// "someone already handled it".
+const ownsKeyEvent = new Function(`
+  ${grabConst('_FIELD_TAGS')}
+  ${grabConst('_CONTROL_REGION')}
+  ${sliceFn('_ownsKeys')}
+  ${grabConst('ownsKeyEvent')}
+  return ownsKeyEvent;
+`)();
 
 // Enough of a DOM for the predicate: a tag, a class, an optional marker attribute, a parent chain, and
 // a `closest` that understands the two selector forms the region list is written in — `.class` and
@@ -123,6 +132,22 @@ is('rendered markdown', ownsKeys(el('P', '', el('DIV', 'md', el('DIV', 'cell')))
 // Non-elements reach it too (a text node, null) and must not throw or match.
 is('null', ownsKeys(null), false);
 is('a text node', ownsKeys({ nodeType: 3 }), false);
+
+// ── The event form: which Escapes a view-state listener may act on ───────────
+// The dep-focus view and zen exit on Escape, from listeners that are not commands and so do not go
+// through the dispatcher. Escape inside a cell editor belongs to the editor — it leaves the editor,
+// and under vim it leaves insert mode — so those listeners have to decline it, or one press both
+// exits insert mode and drops the view (reported as issue #36).
+const ev = (target, over = {}) => Object.assign({ key: 'Escape', target, defaultPrevented: false }, over);
+const editorNode = el('DIV', 'cm-content', el('DIV', 'cm-editor', el('DIV', 'cell')));
+is('Escape from a cell editor is not the view’s', ownsKeyEvent(ev(editorNode)), true);
+is('Escape from a bind control is not the view’s', ownsKeyEvent(ev(el('INPUT', '', el('DIV', 'binds')))), true);
+// Handled by something inner (CM6 returns true from its Escape ladder, which preventDefaults).
+is('an already-handled Escape', ownsKeyEvent(ev(el('BODY', ''), { defaultPrevented: true })), true);
+// …and from the notebook itself it IS the view's, which is the whole point of the view binding.
+is('Escape from the page', ownsKeyEvent(ev(el('BODY', ''))), false);
+is('Escape from a cell body', ownsKeyEvent(ev(el('DIV', 'cell', el('DIV', 'page')))), false);
+is('no event at all', ownsKeyEvent(null), false);
 
 if (fails.length) { console.error('keymap_key_owner FAIL:\n  ' + fails.join('\n  ')); process.exit(1); }
 console.log('keymap_key_owner: ok');

@@ -273,7 +273,8 @@ function _new_module(report::Report)
         # published message ends up at.
         slate_cellout = (cid, out, err) -> _do_cellout(rid, cid, out, err),
         set_bind = (name, value) -> _do_setbind(rid, string(name), value),
-        assetbase = () -> String(get(report.meta, "assetbase", "")))   # `@asset` base (notebook project dir)
+        assetbase = () -> String(get(report.meta, "assetbase", "")),   # `@asset` base (notebook project dir)
+        notebookdir = () -> String(get(report.meta, "notebookdir", ""))) # read fallback (detached notebooks)
     return m
 end
 
@@ -956,6 +957,26 @@ captured, never propagated, so one bad cell doesn't abort the report.
 # ── Durable memoization key (server side) ─────────────────────────────────────────────────────
 const _MEMO_THRESHOLD_MS = 150.0    # only cells slower than this are worth persisting to disk (export ignores it)
 
+"""
+    resolve_input_path(meta, rel) -> String
+
+Absolute path of a cell input (`@asset`/`include` literal), by the SAME two-step rule the run uses
+(`__slate_read_path`, widgets.jl): the notebook's `assetbase`, then the directory the `.jl` sits in
+when the first has no such file. The second step is what a detached notebook needs — its asset base
+is the per-notebook env dir, while the files the author means sit beside the notebook. Hub and
+worker must agree here, or a cell would read one file while the watcher and memo key track another.
+"""
+function resolve_input_path(meta, rel::AbstractString)
+    isabspath(rel) && return String(rel)
+    base = String(get(meta, "assetbase", ""))
+    ap = isempty(base) ? String(rel) : joinpath(base, String(rel))
+    isfile(ap) && return ap
+    nb = String(get(meta, "notebookdir", ""))
+    isempty(nb) && return ap
+    alt = joinpath(nb, String(rel))
+    return isfile(alt) ? alt : ap
+end
+
 # A cell is memoizable if its result is a pure function of its source + upstream sources + bind
 # inputs. Excluded: markdown, `using`/`import` barriers (:opaque — namespace effects not captured by
 # `writes`), control-DECLARING cells (their value comes from the UI), and explicit opt-outs.
@@ -1263,14 +1284,13 @@ function _memo_key(report::Report, cell::Cell)
     unique!(first, svals)
     # `@asset` file deps (this cell + its transitive upstream, mirroring `depsrc`): fold each
     # referenced file's CURRENT content hash into the key so editing an asset invalidates the memo
-    # entry (no stale restore on cold start). Paths resolve against `assetbase` (the notebook's
-    # project dir, set at kernel selection) — the same base the worker's `@asset` reads from.
-    base = String(get(report.meta, "assetbase", ""))
+    # entry (no stale restore on cold start). Paths resolve by `resolve_input_path` — the same rule
+    # the worker's `@asset`/`include` read through, so the hash is of the file the cell actually got.
     relpaths = String[]; append!(relpaths, cell.inputs)
     for id in closure; append!(relpaths, byid[id].inputs); end
     assets = Tuple{String,UInt}[]
     for rel in sort!(unique!(relpaths))
-        ap = isabspath(rel) ? rel : (isempty(base) ? rel : joinpath(base, rel))
+        ap = resolve_input_path(report.meta, rel)
         h = try; isfile(ap) ? hash(read(ap)) : UInt(0); catch; UInt(0); end
         push!(assets, (rel, h))
     end

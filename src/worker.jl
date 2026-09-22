@@ -28,6 +28,12 @@ _blog(m) = try; println("[slate-boot] payload +" * string(round(time() - _BOOT_T
 # — which deps are notebook-specific adds vs. inherited from the parent project.
 const PARENT_PROJECT = Ref("")
 
+# The directory the notebook `.jl` lives in, when the worker runs on the same machine as the file
+# (set by the boot script; "" for a remote worker, where that path means nothing). It is the
+# fallback base for a relative `@asset`/`include` read the project dir doesn't have — the detached
+# case, where the asset base is the per-notebook env dir but the author's files sit by the notebook.
+const NOTEBOOK_DIR = Ref("")
+
 # SHA of the worker payload this process BOOTED with (set from the boot script; "" for a local worker
 # that inherits the hub's version). The hub compares it against the current payload on reattach and
 # reprovisions a worker running stale code — see remote.jl `_payload_sha` / `attached!`.
@@ -131,7 +137,8 @@ function _new_ns()
         # `pkgdir(...)` gives, and where a package notebook's assets live). Read at call time so a
         # provenance change is picked up; falls back to the active project when PARENT_PROJECT is unset.
         assetbase = () -> (p = PARENT_PROJECT[]; !isempty(p) ? p :
-                           (ap = Base.active_project(); ap === nothing ? "" : dirname(ap))))
+                           (ap = Base.active_project(); ap === nothing ? "" : dirname(ap))),
+        notebookdir = () -> NOTEBOOK_DIR[])
     return m
 end
 # Declared here, POPULATED after the last include that contributes a name to the namespace (the
@@ -1658,9 +1665,12 @@ project dir and swap in a fresh namespace. Loaded packages + the memo store surv
 the warmth a pool worker exists to hold; only the (empty) namespace is discarded. `datadir` is
 the adopting REGION's declared data root (`datadir()`/`@sfile`): set-or-clear so a generic pool
 worker takes on this region's root — or falls back to `<parent>/data` when the region has none
-(clearing a prior region's root). Optional args are kwargs (the gate strips optional positionals)."
-function __slate_adopt(parent::String; datadir::AbstractString = "")
+(clearing a prior region's root). `nbdir` is the adopting notebook's own directory (empty unless the
+worker is on the same machine as the file). Optional args are kwargs (the gate strips optional
+positionals)."
+function __slate_adopt(parent::String; datadir::AbstractString = "", nbdir::AbstractString = "")
     PARENT_PROJECT[] = parent
+    NOTEBOOK_DIR[] = String(nbdir)
     if isempty(strip(String(datadir)))
         haskey(ENV, "KAIMONSLATE_DATADIR") && delete!(ENV, "KAIMONSLATE_DATADIR")
     else

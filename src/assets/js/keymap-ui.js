@@ -258,8 +258,15 @@ function Chip({ row, chord }) {
   const km = KM();
   const warn = km.chordWarning(chord);
   const cls = 'kmchip' + (warn === 'reserved' ? ' bad' : warn ? ' warn' : '');
+  // A typed key can only act in command mode: elsewhere it is the character. Say so on the chip
+  // rather than leaving someone to discover that their `/` opened find in one place and typed a
+  // slash in another.
+  const cmd = CMD() && CMD().get(row.id);
+  const narrowed = !!cmd && km.typesText(chord) && cmd.ctx.length > 1 &&
+                   km.contextsFor(cmd, chord).join() === 'command';
   const title = warn === 'reserved' ? 'The browser keeps this chord — it will never reach the page.'
               : warn ? 'Works, but ' + warn + ' while this page has focus.'
+              : narrowed ? 'Acts in command mode only: inside an editor this key types.'
               : 'Click to re-record · ✕ to remove';
   return html`<span class=${cls} title=${title}>
     <button class="kmchipk" onClick=${() => startRec(row.id, chord)}>${km.format(chord)}</button>

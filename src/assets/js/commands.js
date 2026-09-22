@@ -142,7 +142,9 @@ R({ id: 'cell.runAndAdd', label: 'Run selected cell and add one below', group: '
       const ran = _runnable(t.cell) ? window.runCell(t.id) : Promise.resolve();
       Promise.resolve(ran).then(() => _fn('addCell', t.id, 'code', false, true));
     }) });
-R({ id: 'nb.cancel', label: 'Cancel the running cell', group: 'Run', ctx: ['global', 'editor'],
+// `command` too, so the Jupyter preset's `i i` has somewhere to land: a bare key is filtered out of
+// both the other contexts (it would swallow typing, and in an editor the character itself).
+R({ id: 'nb.cancel', label: 'Cancel the running cell', group: 'Run', ctx: ['global', 'command', 'editor'],
     available: _has('cancelRun'), run: () => _fn('cancelRun') });
 R({ id: 'nb.rebuild', label: 'Rebuild (fresh namespace)', group: 'Run', ctx: ['command'],
     available: _has('resetAll'), run: () => _fn('resetAll') });
@@ -277,7 +279,10 @@ R({ id: 'view.toc', label: 'Table of contents', group: 'Panels', ctx: ['global',
     keys: ['Mod-Shift-l'], available: _has('toggleTOC'), run: () => _fn('toggleTOC') });
 R({ id: 'view.dag', label: 'Pipeline DAG (dataflow graph)', group: 'Panels', ctx: ['global', 'editor'],
     keys: ['Mod-Shift-g'], available: _has('toggleDag'), run: () => _fn('toggleDag') });
-R({ id: 'view.search', label: 'Find across cells', group: 'Panels', ctx: ['global', 'editor'],
+// `command` as well as the chord contexts, so a preset can put a BARE key on find — vim's `/`. A
+// text-producing chord is filtered out of `global` and `editor` (it would swallow typing), so without
+// a command-mode home such a binding would have nowhere to land.
+R({ id: 'view.search', label: 'Find across cells', group: 'Panels', ctx: ['global', 'command', 'editor'],
     keys: ['Mod-f'], available: _has('slateSearchOpen'), run: () => _fn('slateSearchOpen') });
 R({ id: 'view.replace', label: 'Find & replace across cells', group: 'Panels', ctx: ['global', 'editor'],
     keys: ['Mod-Alt-f'], available: _has('slateSearchOpen'), run: () => _fn('slateSearchOpen', true) });

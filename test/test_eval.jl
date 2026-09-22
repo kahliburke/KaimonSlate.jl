@@ -549,6 +549,43 @@ end
         @test isempty(rd.cells[1].inputs)
     end
 
+    @testset "detached notebook: reads fall back to the notebook's own dir" begin
+        # A notebook with no enclosing project takes its asset base from the per-notebook env dir
+        # (where pasted media lands and what a region worker can resolve), while the files the author
+        # means sit beside the `.jl`. Reads try the base first, then that directory — and the hub
+        # resolves cell inputs by the same rule, so what a cell reads is what gets hashed and watched.
+        envdir = mktempdir()                               # stands in for the per-notebook env dir
+        nbdir = mktempdir()                                # where the .jl and its helpers live
+        write(joinpath(nbdir, "helpers.jl"), "sidecar(x) = x + 1\n")
+        write(joinpath(nbdir, "note.txt"), "beside the notebook")
+        write(joinpath(envdir, "shared.txt"), "in the env dir")
+        r = parse_report("#%% code id=a\ninclude(\"helpers.jl\")\n\n#%% code id=b\nv = sidecar(1)")
+        r.meta["assetbase"] = envdir
+        r.meta["notebookdir"] = nbdir
+        m = ReportEngine.report_module(r)
+        Base.invokelatest(Core.eval, m, Expr(:call, :include, "helpers.jl"))   # ReTest: build, don't quote
+        @test Base.invokelatest(Core.eval, m, :(sidecar(1))) == 2
+        @test Base.invokelatest(Core.eval, m, :(@asset "note.txt")) == "beside the notebook"
+        @test Base.invokelatest(Core.eval, m, :(@asset "shared.txt")) == "in the env dir"  # base still wins
+        # The base takes precedence when BOTH have the file, so nothing that resolves today moves.
+        write(joinpath(envdir, "note.txt"), "in the env dir too")
+        @test Base.invokelatest(Core.eval, m, :(@asset "note.txt")) == "in the env dir too"
+
+        # Hub side: the same two-step rule, so the memo key folds the file the cell actually read.
+        @test ReportEngine.resolve_input_path(r.meta, "helpers.jl") == joinpath(nbdir, "helpers.jl")
+        @test ReportEngine.resolve_input_path(r.meta, "shared.txt") == joinpath(envdir, "shared.txt")
+        @test ReportEngine.resolve_input_path(r.meta, "missing.txt") == joinpath(envdir, "missing.txt")
+        build_dependencies!(r)
+        kb = ReportEngine._memo_key(r, r.byid["b"])
+        @test !isempty(kb)
+        write(joinpath(nbdir, "helpers.jl"), "sidecar(x) = x + 100\n")
+        @test ReportEngine._memo_key(r, r.byid["b"]) != kb
+        # With no notebook dir recorded (a remote worker, where that path means nothing) the base is
+        # the only root, exactly as before.
+        delete!(r.meta, "notebookdir")
+        @test ReportEngine.resolve_input_path(r.meta, "helpers.jl") == joinpath(envdir, "helpers.jl")
+    end
+
     @testset "WebPage renders self-contained HTML" begin
         w = ReportEngine.WebPage(css = "body{color:red}", html = "<h1>hi</h1>", js = "console.log(1)")
         h = sprint(show, MIME"text/html"(), w)

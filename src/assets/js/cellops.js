@@ -275,8 +275,12 @@ function pickerNames(c) {
 // 🔗 → dep-focus: render ONLY this cell's dependency chain (precursors + itself + dependents);
 // click again (or Esc) to return to the full notebook. Filtering lives in the Preact <Notebook>.
 function toggleDeps(id) { window.slateStore && window.slateStore.setFocus(id); }
+// Only from the notebook itself: Escape inside a cell editor means "leave the editor" (and under vim,
+// "leave insert mode"), so it must not also drop the focus view out from under you — one press, one
+// layer. `ownsKeyEvent` is the same rule the keymap dispatcher applies to every other shortcut.
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && window.slateStore && window.slateStore.focus.value) window.slateStore.setFocus(null);
+  if (e.key !== 'Escape' || (window.slateKeymap && window.slateKeymap.ownsKeyEvent(e))) return;
+  if (window.slateStore && window.slateStore.focus.value) window.slateStore.setFocus(null);
 });
 async function moveCellRel(id, target, before) { renderAll(await api('POST', '/api/cell-move/' + id, { target, before })); }
 async function toggleType(id, kind)  {

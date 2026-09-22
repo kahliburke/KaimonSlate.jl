@@ -312,14 +312,14 @@ function _sse_preflight(stream::HTTP.Stream, h)
     return nothing
 end
 
-# Resolved absolute paths of the notebook's `@asset` file deps (existing files only). `cell.inputs`
-# holds the statically-extracted literal paths; resolve each against `assetbase` (the project dir).
+# Resolved absolute paths of the notebook's `@asset`/`include` file deps (existing files only).
+# `cell.inputs` holds the statically-extracted literal paths; `resolve_input_path` applies the same
+# base (+ notebook-dir fallback) the run reads through, so the watcher arms on the file the cell got.
 function _asset_files(nb::LiveNotebook)
-    base = String(get(nb.report.meta, "assetbase", ""))
     out = String[]
     lock(nb.lock) do
         for c in nb.report.cells, rel in c.inputs
-            ap = isabspath(rel) ? String(rel) : (isempty(base) ? String(rel) : joinpath(base, rel))
+            ap = ReportEngine.resolve_input_path(nb.report.meta, rel)
             isfile(ap) && push!(out, ap)
         end
     end
