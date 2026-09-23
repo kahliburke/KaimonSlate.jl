@@ -659,8 +659,8 @@ the cell it blew up in. Without it the only way to see another cell was to open 
 on it blind, and a specialist that found a corrupt input correctly reported the symptom's cell and
 recommended changing the code there — which was not where the fault was.
 """
-const DEBUG_VERBS = String["dbg_start", "dbg_step", "dbg_into", "dbg_frame", "dbg_eval",
-                           "dbg_break", "dbg_watch", "dbg_ask", "dbg_choose", "dbg_done",
+const DEBUG_VERBS = String["dbg_start", "dbg_step", "dbg_frame", "dbg_eval",
+                           "dbg_break", "dbg_watch", "dbg_ask", "dbg_done",
                            "read"]
 
 const DEBUG_BRIEF = """
@@ -683,9 +683,9 @@ How to work:
   old age. That breakpoint is hit on EVERY iteration, so once you have seen what the line does,
   disable it and continue: the line and its condition stay, and you can turn it back on.
 - A line usually makes more than one call, and `dbg_step(mode="into")` takes whichever comes
-  first. `dbg_into` lists them and steps into the one you name. Library code runs compiled and
-  cannot be stepped until `dbg_into(admit=...)` says so; do that when you have a reason to
-  disbelieve a library, not by habit.
+  first. `dbg_step(mode="calls")` lists them, and `dbg_step(call="f")` steps into the one you name.
+  Library code runs compiled and cannot be stepped until `dbg_step(call=…, admit=…)` says so; do
+  that when you have a reason to disbelieve a library, not by habit.
 
 A WRONG VALUE IS NOT A WRONG LINE. When what you find is bad data rather than bad logic, the line
 that chokes on it is the symptom and the fault is upstream. Follow it: `read` the cell that

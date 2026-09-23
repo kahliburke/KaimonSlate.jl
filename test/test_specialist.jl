@@ -319,7 +319,7 @@ current_agent_id() = nothing
             # of them the ones that exist to ask a person something.
             tools = KaimonSlate.create_tools(ToolSpec)
             by = Dict(t.name => t for t in tools)
-            for v in ("dbg_ask", "dbg_choose", "dbg_propose", "request_file_access", "dbg_wait")
+            for v in ("dbg_ask", "dbg_propose", "request_file_access", "dbg_wait")
                 @test haskey(by, v)
                 t = by[v]
                 @test t.timeout_ms !== nothing

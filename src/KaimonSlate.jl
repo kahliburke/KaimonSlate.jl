@@ -1369,7 +1369,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        dbg_step(notebook; mode="next") -> String
+        dbg_step(notebook; mode="next", call="", admit="", drop="") -> String
 
     Advance the session. `next` runs the line and stops on the next one in this frame; `into`
     descends into the call on this line when its module is being interpreted; `out` finishes this
@@ -1379,52 +1379,42 @@ function create_tools(GateTool::Type)
     breakpoint inside a loop is hit on every iteration, so once you have seen what that line does,
     turn it off with `dbg_break(enabled=false)` and continue. The line and its condition stay set,
     so you can turn it back on without retyping either.
+
+    `mode="calls"` advances nowhere and lists what THIS line calls: each entry is a name, the module
+    it would land in, and whether that module is being interpreted. `push!(xs, f(y))` offers `f` and
+    `push!`, and a plain `into` picks for you. Name one with `call=` to step into that one instead.
+    The list is in call order and the first match wins, so reach a repeated name with `next` first.
+
+    A module the session runs compiled (Base, a stdlib, a registered package) cannot be stepped into
+    until it is interpreted. `admit` names one to start interpreting; `drop` hands one back. Admit
+    when you have reason to disbelieve a library, not by habit, and drop it once you have your
+    answer: everything in an interpreted module steps, which is slow and fills the stack.
     """
-    function dbg_step(notebook::String; mode::String = "next")::String
+    function dbg_step(notebook::String; mode::String = "next", call::String = "",
+                      admit::String = "", drop::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         r = _dbg_refusal(nb); isempty(r) || return r
-        return _dbg_render(NotebookServer.step_debug!(nb, strip(mode)))
-    end
-
-    """
-        dbg_into(notebook; call="", admit="") -> String
-
-    Step into a NAMED call on the current line, rather than whichever one comes first.
-
-    Called with no `call`, this lists what the line calls and steps nowhere: each entry is a name,
-    the module it would land in, and whether that module is being interpreted. `push!(xs, f(y))`
-    offers `f` and `push!`, and a plain `dbg_step(mode="into")` would have picked for you.
-
-    A module the session runs compiled (Base, a stdlib, a registered package) cannot be stepped
-    into until it is interpreted. `admit` names one to start interpreting; `drop` hands one back.
-    Admit when you have a reason to disbelieve a library, not by habit, and drop it once you have
-    your answer: everything in an interpreted module steps, which is slow and fills the stack.
-
-    Names the same function twice on one line? The list is in call order and the first match wins,
-    so step to the one you want with `next` first.
-    """
-    function dbg_into(notebook::String; call::String = "", admit::String = "",
-                      drop::String = "")::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        r = _dbg_refusal(nb); isempty(r) || return r
-        # Handing a module back is its own act: it does not need a call to step into.
         isempty(strip(drop)) ||
             return _dbg_render(NotebookServer.interpret_debug!(nb; drop = strip(drop)))
-        ts = get(NotebookServer.into_targets_debug(nb), "targets", [])
-        if isempty(strip(call))
-            isempty(ts) && return "this line calls nothing you can step into"
-            return "this line calls:\n" * join(
-                [string("  ", get(t, "name", ""), "  in ", get(t, "mod", ""),
-                        get(t, "interpreted", false) === true ? "" :
-                        "  (compiled — pass admit=\"" * String(get(t, "mod", "")) * "\" to step in)")
-                 for t in ts], "\n")
+        m = String(strip(mode))
+        want = String(strip(call))
+        if m == "calls" || !isempty(want)
+            ts = get(NotebookServer.into_targets_debug(nb), "targets", [])
+            if m == "calls"
+                isempty(ts) && return "this line calls nothing you can step into"
+                return "this line calls:\n" * join(
+                    [string("  ", get(t, "name", ""), "  in ", get(t, "mod", ""),
+                            get(t, "interpreted", false) === true ? "" :
+                            "  (compiled — pass admit=\"" * String(get(t, "mod", "")) * "\" to step in)")
+                     for t in ts], "\n")
+            end
+            i = findfirst(t -> String(get(t, "name", "")) == want, ts)
+            i === nothing && return "⛔ this line does not call `$want`. It calls: " *
+                join([String(get(t, "name", "")) for t in ts], ", ")
+            t = ts[i]
+            return _dbg_render(NotebookServer.into_debug!(nb; pc = Int(get(t, "pc", 0)), admit = admit))
         end
-        want = strip(call)
-        i = findfirst(t -> String(get(t, "name", "")) == want, ts)
-        i === nothing && return "⛔ this line does not call `$want`. It calls: " *
-            join([String(get(t, "name", "")) for t in ts], ", ")
-        t = ts[i]
-        return _dbg_render(NotebookServer.into_debug!(nb; pc = Int(get(t, "pc", 0)), admit = admit))
+        return _dbg_render(NotebookServer.step_debug!(nb, m))
     end
 
     """
@@ -1635,43 +1625,6 @@ function create_tools(GateTool::Type)
     end
 
     """
-        dbg_choose(notebook, question, options) -> String
-
-    Put a choice to the person and block until they pick one. Returns the chosen VALUE.
-
-    `options` is `value=label` pairs separated by `|`, e.g.
-
-        dbg_choose(notebook="nb", question="Which model should the debugging specialist use?",
-                   options="acp:claude:sonnet=Sonnet — fast, good at traces|" *
-                           "acp:claude:default=Opus — slower, better at subtle coupling")
-
-    Use this instead of asking in prose whenever you already know the alternatives. You have done
-    the work of finding them; making someone retype one is both slower and a way to get a typo you
-    will not notice until the call fails. It is also how you propose a fix: the options are what
-    you would do, and the answer is whether to do it.
-
-    Blocks like `dbg_ask`, so the same rules apply — the person may be away, and the call can be
-    abandoned before they answer. The notebook shows the question with a button per option.
-    """
-    function dbg_choose(notebook::String, question::String, options::String)::String
-        nb, err = _nb(notebook); nb === nothing && return err
-        isempty(strip(question)) && return "⛔ a choice needs a question"
-        opts = Tuple{String,String}[]
-        for part in split(options, '|')
-            isempty(strip(part)) && continue
-            i = findfirst('=', part)
-            v = i === nothing ? strip(part) : strip(part[1:i-1])
-            l = i === nothing ? strip(part) : strip(part[i+1:end])
-            isempty(v) || push!(opts, (String(v), String(isempty(l) ? v : l)))
-        end
-        length(opts) < 2 && return "⛔ a choice needs at least two options (value=label|value=label)"
-        reply = NotebookServer.ask_and_wait(nb, NotebookServer.DEBUG_ROLE, "choice", _dbg_who(),
-                                            strip(question); options = opts)
-        isempty(strip(reply)) && return "No answer — the question is still open, or it timed out."
-        return String(strip(reply))
-    end
-
-    """
         dbg_watch(notebook, file, line; expr) -> String
 
     Sample an expression every time a line runs, without stopping, and keep the series.
@@ -1742,18 +1695,50 @@ function create_tools(GateTool::Type)
     end
 
     """
-        dbg_ask(notebook, question) -> String
+        dbg_ask(notebook, question; options="") -> String
 
     Ask the person watching — or whoever started you — and WAIT for the reply.
 
     You know the frame in front of you and nothing about why this notebook exists. When what to do
     next turns on that, ask instead of guessing. This blocks your turn until an answer arrives, so
     ask a specific question and expect a real answer.
+
+    `options` turns it into a CHOICE and returns the picked value: `value=label` pairs separated by
+    `|`, shown as a button each.
+
+        dbg_ask(notebook="nb", question="Which model should the specialist use?",
+                options="acp:claude:sonnet=Sonnet — fast, good at traces|" *
+                        "acp:claude:default=Opus — slower, better at subtle coupling")
+
+    Pass them whenever you already know the alternatives. You did the work of finding them, and
+    making someone retype one is both slower and a way to get a typo you will not notice until the
+    call fails. It is also how you propose a fix: the options are what you would do, and the answer
+    is whether to do it.
     """
-    function dbg_ask(notebook::String, question::String)::String
+    function dbg_ask(notebook::String, question::String; options::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
-        reply = NotebookServer.ask_and_wait(nb, NotebookServer.DEBUG_ROLE, "question", _dbg_who(), strip(question))
-        return isempty(strip(reply)) ? "No answer came back. Decide for yourself and say what you assumed." : reply
+        isempty(strip(question)) && return "⛔ a question needs asking"
+        opts = Tuple{String,String}[]
+        for part in split(options, '|')
+            isempty(strip(part)) && continue
+            i = findfirst('=', part)
+            v = i === nothing ? strip(part) : strip(part[1:i-1])
+            l = i === nothing ? strip(part) : strip(part[i+1:end])
+            isempty(v) || push!(opts, (String(v), String(isempty(l) ? v : l)))
+        end
+        # One option is not a choice, and silently asking it as prose would drop the buttons the
+        # caller meant to offer.
+        (length(opts) == 1) && return "⛔ a choice needs at least two options (value=label|value=label)"
+        if isempty(opts)
+            reply = NotebookServer.ask_and_wait(nb, NotebookServer.DEBUG_ROLE, "question",
+                                                _dbg_who(), strip(question))
+            return isempty(strip(reply)) ?
+                "No answer came back. Decide for yourself and say what you assumed." : reply
+        end
+        reply = NotebookServer.ask_and_wait(nb, NotebookServer.DEBUG_ROLE, "choice", _dbg_who(),
+                                            strip(question); options = opts)
+        isempty(strip(reply)) && return "No answer — the question is still open, or it timed out."
+        return String(strip(reply))
     end
 
     """
@@ -3171,12 +3156,10 @@ function create_tools(GateTool::Type)
         # `dbg_step` only runs user code, so the cell-run one fits it.
         GateTool("dbg_start", dbg_start; timeout_ms = ASK_MS),
         GateTool("dbg_step", dbg_step; timeout_ms = CELL_RUN_MS),
-        GateTool("dbg_into", dbg_into; timeout_ms = CELL_RUN_MS),
         GateTool("dbg_frame", dbg_frame),
         GateTool("dbg_eval", dbg_eval; timeout_ms = CELL_RUN_MS),
         GateTool("dbg_break", dbg_break),
         GateTool("dbg_watch", dbg_watch),
-        GateTool("dbg_choose", dbg_choose; timeout_ms = ASK_MS),
         GateTool("request_file_access", request_file_access; timeout_ms = ASK_MS),
         GateTool("dbg_findings", dbg_findings),
         GateTool("dbg_propose", dbg_propose; timeout_ms = ASK_MS),

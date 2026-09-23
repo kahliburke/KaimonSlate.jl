@@ -153,7 +153,7 @@ const _TOOL_LABEL = {
   dbg_start:'🐞 start debugging', dbg_step:'👣 step', dbg_frame:'🧾 frame',
   dbg_eval:'🔬 look at a value', dbg_break:'⏹ breakpoint', dbg_watch:'📈 watch',
   dbg_summon:'🐞 summon debugger', dbg_wait:'⏳ wait for specialist', dbg_tell:'💬 tell specialist',
-  dbg_ask:'❓ ask', dbg_choose:'❓ offer a choice', dbg_answer:'✔ answer', dbg_done:'✓ finish debugging',
+  dbg_ask:'❓ ask', dbg_answer:'✔ answer', dbg_done:'✓ finish debugging',
   check_ok:'✔ checked', check_flag:'⚑ flagged',
   ex:'λ eval', qdrant_search_code:'🔎 search code', search_code:'🔎 search code', goto_definition:'↪ goto def',
   search_methods:'🔎 search methods', format_code:'✨ format', run_tests:'✅ run tests',
