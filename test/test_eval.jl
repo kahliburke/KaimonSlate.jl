@@ -807,36 +807,39 @@ end
         end
     end
 
-    @testset "LOAD_PATH layers most-specific first" begin
+    # The notebook's scope is CONSTRUCTED, not layered in front of the hub's. A standalone hub is
+    # launched by the Pkg-generated `slate` shim with `JULIA_LOAD_PATH=<the Slate app env>` — one
+    # entry, no `@`, no globals — so prepending to it left every notebook resolving Slate's own
+    # project, and took its stdlib from Slate's manifest rather than `@stdlib`.
+    @testset "the notebook scope excludes the hub and names the globals" begin
         proj, env = mktempdir(), mktempdir()
-        was = copy(LOAD_PATH)
-        try
-            ReportEngine._layer_load_path!(ReportEngine.InProcessKernel(proj, env))
-            @test LOAD_PATH[1] == env && LOAD_PATH[2] == proj   # notebook env wins over its project
-            @test was ⊆ LOAD_PATH                               # the host's own entries survive
-            ReportEngine._layer_load_path!(ReportEngine.InProcessKernel(proj, env))
-            @test count(==(env), LOAD_PATH) == 1                # idempotent: reopening must not stack up
-        finally
-            empty!(LOAD_PATH); append!(LOAD_PATH, was)
-            ReportEngine._INPROC_PROJECT[] = ""
-        end
+        scope = ReportEngine._notebook_scope(ReportEngine.InProcessKernel(proj, env))
+        @test scope == [env, proj, "@v#.#", "@stdlib"]        # most specific first, globals explicit
+        @test !any(p -> occursin("KaimonSlate", p), scope)    # the hub's own project is not in it
+
+        # A directory that isn't there is dropped rather than named: a detached notebook has no
+        # project, and a scope entry pointing at nothing would only break resolution.
+        @test ReportEngine._notebook_scope(ReportEngine.InProcessKernel("", env)) == [env, "@v#.#", "@stdlib"]
+        @test ReportEngine._notebook_scope(ReportEngine.InProcessKernel()) == ["@v#.#", "@stdlib"]
     end
 
-    # Notebooks from one project share a resolution scope, which is the same scope a REPL session
-    # has. A SECOND project in the same process is the case that stops being explainable, so it is
-    # reported rather than left to surface as a package resolving to an unexpected version.
-    @testset "a second project in one process is reported" begin
-        a, b = mktempdir(), mktempdir()
-        was = copy(LOAD_PATH)
-        try
-            ReportEngine._INPROC_PROJECT[] = ""
-            @test_logs ReportEngine._layer_load_path!(ReportEngine.InProcessKernel(a, ""))
-            @test_logs ReportEngine._layer_load_path!(ReportEngine.InProcessKernel(a, ""))  # same project: silent
-            @test_logs (:warn, r"two projects") ReportEngine._layer_load_path!(ReportEngine.InProcessKernel(b, ""))
-        finally
-            empty!(LOAD_PATH); append!(LOAD_PATH, was)
-            ReportEngine._INPROC_PROJECT[] = ""
+    @testset "the swap is scoped: LOAD_PATH and the active project both come back" begin
+        proj, env = mktempdir(), mktempdir()
+        write(joinpath(env, "Project.toml"), "")
+        k = ReportEngine.InProcessKernel(proj, env)
+        was_path, was_proj = copy(LOAD_PATH), Base.active_project()
+
+        inner_path, inner_proj = ReportEngine._in_notebook_env(k) do
+            (copy(LOAD_PATH), Base.active_project())
         end
+        @test inner_path == [env, proj, "@v#.#", "@stdlib"]        # the notebook's scope, while it runs
+        @test inner_proj == joinpath(env, "Project.toml")          # …and Pkg in a cell sees the notebook
+        @test LOAD_PATH == was_path && Base.active_project() == was_proj   # restored after
+
+        # Restored on the error path too, or one failing cell would leave the hub resolving as the
+        # notebook for the rest of its life.
+        @test_throws ErrorException ReportEngine._in_notebook_env(() -> error("boom"), k)
+        @test LOAD_PATH == was_path && Base.active_project() == was_proj
     end
 
 end

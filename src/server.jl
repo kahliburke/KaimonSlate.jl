@@ -407,13 +407,17 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             @warn "slate: this notebook asked to run elsewhere, but this hub has no compute gate — running locally instead" notebook = basename(String(path)) requested = asked source = _runon_source(report) hint = "remote execution needs the Kaimon host; a standalone hub cannot spawn or dial a remote worker"
         end
     end
-    # No gate (standalone `slate`, no Kaimon host): cells run in THIS process. The notebook still
-    # gets the same two environments a worker would be given — its enclosing project and its own
-    # env — layered onto LOAD_PATH rather than resolved into one, since there is no separate
-    # process whose active project we could repoint. The env dir is named now and materialised on
-    # the first package add, so a notebook that adds nothing costs nothing.
-    k = InProcessKernel(enclosing, ReportEngine.notebook_env_dir(path))
-    ReportEngine._layer_load_path!(k)
+    # No gate (standalone `slate`, no Kaimon host): cells run in THIS process. The notebook gets the
+    # same two environments a worker would be given — its own env and its enclosing project — but
+    # stacked on LOAD_PATH rather than resolved into one, since there is no separate process whose
+    # active project we could repoint. `_in_notebook_env` installs that stack around each eval and
+    # takes it down again; nothing is layered here.
+    #
+    # The env is MATERIALISED now rather than on the first package add. It is what the notebook's
+    # active project is set to while a cell runs, so creating it up front is what makes `Pkg.status()`
+    # in a cell describe the notebook instead of the hub, from the very first cell rather than from
+    # whenever a package happens to be added.
+    k = InProcessKernel(enclosing, ReportEngine.ensure_notebook_env!(ReportEngine.notebook_env_dir(path)))
     return k
 end
 

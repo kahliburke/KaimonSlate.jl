@@ -58,6 +58,17 @@ function _worker_tag(label::AbstractString, region::AbstractString, port::Intege
 end
 
 const _WORKER_JL = joinpath(@__DIR__, "worker.jl")
+# Julia's default load path, spelled with the OS path-list separator (`;` on Windows). A worker is
+# handed this EXPLICITLY rather than inheriting one. When the hub runs as a Kaimon extension, Kaimon
+# launches it with `JULIA_LOAD_PATH=@:<kaimon project>:@v#.#:@stdlib` so the extension can import
+# Kaimon and its deps; a worker spawned from here inherits that variable, and `--project` does not
+# undo it — it only decides what `@` resolves to. Kaimon's project therefore stayed stacked behind
+# the notebook env, and every package Kaimon depends on was importable in a notebook that never
+# declared one: the notebook ran green here and failed the moment it was published, exported, or
+# run on a remote worker, whose stack is clean. It also put a second HTTP on the path, the shadowing
+# hazard `_worker_script` describes below. Passing the default stack is what makes that function's
+# comment true — KaimonGate, the notebook project, the infra env, globals, stdlib, nothing else.
+const _DEFAULT_LOAD_PATH = join(("@", "@v#.#", "@stdlib"), Sys.iswindows() ? ';' : ':')
 # Slate-owned WORKER INFRA env — Revise (hot-reload the parent project's /src), ExpressionExplorer
 # (macro-aware dep recovery, pinned to the engine's version — see macroexpand.jl), and
 # SlateExtensionsBase (the extension SDK: Widget/Choice/WebPage/slate_context). Carried in ONE env
@@ -817,6 +828,8 @@ function _spawn_worker!(k::GateKernel)
     extra_args = Base.shell_split(effective_worker_extra_flags(k.extra_flags))
     cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads $extra_args -e $(_worker_script(port, stream_port, k.parent, k.nbdir))`
     cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas,
+                 # Never inherit the hub's load path — see `_DEFAULT_LOAD_PATH`.
+                 "JULIA_LOAD_PATH" => _DEFAULT_LOAD_PATH,
                  "KAIMON_SESSION_LABEL" => k.label,   # worker reports this as its gate-session name (notebook filename)
                  # Self-identifying process tag (see the remote path) — in `ps e` / /proc/<pid>/environ.
                  "KAIMONSLATE_WORKER" => _worker_tag(k.label, "", port))

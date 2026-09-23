@@ -227,4 +227,28 @@ end
         end
     end
 
+    # A worker must resolve packages from its own project and nothing else. The hub does not control
+    # what load path it was itself launched with — as a Kaimon extension it gets Kaimon's project
+    # stacked in, so an inherited variable silently widened every notebook's environment.
+    @testset "a worker does not inherit the hub's load path" begin
+        @test RE._DEFAULT_LOAD_PATH == join(("@", "@v#.#", "@stdlib"), Sys.iswindows() ? ';' : ':')
+
+        # `--project` does not displace an inherited JULIA_LOAD_PATH; only setting the variable does.
+        # Assert that against a real subprocess, since it is the mechanism the fix relies on.
+        proj = mktempdir(); write(joinpath(proj, "Project.toml"), "name = \"Probe\"\nuuid = \"4a9f1f0e-0000-4000-8000-000000000001\"\n")
+        intruder = mktempdir()
+        # The child's code goes through a variable, not a quoted literal inside the backticks:
+        # Windows builds a command LINE rather than an argv, so shell-style quoting written here
+        # is one more thing that has to survive a second parser on the way out.
+        code = "print(join(Base.load_path(), \"\\n\"))"
+        base = `$(Base.julia_cmd()) --startup-file=no --project=$proj -e $code`
+        polluted = addenv(base, "JULIA_LOAD_PATH" => join(("@", intruder, "@v#.#", "@stdlib"), Sys.iswindows() ? ';' : ':'))
+
+        @test occursin(intruder, read(polluted, String))                     # inherited: the intruder lands on the path
+        scrubbed = addenv(polluted, "JULIA_LOAD_PATH" => RE._DEFAULT_LOAD_PATH)
+        out = read(scrubbed, String)
+        @test !occursin(intruder, out)                                       # scrubbed: it does not
+        @test occursin(joinpath(proj, "Project.toml"), out)                  # and `--project` still wins `@`
+    end
+
 end

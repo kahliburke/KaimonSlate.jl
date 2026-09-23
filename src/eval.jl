@@ -390,10 +390,12 @@ end
 
 "Evaluate `source` in the kernel and capture stdout + rich output → `CellOutput`. `region`/`regions`
 seed the task-local Slate execution context (see `_build_slate_ctx`); `region=\"\"` ⇒ the main kernel."
-eval_capture(::InProcessKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
+eval_capture(k::InProcessKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
              region::AbstractString = "", regions::AbstractVector = String[]) =
-    _eval_capture(report_module(report), source, filename;
-                  slate_ctx = _build_slate_ctx(report_module(report), report.id, region, regions))
+    _in_notebook_env(k) do
+        _eval_capture(report_module(report), source, filename;
+                      slate_ctx = _build_slate_ctx(report_module(report), report.id, region, regions))
+    end
 
 # Memo-aware entry (5-arg `memo` = (; key, names, threshold)). Default: ignore caching and just
 # evaluate — only the gate kernel (real notebooks) implements durable memoization. Keeps in-process
@@ -513,8 +515,10 @@ table_page(::InProcessKernel, ::Report, table_id::AbstractString, request::Abstr
 Capture each markdown `{{ expr }}` in the kernel (rich output, like a mini code
 cell). The gate kernel forwards to its worker.
 """
-interpolate(::InProcessKernel, report::Report, exprs::Vector{String}) =
-    CellOutput[_eval_capture(report_module(report), e) for e in exprs]
+interpolate(k::InProcessKernel, report::Report, exprs::Vector{String}) =
+    _in_notebook_env(k) do
+        CellOutput[_eval_capture(report_module(report), e) for e in exprs]
+    end
 
 """
     harvest_docs(kernel, report, mod_names) -> Vector{Dict}
@@ -606,20 +610,23 @@ end
 
 The notebook project's direct dependencies as `{name, version}` (for eager docs
 auto-indexing — everything reachable is worth indexing, so this is intentionally
-unfiltered). The gate kernel reads its worker's active project; the in-process
-kernel has no separate worker, so it reads the host's own active project — the same
-one `pkg_op` adds/removes into.
+unfiltered). The gate kernel reads its worker's active project; the in-process kernel
+reads the notebook's own env, under the same scope swap a cell runs in — so what gets
+indexed is what the notebook can actually `using`, not what the hub happens to carry.
 """
-project_deps(::InProcessKernel, ::Report) = _active_project_deps()
+project_deps(k::InProcessKernel, ::Report) = _in_notebook_env(k) do
+    _active_project_deps()
+end
 
-# In-process has no worker env to fork, so cells run in the host's active project. That project
-# already carries the running app's OWN deps, so filter those out via the startup baseline: only
-# what a notebook itself added should show in the package panel / reproducibility footer.
+# A server-opened notebook always has an env of its own (`_select_kernel` materialises it), so `own`
+# below is the notebook's own env and the branch after it is for a BARE `InProcessKernel()` — the
+# `eval_report!` API and tests, which have no env dir. There the only notebook-specific packages are
+# whatever was added to the host project at runtime, which the startup baseline isolates.
 #
 # The notebook's ENCLOSING project is still reported as the parent when there is one. It is not an
 # environment the notebook can add to from here (that is why the panel stays read-only), but it is
-# on LOAD_PATH and its packages are what the notebook can `using`, so calling such a notebook
-# "detached" was wrong: it named the one project the notebook actually depends on.
+# in the notebook's scope and its packages are what the notebook can `using`, so calling such a
+# notebook "detached" was wrong: it named the one project the notebook actually depends on.
 function env_info(k::InProcessKernel, ::Report)
     own = _project_group(k.envdir)
     if own === nothing
@@ -695,9 +702,8 @@ function pkg_op(k::InProcessKernel, ::Report, op::AbstractString, name::Abstract
                          Pkg.rm(String(name))
         return Dict{String,Any}("ok" => true, "message" => "")
     end
-    # A fresh notebook env only becomes reachable to `using` once it exists, and the enclosing
-    # project has to stay behind it. Re-layering after the op keeps that order true.
-    r["ok"] === true && _layer_load_path!(k)
+    # No re-layering afterwards: `_in_notebook_env` rebuilds the scope from `k` at every eval, so an
+    # env that only came into existence just now is picked up by the next cell on its own.
     return r
 end
 
@@ -722,35 +728,48 @@ function _in_env(f, dir::AbstractString)
     end
 end
 
-# Put this notebook's environments on LOAD_PATH, most specific first: its own env, then the
-# enclosing project, then whatever the host already had. Idempotent, and it re-asserts the relative
-# order on every call so a later add can't leave the project ahead of the notebook env.
-function _layer_load_path!(k::InProcessKernel)
-    _warn_second_project(k.projectdir)
-    for d in (k.projectdir, k.envdir)          # pushed in reverse precedence; each `pushfirst!` wins
-        isempty(d) && continue
-        isdir(d) || continue
-        filter!(!=(d), LOAD_PATH)
-        pushfirst!(LOAD_PATH, d)
-    end
-    isempty(k.projectdir) || (_INPROC_PROJECT[] = k.projectdir)
-    return nothing
-end
+# The environments a notebook should resolve against, most specific first: its own env, then its
+# enclosing project, then the user's global env and the stdlibs.
+#
+# CONSTRUCTED, not prepended to what the hub already had — that distinction is the whole point. A
+# standalone hub is launched by the Pkg-generated `slate` shim, which exports
+# `JULIA_LOAD_PATH=<the KaimonSlate app env>`: ONE entry, no `@`, no `@v#.#`, no `@stdlib`. Layering
+# in front of that left every notebook resolving Slate's OWN project, so any package Slate depends on
+# satisfied a notebook `using` that declared nothing — green here, broken the moment the notebook was
+# published, exported, or opened anywhere else. It also made a notebook's stdlib come from Slate's
+# manifest rather than `@stdlib`, which is why the globals below are named explicitly: without them
+# this list would take stdlib away along with the leak.
+_notebook_scope(k::InProcessKernel) =
+    String[filter(d -> !isempty(d) && isdir(d), (k.envdir, k.projectdir))..., "@v#.#", "@stdlib"]
 
-# One in-process hub holds one LOAD_PATH, so its notebooks share a single resolution scope — the
-# same scope a REPL session has, and fine for notebooks from one project. A notebook from a SECOND
-# project is a different matter: both projects end up stacked, the newer in front, and which one a
-# shared package resolves from stops being a property of the notebook you are looking at. Say so
-# once, rather than letting it be discovered as a package that inexplicably has the wrong version.
-const _INPROC_PROJECT = Ref{String}("")
-function _warn_second_project(dir::AbstractString)
-    (isempty(dir) || isempty(_INPROC_PROJECT[]) || _INPROC_PROJECT[] == dir) && return nothing
-    @warn """
-          Slate is serving notebooks from two projects in ONE process, so they share a single \
-          package resolution scope and the newer project takes precedence. Run a separate `slate` \
-          per project to keep them apart.
-          """ first = _INPROC_PROJECT[] second = dir
-    return nothing
+# Evaluate `f` with the process resolving packages as the NOTEBOOK should, then put the hub's own
+# resolution back. `LOAD_PATH` and the active project are both process-global, so this is serialised
+# on the same lock as package operations: one in-process hub evaluates one cell at a time across all
+# its notebooks. That is the price of a single process, and it is why `slate --ai` exists — an
+# embedded Kaimon gives every notebook its own worker and none of this applies.
+#
+# The active project is moved too, not just `LOAD_PATH`. Without it `Pkg.status()` in a cell reports
+# the environment SLATE is running out of, and a bare `Pkg.add` in a cell writes into it — a notebook
+# mutating the hub's own dependencies, which is exactly what `pkg_op` refuses to do.
+function _in_notebook_env(f, k::InProcessKernel)
+    lock(_INPROC_ENV_LOCK) do
+        scope = _notebook_scope(k)
+        saved_path = copy(LOAD_PATH)
+        saved_proj = Base.active_project()
+        # First real directory in the scope — the notebook's own env when it has one, else its
+        # project. Nothing to activate (a detached notebook that has never added a package) leaves
+        # the hub's active project alone: `LOAD_PATH` already denies it, and activating a directory
+        # that isn't there would only break `Pkg` for the cell.
+        home = findfirst(d -> !startswith(d, '@'), scope)
+        try
+            append!(empty!(LOAD_PATH), scope)
+            home === nothing || Base.set_active_project(joinpath(scope[home], "Project.toml"))
+            return f()
+        finally
+            append!(empty!(LOAD_PATH), saved_path)
+            try; Base.set_active_project(saved_proj); catch; end
+        end
+    end
 end
 
 """

@@ -94,7 +94,7 @@ function _embedded_env_vars(port::Integer)
         # the host dies with "Package Kaimon not found in current path". Restore the default so
         # `--project` means what it says. (Kaimon's own extension launcher does the same thing for
         # the same reason.)
-        "JULIA_LOAD_PATH" => join(("@", "@v#.#", "@stdlib"), Sys.iswindows() ? ';' : ':'),
+        "JULIA_LOAD_PATH" => ReportEngine._DEFAULT_LOAD_PATH,
         "JULIA_PROJECT" => nothing,
     ]
 end
