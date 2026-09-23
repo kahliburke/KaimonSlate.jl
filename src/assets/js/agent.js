@@ -530,6 +530,12 @@ function _agentNote(text) { agentMsgs.push({ role: 'note', text }); renderAgentM
 // user can SEE what's being done to their notebook. Returns the message object so the caller can
 // flip `done`/`text` (then re-render) once it resolves.
 function logAgentAction(text, code) {
+  // A call the notebook's OWN agent makes arrives twice: once as its `tool_use` event, and once
+  // from the tab when the call lands here — which is the path that exists so an OUTSIDE agent's
+  // actions are visible at all. The two carry no common id, one having ACP's and the other none,
+  // so they are matched on the code being run, which is what a reader matches them on too.
+  const seen = code && agentMsgs.find(m => m.role === 'tool' && !m.done && m.id && m.code === code);
+  if (seen) return seen;
   const m = { role: 'tool', text, code: code || '', done: false };
   agentMsgs.push(m); renderAgentMsgs();
   return m;
@@ -678,7 +684,16 @@ function agentEvent(env) {
     // Upsert by toolCallId — `tool_use` fires at call-begin (in_progress) and may
     // be re-emitted; don't duplicate. Authoritative input (if present) wins.
     const c = d.call || {};
-    let tm = agentMsgs.find(m => m.role === 'tool' && m.id === c.toolCallId);
+    // `id &&` on both sides: an event with no id must not match the id-less rows the tab makes, or
+    // every externally-driven action would land on whichever one came first.
+    let tm = c.toolCallId && agentMsgs.find(m => m.role === 'tool' && m.id === c.toolCallId);
+    if (!tm) {
+      // The tab may have got here first, with the same code and no id. Adopt that row rather than
+      // opening a second one beside it.
+      const code = c.rawInput ? _extractCode(JSON.stringify(c.rawInput)) : '';
+      const mine = code && agentMsgs.find(m => m.role === 'tool' && !m.done && !m.id && m.code === code);
+      if (mine) { mine.id = c.toolCallId; tm = mine; }
+    }
     if (!tm) { tm = { role: 'tool', id: c.toolCallId, title: '', inputBuf: '', code: '', done: false, crew }; agentMsgs.push(tm); }
     if (env.external) tm.external = true;   // a tool call from OUTSIDE this notebook's chat (an external agent)
     tm.raw = _bareTool(c.title || c.kind || tm.raw || 'tool');
@@ -689,14 +704,14 @@ function agentEvent(env) {
     // The call's arguments stream as raw JSON fragments — concatenate, then
     // tolerant-extract the field being written (source/code/new_string/…) so the
     // agent's code "types in" live. (Liveness only; not buffered for replay.)
-    const tm = agentMsgs.find(m => m.role === 'tool' && m.id === d.toolCallId);
+    const tm = d.toolCallId && agentMsgs.find(m => m.role === 'tool' && m.id === d.toolCallId);
     if (tm) { tm.inputBuf = (tm.inputBuf || '') + (d.partialJson || ''); tm.code = _extractCode(tm.inputBuf); }
   } else if (k === 'tool_result') {
     // Every tool_result is terminal — Kaimon rides the authoritative input as a 2nd
     // `tool_use` (rawInput), not an in_progress tool_result (consumed in tool_use
     // above). So finalize the call and surface any image blocks.
     const u = d.update || {};
-    const tm = agentMsgs.find(m => m.role === 'tool' && m.id === u.toolCallId && !m.done);
+    const tm = u.toolCallId && agentMsgs.find(m => m.role === 'tool' && m.id === u.toolCallId && !m.done);
     if (tm) { tm.done = true; if (env.external) tm.external = true; if (u.status === 'failed') tm.role = 'err'; }
     for (const b of (u.content || [])) {
       const inner = b && b.content;
