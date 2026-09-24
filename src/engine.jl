@@ -747,6 +747,7 @@ include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace c
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest for semantic docs search
 include(joinpath(@__DIR__, "termcook.jl"))  # cook_terminal — replay \r/cursor redraws (used by capture.jl)
 include(joinpath(@__DIR__, "record_display.jl")) # record_html — a NamedTuple value as a grid of fields (used by capture.jl)
+include(joinpath(@__DIR__, "record_source.jl")) # record_field_range — where a record field came from in the cell source
 include(joinpath(@__DIR__, "capture.jl"))   # shared run_capture (engine + worker)
 include(joinpath(@__DIR__, "format.jl"))    # _format_cell — server-side table cell renderer (JS mirror: fmtCell)
 include(joinpath(@__DIR__, "completion.jl")) # shared REPLCompletions (engine + worker)

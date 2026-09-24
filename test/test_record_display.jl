@@ -40,3 +40,45 @@ Base.show(io::IO, ::MIME"text/plain", q::_Unc) = print(io, "(", q.v, " ± ", q.e
     @test any(ch -> ch.mime == "application/vnd.kaimonslate.html+html" && occursin("slate-record", String(ch.data)), o.display)
     @test occursin("a = 1.23456789", o.value_repr)
 end
+
+# Clicking a field points at the source that produced it. The rule is per FIELD: a variable is what
+# was "used to assign", a literal is not, and a record nested in the tuple is its own expression.
+@testset "a record field resolves to its source" begin
+    span(src, f) = (r = RE.record_field_span(src, f); r === nothing ? nothing : String(codeunits(src)[r[1]:r[2]]))
+
+    @testset "the variable that was put in" begin
+        @test span("(; f0 = measured, n = 3)", "f0") == "measured"
+        @test span("res = (; a = 1, b = bee)", "b") == "bee"
+        @test span("(; f0, ζ)", "ζ") == "ζ"                       # shorthand: the name IS the variable
+        @test span("(; a = f(g(h(1))), b = 2)", "a") == "f(g(h(1)))"
+        @test span("(; outer = 1, inner = (; x = 2))", "inner") == "(; x = 2)"
+    end
+
+    @testset "a literal has no variable, so the tuple is what is pointed at" begin
+        whole = "(; f0 = 1006.6, n = 3)"
+        @test span(whole, "f0") == whole
+        # A number is one token and a string is three, so a token count would treat them
+        # differently; both are literals and both must land on the tuple.
+        @test span("(; a = x, b = \"lit\")", "b") == "(; a = x, b = \"lit\")"
+        @test span("(; a = true, b = 2)", "a") == "(; a = true, b = 2)"
+    end
+
+    @testset "nothing is pointed at rather than the wrong thing" begin
+        @test span("(; a = 1, b = 2)", "nope") === nothing
+        @test span("", "a") === nothing
+        @test span("(; a = 1", "a") === nothing                   # unclosed: no tuple to name
+        @test span("foo(a = 1)", "a") === nothing                 # a call's keyword argument, not a field
+        # …but a real tuple after a call still resolves: the `)` above it is not this bracket's callee.
+        @test span("res = foo(a = 1)\n(; a = res.x)", "a") == "res.x"
+    end
+
+    # The editor indexes UTF-16 units and the tokens are byte ranges, so a multibyte or astral
+    # character ABOVE the tuple would slide the mark left of the text it names.
+    @testset "offsets survive characters outside ASCII" begin
+        src = "ζ = 1\n(; a = beta, b = 2)"
+        r = RE.record_field_range(src, "a")
+        @test r !== nothing
+        units = Char[]; for c in src; push!(units, c); ncodeunits(c) > 3 && push!(units, c); end
+        @test String(units[(r[1] + 1):r[2]]) == "beta"
+    end
+end

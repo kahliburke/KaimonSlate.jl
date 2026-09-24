@@ -752,6 +752,25 @@
   const flashField = mkField(setFlash, 'cm-errorline-flash');
   const originField = mkField(setOrigin, 'cm-errorline-origin');
 
+  // A RANGE mark, not a line one: clicking a record's field points at the expression that produced
+  // it, which is usually part of a line rather than all of it. Two marks, because the ask is a
+  // flash that then settles — the flash clears itself and the quiet one stays until the next click.
+  const setSpan = StateEffect.define(), setSpanFlash = StateEffect.define();
+  const mkSpanField = (effect, cls) => StateField.define({
+    create: () => Decoration.none,
+    update(deco, tr) {
+      deco = deco.map(tr.changes);            // survives edits: the mark follows the text it marks
+      for (const e of tr.effects) if (e.is(effect)) {
+        deco = (e.value == null) ? Decoration.none
+          : Decoration.set([Decoration.mark({ class: cls }).range(e.value.from, e.value.to)]);
+      }
+      return deco;
+    },
+    provide: f => EditorView.decorations.from(f),
+  });
+  const spanField = mkSpanField(setSpan, 'cm-recordspan');
+  const spanFlashField = mkSpanField(setSpanFlash, 'cm-recordspan-flash');
+
   // ── Inline data-URI "chit" ────────────────────────────────────────────────────────────────────
   // A pasted/dropped image with no project to attach into lands in the cell source as a HUGE
   // `data:…;base64,<blob>` — thousands of chars that make the cell impossible to edit. Collapse each
@@ -802,6 +821,21 @@
   window.clearErrorLine = (id) => { const v = editors[id]; if (v) v.dispatch({ effects: setErr.of(null) }); };
   window.markOriginLine = (id, line1) => { const v = editors[id]; if (v) v.dispatch({ effects: setOrigin.of(_validLine(v, line1) ? line1 : null) }); };
   window.clearOriginLine = (id) => { const v = editors[id]; if (v) v.dispatch({ effects: setOrigin.of(null) }); };
+  // Flash a source range, then leave it quietly marked. `from`/`to` are JS string offsets, which is
+  // what the server sends (it converts from Julia's bytes). Out-of-range is ignored rather than
+  // clamped: a stale offset would otherwise mark arbitrary text with confident-looking styling.
+  window.flashRange = (id, from, to) => {
+    const v = (window.ensureEditor && window.ensureEditor(id)) || editors[id];
+    if (!v) return;
+    const len = v.state.doc.length;
+    if (!(from >= 0 && to > from && to <= len)) return;
+    const span = { from, to };
+    v.dispatch({ effects: [setSpan.of(span), setSpanFlash.of(span),
+                           EditorView.scrollIntoView(from, { y: 'center' })] });
+    setTimeout(() => { try { v.dispatch({ effects: setSpanFlash.of(null) }); } catch (_) {} }, 900);
+  };
+  window.clearRange = id => { const v = editors[id]; if (v) v.dispatch({ effects: [setSpan.of(null), setSpanFlash.of(null)] }); };
+
   window.flashLine = (id, line1) => {
     const v = editors[id]; if (!v || !_validLine(v, line1)) return;
     const off = v.state.doc.line(line1).from;
@@ -1172,6 +1206,7 @@
         // `:root`, so the popup still themes correctly from here.
         tooltips({ parent: document.body }),
         indentUnit.of(_indent), EditorState.tabSize.of(webLang ? 2 : 4), errField, originField, flashField,
+        spanField, spanFlashField,
         matchField,                      // notebook-wide search highlights (painted by search.js)
         wrapComp.of(_wrapExt(!!opts.markdown)),
         ..._multiCursor,

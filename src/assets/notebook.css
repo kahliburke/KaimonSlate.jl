@@ -2817,3 +2817,13 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 /* The stage holds the thumbnail first, then whatever `slate_matrix` sends back in its place. */
 .srec-matchart { width:min(76vw, 620px); height:min(70vh, 520px); }
 .srec-mattex { max-width:min(80vw, 760px); overflow:auto; }
+
+/* Clicking a record field marks the source that produced it: a brief flash, then a quiet tint that
+   stays until the next click. Kept clear of the error-line marks, which own the warm colours. */
+.cm-recordspan { background:rgba(86,156,214,.16); border-radius:3px;
+  box-shadow:inset 0 -1px 0 rgba(86,156,214,.55); }
+.cm-recordspan-flash { animation:recordspan-flash .9s ease-out; border-radius:3px; }
+@keyframes recordspan-flash {
+  0%   { background:rgba(86,156,214,.62); }
+  100% { background:rgba(86,156,214,.00); }
+}

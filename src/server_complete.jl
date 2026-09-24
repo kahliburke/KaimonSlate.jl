@@ -2079,6 +2079,21 @@ function _make_router(h::Hub)
         end
         return _json(out)
     end))
+    # Where a record field came from, so clicking it can point at the source that produced it. The
+    # hub answers from the cell's own text — no kernel, because this is a question about source.
+    HTTP.register!(router, "POST", "/api/{id}/recordspan", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        cell, field = String(get(b, "cell", "")), String(get(b, "field", ""))
+        i = findfirst(c -> c.id == cell, nb.report.cells)
+        i === nothing && return _json(Dict("found" => false))
+        r = try
+            ReportEngine.record_field_range(nb.report.cells[i].source, field)
+        catch
+            nothing
+        end
+        r === nothing && return _json(Dict("found" => false))
+        return _json(Dict("found" => true, "from" => r[1], "to" => r[2]))
+    end))
     # ── Extension catalog ─────────────────────────────────────────────────────
     # The gallery's data: catalog entries annotated with this notebook's install state. `refresh=1`
     # bypasses the cache TTL (the "check for new extensions" action) — an ordinary open should not

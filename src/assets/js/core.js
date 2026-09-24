@@ -1550,6 +1550,24 @@ async function api(method, path, body) {
 window.addEventListener('unhandledrejection', e => { if (typeof _connDown !== 'undefined' && _connDown) e.preventDefault(); });
 
 
+// ── Clicking a record field points at the source that produced it ──────────────────────────────
+// The grid renders values, not code, so a field is a dead end unless it can say where it came
+// from. The hub answers from the cell's own text (`/api/{id}/recordspan`): the variable that was
+// put in, or the tuple itself when the field was written as a literal and there is no variable to
+// point at. A matrix field is excluded — that click already opens the matrix.
+document.addEventListener('click', e => {
+  if (!e.target.closest) return;
+  if (e.target.closest('.srec-mat')) return;                  // the matrix popup owns this click
+  const f = e.target.closest('.srec-f');
+  if (!f || !f.dataset.field) return;
+  const cellEl = f.closest('[id^="cell-"]');
+  if (!cellEl) return;
+  const cellId = cellEl.id.slice(5);
+  api('POST', '/api/recordspan', { cell: cellId, field: f.dataset.field })
+    .then(r => { if (r && r.found && window.flashRange) window.flashRange(cellId, r.from, r.to); })
+    .catch(() => {});
+});
+
 // ── A record's matrix field, expanded ──────────────────────────────────────────────────────────
 // The field carries a small heat strip and, in a <template>, a larger one (record_display.jl).
 // Clicking lifts the larger SVG into an overlay. Delegated from the document so it keeps working
