@@ -1749,6 +1749,45 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-md .admonition.answer,.exp-md .admonition.solution{--adm:var(--green);}
 .exp-md .admonition.warning,.exp-md .admonition.caution{--adm:var(--gold);}
 .exp-md .admonition.danger,.exp-md .admonition.error,.exp-md .admonition.compat{--adm:var(--red);}
+/* A NamedTuple value rendered as a RECORD (record_display.jl). Mirrored from notebook.css for the
+   same reason as the admonitions above: the export sheet is separate, so without these an exported
+   page carries correct record markup with nothing to draw it — the field cards collapse into a run
+   of bare text. `--val` and `--ovl` are live-sheet colours the export palette does not define, so
+   each use carries a fallback rather than the palettes growing two entries for one component.
+   The matrix thumbnails' click-to-expand is live-only (it needs the notebook's JS), so the overlay
+   rules are not mirrored — a thumbnail exports as the static image it already is. */
+.exp-out .slate-record{margin:4px 0;}
+.exp-out .srec-grid{display:flex;flex-wrap:wrap;gap:6px;align-items:stretch;}
+.exp-out .srec-f{display:flex;flex-direction:column;justify-content:flex-start;gap:0;min-width:0;
+  max-width:100%;padding:0;border-radius:7px;background:var(--bg2);border:1px solid var(--border);overflow:hidden;}
+.exp-out .srec-k{display:block;font-size:.66rem;color:var(--dim);letter-spacing:.03em;white-space:nowrap;
+  padding:3px 10px;background:var(--bg);border-bottom:1px solid var(--border);}
+.exp-out .srec-f>:not(.srec-k){margin:5px 10px 6px;}
+.exp-out .srec-v{font-family:'Cascadia Code','Fira Code',monospace;font-size:.88rem;
+  color:var(--val,var(--text));white-space:nowrap;font-variant-numeric:tabular-nums;}
+.exp-out .srec-err{font-size:.74rem;color:var(--dim);}
+.exp-out .srec-u{margin-left:5px;font-size:.76rem;color:var(--dim);}
+.exp-out .srec-bool.yes{color:var(--green);} .exp-out .srec-bool.no{color:var(--red);}
+.exp-out .srec-str,.exp-out .srec-text{color:var(--text);white-space:normal;overflow-wrap:anywhere;font-size:.82rem;}
+/* A nested tuple groups by a rule down the left rather than a box, so it cannot be mistaken for a cell. */
+.exp-out .srec-nest{flex-basis:100%;padding:2px 0 3px 10px;border-radius:0;background:transparent;
+  border:none;border-left:2px solid var(--accent);}
+.exp-out .srec-nest>.srec-k{display:block;font-size:.66rem;color:var(--accent);font-weight:600;padding:0;
+  margin-bottom:4px;letter-spacing:.06em;text-transform:uppercase;opacity:.75;background:transparent;border-bottom:none;}
+.exp-out .srec-nest>:not(.srec-k){margin:0;}
+.exp-out .srec-nest .srec-nest{border-left-color:var(--dim);}
+.exp-out .srec-nest .srec-nest>.srec-k{color:var(--dim);}
+.exp-out .srec-rich>*{margin:0;}
+.exp-out .srec-more{align-self:center;color:var(--dim);font-size:.74rem;}
+.exp-out .srec-mat{display:flex;flex-direction:column;align-items:center;gap:3px;}
+.exp-out .srec-mat-svg{display:block;border-radius:2px;border:1px solid var(--border);}
+.exp-out .srec-mat-cap{font-family:'Cascadia Code','Fira Code',monospace;font-size:.68rem;color:var(--dim);white-space:nowrap;}
+/* Record vs plain text. The preference is a class on the body, which is why it survives into a
+   static export at all — no re-render and no round trip, so the toggle keeps working with no kernel. */
+.exp-out .srec-plain{display:none;margin:0;font-family:'Cascadia Code','Fira Code',monospace;
+  font-size:.84rem;color:var(--val,var(--text));white-space:pre-wrap;overflow-wrap:anywhere;}
+body.record-plain .exp-out .slate-record>.srec-grid{display:none;}
+body.record-plain .exp-out .srec-plain{display:block;}
 /* An image (or dropped clip) alone in its paragraph is a figure — centred. One inside a run of prose
    stays inline. A `{width=…}`/`{align=…}` block writes an inline style, which outranks this. */
 .exp-md p>img:only-child,.exp-md p>video:only-child,.exp-md p>audio:only-child,

@@ -247,6 +247,19 @@ end
     @test occursin("ansi-fg-1", html) && occursin("color:#ff8700", html)
     @test occursin(".ansi-fg-1", html) && occursin(".ansi-bold", html)
 
+    # A RECORD (a NamedTuple value) has the same hazard for the same reason: the export sheet is
+    # separate from notebook.css, so a component styled only there exports with correct markup and
+    # nothing to draw it — the field cards collapse into a run of bare text, which looks like a
+    # rendering bug rather than a missing stylesheet. These are the rules that carry the layout.
+    @test occursin(".srec-grid", html) && occursin(".srec-f", html) && occursin(".srec-k", html)
+    @test occursin(".srec-nest", html)          # nested tuples group by a left rule, not a box
+    # The record/plain-text preference is a class on `body`, which is the whole reason it survives
+    # into a static export: no re-render and no round trip, so the toggle works with no kernel.
+    @test occursin("body.record-plain", html) && occursin(".srec-plain", html)
+    # `--val`/`--ovl` are live-sheet colours the export palette doesn't define, so every use has to
+    # carry a fallback or the text renders as the browser's default black on a dark page.
+    @test !occursin("var(--val)", html) && !occursin("var(--ovl)", html)
+
     # The Typst side writes the text to a sidecar file that `#outblock` reads verbatim.
     dir = mktempdir()
     io = IOBuffer()
