@@ -659,8 +659,9 @@ the cell it blew up in. Without it the only way to see another cell was to open 
 on it blind, and a specialist that found a corrupt input correctly reported the symptom's cell and
 recommended changing the code there — which was not where the fault was.
 """
+# Its own verbs, plus the conversation every specialist has: ask the person, sign off.
 const DEBUG_VERBS = String["dbg_start", "dbg_step", "dbg_frame", "dbg_eval",
-                           "dbg_break", "dbg_watch", "dbg_ask", "dbg_done",
+                           "dbg_break", "dbg_watch", "spec_ask", "spec_done",
                            "read"]
 
 const DEBUG_BRIEF = """
@@ -715,7 +716,7 @@ say what you found. Deciding you are done is yours to make — and if an orchest
 it may also decide, since it can see a goal you cannot. Say what is true, including "I could
 not work it out" — a wrong confident answer costs more than an honest empty one.
 
-Finishing NAMES A CELL: `dbg_done(cell=…, summary=…, evidence=…)`. The summary is the claim in a
+Finishing NAMES A CELL: `spec_done(cell=…, summary=…, evidence=…)`. The summary is the claim in a
 sentence, the evidence is what you saw that says so, and the cell is the one you are saying is at
 fault. That is not bookkeeping — your finding is read by someone who did not watch you work, and a
 claim with no cell cannot be checked by anyone. If you have no answer, say so and name no cell.

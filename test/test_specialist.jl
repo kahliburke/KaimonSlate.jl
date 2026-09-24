@@ -67,7 +67,7 @@ current_agent_id() = nothing
             @test !isempty(allowed)
             @test all(v -> any(endswith(a, v) for a in allowed),
                       ["dbg_start", "dbg_step", "dbg_frame", "dbg_eval", "dbg_break",
-                       "dbg_ask", "dbg_done", "read"])
+                       "spec_ask", "spec_done", "read"])
             # Reading is not editing: nothing here may change the notebook or run it. (`_eval` is
             # not on this list — the specialist's own `dbg_eval` ends in it, and that one evaluates
             # in the paused frame rather than in the notebook.)
@@ -130,7 +130,7 @@ current_agent_id() = nothing
         end
 
         @testset "signing off reports without closing" begin
-            # `sign_off!` announces; it does not stop. Closing is `dbg_done`'s, and only when the
+            # `sign_off!` announces; it does not stop. Closing is `spec_done`'s, and only when the
             # session was the specialist's own — a session a person opened stays open for them.
             fake_agent_reset!((args, text) -> nothing)
             @test !isempty(NS._debug_session(nb).cell)          # still held from above
@@ -319,11 +319,41 @@ current_agent_id() = nothing
             # of them the ones that exist to ask a person something.
             tools = KaimonSlate.create_tools(ToolSpec)
             by = Dict(t.name => t for t in tools)
-            for v in ("dbg_ask", "dbg_propose", "request_file_access", "dbg_wait")
+            for v in ("spec_ask", "spec_propose", "request_file_access", "spec_wait")
                 @test haskey(by, v)
                 t = by[v]
                 @test t.timeout_ms !== nothing
                 @test t.timeout_ms > NS.ASK_TIMEOUT * 1000      # milliseconds, and with headroom
+            end
+        end
+
+        @testset "the protocol belongs to every role, not to the debugger" begin
+            # Summoning and the conversation around it were spelled `dbg_*` and passed the debugger
+            # role as a literal, so the second kind of specialist could not use any of it: the
+            # checker had no way to ask the person a question or to sign off, and a third role would
+            # have had to copy seven tools to get them.
+            tools = Dict(t.name => t.f for t in KaimonSlate.create_tools(ToolSpec))
+            old = KaimonSlate._HUB[]
+            KaimonSlate._HUB[] = hub
+            try
+                # Both registered roles carry the conversation verbs.
+                for role in ("debugger", "checker")
+                    @test "spec_ask" in NS.SPECIALISTS[role].verbs
+                    @test "spec_done" in NS.SPECIALISTS[role].verbs
+                end
+                # …and only the debugger carries the stepping verbs, which are its own.
+                @test "dbg_step" in NS.SPECIALISTS["debugger"].verbs
+                @test !("dbg_step" in NS.SPECIALISTS["checker"].verbs)
+
+                # `role` is a parameter now, and an unknown one says what there is rather than
+                # summoning nothing and reporting success.
+                bad = tools["spec_summon"](nb.id, "profiler")
+                @test occursin("⛔", bad) && occursin("debugger", bad) && occursin("checker", bad)
+
+                listed = tools["spec_roles"](nb.id)
+                @test occursin("debugger", listed) && occursin("checker", listed)
+            finally
+                KaimonSlate._HUB[] = old
             end
         end
 
@@ -338,7 +368,7 @@ current_agent_id() = nothing
                 f = NS.record_finding!(nb, "debugger", AGENT; cell = "drive",
                                        claim = "the sum overflows", evidence = "total > typemax")
 
-                listed = tools["dbg_findings"](nb.id)
+                listed = tools["spec_findings"](nb.id)
                 @test occursin(f.id, listed)
                 @test occursin("the sum overflows", listed)
 
@@ -357,14 +387,14 @@ current_agent_id() = nothing
                         sleep(0.02)
                     end
                 end
-                out = tools["dbg_propose"](nb.id, f.id, "rewrite the accumulator", "it disputes cleanly")
+                out = tools["spec_propose"](nb.id, f.id, "rewrite the accumulator", "it disputes cleanly")
                 wait(answerer)
                 @test occursin("Approved", out)
                 @test f.plan == "rewrite the accumulator"
                 @test f.decision == "go"
 
-                @test occursin("⛔", tools["dbg_propose"](nb.id, f.id, "", "no plan"))
-                @test occursin("no finding", tools["dbg_propose"](nb.id, "nope", "x", "y"))
+                @test occursin("⛔", tools["spec_propose"](nb.id, f.id, "", "no plan"))
+                @test occursin("no finding", tools["spec_propose"](nb.id, "nope", "x", "y"))
             finally
                 KaimonSlate._HUB[] = old
             end

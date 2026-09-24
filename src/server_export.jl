@@ -5507,11 +5507,12 @@ end
 #
 # Only TOOLS are rewritten. `slate_table`, `slate_query` and the rest of the cheatsheet are Julia
 # functions the notebook calls, and they keep their names whatever the gate is called.
-const _PROMPT_TOOLS = ("add_cell", "api", "dbg_answer", "dbg_break", "dbg_eval", "dbg_findings",
-                       "dbg_frame", "dbg_propose", "dbg_start", "dbg_step", "dbg_summon",
-                       "dbg_tell", "dbg_wait", "dbg_watch", "delete_cell", "edit_cell", "eval",
+const _PROMPT_TOOLS = ("add_cell", "api", "dbg_break", "dbg_eval", "dbg_frame", "dbg_start",
+                       "dbg_step", "dbg_watch", "delete_cell", "edit_cell", "eval",
                        "index_docs", "inspect", "pkg", "read", "rename_cell",
-                       "request_file_access", "run", "run_on", "search_docs", "set_bind", "view")
+                       "request_file_access", "run", "run_on", "search_docs", "set_bind",
+                       "spec_answer", "spec_findings", "spec_propose", "spec_summon",
+                       "spec_tell", "spec_wait", "view")
 
 # One alternation in one pass, longest name first (PCRE alternation is leftmost-first, so `eval`
 # would otherwise win over `dbg_eval`). A name per pass would rewrite its own output: under

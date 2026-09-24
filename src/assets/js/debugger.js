@@ -441,7 +441,7 @@ async function loadBrief() {
 // of seven verbs, so the row is the verb plus what came back — not the tool name and its arguments.
 const VERB = {
   dbg_start: 'start', dbg_step: 'step', dbg_frame: 'frame', dbg_eval: 'eval',
-  dbg_break: 'breakpoint', dbg_ask: 'ask', dbg_done: 'done',
+  dbg_break: 'breakpoint', spec_ask: 'ask', spec_done: 'done',
 };
 const verbOf = (title) => {
   const t = String(title || '').replace(/^.*?(dbg_\w+).*$/, '$1');

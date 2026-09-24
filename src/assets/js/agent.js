@@ -152,8 +152,9 @@ const _TOOL_LABEL = {
   rename_cell:'🏷 rename cell', pkg:'📦 packages', request_file_access:'🔑 ask for file access',
   dbg_start:'🐞 start debugging', dbg_step:'👣 step', dbg_frame:'🧾 frame',
   dbg_eval:'🔬 look at a value', dbg_break:'⏹ breakpoint', dbg_watch:'📈 watch',
-  dbg_summon:'🐞 summon debugger', dbg_wait:'⏳ wait for specialist', dbg_tell:'💬 tell specialist',
-  dbg_ask:'❓ ask', dbg_answer:'✔ answer', dbg_done:'✓ finish debugging',
+  spec_summon:'✳ summon specialist', spec_roles:'✳ specialists', spec_wait:'⏳ wait for specialist',
+  spec_tell:'💬 tell specialist', spec_ask:'❓ ask', spec_answer:'✔ answer',
+  spec_done:'✓ sign off', spec_findings:'📋 findings', spec_propose:'📐 propose',
   check_ok:'✔ checked', check_flag:'⚑ flagged',
   ex:'λ eval', qdrant_search_code:'🔎 search code', search_code:'🔎 search code', goto_definition:'↪ goto def',
   search_methods:'🔎 search methods', format_code:'✨ format', run_tests:'✅ run tests',
@@ -332,7 +333,7 @@ function _agentMsgHtml(m) {
 // it goes. The value is that line's caption; a kind with no caption disappears silently.
 const _PLUMBING = {
   ToolSearch: '⋯ discovering tools',
-  dbg_wait: '⋯ waiting for the specialist',
+  spec_wait: '⋯ waiting for the specialist',
   TodoWrite: '',
 };
 const _plumbingOf = m => (m.role === 'tool' ? _PLUMBING[m.raw || m.text] : undefined);

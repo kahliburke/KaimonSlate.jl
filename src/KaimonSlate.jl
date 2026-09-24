@@ -1247,7 +1247,7 @@ function create_tools(GateTool::Type)
     # "" when it may proceed.
     #
     # Refused rather than hidden: a tool that is simply absent sends an agent looking for another
-    # way to do the same thing, while a refusal naming `dbg_summon` tells it what the right move
+    # way to do the same thing, while a refusal naming `spec_summon` tells it what the right move
     # is. Only KAIMON AGENTS are judged — a person driving from the browser or an MCP client is
     # not an agent that can wander, and blocking them would break the manual path the UI is.
     function _dbg_refusal(nb)
@@ -1259,18 +1259,49 @@ function create_tools(GateTool::Type)
         a = _agent_id()
         isempty(a) && return ""                                     # nobody's agent: a person
         a == String(NotebookServer.specialist_here(nb, NotebookServer.DEBUG_ROLE)) && return ""  # itself
-        # Naming the supervisor's verbs, not the specialist's. This used to say `dbg_ask` and
-        # `dbg_done`, which are the things the SPECIALIST calls — so an orchestrator that followed
+        # Naming the supervisor's verbs, not the specialist's. This used to name the asking and
+        # signing-off verbs, which are the things the SPECIALIST calls — so an orchestrator that followed
         # it signed off on an investigation it had not run, filing a second finding that said what
         # the first one already did.
-        return "⛔ Stepping is the debugging specialist's. Call `dbg_summon(notebook, cell, task=…)` " *
-               "to put one on it, then supervise: `dbg_wait` blocks until it asks or finishes, " *
-               "`dbg_answer` unblocks a question, `dbg_tell` redirects it. When it has finished, " *
-               "read `dbg_findings` and put a course of action to the person with `dbg_propose`. " *
+        return "⛔ Stepping is the debugging specialist's. Call " *
+               "`spec_summon(notebook, role=\"debugger\", subject=cell, task=…)` to put one on it, " *
+               "then supervise: `spec_wait` blocks until it asks or finishes, `spec_answer` " *
+               "unblocks a question, `spec_tell` redirects it. When it has finished, read " *
+               "`spec_findings` and put a course of action to the person with `spec_propose`. " *
                "(Turn this off with `KaimonSlate.set_debug_specialist_only!(false)`.)"
     end
 
     _dbg_who() = (a = _agent_id(); "agent:" * (isempty(a) ? (c = _caller(); isempty(c) ? "mcp" : c) : a))
+
+    """
+    Which KIND of specialist is calling, from the agent id behind the call.
+
+    A specialist knows what it is without being told, and asking it to name its own role in every
+    message would be a parameter that can only be got wrong. `nb.agents` maps role to agent id, so
+    this is that map read backwards. Empty when the caller is not a specialist at all — an
+    orchestrator, or a person — which is the case the callers treat as "say which one you mean".
+    """
+    function _spec_role_of(nb)::String
+        a = _agent_id()
+        isempty(a) && return ""
+        for (role, id) in nb.agents
+            String(id) == a && return String(role)
+        end
+        return ""
+    end
+
+    """
+    The role a message is FOR, when the caller did not name one.
+
+    An orchestrator talking to the only specialist in the notebook should not have to name it, and
+    naming the wrong one is worse than being asked. So: what was asked for, else the only one here,
+    else empty — and a caller that gets empty back says which it meant.
+    """
+    function _spec_role_for(nb, want::AbstractString)::String
+        isempty(strip(want)) || return String(strip(want))
+        live = [String(r) for (r, id) in nb.agents if !isempty(String(id))]
+        return length(live) == 1 ? live[1] : ""
+    end
 
     # A frame, rendered for reading rather than for a renderer. Values are summaries — type, size,
     # a clipped repr — because the frame may be on a compute node and the point is to decide what
@@ -1286,7 +1317,7 @@ function create_tools(GateTool::Type)
                     get(a, "from", ""), " is WAITING — id ", get(a, "id", ""))
             println(io, "   ", get(a, "text", ""))
         end
-        println(io, "   (answer with dbg_answer)")
+        println(io, "   (answer with spec_answer)")
         return String(take!(io))
     end
 
@@ -1491,17 +1522,17 @@ function create_tools(GateTool::Type)
     end
 
     """
-        dbg_findings(notebook) -> String
+        spec_findings(notebook) -> String
 
     Every finding on this notebook: the claim, the cell it names, the checker's verdict if one has
     arrived, and what was decided about it.
 
-    This is what you read after `dbg_wait` says a specialist is done. The finding is the record; the
+    This is what you read after `spec_wait` says a specialist is done. The finding is the record; the
     specialist's chat message is the same thing in prose, and re-summarising it for the person is
     work nobody asked for. Read this, judge it against what the notebook is FOR — which the
-    specialist does not know and you do — and then propose what to do with `dbg_propose`.
+    specialist does not know and you do — and then propose what to do with `spec_propose`.
     """
-    function dbg_findings(notebook::String)::String
+    function spec_findings(notebook::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
         fs = NotebookServer.findings_json(nb)
         isempty(fs) && return "No findings on this notebook."
@@ -1522,7 +1553,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        dbg_propose(notebook, finding, plan, why) -> String
+        spec_propose(notebook, finding, plan, why) -> String
 
     Put a plan to the person and block until they answer. Returns what they said.
 
@@ -1543,7 +1574,7 @@ function create_tools(GateTool::Type)
     do not treat a reply that is not "go ahead" as a refusal. Silence is not agreement: if nobody
     answers, this returns no and you must not act.
     """
-    function dbg_propose(notebook::String, finding::String, plan::String, why::String)::String
+    function spec_propose(notebook::String, finding::String, plan::String, why::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
         isempty(strip(plan)) && return "⛔ a proposal needs a plan"
         f = NotebookServer.finding_by_id(nb, strip(finding))
@@ -1695,7 +1726,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        dbg_ask(notebook, question; options="") -> String
+        spec_ask(notebook, question; options="") -> String
 
     Ask the person watching — or whoever started you — and WAIT for the reply.
 
@@ -1706,7 +1737,7 @@ function create_tools(GateTool::Type)
     `options` turns it into a CHOICE and returns the picked value: `value=label` pairs separated by
     `|`, shown as a button each.
 
-        dbg_ask(notebook="nb", question="Which model should the specialist use?",
+        spec_ask(notebook="nb", question="Which model should the specialist use?",
                 options="acp:claude:sonnet=Sonnet — fast, good at traces|" *
                         "acp:claude:default=Opus — slower, better at subtle coupling")
 
@@ -1715,7 +1746,7 @@ function create_tools(GateTool::Type)
     call fails. It is also how you propose a fix: the options are what you would do, and the answer
     is whether to do it.
     """
-    function dbg_ask(notebook::String, question::String; options::String = "")::String
+    function spec_ask(notebook::String, question::String; options::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         isempty(strip(question)) && return "⛔ a question needs asking"
         opts = Tuple{String,String}[]
@@ -1730,62 +1761,84 @@ function create_tools(GateTool::Type)
         # caller meant to offer.
         (length(opts) == 1) && return "⛔ a choice needs at least two options (value=label|value=label)"
         if isempty(opts)
-            reply = NotebookServer.ask_and_wait(nb, NotebookServer.DEBUG_ROLE, "question",
+            reply = NotebookServer.ask_and_wait(nb, _spec_role_of(nb), "question",
                                                 _dbg_who(), strip(question))
             return isempty(strip(reply)) ?
                 "No answer came back. Decide for yourself and say what you assumed." : reply
         end
-        reply = NotebookServer.ask_and_wait(nb, NotebookServer.DEBUG_ROLE, "choice", _dbg_who(),
+        reply = NotebookServer.ask_and_wait(nb, _spec_role_of(nb), "choice", _dbg_who(),
                                             strip(question); options = opts)
         isempty(strip(reply)) && return "No answer — the question is still open, or it timed out."
         return String(strip(reply))
     end
 
     """
-        dbg_summon(notebook, cell; task="", model="") -> String
+        spec_summon(notebook, role; subject="", task="", model="") -> String
 
-    Bring a debugging SPECIALIST into the notebook and hand it `cell`.
+    Bring a SPECIALIST of kind `role` into the notebook and hand it `subject`.
 
-    It is a narrow agent: seven debugger verbs and nothing else — no file edits, no shell, no
-    browsing. That narrowness is why the brief matters. You know what this notebook is for and
-    what "wrong" would mean here; it does not, and cannot find out on its own. Put that in `task`:
-    what you suspect, what you have already ruled out, what a correct answer would look like.
+    `role` is what kind of narrow agent you want — `spec_roles` lists them. A specialist gets its
+    role's verbs and nothing else: no file edits, no shell, no browsing. That narrowness is why the
+    brief matters. You know what this notebook is for and what "wrong" would mean here; it does not,
+    and cannot find out on its own. Put that in `task`: what you suspect, what you have already
+    ruled out, what a correct answer would look like.
+
+    `subject` is what it is being pointed AT, which for most roles is a cell id.
 
     `model` picks the backend — an `acp:<agent>:<model>` id runs it over ACP. Empty uses the
     notebook's default. It works in the open: its reasoning and every tool call stream into the
-    notebook's chat while it goes, and it can call `dbg_ask` to come back to YOU for detail —
-    answer with `dbg_answer`.
+    notebook's chat while it goes, and it can call `spec_ask` to come back to YOU for detail —
+    answer with `spec_answer`.
     """
-    function dbg_summon(notebook::String, cell::String; task::String = "", model::String = "")::String
+    function spec_summon(notebook::String, role::String; subject::String = "",
+                         task::String = "", model::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
+        want = String(strip(role))
+        known = NotebookServer.specialist_names()
+        want in known || return "⛔ no specialist `$want`. This notebook has: " * join(known, ", ")
         r = try
-            NotebookServer.summon!(nb, NotebookServer.DEBUG_ROLE; subject = strip(cell), model = strip(model),
+            NotebookServer.summon!(nb, want; subject = strip(subject), model = strip(model),
                                    task = task, orchestrator = _agent_id())
         catch e
             # With the top frames: summoning threads a briefing through cell analysis, the agent
             # service and the chat bus, and "it failed" names none of those.
             bt = first(sprint(Base.show_backtrace, catch_backtrace()), 900)
-            return "Could not summon a debugger: $(first(sprint(showerror, e), 300))\n$bt"
+            return "Could not summon a $want: $(first(sprint(showerror, e), 300))\n$bt"
         end
-        return "🐞 Debugging specialist $(get(r, "agent_id", "")) is on cell '$(strip(cell))'. " *
-               "It works in the chat pane; watch it there, answer its questions with dbg_answer, " *
-               "and read the session with dbg_frame."
+        return "✳ $want specialist $(get(r, "agent_id", "")) is on '$(strip(subject))'. " *
+               "It works in the chat pane; watch it there, answer its questions with spec_answer, " *
+               "and wait on it with spec_wait."
     end
 
     """
-        dbg_wait(notebook; timeout=300, since=0) -> String
+        spec_roles(notebook) -> String
+
+    The kinds of specialist this notebook can summon, and which are already here.
+    """
+    function spec_roles(notebook::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        io = IOBuffer()
+        for r in NotebookServer.specialist_names()
+            here = String(NotebookServer.specialist_here(nb, r))
+            println(io, "  ", r, isempty(here) ? "" : "   ← here now ($here)")
+        end
+        return String(take!(io))
+    end
+
+    """
+        spec_wait(notebook; timeout=300, since=0) -> String
 
     WAIT for the specialist to need you, or to finish. This is how it pages you.
 
     You reach this notebook over MCP, which is request/response — nothing can be pushed at you, so
     a question it asks would otherwise block for its full timeout while you, the only one who can
-    answer, never learn it was asked. Call this after `dbg_summon` and you are genuinely in the
-    loop: it returns the moment a question is posted (answer with `dbg_answer`) or a sign-off lands.
+    answer, never learn it was asked. Call this after `spec_summon` and you are genuinely in the
+    loop: it returns the moment a question is posted (answer with `spec_answer`) or a sign-off lands.
 
     The normal shape is a loop — summon, wait, answer, wait, until it is done. A timeout means it
     is still working; check `dbg_frame` to see where it has got to, and wait again.
     """
-    function dbg_wait(notebook::String; timeout::Int = 300, since::String = "0")::String
+    function spec_wait(notebook::String; timeout::Int = 300, since::String = "0")::String
         nb, err = _nb(notebook); nb === nothing && return err
         sec = clamp(timeout, 5, 900)
         r = NotebookServer.wait_for_specialist(nb; timeout = sec,
@@ -1799,7 +1852,7 @@ function create_tools(GateTool::Type)
                         " id ", get(a, "id", ""), "  (from ", get(a, "from", ""), ")")
                 println(io, "     ", get(a, "text", ""))
             end
-            print(io, "Answer with dbg_answer(notebook, id, text). It is blocked until you do.")
+            print(io, "Answer with spec_answer(notebook, id, text). It is blocked until you do.")
             return String(take!(io))
         elseif kind == "done"
             io = IOBuffer()
@@ -1819,7 +1872,7 @@ function create_tools(GateTool::Type)
                     println(io, "It never looked at ", join(f.unread_upstream, ", "),
                             ", which produce that cell's inputs.")
                 println(io, "Judge it, then put ONE course of action to the person with ",
-                        "dbg_propose(finding=\"", f.id, "\", plan=…, why=…). Do not retell the ",
+                        "spec_propose(finding=\"", f.id, "\", plan=…, why=…). Do not retell the ",
                         "summary above — they have read it.")
             end
             print(io, "\nPass that mark back as `since` if you wait again, or it will re-report this ending.")
@@ -1830,28 +1883,31 @@ function create_tools(GateTool::Type)
     end
 
     """
-        dbg_tell(notebook, text) -> String
+        spec_tell(notebook, text; role="") -> String
 
     Say something to the specialist while it works — a correction, a constraint, something you have
     just learned that changes what it should look at.
 
-    This is the half of the conversation `dbg_ask` does not cover: it can stop and ask YOU, and this
+    This is the half of the conversation `spec_ask` does not cover: it can stop and ask YOU, and this
     is how you reach IT without being asked. Refused while it is mid-turn, because a second message
     into a live turn destroys the reply in progress — wait for it, or interrupt it in the notebook.
     """
-    function dbg_tell(notebook::String, text::String)::String
+    function spec_tell(notebook::String, text::String; role::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
+        want = _spec_role_for(nb, role)
+        isempty(want) && return "⛔ say which specialist with role= — this notebook has more than " *
+                                "one, or none. `spec_roles` lists them."
         r = try
-            NotebookServer.tell!(nb, NotebookServer.DEBUG_ROLE, text)
+            NotebookServer.tell!(nb, want, text)
         catch e
             return "Could not reach the specialist: $(first(sprint(showerror, e), 200))"
         end
-        get(r, "ok", false) === true && return "Delivered. Watch its reply with dbg_frame / the notebook chat."
+        get(r, "ok", false) === true && return "Delivered. Watch its reply in the notebook chat."
         return "⛔ " * string(get(r, "error", "could not deliver"))
     end
 
     """
-        dbg_answer(notebook, id, text) -> String
+        spec_answer(notebook, id, text) -> String
 
     Answer a question the specialist is BLOCKED on (its id comes from `dbg_frame`).
 
@@ -1859,7 +1915,7 @@ function create_tools(GateTool::Type)
     counts as correct. Answer the question that was asked, concretely. A person can answer in the
     notebook too, so check `dbg_frame` before replying to something already handled.
     """
-    function dbg_answer(notebook::String, id::String, text::String)::String
+    function spec_answer(notebook::String, id::String, text::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
         ok = NotebookServer.answer_ask!(nb, strip(id), text)
         return ok ? "Answered $(strip(id)); the specialist is unblocked." :
@@ -1867,7 +1923,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        dbg_done(notebook, summary; cell="", evidence="") -> String
+        spec_done(notebook, summary; cell="", evidence="") -> String
 
     Finish: say what you found and let go of the session.
 
@@ -1884,11 +1940,21 @@ function create_tools(GateTool::Type)
     If the cell you name has inputs you never looked at, this asks you once to go and look. Say
     where the value came from, not only where it landed.
     """
-    function dbg_done(notebook::String, summary::String; cell::String = "",
+    function spec_done(notebook::String, summary::String; cell::String = "",
                       evidence::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         who = _dbg_who()
-        owner = NotebookServer._debug_session(nb).owner
+        role = _spec_role_of(nb)
+        # The stepping session belongs to the debugger. Another kind of specialist has none, and
+        # asking after one would make every role answer a debugger's question about itself.
+        dbg_owner = role == NotebookServer.DEBUG_ROLE || isempty(role) ?
+                    NotebookServer._debug_session(nb).owner : ""
+        owner = dbg_owner
+        # Someone who is not a specialist can still have done the work — a person stepping a cell by
+        # hand, which is the manual path the tools are also there for. Attribute it to the role whose
+        # session they are holding, so the finding says what kind of work produced it rather than
+        # being filed under nothing.
+        isempty(role) && dbg_owner == who && (role = NotebookServer.DEBUG_ROLE)
         # A supervising orchestrator signing off after its specialist already did was observed, and
         # it recorded a second finding saying the same thing. Signing off is reporting what YOU
         # found; with no session left and someone else's conclusion already on the record, there is
@@ -1897,7 +1963,7 @@ function create_tools(GateTool::Type)
             prev = NotebookServer.latest_finding(nb)
             prev === nothing || prev.from == who ||
                 return "The session is already finished and `$(prev.from)` has recorded its " *
-                       "finding (`$(prev.id)`). Read it with dbg_findings and decide what to do " *
+                       "finding (`$(prev.id)`). Read it with spec_findings and decide what to do " *
                        "about it — signing off again would only file a second copy."
         end
         # Naming the cell where a bad value was USED, having never looked at the cell that produced
@@ -1917,10 +1983,10 @@ function create_tools(GateTool::Type)
                        "again — calling this a second time goes through."
             end
         end
-        f = NotebookServer.record_finding!(nb, NotebookServer.DEBUG_ROLE, who;
+        f = NotebookServer.record_finding!(nb, role, who;
                                            cell = strip(cell), claim = strip(summary),
                                            evidence = strip(evidence))
-        NotebookServer.sign_off!(nb, NotebookServer.DEBUG_ROLE, who, strip(summary))
+        NotebookServer.sign_off!(nb, role, who, strip(summary))
         NotebookServer.review_finding!(nb, f)   # the checker, if it is on: a second read of the CLAIM
         # Three outcomes, and they are not the same thing: a cell that ran to the end has already
         # closed its own session, which is not "someone else has it".
@@ -3128,7 +3194,7 @@ function create_tools(GateTool::Type)
     # silently push the blocking path past a budget that stayed put.
     CELL_RUN_MS = round(Int, (NotebookServer._scratch_grace() + 120) * 1000)
     DEPLOY_MS   = 1_800_000   # package precompile / a build + deploy round-trip
-    # `dbg_ask` blocks on a PERSON answering, so its budget is theirs, not a machine's. A little
+    # `spec_ask` blocks on a PERSON answering, so its budget is theirs, not a machine's. A little
     # over the server-side wait (`_ASK_TIMEOUT`), so the answer that times out is the one with the
     # explanation rather than a bare tool timeout.
     ASK_MS      =   960_000
@@ -3151,7 +3217,7 @@ function create_tools(GateTool::Type)
         GateTool("peer_plan", peer_plan_tool),
         GateTool("transfers", transfers),
         GateTool("memo_trace", memo_trace),
-        # Cell debugger. `dbg_start` and `dbg_ask` can both block on a PERSON — one asking to take
+        # Cell debugger. `dbg_start` and `spec_ask` can both block on a PERSON — one asking to take
         # a session, the other asking a question — so they get a person's budget, not a machine's.
         # `dbg_step` only runs user code, so the cell-run one fits it.
         GateTool("dbg_start", dbg_start; timeout_ms = ASK_MS),
@@ -3161,22 +3227,23 @@ function create_tools(GateTool::Type)
         GateTool("dbg_break", dbg_break),
         GateTool("dbg_watch", dbg_watch),
         GateTool("request_file_access", request_file_access; timeout_ms = ASK_MS),
-        GateTool("dbg_findings", dbg_findings),
-        GateTool("dbg_propose", dbg_propose; timeout_ms = ASK_MS),
+        GateTool("spec_findings", spec_findings),
+        GateTool("spec_propose", spec_propose; timeout_ms = ASK_MS),
         GateTool("check_ok", check_ok),
         GateTool("check_verdict", check_verdict),
         GateTool("check_flag", check_flag),
-        GateTool("dbg_ask", dbg_ask; timeout_ms = ASK_MS),
-        GateTool("dbg_done", dbg_done),
+        GateTool("spec_ask", spec_ask; timeout_ms = ASK_MS),
+        GateTool("spec_done", spec_done),
         # The orchestrator's half of the pair: summon a specialist with a brief only you can
         # write, and answer what it comes back to ask. NOT in `DEBUG_TOOLS` — a specialist
         # summoning specialists is a recursion, and answering its own questions is a loop.
-        GateTool("dbg_summon", dbg_summon; timeout_ms = CELL_RUN_MS),
-        GateTool("dbg_answer", dbg_answer),
-        GateTool("dbg_tell", dbg_tell),
+        GateTool("spec_summon", spec_summon; timeout_ms = CELL_RUN_MS),
+        GateTool("spec_roles", spec_roles),
+        GateTool("spec_answer", spec_answer),
+        GateTool("spec_tell", spec_tell),
         # A long poll: it BLOCKS on the specialist, so its budget is the specialist's, not a
         # control message's — that is the whole point of it.
-        GateTool("dbg_wait", dbg_wait; timeout_ms = ASK_MS),
+        GateTool("spec_wait", spec_wait; timeout_ms = ASK_MS),
         GateTool("read", read_cells),
         GateTool("add_cell", add_cell; timeout_ms = CELL_RUN_MS),
         GateTool("edit_cell", edit_cell; timeout_ms = CELL_RUN_MS),

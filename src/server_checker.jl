@@ -13,8 +13,11 @@
 # say WHICH cell is wrong and WHY, it says nothing.
 
 "What the checker may reach: everything needed to read a notebook, and nothing that changes it."
+# `spec_ask` and `spec_done` are the specialist conversation, which used to be spelled for the
+# debugger alone — so a checker could not ask the person anything, and said what it found only
+# through `check_*`. Nothing about either verb was ever debugger-specific.
 const CHECKER_VERBS = String["read", "view", "inspect", "api", "search_docs", "check_ok",
-                             "check_flag", "check_verdict"]
+                             "check_flag", "check_verdict", "spec_ask", "spec_done"]
 
 const CHECKER_ROLE = "checker"
 
