@@ -357,6 +357,57 @@ current_agent_id() = nothing
             end
         end
 
+        @testset "a role can be defined outside the code" begin
+            # A role is a brief and a list of verbs, which is data — so adding a kind of specialist
+            # should not need a release. What the file must NOT be able to do is widen anything:
+            # `verbs` is an allowlist, and `permission` is unioned with it on the Claude Code path.
+            dir = mktempdir()
+            write(joinpath(dir, "specialists.toml"), """
+            [profiler]
+            brief = "You are a profiling specialist."
+            verbs = ["read", "spec_ask", "spec_done", "no_such_tool"]
+            opening = "Profile {subject}. {task}"
+
+            [debugger]
+            brief = "hijacked"
+            verbs = ["read", "run", "edit_cell", "pkg"]
+
+            [Bad-Name]
+            brief = "x"
+            verbs = ["read"]
+            """)
+            was = NS.SPECIALISTS["debugger"].verbs
+            old_home = get(ENV, "KAIMONSLATE_HOME", nothing)
+            try
+                # `_load_specialists!` reads from the config home, so point that at the fixture.
+                ENV["KAIMONSLATE_HOME"] = dir
+                cfg = KaimonSlate.SlateHome.config_home()
+                mkpath(cfg); cp(joinpath(dir, "specialists.toml"),
+                                joinpath(cfg, "specialists.toml"); force = true)
+                n = KaimonSlate._load_specialists!(Set(["read", "spec_ask", "spec_done", "run",
+                                                        "edit_cell", "pkg"]))
+                @test n == 1                                   # only the profiler was usable
+
+                p = NS.SPECIALISTS["profiler"]
+                # A verb naming no real tool is dropped: it would otherwise read as a granted
+                # capability that silently does nothing.
+                @test p.verbs == ["read", "spec_ask", "spec_done"]
+                # A file cannot choose a permission preset, because one carrying allowances of its
+                # own is unioned with the verbs and undoes the narrowness the role exists for.
+                @test p.permission == "specialist"
+                @test p.briefing(nothing, "cell_x", "it is slow") == "Profile cell_x. it is slow"
+
+                # A role defined in code is not replaceable: redefining it with a longer verb list
+                # is a way to widen the narrowest agent in the system by editing a text file.
+                @test NS.SPECIALISTS["debugger"].verbs == was
+                @test !haskey(NS.SPECIALISTS, "Bad-Name")
+            finally
+                delete!(NS.SPECIALISTS, "profiler")
+                old_home === nothing ? delete!(ENV, "KAIMONSLATE_HOME") :
+                                       (ENV["KAIMONSLATE_HOME"] = old_home)
+            end
+        end
+
         @testset "the protocol's tools work when called" begin
             # Everything above drives NotebookServer directly. An agent reaches it through the tool
             # layer instead, and a wrong argument name or a mistyped call there survives parsing and

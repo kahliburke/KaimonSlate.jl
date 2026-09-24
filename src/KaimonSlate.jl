@@ -28,6 +28,7 @@ include(joinpath(@__DIR__, "expanduser_fix.jl"))
 
 
 import JSON
+import TOML    # the specialist roles defined outside the code (`<config>/specialists.toml`)
 
 # In dependency order; each depends on nothing but what precedes it. SlateHome is first because
 # every other module resolves its paths through it.
@@ -1813,15 +1814,23 @@ function create_tools(GateTool::Type)
     """
         spec_roles(notebook) -> String
 
-    The kinds of specialist this notebook can summon, and which are already here.
+    The kinds of specialist this notebook can summon, which are already here, and where a new one
+    is defined. A role is a brief and a list of verbs, so adding one is editing a file rather than
+    writing code — and nothing in the interface says so, which is why this does.
     """
     function spec_roles(notebook::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
         io = IOBuffer()
         for r in NotebookServer.specialist_names()
             here = String(NotebookServer.specialist_here(nb, r))
-            println(io, "  ", r, isempty(here) ? "" : "   ← here now ($here)")
+            println(io, "  ", rpad(r, 12),
+                    r in _CONFIG_ROLES ? "from config" : "built in",
+                    isempty(here) ? "" : "   ← here now ($here)")
         end
+        println(io)
+        println(io, "Add one in ", joinpath(SlateHome.config_home(), "specialists.toml"),
+                " — a `brief`, the `verbs` it may call, and an optional `opening` template.")
+        println(io, "Read at startup, so a change needs the hub restarted.")
         return String(take!(io))
     end
 
@@ -3274,7 +3283,86 @@ function create_tools(GateTool::Type)
         GateTool("site_publish", site_publish_tool),
     ]
     _warn_undocumented_tools(GateTool, tools)
+    # Roles defined outside this file. Done HERE because the verbs a role may call have to be
+    # checked against the tools that actually exist, and this is the first moment both are known.
+    _load_specialists!(Set(String(t.name) for t in tools))
     return tools
+end
+
+"""
+Register the specialist roles defined in `<config>/specialists.toml`.
+
+A role is a brief and a list of verbs, which is data — so a new kind of specialist should not need
+a new release. The file is read at startup and nowhere else: a role is the standing instruction an
+agent is spawned with, and one that changed under a running specialist would leave it working to a
+brief nobody could read afterwards.
+
+    [profiler]
+    brief  = "You are a profiling specialist. …"        # or a TOML multi-line string
+    verbs  = ["read", "view", "eval", "spec_ask", "spec_done"]
+    opening = "Profile {subject}. {task}"      # optional; default is the task alone
+
+Two things this deliberately will NOT let a file do.
+
+It cannot replace a role defined in code. `verbs` is an allowlist, so redefining `debugger` with a
+longer one is a way to widen the narrowest agent in the system by editing a text file.
+
+It cannot choose a `permission` preset. A preset carrying allowances of its own is UNIONED with
+`verbs` on the Claude Code path, so naming a permissive one widens the allowlist and undoes the
+narrowness the role exists for. Config roles get `specialist`, which grants nothing by itself.
+
+A verb that names no real tool is dropped and said so. It would otherwise read as a granted
+capability that silently does nothing, which is the same symptom as a role that does not work.
+"""
+const _CONFIG_ROLES = Set{String}()
+
+function _load_specialists!(known::Set{String})
+    path = joinpath(SlateHome.config_home(), "specialists.toml")
+    isfile(path) || return 0
+    doc = try
+        TOML.parsefile(path)
+    catch e
+        @warn "slate: could not read $path — no roles from it" exception = e
+        return 0
+    end
+    builtin = Set(NotebookServer.specialist_names())
+    n = 0
+    for (name, v) in doc
+        nm = String(name)
+        v isa AbstractDict || (@warn "slate: specialist `$nm` is not a table — skipped"; continue)
+        if nm in builtin
+            @warn "slate: specialist `$nm` is defined in code and cannot be replaced from $path"
+            continue
+        end
+        occursin(r"^[a-z][a-z0-9_]*$", nm) ||
+            (@warn "slate: specialist `$nm` — a role name is lowercase letters, digits and _"; continue)
+        brief = String(get(v, "brief", ""))
+        isempty(strip(brief)) && (@warn "slate: specialist `$nm` has no brief — skipped"; continue)
+        raw = get(v, "verbs", nothing)
+        raw isa AbstractVector ||
+            (@warn "slate: specialist `$nm` has no verbs — skipped"; continue)
+        verbs = String[]
+        for x in raw
+            b = String(x)
+            if b in known
+                push!(verbs, b)
+            else
+                @warn "slate: specialist `$nm` names `$b`, which is not a tool here — dropped"
+            end
+        end
+        isempty(verbs) && (@warn "slate: specialist `$nm` has no usable verbs — skipped"; continue)
+        tmpl = String(get(v, "opening", ""))
+        # The opening turn is the only place a role needs to say anything about the thing it was
+        # pointed at, and a template covers that without a config file carrying code.
+        briefing = (nb, subject, task) -> isempty(strip(tmpl)) ? String(task) :
+            replace(tmpl, "{subject}" => String(subject), "{task}" => String(task))
+        NotebookServer.register_specialist!(
+            NotebookServer.Specialist(nm; brief = brief, verbs = verbs, briefing = briefing))
+        push!(_CONFIG_ROLES, nm)
+        n += 1
+    end
+    n > 0 && @info "slate: registered $n specialist role(s) from $path"
+    return n
 end
 
 """
