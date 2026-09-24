@@ -455,7 +455,12 @@ async function loadAsksAndFindings() {
   // the debugging workspace, so the pane that shows findings is gone at the moment one appears.
   // The chat is where it lasts, and where the proposal about it arrives.
   if (p.finding) { _agentFinding(p.finding); return; }
-  if (p.role) return;                       // everything below is the notebook agent's own
+  // A role with a pane of its own answers there. Everything else belongs HERE — the notebook's own
+  // agent, which has no role, and any specialist without a surface. A config-defined role has none
+  // by construction, and this used to drop its questions: the debugger's pane refused them for
+  // having the wrong role and the chat refused them for having one at all, so a question was
+  // pushed to the page, rendered nowhere, and sat until it timed out.
+  if (p.role && (window.slateRolePanes || new Set()).has(p.role)) return;
   if (p.ask) _agentAsk(p.ask);
   // The full list arrives when one is cleared. An ask that is gone but still has buttons here was
   // answered somewhere else, or timed out — either way it is no longer a question.

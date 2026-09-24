@@ -586,6 +586,10 @@ async function answerAsk(id, text) {
 // watchable: the strip and the focus view are reading the session, not their own last click.
 // Specialist-framework events arrive on their own channel and name the role they belong to, so a
 // second kind of specialist gets its own pane without either surface knowing about the other.
+// This pane OWNS the debugger's events, and says so: anything nobody claims falls through to the
+// chat, which is where a specialist with no surface of its own has to be answerable.
+(window.slateRolePanes ||= new Set()).add(DEBUG_ROLE);
+
 (window.slateSpecialistSubs ||= []).push((p) => {
   if (!p || p.role !== DEBUG_ROLE) return;
   if (p.asks !== undefined) asks.value = p.asks || [];
