@@ -1061,7 +1061,15 @@ function _stmt_callee(fr, st, code)
     args = st.head === :call ? st.args :
            (st.head === :invoke && length(st.args) >= 2) ? st.args[2:end] : nothing
     (args === nothing || isempty(args)) && return nothing
-    return _resolve_callee(fr, args[1], code)
+    f = _resolve_callee(fr, args[1], code)
+    # A keyword call lowers to `Core.kwcall(nt, f, args...)`, so the function BEING called is the
+    # third argument. Reading the first gives `Core.kwcall`, which the caller then drops for living
+    # in Core — so a line whose only call took a keyword argument offered nothing to step into,
+    # while a plain `into` on the same line descended into it perfectly well.
+    if isdefined(Core, :kwcall) && f === Core.kwcall && length(args) >= 3
+        return _resolve_callee(fr, args[3], code)
+    end
+    return f
 end
 
 _callee_name(f) = try; string(nameof(f)); catch; string(f); end

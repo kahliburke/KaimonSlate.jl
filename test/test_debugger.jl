@@ -21,6 +21,8 @@ module Sandbox
     end
     outer(x) = inner(x) + 1
     inner(x) = x * 2
+    # Takes a KEYWORD argument, which is lowered through `Core.kwcall` rather than called directly.
+    relax(v; steps = 1) = v * steps
 end
 
 step!(mode) = RE.debug_step!(; mode = mode)
@@ -259,6 +261,24 @@ end
             st = RE.debug_into!(; pc = tgt.pc)
             @test !st.finished
             @test occursin("outer", st.scope)
+        finally
+            RE.debug_stop!()
+        end
+
+        # A call with a KEYWORD argument is still a call you can step into. It lowers to
+        # `Core.kwcall(nt, f, …)`, so reading the callee off the first argument gives `Core.kwcall`
+        # — which is then dropped for living in Core, and the line offered nothing at all. A plain
+        # `into` descended into it the whole time, so the two disagreed about the same line.
+        RE.debug_start!(Sandbox; cell = "intokw", source = "r = relax(3.0; steps = 2)\n")
+        try
+            ts = RE.debug_into_targets()
+            names = [t.name for t in ts]
+            @test "relax" in names
+            @test !("kwcall" in names)
+            tgt = only(t for t in ts if t.name == "relax")
+            @test tgt.interpreted                       # it is in the stepped namespace
+            st = RE.debug_into!(; pc = tgt.pc)
+            @test !st.finished && occursin("relax", st.scope)
         finally
             RE.debug_stop!()
         end
