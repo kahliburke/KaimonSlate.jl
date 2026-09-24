@@ -20,6 +20,9 @@ _rec_round(s::AbstractString) = replace(s, r"-?\d+\.\d+(?:e[-+]?\d+)?" => m -> (
 function _rec_number(x::Real)
     x isa Bool && return string(x)
     x isa Integer && return string(x)
+    # An exact type keeps its own notation. Rounding a Rational to five significant figures turns
+    # `22//7` into `3.1429` and throws away the one property it was chosen for.
+    x isa Rational && return string(x)
     f = try; Float64(x); catch; return nothing; end
     isfinite(f) || return string(f)
     return string(round(f; sigdigits = 5))
@@ -126,10 +129,102 @@ function common_units_text(text::AbstractString)
     return num * (isempty(err) ? "" : " ± " * err) * " " * unit
 end
 
-function _rec_value_html(io::IO, v, depth::Int)
+# ── A matrix field ─────────────────────────────────────────────────────────────────────────────
+# The downsampling is NOT redone here: `_matrix_grid` (slate_matrix.jl, included above) already
+# block-averages a dense matrix, walks CSC storage directly for a sparse one, and reads only
+# `dv`/`ev` for a SymTridiagonal — so a matrix with a side in the tens of thousands costs its
+# structure, not its area. This adds only the one thing slate_matrix has no form of: a STATIC
+# picture. Its own renderings are an ECharts instance or KaTeX, and a record field can host
+# neither, so the grid is painted as an inline SVG that needs nothing to boot and survives
+# export, PDF and html2canvas. Clicking the field asks for the real `slate_matrix` rendering.
+const _MAT_MINI_CELLS = 18 * 18   # `max_cells` for the field-sized thumbnail
+const _MAT_FULL_CELLS = 64 * 64   # …and for the expanded view behind a click
+const _MAT_LEVELS = 24            # ramp steps — quantised so equal neighbours merge into one rect
+const _MAT_MINI_BYTES = 3_000     # markup ceilings the grid is coarsened to meet (`_mat_svg_capped`)
+const _MAT_FULL_BYTES = 24_000
+
+# The ramp `_matrix_heatmap` uses, resolved to a concrete fill (ECharts interpolates its own).
+function _mat_color(t::Float64)
+    isfinite(t) || return "#3a3f4b"
+    t = clamp(t, 0.0, 1.0)
+    lo, mid, hi = (0x1e, 0x22, 0x2a), (0x56, 0x9c, 0xd6), (0xff, 0xd7, 0x00)
+    a, b, u = t < 0.5 ? (lo, mid, t * 2) : (mid, hi, (t - 0.5) * 2)
+    ch(i) = round(Int, a[i] + (b[i] - a[i]) * u)
+    return string("#", string(ch(1); base = 16, pad = 2), string(ch(2); base = 16, pad = 2),
+                  string(ch(3); base = 16, pad = 2))
+end
+
+# One `<rect>` per cell is too verbose for something that crosses a websocket on every render, so
+# the ramp is quantised and each row's equal neighbours merge into a single rect.
+function _mat_svg(grid::AbstractMatrix{Float64}, gnr::Int, gnc::Int, px::Int)
+    (gnr == 0 || gnc == 0) && return ""
+    lo, hi = Inf, -Inf
+    for v in grid
+        isfinite(v) || continue
+        v < lo && (lo = v); v > hi && (hi = v)
+    end
+    span = (isfinite(lo) && isfinite(hi) && hi > lo) ? hi - lo : 1.0
+    lev(v) = isfinite(v) ? clamp(round(Int, (v - lo) / span * (_MAT_LEVELS - 1)), 0, _MAT_LEVELS - 1) : -1
+    h = max(round(Int, px * gnr / max(gnc, 1)), 1)
+    io = IOBuffer()
+    print(io, "<svg class=\"srec-mat-svg\" viewBox=\"0 0 ", gnc, " ", gnr, "\" width=\"", px, "\" height=\"", h,
+              "\" preserveAspectRatio=\"none\" shape-rendering=\"crispEdges\">")
+    for i in 1:gnr
+        j = 1
+        while j <= gnc
+            k = j
+            while k < gnc && lev(grid[i, k + 1]) == lev(grid[i, j]); k += 1; end
+            l = lev(grid[i, j])
+            print(io, "<rect x=\"", j - 1, "\" y=\"", i - 1, "\" width=\"", k - j + 1, "\" height=\"1\" fill=\"",
+                      l < 0 ? _mat_color(NaN) : _mat_color(l / (_MAT_LEVELS - 1)), "\"/>")
+            j = k + 1
+        end
+    end
+    print(io, "</svg>")
+    return String(take!(io))
+end
+
+_mat_label(M::AbstractMatrix) = first(try; summary(M); catch; string(size(M, 1), "×", size(M, 2)); end, 90)
+
+# Run-merging is data-dependent — a diagonal or a gradient collapses, uncorrelated noise does not
+# — so resolution cannot be the guarantee and SIZE has to be: coarsen the grid until the markup
+# fits. A record's output crosses a websocket and lands in the memo store on every render, so a
+# preview that is merely usually-small is not good enough.
+function _mat_svg_capped(M::AbstractMatrix, max_cells::Int, px::Int, maxbytes::Int)
+    cells = max_cells
+    while true
+        grid, gnr, gnc = Base.invokelatest(_matrix_grid, M; max_cells = cells)
+        s = _mat_svg(grid, gnr, gnc, px)
+        (length(s) <= maxbytes || cells <= 64) && return s
+        cells = max(64, cells ÷ 4)
+    end
+end
+
+function _rec_matrix_html(io::IO, M::AbstractMatrix, field::AbstractString)
+    svg = _mat_svg_capped(M, _MAT_MINI_CELLS, 46, _MAT_MINI_BYTES)
+    isempty(svg) && return false
+    # The expanded view rides along in a <template> at a larger grid, from the SAME `_matrix_grid`
+    # — so opening it costs no round-trip and the picture cannot disagree with the thumbnail.
+    # `data-matfield` names the field for anything that later wants the value itself.
+    big = _mat_svg_capped(M, _MAT_FULL_CELLS, 360, _MAT_FULL_BYTES)
+    print(io, "<span class=\"srec-mat srec-mat-open\" data-matfield=\"", _rec_esc(field), "\" title=\"",
+              _rec_esc(_mat_label(M)), " — click to open\">", svg,
+              "<span class=\"srec-mat-cap\">", _rec_esc(string(size(M, 1), "×", size(M, 2))), "</span>")
+    isempty(big) || print(io, "<template class=\"srec-mat-full\" data-label=\"",
+                              _rec_esc(_mat_label(M)), "\">", big, "</template>")
+    print(io, "</span>")
+    return true
+end
+
+function _rec_value_html(io::IO, v, depth::Int, field::AbstractString)
     if v isa NamedTuple && !isempty(v) && depth < _RECORD_MAX_DEPTH
-        _record_fields(io, v, depth + 1)
+        _record_fields(io, v, depth + 1, field)
         return
+    end
+    # A matrix shows its shape AS a shape, not as `4×3 Matrix{Float64}`. Complex goes through too:
+    # `_matrix_grid` takes `real` itself, the same view its ECharts heatmap gives.
+    if v isa AbstractMatrix && eltype(v) <: Number && !isempty(v)
+        (try _rec_matrix_html(io, v, field) catch; false end) && return
     end
     # A value that renders itself for Slate (a requirement's badge, a component) is shown as that.
     if !(v isa Number || v isa AbstractString || v isa Symbol)
@@ -165,18 +260,94 @@ function _rec_value_html(io::IO, v, depth::Int)
     print(io, "</span>")
 end
 
-function _record_fields(io::IO, nt::NamedTuple, depth::Int)
+function _record_fields(io::IO, nt::NamedTuple, depth::Int, path::AbstractString = "")
     print(io, "<div class=\"srec-grid\">")
     ks = keys(nt)
     for (i, k) in enumerate(ks)
         i > _RECORD_MAX_FIELDS && (print(io, "<div class=\"srec-more\">+", length(ks) - _RECORD_MAX_FIELDS, " more</div>"); break)
         v = nt[k]
         nested = v isa NamedTuple && !isempty(v) && depth < _RECORD_MAX_DEPTH
-        print(io, "<div class=\"srec-f", nested ? " srec-nest" : "", "\"><span class=\"srec-k\">", _rec_esc(string(k)), "</span>")
-        _rec_value_html(io, v, depth)
+        # The dotted path from the record's root, so a click on a nested field can name the value
+        # it came from (`fit.coeffs`) when it asks for the full rendering.
+        sub = isempty(path) ? string(k) : string(path, '.', k)
+        print(io, "<div class=\"srec-f", nested ? " srec-nest" : "", "\" data-field=\"", _rec_esc(sub),
+                  "\"><span class=\"srec-k\">", _rec_esc(string(k)), "</span>")
+        _rec_value_html(io, v, depth, sub)
         print(io, "</div>")
     end
     print(io, "</div>")
+end
+
+# ── Keeping the record's value, so a field can be asked about later ────────────────────────────
+# The rendered grid is HTML: its numbers are text and its matrices are thumbnails. Opening a field
+# in its real `slate_matrix` form needs the VALUE, and a cell's value is anonymous unless the cell
+# assigned it. So the record keeps the last one per cell, and a lookup walks the dotted field path
+# the grid already labels each field with.
+#
+# Bounded and ordered: a record can hold large arrays, and holding every cell's forever would make
+# viewing a notebook a memory leak. The oldest entry goes when the bound is reached; a miss simply
+# means the popup asks for a value no longer held, which the caller reports rather than guesses at.
+const _RECORD_KEEP = 24
+const _RECORD_CACHE = Dict{String,Any}()
+const _RECORD_ORDER = String[]
+const _RECORD_LOCK = ReentrantLock()
+
+function record_remember!(cellid::AbstractString, nt::NamedTuple)
+    isempty(cellid) && return nt
+    lock(_RECORD_LOCK) do
+        id = String(cellid)
+        haskey(_RECORD_CACHE, id) || push!(_RECORD_ORDER, id)
+        _RECORD_CACHE[id] = nt
+        while length(_RECORD_ORDER) > _RECORD_KEEP
+            delete!(_RECORD_CACHE, popfirst!(_RECORD_ORDER))
+        end
+    end
+    return nt
+end
+
+"Walk `a.b.c` from the record kept for `cellid`. `nothing` when the cell or the path is unknown."
+function record_field(cellid::AbstractString, path::AbstractString)
+    v = lock(_RECORD_LOCK) do; get(_RECORD_CACHE, String(cellid), nothing); end
+    v === nothing && return nothing
+    for part in split(String(path), '.'; keepempty = false)
+        k = Symbol(part)
+        (v isa NamedTuple && haskey(v, k)) || return nothing
+        v = v[k]
+    end
+    return v
+end
+
+"""
+    record_matrix_render(cell, field) -> Dict
+
+One matrix field of a cell's remembered record, rendered by `slate_matrix` — the SAME renderer a
+bare matrix gets, not a second-best built for the grid. So the popup shows an ECharts heatmap or
+the KaTeX form exactly as that matrix's size and structure warrant.
+
+`{kind = "echart", option}` or `{kind = "latex", tex}`, plus `label`; `{error}` when the value is no
+longer held (the cache is bounded) or the path names no matrix. Lives here so the gate worker and
+an in-process kernel answer the request with one implementation.
+"""
+function record_matrix_render(cell::AbstractString, field::AbstractString)
+    v = try; record_field(cell, field); catch; nothing; end
+    v === nothing && return Dict{String,Any}("error" => "that value is no longer available — re-run the cell")
+    v isa AbstractMatrix || return Dict{String,Any}("error" => "field '$field' is not a matrix")
+    r = try
+        Base.invokelatest(slate_matrix, v)
+    catch e
+        return Dict{String,Any}("error" => first(sprint(showerror, e), 200))
+    end
+    label = try; first(summary(v), 90); catch; ""; end
+    # An EChart carries its spec in `.option`; the KaTeX forms render through `text/latex`. Tested
+    # by shape rather than by type, because `EChart` is declared by each host, not by this file.
+    hasproperty(r, :option) &&
+        return Dict{String,Any}("kind" => "echart", "option" => getproperty(r, :option), "label" => label)
+    tex = try
+        sprint((io, x) -> show(io, MIME"text/latex"(), x), r)
+    catch e
+        return Dict{String,Any}("error" => first(sprint(showerror, e), 200))
+    end
+    return Dict{String,Any}("kind" => "latex", "tex" => tex, "label" => label)
 end
 
 """

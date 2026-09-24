@@ -2493,8 +2493,18 @@ function __slate_drop_blob(hash::String)
     end
 end
 
+"""
+Render one field of a cell's remembered record through `slate_matrix` — the SAME renderer a bare
+matrix gets, rather than a second-best made for the grid. The grid's thumbnail is a static picture;
+this is the real thing, so the popup shows an ECharts heatmap or the KaTeX form as the matrix's own
+size and structure warrant. Returns `{kind}` plus whichever payload that kind implies, or `{error}`
+when the cell's value is no longer held (the cache is bounded) or the path names no matrix.
+"""
+__slate_matrix_render(; cell::String = "", field::String = "") = record_matrix_render(cell, field)
+
 function tools()
     return KaimonGate.GateTool[
+        KaimonGate.GateTool("__slate_matrix_render", __slate_matrix_render),
         KaimonGate.GateTool("__slate_eval", __slate_eval),
         KaimonGate.GateTool("__slate_rerender_fig", __slate_rerender_fig),
         KaimonGate.GateTool("__slate_eval_batch", __slate_eval_batch),

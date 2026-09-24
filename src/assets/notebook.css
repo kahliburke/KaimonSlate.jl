@@ -2786,8 +2786,34 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .srec-bool.yes { color:var(--green); } .srec-bool.no { color:var(--red); }
 .srec-str, .srec-text { color:var(--text); white-space:normal; overflow-wrap:anywhere; font-size:.82rem; }
 .srec-str { font-family:var(--font, inherit); }
-.srec-nest { flex-basis:100%; background:transparent; padding:4px 0 2px; border:none; }
-.srec-nest > .srec-k { font-size:.72rem; color:var(--text); font-weight:600; margin-bottom:2px; }
-.srec-nest .srec-f { background:color-mix(in srgb, var(--bg2) 70%, var(--bg)); }
+/* A nested NamedTuple needs to read as a CONTAINER without borrowing the cell's own vocabulary.
+   A rounded bordered panel does the first and fails the second: at a glance it is another cell.
+   So grouping is carried by a rule down the left and the indent it creates, which nothing else in
+   a cell uses, and the group's name sits on that rule in the accent colour. */
+.srec-nest { flex-basis:100%; padding:2px 0 3px 10px; border-radius:0;
+  background:transparent; border:none; border-left:2px solid var(--accent); }
+.srec-nest > .srec-k { display:block; font-size:.66rem; color:var(--accent); font-weight:600;
+  margin-bottom:4px; letter-spacing:.06em; text-transform:uppercase; opacity:.75; }
+/* Depth steps the rule down in emphasis rather than nesting box inside box. */
+.srec-nest .srec-nest { border-left-color:var(--dim); }
+.srec-nest .srec-nest > .srec-k { color:var(--dim); }
 .srec-rich > * { margin:0; }
 .srec-more { align-self:center; color:var(--dim); font-size:.74rem; }
+
+/* A matrix field: thumbnail with its shape UNDER it. A thumbnail is roughly square and the fields
+   wrap along a row, so stacking keeps each one narrow and the row packs; setting the shape beside
+   it doubles every field's width for one short string. Type and value range go in the title. */
+.srec-mat { display:flex; flex-direction:column; align-items:center; gap:3px; cursor:pointer; }
+.srec-mat-svg { display:block; border-radius:2px; border:1px solid var(--border); }
+.srec-mat-cap { font-family:'Cascadia Code',monospace; font-size:.68rem; color:var(--dim); white-space:nowrap; }
+.srec-mat:hover .srec-mat-svg { border-color:var(--accent); }
+/* The expanded view rides in a <template>, so it costs the page nothing until it is opened. */
+.srec-matovl { position:fixed; inset:0; z-index:9000; display:flex; align-items:center; justify-content:center;
+  background:rgba(0,0,0,.62); backdrop-filter:blur(3px); }
+.srec-matbox { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px;
+  max-width:92vw; max-height:92vh; overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+.srec-matbox .srec-mat-svg { width:min(76vw, 620px); height:auto; }
+.srec-matbox .srec-matlabel { font-family:'Cascadia Code',monospace; font-size:.8rem; color:var(--text); margin-bottom:9px; }
+/* The stage holds the thumbnail first, then whatever `slate_matrix` sends back in its place. */
+.srec-matchart { width:min(76vw, 620px); height:min(70vh, 520px); }
+.srec-mattex { max-width:min(80vw, 760px); overflow:auto; }

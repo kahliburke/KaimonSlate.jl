@@ -954,6 +954,10 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
             elseif value isa NamedTuple && (rec = (try Base.invokelatest(record_html, value) catch; nothing end)) !== nothing
                 # A NamedTuple of results reads as a grid of fields (record_display.jl).
                 push!(chunks, (_RECORD_SLATE_HTML, Vector{UInt8}(rec)))
+                # Keep the value against this cell so a field can later be opened in its own right
+                # (a matrix in its real `slate_matrix` rendering). `filename` is "cell:<id>".
+                startswith(filename, "cell:") &&
+                    (try Base.invokelatest(record_remember!, filename[6:end], value) catch; end)
             else
                 try
                     Base.invokelatest(_capture_rich!, chunks, value)

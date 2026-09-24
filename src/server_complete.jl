@@ -2052,6 +2052,33 @@ function _make_router(h::Hub)
         tgt = String(get(b, "target", "notebook")); tgt in ("notebook", "project") || (tgt = "notebook")
         _json(notebook_pkg_op!(nb, String(get(b, "op", "")), String(get(b, "name", "")); target = tgt))
     end))
+    # Open one matrix field of a record in its REAL rendering. The grid a NamedTuple cell draws
+    # carries thumbnails; this asks the kernel that holds the value to run `slate_matrix` on the
+    # named field, so the popup gets the same ECharts heatmap or KaTeX a bare matrix would produce.
+    # Kernel-side by necessity: the value lives where the cell ran, and the hub never had it.
+    HTTP.register!(router, "POST", "/api/{id}/matrix", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        cell, field = String(get(b, "cell", "")), String(get(b, "field", ""))
+        k = nb.kernel
+        if k isa ReportEngine.GateKernel
+            r = try
+                ReportEngine._tool(k, "__slate_matrix_render",
+                                   Dict{String,Any}("cell" => cell, "field" => field); timeout = 30.0)
+            catch e
+                return _json(Dict("error" => first(sprint(showerror, e), 200)))
+            end
+            return _json(Dict("kind" => string(_gf(r, :kind, "")), "option" => _gf(r, :option, nothing),
+                              "tex" => string(_gf(r, :tex, "")), "label" => string(_gf(r, :label, "")),
+                              "error" => string(_gf(r, :error, ""))))
+        end
+        # In-process: the record cache is in THIS process, so call straight through.
+        out = try
+            Base.invokelatest(ReportEngine.record_matrix_render, cell, field)
+        catch e
+            Dict{String,Any}("error" => first(sprint(showerror, e), 200))
+        end
+        return _json(out)
+    end))
     # ── Extension catalog ─────────────────────────────────────────────────────
     # The gallery's data: catalog entries annotated with this notebook's install state. `refresh=1`
     # bypasses the cache TTL (the "check for new extensions" action) — an ordinary open should not

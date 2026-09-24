@@ -1549,3 +1549,67 @@ async function api(method, path, body) {
 // explains it, so swallow those rejections rather than spamming the console with red noise.
 window.addEventListener('unhandledrejection', e => { if (typeof _connDown !== 'undefined' && _connDown) e.preventDefault(); });
 
+
+// ── A record's matrix field, expanded ──────────────────────────────────────────────────────────
+// The field carries a small heat strip and, in a <template>, a larger one (record_display.jl).
+// Clicking lifts the larger SVG into an overlay. Delegated from the document so it keeps working
+// across Preact re-renders, and it reads only markup the worker already sent — no round-trip.
+document.addEventListener('click', e => {
+  const host = e.target.closest && e.target.closest('.srec-mat-open');
+  if (!host) return;
+  const tpl = host.querySelector('template.srec-mat-full');
+  if (!tpl) return;
+  e.preventDefault(); e.stopPropagation();
+  const ovl = document.createElement('div');
+  ovl.className = 'srec-matovl';
+  const box = document.createElement('div');
+  box.className = 'srec-matbox';
+  const lab = document.createElement('div');
+  lab.className = 'srec-matlabel';
+  lab.textContent = tpl.getAttribute('data-label') || '';
+  box.appendChild(lab);
+  // The thumbnail's larger SVG goes up IMMEDIATELY, so the popup is never empty while the kernel
+  // is asked for the real thing. It is replaced below the moment that answer lands.
+  const stage = document.createElement('div');
+  stage.className = 'srec-matstage';
+  stage.appendChild(tpl.content.cloneNode(true));
+  box.appendChild(stage);
+  ovl.appendChild(box);
+  const close = () => { ovl.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = ev => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } };
+  ovl.addEventListener('click', close);
+  // Clicks INSIDE the box must not close it — a chart is interactive (zoom, tooltip, brush).
+  box.addEventListener('click', ev => ev.stopPropagation());
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(ovl);
+
+  // Ask the kernel that holds the value to render it with `slate_matrix` — the same renderer a
+  // bare matrix gets. A heatmap comes back as an ECharts option, a small or banded one as KaTeX.
+  const cellEl = host.closest('[id^="cell-"]');
+  const cellId = cellEl ? cellEl.id.slice(5) : '';
+  const field = host.getAttribute('data-matfield') || '';
+  if (!cellId || !field) return;
+  api('POST', '/api/matrix', { cell: cellId, field })
+    .then(r => {
+      if (!document.body.contains(ovl)) return;          // closed while we waited
+      if (!r || r.error) { if (r && r.error) lab.textContent += '  (' + r.error + ')'; return; }
+      if (r.label) lab.textContent = r.label;
+      if (r.kind === 'echart' && r.option && window.echarts) {
+        stage.innerHTML = '';
+        const div = document.createElement('div');
+        div.className = 'srec-matchart';
+        stage.appendChild(div);
+        const inst = echarts.init(div, _slateEchartsTheme());
+        inst.setOption(r.option);
+        ovl.addEventListener('DOMNodeRemoved', () => { try { inst.dispose(); } catch (_) {} }, { once: true });
+      } else if (r.kind === 'latex' && r.tex && typeof katex !== 'undefined') {
+        stage.innerHTML = '';
+        const d = document.createElement('div');
+        d.className = 'srec-mattex';
+        stage.appendChild(d);
+        try { katex.render(r.tex.replace(/^\$\$|\$\$$/g, ''), d, { displayMode: true, throwOnError: false }); }
+        catch (_) {}
+      }
+    })
+    .catch(() => {});                                     // the thumbnail stays up; nothing to say
+});
