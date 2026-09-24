@@ -17,6 +17,8 @@ using OteraEngine, CommonMark
 using ..ReportEngine
 import Base64
 
+include(joinpath(@__DIR__, "expanduser_fix.jl"))   # `~` in a backtrace path (`_linkify_trace`)
+
 export render_html, render_report_file, output_html, markdown_html
 
 const _TEMPLATE = joinpath(@__DIR__, "templates", "report.html.tmpl")
@@ -232,7 +234,6 @@ end
 # Make source locations in a backtrace clickable: `path.jl:line` → open in VS Code; `string:N`
 # (our cell eval `filename`) → jump to that line IN THIS CELL (errors.js wires `.cellref`).
 function _linkify_trace(bt0::AbstractString)
-    home = homedir()
     bt = _unmangle_cellrefs(bt0)
     # `~/…` and `/…` are the unix forms; `C:\…` (or `C:/…`) is what a Windows backtrace carries,
     # and without it no source frame is clickable there.
@@ -240,7 +241,7 @@ function _linkify_trace(bt0::AbstractString)
         p = match(r"^(.*\.jl):(\d+)$", m)
         p === nothing && return m
         path, line = String(p.captures[1]), String(p.captures[2])
-        ap = startswith(path, "~") ? home * path[2:end] : path
+        ap = expanduser(path)
         isabspath(ap) && isfile(ap) || return m   # skip Base's relative ./foo.jl etc. — only real files
         # vscode://file wants an absolute path with forward slashes; a Windows one needs its
         # separators flipped and the leading slash added (`vscode://file/C:/…`).
