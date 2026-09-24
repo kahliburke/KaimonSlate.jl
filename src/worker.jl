@@ -63,6 +63,7 @@ include(joinpath(@__DIR__, "demux.jl"))     # task-demux output capture (paralle
 include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_scheduled — parallel batch scheduler
 include(joinpath(@__DIR__, "macroexpand.jl")) # _expand_cell_source — macro-aware deps (engine + worker)
 include(joinpath(@__DIR__, "termcook.jl"))  # cook_terminal — replay \r/cursor redraws (used by capture.jl)
+include(joinpath(@__DIR__, "record_display.jl")) # record_html — a NamedTuple value as a grid of fields (used by capture.jl)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
 include(joinpath(@__DIR__, "prepare.jl"))   # PrepareTracker — classify precompile output into structured status (shared w/ engine)

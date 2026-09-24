@@ -2773,3 +2773,21 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .nbfind-opt[data-opt="word"] { text-decoration:underline; }
 .nbfind-opt.on { color:var(--accent); border-color:var(--accent); background:var(--ovl); }
 .nbfind-x { margin-left:2px; }
+
+/* a NamedTuple value: its fields as a wrap of small cards, name above value (record_display.jl) */
+.slate-record { margin:4px 0; }
+.srec-grid { display:flex; flex-wrap:wrap; gap:6px; align-items:stretch; }
+.srec-f { display:flex; flex-direction:column; justify-content:center; gap:2px; min-width:0; max-width:100%;
+  padding:5px 11px 6px; border-radius:7px; background:var(--bg2); border:1px solid var(--border); }
+.srec-k { font-size:.68rem; color:var(--dim); letter-spacing:.02em; white-space:nowrap; }
+.srec-v { font-family:'Cascadia Code',monospace; font-size:.88rem; color:var(--val); white-space:nowrap; font-variant-numeric:tabular-nums; }
+.srec-err { font-size:.74rem; color:var(--dim); }
+.srec-u { margin-left:5px; font-family:var(--font, inherit); font-size:.76rem; color:var(--dim); }
+.srec-bool.yes { color:var(--green); } .srec-bool.no { color:var(--red); }
+.srec-str, .srec-text { color:var(--text); white-space:normal; overflow-wrap:anywhere; font-size:.82rem; }
+.srec-str { font-family:var(--font, inherit); }
+.srec-nest { flex-basis:100%; background:transparent; padding:4px 0 2px; border:none; }
+.srec-nest > .srec-k { font-size:.72rem; color:var(--text); font-weight:600; margin-bottom:2px; }
+.srec-nest .srec-f { background:color-mix(in srgb, var(--bg2) 70%, var(--bg)); }
+.srec-rich > * { margin:0; }
+.srec-more { align-self:center; color:var(--dim); font-size:.74rem; }

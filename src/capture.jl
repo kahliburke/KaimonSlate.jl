@@ -951,6 +951,9 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
                 push!(animations, (manifest = value.manifest, frames = value.frames, lut = value.lut))
             elseif (st = (try Base.invokelatest(_as_slate_table, value) catch; nothing end)) !== nothing
                 push!(tables, _table_wire(st))
+            elseif value isa NamedTuple && (rec = (try Base.invokelatest(record_html, value) catch; nothing end)) !== nothing
+                # A NamedTuple of results reads as a grid of fields (record_display.jl).
+                push!(chunks, (_RECORD_SLATE_HTML, Vector{UInt8}(rec)))
             else
                 try
                     Base.invokelatest(_capture_rich!, chunks, value)
@@ -963,9 +966,10 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     end
 
     # text/plain repr — skipped when richer output exists (the renderer suppresses
-    # it anyway), and `invokelatest`-guarded for the world-age reason.
+    # it anyway), and `invokelatest`-guarded for the world-age reason. A NamedTuple keeps it beside
+    # its record grid: the page shows the grid, and an agent reading the result gets the numbers.
     value_repr = ""
-    if err === nothing && value !== nothing && !quiet && isempty(chunks) && isempty(echarts) && isempty(tables) && isempty(animations)
+    if err === nothing && value !== nothing && !quiet && (isempty(chunks) || value isa NamedTuple) && isempty(echarts) && isempty(tables) && isempty(animations)
         try
             # `:displaysize` bounds how much `show` even generates for big containers (≈40 rows),
             # then `_cap_keep!` is the hard ceiling for anything still huge (e.g. a giant String value).
