@@ -750,6 +750,117 @@ end
 
 # ── Extension entrypoints ─────────────────────────────────────────────────────
 
+# ── Rendering a debug frame for reading ──────────────────────────────────────────────────────
+# Module level, not inside `create_tools`, because this is a pure function from the frame payload
+# to text and the only way to test it otherwise is to stand up a hub, a worker and a live session.
+function _dbg_asks(j::Dict{String,Any})::String
+    as = get(j, "asks", [])
+    isempty(as) && return ""
+    io = IOBuffer()
+    for a in as
+        println(io, get(a, "kind", "question") == "consent" ? "🔔 " : "❓ ",
+                get(a, "from", ""), " is WAITING — id ", get(a, "id", ""))
+        println(io, "   ", get(a, "text", ""))
+    end
+    println(io, "   (answer with spec_answer)")
+    return String(take!(io))
+end
+
+function _dbg_render(j::Dict{String,Any})::String
+    pending = _dbg_asks(j)
+    get(j, "session", true) === false &&
+        return pending * (isempty(pending) ? "" : "\n") * "No debug session. Start one with dbg_start."
+    err = get(j, "error", nothing)
+    io = IOBuffer()
+    isempty(pending) || print(io, pending)
+    cell = get(j, "cell", "")
+    if get(j, "finished", false) === true
+        r = get(j, "result", nothing)
+        println(io, err === nothing ? "✅ cell '$cell' ran to the end." : "⛔ cell '$cell' stopped: $err")
+        r === nothing || println(io, "   result: ", get(r, "repr", ""), "  ::", get(r, "type", ""))
+    else
+        bp = get(j, "at_breakpoint", false) === true ? "  ● breakpoint" : ""
+        println(io, "⏸ ", get(j, "scope", ""), "  ", get(j, "file", ""), ":", get(j, "line", 0), bp)
+        println(io, "   on ", get(j, "where", "local"), " · step ", get(j, "steps", 0),
+                " · owner ", get(j, "owner", ""))
+        err === nothing || println(io, "   ⚠ ", err)
+    end
+    # A binding whose line hasn't run yet still holds the PREVIOUS run's value. Said plainly:
+    # a reader who mistakes one for the current state debugs the wrong number for a while.
+    show_vals(label, vs) = begin
+        isempty(vs) && return
+        println(io, label, ":")
+        for v in vs
+            t = get(v, "type", "")
+            stale = !isempty(t) && get(v, "fresh", true) === false
+            println(io, "   ", rpad(get(v, "name", ""), 14), " ",
+                    isempty(t) ? "(not assigned yet)" :
+                    t * get(v, "size", "") * "  " * get(v, "repr", "") *
+                    (stale ? "   ← previous run; this line has not run yet" : ""))
+        end
+    end
+    # THE CODE. The state carries it — fetched through CodeTracking on whichever machine the
+    # frame is on, or filled from the notebook for a cell — and it used to be dropped right
+    # here, leaving a specialist to reason about `kit:7` without ever seeing line 7. The human
+    # looking at the same session had it on screen, which made the two of them unequal for no
+    # reason. Windowed, because a method can be long and the lines around the stop are what
+    # the question is about.
+    src, first = String(get(j, "source", "")), Int(get(j, "srcfirst", 0))
+    line = Int(get(j, "line", 0))
+    if !isempty(src) && first > 0
+        lines = split(src, '\n')
+        lo = max(1, line - first + 1 - 8)
+        hi = min(length(lines), line - first + 1 + 8)
+        println(io, "source  ", get(j, "file", ""), " (", get(j, "scope", ""), "):")
+        for k in lo:hi
+            n = k + first - 1
+            println(io, n == line ? " ▸ " : "   ", lpad(n, 4), "  ", lines[k])
+        end
+    end
+    show_vals("locals", get(j, "locals", []))
+    show_vals("cell bindings", get(j, "bindings", []))
+    stk = get(j, "stack", [])
+    length(stk) > 1 && println(io, "stack: ",
+        join([string(get(f, "scope", ""), ":", get(f, "line", 0)) for f in reverse(stk)], "  ←  "))
+    ms = get(j, "marks", [])
+    isempty(ms) || println(io, "breakpoints: ",
+        join([string(get(m, "file", ""), ":", get(m, "line", 0)) for m in ms], ", "))
+    # What each watch has COLLECTED. The frame carried these all along and nothing printed
+    # them, so a watch read as registered and inert: the tool that says it reports them showed
+    # only the breakpoint beside it. The series itself goes to the chart; what belongs in a
+    # tool result is enough to see whether a value turned, and where.
+    for t in get(j, "traces", [])
+        n = Int(get(t, "n", 0))
+        print(io, "watch ", get(t, "expr", ""), ": ")
+        if n == 0
+            hits = Int(get(t, "hits", 0))
+            ty = String(get(t, "type", ""))
+            println(io, hits == 0 ? "no passes yet" :
+                    string(hits, " pass", hits == 1 ? "" : "es", ", nothing kept",
+                           isempty(ty) ? "" : " (it is a $ty, and a trace is a curve)"))
+            continue
+        end
+        print(io, n, " sample", n == 1 ? "" : "s", "  ",
+              _dbg_num(get(t, "first", 0.0)), " → ", _dbg_num(get(t, "last", 0.0)),
+              "   (min ", _dbg_num(get(t, "min", 0.0)),
+              ", max ", _dbg_num(get(t, "max", 0.0)), ")")
+        # Passes that kept nothing are the difference between "it never ran" and "it ran and
+        # the value was not a number", which look identical from a count alone.
+        hits = Int(get(t, "hits", n))
+        hits > n && print(io, "  [", hits - n, " pass", hits - n == 1 ? "" : "es",
+                          " kept nothing]")
+        println(io)
+    end
+    return String(take!(io))
+end
+
+# Compact enough to sit several to a line, and still readable across twenty orders of
+# magnitude, which is the range a diverging trace covers on its way past. A sample that reached
+# Inf or NaN arrives as `nothing`: JSON has neither, and the frame is sanitized before it is sent.
+_dbg_num(::Nothing) = "non-finite"
+_dbg_num(x) = (v = Float64(x); isfinite(v) ?
+    sprint(show, v; context = :compact => true) : string(v))
+
 """
     create_tools(GateTool) -> Vector{GateTool}
 
@@ -1309,80 +1420,7 @@ function create_tools(GateTool::Type)
     # to ask for next, not to haul it here.
     # A blocked question comes FIRST, above the frame. A specialist waiting on an answer is not
     # doing anything else, so it is the most important fact about the session.
-    function _dbg_asks(j::Dict{String,Any})::String
-        as = get(j, "asks", [])
-        isempty(as) && return ""
-        io = IOBuffer()
-        for a in as
-            println(io, get(a, "kind", "question") == "consent" ? "🔔 " : "❓ ",
-                    get(a, "from", ""), " is WAITING — id ", get(a, "id", ""))
-            println(io, "   ", get(a, "text", ""))
-        end
-        println(io, "   (answer with spec_answer)")
-        return String(take!(io))
-    end
 
-    function _dbg_render(j::Dict{String,Any})::String
-        pending = _dbg_asks(j)
-        get(j, "session", true) === false &&
-            return pending * (isempty(pending) ? "" : "\n") * "No debug session. Start one with dbg_start."
-        err = get(j, "error", nothing)
-        io = IOBuffer()
-        isempty(pending) || print(io, pending)
-        cell = get(j, "cell", "")
-        if get(j, "finished", false) === true
-            r = get(j, "result", nothing)
-            println(io, err === nothing ? "✅ cell '$cell' ran to the end." : "⛔ cell '$cell' stopped: $err")
-            r === nothing || println(io, "   result: ", get(r, "repr", ""), "  ::", get(r, "type", ""))
-        else
-            bp = get(j, "at_breakpoint", false) === true ? "  ● breakpoint" : ""
-            println(io, "⏸ ", get(j, "scope", ""), "  ", get(j, "file", ""), ":", get(j, "line", 0), bp)
-            println(io, "   on ", get(j, "where", "local"), " · step ", get(j, "steps", 0),
-                    " · owner ", get(j, "owner", ""))
-            err === nothing || println(io, "   ⚠ ", err)
-        end
-        # A binding whose line hasn't run yet still holds the PREVIOUS run's value. Said plainly:
-        # a reader who mistakes one for the current state debugs the wrong number for a while.
-        show_vals(label, vs) = begin
-            isempty(vs) && return
-            println(io, label, ":")
-            for v in vs
-                t = get(v, "type", "")
-                stale = !isempty(t) && get(v, "fresh", true) === false
-                println(io, "   ", rpad(get(v, "name", ""), 14), " ",
-                        isempty(t) ? "(not assigned yet)" :
-                        t * get(v, "size", "") * "  " * get(v, "repr", "") *
-                        (stale ? "   ← previous run; this line has not run yet" : ""))
-            end
-        end
-        # THE CODE. The state carries it — fetched through CodeTracking on whichever machine the
-        # frame is on, or filled from the notebook for a cell — and it used to be dropped right
-        # here, leaving a specialist to reason about `kit:7` without ever seeing line 7. The human
-        # looking at the same session had it on screen, which made the two of them unequal for no
-        # reason. Windowed, because a method can be long and the lines around the stop are what
-        # the question is about.
-        src, first = String(get(j, "source", "")), Int(get(j, "srcfirst", 0))
-        line = Int(get(j, "line", 0))
-        if !isempty(src) && first > 0
-            lines = split(src, '\n')
-            lo = max(1, line - first + 1 - 8)
-            hi = min(length(lines), line - first + 1 + 8)
-            println(io, "source  ", get(j, "file", ""), " (", get(j, "scope", ""), "):")
-            for k in lo:hi
-                n = k + first - 1
-                println(io, n == line ? " ▸ " : "   ", lpad(n, 4), "  ", lines[k])
-            end
-        end
-        show_vals("locals", get(j, "locals", []))
-        show_vals("cell bindings", get(j, "bindings", []))
-        stk = get(j, "stack", [])
-        length(stk) > 1 && println(io, "stack: ",
-            join([string(get(f, "scope", ""), ":", get(f, "line", 0)) for f in reverse(stk)], "  ←  "))
-        ms = get(j, "marks", [])
-        isempty(ms) || println(io, "breakpoints: ",
-            join([string(get(m, "file", ""), ":", get(m, "line", 0)) for m in ms], ", "))
-        return String(take!(io))
-    end
 
     """
         dbg_start(notebook, cell) -> String

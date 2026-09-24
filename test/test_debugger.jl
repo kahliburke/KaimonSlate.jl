@@ -410,6 +410,56 @@ end
         end
     end
 
+    @testset "the frame says what a watch has collected" begin
+        # The summary rides in every state and the browser's chart reads it; the TOOL never printed
+        # it. So a watch registered, sampled every pass, and reported nothing to the one reader that
+        # `dbg_watch` tells you to look at — indistinguishable from a watch that does not work.
+        R = KaimonSlate._dbg_render
+        frame = Dict{String,Any}(
+            "session" => true, "scope" => "Main.NB", "file" => "cell:relax", "line" => 8,
+            "traces" => [Dict{String,Any}("expr" => "maximum(abs, u)", "n" => 120,
+                                          "first" => 0.96603, "last" => 3.40689e6,
+                                          "min" => 0.395189, "max" => 3.40689e6,
+                                          "hits" => 120, "type" => "Float64")])
+        out = R(frame)
+        @test occursin("maximum(abs, u)", out)
+        @test occursin("120 samples", out)
+        # First AND min, because they differ: the value fell before it turned, which is the whole
+        # thing a series shows that a breakpoint cannot.
+        @test occursin("0.96603", out) && occursin("0.395189", out)
+        @test occursin("3.40689e6", out)
+
+        # A line that ran but kept nothing is not a line that never ran, and a count alone cannot
+        # tell them apart.
+        none = R(Dict{String,Any}("session" => true, "scope" => "M", "file" => "f", "line" => 1,
+                 "traces" => [Dict{String,Any}("expr" => "s", "n" => 0, "first" => 0.0,
+                                               "last" => 0.0, "min" => 0.0, "max" => 0.0,
+                                               "hits" => 9, "type" => "String")]))
+        @test occursin("9 passes", none) && occursin("nothing kept", none)
+        @test occursin("String", none)
+        @test occursin("no passes yet",
+                       R(Dict{String,Any}("session" => true, "scope" => "M", "file" => "f",
+                                          "line" => 1,
+                                          "traces" => [Dict{String,Any}("expr" => "s", "n" => 0,
+                                                       "first" => 0.0, "last" => 0.0, "min" => 0.0,
+                                                       "max" => 0.0, "hits" => 0, "type" => "")])))
+
+        # Some passes kept, some not — the difference is worth saying, since it means the expression
+        # is not always a number.
+        mixed = R(Dict{String,Any}("session" => true, "scope" => "M", "file" => "f", "line" => 1,
+                  "traces" => [Dict{String,Any}("expr" => "x", "n" => 7, "first" => 1.0,
+                                                "last" => 2.0, "min" => 1.0, "max" => 2.0,
+                                                "hits" => 10, "type" => "Float64")]))
+        @test occursin("3 passes kept nothing", mixed)
+
+        # A trace that diverged reaches the tool with its non-finite ends as JSON null.
+        blown = R(Dict{String,Any}("session" => true, "scope" => "M", "file" => "f", "line" => 1,
+                  "traces" => [Dict{String,Any}("expr" => "u", "n" => 5, "first" => 1.0,
+                                                "last" => nothing, "min" => 1.0, "max" => nothing,
+                                                "hits" => 5, "type" => "Float64")]))
+        @test occursin("1.0 → non-finite", blown)
+    end
+
     @testset "watch expressions" begin
         # A watch samples at every execution of its line and never stops the run. That is the
         # question a stepper cannot answer: not what a value is now, but what it has been — which
