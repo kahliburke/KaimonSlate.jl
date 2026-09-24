@@ -28,6 +28,36 @@ function _cleanCellHtml(el) {
   if (html.length > 20000) html = html.slice(0, 20000) + '\n<!-- …truncated… -->';
   return html;
 }
+// html2canvas parses colours itself and rejects the `color(srgb …)` form a browser computes for
+// `color-mix()`, throwing on the first one it meets — which abandons the raster for the WHOLE cell,
+// not just the element wearing it. The stylesheet uses `color-mix` freely, including on `.output
+// .err` and `.output .warn`, so every cell that raised an error had no image for `slate.view` at
+// all. Rewrite the computed value to `rgb()/rgba()` on html2canvas's own clone, where overriding
+// inline styles costs the live page nothing.
+const _SRGB_FN = /^color\(srgb\s+([\d.eE+-]+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)(?:\s*\/\s*([\d.eE+-]+))?\s*\)$/;
+const _COLOR_PROPS = ['backgroundColor', 'color', 'borderTopColor', 'borderRightColor',
+                      'borderBottomColor', 'borderLeftColor', 'outlineColor', 'textDecorationColor'];
+const _SANITIZE_CAP = 4000;   // a pathological cell walks its own DOM, not the agent's patience
+function _plainColor(v) {
+  const m = _SRGB_FN.exec(v || '');
+  if (!m) return null;
+  const ch = i => Math.round(Math.min(1, Math.max(0, parseFloat(m[i]) || 0)) * 255);
+  const a = m[4] === undefined ? 1 : parseFloat(m[4]);
+  return a >= 1 ? `rgb(${ch(1)}, ${ch(2)}, ${ch(3)})` : `rgba(${ch(1)}, ${ch(2)}, ${ch(3)}, ${a})`;
+}
+function _sanitizeColors(root) {
+  if (!root) return;
+  const els = [root].concat(Array.prototype.slice.call(root.querySelectorAll('*'), 0, _SANITIZE_CAP));
+  for (const el of els) {
+    let cs; try { cs = getComputedStyle(el); } catch (_) { continue; }
+    for (const p of _COLOR_PROPS) {
+      const fixed = _plainColor(cs[p]);
+      if (fixed) el.style[p] = fixed;
+    }
+  }
+}
+window._slateSanitizeColors = _sanitizeColors;
+
 // Answer one inspect request: capture cell `cellId` and POST it back under `reqid`.
 async function _slateInspect(reqid, cellId) {
   const out = { reqid, cell: cellId, html: '', console: (window.__diag || []).slice(-40), png: '' };
@@ -57,7 +87,8 @@ async function _slateInspect(reqid, cellId) {
           // Raster the rendered CONTENT (markdown / output / table), not the cell's button chrome —
           // so a markdown-layout inspect shows the math/text as laid out, nothing wasteful.
           const target = el.querySelector('.md, .output, .tables') || el;
-          const canvas = await h2c(target, { backgroundColor: bg, scale: 1, logging: false, useCORS: true });
+          const canvas = await h2c(target, { backgroundColor: bg, scale: 1, logging: false, useCORS: true,
+                                             onclone: (_doc, el) => { try { _sanitizeColors(el); } catch (_) {} } });
           out.png = (canvas.toDataURL('image/png').split(',')[1]) || '';
         } catch (_) {}
       }
