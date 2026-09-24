@@ -2777,9 +2777,16 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 /* a NamedTuple value: its fields as a wrap of small cards, name above value (record_display.jl) */
 .slate-record { margin:4px 0; }
 .srec-grid { display:flex; flex-wrap:wrap; gap:6px; align-items:stretch; }
-.srec-f { display:flex; flex-direction:column; justify-content:center; gap:2px; min-width:0; max-width:100%;
-  padding:5px 11px 6px; border-radius:7px; background:var(--bg2); border:1px solid var(--border); }
-.srec-k { font-size:.68rem; color:var(--dim); letter-spacing:.02em; white-space:nowrap; }
+/* `flex-start`, not `center`: the cards stretch to the tallest in the row, and centring the
+   contents then drops each header by half of whatever that card is missing, so no two line up. */
+.srec-f { display:flex; flex-direction:column; justify-content:flex-start; gap:0; min-width:0; max-width:100%;
+  padding:0; border-radius:7px; background:var(--bg2); border:1px solid var(--border); overflow:hidden; }
+/* The name is a HEADER, not a caption: it is the click target (→ the source that produced the
+   field), so it needs to look like something you can press and to own a band of its own. */
+.srec-k { display:block; font-size:.66rem; color:var(--dim); letter-spacing:.03em; white-space:nowrap;
+  padding:3px 10px; background:var(--bg); border-bottom:1px solid var(--border); cursor:pointer; }
+.srec-k:hover { color:var(--accent); background:var(--ovl); }
+.srec-f > :not(.srec-k) { margin:5px 10px 6px; }
 .srec-v { font-family:'Cascadia Code',monospace; font-size:.88rem; color:var(--val); white-space:nowrap; font-variant-numeric:tabular-nums; }
 .srec-err { font-size:.74rem; color:var(--dim); }
 .srec-u { margin-left:5px; font-family:var(--font, inherit); font-size:.76rem; color:var(--dim); }
@@ -2792,8 +2799,13 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
    a cell uses, and the group's name sits on that rule in the accent colour. */
 .srec-nest { flex-basis:100%; padding:2px 0 3px 10px; border-radius:0;
   background:transparent; border:none; border-left:2px solid var(--accent); }
+/* A nested group's title keeps the rule's vocabulary rather than the card header's: there is no
+   card to head, and it is still the click target for that sub-tuple. */
 .srec-nest > .srec-k { display:block; font-size:.66rem; color:var(--accent); font-weight:600;
-  margin-bottom:4px; letter-spacing:.06em; text-transform:uppercase; opacity:.75; }
+  padding:0; margin-bottom:4px; letter-spacing:.06em; text-transform:uppercase; opacity:.75;
+  background:transparent; border-bottom:none; }
+.srec-nest > .srec-k:hover { opacity:1; background:transparent; }
+.srec-nest > :not(.srec-k) { margin:0; }
 /* Depth steps the rule down in emphasis rather than nesting box inside box. */
 .srec-nest .srec-nest { border-left-color:var(--dim); }
 .srec-nest .srec-nest > .srec-k { color:var(--dim); }

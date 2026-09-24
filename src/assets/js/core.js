@@ -1555,10 +1555,14 @@ window.addEventListener('unhandledrejection', e => { if (typeof _connDown !== 'u
 // from. The hub answers from the cell's own text (`/api/{id}/recordspan`): the variable that was
 // put in, or the tuple itself when the field was written as a literal and there is no variable to
 // point at. A matrix field is excluded — that click already opens the matrix.
+// The TITLE is the click target, not the whole card: a field has two questions attached to it and
+// one card cannot answer both. The name asks "where did this come from" and answers here; the value
+// is left free to ask "what is this" (a matrix opens its rendering).
 document.addEventListener('click', e => {
   if (!e.target.closest) return;
-  if (e.target.closest('.srec-mat')) return;                  // the matrix popup owns this click
-  const f = e.target.closest('.srec-f');
+  const k = e.target.closest('.srec-k');
+  if (!k) return;
+  const f = k.parentElement && k.parentElement.closest('.srec-f');
   if (!f || !f.dataset.field) return;
   const cellEl = f.closest('[id^="cell-"]');
   if (!cellEl) return;
