@@ -3880,7 +3880,11 @@ _remote_env_key(origin_env, parent) = _proj_key(isempty(String(origin_env)) ? pa
 _region_target(r::Region; origin_env::AbstractString = r.preload, host::AbstractString = region_host(r)) =
     RemoteTarget(host; transport = r.transport,
         project = "~/.cache/kaimonslate/remote/" * _proj_key(origin_env),
-        port = r.base_port,
+        # `base_port` pins a firewall-opened range, which only a :direct region needs. A :tunnel worker
+        # is reached through an SSH forward to any free remote port, so pinning it there would only
+        # collide with whatever already holds that port - a leaked socket, another tenant - with no way
+        # to move off it (`_port_movable`). Take a free port there, the same as every other tunnel worker.
+        port = r.transport === :direct ? r.base_port : 0,
         origin_env = origin_env, datadir = r.data_root, cache_root = r.cache_root, region = r.name,
         sysimage = r.sysimage, curve = r.curve)
 
@@ -4280,8 +4284,10 @@ function _region_reconcile_impl!(r::Region)
         # Ports for the new workers. A :direct region with a pinned base marches up from it in strides of
         # 3 (each worker owns port..port+2) so you know exactly which range to open in the firewall.
         # Otherwise (tunnel, or no base) auto-assign from _next_ports, floored above the live roster —
-        # stride 2 for a :tunnel region (its blob picks a worker-chosen free port, not gate+2).
-        ports = r.base_port > 0 ?
+        # stride 2 for a :tunnel region (its blob picks a worker-chosen free port, not gate+2). The
+        # base only pins a :direct region; a :tunnel one takes a free port even when a base is set,
+        # since its remote port is reached through the forward and pinning it only invites collisions.
+        ports = (r.transport === :direct && r.base_port > 0) ?
             _direct_port_slots(r.base_port, deficit; roster = roster, label = "region[$(r.name)]") :
             begin
                 floor = _port_floor(host; workers = roster)   # never deal a live worker's ports (see _port_floor)
