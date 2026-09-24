@@ -82,3 +82,28 @@ end
         @test String(units[(r[1] + 1):r[2]]) == "beta"
     end
 end
+
+# The reader can ask for Julia's own text instead of the grid. Both forms ship inside the record
+# chunk, because the text repr beside the cell is dropped wherever richer output exists
+# (`_cell_view`) — a preference built on that one would work live and blank a static export.
+@testset "a record carries its plain text too" begin
+    h = RE.record_html((; f0 = 1006.63, label = "run 7"))
+    @test occursin("srec-grid", h)                       # the grid…
+    @test occursin("<pre class=\"srec-plain\">", h)      # …and the text, in one chunk
+    plain = match(r"<pre class=\"srec-plain\">(.*?)</pre>"s, h).captures[1]
+    @test occursin("f0 = 1006.63", plain)
+
+    @testset "it is escaped, not injected" begin
+        p = match(r"<pre class=\"srec-plain\">(.*?)</pre>"s,
+                  RE.record_html((; s = "<script>x</script>"))).captures[1]
+        @test occursin("&lt;script&gt;", p) && !occursin("<script>", p)
+    end
+
+    @testset "and bounded" begin
+        # A record may hold a large array; keeping the alternative available must not put that
+        # array's whole printed form on the wire.
+        p = match(r"<pre class=\"srec-plain\">(.*?)</pre>"s,
+                  RE.record_html((; big = collect(1:200_000)))).captures[1]
+        @test length(p) <= RE._RECORD_PLAIN_MAX + 8
+    end
+end

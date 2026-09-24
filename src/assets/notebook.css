@@ -2839,3 +2839,10 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
   0%   { background:rgba(86,156,214,.62); }
   100% { background:rgba(86,156,214,.00); }
 }
+
+/* Record vs plain text. Both forms live inside the record chunk, so the preference is a class on
+   the body rather than a re-render or a round trip — and it holds in a static export too. */
+.srec-plain { display:none; margin:0; font-family:'Cascadia Code',monospace; font-size:.84rem;
+  color:var(--val); white-space:pre-wrap; overflow-wrap:anywhere; }
+body.record-plain .slate-record > .srec-grid { display:none; }
+body.record-plain .srec-plain { display:block; }

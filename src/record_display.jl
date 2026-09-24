@@ -317,6 +317,20 @@ function record_field(cellid::AbstractString, path::AbstractString)
     return v
 end
 
+# The NamedTuple as Julia would have shown it, for the reader who wants the text back. Bounded the
+# same way the fields are: a record holding a large array must not put that array's whole printed
+# form on the wire just to keep the alternative available.
+const _RECORD_PLAIN_MAX = 4_000
+function _rec_plain(nt::NamedTuple)
+    s = try
+        sprint((io, x) -> show(IOContext(io, :limit => true, :compact => true,
+                                         :displaysize => (24, 120)), MIME"text/plain"(), x), nt)
+    catch
+        try; repr(nt); catch; string(typeof(nt)); end
+    end
+    return length(s) > _RECORD_PLAIN_MAX ? first(s, _RECORD_PLAIN_MAX) * "\n…" : s
+end
+
 """
     record_matrix_render(cell, field) -> Dict
 
@@ -361,6 +375,11 @@ function record_html(nt::NamedTuple)
     io = IOBuffer()
     print(io, "<div class=\"slate-record\">")
     _record_fields(io, nt, 0)
+    # The plain text rides along so the reader can switch back to it. It has to be HERE rather than
+    # left to the text repr beside the cell: that one is dropped wherever richer output exists
+    # (`_cell_view`), so a preference built on it would work live and show an empty cell in an
+    # export. Carrying both inside the chunk makes the choice one CSS class, everywhere.
+    print(io, "<pre class=\"srec-plain\">", _rec_esc(_rec_plain(nt)), "</pre>")
     print(io, "</div>")
     return String(take!(io))
 end

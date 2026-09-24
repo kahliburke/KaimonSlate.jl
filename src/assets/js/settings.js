@@ -224,6 +224,16 @@ function bindDisplaySettings(ids) {
       localStorage.setItem('slateWrapOutput', wrap.checked ? '1' : '0');
     };
   }
+  // Both forms of a NamedTuple value are already in the cell's output (record_display.jl), so the
+  // choice is a class — nothing re-runs, and a reader who prefers the text keeps it across cells.
+  const recplain = el('recplain');
+  if (recplain) {
+    recplain.checked = document.body.classList.contains('record-plain');
+    recplain.onchange = () => {
+      document.body.classList.toggle('record-plain', recplain.checked);
+      localStorage.setItem('slateRecordPlain', recplain.checked ? '1' : '0');
+    };
+  }
   // ── Editor settings ────────────────────────────────────────────────────────────────────────
   // Optional: only bound when the caller passes the ids, so the authoring Settings modal (which has
   // its own, richer Editing tab) is unaffected. Every setter here already applies LIVE across open
@@ -470,6 +480,7 @@ window.slateSettingsNav = _setNavFor;             // config.js rebuilds the list
 function applyDisplaySettings() {
   document.body.classList.toggle('fullwidth', localStorage.getItem('slateFullWidth') === '1');
   document.body.classList.toggle('wrap-output', localStorage.getItem('slateWrapOutput') === '1');
+  document.body.classList.toggle('record-plain', localStorage.getItem('slateRecordPlain') === '1');
 }
 window.applyDisplaySettings = applyDisplaySettings;
 
@@ -514,7 +525,7 @@ function openSettings(scope, section) {
   bindDisplaySettings({ theme: 'settheme', renderer: 'setrenderer',
                         wide: 'setwide', page: 'setpage', pagev: 'setpagev',
                         fig: 'setfig', figv: 'setfigv', zoom: 'setzoom', zoomv: 'setzoomv',
-                        wrap: 'setwrap' });
+                        wrap: 'setwrap', recplain: 'setrecplain' });
   // Soft-wrap long lines in the CODE editor (markdown editors always wrap). Live across all editors.
   const wraped = document.getElementById('setwraped');
   if (wraped) {
