@@ -1169,12 +1169,46 @@ function _effect_record(e)
     return (; kind = kind, names = names, stmt_src = src)
 end
 
+# A `:pick` effect aims a pick control at an axis. The calibration has TWO consumers and they need
+# it for different reasons, so it goes to both from this one declaration: the widget's params, so
+# coercion can clamp a click into the axis and `bind_domain` can enumerate a snapped grid; and the
+# cell's wire payload (see `_picks_json`), so the browser can put a click target over the figure.
+# Writing it onto the widget is what keeps a pick honest — an uncalibrated control cannot clamp,
+# and a stale one would clamp to an axis that is no longer on screen.
+function _apply_pick_effect!(nb::LiveNotebook, c::Cell, r, e)
+    data = _effect_field(e, :data)
+    cal = data === nothing ? nothing : _effect_field(data, :calibration)
+    cal === nothing && return nothing
+    for nm in r.names
+        id = ReportEngine.bind_owner(nb.report, String(nm))
+        if isempty(id)
+            ReportEngine._rlog("pick_on!: cell $(c.id) aimed at ':$(nm)', which no cell declares — ignored")
+            continue
+        end
+        idx = findfirst(cc -> cc.id == id, nb.report.cells)
+        idx === nothing && continue
+        for b in nb.report.cells[idx].binds
+            b.name === nm || continue
+            if b.widget != "pick"
+                ReportEngine._rlog("pick_on!: ':$(nm)' is a $(b.widget), not a pick control — ignored")
+                continue
+            end
+            for (k, v) in pairs(cal)
+                b.params[String(k)] = v
+            end
+        end
+    end
+    return nothing
+end
+
 function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
     (out === nothing || isempty(out.effects)) && return nothing
     recs = [_effect_record(e) for e in out.effects]
-    for r in recs
+    for (r, e) in zip(recs, out.effects)
         if r.kind === :everywhere
             :everywhere_declared in c.flags || push!(c.flags, :everywhere_declared)
+        elseif r.kind === :pick
+            _apply_pick_effect!(nb, c, r, e)
         elseif r.kind !== nothing
             ReportEngine._rlog("cell effects: cell $(c.id) declared unhandled effect kind ':$(r.kind)' — ignored")
         end

@@ -458,6 +458,29 @@ _control_spec(cell::Cell, spec::BindSpec) =
 # `hosts` is the list of cell ids whose control strip surfaces this bind (usually one,
 # possibly several, possibly the bind's OWN cell). `hosted` stays a simple bool for the
 # common path; `hostedby` lets the frontend say *where* (jump link) and tell self-host apart.
+# `:pick` effects → the cell's `picks` payload: which bind, and where on the rendered figure its
+# axis sits. Tolerant of the record arriving as a NamedTuple (in-process) or a Dict/JSON3 object
+# (over the gate), and silently skips a malformed one — a cell's output must render either way.
+function _picks_json(effects)
+    out = Dict{String,Any}[]
+    for e in effects
+        kind = _effect_field(e, :kind)
+        Symbol(kind === nothing ? "" : kind) === :pick || continue
+        data = _effect_field(e, :data)
+        cal = data === nothing ? nothing : _effect_field(data, :calibration)
+        names = _effect_field(e, :names)
+        (cal === nothing || names === nothing) && continue
+        for n in names
+            d = Dict{String,Any}("bind" => String(n))
+            for (k, v) in pairs(cal)
+                d[String(k)] = v
+            end
+            push!(out, d)
+        end
+    end
+    return out
+end
+
 _bind_json(spec::BindSpec, hosts::Vector{String}) =
     Dict{String,Any}("name" => String(spec.name), "widget" => spec.widget,
                      "params" => spec.params, "value" => spec.value,
@@ -936,6 +959,12 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     end
     if !isempty(c.binds)
         d["binds"] = [_bind_json(b, get(hostednames, String(b.name), String[])) for b in c.binds]
+    end
+    # Pick targets declared by THIS cell (`pick_on!`). They ride with the figure they calibrate —
+    # the same payload, so the click target cannot arrive without the image or outlive it.
+    if c.output !== nothing && !isempty(c.output.effects)
+        picks = _picks_json(c.output.effects)
+        isempty(picks) || (d["picks"] = picks)
     end
     (:collapsed in c.flags) && (d["collapsed"] = true)   # folded in the UI (persisted in the .jl)
     (:hidecode in c.flags) && (d["codeHidden"] = true)   # code editor hidden, output shown

@@ -95,6 +95,100 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         @test (first(s), last(s)) == (1500.0, 1800.0)
     end
 
+    # A pick reads its value off a figure, so every guarantee a cell relies on has to hold against
+    # whatever the browser posts: a click lands in data coordinates, inside the axis, on the grid.
+    @testset "Pick: coercion clamps, snaps and normalises" begin
+        w = RE.PickPoint(; default = (-0.6, -0.9), snap = 0.05)
+        # Uncalibrated — no axis attached yet, so there are no limits to clamp to. It must pass the
+        # value through rather than invent a range, but the grid is the author's and still applies.
+        @test RE.coerce_bind(w, Any[1.234, -2.345]) == Any[1.25, -2.35]
+        w.params["xlim"] = Any[-3.0, 3.0]; w.params["ylim"] = Any[-3.0, 3.0]
+        @test RE.coerce_bind(w, Any[99.0, -99.0]) == Any[3.0, -3.0]      # outside → clamped
+        @test RE.coerce_bind(w, Any[1.234, -2.346]) == Any[1.25, -2.35]  # snapped to the grid
+        @test RE.coerce_bind(w, "nonsense") == w.default                 # garbage → the default
+        @test RE.coerce_bind(w, Any[1.0]) == w.default                   # wrong arity → the default
+        p = RE.wrap_value(w, Any[1.25, -2.35])
+        @test (p.x, p.y) == (1.25, -2.35)
+
+        # A region's WIRE order is [xlo, xhi, ylo, yhi] — both x's, then both y's — which is what
+        # `wrap` and the constructor's `default` mean by those four numbers. Reading it as two
+        # corner points instead transposes the box while still type-checking and still looking like
+        # a box, so the order is pinned here rather than left to whoever reads the code next.
+        r = RE.PickRegion(; snap = 0.5)
+        r.params["xlim"] = Any[-3.0, 3.0]; r.params["ylim"] = Any[-3.0, 3.0]
+        fwd = RE.coerce_bind(r, Any[-1.0, 2.0, -2.0, 1.0])
+        b = RE.wrap_value(r, fwd)
+        @test (b.xlo, b.xhi, b.ylo, b.yhi) == (-1.0, 2.0, -2.0, 1.0)
+        # …and a box must not remember which corner the reader started from: dragging the other way
+        # swaps the ends WITHIN each pair, and must land on the same box.
+        @test RE.coerce_bind(r, Any[2.0, -1.0, 1.0, -2.0]) == fwd
+        @test b.xlo <= b.xhi && b.ylo <= b.yhi
+
+        # A path is fixed-length: a partial path is still in progress, a long one is trimmed.
+        q = RE.PickPath(; n = 3)
+        q.params["xlim"] = Any[-3.0, 3.0]; q.params["ylim"] = Any[-3.0, 3.0]
+        @test length(RE.coerce_bind(q, Any[Any[0, 0], Any[1, 1], Any[2, 2], Any[3, 3]])) == 3
+        @test RE.wrap_value(q, RE.coerce_bind(q, Any[Any[0, 0], Any[1, 1]])) ==
+              [(x = 0.0, y = 0.0), (x = 1.0, y = 1.0)]
+    end
+
+    # A pick has no enumerable domain today, so it is a LIVE-only control: a static export renders
+    # the figure and the crosshair, but nothing downstream reacts to a click. `bind_domain` lives in
+    # SlateExtensionsBase, which ships as its own registered package, so teaching it that a SNAPPED
+    # pick is a finite grid needs an SEB release rather than a change here. Pinned so the day that
+    # lands is a deliberate change to this test, not a silent one.
+    @testset "Pick: no enumerable domain (live-only until SEB knows the kind)" begin
+        for w in (RE.PickPoint(; snap = 0.5), RE.PickPoint(),
+                  RE.PickRegion(; snap = 0.5), RE.PickPath(; n = 3, snap = 0.5))
+            w.params["xlim"] = Any[-3.0, 3.0]; w.params["ylim"] = Any[-2.0, 2.0]
+            @test RE.bind_domain(w) === nothing
+        end
+        # The grid itself is still real, and is what an eventual domain has to reproduce EXACTLY —
+        # an export matches a live control to a precomputed column with `isequal`, so snapping and
+        # enumerating must agree to the last bit. Coercion is idempotent, which is that property.
+        w = RE.PickPoint(; snap = 0.5)
+        w.params["xlim"] = Any[-3.0, 3.0]; w.params["ylim"] = Any[-2.0, 2.0]
+        for (x, y) in ((0.13, -1.87), (2.99, 1.4), (-100.0, 100.0), (-0.75, 0.25))
+            v = RE.coerce_bind(w, Any[x, y])
+            @test RE.coerce_bind(w, v) == v
+            # …and every coordinate sits ON the grid (an integer number of steps above the floor).
+            @test all(q -> (n = (q + 3.0) / 0.5; abs(n - round(n)) < 1e-9), v)
+        end
+    end
+
+    # The pixel→data mapping is the part that would fail SILENTLY — a wrong rectangle returns
+    # plausible coordinates instead of an error — so it is pinned against a known geometry. The
+    # calibration is duck-typed on the axis, which is what lets this run without a plotting backend.
+    @testset "axis_calibration: pixel rectangle → data coordinates" begin
+        mkaxis(origin, widths, xlim, ylim; xs = identity, ys = identity) =
+            (; finallimits = Ref((; origin = (xlim[1], ylim[1]),
+                                   widths = (xlim[2] - xlim[1], ylim[2] - ylim[1]))),
+               scene = (; viewport = Ref((; origin = origin, widths = widths))),
+               xscale = Ref(xs), yscale = Ref(ys))
+        fig = (; scene = (; viewport = Ref((; origin = (0, 0), widths = (1000, 500)))))
+        # Makie's viewport origin is BOTTOM-left; CSS is TOP-left. An axis 100px up from the bottom
+        # of a 500px figure, 300px tall, must report top = 1 - (100+300)/500 = 0.2.
+        ax = mkaxis((200, 100), (400, 300), (-3.0, 3.0), (-1.0, 5.0))
+        cal = RE.axis_calibration(fig, ax)
+        @test cal["rect"]["left"] ≈ 0.2 && cal["rect"]["width"] ≈ 0.4
+        @test cal["rect"]["top"] ≈ 0.2 && cal["rect"]["height"] ≈ 0.6
+        @test cal["xlim"] == Any[-3.0, 3.0] && cal["ylim"] == Any[-1.0, 5.0]
+        @test cal["xscale"] == "linear" && cal["yscale"] == "linear"
+        # A log axis reports its scale by name so the browser can invert it; data limits stay linear.
+        lg = RE.axis_calibration(fig, mkaxis((0, 0), (100, 100), (1.0, 1000.0), (0.0, 1.0);
+                                             xs = log10))
+        @test lg["xscale"] == "log10" && lg["xlim"] == Any[1.0, 1000.0]
+        # An axis with no rectangular mapping, or no area yet, is refused rather than mis-mapped.
+        @test_throws ErrorException RE.axis_calibration(fig, (; scene = (; viewport = Ref(nothing))))
+        @test_throws ErrorException RE.axis_calibration(fig, mkaxis((0, 0), (0, 0), (0.0, 1.0), (0.0, 1.0)))
+        # An `Axis3` HAS finallimits — three-dimensional ones. Taking the first two would map a
+        # rotated projection as if it were flat: plausible coordinates, quietly wrong. Refuse it.
+        ax3 = (; finallimits = Ref((; origin = (0.0, 0.0, 0.0), widths = (1.0, 1.0, 1.0))),
+                 scene = (; viewport = Ref((; origin = (0, 0), widths = (100, 100)))),
+                 xscale = Ref(identity), yscale = Ref(identity))
+        @test_throws ErrorException RE.axis_calibration(fig, ax3)
+    end
+
     # `set_bind(:name, v)` from cell code names only the VARIABLE — a notebook shouldn't have to
     # know which of its own cells happens to declare a control in order to move it. `bind_owner` is
     # how that name is resolved to the cell id the setter needs.

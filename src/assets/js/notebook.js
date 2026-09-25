@@ -542,7 +542,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // see its definition in view.js.
     const _stale = window.slateRevIsNew ? !window.slateRevIsNew(c) : false;
     const out = el.querySelector('.output');
-    if (!_conflicted && !_stale && out && c.output !== last.current.out) { window.slateRevMark && window.slateRevMark(c); last.current.out = c.output; window._swapOutput(out, c.output, c.live, () => { window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }); }
+    if (!_conflicted && !_stale && out && c.output !== last.current.out) { window.slateRevMark && window.slateRevMark(c); last.current.out = c.output; window._swapOutput(out, c.output, c.live, () => { window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); window.mountPicks && window.mountPicks(c, el); }); }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     window._applyMissingPkg && window._applyMissingPkg(c);   // "Package X not found" → one-click install banner
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
@@ -555,6 +555,12 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     if (!_conflicted && !_stale && c.tables !== last.current.tables) { last.current.tables = c.tables; window.renderTables(c); }
     if (!_conflicted && !_stale && c.animations !== last.current.animations) { last.current.animations = c.animations; window.renderAnimation && window.renderAnimation(c); }
     if ((c.binds && c.binds.length) || (c.controls && c.controls.length)) window.syncControlValuesSoon(c);
+    // `pick_on!` click targets ride with the OUTPUT, not the control strip — the figure is the
+    // control — so they mount from the output swap's callback above, once the image is actually in
+    // the DOM. This second call catches the case where the output did NOT change (a reconnect, a
+    // re-render at the same revision) and the overlay would otherwise never be built. Idempotent:
+    // an overlay whose axis is unchanged is kept rather than replaced, so a drag survives it.
+    if ((c.picks || []).length) window.mountPicks && window.mountPicks(c, el);
     // Last: whether this cell shows anything is only knowable once its output, charts, tables and
     // controls are in place. The reading view collapses `.cell-blank` (see notebook.css).
     window.slateMarkBlank && window.slateMarkBlank(el, c);

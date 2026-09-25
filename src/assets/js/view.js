@@ -207,6 +207,25 @@ function controlMarkup(bindId, b) {
     ctrl = `<div class="tablesel slatetable selectable" ${a} data-selrow="${parseInt(b.value, 10) || 0}"></div>`;
     wval = '';                                        // the highlighted row IS the value indicator
   }
+  else if (w === 'pick') {
+    // The FIGURE is this control, so the strip shows a READOUT rather than something to drag —
+    // like `playhead`, which is likewise driven from elsewhere. Without this it fell through to
+    // the custom-widget branch below and rendered an empty box waiting for a renderer that will
+    // never register: a control that looks broken but says nothing. The two states worth telling
+    // apart are "aimed at an axis" and "declared but never aimed", because an unaimed pick is
+    // inert and the reason is a missing `pick_on!` the author can't otherwise see.
+    const r = n => typeof n === 'number' ? Math.round(n * 1000) / 1000 : n;
+    const v = b.value, mode = p.mode || 'point', aimed = Array.isArray(p.xlim);
+    let txt;
+    if (!aimed) txt = `aim it → pick_on!(:${b.name}, fig, ax)`;
+    else if (mode === 'region') txt = Array.isArray(v) && v.length === 4
+      ? `x ${r(v[0])}…${r(v[1])}   y ${r(v[2])}…${r(v[3])}` : '—';
+    else if (mode === 'path') txt = `${Array.isArray(v) ? v.length : 0}${p.n ? ' / ' + p.n : ''} points`;
+    else txt = Array.isArray(v) && v.length === 2 ? `${r(v[0])}, ${r(v[1])}` : '—';
+    ctrl = `<span class="pick-ro" ${a} title="${aimed ? 'click the figure to set this' :
+      'declared, but no figure has been aimed at it yet'}"></span>`;
+    wval = `<span class="wval${aimed ? '' : ' pick-unaimed'}">${_esc(txt)}</span>`;
+  }
   else {                                              // any non-builtin kind → a registered custom widget
     ctrl = `<span class="customwidget" ${a}></span>`; // empty container; its wire() builds + wires the DOM
     wval = '';
@@ -596,6 +615,208 @@ function mountOutputComponents(root) {
   (root || document).querySelectorAll('.slatecomponent').forEach(wireOutputComponent);
 }
 
+// ── Picking on a figure (`pick_on!`) ─────────────────────────────────────────
+// A cell's `picks` say: this rendered figure has an axis at this rectangle, spanning these data
+// limits, and clicking inside it sets that bind. The click target belongs to the FIGURE cell while
+// the control is declared elsewhere, so the value is posted to the DECLARING cell — exactly what a
+// surfaced slider does, and the reason the two stay in step no matter which one the reader moves.
+const _pickFwd = { linear: v => v, log10: Math.log10, ln: Math.log, log2: Math.log2, sqrt: Math.sqrt };
+const _pickInv = { linear: v => v, log10: v => 10 ** v, ln: Math.exp, log2: v => 2 ** v, sqrt: v => v * v };
+// A fraction across the axis → a data coordinate, through the axis's own scale. Done in SCALE space
+// so a log axis maps where its ticks actually are rather than linearly between its endpoints.
+function _pickToData(frac, lim, scale) {
+  const f = _pickFwd[scale] || _pickFwd.linear, g = _pickInv[scale] || _pickInv.linear;
+  return g(f(lim[0]) + frac * (f(lim[1]) - f(lim[0])));
+}
+const _pickOwner = name => ((nbState && nbState.cells) || [])
+  .find(c => (c.binds || []).some(b => b.name === name));
+
+// `slateSetBind(name, value)` — drive one of the notebook's own controls from front-end JS, by the
+// bound VARIABLE name. The JS counterpart of `set_bind(:name, v)` in cell code, and the same path a
+// dragged slider takes (coerce → restale readers → sync the widget → persist), so a value set from
+// a web cell's canvas is indistinguishable from one the reader dialled in. Resolving the declaring
+// cell here is the point: a custom visualisation shouldn't have to know which cell happens to
+// declare the control it drives. Returns a promise; resolves false if no such control exists.
+window.slateSetBind = function (name, value) {
+  const owner = _pickOwner(name);
+  if (!owner) return Promise.resolve(false);
+  return api('POST', '/api/bind/' + owner.id, { name, value }).then(applyAck).then(() => true);
+};
+
+function mountPicks(c, cell) {
+  const picks = c.picks || [];
+  if (!picks.length) return;
+  const img = cell.querySelector('.output img');
+  if (!img) return;                                  // nothing rendered (yet) to click on
+  const host = img.parentElement;
+  if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+
+  const keyed = {};
+  host.querySelectorAll('.pickovl').forEach(n => { keyed[n.dataset.pickkey] = n; });
+
+  picks.forEach(p => {
+    const owner = _pickOwner(p.bind);
+    if (!owner) return;
+    const spec = (owner.binds || []).find(b => b.name === p.bind) || {};
+    // Dragging re-renders the figure on every commit, which lands right back here. Rebuilding the
+    // overlay then would tear down the node holding the pointer capture and the drag would die
+    // after one step — so an overlay whose geometry is unchanged is KEPT and merely redrawn.
+    const key = JSON.stringify([p.bind, p.rect, p.xlim, p.ylim, p.xscale, p.yscale]);
+    const existing = keyed[key];
+    if (existing) {
+      delete keyed[key];
+      existing._refresh && existing._refresh(spec.value);
+      return;
+    }
+    const mode = (spec.params && spec.params.mode) || 'point';
+    const n = (spec.params && spec.params.n) || 0;
+    const r = p.rect || {};
+
+    const ov = document.createElement('div');
+    ov.className = 'pickovl';
+    ov.dataset.pickkey = key;
+    ov.style.cssText = 'position:absolute;cursor:crosshair;touch-action:none';
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', '100%'); svg.setAttribute('height', '100%');
+    svg.style.cssText = 'position:absolute;inset:0;overflow:visible;pointer-events:none';
+    ov.appendChild(svg);
+    host.appendChild(ov);
+
+    // The overlay tracks the IMAGE's box, so it stays put when the cell is resized or the figure
+    // is re-rendered at a different size.
+    const place = () => {
+      ov.style.left   = (img.offsetLeft + (r.left || 0) * img.offsetWidth) + 'px';
+      ov.style.top    = (img.offsetTop + (r.top || 0) * img.offsetHeight) + 'px';
+      ov.style.width  = ((r.width || 0) * img.offsetWidth) + 'px';
+      ov.style.height = ((r.height || 0) * img.offsetHeight) + 'px';
+    };
+    place();
+
+    // COMMIT ON RELEASE, never mid-gesture. This control lives in the cell's OUTPUT, and committing
+    // is exactly what replaces that output — so a commit part-way through a drag tears down the very
+    // node holding the pointer capture and the drag dies in the reader's hand. (Keeping the overlay
+    // across a re-render doesn't rescue it either: a figure whose title reports the selection changes
+    // width, which moves the axis rectangle, so the overlay legitimately has to be rebuilt.) A
+    // control in the strip can stream its value as it moves because nothing redraws it; one drawn ON
+    // the figure cannot.
+    //
+    // The same rule is what stops a drag from ordering a pile of recomputes nobody asked for: the
+    // half-drawn boxes on the way to the one the reader wants are not results they want computed.
+    // So the gesture draws locally — instantly, no round trip — and sends exactly one value.
+    let inflight = false;
+    // New gestures are turned away while a commit is in flight (see pointerdown) rather than banked.
+    // Say so WITHOUT animation: the crosshair drops back to a plain pointer, so the figure stops
+    // looking like a target, and the marker dims — honest, since it is showing a position the rest
+    // of the figure has not caught up with yet.
+    const busy = b => {
+      ov.style.cursor = b ? 'default' : 'crosshair';
+      svg.style.opacity = b ? '0.45' : '1';
+    };
+    const fire = v => {
+      inflight = true; busy(true);
+      api('POST', '/api/bind/' + owner.id, { name: p.bind, value: v })
+        .then(applyAck)
+        .finally(() => { inflight = false; busy(false); });
+    };
+
+    const at = ev => {
+      const b = ov.getBoundingClientRect();
+      const fx = Math.min(1, Math.max(0, (ev.clientX - b.left) / b.width));
+      // Screen y grows downward and data y upward, so the fraction is flipped here — the one place
+      // the two conventions meet.
+      const fy = Math.min(1, Math.max(0, 1 - (ev.clientY - b.top) / b.height));
+      return [_pickToData(fx, p.xlim, p.xscale), _pickToData(fy, p.ylim, p.yscale)];
+    };
+    const px = d => ((_pickFwd[p.xscale] || _pickFwd.linear)(d) - (_pickFwd[p.xscale] || _pickFwd.linear)(p.xlim[0]))
+      / ((_pickFwd[p.xscale] || _pickFwd.linear)(p.xlim[1]) - (_pickFwd[p.xscale] || _pickFwd.linear)(p.xlim[0])) * ov.clientWidth;
+    const py = d => (1 - ((_pickFwd[p.yscale] || _pickFwd.linear)(d) - (_pickFwd[p.yscale] || _pickFwd.linear)(p.ylim[0]))
+      / ((_pickFwd[p.yscale] || _pickFwd.linear)(p.ylim[1]) - (_pickFwd[p.yscale] || _pickFwd.linear)(p.ylim[0]))) * ov.clientHeight;
+
+    const mk = (tag, attrs) => { const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+      for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+    // Draw from the CONTROL's value, not from the pointer — so the marker shows what the notebook
+    // actually holds, and moving the bind another way (a slider, set_bind) moves it too.
+    const draw = v => {
+      svg.replaceChildren();
+      const line = (x1, y1, x2, y2) => mk('line', { x1, y1, x2, y2, stroke: '#ffcd3c', 'stroke-width': 1.5 });
+      if (mode === 'point' && Array.isArray(v) && v.length === 2) {
+        const x = px(v[0]), y = py(v[1]);
+        svg.append(line(x - 9, y, x + 9, y), line(x, y - 9, x, y + 9),
+                   mk('circle', { cx: x, cy: y, r: 4, fill: 'none', stroke: '#ffcd3c', 'stroke-width': 1.5 }));
+      } else if (mode === 'region' && Array.isArray(v) && v.length === 4) {
+        const x1 = px(v[0]), x2 = px(v[1]), y1 = py(v[2]), y2 = py(v[3]);
+        svg.append(mk('rect', { x: Math.min(x1, x2), y: Math.min(y1, y2),
+          width: Math.abs(x2 - x1), height: Math.abs(y2 - y1),
+          fill: 'rgba(255,205,60,.15)', stroke: '#ffcd3c', 'stroke-width': 1.5 }));
+      } else if (mode === 'path' && Array.isArray(v) && v.length) {
+        svg.append(mk('polyline', { points: v.map(q => px(q[0]) + ',' + py(q[1])).join(' '),
+          fill: 'none', stroke: '#ffcd3c', 'stroke-width': 1.5 }));
+        v.forEach(q => svg.append(mk('circle', { cx: px(q[0]), cy: py(q[1]), r: 3, fill: '#ffcd3c' })));
+      }
+    };
+    // The marker is drawn in the overlay's own pixels, so it has to be redrawn whenever the
+    // overlay is re-placed — including the first paint after a not-yet-loaded image gets its size.
+    let shown = spec.value;
+    const refresh = v => { if (v !== undefined) shown = v; place(); draw(shown); };
+    ov._refresh = refresh;                       // a kept overlay is redrawn through this
+    refresh();
+    if (window.ResizeObserver) { const ro = new ResizeObserver(() => refresh()); ro.observe(img); ov._ro = ro; }
+    img.addEventListener('load', () => refresh());
+
+    // `anchor` is the gesture's fixed corner; `staged` is what release will commit; `dragging` says
+    // a gesture is live. The flag is deliberately NOT `hasPointerCapture`: capture is a best-effort
+    // nicety that can fail to take, and hinging the drag on it means the box silently stops
+    // resizing with the button still down — the failure is invisible until someone tries to drag.
+    let anchor = null, staged = null, dragging = false;
+    const regionFrom = q => [Math.min(anchor[0], q[0]), Math.max(anchor[0], q[0]),
+                             Math.min(anchor[1], q[1]), Math.max(anchor[1], q[1])];
+    ov.addEventListener('pointerdown', ev => {
+      ev.preventDefault();
+      // Busy: turn the gesture away instead of banking it. The cursor has already said so.
+      if (inflight) return;
+      // Capture keeps the drag alive outside the overlay; if it's refused, the drag still works.
+      try { ov.setPointerCapture(ev.pointerId); } catch (_) {}
+      dragging = true;
+      anchor = at(ev);
+      if (mode === 'point') staged = anchor;
+      else if (mode === 'region') staged = regionFrom(anchor);     // a zero-size box, for now
+      else {
+        // A fixed-length path fills up and then starts over, so the reader is never stuck with a
+        // complete path and no way to draw another.
+        const cur = Array.isArray(shown) ? shown : [];
+        staged = (n > 0 && cur.length >= n) ? [anchor] : cur.concat([anchor]);
+      }
+      refresh(staged);                                             // drawn locally, nothing sent
+    });
+    ov.addEventListener('pointermove', ev => {
+      if (!dragging) return;
+      const q = at(ev);
+      if (mode === 'point') staged = q;
+      else if (mode === 'region') staged = regionFrom(q);
+      else return;                                                 // a path's points don't drag
+      refresh(staged);                                             // still local — one commit, on release
+    });
+    const release = () => {
+      if (!dragging) return;
+      const v = staged;
+      dragging = false; anchor = null; staged = null;
+      v === null || fire(v);
+    };
+    ov.addEventListener('pointerup', release);
+    // A cancelled gesture (the pointer is stolen, the window loses focus) still commits what the
+    // reader had drawn. Dropping it would leave the figure showing a box that was never sent.
+    ov.addEventListener('pointercancel', release);
+    ov.addEventListener('lostpointercapture', release);
+  });
+  // Anything left over targets an axis this render no longer has — drop it, and its observer with
+  // it, rather than leaving a click target floating over a figure that has moved on.
+  Object.keys(keyed).forEach(k => {
+    const n = keyed[k];
+    if (n._ro) { try { n._ro.disconnect(); } catch (_) {} }
+    n.remove();
+  });
+}
+
 // Wire every bound widget in a cell — its own @bind widget and/or control strip.
 function mountControls(c) {
   const cell = document.getElementById('cell-' + c.id);
@@ -603,6 +824,7 @@ function mountControls(c) {
   cell.querySelectorAll('[data-bind]').forEach(wireControl);
   cell.querySelectorAll('.radiogroup, .checkgroup, .mslist').forEach(typeset);   // render rich ($math$) option labels
   mountOutputComponents(cell);                                                   // return-value component outputs
+  mountPicks(c, cell);                                                           // pick_on! click targets on a figure
 }
 
 // Source editing for non-code cells (markdown + @bind widgets): reveal a raw

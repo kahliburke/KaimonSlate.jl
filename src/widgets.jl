@@ -492,6 +492,160 @@ function _rangeslider(lo, hi, st, default, label)
     return Widget("rangeslider", p, Any[a, b])
 end
 
+# ── Picking on a figure ───────────────────────────────────────────────────────
+# A pick control reads its coordinates off a Makie axis: the reader clicks the rendered figure and
+# the value arrives in DATA coordinates. The three modes share one kind — the pixel→data mapping,
+# the overlay and the throttled commit are identical, and only the pointer gesture and the shape of
+# the value differ, so splitting them into three kinds would triplicate the part that is hard.
+#
+# The control CANNOT be constructed from the figure. A figure that draws the pick (a marker at the
+# chosen point, say) reads the bind, so `PickPoint(fig, ax)` would make the bind depend on a figure
+# that depends on the bind. The calibration therefore arrives afterwards, from `pick_on!`, and a
+# control with none yet is simply uncalibrated: it holds its value and renders inert.
+
+# Wire values are JSON-native flat vectors; `wrap` gives cells the named form.
+_pick_xy(d, fallback) =
+    d === nothing ? fallback :
+    d isa NamedTuple ? Any[float(d.x), float(d.y)] :
+    Any[float(first(d)), float(last(d))]
+
+function _pick(mode::AbstractString, default, snap, label, extra)
+    p = merge(_wparams(label), Dict{String,Any}("mode" => mode, "snap" => float(snap)), extra)
+    return Widget("pick", p, default)
+end
+
+"""
+    PickPoint(; default=(0,0), snap=0, label=nothing) -> Widget
+
+Pick a point by clicking (or dragging) on a figure, binding `(x, y)` in DATA coordinates.
+
+Attach it to an axis with [`pick_on!`](@ref) from the cell that builds the figure — the control is
+declared first and calibrated after, because a figure that draws the pick reads the bind:
+
+```julia
+@bind p PickPoint(; default = (-0.6, -0.9), snap = 0.05)
+
+fig = Figure(); ax = Axis(fig[1, 1]); heatmap!(ax, xs, ys, Z)
+scatter!(ax, [p.x], [p.y])          # the marker follows the bind
+pick_on!(:p, fig, ax)               # …and the click target follows the axis
+fig
+```
+
+`snap` is not cosmetic. A continuous pick has no finite domain, so a static export can render the
+control but nothing downstream can react to it. Snapping makes the domain a grid, which `@replay`
+can enumerate and precompute — so a snapped pick keeps working with no kernel.
+"""
+PickPoint(; default = (0.0, 0.0), snap = 0, label = nothing) =
+    _pick("point", _pick_xy(default, Any[0.0, 0.0]), snap, label, Dict{String,Any}())
+
+"""
+    PickRegion(; default=nothing, snap=0, label=nothing) -> Widget
+
+Drag out a box on a figure, binding `(xlo, xhi, ylo, yhi)` in DATA coordinates.
+
+The corners are normalised in coercion, so the value never depends on which way the reader dragged.
+Attach it with [`pick_on!`](@ref). A region's domain is not enumerable, so it is a live-only control.
+"""
+PickRegion(; default = nothing, snap = 0, label = nothing) =
+    _pick("region", default === nothing ? nothing :
+          Any[float(default[1]), float(default[2]), float(default[3]), float(default[4])],
+          snap, label, Dict{String,Any}())
+
+"""
+    PickPath(; n=3, default=nothing, snap=0, label=nothing) -> Widget
+
+Click `n` points on a figure, binding them as a `Vector` of `(x, y)` in DATA coordinates.
+
+The length is FIXED at `n`: the reader's clicks fill the path and the next one starts it over. A
+variable-length path would be a value whose shape changes under the reader, which neither the
+coercion contract nor a static export's domain can express. Attach it with [`pick_on!`](@ref).
+"""
+PickPath(; n::Integer = 3, default = nothing, snap = 0, label = nothing) =
+    _pick("path", default === nothing ? Any[] : Any[Any[float(q[1]), float(q[2])] for q in default],
+          snap, label, Dict{String,Any}("n" => Int(n)))
+
+# Makie's scale functions, as names the browser can invert. An unrecognised scale is an ERROR
+# rather than a silent fallback to linear: a mis-mapped axis returns plausible wrong coordinates,
+# which is far worse than refusing to calibrate.
+const _PICK_SCALES = Dict{Any,String}()
+_pick_scale_name(f) = get(_PICK_SCALES, f) do
+    s = string(f)
+    s == "identity" ? "linear" :
+    s == "log10" ? "log10" : s == "log" ? "ln" : s == "log2" ? "log2" : s == "sqrt" ? "sqrt" :
+    error("pick_on!: unsupported axis scale $(s). Supported: identity, log10, log, log2, sqrt.")
+end
+
+"""
+    axis_calibration(figure, axis) -> Dict
+
+The mapping from a rendered figure's pixels to ONE axis's data coordinates: where the axis sits in
+the image, what data range it spans, and how each coordinate is scaled.
+
+Duck-typed on the axis rather than typed against Makie, so this file keeps no plotting dependency.
+Everything comes from the axis itself, so the mapping is exact rather than assumed — in particular
+`scene.viewport` is the PLOTTED area, so an `aspect = DataAspect()` axis that letterboxes inside
+its layout cell is already accounted for. An axis with no `finallimits` (a `PolarAxis`, an `Axis3`)
+cannot be mapped by a rectangle and is refused.
+"""
+function axis_calibration(figure, axis)
+    hasproperty(axis, :finallimits) ||
+        error("pick_on!: this axis has no rectangular data mapping (got $(typeof(axis))). " *
+              "Picking works on a Cartesian `Axis`.")
+    vp   = axis.scene.viewport[]
+    lims = axis.finallimits[]
+    # An `Axis3` HAS `finallimits` — three-dimensional ones. Taking the first two would map a
+    # rotated projection as if it were flat: plausible coordinates, quietly wrong, with nothing to
+    # notice. A click on a 3-D scene is a ray, not a point, so refuse it outright.
+    length(lims.origin) == 2 ||
+        error("pick_on!: this axis is $(length(lims.origin))-dimensional (got $(typeof(axis))). " *
+              "Picking needs a flat pixel→data rectangle, so it works on a 2-D Cartesian `Axis`.")
+    # The figure's own pixel size, read through the SAME accessor as the axis rather than `size`,
+    # so the two rectangles cannot come from different conventions.
+    W, H = float.(figure.scene.viewport[].widths)
+    ox, oy = float.(vp.origin); wx, wy = float.(vp.widths)
+    (wx > 0 && wy > 0 && W > 0 && H > 0) || error("pick_on!: the axis has no area yet — " *
+        "call `pick_on!` after the figure is built, with the axis already populated.")
+    x0, y0 = float(lims.origin[1]), float(lims.origin[2])
+    # CSS-ready: the browser positions an overlay on the <img>, whose origin is TOP-left while
+    # Makie's viewport origin is bottom-left.
+    return Dict{String,Any}(
+        "rect"   => Dict{String,Any}("left" => ox / W, "top" => 1 - (oy + wy) / H,
+                                     "width" => wx / W, "height" => wy / H),
+        "xlim"   => Any[x0, x0 + float(lims.widths[1])],
+        "ylim"   => Any[y0, y0 + float(lims.widths[2])],
+        "xscale" => _pick_scale_name(axis.xscale[]),
+        "yscale" => _pick_scale_name(axis.yscale[]),
+    )
+end
+
+"""
+    pick_on!(name::Symbol, figure, axis)
+
+Point the pick control `name` at `axis` of `figure`: from here on, a click inside that axis sets
+the bind, in data coordinates.
+
+Call it from the cell that BUILDS the figure, which is also the cell that reads the bind — the
+control is declared without a figure precisely so this can happen afterwards. It declares a cell
+effect rather than setting anything, so the calibration rides out with the figure it describes and
+cannot get out of step with it: re-run the cell, change the limits, resize, and the next
+calibration replaces the last. Outside a harvesting eval (a plain `julia notebook.jl`) it is a
+no-op, so a notebook still runs as a script.
+
+```julia
+@bind p PickPoint(; snap = 0.05)
+
+fig = Figure(); ax = Axis(fig[1, 1]); heatmap!(ax, xs, ys, Z)
+scatter!(ax, [p.x], [p.y])
+pick_on!(:p, fig, ax)
+fig
+```
+"""
+function pick_on!(name::Symbol, figure, axis)
+    _slate_effect(:pick; names = [name], calibration = axis_calibration(figure, axis))
+    return nothing
+end
+pick_on!(name::AbstractString, figure, axis) = pick_on!(Symbol(name), figure, axis)
+
 """
     FileUpload(; accept="", label=nothing, maxbytes=0) -> Widget
 
@@ -573,6 +727,7 @@ custom_widget(kind::AbstractString, default = ""; kwargs...) =
 const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :TextArea,
                        :Select, :Radio, :MultiSelect, :MultiCheckBox, :ColorPicker, :DateField,
                        :TimeField, :Button, :FileUpload, :RangeSlider, :playhead, :TableSelect,
+                       :PickPoint, :PickRegion, :PickPath,
                        :custom_widget,
                        # Not a widget but a modifier over one — injected alongside so
                        # `@bind x hidden(Slider(…))` needs no import.
@@ -693,6 +848,84 @@ function _register_builtin_kinds!()
         wrap = (w, v) -> begin
             p = v isa AbstractVector && length(v) == 2 ? v : w.default
             (; lo = float(p[1]), hi = float(p[2]))
+        end)
+    # Pick — a point, box or path read off a figure. As with the RangeSlider, coercion is where the
+    # invariants live: a value is clamped into the axis's own data limits, a box has its corners
+    # normalised so the drag direction cannot show through, and a path is trimmed to its declared
+    # length. Doing it here means the browser, `set_bind` from a cell and the agent tool all land on
+    # the same guarantees, and a cell reading `r.xlo` can never see it above `r.xhi`.
+    #
+    # An UNCALIBRATED control (no `pick_on!` yet) has no limits to clamp to, so it passes values
+    # through untouched rather than inventing a range.
+    _pick_lim(w, ax) = begin
+        l = get(w.params, ax, nothing)
+        (l isa AbstractVector && length(l) == 2 && all(x -> x isa Number, l)) ?
+            (float(l[1]), float(l[2])) : nothing
+    end
+    _pick_snap(w, v, lim) = begin
+        st = float(get(w.params, "snap", 0))
+        x = float(v)
+        lim !== nothing && (x = clamp(x, min(lim...), max(lim...)))
+        st <= 0 && return x
+        # Anchor the grid at the axis floor, so it stays put as limits move, and round to the
+        # step's own precision — `lo + n*st` reintroduces the noise the snap exists to remove
+        # (a 0.05 step lands on 0.30000000000000004). Same rule the RangeSlider snaps by.
+        lo = lim === nothing ? 0.0 : min(lim...)
+        round(lo + round((x - lo) / st) * st; digits = _step_digits(st))
+    end
+    _pick_pt(w, q) = begin
+        (q isa AbstractVector && length(q) == 2 && all(x -> x isa Number, q)) || return nothing
+        Any[_pick_snap(w, q[1], _pick_lim(w, "xlim")), _pick_snap(w, q[2], _pick_lim(w, "ylim"))]
+    end
+    function _pick_coerce(w, v)
+        mode = String(get(w.params, "mode", "point"))
+        if mode == "point"
+            p = _pick_pt(w, v)
+            return p === nothing ? w.default : p
+        elseif mode == "region"
+            # The wire order is [xlo, xhi, ylo, yhi] — BOTH x's, then both y's — matching `wrap`
+            # and the constructor's `default`. Reading it as two corner points instead silently
+            # transposes the box, which still type-checks and still looks like a box.
+            (v isa AbstractVector && length(v) == 4 && all(x -> x isa Number, v)) || return w.default
+            xl, yl = _pick_lim(w, "xlim"), _pick_lim(w, "ylim")
+            xlo, xhi = minmax(_pick_snap(w, v[1], xl), _pick_snap(w, v[2], xl))
+            ylo, yhi = minmax(_pick_snap(w, v[3], yl), _pick_snap(w, v[4], yl))
+            return Any[xlo, xhi, ylo, yhi]
+        else # path — fixed length, so a short list is still in progress and a long one is trimmed
+            v isa AbstractVector || return w.default
+            pts = Any[]
+            for q in v
+                p = _pick_pt(w, q)
+                p === nothing || push!(pts, p)
+            end
+            n = Int(get(w.params, "n", 0))
+            n > 0 && length(pts) > n && (pts = pts[1:n])
+            return pts
+        end
+    end
+    register_kind!("pick";
+        coerce = _pick_coerce,
+        # Re-running the bind cell must not throw away where the reader clicked. Recalibration is
+        # not a bind-cell re-run — it goes through `pick_on!` — so the only thing arriving here is a
+        # genuine redeclaration, and the reader's pick survives it if it is still well-formed.
+        reconcile = function (ow, ov, nw)
+            ov === nothing && return nw.default
+            c = _pick_coerce(nw, ov)
+            c === nw.default && ov != nw.default ? nw.default : c
+        end,
+        wrap = (w, v) -> begin
+            mode = String(get(w.params, "mode", "point"))
+            if mode == "point"
+                p = v isa AbstractVector && length(v) == 2 ? v : Any[0.0, 0.0]
+                (; x = float(p[1]), y = float(p[2]))
+            elseif mode == "region"
+                v isa AbstractVector && length(v) == 4 || return nothing
+                (; xlo = float(v[1]), xhi = float(v[2]), ylo = float(v[3]), yhi = float(v[4]))
+            else
+                v isa AbstractVector || return NamedTuple{(:x, :y),Tuple{Float64,Float64}}[]
+                [(; x = float(q[1]), y = float(q[2])) for q in v
+                 if q isa AbstractVector && length(q) == 2]
+            end
         end)
     # FileUpload — the SERVER sets this one, not the browser: the upload route stores the bytes and
     # binds the resulting record (a plain Dict, so it survives the wire and the notebook footer).
@@ -1484,6 +1717,10 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # registering statement so the attribution lands there (a package's registrar self-declaring is the
     # zero-overhead path). No `@everywhere` MACRO is injected — it would clash with `Distributed.@everywhere`.
     Core.eval(m, :(const slate_effect = $_slate_effect))      # slate_effect(kind; names=…, data...) → declare a cell effect
+    # `pick_on!(:name, fig, ax)` — aim a pick control at an axis. A `:pick` effect on top of the
+    # same channel, so the calibration travels with the figure cell that produced it.
+    Core.eval(m, :(const pick_on! = $pick_on!))
+    Core.eval(m, :(const axis_calibration = $axis_calibration))
     Core.eval(m, :(const save_asset = $_save_asset))          # save_asset(name, data) → AssetRef (write-side dual of @asset)
     Core.eval(m, :(const download_button = $_download_button))  # download_button(name, data) → a button that saves it to the reader's disk
     Core.eval(m, :(slate_everywhere(names::Symbol...) = slate_effect(:everywhere; names = collect(names))))

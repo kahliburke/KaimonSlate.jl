@@ -47,6 +47,12 @@ Everything else is refused when the cell runs, with a message naming the control
 finite domain to sweep. Combinatorial domains are capped at 20,000 positions, which is roughly a
 200-stop range slider or 14 checkboxes.
 
+The [`Pick*` controls](widgets.md#Picking-on-a-figure) are refused too, and are worth calling out
+because they don't look like they should be: in an export the figure still renders and the
+crosshair still moves, but nothing downstream reacts, so the numbers beside it go stale. A pick's
+positions are continuous unless you pass `snap`, and even a snapped one is not enumerated today.
+Keep a pick for live notebooks, and give an exported page a `Slider` for the same quantity.
+
 The value your expression sees is the value the live cell sees: a `Choice` for a labelled `Select`,
 a row `NamedTuple` for a `TableSelect`, a low/high tuple for a `RangeSlider`.
 
