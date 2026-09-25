@@ -719,8 +719,11 @@ function mountPicks(c, cell) {
         .finally(() => { inflight = false; busy(false); });
     };
 
+    // A click before the figure has been laid out divides by a zero-width box, and `Math.max(0, NaN)`
+    // is NaN, so the whole gesture would post NaN coordinates. Refuse to read a box with no area.
     const at = ev => {
       const b = ov.getBoundingClientRect();
+      if (!(b.width > 0 && b.height > 0)) return null;
       const fx = Math.min(1, Math.max(0, (ev.clientX - b.left) / b.width));
       // Screen y grows downward and data y upward, so the fraction is flipped here — the one place
       // the two conventions meet.
@@ -775,9 +778,11 @@ function mountPicks(c, cell) {
       // Busy: turn the gesture away instead of banking it. The cursor has already said so.
       if (inflight) return;
       // Capture keeps the drag alive outside the overlay; if it's refused, the drag still works.
+      const q0 = at(ev);
+      if (q0 === null) return;                                   // no laid-out box to read yet
       try { ov.setPointerCapture(ev.pointerId); } catch (_) {}
       dragging = true;
-      anchor = at(ev);
+      anchor = q0;
       if (mode === 'point') staged = anchor;
       else if (mode === 'region') staged = regionFrom(anchor);     // a zero-size box, for now
       else {
@@ -791,6 +796,7 @@ function mountPicks(c, cell) {
     ov.addEventListener('pointermove', ev => {
       if (!dragging) return;
       const q = at(ev);
+      if (q === null) return;
       if (mode === 'point') staged = q;
       else if (mode === 'region') staged = regionFrom(q);
       else return;                                                 // a path's points don't drag

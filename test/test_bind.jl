@@ -117,6 +117,12 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         # and a bare `(x, y)` tuple is the other form an author reaches for.
         @test RE.coerce_bind(w, RE.wrap_value(w, Any[1.25, -2.35])) == Any[1.25, -2.35]
         @test RE.coerce_bind(w, (1.25, -2.35)) == Any[1.25, -2.35]
+        # NaN is the one number with no sensible clamp — it survives both `clamp` and `round`, so
+        # without this it reaches a cell as a coordinate and breaks whatever it is plotted into,
+        # a long way from here. `Inf` needs no special case: it clamps like any out-of-range value.
+        @test RE.coerce_bind(w, Any[NaN, 0.0]) == w.default
+        @test RE.coerce_bind(w, Any[0.0, NaN]) == w.default
+        @test RE.coerce_bind(w, Any[Inf, -Inf]) == Any[3.0, -3.0]
         p = RE.wrap_value(w, Any[1.25, -2.35])
         @test (p.x, p.y) == (1.25, -2.35)
 
@@ -201,7 +207,8 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
             (; finallimits = Ref((; origin = (xlim[1], ylim[1]),
                                    widths = (xlim[2] - xlim[1], ylim[2] - ylim[1]))),
                scene = (; viewport = Ref((; origin = origin, widths = widths))),
-               xscale = Ref(xs), yscale = Ref(ys))
+               xscale = Ref(xs), yscale = Ref(ys),
+               xreversed = Ref(false), yreversed = Ref(false))
         fig = (; scene = (; viewport = Ref((; origin = (0, 0), widths = (1000, 500)))))
         # Makie's viewport origin is BOTTOM-left; CSS is TOP-left. An axis 100px up from the bottom
         # of a 500px figure, 300px tall, must report top = 1 - (100+300)/500 = 0.2.
@@ -211,6 +218,17 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         @test cal["rect"]["top"] ≈ 0.2 && cal["rect"]["height"] ≈ 0.6
         @test cal["xlim"] == Any[-3.0, 3.0] && cal["ylim"] == Any[-1.0, 5.0]
         @test cal["xscale"] == "linear" && cal["yscale"] == "linear"
+        # A REVERSED axis draws the same limits mirrored, and `finallimits` does not say so — it
+        # still reads low-to-high while the pixels run the other way. The limits are reported in
+        # DRAWING order, so the browser's plain interpolation lands on the right side of the axis
+        # rather than returning an in-range number for the wrong place.
+        revd = mkaxis((0, 0), (100, 100), (-3.0, 3.0), (-2.0, 2.0))
+        @test RE.axis_calibration(fig, revd)["xlim"] == Any[-3.0, 3.0]
+        revd.xreversed[] = true
+        @test RE.axis_calibration(fig, revd)["xlim"] == Any[3.0, -3.0]
+        revd.yreversed[] = true
+        @test RE.axis_calibration(fig, revd)["ylim"] == Any[2.0, -2.0]
+
         # A log axis reports its scale by name so the browser can invert it; data limits stay linear.
         lg = RE.axis_calibration(fig, mkaxis((0, 0), (100, 100), (1.0, 1000.0), (0.0, 1.0);
                                              xs = log10))
