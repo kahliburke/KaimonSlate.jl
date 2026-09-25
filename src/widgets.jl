@@ -813,6 +813,14 @@ function _register_builtin_kinds!()
     for k in ("button", "playhead")
         register_kind!(k; coerce = (w, v) -> v isa Number ? Int(round(v)) : v)
     end
+    # A COMPOSITE control's wire value is a flat vector, but what a cell READS is the wrapped form:
+    # `(lo, hi)` for a range slider, `(x, y)` for a pick. Writing that value straight back —
+    # `set_bind(:span, span)`, or passing it on from another control — has to mean what it says, so
+    # a Tuple or NamedTuple is flattened to the wire shape before any of the checks below. Without
+    # this the value a cell was just handed fails its own control's shape test and coerces to the
+    # DEFAULT, which moves the control instead of leaving it where it was.
+    _wire_seq(v) = (v isa Tuple || v isa NamedTuple) ? Any[v...] : v
+
     # RangeSlider — two numbers that are one decision. Coercion is where the invariant lives: the
     # pair is always sorted and inside the widget's own bounds, so a cell reading `span.lo` can
     # never see it above `span.hi` no matter what the browser sent.
@@ -820,6 +828,7 @@ function _register_builtin_kinds!()
         lo = float(get(w.params, "min", 0)); hi = float(get(w.params, "max", 1))
         st = float(get(w.params, "step", 1))
         d = w.default isa AbstractVector && length(w.default) == 2 ? w.default : Any[lo, hi]
+        v = _wire_seq(v)
         (v isa AbstractVector && length(v) == 2 && all(x -> x isa Number, v)) || return d
         # SNAP to the control's own step. The thumb can only ever sit on a step, but another input
         # device can hand over anything — an `echart(…; select = …)` brush posts raw axis
@@ -873,12 +882,16 @@ function _register_builtin_kinds!()
         lo = lim === nothing ? 0.0 : min(lim...)
         round(lo + round((x - lo) / st) * st; digits = _step_digits(st))
     end
+    # `_wire_seq` here too, so a path's individual points may be `(x, y)` or `(x = …, y = …)` —
+    # the shape `wrap` hands back for each point of a path.
     _pick_pt(w, q) = begin
+        q = _wire_seq(q)
         (q isa AbstractVector && length(q) == 2 && all(x -> x isa Number, q)) || return nothing
         Any[_pick_snap(w, q[1], _pick_lim(w, "xlim")), _pick_snap(w, q[2], _pick_lim(w, "ylim"))]
     end
     function _pick_coerce(w, v)
         mode = String(get(w.params, "mode", "point"))
+        v = _wire_seq(v)
         if mode == "point"
             p = _pick_pt(w, v)
             return p === nothing ? w.default : p
