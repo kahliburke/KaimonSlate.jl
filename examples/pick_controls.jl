@@ -71,48 +71,69 @@ Everything else here checks that a value *arrives*. This one checks it is the **
 is the failure worth catching: a mis-mapped axis returns a plausible number for the wrong place and
 nothing looks broken.
 
-Each ringed dot below sits on a whole number. **Click the centre of a ring** and the readout says
-which one you hit and how far off it was. On target, the error is zero — the pick is snapped to
-`0.25`, so anything under `0.125` rounds onto the dot exactly.
+The nine rings are **targets at whole-number coordinates**, each labelled with the point it marks —
+the ring at the top left is exactly $(-2, 2)$. Click the centre of one and the readout tells you the
+coordinate you actually got, which target was nearest, and how far off you were in both data units
+and screen pixels.
 
-Worth running this in each of these states, since each one has its own way of going wrong:
+**Snapping is off in this section**, unlike the rest of the notebook. That is deliberate: elsewhere
+`snap` quantises the value, so a click within half a step of a target lands on it exactly and reads
+as perfect whether or not the mapping is right. Here you see the raw number.
+
+So read the pixel figure, not the data one:
+
+- **under ~3 px** is your aim. No mouse lands on the centre of a ring.
+- **a consistent offset in one direction** is the overlay out of step with the image.
+- **a large error, or one that grows towards an edge**, is the mapping itself.
+
+Worth repeating in each of these states, since each has its own way of going wrong:
 
 | state | what it would break |
 |---|---|
 | **browser zoom** (⌘/Ctrl `+` to 150%, then `-` back) | the overlay drifting out of step with the image |
 | **window resized narrow**, then wide | the axis rectangle going stale |
 | **the cell collapsed and reopened** | the overlay never re-attaching |
-| **a slow drag from one dot to another** | the value lagging, or the drag dying part-way |
+| **a slow drag from one ring to another** | the value lagging, or the drag dying part-way |
 
-The self-check below the figure measures the overlay against the image independently, and updates
-live as you zoom — so if a click ever feels offset, that number says whether the overlay moved or
-the mapping did.
+The self-check below measures the overlay against the image independently and updates live as you
+zoom, so if a click feels offset that number says whether the overlay moved or the mapping did.
 """
 
 #%% code id=acc
-@bind hit hidden(PickPoint(; default = (0.0, 0.0), snap = 0.25))
+# No `snap` here on purpose: quantising would land a near-enough click exactly on the target and
+# report perfect whether or not the mapping is right, which is the thing this section measures.
+@bind hit hidden(PickPoint(; default = (0.0, 0.0)))
 
-TARGETS = [(x, y) for x in -2:2:2 for y in -2:2:2]          # nine dots on whole numbers
+TARGETS = [(x, y) for x in -2:2:2 for y in -2:2:2]          # nine rings on whole numbers
 near = argmin([hypot(hit.x - t[1], hit.y - t[2]) for t in TARGETS])
-err  = hypot(hit.x - TARGETS[near][1], hit.y - TARGETS[near][2])
+tgt  = TARGETS[near]
+err  = hypot(hit.x - tgt[1], hit.y - tgt[2])
 
-figA = Figure(size = (560, 470))
+FIGW, SPAN = 620, 6.0                        # figure width in px, axis span in data units
+figA = Figure(size = (FIGW, 500))
 axA = Axis(figA[1, 1]; aspect = DataAspect(), xlabel = "x", ylabel = "y",
-           title = err < 1e-9 ? "on target $(TARGETS[near]) — exact" :
-                   @sprintf("nearest %s · off by %.3f", TARGETS[near], err),
-           titlecolor = err < 1e-9 ? :seagreen : :gold,
            xticks = -3:1:3, yticks = -3:1:3)
-vlines!(axA, -3:1:3; color = (:white, 0.08)); hlines!(axA, -3:1:3; color = (:white, 0.08))
-scatter!(axA, first.(TARGETS), last.(TARGETS); color = :transparent,
-         strokecolor = (:white, 0.55), strokewidth = 1.5, markersize = 26)
-scatter!(axA, first.(TARGETS), last.(TARGETS); color = (:white, 0.55), markersize = 4)
-# where the click actually landed
-scatter!(axA, [hit.x], [hit.y]; color = err < 1e-9 ? :seagreen : :gold, markersize = 13,
+vlines!(axA, -3:1:3; color = (:white, 0.07)); hlines!(axA, -3:1:3; color = (:white, 0.07))
+for t in TARGETS
+    scatter!(axA, [t[1]], [t[2]]; color = :transparent, strokecolor = (:white, 0.5),
+             strokewidth = 1.5, markersize = 30)
+    scatter!(axA, [t[1]], [t[2]]; color = (:white, 0.5), markersize = 3)
+    text!(axA, t[1], t[2]; text = "($(Int(t[1])), $(Int(t[2])))", align = (:center, :center),
+          offset = (0, 23), color = (:white, 0.45), fontsize = 11)
+end
+scatter!(axA, [hit.x], [hit.y]; color = :gold, markersize = 11,
          strokecolor = :black, strokewidth = 1)
-err < 1e-9 || lines!(axA, [hit.x, TARGETS[near][1]], [hit.y, TARGETS[near][2]];
-                     color = :gold, linestyle = :dash, linewidth = 2)
+err > 1e-9 && lines!(axA, [hit.x, tgt[1]], [hit.y, tgt[2]];
+                     color = :gold, linestyle = :dash, linewidth = 1.5)
 limits!(axA, -3, 3, -3, 3)
 pick_on!(:hit, figA, axA)
+
+# Pixels are the judgeable number: no mouse lands on the exact centre of a ring, so a few px is
+# your aim and a large or one-sided error is the mapping. Derived from the axis's own rectangle.
+pxper = axis_calibration(figA, axA)["rect"]["width"] * FIGW / SPAN
+axA.title = @sprintf("clicked (%.3f, %.3f)   ·   nearest (%d, %d)   ·   off by %.3f  ≈ %.1f px",
+                     hit.x, hit.y, Int(tgt[1]), Int(tgt[2]), err, err * pxper)
+axA.titlecolor = err * pxper <= 3 ? :seagreen : :gold
 figA
 
 #%% web id=acc_selfcheck
@@ -188,6 +209,34 @@ const mo = new MutationObserver(recs => {
 });
 mo.observe(document.body, { childList: true, subtree: true });
 """)
+
+#%% md id=s1c_md
+@md"""
+## 1c · Snapping to named points — `snapto`
+
+`snap` quantises to a lattice, so a click lands on the nearest *grid* position — which is only a
+target when you were already close to one. `snapto` names the points that may be chosen and takes
+the nearest, so **every** click resolves to a real candidate however far away you press. Its
+domain is the candidate set itself, which is what `@replay` needs and what a lattice can only
+approximate: the five points below need 5 entries, the equivalent `snap = 0.25` grid needs 625.
+"""
+
+#%% code id=s1c
+STATIONS = [(-2.0, -2.0), (0.0, 0.0), (2.0, 2.0), (2.0, -2.0), (-2.0, 2.0)]
+
+@bind stn hidden(PickPoint(; default = (0.0, 0.0), snapto = STATIONS))
+
+figS = Figure(size = (520, 450))
+axS = Axis(figS[1, 1]; aspect = DataAspect(), xlabel = "x", ylabel = "y",
+           title = "click anywhere — it lands on the nearest station: $(stn.x), $(stn.y)")
+scatter!(axS, first.(STATIONS), last.(STATIONS); color = :transparent,
+         strokecolor = (:white, 0.55), strokewidth = 1.5, markersize = 30)
+# a line from where a naive grid snap would have put you, to the station actually chosen
+scatter!(axS, [stn.x], [stn.y]; color = :seagreen, markersize = 15,
+         strokecolor = :black, strokewidth = 1)
+limits!(axS, -3, 3, -3, 3)
+pick_on!(:stn, figS, axS)
+figS
 
 #%% code id=s2
 @bind sq hidden(PickPoint(; default = (0.0, 0.0)))
