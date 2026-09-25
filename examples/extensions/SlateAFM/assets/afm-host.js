@@ -78,6 +78,24 @@
     });
   }
 
+  // Julia → JS trait patches (`afm_patch`): ONE page-wide channel carrying `{ <widget id>: {traits…}, … }`
+  // for any number of widgets per frame. Each entry is applied to that instance's model exactly like a
+  // value pushed from Julia (diff + `change:<key>`), without a round-trip through the bind registry.
+  function listenForPatches() {
+    if (window.__slateAFMpatch) return;
+    try {
+      window.slateOnStream("SlateAFM.patch", function (m) {
+        if (!m || typeof m !== "object") return;
+        var reg = window.__slateAFM || {};
+        Object.keys(m).forEach(function (id) {
+          var rec = reg[id];
+          if (rec && rec.model) rec.model._external(m[id]);
+        });
+      });
+      window.__slateAFMpatch = true;
+    } catch (e) {}
+  }
+
   window.slateRegisterWidget("SlateAFM.AFM", {
     wire: function (el, api) {
       var controller = new AbortController();
@@ -100,6 +118,7 @@
       var state = { controller: controller, model: model, cleanups: [], msgCh: msgCh, id: instId, record: record };
       el._afm = state;
       if (instId) { (window.__slateAFM || (window.__slateAFM = {}))[instId] = record; }
+      listenForPatches();
 
       // Julia → JS custom messages on `msgCh`. A plain message is one JSON frame `{content}`. A message
       // WITH buffers is N+1 frames sharing a `mid`: a content frame `{content, mid, nbuf}` plus one binary
