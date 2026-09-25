@@ -47,11 +47,15 @@ Everything else is refused when the cell runs, with a message naming the control
 finite domain to sweep. Combinatorial domains are capped at 20,000 positions, which is roughly a
 200-stop range slider or 14 checkboxes.
 
-The [`Pick*` controls](widgets.md#Picking-on-a-figure) are refused too, and are worth calling out
-because they don't look like they should be: in an export the figure still renders and the
-crosshair still moves, but nothing downstream reacts, so the numbers beside it go stale. A pick's
-positions are continuous unless you pass `snap`, and even a snapped one is not enumerated today.
-Keep a pick for live notebooks, and give an exported page a `Slider` for the same quantity.
+A [`PickPoint`](widgets.md#Picking-on-a-figure) qualifies when you give it `snap`, which turns the
+axis into a grid: a reader clicking an exported page lands on a position the export already has an
+answer for. Without `snap` its positions are continuous and it is refused. `PickRegion` and
+`PickPath` are never enumerable, since a region is the product of two such grids and a path the
+product of one per point.
+
+A kind this package has never heard of can qualify too. `register_kind!(kind; domain = w -> …)`
+reports the values that kind can take, so a widget from another package is replayable on the same
+terms as a built-in.
 
 The value your expression sees is the value the live cell sees: a `Choice` for a labelled `Select`,
 a row `NamedTuple` for a `TableSelect`, a low/high tuple for a `RangeSlider`.

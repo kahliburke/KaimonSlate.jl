@@ -132,28 +132,49 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
               [(x = 0.0, y = 0.0), (x = 1.0, y = 1.0)]
     end
 
-    # A pick has no enumerable domain today, so it is a LIVE-only control: a static export renders
-    # the figure and the crosshair, but nothing downstream reacts to a click. `bind_domain` lives in
-    # SlateExtensionsBase, which ships as its own registered package, so teaching it that a SNAPPED
-    # pick is a finite grid needs an SEB release rather than a change here. Pinned so the day that
-    # lands is a deliberate change to this test, not a silent one.
-    @testset "Pick: no enumerable domain (live-only until SEB knows the kind)" begin
-        for w in (RE.PickPoint(; snap = 0.5), RE.PickPoint(),
-                  RE.PickRegion(; snap = 0.5), RE.PickPath(; n = 3, snap = 0.5))
-            w.params["xlim"] = Any[-3.0, 3.0]; w.params["ylim"] = Any[-2.0, 2.0]
-            @test RE.bind_domain(w) === nothing
-        end
-        # The grid itself is still real, and is what an eventual domain has to reproduce EXACTLY —
-        # an export matches a live control to a precomputed column with `isequal`, so snapping and
-        # enumerating must agree to the last bit. Coercion is idempotent, which is that property.
+    # A SNAPPED point pick is exportable: the grid is finite, so a static page can precompute every
+    # position. The grid it ships has to be the SAME floats coercion produces — an exported page
+    # matches the live control to a precomputed column with `isequal`, so a grid built even slightly
+    # differently means a click matches nothing and the page shows no data for where the reader is.
+    @testset "Pick: a snapped point enumerates, and the grid matches coercion" begin
         w = RE.PickPoint(; snap = 0.5)
+        @test RE.bind_domain(w) === nothing            # uncalibrated — no axis, so no grid
         w.params["xlim"] = Any[-3.0, 3.0]; w.params["ylim"] = Any[-2.0, 2.0]
-        for (x, y) in ((0.13, -1.87), (2.99, 1.4), (-100.0, 100.0), (-0.75, 0.25))
-            v = RE.coerce_bind(w, Any[x, y])
+        dom = RE.bind_domain(w)
+        @test length(dom) == 13 * 9                    # 13 x-stops × 9 y-stops
+        @test dom[1] == Any[-3.0, -2.0] && dom[end] == Any[3.0, 2.0]
+        # Every point the control can report must be one the export already has an answer for.
+        for v in dom
             @test RE.coerce_bind(w, v) == v
-            # …and every coordinate sits ON the grid (an integer number of steps above the floor).
-            @test all(q -> (n = (q + 3.0) / 0.5; abs(n - round(n)) < 1e-9), v)
         end
+        # …and a click anywhere lands ON a member of the domain, not merely near one.
+        for (x, y) in ((0.13, -1.87), (2.99, 1.4), (-100.0, 100.0), (-0.75, 0.25))
+            @test RE.coerce_bind(w, Any[x, y]) in dom
+        end
+        # Unsnapped is continuous, so it stays live-only rather than shipping a bogus grid.
+        u = RE.PickPoint(); u.params["xlim"] = Any[-3.0, 3.0]; u.params["ylim"] = Any[-2.0, 2.0]
+        @test RE.bind_domain(u) === nothing
+        # A fine grid over a wide axis is past the ceiling and refuses rather than grinding.
+        big = RE.PickPoint(; snap = 0.001)
+        big.params["xlim"] = Any[-3.0, 3.0]; big.params["ylim"] = Any[-2.0, 2.0]
+        @test RE.bind_domain(big) === nothing
+        # A region is the product of two such grids and a path the product of n — never enumerable.
+        for m in (RE.PickRegion(; snap = 0.5), RE.PickPath(; n = 3, snap = 0.5))
+            m.params["xlim"] = Any[-3.0, 3.0]; m.params["ylim"] = Any[-2.0, 2.0]
+            @test RE.bind_domain(m) === nothing
+        end
+    end
+
+    # The hook the pick's domain rides on is generic, and that is the point: before it, `bind_domain`
+    # only knew the kinds hardcoded in its own table, so a widget defined in another package could
+    # never appear in a static export however finite its values were.
+    @testset "register_kind!: a kind outside this package can declare its own domain" begin
+        RE.register_kind!("test.stars"; domain = w -> collect(0:Int(get(w.params, "max", 5))))
+        w = RE.Widget("test.stars", Dict{String,Any}("max" => 3), 0)
+        @test RE.bind_domain(w) == Any[0, 1, 2, 3]
+        # A kind that declares none is still refused, rather than guessed at.
+        RE.register_kind!("test.freeform"; coerce = (_, v) -> v)
+        @test RE.bind_domain(RE.Widget("test.freeform", Dict{String,Any}(), "")) === nothing
     end
 
     # The pixel→data mapping is the part that would fail SILENTLY — a wrong rectangle returns
