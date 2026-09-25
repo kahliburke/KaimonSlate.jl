@@ -474,6 +474,25 @@ current_agent_id() = nothing
             end
         end
 
+        @testset "a sign-off is refused only over a finding from the latest session" begin
+            tools = Dict(t.name => t.f for t in KaimonSlate.create_tools(ToolSpec))
+            old = KaimonSlate._HUB[]
+            KaimonSlate._HUB[] = hub
+            try
+                NS.record_finding!(nb, "debugger", "agent:an-earlier-one"; claim = "an earlier conclusion")
+                NS.start_debug!(nb, "drive"; by = NS.HUMAN)
+                NS.stop_debug!(nb; by = NS.HUMAN)
+                @test !occursin("has recorded its finding", tools["spec_done"](nb.id, "a new conclusion"))
+
+                NS.start_debug!(nb, "drive"; by = NS.HUMAN)
+                NS.stop_debug!(nb; by = NS.HUMAN)
+                NS.record_finding!(nb, "debugger", "agent:the-specialist"; claim = "this session's conclusion")
+                @test occursin("has recorded its finding", tools["spec_done"](nb.id, "the same again"))
+            finally
+                KaimonSlate._HUB[] = old
+            end
+        end
+
         @testset "a session's owner is named for a person to read" begin
             @test NS.owner_label(nb, NS.HUMAN) == "you"
             @test NS.owner_label(nb, "agent:not-one-of-ours") == "external agent"

@@ -216,17 +216,25 @@ _debug_session(nb::LiveNotebook) = lock(_DEBUG_LOCK) do
     get(_DEBUG_LIVE, nb.id, _NO_SESSION)
 end
 
+# When the latest session started, kept after the session itself is forgotten: a sign-off arrives
+# after the run has finished, and needs to know which findings were filed during it.
+const _DEBUG_STARTED = Dict{String,Float64}()
+
 _debug_remember!(nb::LiveNotebook, cell::AbstractString, side::AbstractString, owner::AbstractString) =
     lock(_DEBUG_LOCK) do
         _DEBUG_LIVE[nb.id] = DebugSession(String(cell), String(side), String(owner))
+        _DEBUG_STARTED[nb.id] = time()
     end
 
 _debug_forget!(nb::LiveNotebook) = lock(_DEBUG_LOCK) do; delete!(_DEBUG_LIVE, nb.id); end
 
+"When this notebook's latest debug session started, or 0.0 if none has."
+debug_started_at(nb::LiveNotebook) = lock(_DEBUG_LOCK) do; get(_DEBUG_STARTED, nb.id, 0.0); end
+
 "Drop a closed notebook's breakpoints — the ids are reused when the same file is reopened."
 forget_debug!(id::AbstractString) = lock(_DEBUG_LOCK) do
     delete!(_DEBUG_MARKS, String(id)); delete!(_DEBUG_WATCHES, String(id))
-    delete!(_DEBUG_LIVE, String(id))
+    delete!(_DEBUG_LIVE, String(id)); delete!(_DEBUG_STARTED, String(id))
 end
 
 """

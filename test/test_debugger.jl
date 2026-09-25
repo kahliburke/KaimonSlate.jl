@@ -466,6 +466,19 @@ end
                                                 "last" => nothing, "min" => 1.0, "max" => nothing,
                                                 "hits" => 5, "type" => "Float64")]))
         @test occursin("1.0 → non-finite", blown)
+
+        # A silenced breakpoint reads as silenced, with its condition.
+        marked = R(Dict{String,Any}("session" => true, "scope" => "M", "file" => "f", "line" => 1,
+                   "marks" => [Dict{String,Any}("file" => "cell:relax", "line" => 8,
+                                                "cond" => "k > 3", "enabled" => false)]))
+        @test occursin("cell:relax:8 when k > 3 (off)", marked)
+    end
+
+    @testset "a flag argument refuses a word it does not know" begin
+        F = KaimonSlate._dbg_flag
+        @test F("on") === true && F("TRUE") === true && F("1") === true
+        @test F("off") === false && F("no") === false
+        @test F("set") === missing && F("") === missing
     end
 
     @testset "watch expressions" begin

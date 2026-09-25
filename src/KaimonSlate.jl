@@ -823,8 +823,7 @@ function _dbg_render(j::Dict{String,Any})::String
     length(stk) > 1 && println(io, "stack: ",
         join([string(get(f, "scope", ""), ":", get(f, "line", 0)) for f in reverse(stk)], "  ←  "))
     ms = get(j, "marks", [])
-    isempty(ms) || println(io, "breakpoints: ",
-        join([string(get(m, "file", ""), ":", get(m, "line", 0)) for m in ms], ", "))
+    isempty(ms) || println(io, "breakpoints: ", join(_dbg_mark.(ms), ", "))
     # What each watch has COLLECTED. The frame carried these all along and nothing printed
     # them, so a watch read as registered and inert: the tool that says it reports them showed
     # only the breakpoint beside it. The series itself goes to the chart; what belongs in a
@@ -858,6 +857,22 @@ end
 # magnitude, which is the range a diverging trace covers on its way past. A sample that reached
 # Inf or NaN arrives as `nothing`: JSON has neither, and the frame is sanitized before it is sent.
 _dbg_num(::Nothing) = "non-finite"
+
+"""
+A yes/no tool argument, or `missing` for anything else. An unrecognized word is refused rather
+than read as "no", since "no" clears a breakpoint.
+"""
+function _dbg_flag(v::AbstractString)
+    s = lowercase(strip(v))
+    s in ("1", "true", "on", "yes") && return true
+    s in ("0", "false", "off", "no") && return false
+    return missing
+end
+
+"One breakpoint as `file:line`, with its condition and whether it is switched off."
+_dbg_mark(m) = string(get(m, "file", ""), ":", get(m, "line", 0),
+                      isempty(String(get(m, "cond", ""))) ? "" : " when " * String(get(m, "cond", "")),
+                      get(m, "enabled", true) === true ? "" : " (off)")
 _dbg_num(x) = (v = Float64(x); isfinite(v) ?
     sprint(show, v; context = :compact => true) : string(v))
 
@@ -1726,9 +1741,10 @@ function create_tools(GateTool::Type)
     """
         dbg_break(notebook, file, line; on="toggle", cond="", enabled="") -> String
 
-    Arm or clear a breakpoint. `file` is what a frame reports — `cell:<id>` for notebook code, a
-    path for a package — so copy it from `dbg_frame`. Breakpoints may be set before a session
-    exists and survive one, which is the order the work usually happens in.
+    Arm or clear a breakpoint: `on` is `toggle` (the default), `on` or `off`. `file` is what a
+    frame reports — `cell:<id>` for notebook code, a path for a package — so copy it from
+    `dbg_frame`. Breakpoints may be set before a session exists and survive one, which is the
+    order the work usually happens in.
 
     `enabled="false"` silences one without clearing it, which is what you want after a breakpoint
     in a loop has shown you what it had to show: the line and its condition stay, and the person
@@ -1748,20 +1764,18 @@ function create_tools(GateTool::Type)
                        cond::String = "", enabled::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         r = _dbg_refusal(nb); isempty(r) || return r
-        yes(v) = v in ("1", "true", "on", "yes")
-        want = on == "toggle" ? nothing : yes(on)
-        en = isempty(enabled) ? nothing : yes(enabled)
+        want = on == "toggle" ? nothing : _dbg_flag(on)
+        want === missing && return "⛔ on=\"$on\" is not one of toggle, on, off"
+        en = isempty(enabled) ? nothing : _dbg_flag(enabled)
+        en === missing && return "⛔ enabled=\"$enabled\" is not one of true, false"
         r = NotebookServer.mark_debug!(nb, strip(file), line; on = want,
                                        cond = isempty(cond) ? nothing : cond, enabled = en)
         get(r, "ok", false) === true || return "⛔ " * string(get(r, "error", "could not set that"))
         ms = get(r, "marks", [])
-        shown(m) = string(get(m, "file", ""), ":", get(m, "line", 0),
-                          isempty(String(get(m, "cond", ""))) ? "" : " when " * String(get(m, "cond", "")),
-                          get(m, "enabled", true) === true ? "" : " (off)")
         head = get(r, "on", false) !== true ? "○ cleared " :
                en === false ? "○ disabled " : en === true ? "● enabled " : "● armed "
         return head * "$file:$line" * (isempty(cond) ? "" : " when $cond") * "\n" *
-               (isempty(ms) ? "no breakpoints set" : "breakpoints: " * join(shown.(ms), ", "))
+               (isempty(ms) ? "no breakpoints set" : "breakpoints: " * join(_dbg_mark.(ms), ", "))
     end
 
     """
@@ -2005,10 +2019,12 @@ function create_tools(GateTool::Type)
         # A supervising orchestrator signing off after its specialist already did was observed, and
         # it recorded a second finding saying the same thing. Signing off is reporting what YOU
         # found; with no session left and someone else's conclusion already on the record, there is
-        # nothing here to report.
+        # nothing here to report. Only a finding filed since the latest session started counts: an
+        # older one concluded an earlier investigation and says nothing about this one.
         if isempty(owner)
             prev = NotebookServer.latest_finding(nb)
             prev === nothing || prev.from == who ||
+                prev.at < NotebookServer.debug_started_at(nb) ||
                 return "The session is already finished and `$(prev.from)` has recorded its " *
                        "finding (`$(prev.id)`). Read it with spec_findings and decide what to do " *
                        "about it — signing off again would only file a second copy."
