@@ -79,9 +79,17 @@ re-run, a limit change or a resize simply re-aims it: the calibration travels wi
 describes and cannot drift from it. Outside a harvesting eval (`julia notebook.jl`) `pick_on!` is a
 no-op, so the notebook still runs as a script.
 
+**Call `pick_on!` last.** It measures where the axis *is*, so anything that changes the layout
+afterwards — a title, an axis label, a legend, another plot — moves the axis out from under that
+measurement and every click lands offset by however far it shifted. The failure is silent: the
+control still returns coordinates in range, they are simply the wrong ones. The trap worth naming
+is a title that reports the picked value, since that changes the layout on every pick; put such a
+readout in a markdown cell below the figure, where `{{ }}` can interpolate it.
+
 The mapping comes from the axis itself, so it is exact rather than assumed. An `aspect =
 DataAspect()` axis that letterboxes inside its layout cell reports the *plotted* area, not the
-cell; a log axis maps where its ticks are, not linearly between its endpoints. An axis with no
+cell; a log axis maps where its ticks are, not linearly between its endpoints. A reversed axis is
+mapped in drawing order, so a click lands on the side of the axis it was made on. An axis with no
 rectangular pixel→data mapping — a `PolarAxis`, or a three-dimensional `Axis3` — is refused with an
 error rather than silently mapped, because a wrong rectangle returns plausible coordinates instead
 of failing.

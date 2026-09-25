@@ -65,38 +65,31 @@ should reach exactly ±3, and clicking in the empty margin should do nothing.
 
 #%% md id=acc_md
 @md"""
-## 1b · Does the click land where you clicked?
+## 1b · Click accuracy
 
-Everything else here checks that a value *arrives*. This one checks it is the **right** value, which
-is the failure worth catching: a mis-mapped axis returns a plausible number for the wrong place and
-nothing looks broken.
+**Click the centre of any ✛ below.** The heading then tells you how far your click landed from
+that cross, in screen pixels.
 
-The nine rings are **targets at whole-number coordinates**, each labelled with the point it marks —
-the ring at the top left is exactly $(-2, 2)$. Click the centre of one and the readout tells you the
-coordinate you actually got, which target was nearest, and how far off you were in both data units
-and screen pixels.
+That is the whole test. Under about 3 px means the pick is accurate and the rest is your aim, since
+nobody clicks the exact centre of a cross. A number in the tens means the click is being mapped to
+the wrong place, which is the failure worth catching: a mis-mapped axis still returns a sensible
+looking coordinate, so nothing appears broken.
 
-**Snapping is off in this section**, unlike the rest of the notebook. That is deliberate: elsewhere
-`snap` quantises the value, so a click within half a step of a target lands on it exactly and reads
-as perfect whether or not the mapping is right. Here you see the raw number.
+Snapping is switched off here, unlike the rest of the notebook, so you see the raw number. With
+`snap` on, a near-enough click would land exactly on the cross and read as perfect whether or not
+the mapping was right.
 
-So read the pixel figure, not the data one:
+Then repeat it while changing the view, because each of these breaks it differently:
 
-- **under ~3 px** is your aim. No mouse lands on the centre of a ring.
-- **a consistent offset in one direction** is the overlay out of step with the image.
-- **a large error, or one that grows towards an edge**, is the mapping itself.
-
-Worth repeating in each of these states, since each has its own way of going wrong:
-
-| state | what it would break |
+| do this | what a big number would mean |
 |---|---|
-| **browser zoom** (⌘/Ctrl `+` to 150%, then `-` back) | the overlay drifting out of step with the image |
-| **window resized narrow**, then wide | the axis rectangle going stale |
-| **the cell collapsed and reopened** | the overlay never re-attaching |
-| **a slow drag from one ring to another** | the value lagging, or the drag dying part-way |
+| **zoom** with ⌘/Ctrl `+` to 150%, then back | the overlay no longer lines up with the image |
+| **resize** the window narrow, then wide | the axis rectangle went stale |
+| **collapse** the cell and reopen it | the overlay never re-attached |
+| **drag slowly** between two crosses | the value lags, or the drag dies part-way |
 
-The self-check below measures the overlay against the image independently and updates live as you
-zoom, so if a click feels offset that number says whether the overlay moved or the mapping did.
+The strip underneath measures the overlay against the image on its own, and updates as you zoom. If
+a click feels off, that number says whether the overlay moved or the mapping did.
 """
 
 #%% code id=acc
@@ -104,37 +97,49 @@ zoom, so if a click feels offset that number says whether the overlay moved or t
 # report perfect whether or not the mapping is right, which is the thing this section measures.
 @bind hit hidden(PickPoint(; default = (0.0, 0.0)))
 
-TARGETS = [(x, y) for x in -2:2:2 for y in -2:2:2]          # nine rings on whole numbers
+TARGETS = [(x, y) for x in -2:2:2 for y in -2:2:2]
 near = argmin([hypot(hit.x - t[1], hit.y - t[2]) for t in TARGETS])
 tgt  = TARGETS[near]
-err  = hypot(hit.x - tgt[1], hit.y - tgt[2])
 
-FIGW, SPAN = 620, 6.0                        # figure width in px, axis span in data units
+FIGW, SPAN = 620, 6.0
 figA = Figure(size = (FIGW, 500))
 axA = Axis(figA[1, 1]; aspect = DataAspect(), xlabel = "x", ylabel = "y",
            xticks = -3:1:3, yticks = -3:1:3)
 vlines!(axA, -3:1:3; color = (:white, 0.07)); hlines!(axA, -3:1:3; color = (:white, 0.07))
-for t in TARGETS
-    scatter!(axA, [t[1]], [t[2]]; color = :transparent, strokecolor = (:white, 0.5),
-             strokewidth = 1.5, markersize = 30)
-    scatter!(axA, [t[1]], [t[2]]; color = (:white, 0.5), markersize = 3)
+for t in TARGETS                                   # a cross you can aim at, and its coordinates
+    lines!(axA, [t[1]-0.28, t[1]+0.28], [t[2], t[2]]; color = (:white, 0.55), linewidth = 1.2)
+    lines!(axA, [t[1], t[1]], [t[2]-0.28, t[2]+0.28]; color = (:white, 0.55), linewidth = 1.2)
     text!(axA, t[1], t[2]; text = "($(Int(t[1])), $(Int(t[2])))", align = (:center, :center),
-          offset = (0, 23), color = (:white, 0.45), fontsize = 11)
+          offset = (0, 20), color = (:white, 0.4), fontsize = 11)
 end
-scatter!(axA, [hit.x], [hit.y]; color = :gold, markersize = 11,
+scatter!(axA, [hit.x], [hit.y]; color = :gold, markersize = 10,
          strokecolor = :black, strokewidth = 1)
-err > 1e-9 && lines!(axA, [hit.x, tgt[1]], [hit.y, tgt[2]];
-                     color = :gold, linestyle = :dash, linewidth = 1.5)
 limits!(axA, -3, 3, -3, 3)
-pick_on!(:hit, figA, axA)
 
-# Pixels are the judgeable number: no mouse lands on the exact centre of a ring, so a few px is
-# your aim and a large or one-sided error is the mapping. Derived from the axis's own rectangle.
+# NOTHING may touch the layout after this. `pick_on!` measures where the axis IS, so a title set
+# afterwards (or any other layout change) moves the axis out from under the calibration and every
+# click lands offset by however far it shifted. The readout lives in the cell below for exactly
+# that reason — a title that changes with each click would move the axis on each click.
+pick_on!(:hit, figA, axA)
 pxper = axis_calibration(figA, axA)["rect"]["width"] * FIGW / SPAN
-axA.title = @sprintf("clicked (%.3f, %.3f)   ·   nearest (%d, %d)   ·   off by %.3f  ≈ %.1f px",
-                     hit.x, hit.y, Int(tgt[1]), Int(tgt[2]), err, err * pxper)
-axA.titlecolor = err * pxper <= 3 ? :seagreen : :gold
+err_px = hypot(hit.x - tgt[1], hit.y - tgt[2]) * pxper
 figA
+
+#%% md id=acc_out
+@md"""
+### {{ round(err_px; digits=1) }} px from ({{ Int(tgt[1]) }}, {{ Int(tgt[2]) }})
+
+You clicked **({{ round(hit.x; digits=3) }}, {{ round(hit.y; digits=3) }})**; the nearest cross is
+at ({{ Int(tgt[1]) }}, {{ Int(tgt[2]) }}).
+
+Under about 3 px is your aim. Tens of pixels means the click is being mapped to the wrong place.
+
+!!! note "Why the number is here and not on the figure"
+    `pick_on!` measures where the axis **is**. Anything that changes the layout afterwards — a
+    title, a label, a legend — moves the axis out from under that measurement, and every click then
+    lands offset by however far it shifted. A title carrying this readout would change on every
+    click, so it would move the axis on every click. Call `pick_on!` last.
+"""
 
 #%% web id=acc_selfcheck
 @web(html"""
