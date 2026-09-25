@@ -63,6 +63,113 @@ cell. This is the case a hand-rolled overlay gets wrong: the click target has to
 should reach exactly ±3, and clicking in the empty margin should do nothing.
 """
 
+#%% md id=acc_md
+@md"""
+## 1b · Does the click land where you clicked?
+
+Everything else here checks that a value *arrives*. This one checks it is the **right** value, which
+is the failure worth catching: a mis-mapped axis returns a plausible number for the wrong place and
+nothing looks broken.
+
+Each ringed dot below sits on a whole number. **Click the centre of a ring** and the readout says
+which one you hit and how far off it was. On target, the error is zero — the pick is snapped to
+`0.25`, so anything under `0.125` rounds onto the dot exactly.
+
+Worth running this in each of these states, since each one has its own way of going wrong:
+
+| state | what it would break |
+|---|---|
+| **browser zoom** (⌘/Ctrl `+` to 150%, then `-` back) | the overlay drifting out of step with the image |
+| **window resized narrow**, then wide | the axis rectangle going stale |
+| **the cell collapsed and reopened** | the overlay never re-attaching |
+| **a slow drag from one dot to another** | the value lagging, or the drag dying part-way |
+
+The self-check below the figure measures the overlay against the image independently, and updates
+live as you zoom — so if a click ever feels offset, that number says whether the overlay moved or
+the mapping did.
+"""
+
+#%% code id=acc
+@bind hit hidden(PickPoint(; default = (0.0, 0.0), snap = 0.25))
+
+TARGETS = [(x, y) for x in -2:2:2 for y in -2:2:2]          # nine dots on whole numbers
+near = argmin([hypot(hit.x - t[1], hit.y - t[2]) for t in TARGETS])
+err  = hypot(hit.x - TARGETS[near][1], hit.y - TARGETS[near][2])
+
+figA = Figure(size = (560, 470))
+axA = Axis(figA[1, 1]; aspect = DataAspect(), xlabel = "x", ylabel = "y",
+           title = err < 1e-9 ? "on target $(TARGETS[near]) — exact" :
+                   @sprintf("nearest %s · off by %.3f", TARGETS[near], err),
+           titlecolor = err < 1e-9 ? :seagreen : :gold,
+           xticks = -3:1:3, yticks = -3:1:3)
+vlines!(axA, -3:1:3; color = (:white, 0.08)); hlines!(axA, -3:1:3; color = (:white, 0.08))
+scatter!(axA, first.(TARGETS), last.(TARGETS); color = :transparent,
+         strokecolor = (:white, 0.55), strokewidth = 1.5, markersize = 26)
+scatter!(axA, first.(TARGETS), last.(TARGETS); color = (:white, 0.55), markersize = 4)
+# where the click actually landed
+scatter!(axA, [hit.x], [hit.y]; color = err < 1e-9 ? :seagreen : :gold, markersize = 13,
+         strokecolor = :black, strokewidth = 1)
+err < 1e-9 || lines!(axA, [hit.x, TARGETS[near][1]], [hit.y, TARGETS[near][2]];
+                     color = :gold, linestyle = :dash, linewidth = 2)
+limits!(axA, -3, 3, -3, 3)
+pick_on!(:hit, figA, axA)
+figA
+
+#%% web id=acc_selfcheck
+@web(html"""<div id="chk"></div>""",
+css"""
+#chk { font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px 11px;
+       border-radius: 8px; background: rgba(255,255,255,.04); border-left: 3px solid var(--dim); }
+#chk.ok   { border-left-color: #3ddc97; }
+#chk.bad  { border-left-color: #f5a623; }
+#chk b { font-weight: 700; }
+#chk .row { white-space: pre; }
+""",
+js"""
+// Measures each pick overlay against the image it is aimed at, independently of the code that
+// places it: the overlay SHOULD sit at the calibrated fraction of the image's own screen box.
+// Any drift shows up here as a pixel error, which is what a click landing offset would look like.
+// Re-measured on zoom, resize and scroll, so the number is live while you change the view.
+const el = root.querySelector('#chk');
+
+function measure() {
+  const rows = [];
+  let worst = 0;
+  for (const cell of document.querySelectorAll('.cell')) {
+    const img = cell.querySelector('.output img');
+    const ovs = cell.querySelectorAll('.pickovl');
+    if (!img || !ovs.length) continue;
+    const ib = img.getBoundingClientRect();
+    const picks = ((window.nbState && window.nbState.cells) || [])
+      .find(c => 'cell-' + c.id === cell.id)?.picks || [];
+    ovs.forEach((ov, i) => {
+      const p = picks[i]; if (!p || !p.rect) return;
+      const ob = ov.getBoundingClientRect();
+      const want = { left: ib.left + p.rect.left * ib.width, top: ib.top + p.rect.top * ib.height,
+                     width: p.rect.width * ib.width, height: p.rect.height * ib.height };
+      const e = Math.max(Math.abs(ob.left - want.left), Math.abs(ob.top - want.top),
+                         Math.abs(ob.width - want.width), Math.abs(ob.height - want.height));
+      worst = Math.max(worst, e);
+      rows.push(`${(cell.id.replace('cell-','') + ' ').padEnd(16,'·')} ${p.bind.padEnd(8)} off by ${e.toFixed(2)} px`);
+    });
+  }
+  const dpr = (window.devicePixelRatio || 1).toFixed(2);
+  if (!rows.length) { el.className = ''; el.textContent = 'no pick overlays on the page yet'; return; }
+  // Half a CSS pixel is the most sub-pixel layout rounding can account for.
+  el.className = worst <= 0.5 ? 'ok' : 'bad';
+  el.innerHTML = `<div class="row"><b>overlay vs image — worst ${worst.toFixed(2)} px</b>` +
+                 `   (zoom ${dpr}×, ${worst <= 0.5 ? 'aligned' : 'DRIFTED — clicks will land offset'})</div>` +
+                 rows.map(r => `<div class="row">${r}</div>`).join('');
+}
+
+measure();
+// Zoom fires `resize`; scroll moves the boxes; a re-render swaps the overlays out.
+addEventListener('resize', measure);
+addEventListener('scroll', measure, true);
+const mo = new MutationObserver(() => measure());
+mo.observe(document.body, { childList: true, subtree: true });
+""")
+
 #%% code id=s2
 @bind sq hidden(PickPoint(; default = (0.0, 0.0)))
 
@@ -114,6 +221,45 @@ Both panels live in the same rendered image. Each `pick_on!` describes its own r
 clicking the left panel must move only `a` and the right only `b`. If the two ever cross-talk, the
 per-axis rectangle is wrong.
 """
+
+#%% md id=s3b_md
+@md"""
+## 3b · A reversed axis
+
+`xreversed`/`yreversed` draw the same limits mirrored, and `finallimits` still reads low-to-high
+while the pixels run the other way. Taking it at face value puts every click on the wrong side of
+the axis while still returning a number in range, which is why this has a section of its own.
+
+Here **x runs right-to-left and y runs top-to-bottom.** Click the corner marked `(-2, 2)` — the
+readout has to agree with the label, not with where that point would be on an ordinary axis.
+"""
+
+#%% code id=s3b
+@bind rv hidden(PickPoint(; default = (0.0, 0.0), snap = 0.25))
+
+CORNERS = [(-2.0, 2.0), (2.0, 2.0), (-2.0, -2.0), (2.0, -2.0)]
+nr = argmin([hypot(rv.x - c[1], rv.y - c[2]) for c in CORNERS])
+er = hypot(rv.x - CORNERS[nr][1], rv.y - CORNERS[nr][2])
+
+figR = Figure(size = (520, 450))
+axR = Axis(figR[1, 1]; aspect = DataAspect(), xlabel = "x  (runs right to left)",
+           ylabel = "y  (runs top to bottom)",
+           title = er < 1e-9 ? "on $(CORNERS[nr]) — exact" :
+                   @sprintf("nearest %s · off by %.3f", CORNERS[nr], er),
+           titlecolor = er < 1e-9 ? :seagreen : :gold)
+for c in CORNERS
+    scatter!(axR, [c[1]], [c[2]]; color = :transparent, strokecolor = (:white, 0.6),
+             strokewidth = 1.5, markersize = 26)
+    text!(axR, c[1], c[2]; text = string(c), align = (:center, :center),
+          offset = (0, 20), color = (:white, 0.6), fontsize = 11)
+end
+scatter!(axR, [rv.x], [rv.y]; color = er < 1e-9 ? :seagreen : :gold, markersize = 13,
+         strokecolor = :black, strokewidth = 1)
+limits!(axR, -3, 3, -3, 3)
+axR.xreversed[] = true          # set after `limits!`; the constructor kwarg does not take
+axR.yreversed[] = true
+pick_on!(:rv, figR, axR)
+figR
 
 #%% code id=s4
 @bind a hidden(PickPoint(; default = (-1.0, 1.0), snap = 0.1))
