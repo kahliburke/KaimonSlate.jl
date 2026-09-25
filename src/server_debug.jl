@@ -230,6 +230,21 @@ forget_debug!(id::AbstractString) = lock(_DEBUG_LOCK) do
 end
 
 """
+A name a person can read for whoever holds a session: a specialist by its role, the notebook's own
+agent as such, and anything else reaching in over MCP as an external agent.
+"""
+function owner_label(nb::LiveNotebook, owner::AbstractString)::String
+    owner == HUMAN && return "you"
+    _is_agent(owner) || return String(owner)
+    id = chopprefix(String(owner), "agent:")
+    crew = lock(_AGENT_LOCK) do
+        findfirst(==(id), nb.agents)
+    end
+    crew === nothing && return "external agent"
+    return isempty(crew) ? "notebook agent" : String(crew)
+end
+
+"""
 May `who` disturb this notebook's session — end it, or start a different one over it?
 
 Yes when there is nothing running, when they own it, or when they are a person: it is their
@@ -331,6 +346,7 @@ function _debug_json(nb::LiveNotebook, st, side::AbstractString)
         # Who is driving, and anything waiting on an answer. Both are shown, because a session
         # someone else is steering — or one stalled on a question — has to be legible as that.
         "owner" => _debug_session(nb).owner,
+        "owner_label" => owner_label(nb, _debug_session(nb).owner),
         "asks" => asks_json(nb),
         "findings" => findings_json(nb),
         # Summaries only. The series drives the chart and is fetched separately; putting it here

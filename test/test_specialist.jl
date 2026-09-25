@@ -474,6 +474,30 @@ current_agent_id() = nothing
             end
         end
 
+        @testset "a session's owner is named for a person to read" begin
+            @test NS.owner_label(nb, NS.HUMAN) == "you"
+            @test NS.owner_label(nb, "agent:not-one-of-ours") == "external agent"
+            prev = get(nb.agents, "", nothing)
+            lock(NS._AGENT_LOCK) do
+                nb.agents["profiler"] = "prof-id"; nb.agents[""] = "own-id"
+            end
+            try
+                @test NS.owner_label(nb, "agent:prof-id") == "profiler"
+                @test NS.owner_label(nb, "agent:own-id") == "notebook agent"
+            finally
+                lock(NS._AGENT_LOCK) do
+                    delete!(nb.agents, "profiler")
+                    prev === nothing ? delete!(nb.agents, "") : (nb.agents[""] = prev)
+                end
+            end
+            st = NS.start_debug!(nb, "drive"; by = NS.HUMAN)
+            try
+                @test st["owner_label"] == "you"
+            finally
+                NS.stop_debug!(nb; by = NS.HUMAN)
+            end
+        end
+
         @testset "a value carries where it came from" begin
             # The preventive half. The sign-off guard catches a specialist that blamed the cell a
             # bad value landed in; this stops it forming that belief, by answering "where is this

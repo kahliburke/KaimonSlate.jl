@@ -782,7 +782,7 @@ function _dbg_render(j::Dict{String,Any})::String
         bp = get(j, "at_breakpoint", false) === true ? "  ● breakpoint" : ""
         println(io, "⏸ ", get(j, "scope", ""), "  ", get(j, "file", ""), ":", get(j, "line", 0), bp)
         println(io, "   on ", get(j, "where", "local"), " · step ", get(j, "steps", 0),
-                " · owner ", get(j, "owner", ""))
+                " · owner ", get(j, "owner_label", get(j, "owner", "")))
         err === nothing || println(io, "   ⚠ ", err)
     end
     # A binding whose line hasn't run yet still holds the PREVIOUS run's value. Said plainly:

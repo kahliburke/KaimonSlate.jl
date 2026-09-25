@@ -838,8 +838,9 @@ function Controls({ compact }) {
 // Who is driving. Absent for your own session — the common case shouldn't carry a label.
 function Owner({ s }) {
   if (!s || !s.owner || s.owner === 'human') return null;
-  return html`<span class="dbgowner" title="an agent is driving this session — your controls still work">
-    ⌁ ${s.owner.replace(/^agent:/, '')}</span>`;
+  const id = s.owner.replace(/^agent:/, '');
+  return html`<span class="dbgowner" title=${`an agent is driving this session (${id}) — your controls still work`}>
+    ⌁ ${s.owner_label || 'agent'}</span>`;
 }
 
 // An agent waiting on an answer. Its turn is stopped here, so this is a blocking prompt, not a
