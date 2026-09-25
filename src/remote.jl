@@ -3709,10 +3709,7 @@ region_get(name) = (n = _fold_region(name); for r in regions(); r.name == n && r
 function region_uuid(name)
     r = region_get(name); r === nothing && return ""
     isempty(r.uuid) || return r.uuid
-    region_set!(r.name; host = r.host, transport = r.transport, base_port = r.base_port,
-                preload = r.preload, data_root = r.data_root, cache_root = r.cache_root,
-                warm = r.warm, threads = r.threads, sysimage = r.sysimage, curve = r.curve,
-                peer = r.peer).uuid
+    return region_set!(r.name).uuid        # sets nothing, so it only mints the UUID
 end
 
 function _write_regions!(list::AbstractVector{Region})
@@ -3722,34 +3719,46 @@ function _write_regions!(list::AbstractVector{Region})
     return nothing
 end
 
-# Create or update a region by name (upsert). Returns the stored Region.
-function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "",
-                     data_root = "", cache_root = "", warm = 0, threads = "", sysimage = false,
-                     curve = true, uuid = "", peer = "",
-                     scheduler = :none, partition = "", walltime = "", cpus = 0, mem = "",
-                     gpus = "", account = "", alloc_name = "", idle_release = 0, idle_warn = 0,
-                     options = Dict{String,String}(), prologue = "")
+# A new region's fields, before anything is set.
+const REGION_DEFAULTS = (host = "", transport = :tunnel, base_port = 0, preload = "", data_root = "",
+                         cache_root = "", warm = 0, threads = "", sysimage = false, curve = true,
+                         uuid = "", peer = "", scheduler = :none, partition = "", walltime = "",
+                         cpus = 0, mem = "", gpus = "", account = "", alloc_name = "",
+                         idle_release = 0, idle_warn = 0, options = Dict{String,String}(),
+                         prologue = "")
+
+# An existing region's fields, in the shape `region_set!` takes.
+_region_fields(r::Region) = NamedTuple{keys(REGION_DEFAULTS)}(Tuple(getfield(r, k) for k in keys(REGION_DEFAULTS)))
+
+"""
+    region_set!(name; fields...) -> Region
+
+Create or update a region by name. Only the fields passed change: an existing region keeps the rest,
+and a new one takes `REGION_DEFAULTS`. Every caller sets a subset — a tool that knows nothing about
+schedulers, a form that has no `cache_root` — so replacing the whole record would reset whatever the
+caller did not mention.
+"""
+function region_set!(name; kw...)
     n = _fold_region(name)   # tag-safe id — MUST match region_get/region_delete! + a cell's `region=` tag
     isempty(n) && error("region name required")
+    bad = setdiff(keys(kw), keys(REGION_DEFAULTS))
+    isempty(bad) || throw(ArgumentError("unknown region field(s): " * join(bad, ", ")))
     return lock(_REGIONS_LOCK) do
         list = regions()
         i = findfirst(x -> x.name == n, list)
-        # The UUID is STABLE across upserts: an explicit arg wins, else keep the existing region's,
-        # else mint one. Editing a region (warm count, ports, …) must never rotate it — every mesh
-        # artifact keyed on `slate-<region>-<uuid8>` would orphan (PEER_TUNNEL_PLAN §5.5).
-        u = !isempty(String(uuid)) ? String(uuid) :
-            (i === nothing || isempty(list[i].uuid)) ? _mint_region_uuid() : list[i].uuid
-        # `peer` (§5.6 advertise addr) is likewise sticky across upserts: explicit arg wins, else keep
-        # the existing value, else "" (derive from the hub-facing IP).
-        pe = !isempty(String(peer)) ? String(peer) : (i === nothing ? "" : list[i].peer)
-        sched = Symbol(scheduler)
-        r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
-                   String(data_root), String(cache_root), _warm_for(Int(warm), sched), String(threads),
-                   _asbool(sysimage), _asbool(curve), u, pe,
-                   sched, String(partition), String(walltime), Int(cpus),
-                   String(mem), String(gpus), String(account), String(alloc_name),
-                   max(0, Int(idle_release)), max(0, Int(idle_warn)),
-          _region_options_of(Dict("options" => options)), String(prologue))
+        f = merge(i === nothing ? REGION_DEFAULTS : _region_fields(list[i]), NamedTuple(kw))
+        # The UUID is STABLE across updates, and minted only when there is none. Editing a region must
+        # never rotate it — every mesh artifact keyed on `slate-<region>-<uuid8>` would orphan
+        # (PEER_TUNNEL_PLAN §5.5).
+        u = isempty(String(f.uuid)) ? _mint_region_uuid() : String(f.uuid)
+        sched = Symbol(f.scheduler)
+        r = Region(String(n), String(f.host), Symbol(f.transport), Int(f.base_port), String(f.preload),
+                   String(f.data_root), String(f.cache_root), _warm_for(Int(f.warm), sched), String(f.threads),
+                   _asbool(f.sysimage), _asbool(f.curve), u, String(f.peer),
+                   sched, String(f.partition), String(f.walltime), Int(f.cpus),
+                   String(f.mem), String(f.gpus), String(f.account), String(f.alloc_name),
+                   max(0, Int(f.idle_release)), max(0, Int(f.idle_warn)),
+          _region_options_of(Dict("options" => f.options)), String(f.prologue))
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)
         r

@@ -474,6 +474,23 @@ current_agent_id() = nothing
             end
         end
 
+        @testset "the region tool changes only what it is given" begin
+            RG = KaimonSlate.ReportEngine
+            withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir()) do
+                tools = Dict(t.name => t.f for t in KaimonSlate.create_tools(ToolSpec))
+                RG.region_set!("tooltest"; host = "login", scheduler = :slurm, partition = "gpu", gpus = "1")
+                @test occursin("slurm", tools["region"]("tooltest"; base_port = "9710"))
+                r = RG.region_get("tooltest")
+                @test r.scheduler === :slurm && r.partition == "gpu" && r.base_port == 9710
+                tools["region"]("tooltest"; clear = "gpus")
+                @test RG.region_get("tooltest").gpus == "" && RG.region_get("tooltest").partition == "gpu"
+                @test occursin("⛔", tools["region"]("tooltest"; scheduler = "lsf"))
+                @test occursin("⛔", tools["region"]("tooltest"; clear = "nosuch"))
+                @test occursin("⛔", tools["region"]("tooltest"; base_port = "x"))
+                @test RG.region_get("tooltest").base_port == 9710          # a refused call changed nothing
+            end
+        end
+
         @testset "a sign-off is refused only over a finding from the latest session" begin
             tools = Dict(t.name => t.f for t in KaimonSlate.create_tools(ToolSpec))
             old = KaimonSlate._HUB[]

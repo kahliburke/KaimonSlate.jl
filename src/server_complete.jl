@@ -1598,7 +1598,8 @@ function _make_router(h::Hub)
                                        nb -> _push_alloc_event!([nb], r.name, "released"; reason = "manual"))
         _json(Dict("ok" => ok, "region" => r.name))
     end)
-    # Create/update a named region (full-record upsert) and reconcile toward its warm count. The def is
+    # Create/update a named region and reconcile toward its warm count. The form sends every field it
+    # shows; what it does not show (cache_root, curve, peer) keeps its stored value. The def is
     # persisted synchronously (fast, durable); the reconcile — which may provision a cold host for minutes —
     # runs in the background so the request returns at once. Re-runnable: it reconciles toward `warm`.
     HTTP.register!(router, "POST", "/api/regions", req -> begin

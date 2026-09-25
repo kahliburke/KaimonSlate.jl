@@ -157,11 +157,25 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
             @test t.transport === :direct && t.origin_env == "/tmp/My Proj"
             @test t.datadir == "/scratch/flights" && t.region == RE._fold_region(name)  # worker is tagged with its (folded) region
             @test any(x -> x.name == RE._fold_region(name) && x.warm == 2 && x.data_root == "/scratch/flights", RE.regions())
-            RE.region_set!(name; host = "h1")                          # full-record upsert clears the rest
+            # Only what is passed changes: the rest of the record stays as it was.
+            RE.region_set!(name; warm = 1)
+            r = RE.region_get(name)
+            @test r.warm == 1 && r.preload == "/tmp/My Proj" && r.base_port == 9200 && r.threads == "8,1"
+            # A field is reset by passing its default, which is how a caller clears one.
+            RE.region_set!(name; preload = "", data_root = "")
             @test RE.region_get(name).preload == "" && RE.region_get(name).data_root == ""
             @test RE._region_target(RE.region_get(name)).project == "~/.cache/kaimonslate/remote/detached"
             @test RE._region_target(RE.region_get(name)).datadir == ""
             @test RE.region_get("__no-such-region__") === nothing
+            @test_throws ArgumentError RE.region_set!(name; nosuchfield = 1)
+
+            # A scheduler region edited by something that knows nothing about schedulers keeps them.
+            RE.region_set!(name; scheduler = :slurm, partition = "gpu", walltime = "00:20:00", gpus = "1")
+            RE.region_set!(name; base_port = 9710)
+            r = RE.region_get(name)
+            @test r.scheduler === :slurm && r.partition == "gpu" && r.gpus == "1" && r.base_port == 9710
+            u = r.uuid
+            @test !isempty(u) && RE.region_set!(name; warm = 0).uuid == u   # never rotated by an edit
             RE.region_delete!(name)
             @test RE.region_get(name) === nothing
         end

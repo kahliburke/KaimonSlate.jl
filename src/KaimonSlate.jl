@@ -1215,18 +1215,29 @@ function create_tools(GateTool::Type)
     end
 
     """
-        region(name::String; host="", transport="tunnel", base_port=0, preload="", data_root="", cache_root="", warm=0, threads="") -> String
+        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", clear="") -> String
 
     Define (or update) a named region — a global compute target: a `host` reached over `transport`
     (`tunnel`|`direct`), an optional `preload` (a LOCAL project dir replicated on the host so its
     packages load warm), a `data_root` (a REMOTE absolute path pinned as the workers' `datadir()`/`@sfile`),
     and `warm` (how many workers to keep booted and ready to adopt — 0 = cold spin on demand). Many
-    regions may point at the same host with different config. Full-record upsert; reconciles toward
-    `warm` in the background. Notebooks reference a region by NAME via `region_on` + `region=<name>`
-    cell tags. `base_port` pins the port range for a `:direct` region (worker *i* → base_port+3i..+2).
+    regions may point at the same host with different config. Reconciles toward `warm` in the
+    background. Notebooks reference a region by NAME via `region_on` + `region=<name>` cell tags.
+
+    ONLY THE ARGUMENTS YOU PASS CHANGE: on an existing region, everything else keeps its value, so
+    `region(name="gpu", base_port="9700")` moves the ports and leaves its scheduler alone. To reset a
+    field to its default, name it in `clear` (`clear="partition,gpus"`).
+
+    `base_port` is the base of a port stride (worker *i* → base_port+3i..+2): the range a `:direct`
+    region opens in its firewall, and on either transport what keeps hosts that share a home
+    directory from colliding. A taken port moves the worker to the next slot.
     `cache_root` (a REMOTE absolute path) pins the workers' `KAIMONSLATE_CACHE_HOME` — a SEPARATE
     content-addressed store per region, so co-located region workers don't share `~/.cache/kaimonslate/memo`
     (they otherwise dedup a cross-region blob to 0 bytes instead of moving it over the peer channel).
+
+    A region whose host fronts a cluster asks its `scheduler` (`slurm`, `pbs`, `auto`, or `none` to
+    run on the host itself) for a node: `partition`, `walltime` (`HH:MM:SS`), `cpus`, `mem` (`16G`),
+    `gpus` (`1`, `a100:2`) and `account` say what to ask for.
 
     Pass `delete=true` to REMOVE the named region from the registry (all other args ignored): its
     workers are reaped, attached ones included, and a scheduler region's allocation is released.
@@ -1234,25 +1245,66 @@ function create_tools(GateTool::Type)
     `warm` is ignored on a SCHEDULER region: its node is an allocation rather than a host to keep
     workers on, and holding workers there holds the node.
     """
-    function region(name::String; host::String = "", transport::String = "tunnel", base_port::Int = 0,
-                    preload::String = "", data_root::String = "", cache_root::String = "", warm::Int = 0,
-                    threads::String = "", sysimage::Bool = false, curve::Bool = true, peer::String = "",
-                    delete::Bool = false)::String
+    function region(name::String; host::String = "", transport::String = "", base_port::String = "",
+                    preload::String = "", data_root::String = "", cache_root::String = "", warm::String = "",
+                    threads::String = "", sysimage::String = "", curve::String = "", peer::String = "",
+                    scheduler::String = "", partition::String = "", walltime::String = "",
+                    cpus::String = "", mem::String = "", gpus::String = "", account::String = "",
+                    clear::String = "", delete::Bool = false)::String
         nm = strip(name); isempty(nm) && return "Give a region name."
         if delete
             ReportEngine.region_get(nm) === nothing && return "No region '$nm' to delete."
             ReportEngine.region_remove!(nm)   # reaps this region's workers, then drops the record
             return "🗑️ region '$nm' deleted (workers reaped; a scheduler region's node released too)."
         end
-        tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
-        pl = strip(preload); (isempty(pl) || isdir(expanduser(pl))) || return "preload project dir not found: $pl"
-        r = ReportEngine.region_set!(nm; host = String(strip(host)), transport = tr, base_port = base_port,
-                                     preload = isempty(pl) ? "" : abspath(expanduser(pl)),
-                                     data_root = String(strip(data_root)), cache_root = String(strip(cache_root)),
-                                     warm = max(0, warm), threads = String(strip(threads)), sysimage = sysimage,
-                                     curve = curve, peer = String(strip(peer)))
+        kw = Dict{Symbol,Any}()
+        D = ReportEngine.REGION_DEFAULTS
+        for f in split(clear, ','; keepempty = false)
+            k = Symbol(strip(f))
+            (haskey(D, k) && k !== :uuid) || return "⛔ clear: '$(strip(f))' is not a region field"
+            kw[k] = D[k]
+        end
+        given(v) = !isempty(strip(v))
+        for (k, v) in ((:host, host), (:data_root, data_root), (:cache_root, cache_root),
+                       (:threads, threads), (:peer, peer), (:partition, partition),
+                       (:walltime, walltime), (:mem, mem), (:gpus, gpus), (:account, account))
+            given(v) && (kw[k] = String(strip(v)))
+        end
+        for (k, v) in ((:base_port, base_port), (:warm, warm), (:cpus, cpus))
+            given(v) || continue
+            n = tryparse(Int, strip(v))
+            (n === nothing || n < 0) && return "⛔ $k must be a non-negative whole number, not '$v'"
+            kw[k] = n
+        end
+        for (k, v) in ((:sysimage, sysimage), (:curve, curve))
+            given(v) || continue
+            b = _dbg_flag(v)
+            b === missing && return "⛔ $k must be true or false, not '$v'"
+            kw[k] = b
+        end
+        if given(transport)
+            tr = Symbol(strip(transport))
+            tr in (:tunnel, :direct) || return "⛔ transport must be tunnel or direct, not '$transport'"
+            kw[:transport] = tr
+        end
+        if given(scheduler)
+            sc = Symbol(lowercase(strip(scheduler)))
+            sc in (:none, :auto, :slurm, :pbs) || return "⛔ scheduler must be none, auto, slurm or pbs, not '$scheduler'"
+            kw[:scheduler] = sc
+        end
+        if given(preload)
+            pl = strip(preload)
+            isdir(expanduser(pl)) || return "preload project dir not found: $pl"
+            kw[:preload] = abspath(expanduser(pl))
+        end
+        r = ReportEngine.region_set!(nm; kw...)
         r.warm > 0 && Threads.@spawn try; ReportEngine.region_reconcile!(r.name); catch; end
         return "✅ region '$(r.name)' → $(isempty(r.host) ? "(no host)" : r.host) ($(r.transport))" *
+               (r.scheduler === :none ? "" :
+                string(", ", r.scheduler, isempty(r.partition) ? "" : " partition=$(r.partition)",
+                       isempty(r.walltime) ? "" : " walltime=$(r.walltime)",
+                       isempty(r.gpus) ? "" : " gpus=$(r.gpus)")) *
+               (r.base_port > 0 ? ", base_port=$(r.base_port)" : "") *
                (r.warm > 0 ? ", warm=$(r.warm) (reconciling)" : "") *
                (r.sysimage ? ", sysimage=on" : "") *
                (r.curve ? "" : ", curve=off") *
