@@ -216,7 +216,10 @@ struct KindSpec
     coerce::Any       # (w::Widget, v) -> value
     reconcile::Any    # (oldw::Widget, oldv, neww::Widget) -> value
     wrap::Any         # (w::Widget, v) -> user-facing value
+    domain::Any       # (w::Widget) -> every value it can take, or `nothing`
 end
+# Three-arg form for a kind that has no enumerable domain, which is most of them.
+KindSpec(coerce, reconcile, wrap) = KindSpec(coerce, reconcile, wrap, nothing)
 
 const _KINDS = Dict{String,KindSpec}()
 
@@ -288,7 +291,11 @@ function register_kind!(kind::AbstractString;
                         coerce = nothing, reconcile = nothing, wrap = _default_wrap, domain = nothing)
     co = coerce    !== nothing ? coerce    : domain !== nothing ? _domain_coerce(domain)    : _default_coerce
     re = reconcile !== nothing ? reconcile : domain !== nothing ? _domain_reconcile(domain) : _default_reconcile
-    _KINDS[String(kind)] = KindSpec(co, re, wrap)
+    # `domain` is also KEPT, not just used to derive the two above: `bind_domain` consults it, which
+    # is what lets a kind defined outside this package be replayable in a static export. Without it
+    # the only enumerable controls are the ones `bind_domain` hardcodes, so every third-party widget
+    # was silently unexportable however finite its values were.
+    _KINDS[String(kind)] = KindSpec(co, re, wrap, domain)
     return nothing
 end
 
@@ -353,6 +360,23 @@ drift from the control it belongs to.
 function bind_domain(w::Widget)
     p = w.params
     k = lowercase(String(w.kind))
+    # A kind that declared its own domain at registration answers for itself. Checked FIRST so a
+    # widget's domain lives with the widget rather than in the table below, and so a kind this
+    # package has never heard of can be replayable too. The table is the fallback for the built-ins
+    # that predate the hook.
+    let spec = get(_KINDS, String(w.kind), nothing)
+        if spec !== nothing && spec.domain !== nothing
+            d = try spec.domain(w) catch; nothing end
+            if d !== nothing
+                # Capped BEFORE materialising. A `domain` was usable as a bare range long before it
+                # was enumerable, because coercion only ever clamped or tested membership against
+                # it, so an existing kind may well answer with something the size of `0:10^9`.
+                n = try length(d) catch; nothing end
+                (n === nothing || n > REPLAY_DOMAIN_CAP) && return nothing
+                return Any[v for v in d]
+            end
+        end
+    end
     if k in ("checkbox", "toggle")
         return Any[false, true]
     elseif k in ("select", "radio")
