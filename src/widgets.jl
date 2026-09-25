@@ -903,7 +903,30 @@ function _register_builtin_kinds!()
             return pts
         end
     end
+    # A pick on a figure is CONTINUOUS unless the author snapped it, and only a snapped one can be
+    # exported: `snap` turns the axis into a grid small enough to precompute, so a reader clicking an
+    # offline page lands on a point the export already has an answer for. The grid is built from the
+    # SAME `_pick_snap` the coercion uses, because the page matches a live value to a precomputed
+    # column with `isequal` — two roundings that merely agree would eventually not.
+    _pick_axis_grid(w, key, st) = begin
+        lim = _pick_lim(w, key)
+        lim === nothing && return nothing
+        lo, hi = min(lim...), max(lim...)
+        hi > lo || return nothing
+        Any[_pick_snap(w, lo + i * st, lim) for i in 0:floor(Int, (hi - lo) / st + 1e-9)]
+    end
+    function _pick_domain(w)
+        String(get(w.params, "mode", "point")) == "point" || return nothing
+        st = get(w.params, "snap", 0)
+        (st isa Real && st > 0) || return nothing
+        gx = _pick_axis_grid(w, "xlim", float(st)); gy = _pick_axis_grid(w, "ylim", float(st))
+        (gx === nothing || gy === nothing) && return nothing
+        length(gx) * length(gy) > SlateExtensionsBase.REPLAY_DOMAIN_CAP && return nothing
+        # Row-major, so dragging horizontally sweeps a contiguous run of the domain.
+        return Any[Any[x, y] for y in gy for x in gx]
+    end
     register_kind!("pick";
+        domain = _pick_domain,
         coerce = _pick_coerce,
         # Re-running the bind cell must not throw away where the reader clicked. Recalibration is
         # not a bind-cell re-run — it goes through `pick_on!` — so the only thing arriving here is a

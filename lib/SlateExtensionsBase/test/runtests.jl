@@ -186,6 +186,28 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
         register_kind!("oneof"; domain = w -> ["a", "b", "c"])                # a collection domain
         ow = Widget("oneof", "a")
         @test coerce_bind(ow, "b") == "b" && coerce_bind(ow, "z") == "a"      # member kept; non-member → default
+
+        # The domain is KEPT, not just used to derive coercion: `bind_domain` reports it, which is
+        # what makes a kind defined outside this package replayable in a static export. Without it
+        # only the kinds hardcoded in `bind_domain` could be enumerated, so every third-party widget
+        # was silently unexportable however finite its values were.
+        @test bind_domain(rw) == Any[0, 1, 2, 3, 4, 5]
+        @test bind_domain(Widget("ranged", 0; max = 2)) == Any[0, 1, 2]       # read per widget
+        @test bind_domain(ow) == Any["a", "b", "c"]
+        # A kind that declares no domain is still refused rather than guessed at.
+        register_kind!("freeform"; coerce = (_, v) -> v)
+        @test bind_domain(Widget("freeform", "")) === nothing
+        # A domain function that throws must not take the export down with it.
+        register_kind!("brittle"; domain = _ -> error("boom"))
+        @test bind_domain(Widget("brittle", 0)) === nothing
+        # A domain was usable as a bare RANGE long before it was enumerable: coercion only clamps
+        # or tests membership, so a kind may answer with something vast and have paid nothing for
+        # it. The cap is applied before the range is materialised, not after.
+        register_kind!("huge"; domain = _ -> 0:10^9)
+        @test bind_domain(Widget("huge", 0)) === nothing
+        @test coerce_bind(Widget("huge", 0), 10^8) == 10^8          # …and it still coerces lazily
+        register_kind!("lazyinfinite"; domain = _ -> Iterators.countfrom(1))
+        @test bind_domain(Widget("lazyinfinite", 1)) === nothing     # no length → refused, not hung
     end
 
     @testset "WebPage rendering" begin

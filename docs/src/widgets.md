@@ -92,9 +92,9 @@ cell's output, and committing replaces that output, so a mid-drag commit would p
 from under the gesture. It also means dragging out a box orders one recompute, not one per frame.
 
 `snap` quantises the value to a grid measured from the axis floor. Aside from keeping long floats
-out of a readout, it is what a [static export](replay.md) would need to precompute a pick's
-positions; without it the value is continuous. Today a pick is **live-only** either way — see
-[Replayable exports](replay.md).
+out of a readout, it is what makes a `PickPoint` work in a [static export](replay.md): a finite grid
+can be precomputed, so a click on an offline page lands on a position the export already has an
+answer for. Without it the value is continuous and the pick is live-only.
 
 Pair a pick with [`hidden`](#Controls-drawn-somewhere-else) when the figure is the only control you
 want on screen; otherwise the control strip shows a readout of the current value, since there is
