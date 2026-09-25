@@ -280,6 +280,10 @@ answer is never implied by the notebook, because a single notebook can be steppi
 code on a compute node while the rest of it runs locally.
 """
 function _debug_json(nb::LiveNotebook, st, side::AbstractString)
+    # A frame stopped in a cell's code counts as having looked at that cell. Stepping into a
+    # function defined upstream is how an investigation usually reaches the cell that produced a
+    # value, so the session's own cell is not the only one that counts.
+    startswith(st.file, "cell:") && note_cells_seen!(nb, [chopprefix(String(st.file), "cell:")])
     src, first = String(st.source), Int(st.srcfirst)
     if isempty(src)
         cs = _cell_source(nb, st.file)

@@ -48,6 +48,15 @@ current_agent_id() = nothing
                   global total += i
               end
               total
+
+              #%% code id=helper
+              function bump(x)
+                  y = x + 1
+                  return y
+              end
+
+              #%% code id=use
+              bumped = bump(total)
               """)
         nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
 
@@ -310,6 +319,20 @@ current_agent_id() = nothing
             @test NS.done_warned(nb)
             NS.reset_cells_seen!(nb, ["drive"])                  # a new investigation, a fresh warning
             @test !NS.done_warned(nb)
+        end
+
+        @testset "stepping into an upstream cell's code counts as looking at it" begin
+            NS.reset_cells_seen!(nb)
+            @test Set(NS.unread_upstream(nb, "use")) == Set(["drive", "helper"])
+            NS.start_debug!(nb, "use"; by = NS.HUMAN)
+            try
+                st = NS.step_debug!(nb, "into")
+                @test st["file"] == "cell:helper"
+                # `helper` was stepped; `drive` was only a value passed in, and still counts as unread.
+                @test NS.unread_upstream(nb, "use") == ["drive"]
+            finally
+                NS.stop_debug!(nb; by = NS.HUMAN)
+            end
         end
 
         @testset "a tool that waits on a person outlasts the ask" begin
