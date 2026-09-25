@@ -116,7 +116,9 @@ pick_on!(:hit, figA, axA)
 figA
 
 #%% web id=acc_selfcheck
-@web(html"""<div id="chk"></div>""",
+@web(html"""
+<div id="chk"></div>
+""",
 css"""
 #chk { font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px 11px;
        border-radius: 8px; background: rgba(255,255,255,.04); border-left: 3px solid var(--dim); }
@@ -132,16 +134,19 @@ js"""
 // Re-measured on zoom, resize and scroll, so the number is live while you change the view.
 const el = root.querySelector('#chk');
 
+// The page's cell state, which carries each cell's `picks` (bind, rect, xlim/ylim, scales).
+const slateState = () => window.__slateState || window.nbState || null;
+
 function measure() {
   const rows = [];
   let worst = 0;
+  const cells = (slateState()?.cells) || [];
   for (const cell of document.querySelectorAll('.cell')) {
     const img = cell.querySelector('.output img');
     const ovs = cell.querySelectorAll('.pickovl');
     if (!img || !ovs.length) continue;
     const ib = img.getBoundingClientRect();
-    const picks = ((window.nbState && window.nbState.cells) || [])
-      .find(c => 'cell-' + c.id === cell.id)?.picks || [];
+    const picks = cells.find(c => 'cell-' + c.id === cell.id)?.picks || [];
     ovs.forEach((ov, i) => {
       const p = picks[i]; if (!p || !p.rect) return;
       const ob = ov.getBoundingClientRect();
@@ -162,11 +167,25 @@ function measure() {
                  rows.map(r => `<div class="row">${r}</div>`).join('');
 }
 
-measure();
-// Zoom fires `resize`; scroll moves the boxes; a re-render swaps the overlays out.
-addEventListener('resize', measure);
-addEventListener('scroll', measure, true);
-const mo = new MutationObserver(() => measure());
+// Coalesce to one measure per frame. Scroll and a re-render both fire in bursts, and measuring
+// reads layout for every overlay on the page.
+let queued = false;
+const schedule = () => {
+  if (queued) return;
+  queued = true;
+  requestAnimationFrame(() => { queued = false; measure(); });
+};
+
+schedule();
+addEventListener('resize', schedule);
+addEventListener('scroll', schedule, true);
+// Watch the page for re-renders that swap overlays out — but IGNORE the mutations this cell makes
+// itself. Writing the report is a DOM change inside `el`, so re-measuring on it would rewrite it
+// and measure again: a loop with nothing to break it, which hangs the tab the moment it renders.
+const mo = new MutationObserver(recs => {
+  if (recs.every(r => el === r.target || el.contains(r.target))) return;
+  schedule();
+});
 mo.observe(document.body, { childList: true, subtree: true });
 """)
 
