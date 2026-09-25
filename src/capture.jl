@@ -809,6 +809,10 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
     return (; region   = isempty(region) ? nothing : Symbol(region),
               notebook = String(notebook),
               docid    = String(docid),
+              # The notebook's directory and the cell being evaluated, read when asked: a package that
+              # records where a result came from (an experiment tracker) needs both.
+              dir      = () -> (_ns_defined(mod, :__slate_nbdir) ? String(_ns_read(mod, :__slate_nbdir)()) : ""),
+              cell     = () -> String(get(task_local_storage(), :slate_cell, "")),
               side     = String(region),
               emit     = emit,
               regions  = Symbol[Symbol(r) for r in regions],
