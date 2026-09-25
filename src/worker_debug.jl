@@ -884,7 +884,9 @@ function _advance!(s::_DebugSession, cmd::Symbol; max_micro::Int = 500)
         if ret === nothing
             # This top-level thunk is done; move to the next statement in the cell. Its writes
             # have landed now, which is what makes them this session's rather than last run's.
-            s.result = try; ji.get_return(s.frame); catch; nothing; end
+            # From the root: `s.frame` is still whichever callee the session last stood in, and its
+            # return value is not the statement's.
+            s.result = try; ji.get_return(ji.root(s.frame)); catch; nothing; end
             union!(s.assigned, s.current_writes)
             _next_thunk!(s)
             return

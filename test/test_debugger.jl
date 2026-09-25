@@ -142,6 +142,14 @@ end
         @test st.error === nothing
         @test only(b.repr for b in st.bindings if b.name == "b") == "5"
         RE.debug_stop!()
+
+        # Continuing from inside a callee still reports the cell's value, not the callee's.
+        RE.debug_start!(Sandbox; cell = "c5", source = "outer(3) * 10\n")
+        step!("into")
+        st = step!("continue")
+        @test st.finished && st.error === nothing
+        @test st.result.repr == "70"
+        RE.debug_stop!()
     end
 
     @testset "refusals keep the shape" begin
