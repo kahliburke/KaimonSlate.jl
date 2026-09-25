@@ -511,9 +511,22 @@ _pick_xy(d, fallback) =
 
 # The candidate set as the wire carries it. Built once for both constructors that take one, so a
 # point and a path cannot disagree about the shape the coercion reads.
-_snapto_params(snapto) =
-    snapto === nothing ? Dict{String,Any}() :
-    Dict{String,Any}("snapto" => Any[Any[float(q[1]), float(q[2])] for q in snapto])
+function _snapto_params(snapto)
+    snapto === nothing && return Dict{String,Any}()
+    out = Any[]
+    for (i, q) in enumerate(snapto)
+        # Checked HERE, where the author is, and named by position. `_pick_targets` skips a
+        # malformed candidate because it reads whatever the wire sent; a list written in a cell is
+        # different — a typo'd station that quietly vanished from the set is found out about much
+        # later, by which time the missing choice looks like a bug in picking.
+        ok = try; length(q) == 2 && all(x -> x isa Number && isfinite(x), (q[1], q[2])); catch; false; end
+        ok || throw(ArgumentError(
+            "snapto[$i] is $(repr(q)); each candidate must be two finite numbers, e.g. (x, y)."))
+        push!(out, Any[float(q[1]), float(q[2])])
+    end
+    isempty(out) && throw(ArgumentError("snapto is empty — give at least one candidate, or omit it."))
+    return Dict{String,Any}("snapto" => out)
+end
 
 function _pick(mode::AbstractString, default, snap, label, extra)
     p = merge(_wparams(label), Dict{String,Any}("mode" => mode, "snap" => float(snap)), extra)
@@ -933,13 +946,47 @@ function _register_builtin_kinds!()
     # different questions — "anywhere, to this precision" against "one of these" — and the second
     # has no radius to miss, so a click always resolves to a real candidate. Given both, the
     # candidate set wins: it is the more specific statement of what the reader may choose.
-    _pick_nearest(ts, x, y) = ts[argmin([(x - t[1])^2 + (y - t[2])^2 for t in ts])]
+    #
+    # "Nearest" is measured ACROSS THE AXIS, not in data units. Raw `(x-tx)² + (y-ty)²` is
+    # meaningless when the two axes carry different quantities: on the log section of the pick
+    # example, x spans 1…10000 against y's 0…1, so the x term swamps the y term entirely and the
+    # candidate chosen is not the one under the cursor. Both coordinates go through the axis's own
+    # scale first and are then divided by its span, which is the position the reader is looking at.
+    # The browser's hover highlight computes the same fraction, so the lit candidate and the
+    # committed one cannot disagree.
+    _pick_fwd(scale, v) = begin
+        s = String(scale)
+        s == "log10" ? (v > 0 ? log10(v) : -Inf) :
+        s == "ln"    ? (v > 0 ? log(v)   : -Inf) :
+        s == "log2"  ? (v > 0 ? log2(v)  : -Inf) :
+        s == "sqrt"  ? (v >= 0 ? sqrt(v) : -Inf) : float(v)
+    end
+    # Position across one axis, 0..1. No calibration yet (or a degenerate span) ⇒ the raw value, so
+    # an uncalibrated control still picks something sensible instead of dividing by zero.
+    _pick_frac(w, v, key, scalekey) = begin
+        lim = _pick_lim(w, key)
+        lim === nothing && return float(v)
+        sc = get(w.params, scalekey, "linear")
+        a, b = _pick_fwd(sc, lim[1]), _pick_fwd(sc, lim[2])
+        (isfinite(a) && isfinite(b) && b != a) || return float(v)
+        f = _pick_fwd(sc, float(v))
+        isfinite(f) ? (f - a) / (b - a) : 0.0
+    end
+    _pick_nearest(w, ts, x, y) = begin
+        fx, fy = _pick_frac(w, x, "xlim", "xscale"), _pick_frac(w, y, "ylim", "yscale")
+        ts[argmin([(fx - _pick_frac(w, t[1], "xlim", "xscale"))^2 +
+                   (fy - _pick_frac(w, t[2], "ylim", "yscale"))^2 for t in ts])]
+    end
     _pick_pt(w, q) = begin
         q = _wire_seq(q)
         (q isa AbstractVector && length(q) == 2 && all(_pick_num, q)) || return nothing
         ts = _pick_targets(w)
+        # A candidate is returned AS GIVEN, without the axis clamp the other paths apply. The
+        # author named this point, so moving it to the axis edge would hand back a coordinate that
+        # is in no sense what they listed. A candidate outside the current limits is simply one the
+        # reader cannot reach by clicking, which is the author's business, not a value to rewrite.
         ts === nothing ||
-            return copy(_pick_nearest(ts, float(q[1]), float(q[2])))
+            return copy(_pick_nearest(w, ts, float(q[1]), float(q[2])))
         Any[_pick_snap(w, q[1], _pick_lim(w, "xlim")), _pick_snap(w, q[2], _pick_lim(w, "ylim"))]
     end
     function _pick_coerce(w, v)

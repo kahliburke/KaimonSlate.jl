@@ -817,3 +817,54 @@ end
         end
     end
 end
+
+# "Nearest" has to mean nearest ON SCREEN. Raw data distance is meaningless when the axes carry
+# different quantities, and the browser's hover highlight measures the same way, so a mismatch here
+# would light one candidate and commit another.
+@testset "Pick: snapto measures across the axis, not in data units" begin
+    targets = [(10.0, 0.9), (5000.0, 0.1)]
+    w = RE.PickPoint(; snapto = targets)
+    w.params["xlim"] = Any[1.0, 10000.0]; w.params["xscale"] = "log10"
+    w.params["ylim"] = Any[0.0, 1.0];     w.params["yscale"] = "linear"
+
+    # At screen (0.87, 0.85): (10, 0.9) sits at (0.25, 0.9) and is 0.62 away; (5000, 0.1) sits at
+    # (0.92, 0.1) and is 0.75 away. Data distance ranks them the other way round, because x spans
+    # four orders of magnitude and y spans one unit.
+    q = Any[3000.0, 0.85]
+    @test RE.coerce_bind(w, q) == Any[10.0, 0.9]
+    @test argmin([(q[1] - t[1])^2 + (q[2] - t[2])^2 for t in targets]) == 2   # …data distance disagrees
+
+    @testset "a log axis is measured where its ticks are" begin
+        lg = RE.PickPoint(; snapto = [(10.0, 0.5), (1000.0, 0.5)])
+        lg.params["xlim"] = Any[1.0, 10000.0]; lg.params["xscale"] = "log10"
+        lg.params["ylim"] = Any[0.0, 1.0];     lg.params["yscale"] = "linear"
+        # 100 is the midpoint BETWEEN 10 and 1000 on a log axis, so either is admissible; 90 is
+        # decisively nearer 10 in log space and decisively nearer 1000 in linear space.
+        @test RE.coerce_bind(lg, Any[90.0, 0.5]) == Any[10.0, 0.5]
+    end
+
+    @testset "uncalibrated still picks something" begin
+        u = RE.PickPoint(; snapto = targets)          # no xlim/ylim yet — pick_on! has not run
+        @test RE.coerce_bind(u, Any[9.0, 0.9]) in (Any[10.0, 0.9], Any[5000.0, 0.1])
+    end
+end
+
+# A candidate is returned as the author wrote it. The other coercion paths clamp into the axis, and
+# this one deliberately does not: moving a named point to the axis edge would hand back a
+# coordinate that is not in the list at all.
+@testset "Pick: a candidate outside the axis is returned unclamped" begin
+    w = RE.PickPoint(; snapto = [(0.0, 0.0), (99.0, 99.0)])
+    w.params["xlim"] = Any[-1.0, 1.0]; w.params["ylim"] = Any[-1.0, 1.0]
+    @test RE.coerce_bind(w, Any[80.0, 80.0]) == Any[99.0, 99.0]
+    @test Any[99.0, 99.0] in RE.bind_domain(w)      # …and the domain agrees it is reachable
+end
+
+# The set comes from the author, not the wire, so a typo is an error at construction rather than a
+# candidate that silently vanishes and is missed much later.
+@testset "Pick: a malformed snapto is refused where it is written" begin
+    @test_throws ArgumentError RE.PickPoint(; snapto = [(1.0, 2.0), (3.0,)])
+    @test_throws ArgumentError RE.PickPoint(; snapto = [(1.0, 2.0), ("x", 4.0)])
+    @test_throws ArgumentError RE.PickPoint(; snapto = [(1.0, NaN)])
+    @test_throws ArgumentError RE.PickPoint(; snapto = [])
+    @test_throws ArgumentError RE.PickPath(; n = 2, snapto = [(1.0, 2.0), (3.0,)])
+end

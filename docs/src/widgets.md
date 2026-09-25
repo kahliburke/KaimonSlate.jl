@@ -120,6 +120,13 @@ and has to be checked against the replay cap. `PickPath` takes `snapto` too, cho
 points from the set; `PickRegion` does not, because "nearest candidate" for a box is a different
 operation than for a point.
 
+Two details worth knowing. "Nearest" is measured **across the axis**, through its own scale, not in
+data units — on a log x spanning `1…10000` against a y of `0…1`, raw distance would be decided
+entirely by x and the candidate chosen would not be the one under the cursor. And a candidate is
+returned **exactly as written**, without the clamp the other paths apply: you named the point, so a
+value outside the current limits is one the reader cannot click rather than one to be rewritten. A
+malformed candidate is an error where you wrote it, not a silent omission from the set.
+
 Pair a pick with [`hidden`](#Controls-drawn-somewhere-else) when the figure is the only control you
 want on screen; otherwise the control strip shows a readout of the current value, since there is
 nothing to drag there.

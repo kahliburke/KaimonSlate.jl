@@ -747,10 +747,23 @@ function mountPicks(c, cell) {
     // where they pressed and the value jumps somewhere else, which reads as the pick missing.
     const targets = (spec.params && Array.isArray(spec.params.snapto) && spec.params.snapto.length)
       ? spec.params.snapto : null;
+    // Nearest ACROSS THE AXIS, not in data units — and by the same measure the server coerces with
+    // (`_pick_nearest`), or the lit candidate and the committed one could differ. Raw data distance
+    // is meaningless when the axes carry different quantities: on a log x of 1…10000 against a y of
+    // 0…1 the x term swamps the y term and the highlight lands on the wrong candidate.
+    const _fwd = s => (_pickFwd[s] || _pickFwd.linear);
+    const fracOf = (d, lim, scale) => {
+      const f = _fwd(scale), a = f(lim[0]), b = f(lim[1]);
+      if (!isFinite(a) || !isFinite(b) || b === a) return 0;
+      const v = f(d);
+      return isFinite(v) ? (v - a) / (b - a) : 0;
+    };
     const nearestTarget = q => {
+      const qx = fracOf(q[0], p.xlim, p.xscale), qy = fracOf(q[1], p.ylim, p.yscale);
       let best = null, bd = Infinity;
       for (const t of targets) {
-        const d = (q[0] - t[0]) ** 2 + (q[1] - t[1]) ** 2;
+        const d = (qx - fracOf(t[0], p.xlim, p.xscale)) ** 2 +
+                  (qy - fracOf(t[1], p.ylim, p.yscale)) ** 2;
         if (d < bd) { bd = d; best = t; }
       }
       return best;
