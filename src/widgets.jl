@@ -509,15 +509,28 @@ _pick_xy(d, fallback) =
     d isa NamedTuple ? Any[float(d.x), float(d.y)] :
     Any[float(first(d)), float(last(d))]
 
+# The candidate set as the wire carries it. Built once for both constructors that take one, so a
+# point and a path cannot disagree about the shape the coercion reads.
+_snapto_params(snapto) =
+    snapto === nothing ? Dict{String,Any}() :
+    Dict{String,Any}("snapto" => Any[Any[float(q[1]), float(q[2])] for q in snapto])
+
 function _pick(mode::AbstractString, default, snap, label, extra)
     p = merge(_wparams(label), Dict{String,Any}("mode" => mode, "snap" => float(snap)), extra)
     return Widget("pick", p, default)
 end
 
 """
-    PickPoint(; default=(0,0), snap=0, label=nothing) -> Widget
+    PickPoint(; default=(0,0), snap=0, snapto=nothing, label=nothing) -> Widget
 
 Pick a point by clicking (or dragging) on a figure, binding `(x, y)` in DATA coordinates.
+
+`snap` and `snapto` answer different questions. `snap` quantises to a lattice, for a continuous
+quantity read to a given precision. `snapto` names the points that may be chosen and takes the
+NEAREST one, so a click always lands on a real candidate instead of on whichever lattice point
+happens to be closest. Given both, `snapto` wins, being the more specific statement of the choice.
+
+    @bind sensor PickPoint(; snapto = [(s.x, s.y) for s in stations])
 
 Attach it to an axis with [`pick_on!`](@ref) from the cell that builds the figure — the control is
 declared first and calibrated after, because a figure that draws the pick reads the bind:
@@ -535,8 +548,8 @@ fig
 control but nothing downstream can react to it. Snapping makes the domain a grid, which `@replay`
 can enumerate and precompute — so a snapped pick keeps working with no kernel.
 """
-PickPoint(; default = (0.0, 0.0), snap = 0, label = nothing) =
-    _pick("point", _pick_xy(default, Any[0.0, 0.0]), snap, label, Dict{String,Any}())
+PickPoint(; default = (0.0, 0.0), snap = 0, snapto = nothing, label = nothing) =
+    _pick("point", _pick_xy(default, Any[0.0, 0.0]), snap, label, _snapto_params(snapto))
 
 """
     PickRegion(; default=nothing, snap=0, label=nothing) -> Widget
@@ -560,9 +573,9 @@ The length is FIXED at `n`: the reader's clicks fill the path and the next one s
 variable-length path would be a value whose shape changes under the reader, which neither the
 coercion contract nor a static export's domain can express. Attach it with [`pick_on!`](@ref).
 """
-PickPath(; n::Integer = 3, default = nothing, snap = 0, label = nothing) =
+PickPath(; n::Integer = 3, default = nothing, snap = 0, snapto = nothing, label = nothing) =
     _pick("path", default === nothing ? Any[] : Any[Any[float(q[1]), float(q[2])] for q in default],
-          snap, label, Dict{String,Any}("n" => Int(n)))
+          snap, label, merge(Dict{String,Any}("n" => Int(n)), _snapto_params(snapto)))
 
 # Makie's scale functions, as names the browser can invert. An unrecognised scale is an ERROR
 # rather than a silent fallback to linear: a mis-mapped axis returns plausible wrong coordinates,
@@ -648,6 +661,13 @@ scatter!(ax, [p.x], [p.y])
 pick_on!(:p, fig, ax)
 fig
 ```
+
+CALL IT LAST. It measures where the axis IS, so anything that changes the layout afterwards — a
+title, an axis label, a legend, another plot in the figure — moves the axis out from under that
+measurement, and every click then lands offset by however far it shifted. That failure is silent:
+the control still returns coordinates in range, they are just the wrong ones. A title that reports
+the picked value is the trap worth naming, because it changes the layout on every pick; put that
+readout in a markdown cell below the figure instead.
 """
 function pick_on!(name::Symbol, figure, axis)
     _slate_effect(:pick; names = [name], calibration = axis_calibration(figure, axis))
@@ -897,9 +917,29 @@ function _register_builtin_kinds!()
     # would reach a cell as a coordinate and break whatever it is plotted into, far from here.
     # `Inf` needs no special case — it clamps to the axis edge like any out-of-range value.
     _pick_num(x) = x isa Number && !isnan(x)
+    # The candidate set for `snapto`, as `[[x, y], …]`, or `nothing` when the control has none.
+    _pick_targets(w) = begin
+        t = get(w.params, "snapto", nothing)
+        (t isa AbstractVector && !isempty(t)) || return nothing
+        out = Any[]
+        for q in t
+            p = _wire_seq(q)
+            (p isa AbstractVector && length(p) == 2 && all(_pick_num, p)) || continue
+            push!(out, Any[float(p[1]), float(p[2])])
+        end
+        isempty(out) ? nothing : out
+    end
+    # `snap` quantises to a lattice; `snapto` chooses the NEAREST of a given set. They answer
+    # different questions — "anywhere, to this precision" against "one of these" — and the second
+    # has no radius to miss, so a click always resolves to a real candidate. Given both, the
+    # candidate set wins: it is the more specific statement of what the reader may choose.
+    _pick_nearest(ts, x, y) = ts[argmin([(x - t[1])^2 + (y - t[2])^2 for t in ts])]
     _pick_pt(w, q) = begin
         q = _wire_seq(q)
         (q isa AbstractVector && length(q) == 2 && all(_pick_num, q)) || return nothing
+        ts = _pick_targets(w)
+        ts === nothing ||
+            return copy(_pick_nearest(ts, float(q[1]), float(q[2])))
         Any[_pick_snap(w, q[1], _pick_lim(w, "xlim")), _pick_snap(w, q[2], _pick_lim(w, "ylim"))]
     end
     function _pick_coerce(w, v)
@@ -943,6 +983,11 @@ function _register_builtin_kinds!()
     end
     function _pick_domain(w)
         String(get(w.params, "mode", "point")) == "point" || return nothing
+        # A candidate set IS the domain — exactly, with no grid to build and no cap to check
+        # against, which is the other reason to prefer it when the choices are known.
+        ts = _pick_targets(w)
+        ts === nothing || return length(ts) > SlateExtensionsBase.REPLAY_DOMAIN_CAP ? nothing :
+                                 Any[copy(t) for t in ts]
         st = get(w.params, "snap", 0)
         (st isa Real && st > 0) || return nothing
         gx = _pick_axis_grid(w, "xlim", float(st)); gy = _pick_axis_grid(w, "ylim", float(st))

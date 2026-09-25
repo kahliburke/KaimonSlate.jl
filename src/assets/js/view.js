@@ -661,7 +661,10 @@ function mountPicks(c, cell) {
     // Dragging re-renders the figure on every commit, which lands right back here. Rebuilding the
     // overlay then would tear down the node holding the pointer capture and the drag would die
     // after one step — so an overlay whose geometry is unchanged is KEPT and merely redrawn.
-    const key = JSON.stringify([p.bind, p.rect, p.xlim, p.ylim, p.xscale, p.yscale]);
+    // The candidate set is part of what the overlay DRAWS, so a change to it has to rebuild the
+    // overlay rather than be kept and merely redrawn against a stale set.
+    const key = JSON.stringify([p.bind, p.rect, p.xlim, p.ylim, p.xscale, p.yscale,
+                                (spec.params || {}).snapto || null]);
     const existing = keyed[key];
     if (existing) {
       delete keyed[key];
@@ -739,9 +742,37 @@ function mountPicks(c, cell) {
       for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
     // Draw from the CONTROL's value, not from the pointer — so the marker shows what the notebook
     // actually holds, and moving the bind another way (a slider, set_bind) moves it too.
+    // A `snapto` control may only take the values in its candidate set, so the set is what the
+    // reader is actually choosing between and has to be visible. Without it the crosshair lands
+    // where they pressed and the value jumps somewhere else, which reads as the pick missing.
+    const targets = (spec.params && Array.isArray(spec.params.snapto) && spec.params.snapto.length)
+      ? spec.params.snapto : null;
+    const nearestTarget = q => {
+      let best = null, bd = Infinity;
+      for (const t of targets) {
+        const d = (q[0] - t[0]) ** 2 + (q[1] - t[1]) ** 2;
+        if (d < bd) { bd = d; best = t; }
+      }
+      return best;
+    };
+    // `hover` is the candidate under the pointer, lit so the reader can see where a click will go
+    // BEFORE committing. Null when the pointer is outside the axis.
+    let hover = null;
+
     const draw = v => {
       svg.replaceChildren();
       const line = (x1, y1, x2, y2) => mk('line', { x1, y1, x2, y2, stroke: '#ffcd3c', 'stroke-width': 1.5 });
+      if (targets) {
+        const chosen = Array.isArray(v) && v.length === 2 ? v : null;
+        for (const t of targets) {
+          const lit = hover && hover[0] === t[0] && hover[1] === t[1];
+          const on  = chosen && chosen[0] === t[0] && chosen[1] === t[1];
+          svg.append(mk('circle', { cx: px(t[0]), cy: py(t[1]), r: lit ? 6 : 4,
+            fill: on ? '#ffcd3c' : (lit ? 'rgba(255,205,60,.35)' : 'none'),
+            stroke: '#ffcd3c', 'stroke-width': lit || on ? 1.5 : 1,
+            opacity: on || lit ? 1 : 0.45 }));
+        }
+      }
       if (mode === 'point' && Array.isArray(v) && v.length === 2) {
         const x = px(v[0]), y = py(v[1]);
         svg.append(line(x - 9, y, x + 9, y), line(x, y - 9, x, y + 9),
@@ -764,6 +795,8 @@ function mountPicks(c, cell) {
     ov._refresh = refresh;                       // a kept overlay is redrawn through this
     refresh();
     if (window.ResizeObserver) { const ro = new ResizeObserver(() => refresh()); ro.observe(img); ov._ro = ro; }
+    // Leaving the overlay must drop the lit candidate, or it stays lit pointing at nothing.
+    ov.addEventListener('pointerleave', () => { if (hover !== null) { hover = null; refresh(); } });
     img.addEventListener('load', () => refresh());
 
     // `anchor` is the gesture's fixed corner; `staged` is what release will commit; `dragging` says
@@ -794,6 +827,15 @@ function mountPicks(c, cell) {
       refresh(staged);                                             // drawn locally, nothing sent
     });
     ov.addEventListener('pointermove', ev => {
+      // Light the candidate a click would choose, whether or not a drag is in progress — this is
+      // the only cue that says where the value will land before it lands there.
+      if (targets) {
+        const q0 = at(ev);
+        const h = q0 === null ? null : nearestTarget(q0);
+        const changed = (h === null) !== (hover === null) ||
+                        (h && hover && (h[0] !== hover[0] || h[1] !== hover[1]));
+        if (changed) { hover = h; if (!dragging) refresh(); }
+      }
       if (!dragging) return;
       const q = at(ev);
       if (q === null) return;

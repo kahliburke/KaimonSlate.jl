@@ -32,9 +32,9 @@ lines(1:n, sin.(range(0, 4π, n)))
 | `FileUpload(; accept, maxbytes)` | file picker / drop target | `UploadedFile`, or `nothing` until something is uploaded |
 | `Button(label)` | action button | click count |
 | `TableSelect(data)` | clickable [table](tables.md) | clicked row as a `NamedTuple` (or `nothing`) |
-| `PickPoint(; snap)` | a click target on a figure (driven) | `(x, y)` NamedTuple in data coordinates |
+| `PickPoint(; snap, snapto)` | a click target on a figure (driven) | `(x, y)` NamedTuple in data coordinates |
 | `PickRegion(; snap)` | drag a box on a figure (driven) | `(xlo, xhi, ylo, yhi)` NamedTuple |
-| `PickPath(; n, snap)` | click `n` points on a figure (driven) | `Vector` of `(x, y)` |
+| `PickPath(; n, snap, snapto)` | click `n` points on a figure (driven) | `Vector` of `(x, y)` |
 | `playhead(anim)` | [animation](animation.md) player (driven) | current frame index |
 
 `RangeSlider` binds one interval rather than two numbers, so the reader cannot cross the ends:
@@ -103,6 +103,22 @@ from under the gesture. It also means dragging out a box orders one recompute, n
 out of a readout, it is what makes a `PickPoint` work in a [static export](replay.md): a finite grid
 can be precomputed, so a click on an offline page lands on a position the export already has an
 answer for. Without it the value is continuous and the pick is live-only.
+
+`snapto` answers a different question. Where `snap` says "anywhere, to this precision", `snapto`
+names the points that may be chosen and takes the nearest, so a click always resolves to a real
+candidate however far away it was pressed — there is no radius to miss. The candidates are drawn on
+the figure and the one under the pointer lights up, so the reader can see where a click will land
+before committing to it. Given both, `snapto` wins, being the more specific statement of the choice.
+
+```julia
+@bind sensor PickPoint(; snapto = [(s.x, s.y) for s in stations])
+```
+
+It is also the better shape for a [static export](replay.md): the domain *is* the candidate set, so
+five stations are five entries, where the equivalent `snap = 0.25` grid over the same axis is 625
+and has to be checked against the replay cap. `PickPath` takes `snapto` too, choosing each of its
+points from the set; `PickRegion` does not, because "nearest candidate" for a box is a different
+operation than for a point.
 
 Pair a pick with [`hidden`](#Controls-drawn-somewhere-else) when the figure is the only control you
 want on screen; otherwise the control strip shows a readout of the current value, since there is

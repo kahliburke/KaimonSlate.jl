@@ -773,3 +773,47 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
     end
 
 end
+
+# `snap` quantises to a lattice; `snapto` chooses the nearest of a named set. The second has no
+# radius to miss — a click anywhere resolves to a real candidate — and its domain is the set
+# itself, which is what a static export needs and what a lattice can only approximate.
+@testset "Pick: snapto takes the nearest candidate" begin
+    targets = [(-2.0, -2.0), (0.0, 0.0), (2.0, 2.0), (2.0, -2.0), (-2.0, 2.0)]
+    w = RE.PickPoint(; snapto = targets)
+    w.params["xlim"] = Any[-3.0, 3.0]; w.params["ylim"] = Any[-3.0, 3.0]
+
+    @test RE.coerce_bind(w, Any[1.4, 1.6])   == Any[2.0, 2.0]
+    @test RE.coerce_bind(w, Any[-0.3, 0.2])  == Any[0.0, 0.0]
+    # Far outside the candidates, and outside the axis: still a candidate, never a lattice point.
+    @test RE.coerce_bind(w, Any[99.0, -99.0]) == Any[2.0, -2.0]
+
+    @testset "the domain IS the candidate set" begin
+        d = RE.bind_domain(w)
+        @test length(d) == length(targets)
+        @test all(t -> Any[t[1], t[2]] in d, targets)
+        # An export matches a live control against its precomputed column with `isequal`, so every
+        # value the control can take has to BE in the domain, bit for bit.
+        for q in ([1.4, 1.6], [-0.3, 0.2], [99.0, -99.0], [-1.9, 2.1])
+            v = RE.coerce_bind(w, Any[q...])
+            @test v in d
+            @test RE.coerce_bind(w, v) == v          # idempotent
+        end
+    end
+
+    @testset "snapto wins over snap, and snap still works alone" begin
+        both = RE.PickPoint(; snap = 0.25, snapto = targets)
+        both.params["xlim"] = Any[-3.0, 3.0]; both.params["ylim"] = Any[-3.0, 3.0]
+        @test RE.coerce_bind(both, Any[1.4, 1.6]) == Any[2.0, 2.0]   # not the 0.25 lattice
+        g = RE.PickPoint(; snap = 0.25)
+        g.params["xlim"] = Any[-3.0, 3.0]; g.params["ylim"] = Any[-3.0, 3.0]
+        @test RE.coerce_bind(g, Any[1.03, -0.98]) == Any[1.0, -1.0]
+    end
+
+    @testset "an empty or malformed set is no set at all" begin
+        for bad in (Any[], Any[Any[1.0]], Any["x"])
+            b = RE.PickPoint(); b.params["snapto"] = bad
+            b.params["xlim"] = Any[-3.0, 3.0]; b.params["ylim"] = Any[-3.0, 3.0]
+            @test RE.coerce_bind(b, Any[1.4, 1.6]) == Any[1.4, 1.6]   # falls through to plain
+        end
+    end
+end
