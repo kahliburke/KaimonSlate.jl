@@ -92,6 +92,7 @@ include(joinpath(@__DIR__, "demux.jl"))     # task-demux output capture (paralle
 include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_scheduled — parallel batch scheduler
 include(joinpath(@__DIR__, "macroexpand.jl")) # _expand_cell_source — macro-aware deps (engine + worker)
 include(joinpath(@__DIR__, "termcook.jl"))  # cook_terminal — replay \r/cursor redraws (used by capture.jl)
+include(joinpath(@__DIR__, "record_display.jl")) # record_html — a NamedTuple value as a grid of fields (used by capture.jl)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
 include(joinpath(@__DIR__, "prepare.jl"))   # PrepareTracker — classify precompile output into structured status (shared w/ engine)
@@ -2653,10 +2654,20 @@ function _install_sshop_delegate!()
     return nothing
 end
 
+"""
+Render one field of a cell's remembered record through `slate_matrix` — the SAME renderer a bare
+matrix gets, rather than a second-best made for the grid. The grid's thumbnail is a static picture;
+this is the real thing, so the popup shows an ECharts heatmap or the KaTeX form as the matrix's own
+size and structure warrant. Returns `{kind}` plus whichever payload that kind implies, or `{error}`
+when the cell's value is no longer held (the cache is bounded) or the path names no matrix.
+"""
+__slate_matrix_render(; cell::String = "", field::String = "") = record_matrix_render(cell, field)
+
 function tools()
     return KaimonGate.GateTool[
         KaimonGate.GateTool("__slate_cluster_status", __slate_cluster_status),
         KaimonGate.GateTool("__slate_cluster_forget", __slate_cluster_forget),
+        KaimonGate.GateTool("__slate_matrix_render", __slate_matrix_render),
         KaimonGate.GateTool("__slate_eval", __slate_eval),
         KaimonGate.GateTool("__slate_rerender_fig", __slate_rerender_fig),
         KaimonGate.GateTool("__slate_eval_batch", __slate_eval_batch),

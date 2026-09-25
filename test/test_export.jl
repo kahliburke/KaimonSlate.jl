@@ -247,6 +247,19 @@ end
     @test occursin("ansi-fg-1", html) && occursin("color:#ff8700", html)
     @test occursin(".ansi-fg-1", html) && occursin(".ansi-bold", html)
 
+    # A RECORD (a NamedTuple value) has the same hazard for the same reason: the export sheet is
+    # separate from notebook.css, so a component styled only there exports with correct markup and
+    # nothing to draw it — the field cards collapse into a run of bare text, which looks like a
+    # rendering bug rather than a missing stylesheet. These are the rules that carry the layout.
+    @test occursin(".srec-grid", html) && occursin(".srec-f", html) && occursin(".srec-k", html)
+    @test occursin(".srec-nest", html)          # nested tuples group by a left rule, not a box
+    # The record/plain-text preference is a class on `body`, which is the whole reason it survives
+    # into a static export: no re-render and no round trip, so the toggle works with no kernel.
+    @test occursin("body.record-plain", html) && occursin(".srec-plain", html)
+    # `--val`/`--ovl` are live-sheet colours the export palette doesn't define, so every use has to
+    # carry a fallback or the text renders as the browser's default black on a dark page.
+    @test !occursin("var(--val)", html) && !occursin("var(--ovl)", html)
+
     # The Typst side writes the text to a sidecar file that `#outblock` reads verbatim.
     dir = mktempdir()
     io = IOBuffer()
@@ -1757,4 +1770,26 @@ end
     @test [(r["module"], r["name"]) for r in got] == [("A", "f"), ("B", "f"), ("A", "g")]
     @test got[1]["score"] == 0.9                                 # the best chunk wins, not the first
     @test isempty(NS._best_per_symbol(Dict{String,Any}[]))
+end
+
+# The stylesheet test above proves the RULES ship. This proves the MARKUP does: a record reaches a
+# static export as its grid, so the page a reader downloads shows what the notebook showed. The two
+# fail independently — rules without markup is a blank cell, markup without rules is a run of bare
+# text — so neither test stands in for the other.
+@testset "a record's markup reaches the exported HTML" begin
+    RE = KaimonSlate.ReportEngine
+    rec = RE.record_html((; f0 = 1006.63, nested = (; a = 1), m = [1.0 2.0; 3.0 4.0]))
+    rep = RE.parse_report("#%% md id=t title\n# Rec\n\n#%% code id=c\n(; f0 = 1006.63)\n")
+    rep.cells[end].output = RE.CellOutput(
+        "", RE.MimeChunk[RE.MimeChunk("application/vnd.kaimonslate.html+html", Vector{UInt8}(rec))],
+        Any[], Any[], RE.BindSpec[], "(f0 = 1006.63,)", nothing, nothing, 1.0, Any[], "")
+    nb = NS.LiveNotebook("rec", "/tmp/rectest.jl", rep, RE.InProcessKernel(), 1, String[],
+                         String[], ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                         Dict{String,String}())
+    html = NS.export_html(nb)
+    @test occursin("slate-record", html) && occursin("srec-grid", html)
+    @test occursin("srec-nest", html)        # a nested tuple keeps its group
+    @test occursin("srec-mat-svg", html)     # …and a matrix field its thumbnail
+    # Both renderings travel, which is what lets the plain-text preference work with no kernel.
+    @test occursin("srec-plain", html)
 end

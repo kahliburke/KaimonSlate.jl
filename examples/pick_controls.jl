@@ -1,0 +1,253 @@
+try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+
+#%% md id=intro
+@md"""
+# Pick controls — `PickPoint`, `PickRegion`, `PickPath`
+
+A figure you can click. Each section drives a control by clicking the plot itself instead of
+dragging a slider, and prints the bound value so you can see exactly what arrived.
+
+The control is declared **without** the figure and aimed at an axis afterwards with `pick_on!`.
+That order is forced rather than stylistic: a figure that draws the pick *reads* the bind, so a
+control constructed from the figure would depend on a figure that depends on it.
+
+What each section below is here to exercise:
+
+| | checks |
+|---|---|
+| **1 · point** | the basic click → `(x, y)`, and that `snap` quantises it |
+| **2 · letterboxed** | `DataAspect()`, where the axis is narrower than its layout cell |
+| **3 · log axis** | a log scale maps where the ticks are, not linearly |
+| **4 · two axes** | two independent picks in ONE figure — the rectangle really is per-axis |
+| **5 · region** | drag a box; corners normalise however you drag |
+| **6 · path** | click `n` points; the path fills and then starts over |
+| **7 · refusal** | a `PolarAxis` has no rectangular mapping and must be refused, not guessed |
+"""
+
+#%% code id=setup
+using CairoMakie, Printf, Random
+use_slate_theme!()
+nothing
+
+#%% md id=s1_md
+@md"""
+## 1 · A point, snapped to a grid
+
+`snap = 0.05`, so every click lands on a multiple of 0.05 measured from the axis floor — drag
+around and the readout never shows a long float. Coercion clamps to the axis too, so there is no
+value the figure can produce that is outside it.
+"""
+
+#%% code id=s1
+@bind pt hidden(PickPoint(; default = (0.40, -0.20), snap = 0.05))
+
+gr = range(-2, 2, 200)
+fig1 = Figure(size = (620, 400))
+ax1 = Axis(fig1[1, 1]; title = "click anywhere", xlabel = "x", ylabel = "y")
+heatmap!(ax1, gr, gr, [sin(3x) * cos(3y) for x in gr, y in gr]; colormap = :viridis)
+scatter!(ax1, [pt.x], [pt.y]; color = :gold, markersize = 16,
+         strokecolor = :black, strokewidth = 1.5)
+limits!(ax1, -2, 2, -2, 2)
+pick_on!(:pt, fig1, ax1)
+fig1
+
+#%% md id=s1_out
+@md"""
+`pt` = **({{ pt.x }}, {{ pt.y }})** — a `(x, y)` NamedTuple, so `pt.x` and `pt.y` read by name.
+
+## 2 · A letterboxed axis (`DataAspect`)
+
+The axis below is square but its layout cell is wide, so the plotted area does **not** fill the
+cell. This is the case a hand-rolled overlay gets wrong: the click target has to follow the
+*plotted area*, not the cell. Click near the left and right edges of the dark square — the readout
+should reach exactly ±3, and clicking in the empty margin should do nothing.
+"""
+
+#%% code id=s2
+@bind sq hidden(PickPoint(; default = (0.0, 0.0)))
+
+fig2 = Figure(size = (900, 320))
+ax2 = Axis(fig2[1, 1]; aspect = DataAspect(), title = "square axis in a wide cell",
+           xlabel = "x", ylabel = "y")
+heatmap!(ax2, range(-3, 3, 120), range(-3, 3, 120),
+         [exp(-(x^2 + y^2) / 4) for x in range(-3, 3, 120), y in range(-3, 3, 120)];
+         colormap = :magma)
+scatter!(ax2, [sq.x], [sq.y]; color = :gold, markersize = 16,
+         strokecolor = :black, strokewidth = 1.5)
+limits!(ax2, -3, 3, -3, 3)
+pick_on!(:sq, fig2, ax2)
+fig2
+
+#%% md id=s3_md
+@md"""
+`sq` = **({{ round(sq.x; digits=3) }}, {{ round(sq.y; digits=3) }})** — reaches ±3 at the edges of
+the plotted square, not of the layout cell.
+
+## 3 · A log axis
+
+`x` runs from 1 to 10 000 on a log scale. The mapping is done in scale space, so clicking
+**halfway across** gives ~100 (the geometric middle), not ~5000. That is the check: a linear
+mapping would be plausible and wrong.
+"""
+
+#%% code id=s3
+@bind lg hidden(PickPoint(; default = (100.0, 0.5)))
+
+fig3 = Figure(size = (620, 360))
+ax3 = Axis(fig3[1, 1]; xscale = log10, title = "log x — halfway across is 100",
+           xlabel = "x (log)", ylabel = "y")
+lines!(ax3, 10 .^ range(0, 4, 200), range(0, 1, 200); color = :deepskyblue, linewidth = 2)
+vlines!(ax3, [lg.x]; color = :gold, linewidth = 2)
+scatter!(ax3, [lg.x], [lg.y]; color = :gold, markersize = 15,
+         strokecolor = :black, strokewidth = 1.5)
+limits!(ax3, 1, 10_000, 0, 1)
+pick_on!(:lg, fig3, ax3)
+fig3
+
+#%% md id=s4_md
+@md"""
+`lg.x` = **{{ round(lg.x; digits=1) }}** — click the middle of the axis and this reads ≈100.
+
+## 4 · Two axes, one figure, two independent picks
+
+Both panels live in the same rendered image. Each `pick_on!` describes its own rectangle, so
+clicking the left panel must move only `a` and the right only `b`. If the two ever cross-talk, the
+per-axis rectangle is wrong.
+"""
+
+#%% code id=s4
+@bind a hidden(PickPoint(; default = (-1.0, 1.0), snap = 0.1))
+@bind b hidden(PickPoint(; default = (5.0, 5.0), snap = 0.5))
+
+fig4 = Figure(size = (900, 340))
+axL = Axis(fig4[1, 1]; title = "left — drives `a`  (−2…2)")
+scatter!(axL, [a.x], [a.y]; color = :tomato, markersize = 18)
+limits!(axL, -2, 2, -2, 2)
+
+axR = Axis(fig4[1, 2]; title = "right — drives `b`  (0…10)")
+scatter!(axR, [b.x], [b.y]; color = :deepskyblue, markersize = 18)
+limits!(axR, 0, 10, 0, 10)
+
+pick_on!(:a, fig4, axL)
+pick_on!(:b, fig4, axR)
+fig4
+
+#%% md id=s5_md
+@md"""
+`a` = ({{ a.x }}, {{ a.y }})  ·  `b` = ({{ b.x }}, {{ b.y }}) — each panel moves only its own.
+
+## 5 · A region
+
+Drag a box. Whichever corner you start from, the value comes back normalised, so
+`xlo ≤ xhi` and `ylo ≤ ylh` always hold — drag right-to-left and bottom-to-top and check the
+readout is the same box.
+"""
+
+#%% code id=s5
+@bind box hidden(PickRegion(; default = (-1.0, 1.0, -1.0, 1.0), snap = 0.1))
+
+# Seeded: this cell re-runs on every drag, and unseeded points would jump each time.
+rng = MersenneTwister(20260923)
+pts = [(2randn(rng), 2randn(rng)) for _ in 1:400]
+inside = [p for p in pts if box.xlo <= p[1] <= box.xhi && box.ylo <= p[2] <= box.yhi]
+
+fig5 = Figure(size = (620, 400))
+ax5 = Axis(fig5[1, 1]; title = "drag a box — $(length(inside)) of $(length(pts)) points inside")
+scatter!(ax5, first.(pts), last.(pts); color = (:white, 0.35), markersize = 6)
+isempty(inside) || scatter!(ax5, first.(inside), last.(inside); color = :gold, markersize = 7)
+limits!(ax5, -6, 6, -6, 6)
+pick_on!(:box, fig5, ax5)
+fig5
+
+#%% md id=s6_md
+@md"""
+`box` = xlo **{{ box.xlo }}**, xhi **{{ box.xhi }}**, ylo **{{ box.ylo }}**, yhi **{{ box.yhi }}**
+— normalised however you dragged.
+
+## 6 · A path
+
+Click four points. The path fills up, and the **fifth click starts a new one** rather than leaving
+you with a finished path and no way to draw another. The length is fixed on purpose: a value whose
+arity changes under the reader is one neither the coercion contract nor a static export's domain
+can express.
+"""
+
+#%% code id=s6
+@bind way hidden(PickPath(; n = 4, snap = 0.25))
+
+len = length(way) < 2 ? 0.0 :
+      sum(hypot(way[i+1].x - way[i].x, way[i+1].y - way[i].y) for i in 1:length(way)-1)
+
+fig6 = Figure(size = (620, 400))
+ax6 = Axis(fig6[1, 1];
+           title = @sprintf("%d / 4 points · path length %.2f", length(way), len))
+if !isempty(way)
+    lines!(ax6, [w.x for w in way], [w.y for w in way]; color = :gold, linewidth = 2)
+    scatter!(ax6, [w.x for w in way], [w.y for w in way]; color = :gold, markersize = 11)
+end
+limits!(ax6, -5, 5, -5, 5)
+pick_on!(:way, fig6, ax6)
+fig6
+
+#%% md id=s7_md
+@md"""
+## 7 · What must be refused
+
+A `PolarAxis` has no rectangular pixel→data mapping, so `pick_on!` has to **fail loudly**. This is
+the case worth being strict about: a wrong rectangle doesn't look broken, it returns
+plausible-but-wrong coordinates forever. Same for an axis that has no area yet.
+
+The cell below expects both to throw, and prints what the reader would see.
+"""
+
+#%% code id=s7
+figp = Figure(size = (640, 300))
+axpolar = PolarAxis(figp[1, 1])
+lines!(axpolar, range(0, 2π, 100), fill(1.0, 100); color = :tomato)
+ax3d = Axis3(figp[1, 2])
+scatter!(ax3d, randn(20), randn(20), randn(20))
+Makie.update_state_before_display!(figp)
+
+# `Axis3` is the interesting one: it HAS `finallimits`, just three-dimensional. Silently taking
+# the first two would map a rotated projection as if it were flat — plausible coordinates, quietly
+# wrong. A click on a 3-D scene is a ray, not a point.
+results = String[]
+for (what, ax) in (("PolarAxis", axpolar), ("Axis3", ax3d))
+    push!(results, try
+        axis_calibration(figp, ax)
+        "✗ $what — NOT refused (this is a bug)"
+    catch e
+        "✓ $what → " * first(sprint(showerror, e), 110)
+    end)
+end
+figp
+
+#%% code id=77e4a7
+println(join(results, "\n"))
+length(results)
+
+#%% code id=fb39db hidecode
+using Base64, Dates
+let ffmpeg = "/opt/homebrew/bin/ffmpeg", ffprobe = "/opt/homebrew/bin/ffprobe"
+    dur(p) = try; parse(Float64, strip(read(`$ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 $p`, String))); catch; -1.0; end
+    bufs = Dict{String,IOBuffer}()
+    slate_on("clip_begin", a -> (bufs[String(a.id)] = IOBuffer(); (ok = true)))
+    slate_on("clip_chunk", a -> (write(get!(bufs, String(a.id), IOBuffer()), String(a.data)); (ok = true)))
+    slate_on("clip_end", a -> begin
+        id = String(a.id); mime = String(get(a, :mime, "video/webm"))
+        buf = get(bufs, id, nothing); buf === nothing && return (ok = false, error = "no buffer")
+        b64 = String(take!(buf)); delete!(bufs, id)
+        ext = occursin("mp4", mime) ? "mp4" : "webm"; bytes = base64decode(b64)
+        ts = Dates.format(now(), "yyyymmdd-HHMMSS"); dir = expanduser("~/Downloads")
+        raw = joinpath(dir, "slate-rec-$ts-raw.$ext"); out = joinpath(dir, "slate-rec-$ts.mp4")
+        write(raw, bytes); dr = dur(raw)
+        ok = try; run(`$ffmpeg -y -loglevel error -fflags +genpts -i $raw -c:v libx264 -pix_fmt yuv420p -crf 23 -fps_mode cfr -r 30 -movflags +faststart $out`); true; catch e; @warn e; false; end
+        dout = ok ? dur(out) : -1.0; ok && rm(raw; force = true)
+        (ok = ok, path = (ok ? out : raw), mb = round(length(bytes)/1e6, digits = 1), raw_dur = round(dr, digits = 2), out_dur = round(dout, digits = 2))
+    end)
+end
+"screen-record handlers registered (bookmarklet)"
+
+# ╔═╡ Slate.config · per-notebook settings (Settings panel)
+#   docid = 350705b1-d198-4191-b306-d90c8b4207bd
+# ╚═╡

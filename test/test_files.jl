@@ -400,7 +400,7 @@ const NS = KaimonSlate.NotebookServer
     @testset "expanduser resolves ~ on every platform" begin
         home = homedir()
         for M in (KaimonSlate, KaimonSlate.ReportEngine, KaimonSlate.NotebookServer,
-                  KaimonSlate.SlateHome)
+                  KaimonSlate.SlateHome, KaimonSlate.ReportRender)
             @test M.expanduser("~") == home
             @test M.expanduser("~/notebook.jl") == joinpath(home, "notebook.jl")
             @test M.expanduser("~/a/b.jl") == joinpath(home, "a", "b.jl")

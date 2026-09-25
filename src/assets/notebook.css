@@ -3545,3 +3545,76 @@ body.slate-dragging .logv-body *, body.slate-dragging .swcfg-body * { pointer-ev
 
 .logv-job { color:var(--dim); }
 .logv-pid { color:var(--dim); text-align:right; }
+
+/* a NamedTuple value: its fields as a wrap of small cards, name above value (record_display.jl) */
+.slate-record { margin:4px 0; }
+.srec-grid { display:flex; flex-wrap:wrap; gap:6px; align-items:stretch; }
+/* `flex-start`, not `center`: the cards stretch to the tallest in the row, and centring the
+   contents then drops each header by half of whatever that card is missing, so no two line up. */
+.srec-f { display:flex; flex-direction:column; justify-content:flex-start; gap:0; min-width:0; max-width:100%;
+  padding:0; border-radius:7px; background:var(--bg2); border:1px solid var(--border); overflow:hidden; }
+/* The name is a HEADER, not a caption: it is the click target (→ the source that produced the
+   field), so it needs to look like something you can press and to own a band of its own. */
+.srec-k { display:block; font-size:.66rem; color:var(--dim); letter-spacing:.03em; white-space:nowrap;
+  padding:3px 10px; background:var(--bg); border-bottom:1px solid var(--border); cursor:pointer; }
+.srec-k:hover { color:var(--accent); background:var(--ovl); }
+.srec-f > :not(.srec-k) { margin:5px 10px 6px; }
+.srec-v { font-family:'Cascadia Code',monospace; font-size:.88rem; color:var(--val); white-space:nowrap; font-variant-numeric:tabular-nums; }
+.srec-err { font-size:.74rem; color:var(--dim); }
+.srec-u { margin-left:5px; font-family:var(--font, inherit); font-size:.76rem; color:var(--dim); }
+.srec-bool.yes { color:var(--green); } .srec-bool.no { color:var(--red); }
+.srec-str, .srec-text { color:var(--text); white-space:normal; overflow-wrap:anywhere; font-size:.82rem; }
+.srec-str { font-family:var(--font, inherit); }
+/* A nested NamedTuple needs to read as a CONTAINER without borrowing the cell's own vocabulary.
+   A rounded bordered panel does the first and fails the second: at a glance it is another cell.
+   So grouping is carried by a rule down the left and the indent it creates, which nothing else in
+   a cell uses, and the group's name sits on that rule in the accent colour. */
+.srec-nest { flex-basis:100%; padding:2px 0 3px 10px; border-radius:0;
+  background:transparent; border:none; border-left:2px solid var(--accent); }
+/* A nested group's title keeps the rule's vocabulary rather than the card header's: there is no
+   card to head, and it is still the click target for that sub-tuple. */
+.srec-nest > .srec-k { display:block; font-size:.66rem; color:var(--accent); font-weight:600;
+  padding:0; margin-bottom:4px; letter-spacing:.06em; text-transform:uppercase; opacity:.75;
+  background:transparent; border-bottom:none; }
+.srec-nest > .srec-k:hover { opacity:1; background:transparent; }
+.srec-nest > :not(.srec-k) { margin:0; }
+/* Depth steps the rule down in emphasis rather than nesting box inside box. */
+.srec-nest .srec-nest { border-left-color:var(--dim); }
+.srec-nest .srec-nest > .srec-k { color:var(--dim); }
+.srec-rich > * { margin:0; }
+.srec-more { align-self:center; color:var(--dim); font-size:.74rem; }
+
+/* A matrix field: thumbnail with its shape UNDER it. A thumbnail is roughly square and the fields
+   wrap along a row, so stacking keeps each one narrow and the row packs; setting the shape beside
+   it doubles every field's width for one short string. Type and value range go in the title. */
+.srec-mat { display:flex; flex-direction:column; align-items:center; gap:3px; cursor:pointer; }
+.srec-mat-svg { display:block; border-radius:2px; border:1px solid var(--border); }
+.srec-mat-cap { font-family:'Cascadia Code',monospace; font-size:.68rem; color:var(--dim); white-space:nowrap; }
+.srec-mat:hover .srec-mat-svg { border-color:var(--accent); }
+/* The expanded view rides in a <template>, so it costs the page nothing until it is opened. */
+.srec-matovl { position:fixed; inset:0; z-index:9000; display:flex; align-items:center; justify-content:center;
+  background:rgba(0,0,0,.62); backdrop-filter:blur(3px); }
+.srec-matbox { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px;
+  max-width:92vw; max-height:92vh; overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+.srec-matbox .srec-mat-svg { width:min(76vw, 620px); height:auto; }
+.srec-matbox .srec-matlabel { font-family:'Cascadia Code',monospace; font-size:.8rem; color:var(--text); margin-bottom:9px; }
+/* The stage holds the thumbnail first, then whatever `slate_matrix` sends back in its place. */
+.srec-matchart { width:min(76vw, 620px); height:min(70vh, 520px); }
+.srec-mattex { max-width:min(80vw, 760px); overflow:auto; }
+
+/* Clicking a record field marks the source that produced it: a brief flash, then a quiet tint that
+   stays until the next click. Kept clear of the error-line marks, which own the warm colours. */
+.cm-recordspan { background:rgba(86,156,214,.16); border-radius:3px;
+  box-shadow:inset 0 -1px 0 rgba(86,156,214,.55); }
+.cm-recordspan-flash { animation:recordspan-flash .9s ease-out; border-radius:3px; }
+@keyframes recordspan-flash {
+  0%   { background:rgba(86,156,214,.62); }
+  100% { background:rgba(86,156,214,.00); }
+}
+
+/* Record vs plain text. Both forms live inside the record chunk, so the preference is a class on
+   the body rather than a re-render or a round trip — and it holds in a static export too. */
+.srec-plain { display:none; margin:0; font-family:'Cascadia Code',monospace; font-size:.84rem;
+  color:var(--val); white-space:pre-wrap; overflow-wrap:anywhere; }
+body.record-plain .slate-record > .srec-grid { display:none; }
+body.record-plain .srec-plain { display:block; }

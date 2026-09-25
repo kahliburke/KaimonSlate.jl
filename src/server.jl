@@ -458,13 +458,17 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             @warn "slate: this notebook asked to run elsewhere, but this hub has no compute gate — running locally instead" notebook = basename(String(path)) requested = asked source = _runon_source(report) hint = "remote execution needs the Kaimon host; a standalone hub cannot spawn or dial a remote worker"
         end
     end
-    # No gate (standalone `slate`, no Kaimon host): cells run in THIS process. The notebook still
-    # gets the same two environments a worker would be given — its enclosing project and its own
-    # env — layered onto LOAD_PATH rather than resolved into one, since there is no separate
-    # process whose active project we could repoint. The env dir is named now and materialised on
-    # the first package add, so a notebook that adds nothing costs nothing.
-    k = InProcessKernel(enclosing, ReportEngine.notebook_env_dir(path))
-    ReportEngine._layer_load_path!(k)
+    # No gate (standalone `slate`, no Kaimon host): cells run in THIS process. The notebook gets the
+    # same two environments a worker would be given — its own env and its enclosing project — but
+    # stacked on LOAD_PATH rather than resolved into one, since there is no separate process whose
+    # active project we could repoint. `_in_notebook_env` installs that stack around each eval and
+    # takes it down again; nothing is layered here.
+    #
+    # The env is MATERIALISED now rather than on the first package add. It is what the notebook's
+    # active project is set to while a cell runs, so creating it up front is what makes `Pkg.status()`
+    # in a cell describe the notebook instead of the hub, from the very first cell rather than from
+    # whenever a package happens to be added.
+    k = InProcessKernel(enclosing, ReportEngine.ensure_notebook_env!(ReportEngine.notebook_env_dir(path)))
     return k
 end
 
@@ -1290,10 +1294,42 @@ function _effect_data(r, f::Symbol)
     return v === nothing ? nothing : String(v)
 end
 
+# A `:pick` effect aims a pick control at an axis. The calibration has TWO consumers and they need
+# it for different reasons, so it goes to both from this one declaration: the widget's params, so
+# coercion can clamp a click into the axis and `bind_domain` can enumerate a snapped grid; and the
+# cell's wire payload (see `_picks_json`), so the browser can put a click target over the figure.
+# Writing it onto the widget is what keeps a pick honest — an uncalibrated control cannot clamp,
+# and a stale one would clamp to an axis that is no longer on screen.
+function _apply_pick_effect!(nb::LiveNotebook, c::Cell, r, e)
+    data = _effect_field(e, :data)
+    cal = data === nothing ? nothing : _effect_field(data, :calibration)
+    cal === nothing && return nothing
+    for nm in r.names
+        id = ReportEngine.bind_owner(nb.report, String(nm))
+        if isempty(id)
+            ReportEngine._rlog("pick_on!: cell $(c.id) aimed at ':$(nm)', which no cell declares — ignored")
+            continue
+        end
+        idx = findfirst(cc -> cc.id == id, nb.report.cells)
+        idx === nothing && continue
+        for b in nb.report.cells[idx].binds
+            b.name === nm || continue
+            if b.widget != "pick"
+                ReportEngine._rlog("pick_on!: ':$(nm)' is a $(b.widget), not a pick control — ignored")
+                continue
+            end
+            for (k, v) in pairs(cal)
+                b.params[String(k)] = v
+            end
+        end
+    end
+    return nothing
+end
+
 function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
     (out === nothing || isempty(out.effects)) && return nothing
     recs = [_effect_record(e) for e in out.effects]
-    for r in recs
+    for (r, e) in zip(recs, out.effects)
         if r.kind === :everywhere
             :everywhere_declared in c.flags || push!(c.flags, :everywhere_declared)
         elseif r.kind === :volatile
@@ -1310,6 +1346,8 @@ function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
             d === nothing || for n in c.writes
                 ReportEngine.note_state_write!(nb.report.id, string(n), d)
             end
+        elseif r.kind === :pick
+            _apply_pick_effect!(nb, c, r, e)
         elseif r.kind !== nothing
             ReportEngine._rlog("cell effects: cell $(c.id) declared unhandled effect kind ':$(r.kind)' — ignored")
         end

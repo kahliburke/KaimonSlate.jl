@@ -32,6 +32,9 @@ lines(1:n, sin.(range(0, 4π, n)))
 | `FileUpload(; accept, maxbytes)` | file picker / drop target | `UploadedFile`, or `nothing` until something is uploaded |
 | `Button(label)` | action button | click count |
 | `TableSelect(data)` | clickable [table](tables.md) | clicked row as a `NamedTuple` (or `nothing`) |
+| `PickPoint(; snap)` | a click target on a figure (driven) | `(x, y)` NamedTuple in data coordinates |
+| `PickRegion(; snap)` | drag a box on a figure (driven) | `(xlo, xhi, ylo, yhi)` NamedTuple |
+| `PickPath(; n, snap)` | click `n` points on a figure (driven) | `Vector` of `(x, y)` |
 | `playhead(anim)` | [animation](animation.md) player (driven) | current frame index |
 
 `RangeSlider` binds one interval rather than two numbers, so the reader cannot cross the ends:
@@ -52,6 +55,50 @@ datafile === nothing ? md"Upload a file to begin." : CSV.read(datafile.path, Dat
 `accept` filters the picker. It is a convenience, not a guarantee, so validate what you got.
 `FileUpload` is also one of the few write paths an [app-mode](app-mode.md) visitor is allowed, which
 makes it the way a reader gets data into an app.
+
+### Picking on a figure
+
+The `Pick*` controls make the figure itself the control: the reader clicks the plot instead of
+dragging a pair of x/y sliders, and the value arrives in the axis's own data coordinates.
+
+They are declared **without** the figure and aimed at an axis afterwards with `pick_on!`:
+
+```julia
+@bind p PickPoint(; default = (-0.6, -0.9), snap = 0.05)
+
+fig = Figure(); ax = Axis(fig[1, 1]); heatmap!(ax, xs, ys, Z)
+scatter!(ax, [p.x], [p.y])       # the marker follows the bind
+pick_on!(:p, fig, ax)            # …and the click target follows the axis
+fig
+```
+
+That order is forced rather than stylistic. A figure that draws the pick *reads* the bind, so a
+control built from the figure — `PickPoint(fig, ax)` — would depend on a figure that depends on it.
+Declaring the control bare and aiming it afterwards is what breaks the cycle, and it means a
+re-run, a limit change or a resize simply re-aims it: the calibration travels with the figure it
+describes and cannot drift from it. Outside a harvesting eval (`julia notebook.jl`) `pick_on!` is a
+no-op, so the notebook still runs as a script.
+
+The mapping comes from the axis itself, so it is exact rather than assumed. An `aspect =
+DataAspect()` axis that letterboxes inside its layout cell reports the *plotted* area, not the
+cell; a log axis maps where its ticks are, not linearly between its endpoints. An axis with no
+rectangular pixel→data mapping — a `PolarAxis`, or a three-dimensional `Axis3` — is refused with an
+error rather than silently mapped, because a wrong rectangle returns plausible coordinates instead
+of failing.
+
+Several picks can share one figure: each `pick_on!` describes its own axis, so two panels drive two
+different controls. A pick commits **on release**, never mid-drag — the control is drawn on the
+cell's output, and committing replaces that output, so a mid-drag commit would pull the figure out
+from under the gesture. It also means dragging out a box orders one recompute, not one per frame.
+
+`snap` quantises the value to a grid measured from the axis floor. Aside from keeping long floats
+out of a readout, it is what a [static export](replay.md) would need to precompute a pick's
+positions; without it the value is continuous. Today a pick is **live-only** either way — see
+[Replayable exports](replay.md).
+
+Pair a pick with [`hidden`](#Controls-drawn-somewhere-else) when the figure is the only control you
+want on screen; otherwise the control strip shows a readout of the current value, since there is
+nothing to drag there.
 
 ### Labelled options
 

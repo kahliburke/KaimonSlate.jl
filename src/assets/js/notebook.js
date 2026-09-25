@@ -579,7 +579,8 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
         // that read as stale. The cell then froze — a sweep card kept showing a superseded run, and
         // acting on it drove the wrong one.
         if (window._swapOutput(out, c.output, c.live,
-                               () => { window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }))
+                               () => { window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out);
+                                     window.mountPicks && window.mountPicks(c, el); }))
           last.current.out = c.output;
         else _landed = false;
       } else _landed = false;                     // host not committed yet — retry on the next pass
@@ -609,6 +610,12 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     // applied and leaving it blank until its next change.
     if (!_conflicted && !_stale && _landed) window.slateRevMark && window.slateRevMark(c);
     if ((c.binds && c.binds.length) || (c.controls && c.controls.length)) window.syncControlValuesSoon(c);
+    // `pick_on!` click targets ride with the OUTPUT, not the control strip — the figure is the
+    // control — so they mount from the output swap's callback above, once the image is actually in
+    // the DOM. This second call catches the case where the output did NOT change (a reconnect, a
+    // re-render at the same revision) and the overlay would otherwise never be built. Idempotent:
+    // an overlay whose axis is unchanged is kept rather than replaced, so a drag survives it.
+    if ((c.picks || []).length) window.mountPicks && window.mountPicks(c, el);
     // Last: whether this cell shows anything is only knowable once its output, charts, tables and
     // controls are in place. The reading view collapses `.cell-blank` (see notebook.css).
     window.slateMarkBlank && window.slateMarkBlank(el, c);

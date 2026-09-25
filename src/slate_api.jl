@@ -335,6 +335,76 @@ separate sliders let the reader cross them; this cannot be put into that state.
 @bind span RangeSlider(400:4000; default = (1500, 1800), label = "region")
 lo, hi = span            # destructures  ·  span.lo / span.hi by name
 ```"""),
+    SlateApiEntry("PickPoint", "Widgets",
+        "Click a figure to choose a point; binds `(x, y)` in the axis's DATA coordinates.",
+        ["click", "pick", "figure", "image map", "crosshair", "probe", "coordinates", "canvas",
+         "select point", "drag", "on the plot", "cursor"],
+        "PickPoint(; default, snap, label)  ·  pick_on!(:name, fig, ax)",
+        """Pick a point by clicking (or dragging) on a rendered figure, binding `(x, y)` in DATA
+coordinates — the control that replaces a pair of x/y sliders.
+
+It is declared WITHOUT the figure and attached to an axis afterwards with `pick_on!`. That is not
+an inconvenience but the only order that works: a figure which draws the pick reads the bind, so
+`PickPoint(fig, ax)` would make the bind depend on a figure that depends on the bind.
+```julia
+@bind p PickPoint(; default = (-0.6, -0.9), snap = 0.05)
+
+fig = Figure(); ax = Axis(fig[1, 1]); heatmap!(ax, xs, ys, Z)
+scatter!(ax, [p.x], [p.y])       # the marker follows the bind
+pick_on!(:p, fig, ax)            # …and the click target follows the axis
+fig
+```
+The calibration comes from the axis itself, so `DataAspect()` letterboxing and log scales map
+exactly, and a non-Cartesian axis (`PolarAxis`, `Axis3`) is refused rather than mis-mapped.
+
+`snap` is not cosmetic: a continuous pick has no finite domain, so a static export renders the
+control but nothing downstream reacts. Snapping makes the domain a grid `@replay` can precompute,
+so a snapped pick keeps working with no kernel. See also `PickRegion`, `PickPath`."""),
+    SlateApiEntry("PickRegion", "Widgets",
+        "Drag a box on a figure; binds `(xlo, xhi, ylo, yhi)` in DATA coordinates.",
+        ["box", "rectangle", "region", "roi", "zoom", "area", "drag out", "select region", "brush"],
+        "PickRegion(; default, snap, label)  ·  pick_on!(:name, fig, ax)",
+        """Drag out a box on a figure, binding `(xlo, xhi, ylo, yhi)` in DATA coordinates. Corners
+are normalised, so the value never depends on which way the reader dragged. Attached with
+`pick_on!` exactly like `PickPoint`. A region's domain is a product of two grids, so it is past any
+sane export ceiling and stays live-only."""),
+    SlateApiEntry("PickPath", "Widgets",
+        "Click n points on a figure; binds them as a `Vector` of `(x, y)`.",
+        ["path", "polyline", "line", "loop", "contour", "waypoints", "multiple points", "seed"],
+        "PickPath(; n, default, snap, label)  ·  pick_on!(:name, fig, ax)",
+        """Click `n` points on a figure, binding them as a `Vector` of `(x, y)` in DATA coordinates
+— for a loop to integrate around, streamline seeds, or waypoints. The length is FIXED at `n`: the
+clicks fill the path and the next one starts it over, because a value whose arity changes under the
+reader is one neither the coercion contract nor an export's domain can express. Attached with
+`pick_on!`. Live-only, like `PickRegion`."""),
+    SlateApiEntry("pick_on!", "Widgets",
+        "Aim a pick control at an axis — from the cell that builds the figure.",
+        ["attach", "calibrate", "click target", "figure", "axis", "pick", "wire up", "point at"],
+        "pick_on!(:name, fig, ax)",
+        """Point the pick control `:name` at `ax` of `fig`: from there on a click inside that axis
+sets the bind, in data coordinates.
+
+Call it from the cell that BUILDS the figure — which is also the cell that READS the bind. That
+order is forced, not stylistic: a figure that draws the pick reads the bind, so a control
+constructed from the figure would depend on a figure that depends on it. Declaring the control bare
+and aiming it afterwards is what breaks the cycle.
+
+It declares a cell effect rather than setting state, so the calibration travels with the figure it
+describes and cannot drift from it — re-run, change the limits, resize, and the next calibration
+replaces the last. Outside a harvesting eval (`julia notebook.jl`) it is a no-op, so the notebook
+still runs as a script. See `PickPoint`, `PickRegion`, `PickPath`."""),
+    SlateApiEntry("axis_calibration", "Widgets",
+        "The pixel→data mapping for one axis of a figure: where it sits, what it spans, how it scales.",
+        ["mapping", "pixels", "coordinates", "viewport", "data coords", "overlay", "image map"],
+        "axis_calibration(fig, ax) -> Dict",
+        """Where an axis sits in its rendered figure (`rect`, as fractions of the image), the data
+range it spans (`xlim`/`ylim`) and each coordinate's scale. What [`pick_on!`](@ref) sends to the
+browser — exposed because it is also what you need to put your OWN overlay on a Makie figure.
+
+Read off the axis itself, so it is exact rather than assumed: a `DataAspect()` axis that letterboxes
+inside its layout cell reports the plotted area, not the cell, and a log axis reports its scale by
+name. An axis with no rectangular mapping (`PolarAxis`, `Axis3`) is refused rather than mis-mapped —
+a wrong rectangle returns plausible coordinates, which is worse than an error."""),
     SlateApiEntry("FileUpload", "Widgets",
         "A file the READER supplies; binds an `UploadedFile` with a real `.path` under `datadir()`.",
         ["upload", "file", "csv", "import", "attach", "drop", "browse", "data"],

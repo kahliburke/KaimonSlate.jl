@@ -312,7 +312,9 @@
   // ── BroadcastChannel sync (audience ⇄ presenter) ────────────────────────────
   function _broadcast() {
     if (!bc || _muteBroadcast) return;
-    bc.postMessage({ type: 'goto', idx: D.idx, total: D.slides.length, from: IS_PRESENTER ? 'presenter' : 'deck' });
+    // Each window sends its OWN position: the presenter never opens the deck, so `D` stays at 0 there.
+    const idx = IS_PRESENTER ? P.idx : D.idx, total = IS_PRESENTER ? P.total : D.slides.length;
+    bc.postMessage({ type: 'goto', idx, total, from: IS_PRESENTER ? 'presenter' : 'deck' });
   }
   if (bc) bc.onmessage = ev => {
     const m = ev.data || {};

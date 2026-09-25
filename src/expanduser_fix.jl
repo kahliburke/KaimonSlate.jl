@@ -19,8 +19,12 @@ function expanduser(path::AbstractString)
     tilde = startswith(s, "~/") || (Sys.iswindows() && startswith(s, "~\\"))
     if tilde
         rest = s[3:end]
-        Sys.iswindows() && (rest = replace(rest, '\\' => '/'))
-        return isempty(rest) ? homedir() : joinpath(homedir(), rest)
+        isempty(rest) && return homedir()
+        # One `joinpath` argument PER COMPONENT: a whole remainder passed as a single component
+        # keeps whatever separators are already inside it, so `~/a/b.jl` comes back from a Windows
+        # `joinpath` as `C:\Users\me\a/b.jl`. `splitpath` also settles which separators count,
+        # splitting on both on Windows and on `/` alone on unix, where `\` is a filename character.
+        return joinpath(homedir(), splitpath(rest)...)
     end
     # `~user` on unix, and every path without a leading tilde.
     return Base.expanduser(s)
