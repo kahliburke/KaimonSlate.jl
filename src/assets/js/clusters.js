@@ -15,6 +15,17 @@ import { sessions, loadSessions, openSessions } from './sessions.js';
 export const clusters = signal([]);
 const procsDefault = signal(0);      // what a local target that names no `procs` gets on this machine
 const editing = signal(null);        // the target being edited (null = the "new" form)
+// Whether the form is showing. Closed until asked for: open by default, it filled the pane under a
+// list whose own "New target" row already offers it, and pushed the list's purpose out of view.
+const formOpen = signal(false);
+export function closeClusterForm() { formOpen.value = false; cmsg.value = null; }
+// Clicking the row already open closes it, the way a disclosure does.
+function toggleForm(c) {
+  const same = formOpen.value && ((c === null && editing.value === null) || (c && editing.value && editing.value.name === c.name));
+  if (same) { closeClusterForm(); return; }
+  seed(c);
+  formOpen.value = true;
+}
 const cmsg = signal(null);           // {text, err}
 const more = signal(false);          // show the set-once fields (chunk, account, prologue, …)
 
@@ -106,7 +117,7 @@ function save() {
 async function del(name) {
   if (!await confirmP('Delete compute target “' + name + '”?\nSweep cells using it will stop resolving. Work already in its store is untouched.', 'Delete', 'danger')) return;
   await fetch('/api/clusters/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).catch(() => {});
-  if (editing.value && editing.value.name === name) seed(null);
+  if (editing.value && editing.value.name === name) { seed(null); closeClusterForm(); }
   loadClusters();
 }
 
@@ -155,20 +166,20 @@ function Partitions() {
 }
 
 export function Clusters() {
-  const cs = clusters.value, e = editing.value;
+  const cs = clusters.value, e = editing.value, open = formOpen.value;
   // `local` is the older spelling of `exec` with no host; a definition on disk still uses it.
   const isExec = kKind.value === 'exec' || kKind.value === 'local';
   return html`<div>
     <div class="msg"><strong>Compute targets</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Where sweep cells send their jobs.</span></div>
     <div class="rppreglist">
-      ${cs.map(c => html`<div class=${'rppregrow' + (e && e.name === c.name ? ' sel' : '')} onClick=${() => seed(c)}>
+      ${cs.map(c => html`<div class=${'rppregrow' + (open && e && e.name === c.name ? ' sel' : '')} onClick=${() => toggleForm(c)}>
         <span class="rppregname">⎈ ${c.name}</span>
         <span class="rppregmeta" title=${c.note || ''}>${clusterSummary(c)}${c.note ? ' · ' + c.note : ''}</span>
         <button class="rppregdel" title="forget this compute target" onClick=${ev => { ev.stopPropagation(); del(c.name); }}>✕</button></div>`)}
-      <div class=${'rppregrow rppregnew' + (e ? '' : ' sel')} onClick=${() => seed(null)}>
+      <div class=${'rppregrow rppregnew' + (open && !e ? ' sel' : '')} onClick=${() => toggleForm(null)}>
         <span class="rppregname">＋ New target</span><span class="rppregmeta">cluster or local</span></div>
     </div>
-    <div class="rppcfg">
+    ${!open ? null : html`<div class="rppcfg">
       <div class="rppformhead">${e ? ('Edit target “' + e.name + '”') : 'New compute target'}</div>
       <div class="rpprow"><label>Name</label>
         <input class="rppname" autocomplete="off" spellcheck="false" placeholder="e.g. hpc, gpu, here" value=${kName.value} onInput=${ev => kName.value = ev.target.value}/>
@@ -243,8 +254,9 @@ export function Clusters() {
             <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="task runner path on the cluster; blank = shipped" value=${kPayload.value} onInput=${ev => kPayload.value = ev.target.value}/></div>`}
         <div class="rpprow"><label>Note</label>
           <input class="rppname" autocomplete="off" placeholder="note" value=${kNote.value} onInput=${ev => kNote.value = ev.target.value}/></div>`}
-      <div class="rppact"><button class="rppsavereg" onClick=${save}>${e ? 'Save' : 'Create'}</button></div>
-    </div>
+      <div class="rppact"><button class="rppsavereg" onClick=${save}>${e ? 'Save' : 'Create'}</button>
+        <button class="rppmore" onClick=${closeClusterForm}>Close</button></div>
+    </div>`}
     <div class=${'rppmsg' + (cmsg.value && cmsg.value.err ? ' err' : '')}>${cmsg.value ? cmsg.value.text : ''}</div>
   </div>`;
 }

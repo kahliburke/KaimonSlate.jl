@@ -15,7 +15,7 @@ import { modalOpen, focusHost, editRegion, regions, loadRegions } from './stores
 import { RunOnPicker, loadRunon, rememberRemote, forgetHost, setDefaultHost, allHosts, visibleHosts,
          hiddenHosts, hideHost, unhideHost, sshHosts, sshGlobal } from './hoststore.js';
 import { Focus } from './remotes-focus.js';
-import { Clusters, loadClusters, clusters } from './clusters.js';
+import { Clusters, loadClusters, clusters, closeClusterForm } from './clusters.js';
 
 // ── host-setup form state ──────────────────────────────────────────────────────────────
 const host = signal('');           // #rthost value
@@ -83,9 +83,9 @@ function TestSteps() {
     ${s.err ? html`<div class="rtnote err">${s.err}</div>` : null}`;
 }
 
-// The list has TWO sources, and which one a row came from decides whether you can delete it here:
-// an `~/.ssh/config` alias is the file's to remove, a host you typed into the box above is Slate's.
-// Saying so on the row is the difference between "why is there no ✕ on this one" and an answer.
+// The list has TWO sources: `~/.ssh/config`, which is nearly every row, and a host you typed into the
+// box above and tested. Only the second is marked, because a label on every row says nothing. The
+// source also decides what ✕ does: a remembered host is forgotten, a config host is only hidden.
 function KnownHosts() {
   const all = allHosts.value, glob = sshGlobal.value, ssh = sshHosts.value, regs = regions.value, cls = clusters.value;
   if (!all.length) return html`<div class="rthosts"><div class="pddim" style="margin-top:6px">No remotes yet — test one above to add it.</div></div>`;
@@ -99,27 +99,23 @@ function KnownHosts() {
       const isHidden = hid.indexOf(h) >= 0;
       return html`<div class=${'rthrow' + (isDef ? ' isdef' : '') + (isHidden ? ' ishidden' : '')}>
         <span class="rthname" role="button" title="use this remote" onClick=${() => host.value = h}>${isDef ? '★' : '🖧'} ${h}${isDef ? html` <em>(default)</em>` : null}${n ? html` <em>· ${n} region${n > 1 ? 's' : ''}</em>` : null}${nc ? html` <em>· ${nc} ⎈</em>` : null}</span>
-        <span class=${'rthsrc' + (remembered ? ' mem' : '')} title=${remembered
-          ? 'remembered by Slate because you tested it here — not in ~/.ssh/config'
-          : 'a Host alias in ~/.ssh/config, which Slate reads'}>${remembered ? 'remembered' : '~/.ssh/config'}</span>
+        ${remembered ? html`<span class="rthsrc mem" title="Tested here; not in ~/.ssh/config">added here</span>` : null}
         <span class="rthbtns">
-          <button class="rthexp" title="regions & live workers on this host" onClick=${() => { editRegion.value = null; focusHost.value = h; }}>Regions ›</button>
+          <button class="rthexp" title="Regions and live workers" onClick=${() => { editRegion.value = null; focusHost.value = h; }}>Regions ›</button>
+          ${/* Gold belongs to the ONE default. The button on every other row is an offer, and making
+                it the same gold as the default's marker left no way to tell which host was the default. */ null}
           ${isDef
-            ? html`<button class="rthdef" title="stop using this as the default → new notebooks run local" onClick=${() => setDefaultHost('')}>★ Unset</button>`
-            : html`<button class="rthdef" title="make this the default for new notebooks" onClick=${() => setDefaultHost(h)}>★ Default</button>`}
+            ? html`<button class="rthexp" title="New notebooks run locally" onClick=${() => setDefaultHost('')}>Unset default</button>`
+            : html`<button class="rthexp" title="Default for new notebooks" onClick=${() => setDefaultHost(h)}>☆ Set default</button>`}
           ${isHidden
-            ? html`<button class="rthexp" title=${'put ' + h + ' back in the list'} onClick=${() => unhideHost(h)}>↩ Unhide</button>`
+            ? html`<button class="rthexp" title="Show in list" onClick=${() => unhideHost(h)}>↩ Unhide</button>`
             : isDef ? null
-            : html`<button class="rthforget" title=${remembered
-                ? 'forget ' + h + ' — Slate only remembered it because you tested it here; nothing on the host is touched'
-                : 'hide ' + h + ' from these lists. It stays in ~/.ssh/config and stays reachable — Slate just stops offering it.'}
+            : html`<button class="rthforget" title=${remembered ? 'Forget' : 'Hide from list'}
                 onClick=${() => remembered ? forgetHost(h) : hideHost(h)}>✕</button>`}
         </span></div>`;
     })}
-    <div class="pddim" style="margin-top:7px;font-size:.75rem">
-      ✕ forgets a remembered host; a <code>~/.ssh/config</code> host is hidden, not deleted.
-      ${nhid ? html` <button class="rthlink" onClick=${() => showHidden.value = !showHidden.value}>${showHidden.value ? 'done' : nhid + ' hidden — show'}</button>` : null}
-    </div></div>`;
+    ${nhid ? html`<div class="rthfoot"><button class="rthlink" onClick=${() => showHidden.value = !showHidden.value}>${showHidden.value ? 'Hide hidden' : 'Show hidden (' + nhid + ')'}</button></div>` : null}
+    </div>`;
 }
 
 function Modal() {
@@ -146,14 +142,19 @@ function Modal() {
   }, [open]);
 
   const t = tab.value;
+  // A fixed header over a scrolling body: the tabs and ✕ stay put however long a tab's content runs.
   return html`<div class=${'modal remotesmodal' + (focused ? ' focusmode' : '')}>
-    <button class="modalx" title="Close (Esc)" onClick=${close}>✕</button>
-    <div class="rttabs">
-      ${TABS.map(([k, label, title]) => html`<button class=${'rttab' + (t === k ? ' on' : '')} title=${title}
-        onClick=${() => tab.value = k}>${label}${k === 'clusters' && clusters.value.length ? html` <span class="rttabn">${clusters.value.length}</span>` : null}</button>`)}
+    <div class="rthead">
+      <div class="rttabs">
+        ${TABS.map(([k, label, title]) => html`<button class=${'rttab' + (t === k ? ' on' : '')} title=${title}
+          onClick=${() => tab.value = k}>${label}${k === 'clusters' && clusters.value.length ? html` <span class="rttabn">${clusters.value.length}</span>` : null}</button>`)}
+      </div>
+      <button class="modalx" title="Close (Esc)" onClick=${close}>✕</button>
     </div>
-    ${t === 'hosts' ? html`<${HostsTab}/>` : t === 'clusters' ? html`<${Clusters}/>` : html`<${TransferTab}/>`}
-    <div class="rtfocus"><${Focus}/></div>
+    <div class="rtbody">
+      ${t === 'hosts' ? html`<${HostsTab}/>` : t === 'clusters' ? html`<${Clusters}/>` : html`<${TransferTab}/>`}
+      <div class="rtfocus"><${Focus}/></div>
+    </div>
   </div>`;
 }
 
@@ -212,6 +213,7 @@ loadRunon();   // populate the pickers on page load (independent of the modal be
 function openRemotes(which = 'hosts') {
   focusHost.value = ''; editRegion.value = null; steps.value = null;
   port.value = ''; stream.value = ''; host.value = '';
+  closeClusterForm();
   tab.value = which;
   modalOpen.value = true;
 }
