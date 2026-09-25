@@ -63,6 +63,186 @@ cell. This is the case a hand-rolled overlay gets wrong: the click target has to
 should reach exactly ±3, and clicking in the empty margin should do nothing.
 """
 
+#%% md id=acc_md
+@md"""
+## 1b · Click accuracy
+
+**Click the centre of any ✛ below.** The heading then tells you how far your click landed from
+that cross, in screen pixels.
+
+That is the whole test. Under about 3 px means the pick is accurate and the rest is your aim, since
+nobody clicks the exact centre of a cross. A number in the tens means the click is being mapped to
+the wrong place, which is the failure worth catching: a mis-mapped axis still returns a sensible
+looking coordinate, so nothing appears broken.
+
+Snapping is switched off here, unlike the rest of the notebook, so you see the raw number. With
+`snap` on, a near-enough click would land exactly on the cross and read as perfect whether or not
+the mapping was right.
+
+Then repeat it while changing the view, because each of these breaks it differently:
+
+| do this | what a big number would mean |
+|---|---|
+| **zoom** with ⌘/Ctrl `+` to 150%, then back | the overlay no longer lines up with the image |
+| **resize** the window narrow, then wide | the axis rectangle went stale |
+| **collapse** the cell and reopen it | the overlay never re-attached |
+| **drag slowly** between two crosses | the value lags, or the drag dies part-way |
+
+The strip underneath measures the overlay against the image on its own, and updates as you zoom. If
+a click feels off, that number says whether the overlay moved or the mapping did.
+"""
+
+#%% code id=acc
+# No `snap` here on purpose: quantising would land a near-enough click exactly on the target and
+# report perfect whether or not the mapping is right, which is the thing this section measures.
+@bind hit hidden(PickPoint(; default = (0.0, 0.0)))
+
+TARGETS = [(x, y) for x in -2:2:2 for y in -2:2:2]
+near = argmin([hypot(hit.x - t[1], hit.y - t[2]) for t in TARGETS])
+tgt  = TARGETS[near]
+
+FIGW, SPAN = 620, 6.0
+figA = Figure(size = (FIGW, 500))
+axA = Axis(figA[1, 1]; aspect = DataAspect(), xlabel = "x", ylabel = "y",
+           xticks = -3:1:3, yticks = -3:1:3)
+vlines!(axA, -3:1:3; color = (:white, 0.07)); hlines!(axA, -3:1:3; color = (:white, 0.07))
+for t in TARGETS                                   # a cross you can aim at, and its coordinates
+    lines!(axA, [t[1]-0.28, t[1]+0.28], [t[2], t[2]]; color = (:white, 0.55), linewidth = 1.2)
+    lines!(axA, [t[1], t[1]], [t[2]-0.28, t[2]+0.28]; color = (:white, 0.55), linewidth = 1.2)
+    text!(axA, t[1], t[2]; text = "($(Int(t[1])), $(Int(t[2])))", align = (:center, :center),
+          offset = (0, 20), color = (:white, 0.4), fontsize = 11)
+end
+scatter!(axA, [hit.x], [hit.y]; color = :gold, markersize = 10,
+         strokecolor = :black, strokewidth = 1)
+limits!(axA, -3, 3, -3, 3)
+
+# NOTHING may touch the layout after this. `pick_on!` measures where the axis IS, so a title set
+# afterwards (or any other layout change) moves the axis out from under the calibration and every
+# click lands offset by however far it shifted. The readout lives in the cell below for exactly
+# that reason — a title that changes with each click would move the axis on each click.
+pick_on!(:hit, figA, axA)
+pxper = axis_calibration(figA, axA)["rect"]["width"] * FIGW / SPAN
+err_px = hypot(hit.x - tgt[1], hit.y - tgt[2]) * pxper
+figA
+
+#%% md id=acc_out
+@md"""
+### {{ round(err_px; digits=1) }} px from ({{ Int(tgt[1]) }}, {{ Int(tgt[2]) }})
+
+You clicked **({{ round(hit.x; digits=3) }}, {{ round(hit.y; digits=3) }})**; the nearest cross is
+at ({{ Int(tgt[1]) }}, {{ Int(tgt[2]) }}).
+
+Under about 3 px is your aim. Tens of pixels means the click is being mapped to the wrong place.
+
+!!! note "Why the number is here and not on the figure"
+    `pick_on!` measures where the axis **is**. Anything that changes the layout afterwards — a
+    title, a label, a legend — moves the axis out from under that measurement, and every click then
+    lands offset by however far it shifted. A title carrying this readout would change on every
+    click, so it would move the axis on every click. Call `pick_on!` last.
+"""
+
+#%% web id=acc_selfcheck
+@web(html"""
+<div id="chk"></div>
+""",
+css"""
+#chk { font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px 11px;
+       border-radius: 8px; background: rgba(255,255,255,.04); border-left: 3px solid var(--dim); }
+#chk.ok   { border-left-color: #3ddc97; }
+#chk.bad  { border-left-color: #f5a623; }
+#chk b { font-weight: 700; }
+#chk .row { white-space: pre; }
+""",
+js"""
+// Measures each pick overlay against the image it is aimed at, independently of the code that
+// places it: the overlay SHOULD sit at the calibrated fraction of the image's own screen box.
+// Any drift shows up here as a pixel error, which is what a click landing offset would look like.
+// Re-measured on zoom, resize and scroll, so the number is live while you change the view.
+const el = root.querySelector('#chk');
+
+// The page's cell state, which carries each cell's `picks` (bind, rect, xlim/ylim, scales).
+const slateState = () => window.__slateState || window.nbState || null;
+
+function measure() {
+  const rows = [];
+  let worst = 0;
+  const cells = (slateState()?.cells) || [];
+  for (const cell of document.querySelectorAll('.cell')) {
+    const img = cell.querySelector('.output img');
+    const ovs = cell.querySelectorAll('.pickovl');
+    if (!img || !ovs.length) continue;
+    const ib = img.getBoundingClientRect();
+    const picks = cells.find(c => 'cell-' + c.id === cell.id)?.picks || [];
+    ovs.forEach((ov, i) => {
+      const p = picks[i]; if (!p || !p.rect) return;
+      const ob = ov.getBoundingClientRect();
+      const want = { left: ib.left + p.rect.left * ib.width, top: ib.top + p.rect.top * ib.height,
+                     width: p.rect.width * ib.width, height: p.rect.height * ib.height };
+      const e = Math.max(Math.abs(ob.left - want.left), Math.abs(ob.top - want.top),
+                         Math.abs(ob.width - want.width), Math.abs(ob.height - want.height));
+      worst = Math.max(worst, e);
+      rows.push(`${(cell.id.replace('cell-','') + ' ').padEnd(16,'·')} ${p.bind.padEnd(8)} off by ${e.toFixed(2)} px`);
+    });
+  }
+  const dpr = (window.devicePixelRatio || 1).toFixed(2);
+  if (!rows.length) { el.className = ''; el.textContent = 'no pick overlays on the page yet'; return; }
+  // Half a CSS pixel is the most sub-pixel layout rounding can account for.
+  el.className = worst <= 0.5 ? 'ok' : 'bad';
+  el.innerHTML = `<div class="row"><b>overlay vs image — worst ${worst.toFixed(2)} px</b>` +
+                 `   (zoom ${dpr}×, ${worst <= 0.5 ? 'aligned' : 'DRIFTED — clicks will land offset'})</div>` +
+                 rows.map(r => `<div class="row">${r}</div>`).join('');
+}
+
+// Coalesce to one measure per frame. Scroll and a re-render both fire in bursts, and measuring
+// reads layout for every overlay on the page.
+let queued = false;
+const schedule = () => {
+  if (queued) return;
+  queued = true;
+  requestAnimationFrame(() => { queued = false; measure(); });
+};
+
+schedule();
+addEventListener('resize', schedule);
+addEventListener('scroll', schedule, true);
+// Watch the page for re-renders that swap overlays out — but IGNORE the mutations this cell makes
+// itself. Writing the report is a DOM change inside `el`, so re-measuring on it would rewrite it
+// and measure again: a loop with nothing to break it, which hangs the tab the moment it renders.
+const mo = new MutationObserver(recs => {
+  if (recs.every(r => el === r.target || el.contains(r.target))) return;
+  schedule();
+});
+mo.observe(document.body, { childList: true, subtree: true });
+""")
+
+#%% md id=s1c_md
+@md"""
+## 1c · Snapping to named points — `snapto`
+
+`snap` quantises to a lattice, so a click lands on the nearest *grid* position — which is only a
+target when you were already close to one. `snapto` names the points that may be chosen and takes
+the nearest, so **every** click resolves to a real candidate however far away you press. Its
+domain is the candidate set itself, which is what `@replay` needs and what a lattice can only
+approximate: the five points below need 5 entries, the equivalent `snap = 0.25` grid needs 625.
+"""
+
+#%% code id=s1c
+STATIONS = [(-2.0, -2.0), (0.0, 0.0), (2.0, 2.0), (2.0, -2.0), (-2.0, 2.0)]
+
+@bind stn hidden(PickPoint(; default = (0.0, 0.0), snapto = STATIONS))
+
+figS = Figure(size = (520, 450))
+axS = Axis(figS[1, 1]; aspect = DataAspect(), xlabel = "x", ylabel = "y",
+           title = "click anywhere — it lands on the nearest station: $(stn.x), $(stn.y)")
+scatter!(axS, first.(STATIONS), last.(STATIONS); color = :transparent,
+         strokecolor = (:white, 0.55), strokewidth = 1.5, markersize = 30)
+# a line from where a naive grid snap would have put you, to the station actually chosen
+scatter!(axS, [stn.x], [stn.y]; color = :seagreen, markersize = 15,
+         strokecolor = :black, strokewidth = 1)
+limits!(axS, -3, 3, -3, 3)
+pick_on!(:stn, figS, axS)
+figS
+
 #%% code id=s2
 @bind sq hidden(PickPoint(; default = (0.0, 0.0)))
 
@@ -114,6 +294,45 @@ Both panels live in the same rendered image. Each `pick_on!` describes its own r
 clicking the left panel must move only `a` and the right only `b`. If the two ever cross-talk, the
 per-axis rectangle is wrong.
 """
+
+#%% md id=s3b_md
+@md"""
+## 3b · A reversed axis
+
+`xreversed`/`yreversed` draw the same limits mirrored, and `finallimits` still reads low-to-high
+while the pixels run the other way. Taking it at face value puts every click on the wrong side of
+the axis while still returning a number in range, which is why this has a section of its own.
+
+Here **x runs right-to-left and y runs top-to-bottom.** Click the corner marked `(-2, 2)` — the
+readout has to agree with the label, not with where that point would be on an ordinary axis.
+"""
+
+#%% code id=s3b
+@bind rv hidden(PickPoint(; default = (0.0, 0.0), snap = 0.25))
+
+CORNERS = [(-2.0, 2.0), (2.0, 2.0), (-2.0, -2.0), (2.0, -2.0)]
+nr = argmin([hypot(rv.x - c[1], rv.y - c[2]) for c in CORNERS])
+er = hypot(rv.x - CORNERS[nr][1], rv.y - CORNERS[nr][2])
+
+figR = Figure(size = (520, 450))
+axR = Axis(figR[1, 1]; aspect = DataAspect(), xlabel = "x  (runs right to left)",
+           ylabel = "y  (runs top to bottom)",
+           title = er < 1e-9 ? "on $(CORNERS[nr]) — exact" :
+                   @sprintf("nearest %s · off by %.3f", CORNERS[nr], er),
+           titlecolor = er < 1e-9 ? :seagreen : :gold)
+for c in CORNERS
+    scatter!(axR, [c[1]], [c[2]]; color = :transparent, strokecolor = (:white, 0.6),
+             strokewidth = 1.5, markersize = 26)
+    text!(axR, c[1], c[2]; text = string(c), align = (:center, :center),
+          offset = (0, 20), color = (:white, 0.6), fontsize = 11)
+end
+scatter!(axR, [rv.x], [rv.y]; color = er < 1e-9 ? :seagreen : :gold, markersize = 13,
+         strokecolor = :black, strokewidth = 1)
+limits!(axR, -3, 3, -3, 3)
+axR.xreversed[] = true          # set after `limits!`; the constructor kwarg does not take
+axR.yreversed[] = true
+pick_on!(:rv, figR, axR)
+figR
 
 #%% code id=s4
 @bind a hidden(PickPoint(; default = (-1.0, 1.0), snap = 0.1))

@@ -606,13 +606,22 @@ function axis_calibration(figure, axis)
     (wx > 0 && wy > 0 && W > 0 && H > 0) || error("pick_on!: the axis has no area yet — " *
         "call `pick_on!` after the figure is built, with the axis already populated.")
     x0, y0 = float(lims.origin[1]), float(lims.origin[2])
+    xlo, xhi = x0, x0 + float(lims.widths[1])
+    ylo, yhi = y0, y0 + float(lims.widths[2])
+    # A REVERSED axis draws the same limits mirrored, and `finallimits` does not say so: it still
+    # reads low-to-high while the pixels run the other way. Reporting the limits in drawing order
+    # is what keeps the mapping a plain interpolation; taking them at face value would put every
+    # click on the wrong side of the axis while still returning a number in range.
+    rev(sym) = hasproperty(axis, sym) && getproperty(axis, sym)[] === true
+    rev(:xreversed) && ((xlo, xhi) = (xhi, xlo))
+    rev(:yreversed) && ((ylo, yhi) = (yhi, ylo))
     # CSS-ready: the browser positions an overlay on the <img>, whose origin is TOP-left while
     # Makie's viewport origin is bottom-left.
     return Dict{String,Any}(
         "rect"   => Dict{String,Any}("left" => ox / W, "top" => 1 - (oy + wy) / H,
                                      "width" => wx / W, "height" => wy / H),
-        "xlim"   => Any[x0, x0 + float(lims.widths[1])],
-        "ylim"   => Any[y0, y0 + float(lims.widths[2])],
+        "xlim"   => Any[xlo, xhi],
+        "ylim"   => Any[ylo, yhi],
         "xscale" => _pick_scale_name(axis.xscale[]),
         "yscale" => _pick_scale_name(axis.yscale[]),
     )
@@ -884,9 +893,13 @@ function _register_builtin_kinds!()
     end
     # `_wire_seq` here too, so a path's individual points may be `(x, y)` or `(x = …, y = …)` —
     # the shape `wrap` hands back for each point of a path.
+    # NaN is the one number with no sensible clamp: it survives both `clamp` and `round`, so it
+    # would reach a cell as a coordinate and break whatever it is plotted into, far from here.
+    # `Inf` needs no special case — it clamps to the axis edge like any out-of-range value.
+    _pick_num(x) = x isa Number && !isnan(x)
     _pick_pt(w, q) = begin
         q = _wire_seq(q)
-        (q isa AbstractVector && length(q) == 2 && all(x -> x isa Number, q)) || return nothing
+        (q isa AbstractVector && length(q) == 2 && all(_pick_num, q)) || return nothing
         Any[_pick_snap(w, q[1], _pick_lim(w, "xlim")), _pick_snap(w, q[2], _pick_lim(w, "ylim"))]
     end
     function _pick_coerce(w, v)
@@ -899,7 +912,7 @@ function _register_builtin_kinds!()
             # The wire order is [xlo, xhi, ylo, yhi] — BOTH x's, then both y's — matching `wrap`
             # and the constructor's `default`. Reading it as two corner points instead silently
             # transposes the box, which still type-checks and still looks like a box.
-            (v isa AbstractVector && length(v) == 4 && all(x -> x isa Number, v)) || return w.default
+            (v isa AbstractVector && length(v) == 4 && all(_pick_num, v)) || return w.default
             xl, yl = _pick_lim(w, "xlim"), _pick_lim(w, "ylim")
             xlo, xhi = minmax(_pick_snap(w, v[1], xl), _pick_snap(w, v[2], xl))
             ylo, yhi = minmax(_pick_snap(w, v[3], yl), _pick_snap(w, v[4], yl))
