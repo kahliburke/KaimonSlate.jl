@@ -149,7 +149,10 @@ function _mat_color(t::Float64)
     t = clamp(t, 0.0, 1.0)
     lo, mid, hi = (0x1e, 0x22, 0x2a), (0x56, 0x9c, 0xd6), (0xff, 0xd7, 0x00)
     a, b, u = t < 0.5 ? (lo, mid, t * 2) : (mid, hi, (t - 0.5) * 2)
-    ch(i) = round(Int, a[i] + (b[i] - a[i]) * u)
+    # Widened to Int first: a hex literal is a UInt8, and blue DECREASES from mid to hi, so
+    # `0x00 - 0xd6` wraps to 42 instead of going negative. The channel then climbs to 256, which
+    # prints as a seven-digit hex that a browser cannot parse and draws as black.
+    ch(i) = round(Int, Int(a[i]) + (Int(b[i]) - Int(a[i])) * u)
     return string("#", string(ch(1); base = 16, pad = 2), string(ch(2); base = 16, pad = 2),
                   string(ch(3); base = 16, pad = 2))
 end

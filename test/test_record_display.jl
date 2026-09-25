@@ -107,3 +107,21 @@ end
         @test length(p) <= RE._RECORD_PLAIN_MAX + 8
     end
 end
+
+# A colour channel that DECREASES along the ramp is the case to pin: the endpoints are hex
+# literals, so they are UInt8, and `0x00 - 0xd6` wraps to 42 rather than going negative. The
+# channel then climbs past 255 and prints as a seven-digit hex, which a browser draws as black —
+# a matrix thumbnail whose brightest cell came out darkest.
+@testset "the matrix ramp stays a valid colour end to end" begin
+    @test RE._mat_color(0.0) == "#1e222a"
+    @test RE._mat_color(1.0) == "#ffd700"          # the top is gold, not an overflow
+    @test all(t -> occursin(r"^#[0-9a-f]{6}$", RE._mat_color(t)), 0:0.001:1)
+    @test occursin(r"^#[0-9a-f]{6}$", RE._mat_color(NaN))   # non-finite cells too
+
+    # …and through the SVG: the brightest cell of a gradient must be the ramp's top.
+    M = [i * j / 7.0 for i in 1:40, j in 1:30]
+    grid, gnr, gnc = RE._matrix_grid(M; max_cells = RE._MAT_MINI_CELLS)
+    fills = [m.captures[1] for m in eachmatch(r"fill=\"([^\"]+)\"", RE._mat_svg(grid, gnr, gnc, 46))]
+    @test all(f -> occursin(r"^#[0-9a-f]{6}$", f), fills)
+    @test last(fills) == "#ffd700"
+end

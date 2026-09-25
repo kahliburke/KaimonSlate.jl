@@ -1741,3 +1741,25 @@ end
     @test got[1]["score"] == 0.9                                 # the best chunk wins, not the first
     @test isempty(NS._best_per_symbol(Dict{String,Any}[]))
 end
+
+# The stylesheet test above proves the RULES ship. This proves the MARKUP does: a record reaches a
+# static export as its grid, so the page a reader downloads shows what the notebook showed. The two
+# fail independently — rules without markup is a blank cell, markup without rules is a run of bare
+# text — so neither test stands in for the other.
+@testset "a record's markup reaches the exported HTML" begin
+    RE = KaimonSlate.ReportEngine
+    rec = RE.record_html((; f0 = 1006.63, nested = (; a = 1), m = [1.0 2.0; 3.0 4.0]))
+    rep = RE.parse_report("#%% md id=t title\n# Rec\n\n#%% code id=c\n(; f0 = 1006.63)\n")
+    rep.cells[end].output = RE.CellOutput(
+        "", RE.MimeChunk[RE.MimeChunk("application/vnd.kaimonslate.html+html", Vector{UInt8}(rec))],
+        Any[], Any[], RE.BindSpec[], "(f0 = 1006.63,)", nothing, nothing, 1.0, Any[], "")
+    nb = NS.LiveNotebook("rec", "/tmp/rectest.jl", rep, RE.InProcessKernel(), 1, String[],
+                         String[], ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                         Dict{String,String}())
+    html = NS.export_html(nb)
+    @test occursin("slate-record", html) && occursin("srec-grid", html)
+    @test occursin("srec-nest", html)        # a nested tuple keeps its group
+    @test occursin("srec-mat-svg", html)     # …and a matrix field its thumbnail
+    # Both renderings travel, which is what lets the plain-text preference work with no kernel.
+    @test occursin("srec-plain", html)
+end
