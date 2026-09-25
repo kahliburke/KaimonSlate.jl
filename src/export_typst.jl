@@ -61,6 +61,19 @@ end
 # is cached between exports: a component draws from live state, so a stale picture is worse than
 # paying the round-trip again. Best-effort — a mount that fails or times out is simply absent, and
 # the caller says so rather than dropping it silently.
+# Rasterise every HTML-output cell (a record grid, a custom card) in ONE round-trip, before the
+# document is written, so `_emit_output!` finds each picture already in the snapshot store. Asking
+# per cell as it emits costs a push and a 4 s wait EACH, so a notebook with a dozen of them spends a
+# dozen timeouts in series and the slowest raster quietly comes out as text — the failure is per
+# cell, silent, and different run to run. Returns how many pictures arrived.
+function _warm_html_rasters!(nb::LiveNotebook)
+    ids = lock(nb.lock) do
+        [c.id for c in nb.report.cells if _has_html_output(c) && !_has_server_raster(nb, c.id)]
+    end
+    isempty(ids) && return 0
+    return try; request_live_inspect_many(nb, ids); catch; 0; end
+end
+
 function _warm_component_figs!(nb::LiveNotebook; theme::AbstractString = "midnight", progress = nothing)
     targets = lock(nb.lock) do
         [(c.id, s) for c in nb.report.cells for (s, _) in _component_slots(c)]
@@ -800,7 +813,10 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
     # tab (html2canvas, same round-trip slate.inspect uses) and embed that image. Needs a live tab;
     # falls back to nothing (just the code) if none is open or the capture times out.
     if fig === nothing && _has_html_output(c)
-        png = try; cell_image_fresh(nb, c.id); catch; nothing; end
+        # `cell_image`, not `cell_image_fresh`: `_warm_html_rasters!` already asked the tab for
+        # every one of these in a single round-trip, so this is a store read. Asking again here
+        # would reintroduce the per-cell wait the batch exists to remove.
+        png = try; cell_image(nb, c.id); catch; nothing; end
         png === nothing || (fig = (copy(png), "png"))
     end
     if fig !== nothing
@@ -1372,6 +1388,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
     # Themed override: re-render native (Makie) figures under the picked palette too (see the export
     # dialog's warning). No-op when not overriding — the baked figure bytes already match the live theme.
     override && _warm_makie_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
+    _warm_html_rasters!(nb)            # one round-trip for every HTML-output cell (see above)
     compfigs = _warm_component_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()
@@ -1500,6 +1517,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
     ct = _chart_theme(charttheme, theme)                               # the Slate palette charts render in
     _warm_chart_svgs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
     override && _warm_makie_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
+    _warm_html_rasters!(nb)            # one round-trip for every HTML-output cell (see above)
     compfigs = _warm_component_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()

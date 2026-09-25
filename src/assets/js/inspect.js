@@ -98,6 +98,38 @@ async function _slateInspect(reqid, cellId) {
 }
 window._slateInspect = _slateInspect;
 
+// Rasterise SEVERAL cells for one request (`inspectmany:`), for a PDF export that needs a picture
+// of every HTML-output cell. Each raster is posted store-only as it is made — one body per cell
+// keeps each small, and the server is waiting on the single reply at the end, so the whole batch
+// costs one round-trip instead of one per cell. A cell that fails is skipped rather than aborting
+// the batch: a missing picture degrades that one cell, a thrown batch loses every picture.
+async function _slateInspectMany(reqid, cellIds) {
+  let captured = 0;
+  for (const cellId of (cellIds || [])) {
+    try {
+      const el = document.getElementById('cell-' + cellId);
+      if (!el) continue;
+      if (el.querySelector('.echarts canvas, .echart canvas, .output img')) continue;  // native figure already captured
+      let png = '';
+      const prov = window.__slateSnapshot && window.__slateSnapshot[cellId];
+      if (typeof prov === 'function') png = prov() || '';
+      if (!png) {
+        const h2c = await _loadHtml2Canvas();
+        const bg = (getComputedStyle(document.body).backgroundColor) || '#12141c';
+        const target = el.querySelector('.md, .output, .tables') || el;
+        const canvas = await h2c(target, { backgroundColor: bg, scale: 1, logging: false, useCORS: true,
+                                           onclone: (_doc, e) => { try { _sanitizeColors(e); } catch (_) {} } });
+        png = (canvas.toDataURL('image/png').split(',')[1]) || '';
+      }
+      if (!png) continue;
+      await api('POST', '/api/inspect-result', { reqid: '', cell: cellId, png });   // store-only
+      captured++;
+    } catch (_) { /* this cell has no picture; the rest still do */ }
+  }
+  try { await api('POST', '/api/inspect-result', { reqid, captured }); } catch (_) {}
+}
+window._slateInspectMany = _slateInspectMany;
+
 // slate.eval_js: run agent-supplied JS in THIS tab and POST the result back, keyed by reqid. Indirect
 // eval `(0, eval)` runs in global scope so page globals (nbState, charts, exportPdf, renderCharts, …)
 // are reachable; a returned Promise is awaited so `await`-style snippets work. Result is JSON-stringified

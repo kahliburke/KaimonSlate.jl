@@ -2319,9 +2319,13 @@ function _make_router(h::Hub)
     # `inspect:` SSE request (assets/js/inspect.js), routed back to the waiting slate.inspect call.
     HTTP.register!(router, "POST", "/api/{id}/inspect-result", req -> _withnb(h, req, nb -> begin
         b = _body(req); reqid = String(get(b, "reqid", ""))
-        isempty(reqid) && return _json(Dict("ok" => false))
+        # Store FIRST, and accept a post with no reqid at all. A batch capture (`inspectmany:`)
+        # posts one raster per cell store-only and then a single reply to release the waiter, so
+        # N cells cost one round-trip instead of N — refusing a reqid-less post here would mean
+        # either N waits or squeezing every raster into one body.
         cell = String(get(b, "cell", "")); png = String(get(b, "png", ""))   # raster → snapshot store (slate.view)
         (isempty(cell) || isempty(png)) || (try; set_snapshot!(nb.id, cell, Vector{UInt8}(Base64.base64decode(png))); catch; end)
+        isempty(reqid) && return _json(Dict("ok" => true, "stored" => !isempty(png)))
         _json(Dict("ok" => deliver_live!(reqid, b)))
     end))
     # PDF export: the open tab POSTs one mounted component's figure (SVG, or a base64 PNG) in answer
