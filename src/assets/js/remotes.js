@@ -90,9 +90,11 @@ function KnownHosts() {
         <span class="rthname" role="button" title="use this remote" onClick=${() => host.value = h}>${isDef ? '★' : '🖧'} ${h}${isDef ? html` <em>(default)</em>` : null}${isCustom ? html` <em>(custom)</em>` : null}${n ? html` <em>(${n} region${n > 1 ? 's' : ''})</em>` : null}</span>
         <span class="rthbtns">
           <button class="rthexp" title="regions & live workers on this host" onClick=${() => { editRegion.value = null; focusHost.value = h; }}>Regions ›</button>
+          ${/* Gold belongs to the ONE default. The button on every other row is an offer, and making
+                it the same gold as the default's marker left no way to tell which host was the default. */ null}
           ${isDef
-            ? html`<button class="rthdef" title="stop using this as the default → new notebooks run local" onClick=${() => setDefaultHost('')}>★ Unset</button>`
-            : html`<button class="rthdef" title="make this the default for new notebooks" onClick=${() => setDefaultHost(h)}>★ Default</button>`}
+            ? html`<button class="rthexp" title="New notebooks run locally" onClick=${() => setDefaultHost('')}>Unset default</button>`
+            : html`<button class="rthexp" title="Default for new notebooks" onClick=${() => setDefaultHost(h)}>☆ Set default</button>`}
           ${isCustom ? html`<button class="rthforget" title="forget this custom host" onClick=${() => forgetHost(h)}>✕</button>` : null}
         </span></div>`;
     })}</div>`;
@@ -122,8 +124,11 @@ function Modal() {
   }, [open]);
 
   const x = xfer.value || {};
+  // The ✕ stays on the modal and everything else scrolls in `.rtbody`, so a long host list scrolls
+  // under a close button that is always there.
   return html`<div class=${'modal remotesmodal' + (focused ? ' focusmode' : '')}>
     <button class="modalx" title="Close (Esc)" onClick=${close}>✕</button>
+    <div class="rtbody">
     <div class="msg"><strong>Remote hosts</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Run notebooks on another machine. A remote is any SSH host you already reach with key auth (a <code>Host</code> in ~/.ssh/config).</span></div>
     <div class="imrow"><label>Host</label><input id="rthost" spellcheck="false" autocomplete="off" placeholder="ssh_host (or user@host)"
       value=${host.value} onInput=${e => host.value = e.target.value} onKeyDown=${e => { if (e.key === 'Enter') { e.preventDefault(); runTest(); } }}/></div>
@@ -146,6 +151,7 @@ function Modal() {
     <div class="imrow"><label title="A cell needing a value from the other side of a region boundary pauses with a preview (exact size + estimated time) when the transfer would take longer than this; running the cell again proceeds. 0 disables previews. Blank = default.">Confirm transfers over</label>
       <span class="rttr"><input id="rtxconfirm" class="rtportin" type="number" min="0" step="5" placeholder=${x.effective_confirm_s} value=${x.confirm_s >= 0 ? x.confirm_s : ''} onChange=${commitXfer}/> <span class="pddim">s (0 = never ask)</span></span></div>
     <div class="rtfocus"><${Focus}/></div>
+    </div>
   </div>`;
 }
 

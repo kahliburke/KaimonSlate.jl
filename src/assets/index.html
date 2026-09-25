@@ -109,14 +109,23 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .nnhint{color:#6a7090;font-size:.78rem;min-height:1.1em;margin:2px 0 14px;word-break:break-all;}
 .nnhint.err{color:#e57575;}
 .nnhint code{color:#9fd0f5;font-family:Menlo,monospace;}
-/* Remotes manager modal */
-.remotesmodal{max-width:640px;position:relative;}
+/* Remotes manager modal. `.modal` bounds width but not HEIGHT, and the host list alone outgrows a
+   window, so the box is capped and its content scrolls in `.rtbody` under a ✕ that stays put. */
+.remotesmodal{max-width:640px;position:relative;max-height:88vh;display:flex;flex-direction:column;padding:0;overflow:hidden;}
+.rtbody{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:18px 20px;
+  scrollbar-width:thin;scrollbar-color:#2a2e40 transparent;}
+.rtbody::-webkit-scrollbar{width:10px;}
+.rtbody::-webkit-scrollbar-thumb{background:#2a2e40;border-radius:7px;border:2px solid transparent;background-clip:padding-box;}
+.rtbody::-webkit-scrollbar-thumb:hover{background:#569cd6;}
+/* Opaque, since the list now scrolls underneath it. */
+.remotesmodal .modalx{top:10px;right:16px;background:#141828;border-radius:6px;}
+.remotesmodal .modalx:hover{background:#141828;}
 /* Standard top-right modal close (✕) — consistent across modals; Esc also closes. `.modal .modalx`
    specificity (0,2,1) beats the `.modal button` base rule so it stays a bare glyph, no button chrome. */
 .modal .modalx{position:absolute;top:8px;right:10px;background:none;border:none;box-shadow:none;color:#6a7090;font-size:1.15rem;line-height:1;cursor:pointer;padding:4px 8px;z-index:3;}
 .modal .modalx:hover{color:#569cd6;background:none;}
 /* Reserve right-space in the remotes header rows so the absolute ✕ never overlaps their text. */
-.remotesmodal>.msg{padding-right:30px;}
+.rtbody>.msg{padding-right:30px;}
 .rtfhead{padding-right:30px;}
 .remotesmodal .imrow{flex-direction:row;align-items:center;gap:10px;}
 .remotesmodal .imrow>label{flex:0 0 70px;color:#8a90a8;font-size:.82rem;}
@@ -142,16 +151,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rthname{cursor:pointer;flex:1 1 auto;padding:2px 4px;border-radius:6px;transition:background .1s;}
 .rthname:hover{background:rgba(88,110,240,.16);}
 .rthbtns{display:flex;gap:6px;flex:0 0 auto;}
-.modal .rthforget,.modal .rthdef{padding:3px 10px;font-size:.76rem;border-radius:6px;}
-.modal .rthforget{color:#e57575;border-color:#3a2030;}
-.modal .rthdef{color:#e3b341;border-color:#3a3320;}
+.modal .rthforget{padding:3px 10px;font-size:.76rem;border-radius:6px;color:#e57575;border-color:#3a2030;}
 .rthrow.isdef{background:rgba(227,179,65,.06);border-radius:6px;padding-left:6px;padding-right:6px;}
 .rthrow.isdef em{color:#e3b341;}
 .rtportin{width:74px;background:#0d1120;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:5px 8px;font-size:.8rem;}
 /* Warm-pool + live-worker management: a focused per-host view inside the Remotes modal */
 .rthexp{flex:0 0 auto;background:none;border:1px solid #2a2e40;color:#8a90a8;cursor:pointer;font-size:.72rem;padding:2px 8px;border-radius:6px;transition:background .1s,color .1s,border-color .1s;}
 .rthexp:hover{background:rgba(88,110,240,.16);color:#cdd3e6;border-color:#3a4b7a;}
-.remotesmodal.focusmode>*:not(.rtfocus):not(.modalx){display:none;}
+.remotesmodal.focusmode .rtbody>*:not(.rtfocus){display:none;}
 .rtfocus{display:none;}
 .remotesmodal.focusmode .rtfocus{display:block;}
 /* Breadcrumb header, mirroring the Publishing dashboard: "Remotes › host — subtitle" with the host
