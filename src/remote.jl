@@ -3995,7 +3995,7 @@ function _placement(r::Region)
     # carries every other command to the cluster. Spawned because this runs under `region_host`,
     # which the UI polls and which must not wait on a session queue.
     Threads.@spawn try; _evict_data_tunnels!(p.host); catch; end
-    _rlog("region[$(r.name)]: allocation $(p.job) on $(p.host) has run out its time — asking for another node")
+    _rlog("region[$(r.name)]: allocation $(p.job) on $(p.host) has run out its time — the next region cell asks for another node")
     return nothing
 end
 
