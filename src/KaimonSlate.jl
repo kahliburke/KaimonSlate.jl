@@ -1696,6 +1696,13 @@ function create_tools(GateTool::Type)
                              code::String = "normal", body::String = "", path::String = "",
                              layout::String = "article", notes::String = "0")::String
         nb, err = _nb(notebook); nb === nothing && return err
+        # A cell whose output is HTML (a record grid, a custom card) has no figure bytes behind it,
+        # so the PDF gets one by rasterising the rendered card IN AN OPEN TAB. Exporting headless
+        # is the normal case for this tool, and the fallback is quiet: the PDF still builds and
+        # those cells come out as plain text. Count them first so the answer can say so, rather
+        # than leaving the caller to notice that a grid they expected is missing.
+        htmlcells = count(c -> NotebookServer._has_html_output(c), nb.report.cells)
+        notab = htmlcells > 0 && lock(nb.llock) do; isempty(nb.listeners); end
         # Deck defaults: code hidden unless the caller explicitly opts in.
         slides = layout == "slides"
         slide_source = slides ? (source == "1") : (source != "0")
@@ -1719,7 +1726,11 @@ function create_tools(GateTool::Type)
         catch e
             return "PDF rendered ($(length(pdf)) bytes) but writing to $out failed: " * sprint(showerror, e)
         end
-        return "Wrote $(length(pdf)) bytes → $out\n(open it with Read to view the pages)"
+        warn = notab ? "\n⚠ $htmlcells cell(s) render as HTML (a record grid, a custom card). No " *
+                       "browser tab is open, so they fell back to plain text — the PDF is complete " *
+                       "but those cells are not what the page shows. Open the notebook in a browser " *
+                       "and re-export to capture them." : ""
+        return "Wrote $(length(pdf)) bytes → $out\n(open it with Read to view the pages)" * warn
     end
 
     """
