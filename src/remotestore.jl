@@ -346,7 +346,8 @@ const _SLATEIGNORE = ".slateignore"
 function _git_kept(dir::AbstractString)
     out = try
         d = abspath(String(dir))
-        readchomp(`git -C $d ls-files -c -o --exclude-standard -z`)
+        # stderr discarded: outside a work tree git says so, and that is the expected answer here.
+        read(pipeline(`git -C $d ls-files -c -o --exclude-standard -z`; stderr = devnull), String)
     catch
         return nothing
     end
