@@ -1789,15 +1789,17 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     function fresh_spawn()
         provision_remote!(t, parent_project)
         start_sync!(t, parent_project)
-        # Remote ports (loopback for :tunnel, 0.0.0.0 for :direct). Pinned when the target names them
-        # (needed for :direct behind a firewall); else auto from _next_ports (9100+), floored above the roster.
+        # Remote ports (loopback for :tunnel, 0.0.0.0 for :direct). Pinned when the target names them;
+        # else auto from _next_ports (9100+), floored above the roster.
         pick_ports() =
-            (t.transport === :direct && t.port != 0) ?
-                # :direct region: t.port is the base_port HINT — take a FREE slot in its stride (roster-aware)
-                # so we land in the firewall-opened range, never colliding with warm workers / another notebook.
-                (let sl = _direct_port_slots(t.port, 1; roster = (try; list_remote_workers(host); catch; Any[]; end), label = "region cold-spawn on $host")
+            (t.port != 0 && _port_is_base(t)) ?
+                # t.port is the base of a stride, not a pin: take a FREE slot in it, clear of warm workers,
+                # another notebook and anything else listening on the host.
+                (let busy = try; busy_ports(host); catch; nothing; end,
+                     sl = _base_port_slots(t.port, 1; roster = (try; list_remote_workers(host); catch; Any[]; end),
+                                           taken = busy, label = "region cold-spawn on $host")
                      isempty(sl) ? _next_ports(floor = try; _port_floor(host); catch; 0; end, reserve = 3,
-                                           taken = try; busy_ports(host); catch; nothing; end, probe = isempty(host)) : sl[1]   # :direct pins blob at gate+2
+                                           taken = busy, probe = isempty(host)) : sl[1]   # :direct pins blob at gate+2
                  end) :
             t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) :
                           _next_ports(floor = try; _port_floor(host); catch; 0; end,
@@ -1807,7 +1809,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         # between another hub on that machine can take it, and no amount of probing closes a window
         # that long — so the answer is to notice and pick again rather than to reserve harder.
         # A port the TARGET names is not ours to move (it was opened in a firewall for this), so
-        # that one reports instead. `:direct`'s `t.port` is a hint into a stride, not a pin.
+        # that one reports instead. A base (`_port_is_base`) is a hint into a stride, not a pin.
         movable = _port_movable(t)
         local r, port, stream_port
         for attempt in 1:_SPAWN_TRIES
@@ -3126,10 +3128,14 @@ end
 _bind_conflict(host::AbstractString, port::Int) =
     _bind_conflict(sc -> _run_on(String(host), sc), port)
 
+# Is `t.port` the base of a stride rather than a pin? A `:direct` target's is (a slot in it is still
+# inside the range opened in the firewall), and so is any region's: its base keeps the worker records
+# of hosts sharing a home directory apart (see `_region_target`), which any slot in the stride does.
+_port_is_base(t::RemoteTarget) = t.transport === :direct || !isempty(t.region)
+
 # Is this port Slate's to move? One the TARGET names was opened in a firewall for exactly this and
-# moving it silently would trade a loud failure for a quiet one. `:direct`'s `t.port` is the base of
-# a stride rather than a pin, so a different slot in it is still inside what was opened.
-_port_movable(t::RemoteTarget) = t.port == 0 || t.transport === :direct
+# moving it silently would trade a loud failure for a quiet one. A base can move within its stride.
+_port_movable(t::RemoteTarget) = t.port == 0 || _port_is_base(t)
 
 # The address a PEER dials to reach `region`'s blob port. Prefer the region's explicit `peer` advertise
 # address — its PUBLIC IP when peers live on a different network than the hub (§5.6: the hub-facing IP is
@@ -3820,17 +3826,19 @@ function parked_wires()
     end
 end
 
-# Free (main, stream) port slots inside a :direct region's base_port stride (worker i → base+3i..+2),
-# skipping any 3-port block a live worker already holds. Returns up to `n` tuples; fewer (with a log)
-# when the open range is too narrow. Shared by the warm reconcile AND a region kernel's own cold spawn
-# so both land inside the base range you opened in the firewall — never the monotonic auto counter,
-# which marches past the range and never rewinds.
-function _direct_port_slots(base_port::Int, n::Int; roster, label::AbstractString = "")
+# Free (main, stream) port slots inside a region's base_port stride (worker i → base+3i..+2), skipping
+# any 3-port block a live worker holds or that has a port in `taken` (what the host reports listening:
+# another tenant, or a socket a dead worker left behind). Returns up to `n` tuples; fewer (with a log)
+# when the range is too narrow. Shared by the warm reconcile AND a region kernel's own cold spawn so
+# both land inside the base range — never the monotonic auto counter, which marches past the range
+# and never rewinds.
+function _base_port_slots(base_port::Int, n::Int; roster, taken = nothing, label::AbstractString = "")
     occupied = Set{Int}()
     for w in roster
         w["alive"] === true || continue
         p = w["port"]; push!(occupied, p, p + 1, p + 2)
     end
+    taken === nothing || union!(occupied, taken)
     ports = Tuple{Int,Int}[]
     k = 0
     while length(ports) < n && k < 256
@@ -3840,7 +3848,7 @@ function _direct_port_slots(base_port::Int, n::Int; roster, label::AbstractStrin
         push!(ports, (p, p + 1))
     end
     length(ports) < n &&
-        _rlog("$(isempty(label) ? "" : label * ": ")only $(length(ports)) free :direct slot(s) from base $base_port — open a wider range for $n worker(s)")
+        _rlog("$(isempty(label) ? "" : label * ": ")only $(length(ports)) free slot(s) from base $base_port — widen the range for $n worker(s)")
     return ports
 end
 
@@ -3866,11 +3874,11 @@ _remote_env_key(origin_env, parent) = _proj_key(isempty(String(origin_env)) ? pa
 # truth for what a region cell runs. The env dir is keyed (isolated) by the env it replicates, so two
 # notebooks with different projects never share/poison one mutable env, and a notebook running whole-
 # remote (`run_on`) and on a region converge on the SAME dir. `region` tags the worker so its own
-# region reclaims it on adoption. For a :direct region, `port` carries base_port as the range HINT —
-# fresh_spawn allocates a free slot from it (see _direct_port_slots) so the kernel lands in the
-# firewall-opened range, not the growing auto counter.
+# region reclaims it on adoption. `port` carries base_port as the range HINT — fresh_spawn allocates
+# a free slot from it (see _base_port_slots), so the kernel lands in that range rather than the
+# growing auto counter, and moves to the next slot when a port there is already taken.
 #
-# A :tunnel region pins the same way, because the auto counter cannot see everything it needs to.
+# A :tunnel region takes a base too, because the auto counter cannot see everything it needs to.
 # Worker records are named `worker-<port>.*` under a $HOME-relative directory with no host in the
 # name, so two hosts sharing a home filesystem share that directory: a spawn on one overwrites the
 # other's manifest, and reaping or the roster GC then deletes the records of a worker that is still
@@ -4277,16 +4285,16 @@ function _region_reconcile_impl!(r::Region)
     cleaned = isempty(dead) && isempty(stale) ? "" : " (cleaned $(length(dead)) dead, $(length(stale)) stale-env)"
     if deficit > 0
         provision_remote!(t, r.preload)              # idempotent; one pass covers every launch below
-        # Ports for the new workers. A :direct region with a pinned base marches up from it in strides of
-        # 3 (each worker owns port..port+2) so you know exactly which range to open in the firewall.
-        # Otherwise (tunnel, or no base) auto-assign from _next_ports, floored above the live roster —
-        # stride 2 for a :tunnel region (its blob picks a worker-chosen free port, not gate+2).
+        # Ports for the new workers. A region with a base marches up from it in strides of 3 (each worker
+        # owns port..port+2), so you know exactly which range to open in the firewall. Otherwise auto-
+        # assign from _next_ports, floored above the live roster — stride 2 for a :tunnel region (its
+        # blob picks a worker-chosen free port, not gate+2). Either way, never another tenant's ports.
+        busy = try; busy_ports(host); catch; nothing; end
         ports = r.base_port > 0 ?
-            _direct_port_slots(r.base_port, deficit; roster = roster, label = "region[$(r.name)]") :
+            _base_port_slots(r.base_port, deficit; roster = roster, taken = busy, label = "region[$(r.name)]") :
             begin
                 floor = _port_floor(host; workers = roster)   # never deal a live worker's ports (see _port_floor)
                 res = r.transport === :direct ? 3 : 2
-                busy = try; busy_ports(host); catch; nothing; end   # …and never another tenant's
                 [_next_ports(; floor, reserve = res, taken = busy, probe = isempty(host))
                  for _ in 1:deficit]
             end

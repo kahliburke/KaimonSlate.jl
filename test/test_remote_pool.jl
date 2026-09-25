@@ -126,6 +126,15 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         @test RE._port_movable(RE.RemoteTarget("h"))                                   # auto
         @test RE._port_movable(RE.RemoteTarget("h"; transport = :direct, port = 9400))  # a hint
         @test !RE._port_movable(RE.RemoteTarget("h"; transport = :tunnel, port = 9400)) # a pin
+        # A region's base is a stride on either transport, so a taken port there moves on.
+        @test RE._port_movable(RE.RemoteTarget("h"; transport = :tunnel, port = 9400, region = "gpu"))
+    end
+
+    @testset "a region's base stride skips ports the host already has in use" begin
+        # A socket a dead worker left behind is in no roster, so only the host's own listing sees it.
+        @test RE._base_port_slots(9400, 2; roster = Any[], taken = Set([9401])) == [(9403, 9404), (9406, 9407)]
+        @test RE._base_port_slots(9400, 1; roster = Any[mkworker(9400)], taken = Set([9405])) == [(9406, 9407)]
+        @test RE._base_port_slots(9400, 1; roster = Any[]) == [(9400, 9401)]
     end
 
     @testset "_port_floor: above every live worker's 3-port block; dead ports are free" begin
