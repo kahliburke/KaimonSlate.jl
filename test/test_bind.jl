@@ -93,6 +93,11 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         s = RE.wrap_value(w, c([1500, 1800]))
         @test s.lo == 1500 && s.hi == 1800
         @test (first(s), last(s)) == (1500.0, 1800.0)
+        # What a cell READS must be writable straight back. `set_bind(:span, span)` hands over the
+        # wrapped `(lo, hi)`, and a composite control whose coercion only knew the flat wire vector
+        # would take that for malformed input and move the control to its default.
+        @test c(s) == Any[1500.0, 1800.0]
+        @test c((1500, 1800)) == Any[1500.0, 1800.0]
     end
 
     # A pick reads its value off a figure, so every guarantee a cell relies on has to hold against
@@ -107,6 +112,11 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         @test RE.coerce_bind(w, Any[1.234, -2.346]) == Any[1.25, -2.35]  # snapped to the grid
         @test RE.coerce_bind(w, "nonsense") == w.default                 # garbage → the default
         @test RE.coerce_bind(w, Any[1.0]) == w.default                   # wrong arity → the default
+        # A cell writes back the shape it was given. `probe` reads as `(x = …, y = …)`, so
+        # `set_bind(:probe, probe)` has to leave the control where it is rather than reset it,
+        # and a bare `(x, y)` tuple is the other form an author reaches for.
+        @test RE.coerce_bind(w, RE.wrap_value(w, Any[1.25, -2.35])) == Any[1.25, -2.35]
+        @test RE.coerce_bind(w, (1.25, -2.35)) == Any[1.25, -2.35]
         p = RE.wrap_value(w, Any[1.25, -2.35])
         @test (p.x, p.y) == (1.25, -2.35)
 
@@ -123,6 +133,8 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         # swaps the ends WITHIN each pair, and must land on the same box.
         @test RE.coerce_bind(r, Any[2.0, -1.0, 1.0, -2.0]) == fwd
         @test b.xlo <= b.xhi && b.ylo <= b.yhi
+        @test RE.coerce_bind(r, b) == fwd                     # a region round-trips too
+        @test RE.coerce_bind(r, (-1.0, 2.0, -2.0, 1.0)) == fwd
 
         # A path is fixed-length: a partial path is still in progress, a long one is trimmed.
         q = RE.PickPath(; n = 3)
@@ -130,6 +142,10 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
         @test length(RE.coerce_bind(q, Any[Any[0, 0], Any[1, 1], Any[2, 2], Any[3, 3]])) == 3
         @test RE.wrap_value(q, RE.coerce_bind(q, Any[Any[0, 0], Any[1, 1]])) ==
               [(x = 0.0, y = 0.0), (x = 1.0, y = 1.0)]
+        # …and a path round-trips, whose points arrive as NamedTuples rather than a flat vector.
+        way = RE.wrap_value(q, RE.coerce_bind(q, Any[Any[0, 0], Any[1, 1]]))
+        @test RE.coerce_bind(q, way) == Any[Any[0.0, 0.0], Any[1.0, 1.0]]
+        @test RE.coerce_bind(q, [(0.0, 0.0), (1.0, 1.0)]) == Any[Any[0.0, 0.0], Any[1.0, 1.0]]
     end
 
     # A SNAPPED point pick is exportable: the grid is finite, so a static page can precompute every
