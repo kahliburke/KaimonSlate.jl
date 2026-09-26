@@ -284,6 +284,40 @@ Register the widget at notebook load (in a `WebPage` or an `@asset`ed script). A
 whose `kind` matches picks it up, and reading `answer` in another cell recomputes it when the widget
 pushes a new value.
 
+### Keep a returned output mounted across runs
+
+When a cell runs again, Slate replaces its output. A figure that a script draws then starts again
+from an empty element, so it blinks and loses its zoom and any state in the page. An output can
+ask Slate to keep its element and update it in place instead. There are three ways to ask:
+
+- **A widget kind from `slateRegisterWidget`.** Add `update(el, props)` to the registration. When a
+  cell returns the same kind at the same position, Slate keeps the mounted element and calls
+  `update` with the new props. Without `update`, Slate mounts a new element and calls `destroy` on
+  the old one.
+- **A Preact component from `registerComponent`.** Add `export const keepMounted = true` to the
+  module. Slate then renders the component again with the new `params`, and Preact keeps its DOM
+  and its state. A component that reads `params` only when it mounts shows old values, so this is
+  an opt-in.
+- **Any element in HTML output.** Mark it `data-slate-keep="key"`. On the next run, the old element
+  with the same key takes the place of the new one, with its children and the properties that
+  scripts set on it. A script in the new output finds it in the DOM and updates it. When a run no
+  longer outputs the key, Slate sends a `slate:discard` event to the old element before it removes
+  it, so a script can remove its listeners.
+
+```html
+<div data-slate-keep="counter"></div>
+<script>
+{ // a block: a top-level `const` in a classic script stays declared after the first run
+  const box = document.currentScript.previousElementSibling;
+  box.runs = (box.runs ?? 0) + 1;          // kept across runs of the cell
+  box.textContent = `run ${box.runs}`;
+}
+</script>
+```
+
+Keys match by position when an output has more than one element with the same key, so two figures
+in one output stay apart. A script inside a kept element does not run again.
+
 ### Cell toolbar buttons — `slateRegisterCellAction`
 
 ```js
