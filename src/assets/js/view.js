@@ -34,11 +34,13 @@ function _ctrlValLabel(el, v) {
 //     wire(el, api) { /* build DOM inside el; on change, api.push(value) */ },
 //     sync(el, value, params) { /* reflect a server-pushed value (optional) */ },
 //     destroy(el) { /* free resources before el is discarded (optional) */ },
+//     update(el, props) { /* redraw a RETURNED output in place when its cell runs again (optional) */ },
 //   });
 // `api` = { push, schedule, flush, value, name, bindId, params, mirror }. `value` is the current
 // value at wire time (build from it; `sync` delivers later reactive updates). `push`/`flush` send
 // the value immediately; `schedule` is throttled/coalesced (same policy as built-ins). `destroy` is
-// called before a rebuild orphans the element, so a widget holding resources can clean up.
+// called before a rebuild orphans the element, so a widget holding resources can clean up. Without
+// `update`, a returned output is mounted fresh on every run; with it, `_swapOutput` keeps the element.
 window.slateWidgets = window.slateWidgets || {};
 window.slateRegisterWidget = function (kind, impl) {
   const im = impl || {};
@@ -589,6 +591,11 @@ function _bindSpec(bindId, name) {
   const c = _cellById(bindId); if (!c) return null;
   return (c.binds || []).find(b => b.name === name) || null;
 }
+// The descriptor {v, component, props} of a component placeholder, from its sibling JSON script.
+function _componentDesc(el) {
+  const scr = el.parentNode && el.parentNode.querySelector('script.slatecomponent-desc');
+  try { return scr ? JSON.parse(scr.textContent) : null; } catch (e) { return null; }
+}
 // Mount return-value component OUTPUTS: a `slate_render` descriptor {v, component, props} is emitted as a
 // `.slatecomponent` placeholder plus a sibling JSON `<script class="slatecomponent-desc">`. Look the
 // component up in the widget registry and wire it with the props + a DISPLAY ctx (call/stream, no bind
@@ -596,9 +603,8 @@ function _bindSpec(bindId, name) {
 // an as-yet-unregistered component just waits for `slateRegisterWidget` to re-scan (see above).
 function wireOutputComponent(el) {
   if (el._customWired) return;
-  const scr = el.parentNode && el.parentNode.querySelector('script.slatecomponent-desc');
-  if (!scr) return;
-  let desc; try { desc = JSON.parse(scr.textContent); } catch (e) { return; }
+  const desc = _componentDesc(el);
+  if (!desc) return;
   const kind = desc && desc.component;
   const reg = kind && window.slateWidgets && window.slateWidgets[kind];
   el.dataset.component = kind || '';
@@ -1528,10 +1534,12 @@ function _swapOutput(out, html, live, after) {
   const seq = (out.__slateSwapSeq = (out.__slateSwapSeq || 0) + 1);
   const commit = () => {
     if (out.__slateSwapSeq !== seq) return;
+    const applyUpdates = _carryMounted(out, stage);
     out.style.minHeight = out.offsetHeight + 'px';
     out.replaceChildren(...Array.from(stage.childNodes));
     runScripts(out);   // a <script> from parsed HTML is inert — re-create so figures boot
     mountOutputComponents(out);   // mount any `slate_render` component OUTPUTS in the freshly-swapped output
+    applyUpdates();
     const mounted = out.querySelectorAll('img');
     const release = () => { out.style.minHeight = ''; };
     if (!mounted.length) requestAnimationFrame(release);
@@ -1554,6 +1562,50 @@ function _swapOutput(out, html, live, after) {
                                        : new Promise(r => { im.onload = im.onerror = r; }))).then(go);
 }
 
+// Carry what the previous output mounted into the new one, so that a re-run UPDATES a figure in place
+// and does not draw it again into an empty element. This is the persistence an echart gets from
+// `EChartHost`. Nothing is kept unless its owner asks for it, in one of two ways:
+//   • a `slate_render` component whose kind registers `update(el, props)`. The mounted element takes
+//     the place of the new placeholder, and gets the new props once it is back in the document.
+//   • any element marked `data-slate-keep="key"`. The old element with the same key takes the place of
+//     the new one, with its children and its JS state. A script in the new output finds it in the DOM.
+// Both match by position among their peers, so two figures in one output stay apart. A component that
+// is not kept gets its `destroy`; a marked element that is not kept gets a `slate:discard` event.
+// Returns a function that applies the component updates; call it after the swap.
+function _carryMounted(out, stage) {
+  const updates = [], kept = new Set();
+  const olds = out.querySelectorAll('.slatecomponent');
+  stage.querySelectorAll('.slatecomponent').forEach((nu, i) => {
+    const old = olds[i];
+    const reg = old && old._customWired && window.slateWidgets[old.dataset.component];
+    const desc = reg && reg.update && _componentDesc(nu);
+    if (!desc || desc.component !== old.dataset.component) return;
+    nu.replaceWith(old);
+    kept.add(old);
+    updates.push(() => reg.update(old, desc.props || {}));
+  });
+  olds.forEach(old => {
+    const reg = !kept.has(old) && old._customWired && window.slateWidgets[old.dataset.component];
+    if (reg && reg.destroy) { try { reg.destroy(old); } catch (e) { console.error(e); } }
+  });
+  const byKey = root => {
+    const m = new Map();
+    root.querySelectorAll('[data-slate-keep]').forEach(el => {
+      const k = el.dataset.slateKeep;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(el);
+    });
+    return m;
+  };
+  const prev = byKey(out);
+  byKey(stage).forEach((news, k) => news.forEach((nu, i) => {
+    const old = (prev.get(k) || [])[i];
+    if (old) { nu.replaceWith(old); kept.add(old); }
+  }));
+  prev.forEach(els => els.forEach(el => { if (!kept.has(el)) el.dispatchEvent(new Event('slate:discard')); }));
+  return () => updates.forEach(f => { try { f(); } catch (e) { console.error(e); } });
+}
+
 // A <script> assigned via innerHTML is parsed but never executed. Rich output
 // (notably a WGLMakie/Bonito figure: a module bundle <script src> that defines
 // `Bonito`, then an inline module that calls `Bonito.init_session(…)`) only boots
@@ -1564,7 +1616,9 @@ function _swapOutput(out, html, live, after) {
 async function runScripts(root) {
   if (!root) return;
   for (const old of Array.from(root.querySelectorAll('script'))) {
+    if (old.__slateRan) continue;   // already run, inside an element `_carryMounted` kept
     const s = document.createElement('script');
+    s.__slateRan = true;
     for (const a of old.attributes) s.setAttribute(a.name, a.value);
     if (old.textContent) s.textContent = old.textContent;
     const loaded = s.src ? new Promise(res => { s.onload = s.onerror = res; }) : null;
