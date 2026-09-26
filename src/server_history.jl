@@ -1270,7 +1270,18 @@ end
 # The cells payload for a NON-live state (inactive/hydrating): the embedded frozen render if present
 # (already `cell_json`-shaped), else the parsed cells rendered un-run.
 function _static_cells(nb::LiveNotebook)
-    haskey(nb.report.meta, "preview") && return nb.report.meta["preview"]
+    if haskey(nb.report.meta, "preview")
+        # A stored render keeps the `rev` values of the process that saved it. This process counts
+        # from zero, and the browser ignores a payload whose `rev` is not above the last one it drew
+        # (`revIsNew` in view.js). A stored rev of 18 thus blocks the live outputs of this run up to
+        # rev 18, and the page keeps the stored output. Give each stored cell a rev below every live
+        # rev, so any live payload replaces it and a late stored payload does not replace a live one.
+        cells = nb.report.meta["preview"]
+        for e in cells
+            e isa AbstractDict && (e["rev"] = -1)
+        end
+        return cells
+    end
     bindref, hostednames = _bind_index(nb.report)
     return [cell_json(c, bindref, hostednames) for c in nb.report.cells]
 end
