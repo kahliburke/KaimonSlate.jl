@@ -216,7 +216,9 @@ SlateExtensionsBase.to_palette_command(c::TaggedCmd) = auto_palette_command(c)
         s = html(WebPage(css = "a{}", html = "<p>", js = "x=1"))
         @test occursin("<style>a{}</style>", s)
         @test occursin("<p>", s)
-        @test occursin("<script>x=1</script>", s)
+        @test occursin("<script>{\nx=1\n}</script>", s)
+        # The script runs in a block of its own, so rendering it twice doesn't redeclare its consts.
+        @test occursin("{\nconst a = 1 // note\n}", html(WebPage(js = "const a = 1 // note")))
         # empty sections omitted
         @test !occursin("<style>", html(WebPage(html = "x")))
         @test !occursin("<script>", html(WebPage(html = "x")))
