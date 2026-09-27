@@ -1711,6 +1711,17 @@ end
 # `strides` is per-mark (id → n), not one global setting: a notebook mixes a 4-option Select with a
 # 500-position slider, and the useful decision is almost always about ONE of them. A missing id means
 # stride 1.
+# A series written as points, `[[x, y], …]`, is a list of equal-length coordinate vectors. Each
+# position becomes a points × coordinates matrix, which stacks like any other numeric array, and the
+# page reads a two-dimensional slice back as rows: the same list of points.
+function _replay_points_matrix(s)
+    (s isa AbstractVector && !isempty(s) &&
+     all(p -> (p isa AbstractVector || p isa Tuple) && !isempty(p) && all(x -> x isa Real, p), s)) || return s
+    n = length(first(s))
+    all(p -> length(p) == n, s) || return s
+    return [s[i][j] for i in eachindex(s), j in 1:n]
+end
+
 function _run_replay_sweeps(sweeps::Dict{String,Any}, lk::ReentrantLock = ReentrantLock();
                             only = nothing,
                             strides::AbstractDict = Dict{String,Int}(), stride::Int = 1,
@@ -1755,7 +1766,7 @@ function _run_replay_sweeps(sweeps::Dict{String,Any}, lk::ReentrantLock = Reentr
             rows, cols, M = _table_replay_pack(slices)
             (M, Dict{String,Any}("target" => "table", "rows" => rows, "cols" => cols))
         else
-            (replay_stack(slices), Dict{String,Any}())
+            (replay_stack(map(_replay_points_matrix, slices)), Dict{String,Any}())
         end
         # Bytes are handed BACK rather than pushed through `save_asset`. That writes into a task-local
         # sink seeded by a running cell, and an export-time sweep has no cell running — the record would

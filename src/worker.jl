@@ -45,7 +45,7 @@ const PAYLOAD_SHA = Ref("")
 struct EChart
     option::Any
 end
-echart(option::AbstractDict) = EChart(Dict{String,Any}(string(k) => v for (k, v) in option))
+echart(option::AbstractDict) = EChart(_mark_option_replays!(Dict{String,Any}(string(k) => v for (k, v) in option)))
 
 include(joinpath(@__DIR__, "echarts_dsl.jl")) # echart(:line,…)/series DSL (shared with the engine)
 include(joinpath(@__DIR__, "slate_look.jl")) # slate_theme()/use_slate_theme! — shared ECharts/Makie palette

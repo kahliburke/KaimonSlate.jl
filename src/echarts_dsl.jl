@@ -63,6 +63,48 @@ function _mark_replay!(opt, arr, comp)
     return opt
 end
 
+# A hand-written option (`echart(Dict(...))`) carries `@replay` values wherever the author put them.
+# A series whose `data` is one is the whole series, so it is marked to be replaced wholesale: a flat
+# array against a category axis, or points (`[[x, y], …]`, which the sweep stacks as a matrix per
+# position). A `@replay` value anywhere else has no series to drive, so the author is told instead of
+# shipping a control that moves nothing.
+function _mark_option_replays!(opt::Dict{String,Any})
+    s = get(opt, "series", nothing)
+    list = s isa AbstractDict ? Any[s] : s isa AbstractVector ? s : Any[]
+    marked = Any[]
+    if any(e -> e isa AbstractDict && _replay_of(get(e, "data", nothing)) !== nothing, list)
+        # String-keyed and Any-valued, so the mark can be written: a `Dict("type" => "line", …)` built
+        # in a cell may have a narrower value type.
+        list = Any[e isa AbstractDict ? Dict{String,Any}(string(k) => v for (k, v) in e) : e for e in list]
+        opt["series"] = s isa AbstractDict ? only(list) : list
+        for e in list
+            e isa AbstractDict || continue
+            r = _replay_of(get(e, "data", nothing))
+            r === nothing && continue
+            _mark_replay!(e, r, nothing)
+            push!(marked, r)
+        end
+    end
+    stray = _stray_replays(opt, marked)
+    isempty(stray) || @warn "echart: `@replay` value(s) for $(join(unique(string.(getfield.(stray, :control))), ", ")) " *
+        "sit outside a series' `data`, where an exported page cannot apply them; the control will be " *
+        "frozen there. Put the replayed values in a series' `data`, or use the DSL " *
+        "(`echart(:line, x, @replay(ctl, y))`)."
+    return opt
+end
+
+function _stray_replays(x, marked, out = Any[])
+    r = _replay_of(x)
+    if r !== nothing
+        any(m -> m === r, marked) || push!(out, r)
+    elseif x isa AbstractDict
+        for v in values(x); _stray_replays(v, marked, out); end
+    elseif x isa AbstractVector && !(eltype(x) <: Number)
+        for v in x; _stray_replays(v, marked, out); end
+    end
+    return out
+end
+
 # Pair x and y into ECharts `[x,y]` points, with a clear error on a length mismatch instead of a
 # deep `eachindex(x,y)` DimensionMismatch from inside the DSL.
 function _xy(kind, x, y)
