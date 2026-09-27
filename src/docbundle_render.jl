@@ -62,9 +62,13 @@ end
 # refused; the running hub is the one to render through.
 _kaimon_slate_extension_running() = !isempty(_pids_matching("namespace=\"slate\""))
 
+# Any Kaimon-hosted Slate, including a checkout registered under its own namespace (`slatedoc`, …):
+# something that will answer on a hub port once it has loaded.
+_kaimon_slate_family_running() = !isempty(_pids_matching("namespace=\"slate"))
+
 function _await_hub(host_timeout::Real)
     _hub_running() && return nothing
-    _kaimon_slate_extension_running() ||
+    _kaimon_slate_family_running() ||
         error("render_doc_bundle: no Slate hub is answering at $(_base())")
     @info "render_doc_bundle: waiting for the Kaimon-hosted Slate hub at $(_base())"
     t0 = time()
