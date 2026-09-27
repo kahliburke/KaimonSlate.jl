@@ -1791,6 +1791,40 @@ function create_tools(GateTool::Type)
     end
 
     """
+        export_docs(notebook, dir="") -> String
+
+    Write this notebook as a **doc bundle** for a Documenter / DocumenterVitepress site that uses the
+    DocumenterSlate plugin, from its current live state (outputs as they stand; run it first if cells
+    are stale). `@replay` controls are swept, so they stay interactive on the docs page.
+
+    `dir` is where the bundle goes; relative paths resolve against the notebook's project. Empty →
+    `docs/slate/<notebook>` under the nearest directory whose `docs/` has a `make.jl`. The folder's
+    name is what a docs page calls the notebook: ```` ```@slate <name> ```` places the whole
+    notebook (prose as the page's markdown, code as code blocks, outputs live), and
+    ```` ```@slate <name> <cell> ```` one cell. Commit the folder with the docs.
+    """
+    function export_docs_tool(notebook::String; dir::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        NS = NotebookServer
+        d = strip(expanduser(dir))
+        dest = isempty(d) ? NS.doc_bundle_default_dir(nb) : isabspath(d) ? d :
+               joinpath((r = NS._proj_root(nb); isempty(r) ? dirname(abspath(nb.path)) : r), d)
+        man = try
+            NS.export_doc_bundle(nb, normpath(dest); render_info = Dict{String,Any}("via" => "agent"))
+        catch e
+            return "Docs export failed: " * sprint(showerror, e)
+        end
+        name = basename(normpath(dest))
+        withoutput = count(c -> get(c, "output", false) === true, man["cells"])
+        errs = man["rendered"]["errors"]
+        return string("Wrote the doc bundle → ", normpath(dest), "\n  ", withoutput, " cells with output, ",
+                      length(man["replays"]), " replay sweep(s)",
+                      isempty(errs) ? "" : string("\n  cells with errors (their error output is bundled): ", join(errs, ", ")),
+                      "\n\nIn a docs page:  ```@slate ", name, "```  (whole notebook)  or  ```@slate ", name,
+                      " <cell>```  (one cell).")
+    end
+
+    """
         pkg(notebook; op="list", name="") -> String
 
     View or manage THIS NOTEBOOK's own package dependencies — the packages it adds on top of its
@@ -2334,6 +2368,7 @@ function create_tools(GateTool::Type)
         GateTool("eval_js", eval_js),
         GateTool("export_pdf", export_pdf_tool; timeout_ms = RENDER_MS),
         GateTool("export_app", export_app_tool; timeout_ms = DEPLOY_MS),
+        GateTool("export_docs", export_docs_tool; timeout_ms = DEPLOY_MS),
         GateTool("index_docs", index_docs; timeout_ms = RENDER_MS),
         GateTool("search_docs", search_docs_tool),
         GateTool("pkg", pkg; timeout_ms = DEPLOY_MS),

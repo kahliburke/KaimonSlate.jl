@@ -147,6 +147,8 @@ function _render_via_hub(path::AbstractString, dir::AbstractString; light, dark,
             error("render_doc_bundle: the hub at $(_base()) runs a KaimonSlate without doc bundle " *
                   "support; update the KaimonSlate that Kaimon loads, then restart its extension")
         end
+        get(man, "ok", true) === false &&
+            error("render_doc_bundle: $(basename(path)): $(get(man, "error", "the hub could not write the bundle"))")
         errs = get(get(man, "rendered", Dict()), "errors", Any[])
         isempty(errs) || @warn "render_doc_bundle: cells raised errors; their error output is in the bundle" notebook = basename(path) cells = errs
         @info "render_doc_bundle: wrote $(basename(dir))" notebook = basename(path) cells = length(get(man, "cells", Any[]))

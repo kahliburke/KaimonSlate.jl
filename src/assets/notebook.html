@@ -533,6 +533,7 @@
       <option value="website" hidden>Website — publishable page (+ og:image)</option>
       <option value="standalone">Standalone .jl — reproducible bundle</option>
       <option value="app">App — a folder that runs as an application</option>
+      <option value="docs">Docs — a bundle for a Documenter site</option>
     </select></div>
   <div class="setrow exrow fmt-pdf fmt-html fmt-website fmt-markdown"><label title="Filter which cell outputs appear">Outputs</label>
     <select id="exoutputs">
@@ -712,6 +713,11 @@
       <input id="appworkbook" type="checkbox"/> readers can edit and run the cells tagged <code>workbook</code></label></div>
   <div class="setrow exrow fmt-app sethint"><span></span>Writes a self-contained folder. Running <code>run.sh</code> (macOS/Linux) or <code>run.bat</code> (Windows) inside it installs the Julia packages, reconstructs this notebook's exact environment, and serves it as an <b>app</b>: prose, results and live controls, with the authoring API refused by the server. Copy it to another machine or keep it here — it needs only Julia 1.10+. Ships the project's <b>git-tracked</b> files; add anything else under “Also ship”. <b>No authentication</b> — whoever can reach the port can drive it.</div>
   <div class="setrow exrow fmt-app" id="appoutrow" style="display:none"><span></span><div id="appout" class="publog" style="flex:1;margin:0"></div></div>
+  <div class="setrow exrow fmt-docs"><label title="Folder to write the bundle into, on THIS machine. Relative paths resolve against the notebook's project. The folder's name is what a docs page calls the notebook: ```@slate <name>```. Re-exporting replaces it.">Folder</label>
+    <input id="docsdir" type="text" placeholder="docs/slate/notebook" autocomplete="off" spellcheck="false"
+      style="flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>
+  <div class="setrow exrow fmt-docs sethint"><span></span>Writes the notebook as it stands now, outputs and all, for a <b>Documenter</b> or <b>DocumenterVitepress</b> site with the DocumenterSlate plugin. Prose becomes the page's own markdown; code, charts, tables and controls are drawn live on the page. Controls with <code>@replay</code> stay interactive. Commit the folder with your docs.</div>
+  <div class="setrow exrow fmt-docs" id="docsoutrow" style="display:none"><span></span><div id="docsout" class="publog" style="flex:1;margin:0"></div></div>
   <div class="setrow" id="sitepubrow" style="display:none"><div id="sitepublog" class="publog" style="flex:1;margin:0"></div></div>
   <div class="row"><button id="excancel" onclick="closeExport(false)">Cancel</button>
     <button class="exrow fmt-markdown" onclick="closeExport('copy')">Copy to clipboard</button>
@@ -719,7 +725,8 @@
     <button class="exrow fmt-pdf fmt-html fmt-markdown fmt-standalone primary" onclick="closeExport(true)">Export</button>
     <!-- The app export stays IN the dialog: it writes a folder rather than downloading, so the modal
          is the only place its destination path can be reported back. -->
-    <button class="exrow fmt-app primary" id="appexportbtn" onclick="exportApp()">Write app folder</button></div>
+    <button class="exrow fmt-app primary" id="appexportbtn" onclick="exportApp()">Write app folder</button>
+    <button class="exrow fmt-docs primary" id="docsexportbtn" onclick="exportDocs()">Write bundle</button></div>
 </div></div>
 <div class="palette-bg" id="cmdbg"><div class="cmdpal">
   <input id="cmdin" placeholder="Type a command…" autocomplete="off" spellcheck="false"/>

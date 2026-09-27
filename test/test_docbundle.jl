@@ -113,3 +113,27 @@ end
         @test NS.doc_bundle_key(a) != NS.doc_bundle_key(b)
     end
 end
+
+@testset "doc bundle: default folder follows the nearest docs/make.jl" begin
+    mktempdir() do root
+        mk(p) = (mkpath(dirname(p)); write(p, ""); p)
+        nbfor(path) = NS.LiveNotebook("x", path, RE.parse_report(""), RE.InProcessKernel(), 1, String[], String[],
+                                      ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+        mk(joinpath(root, "docs", "make.jl"))
+        # a notebook elsewhere in the package → the package's docs/slate
+        a = nbfor(mk(joinpath(root, "examples", "tour.jl")))
+        @test NS.doc_bundle_default_dir(a) == joinpath(root, "docs", "slate", "tour")
+        @test NS.doc_bundle_name(a) == "tour"
+        # a notebook inside docs/ → the docs dir it is in
+        b = nbfor(mk(joinpath(root, "docs", "notebooks", "osc.jl")))
+        @test NS.doc_bundle_default_dir(b) == joinpath(root, "docs", "slate", "osc")
+    end
+    # no docs/ and no project anywhere above → beside the notebook
+    mktempdir() do root
+        p = joinpath(root, "loose.jl"); write(p, "")
+        nb = NS.LiveNotebook("x", p, RE.parse_report(""), RE.InProcessKernel(), 1, String[], String[],
+                             ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+        Base.current_project(root) === nothing &&
+            @test NS.doc_bundle_default_dir(nb) == joinpath(root, "docs", "slate", "loose")
+    end
+end

@@ -348,6 +348,55 @@ async function exportApp() {
 }
 window.exportApp = exportApp;
 
+// ── Docs bundle ───────────────────────────────────────────────────────────────
+// Like the app export, a folder written on the machine running Slate, reported in the dialog. The
+// default folder depends on where THIS notebook sits (the nearest `docs/make.jl`), so it is asked for
+// per notebook rather than remembered across them.
+async function _docsPrefill() {
+  const inp = document.getElementById('docsdir');
+  if (!inp || inp.dataset.nb === NB_ID) return;
+  try {
+    const j = await (await fetch(_apipath('/api/docbundle'), { cache: 'no-store' })).json();
+    inp.value = j.dir || '';
+    inp.dataset.nb = NB_ID;
+  } catch (_) { /* leave it for the author to fill in */ }
+}
+async function exportDocs() {
+  const dir = (document.getElementById('docsdir').value || '').trim();
+  const out = document.getElementById('docsout'), row = document.getElementById('docsoutrow');
+  const btn = document.getElementById('docsexportbtn');
+  const line = (cls, html) => {
+    const d = document.createElement('div');
+    d.className = 'publogln' + (cls ? ' ' + cls : '');
+    d.innerHTML = html;
+    out.appendChild(d);
+    out.scrollTop = out.scrollHeight;
+  };
+  const label = btn.textContent;
+  row.style.display = ''; out.innerHTML = '';
+  line('st', 'Writing the bundle (controls with <code>@replay</code> are swept first)…');
+  btn.disabled = true; btn.classList.add('busy'); btn.textContent = 'Writing…';
+  try {
+    const r = await fetch(_apipath('/api/docbundle'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir }) });
+    const j = await r.json().catch(() => ({}));
+    out.innerHTML = '';
+    if (!r.ok || !j.ok) { line('err', '✗ ' + _esc(j.error || 'export failed')); return; }
+    const cells = (j.cells || []).filter(c => c.output).length;
+    const sweeps = Object.keys(j.replays || {}).length;
+    const errs = ((j.rendered || {}).errors || []);
+    line('st', 'Wrote <code>' + _esc(j.dir) + '</code>: ' + cells + ' cells with output, ' +
+               sweeps + ' replay sweep' + (sweeps === 1 ? '' : 's') + '.');
+    if (errs.length) line('err', '⚠ These cells raised errors, and their error output is in the bundle: ' + errs.map(_esc).join(', '));
+    line('', 'In a docs page, the whole notebook:  <code>```@slate ' + _esc(j.name) + '</code> … <code>```</code>');
+    line('', 'or one cell:  <code>```@slate ' + _esc(j.name) + ' &lt;cell&gt;</code> … <code>```</code>');
+    line('ok', '✓ Bundle written');
+    btn.textContent = 'Write again';
+  } catch (e) { out.innerHTML = ''; line('err', '✗ Docs export failed: ' + _esc(String(e))); }
+  finally { btn.disabled = false; btn.classList.remove('busy'); if (btn.textContent === 'Writing…') btn.textContent = label; }
+}
+window.exportDocs = exportDocs;
+
 // ── Precomputed-results (memo) quality slider ─────────────────────────────────
 // The standalone / runnable-HTML formats can embed THIS notebook's memoizable cell results so it
 // springs to life on import (expensive cells RESTORE instead of recompute). The slider is a byte
@@ -469,6 +518,12 @@ function _exSyncRows() {
   const f = _exFormat();
   document.querySelectorAll('#exportbg .exrow').forEach(el => { el.style.display = el.classList.contains('fmt-' + f) ? '' : 'none'; });
   if (f === 'pdf') { _pdfSyncSlides(); _pdfSyncThemeWarn(); }
+  if (f === 'docs') _docsPrefill();
+  // A write's log row is part of its format's rows, but has nothing to show until something is written.
+  [['appoutrow', 'appout'], ['docsoutrow', 'docsout']].forEach(([r, o]) => {
+    const row = document.getElementById(r), out = document.getElementById(o);
+    if (row && out && !out.textContent.trim()) row.style.display = 'none';
+  });
   // The bundle-only rows (git history + precomputed results) apply only to a RUNNABLE html page —
   // hide them when html isn't runnable, where they'd have nowhere to embed.
   if (f === 'html') {
@@ -754,7 +809,7 @@ function closeExport(go) {
     return exportMarkdown(go === 'copy' ? 'copy' : 'file');
   }
   if (fmt === 'website') return;   // publishing runs via the ☁ button → publishToSite(), not through closeExport
-  if (fmt === 'app') return;       // …and the app export via "Write app folder" → exportApp(), which keeps the dialog open
+  if (fmt === 'app' || fmt === 'docs') return;       // …and the app export via "Write app folder" → exportApp(), which keeps the dialog open
   if (fmt === 'standalone') return exportStandalone();
   return _runPdfExport();
 }

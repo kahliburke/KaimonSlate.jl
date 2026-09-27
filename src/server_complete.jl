@@ -1602,17 +1602,31 @@ function _make_router(h::Hub)
                   for t in ReportEngine.xfer_traces() if (t.src in rset || t.dst in rset)]
         _json(Dict("traces" => traces, "now" => time()))
     end))
-    # Write this notebook's doc bundle (server_docbundle.jl) into `dir` on the hub's own filesystem and
-    # return the manifest. Body: {dir, light?, dark?}. Blocks while `@replay` sweeps are evaluated,
-    # which is why a docs build drives it with a long read timeout (`render_doc_bundle`).
+    # Doc bundles (server_docbundle.jl). GET → where one would go by default and the name a docs page
+    # refers to it by; POST {dir?, light?, dark?} → write it and return the manifest plus `dir`/`name`.
+    # A relative `dir` resolves against the notebook's project, like the app export. The POST blocks
+    # while `@replay` sweeps are evaluated, which is why a docs build drives it with a long timeout.
+    HTTP.register!(router, "GET", "/api/{id}/docbundle", req -> _withnb(h, req, nb ->
+        _json(Dict("dir" => doc_bundle_default_dir(nb), "name" => doc_bundle_name(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/docbundle", req -> _withnb(h, req, nb -> begin
         b = _body(req)
-        dir = strip(String(get(b, "dir", "")))
-        isempty(dir) && return HTTP.Response(400, "missing dir")
-        _json(export_doc_bundle(nb, abspath(expanduser(dir));
-                                light = String(get(b, "light", "daylight")),
-                                dark = String(get(b, "dark", "midnight")),
-                                render_info = Dict{String,Any}("via" => "hub")))
+        dir = expanduser(strip(String(get(b, "dir", ""))))
+        dest = if isempty(dir)
+            doc_bundle_default_dir(nb)
+        elseif isabspath(dir)
+            dir
+        else
+            root = _proj_root(nb)
+            joinpath(isempty(root) ? dirname(abspath(nb.path)) : root, dir)
+        end
+        man = try
+            export_doc_bundle(nb, normpath(dest); light = String(get(b, "light", "daylight")),
+                              dark = String(get(b, "dark", "midnight")),
+                              render_info = Dict{String,Any}("via" => "hub"))
+        catch e
+            return _json(Dict("ok" => false, "error" => sprint(showerror, e)))
+        end
+        _json(merge(man, Dict{String,Any}("ok" => true, "dir" => normpath(dest), "name" => basename(normpath(dest)))))
     end))
     # Static export: a self-contained HTML document of the notebook. `?dl=1` downloads; `?source=0`
     # hides code; `?theme=light|dark`; `?code=normal|small|smaller|tiny|hidden` sizes/hides listings.

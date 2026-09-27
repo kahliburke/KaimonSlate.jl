@@ -85,6 +85,37 @@ function _doc_markdown(ctx::_ExportCtx, c::Cell)
     return (_documenter_math(s), native)
 end
 
+"""
+    doc_bundle_name(nb) -> String
+
+The name a docs page uses for this notebook's bundle (```` ```@slate <name> ````): the notebook's file
+name without `.jl`.
+"""
+doc_bundle_name(nb::LiveNotebook) = splitext(basename(nb.path))[1]
+
+"""
+    doc_bundle_default_dir(nb) -> String
+
+Where a notebook's bundle goes when nobody says: `docs/slate/<name>` under the nearest enclosing
+directory whose `docs/` has a `make.jl` (a notebook inside `docs/` finds the one it is in). With none,
+`docs/slate/<name>` under the notebook's project, or beside the notebook when it has no project (its
+environment then lives in a directory the author never sees).
+"""
+function doc_bundle_default_dir(nb::LiveNotebook)
+    name = doc_bundle_name(nb)
+    d = dirname(abspath(nb.path))
+    while true
+        basename(d) == "docs" && isfile(joinpath(d, "make.jl")) && return joinpath(d, "slate", name)
+        isfile(joinpath(d, "docs", "make.jl")) && return joinpath(d, "docs", "slate", name)
+        p = dirname(d)
+        p == d && break
+        d = p
+    end
+    proj = Base.current_project(dirname(abspath(nb.path)))
+    base = proj === nothing ? dirname(abspath(nb.path)) : dirname(proj)
+    return joinpath(base, "docs", "slate", name)
+end
+
 # Does a code cell show anything below its (hidden) source? A cell that only defines things has no
 # payload, and a docs page has nothing to embed for it.
 function _doc_cell_has_output(c::Cell, ctrls::AbstractString)
