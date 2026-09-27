@@ -480,17 +480,33 @@ implicit content after a header is taken as that explicit cell's verbatim body.)
 """
 function parse_report(text::AbstractString; id::AbstractString = "r", title::AbstractString = "")
     report = Report(id, title)
-    lines = split(text, '\n')
-    # Split off any Slate footer block (always terminal: the `env` delta and/or a standalone
-    # `bundle`) before cell parsing, so their comment lines aren't taken for a markdown cell.
-    fi = findfirst(l -> startswith(l, "# ╔═╡ Slate."), lines)
-    if fi !== nothing
-        env = _parse_env_footer(@view lines[fi:end])   # picks up the Slate.env block if present
+    # Lift out Slate's footer blocks (`# ╔═╡ Slate.<kind>` … `# ╚═╡`) before cell parsing, so their
+    # comment lines aren't taken for a markdown cell. Slate writes them last, but each block is removed
+    # wherever it sits and every other line is kept: an edit that appends a cell after them, by hand or
+    # by a tool, would otherwise lose that cell without a word. The next save writes the footers last
+    # again. An unclosed block runs to the end of the file.
+    raw = split(text, '\n')
+    body = empty(raw)
+    footer = empty(raw)
+    infooter = false
+    for l in raw
+        if !infooter && startswith(l, "# ╔═╡ Slate.")
+            infooter = true
+        end
+        if infooter
+            push!(footer, l)
+            startswith(l, "# ╚═╡") && (infooter = false)
+        else
+            push!(body, l)
+        end
+    end
+    lines = body
+    if !isempty(footer)
+        env = _parse_env_footer(footer)                # picks up the Slate.env block if present
         isempty(env) || (report.meta["env"] = env)
-        for (k, v) in _parse_config_footer(@view lines[fi:end])   # Slate.config: per-notebook settings
+        for (k, v) in _parse_config_footer(footer)     # Slate.config: per-notebook settings
             report.meta[k] = v
         end
-        lines = lines[1:(fi - 1)]
     end
 
     # Drop the standalone preamble (a leading `KaimonSlate.standalone!(…)` line): the engine injects

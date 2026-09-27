@@ -489,3 +489,14 @@ end
     ReportEngine.ensure_notebook_file!(p)
     @test occursin("id=keep", read(p, String))
 end
+
+# Slate writes its footer blocks last, but a cell appended after them (by hand, or by a tool that
+# edits the file) is content like any other and must survive a parse.
+@testset "a cell after a footer block is kept, and the footer still read" begin
+    src = "#%% code id=a\n1\n\n# ╔═╡ Slate.config · per-notebook settings\n#   docid = abc\n# ╚═╡\n\n#%% md id=after\nhello\n"
+    r = parse_report(src)
+    @test [c.id for c in r.cells] == ["a", "after"]
+    @test get(r.meta, "docid", nothing) == "abc"
+    @test !any(c -> occursin("Slate.config", c.source), r.cells)
+end
+
