@@ -74,13 +74,17 @@ end
         NS = KaimonSlate.NotebookServer
         # Each is a complete script the export writes into a <script> tag of its own.
         blobs = [(name, getfield(NS, name)) for name in
-                 (:_EXPORT_TABLE_JS, :_EXPORT_TABLE_REPLAY_JS, :_EXPORT_MEDIA_JS,
-                  :_EXPORT_ECHARTS_THEME_JS, :_EXPORT_CHART_RUNTIME_JS)
+                 (:_EXPORT_TABLE_JS, :_EXPORT_TABLE_REPLAY_JS, :_EXPORT_PROSE_REPLAY_JS, :_EXPORT_MEDIA_JS,
+                  :_EXPORT_ECHARTS_THEME_JS, :_EXPORT_CHART_RUNTIME_JS, :_EXPORT_CHART_BOOT_JS,
+                  :_EXPORT_COMPONENT_MOUNT_JS)
                  if isdefined(NS, name)]
         # The asset runtime is composed (generated dtype table + body), so check what actually ships:
         # this also proves the emitted `window.__SLATE_DTYPES` is syntactically valid JS.
         push!(blobs, (:_export_asset_js, NS._export_asset_js()))
-        @test length(blobs) == 6          # a renamed constant must fail loudly, not silently skip
+        # The docs embed runtime is assembled from all of the above plus `slate-embed.js` inside one
+        # closure; a name the element relies on that only existed as a page global breaks it here.
+        push!(blobs, (:_embed_runtime_js, NS._embed_runtime_js()))
+        @test length(blobs) == 10         # a renamed constant must fail loudly, not silently skip
         bad = String[]
         dir = mktempdir()
         for (name, src) in blobs

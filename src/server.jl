@@ -32,6 +32,7 @@ include("parsched.jl")  # ParCell / par_blockers / run_scheduled — the paralle
 
 export serve_notebook, start_server, stop_server, LiveNotebook
 export export_app, app_defaults          # deploy a notebook as an application (server_app.jl / server_export.jl)
+export export_doc_bundle, render_doc_bundle_inprocess   # a rendered notebook for a Documenter site (server_docbundle.jl)
 export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
 export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_delete_cells!, agent_rename_cell!, agent_scratch_eval!, agent_scratch_eval_bg!, scratch_check, agent_surface_controls!
 export cell_image, set_snapshot!
@@ -3384,6 +3385,7 @@ include("server_catalog.jl")   # extension catalog: the published artifact, its 
 include("slate_api.jl")        # Slate notebook-API registry (SSOT for the api tool, search, prompt)
 include("echarts_docs.jl")     # curated ECharts option reference, mapped to the DSL, indexed for search
 include("server_export.jl")
+include("server_docbundle.jl")   # doc bundles: a rendered notebook for a Documenter site + the <slate-cell> runtime
 include("publish_targets.jl")  # PublishTarget adapters (github-pages, generic-upload) + multi-target fan-out
 include("publish_zenodo.jl")   # Zenodo archival target — versioned citable DOI
 include("server_hub.jl")

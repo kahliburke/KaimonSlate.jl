@@ -14,10 +14,19 @@
 # the live UI; `light` is publication-style (matches the PDF's light default). The structural CSS below
 # is theme-agnostic (all colours flow through the vars / `.hl-*` rules).
 const _EXPORT_THEMES = Dict(
-    "dark" => (root = "--bg:#0d1120;--bg2:#141828;--bg3:#1a1e2e;--border:#2a2e40;--text:#d4d8e8;--dim:#6a7090;--accent:#569cd6;--green:#56d364;--red:#e57575;--gold:#ffd700;--titlefg:#ffffff;",
-               hl = ".hl-kw{color:#c586c0;} .exp-src .hl-com{color:#6a9955;font-style:italic;} .exp-src .hl-num{color:#b5cea8;} .exp-src .hl-str{color:#ce9178;} .exp-src .hl-macro{color:#569cd6;} .exp-src .hl-op{color:#56b6c2;} .exp-src .hl-fn{color:#dcdcaa;} .exp-src .hl-type{color:#4ec9b0;} .exp-src .hl-sym{color:#d19a66;}"),
-    "light" => (root = "--bg:#ffffff;--bg2:#f6f7f9;--bg3:#eceef2;--border:#d8dce4;--text:#1f2430;--dim:#68708a;--accent:#2660a4;--green:#1a7f37;--red:#b4232a;--gold:#8a6d00;--titlefg:#0b0e16;",
-                hl = ".hl-kw{color:#af00db;} .exp-src .hl-com{color:#008000;font-style:italic;} .exp-src .hl-num{color:#098658;} .exp-src .hl-str{color:#a31515;} .exp-src .hl-macro{color:#0000ff;} .exp-src .hl-op{color:#0451a5;} .exp-src .hl-fn{color:#795e26;} .exp-src .hl-type{color:#267f99;} .exp-src .hl-sym{color:#b26900;}"))
+    "dark"  => Dict("kw" => "#c586c0", "com" => "#6a9955", "num" => "#b5cea8", "str" => "#ce9178",
+                    "macro" => "#569cd6", "op" => "#56b6c2", "fn" => "#dcdcaa", "type" => "#4ec9b0",
+                    "sym" => "#d19a66"),
+    "light" => Dict("kw" => "#af00db", "com" => "#008000", "num" => "#098658", "str" => "#a31515",
+                    "macro" => "#0000ff", "op" => "#0451a5", "fn" => "#795e26", "type" => "#267f99",
+                    "sym" => "#b26900"))
+
+_export_hl_vars(family::AbstractString) =
+    join(string("--hl-", k, ":", v, ";") for (k, v) in sort!(collect(_EXPORT_THEMES[family])))
+
+const _EXPORT_HL_CSS = join((string(".exp-src .hl-", k, "{color:var(--hl-", k, ");",
+                                    k == "com" ? "font-style:italic;" : "", "}")
+                             for k in ("kw", "com", "num", "str", "macro", "op", "fn", "type", "sym")), " ")
 
 # Code-listing font size, mirroring the PDF's `code` option.
 _export_code_size(code) = get(Dict("normal" => ".82rem", "small" => ".76rem", "smaller" => ".70rem", "tiny" => ".64rem"), String(code), ".82rem")
@@ -38,7 +47,7 @@ if(a<1e-4||a>=1e15)return v.toExponential(3);
 return String(parseFloat(v.toPrecision(6)));}
 /* A datum is a scalar on a value axis, or a tuple: [x,y] for a line, [x,y,v] for a heatmap. */
 function _slateValueFormatter(v){return Array.isArray(v)?v.map(_slateNum).join(', '):_slateNum(v);}
-function _slateExportTheme(){var cs=getComputedStyle(document.documentElement);
+function _slateExportTheme(el){var cs=getComputedStyle(el||document.documentElement);
 var V=function(n,d){var v=cs.getPropertyValue(n).trim();return v||d;};
 var text=V('--text','#d4d8e8'),dim=V('--dim','#6a7090'),border=V('--border','#2a2e40'),bg2=V('--bg2','#141828');
 var cycle=[['--accent','#569cd6'],['--green','#56d364'],['--orange','#ce9178'],['--purple','#c586c0'],['--teal','#4ec9b0'],['--gold','#ffd700'],['--red','#e57575']].map(function(p){return V(p[0],p[1]);});
@@ -957,11 +966,13 @@ end
 # the elements exist and no failed `data:` load is ever attempted. With scripting off the player stays
 # empty — the honest outcome for bytes that only a script can hand over.
 const _EXPORT_MEDIA_JS = raw"""
-(function(){var R=window.__slateMedia||{};
-Array.prototype.forEach.call(document.querySelectorAll("[data-slate-media]"),function(el){
+(function(){
+window._slateMediaIn=function(root){var R=window.__slateMedia||{};
+Array.prototype.forEach.call((root||document).querySelectorAll("[data-slate-media]"),function(el){
 var m=R[el.getAttribute("data-slate-media")];if(!m)return;
 var b=atob(m.b64),n=b.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=b.charCodeAt(i);
-try{el.src=URL.createObjectURL(new Blob([u],{type:m.mime}));}catch(e){}});})();
+try{el.src=URL.createObjectURL(new Blob([u],{type:m.mime}));}catch(e){}});};
+window._slateMediaIn(document);})();
 """
 
 # Every project file a notebook references through the asset route — `![](/n/<id>/asset/…)` or a raw
@@ -1309,7 +1320,9 @@ const _EXPORT_CHART_RUNTIME_JS = string(
     # declares `pieces` (or says so by `type`).
     "function _slateVmPiecewise(vm){return [].concat(vm).some(function(v){",
     "return v&&(v.pieces||v.type==='piecewise');});}",
-    "function _slateWireReplay(ch,opt){var marks=[];",
+    # `rec` rather than the chart: a re-themed chart is a NEW instance (ECharts 5 cannot change theme in
+    # place), and the patch is kept so the new one reopens at the reader's position.
+    "function _slateWireReplay(rec,opt,scope){var marks=[];",
     "((opt&&opt.series)||[]).forEach(function(s,i){if(s&&s.__replay)",
     "marks.push(Object.assign({series:i,base:s.data||[]},s.__replay));});",
     "if(!marks.length)return;",
@@ -1326,29 +1339,53 @@ const _EXPORT_CHART_RUNTIME_JS = string(
     "var scan=function(v){if(Array.isArray(v))v.forEach(scan);",
     "else if(typeof v==='number'&&isFinite(v)){if(v<lo)lo=v;if(v>hi)hi=v;}};scan(sl);",
     "if(isFinite(lo)&&isFinite(hi))patch.visualMap={min:lo,max:hi};}",
-    "ch.setOption(patch);});}",
+    "rec.last=patch;if(rec.chart)rec.chart.setOption(patch);},scope);}",
     # Load a chart's `requireScripts` (echarts-gl etc.) before render — ONE <script> per url
     # (shared promise), ordered so a lib sees its deps; a failed load resolves so it can't wedge.
     "var _slateScripts={};function _slateLoadScript(u){if(_slateScripts[u])return _slateScripts[u];",
     "_slateScripts[u]=new Promise(function(res){var s=document.createElement('script');s.src=u;s.async=false;",
     "s.onload=function(){res();};s.onerror=function(){res();};document.head.appendChild(s);});return _slateScripts[u];}",
     "function _slateEnsureScripts(reqs){return Promise.all((reqs?[].concat(reqs):[]).map(function(u){return u?_slateLoadScript(u):Promise.resolve();}));}",
-    "function _slateRenderCharts(){if(!window.echarts)return;",
-    "try{echarts.registerTheme('slate',_slateExportTheme());}catch(e){}",
-    "_slateCharts.forEach(function(c){",
-    "var el=document.getElementById(c[0]);if(!el)return;var opt=c[1];",
+    "function _slateFindIn(roots,id){for(var i=0;i<roots.length;i++){var r=roots[i];",
+    "var el=r.getElementById?r.getElementById(id):r.querySelector('[id=\"'+id+'\"]');if(el)return el;}return null;}",
+    # Mount `[[domid, option], …]` found under `scope.roots` (default: the page), themed from the CSS
+    # variables on `scope.themeEl`. Returns one record per chart so a caller can re-theme
+    # (`_slateRethemeCharts`) or dispose (`_slateDisposeCharts`) them — the docs embed does both.
+    "function _slateMountCharts(list,scope){scope=scope||{};var roots=scope.roots||Slate.roots(),out=[];",
+    "if(!window.echarts)return out;",
+    "try{echarts.registerTheme('slate',_slateExportTheme(scope.themeEl));}catch(e){}",
+    "list.forEach(function(c){var el=_slateFindIn(roots,c[0]);if(!el)return;var opt=c[1];",
     "var reqs=opt&&opt.registerMap?[].concat(opt.registerMap):[];",
+    "var rec={el:el,opt:opt,chart:null,ro:null,last:null,gone:false};out.push(rec);",
     # A GL lib (requireScripts) must load BEFORE echarts.init — an instance created before
     # echarts-gl registers its 3D views renders a GL series blank. So init INSIDE the .then.
     "Promise.all([_slateEnsureMaps(reqs),_slateEnsureScripts(opt&&opt.requireScripts)]).then(function(){",
-    "var ch=echarts.init(el,'slate',{renderer:_slateRenderer(opt)});",
-    "ch.setOption(_slateSansMaps(opt));_slateWireReplay(ch,opt);",
-    "window.addEventListener('resize',function(){ch.resize();});});});}",
-    "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);"
+    "if(rec.gone)return;_slateInitChart(rec);if(!scope.nowire)_slateWireReplay(rec,opt,scope);",
+    # A ResizeObserver follows the element, not the window: a docs sidebar collapsing resizes the
+    # content column without any window resize.
+    "if(window.ResizeObserver){rec.ro=new ResizeObserver(function(){if(rec.chart)rec.chart.resize();});rec.ro.observe(el);}",
+    "else window.addEventListener('resize',function(){if(rec.chart)rec.chart.resize();});});});",
+    "return out;}",
+    "function _slateInitChart(rec){var ch=echarts.init(rec.el,'slate',{renderer:_slateRenderer(rec.opt)});",
+    "ch.setOption(_slateSansMaps(rec.opt));if(rec.last)ch.setOption(rec.last);rec.chart=ch;}",
+    "function _slateRethemeCharts(recs,themeEl){if(!window.echarts)return;",
+    "try{echarts.registerTheme('slate',_slateExportTheme(themeEl));}catch(e){}",
+    "(recs||[]).forEach(function(r){if(r.gone||!r.chart)return;r.chart.dispose();_slateInitChart(r);});}",
+    "function _slateDisposeCharts(recs){(recs||[]).forEach(function(r){r.gone=true;",
+    "if(r.ro)r.ro.disconnect();if(r.chart){r.chart.dispose();r.chart=null;}});}"
 )
+
+# A single exported page: mount everything in `_slateCharts` (written by the writer just before) once
+# ECharts is on the page.
+const _EXPORT_CHART_BOOT_JS =
+    "function _slateRenderCharts(){_slateMountCharts(_slateCharts);}" *
+    "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);"
 
 const _EXPORT_ASSET_JS_BODY = raw"""
 window.Slate=window.Slate||{};window.__slateAssets=window.__slateAssets||{};
+/* Where a page's cells live. An exported page is one document; a docs page embeds each cell in its
+   own element, and the embed runtime replaces this with the roots of one notebook's cells. */
+Slate.roots=Slate.roots||function(){return [document];};
 function _slateTyped(d,b){var C=((window.__SLATE_DTYPES||{}).byTag||{})[d];
 if(!C)throw new Error('Slate.asset: this page cannot decode dtype '+d);return new C(b);}
 /* A packed asset is gzipped before base64 when that wins (see `_pack_export_asset`): base64 costs a
@@ -1389,8 +1426,11 @@ if(a.data===undefined){save(a.url,null);return;}
 var b=atob(a.data),n=b.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=b.charCodeAt(i);
 var mk=function(buf){var h=URL.createObjectURL(new Blob([buf],{type:a.mime||"application/octet-stream"}));save(h,h);};
 if(a.enc==="gzip")_slateInflate(u).then(mk).catch(function(e){console.error(e);});else mk(u);};
+/* `composedPath`, not `target`: a click inside an embedded cell's shadow root reaches the document
+   retargeted to the host element, which is not the link. */
 document.addEventListener("click",function(e){
-var el=e.target&&e.target.closest?e.target.closest("[data-slate-download]"):null;
+var path=e.composedPath?e.composedPath():[e.target],el=null;
+for(var i=0;i<path.length&&!el;i++){var p=path[i];if(p&&p.getAttribute&&p.getAttribute("data-slate-download")!==null)el=p;}
 if(!el)return;e.preventDefault();
 Slate.download(el.getAttribute("data-slate-download"),el.getAttribute("download")||"");});
 Slate.isLive=function(){return false;};
@@ -1403,7 +1443,8 @@ Slate.replay={
 /* EVERY host for a bound name. One name marks several nodes — a live cell shows three for a slider,
    and a control surfaced beside N figures renders N times. Taking only the first left every copy but
    one inert: the reader drags a strip and nothing moves. */
-hosts:function(name){var out=[],nodes=document.querySelectorAll("[data-name]");
+hosts:function(name,roots){var out=[],nodes=[];
+(roots||(Slate.roots?Slate.roots():[document])).forEach(function(r){Array.prototype.push.apply(nodes,r.querySelectorAll("[data-name]"));});
 for(var i=0;i<nodes.length;i++){var h=nodes[i];
 if(h.getAttribute("data-name")!==String(name))continue;
 if(h.getAttribute("data-widget")){out.push(h);continue;}
@@ -1501,21 +1542,25 @@ for(var y=0;y<rows;y++){var row=new Array(cols);
 for(var x=0;x<cols;x++)row[x]=flat[x*rows+y];out[y]=row;}
 return out;}
 return Array.from(flat);},
-/* `marks` each carry at least {id, control}; `apply(slice, mark)` is the renderer's one step. */
-wire:function(marks,apply){if(Slate.isLive())return;
+/* `marks` each carry at least {id, control}; `apply(slice, mark)` is the renderer's one step. `scope`
+   narrows it to one notebook on a page that embeds several: `{roots, replays}`, defaulting to the page. */
+wire:function(marks,apply,scope){if(Slate.isLive())return;
+var reps=(scope&&scope.replays)||window.__slateReplays||{},roots=scope&&scope.roots;
 (marks||[]).forEach(function(m){
 /* A mark names a SWEEP, not an asset: what shipped — and at what resolution — is the export's
    decision, published in this table. A mark with no entry never wires, so a figure whose sweep was
    skipped leaves its control visibly disabled instead of failing at the first drag. */
 var R=Slate.replay;
-var sweep=(window.__slateReplays||{})[m.id];if(!sweep)return;
-var hosts=R.hosts(m.control);if(!hosts.length)return;
+var sweep=reps[m.id];if(!sweep)return;
+var hosts=R.hosts(m.control,roots);if(!hosts.length)return;
 /* A sweep whose payload rode INLINE rather than in a binary asset. Prose is the case: a position is a
    few short strings, and a fetch + decode + narrowing step exists to move megabytes of floats. There is
    nothing to await, so the control enables immediately. */
 var inline=Array.isArray(sweep.values)?sweep.values:null;
 var loaded=inline?null:Slate.asset(sweep.asset);
-var run=function(src){var key=R.read(src);var i=R.index(sweep.domain||[],key);if(i<0)return;
+/* `scope.live()` false ⇒ a docs page has since rewired this notebook over a new set of cells; the
+   listeners from before stay attached but do nothing. */
+var run=function(src){if(scope&&scope.live&&!scope.live())return;var key=R.read(src);var i=R.index(sweep.domain||[],key);if(i<0)return;
 /* A control surfaced beside several figures renders once per cell. Push the mover's state onto its
    copies, or the reader drags one strip and the others sit there stating something false. */
 hosts.forEach(function(h){if(h!==src)R.mirror(h,key);R.paint(h);R.relabel(h,key);});
@@ -1536,7 +1581,9 @@ loaded.then(function(){hosts.forEach(function(h){R.enable(h,true);});run(hosts[0
 Slate.assetUrl=function(path){var a=window.__slateAssets[path];if(!a)return path;
 if(a.data!==undefined)return "data:"+(a.mime||"application/octet-stream")+";base64,"+a.data;return a.url||path;};
 
-Slate.runFragment=function(scriptEl,fn){var root=scriptEl&&scriptEl.parentElement;
+/* `document.currentScript` is null for a script inside a shadow root, so the docs embed names the
+   script it is running in `Slate._currentScript` while it runs it. */
+Slate.runFragment=function(scriptEl,fn){scriptEl=scriptEl||Slate._currentScript;var root=scriptEl&&scriptEl.parentElement;
 var echo=function(){var g=root&&root.querySelector(".weblog");if(root&&!g){g=document.createElement("pre");g.className="weblog";root.appendChild(g);}
 var line=Array.prototype.map.call(arguments,function(a){return typeof a==="string"?a:(function(){try{return JSON.stringify(a);}catch(_){return String(a);}})();}).join(" ");
 if(g)g.textContent+=line+"\n";try{console.log.apply(console,arguments);}catch(_){}};
@@ -1548,6 +1595,30 @@ try{var b=document.createElement("pre");b.className="web-err";b.textContent="⚠
 # A frozen page has no server to fetch `/assets/js/dtypes.js` from, so the rows are inlined — from
 # the same `SlateExtensionsBase.DTYPES` the live page is served.
 _export_asset_js() = string(SlateExtensionsBase.dtype_js(), "\n", _EXPORT_ASSET_JS_BODY)
+
+# The registration globals a classic widget script expects, and the step that mounts registered
+# component kinds onto their descriptors (see `_frontend_export_head`). `__slateMountComponents(root)`
+# walks one root, or every root the page has (`Slate.roots()`) when called bare — the docs embed calls
+# it per cell.
+const _EXPORT_COMPONENT_MOUNT_JS = raw"""window.slateWidgets=window.slateWidgets||{};
+window.__slateMountComponents=function(root){
+  /* `root` is absent, a root, or — as a DOMContentLoaded listener — an Event. */
+  var roots=(root&&root.querySelectorAll)?[root]:(window.Slate&&Slate.roots?Slate.roots():[document]);
+  roots.forEach(function(r){r.querySelectorAll('script.slatecomponent-desc').forEach(function(s){
+    if(s._slateMounted)return;
+    var d;try{d=JSON.parse(s.textContent||'{}');}catch(e){return;}
+    var impl=window.slateWidgets[d&&d.component];
+    if(!impl||!impl.wire)return;                       /* kind not registered yet — retried on register */
+    var el=s.parentElement&&s.parentElement.querySelector('.slatecomponent');
+    if(!el)return;
+    s._slateMounted=true;
+    try{impl.wire(el,{params:(d.props||{}),value:null});}catch(e){console.error('slate: component mount failed',e);}
+  });});
+};
+window.slateRegisterWidget=window.slateRegisterWidget||function(k,i){window.slateWidgets[k]=i||{};try{window.__slateMountComponents();}catch(_){}};
+window.slateRegisterEditorExtension=window.slateRegisterEditorExtension||function(){};
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',window.__slateMountComponents);
+else window.__slateMountComponents();"""
 
 # Package-declared front-end scripts (SlateExtensionsBase manifest) as a body-top `<script>` block for a
 # static export, or "" when none. CLASSIC scripts are prefixed with tolerant no-op stubs for the
@@ -1586,23 +1657,7 @@ function _frontend_export_head(nb, inline::Bool = false, compress::Bool = false)
     # is defined right here — so gating this on a classic script left a component-only package throwing
     # `slateRegisterWidget is not a function` on load and, had it survived that, with nothing to mount
     # it. That is precisely the silent-blank-output this block exists to prevent.
-    push!(parts, raw"""<script>window.slateWidgets=window.slateWidgets||{};
-window.__slateMountComponents=function(){
-  document.querySelectorAll('script.slatecomponent-desc').forEach(function(s){
-    if(s._slateMounted)return;
-    var d;try{d=JSON.parse(s.textContent||'{}');}catch(e){return;}
-    var impl=window.slateWidgets[d&&d.component];
-    if(!impl||!impl.wire)return;                       /* kind not registered yet — retried on register */
-    var el=s.parentElement&&s.parentElement.querySelector('.slatecomponent');
-    if(!el)return;
-    s._slateMounted=true;
-    try{impl.wire(el,{params:(d.props||{}),value:null});}catch(e){console.error('slate: component mount failed',e);}
-  });
-};
-window.slateRegisterWidget=window.slateRegisterWidget||function(k,i){window.slateWidgets[k]=i||{};try{window.__slateMountComponents();}catch(_){}};
-window.slateRegisterEditorExtension=window.slateRegisterEditorExtension||function(){};
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',window.__slateMountComponents);
-else window.__slateMountComponents();</script>""")
+    push!(parts, string("<script>", _EXPORT_COMPONENT_MOUNT_JS, "</script>"))
     for e in fe
         if !isempty(e.kind)
             # Component module: import its default export (inlined as a data: module) + register under the
@@ -1646,15 +1701,23 @@ function _export_palette_root(name::AbstractString)
                   ";--teal:", p.teal, ";--titlefg:", titlefg, ";")
 end
 
+# The export's colours as CSS custom properties: the Slate palette plus the code-highlight colours of its
+# family. Everything in the export sheets reads colour through these, so a page (or an embedded cell)
+# changes theme by swapping one declaration block.
+_export_theme_vars(name::AbstractString) =
+    string(_export_palette_root(name), _export_hl_vars(_export_is_light(name) ? "light" : "dark"))
+
 function _export_css(theme::AbstractString = "dark", code::AbstractString = "normal", width::Integer = 900)
     name = _resolve_export_theme(theme)                       # a Slate palette name (charttheme or dark/light)
-    root = _export_palette_root(name)                         # full Slate palette → page + chart colours match
-    t = _EXPORT_THEMES[_export_is_light(name) ? "light" : "dark"]   # code-highlight theme by family
     # Content column width from the export/publish slider: a px cap (already responsive DOWN — max-width
     # shrinks on a narrow screen), or `≤ 0` = full-width (100%, the slider's far "Full" stop).
     mw = Int(width) <= 0 ? "100%" : string(clamp(Int(width), 480, 2400), "px")
-    return """
-:root{$(root)}
+    return string(":root{", _export_theme_vars(name), "}\n", _export_page_css(mw), _export_component_css(code))
+end
+
+# The page around the cells: body, article column, title block, footer, "run this live" modal. A docs
+# embed has none of these — the docs site is the page.
+_export_page_css(mw::AbstractString) = """
 *{box-sizing:border-box;} body{background:var(--bg);color:var(--text);margin:0;
   font-family:'Segoe UI',system-ui,sans-serif;line-height:1.6;}
 .export{max-width:$(mw);margin:0 auto;padding:36px 24px 80px;}
@@ -1666,14 +1729,6 @@ function _export_css(theme::AbstractString = "dark", code::AbstractString = "nor
   color:var(--text);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:12px 0;}
 .exp-abslabel{display:block;font-style:normal;font-size:.7rem;text-transform:uppercase;letter-spacing:.09em;
   font-weight:700;color:var(--accent);margin-bottom:5px;text-align:left;}
-.exp-md{margin:14px 0;} .exp-md h1{font-size:1.6rem;border-bottom:1px solid var(--border);padding-bottom:.2em;}
-.exp-figcap{margin:2px 24px 16px;font-size:.85rem;color:var(--dim);line-height:1.5;}
-.exp-figcap b{color:var(--text);}.exp-figcap p{display:inline;margin:0;}
-.exp-chart{margin:14px 0;}
-.exp-refs{margin-top:28px;border-top:1px solid var(--border);padding-top:8px;font-size:.9rem;}
-.exp-refs h2{font-size:1.1rem;}
-.exp-reflist{margin:6px 0 0;padding-left:1.6em;}.exp-reflist li{margin:3px 0;}
-.exp-reflist li:target{background:color-mix(in srgb,var(--accent) 16%,transparent);border-radius:4px;}
 /* Sub-page back-nav (inside the article column) + page footer credit (full-width, aligned to content). */
 .exp-topnav{margin:-8px 0 10px;font-size:.85rem;text-align:left;}
 .exp-topnav a,.exp-ft a{color:var(--dim);text-decoration:none;border-bottom:1px solid transparent;transition:color .12s,border-color .12s;}
@@ -1681,11 +1736,6 @@ function _export_css(theme::AbstractString = "dark", code::AbstractString = "nor
 .exp-ft{max-width:$(mw);margin:44px auto 0;padding:18px 24px 44px;border-top:1px solid var(--border);
   display:flex;align-items:center;gap:16px;flex-wrap:wrap;font-size:.8rem;color:var(--dim);}
 .exp-ft-credit{margin-left:auto;}
-/* Regular markdown links — accent-toned with a soft underline (parity with the live notebook's `.md a`),
-   not the browser default dark blue. Emitted BEFORE `a.cite`/`a.figref` so those keep their own style. */
-.exp-md a{color:var(--accent);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--accent) 38%,transparent);transition:color .12s,border-color .12s;}
-.exp-md a:hover{color:color-mix(in srgb,var(--accent) 78%,var(--text));border-bottom-color:var(--accent);}
-a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:underline;}
 :target{scroll-margin-top:12px;}
 .exp-run{text-align:center;margin:10px 0 4px;}
 #exp-run-btn{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 16px;
@@ -1700,6 +1750,24 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-run-cmd code{font-family:'Cascadia Code','Fira Code',monospace;font-size:.8rem;white-space:pre-wrap;word-break:break-all;color:var(--text);}
 .exp-run-row{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;}
 .exp-run-row button{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 14px;cursor:pointer;font-family:inherit;}
+"""
+
+# Everything that draws a cell: prose, code, outputs, tables, controls. Shared by the exported page and
+# the docs embed (`_export_embed_css`), which scopes it inside each embedded cell's shadow root.
+_export_component_css(code::AbstractString = "normal") = """
+.exp-md{margin:14px 0;} .exp-md h1{font-size:1.6rem;border-bottom:1px solid var(--border);padding-bottom:.2em;}
+.exp-figcap{margin:2px 24px 16px;font-size:.85rem;color:var(--dim);line-height:1.5;}
+.exp-figcap b{color:var(--text);}.exp-figcap p{display:inline;margin:0;}
+.exp-chart{margin:14px 0;}
+.exp-refs{margin-top:28px;border-top:1px solid var(--border);padding-top:8px;font-size:.9rem;}
+.exp-refs h2{font-size:1.1rem;}
+.exp-reflist{margin:6px 0 0;padding-left:1.6em;}.exp-reflist li{margin:3px 0;}
+.exp-reflist li:target{background:color-mix(in srgb,var(--accent) 16%,transparent);border-radius:4px;}
+/* Regular markdown links — accent-toned with a soft underline (parity with the live notebook's `.md a`),
+   not the browser default dark blue. Emitted BEFORE `a.cite`/`a.figref` so those keep their own style. */
+.exp-md a{color:var(--accent);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--accent) 38%,transparent);transition:color .12s,border-color .12s;}
+.exp-md a:hover{color:color-mix(in srgb,var(--accent) 78%,var(--text));border-bottom-color:var(--accent);}
+a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:underline;}
 .exp-md table,.exp-table{border-collapse:collapse;margin:8px 0;font-size:.84rem;}
 .exp-md td,.exp-md th,.exp-table td,.exp-table th{border:1px solid var(--border);padding:4px 10px;text-align:left;}
 .exp-table th{background:var(--bg3);color:var(--dim);} .exp-table td.num{font-variant-numeric:tabular-nums;}
@@ -1799,7 +1867,7 @@ body.record-plain .exp-out .srec-plain{display:block;}
 @media(max-width:640px){.exp-row{flex-direction:column;}}
 .exp-src{margin:0;padding:10px 14px;background:var(--bg3);border-bottom:1px solid var(--border);overflow-x:auto;}
 .exp-src code{font-family:'Cascadia Code','Fira Code',monospace;font-size:$(_export_code_size(code));color:var(--text);white-space:pre;}
-.exp-src $(t.hl)
+$(_EXPORT_HL_CSS)
 .exp-out{font-size:.86rem;} .exp-out .out,.exp-out .val,.exp-out .err{padding:8px 14px;}
 .exp-out .out{color:var(--dim);} .exp-out .val{color:var(--green);} .exp-out .err{color:var(--red);}
 /* ANSI colour in captured output — the same class names `_ansi_html` emits for the live page. This
@@ -1911,7 +1979,6 @@ body.record-plain .exp-out .srec-plain{display:block;}
 @media print{ .exp-ctls{opacity:.7;} }
 @media print{ body{-webkit-print-color-adjust:exact;print-color-adjust:exact;} .exp-code{break-inside:avoid;} }
 """
-end
 
 # A themed-override figure (re-rendered raster/svg) as an HTML fragment: inline for SVG, a base64
 # data-URI `<img>` for a raster. Matches the `.dispwrap > .disp.img` structure `_render_chunks` emits.
@@ -2043,7 +2110,11 @@ function enh(table){
       st.page=0;render();};
   render();
 }
-[].forEach.call(document.querySelectorAll('table.exp-table'),enh);
+/* Per root, once per table: the docs embed calls this for each cell it mounts. */
+window._slateEnhanceTables=function(root){
+  [].forEach.call((root||document).querySelectorAll('table.exp-table'),function(t){
+    if(t._slateEnh)return;t._slateEnh=true;enh(t);});};
+window._slateEnhanceTables(document);
 })();"""
 
 # The one `@replay` step that is TABLE-specific — the mirror of `_slateWireReplay` for a chart: hand the
@@ -2060,9 +2131,12 @@ function enh(table){
 # `textContent`, never `innerHTML`: what ships is the same text the live page showed, already escaped
 # once when the export was written, and a value that happens to contain `<` is a value, not markup.
 const _EXPORT_PROSE_REPLAY_JS = raw"""(function(){
-if(!window.Slate||!Slate.replay||!window._slateProseMarks||!_slateProseMarks.length)return;
-Slate.replay.wire(_slateProseMarks,function(strings,m,i){
-var root=document.querySelector('section.exp-md[data-replay="'+m.id+'"]');
+window._slateWireProse=function(marks,scope){
+if(!window.Slate||!Slate.replay||!marks||!marks.length)return;
+var roots=(scope&&scope.roots)||Slate.roots(),reps=(scope&&scope.replays)||window.__slateReplays||{};
+Slate.replay.wire(marks,function(strings,m,i){
+var root=null;
+for(var r=0;r<roots.length&&!root;r++)root=roots[r].querySelector('section.exp-md[data-replay="'+m.id+'"]');
 if(!root)return;
 if(strings)for(var k=0;k<strings.length;k++){
 var el=root.querySelector('.ival[data-i="'+k+'"]');
@@ -2070,17 +2144,20 @@ if(el)el.textContent=strings[k];}
 /* An interpolation that built an ATTRIBUTE rather than prose — an image URL is the ordinary case.
    The finished attribute for this position was resolved at export (a `data:` URI in a standalone
    page), so this only has to assign it. */
-var slots=((window.__slateReplays||{})[m.id]||{}).slots||[];
+var slots=(reps[m.id]||{}).slots||[];
 slots.forEach(function(s){
 var el=root.querySelector('[data-islot="'+s.slot+'"]');
-if(el&&s.values&&s.values[i]!==undefined)el.setAttribute(s.attr,s.values[i]);});});
+if(el&&s.values&&s.values[i]!==undefined)el.setAttribute(s.attr,s.values[i]);});},scope);};
+if(window._slateProseMarks)window._slateWireProse(window._slateProseMarks);
 })();"""
 
 const _EXPORT_TABLE_REPLAY_JS = raw"""(function(){
-if(!window.Slate||!Slate.replay||!window._slateTableMarks||!_slateTableMarks.length)return;
-Slate.replay.wire(_slateTableMarks,function(slice,m){
+window._slateWireTables=function(marks,scope){
+if(!window.Slate||!Slate.replay||!marks||!marks.length)return;
+Slate.replay.wire(marks,function(slice,m){
 var set=(window.__slateTableReplay||{})[m.id];
-if(set)set(slice);});
+if(set)set(slice);},scope);};
+if(window._slateTableMarks)window._slateWireTables(window._slateTableMarks);
 })();"""
 
 # Inline background for an in-cell `:bar`/`:heat` column, scaled over the column's numeric domain
@@ -2701,6 +2778,248 @@ function _export_importmap_for(nb::LiveNotebook, offline::Bool = false, mode::Sy
     return _export_importmap(isempty(merged) ? nothing : merged)
 end
 
+# ── A page's cells, written one at a time ─────────────────────────────────────────────────────────
+# Everything a cell's HTML depends on that is decided for the notebook as a whole: which `@replay`
+# sweeps shipped, the citation rewriter, the bind index for surfaced controls, and the collectors a
+# cell adds to as it is written (charts to mount, geo maps to inline, media to hoist, replayed tables
+# to wire). `export_html` writes every cell through one of these, and the docs bundle writes each cell
+# into its own file through the same one — so there is one definition of what a cell looks like.
+mutable struct _ExportCtx
+    nb::LiveNotebook
+    inline::Bool                          # standalone (inline everything) vs published siblings
+    show_source::Bool
+    outputs::String
+    override::Bool                        # themed re-render of native figures
+    palette::String
+    titlecell::Any                        # the cell whose H1 was hoisted into the title block
+    citectx::Any
+    citekeys::Set{String}
+    figidx::Any
+    rw::Any                               # markdown body rewriter: citations + figure refs → HTML
+    chain_marks::Any
+    replay_assets::Any
+    replay_table::Any
+    replay_rows::Any
+    mediareg::Vector{Tuple{String,String,String}}
+    media::Any                            # `mediareg` when media is hoisted (standalone), else `nothing`
+    tablemarks::Vector{Dict{String,Any}}
+    charts::Vector{Tuple{String,String}}  # (dom id, option JSON), mounted by the chart runtime
+    geomaps::Dict{String,String}          # map name => local GeoJSON file (inline mode only)
+    bind_by_name::Any
+    surfaced_names::Any
+    idprefix::String                      # prefix for generated DOM ids; "" on a single page
+end
+
+# Must be called with `nb.lock` held: it reads the report and evaluates the `@replay` sweeps.
+function _export_ctx(nb::LiveNotebook; inline::Bool, show_source::Bool = true, outputs::String = "all",
+                     override::Bool = false, palette::AbstractString = "midnight",
+                     replay_stride::Integer = 1, replay_strides = nothing, idprefix::AbstractString = "")
+    fm = report_frontmatter(nb.report)
+    figidx = figure_index(nb.report)
+    citectx = _md_cite_ctx(nb)
+    citekeys = citectx === nothing ? Set{String}() : citectx.citekeys
+    rw(s) = _rewrite_citations(s, citekeys; emit = citectx === nothing ? _cite_literal : citectx.emit_html,
+                               figrefs = figidx.labels, figemit = _fig_text)
+    # `@replay` marks are evaluated across their domains HERE and nowhere else. Their packed arrays
+    # join the ordinary asset stream, so they narrow/compress/inline exactly like any other data.
+    # A table whose control is a hop or more upstream carries no mark of its own; the graph is where
+    # that connection lives, so it is composed into a sweep HERE, before the registry is read. Keyed
+    # `<cell>#<n>` — the writer looks each table spec up as it emits it.
+    chain_marks = _register_chain_sweeps!(nb)
+    replay_assets, replay_table, replay_rows = _replay_sweep_assets(nb; stride = replay_stride,
+                                                                   strides = replay_strides)
+    # Author-embedded video/audio hoisted out of the body (key, mime, base64) → the blob registry
+    # emitted with the trailing scripts. Standalone only: a published page keeps its sibling file.
+    mediareg = Tuple{String,String,String}[]
+    media = inline ? mediareg : nothing
+    # An interpolated ATTRIBUTE is finished per position here, and not while the body is written:
+    # the routing table is emitted at the TOP of the body, so anything added to it later is added
+    # after the page has already been told what shipped. The markdown is rendered a second time for
+    # this, which is cheap and only happens for a cell that actually carries a prose mark.
+    for c in nb.report.cells
+        c.kind == MARKDOWN || continue
+        pm = get(chain_marks, string("prose:", c.id), nothing)
+        pm isa AbstractDict || continue
+        sw = get(replay_table, String(get(pm, "id", "")), nothing)
+        sw isa AbstractDict || continue
+        sl = try
+            _prose_attr_slots(markdown_html(c.source, c.interp), get(sw, "values", nothing),
+                              _proj_root(nb); inline = inline, media = media)
+        catch e
+            @warn "@replay: could not resolve an interpolated attribute" cell = c.id exception = e
+            Any[]
+        end
+        isempty(sl) || (sw["slots"] = sl)
+    end
+    # Built once for the whole notebook: a surfaced control is DECLARED somewhere else, so the cell
+    # rendering it can't find the spec in its own `binds`.
+    return _ExportCtx(nb, inline, show_source, outputs, override, String(palette), fm.titlecell,
+                      citectx, citekeys, figidx, rw, chain_marks, replay_assets, replay_table,
+                      replay_rows, mediareg, media, Dict{String,Any}[], Tuple{String,String}[],
+                      Dict{String,String}(), _bind_index(nb.report.cells),
+                      _surfaced_names(nb.report.cells), String(idprefix))
+end
+
+# The page's data assets (`save_asset` blobs, `@replay` sweeps, web-cell modules) as registry entries
+# `path => entry`, or `nothing` when the page has no asset runtime to set up. Inline mode packs each
+# asset into the entry; sibling mode names a relative url and hands the bytes to `asset_sink` for the
+# caller to write.
+function _export_asset_entries(ctx::_ExportCtx; narrow::Bool = true, compress::Bool = true,
+                               asset_sink::Union{Nothing,AbstractDict} = nothing)
+    nb = ctx.nb
+    sa = vcat(_page_save_assets(nb), ctx.replay_assets)
+    wm = _web_asset_modules(nb)
+    has_web = any(c -> occursin("@web", c.source) || occursin("Slate.runFragment", c.source), nb.report.cells)
+    (has_web || !isempty(sa) || !isempty(wm)) || return nothing
+    ents = Pair{String,Dict{String,Any}}[]
+    for (spec, bytes) in sa
+        e = Dict{String,Any}(copy(spec))
+        if ctx.inline
+            # Only the inlined path is packed: a served asset already rides HTTP's own compression, and
+            # a published sibling stays a plain file anyone can read.
+            b, dt, enc = _pack_export_asset(spec, bytes; narrow = narrow, compress = compress)
+            dt === nothing || (e["dtype"] = dt)
+            enc === nothing || (e["enc"] = enc)
+            e["bytes"] = length(b)
+            e["data"] = Base64.base64encode(b)
+        else
+            e["url"] = spec["path"]
+            # Hand the bytes back so the caller can write the sibling this URL names.
+            asset_sink === nothing || (asset_sink[String(spec["path"])] = bytes)
+        end
+        push!(ents, String(spec["path"]) => e)
+    end
+    # Standalone rewrites each module's relative imports to its dependencies' data URLs; a published
+    # site keeps them as-is, since there the modules are page-local siblings and the browser resolves
+    # `./x.js` against the entry module's own URL.
+    wmi = ctx.inline ? _inline_js_modules(wm) : wm
+    for (rel, bytes) in wm
+        e = Dict{String,Any}("path" => rel, "name" => basename(rel), "mime" => "text/javascript")
+        ctx.inline ? (e["data"] = Base64.base64encode(get(wmi, rel, bytes))) : (e["url"] = rel)
+        push!(ents, String(rel) => e)
+    end
+    return ents
+end
+
+# The body-top `<script>` for a single page: the Slate shim, the asset registry, and the `@replay`
+# routing table. Emitted at the TOP of <body> so a `@web` cell's inline <script> finds
+# `Slate.runFragment`/`asset`/`assetUrl` already defined when it runs during body parse.
+function _export_asset_head(ctx::_ExportCtx; kw...)
+    ents = _export_asset_entries(ctx; kw...)
+    ents === nothing && return ""
+    return string("<script>", _export_asset_js(),
+                  isempty(ents) ? "" :
+                      string("Object.assign(window.__slateAssets,{",
+                             join((string(JSON.json(p), ":", JSON.json(e)) for (p, e) in ents), ","), "});"),
+                  # A figure's route names a SWEEP, not an asset — what shipped, and at what resolution,
+                  # is this export's decision. Published here so the page can resolve one against the
+                  # other; a route with no entry leaves its control disabled.
+                  isempty(ctx.replay_table) ? "" :
+                      string("window.__slateReplays=", JSON.json(ctx.replay_table), ";"),
+                  "</script>")
+end
+
+# One cell's `<section>` (or figure caption) into `io`. Charts, maps, media and replayed tables the
+# cell carries are added to `ctx` for the caller to mount.
+function _export_cell_html!(io::IO, ctx::_ExportCtx, c::Cell)
+    nb = ctx.nb
+    root = _proj_root(nb)
+    embed(html) = _export_embed_html(html, root; inline = ctx.inline, media = ctx.media)
+    if c.kind == MARKDOWN
+        # citations/refs + hoisted H1. Dropping the H1 drops whatever interpolations sat in it, and
+        # `markdown_html` pairs the remaining ones positionally, so `c.interp` has to be advanced by
+        # the same amount or the body renders the title's values.
+        mdbody, mdbase = c.id == ctx.titlecell ? _body_after_hoisted_h1(c) : (c.source, 0)
+        mdsrc = ctx.rw(mdbody)
+        mdinterp = mdbase == 0 ? c.interp : c.interp[min(mdbase + 1, length(c.interp) + 1):end]
+        if haskey(ctx.figidx.numbers, c.id)     # caption cell → numbered "Figure N." block
+            print(io, "<figcaption class=\"exp-figcap\" id=\"fig-", _esc(c.id), "\"><b>Figure ",
+                  ctx.figidx.numbers[c.id], ".</b> ", embed(markdown_html(mdsrc, mdinterp)), "</figcaption>")
+        else
+            # A prose sweep is scoped to the cell it swept: the mark id goes on the section so the
+            # client writes a position's strings into THIS cell's `.ival` spans and not into another
+            # cell's, which are numbered from zero just the same.
+            pm = get(ctx.chain_marks, string("prose:", c.id), nothing)
+            pattr = pm isa AbstractDict ? string(" data-replay=\"", _esc(String(get(pm, "id", ""))), "\"") : ""
+            print(io, "<section class=\"exp-md\"", pattr, ">",
+                  _strip_attr_templates(embed(markdown_html(mdsrc, mdinterp))), "</section>")
+        end
+        return nothing
+    end
+    print(io, "<section class=\"exp-code\">")
+    # Show source only when the NOTEBOOK shows it: respect the global `?source=0` toggle, the per-cell
+    # `hidecode` (🙈) flag, AND widget cells — `@bind` and `@web` — which render their widget, not a
+    # code editor, in the browser, so the export matches what's on screen.
+    (ctx.show_source && !(:hidecode in c.flags) && isempty(c.binds) && !_is_web_cell(c) && !isempty(strip(c.source))) &&
+        print(io, "<pre class=\"exp-src\"><code>", _highlight_julia(c.source), "</code></pre>")
+    # A `@bind` cell renders its CONTROL, matching what the live page shows in place of source — and
+    # so does a cell that SURFACES one (`controls=` on its header), which is where an author put the
+    # knob next to the figure it drives.
+    print(io, _export_controls_html(c, ctx.bind_by_name, ctx.surfaced_names))
+    if _outputs_any(ctx.outputs)
+        # `figures`: only rich display (images/html/latex) — drop scalar text / stdout / errors.
+        o = c.output
+        # Themed OVERRIDE: a native figure re-rendered under the palette (raster) replaces the baked
+        # image, so an exported page's Makie plots follow the picker like its ECharts do.
+        themed = ctx.override ? _snapshot_fig(nb.id, c.id, ctx.palette; raster = true) : nothing
+        if _outputs_text_ok(ctx.outputs)
+            # Wrap so an author-embedded `/asset/` <img> in a code/web cell's HTML output is
+            # inlined/rewritten like a markdown image (see `_export_embed_html`).
+            themed === nothing ?
+                print(io, "<div class=\"exp-out\">", embed(output_html(c)), "</div>") :
+                print(io, "<div class=\"exp-out\">", _output_text_only_html(c),
+                      "<div class=\"dispwrap\">", _themed_fig_html(themed[1], themed[2]), "</div></div>")
+        elseif o !== nothing && !isempty(o.display)
+            print(io, "<div class=\"exp-out\"><div class=\"dispwrap\">",
+                  themed === nothing ? embed(ReportRender._render_chunks(o.display)) :
+                                       _themed_fig_html(themed[1], themed[2]),
+                  "</div></div>")
+        end
+        for (si, spec) in enumerate(_echarts_specs(c))   # embed each chart's spec → client renders it
+            did = string(ctx.idprefix, "chart-", c.id, "-", si)
+            # Geo maps: inline the GeoJSON (standalone) or repoint `registerMap` at the published
+            # sibling asset (site). Only LOCAL Slate maps are handled; an external GeoJSON url is left
+            # untouched (fetched at render time).
+            for (nm, url) in _spec_geomaps(spec)
+                _geo_map_file(url) === nothing && continue
+                if ctx.inline
+                    ctx.geomaps[nm] = _geo_map_file(url)
+                else
+                    _rewrite_geomap_url!(spec, url, _geo_asset_path(url))
+                end
+            end
+            # Package-vendored libs a chart needs (echarts-gl): inline as data: (standalone) or repoint
+            # at the page-local `ext-assets/…` sibling (site).
+            _rewrite_requirescripts!(spec, nb; inline = ctx.inline)
+            # Any OTHER vendored-asset url in the spec (a globe `baseTexture`, a graphic image).
+            _rewrite_ext_asset_urls!(spec, nb; inline = ctx.inline)
+            print(io, "<div class=\"exp-chart\" id=\"", did, "\" style=\"width:100%;height:", _chart_css_height(spec), "\"></div>")
+            push!(ctx.charts, (did, JSON.json(spec)))
+        end
+        for (si, spec) in enumerate(_table_specs(c))
+            # A replayed table — marked in its own cell, or composed from the graph — is written with
+            # the UNION of its control's positions as its body, and the shipped order picks one of
+            # them. A mark whose sweep did NOT resolve is stripped rather than emitted: the table
+            # degrades to the ordinary static one, instead of carrying an attribute and a registration
+            # nothing will ever drive.
+            sub = _chain_marked(spec, ctx.chain_marks, c.id, si)
+            mk = _table_replay_mark(sub)
+            if mk isa AbstractDict
+                if haskey(ctx.replay_table, String(get(mk, "id", "")))
+                    push!(ctx.tablemarks, Dict{String,Any}("id" => String(mk["id"]),
+                                                           "control" => String(get(mk, "control", ""))))
+                    sub = _replay_base_spec(sub, ctx.replay_rows)
+                else
+                    sub = _unmarked_spec(sub)
+                end
+            end
+            print(io, _export_table_html(sub))
+        end
+    end
+    print(io, "</section>")
+    return nothing
+end
+
 # The export-wide renderer, normalised. An unrecognised value means "leave each chart alone" rather
 # than an error: this arrives from a query param, and a typo there should not fail an export that is
 # otherwise fine.
@@ -2771,16 +3090,15 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
         title = _esc(fm0.title)
-        # Citation/figure context, computed once. The BODY rewriter `rw` emits HTML citations that LINK
-        # to the References section (`emit_html` → `#ref-<key>`); the plain-text `rwtext` is for places
-        # that can't take HTML — the OG/meta description below — so neither ever shows a raw `[@key]`.
-        figidx = figure_index(nb.report)
-        citectx = _md_cite_ctx(nb)
-        citekeys = citectx === nothing ? Set{String}() : citectx.citekeys
-        rw(s)     = _rewrite_citations(s, citekeys; emit = citectx === nothing ? _cite_literal : citectx.emit_html,
-                                       figrefs = figidx.labels, figemit = _fig_text)
-        rwtext(s) = _rewrite_citations(s, citekeys; emit = citectx === nothing ? _cite_literal : citectx.emit,
-                                       figrefs = figidx.labels, figemit = _fig_text)
+        ctx = _export_ctx(nb; inline = inline_assets, show_source = show_source, outputs = String(outputs),
+                          override = override, palette = palette,
+                          replay_stride = replay_stride, replay_strides = replay_strides)
+        # The BODY rewriter (`ctx.rw`) emits HTML citations that LINK to the References section; this
+        # plain-text one is for places that can't take HTML — the OG/meta description below — so neither
+        # ever shows a raw `[@key]`.
+        citectx = ctx.citectx
+        rwtext(s) = _rewrite_citations(s, ctx.citekeys; emit = citectx === nothing ? _cite_literal : citectx.emit,
+                                       figrefs = ctx.figidx.labels, figemit = _fig_text)
         # `og_image`/`og_url` are absolute URLs (or a path relative to the page) supplied by the site
         # builder; the OG/Twitter tags let a hosted link unfurl into a rich card (see `_og_tags`).
         rawdesc = _first_words(rwtext(isempty(strip(fm0.abstract)) ? fm0.byline : fm0.abstract), 40)
@@ -2788,85 +3106,8 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # Slate shim + asset registry, emitted at the TOP of <body> so a `@web` cell's inline <script>
         # finds `Slate.runFragment`/`asset`/`assetUrl` (+ a populated `__slateAssets`) already defined
         # when it runs during body parse — otherwise the widget dies on "Slate is not defined".
-        # `@replay` marks are evaluated across their domains HERE and nowhere else. Their packed arrays
-        # join the ordinary asset stream, so they narrow/compress/inline exactly like any other data.
-        # A table whose control is a hop or more upstream carries no mark of its own; the graph is where
-        # that connection lives, so it is composed into a sweep HERE, before the registry is read. Keyed
-        # `<cell>#<n>` — the writer looks each table spec up as it emits it.
-        chain_marks = _register_chain_sweeps!(nb)
-        replay_assets, replay_table, replay_rows = _replay_sweep_assets(nb; stride = replay_stride,
-                                                                       strides = replay_strides)
-        # Author-embedded video/audio hoisted out of the body (key, mime, base64) → the blob registry
-        # emitted with the trailing scripts. Standalone only: a published page keeps its sibling file.
-        # Declared here rather than beside the body writer because the attribute pass below resolves
-        # media URLs too, and it has to run before the routing table is written.
-        mediareg = Tuple{String,String,String}[]
-        media = inline_assets ? mediareg : nothing
-        # An interpolated ATTRIBUTE is finished per position here, and not while the body is written:
-        # the routing table below is emitted at the TOP of the body, so anything added to it later is
-        # added after the page has already been told what shipped. The markdown is rendered a second
-        # time for this, which is cheap and only happens for a cell that actually carries a prose mark.
-        for c in nb.report.cells
-            c.kind == MARKDOWN || continue
-            pm = get(chain_marks, string("prose:", c.id), nothing)
-            pm isa AbstractDict || continue
-            sw = get(replay_table, String(get(pm, "id", "")), nothing)
-            sw isa AbstractDict || continue
-            sl = try
-                _prose_attr_slots(markdown_html(c.source, c.interp), get(sw, "values", nothing),
-                                  _proj_root(nb); inline = inline_assets, media = media)
-            catch e
-                @warn "@replay: could not resolve an interpolated attribute" cell = c.id exception = e
-                Any[]
-            end
-            isempty(sl) || (sw["slots"] = sl)
-        end
-        # Table marks, collected as the body is written: a replayed table needs its own one-line wiring
-        # (see `_EXPORT_TABLE_REPLAY_JS`) and the enhancer that receives it only exists at the end.
-        tablemarks = Dict{String,Any}[]
-        _asset_head = let sa = vcat(_page_save_assets(nb), replay_assets), wm = _web_asset_modules(nb),
-                          has_web = any(c -> occursin("@web", c.source) || occursin("Slate.runFragment", c.source), nb.report.cells)
-            if !(has_web || !isempty(sa) || !isempty(wm))
-                ""
-            else
-                ents = String[]
-                for (spec, bytes) in sa
-                    e = copy(spec)
-                    if inline_assets
-                        # Only the inlined path is packed: a served asset already rides HTTP's own
-                        # compression, and a published sibling stays a plain file anyone can read.
-                        b, dt, enc = _pack_export_asset(spec, bytes;
-                                                        narrow = narrow_data, compress = compress_data)
-                        dt === nothing || (e["dtype"] = dt)
-                        enc === nothing || (e["enc"] = enc)
-                        e["bytes"] = length(b)
-                        e["data"] = Base64.base64encode(b)
-                    else
-                        e["url"] = spec["path"]
-                        # Hand the bytes back so the caller can write the sibling this URL names.
-                        asset_sink === nothing || (asset_sink[String(spec["path"])] = bytes)
-                    end
-                    push!(ents, string(JSON.json(spec["path"]), ":", JSON.json(e)))
-                end
-                # Standalone rewrites each module's relative imports to its dependencies' data URLs;
-                # a published site keeps them as-is, since there the modules are page-local siblings
-                # and the browser resolves `./x.js` against the entry module's own URL.
-                wmi = inline_assets ? _inline_js_modules(wm) : wm
-                for (rel, bytes) in wm
-                    e = Dict{String,Any}("path" => rel, "name" => basename(rel), "mime" => "text/javascript")
-                    inline_assets ? (e["data"] = Base64.base64encode(get(wmi, rel, bytes))) : (e["url"] = rel)
-                    push!(ents, string(JSON.json(rel), ":", JSON.json(e)))
-                end
-                string("<script>", _export_asset_js(),
-                       isempty(ents) ? "" : string("Object.assign(window.__slateAssets,{", join(ents, ","), "});"),
-                       # A figure's route names a SWEEP, not an asset — what shipped, and at what
-                       # resolution, is this export's decision. Published here so the page can resolve
-                       # one against the other; a route with no entry leaves its control disabled.
-                       isempty(replay_table) ? "" :
-                           string("window.__slateReplays=", JSON.json(replay_table), ";"),
-                       "</script>")
-            end
-        end
+        _asset_head = _export_asset_head(ctx; narrow = narrow_data, compress = compress_data,
+                                         asset_sink = asset_sink)
         print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
               "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", title, "</title>",
               # The page's import map → so an exported page's front-end JS resolves the same bare
@@ -2883,19 +3124,9 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                end),
               "<style>", _export_css(palette, code, width), "</style></head><body>", _asset_head,
               _frontend_export_head(nb, inline_assets, compress_data), "<article class=\"export\">")
-        charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
-        # Built once for the whole notebook: a surfaced control is DECLARED somewhere else, so the
-        # cell rendering it can't find the spec in its own `binds`.
-        bind_by_name = _bind_index(nb.report.cells)
-        surfaced_names = _surfaced_names(nb.report.cells)
-        # Geo-map GeoJSON referenced by the charts. `inline_assets` (standalone) ⇒ inline each map here
-        # (name => local file, read into the page). Otherwise (published page) the map rides as a
-        # page-local sibling `assets/maps/` file (written by the site builder) and `registerMap` is
-        # rewritten below to a plain relative path.
-        geomaps = Dict{String,String}()   # map name => local GeoJSON file (inline mode only)
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
         # body (mirrors the PDF/Typst export).
-        fm = fm0   # citation/figure context + the `rw` body rewriter were set up above (used for the OG desc too)
+        fm = fm0
         # Sub-page back-nav: on a doc page inside a site, a "← <site>" link home (site_home is the
         # relative URL to the site root, e.g. "../"). Empty for standalone/home pages — no bar then.
         isempty(strip(site_home)) || print(io,
@@ -2907,7 +3138,8 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         isempty(strip(fm.byline)) || print(io, "<div class=\"exp-byline\">", _esc(fm.byline), "</div>")
         if !isempty(strip(fm.abstract))
             print(io, "<div class=\"exp-abstract\"><span class=\"exp-abslabel\">Abstract</span>",
-                  _export_embed_html(markdown_html(rw(fm.abstract), CellOutput[]), _proj_root(nb); inline = inline_assets, media = media), "</div>")
+                  _export_embed_html(markdown_html(ctx.rw(fm.abstract), CellOutput[]), _proj_root(nb);
+                                     inline = inline_assets, media = ctx.media), "</div>")
         end
         runnable && print(io, "<div class=\"exp-run\"><button id=\"exp-run-btn\">▶ Run this notebook live</button></div>")
         print(io, "</header>")
@@ -2928,102 +3160,12 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             c.id in fm.skip && continue              # hoisted into the title block above
             (:bibliography in c.flags) && continue   # raw BibTeX isn't shown (HTML has no CSL engine yet)
             haskey(rowopen, c.id) && print(io, "<div class=\"exp-row\">")   # open a side-by-side row
-            if c.kind == MARKDOWN
-                # citations/refs + hoisted H1. Dropping the H1 drops whatever interpolations sat in it,
-                # and `markdown_html` pairs the remaining ones positionally, so `c.interp` has to be
-                # advanced by the same amount or the body renders the title's values.
-                mdbody, mdbase = c.id == fm.titlecell ? _body_after_hoisted_h1(c) : (c.source, 0)
-                mdsrc = rw(mdbody)
-                mdinterp = mdbase == 0 ? c.interp : c.interp[min(mdbase + 1, length(c.interp) + 1):end]
-                if haskey(figidx.numbers, c.id)     # caption cell → numbered "Figure N." block
-                    print(io, "<figcaption class=\"exp-figcap\" id=\"fig-", _esc(c.id), "\"><b>Figure ",
-                          figidx.numbers[c.id], ".</b> ",
-                          _export_embed_html(markdown_html(mdsrc, mdinterp), _proj_root(nb); inline = inline_assets, media = media), "</figcaption>")
-                else
-                    # A prose sweep is scoped to the cell it swept: the mark id goes on the section so
-                    # the client writes a position's strings into THIS cell's `.ival` spans and not
-                    # into another cell's, which are numbered from zero just the same.
-                    pm = get(chain_marks, string("prose:", c.id), nothing)
-                    pattr = pm isa AbstractDict ? string(" data-replay=\"", _esc(String(get(pm, "id", ""))), "\"") : ""
-                    print(io, "<section class=\"exp-md\"", pattr, ">",
-                          _strip_attr_templates(
-                              _export_embed_html(markdown_html(mdsrc, mdinterp), _proj_root(nb); inline = inline_assets, media = media)),
-                          "</section>")
-                end
-            else
-                print(io, "<section class=\"exp-code\">")
-                # Show source only when the NOTEBOOK shows it: respect the global `?source=0` toggle,
-                # the per-cell `hidecode` (🙈) flag, AND widget cells — `@bind` and `@web` — which render
-                # their widget, not a code editor, in the browser, so the export matches what's on screen.
-                (show_source && !(:hidecode in c.flags) && isempty(c.binds) && !_is_web_cell(c) && !isempty(strip(c.source))) &&
-                    print(io, "<pre class=\"exp-src\"><code>", _highlight_julia(c.source), "</code></pre>")
-                # A `@bind` cell renders its CONTROL, matching what the live page shows in place of
-                # source — and so does a cell that SURFACES one (`controls=` on its header), which is
-                # where an author put the knob next to the figure it drives.
-                print(io, _export_controls_html(c, bind_by_name, surfaced_names))
-                if _outputs_any(outputs)
-                    # `figures`: only rich display (images/html/latex) — drop scalar text / stdout / errors.
-                    o = c.output
-                    # Themed OVERRIDE: a native figure re-rendered under the palette (raster) replaces the
-                    # baked image, so an exported page's Makie plots follow the picker like its ECharts do.
-                    themed = override ? _snapshot_fig(nb.id, c.id, palette; raster = true) : nothing
-                    if _outputs_text_ok(outputs)
-                        themed === nothing ?
-                            # Wrap so an author-embedded `/asset/` <img> in a code/web cell's HTML output
-                            # is inlined/rewritten like a markdown image (see `_export_embed_html`).
-                            print(io, "<div class=\"exp-out\">", _export_embed_html(output_html(c), _proj_root(nb); inline = inline_assets, media = media), "</div>") :
-                            print(io, "<div class=\"exp-out\">", _output_text_only_html(c),
-                                  "<div class=\"dispwrap\">", _themed_fig_html(themed[1], themed[2]), "</div></div>")
-                    elseif o !== nothing && !isempty(o.display)
-                        print(io, "<div class=\"exp-out\"><div class=\"dispwrap\">",
-                              themed === nothing ? _export_embed_html(ReportRender._render_chunks(o.display), _proj_root(nb); inline = inline_assets, media = media) : _themed_fig_html(themed[1], themed[2]),
-                              "</div></div>")
-                    end
-                    for (si, spec) in enumerate(_echarts_specs(c))   # embed each chart's spec → client renders it
-                        did = string("chart-", c.id, "-", si)
-                        # Geo maps: inline the GeoJSON (standalone) or repoint `registerMap` at the
-                        # published sibling asset (site). Only LOCAL Slate maps are handled; an external
-                        # GeoJSON url is left untouched (fetched at render time).
-                        for (nm, url) in _spec_geomaps(spec)
-                            _geo_map_file(url) === nothing && continue
-                            if inline_assets
-                                geomaps[nm] = _geo_map_file(url)
-                            else
-                                _rewrite_geomap_url!(spec, url, _geo_asset_path(url))
-                            end
-                        end
-                        # Package-vendored libs a chart needs (echarts-gl): inline as data: (standalone) or
-                        # repoint at the page-local `ext-assets/…` sibling (site).
-                        _rewrite_requirescripts!(spec, nb; inline = inline_assets)
-                        # Any OTHER vendored-asset url in the spec (a globe `baseTexture`, a graphic image).
-                        _rewrite_ext_asset_urls!(spec, nb; inline = inline_assets)
-                        print(io, "<div class=\"exp-chart\" id=\"", did, "\" style=\"width:100%;height:", _chart_css_height(spec), "\"></div>")
-                        push!(charts, (did, JSON.json(spec)))
-                    end
-                    for (si, spec) in enumerate(_table_specs(c))
-                        # A replayed table — marked in its own cell, or composed from the graph — is
-                        # written with the UNION of its control's positions as its body, and the shipped
-                        # order picks one of them. A mark whose sweep did NOT resolve is stripped rather
-                        # than emitted: the table degrades to the ordinary static one, instead of
-                        # carrying an attribute and a registration nothing will ever drive.
-                        sub = _chain_marked(spec, chain_marks, c.id, si)
-                        mk = _table_replay_mark(sub)
-                        if mk isa AbstractDict
-                            if haskey(replay_table, String(get(mk, "id", "")))
-                                push!(tablemarks, Dict{String,Any}("id" => String(mk["id"]),
-                                                                   "control" => String(get(mk, "control", ""))))
-                                sub = _replay_base_spec(sub, replay_rows)
-                            else
-                                sub = _unmarked_spec(sub)
-                            end
-                        end
-                        print(io, _export_table_html(sub))
-                    end
-                end
-                print(io, "</section>")
-            end
+            _export_cell_html!(io, ctx, c)
             c.id in rowclose && print(io, "</div>")   # close a side-by-side row
         end
+        # What the cells collected, for the trailing scripts.
+        charts, geomaps, tablemarks = ctx.charts, ctx.geomaps, ctx.tablemarks
+        chain_marks, mediareg = ctx.chain_marks, ctx.mediareg
         # References — as HTML with per-entry `id="ref-<key>"` anchors, so the inline citation links
         # (emit_html) jump to them. (The raw BibTeX cell itself is skipped above.)
         refs = _html_references(citectx)
@@ -3109,7 +3251,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                   # Register a chart's geo maps before its first paint: an inlined map (`_slateMaps`)
                   # registers synchronously, otherwise fetch the (rewritten) url. A registered/absent map
                   # resolves immediately, so a non-geo chart pays nothing.
-                  _EXPORT_CHART_RUNTIME_JS)
+                  _EXPORT_CHART_RUNTIME_JS, _EXPORT_CHART_BOOT_JS)
         end
         if runnable
             print(io, "(function(){var q=function(id){return document.getElementById(id);};",

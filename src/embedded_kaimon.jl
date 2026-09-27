@@ -241,7 +241,9 @@ function start_embedded_kaimon!(port::Integer; online = nothing)
     # at call time and refuses when the directory is absent, so create it first.
     withenv(envv...) do
         mkpath(_kaimon_dir())
-        register_extension(; announce = false)
+        # `force`: this registry is ours alone, and it must name the checkout running NOW. Without it a
+        # previous run's path wins the identity dedup and the host silently serves that code instead.
+        register_extension(; announce = false, force = true)
     end
     note("Starting the Kaimon host on port $port")
     cmd = addenv(`$(Base.julia_cmd()) --project=$(_embedded_env()) --startup-file=no

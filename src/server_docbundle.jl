@@ -1,0 +1,327 @@
+# Part of the NotebookServer submodule — included by server.jl. Names here resolve in NotebookServer.
+
+# ── Doc bundles: a rendered notebook for a documentation site ─────────────────────────────────────
+# A doc bundle is a directory a docs build reads instead of running the notebook:
+#
+#     slate-bundle.json     manifest: notebook, source key, theme, libraries, assets, cells[]
+#     cells/<id>.json       one cell's rendered payload (html, charts, replay marks), loaded on demand
+#     data/, assets/, ext-assets/, frontend/   everything the payloads reference, as plain files
+#     runtime/slate-embed.js                   the `<slate-cell>` element that draws a payload
+#
+# Markdown cells also carry a Documenter-flavoured markdown rendering, so a docs page can use them as
+# its own prose (cross-references, search, table of contents) and embed only what needs Slate to draw.
+# The bundle is written by the same per-cell emitter as `export_html`, so a cell looks the same in an
+# exported page, a published site and a docs page.
+
+import SHA
+
+const DOC_BUNDLE_SCHEMA = 1
+const DOC_BUNDLE_MANIFEST = "slate-bundle.json"
+
+"""
+    doc_bundle_key(notebook_path) -> String
+
+The key a doc bundle is stored under: the SHA-256 of the notebook file, line endings normalised so a
+checkout with `core.autocrlf` agrees with the machine that rendered it. A docs build compares this
+against the key recorded in the bundle to decide whether the bundle is current.
+"""
+doc_bundle_key(path::AbstractString) =
+    bytes2hex(SHA.sha256(replace(read(path, String), "\r\n" => "\n")))
+
+# A file-name-safe form of an id. Cell ids are author-chosen and may hold characters a URL or a file
+# system treats specially; the manifest maps each id to its file, so this only has to be safe and stable.
+_docbundle_slug(s::AbstractString) = (t = replace(String(s), r"[^A-Za-z0-9_-]" => "_"); isempty(t) ? "_" : t)
+
+_cell_kind_name(c::Cell) = c.kind == MARKDOWN ? "markdown" : c.kind == WEB ? "web" :
+                           c.kind == TOOL ? "tool" : "code"
+
+# Math in Documenter's spelling: ``x`` inline and a ```math block for display. Slate accepts four
+# delimiters; the display forms are converted first so `$…$` cannot split a `$$…$$`.
+function _documenter_math(s::AbstractString)
+    blk(m) = string("\n\n```math\n", strip(m), "\n```\n\n")
+    s = replace(String(s), r"\\\[(.+?)\\\]"s => m -> blk(match(r"\\\[(.+?)\\\]"s, m).captures[1]))
+    s = replace(s, r"\$\$(.+?)\$\$"s => m -> blk(match(r"\$\$(.+?)\$\$"s, m).captures[1]))
+    s = replace(s, r"\\\((.+?)\\\)"s => m -> string("``", match(r"\\\((.+?)\\\)"s, m).captures[1], "``"))
+    s = replace(s, ReportRender._MATH_INLINE => m -> string("``", match(ReportRender._MATH_INLINE, m).captures[1], "``"))
+    return s
+end
+
+"""
+    _doc_markdown(ctx, c) -> (markdown, native)
+
+A markdown cell as Documenter-flavoured markdown, with its `{{ }}` values written in as text. `native`
+is false when the cell has something plain markdown cannot carry — a rich or failed interpolation, an
+extension-rendered fence, a local image, a citation or figure reference, a `@replay`-driven value — in
+which case a docs page embeds the rendered cell instead.
+"""
+function _doc_markdown(ctx::_ExportCtx, c::Cell)
+    tmpl, exprs = ReportEngine._md_template(c.source)
+    native = true
+    s = tmpl
+    for (i, e) in enumerate(exprs)
+        o = i <= length(c.interp) ? c.interp[i] : nothing
+        fence = ReportEngine._fence_call(e)
+        text = if fence !== nothing
+            (o === nothing || ReportRender._is_empty_output(o)) ?
+                ReportEngine._md_fence_block(fence.lang, fence.body) : (native = false; "")
+        elseif o === nothing
+            ""
+        elseif o.exception !== nothing || !isempty(o.display) || !isempty(o.echarts) || !isempty(o.tables)
+            native = false; ""
+        else
+            ReportRender._interp_scalar(o.value_repr)
+        end
+        s = replace(s, ReportEngine._interp_token(i) => text; count = 1)
+    end
+    # Things only Slate's renderer resolves. A local image would need copying into the docs source
+    # tree and a path rewrite per writer; embedding the rendered cell carries it already.
+    (occursin(r"!\[[^\]]*\]\((?!https?://)", s) || occursin(r"<img\s", s) ||
+     occursin(r"\[@[\w:.-]", s) || occursin(r"\{\s*(width|height|align)\s*=", s)) && (native = false)
+    haskey(ctx.figidx.numbers, c.id) && (native = false)
+    # Prose whose values follow a control needs the embedded cell to follow it — but only when a sweep
+    # actually shipped; with none, the values are fixed and plain markdown carries them.
+    pm = get(ctx.chain_marks, string("prose:", c.id), nothing)
+    (pm isa AbstractDict && haskey(ctx.replay_table, String(get(pm, "id", "")))) && (native = false)
+    return (_documenter_math(s), native)
+end
+
+# Does a code cell show anything below its (hidden) source? A cell that only defines things has no
+# payload, and a docs page has nothing to embed for it.
+function _doc_cell_has_output(c::Cell, ctrls::AbstractString)
+    isempty(ctrls) || return true
+    o = c.output
+    o === nothing && return false
+    return !isempty(o.stdout) || !isempty(o.stderr) || !isempty(o.value_repr) || !isempty(o.display) ||
+           o.exception !== nothing || !isempty(o.echarts) || !isempty(o.tables)
+end
+
+# The libraries a bundle's cells need, as CDN URLs pinned by vendor.json. KaTeX always: math appears
+# in ordinary output (a `text/latex` display) as well as prose.
+function _doc_bundle_libs(nb::LiveNotebook)
+    libs = Dict{String,Any}[]
+    add(pkg, sub, kind) = (u = _vendor_url(pkg, sub); u === nothing || push!(libs, Dict{String,Any}("name" => pkg, kind => u)))
+    add("katex", "katex.min.css", "css")
+    add("katex", "katex.min.js", "js")
+    add("katex", "contrib/auto-render.min.js", "js")
+    pl = _page_libs(nb)
+    pl.echarts && add("echarts", "echarts.min.js", "js")
+    pl.dagre && add("dagre", "dagre.min.js", "js")
+    return libs
+end
+
+# Placeholder a bundle's front-end scripts use for their own location; the runtime substitutes the
+# bundle's URL before running them, since a docs page's URL says nothing about where the bundle is.
+const _DOC_BUNDLE_BASE_TOKEN = "__SLATE_BUNDLE_BASE__"
+
+"""
+    export_doc_bundle(nb, dir; light = "daylight", dark = "midnight", render_info = Dict()) -> Dict
+
+Write `nb`'s doc bundle into `dir`, replacing any bundle already there, and return the manifest.
+`light`/`dark` are the Slate palettes the embedded cells use under the docs site's light and dark
+themes. `render_info` is merged into the manifest's `rendered` record (how and where it was run).
+
+The bundle is assembled in a sibling temporary directory and moved into place at the end, so a render
+that fails leaves the previous bundle intact.
+"""
+function export_doc_bundle(nb::LiveNotebook, dir::AbstractString; light::AbstractString = "daylight",
+                           dark::AbstractString = "midnight", render_info::AbstractDict = Dict{String,Any}())
+    dir = abspath(dir)
+    mkpath(dirname(dir))
+    stage = mktempdir(dirname(dir); prefix = "." * basename(dir) * ".tmp-", cleanup = false)
+    try
+        manifest = _write_doc_bundle!(stage, nb; light, dark, render_info)
+        isdir(dir) && rm(dir; recursive = true, force = true)
+        mv(stage, dir)
+        return manifest
+    catch
+        rm(stage; recursive = true, force = true)
+        rethrow()
+    end
+end
+
+function _write_doc_bundle!(out::AbstractString, nb::LiveNotebook; light, dark, render_info)
+    nbslug = _docbundle_slug(splitext(basename(nb.path))[1])
+    sink = Dict{String,Any}()
+    cells = Dict{String,Any}[]
+    payloads = Pair{String,String}[]
+    used = Set{String}()
+    local ctx, fm, entries
+    lock(nb.lock) do
+        # Sibling assets (a docs site serves files), no source in the payloads (the docs page shows code
+        # itself, highlighted by the site), ids prefixed so two notebooks on one page cannot collide.
+        ctx = _export_ctx(nb; inline = false, show_source = false, outputs = "all", palette = dark,
+                          idprefix = nbslug * "-")
+        fm = report_frontmatter(nb.report)
+        entries = _export_asset_entries(ctx; asset_sink = sink)
+        for c in nb.report.cells
+            ((:bibliography in c.flags) || (:docindex in c.flags)) && continue
+            entry = Dict{String,Any}("id" => c.id, "kind" => _cell_kind_name(c),
+                                     "tags" => sort!([string(f) for f in c.flags]))
+            n0, t0 = length(ctx.charts), length(ctx.tablemarks)
+            io = IOBuffer()
+            _export_cell_html!(io, ctx, c)
+            html = String(take!(io))
+            if c.kind == MARKDOWN
+                md, native = _doc_markdown(ctx, c)
+                entry["markdown"] = md
+                entry["native"] = native
+                has = true                       # the rendered form is the fallback for a non-native cell
+            else
+                entry["source"] = c.source
+                entry["hidecode"] = (:hidecode in c.flags) || _is_web_cell(c) || !isempty(c.binds)
+                has = _doc_cell_has_output(c, _export_controls_html(c, ctx.bind_by_name, ctx.surfaced_names))
+            end
+            entry["output"] = has
+            if has
+                slug = _docbundle_slug(c.id)
+                while slug in used; slug *= "_"; end
+                push!(used, slug)
+                file = "cells/" * slug * ".json"
+                entry["file"] = file
+                charts = ctx.charts[(n0 + 1):end]
+                pm = get(ctx.chain_marks, string("prose:", c.id), nothing)
+                # Chart options are already JSON (the page writer embeds them verbatim); splice them in
+                # rather than parsing each back into a Dict just to print it again.
+                push!(payloads, file => string(
+                    "{\"id\":", JSON.json(c.id), ",\"html\":", JSON.json(html),
+                    ",\"charts\":[", join((string("[", JSON.json(id), ",", spec, "]") for (id, spec) in charts), ","), "]",
+                    ",\"tablemarks\":", JSON.json(ctx.tablemarks[(t0 + 1):end]),
+                    ",\"prosemarks\":", JSON.json(pm isa AbstractDict ? [pm] : Any[]), "}"))
+            end
+            push!(cells, entry)
+        end
+    end
+
+    # Files. Everything a payload references, at the relative path it references it by.
+    for (rel, src) in _referenced_page_assets(nb)
+        dst = joinpath(out, rel); mkpath(dirname(dst))
+        src isa AbstractVector{UInt8} ? write(dst, src) : cp(src, dst; force = true)
+    end
+    _write_sibling_assets!(out, sink)
+    for (file, json) in payloads
+        dst = joinpath(out, file); mkpath(dirname(dst)); write(dst, json)
+    end
+    frontend = Dict{String,Any}[]
+    for (i, e) in enumerate(_frontend_scripts(nb))
+        file = string("frontend/", i, "-", _docbundle_slug(e.id), ".js")
+        dst = joinpath(out, file); mkpath(dirname(dst))
+        write(dst, replace(e.js, "/ext-assets/" => _DOC_BUNDLE_BASE_TOKEN * "ext-assets/"))
+        push!(frontend, Dict{String,Any}("id" => e.id, "file" => file, "esm" => e.esm, "kind" => e.kind))
+    end
+    rt = joinpath(out, "runtime", "slate-embed.js"); mkpath(dirname(rt))
+    write(rt, _embed_runtime_js())
+
+    rendered = Dict{String,Any}("at" => string(Dates.now(Dates.UTC), "Z"), "julia" => string(VERSION),
+                                "kernel" => _doc_kernel_kind(nb),
+                                "errors" => [c.id for c in nb.report.cells
+                                             if c.output !== nothing && c.output.exception !== nothing])
+    merge!(rendered, Dict{String,Any}(String(k) => v for (k, v) in render_info))
+    manifest = Dict{String,Any}(
+        "schema" => DOC_BUNDLE_SCHEMA,
+        "generator" => string("KaimonSlate ", try; string(pkgversion(@__MODULE__)); catch; "?"; end),
+        "notebook" => Dict{String,Any}("id" => nb.id, "file" => basename(nb.path), "title" => fm.title,
+                                       "subtitle" => fm.subtitle, "byline" => fm.byline, "abstract" => fm.abstract),
+        "key" => isfile(nb.path) ? doc_bundle_key(nb.path) : "",
+        "rendered" => rendered,
+        "theme" => Dict{String,Any}(
+            "light" => Dict{String,Any}("palette" => String(light), "vars" => _export_theme_vars(_resolve_export_theme(light))),
+            "dark"  => Dict{String,Any}("palette" => String(dark),  "vars" => _export_theme_vars(_resolve_export_theme(dark)))),
+        "libs" => _doc_bundle_libs(nb),
+        "assets" => entries === nothing ? Dict{String,Any}() : Dict{String,Any}(p => e for (p, e) in entries),
+        "replays" => ctx.replay_table,
+        "frontend" => frontend,
+        "runtime" => "runtime/slate-embed.js",
+        "cells" => cells,
+    )
+    open(io -> JSON.print(io, manifest, 1), joinpath(out, DOC_BUNDLE_MANIFEST), "w")
+    return manifest
+end
+
+# How the notebook was run, for the manifest: a docs reader cannot see it, but a maintainer looking at
+# why a bundle differs from what CI produced can.
+_doc_kernel_kind(nb::LiveNotebook) = nb.kernel isa ReportEngine.InProcessKernel ? "inprocess" : "worker"
+
+# ── The embed runtime ──────────────────────────────────────────────────────────────────────────────
+# One script: the static export's runtime (assets, replay, charts, tables, media, component mount),
+# the export component CSS, and the `<slate-cell>` element (assets/js/slate-embed.js). Everything is
+# inside one closure, so the export's top-level helpers do not become globals on a docs page.
+
+_export_embed_css(code::AbstractString = "normal") = string(
+    ":host{display:block;margin:1em 0;color:var(--text);line-height:1.6;}",
+    ":host([hidden]){display:none;}",
+    "*{box-sizing:border-box;}",
+    _export_component_css(code),
+    # A cell on a docs page is one output, not a notebook card: no outer margin, and a frame that lets
+    # the site's own background show through, so a palette never paints a block of a different colour
+    # onto a docs theme it was not chosen for. The border is mixed from the text colour for the same
+    # reason: it reads as a hairline on any background.
+    # Surfaces (table headers, inputs, control tracks) as tints of the text colour for the same reason.
+    # Set on the wrapper, not the host: chart tooltips read the host's palette and stay opaque.
+    ".slate-embed{--bg2:color-mix(in srgb,var(--text) 4%,transparent);",
+    "--bg3:color-mix(in srgb,var(--text) 8%,transparent);}",
+    ".slate-embed>section.exp-code{margin:0;background:transparent;",
+    "border-color:color-mix(in srgb,var(--text) 16%,transparent);}",
+    ".slate-embed .exp-ctls{border-bottom:1px solid color-mix(in srgb,var(--text) 10%,transparent);}",
+    ".slate-embed .exp-ctls:last-child{border-bottom:none;}",
+    ".slate-embed>section.exp-md{margin:0;}",
+    ".slate-embed-msg{padding:8px 12px;border:1px dashed var(--border);border-radius:6px;color:var(--dim);",
+    "font-size:.85rem;}")
+
+function _embed_runtime_js()
+    return string(
+        "/* Slate embed runtime (doc bundle schema ", DOC_BUNDLE_SCHEMA, "), generated by KaimonSlate. */\n",
+        "(function(){\nif(window.__slateEmbedRuntime)return;window.__slateEmbedRuntime=",
+        DOC_BUNDLE_SCHEMA, ";\n",
+        _export_asset_js(), "\n",
+        _EXPORT_ECHARTS_THEME_JS, "\n",
+        "var _slateMaps={};\n",
+        _EXPORT_CHART_RUNTIME_JS, "\n",
+        _EXPORT_TABLE_JS, "\n",
+        _EXPORT_TABLE_REPLAY_JS, "\n",
+        _EXPORT_PROSE_REPLAY_JS, "\n",
+        _EXPORT_MEDIA_JS, "\n",
+        _EXPORT_COMPONENT_MOUNT_JS, "\n",
+        "var _SLATE_EMBED_CSS=", JSON.json(_export_embed_css()), ";\n",
+        "var _SLATE_BASE_TOKEN=", JSON.json(_DOC_BUNDLE_BASE_TOKEN), ";\n",
+        read(joinpath(_JS_DIR, "slate-embed.js"), String),
+        "\n})();\n")
+end
+
+# ── Rendering a notebook headlessly ────────────────────────────────────────────────────────────────
+
+"""
+    render_doc_bundle_inprocess(notebook, dir; light = "daylight", dark = "midnight", timeout = 3600) -> Dict
+
+Run `notebook` in this process and write its doc bundle to `dir`, returning the manifest. No hub, no
+browser, no worker — `KaimonSlate.render_doc_bundle(…; backend = :inprocess)`.
+
+The notebook runs in THIS process, in its own environment (the in-process kernel swaps the load path
+around each cell), so its packages must be installed. Nothing is written to Slate's own state: no
+preview snapshot, no history, no docs index. Cells that error are reported and still bundled, as the
+error output they produced — a docs build decides whether that is acceptable.
+"""
+function render_doc_bundle_inprocess(path::AbstractString, dir::AbstractString; light::AbstractString = "daylight",
+                           dark::AbstractString = "midnight", timeout::Real = 3600)
+    path = abspath(path)
+    isfile(path) || throw(ArgumentError("no notebook at $path"))
+    base = splitext(basename(path))[1]
+    rid = replace(base, r"[^A-Za-z0-9]" => "_")
+    r = parse_report(read(path, String); id = rid, title = base)
+    build_dependencies!(r)
+    kernel = _select_kernel(path, r)
+    nb = LiveNotebook(rid, path, r, kernel, 0, String[], String[], ReentrantLock(), Channel{String}[],
+                      ReentrantLock(), "", false, Dict{String,String}())
+    t0 = time()
+    run = Threads.@spawn _drain!(nb)
+    while !istaskdone(run)
+        time() - t0 > timeout && error("render_doc_bundle: $base did not finish within $(timeout)s")
+        sleep(0.1)
+    end
+    fetch(run)                                    # surface a runner failure here, not as a half bundle
+    _refresh_extensions!(nb)                      # extension front-ends the outputs need (normally the run loop's job)
+    man = export_doc_bundle(nb, dir; light, dark,
+                            render_info = Dict{String,Any}("seconds" => round(time() - t0; digits = 1)))
+    errs = man["rendered"]["errors"]
+    isempty(errs) || @warn "render_doc_bundle: cells raised errors; their error output is in the bundle" notebook = base cells = errs
+    return man
+end
