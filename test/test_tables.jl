@@ -95,6 +95,9 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
         wa = ReportEngine._col_wire(ca)
         @test wa["viz"] == "bar" && wa["domain"] == Any[1.0, 4.0]
         @test !haskey(ReportEngine._col_wire(cb), "viz")
+        # A fixed range: a small value stays a small bar instead of filling the cell.
+        f = slate_table((a = [0.01, 0.02],); viz = (a = (kind = :bar, domain = (0, 1)),)).columns[1]
+        @test f.viz == :bar && f.domain == (0.0, 1.0)
     end
 
     @testset "cells are reduced to JSON-safe scalars" begin

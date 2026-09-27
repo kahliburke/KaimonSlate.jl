@@ -279,9 +279,19 @@ function _apply_col_opts!(cols::Vector{ColumnDef}; format = NamedTuple(), align 
         i = _at(nm); c = cols[i]
         cols[i] = ColumnDef(c.name, c.type, c.align, _parse_col_format(v), c.sortable, c.filterable, c.viz, c.domain)
     end
+    # A viz is a kind (`:bar`), or a kind with the range it is drawn against, `(kind = :bar, domain =
+    # (0, 1))`: without one, a column is scaled over its own min→max, so its largest value always
+    # fills the cell, however small it is.
     for (nm, v) in pairs(viz)
         i = _at(nm); c = cols[i]
-        cols[i] = ColumnDef(c.name, c.type, c.align, c.format, c.sortable, c.filterable, Symbol(v), c.domain)
+        opt(k, dv) = v isa NamedTuple ? get(v, k, dv) : get(v, String(k), get(v, k, dv))
+        kind, dom = if v isa Union{NamedTuple,AbstractDict}
+            d = opt(:domain, nothing)
+            (Symbol(opt(:kind, :bar)), d === nothing ? c.domain : (Float64(d[1]), Float64(d[2])))
+        else
+            (Symbol(v), c.domain)
+        end
+        cols[i] = ColumnDef(c.name, c.type, c.align, c.format, c.sortable, c.filterable, kind, dom)
     end
     return cols
 end
@@ -310,7 +320,8 @@ NamedTuple needs its trailing comma: `(Revenue = :currency,)`:
   • `align` — `:left` / `:right` / `:center`, overriding the type-inferred default.
   • `coltype` — override the inferred physical type (e.g. force an id column to `:string`).
   • `viz` — an in-cell visualization for a NUMERIC column, scaled over its min→max: `:bar`
-    (a proportional bar behind the value) or `:heat` (a background shaded by magnitude).
+    (a proportional bar behind the value) or `:heat` (a background shaded by magnitude). To draw
+    against a fixed range instead, give it: `(Missing = (kind = :bar, domain = (0, 1)),)`.
   • `default_format` — one format spec (same DSL as a `format` value) applied to EVERY numeric
     column that doesn't have an explicit entry in `format`. Handy for a blanket
     `default_format = :integer` (round-to-nearest-int) instead of listing every column.
