@@ -23,7 +23,9 @@ _ec(v::Symbol) = String(v)
 _ec(v::NamedTuple) = Dict{String,Any}(String(k) => _ec(getfield(v, k)) for k in keys(v))
 _ec(v::AbstractDict) = Dict{String,Any}(String(k) => _ec(x) for (k, x) in v)
 _ec(v::Tuple) = Any[_ec(x) for x in v]
-_ec(v::AbstractVector) = eltype(v) <: Union{Number,AbstractString} ? v : Any[_ec(x) for x in v]
+# A `@replay` value is kept as it is: converting it would drop the identity that marks it.
+_ec(v::AbstractVector) = (eltype(v) <: Union{Number,AbstractString} || _replay_of(v) !== nothing) ? v :
+                         Any[_ec(x) for x in v]
 _ec(v) = v
 
 # A single series plus the top-level COMPONENTS it implies (xAxis/yAxis/visualMap/radar/…).
@@ -719,4 +721,4 @@ end
 # Composable: one or more `series(...)`, plus raw layout/components (grid/dataZoom/visualMap/…).
 echart(s::EChartSeries, more::EChartSeries...; kwargs...) = EChart(_echart_build([s, more...]; kwargs...))
 # Raw NamedTuple/keyword options — the full ECharts surface, Symbol/NamedTuple-friendly.
-echart(; kwargs...) = EChart(_slate_normalize!(Dict{String,Any}(String(k) => _ec(v) for (k, v) in kwargs)))
+echart(; kwargs...) = EChart(_mark_option_replays!(_slate_normalize!(Dict{String,Any}(String(k) => _ec(v) for (k, v) in kwargs))))

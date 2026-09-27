@@ -202,6 +202,13 @@ const RE = ReportEngine
         @test !haskey(o["series"][1], "__dark")
     end
 
+    @testset "echart(; …) keeps and marks a @replay in a series' data" begin
+        mk(v) = RE.ReplayArray(v, "cell:x", "x", 1, Any[1, 2])
+        o = RE.echart(; series = [(type = :heatmap, data = mk([[0, 0, 1.0], [1, 0, 2.0]]))], height = 300).option
+        @test o["series"][1]["__replay"]["id"] == "cell:x"
+        @test o["__size"]["height"] == 300
+    end
+
     @testset "a point series stacks as a matrix per position" begin
         @test RE._replay_points_matrix([[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]) == [0.0 1.0; 2.0 3.0; 4.0 5.0]
         @test RE._replay_points_matrix([(0, 1), (2, 3)]) == [0 1; 2 3]
