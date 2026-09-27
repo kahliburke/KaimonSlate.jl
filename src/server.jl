@@ -1073,6 +1073,7 @@ end
 # parity); v1 rules: the main kernel should be local when a region is active, `@bind`-declaring
 # cells stay local, cross-boundary MUTATION is undefined (same as the release-plan validity rule).
 const _REGION_KERNELS = Dict{Tuple{String,String},Any}()   # (nb id, region name) → GateKernel
+const _REGION_KERNEL_JOB = WeakKeyDict{Any,String}()        # scheduler region kernel → the job it was built in
 const _REGION_SYNCED = Dict{String,Dict{String,String}}()  # nb id → "side:name" → freshness token
 const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, kernel objectid) → signature of primed `using` cells
 # Keys currently being primed. `_prime_namespace!` stages each EVERYWHERE cell's data reads through
@@ -1724,7 +1725,18 @@ function _region_kernel!(nb::LiveNotebook, name::String)
                 # so the host match above cannot tell a live placement from a released one; reusing then
                 # would spawn OUTSIDE the allocation (no `srun`, so no GPU binding). When nothing is held,
                 # fall through to the placement block below, which asks for a node.
-                (r.scheduler === :none || ReportEngine._region_holds_node(r)) && return k
+                r.scheduler === :none && return k
+                p = ReportEngine.region_placement(r)
+                if p !== nothing
+                    job = get(_REGION_KERNEL_JOB, k, p.job)
+                    p.job == job && return k
+                    # The held node belongs to a different job, so the worker of the cached kernel ended
+                    # with its allocation. A single-node cluster reuses the host name, so the job id is
+                    # what distinguishes the two allocations.
+                    ReportEngine._rlog("region: '$name' is on job $(p.job) now, not $job - rebuilding its kernel")
+                    ReportEngine._drop_kernel_conn!(k)
+                    delete!(_REGION_KERNELS, (nb.id, name))
+                end
             else
                 ReportEngine._rlog("region: '$name' moved off $(tgt.ssh_host) — rebuilding its kernel")
                 delete!(_REGION_KERNELS, (nb.id, name))
@@ -1774,6 +1786,8 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         k = ReportEngine.GateKernel(target.project; parent = parent, target = target,
                                     label = basename(abspath(nb.path)) * "#" * name)
         _REGION_KERNELS[(nb.id, name)] = k
+        p = ReportEngine.region_placement(r)
+        p === nothing || (_REGION_KERNEL_JOB[k] = p.job)
         return k
     end
 end

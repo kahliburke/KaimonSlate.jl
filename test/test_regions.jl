@@ -246,6 +246,31 @@ const RE = KaimonSlate.ReportEngine
                 end
             end
 
+            @testset "a new allocation on the same node rebuilds the region kernel" begin
+                rep = RE.parse_report("#%% code id=c region=gpu\n1\n")
+                nb = NS.LiveNotebook("alloc", joinpath(mktempdir(), "alloc.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                place!(job) = lock(RE._REGION_PLACE_LOCK) do
+                    RE._REGION_PLACE["gpu"] = (host = "c9", job = job, ts = time(),
+                                               checked = time(), until = time() + 600)
+                end
+                RE.route!("c9", "login", "77")
+                try
+                    place!("77")
+                    k = NS._region_kernel!(nb, "gpu")
+                    @test NS._region_kernel!(nb, "gpu") === k
+                    place!("78")
+                    k2 = NS._region_kernel!(nb, "gpu")
+                    @test k2 !== k
+                    @test NS._region_kernel!(nb, "gpu") === k2
+                finally
+                    lock(NS._REGION_LOCK) do; delete!(NS._REGION_KERNELS, ("alloc", "gpu")); end
+                    lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
+                    RE.route!("c9", "")
+                end
+            end
+
             # ── what the fixed fields cannot say ──────────────────────────────────────────────
             # A region carries the same scheduler options a sweep cell does, spelled by the same
             # catalogue, so one cluster described for a sweep and for a region says one thing.
