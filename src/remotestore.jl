@@ -211,6 +211,12 @@ function connect!(host::AbstractString; interactive::Bool = false)
     return ok
 end
 
+"Whether a non-interactive `connect!` to `host` failed recently enough that it is still being left alone."
+connect_failed_recently(host::AbstractString) = lock(_CONNECT_LOCK) do
+    fc = get(_CONNECT_FAILED, String(host), nothing)
+    fc !== nothing && time() - fc[1] < (fc[2] ? _CONNECT_BACKOFF_SIGNIN : _CONNECT_BACKOFF)
+end
+
 """
     run_there(host, script) -> (ok, output)
 

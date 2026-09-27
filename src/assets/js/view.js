@@ -341,7 +341,7 @@ function _cellRegionSet() {
 // the chip leaves nothing on screen saying it left this machine.
 // The server sends a CODE for why a cell is waiting; the words are here. An unknown code shows as
 // itself rather than as nothing, so a new one is visible instead of silently blank.
-const BLOCKED_TEXT = { queued: 'queued', not_signed_in: 'not signed in' };
+const BLOCKED_TEXT = { queued: 'queued', not_signed_in: 'not signed in', connecting: 'connecting' };
 function blockedText(c) {
   const code = (c && c.blocked) || '';
   return BLOCKED_TEXT[code] || code.replace(/_/g, ' ');

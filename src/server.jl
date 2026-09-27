@@ -1084,6 +1084,7 @@ const _REGION_LOCK = ReentrantLock()
 # Codes a BLOCKED cell carries. The page turns each into words; nothing here is a sentence.
 const WAIT_QUEUED = "queued"
 const WAIT_NOT_SIGNED_IN = "not_signed_in"
+const WAIT_CONNECTING = "connecting"
 
 """
     RegionWaiting(why, note = "")
@@ -1624,6 +1625,37 @@ function _restale_region_cells!(nb::LiveNotebook, name::AbstractString)
     return n
 end
 
+# Key-only connects in flight, per host, with the regions waiting on each. One attempt serves every
+# region on the host, and all of them are re-run when it ends.
+const _CONNECTING = Dict{String,Vector{Tuple{Any,String}}}()
+const _CONNECTING_LOCK = ReentrantLock()
+
+function _connect_in_background!(name::AbstractString, nb::Union{LiveNotebook,Nothing}, host::AbstractString)
+    h = String(host)
+    starts = lock(_CONNECTING_LOCK) do
+        w = get(_CONNECTING, h, nothing)
+        w === nothing || (push!(w, (nb, String(name))); return false)
+        _CONNECTING[h] = Tuple{Any,String}[(nb, String(name))]
+        true
+    end
+    starts || return nothing
+    Threads.@spawn begin
+        ok = try; ReportEngine.Sweep.connect!(h); catch; false; end
+        ReportEngine._rlog("region: key-only connect to $h " * (ok ? "succeeded" : "failed — waiting for a sign-in"))
+        waiters = lock(_CONNECTING_LOCK) do; pop!(_CONNECTING, h, Tuple{Any,String}[]); end
+        # Re-run whoever was waiting: connected, they queue for a node; refused, the failure just
+        # recorded turns their wait into a sign-in. A failure that recorded nothing (a login someone
+        # else started is still open) is left alone, since re-running would only start this again.
+        if ok || ReportEngine.Sweep.connect_failed_recently(h)
+            for (w, n) in unique(waiters)
+                w === nothing && continue
+                try; _restale_region_cells!(w, n); _ensure_runner!(w); catch; end
+            end
+        end
+    end
+    return nothing
+end
+
 function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Nothing} = nothing)
     lock(_PLACING_LOCK) do
         String(name) in _PLACING && return false
@@ -1720,9 +1752,15 @@ function _region_kernel!(nb::LiveNotebook, name::String)
             if !ReportEngine._region_holds_node(r)   # nothing placed yet
                 # Asking for a node needs the cluster, and reaching the cluster may need a password
                 # that only a person can supply — which background work is not allowed to ask for.
-                # So say which of the two is missing, because they need different things from you.
-                ReportEngine.Sweep.connected(r.host) ||
-                    throw(RegionWaiting(WAIT_NOT_SIGNED_IN, r.host))
+                # A host that takes a key needs nobody, so that is tried first, in the background
+                # because this runs under `nb.lock`. Only once it has failed is the cell told to wait
+                # on a sign-in; queueing and signing in need different things from you.
+                if !ReportEngine.Sweep.connected(r.host)
+                    ReportEngine.Sweep.connect_failed_recently(r.host) &&
+                        throw(RegionWaiting(WAIT_NOT_SIGNED_IN, r.host))
+                    _connect_in_background!(name, nb, r.host)
+                    throw(RegionWaiting(WAIT_CONNECTING, r.host))
+                end
                 _place_in_background!(name, nb)
                 # A queue wait is minutes on a busy cluster, so this is not a "try again" — the
                 # placement task re-runs this cell itself when the scheduler grants a node.
