@@ -216,8 +216,30 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
             delete = true, excludes = [".git", "Manifest.toml"]) ||
         error("could not copy $(parent) to $(host):$(remote_pkg)")
 
+    # Packages the parent develops by path, which no registry on the cluster can supply: each is sent
+    # to `devsrc/<name>`, and every `[sources]` entry naming one (the parent's, and theirs) is pointed
+    # at that copy, since the paths recorded here mean nothing there. Their sources are already in
+    # the fingerprint, so an edit to one provisions again.
+    devs = env_path_deps(parent)
+    devdir(name) = "$(root_remote)/devsrc/$(name)"
+    for (name, dir) in devs
+        _ssh_run(host, "mkdir -p $(devdir(name))")[1] &&
+            put_dir(host, dir, devdir(name); delete = true, filter = true,
+                    excludes = [".git", "test", "docs", "Manifest.toml", "*.cov"]) ||
+            error("could not copy $(dir) to $(host):$(devdir(name))")
+    end
+    repoint = isempty(devs) ? "" : string(
+        "devs = Dict(", join(("raw\"$(n)\" => raw\"$(devdir(n))\"" for (n, _) in devs), ", "), "); ",
+        "for pf in [", join(("raw\"$(d)/Project.toml\"" for d in [remote_pkg; [devdir(n) for (n, _) in devs]]), ", "), "]; ",
+        "isfile(pf) || continue; d = Pkg.TOML.parsefile(pf); s = get(d, \"sources\", nothing); ",
+        "s isa AbstractDict || continue; ",
+        "for (k, e) in s; e isa AbstractDict && haskey(e, \"path\") && haskey(devs, k) && (e[\"path\"] = devs[k]); end; ",
+        "open(io -> Pkg.TOML.print(io, d), pf, \"w\"); end;")
+
     pre = isempty(prologue) ? "" : prologue * "\n"
-    dev = isempty(pname) ? "" : "Pkg.develop(Pkg.PackageSpec(path=raw\"$(remote_pkg)\"));"
+    specs = String["Pkg.PackageSpec(path=raw\"$(devdir(n))\")" for (n, _) in devs]
+    isempty(pname) || push!(specs, "Pkg.PackageSpec(path=raw\"$(remote_pkg)\")")
+    dev = isempty(specs) ? "" : "Pkg.develop([" * join(specs, ", ") * "]);"
     # The parent's deps become DIRECT deps of the task environment, not merely transitive ones.
     #
     # `develop` alone makes them reachable from the parent package's own code and nowhere else: a
@@ -225,16 +247,17 @@ function provision_remote_env!(host::AbstractString, root_remote::AbstractString
     # active project's direct deps. So a parent that lists a package precisely so the compute nodes
     # have it — which is the whole reason a task-env package carries deps it never imports — got an
     # environment where `using` it still failed. Loading by UUID happened to work, which is why the
-    # one package Slate loads that way (Arrow) masked this for as long as it did.
+    # one package Slate loads that way (Arrow) masked this for as long as it did. The ones sent by
+    # path are direct already, through `develop`.
     depnames = try
         pt = Pkg.TOML.parsefile(joinpath(parent, "Project.toml"))
-        sort!(String[k for k in keys(get(pt, "deps", Dict{String,Any}()))])
+        sort!(String[k for k in keys(get(pt, "deps", Dict{String,Any}())) if !any(d -> d.first == k, devs)])
     catch
         String[]
     end
     addl = isempty(depnames) ? "" :
         "Pkg.add([" * join(("Pkg.PackageSpec(name=raw\"$(d)\")" for d in depnames), ", ") * "]);"
-    code = "using Pkg; Pkg.activate(raw\"$(envdir)\"); $dev $addl Pkg.instantiate(); Pkg.precompile()"
+    code = "using Pkg; $repoint Pkg.activate(raw\"$(envdir)\"); $dev $addl Pkg.instantiate(); Pkg.precompile()"
     ok, out = _ssh_run(host, "$(pre)$(julia) --startup-file=no -e '$(code)' && " *
                              "printf '%s' '$(fp)' > $(stamp)")
     ok || error("could not instantiate the task environment on $(host):\n$(strip(out))")

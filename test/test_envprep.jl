@@ -286,6 +286,8 @@ end
         @test joinpath(par, "src") in dirs
         @test joinpath(foo, "src") in dirs          # dev'd in by the parent
         @test joinpath(bar, "src") in dirs          # …and by Foo, so transitively
+        # The same walk names what an environment built elsewhere has to be sent.
+        @test ReportEngine.env_path_deps(par) == ["Foo" => foo, "Bar" => bar]
 
         a = ReportEngine.env_source_fingerprint(par)
         write(joinpath(foo, "src", "Foo.jl"), "module Foo\ncrisscross(x) = x * 999\nend
