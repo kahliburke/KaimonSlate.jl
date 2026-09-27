@@ -8,7 +8,7 @@
 #   * the same facts were being configured twice, because a region on that cluster needs them too.
 #
 # So they live here, beside regions, in the same config directory: one definition per cluster, named,
-# referenced by a sweep cell's `cluster=<name>` header and by a region's host.
+# referenced by a job cell's `cluster=<name>` header and by a region's host.
 #
 # The name is the contract, not the address: a notebook says `cluster=hpc`, and each machine that
 # opens it resolves that against its own registry. Which is what makes the same notebook run against

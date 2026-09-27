@@ -1,6 +1,6 @@
 // Asserts src/assets/js/schedopts.js — the rules a scheduler option's NAME obeys.
 //
-// Two editors set these: a sweep cell and a region. They have to agree about what a name means, or
+// Two editors set these: a job cell and a region. They have to agree about what a name means, or
 // the same setting typed in both places becomes two settings that emit one flag. The markup differs
 // and the vocabulary must not, so the vocabulary lives in one file and this is what pins it.
 //
@@ -95,7 +95,7 @@ eq('the catalogue loads once', SO.all().length, CAT.length);
 }
 
 // ── the suggestion filter ───────────────────────────────────────────────────────────────────────
-// Shared with the sweep cell, which learned the rules first: nothing until you type, prefix before
+// Shared with the job cell, which learned the rules first: nothing until you type, prefix before
 // substring, and never an option this scheduler cannot say.
 {
   eq('nothing typed offers nothing', SO.matches('', 'slurm').length, 0);
@@ -124,7 +124,7 @@ eq('the catalogue loads once', SO.all().length, CAT.length);
   // what the form is already saying, and the request drops the duplicate anyway.
   eq('mem has a box, so it is not suggested',
      SO.matches('me', 'slurm', 9, SO.FIELD_OWNED).map(o => o.key).includes('mem'), false);
-  // The sweep cell passes no exclusions — there the options ARE the per-cell override of a
+  // The job cell passes no exclusions — there the options ARE the per-cell override of a
   // cluster's defaults, so `mem` meaning "mem, but here" is the point.
   eq('the cell still gets it', SO.matches('me', 'slurm', 9).map(o => o.key).includes('mem'), true);
 

@@ -1,6 +1,6 @@
 // Scheduler options: the catalogue, and the rules for naming one.
 //
-// Two places let you set them — a sweep cell (`sweeps.js`) and a region (`remotes-focus.js`) — and
+// Two places let you set them — a job cell (`sweeps.js`) and a region (`remotes-focus.js`) — and
 // they must agree about what a name MEANS, or the same setting typed in both places becomes two
 // settings that emit the same flag. So the rules live here and each page draws its own rows: the
 // markup differs (a cell panel, a form row), the vocabulary must not.
@@ -72,7 +72,7 @@
 
   // What to offer for what has been typed so far.
   //
-  // NOT a `<datalist>`, and the reason is in the sweep cell that learned it first: a datalist shows
+  // NOT a `<datalist>`, and the reason is in the job cell that learned it first: a datalist shows
   // the whole list the moment the box is focused, which buries the fields under it, and the browser
   // draws it so CSS cannot cap it. So: nothing until you type, filtered, and a handful at a time.
   //
@@ -80,7 +80,7 @@
   // finds `cpus-per-task`. An option this scheduler cannot say is not offered at all — suggesting
   // one whose only effect would be a rejected job is worse than saying nothing.
   // Names the REGION FORM already has a box for. Suggesting one would offer a second way to say
-  // something the form is already saying, and the request drops a duplicate anyway. The sweep cell
+  // something the form is already saying, and the request drops a duplicate anyway. The job cell
   // passes `[]`: there the options ARE the override of a cluster's defaults, so `mem` meaning "mem,
   // but for this cell" is the whole point.
   const FIELD_OWNED = ['cpus', 'mem', 'walltime', 'partition', 'account', 'gpus'];

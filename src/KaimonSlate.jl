@@ -2426,7 +2426,9 @@ function create_tools(GateTool::Type)
     setting for a cell that might be slow (auto-promotion covers that), and pairing it with a sleep
     defeats its whole purpose: if you have nothing to do during the run, you wanted the default. See
     `run` for the full rule. `after` = the id to insert after ("" = end of notebook).
-    `kind` = "code" or "md". `id` = an optional explicit cell id (a meaningful label like
+    `kind` = "code", "md", "web", or "job" (work that runs as a background job: a `@sweep` or a
+    campaign; a new job cell starts from a `@sweep` skeleton, and `tags="cluster=<name>"` names its
+    compute target, see `api("job cell")`). `id` = an optional explicit cell id (a meaningful label like
     "ground_state"); must be UNIQUE — errors if already in use — and is folded to header-safe
     characters (letters/digits/underscore). Omit it to auto-generate. `tags` = optional cell tags
     (comma/space-separated), both behaviour tags (`hidecode`, `collapsed`, `trace`, `nocache`, …)

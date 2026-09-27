@@ -38,7 +38,7 @@ end
     # The route allowlist stops at the WebSocket upgrade. Every `slateCall` after it rides that one
     # socket, so a channel is reachable in app mode unless something else says otherwise — and the
     # sweep card's action channel is registered by Slate, not by the author, so publishing a
-    # notebook that contains a sweep cell would hand a reader `submit`, `cancel` and `reset`
+    # notebook that contains a job cell would hand a reader `submit`, `cancel` and `reset`
     # against a cluster allocation, plus the job logs and their paths on that cluster.
     ok = NS._app_channel_allowed
     @test !ok(KaimonSlate.ReportEngine.Sweep.action_channel("sw1_r2"))

@@ -513,12 +513,12 @@ function closeKindPicker() {
   if (p) p.classList.remove('show');
 }
 
-// A sweep cell's compute target, named in its header — the sibling of `cellRegionChip`, and for the
+// A job cell's compute target, named in its header — the sibling of `cellRegionChip`, and for the
 // same reason: WHERE a cell's work happens is not a setting you go looking for, it is something you
 // need to see while reading. A chip rather than an icon because the answer is a NAME; an icon would
-// mean clicking every sweep cell to find out where it goes.
+// mean clicking every job cell to find out where it goes.
 //
-// Unconfigured reads as an invitation, not an error: a sweep cell with no target is the normal state
+// Unconfigured reads as an invitation, not an error: a job cell with no target is the normal state
 // of a cell you just added, and "set a cluster" says what to do about it.
 function cellClusterChip(c) {
   if (c.kind !== 'job') return '';
@@ -616,7 +616,7 @@ function _effectBadge(c) {
   return `<span class="effectbadge" title="${_esc(tip)}">⚙ ${_esc(label + shown)}</span>`;
 }
 function cellHeaderInner(c) {
-  const isCode = (c.kind === 'code' || c.kind === 'web' || c.kind === 'tool' || c.kind === 'job') && !hasBinds(c);   // web/tool/sweep cells run too (▶)
+  const isCode = (c.kind === 'code' || c.kind === 'web' || c.kind === 'tool' || c.kind === 'job') && !hasBinds(c);   // web/tool/job cells run too (▶)
   // ✎ edit source — on EVERY cell. md/@bind hide their source behind a rendered view, so it reveals the
   // source overlay; code/web edit inline, so it just focuses the editor (see editCellSource). NOT </> —
   // that's the "convert to web cell" glyph below, and both show on a @bind cell, so a shared icon would

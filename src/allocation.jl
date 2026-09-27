@@ -241,7 +241,7 @@ end
 # follow up. The node is reached with `srun --overlap`, which joins the running job either way.
 # The catalogued options a region carries, spelled for the scheduler it is asking. The catalogue and
 # the spellings are `Sweep.sched_options()` and `BatchLauncher.sbatch_flag`/`pbs_flag` — the same
-# ones a sweep cell edits and submits against, so one cluster described twice says one thing.
+# ones a job cell edits and submits against, so one cluster described twice says one thing.
 #
 # An option this scheduler cannot express is DROPPED, not guessed at. The catalogue already knows
 # which those are: `pbs_flag` answers "" when PBS has no way to say it, and a `select=…` fragment

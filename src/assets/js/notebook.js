@@ -644,7 +644,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
     + (c.roleBib ? ' role-bib' : '') + (c.roleCaption ? ' role-caption' : '');
   // A tool cell keeps the `code` class (its body IS a code editor) and adds `tool`, so the chrome
   // can mark it without re-implementing the editor mounting.
-  // A sweep cell keeps the `code` class for the same reason a tool cell does — its body IS a code
+  // A job cell keeps the `code` class for the same reason a tool cell does — its body IS a code
   // editor — and adds `sweep`, which the chrome uses to mark it as work that runs off this machine.
   const cls = 'cell ' + (c.kind === 'md' ? 'md' : c.kind === 'web' ? 'web'
                         : c.kind === 'tool' ? 'code tool' : c.kind === 'job' ? 'code job'

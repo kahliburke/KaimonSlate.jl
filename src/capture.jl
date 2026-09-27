@@ -835,7 +835,7 @@ function _build_slate_ctx(mod::Module, notebook::AbstractString, region::Abstrac
               # here. Empty for any cell that declares none.
               attrs    = _attr_dict(attrs),
               # This machine's named compute targets (clusters.jl's registry), referenced by name
-              # from any number of sweep cells — so three cells on the same partition say so once,
+              # from any number of job cells — so three cells on the same partition say so once,
               # and the notebook carries the name rather than the address.
               clusters = _cluster_dict(clusters))
 end

@@ -347,7 +347,7 @@ body:has(.filespanel.open) .cellmove { display:none; }
                      opacity:.85; white-space:nowrap; }
 .cellhead .cregion:hover { opacity:1; }
 .cellhead .cregion.local { color:var(--dim); border-color:var(--border); }   /* home cells: subordinate to the coloured region chips */
-/* A sweep cell's compute target, on the same chip as the region — the two answer the same question
+/* A job cell's compute target, on the same chip as the region — the two answer the same question
    ("where does this run?") for different machinery, so they read as one family. Monospace because
    the content is a cluster NAME and its overridden values. */
 .cellhead .cregion.cluster { color:var(--val); font-family:'Cascadia Code',ui-monospace,monospace;
@@ -1111,7 +1111,7 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .cell.job[data-job-state="succeeded"] { border-left-color:var(--green); }
 @keyframes sweeppulse { 0%,100% { opacity:1 } 50% { opacity:.45 } }
 
-/* ── The sweep target panel (the cluster pill on a sweep cell) ─────────────────────────────────
+/* ── The sweep target panel (the cluster pill on a job cell) ─────────────────────────────────
    Where the job runs, under what limits, and what that cluster is DOING. It began as a narrow
    popover anchored to the pill, which suited a handful of override fields and stopped suiting it
    once the panel also had to carry live status: anchored to a pill near the fold, a tall panel gets

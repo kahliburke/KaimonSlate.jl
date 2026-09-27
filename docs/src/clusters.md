@@ -104,7 +104,7 @@ and the card reads **ready**. Pressing **Submit** *starts* it, and from then on 
 submitting what is missing until it finishes or you cancel. `submit = true` on the `@sweep` call
 skips that approval, and is meant for a script with no card to ask from.
 
-Because it reconciles, the honest thing to do with a sweep cell is run it repeatedly. It tells you
+Because it reconciles, the honest thing to do with a job cell is run it repeatedly. It tells you
 what is queued, what is running, what landed, and what failed its attempt budget.
 
 The body travels as **source**, because a compute node cannot revive a function value. That is

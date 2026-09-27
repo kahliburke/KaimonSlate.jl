@@ -1487,7 +1487,7 @@ function state_json(nb::LiveNotebook)
     # the host it was told to use and isn't. Same shape as `agentAvailable` above.
     meta["remoteAvailable"] = ReportEngine.gate_available()
     meta["regions"] = _regions_json(nb)                                     # declared per-cell destinations (regionon footer) → tag editor + DAG zones
-    meta["clusters"] = _clusters_json()                                     # this machine's compute targets → a sweep cell's cluster= picker
+    meta["clusters"] = _clusters_json()                                     # this machine's compute targets → a job cell's cluster= picker
     meta["health"] = _health_json(nb)                                       # watchdog status + alerts (stall/runaway) → health panel
     meta["workers"] = _workers_json(nb)                                     # ACTIVE workers (main + each region) → topbar pills + log/status popup
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button

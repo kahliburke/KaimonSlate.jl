@@ -71,7 +71,7 @@ end
 # ── Which runs a cell has minted ─────────────────────────────────────────────────────────────
 # A tiny index per cell, so "this cell's other runs" is one small file read. The alternative —
 # scanning the store for sweep descriptors — means parsing every manifest in it, and a store holds
-# one per UNIT: fine for a panel somebody opened, ruinous on every run of a sweep cell.
+# one per UNIT: fine for a panel somebody opened, ruinous on every run of a job cell.
 
 cells_dir(root) = joinpath(String(root), "cells")
 # A cell id comes from a notebook and is not promised to be a filename. Keep it recognisable where

@@ -810,6 +810,29 @@ See also `save_asset`, `FileUpload`."""),
         `for i in 1:n; slate_progress(i/n; msg=\"step \$i\"); end`."""),
 
     # ── Batch sweeps ─────────────────────────────────────────────────────────────────────────────
+    SlateApiEntry("job cell", "Batch sweep",
+        "A cell whose work runs as a background JOB (a `@sweep` or a campaign), its compute target in its header.",
+        ["job", "background", "long running", "cluster", "compute target", "campaign", "sweep", "submit",
+         "cell kind", "resume", "stop"],
+        "#%% job id=<id> cluster=<name> walltime=… chunk=… data=…",
+        """A cell whose value arrives over time. Running it never waits for the work: it starts the job,
+        or finds the one already going under the same content, and returns at once, so the notebook
+        stays usable while it runs. Its card shows progress and carries the controls (Submit, Stop,
+        Resume or Run again), and the cells that read its value run again when the work lands.
+        Two things belong in one:
+        - `@sweep`: a parameter grid fanned out as units on a cluster or local processes.
+        - a campaign (`@campaign`, from SlateTradespace): a search or study run as a job kept under the
+          cell's content key. On a compute target each of its rounds is batch work there, and it
+          survives a worker restart by reading its finished rounds back from the store.
+        The header names the compute target (`cluster=` one of this machine's compute targets; none
+        runs a campaign in the notebook's own process) and scheduler options (`walltime=`, `chunk=`,
+        `data=`, …). The ⎈ on the cell edits them, kept in the `Slate.job` footer rather than the
+        source, so moving the work to another machine is one edit. An agent creates one with
+        `add_cell(kind = "job", tags = "cluster=hpc")`.
+        Notebook files before format 2 called these `sweep` cells; opening one offers the update.
+        `#%% job id=scan cluster=hpc walltime=04:00:00`
+        `scan = @sweep(paramgrid(β = 0:0.1:2)) do p; simulate(p); end`"""),
+
     SlateApiEntry("@sweep", "Batch sweep",
         "Fan a parameter grid out to a cluster (or local processes) — resumable, watchable, never blocks.",
         ["slurm", "cluster", "hpc", "parameter sweep", "parallel", "batch", "fan out", "long running",
@@ -819,8 +842,8 @@ See also `save_asset`, `FileUpload`."""),
         `cluster=<name>`, and `walltime=`, `chunk=`, `data=` beside it. The name is resolved by each
         machine against its own registry, which is what lets one notebook run against a laptop's
         test cluster and a site's real one with nothing edited in a cell — and the ⚙ on the cell
-        edits all of it without touching Julia source. Creating the cell with kind `sweep` is what
-        makes that ⚙ exist; in a plain code cell the target has to be hard-coded in the body, the
+        edits all of it without touching Julia source. Creating the cell with kind `job` is what
+        makes that ⚙ exist (see `job cell`); in a plain code cell the target has to be hard-coded in the body, the
         header settings have nowhere to live, and nothing is configurable. Pass a target positionally
         ONLY for a standalone `.jl` run outside Slate, which is also the only place `submit=true`
         belongs — in a notebook the work starts when someone presses Submit on the card.
@@ -931,7 +954,7 @@ See also `save_asset`, `FileUpload`."""),
         export: `Sweep.refresh!(r)`, `Sweep.retry_failed!(r)`, `Sweep.cancel!(r)`, `Sweep.resume!(r)`,
         `Sweep.reset!(r)`. The card offers the same as buttons.
         `Sweep.text(r)` is the sweep in PLAIN TEXT — state, progress, timing and the first rows of
-        `r.dataset`. A sweep cell renders as an HTML card and the richer MIME always wins in a
+        `r.dataset`. A job cell renders as an HTML card and the richer MIME always wins in a
         notebook, so the text form needs asking for. It renders as the report in a cell and also
         `print`s, `String`s and interpolates as one, for a terminal, a log or a message.
         `println(r)` and `@show r` stay on ONE line: they share a method with string interpolation

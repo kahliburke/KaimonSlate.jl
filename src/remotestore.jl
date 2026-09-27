@@ -882,8 +882,8 @@ _dirlist(dirs) = join((shq(String(d)) for d in dirs), " ")
 # One sync at a time per mirror. A pull REPLACES the mirror's metadata dirs — remove, then extract —
 # so two of them on the same store interleave: one walks a directory while the other is writing into
 # it, and the `rm` fails with ENOTEMPTY on a directory that was empty when it started. That is not
-# hypothetical bookkeeping: a sweep cell running while its own card polls is two syncs on one store,
-# and a notebook with several sweep cells against one cluster is more.
+# hypothetical bookkeeping: a job cell running while its own card polls is two syncs on one store,
+# and a notebook with several job cells against one cluster is more.
 #
 # The lock is held across the round trip, which also collapses a burst of concurrent syncs into one
 # useful fetch instead of several redundant ones.

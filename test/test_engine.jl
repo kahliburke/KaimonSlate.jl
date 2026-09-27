@@ -486,7 +486,7 @@ end
         end
     end
 
-    # A sweep cell names its target in its OWN header, which is notebook business and unchanged.
+    # A job cell names its target in its OWN header, which is notebook business and unchanged.
     r = parse_report("#%% job id=scan cluster=hpc walltime=04:00:00\nr = 1")
     @test length(r.cells) == 1 && r.cells[1].kind == ReportEngine.JOB
     a = cell_attrs(r.cells[1])

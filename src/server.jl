@@ -1302,7 +1302,7 @@ function set_notebook_regions!(nb::LiveNotebook, csv::AbstractString)
     return names
 end
 
-"This machine's named compute targets for the browser — a sweep cell's `cluster=` picker."
+"This machine's named compute targets for the browser — a job cell's `cluster=` picker."
 _clusters_json() =
     Any[Dict{String,Any}(String(k) => string(v) for (k, v) in c) for c in ReportEngine.clusters_all()]
 
@@ -4249,7 +4249,7 @@ function _reestablish_fresh_namespace!(nb::LiveNotebook)
         bs = Tuple{Symbol,Any}[(b.name, b.value) for c in nb.report.cells for b in c.binds]
         # A blank namespace ⇒ every global is gone: re-run/restore all. EVERY kind that runs, not
         # just CODE — a WEB cell defines bindings too, and a JOB cell registers the channel its
-        # card's buttons call. Leaving a sweep cell `fresh` across a worker restart left a card on
+        # card's buttons call. Leaving a job cell `fresh` across a worker restart left a card on
         # screen whose Submit reached a handler that no longer existed.
         for c in nb.report.cells
             (c.kind !== ReportEngine.MARKDOWN && ReportEngine.runs_automatically(c.kind)) &&

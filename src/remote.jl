@@ -3801,7 +3801,7 @@ struct Region
     # `idle_release`, or the question arrives too late to be answered.
     idle_warn::Int
     # ── What the fields above cannot say ─────────────────────────────────────────────────────
-    # Everything else the scheduler will take, as the sweep cell's editor stores it: KEY => VALUE
+    # Everything else the scheduler will take, as the job cell's editor stores it: KEY => VALUE
     # against `Sweep.sched_options()`, spelled per scheduler at request time by the same
     # `sbatch_flag`/`pbs_flag` the batch side uses. `qos`, `constraint`, `exclusive`, `reservation`
     # and a site's own names all live here rather than each earning a field.
@@ -3847,7 +3847,7 @@ _region_warm_for(d, scheduler::Symbol) = _warm_for(_asint(get(d, "warm", 0)), sc
 _region_scheduler_of(d) =
     Symbol(let x = String(get(d, "scheduler", "none")); isempty(x) ? "none" : x end)
 
-# Scheduler options as the sweep cell stores them: a flat map of key => value. Values are kept as
+# Scheduler options as the job cell stores them: a flat map of key => value. Values are kept as
 # STRINGS whatever JSON made of them, so `nodes = 2` and `nodes = "2"` are one setting rather than
 # two spellings that render differently.
 function _region_options_of(d)

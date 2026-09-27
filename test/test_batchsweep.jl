@@ -2413,7 +2413,7 @@ end
             a = mk(1)
             @test BS.sweep_cell(root, a.run) == "sweepcell"
             # Found through the cell's own index, not by parsing every manifest in a store that
-            # holds one per unit — this runs on every execution of a sweep cell.
+            # holds one per unit — this runs on every execution of a job cell.
             @test BS.cell_runs(root, "sweepcell") == [a.run]
             b = mk(2)                                  # an edited body ⇒ a different run
             @test b.run != a.run
@@ -2574,7 +2574,7 @@ end
     end
 
     @testset "the sweep in words, not markup" begin
-        # A sweep cell renders as an HTML card and the richer MIME always wins in a notebook, so the
+        # A job cell renders as an HTML card and the richer MIME always wins in a notebook, so the
         # text/plain form existed and had no way to reach the screen. One renderer, two surfaces.
         mktempdir() do root
             t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 4,
@@ -3065,7 +3065,7 @@ end
         end
     end
 
-    @testset "a sweep cell resolves its cluster by name" begin
+    @testset "a job cell resolves its cluster by name" begin
         # Clusters are defined ONCE for the notebook and referenced by name, so several cells share
         # one definition and moving the work is a single edit.
         mktempdir() do root
@@ -3197,7 +3197,7 @@ end
 
                 # A cell header's `chunk=` rebuilds the target POSITIONALLY, so every field has to
                 # be carried across by hand — which is the one place a new field is silently
-                # dropped, and it is on the path every sweep cell with a `chunk=` takes.
+                # dropped, and it is on the path every job cell with a `chunk=` takes.
                 t3 = Sweep.with_chunk(mk(procs = 3), 5)
                 @test t3.chunk == 5 && t3.procs == 3 && maxproc(t3) == 3
                 @test Sweep.with_chunk(mk(), 5).procs == 0        # unset stays unset, not defaulted

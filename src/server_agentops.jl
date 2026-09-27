@@ -76,11 +76,11 @@ end
 
 _index_of(cells, id) = findfirst(c -> c.id == id, cells)
 
-# Cell-kind token ("md"/"web"/"code") → CellKind, shared by cell creation and kind-conversion.
+# Cell-kind token ("md"/"web"/"tool"/"job"/"code") → CellKind, shared by cell creation and kind-conversion.
 _cellkind(k::AbstractString) = k == "md" ? MARKDOWN : k == "web" ? WEB : k == "tool" ? TOOL :
                                k == "job" ? JOB : CODE
 
-# A new cell starts empty, except where the KIND itself implies a shape. A sweep cell's whole point
+# A new cell starts empty, except where the KIND itself implies a shape. A job cell's whole point
 # is the `@sweep` call — starting it blank would make the reader work out the skeleton from docs
 # before they can do anything, and there is exactly one right skeleton.
 _new_cell_source(k::CellKind) = k === JOB ? """

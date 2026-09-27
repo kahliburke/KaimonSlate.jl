@@ -446,7 +446,7 @@ const RE = KaimonSlate.ReportEngine
             end
 
             # ── what the fixed fields cannot say ──────────────────────────────────────────────
-            # A region carries the same scheduler options a sweep cell does, spelled by the same
+            # A region carries the same scheduler options a job cell does, spelled by the same
             # catalogue, so one cluster described for a sweep and for a region says one thing.
             @testset "a region's scheduler options reach the request" begin
                 S = RE.Sweep

@@ -266,7 +266,7 @@ end
 
 # ── Targets ──────────────────────────────────────────────────────────────────────────────────
 # A target says WHERE shards run and HOW the two sides see the store. Everything a notebook needs
-# to switch between a laptop and a cluster lives here, so the sweep cell itself never changes.
+# to switch between a laptop and a cluster lives here, so the job cell itself never changes.
 
 abstract type SweepTarget end
 
@@ -508,7 +508,7 @@ sched_options() = [(; key = String(k), flag = BatchLauncher.sbatch_flag(k),
 
 # ── Named compute targets ────────────────────────────────────────────────────────────────────
 # A cluster is defined ONCE for the notebook (engine.jl's `Slate.clusters` footer, edited from the
-# ⎈ on a sweep cell) and referenced by name: `#%% job cluster=hpc`. Three cells that run on the
+# ⎈ on a job cell) and referenced by name: `#%% job cluster=hpc`. Three cells that run on the
 # same partition then say so once, and changing where the work goes is one edit rather than three.
 #
 # `kind` selects the backend. SLURM is the one that is real today; `local` runs the same cells with
@@ -519,7 +519,7 @@ sched_options() = [(; key = String(k), flag = BatchLauncher.sbatch_flag(k),
     cluster(spec) -> SweepTarget
 
 Build a target from a notebook cluster definition (a flat `Dict` of strings). Called for you when a
-sweep cell names one with `cluster=`; call it directly only to inspect what a definition resolves to.
+job cell names one with `cluster=`; call it directly only to inspect what a definition resolves to.
 """
 function cluster(spec::AbstractDict)
     a = cluster_args(spec)
@@ -590,7 +590,7 @@ function cluster_args(spec::AbstractDict)
               resources = res === nothing ? NamedTuple() : res)
 end
 
-# Resolve the target a sweep cell asked for: an explicit one written in the cell wins, else the
+# Resolve the target a job cell asked for: an explicit one written in the cell wins, else the
 # `cluster=` named on its header, else nothing to run on — which is worth an error naming the
 # targets that ARE defined, because the usual cause is a typo, a rename, or opening a notebook on a
 # machine that has never been told what `hpc` means. The name is the notebook's; what it resolves to
@@ -1229,7 +1229,7 @@ function cluster_status(name::AbstractString = "";
     nm = String(name)
     if isempty(nm)
         length(clusters) == 1 || error("name a cluster: " *
-            (isempty(clusters) ? "this notebook defines none (⎈ on a sweep cell)" :
+            (isempty(clusters) ? "this notebook defines none (⎈ on a job cell)" :
              join(sort(collect(keys(clusters))), ", ")))
         nm = first(keys(clusters))
     end
@@ -2817,7 +2817,7 @@ a handle on the results themselves before it can decide whether a cached answer 
 
 Built from ROWS the caller already has, never by re-reading the store. A sweep of a few thousand
 units is a few thousand manifests, and every caller here has just parsed them for its own purposes;
-parsing them again to compute this would double what running a sweep cell costs.
+parsing them again to compute this would double what running a job cell costs.
 
 Content, not counts. A retry that turns one failure into a success moves it, and so does one that
 replaces a result with different bytes at the same tally — which counting could not see.
@@ -2866,7 +2866,7 @@ function load(r::ShardedResult; max_bytes::Integer = 512 * 1024^2, limit::Intege
     return [row.value isa ShardRef ? row.value[] : row.value for row in ok]
 end
 
-"Clear the failed shards so the next run of the sweep cell retries exactly those."
+"Clear the failed shards so the next run of the job cell retries exactly those."
 function retry_failed!(r::ShardedResult)
     root = store_root(r.target)
     st = BatchSweep.fold(root).status          # status alone: no record is read to find a failure
@@ -3023,7 +3023,7 @@ function _forget_stale_runs(root::AbstractString, keep::AbstractString, cell::Ab
     isempty(cell) && return 0          # a run with no cell behind it is nobody's to collect
     n = 0
     # From the cell's own index, not a scan of the store: a store holds one manifest per UNIT, and
-    # this runs on every execution of a sweep cell.
+    # this runs on every execution of a job cell.
     for sw in BatchSweep.cell_runs(root, cell)
         sw == keep && continue
         try
@@ -3282,7 +3282,7 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
     # is exactly the manual bookkeeping this fabric exists to remove.
     if action == "settled"
         # The result object is a SNAPSHOT: its counters come from the plan stored on it, and only a
-        # re-run of the sweep cell rebuilds that — which must not happen, or the sweep resubmits. So
+        # re-run of the job cell rebuilds that — which must not happen, or the sweep resubmits. So
         # a settle left `r.settled` reading false beside a card that said "finished, with failures",
         # and every counter with it. Re-read here, where the card has just established that they
         # changed, rather than on property access, where it would cost a manifest per shard.
@@ -4683,7 +4683,7 @@ function Base.show(io::IO, ::MIME"text/plain", r::ShardedResult)
 end
 
 # ── The sweep in words ───────────────────────────────────────────────────────────────────────
-# A sweep cell renders as an HTML card, and in a notebook the richer MIME always wins — so the
+# A job cell renders as an HTML card, and in a notebook the richer MIME always wins — so the
 # `text/plain` form, which is what a terminal, a log, a standalone `julia notebook.jl` run and a
 # copy-paste into a message all need, was written and then unreachable.
 #
@@ -4904,7 +4904,7 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # Filled with the result below, so the card's settle report can bring the OBJECT level with what
     # the card already knows. A Ref because the channel is registered before the result exists.
     rref = Ref{Any}(nothing)
-    # The card's live channel. Registered here rather than by the author, so a sweep cell needs no
+    # The card's live channel. Registered here rather than by the author, so a job cell needs no
     # wiring to be watchable. `register` is the notebook's `slate_on`; outside a notebook (a
     # standalone run, a test) it is simply absent and the card renders static.
     if register !== nothing
@@ -5253,7 +5253,7 @@ The header is where the target and the resources live. `cluster=hpc` is a NAME, 
 machine against its own registry — which is what lets one notebook run against a laptop's test
 cluster and a site's real one with nothing edited in a cell. `walltime=`, `chunk=` and `data=` sit
 beside it, and the ⚙ on the cell edits all of them without touching Julia source. That ⚙ is offered
-on a sweep cell and nowhere else.
+on a job cell and nowhere else.
 
 In an ordinary code cell this still runs, and is a worse version of the same thing: the target must
 be written into the body, the header settings have nowhere to live, and nothing can be changed
@@ -5384,7 +5384,7 @@ macro sweep(args...)
         local _caps = $(Sweep)._collect_captures(@__MODULE__, vcat(_names, _helpers[2]),
                                                  $(QuoteNode(param)))
         # `slate_on` is injected into a notebook's namespace, so it is reachable from here and
-        # nowhere else. Picking it up automatically is what lets a sweep cell be live without the
+        # nowhere else. Picking it up automatically is what lets a job cell be live without the
         # author registering anything.
         local _reg = isdefined(@__MODULE__, :slate_on) ?
                      getfield(@__MODULE__, :slate_on) : nothing

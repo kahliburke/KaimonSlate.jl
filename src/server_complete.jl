@@ -1354,7 +1354,7 @@ function _make_router(h::Hub)
                  # As the user wrote them, so the form shows "1h" rather than 3600.
                  "idle_release" => ReportEngine.Sweep.format_duration(r.idle_release),
                  "idle_warn" => ReportEngine.Sweep.format_duration(r.idle_warn),
-                 # Everything the fixed fields cannot say, as the sweep cell's editor stores it,
+                 # Everything the fixed fields cannot say, as the job cell's editor stores it,
                  # plus the shell to run before a worker boots.
                  "options" => r.options, "prologue" => r.prologue,
                  "liveness_grace" => r.liveness_grace > 0 ? ReportEngine.Sweep.format_duration(r.liveness_grace) : "",
@@ -1706,7 +1706,7 @@ function _make_router(h::Hub)
         end
         _json(Dict("ok" => true, "name" => String(get(c, "name", name))))
     end)
-    # The scheduler options a sweep cell's editor suggests. A catalogue, not a permitted set — the
+    # The scheduler options a job cell's editor suggests. A catalogue, not a permitted set — the
     # editor warns outside it and forwards the name anyway. Served rather than duplicated in JS so
     # what the UI offers and what Slate types cannot drift.
     # Machine-wide, so deliberately NOT `/api/sweep-options`: the page's `api()` helper rewrites any
@@ -1984,7 +1984,7 @@ function _make_router(h::Hub)
         _html(_inject_app(_inject_imports(read(_ASSET, String), _effective_imports(nb)), h, nb;
                           preview = _app_preview(req.target)))
     end)
-    # A sweep cell's scheduler options, read and written as a MAP rather than as header tags: half of
+    # A job cell's scheduler options, read and written as a MAP rather than as header tags: half of
     # what a scheduler accepts cannot survive a header (`--licenses=ansys@srv` loses its `=` to the
     # tag sanitiser), and an option a cell cannot express is a batch script a notebook cannot
     # replace. Stored in the `Slate.job` footer, merged over the header attrs when the cell runs.

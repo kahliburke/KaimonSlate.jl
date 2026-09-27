@@ -1286,7 +1286,7 @@ _ctx_args(report::Report, region::AbstractString, regions::AbstractVector,
     # walltime/partition/memory, which belong to the cell rather than to its code. Wired as
     # `"k=v"` strings because the gate's tool args carry no dict type.
     "ctx_attrs"    => _attr_args(report, filename),
-    # This machine's named compute targets, flattened to `"<cluster>.<key>=<value>"` so a sweep cell
+    # This machine's named compute targets, flattened to `"<cluster>.<key>=<value>"` so a job cell
     # can say `cluster=hpc` and have the definition resolved where the sweep actually runs.
     "ctx_clusters" => _cluster_args(report))
 

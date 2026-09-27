@@ -8,7 +8,7 @@
 // reports what it just learned, and this aggregates. A card that is scrolled away, collapsed, or
 // below the fold still reports, which is exactly when the pill earns its place.
 
-// ── A sweep cell's spec ──────────────────────────────────────────────────────────────────────
+// ── A job cell's spec ──────────────────────────────────────────────────────────────────────
 // Where the work runs and under what limits: partition, walltime, memory, how many units ride one
 // scheduler job. These are the settings you change WHILE a job is queued, or after one was killed
 // for outrunning its walltime — so they must not live in Julia source, where adjusting a number
@@ -517,7 +517,7 @@ function showOptMenu(row, inp) {
     const cur = spec.cluster || '';
     const sel = clusterByName(cur);
     KIND = ((sel && sel.kind) || 'slurm').toLowerCase();
-    // The cell names a target; several sweep cells share one, and moving the work is a single edit.
+    // The cell names a target; several job cells share one, and moving the work is a single edit.
     // The per-cell fields below only override it.
     const picker =
       '<div class="ctlsub">Cluster</div>' +
@@ -695,7 +695,7 @@ function showOptMenu(row, inp) {
       return;
     }
     if (window.setTags) await window.setTags(id, tags);
-    // Re-run so the new spec takes effect. Safe and cheap by construction: a sweep cell RECONCILES
+    // Re-run so the new spec takes effect. Safe and cheap by construction: a job cell RECONCILES
     // — it submits only what is missing and never recomputes a unit that has already landed.
     if (window.runCell) window.runCell(id, true);
   }
@@ -835,7 +835,7 @@ function showOptMenu(row, inp) {
     report(key, cellId, status, ch) {
       sweeps.set(key, { key, cellId, status, ch, ts: Date.now() });
       // Mark the owning CELL with the sweep's state, so its rail reads as "work still out there"
-      // from across the notebook. A sweep cell's own run took milliseconds and finished long ago;
+      // from across the notebook. A job cell's own run took milliseconds and finished long ago;
       // without this the cell chrome would report that and say nothing about the job.
       if (cellId) {
         const el = document.querySelector(`[data-cid="${CSS.escape(cellId)}"]`);

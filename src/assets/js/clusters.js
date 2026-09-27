@@ -74,7 +74,7 @@ function seed(c) {
 const filledExtras = () =>
   [kChunk, kAccount, kPrologue, kPayload, kNote].filter(s => (s.value || '').trim()).length;
 
-// One line saying where the work goes, for the list and for the sweep cell's summary.
+// One line saying where the work goes, for the list and for the job cell's summary.
 export function clusterSummary(c) {
   if (!c) return '';
   const k = c.kind || 'slurm';
@@ -115,7 +115,7 @@ function save() {
 }
 
 async function del(name) {
-  if (!await confirmP('Delete compute target “' + name + '”?\nSweep cells using it will stop resolving. Work already in its store is untouched.', 'Delete', 'danger')) return;
+  if (!await confirmP('Delete compute target “' + name + '”?\nJob cells using it will stop resolving. Work already in its store is untouched.', 'Delete', 'danger')) return;
   await fetch('/api/clusters/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).catch(() => {});
   if (editing.value && editing.value.name === name) { seed(null); closeClusterForm(); }
   loadClusters();
@@ -170,7 +170,7 @@ export function Clusters() {
   // `local` is the older spelling of `exec` with no host; a definition on disk still uses it.
   const isExec = kKind.value === 'exec' || kKind.value === 'local';
   return html`<div>
-    <div class="msg"><strong>Compute targets</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Where sweep cells send their jobs.</span></div>
+    <div class="msg"><strong>Compute targets</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Where job cells send their jobs.</span></div>
     <div class="rppreglist">
       ${cs.map(c => html`<div class=${'rppregrow' + (open && e && e.name === c.name ? ' sel' : '')} onClick=${() => toggleForm(c)}>
         <span class="rppregname">⎈ ${c.name}</span>
@@ -183,7 +183,7 @@ export function Clusters() {
       <div class="rppformhead">${e ? ('Edit target “' + e.name + '”') : 'New compute target'}</div>
       <div class="rpprow"><label>Name</label>
         <input class="rppname" autocomplete="off" spellcheck="false" placeholder="e.g. hpc, gpu, here" value=${kName.value} onInput=${ev => kName.value = ev.target.value}/>
-        <span class="pddim" style="flex:0 0 auto">how sweep cells refer to it</span></div>
+        <span class="pddim" style="flex:0 0 auto">how job cells refer to it</span></div>
       <div class="rpprow"><label>Kind</label>
         <select class="rpptr" value=${kKind.value} onChange=${ev => kKind.value = ev.target.value}>
           <option value="slurm">slurm</option>

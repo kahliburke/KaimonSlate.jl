@@ -81,7 +81,7 @@ cell(src) = RE.Cell("c", RE.CODE, src)
     end
 
     @testset "a fresh worker restales every kind that runs" begin
-        # A blank namespace loses every global — and, for a sweep cell, the channel its card's
+        # A blank namespace loses every global — and, for a job cell, the channel its card's
         # buttons call. Restaling only CODE left a card on screen whose Submit reached a handler
         # that no longer existed, which looks like a dead button rather than a lost worker.
         src = "#%% code id=a\nx = 1\n" *

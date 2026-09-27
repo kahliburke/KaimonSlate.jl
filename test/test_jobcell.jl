@@ -64,7 +64,7 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
     end
 
     @testset "runs automatically, unlike a tool call" begin
-        # Evaluating a sweep cell RECONCILES (reads the store and the scheduler); it does not submit.
+        # Evaluating a job cell RECONCILES (reads the store and the scheduler); it does not submit.
         # That is what makes reopening a notebook safe, so unlike TOOL it is not excluded from
         # automatic runs — otherwise a reopened notebook could never show progress on its own.
         @test RE.runs_automatically(RE.JOB)
