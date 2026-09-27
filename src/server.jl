@@ -2728,15 +2728,32 @@ function _push_alloc_event!(nbs, region::AbstractString, event::AbstractString; 
     return nothing
 end
 
-function _push_alloc_notice!(nbs, r, extra::Dict{String,Any})
-    # Whether this site allows an extension is decided by asking for the smallest one there is; the
-    # popup offers the control only when the answer was yes.
+# Whether a site lets a running allocation be lengthened, per (scheduler, login host). The only way to
+# find out adds a minute to the job, and a longer job moves the deadline the walltime notices are keyed
+# on, so the question is put once per site rather than on every notice.
+const _EXTENDABLE = Dict{Tuple{Symbol,String},Any}()
+const _EXTENDABLE_LOCK = ReentrantLock()
+
+function _site_extendable!(r)
+    key = (ReportEngine.region_scheduler(r), String(r.host))
+    hit = lock(_EXTENDABLE_LOCK) do; get(_EXTENDABLE, key, nothing); end
+    hit === nothing || return hit
     ext = try
-        ReportEngine.Sweep.can_extend_allocation!(ReportEngine.region_scheduler(r), r.host,
-                                                  ReportEngine.region_alloc_name(r))
+        ReportEngine.Sweep.can_extend_allocation!(key[1], r.host, ReportEngine.region_alloc_name(r))
     catch e
         (; ok = false, reason = :unreachable, said = first(sprint(showerror, e), 200), added_s = 0)
     end
+    # The probe really did lengthen the job, so the hub's lease moves with it, or the hub stops
+    # trusting a node it still holds and asks for a second one.
+    ext.ok === true && ReportEngine.region_extend_lease!(r, ext.added_s)
+    # Only a definite answer describes the site. An unreachable host or a missing job says nothing.
+    ext.reason in (:ok, :refused) && lock(_EXTENDABLE_LOCK) do; _EXTENDABLE[key] = ext; end
+    return ext
+end
+
+function _push_alloc_notice!(nbs, r, extra::Dict{String,Any})
+    # The popup offers the extend control only where the site allows one.
+    ext = _site_extendable!(r)
     p = ReportEngine.region_placement(r)
     payload = merge(Dict{String,Any}("region" => r.name, "host" => r.host,
                                      "node" => ReportEngine.region_host(r),

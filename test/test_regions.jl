@@ -473,6 +473,24 @@ const RE = KaimonSlate.ReportEngine
     # An allocation is held for a bounded time. A placement that outlives it points every cell at a
     # machine the hub no longer holds — and because the read-only view must not ask the scheduler
     # anything, the expiry has to be a clock, not a round trip.
+    # Learning whether a site allows an extension costs the job a minute, so it is learned once per
+    # site. A cached answer comes back without the scheduler being asked, so nothing is added.
+    @testset "whether a site extends allocations is asked once" begin
+        withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir()) do
+            r = RE.region_set!("extsite"; host = "login-unreachable.invalid", scheduler = :pbs)
+            key = (:pbs, "login-unreachable.invalid")
+            lock(NS._EXTENDABLE_LOCK) do
+                NS._EXTENDABLE[key] = (; ok = false, reason = :refused, said = "not permitted", added_s = 0)
+            end
+            try
+                ext = NS._site_extendable!(r)
+                @test ext.reason === :refused && ext.said == "not permitted"
+            finally
+                lock(NS._EXTENDABLE_LOCK) do; delete!(NS._EXTENDABLE, key); end
+            end
+        end
+    end
+
     @testset "a placement expires with its allocation" begin
         # SLURM's own time spellings (`squeue %L`), which is where the lease comes from.
         s = RE._sched_seconds
