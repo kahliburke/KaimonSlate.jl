@@ -1278,9 +1278,10 @@ end
 # receives; checking the constant checks what actually ships.
 #
 # `_slateMaps` and `_slateCharts` are defined by the writer immediately before this is emitted.
-# Per-mode option overrides (`__light`/`__dark`): the mirror of core.js `_slateForMode`, for pages
-# that cannot load core.js. The mode is read from the `--bg` of the element the chart is themed from,
-# so a docs page's toggle re-merges on re-theme like it re-colours everything else.
+# Per-mode option overrides (`__light`/`__dark`) and tooltip templates: the mirror of core.js
+# `_slateForMode` and `_slateTipTemplates`, for pages that cannot load core.js. The mode is read from
+# the `--bg` of the element the chart is themed from, so a docs page's toggle re-merges on re-theme
+# like it re-colours everything else.
 const _EXPORT_MODE_JS = raw"""
 function _slateDarkSurface(el){var v=getComputedStyle(el||document.documentElement).getPropertyValue('--bg').trim(),r,g,b,m;
 if((m=/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(v))){var h=m[1].length===3?m[1].split('').map(function(c){return c+c;}).join(''):m[1];
@@ -1296,6 +1297,21 @@ return b;}
 function _slateForMode(o,dark){if(!o||(!o.__light&&!o.__dark))return o;
 var over=dark?o.__dark:o.__light,c=Object.assign({},o);delete c.__light;delete c.__dark;
 return over?_slateDeepMerge(c,over):c;}
+function _slateFillTip(tpl,p){var v=Array.isArray(p.value)?p.value:[p.value],dims=p.dimensionNames||[];
+var esc=function(x){return String(x==null?'':x).replace(/[&<>"]/g,function(ch){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch];});};
+return tpl.replace(/\{@\[(\d+)\]\}/g,function(_,i){return esc(v[+i]);})
+.replace(/\{@([^}]+)\}/g,function(_,n){var i=dims.indexOf(n);return i<0?'':esc(v[i]);})
+.replace(/\{a\}/g,function(){return esc(p.seriesName);}).replace(/\{b\}/g,function(){return esc(p.name);})
+.replace(/\{c\}/g,function(){return esc(Array.isArray(p.value)?p.value.join(', '):p.value);});}
+function _slateHasTipTpl(t){return !!t&&typeof t==='object'&&typeof t.formatter==='string'&&t.formatter.indexOf('{@')>=0;}
+function _slateTipTemplate(t){if(!_slateHasTipTpl(t))return t;var tpl=t.formatter;
+return Object.assign({},t,{formatter:function(ps){return (Array.isArray(ps)?ps:[ps]).map(function(p){return _slateFillTip(tpl,p);}).join('<br/>');}});}
+function _slateTipTemplates(o){if(!o)return o;var series=Array.isArray(o.series)?o.series:null;
+var top=Array.isArray(o.tooltip)?o.tooltip.some(_slateHasTipTpl):_slateHasTipTpl(o.tooltip);
+if(!top&&!(series&&series.some(function(s){return s&&_slateHasTipTpl(s.tooltip);})))return o;
+var c=Object.assign({},o);if(top)c.tooltip=Array.isArray(o.tooltip)?o.tooltip.map(_slateTipTemplate):_slateTipTemplate(o.tooltip);
+if(series)c.series=series.map(function(s){return s&&_slateHasTipTpl(s.tooltip)?Object.assign({},s,{tooltip:_slateTipTemplate(s.tooltip)}):s;});
+return c;}
 """
 
 const _EXPORT_CHART_RUNTIME_JS = string(
@@ -1398,7 +1414,7 @@ const _EXPORT_CHART_RUNTIME_JS = string(
     "else window.addEventListener('resize',function(){if(rec.chart)rec.chart.resize();});});});",
     "return out;}",
     "function _slateInitChart(rec){var ch=echarts.init(rec.el,'slate',{renderer:_slateRenderer(rec.opt)});",
-    "ch.setOption(_slateSansMaps(_slateForMode(rec.opt,_slateDarkSurface(rec.themeEl))));if(rec.last)ch.setOption(rec.last);rec.chart=ch;}",
+    "ch.setOption(_slateSansMaps(_slateTipTemplates(_slateForMode(rec.opt,_slateDarkSurface(rec.themeEl)))));if(rec.last)ch.setOption(rec.last);rec.chart=ch;}",
     "function _slateRethemeCharts(recs,themeEl){if(!window.echarts)return;",
     "try{echarts.registerTheme('slate',_slateExportTheme(themeEl));}catch(e){}",
     "(recs||[]).forEach(function(r){if(r.gone||!r.chart)return;r.chart.dispose();r.themeEl=themeEl||r.themeEl;_slateInitChart(r);});}",

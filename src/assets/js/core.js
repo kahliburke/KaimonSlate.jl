@@ -192,13 +192,43 @@ function _slateForMode(o, dark) {
   return over ? _slateDeepMerge(c, over) : c;
 }
 
+// ECharts fills `{@[n]}` and `{@name}` (a data item's dimensions) in label templates but not in
+// tooltip ones, and a spec written in Julia cannot pass a function. A tooltip `formatter` string that
+// uses them becomes a function here that fills them in, along with `{a}`, `{b}` and `{c}` as ECharts
+// defines them. The mirror for exported pages is `_EXPORT_MODE_JS`.
+function _slateFillTip(tpl, p) {
+  const v = Array.isArray(p.value) ? p.value : [p.value];
+  const dims = p.dimensionNames || [];
+  const esc = x => String(x == null ? '' : x).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
+  return tpl.replace(/\{@\[(\d+)\]\}/g, (_, i) => esc(v[+i]))
+    .replace(/\{@([^}]+)\}/g, (_, n) => { const i = dims.indexOf(n); return i < 0 ? '' : esc(v[i]); })
+    .replace(/\{a\}/g, () => esc(p.seriesName)).replace(/\{b\}/g, () => esc(p.name))
+    .replace(/\{c\}/g, () => esc(Array.isArray(p.value) ? p.value.join(', ') : p.value));
+}
+const _slateHasTipTpl = t => !!t && typeof t === 'object' && typeof t.formatter === 'string' && t.formatter.indexOf('{@') >= 0;
+function _slateTipTemplate(t) {
+  if (!_slateHasTipTpl(t)) return t;
+  const tpl = t.formatter;
+  return Object.assign({}, t, { formatter: ps => (Array.isArray(ps) ? ps : [ps]).map(p => _slateFillTip(tpl, p)).join('<br/>') });
+}
+function _slateTipTemplates(o) {
+  if (!o) return o;
+  const series = Array.isArray(o.series) ? o.series : null;
+  const top = Array.isArray(o.tooltip) ? o.tooltip.some(_slateHasTipTpl) : _slateHasTipTpl(o.tooltip);
+  if (!top && !(series && series.some(s => s && _slateHasTipTpl(s.tooltip)))) return o;
+  const c = Object.assign({}, o);
+  if (top) c.tooltip = Array.isArray(o.tooltip) ? o.tooltip.map(_slateTipTemplate) : _slateTipTemplate(o.tooltip);
+  if (series) c.series = series.map(s => s && _slateHasTipTpl(s.tooltip) ? Object.assign({}, s, { tooltip: _slateTipTemplate(s.tooltip) }) : s);
+  return c;
+}
+
 // Strip the keys that ride ALONG on a spec but are not ECharts options — sizing, script prereqs, map
 // registrations, and the per-series `@replay` mark. ECharts carries an unknown key into its option
 // model rather than rejecting it, so they come off at the one place every setOption goes through.
 // The per-mode overrides are resolved here too, against the page the notebook is shown on.
 function _sansMaps(s) {
   if (!s) return s;
-  s = _slateForMode(s, _slateDarkSurface(document.documentElement));
+  s = _slateTipTemplates(_slateForMode(s, _slateDarkSurface(document.documentElement)));
   const marked = Array.isArray(s.series) && s.series.some(x => x && (x.__replay || x.__valuefmt));
   if (!s.registerMap && !s.__size && !s.requireScripts && !s.__valuefmt && !s.__select && !s.__renderer && !marked) return s;
   const c = Object.assign({}, s);

@@ -117,3 +117,23 @@ end
         @test ok
     end
 end
+
+# A tooltip template's `{@[n]}` / `{@name}` are filled by the page, since ECharts leaves them as
+# written in tooltips. Run through node against the export runtime that ships them.
+@testset "tooltip templates fill a data item's dimensions" begin
+    node = Sys.which("node")
+    if node === nothing
+        @info "node not found — skipping the tooltip template check"
+        @test true
+    else
+        js = KaimonSlate.NotebookServer._EXPORT_MODE_JS * """
+        var o = _slateTipTemplates({tooltip: {trigger: 'item', formatter: 'row {@[1]}, {@crop} <b>{a}</b>: {@[2]}'},
+                                    series: [{name: 'Grape', data: []}]});
+        var one = o.tooltip.formatter({value: ['3', '5', 1.5, 'wheat'], dimensionNames: ['x', 'y', 'v', 'crop'], seriesName: 'A<B'});
+        var plain = _slateTipTemplates({tooltip: {formatter: '{a}: {c}'}});
+        console.log(JSON.stringify([one, typeof plain.tooltip.formatter]));
+        """
+        tmp = joinpath(mktempdir(), "tip.js"); write(tmp, js)
+        @test strip(read(`$node $tmp`, String)) == "[\"row 5, wheat <b>A&lt;B</b>: 1.5\",\"string\"]"
+    end
+end
