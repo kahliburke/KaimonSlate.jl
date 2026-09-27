@@ -1030,6 +1030,9 @@ async function main() {
         try {
           await page.locator('.cell[data-cid="highlight"]').scrollIntoViewIfNeeded()
           await sleep(200)
+          // Hover first: a cell's action buttons take no pointer events until the cell is hovered,
+          // and Playwright tests what is under the pointer before its own hover lands.
+          await page.locator('.cell[data-cid="highlight"]').hover()
           await page.locator('.cell[data-cid="highlight"] .tagbtn').first().click()
           await page.waitForSelector('#tagpop.show', { timeout: 4000 })
           await sleep(300)
