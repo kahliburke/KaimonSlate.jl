@@ -99,13 +99,24 @@ function _start_render_host!(host_timeout::Real)
                   _log_tail(log, 20) * "\nFull log: $log")
         end
         if time() - t0 > host_timeout
+            ext = joinpath(_embedded_cache_home(), "kaimon", "extensions", "slate.log")
+            host = joinpath(_embedded_root(), "kaimon.log")
+            tails = string("\nKaimon host (", host, "):\n", _log_tail(host, 15),
+                           "\nSlate extension (", ext, "):\n", _file_tail(ext, 25))
             stop_embedded_kaimon!()
-            error("render_doc_bundle: the embedded host's hub did not answer within $(host_timeout)s")
+            error("render_doc_bundle: the embedded host is running but its Slate hub did not answer within " *
+                  "$(host_timeout)s." * tails)
         end
         sleep(1)
     end
     @info "render_doc_bundle: hub is up" seconds = round(time() - t0; digits = 1)
     return nothing
+end
+
+# The last `n` non-blank lines of a log, indented, or a note that there is none.
+function _file_tail(path::AbstractString, n::Int)
+    lines = try; filter(!isempty ∘ strip, readlines(path)); catch; return "    (no log at this path)"; end
+    isempty(lines) ? "    (empty)" : join(("    " * l for l in last(lines, n)), "\n")
 end
 
 function _free_mcp_port()
