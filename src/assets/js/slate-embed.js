@@ -74,12 +74,15 @@ function loadDocumentCss(url) {
 /* ── theme ─────────────────────────────────────────────────────────────────────────────────── */
 
 /* Which theme the host site is showing. VitePress marks dark with `html.dark`; Documenter with a
-   `theme--documenter-dark` or dark catppuccin class. A page that is neither follows the OS. A cell
-   (or `window.SlateEmbed.theme`) can pin "light" or "dark". */
+   `theme--documenter-dark` or dark catppuccin class; MaterialDocs (and many others) with
+   `data-theme` on <html>. A page that says nothing follows the OS, which is also what MaterialDocs
+   means by an absent `data-theme`. A cell (or `window.SlateEmbed.theme`) can pin "light" or "dark". */
 function siteTheme(el) {
   var pin = (el && el.getAttribute("theme")) || (window.SlateEmbed && window.SlateEmbed.theme) || "auto";
   if (pin === "light" || pin === "dark") return pin;
   var html = document.documentElement, cl = html.classList;
+  var dt = (html.getAttribute("data-theme") || "").toLowerCase();
+  if (dt === "dark" || dt === "light") return dt;
   if (cl.contains("dark") || cl.contains("theme--documenter-dark")) return "dark";
   for (var i = 0; i < cl.length; i++)
     if (/^theme--catppuccin-(frappe|macchiato|mocha)$/.test(cl[i])) return "dark";
@@ -351,7 +354,8 @@ if (window.customElements && !customElements.get("slate-cell")) {
       if (name === "theme") retheme(); else render(this);
     }
   });
-  new MutationObserver(retheme).observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+  new MutationObserver(retheme).observe(document.documentElement,
+                                         { attributes: true, attributeFilter: ["class", "data-theme"] });
   if (window.matchMedia) {
     var mq = window.matchMedia("(prefers-color-scheme: dark)");
     if (mq.addEventListener) mq.addEventListener("change", retheme);
