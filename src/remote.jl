@@ -551,13 +551,27 @@ end
 # `BatchMode=yes` so a node that will not take us fails immediately instead of hanging on a prompt
 # nobody is there to answer, and no host-key check because a compute node's identity changes with
 # every allocation and there is nothing stable to have trusted.
+#
+# The ssh lands OUTSIDE the job, so nothing there carries its id the way a `srun` step carries
+# `SLURM_JOB_ID`. It is exported for the command, since code run on a node (a worker, and the cells
+# on it) names checkpoints and scratch paths after the job it is in.
 _in_allocation(v, node, script) =
     v.kind === :pbs ?
         "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null " *
-        Sweep.shq(node) * " " * Sweep.shq(script) :
+        Sweep.shq(node) * " " *
+        Sweep.shq((isempty(v.job) ? "" : "export PBS_JOBID=" * Sweep.shq(v.job) * "; ") * script) :
         # A step inherits the allocation's task count, so without `--ntasks=1` a job asking for N
         # tasks runs this command N times. Everything routed here is one command on one node.
         "srun --jobid=" * v.job * " --overlap --ntasks=1 bash -c " * Sweep.shq(script)
+
+# A worker started over ssh is outside the PBS job, so the job ending would leave it running on a node
+# that may already belong to someone else. Attaching it to the job lets the node's PBS daemon end it
+# with the job, as a `srun` step does on SLURM. PBS Pro and OpenPBS spell that `pbs_attach`; Torque
+# spells it `pbs_track`, with the same `-j <job> cmd` form. A node with neither runs it unattached.
+_pbs_attached(cmd::AbstractString) =
+    "A=\$(command -v pbs_attach || command -v pbs_track || " *
+    "{ [ -x /opt/pbs/bin/pbs_attach ] && echo /opt/pbs/bin/pbs_attach; }); " *
+    "if [ -n \"\$A\" ] && [ -n \"\$PBS_JOBID\" ]; then exec \"\$A\" -j \"\$PBS_JOBID\" $cmd; else exec $cmd; fi"
 
 # A cluster's login and compute nodes share a filesystem, so a file for a routed node is written
 # through the login session at the same path — no need to run anything on the node to place it.
@@ -1566,7 +1580,7 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
         # cgroup. `setsid nohup` there reparents the step launcher (`srun`, or PBS's `ssh node`) to init, so
         # it survives the ssh channel closing and even a full session drop; the worker is re-attached over
         # the forward on reconnect. `_in_allocation` builds the same in-allocation launcher every poll uses.
-        worker = "$setup && exec $jl"
+        worker = "$setup && " * (v.kind === :pbs ? _pbs_attached(jl) : "exec $jl")
         inner = _in_allocation(v, host, worker)
         launch = "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $inner > $logf 2>&1 & else nohup $inner > $logf 2>&1 & fi"
         # Run the detach on the RAW login session (`run_there`), NOT `_ssh_ok`/`_run_on`: on a single-node

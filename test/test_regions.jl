@@ -433,6 +433,13 @@ const RE = KaimonSlate.ReportEngine
                 cmd = RE._in_allocation(v, "c2", "hostname")
                 @test startswith(cmd, "ssh ") && occursin("'c2'", cmd) && !occursin("srun", cmd)
                 @test occursin("BatchMode=yes", cmd)             # never hang on a prompt
+                # The node sees the job it is in, as a `srun` step sees SLURM_JOB_ID.
+                @test occursin("PBS_JOBID=", cmd) && occursin("88.pbsserver", cmd)
+                # A worker joins the job, so the job ending ends it; a node without the command still runs it.
+                a = RE._pbs_attached("julia w.jl")
+                @test occursin("pbs_attach", a) && occursin("pbs_track", a)       # PBS Pro/OpenPBS, and Torque
+                @test occursin("-j \"\$PBS_JOBID\" julia w.jl", a)
+                @test occursin("else exec julia w.jl", a)
                 @test RE._host_for_files("c2") == "login"        # the filesystem is still shared
             finally
                 RE.route!("c2", "")
