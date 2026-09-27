@@ -196,6 +196,17 @@ window.onAllocNotice = p => {
   notice.value = { ...p, deadline: now.value + (+p.seconds_left || 0) * 1000 };
 };
 
+// A keep or a release decided elsewhere (another page, or an agent) answers the question this page
+// is asking. A `released` notice stays up: the hub pushes it just before its own `released` event,
+// and it reports a release rather than asking about one.
+window.onAllocEvent = p => {
+  const n = notice.value;
+  if (!n || !p || n.region !== p.region) return;
+  const answered = p.event === 'released' ? n.kind === 'idle' || n.kind === 'walltime'
+                                          : p.event === 'kept' && n.kind === 'idle';
+  if (answered) { notice.value = null; busy.value = ''; err.value = ''; }
+};
+
 // The release happens because nobody was here, so the page asks on load rather than waiting for a
 // push it could not have received.
 api('GET', '/api/alloc-notice').then(r => {

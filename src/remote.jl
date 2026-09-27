@@ -2167,11 +2167,9 @@ function preflight_remote(host::AbstractString; transport::Symbol = :tunnel, on_
         # reports is a default to offer.
         bits = String[]
         for s in h.found
-            parts = join((p.name for p in s.partitions), ", ")
-            gpu = count(p -> !isempty(p.gpus), s.partitions)
+            parts = join((sprint(show, p) for p in s.partitions), ", ")
             push!(bits, string(s.kind, isempty(s.version) ? "" : " (" * s.version * ")",
-                               isempty(parts) ? "" : " — " * parts,
-                               gpu == 0 ? "" : " [" * string(gpu) * " with GPUs]"))
+                               isempty(parts) ? "" : " — " * parts))
         end
         # "can reach a scheduler", not "is a login node": compute nodes usually have the client
         # tools too, and what matters here is whether an allocation can be requested from this host.

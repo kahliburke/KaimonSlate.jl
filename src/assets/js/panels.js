@@ -539,6 +539,7 @@ function connectLive() {
     if (e.data.startsWith('exportprog:')) { try { window.onExportProgress && window.onExportProgress(JSON.parse(e.data.slice(11)).cell); } catch (_) {} return; }   // a chart is being rendered live for PDF/Typst export
     if (e.data.startsWith('mesh-consent:')) { try { window.onMeshConsent && window.onMeshConsent(JSON.parse(e.data.slice(13))); } catch (_) {} return; }   // §5.1: a new cross-host pair needs a consented SSH mesh
     if (e.data.startsWith('allocnotice:')) { try { window.onAllocNotice && window.onAllocNotice(JSON.parse(e.data.slice(12))); } catch (_) {} return; }   // a region's node is about to go, or has gone
+    if (e.data.startsWith('allocevent:')) { try { window.onAllocEvent && window.onAllocEvent(JSON.parse(e.data.slice(11))); } catch (_) {} return; }   // a region's node was kept or released, from here or elsewhere
     if (e.data.startsWith('probe-progress:')) { try { window.onProbeProgress && window.onProbeProgress(JSON.parse(e.data.slice(15))); } catch (_) {} return; }   // recalculate: per-pair i/n probe progress → peer-plan panel status
     if (e.data.startsWith('mesh-build:')) { try { window.onMeshBuild && window.onMeshBuild(JSON.parse(e.data.slice(11))); } catch (_) {} return; }   // arming the mesh: per-pair i/n keygen/grant progress → consent popup
     if (e.data.startsWith('bringup:')) { window.onBringup && window.onBringup(e.data.slice(8)); return; }               // worker bring-up: raw instantiate/precompile line → banner build log
