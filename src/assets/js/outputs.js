@@ -28,6 +28,53 @@ function collapseOutputs(root) {
   });
 })();
 
+// Links between notebooks, written the way a docs page would: `[text](other.jl)` or `other.jl#heading`,
+// relative to this notebook, and `#heading` within it. A `.jl` link opens that notebook in the hub; a
+// fragment scrolls to the heading whose slug matches (lowercase, non-alphanumeric runs as `-`, the
+// same rule DocumenterSlate uses for the anchors it gives notebook headings). The raw attribute is
+// read, not `a.href`, which the browser has already resolved against this page's URL.
+function _slateHeadingSlug(s) {
+  return String(s).trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
+}
+function _slateScrollToHeading(slug) {
+  if (!slug) return false;
+  const want = decodeURIComponent(slug).toLowerCase();
+  const h = [...document.querySelectorAll('#nb h1, #nb h2, #nb h3, #nb h4, #nb h5, #nb h6')]
+    .find(el => _slateHeadingSlug(el.textContent) === want);
+  if (h) h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  return !!h;
+}
+(function wireNotebookLinks() {
+  const nb = document.getElementById('nb');
+  if (!nb) return;
+  nb.addEventListener('click', async e => {
+    const a = e.target.closest('a[href]');
+    if (!a || e.metaKey || e.ctrlKey || e.shiftKey) return;
+    const href = a.getAttribute('href') || '';
+    if (href.startsWith('#')) {
+      if (_slateScrollToHeading(href.slice(1))) e.preventDefault();
+      return;
+    }
+    const [target, frag] = href.split('#', 2);
+    if (!/\.jl$/i.test(target) || /^([a-z][a-z0-9+.-]*:|\/)/i.test(target)) return;
+    e.preventDefault();
+    try {
+      const r = await fetch(_apipath('/api/open-link'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ href }) });
+      if (!r.ok) throw new Error(await r.text());
+      const j = await r.json();
+      location.href = j.url + (frag ? '#' + frag : '');
+    } catch (err) { console.error('slate: could not open ' + href, err); }
+  });
+  // Arriving at `…#heading`: the cells render after load, so watch for the heading to appear.
+  const want = location.hash.slice(1);
+  if (want && !_slateScrollToHeading(want)) {
+    const mo = new MutationObserver(() => { if (_slateScrollToHeading(want)) mo.disconnect(); });
+    mo.observe(nb, { childList: true, subtree: true });
+    setTimeout(() => mo.disconnect(), 20000);
+  }
+})();
+
 function updateStaleBadge(state) {
   const n = ((state && state.cells) || []).filter(c => c.kind === 'code' && (c.state === 'stale' || c.state === 'edited')).length;
   const b = document.getElementById('runstale');

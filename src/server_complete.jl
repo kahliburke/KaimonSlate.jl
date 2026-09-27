@@ -941,6 +941,20 @@ function _make_router(h::Hub)
                             inactive = get(b, "inactive", false) === true)
         _json(Dict("id" => id, "url" => "/n/$id", "path" => abspath(path)))
     end)
+    # Follow a link from a notebook's markdown to another notebook: `[text](other.jl)` or
+    # `other.jl#heading`, relative to the notebook the link is in, the way it would be written in a
+    # docs page. Opens the target in this hub and returns its URL; the page scrolls to the heading.
+    # Body: {href}. Only `.jl` files, resolved against the linking notebook's own directory.
+    HTTP.register!(router, "POST", "/api/{id}/open-link", req -> _withnb(h, req, nb -> begin
+        href = strip(String(get(_body(req), "href", "")))
+        target = String(first(split(href, '#'; limit = 2)))
+        (endswith(lowercase(target), ".jl") && !isabspath(target) && !occursin(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target)) ||
+            return HTTP.Response(400, "not a relative notebook link: $href")
+        path = normpath(joinpath(dirname(abspath(nb.path)), HTTP.URIs.unescapeuri(target)))
+        isfile(path) || return HTTP.Response(404, "no notebook at $path")
+        id = open_notebook!(h, path)
+        _json(Dict("id" => id, "url" => "/n/$id"))
+    end))
     # Launch an INACTIVE (dormant) notebook: flip it to hydrating and kick off the standard standalone
     # bring-up (`_hydrate_standalone!` — reconstruct env, spawn worker, restore locked/memo results, run).
     # This is what the grey "Inactive — click to launch" pill hits. Idempotent + no-op once active.
