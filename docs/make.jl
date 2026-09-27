@@ -46,6 +46,9 @@ makedocs(;
         SlateExtensionsBase,
     ],
     remotes = nothing,
+    # Only exported or `public` names must appear in the manual. Internal helpers carry docstrings
+    # for the people working on them, and requiring each in the manual would publish the internals.
+    checkdocs = :public,
     format = DocumenterVitepress.MarkdownVitepress(;
         repo = "https://github.com/kahliburke/KaimonSlate.jl",
         devurl = "dev",

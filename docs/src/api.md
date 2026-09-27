@@ -65,6 +65,20 @@ Their docstrings are rendered below under **Report engine**, because that is the
 Everything else in that section, and the two sections after it, is internal: the serving and
 rendering layers, listed for contributors and the curious.
 
+## Sweeps and compute targets
+
+A sweep runs a cell's body over a parameter grid, on this machine or on a cluster's scheduler. The
+guide is [Clusters](clusters.md).
+
+```@docs
+KaimonSlate.ReportEngine.Sweep.@sweep
+KaimonSlate.ReportEngine.Sweep.paramgrid
+KaimonSlate.ReportEngine.Sweep.LocalTarget
+KaimonSlate.ReportEngine.Sweep.ClusterTarget
+KaimonSlate.ReportEngine.Sweep.SlurmTarget
+KaimonSlate.ReportEngine.Sweep.PbsTarget
+```
+
 ## Notebook server
 
 The HTTP/WebSocket serving layer, live-notebook state, history, and agent integration.

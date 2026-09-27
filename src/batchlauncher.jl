@@ -15,9 +15,6 @@ module BatchLauncher
 
 import Dates
 
-export Launcher, ExecLauncher, SlurmLauncher, PbsLauncher, JobSpec, submit!, poll, cancel!, logs,
-       log_files, log_tail, log_stat, log_slice, log_search, job_pids
-
 """
     JobSpec
 

@@ -24,7 +24,7 @@ import Tar
 import Typst_jll
 import Pkg
 using ..ReportEngine
-using ..SlateDiag                              # switchable instrumentation (off by default)
+import ..SlateDiag                             # switchable instrumentation (off by default)
 using ..ReportRender
 import ..SlateHome
 import ..EffectStore

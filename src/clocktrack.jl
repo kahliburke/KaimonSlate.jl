@@ -17,8 +17,6 @@
 # shorten someone's allocation.
 module ClockTrack
 
-export note_exchange!, to_hub_ns, clock_quality, forget_clock!, tracked_conns
-
 # One exchange: when it happened (hub monotonic, ns), the offset it implies, and what it cost.
 const _WINDOW = 32          # samples kept per connection
 const _MIN_FIT = 4          # below this, report the plain offset rather than a fitted line

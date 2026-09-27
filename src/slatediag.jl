@@ -18,8 +18,6 @@ module SlateDiag
 
 import Profile
 
-export diag_enabled, diag_enable!, diag_record!, diag_gauge!, diag_snapshot, diag_log_line
-
 const _ON = Ref(false)
 const _LOCK = ReentrantLock()
 
