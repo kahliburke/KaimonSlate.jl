@@ -1,6 +1,6 @@
 // Compute targets — the "Compute targets" section of the Remotes modal, under the known-remotes list.
 //
-// A target is what a `#%% sweep cluster=<name>` cell submits to. Its fields describe a MACHINE (login
+// A target is what a `#%% job cluster=<name>` cell submits to. Its fields describe a MACHINE (login
 // host, scheduler, partition, where the scratch store is), which is the same thing a region on that
 // machine needs, so it belongs here beside the hosts rather than inside each notebook that uses it.
 //

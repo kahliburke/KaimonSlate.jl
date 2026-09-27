@@ -333,9 +333,9 @@ async function reopenClosed() {
   let path = null;
   try { path = localStorage.getItem('slate:path:' + NB_ID); } catch (_) {}
   if (path) {
-    try {
-      await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
-    } catch (_) {}
+    let d = null;
+    try { d = await slateOpenPath(path); } catch (_) {}
+    if (!d) { location.href = '/'; return; }     // not opened (an update declined): back to the front page
   }
   location.reload();
 }
@@ -399,8 +399,8 @@ async function _reopenByPath() {
   try { path = localStorage.getItem('slate:path:' + NB_ID); } catch (_) {}
   if (!path) return null;                          // never saw a good state — can't know the path
   try {
-    const r = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
-    if (!r.ok) return null;
+    const d = await slateOpenPath(path);
+    if (!d) return null;
     const st = await fetch(_apipath('/api/state'));
     return st.ok ? st.json() : null;
   } catch (_) { return null; }

@@ -644,14 +644,24 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   // open path — the Open button, Recents, and the standalone-import "Run" — since all route here.
   function _saveLaunchPref(){try{localStorage.setItem('slateLaunchOnOpen',document.getElementById('openlaunch').checked?'1':'0');}catch(e){}}
   (function(){try{var v=localStorage.getItem('slateLaunchOnOpen'),el=document.getElementById('openlaunch');if(el&&v!==null)el.checked=(v==='1');}catch(e){}})();
-  function openPath(p, runon){p=(p||'').trim();if(!p)return;
+  // A notebook written in an older file format is refused (409) with what updating it changes: it
+  // opens only once the update is agreed to, which keeps a copy of the original beside it.
+  function askFormatUpdate(u){
+    var msg='Update “'+u.name+'” to the current notebook format?\n\nIt is written in format '+u.format+
+      '. Opening it updates it to format '+u.current+':\n'+(u.changes||[]).map(function(c){return '•  '+c.replace(/`/g,'');}).join('\n')+
+      '\n\nA copy of the original is saved beside it as '+u.backup+'.';
+    return modal(msg,[{label:'Don\u2019t open',value:false},{label:'Update and open',value:true,cls:'primary'}]);}
+  function openPath(p, runon, update){p=(p||'').trim();if(!p)return;
     if(runon===undefined) runon=_runonOf('openrunon');
     var launchEl=document.getElementById('openlaunch'), launch=launchEl?launchEl.checked:true;
     try{localStorage.setItem('slateLastDir', window.PLATFORM.dirOf(p));}catch(e){}   // remember the directory
     showLoading((launch?('Opening “'+p+'” — starting the worker'+(runon&&runon!=='local'?' on '+runon:'')):('Opening “'+p+'” inactive — static preview'))+'…');
-    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,runon:runon,autorun:true,inactive:!launch})})
-      .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
-      .then(function(d){pushRecent(d.path||p);location.href=d.url;}).catch(function(e){hideLoading();alertDark('Open failed: '+e);});}
+    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,runon:runon,autorun:true,inactive:!launch,update:!!update})})
+      .then(function(r){
+        if(r.status===409) return r.json().then(function(u){hideLoading();
+          return askFormatUpdate(u).then(function(yes){if(yes) openPath(p, runon, true); return null;});});
+        return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+      .then(function(d){if(!d)return;pushRecent(d.path||p);location.href=d.url;}).catch(function(e){hideLoading();alertDark('Open failed: '+e);});}
   // ── Import a self-contained .jl (one carrying a Slate.bundle footer) ─────────
   var importBg=document.getElementById('importbg'),imSrc=document.getElementById('imsrc'),
       imTarget=document.getElementById('imtarget'),imLog=document.getElementById('imlog'),
@@ -677,6 +687,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   }
   // Open a file — classify it server-side first, then dispatch. (Falls back to a plain open if the
   // classify request itself fails, so a transient hiccup still opens a normal notebook.)
+  (function(){try{var q=new URLSearchParams(location.search).get('open');
+    if(q){history.replaceState(null,'',location.pathname);setTimeout(function(){openMaybeStandalone(q);},0);}}catch(e){}})();
   function openMaybeStandalone(p){
     fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();})
       .then(function(info){_dispatchOpen(p,info);})

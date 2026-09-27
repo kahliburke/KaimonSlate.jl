@@ -1306,11 +1306,11 @@ function _attr_args(report::Report, filename::AbstractString)
     for c in report.cells
         c.id == cid && (d = Dict{String,String}(cell_attrs(c)); break)
     end
-    # The cell's footer-stored scheduler options (`Slate.sweep`) go OVER its header attrs. The two
+    # The cell's footer-stored scheduler options (`Slate.job`) go OVER its header attrs. The two
     # say the same kind of thing, but only the footer can hold a value with an `=` or a space in it,
     # so it is where the editor writes and where the answer must come from when both name a setting.
     # Merged here rather than downstream so everything reading `ctx.attrs` sees one resolved view.
-    sw = get(report.meta, "sweepopts", nothing)
+    sw = get(report.meta, "jobopts", nothing)
     if sw !== nothing
         for (k, v) in get(sw, cid, Dict{String,String}()); d[String(k)] = String(v); end
     end

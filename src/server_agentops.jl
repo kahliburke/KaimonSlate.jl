@@ -78,12 +78,12 @@ _index_of(cells, id) = findfirst(c -> c.id == id, cells)
 
 # Cell-kind token ("md"/"web"/"code") → CellKind, shared by cell creation and kind-conversion.
 _cellkind(k::AbstractString) = k == "md" ? MARKDOWN : k == "web" ? WEB : k == "tool" ? TOOL :
-                               k == "sweep" ? SWEEP : CODE
+                               k == "job" ? JOB : CODE
 
 # A new cell starts empty, except where the KIND itself implies a shape. A sweep cell's whole point
 # is the `@sweep` call — starting it blank would make the reader work out the skeleton from docs
 # before they can do anything, and there is exactly one right skeleton.
-_new_cell_source(k::CellKind) = k === SWEEP ? """
+_new_cell_source(k::CellKind) = k === JOB ? """
     # Where this runs: pick a cluster with ⎈ above (or pass a target as the second argument).
     @sweep(paramgrid(x = 1:10)) do p
         p.x^2

@@ -924,12 +924,21 @@ function create_tools(GateTool::Type)
     `autorun=false` opens WITHOUT the initial run — cells land STALE, untouched —
     so you (or the user) can inspect/edit first (e.g. tag a cell `locked`) before
     anything, possibly expensive, runs. Only applies on a fresh open.
+
+    A notebook written in an older file format whose update changes something is not
+    opened: the reply says what the update changes. Ask the user, and open it again
+    with `update=true` to update it (a copy of the original is kept beside it).
     """
-    function nb_open(path::String; threads::String = "", autorun::Bool = true)::String
+    function nb_open(path::String; threads::String = "", autorun::Bool = true, update::Bool = false)::String
         path = expanduser(path)
         ReportEngine.ensure_notebook_file!(path)   # creates the file AND the dirs leading to it
         h = _hub()
-        id = open_notebook!(h, path; threads = threads, autorun = autorun)
+        id = try
+            open_notebook!(h, path; threads = threads, autorun = autorun, update = update)
+        catch e
+            e isa NotebookServer.NotebookNeedsUpdate || rethrow()
+            return "Not opened: " * sprint(showerror, e) * " (open(path; update=true) once the user agrees)"
+        end
         return "Serving $(abspath(path)) at $(_base())/n/$id"
     end
 

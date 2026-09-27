@@ -473,12 +473,22 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
 end
 
 function load_notebook(path::AbstractString; id::AbstractString = "", threads::AbstractString = "",
-                       runon::AbstractString = "", autorun::Bool = true, inactive::Bool = false)
+                       runon::AbstractString = "", autorun::Bool = true, inactive::Bool = false,
+                       update::Bool = false)
     src = read(path, String)
     base = splitext(basename(path))[1]
     rid = replace(base, r"[^A-Za-z0-9]" => "_")
     nbid = isempty(id) ? rid : String(id)
     r = parse_report(src; id = rid, title = base)
+    # A file in an older format whose update changes something opens only once the update is agreed
+    # to: then the original is kept beside it and the file is written in the current format.
+    ch = ReportEngine.format_changes(r)
+    if !isempty(ch)
+        update || throw(NotebookNeedsUpdate(abspath(path), get(r.meta, "format", 1), ch))
+        update_notebook_format!(path)
+        src = read(path, String)
+        r = parse_report(src; id = rid, title = base)
+    end
     # Per-notebook worker-thread override (from slate.open) → meta, where _select_kernel reads it (and
     # state_json round-trips it). The `.jl` footer carries it across restarts when present.
     isempty(threads) || (r.meta["threads"] = String(threads))
@@ -4019,7 +4029,7 @@ end
 # The cells a parallel drain will evaluate, in document order — EVERY one of them, which is what
 # makes the batch safe to schedule from. `par_blockers` derives ordering from the batch alone: a dep
 # on a cell outside it is silently dropped, and the read/write backstop can only see writers that are
-# present. Selecting just the CODE kind therefore ran cells BEFORE the WEB or SWEEP cell they read —
+# present. Selecting just the CODE kind therefore ran cells BEFORE the WEB or JOB cell they read —
 # a plot downstream of a sweep raised `UndefVarError` on every cold open, then worked when re-run by
 # hand, because by then its producer had run in the serial pass.
 #
@@ -4238,7 +4248,7 @@ function _reestablish_fresh_namespace!(nb::LiveNotebook)
     binds = lock(nb.lock) do
         bs = Tuple{Symbol,Any}[(b.name, b.value) for c in nb.report.cells for b in c.binds]
         # A blank namespace ⇒ every global is gone: re-run/restore all. EVERY kind that runs, not
-        # just CODE — a WEB cell defines bindings too, and a SWEEP cell registers the channel its
+        # just CODE — a WEB cell defines bindings too, and a JOB cell registers the channel its
         # card's buttons call. Leaving a sweep cell `fresh` across a worker restart left a card on
         # screen whose Submit reached a handler that no longer existed.
         for c in nb.report.cells
@@ -4599,6 +4609,7 @@ include("server_specialists.jl") # narrow agents summoned into a notebook: roles
 include("server_debug.jl")     # cell debugger: route the stepping verbs to the kernel the cell runs on
 include("server_findings.jl")  # a specialist's conclusion as a record: claim, cell, verdict, disposition
 include("server_checker.jl")   # the checker: a specialist nobody summons — triggered, unsupervised, read-only
+include("server_format.jl")    # a notebook in an older file format: updated, with a copy kept, before it opens
 include("server_complete.jl")
 
 # ── Standalone convenience (one notebook) ─────────────────────────────────────

@@ -12,7 +12,7 @@ Slate does both, and they share one authenticated connection, one store, and one
 
 | | Batch sweep | Interactive region |
 | --- | --- | --- |
-| A cell says | `#%% sweep cluster=hpc` | `#%% code region=gpu` |
+| A cell says | `#%% job cluster=hpc` | `#%% code region=gpu` |
 | Runs as | scheduler jobs | a live Slate worker |
 | Outlives the notebook | yes | no |
 | Where the work goes | wherever the queue puts each job | one node, held for a walltime |
@@ -23,7 +23,7 @@ notebook that names one carries only the name.
 
 ## Defining a compute target
 
-**🖧 Remotes → Compute targets** on the front page. A target is what a `#%% sweep cluster=<name>`
+**🖧 Remotes → Compute targets** on the front page. A target is what a `#%% job cluster=<name>`
 cell submits to:
 
 | Field | What it is |
@@ -81,7 +81,7 @@ you have not defined produces an error naming the ones you have, rather than a s
 ## Sweeping
 
 ```julia
-#%% sweep id=scan cluster=hpc walltime=04:00:00
+#%% job id=scan cluster=hpc walltime=04:00:00
 results = @sweep paramgrid(; n = 1:64, seed = 1:20) do p
     simulate(p.n, p.seed)
 end
@@ -89,7 +89,7 @@ end
 
 Note what the `@sweep` call does **not** say: where the work runs. That is `cluster=hpc` on the
 header, so the cell names a target rather than addressing one, and the ⚙ changes it without touching
-Julia. Make the cell a **Batch sweep** cell (the kind picker on the cell, or `#%% sweep`) — `@sweep`
+Julia. Make the cell a **Job** cell (the kind picker on the cell, or `#%% job`) — `@sweep`
 runs in an ordinary code cell too, but there the target has to be written into the body, `walltime=`
 and `chunk=` have nowhere to live, and there is no ⚙ to change any of it. Passing a target
 positionally is for a standalone `.jl` outside Slate, where there is no header to read.
@@ -124,7 +124,7 @@ inside itself — return `adopt(path)` instead. The file is read on the compute 
 re-emitted in the same addressable form, so nothing extra crosses the wire:
 
 ```julia
-#%% sweep id=runs cluster=hpc data=auto
+#%% job id=runs cluster=hpc data=auto
 runs = @sweep paramgrid(; day = 1:365) do p
     using NCDatasets
     f = @sfile("grid_$(p.day).nc")
@@ -292,7 +292,7 @@ them, so a record carries its level, when it happened, and where it came from, a
 sit beside the message rather than inside it:
 
 ```julia
-#%% sweep id=runs cluster=hpc
+#%% job id=runs cluster=hpc
 runs = @sweep paramgrid(; case = 1:500) do p
     @info "starting" case = p.case
     r = solve(p.case)

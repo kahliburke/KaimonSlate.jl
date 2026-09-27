@@ -397,9 +397,9 @@ with_resources(t::ClusterTarget, res) =
                   merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue, t.directives,
                   t.parent, t.julia, t.procs, t.mode, t.probe)
 
-# The scheduler settings a `#%% sweep` cell may carry on its header (engine.jl `cell_attrs`), e.g.
+# The scheduler settings a `#%% job` cell may carry on its header (engine.jl `cell_attrs`), e.g.
 #
-#     #%% sweep id=scan walltime=02:00:00 partition=gpu mem=16G
+#     #%% job id=scan walltime=02:00:00 partition=gpu mem=16G
 #
 # These are the numbers you change WHILE a job is queued or after it was killed. Keeping them off
 # the Julia source means adjusting one does not edit code — and because resources are deliberately
@@ -485,7 +485,7 @@ sched_options() = [(; key = String(k), flag = BatchLauncher.sbatch_flag(k),
 
 # ── Named compute targets ────────────────────────────────────────────────────────────────────
 # A cluster is defined ONCE for the notebook (engine.jl's `Slate.clusters` footer, edited from the
-# ⎈ on a sweep cell) and referenced by name: `#%% sweep cluster=hpc`. Three cells that run on the
+# ⎈ on a sweep cell) and referenced by name: `#%% job cluster=hpc`. Three cells that run on the
 # same partition then say so once, and changing where the work goes is one edit rather than three.
 #
 # `kind` selects the backend. SLURM is the one that is real today; `local` runs the same cells with
@@ -5205,9 +5205,9 @@ end
 
 Run the body once per row of `grid`, as batch work, and return a [`ShardedResult`].
 
-Belongs in a `#%% sweep` cell, and takes NO target there:
+Belongs in a `#%% job` cell, and takes NO target there:
 
-    #%% sweep id=scan cluster=hpc walltime=04:00:00
+    #%% job id=scan cluster=hpc walltime=04:00:00
     scan = @sweep(paramgrid(n = 1:64)) do p
         simulate(p.n)
     end
@@ -5273,7 +5273,7 @@ macro sweep(args...)
             push!(positional, a)
         end
     end
-    # The target is OPTIONAL. `@sweep(grid) do … end` in a `#%% sweep cluster=hpc` cell takes its
+    # The target is OPTIONAL. `@sweep(grid) do … end` in a `#%% job cluster=hpc` cell takes its
     # target from the notebook's cluster definitions, so where the work runs is configuration rather
     # than something each cell restates.
     isempty(positional) &&
@@ -5356,7 +5356,7 @@ macro sweep(args...)
         local _refresh = isdefined(@__MODULE__, :slate_refresh) ?
                          getfield(@__MODULE__, :slate_refresh) : nothing
         local _cell = get(task_local_storage(), :slate_cell, "")
-        # The cell's own `key=value` header attributes — where a `#%% sweep` cell keeps its
+        # The cell's own `key=value` header attributes — where a `#%% job` cell keeps its
         # walltime, partition and memory, so they can be changed from the UI without editing code.
         local _sctx = get(task_local_storage(), :slate_ctx, nothing)
         local _attrs = (_sctx !== nothing && hasproperty(_sctx, :attrs)) ?

@@ -356,6 +356,8 @@ body:has(.filespanel.open) .cellmove { display:none; }
 .cellhead .cregion.cluster.unset { color:var(--dim); border-style:dashed; border-color:var(--border);
   font-family:inherit; }
 .cellhead .cregion.cluster.unset:hover { color:var(--accent); border-color:var(--accent); }
+.cellhead .cregion.cluster.here { color:var(--dim); border-color:var(--border); }
+.cellhead .cregion.cluster.here:hover { color:var(--accent); border-color:var(--accent); }
 .cellhead .cregion.cluster.missing { color:var(--red); border-style:dashed; }
 /* Hide-code: editor hidden, output/figure (and any @bind control strip) shown — clean,
    interactive plots without the source. */
@@ -1082,31 +1084,31 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .cell.tool > .srchost { opacity:.62; transition:opacity .12s ease; }
 .cell.tool:hover > .srchost, .cell.tool.selected > .srchost { opacity:1; }
 
-/* Sweep cells (#%% sweep) — work that runs somewhere ELSE and outlives the cell that started it.
+/* Job cells (#%% job) — work that runs somewhere ELSE and outlives the cell that started it.
    Marked so it reads as a job rather than a computation: the cell returns in milliseconds while the
    work it launched may run for a day, and the ordinary "ran in 4ms" chrome would be a lie about
    what is happening. The rail carries the JOB's state, not the cell's. */
-.cell.sweep { border-left:2px solid color-mix(in srgb, var(--accent) 55%, transparent); }
-.cell.sweep > .cellhead .cid::before { content:"\1F6F0 \FE0F  "; opacity:.85; }
-.cell.sweep > .cellhead .cid { color:color-mix(in srgb, var(--accent) 80%, var(--text)); }
-.cell.sweep[data-sweep-state="running"], .cell.sweep[data-sweep-state="pending"] {
+.cell.job { border-left:2px solid color-mix(in srgb, var(--accent) 55%, transparent); }
+.cell.job > .cellhead .cid::before { content:"\1F6F0 \FE0F  "; opacity:.85; }
+.cell.job > .cellhead .cid { color:color-mix(in srgb, var(--accent) 80%, var(--text)); }
+.cell.job[data-job-state="running"], .cell.job[data-job-state="pending"] {
   border-left-color:var(--accent); }
-.cell.sweep[data-sweep-state="running"] > .cellhead .cid::after,
-.cell.sweep[data-sweep-state="pending"] > .cellhead .cid::after {
+.cell.job[data-job-state="running"] > .cellhead .cid::after,
+.cell.job[data-job-state="pending"] > .cellhead .cid::after {
   content:"in flight"; margin-left:8px; padding:1px 7px; border-radius:9px; font-size:.68rem;
   color:var(--accent); background:color-mix(in srgb, var(--accent) 14%, var(--bg3));
   border:1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
   animation:sweeppulse 2s ease-in-out infinite; }
-.cell.sweep[data-sweep-state="blocked"], .cell.sweep[data-sweep-state="exhausted"] {
+.cell.job[data-job-state="blocked"], .cell.job[data-job-state="exhausted"] {
   border-left-color:var(--red); }
-.cell.sweep[data-sweep-state="blocked"] > .cellhead .cid::after,
-.cell.sweep[data-sweep-state="exhausted"] > .cellhead .cid::after {
+.cell.job[data-job-state="blocked"] > .cellhead .cid::after,
+.cell.job[data-job-state="exhausted"] > .cellhead .cid::after {
   content:"stopped"; margin-left:8px; padding:1px 7px; border-radius:9px; font-size:.68rem;
   color:var(--red); background:color-mix(in srgb, var(--red) 12%, var(--bg3));
   border:1px solid color-mix(in srgb, var(--red) 45%, var(--border)); }
-.cell.sweep[data-sweep-state="cancelled"] { border-left-color:var(--dim); }
-.cell.sweep[data-sweep-state="partial"] { border-left-color:var(--gold); }
-.cell.sweep[data-sweep-state="succeeded"] { border-left-color:var(--green); }
+.cell.job[data-job-state="cancelled"] { border-left-color:var(--dim); }
+.cell.job[data-job-state="partial"] { border-left-color:var(--gold); }
+.cell.job[data-job-state="succeeded"] { border-left-color:var(--green); }
 @keyframes sweeppulse { 0%,100% { opacity:1 } 50% { opacity:.45 } }
 
 /* ── The sweep target panel (the cluster pill on a sweep cell) ─────────────────────────────────

@@ -1075,9 +1075,18 @@ function _make_router(h::Hub)
         # `inactive=true` opens DORMANT: show the embedded frozen render, spawn no worker, and wait for a
         # click on the "Inactive — click to launch" pill (`/api/launch`). The default for downloaded/
         # uploaded standalones (see run.jl); the author's own files open live.
-        id = open_notebook!(h, path; runon = strip(String(get(b, "runon", ""))),
-                            autorun = get(b, "autorun", true) !== false,
-                            inactive = get(b, "inactive", false) === true)
+        # `update=true`: the notebook is in an older file format and the person opening it agreed to
+        # the update (a copy of the original is kept beside it). Without it such a notebook is
+        # refused with 409 and what the update would change, for the page to ask.
+        id = try
+            open_notebook!(h, path; runon = strip(String(get(b, "runon", ""))),
+                           autorun = get(b, "autorun", true) !== false,
+                           inactive = get(b, "inactive", false) === true,
+                           update = get(b, "update", false) === true)
+        catch e
+            e isa NotebookNeedsUpdate || rethrow()
+            return HTTP.Response(409, ["Content-Type" => "application/json"], JSON.json(_needs_update_json(e)))
+        end
         _json(Dict("id" => id, "url" => "/n/$id", "path" => abspath(path)))
     end)
     # Launch an INACTIVE (dormant) notebook: flip it to hydrating and kick off the standard standalone
@@ -1978,7 +1987,7 @@ function _make_router(h::Hub)
     # A sweep cell's scheduler options, read and written as a MAP rather than as header tags: half of
     # what a scheduler accepts cannot survive a header (`--licenses=ansys@srv` loses its `=` to the
     # tag sanitiser), and an option a cell cannot express is a batch script a notebook cannot
-    # replace. Stored in the `Slate.sweep` footer, merged over the header attrs when the cell runs.
+    # replace. Stored in the `Slate.job` footer, merged over the header attrs when the cell runs.
     # Body {cell, options: {k: v}}; a key with an empty value is removed.
     HTTP.register!(router, "POST", "/api/{id}/sweep-options", req -> _withnb(h, req, nb -> begin
         b = _body(req)
@@ -1994,16 +2003,16 @@ function _make_router(h::Hub)
             clean[ks] = vs
         end
         lock(nb.lock) do
-            all = Dict{String,Dict{String,String}}(get(nb.report.meta, "sweepopts", Dict{String,Dict{String,String}}()))
+            all = Dict{String,Dict{String,String}}(get(nb.report.meta, "jobopts", Dict{String,Dict{String,String}}()))
             isempty(clean) ? delete!(all, cid) : (all[cid] = clean)
-            isempty(all) ? delete!(nb.report.meta, "sweepopts") : (nb.report.meta["sweepopts"] = all)
+            isempty(all) ? delete!(nb.report.meta, "jobopts") : (nb.report.meta["jobopts"] = all)
         end
         _persist!(nb; label = "sweep options · $cid")
         _json(Dict("ok" => true, "cell" => cid, "options" => clean))
     end))
     HTTP.register!(router, "GET", "/api/{id}/sweep-options", req -> _withnb(h, req, nb -> begin
         cid = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "cell", "")))
-        all = lock(nb.lock) do; get(nb.report.meta, "sweepopts", Dict{String,Dict{String,String}}()); end
+        all = lock(nb.lock) do; get(nb.report.meta, "jobopts", Dict{String,Dict{String,String}}()); end
         _json(Dict("ok" => true, "options" => isempty(cid) ? all : get(all, cid, Dict{String,String}())))
     end))
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
@@ -4023,14 +4032,14 @@ Load the notebook at `path` into the hub (reusing the existing entry if already
 open) and start its file watcher. Returns the hub id (its `/n/<id>` route).
 """
 function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = "", runon::AbstractString = "",
-                        autorun::Bool = true, inactive::Bool = false)
+                        autorun::Bool = true, inactive::Bool = false, update::Bool = false)
     file = abspath(path)
     id = lock(h.lock) do
         for nb in values(h.notebooks)
             abspath(nb.path) == file && return nb.id
         end
         id = _unique_id(h, file)
-        nb = load_notebook(file; id = id, threads = threads, runon = runon, autorun = autorun, inactive = inactive)
+        nb = load_notebook(file; id = id, threads = threads, runon = runon, autorun = autorun, inactive = inactive, update = update)
         h.notebooks[id] = nb
         _start_watcher!(nb)
         return id

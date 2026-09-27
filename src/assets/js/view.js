@@ -443,8 +443,8 @@ window.CELL_KINDS = [
     desc: 'HTML, CSS and JS panes. The cell owns its output and can call back into Julia.' },
   { k: 'tool',  glyph: '⌁',     name: 'Tool call',
     desc: 'A call OUT of the notebook. Never runs on open — it has effects in the world.' },
-  { k: 'sweep', glyph: '🛰',    name: 'Batch sweep',
-    desc: 'A parameter grid fanned out to a cluster. Resumable, watchable, never blocks.' },
+  { k: 'job',   glyph: '🛰',    name: 'Job',
+    desc: 'Work that lands over time, in the background or on a cluster: a sweep, a campaign. Resumable, watchable, never blocks.' },
 ];
 window.kindOf = k => window.CELL_KINDS.find(x => x.k === k) || window.CELL_KINDS[0];
 
@@ -521,11 +521,15 @@ function closeKindPicker() {
 // Unconfigured reads as an invitation, not an error: a sweep cell with no target is the normal state
 // of a cell you just added, and "set a cluster" says what to do about it.
 function cellClusterChip(c) {
-  if (c.kind !== 'sweep') return '';
+  if (c.kind !== 'job') return '';
   const tags = c.tags || [];
   const get = k => { const t = tags.find(x => x.startsWith(k + '=')); return t ? t.slice(k.length + 1) : ''; };
   const name = get('cluster');
   if (!name) {
+    // A campaign with no target runs in the background here; a sweep has to be sent somewhere.
+    if (/@campaign\b/.test(c.source || ''))
+      return `<span class="cregion cluster here" onclick="openSweepConfig('${c.id}', event)"
+        title="runs in the background on this machine — click to send its rounds to a compute target">here</span>`;
     return `<span class="cregion cluster unset" onclick="openSweepConfig('${c.id}', event)"
       title="this sweep has no compute target — click to pick one">＋ set cluster</span>`;
   }
@@ -612,7 +616,7 @@ function _effectBadge(c) {
   return `<span class="effectbadge" title="${_esc(tip)}">⚙ ${_esc(label + shown)}</span>`;
 }
 function cellHeaderInner(c) {
-  const isCode = (c.kind === 'code' || c.kind === 'web' || c.kind === 'tool' || c.kind === 'sweep') && !hasBinds(c);   // web/tool/sweep cells run too (▶)
+  const isCode = (c.kind === 'code' || c.kind === 'web' || c.kind === 'tool' || c.kind === 'job') && !hasBinds(c);   // web/tool/sweep cells run too (▶)
   // ✎ edit source — on EVERY cell. md/@bind hide their source behind a rendered view, so it reveals the
   // source overlay; code/web edit inline, so it just focuses the editor (see editCellSource). NOT </> —
   // that's the "convert to web cell" glyph below, and both show on a @bind cell, so a shared icon would
@@ -1842,10 +1846,8 @@ async function _sharedDocDialog(state) {
 // one, so it can't go through api() — that injects this notebook's id into the path.
 async function _openOther(path) {
   try {
-    const r = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                         body: JSON.stringify({ path }) });
-    const d = await r.json();
-    if (d && d.url) window.open(d.url, '_blank'); else await alertDark('Could not open ' + path);
+    const d = await slateOpenPath(path);
+    if (d && d.url) window.open(d.url, '_blank');
   } catch (_) { await alertDark('Could not open ' + path); }
 }
 // Give this notebook a fresh identity, copying the stores across so both sides keep their lineage.

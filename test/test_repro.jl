@@ -81,9 +81,9 @@ end
     @test parse_report(s1).meta["agentmodel"] == "opus"      # idempotent
     @test parse_report(s1).meta["publishrepo"] == "kahli/site"
 
-    r2 = parse_report("#%% code id=a\nx=1\n")         # no config → no footer, no keys
+    r2 = parse_report("#%% code id=a\nx=1\n")         # no config → no keys; the footer carries only the format
     @test !haskey(r2.meta, "agentmodel")
-    @test !occursin("Slate.config", serialize_report(r2))
+    @test !occursin("agentmodel", serialize_report(r2)) && occursin("format = ", serialize_report(r2))
 end
 
 # The `collapsed` header token (cell folded in the UI) round-trips through the .jl via the

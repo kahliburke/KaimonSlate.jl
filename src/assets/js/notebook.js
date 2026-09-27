@@ -647,7 +647,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, editingId, collapsed })
   // A sweep cell keeps the `code` class for the same reason a tool cell does — its body IS a code
   // editor — and adds `sweep`, which the chrome uses to mark it as work that runs off this machine.
   const cls = 'cell ' + (c.kind === 'md' ? 'md' : c.kind === 'web' ? 'web'
-                        : c.kind === 'tool' ? 'code tool' : c.kind === 'sweep' ? 'code sweep'
+                        : c.kind === 'tool' ? 'code tool' : c.kind === 'job' ? 'code job'
                         : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
     // A workbook cell is the reader's to write. The class is emitted in every posture so the author

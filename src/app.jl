@@ -188,11 +188,22 @@ end
 function _open_notebook_url(mode::Symbol, path::AbstractString)
     path = abspath(expanduser(path))
     ReportEngine.ensure_notebook_file!(path)
+    # A notebook in an older file format is not opened here: the front page opens it, which asks
+    # whether to update it first.
+    ask = _base() * "/?open=" * HTTP.escapeuri(path)
     if mode == :owner
-        return "$(_base())/n/$(open_notebook!(_hub(), path))"
+        id = try
+            open_notebook!(_hub(), path)
+        catch e
+            e isa NotebookServer.NotebookNeedsUpdate || rethrow()
+            return ask
+        end
+        return "$(_base())/n/$id"
     end
     r = HTTP.post(_base() * "/api/open", ["Content-Type" => "application/json"],
-                  JSON.json(Dict("path" => path)); retry = false)
+                  JSON.json(Dict("path" => path)); retry = false, status_exception = false)
+    r.status == 409 && return ask
+    r.status == 200 || error("could not open $path: $(String(r.body))")
     return _base() * String(get(JSON.parse(String(r.body)), "url", "/"))
 end
 

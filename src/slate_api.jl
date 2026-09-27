@@ -814,8 +814,8 @@ See also `save_asset`, `FileUpload`."""),
         "Fan a parameter grid out to a cluster (or local processes) — resumable, watchable, never blocks.",
         ["slurm", "cluster", "hpc", "parameter sweep", "parallel", "batch", "fan out", "long running",
          "resume", "sbatch", "grid search"],
-        "@sweep(grid; plot=nothing, cap=0) do p … end   — inside a `#%% sweep cluster=<name>` cell",
-        """GOES IN A `#%% sweep` CELL, and takes NO target there: the cell header carries
+        "@sweep(grid; plot=nothing, cap=0) do p … end   — inside a `#%% job cluster=<name>` cell",
+        """GOES IN A `#%% job` CELL, and takes NO target there: the cell header carries
         `cluster=<name>`, and `walltime=`, `chunk=`, `data=` beside it. The name is resolved by each
         machine against its own registry, which is what lets one notebook run against a laptop's
         test cluster and a site's real one with nothing edited in a cell — and the ⚙ on the cell
@@ -839,7 +839,7 @@ See also `save_asset`, `FileUpload`."""),
         definitions written by hand, for anything with no cell behind it.
         `plot = rows -> echart(…)` draws the units that have landed, on the card's own poll, so the
         chart fills as results arrive. See `paramgrid`, `SlurmTarget`, `LocalTarget`, `Sweep`.
-        `#%% sweep id=scan cluster=hpc walltime=04:00:00`
+        `#%% job id=scan cluster=hpc walltime=04:00:00`
         `scan = @sweep(paramgrid(β = 0:0.1:2, seed = 1:50)) do p
              using MyPkg
              MyPkg.simulate(p)

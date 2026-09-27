@@ -839,8 +839,8 @@ function showOptMenu(row, inp) {
       // without this the cell chrome would report that and say nothing about the job.
       if (cellId) {
         const el = document.querySelector(`[data-cid="${CSS.escape(cellId)}"]`);
-        if (el && el.classList.contains('sweep')) {
-          el.dataset.sweepState = (status && status.state) || '';
+        if (el && el.classList.contains('job')) {
+          el.dataset.jobState = (status && status.state) || '';
         }
       }
       render();

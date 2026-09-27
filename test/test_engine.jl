@@ -418,8 +418,10 @@ end
     rf = parse_report("#%% code id=a\nx = 1"); rf.meta["parallel"] = false
     @test parse_report(serialize_report(rf)).meta["parallel"] === false
 
-    # no settings → no config footer
-    @test !occursin("Slate.config", serialize_report(parse_report("#%% code id=a\nx = 1")))
+    # no settings → a config footer carrying only the file format (every file written says its format)
+    bare = serialize_report(parse_report("#%% code id=a\nx = 1"))
+    @test occursin("# ╔═╡ Slate.config", bare) && occursin("#   format = $(ReportEngine.FORMAT)", bare)
+    @test count(l -> startswith(l, "#   "), split(bare, '\n')) == 1
 
     # A docid ALONE renders and round-trips. `export_standalone` emits exactly this footer, so a
     # downloaded bundle stays the same document as the one that was published instead of being read
@@ -485,8 +487,8 @@ end
     end
 
     # A sweep cell names its target in its OWN header, which is notebook business and unchanged.
-    r = parse_report("#%% sweep id=scan cluster=hpc walltime=04:00:00\nr = 1")
-    @test length(r.cells) == 1 && r.cells[1].kind == ReportEngine.SWEEP
+    r = parse_report("#%% job id=scan cluster=hpc walltime=04:00:00\nr = 1")
+    @test length(r.cells) == 1 && r.cells[1].kind == ReportEngine.JOB
     a = cell_attrs(r.cells[1])
     @test a["cluster"] == "hpc" && a["walltime"] == "04:00:00"
     s = serialize_report(r)

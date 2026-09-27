@@ -28,7 +28,8 @@ module Transfer;  include("test_transfer.jl");  end
 module SyncDictT; include("test_syncdict.jl"); end
 module Dataset; include("test_dataset.jl"); end
 module TablesInc; include("test_tables_include.jl"); end
-module Sweepcell; include("test_sweepcell.jl"); end
+module Jobcell;   include("test_jobcell.jl");   end
+module FormatT;   include("test_format.jl");    end
 module Effectstore; include("test_effectstore.jl"); end
 module Blobchannel; include("test_blobchannel.jl"); end
 module RemotePool; include("test_remote_pool.jl"); end
@@ -86,7 +87,7 @@ module RecordDisplay; include("test_record_display.jl"); end
 # COMPILED, so it never looks broken — it is simply never run, and its testsets pass silently by
 # not existing.
 const _TESTMODS = (Defname, Prepare, Demux, Termcook, SharedInc, Parsched, Memostore, Slatetask,
-                   Batchsweep, Transfer, SyncDictT, Dataset, TablesInc, Sweepcell, Effectstore,
+                   Batchsweep, Transfer, SyncDictT, Dataset, TablesInc, Jobcell, FormatT, Effectstore,
                    Blobchannel, RemotePool, Regions, SlateDiagT, Parallel, Animation, Echarts, SlateLook,
                    Engine, Eval, Deps, Envprep, Gateauth, SshTransportT, Tools, Registry, Toolcell, Web,
                    Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi,

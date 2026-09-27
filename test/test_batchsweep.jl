@@ -3073,7 +3073,7 @@ end
 
             # A typo is the usual cause, so the error names what this machine DOES have. It points at
             # the UI rather than at header syntax: the cluster is picked from the cell's ⚙, and
-            # telling someone to type `#%% sweep cluster=…` describes a path nobody takes.
+            # telling someone to type `#%% job cluster=…` describes a path nobody takes.
             e = try; Sweep.resolve_target(nothing, Dict("cluster" => "hcp"), defs); catch x; x; end
             @test occursin("no cluster named `hcp`", sprint(showerror, e))
             @test occursin("box, hpc", sprint(showerror, e))

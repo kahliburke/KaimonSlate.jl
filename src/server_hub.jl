@@ -190,6 +190,9 @@ function _reopen_persisted!(h::Hub, id::AbstractString)
         nb = try
             load_notebook(abspath(path); id = id)
         catch err
+            # A notebook to update to the current format waits for its page to ask (a 404 here sends
+            # the page to reopen it by path, which is refused with the question).
+            err isa NotebookNeedsUpdate && return nothing
             @warn "Kaimon Slate: failed to re-open notebook after restart" id path exception = err
             return nothing
         end

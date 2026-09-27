@@ -1173,7 +1173,7 @@ end
 # upstream SOURCES, so it's only total if every upstream value is a function of its source. A
 # `nocache`/`volatile` upstream (re-runs produce fresh values from the same source) or an :opaque
 # barrier (include(): effects from outside the source) breaks that — restoring downstream against a
-# re-run impure producer would silently resurrect the PREVIOUS run's values. A SWEEP upstream has the
+# re-run impure producer would silently resurrect the PREVIOUS run's values. A JOB upstream has the
 # same property — its value is what has landed in its store — but is NOT poisoned: it declares an
 # identity for those results (`:value_identity`), which reaches the key through `_STATE_DIGESTS` and
 # moves it when they change. That is the whole point of the declaration; without one it would have to
