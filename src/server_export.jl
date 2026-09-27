@@ -1268,7 +1268,28 @@ end
 # receives; checking the constant checks what actually ships.
 #
 # `_slateMaps` and `_slateCharts` are defined by the writer immediately before this is emitted.
+# Per-mode option overrides (`__light`/`__dark`): the mirror of core.js `_slateForMode`, for pages
+# that cannot load core.js. The mode is read from the `--bg` of the element the chart is themed from,
+# so a docs page's toggle re-merges on re-theme like it re-colours everything else.
+const _EXPORT_MODE_JS = raw"""
+function _slateDarkSurface(el){var v=getComputedStyle(el||document.documentElement).getPropertyValue('--bg').trim(),r,g,b,m;
+if((m=/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(v))){var h=m[1].length===3?m[1].split('').map(function(c){return c+c;}).join(''):m[1];
+r=parseInt(h.slice(0,2),16);g=parseInt(h.slice(2,4),16);b=parseInt(h.slice(4,6),16);}
+else if((m=/rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)/i.exec(v))){r=+m[1];g=+m[2];b=+m[3];}
+else return false;
+return (0.2126*r+0.7152*g+0.0722*b)/255<0.5;}
+function _slateDeepMerge(a,b){var isObj=function(x){return x!==null&&typeof x==='object'&&!Array.isArray(x);};
+if(Array.isArray(a)&&Array.isArray(b)&&b.length&&b.every(isObj))
+return a.map(function(x,i){return i<b.length?_slateDeepMerge(x,b[i]):x;}).concat(b.slice(a.length));
+if(isObj(a)&&isObj(b)){var r=Object.assign({},a);for(var k in b)r[k]=(k in a)?_slateDeepMerge(a[k],b[k]):b[k];return r;}
+return b;}
+function _slateForMode(o,dark){if(!o||(!o.__light&&!o.__dark))return o;
+var over=dark?o.__dark:o.__light,c=Object.assign({},o);delete c.__light;delete c.__dark;
+return over?_slateDeepMerge(c,over):c;}
+"""
+
 const _EXPORT_CHART_RUNTIME_JS = string(
+    _EXPORT_MODE_JS,
     "function _slateEnsureMaps(reqs){return Promise.all((reqs||[]).map(function(r){",
     "if(!r||!r.name||(echarts.getMap&&echarts.getMap(r.name)))return Promise.resolve();",
     "if(_slateMaps[r.name]){try{echarts.registerMap(r.name,_slateMaps[r.name]);}catch(e){}return Promise.resolve();}",
@@ -1356,7 +1377,7 @@ const _EXPORT_CHART_RUNTIME_JS = string(
     "try{echarts.registerTheme('slate',_slateExportTheme(scope.themeEl));}catch(e){}",
     "list.forEach(function(c){var el=_slateFindIn(roots,c[0]);if(!el)return;var opt=c[1];",
     "var reqs=opt&&opt.registerMap?[].concat(opt.registerMap):[];",
-    "var rec={el:el,opt:opt,chart:null,ro:null,last:null,gone:false};out.push(rec);",
+    "var rec={el:el,opt:opt,themeEl:scope.themeEl,chart:null,ro:null,last:null,gone:false};out.push(rec);",
     # A GL lib (requireScripts) must load BEFORE echarts.init — an instance created before
     # echarts-gl registers its 3D views renders a GL series blank. So init INSIDE the .then.
     "Promise.all([_slateEnsureMaps(reqs),_slateEnsureScripts(opt&&opt.requireScripts)]).then(function(){",
@@ -1367,10 +1388,10 @@ const _EXPORT_CHART_RUNTIME_JS = string(
     "else window.addEventListener('resize',function(){if(rec.chart)rec.chart.resize();});});});",
     "return out;}",
     "function _slateInitChart(rec){var ch=echarts.init(rec.el,'slate',{renderer:_slateRenderer(rec.opt)});",
-    "ch.setOption(_slateSansMaps(rec.opt));if(rec.last)ch.setOption(rec.last);rec.chart=ch;}",
+    "ch.setOption(_slateSansMaps(_slateForMode(rec.opt,_slateDarkSurface(rec.themeEl))));if(rec.last)ch.setOption(rec.last);rec.chart=ch;}",
     "function _slateRethemeCharts(recs,themeEl){if(!window.echarts)return;",
     "try{echarts.registerTheme('slate',_slateExportTheme(themeEl));}catch(e){}",
-    "(recs||[]).forEach(function(r){if(r.gone||!r.chart)return;r.chart.dispose();_slateInitChart(r);});}",
+    "(recs||[]).forEach(function(r){if(r.gone||!r.chart)return;r.chart.dispose();r.themeEl=themeEl||r.themeEl;_slateInitChart(r);});}",
     "function _slateDisposeCharts(recs){(recs||[]).forEach(function(r){r.gone=true;",
     "if(r.ro)r.ro.disconnect();if(r.chart){r.chart.dispose();r.chart=null;}});}"
 )

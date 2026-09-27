@@ -194,6 +194,14 @@ const RE = ReportEngine
                                                                      "series" => [Dict("type" => "line")]))
     end
 
+    # Per-mode overrides ride on the OPTION (the front end merges the one for the page's mode), so the
+    # DSL must not mistake them for series keywords.
+    @testset "__light/__dark reach the option, not the series" begin
+        o = RE.echart(:line, [1.0, 2.0], [3.0, 4.0]; __dark = (color = ["#3987e5"],), __light = (color = ["#2a78d6"],)).option
+        @test o["__dark"]["color"] == ["#3987e5"] && o["__light"]["color"] == ["#2a78d6"]
+        @test !haskey(o["series"][1], "__dark")
+    end
+
     @testset "a point series stacks as a matrix per position" begin
         @test RE._replay_points_matrix([[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]) == [0.0 1.0; 2.0 3.0; 4.0 5.0]
         @test RE._replay_points_matrix([(0, 1), (2, 3)]) == [0 1; 2 3]

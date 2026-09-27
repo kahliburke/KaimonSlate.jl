@@ -155,11 +155,50 @@ function _ensureMaps(spec) {
     return _mapRegistry[r.name];
   }));
 }
+// ── `__light` / `__dark`: per-mode option overrides ─────────────────────────────────────────────
+// A chart's theme already follows the page, but a colour the chart sets itself is fixed. A chart
+// that needs its own colours per mode puts them under `__light` and `__dark`; the one for the mode
+// it is drawn in is merged over the option. The mode is read from the surface the chart sits on (the
+// lightness of the `--bg` it inherits), so a live notebook, an exported page and a docs site that
+// toggles light and dark all decide it the same way. Objects merge key by key, arrays of objects
+// merge by index (so `series: [{…}]` reaches series 0), and anything else is replaced.
+function _slateDarkSurface(el) {
+  const v = getComputedStyle(el || document.documentElement).getPropertyValue('--bg').trim();
+  let r, g, b, m;
+  if ((m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(v))) {
+    const h = m[1].length === 3 ? m[1].split('').map(c => c + c).join('') : m[1];
+    r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16);
+  } else if ((m = /rgba?\(\s*([\d.]+)[ ,]+([\d.]+)[ ,]+([\d.]+)/i.exec(v))) {
+    r = +m[1]; g = +m[2]; b = +m[3];
+  } else return false;
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+}
+function _slateDeepMerge(a, b) {
+  const isObj = x => x !== null && typeof x === 'object' && !Array.isArray(x);
+  if (Array.isArray(a) && Array.isArray(b) && b.length && b.every(isObj))
+    return a.map((x, i) => i < b.length ? _slateDeepMerge(x, b[i]) : x).concat(b.slice(a.length));
+  if (isObj(a) && isObj(b)) {
+    const r = Object.assign({}, a);
+    for (const k in b) r[k] = (k in a) ? _slateDeepMerge(a[k], b[k]) : b[k];
+    return r;
+  }
+  return b;
+}
+function _slateForMode(o, dark) {
+  if (!o || (!o.__light && !o.__dark)) return o;
+  const over = dark ? o.__dark : o.__light;
+  const c = Object.assign({}, o);
+  delete c.__light; delete c.__dark;
+  return over ? _slateDeepMerge(c, over) : c;
+}
+
 // Strip the keys that ride ALONG on a spec but are not ECharts options — sizing, script prereqs, map
 // registrations, and the per-series `@replay` mark. ECharts carries an unknown key into its option
 // model rather than rejecting it, so they come off at the one place every setOption goes through.
+// The per-mode overrides are resolved here too, against the page the notebook is shown on.
 function _sansMaps(s) {
   if (!s) return s;
+  s = _slateForMode(s, _slateDarkSurface(document.documentElement));
   const marked = Array.isArray(s.series) && s.series.some(x => x && (x.__replay || x.__valuefmt));
   if (!s.registerMap && !s.__size && !s.requireScripts && !s.__valuefmt && !s.__select && !s.__renderer && !marked) return s;
   const c = Object.assign({}, s);

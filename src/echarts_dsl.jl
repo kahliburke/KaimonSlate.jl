@@ -702,7 +702,9 @@ const _EC_TOPLEVEL = Set{String}(["xAxis", "yAxis", "grid", "dataZoom", "visualM
     # `zoom` likewise expands to the `dataZoom` (+ `toolbox`) components — see `_apply_zoom!`;
     # `select = :binding` makes the chart's x-range an INPUT for a `@bind` — see `_apply_select!`.
     # `renderer = :canvas | :svg` picks the rasteriser — see `_renderer_wire`; rides as `__renderer`.
-    "registerMap", "height", "width", "valuefmt", "zoom", "select", "renderer"])
+    # `__light`/`__dark` are option overrides merged in for the mode the chart is drawn in (see
+    # `_slateForMode` in core.js): colours chosen per mode, where the theme's own don't suit.
+    "registerMap", "height", "width", "valuefmt", "zoom", "select", "renderer", "__light", "__dark"])
 
 # Express: a single series + simple layout. Kwargs naming a top-level component (xAxis/yAxis/grid/…)
 # go on the OPTION (so `yAxis=(type=:log,)` makes a log axis); everything else styles the series.
