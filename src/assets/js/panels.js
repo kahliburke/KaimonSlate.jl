@@ -530,6 +530,7 @@ function connectLive() {
     // depending on who asked, and both surfaces have to be listening at once.
     if (e.data.startsWith('specialist:')) { try { const p = JSON.parse(e.data.slice(11)); for (const h of (window.slateSpecialistSubs || [])) { try { h(p); } catch (_) {} } } catch (_) {} return; }
     if (e.data.startsWith('inspect:')) { try { const r = JSON.parse(e.data.slice(8)); window._slateInspect && window._slateInspect(r.reqid, r.cell); } catch (_) {} return; }   // slate.inspect: capture this cell for the agent
+    if (e.data.startsWith('inspectmany:')) { try { const r = JSON.parse(e.data.slice(12)); window._slateInspectMany && window._slateInspectMany(r.reqid, r.cells, r.theme); } catch (_) {} return; }   // PDF export: every HTML-output cell, one round-trip
     if (e.data.startsWith('js:')) { try { const r = JSON.parse(e.data.slice(3)); window._slateEvalJs && window._slateEvalJs(r.reqid, r.code); } catch (_) {} return; }   // slate.eval_js: run agent JS in this tab
     if (e.data.startsWith('sshauth:')) { try { const r = JSON.parse(e.data.slice(8)); window.onSshAuth && window.onSshAuth(r); } catch (_) {} return; }   // a cluster wants a password / second factor
     if (e.data.startsWith('sshauth-done:')) { window.onSshAuthDone && window.onSshAuthDone(e.data.slice(13)); return; }   // …and is no longer waiting

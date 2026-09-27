@@ -232,16 +232,24 @@ STATIONS = [(-2.0, -2.0), (0.0, 0.0), (2.0, 2.0), (2.0, -2.0), (-2.0, 2.0)]
 @bind stn hidden(PickPoint(; default = (0.0, 0.0), snapto = STATIONS))
 
 figS = Figure(size = (520, 450))
+# The title is FIXED. A title that reported the pick would change the layout on every pick, which
+# moves the axis out from under the calibration `pick_on!` measured — the readout is below instead.
 axS = Axis(figS[1, 1]; aspect = DataAspect(), xlabel = "x", ylabel = "y",
-           title = "click anywhere — it lands on the nearest station: $(stn.x), $(stn.y)")
+           title = "click anywhere — it lands on the nearest station")
 scatter!(axS, first.(STATIONS), last.(STATIONS); color = :transparent,
          strokecolor = (:white, 0.55), strokewidth = 1.5, markersize = 30)
-# a line from where a naive grid snap would have put you, to the station actually chosen
 scatter!(axS, [stn.x], [stn.y]; color = :seagreen, markersize = 15,
          strokecolor = :black, strokewidth = 1)
 limits!(axS, -3, 3, -3, 3)
 pick_on!(:stn, figS, axS)
 figS
+
+#%% md id=s1c_out
+@md"""
+`stn` = **({{ stn.x }}, {{ stn.y }})** — always one of the five, however far from it you clicked.
+The readout lives here rather than in the figure's title for the reason above: a title that changed
+with the pick would move the axis out from under the calibration.
+"""
 
 #%% code id=s2
 @bind sq hidden(PickPoint(; default = (0.0, 0.0)))

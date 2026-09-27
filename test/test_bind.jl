@@ -773,3 +773,98 @@ const _TESTNS = RE.register_refresh_ns!("test-bind", _noop_refresh)
     end
 
 end
+
+# `snap` quantises to a lattice; `snapto` chooses the nearest of a named set. The second has no
+# radius to miss — a click anywhere resolves to a real candidate — and its domain is the set
+# itself, which is what a static export needs and what a lattice can only approximate.
+@testset "Pick: snapto takes the nearest candidate" begin
+    targets = [(-2.0, -2.0), (0.0, 0.0), (2.0, 2.0), (2.0, -2.0), (-2.0, 2.0)]
+    w = RE.PickPoint(; snapto = targets)
+    w.params["xlim"] = Any[-3.0, 3.0]; w.params["ylim"] = Any[-3.0, 3.0]
+
+    @test RE.coerce_bind(w, Any[1.4, 1.6])   == Any[2.0, 2.0]
+    @test RE.coerce_bind(w, Any[-0.3, 0.2])  == Any[0.0, 0.0]
+    # Far outside the candidates, and outside the axis: still a candidate, never a lattice point.
+    @test RE.coerce_bind(w, Any[99.0, -99.0]) == Any[2.0, -2.0]
+
+    @testset "the domain IS the candidate set" begin
+        d = RE.bind_domain(w)
+        @test length(d) == length(targets)
+        @test all(t -> Any[t[1], t[2]] in d, targets)
+        # An export matches a live control against its precomputed column with `isequal`, so every
+        # value the control can take has to BE in the domain, bit for bit.
+        for q in ([1.4, 1.6], [-0.3, 0.2], [99.0, -99.0], [-1.9, 2.1])
+            v = RE.coerce_bind(w, Any[q...])
+            @test v in d
+            @test RE.coerce_bind(w, v) == v          # idempotent
+        end
+    end
+
+    @testset "snapto wins over snap, and snap still works alone" begin
+        both = RE.PickPoint(; snap = 0.25, snapto = targets)
+        both.params["xlim"] = Any[-3.0, 3.0]; both.params["ylim"] = Any[-3.0, 3.0]
+        @test RE.coerce_bind(both, Any[1.4, 1.6]) == Any[2.0, 2.0]   # not the 0.25 lattice
+        g = RE.PickPoint(; snap = 0.25)
+        g.params["xlim"] = Any[-3.0, 3.0]; g.params["ylim"] = Any[-3.0, 3.0]
+        @test RE.coerce_bind(g, Any[1.03, -0.98]) == Any[1.0, -1.0]
+    end
+
+    @testset "an empty or malformed set is no set at all" begin
+        for bad in (Any[], Any[Any[1.0]], Any["x"])
+            b = RE.PickPoint(); b.params["snapto"] = bad
+            b.params["xlim"] = Any[-3.0, 3.0]; b.params["ylim"] = Any[-3.0, 3.0]
+            @test RE.coerce_bind(b, Any[1.4, 1.6]) == Any[1.4, 1.6]   # falls through to plain
+        end
+    end
+end
+
+# "Nearest" has to mean nearest ON SCREEN. Raw data distance is meaningless when the axes carry
+# different quantities, and the browser's hover highlight measures the same way, so a mismatch here
+# would light one candidate and commit another.
+@testset "Pick: snapto measures across the axis, not in data units" begin
+    targets = [(10.0, 0.9), (5000.0, 0.1)]
+    w = RE.PickPoint(; snapto = targets)
+    w.params["xlim"] = Any[1.0, 10000.0]; w.params["xscale"] = "log10"
+    w.params["ylim"] = Any[0.0, 1.0];     w.params["yscale"] = "linear"
+
+    # At screen (0.87, 0.85): (10, 0.9) sits at (0.25, 0.9) and is 0.62 away; (5000, 0.1) sits at
+    # (0.92, 0.1) and is 0.75 away. Data distance ranks them the other way round, because x spans
+    # four orders of magnitude and y spans one unit.
+    q = Any[3000.0, 0.85]
+    @test RE.coerce_bind(w, q) == Any[10.0, 0.9]
+    @test argmin([(q[1] - t[1])^2 + (q[2] - t[2])^2 for t in targets]) == 2   # …data distance disagrees
+
+    @testset "a log axis is measured where its ticks are" begin
+        lg = RE.PickPoint(; snapto = [(10.0, 0.5), (1000.0, 0.5)])
+        lg.params["xlim"] = Any[1.0, 10000.0]; lg.params["xscale"] = "log10"
+        lg.params["ylim"] = Any[0.0, 1.0];     lg.params["yscale"] = "linear"
+        # 100 is the midpoint BETWEEN 10 and 1000 on a log axis, so either is admissible; 90 is
+        # decisively nearer 10 in log space and decisively nearer 1000 in linear space.
+        @test RE.coerce_bind(lg, Any[90.0, 0.5]) == Any[10.0, 0.5]
+    end
+
+    @testset "uncalibrated still picks something" begin
+        u = RE.PickPoint(; snapto = targets)          # no xlim/ylim yet — pick_on! has not run
+        @test RE.coerce_bind(u, Any[9.0, 0.9]) in (Any[10.0, 0.9], Any[5000.0, 0.1])
+    end
+end
+
+# A candidate is returned as the author wrote it. The other coercion paths clamp into the axis, and
+# this one deliberately does not: moving a named point to the axis edge would hand back a
+# coordinate that is not in the list at all.
+@testset "Pick: a candidate outside the axis is returned unclamped" begin
+    w = RE.PickPoint(; snapto = [(0.0, 0.0), (99.0, 99.0)])
+    w.params["xlim"] = Any[-1.0, 1.0]; w.params["ylim"] = Any[-1.0, 1.0]
+    @test RE.coerce_bind(w, Any[80.0, 80.0]) == Any[99.0, 99.0]
+    @test Any[99.0, 99.0] in RE.bind_domain(w)      # …and the domain agrees it is reachable
+end
+
+# The set comes from the author, not the wire, so a typo is an error at construction rather than a
+# candidate that silently vanishes and is missed much later.
+@testset "Pick: a malformed snapto is refused where it is written" begin
+    @test_throws ArgumentError RE.PickPoint(; snapto = [(1.0, 2.0), (3.0,)])
+    @test_throws ArgumentError RE.PickPoint(; snapto = [(1.0, 2.0), ("x", 4.0)])
+    @test_throws ArgumentError RE.PickPoint(; snapto = [(1.0, NaN)])
+    @test_throws ArgumentError RE.PickPoint(; snapto = [])
+    @test_throws ArgumentError RE.PickPath(; n = 2, snapto = [(1.0, 2.0), (3.0,)])
+end

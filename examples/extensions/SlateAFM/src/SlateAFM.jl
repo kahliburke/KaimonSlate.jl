@@ -37,7 +37,7 @@ import JSON   # parse the `meta.json` an introspected PyPI widget writes (defaul
 
 # `ext_asset_url` (from SlateExtensionsBase) is the mechanism for pointing `afm` at a module served from a
 # package's `provide_assets!` scope — re-exported so a notebook builds those URLs without a bespoke helper.
-export AFM, afm, afm_on_msg, afm_emit, ext_asset_url, pypi_afm
+export AFM, afm, afm_on_msg, afm_emit, afm_patch, ext_asset_url, pypi_afm
 export AFMHandle, molstar, load!, spin!, stream!
 
 # The wire kind Slate registers the host shim under. A namespaced (dotted) kind renders as a generic
@@ -119,6 +119,23 @@ function afm_emit(id::AbstractString, content; buffers = ())
     for (i, b) in enumerate(bufs)
         slate_emit(ch, SlateBinary(b, Dict{String,Any}("mid" => mid, "bi" => i - 1, "nbuf" => n)))
     end
+    return nothing
+end
+
+"""
+    afm_patch(patches)
+
+Stream trait changes straight to mounted widgets: `patches` maps a widget's message `id` to a dict of
+the traits that changed (`Dict("gauge-1" => Dict("value" => 42.0), …)`). Every widget in the batch
+travels in ONE frame on the page stream; each view applies its traits as a value pushed from Julia
+(its `change:<key>` handlers fire). Nothing else happens: the bound Julia values keep their last
+committed state and no reader cell re-runs. This is the path for display state a program animates
+(telemetry, animation, dashboards); `set_bind` goes through the bind registry and the reactive graph
+on every call, and is for values a notebook means to commit.
+"""
+function afm_patch(patches::AbstractDict)
+    isempty(patches) && return nothing
+    slate_emit("SlateAFM.patch", patches)
     return nothing
 end
 
