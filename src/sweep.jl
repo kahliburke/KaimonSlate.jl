@@ -2691,9 +2691,16 @@ end
 # A row that FAILED carries its message and traceback in `value` — the same slot, because a unit
 # produced one thing or the other and `status` already says which. There is deliberately no second
 # `error` field to check: a reader that forgot it would silently treat a failure as an empty result.
+#
+# Only the chunks holding these keys are parsed (the fold knows which), so reading a round costs its
+# own units wherever they landed, however large the rest of the store has grown.
 function _rows(root, params, keys, run, src = LocalSource(root))
     rows = NamedTuple[]
-    have = store_rows(root)
+    have = Dict{String,Any}()
+    evs = SlateTask.events_by_chunk(root)
+    for c in BatchSweep.chunks_holding(root, keys)
+        merge!(have, SlateTask.rows_of(root, get(evs, c, String[])))
+    end
     for (prm, k) in zip(params, keys)
         m = get(have, k, nothing)
         if m === nothing
@@ -4844,11 +4851,18 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
     # Unchecked, a failed push submits work the far side cannot run: the chunk starts, finds no
     # descriptor for its key and dies there. An unreachable target pushes nothing and submits
     # nothing, which is how authoring against a cluster you are not signed in to keeps working.
-    if sync_out!(target)
-        _descriptors_sent!(target, run)
-    elseif _reachable(target)
-        error("could not send the sweep's descriptors to " *
-              "$(target_host(target)):$(job_root(target)) — nothing was submitted")
+    #
+    # A run whose every unit has landed will submit nothing, and one this process has already sent
+    # has nothing new to send (its descriptors are named by their content), so neither pays the
+    # round trip. Replaying a campaign's finished rounds is then a matter of local reads. A landed
+    # run is not marked sent: a unit retried later has its descriptors sent before it is submitted.
+    if !all(in(landed), keys) && !lock(() -> (String(root), run) in _DESC_SENT, _DESC_LOCK)
+        if sync_out!(target)
+            _descriptors_sent!(target, run)
+        elseif _reachable(target)
+            error("could not send the sweep's descriptors to " *
+                  "$(target_host(target)):$(job_root(target)) — nothing was submitted")
+        end
     end
 
     launcher = launcher_for(target)

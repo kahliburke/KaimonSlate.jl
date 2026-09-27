@@ -47,6 +47,14 @@ struct NoPollLauncher <: BL.Launcher end
 BL.poll(::NoPollLauncher, root::AbstractString, names) =
     error("the scheduler was asked, and the caller already had the answer")
 
+# Answers every name as pending and remembers what it was asked.
+struct AskLauncher <: BL.Launcher
+    asked::Vector{Vector{String}}
+end
+AskLauncher() = AskLauncher(Vector{String}[])
+BL.poll(l::AskLauncher, root::AbstractString, names) =
+    (push!(l.asked, sort!(String.(collect(names)))); Dict{String,Symbol}(String(n) => :pending for n in names))
+
 specfn(root, project = tempdir()) =
     (name, chunks) -> BL.JobSpec(name, chunks; root,
                                  project, payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
@@ -166,6 +174,41 @@ end
             p = BS.reconcile!(root, sweep, l, specfn(root))
             @test isempty(l.submitted)
             @test BS.is_complete(p) && BS.fraction(p) == 1.0
+        end
+    end
+
+    @testset "the scheduler is asked only about a sweep's unfinished chunks" begin
+        # A store keeps every submission it made, and a campaign adds a sweep a round, so asking
+        # about all of them grows with the store. A finished chunk's state does not depend on the
+        # scheduler: a settled sweep asks nothing, and one in flight asks about its own work.
+        mktempdir() do root
+            a, ca = mksweep(root; sweep = "swa")
+            b, cb = mksweep(root; sweep = "swb")
+            for s in (a, b); BS.reconcile!(root, s, FakeLauncher(), specfn(root); failure_policy = NOPROBE); end
+            for c in ca; SlateTask.run_chunk(root, c); end
+            l = AskLauncher()
+            @test BS.is_complete(BS.plan(root, a; launcher = l))
+            @test isempty(l.asked)
+            p = BS.plan(root, b; launcher = l)
+            want = sort!([n for (n, cs) in BS.known_submissions(root) if any(in(cb), cs)])
+            @test only(l.asked) == want && length(BS.known_submissions(root)) > length(want)
+            @test all(==(:pending), values(p.chunk_state))
+        end
+    end
+
+    @testset "a sweep's rows are read from the chunks holding its units" begin
+        mktempdir() do root
+            a, ca = mksweep(root; sweep = "swa")
+            b, cb = mksweep(root; sweep = "swb")
+            for c in [ca; cb]; SlateTask.run_chunk(root, c); end
+            ka = ["swa_s$i" for i in 1:6]
+            @test BS.chunks_holding(root, ka) == Set(ca)
+            @test BS.chunks_holding(root, ["swa_s1", "not a key"]) == Set([ca[1]])
+            SlateTask.write_event!(root, ca[1], Dict{String,Any}[]; dropped = ["swa_s2"])
+            @test isempty(BS.chunks_holding(root, ["swa_s2"]))
+            rows = Sweep._rows(root, collect(1:6), ka, a)
+            @test [r.status for r in rows] == ["ok", "", "ok", "ok", "ok", "ok"]
+            @test [r.record for r in rows if r.status == "ok"] == [2, 6, 8, 10, 12]
         end
     end
 
@@ -792,6 +835,7 @@ end
             full = Sweep.@sweep(Sweep.paramgrid(x = 1:6), t; submit = false) do p; p.x * 10; end
             @test full.run != pilot.run                       # a different request…
             @test BS.plan(root, full.run).shards_done == 2    # …over results it already shares
+            @test count(row -> row.status == "ok", getfield(full, :rows)) == 2   # records and all
 
             ran = skipped = 0
             for c in BS.sweep_chunks(root, full.run)
