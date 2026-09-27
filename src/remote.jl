@@ -2156,9 +2156,9 @@ function preflight_remote(host::AbstractString; transport::Symbol = :tunnel, on_
     # got. Reported here so configuring a remote can ask for a walltime and a partition when those
     # are real questions, and stay quiet when they are not.
     _pfstep!(steps, "Scheduler", on_step) do
-        h = try; _detect_scheduler(host); catch; nothing; end
+        h = try; Sweep.detect_scheduler(host); catch; nothing; end
         h === nothing && return ("warn", "could not ask $host what it runs — treating it as a plain machine")
-        SD = SchedulerDetect
+        SD = Sweep.SchedulerDetect
         SD.is_cluster(h) || return ("skip", "no scheduler — an ordinary host, so a worker runs here directly")
         # Every scheduler found, not just the first: a host CAN have both, and picking one here
         # would be deciding something that belongs to whoever configures the region. What this
@@ -3945,8 +3945,8 @@ may sit behind a `module load` that a probe cannot see.
 """
 function region_scheduler(r::Region)
     r.scheduler === :auto || return r.scheduler
-    h = try; _detect_scheduler(r.host); catch; nothing; end
-    return h === nothing ? :none : SchedulerDetect.resolve(h, :auto)
+    h = try; Sweep.detect_scheduler(r.host); catch; nothing; end
+    return h === nothing ? :none : Sweep.SchedulerDetect.resolve(h, :auto)
 end
 
 """
