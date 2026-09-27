@@ -609,8 +609,8 @@ function _live_replay_ids(nb::LiveNotebook)
 end
 
 function _replay_sweep_assets(nb::LiveNotebook; stride::Integer = 1, strides = nothing)
-    nb.kernel isa ReportEngine.GateKernel ||
-        return (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}(), Dict{String,Any}())
+    none() = (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}(), Dict{String,Any}(), Dict{String,Any}[])
+    nb.kernel isa ReportEngine.GateKernel || return none()
     live = _live_replay_ids(nb)   # drop marks whose cell is gone (see below) before paying to sweep them
     # A sweep that fails must not take the whole export down — the page is still worth having with its
     # controls frozen. But it must not vanish either: swallowing this silently produces an export that
@@ -621,14 +621,24 @@ function _replay_sweep_assets(nb::LiveNotebook; stride::Integer = 1, strides = n
         @warn "@replay sweeps failed — exporting with controls frozen" exception = (e, catch_backtrace())
         nothing
     end
-    (got isa AbstractDict) ||
-        return (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}(), Dict{String,Any}())
+    (got isa AbstractDict) || return none()
     _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
     assets = Tuple{Dict{String,Any},Vector{UInt8}}[]
     table = Dict{String,Any}()
     rows = Dict{String,Any}()
+    # Marks whose sweep raised: their controls export frozen, and the export says which and why. The
+    # reason is otherwise only in the worker's log, which whoever runs the export never sees.
+    frozen = Dict{String,Any}[]
     for (id, r) in got
         r isa AbstractDict || continue
+        err = _g(r, "error", nothing)
+        if err !== nothing
+            rec = Dict{String,Any}("control" => String(_g(r, "control", "")), "cell" => String(_g(r, "cell", "")),
+                                   "error" => String(err))
+            @warn "@replay: `$(rec["control"])` exports frozen: its sweep failed" cell = rec["cell"] reason = rec["error"]
+            push!(frozen, rec)
+            continue
+        end
         # Prose carries its payload INLINE — a handful of short strings — so it has no asset to
         # register and must be taken before the "no bytes, nothing shipped" skip below.
         if String(_g(r, "target", "")) == "prose"
@@ -667,7 +677,7 @@ function _replay_sweep_assets(nb::LiveNotebook; stride::Integer = 1, strides = n
                                                 "cols" => _g(r, "cols", Any[]))
         end
     end
-    return (assets, table, rows)
+    return (assets, table, rows, frozen)
 end
 
 # ── `@bind` controls in a static export ──────────────────────────────────────────────────────────────
@@ -2821,6 +2831,7 @@ mutable struct _ExportCtx
     replay_assets::Any
     replay_table::Any
     replay_rows::Any
+    replay_frozen::Vector{Dict{String,Any}}   # marks whose sweep failed: (control, cell, error)
     mediareg::Vector{Tuple{String,String,String}}
     media::Any                            # `mediareg` when media is hoisted (standalone), else `nothing`
     tablemarks::Vector{Dict{String,Any}}
@@ -2847,7 +2858,7 @@ function _export_ctx(nb::LiveNotebook; inline::Bool, show_source::Bool = true, o
     # that connection lives, so it is composed into a sweep HERE, before the registry is read. Keyed
     # `<cell>#<n>` — the writer looks each table spec up as it emits it.
     chain_marks = _register_chain_sweeps!(nb)
-    replay_assets, replay_table, replay_rows = _replay_sweep_assets(nb; stride = replay_stride,
+    replay_assets, replay_table, replay_rows, replay_frozen = _replay_sweep_assets(nb; stride = replay_stride,
                                                                    strides = replay_strides)
     # Author-embedded video/audio hoisted out of the body (key, mime, base64) → the blob registry
     # emitted with the trailing scripts. Standalone only: a published page keeps its sibling file.
@@ -2876,7 +2887,7 @@ function _export_ctx(nb::LiveNotebook; inline::Bool, show_source::Bool = true, o
     # rendering it can't find the spec in its own `binds`.
     return _ExportCtx(nb, inline, show_source, outputs, override, String(palette), fm.titlecell,
                       citectx, citekeys, figidx, rw, chain_marks, replay_assets, replay_table,
-                      replay_rows, mediareg, media, Dict{String,Any}[], Tuple{String,String}[],
+                      replay_rows, replay_frozen, mediareg, media, Dict{String,Any}[], Tuple{String,String}[],
                       Dict{String,String}(), _bind_index(nb.report.cells),
                       _surfaced_names(nb.report.cells), String(idprefix))
 end

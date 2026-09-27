@@ -1715,8 +1715,14 @@ end
 # position becomes a points × coordinates matrix, which stacks like any other numeric array, and the
 # page reads a two-dimensional slice back as rows: the same list of points.
 function _replay_points_matrix(s)
-    (s isa AbstractVector && !isempty(s) &&
-     all(p -> (p isa AbstractVector || p isa Tuple) && !isempty(p) && all(x -> x isa Real, p), s)) || return s
+    (s isa AbstractVector && !isempty(s) && all(p -> (p isa AbstractVector || p isa Tuple) && !isempty(p), s)) ||
+        return s
+    for p in s, x in p
+        x isa Real || throw(ArgumentError(
+            "a point in a `@replay` series has a $(typeof(x)) coordinate ($(repr(x))), and a sweep can " *
+            "only ship numbers. Against a category axis, give the category's index, or give the values " *
+            "alone in the axis's order; against a time axis, give milliseconds since 1970."))
+    end
     n = length(first(s))
     all(p -> length(p) == n, s) || return s
     return [s[i][j] for i in eachindex(s), j in 1:n]

@@ -245,7 +245,8 @@ function _write_doc_bundle!(out::AbstractString, nb::LiveNotebook; light, dark, 
     rendered = Dict{String,Any}("at" => string(Dates.now(Dates.UTC), "Z"), "julia" => string(VERSION),
                                 "kernel" => _doc_kernel_kind(nb),
                                 "errors" => [c.id for c in nb.report.cells
-                                             if c.output !== nothing && c.output.exception !== nothing])
+                                             if c.output !== nothing && c.output.exception !== nothing],
+                                "frozen" => ctx.replay_frozen)
     merge!(rendered, Dict{String,Any}(String(k) => v for (k, v) in render_info))
     manifest = Dict{String,Any}(
         "schema" => DOC_BUNDLE_SCHEMA,

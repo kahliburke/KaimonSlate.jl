@@ -162,9 +162,19 @@ function _render_via_hub(path::AbstractString, dir::AbstractString; light, dark,
             error("render_doc_bundle: $(basename(path)): $(get(man, "error", "the hub could not write the bundle"))")
         errs = get(get(man, "rendered", Dict()), "errors", Any[])
         isempty(errs) || @warn "render_doc_bundle: cells raised errors; their error output is in the bundle" notebook = basename(path) cells = errs
+        _warn_frozen(man, path)
         @info "render_doc_bundle: wrote $(basename(dir))" notebook = basename(path) cells = length(get(man, "cells", Any[]))
         return man
     finally
         wasopen || try; _hub_post("/api/close", Dict("path" => path)); catch; end
+    end
+end
+
+# A control whose `@replay` sweep failed ships frozen, and the docs build is where its author will
+# see that, so each one is named with the reason.
+function _warn_frozen(man, path)
+    for f in get(get(man, "rendered", Dict()), "frozen", Any[])
+        f isa AbstractDict || continue
+        @warn "render_doc_bundle: a control exports frozen, its @replay sweep failed" notebook = basename(path) control = get(f, "control", "") cell = get(f, "cell", "") reason = get(f, "error", "")
     end
 end

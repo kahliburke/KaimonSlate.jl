@@ -214,6 +214,9 @@ const RE = ReportEngine
         @test RE._replay_points_matrix([(0, 1), (2, 3)]) == [0 1; 2 3]
         @test RE._replay_points_matrix([1.0, 2.0]) == [1.0, 2.0]                 # flat: unchanged
         @test RE._replay_points_matrix([[0.0, 1.0], [2.0]]) == [[0.0, 1.0], [2.0]] # ragged: left for the stacker to refuse
+        # A text coordinate (a category name, a date string) cannot ship; the error says what to give.
+        err = try; RE._replay_points_matrix([["1950-51", 6.5], ["1951-52", 6.2]]); nothing; catch e; e; end
+        @test err isa ArgumentError && occursin("category's index", err.msg) && occursin("\"1950-51\"", err.msg)
         stacked = RE.replay_stack(map(RE._replay_points_matrix, [[[0.0, 1.0], [1.0, 2.0]], [[0.0, 3.0], [1.0, 4.0]]]))
         @test size(stacked) == (2, 2, 2) && stacked[:, :, 2] == [0.0 3.0; 1.0 4.0]
     end
