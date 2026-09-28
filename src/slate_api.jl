@@ -861,7 +861,11 @@ See also `save_asset`, `FileUpload`."""),
         cell just works, and editing it re-keys the sweep. `setup = begin … end` still takes
         definitions written by hand, for anything with no cell behind it.
         `plot = rows -> echart(…)` draws the units that have landed, on the card's own poll, so the
-        chart fills as results arrive. See `paramgrid`, `SlurmTarget`, `LocalTarget`, `Sweep`.
+        chart fills as results arrive. Without it the card draws one itself when the grid has a shape
+        it knows: a line over a numeric axis, bars over a text axis, a line per category, grouped bars,
+        or a heatmap of two numeric axes, averaging over a replication axis (`seed`, `rep`, …). A unit
+        returning a named tuple shows one numeric field, with a selector on the card for the others.
+        `plot = false` turns it off. See `paramgrid`, `SlurmTarget`, `LocalTarget`, `Sweep`.
         `#%% job id=scan cluster=hpc walltime=04:00:00`
         `scan = @sweep(paramgrid(β = 0:0.1:2, seed = 1:50)) do p
              using MyPkg

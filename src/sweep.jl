@@ -3432,7 +3432,7 @@ end
 # character each. At a few thousand units that string is a few KB, which is cheap next to sending
 # structured rows for every unit.
 function status_payload(target::SweepTarget, run::AbstractString, params, keys;
-                        plot = nothing, advance::Bool = true)
+                        plot = nothing, advance::Bool = true, field::AbstractString = "")
     sync_in!(target)
     root = store_root(target)
     l = launcher_for(target)
@@ -3532,13 +3532,17 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
     # `nothing` here is an explicit null on the wire, which the card reads as "clear it".
     if plot !== false || p.shards_failed > 0
         rows = _rows(root, params, keys, run, source_of(target))
-        opt, err = plot === false ? (nothing, "") : _plot_option(plot, rows)
+        opt, err, fields, f = plot === false ? (nothing, "", String[], "") : _plot_option(plot, rows; field)
         out["chart"] = opt
         out["charterr"] = err
+        out["chartfields"] = fields
+        out["chartfield"] = f
         out["fails"] = _fails_html(rows)
     else
         out["chart"] = nothing
         out["charterr"] = ""
+        out["chartfields"] = String[]
+        out["chartfield"] = ""
         out["fails"] = ""
     end
     return out
@@ -3570,88 +3574,181 @@ const _AUTO_PLOT_MAX = 2000
 # single hue, low end 2.66:1.)
 const _AUTO_HEAT_COLORS = ["#1c5cab", "#2a78d6", "#5598e7", "#86b6ef", "#b7d3f6"]
 
-# The grid axes that are numeric AND actually vary, in grid order.
+# A grid axis that repeats the same experiment (a seed) is averaged over rather than drawn: the picture
+# is of the other axes, and the spread across seeds is noise to it. Recognised by name.
+const _REPLICATION_AXES = Set([:seed, :seeds, :rep, :reps, :replicate, :replication, :repeat,
+                               :trial, :trials, :run, :runs, :sample, :draw])
+# A text axis becomes a category axis up to this many distinct values; past it no chart is drawn.
+const _AUTO_CATEGORIES_MAX = 24
+
+# The grid axes that actually vary, in grid order: each drawn as `:numeric` or `:category`, or among
+# the replication axes averaged over. `nothing` when the grid has no common named shape.
 function _auto_axes(rows)
-    isempty(rows) && return Symbol[]
+    isempty(rows) && return nothing
     p1 = rows[1].params
-    p1 isa NamedTuple || return Symbol[]
-    found = Symbol[]
+    p1 isa NamedTuple || return nothing
+    drawn = Tuple{Symbol,Symbol}[]
+    reps = Symbol[]
     for k in keys(p1)
         vals = Any[]
         for r in rows
-            hasproperty(r.params, k) || return Symbol[]
+            hasproperty(r.params, k) || return nothing
             push!(vals, getproperty(r.params, k))
         end
-        all(v -> v isa Real, vals) || continue
-        length(unique(vals)) > 1 && push!(found, k)
+        n = length(unique(vals))
+        n > 1 || continue
+        if all(v -> v isa Real && !(v isa Bool), vals)
+            k in _REPLICATION_AXES ? push!(reps, k) : push!(drawn, (k, :numeric))
+        elseif all(v -> v isa Union{AbstractString,Symbol,Bool}, vals) && n <= _AUTO_CATEGORIES_MAX
+            push!(drawn, (k, :category))
+        else
+            return nothing
+        end
     end
-    return found
+    return (drawn, reps)
 end
 
-# The one numeric field to plot: a bare number is itself; a grouped record plots only when exactly
-# ONE of its fields is numeric, because with several, which one is the author's business.
-function _auto_field(landed)
-    all(r -> r.summary isa Real, landed) && return (true, nothing)
+# The numeric fields a unit's record offers, in its own order; `[nothing]` for a bare number.
+function _auto_fields(landed)
+    all(r -> r.summary isa Real && !(r.summary isa Bool), landed) && return Any[nothing]
     s1 = landed[1].summary
-    s1 isa NamedTuple || return (false, nothing)
-    nums = [k for k in keys(s1) if getproperty(s1, k) isa Real]
-    length(nums) == 1 || return (false, nothing)
-    f = nums[1]
-    all(r -> r.summary isa NamedTuple && hasproperty(r.summary, f) &&
-             getproperty(r.summary, f) isa Real, landed) || return (false, nothing)
-    return (true, f)
+    s1 isa NamedTuple || return Any[]
+    num(v) = v isa Real && !(v isa Bool)
+    return Any[k for k in keys(s1) if num(getproperty(s1, k)) &&
+               all(r -> r.summary isa NamedTuple && hasproperty(r.summary, k) && num(getproperty(r.summary, k)), landed)]
 end
 
-function _auto_plot(rows)
-    (isempty(rows) || length(rows) > _AUTO_PLOT_MAX) && return nothing
-    axes = _auto_axes(rows)
-    length(axes) in (1, 2) || return nothing
+"""
+    _auto_plot(rows; field = "") -> (option | nothing, fields, field)
+
+The chart a sweep's card draws without being asked. The grid's varying axes decide its shape: one
+numeric axis is a line, one text axis bars, a numeric and a text axis a line per category, two text
+axes grouped bars, two numeric axes a heatmap. An axis repeating the experiment (`seed`, `rep`, …) is
+averaged over, and the value axis says so. A unit returning a number plots it; one returning a named
+tuple plots one of its numeric fields, `field` or else the first whose values vary, and `fields` lists them all
+so the card can offer the choice. More than two axes left to draw, or a grid of no named shape, draws nothing.
+"""
+function _auto_plot(rows; field::AbstractString = "")
+    none = (nothing, String[], "")
+    (isempty(rows) || length(rows) > _AUTO_PLOT_MAX) && return none
+    ax = _auto_axes(rows)
+    ax === nothing && return none
+    drawn, reps = ax
+    length(drawn) in (1, 2) || return none
     landed = [r for r in rows if r.status == "ok"]
-    isempty(landed) && return nothing
-    okf, field = _auto_field(landed)
-    okf || return nothing
-    zof(r) = r.status != "ok" ? nothing :
-             field === nothing ? r.summary : getproperty(r.summary, field)
-    length(axes) == 2 && return _auto_heatmap(rows, axes, field, zof)
-    ax = axes[1]
-    yof = zof
-    # `nothing` for a unit that has not reported: the axis is then fixed from the first frame and the
-    # line breaks at the real gaps, so the picture only gains detail instead of changing shape.
-    return Dict{String,Any}(
-        "backgroundColor" => "transparent", "animation" => false,
-        # `containLabel` rather than fixed margins: this chart is drawn for values nobody has seen
-        # yet, so no hardcoded left inset can be right for both `0.5` and `200,000` — the wide one
-        # gets its first digit clipped. Axis NAMES sit in the middle of their axis for the same
-        # reason: at the end, a name runs off the edge of the plot area it labels.
-        # Same reason as the heatmap below: `containLabel` covers labels, not the axis name.
-        "grid"    => Dict("left" => 10, "right" => 18, "top" => 24, "bottom" => 26,
-                          "containLabel" => true),
-        "tooltip" => Dict("trigger" => "axis"),
-        "xAxis"   => Dict("type" => "value", "name" => String(ax),
-                          "nameLocation" => "middle", "nameGap" => 26),
-        "yAxis"   => Dict("type" => "value", "name" => field === nothing ? "" : String(field),
-                          "nameLocation" => "middle", "nameGap" => 52),
-        "series"  => [Dict("type" => "line", "showSymbol" => true, "symbolSize" => 4,
-                           "connectNulls" => false,
-                           "data" => [[getproperty(r.params, ax), yof(r)] for r in rows])])
+    isempty(landed) && return none
+    fields = _auto_fields(landed)
+    isempty(fields) && return none
+    names = String[f === nothing ? "" : String(f) for f in fields]
+    # The field asked for, or the first that varies across what has landed: a record's fields come
+    # back from the store in no particular order, and a constant field (a budget) makes a flat chart.
+    fval(x, r) = x === nothing ? r.summary : getproperty(r.summary, x)
+    varies(x) = length(unique(fval(x, r) for r in landed)) > 1
+    f = something(findfirst(==(field), names), findfirst(varies, fields), 1)
+    fsym = fields[f]
+    zof(r) = r.status != "ok" ? nothing : fsym === nothing ? r.summary : getproperty(r.summary, fsym)
+    label = (fsym === nothing ? "" : String(fsym)) *
+            (isempty(reps) ? "" : string(isempty(names[f]) ? "" : " ", "(mean over ", join(String.(reps), ", "), ")"))
+    fieldnames = fsym === nothing ? String[] : names
+    # One kind of chart for the grid as it is, unaveraged and with its holes, when a single numeric
+    # axis is all there is: the line keeps its full axis from the first frame and breaks at the gaps.
+    if length(drawn) == 1 && drawn[1][2] === :numeric && isempty(reps)
+        k = drawn[1][1]
+        return (_auto_line(Dict(k => [[getproperty(r.params, k), zof(r)] for r in rows]), String(k), label, false),
+                fieldnames, names[f])
+    end
+    # Otherwise the drawn axes' values, each with the mean of what has landed there.
+    groups = Dict{Tuple,Vector{Float64}}()
+    order = Tuple[]
+    for r in rows
+        key = Tuple(getproperty(r.params, a) for (a, _) in drawn)
+        haskey(groups, key) || (groups[key] = Float64[]; push!(order, key))
+        z = zof(r)
+        z === nothing || push!(groups[key], Float64(z))
+    end
+    mean_(v) = isempty(v) ? nothing : sum(v) / length(v)
+    vals(i) = unique([k[i] for k in order])
+    opt = if length(drawn) == 1
+        # One text axis: a bar a category.
+        a = drawn[1][1]
+        cats = vals(1)
+        _auto_bars(cats, [("", [mean_(groups[(c,)]) for c in cats])], String(a), label)
+    elseif drawn[1][2] === :numeric && drawn[2][2] === :numeric
+        _auto_heatmap([(k[1], k[2], mean_(groups[k])) for k in order], String(drawn[1][1]), String(drawn[2][1]), label)
+    elseif any(d -> d[2] === :numeric, drawn)
+        # A numeric and a text axis: a line a category, over the numeric one.
+        ni = drawn[1][2] === :numeric ? 1 : 2; ci = 3 - ni
+        xs = sort!(vals(ni))
+        series = Dict{Any,Any}()
+        for c in vals(ci)
+            series[string(c)] = [[x, mean_(get(groups, ni == 1 ? (x, c) : (c, x), Float64[]))] for x in xs]
+        end
+        _auto_line(series, String(drawn[ni][1]), label, true)
+    else
+        # Two text axes: grouped bars, the axis with more values along the bottom.
+        xi = length(vals(1)) >= length(vals(2)) ? 1 : 2; si = 3 - xi
+        xs = vals(xi)
+        _auto_bars(xs, [(string(g), [mean_(get(groups, xi == 1 ? (x, g) : (g, x), Float64[])) for x in xs]) for g in vals(si)],
+                   String(drawn[xi][1]), label)
+    end
+    return (opt, fieldnames, names[f])
 end
 
-# Two varying axes: the grid itself, coloured by the reported figure. Categorical axes over the
-# SORTED DISTINCT values of each, so the cells are evenly spaced however the axis is distributed —
-# a log-spaced sweep is the normal case and a value axis would crowd every point but the last into
-# one corner. A unit that has not reported contributes no cell, so the picture fills in rather than
-# changing shape, and the empty squares are where the work still is.
-function _auto_heatmap(rows, axes, field, zof)
-    xs = sort!(unique(Real[getproperty(r.params, axes[1]) for r in rows]))
-    ys = sort!(unique(Real[getproperty(r.params, axes[2]) for r in rows]))
+# `containLabel` rather than fixed margins: this chart is drawn for values nobody has seen yet, so no
+# hardcoded left inset can be right for both `0.5` and `200,000`. Axis names sit in the middle of their
+# axis for the same reason: at the end, a name runs off the edge of the plot area it labels.
+_auto_grid(legend::Bool) = Dict("left" => 10, "right" => 18, "top" => legend ? 52 : 34, "bottom" => 26, "containLabel" => true)
+# The value axis's name sits above the axis, left-aligned: beside it, it would need room past tick
+# labels whose width nobody knows before the values arrive, and `containLabel` does not reserve it.
+_auto_value_axis(name) = Dict("type" => "value", "name" => name, "nameLocation" => "end", "nameGap" => 12,
+                              "nameTextStyle" => Dict("align" => "left"))
+_auto_legend() = Dict("top" => 0, "type" => "scroll", "textStyle" => Dict("color" => "#9aa0b8"))
+
+# Lines over a numeric axis, one a key of `series` (a single unnamed one draws no legend). `nothing` for
+# a point that has not reported, so the axis is fixed from the first frame and the line breaks at gaps.
+function _auto_line(series::AbstractDict, xname, yname, legend::Bool)
+    names = sort!(collect(keys(series)); by = string)
+    out = Dict{String,Any}(
+        "backgroundColor" => "transparent", "animation" => false,
+        "grid"    => _auto_grid(legend),
+        "tooltip" => Dict("trigger" => "axis"),
+        "xAxis"   => Dict("type" => "value", "name" => xname, "nameLocation" => "middle", "nameGap" => 26, "scale" => true),
+        "yAxis"   => _auto_value_axis(yname),
+        "series"  => [Dict{String,Any}("type" => "line", "name" => string(n), "showSymbol" => true, "symbolSize" => 4,
+                                       "connectNulls" => false, "data" => series[n]) for n in names])
+    legend && (out["legend"] = _auto_legend())
+    return out
+end
+
+# Bars over categories: `series` is `[(name, values)]`, several of them grouped side by side.
+function _auto_bars(cats, series, xname, yname)
+    legend = length(series) > 1
+    out = Dict{String,Any}(
+        "backgroundColor" => "transparent", "animation" => false,
+        "grid"    => _auto_grid(legend),
+        "tooltip" => Dict("trigger" => "axis", "axisPointer" => Dict("type" => "shadow")),
+        "xAxis"   => Dict("type" => "category", "data" => [string(c) for c in cats], "name" => xname,
+                          "nameLocation" => "middle", "nameGap" => 26),
+        "yAxis"   => _auto_value_axis(yname),
+        "series"  => [Dict{String,Any}("type" => "bar", "name" => n, "data" => v) for (n, v) in series])
+    legend && (out["legend"] = _auto_legend())
+    return out
+end
+
+# Two numeric axes: the grid itself, coloured by the reported figure. Category axes over the SORTED
+# DISTINCT values of each, so the cells are evenly spaced however the axis is distributed: a log-spaced
+# sweep is the normal case, and a value axis would crowd every point but the last into one corner. A
+# point that has not reported contributes no cell, so the picture fills in rather than changing shape.
+function _auto_heatmap(cells, xname, yname, zname)
+    xs = sort!(unique(Real[c[1] for c in cells]))
+    ys = sort!(unique(Real[c[2] for c in cells]))
     xi = Dict(v => i - 1 for (i, v) in enumerate(xs))
     yi = Dict(v => i - 1 for (i, v) in enumerate(ys))
     data = Any[]
     lo = Inf; hi = -Inf
-    for r in rows
-        z = zof(r)
+    for (x, y, z) in cells
         z === nothing && continue
-        push!(data, Any[xi[getproperty(r.params, axes[1])], yi[getproperty(r.params, axes[2])], z])
+        push!(data, Any[xi[x], yi[y], z])
         lo = min(lo, z); hi = max(hi, z)
     end
     isempty(data) && return nothing
@@ -3663,18 +3760,19 @@ function _auto_heatmap(rows, axes, field, zof)
         # `containLabel` reserves room for axis LABELS and not for axis NAMES, so a `nameGap` that
         # clears the labels then runs off the bottom of the container. The gap below is what the
         # name itself needs, measured from the outside of the labels.
-        "grid"    => Dict("left" => 10, "right" => 64, "top" => 24, "bottom" => 26,
+        "grid"    => Dict("left" => 10, "right" => 64, "top" => 34, "bottom" => 26,
                           "containLabel" => true),
         "tooltip" => Dict("position" => "top"),
-        "xAxis"   => Dict("type" => "category", "data" => xs, "name" => String(axes[1]),
+        "xAxis"   => Dict("type" => "category", "data" => xs, "name" => xname,
                           "nameLocation" => "middle", "nameGap" => 26,
                           "splitArea" => Dict("show" => false)),
-        "yAxis"   => Dict("type" => "category", "data" => ys, "name" => String(axes[2]),
-                          "nameLocation" => "middle", "nameGap" => 52,
+        "yAxis"   => Dict("type" => "category", "data" => ys, "name" => yname,
+                          "nameLocation" => "end", "nameGap" => 12,
+                          "nameTextStyle" => Dict("align" => "left"),
                           "splitArea" => Dict("show" => false)),
         "visualMap" => Dict("min" => lo, "max" => hi, "calculable" => true,
                             "orient" => "vertical", "right" => 4, "top" => "middle",
-                            "text" => field === nothing ? nothing : [String(field), ""],
+                            "text" => isempty(zname) ? nothing : [zname, ""],
                             "textStyle" => Dict("color" => "#6a7090"),
                             "inRange" => Dict("color" => _AUTO_HEAT_COLORS)),
         "series"  => [Dict("type" => "heatmap", "progressive" => 0,
@@ -3691,20 +3789,25 @@ end
 #
 # A plot that throws must say so on the card: a silently blank chart during a long run is exactly
 # the "is it working?" ambiguity the fabric exists to remove, and it would be blamed on the sweep.
-function _plot_option(plot, rows)
-    plot === false && return nothing, ""       # explicitly no chart
-    plot === nothing && return _auto_plot(rows), ""
+# Returns `(option, error, fields, field)`: the numeric fields the automatic chart can show and the one
+# it shows, which the card offers as a choice (`field` asks for one).
+function _plot_option(plot, rows; field::AbstractString = "")
+    plot === false && return nothing, "", String[], ""       # explicitly no chart
+    if plot === nothing
+        opt, fields, f = _auto_plot(rows; field)
+        return opt, "", fields, f
+    end
     try
         v = Base.invokelatest(plot, rows)
-        v === nothing && return nothing, ""
+        v === nothing && return nothing, "", String[], ""
         # Duck-typed rather than depending on the host's `EChart`: this module is loaded into the
         # worker AND the engine, and it should not care which one owns that struct.
         opt = hasproperty(v, :option) ? getproperty(v, :option) : v
         opt isa AbstractDict || return nothing,
-            "plot returned a $(typeof(v)); it must return an echart(…) or an option Dict"
-        return opt, ""
+            "plot returned a $(typeof(v)); it must return an echart(…) or an option Dict", String[], ""
+        return opt, "", String[], ""
     catch e
-        return nothing, sprint(showerror, e)
+        return nothing, sprint(showerror, e), String[], ""
     end
 end
 
@@ -4203,7 +4306,16 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     # keeps filling after it. The host is emitted only when there is something to draw, so a sweep
     # with no plottable shape does not leave a hole in the card.
     if r.plot !== false
-        opt, perr = _plot_option(r.plot, getfield(r, :rows))
+        opt, perr, fields, f = _plot_option(r.plot, getfield(r, :rows))
+        # Which of the record's numeric fields the automatic chart shows, when it has several.
+        print(io, "<select data-sw='chartfield' title='the field the chart shows' style='",
+                  length(fields) > 1 ? "" : "display:none;",
+                  "margin-top:10px;font:inherit;font-size:11px;padding:2px 6px;border-radius:5px;",
+                  "border:1px solid var(--border,#2a2e40);background:transparent;color:var(--text,#d4d8e8)'>")
+        for x in fields
+            print(io, "<option value='", _esc(x), "'", x == f ? " selected" : "", ">", _esc(x), "</option>")
+        end
+        print(io, "</select>")
         # The host is always emitted but starts HIDDEN, because the automatic plot cannot know its
         # own shape until a unit has landed — and a poll that finally has something to draw needs
         # somewhere to draw it. `drawChart` reveals it on the first option; until then the card
@@ -4419,6 +4531,7 @@ function _live_script(io, r::ShardedResult)
           // only the card it was opened from.
           window.slateSweeps.report("$(id)", cell ? cell.dataset.cid : "", s, "$(doch)");
         }
+        syncFields(s);
         if (s.chart) drawChart(s.chart);
         else if (s.chart === null) clearChart();
         var ce = root.querySelector('[data-sw="charterr"]');
@@ -4503,10 +4616,28 @@ function _live_script(io, r::ShardedResult)
           if (n) n.textContent = s.blocked ? s.blocked : "finished";
         }
       }
+      // The field the automatic chart shows, chosen on the card; asked for on every poll.
+      var field = "";
+      var fsel = root.querySelector('[data-sw="chartfield"]');
+      if (fsel) {
+        field = fsel.value || "";
+        fsel.addEventListener('change', function(){ field = fsel.value; chartSig = ""; tick(); });
+      }
+      function syncFields(s){
+        if (!fsel || !s.chartfields) return;
+        var sig = s.chartfields.join(",");
+        if (fsel.dataset.sig !== sig) {
+          fsel.dataset.sig = sig;
+          fsel.innerHTML = "";
+          s.chartfields.forEach(function(f){ var o = document.createElement("option"); o.value = f; o.textContent = f; fsel.appendChild(o); });
+        }
+        fsel.value = s.chartfield || "";
+        fsel.style.display = s.chartfields.length > 1 ? "" : "none";
+      }
       function tick(){
         if (!document.body.contains(root)) { clearInterval(timer); return; }
         if (!window.slateCall) return;
-        window.slateCall("$(ch)", {}).then(paint).catch(function(){ clearInterval(timer); });
+        window.slateCall("$(ch)", { field: field }).then(paint).catch(function(){ clearInterval(timer); });
       }
 
       // Buttons. Disabled while the call is in flight so an impatient second click cannot cancel
@@ -4932,7 +5063,8 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
         # be submitting this sweep's outstanding chunks by polling it.
         register(status_channel(run),
                  a -> status_payload(target, run, ps, ks; plot,
-                                     advance = get(a, :advance, true) !== false))
+                                     advance = get(a, :advance, true) !== false,
+                                     field = String(something(get(a, :field, ""), ""))))
         register(action_channel(run),
                  a -> handle_action(target, run, ps, ks, String(get(a, :action, ""));
                                     plot, notify = note,

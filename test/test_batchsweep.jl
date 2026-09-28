@@ -2374,12 +2374,12 @@ end
             @test Sweep.fetch(a, dest) == dest && filesize(dest) == 4096   # deliberately, one file
             @test length(Sweep.bytes(a)) == 4096
 
-            # A grouped summary auto-plots only when ONE field is numeric; `loss` and `steps` both
-            # are, so it declines rather than choosing for the author.
-            # …and it says so with a null rather than an absent key, so the card can tell "no
-            # chart" from "no news" and clear one it had already drawn.
-            @test Sweep.status_payload(t, r.run, r.params, r.keys;
-                                       advance = false)["chart"] === nothing
+            # A grouped summary with several numeric fields draws the first, and names them all so
+            # the card can offer the others; a Bool (`converged`) is not one of them.
+            s1 = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false)
+            @test sort(s1["chartfields"]) == ["loss", "steps"] && s1["chartfield"] == "loss"   # `steps` is constant
+            s2 = Sweep.status_payload(t, r.run, r.params, r.keys; advance = false, field = "steps")
+            @test s2["chartfield"] == "steps" && s2["chart"]["yAxis"]["name"] == "steps"
         end
     end
 
@@ -2641,6 +2641,44 @@ end
             # `plot = false` says the same thing, rather than omitting the key.
             s3 = Sweep.status_payload(t, r.run, r.params, r.keys; plot = false, advance = false)
             @test haskey(s3, "chart") && s3["chart"] === nothing
+        end
+    end
+
+    @testset "the chart you get without asking averages seeds and draws text axes as categories" begin
+        mktempdir() do root
+            t = Sweep.LocalTarget(; root, project = tempdir(), chunk = 40,
+                                  payload = joinpath(@__DIR__, "..", "src", "slatetask.jl"))
+            chart(r; kw...) = (for c in BS.sweep_chunks(root, r.run); SlateTask.run_chunk(root, c); end;
+                               Sweep.status_payload(t, r.run, r.params, r.keys; advance = false, kw...))
+            # Two text axes and a seed: grouped bars of the mean over seeds, the axis with more
+            # values along the bottom, the other as the series.
+            grid = [(; problem, method, seed) for problem in ["a", "b"] for method in ["x", "y", "z"] for seed in 1:2]
+            r = Sweep.@sweep(grid, t; submit = false) do p
+                (; score = (p.method == "x" ? 1.0 : 2.0) + (p.problem == "b" ? 10.0 : 0.0) + p.seed / 10, n = 3)
+            end
+            s = chart(r)
+            o = s["chart"]
+            @test all(x -> x["type"] == "bar", o["series"]) && o["xAxis"]["data"] == ["x", "y", "z"]
+            @test sort([x["name"] for x in o["series"]]) == ["a", "b"]
+            bars = Dict(x["name"] => x["data"] for x in o["series"])
+            @test bars["a"] ≈ [1.15, 2.15, 2.15] && bars["b"] ≈ [11.15, 12.15, 12.15]   # the mean over both seeds
+            # The field it shows is the first that varies (`n` is the same everywhere); both are offered.
+            @test o["yAxis"]["name"] == "score (mean over seed)" && sort(s["chartfields"]) == ["n", "score"]
+
+            # A numeric and a text axis: a line a category, over the numeric one.
+            r2 = Sweep.@sweep([(; lr, method) for lr in [0.1, 0.2] for method in ["x", "y"]], t; submit = false) do p
+                p.lr * (p.method == "x" ? 1 : 2)
+            end
+            o2 = chart(r2)["chart"]
+            @test all(x -> x["type"] == "line", o2["series"]) && o2["xAxis"]["name"] == "lr"
+            @test Dict(x["name"] => x["data"] for x in o2["series"])["y"] ≈ [[0.1, 0.2], [0.2, 0.4]]
+
+            # One text axis: a bar a category.
+            r3 = Sweep.@sweep([(; method) for method in ["x", "y"]], t; submit = false) do p
+                length(p.method) * 1.0
+            end
+            o3 = chart(r3)["chart"]
+            @test only(o3["series"])["type"] == "bar" && o3["xAxis"]["data"] == ["x", "y"]
         end
     end
 
