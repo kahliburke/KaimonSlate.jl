@@ -570,6 +570,7 @@ function run_chunk(root::AbstractString, chunk::AbstractString; force::Bool = fa
                   "add `data=auto` to the cell header."
         end
         ms = (time() - t0) * 1000
+        _flush_output()
         arts = _ARTIFACTS[]
         _ARTIFACTS[] = nothing
 
@@ -810,13 +811,30 @@ end
 # below, printed once, since a per-record date is ten characters of the same thing on every line.
 _log_clock() = Dates.format(Dates.now(), "HH:MM:SS.sss")
 
+# Redirected to a file, `stderr` is a buffered `IOStream`: records reach the file in bursts, or only
+# when the process exits, so a job's log reads empty while it runs. Each record is flushed as made.
+struct _FlushingLogger <: Logging.AbstractLogger
+    inner::Logging.AbstractLogger
+    io::IO
+end
+function Logging.handle_message(l::_FlushingLogger, args...; kw...)
+    Logging.handle_message(l.inner, args...; kw...)
+    try; flush(l.io); catch; end
+end
+Logging.shouldlog(l::_FlushingLogger, args...) = Logging.shouldlog(l.inner, args...)
+Logging.min_enabled_level(l::_FlushingLogger) = Logging.min_enabled_level(l.inner)
+Logging.catch_exceptions(l::_FlushingLogger) = Logging.catch_exceptions(l.inner)
+
+# What a unit printed itself, sent to the log file now rather than when the buffer fills.
+_flush_output() = (try; flush(stdout); flush(stderr); catch; end; nothing)
+
 function _task_logger(io::IO = stderr)
     # `:color => true` unconditionally: the stream IS a file, so nothing can detect a terminal here,
     # and the viewer renders the codes. `log_stat`-driven reading strips them for classification.
     # `Info`, not `Debug`: a floor of Debug enables debug logging in every package the unit loads,
     # and a job's output is already the largest thing it produces. A body that wants its own debug
     # records asks for them with its own `with_logger`.
-    return Logging.ConsoleLogger(IOContext(io, :color => true), Logging.Info;
+    return _FlushingLogger(Logging.ConsoleLogger(IOContext(io, :color => true), Logging.Info;
         meta_formatter = (lvl, _mod, _grp, _id, file, line) -> begin
             c = lvl < Logging.Info  ? :light_black :
                 lvl < Logging.Warn  ? :cyan :
@@ -824,7 +842,7 @@ function _task_logger(io::IO = stderr)
             name = lvl < Logging.Info ? "Debug" : lvl < Logging.Warn ? "Info" :
                    lvl < Logging.Error ? "Warning" : "Error"
             return c, "$(name) $(_log_clock()):", "@ $(_mod) $(basename(String(file))):$(line)"
-        end)
+        end), io)
 end
 
 """
@@ -843,6 +861,8 @@ function main(args = ARGS)
     # `failed` the ones that did not, so what was attempted is their sum — a chunk that skipped its
     # units (they were already in the store) attempted nothing and proves nothing either way.
     tried = 0; worked = 0
+    # Between records too, for a body that prints: whenever the unit yields.
+    flusher = Timer(_ -> _flush_output(), 2; interval = 2)
     Logging.with_logger(_task_logger()) do
         @info "task starting" at = Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS") host = gethostname() julia = string(VERSION) chunks = length(args) - 1
         # Several chunks per process, run one after another. A process is expensive (a whole Julia
@@ -860,6 +880,7 @@ function main(args = ARGS)
             end
         end
     end
+    close(flusher); _flush_output()
     # Nonzero when everything this process RAN failed. Individual failures stay a store fact — a
     # sweep is expected to have some — but a chunk where nothing worked is a failed chunk, and that
     # has to be visible as an exit status: it is the only thing a scheduler can read, and what lets

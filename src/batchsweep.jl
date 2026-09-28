@@ -601,11 +601,15 @@ function plan(root::AbstractString, sweep::AbstractString; launcher = nothing,
 
     cstate = Dict{String,Symbol}()
     to_submit = String[]
+    # A chunk reports as it starts (its first event), so one covered by a submission the scheduler
+    # has running, but not yet started, is waiting its turn: one of the few processes a local run
+    # keeps going, or an array element still queued behind the ones that are running.
+    begun = keys(fold(root).high)
     for c in chunks
         if get(chunk_done, c, false)
             cstate[c] = :done
         elseif haskey(live, c)
-            cstate[c] = live[c]
+            cstate[c] = live[c] === :running && !(c in begun) ? :pending : live[c]
         elseif cancelled
             cstate[c] = :cancelled
         elseif !isempty(blocked)

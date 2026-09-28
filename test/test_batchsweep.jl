@@ -773,9 +773,10 @@ end
         # A caller holding the answer hands it over, and the plan must then not ask at all — which
         # is what this launcher checks, by refusing.
         mktempdir() do root
-            sweep, _ = mksweep(root)
+            sweep, chunks = mksweep(root)
             BS.reconcile!(root, sweep, FakeLauncher(), specfn(root); failure_policy = NOPROBE)
             @test !isempty(BS.known_submissions(root))       # there IS something to ask about
+            for c in chunks; SlateTask.write_event!(root, c, Dict{String,Any}[]; total = 3, done = 0); end   # started
 
             name = first(keys(BS.known_submissions(root)))
             p = BS.plan(root, sweep; launcher = NoPollLauncher(),
@@ -789,6 +790,23 @@ end
             p2 = BS.reconcile!(root, sweep, NoPollLauncher(), specfn(root);
                                submit = false, job_state = Dict(name => :pending))
             @test all(==(:pending), values(p2.chunk_state))
+        end
+    end
+
+    @testset "a chunk runs once it has started; until then it waits its turn" begin
+        # One submission covers several chunks, and the scheduler reports it running as soon as any
+        # of them is: a local run keeps a few processes going, an array job runs some elements while
+        # the rest queue. A chunk reports as it starts, so the ones that have not are queued.
+        mktempdir() do root
+            sweep, chunks = mksweep(root; nchunk = 3)
+            l = FakeLauncher()
+            BS.reconcile!(root, sweep, l, specfn(root); failure_policy = NOPROBE)
+            for n in keys(l.live); l.live[n] = :running; end
+            SlateTask.write_event!(root, chunks[1], Dict{String,Any}[]; total = 3, done = 0)
+            p = BS.plan(root, sweep; launcher = l)
+            @test p.chunk_state[chunks[1]] === :running
+            @test p.chunk_state[chunks[2]] === :pending && p.chunk_state[chunks[3]] === :pending
+            @test Sweep._sched_counts(p) == (queued = 2, running = 1)
         end
     end
 
