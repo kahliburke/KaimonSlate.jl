@@ -674,7 +674,13 @@ class MemoCell extends Component {
     if ((p.live || {})[id] !== (next.live || {})[id]) return true;
     return false;
   }
-  render() { return html`<${Cell} ...${this.props} />`; }
+  // The `.cellslot` (`display: contents`) is the node that preact keeps in order under #nb. The live
+  // deck moves only the `.cell` inside it onto a slide, so a render that moves the slot does not
+  // take the cell off the slide (slides.js).
+  render() { return html`<div class="cellslot"><${Cell} ...${this.props} /></div>`; }
+  // A slide cell whose slot goes away (the cell was deleted, or preact mounted it again in a new
+  // slot) stays on the slide until slides.js settles it.
+  componentWillUnmount() { window._deckSettle && window._deckSettle(); }
 }
 
 function Notebook({ cells, selectedId, selSet, live, focusId, editingId, cone }) {
