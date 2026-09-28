@@ -1514,10 +1514,14 @@ function updateStates(state) { _publishState(state); window.loadScratch && windo
 // drawn — leaving that cell blank until its next change. A stamp is spent only where the payload
 // actually reaches the DOM.
 const _cellRev = {};
-function revIsNew(c) {
+// `out`, the cell's output element, is what decides a payload at the revision already applied: if the
+// element does not hold that output, it was replaced after the payload landed (a re-render that built
+// the cell's elements again) and the payload has to be drawn again. An OLDER revision stays stale.
+function revIsNew(c, out) {
   if (!c || typeof c.rev !== 'number') return true;   // a server without revs, or a synthetic payload
   const seen = _cellRev[c.id];
-  return seen === undefined || c.rev > seen;
+  if (seen === undefined || c.rev > seen) return true;
+  return c.rev === seen && !!out && out.__slateOut !== c.output;
 }
 function revMark(c) { if (c && typeof c.rev === 'number') _cellRev[c.id] = c.rev; }
 
