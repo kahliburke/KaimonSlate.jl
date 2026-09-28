@@ -271,16 +271,57 @@ end
 # eats backslash-escapes like `\,`), so we keep the TeX byte-for-byte and let the
 # browser render it. Placeholders are bare alphanumerics so markdown leaves them
 # untouched; the restored span keeps its `$`/`$$` delimiters for KaTeX.
-const _MATH_DISPLAY = r"\$\$(.+?)\$\$"s
-# Pandoc-style heuristic: the content must not start/end with whitespace, so prose dollar
-# amounts ("it cost $5 and $10") don't get swallowed as a math span (the candidate "5 and "
-# would have to end right before the second $, but it ends in a space — rejected).
-const _MATH_INLINE = r"\$(?!\s)([^\$\n]+?)(?<!\s)\$"
-# `\[…\]` / `\(…\)`. No whitespace heuristic is needed: unlike a bare `$`, these spellings do not
-# occur by accident in prose.
-const _MATH_BRACKET_DISPLAY = r"\\\[.+?\\\]"s
-const _MATH_BRACKET_INLINE = r"\\\(.+?\\\)"s
+#
+# Every renderer that reads markdown math (this one, doc bundles, Typst) splits the source with
+# `_md_segments`, so they agree on what is math. A bare `$…$` follows Pandoc's rule: the opening `$`
+# is not escaped and not followed by whitespace, the closing one is not preceded by whitespace and not
+# followed by a digit. Prose amounts ("$5 and $10", "$100k–$750k") stay prose. `\[…\]` and `\(…\)`
+# need no such rule: they do not occur by accident in prose.
+const _MD_SCAN = Regex(join((
+    # code, literal: a fenced block (to its closing fence or the end), or an inline span
+    raw"(?<code>^[ ]{0,3}(?<fence>`{3,}|~{3,})[^\n]*\n.*?(?:^[ ]{0,3}\k<fence>[`~]*[ \t]*$|\z)|(?<ticks>`+).+?(?<!`)\k<ticks>(?!`))",
+    # math; display forms first so a `$…$` cannot split a `$$…$$`
+    raw"(?<math>\\\[.+?\\\]|\$\$.+?\$\$|\\\(.+?\\\)|(?<!\\)\$(?!\s)[^\$\n]+?(?<!\s)\$(?!\d))",
+    # a dollar that is prose, escaped or not
+    raw"(?<dollar>\\?\$)"), "|"), "ms")
+
+"""
+    _md_segments(s) -> Vector{Pair{Symbol,String}}
+
+Markdown split into `:code` (fenced blocks and inline spans), `:math` (a span in any of Slate's four
+delimiters, delimiters included), `:dollar` (a `\$` or `\\\$` that is prose) and `:text`.
+"""
+function _md_segments(s::AbstractString)
+    s = String(s)
+    out = Pair{Symbol,String}[]; i = 1
+    for m in eachmatch(_MD_SCAN, s)
+        m.offset > i && push!(out, :text => s[i:prevind(s, m.offset)])
+        kind = m[:code] !== nothing ? :code : m[:math] !== nothing ? :math : :dollar
+        push!(out, kind => String(m.match))
+        i = m.offset + ncodeunits(m.match)
+    end
+    i <= ncodeunits(s) && push!(out, :text => s[i:end])
+    return out
+end
+
+"The TeX inside a `:math` segment, and whether it is display math."
+function _math_parts(m::AbstractString)
+    (startswith(m, "\$\$") || startswith(m, "\\[")) && return (chop(m; head = 2, tail = 2), true)
+    startswith(m, "\\(") && return (chop(m; head = 2, tail = 2), false)
+    return (chop(m; head = 1, tail = 1), false)
+end
+
 _math_token(i::Int) = "xslatemathx" * string(i; pad = 5) * "x"
+const _DOLLAR_TOKEN = "xslatedollarx"
+
+# A prose `$` goes out in an element of its own: KaTeX's auto-render pairs delimiters only within one
+# text node, so it cannot join two prose dollars into a formula. Inside a tag (an attribute value of
+# raw HTML) it is written bare.
+function _restore_dollars(html::AbstractString)
+    occursin(_DOLLAR_TOKEN, html) || return String(html)
+    html = replace(html, r"<[^<>]*>" => t -> replace(t, _DOLLAR_TOKEN => "\$"))
+    return replace(html, _DOLLAR_TOKEN => "<span class=\"dollar\">\$</span>")
+end
 
 # A string value's text/plain repr is quoted (`"c"`), but inside `{{ }}` interpolation — a
 # presentation context, like Julia's `$(…)` — we want the bare content (`c`). Lives in widgets.jl
@@ -410,16 +451,21 @@ function _md_html(src::AbstractString, interps = CellOutput[])
             push!(frags, "")
         end
     end
-    # math → placeholders (kept byte-for-byte for KaTeX).
+    # math and prose dollars → placeholders (math kept byte-for-byte for KaTeX). The LaTeX-bracket
+    # spellings are stashed too, even though KaTeX is configured for them: CommonMark reads `\(` / `\[`
+    # as escaped punctuation and drops the backslash, leaving KaTeX no delimiter to match.
     math = String[]
-    stash(m) = (push!(math, String(m)); _math_token(length(math)))
-    # The LaTeX-bracket spellings MUST be stashed too, even though KaTeX is configured for them:
-    # CommonMark reads `\(` / `\[` as escaped punctuation and drops the backslash, so by the time
-    # KaTeX ran there was no delimiter left to match and the maths rendered as literal text.
-    s = replace(tmpl, _MATH_BRACKET_DISPLAY => stash)   # \[…\] before \(…\), same reason as $$ first
-    s = replace(s, _MATH_BRACKET_INLINE => stash)
-    s = replace(s, _MATH_DISPLAY => stash)   # $$…$$ first, so $…$ can't split it
-    s = replace(s, _MATH_INLINE => stash)
+    b = IOBuffer()
+    for (kind, t) in _md_segments(tmpl)
+        if kind === :math
+            push!(math, t); print(b, _math_token(length(math)))
+        elseif kind === :dollar
+            print(b, _DOLLAR_TOKEN)
+        else
+            print(b, t)
+        end
+    end
+    s = String(take!(b))
     p = CommonMark.Parser()
     # Tables (GFM) and `!!! category "Title"` callouts — the latter is the syntax Julia authors
     # already write in docstrings and Documenter, and the category is free-form, so a notebook can
@@ -435,6 +481,7 @@ function _md_html(src::AbstractString, interps = CellOutput[])
         end
         html = replace(html, _math_token(i) => _esc(tex))           # raw TeX, escaped; KaTeX reads the text node
     end
+    html = _restore_dollars(html)
     # An interpolation that landed inside a TAG is part of an attribute, not prose — `![alt]({{ … }})`
     # is the ordinary case, and a title= or a width= are others. The fragment for a scalar is a
     # `<span>`, and writing that into an attribute value breaks the tag, so those positions take the

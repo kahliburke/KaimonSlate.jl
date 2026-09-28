@@ -1469,6 +1469,29 @@ end
     @test occursin(raw"<code>\(no\)</code>", h) # inline code keeps its text (KaTeX skips <code>)
 end
 
+# Prose dollar amounts are not math, on screen or in print. KaTeX's auto-render pairs any two `$` in
+# one text node, so a prose `$` goes out in its own element.
+@testset "prose dollars stay prose" begin
+    seg = KaimonSlate.ReportRender._md_segments
+    kinds(s) = [k for (k, _) in seg(s)]
+    @test :math ∉ kinds("it cost \$5 and \$10")
+    @test :math ∉ kinds("\$100k–\$750k per award")          # closing `$` before a digit
+    @test :math ∉ kinds(raw"escaped \$x\$ stays text")
+    @test seg("area \$a^2\$ here")[2] == (:math => "\$a^2\$")
+    @test seg("code `\$x\$` here")[2] == (:code => "`\$x\$`")
+    @test count(==(:dollar), kinds("from \$5 to \$10")) == 2
+
+    h = KaimonSlate.ReportRender._md_html("up to \$750k, then \$15M; math \$x^2\$.\n")
+    @test count("<span class=\"dollar\">\$</span>", h) == 2
+    @test occursin(raw"$x^2$", h)
+    @test !occursin("xslatedollarx", h)
+    h = KaimonSlate.ReportRender._md_html("<a title=\"\$5\">link</a> for \$5\n")
+    @test occursin("title=\"\$5\"", h)                     # bare inside a tag
+
+    f = NS._normalize_math_delims
+    @test f("from \$100k–\$750k and \\(z\\)") == raw"from \$100k–\$750k and $z$"
+end
+
 # ── PDF export: admonitions ───────────────────────────────────────────────────────────────────────
 # `cmarker` (the Typst markdown renderer) is plain CommonMark and has no `!!!` rule, so the marker
 # would print literally and the four-space body would typeset as a CODE BLOCK. `_admonitions_to_quotes`

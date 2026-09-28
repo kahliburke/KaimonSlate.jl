@@ -51,8 +51,10 @@ end
     @test occursin("``a+b``", m) && occursin("``c``", m)
     @test occursin("```math\nx^2\n```", m) && occursin("```math\ny\n```", m)
     @test !occursin('$', m)
-    # prose dollar amounts are not maths (the same heuristic the live renderer uses)
-    @test NS._documenter_math("it cost \$5 and \$10") == "it cost \$5 and \$10"
+    # prose dollar amounts are escaped, since Julia's markdown reads a bare `$` as interpolation
+    @test NS._documenter_math("it cost \$5 and \$10") == raw"it cost \$5 and \$10"
+    @test NS._documenter_math("\$100k–\$750k, area \$a^2\$") == raw"\$100k–\$750k, area ``a^2``"
+    @test NS._documenter_math("code `\$x` stays") == "code `\$x` stays"
 end
 
 @testset "doc bundle: manifest, payloads, runtime" begin

@@ -134,10 +134,11 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         # No interps → unchanged; math is still preserved byte-for-byte.
         @test occursin(raw"$e^{i\pi}$", markdown_html(raw"euler $e^{i\pi}$"))
 
-        # Prose dollar amounts must NOT be swallowed as an inline-math span (the candidate
-        # content would have to end right before the closing $, but it ends in a space).
+        # Prose dollar amounts are not math: each `$` goes out in its own element, so KaTeX's
+        # auto-render cannot pair them either.
         ph = markdown_html("it cost \$5 and \$10")
-        @test occursin("\$5", ph) && occursin("\$10", ph) && !occursin("xslatemathx", ph)
+        d = "<span class=\"dollar\">\$</span>"
+        @test occursin(d * "5", ph) && occursin(d * "10", ph) && !occursin("xslatemathx", ph)
 
         # echart / table captures become inline host placeholders for the SPA.
         ech = CellOutput("", MimeChunk[], Any[Dict("x" => 1)], Any[], BindSpec[], "", nothing, nothing, 0.0)

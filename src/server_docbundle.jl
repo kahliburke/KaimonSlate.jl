@@ -35,15 +35,21 @@ _docbundle_slug(s::AbstractString) = (t = replace(String(s), r"[^A-Za-z0-9_-]" =
 _cell_kind_name(c::Cell) = c.kind == MARKDOWN ? "markdown" : c.kind == WEB ? "web" :
                            c.kind == TOOL ? "tool" : "code"
 
-# Math in Documenter's spelling: ``x`` inline and a ```math block for display. Slate accepts four
-# delimiters; the display forms are converted first so `$…$` cannot split a `$$…$$`.
+# Math in Documenter's spelling: ``x`` inline and a ```math block for display. A prose `$` is written
+# `\$`, since Julia's markdown parser reads a bare one as interpolation.
 function _documenter_math(s::AbstractString)
-    blk(m) = string("\n\n```math\n", strip(m), "\n```\n\n")
-    s = replace(String(s), r"\\\[(.+?)\\\]"s => m -> blk(match(r"\\\[(.+?)\\\]"s, m).captures[1]))
-    s = replace(s, r"\$\$(.+?)\$\$"s => m -> blk(match(r"\$\$(.+?)\$\$"s, m).captures[1]))
-    s = replace(s, r"\\\((.+?)\\\)"s => m -> string("``", match(r"\\\((.+?)\\\)"s, m).captures[1], "``"))
-    s = replace(s, ReportRender._MATH_INLINE => m -> string("``", match(ReportRender._MATH_INLINE, m).captures[1], "``"))
-    return s
+    b = IOBuffer()
+    for (kind, t) in ReportRender._md_segments(s)
+        if kind === :math
+            tex, display = ReportRender._math_parts(t)
+            print(b, display ? string("\n\n```math\n", strip(tex), "\n```\n\n") : string("``", tex, "``"))
+        elseif kind === :dollar
+            print(b, "\\\$")
+        else
+            print(b, t)
+        end
+    end
+    return String(take!(b))
 end
 
 """

@@ -561,26 +561,26 @@ end
 # KaTeX is configured (core.js) for FOUR spellings — `$…$`, `$$…$$`, `\(…\)`, `\[…\]` — but cmarker's
 # math hook only fires on the dollar forms, so the LaTeX-bracket ones used to reach the PDF as literal
 # text with the backslashes eaten (`\(a^2\)` printed as "(a^2)"). Prose that looked right on screen
-# quietly came out as garbage in print. Normalize to the spelling cmarker understands.
+# quietly came out as garbage in print. Normalize to the spelling cmarker understands, and escape a
+# prose `$` so cmarker cannot pair two of them into math the screen shows as text.
 #
 # Code is left alone: a fenced block or an inline span may legitimately SHOW `\[…\]` (a LaTeX sample),
 # and rewriting it there would corrupt the listing rather than typeset anything — cmarker's math hook
 # doesn't fire inside code in the first place.
-const _MATH_BRACKET_DISPLAY = r"\\\[(.+?)\\\]"s
-const _MATH_BRACKET_INLINE = r"\\\((.+?)\\\)"s
-const _MD_CODE_SPAN = r"^(?:```|~~~)[^\n]*\n.*?(?:^(?:```|~~~)[^\n]*$|\z)|`[^`\n]+`"ms
 function _normalize_math_delims(src::AbstractString)
-    out = IOBuffer(); last = 1
-    for m in eachmatch(_MD_CODE_SPAN, String(src))
-        print(out, _rewrite_bracket_math(SubString(src, last, prevind(String(src), m.offset))))
-        print(out, m.match)                       # code verbatim
-        last = m.offset + ncodeunits(m.match)
+    out = IOBuffer()
+    for (kind, t) in ReportRender._md_segments(src)
+        if kind === :math
+            tex, display = ReportRender._math_parts(t)
+            print(out, display ? "\$\$" : "\$", tex, display ? "\$\$" : "\$")
+        elseif kind === :dollar
+            print(out, "\\\$")
+        else
+            print(out, t)
+        end
     end
-    print(out, _rewrite_bracket_math(SubString(String(src), last)))
     return String(take!(out))
 end
-_rewrite_bracket_math(s) =
-    replace(replace(String(s), _MATH_BRACKET_DISPLAY => s"$$\1$$"), _MATH_BRACKET_INLINE => s"$\1$")
 
 # Markdown source with `{{ expr }}` interpolations resolved (scalars, a text/latex value's TeX, or a
 # component's captured figure), math delimiters normalized, admonitions lowered to blockquotes, and
