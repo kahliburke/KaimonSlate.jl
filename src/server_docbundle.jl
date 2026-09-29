@@ -19,14 +19,100 @@ const DOC_BUNDLE_SCHEMA = 1
 const DOC_BUNDLE_MANIFEST = "slate-bundle.json"
 
 """
+    doc_bundle_inputs(notebook_path) -> Vector{Pair{String,String}}
+
+What a notebook's rendered output depends on, as `file => SHA-256` pairs sorted by file, each file
+named relative to the notebook's directory:
+
+- the notebook itself, under `"(notebook)"` so that its name does not enter the key;
+- its environment: the project it runs in (the nearest `Project.toml` above it), any workspace roots
+  over that, and the manifest that resolves them;
+- every package that environment takes by `path` in `[sources]`: its project file and the files in
+  its directories, apart from hidden ones, `docs/` and `test/` (and, in a git repository, files git
+  ignores);
+- files the notebook names by a literal path in `include("…")` or `@asset "…"`.
+
+Line endings are normalised throughout, so a checkout with `core.autocrlf` agrees with the machine
+that rendered the bundle.
+"""
+function doc_bundle_inputs(path::AbstractString)
+    nb = abspath(String(path))
+    base = dirname(nb)
+    files = Dict{String,String}()
+    add!(f) = isfile(f) && (files[relpath(f, base)] = _docbundle_sha(f))
+    files["(notebook)"] = _docbundle_sha(nb)       # its content, whatever the file is called
+    proj = Base.current_project(base)
+    if proj !== nothing
+        add!(proj)
+        roots = ReportEngine.workspace_chain(proj)
+        foreach(add!, roots)
+        man = ReportEngine._manifest_for(proj)
+        isempty(man) || add!(man)
+        envdir = dirname(proj)
+        for pf in (proj, roots...)
+            isfile(pf) || continue
+            for (_, s) in get(ReportEngine._toml(pf), "sources", Dict{String,Any}())
+                (s isa AbstractDict && haskey(s, "path")) || continue
+                pkg = normpath(joinpath(dirname(pf), String(s["path"])))
+                isdir(pkg) && foreach(add!, _shipped_files(pkg, envdir))
+            end
+        end
+    end
+    src = read(nb, String)
+    for m in eachmatch(r"(?:\binclude\(\s*|@asset\s*\(?\s*)\"([^\"$]+)\"", src)
+        add!(normpath(joinpath(base, m.captures[1])))
+    end
+    return sort!(collect(files); by = first)
+end
+
+"""
     doc_bundle_key(notebook_path) -> String
 
-The key a doc bundle is stored under: the SHA-256 of the notebook file, line endings normalised so a
-checkout with `core.autocrlf` agrees with the machine that rendered it. A docs build compares this
-against the key recorded in the bundle to decide whether the bundle is current.
+The key a doc bundle is stored under: one SHA-256 over [`doc_bundle_inputs`](@ref), so a bundle is
+current while the notebook, its environment, the packages that environment takes by path and the
+files the notebook reads are all as they were when it was rendered. A docs build compares this
+against the key recorded in the bundle.
 """
-doc_bundle_key(path::AbstractString) =
-    bytes2hex(SHA.sha256(replace(read(path, String), "\r\n" => "\n")))
+doc_bundle_key(path::AbstractString) = doc_bundle_key(doc_bundle_inputs(path))
+doc_bundle_key(inputs::AbstractVector{<:Pair}) =
+    bytes2hex(SHA.sha256(join((string(f, '\0', h, '\n') for (f, h) in inputs))))
+
+_docbundle_sha(f) = bytes2hex(SHA.sha256(replace(read(f, String), "\r\n" => "\n")))
+
+# The files that make up what a package does: its project file and the files in its directories,
+# apart from hidden ones, `docs/`, `test/` and the notebook environment `skip` when that sits inside
+# it. Within those, what git knows of (tracked, or new and not ignored), or everything outside git. A package whose tree holds the notebooks (a docs directory taking its own package
+# by `path = "../.."`) would otherwise re-key every bundle on an edit to any page or notebook.
+function _shipped_files(pkg::AbstractString, skip::AbstractString)
+    out = String[]
+    listed = _git_files(pkg)
+    rels = listed === nothing ?
+        [relpath(joinpath(d, f), pkg) for (d, _, fs) in walkdir(pkg) for f in fs
+         if !any(startswith("."), splitpath(relpath(joinpath(d, f), pkg)))] : listed
+    sk = relpath(abspath(skip), abspath(pkg))
+    skipparts = startswith(sk, "..") ? nothing : splitpath(sk)
+    for r in rels
+        parts = splitpath(r)
+        # Top-level files (a README, a licence, CI settings) do not change what the package does,
+        # apart from its project file.
+        length(parts) == 1 && !(parts[1] in ReportEngine._PROJECT_NAMES) && continue
+        (startswith(parts[1], ".") || parts[1] == "docs" || parts[1] == "test") && continue
+        (skipparts !== nothing && length(parts) > length(skipparts) &&
+         parts[1:length(skipparts)] == skipparts) && continue
+        push!(out, joinpath(pkg, r))
+    end
+    return out
+end
+
+function _git_files(dir::AbstractString)
+    Sys.which("git") === nothing && return nothing
+    txt = try
+        read(pipeline(`git -C $dir ls-files -z --cached --others --exclude-standard .`; stderr = devnull), String)
+    catch
+        return nothing
+    end
+    return [String(f) for f in split(txt, '\0'; keepempty = false) if isfile(joinpath(dir, f))]
+end
 
 # A file-name-safe form of an id. Cell ids are author-chosen and may hold characters a URL or a file
 # system treats specially; the manifest maps each id to its file, so this only has to be safe and stable.
@@ -254,12 +340,15 @@ function _write_doc_bundle!(out::AbstractString, nb::LiveNotebook; light, dark, 
                                              if c.output !== nothing && c.output.exception !== nothing],
                                 "frozen" => ctx.replay_frozen)
     merge!(rendered, Dict{String,Any}(String(k) => v for (k, v) in render_info))
+    inputs = isfile(nb.path) ? doc_bundle_inputs(nb.path) : Pair{String,String}[]
     manifest = Dict{String,Any}(
         "schema" => DOC_BUNDLE_SCHEMA,
         "generator" => string("KaimonSlate ", try; string(pkgversion(@__MODULE__)); catch; "?"; end),
         "notebook" => Dict{String,Any}("id" => nb.id, "file" => basename(nb.path), "title" => fm.title,
                                        "subtitle" => fm.subtitle, "byline" => fm.byline, "abstract" => fm.abstract),
-        "key" => isfile(nb.path) ? doc_bundle_key(nb.path) : "",
+        "key" => isempty(inputs) ? "" : doc_bundle_key(inputs),
+        # What the key covers, so a docs build can say which of them changed.
+        "inputs" => Dict{String,Any}(f => h for (f, h) in inputs),
         "rendered" => rendered,
         "theme" => Dict{String,Any}(
             "light" => Dict{String,Any}("palette" => String(light), "vars" => _export_theme_vars(_resolve_export_theme(light))),

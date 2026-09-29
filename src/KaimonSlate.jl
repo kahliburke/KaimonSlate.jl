@@ -45,11 +45,12 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       acquire_floor!, release_floor!, floor_status,
                       index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
                       request_live_eval, export_standalone, export_pdf, expand,
-    export_app, app_defaults, export_doc_bundle, render_doc_bundle_inprocess
+    export_app, app_defaults, export_doc_bundle, render_doc_bundle_inprocess,
+    doc_bundle_key, doc_bundle_inputs
 
 export serve_notebook, LiveNotebook, expand, standalone!, register_extension
 export export_app, app_defaults
-export export_doc_bundle, render_doc_bundle
+export export_doc_bundle, render_doc_bundle, doc_bundle_key, doc_bundle_inputs
 
 # ── Auto-registration as a Kaimon extension ───────────────────────────────────
 # The intended path is zero-setup: install KaimonSlate, and if Kaimon is present on

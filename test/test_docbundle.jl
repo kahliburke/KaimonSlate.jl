@@ -116,6 +116,37 @@ end
     end
 end
 
+@testset "doc bundle: key follows the notebook's environment and what it takes by path" begin
+    mktempdir() do root
+        # A package the notebooks' environment takes by path; its docs and tests are not what it ships.
+        pkg = joinpath(root, "Helper")
+        for d in ("src", "docs", "test"); mkpath(joinpath(pkg, d)); end
+        write(joinpath(pkg, "Project.toml"), "name = \"Helper\"\n")
+        write(joinpath(pkg, "src", "Helper.jl"), "module Helper end\n")
+        write(joinpath(pkg, "docs", "page.md"), "a")
+        write(joinpath(pkg, "test", "runtests.jl"), "1")
+        nbdir = joinpath(root, "notebooks"); mkpath(nbdir)
+        write(joinpath(nbdir, "Project.toml"), "[sources]\nHelper = {path = \"../Helper\"}\n")
+        nb = joinpath(nbdir, "n.jl")
+        write(nb, "#%% code id=x\ninclude(\"util.jl\")\n")
+        write(joinpath(nbdir, "util.jl"), "f() = 1\n")
+
+        files = first.(NS.doc_bundle_inputs(nb))
+        @test issubset(["(notebook)", "Project.toml", "util.jl", joinpath("..", "Helper", "src", "Helper.jl")], files) &&
+              !any(f -> occursin("page.md", f) || occursin("runtests", f), files)
+        k0 = NS.doc_bundle_key(nb)
+        write(joinpath(pkg, "docs", "page.md"), "b")
+        @test NS.doc_bundle_key(nb) == k0                      # a docs edit re-renders nothing
+        keys = [k0]
+        for (f, text) in ((joinpath(pkg, "src", "Helper.jl"), "module Helper f() = 2 end\n"),
+                          (joinpath(nbdir, "util.jl"), "f() = 2\n"),
+                          (joinpath(nbdir, "Manifest.toml"), "julia_version = \"1.12.0\"\n"))
+            write(f, text); push!(keys, NS.doc_bundle_key(nb))
+        end
+        @test allunique(keys)                                  # each of those does
+    end
+end
+
 @testset "doc bundle: default folder follows the nearest docs/make.jl" begin
     mktempdir() do root
         mk(p) = (mkpath(dirname(p)); write(p, ""); p)
