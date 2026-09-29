@@ -2229,7 +2229,7 @@ function _make_router(h::Hub)
         ok = if k.target isa ReportEngine.RemoteTarget
             host = String(k.target.ssh_host); port = Int(k.port)
             try; _drop_kernels_for_worker!(h, host, port); catch; end   # wake anything bound to it first
-            isempty(side) || lock(_REGION_LOCK) do; delete!(_REGION_KERNELS, (nb.id, String(side))); end
+            isempty(side) || _forget_region_kernel!(nb, side)
             ReportEngine.reap_remote_worker(host, port)
         else
             ReportEngine.shutdown!(k)

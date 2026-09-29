@@ -166,14 +166,16 @@ struct RemoteTarget <: RunTarget
     region::String               # the named region this worker serves — the adoption key ("" ⇒ a notebook's own remote main kernel)
     sysimage::Bool               # opt-in: bake + boot a PackageCompiler worker sysimage for this env (default false)
     curve::Bool                  # CURVE-encrypt this region's data channel (default true; false = plaintext, for the §7 bench)
+    job::String                  # scheduler job whose node `ssh_host` is ("" ⇒ not inside an allocation)
 end
 RemoteTarget(ssh_host::AbstractString; transport::Symbol = :tunnel,
              project::AbstractString = "~/.cache/kaimonslate/remote",
              port::Int = 0, stream_port::Int = 0, origin_env::AbstractString = "",
              datadir::AbstractString = "", cache_root::AbstractString = "", region::AbstractString = "",
-             sysimage::Bool = false, curve::Bool = true) =
+             sysimage::Bool = false, curve::Bool = true, job::AbstractString = "") =
     RemoteTarget(String(ssh_host), transport, String(project), port, stream_port,
-                 String(origin_env), String(datadir), String(cache_root), String(region), sysimage, curve)
+                 String(origin_env), String(datadir), String(cache_root), String(region), sysimage, curve,
+                 String(job))
 
 is_remote(::LocalTarget) = false
 is_remote(::RemoteTarget) = true
@@ -3908,12 +3910,15 @@ _remote_env_key(origin_env, parent) = _proj_key(isempty(String(origin_env)) ? pa
 # running. That worker keeps its port and drops out of `_port_floor`, which is what the allocator
 # later walks into. Disjoint bases per host keep the records disjoint too, since they are keyed by
 # port — so this is the same setting answering both.
-_region_target(r::Region; origin_env::AbstractString = r.preload, host::AbstractString = region_host(r)) =
-    RemoteTarget(host; transport = r.transport,
+function _region_target(r::Region; origin_env::AbstractString = r.preload,
+                        at::Tuple{AbstractString,AbstractString} = region_where(r))
+    host, job = at
+    return RemoteTarget(host; transport = r.transport,
         project = "~/.cache/kaimonslate/remote/" * _proj_key(origin_env),
         port = r.base_port,
         origin_env = origin_env, datadir = r.data_root, cache_root = r.cache_root, region = r.name,
-        sysimage = r.sysimage, curve = r.curve)
+        sysimage = r.sysimage, curve = r.curve, job = job)
+end
 
 # ── Where a region's workers actually go ─────────────────────────────────────────────────────
 # For an ordinary machine that is `r.host` and there is nothing to decide. For a region whose host
@@ -3956,10 +3961,19 @@ Where this region's workers live RIGHT NOW, without asking for anything. `r.host
 region; the cached allocated node for a scheduler one, or `r.host` when no allocation is held —
 which is deliberate: a read-only caller (the roster, the UI) must never cause a queue submission.
 """
-function region_host(r::Region)
-    r.scheduler === :none && return r.host
+region_host(r::Region) = first(region_where(r))
+
+"""
+    region_where(r) -> (host, job)
+
+`region_host` together with the scheduler job that node belongs to (`""` when no allocation is held),
+read from one placement so the two always describe the same grant. The host alone cannot tell two
+allocations apart on a cluster that grants the same node twice; the job can.
+"""
+function region_where(r::Region)
+    r.scheduler === :none && return (r.host, "")
     p = _placement(r)
-    return p === nothing ? r.host : p.host
+    return p === nothing ? (r.host, "") : (p.host, String(p.job))
 end
 
 """
@@ -4271,7 +4285,7 @@ function _region_reconcile_impl!(r::Region)
     # Where the workers go. On a scheduler region this may ASK the scheduler, so what reconciling one
     # is allowed to do is bounded by what it is FOR: `warm` is always 0 there (`_warm_for`), so there
     # are no workers to keep ready and the only question is the node.
-    host = r.host
+    host, alloc = r.host, nothing
     if r.scheduler !== :none
         # Holding nothing means there is nothing to give back and nothing to maintain — and asking
         # here would ALLOCATE a node for a region with no work on it, which is what saving the region
@@ -4290,7 +4304,7 @@ function _region_reconcile_impl!(r::Region)
                    "region[$(r.name)]: $(r.host) granted no node"
         end
     end
-    t = _region_target(r; host = host)
+    t = _region_target(r; at = (host, alloc === nothing ? "" : alloc.id))
     roster = list_remote_workers(host)
     mine = [w for w in roster
             if _manifest_get(w["manifest"], "region") == r.name &&

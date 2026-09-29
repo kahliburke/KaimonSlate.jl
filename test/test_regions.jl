@@ -16,6 +16,7 @@ const RE = KaimonSlate.ReportEngine
         @test RE.RemoteTarget("h").datadir == "" && RE.RemoteTarget("h").region == ""   # defaults
         @test RE.RemoteTarget("h"; datadir = "/scratch/flights").datadir == "/scratch/flights"
         @test RE.RemoteTarget("h"; region = "gpu").region == "gpu"
+        @test RE.RemoteTarget("h").job == "" && RE.RemoteTarget("h"; job = "77").job == "77"
     end
 
     @testset "_remote_worker_script: exports KAIMONSLATE_DATADIR iff a root is pinned" begin
@@ -231,21 +232,37 @@ const RE = KaimonSlate.ReportEngine
                 nb = NS.LiveNotebook("alloc", joinpath(mktempdir(), "alloc.jl"), rep, RE.InProcessKernel(), 1,
                                      String[], String[], ReentrantLock(), Channel{String}[],
                                      ReentrantLock(), "", false, Dict{String,String}())
-                place!(job) = lock(RE._REGION_PLACE_LOCK) do
-                    RE._REGION_PLACE["gpu"] = (host = "c9", job = job, ts = time(),
+                place!(job; host = "c9") = lock(RE._REGION_PLACE_LOCK) do
+                    RE._REGION_PLACE["gpu"] = (host = host, job = job, ts = time(),
                                                checked = time(), until = time() + 600)
                 end
+                synced() = lock(NS._REGION_LOCK) do; sort!(collect(keys(get(NS._REGION_SYNCED, "alloc", Dict())))); end
                 RE.route!("c9", "login", "77")
                 try
                     place!("77")
                     k = NS._region_kernel!(nb, "gpu")
+                    @test (k.target.ssh_host, k.target.job) == ("c9", "77")
                     @test NS._region_kernel!(nb, "gpu") === k
+                    # Values already shipped: one to this region's worker, one to the main kernel.
+                    lock(NS._REGION_LOCK) do
+                        NS._REGION_SYNCED["alloc"] = Dict("gpu:x:g1" => "t", "main:y:g1" => "t")
+                    end
                     place!("78")
                     k2 = NS._region_kernel!(nb, "gpu")
-                    @test k2 !== k
+                    @test k2 !== k && k2.target.job == "78"
                     @test NS._region_kernel!(nb, "gpu") === k2
+                    # The new worker holds nothing yet, so only the region's sync record goes.
+                    @test synced() == ["main:y:g1"]
+                    # A grant on another node rebuilds too.
+                    place!("79"; host = "c10")
+                    k3 = NS._region_kernel!(nb, "gpu")
+                    @test k3 !== k2 && (k3.target.ssh_host, k3.target.job) == ("c10", "79")
+                    # Released: no job left, so no cached kernel can match it.
+                    lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
+                    @test RE.region_where(RE.region_get("gpu")) == ("login", "")
                 finally
-                    lock(NS._REGION_LOCK) do; delete!(NS._REGION_KERNELS, ("alloc", "gpu")); end
+                    NS._forget_region_kernel!(nb, "gpu")
+                    lock(NS._REGION_LOCK) do; delete!(NS._REGION_SYNCED, "alloc"); end
                     lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
                     RE.route!("c9", "")
                 end

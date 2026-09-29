@@ -1073,9 +1073,8 @@ end
 # parity); v1 rules: the main kernel should be local when a region is active, `@bind`-declaring
 # cells stay local, cross-boundary MUTATION is undefined (same as the release-plan validity rule).
 const _REGION_KERNELS = Dict{Tuple{String,String},Any}()   # (nb id, region name) → GateKernel
-const _REGION_KERNEL_JOB = WeakKeyDict{Any,String}()        # scheduler region kernel → the job it was built in
 const _REGION_SYNCED = Dict{String,Dict{String,String}}()  # nb id → "side:name" → freshness token
-const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, kernel objectid) → signature of primed `using` cells
+const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, `_worker_key` of the kernel) → signature of primed `using` cells
 # Keys currently being primed. `_prime_namespace!` stages each EVERYWHERE cell's data reads through
 # `_region_presync!`, which primes both sides before its first transfer — so the two call each other.
 # A nested prime for a key already in flight is a no-op: the outer call is establishing that kernel.
@@ -1713,34 +1712,20 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         r === nothing && error("region '$name' is not defined — create it in the registry: " *
                                "region(\"$name\"; host=…, warm=…) or the home-page Regions manager")
         isempty(r.host) && error("region '$name' has no host — set one in the Regions manager")
+        at = ReportEngine.region_where(r)
         k = get(_REGION_KERNELS, (nb.id, name), nothing)
-        # A cached kernel names a HOST, and on a scheduler region that host is an allocation that
-        # can expire. When the next one lands on a different node the old kernel points at a machine
-        # we no longer hold, so it is dropped and rebuilt rather than retried forever.
+        # A cached kernel's target names the node it runs on and, on a scheduler region, the job that
+        # node was granted in. Either can go stale: the next allocation may land on another node, or on
+        # the same one (a single-node cluster grants its only node every time, so the name alone cannot
+        # tell two allocations apart), and a released allocation leaves no job at all. In each case the
+        # worker ended with its allocation, so the kernel is rebuilt rather than retried forever.
         if k !== nothing
             tgt = k.target
-            if !(tgt isa ReportEngine.RemoteTarget) || tgt.ssh_host == ReportEngine.region_host(r)
-                # The host still matches - but a scheduler region's cached kernel is only good while a
-                # node is actually HELD. On a single-node cluster the node name equals the front door,
-                # so the host match above cannot tell a live placement from a released one; reusing then
-                # would spawn OUTSIDE the allocation (no `srun`, so no GPU binding). When nothing is held,
-                # fall through to the placement block below, which asks for a node.
-                r.scheduler === :none && return k
-                p = ReportEngine.region_placement(r)
-                if p !== nothing
-                    job = get(_REGION_KERNEL_JOB, k, p.job)
-                    p.job == job && return k
-                    # The held node belongs to a different job, so the worker of the cached kernel ended
-                    # with its allocation. A single-node cluster reuses the host name, so the job id is
-                    # what distinguishes the two allocations.
-                    ReportEngine._rlog("region: '$name' is on job $(p.job) now, not $job - rebuilding its kernel")
-                    ReportEngine._drop_kernel_conn!(k)
-                    delete!(_REGION_KERNELS, (nb.id, name))
-                end
-            else
-                ReportEngine._rlog("region: '$name' moved off $(tgt.ssh_host) — rebuilding its kernel")
-                delete!(_REGION_KERNELS, (nb.id, name))
-            end
+            (!(tgt isa ReportEngine.RemoteTarget) || (tgt.ssh_host, tgt.job) == at) && return k
+            ReportEngine._rlog("region: '$name' moved off $(_at_label(tgt.ssh_host, tgt.job)) " *
+                               "to $(_at_label(at...)) — rebuilding its kernel")
+            _forget_region_kernel!(nb, name)
+            ReportEngine._drop_kernel_conn!(k)
         end
         proj = Base.current_project(dirname(abspath(nb.path)))
         parent = proj === nothing ? "" : dirname(proj)   # notebook's own /src synced for hot-reload provenance
@@ -1756,9 +1741,8 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         # it can mean waiting for a person to read a code off a phone. THIS RUNS UNDER `nb.lock`, so
         # it must never wait for either: it reads the placement already held, and otherwise starts
         # one in the background and says so. The cell is run again when there is somewhere to run it.
-        host = r.host
+        host = first(at)
         if r.scheduler !== :none
-            host = ReportEngine.region_host(r)
             # Placed-or-not is asked of the placement, never inferred from the node name: a single-node
             # cluster grants a node named like the front door, so `region_host(r) == r.host` misreads.
             if !ReportEngine._region_holds_node(r)   # nothing placed yet
@@ -1779,15 +1763,30 @@ function _region_kernel!(nb::LiveNotebook, name::String)
                 throw(RegionWaiting(WAIT_QUEUED, r.host))
             end
         end
-        target = ReportEngine._region_target(r; origin_env = origin_env, host = host)   # transport/datadir/region from the def; env = the notebook's
+        target = ReportEngine._region_target(r; origin_env = origin_env, at = at)   # transport/datadir/region from the def; env = the notebook's
         ReportEngine._rlog("region: kernel '$name' for $(nb.id) → $host ($(r.transport))" *
                            (host == r.host ? "" : " via $(r.host)") *
                            (isempty(r.data_root) ? "" : " root=$(r.data_root)"))
         k = ReportEngine.GateKernel(target.project; parent = parent, target = target,
                                     label = basename(abspath(nb.path)) * "#" * name)
         _REGION_KERNELS[(nb.id, name)] = k
-        p = ReportEngine.region_placement(r)
-        p === nothing || (_REGION_KERNEL_JOB[k] = p.job)
+        return k
+    end
+end
+
+_at_label(host, job) = isempty(job) ? String(host) : "$host (job $job)"
+
+# Forget one of a notebook's region kernels, along with what the hub remembers about it: that its
+# imports were primed, and which boundary values it already holds. The kernel that replaces it is a
+# fresh namespace whose generation count starts over, so a sync record left behind can match the new
+# kernel's key and skip shipping a value the new worker never received. Returns the kernel, which the
+# caller shuts down or disconnects as the situation needs.
+function _forget_region_kernel!(nb::LiveNotebook, side::AbstractString)
+    lock(_REGION_LOCK) do
+        k = pop!(_REGION_KERNELS, (nb.id, String(side)), nothing)
+        k === nothing || delete!(_REGION_PRIMED, (nb.id, _worker_key(k)))
+        synced = get(_REGION_SYNCED, nb.id, nothing)
+        synced === nothing || filter!(kv -> !startswith(kv[1], side * ":"), synced)
         return k
     end
 end
@@ -1916,12 +1915,7 @@ end
 # eval. `side == ""` means the main kernel → fall back to a full restart.
 function restart_region!(nb::LiveNotebook, side::AbstractString)
     isempty(side) && return restart_kernel!(nb)
-    k = lock(_REGION_LOCK) do
-        kk = pop!(_REGION_KERNELS, (nb.id, String(side)), nothing)
-        kk === nothing || delete!(_REGION_PRIMED, (nb.id, objectid(kk)))   # fresh kernel re-primes itself
-        delete!(_REGION_SYNCED, nb.id)   # coarse (keyed per-nb): re-ships boundary values to the fresh kernel
-        kk
-    end
+    k = _forget_region_kernel!(nb, side)
     k === nothing || try; ReportEngine.shutdown!(k; kill_remote = true); catch e
         @warn "slate region: restart teardown failed" notebook = nb.id side = side exception = e
     end
@@ -2259,7 +2253,7 @@ function restart_worker!(h, host::AbstractString, port::Integer)
         if side == "local"
             try; restart_kernel!(nb); catch; end
         else
-            lock(_REGION_LOCK) do; delete!(_REGION_KERNELS, (nb.id, side)); end
+            _forget_region_kernel!(nb, side)
             n = lock(nb.lock) do
                 m = 0
                 for c in nb.report.cells
