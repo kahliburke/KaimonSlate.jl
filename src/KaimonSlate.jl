@@ -28,6 +28,7 @@ include(joinpath(@__DIR__, "expanduser_fix.jl"))
 
 
 import JSON
+import TOML
 
 include("engine.jl")    # module ReportEngine (+ eval / deps / bind / echarts)
 include("render.jl")    # module ReportRender

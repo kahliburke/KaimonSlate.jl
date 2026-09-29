@@ -263,3 +263,28 @@ end
         @test KS._orphaned_by(999_999) == true   # parent gone (the Windows dangling-PID case)
     end
 end
+
+# The embedded host's env lives outside the depot, so a `.ready` env can lose its packages underneath
+# it. The check behind trusting `.ready` has to notice.
+@testset "embedded env: manifest packages present in a depot" begin
+    import Pkg
+    env = mktempdir()
+    write_manifest(deps) = open(io -> Pkg.TOML.print(io, Dict("manifest_format" => "2.0", "deps" => deps)),
+                                joinpath(env, "Manifest.toml"), "w")
+    @test !KS._manifest_installed(env)                                    # no manifest at all
+
+    # a package this test environment has installed, recorded as its own manifest records it
+    active = Pkg.TOML.parsefile(joinpath(dirname(Base.active_project()), "Manifest.toml"))
+    json = only(active["deps"]["JSON"])
+    write_manifest(Dict("JSON" => [json], "Dates" => [Dict("uuid" => "ade2ca70-3891-5945-98fb-dc099432e06a")]))
+    @test KS._manifest_installed(env)
+
+    gone = merge(json, Dict("git-tree-sha1" => "0000000000000000000000000000000000000000"))
+    write_manifest(Dict("JSON" => [gone]))
+    @test !KS._manifest_installed(env)                                    # removed from every depot
+
+    write_manifest(Dict("Local" => [Dict("uuid" => string(Base.UUID(1)), "path" => env)]))
+    @test KS._manifest_installed(env)
+    write_manifest(Dict("Local" => [Dict("uuid" => string(Base.UUID(1)), "path" => joinpath(env, "nope"))]))
+    @test !KS._manifest_installed(env)
+end

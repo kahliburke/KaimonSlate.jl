@@ -158,7 +158,11 @@ for, and that is orthogonal to where package artifacts live.
 """
 function _ensure_embedded_env!(; online = nothing)
     env = _embedded_env()
-    isfile(joinpath(env, ".ready")) && return true
+    isfile(joinpath(env, ".ready")) && _manifest_installed(env) && return true
+    # The env lives outside the depot, so the depot can lose its packages underneath it (another
+    # `JULIA_DEPOT_PATH`, a `Pkg.gc()`, a deleted depot). Such an env still has its `.ready`, and the
+    # host spawned on it dies at `using Kaimon`. Rebuild it from nothing.
+    rm(env; recursive = true, force = true)
     mkpath(env)
     # Kaimon's extension launcher puts THIS env on the extension's `JULIA_LOAD_PATH` so the
     # extension can reach Kaimon and its deps ("for Gate, LoggingExtras, etc." in its own comment).
@@ -187,6 +191,29 @@ function _ensure_embedded_env!(; online = nothing)
     ok = ok && _embedded_kaimon_loads()
     ok && write(joinpath(env, ".ready"), string(round(Int, time())))
     return ok
+end
+
+"""
+    _manifest_installed(env) -> Bool
+
+Whether every package `env`'s manifest records is present in a depot on `DEPOT_PATH` (or, for a
+`path` dependency, on disk). A file-system check, cheap enough to make before every host start.
+"""
+function _manifest_installed(env::AbstractString)
+    m = try; TOML.parsefile(joinpath(env, "Manifest.toml")); catch; return false; end
+    deps = get(m, "deps", nothing)
+    deps isa AbstractDict || return false
+    for (name, entries) in deps, e in (entries isa AbstractVector ? entries : (entries,))
+        e isa AbstractDict || continue
+        if haskey(e, "path")
+            p = String(e["path"])
+            isdir(isabspath(p) ? p : joinpath(env, p)) || return false
+        elseif haskey(e, "git-tree-sha1")       # entries without one are stdlibs, shipped with Julia
+            slug = Base.version_slug(Base.UUID(e["uuid"]), Base.SHA1(e["git-tree-sha1"]))
+            any(d -> isdir(joinpath(d, "packages", name, slug)), DEPOT_PATH) || return false
+        end
+    end
+    return true
 end
 
 # Can the embedded env actually load Kaimon? The question `.ready` is asserting.
