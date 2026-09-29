@@ -196,27 +196,27 @@ function _memo_dir()
 end
 
 # The DEVELOPED source dirs whose edits should invalidate a memo entry: the parent project's `src/`
-# plus any dev'd path-dependency's `src/` (from `path = "…"` lines in the active Manifest). Derived
-# deterministically from disk + the Manifest — NOT Revise's `pkgdatas`.
+# plus any dev'd path-dependency's `src/` (from `path = "…"` lines in the Manifest that resolves the
+# active project). Derived deterministically from disk + the Manifest — NOT Revise's `pkgdatas`.
 function _memo_src_dirs()
     dirs = String[]
     p = PARENT_PROJECT[]
     isempty(p) || (d = joinpath(p, "src"); isdir(d) && push!(dirs, d))
     try
         proj = Base.active_project()
-        if proj !== nothing
-            base = dirname(proj); man = joinpath(base, "Manifest.toml")
-            if isfile(man)
-                for m in eachmatch(r"(?m)^\s*path\s*=\s*\"([^\"]+)\"", read(man, String))
-                    pd = String(m.captures[1])
-                    # `_replicate_env!` rewrites remote dev paths as literal "~/…" — without
-                    # expanduser the remote worker can't FIND the synced source it should digest,
-                    # so its src_digest fell to the empty-constant while the local one didn't:
-                    # divergent fullkeys, and every transferred memo entry missed (found live).
-                    startswith(pd, "~") && (pd = expanduser(pd))
-                    isabspath(pd) || (pd = normpath(joinpath(base, pd)))
-                    d = joinpath(pd, "src"); isdir(d) && push!(dirs, d)
-                end
+        man = proj === nothing ? "" : _manifest_for(proj)
+        if !isempty(man)
+            # A relative `path` is anchored on the manifest's dir: the workspace root for a member.
+            base = dirname(man)
+            for m in eachmatch(r"(?m)^\s*path\s*=\s*\"([^\"]+)\"", read(man, String))
+                pd = String(m.captures[1])
+                # `_replicate_env!` rewrites remote dev paths as literal "~/…" — without
+                # expanduser the remote worker can't FIND the synced source it should digest,
+                # so its src_digest fell to the empty-constant while the local one didn't:
+                # divergent fullkeys, and every transferred memo entry missed (found live).
+                startswith(pd, "~") && (pd = expanduser(pd))
+                isabspath(pd) || (pd = normpath(joinpath(base, pd)))
+                d = joinpath(pd, "src"); isdir(d) && push!(dirs, d)
             end
         end
     catch
@@ -269,32 +269,22 @@ function _src_digest()
 end
 
 # Digest of the notebook env's DIRECT deps → resolved versions (Project [deps] minus the
-# worker-infra adds KaimonGate/Revise). HOST-PORTABLE by construction: the remote worker env is
-# the notebook env RESOLVED TOGETHER with that infra, so whole-Manifest bytes can never match
-# across hosts (found live: local 4239… vs remote f48c… made every transferred entry miss).
+# worker-infra adds KaimonGate/Revise; see `deps_digest`). HOST-PORTABLE by construction: the remote
+# worker env is the notebook env RESOLVED TOGETHER with that infra, so whole-Manifest bytes can never
+# match across hosts (found live: local 4239… vs remote f48c… made every transferred entry miss).
 # The user's own name→version/tree-sha pairs are the behavior-pinning, host-invariant core.
-const _MANIFEST_DIGEST = Ref{Tuple{Float64,UInt}}((-1.0, UInt(0)))
+# Cached by the resolving manifest's path + mtime.
+const _MANIFEST_DIGEST = Ref{Tuple{String,Float64,UInt}}(("", -1.0, UInt(0)))
 const _INFRA_DEPS = ("KaimonGate", "Revise", "ExpressionExplorer")   # mirror _WORKER_INFRA_PKGS (server_history.jl)
 function _manifest_digest()
     try
         proj = Base.active_project(); proj === nothing && return UInt(0)
-        man = joinpath(dirname(proj), "Manifest.toml"); isfile(man) || return UInt(0)
+        man = _manifest_for(proj); isempty(man) && return UInt(0)
         mt = Float64(mtime(man))
-        _MANIFEST_DIGEST[][1] == mt && return _MANIFEST_DIGEST[][2]
-        # Real TOML parsing (via MemoStore's stdlib import — the memo guard covers us): the
-        # notebook's direct deps from Project [deps], each mapped to its resolved
-        # version/tree-sha in the Manifest (format-2 layout: top-level "deps" → name → [entry]).
-        pdeps = sort!([d for d in keys(get(MemoStore.TOML.parsefile(proj), "deps", Dict{String,Any}()))
-                       if !(d in _INFRA_DEPS)])
-        mdeps = get(MemoStore.TOML.parsefile(man), "deps", Dict{String,Any}())
-        h = UInt(0x4d616e00)
-        for dn in pdeps
-            e = get(mdeps, dn, nothing)
-            ver = (e isa Vector && !isempty(e) && e[1] isa AbstractDict) ?
-                  string(get(e[1], "version", ""), get(e[1], "git-tree-sha1", "")) : ""
-            h = hash((dn, ver), h)
-        end
-        _MANIFEST_DIGEST[] = (mt, h); return h
+        c = _MANIFEST_DIGEST[]
+        (c[1] == man && c[2] == mt) && return c[3]
+        h = deps_digest(proj, _INFRA_DEPS)
+        _MANIFEST_DIGEST[] = (man, mt, h); return h
     catch; return UInt(0); end
 end
 

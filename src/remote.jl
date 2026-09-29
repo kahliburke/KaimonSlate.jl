@@ -1113,7 +1113,8 @@ function start_sync!(t::RemoteTarget, parent_project::AbstractString)
         #    provisioning. Read the SAME env whose Manifest provisioning replicated (origin_env, else the
         #    parent) to discover which deps are dev'd; skip the project itself and any vanished source.
         env = isempty(t.origin_env) ? parent_project : t.origin_env
-        for (name, lpath) in _dev_deps(joinpath(env, "Manifest.toml"), env)
+        mf = parent_manifest(env)   # the workspace root's manifest for a member, as in `_rsync_dev_deps!`
+        for (name, lpath) in _dev_deps(mf, isempty(mf) ? env : dirname(abspath(mf)))
             rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
             isdir(lpath) || continue
             _start_syncer!("$base:dev:$name", t.ssh_host, lpath,
