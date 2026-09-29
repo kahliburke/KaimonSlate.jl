@@ -1807,9 +1807,9 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/scheduler", req -> begin
         host = get(HTTP.queryparams(HTTP.URI(req.target)), "host", "")
         isempty(host) && return _json(Dict("kinds" => String[]))
-        det = try; ReportEngine._detect_scheduler(host); catch; nothing; end
+        det = try; ReportEngine.Sweep.detect_scheduler(host); catch; nothing; end
         det === nothing && return _json(Dict("kinds" => String[], "error" => "could not ask $host"))
-        SD = ReportEngine.SchedulerDetect
+        SD = ReportEngine.Sweep.SchedulerDetect
         _json(Dict(
             "kinds" => String[String(s.kind) for s in det.found],
             "suggested" => String(SD.suggested(det)),

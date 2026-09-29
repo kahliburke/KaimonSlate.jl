@@ -167,6 +167,26 @@ const RE = KaimonSlate.ReportEngine
                                  partition = "gpus", gpus = "1")
             @test RE.region_scheduler(gpu) === :slurm
             @test RE.region_host(gpu) == "login"
+
+            @testset "an auto region asks its host which scheduler it runs" begin
+                bin = mktempdir()
+                write(joinpath(bin, "sinfo"), """
+                    #!/bin/sh
+                    case "\$*" in
+                      *--version*) echo "slurm 24.05.1" ;;
+                      *) echo "PART slurm batch|gpu:A100:8|infinite|up" ;;
+                    esac
+                    """)
+                write(joinpath(bin, "sbatch"), "#!/bin/sh\nexit 0\n")
+                foreach(f -> chmod(joinpath(bin, f), 0o755), ("sinfo", "sbatch"))
+                withenv("PATH" => bin * ":" * ENV["PATH"]) do
+                    det = RE.Sweep.detect_scheduler("")
+                    @test RE.Sweep.SchedulerDetect.kinds(det) == [:slurm]
+                    p = only(RE.Sweep.SchedulerDetect.scheduler(det, :slurm).partitions)
+                    @test (p.name, p.gpus, p.maxtime, p.up) == ("batch", "gpu:A100:8", "infinite", true)
+                    @test RE.region_scheduler(RE.region_set!("auto_local"; host = "", scheduler = :auto)) === :slurm
+                end
+            end
             # The job name is stable across reopens — that is what lets a notebook ATTACH to the
             # allocation it was already using instead of queueing for a second one.
             @test RE.region_alloc_name(gpu) == "slate-gpu"
