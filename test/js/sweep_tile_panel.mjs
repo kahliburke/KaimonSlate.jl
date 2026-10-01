@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { loadEscHtml } from './_esc_src.mjs';
+import { loadSlateBytes } from './_bytes_src.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const jsdir = join(here, '..', '..', 'src', 'assets', 'js');
@@ -20,7 +21,7 @@ globalThis.document = { createElement: () => ({ style: {}, addEventListener() {}
 window.slateEscHtml = loadEscHtml();
 // The REAL byte formatter, for the same reason: this compares rendered text, and a stand-in with
 // its own cutoffs would report a mismatch that does not exist.
-(0, eval)(readFileSync(join(jsdir, 'platform.js'), 'utf8'));
+window.slateBytes = loadSlateBytes();
 (0, eval)(readFileSync(join(jsdir, 'sweeptip.js'), 'utf8'));
 
 const T = window.slateSweepTip && window.slateSweepTip._test;
