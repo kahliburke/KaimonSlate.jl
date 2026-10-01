@@ -830,7 +830,7 @@ bump_rev!(c::Cell) = (c.rev = Threads.atomic_add!(_REV, 1) + 1; c)
 
 # Drop the wait: the reason AND the clock behind it. Called by every transition out of BLOCKED, so
 # a stale "waiting 40m" can never sit on a cell that has since run.
-_unblock!(c::Cell) = (c.blocked = ""; c.blocked_host = ""; c.blocked_at = 0.0; c)
+_unblock!(c::Cell) = (c.blocked = ""; c.blocked_host = ""; c.blocked_region = ""; c.blocked_at = 0.0; c)
 
 mark_running!(c::Cell) = (_unblock!(c); c.state = RUNNING; bump_rev!(c))
 
@@ -868,20 +868,23 @@ mark_errored!(c::Cell, msg::AbstractString) = (
     c.state = ERRORED; bump_rev!(c))
 
 """
-    mark_blocked!(c, why, host = "") -> c
+    mark_blocked!(c, why, host = "", region = "") -> c
 
 The cell cannot run YET, for a reason that is not its own — a queue that has not granted a node, a
 host nobody has signed in to. Deliberately NOT `mark_errored!`: a wait rendered as a failure reads
 as broken code, and it sends people to fix a cell that is fine.
 
 `why` is a CODE (`queued`, `not_signed_in`), not a sentence: the page words it, next to the chip it
-is drawn in and the buttons it offers. `host` is the one detail those words need.
+is drawn in and the buttons it offers. `host` is the one detail those words need. `region` is the
+region whose kernel the cell waits for, so that withdrawing that region's request ends this wait
+and no other.
 
 The reason goes on the cell rather than into an output, so the header can show it and the output
 area keeps whatever the last successful run produced — a cell waiting for a node has not lost the
 value it had. Cleared by every other transition, so it can never outlive the wait.
 """
-function mark_blocked!(c::Cell, why::AbstractString, host::AbstractString = "")
+function mark_blocked!(c::Cell, why::AbstractString, host::AbstractString = "",
+                       region::AbstractString = "")
     w = String(why)
     # The clock starts at the FIRST attempt. The runner re-enters this path whenever it retries a
     # blocked cell, and re-stamping each time would show "waiting 0s" against a queue wait of an
@@ -889,6 +892,7 @@ function mark_blocked!(c::Cell, why::AbstractString, host::AbstractString = "")
     (c.state == BLOCKED && c.blocked == w) || (c.blocked_at = time())
     c.blocked = w
     c.blocked_host = String(host)
+    c.blocked_region = String(region)
     c.state = BLOCKED
     bump_rev!(c)
 end

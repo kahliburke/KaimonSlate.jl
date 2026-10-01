@@ -1087,7 +1087,7 @@ const WAIT_NOT_SIGNED_IN = "not_signed_in"
 const WAIT_CONNECTING = "connecting"
 
 """
-    RegionWaiting(why, note = "")
+    RegionWaiting(why, host = "", region = "")
 
 A region cell cannot run YET, and nothing is wrong. Thrown where the wait is discovered (under
 `nb.lock`, which must never block), caught where the cell's state is set, and turned into `BLOCKED`
@@ -1098,13 +1098,15 @@ region that is not defined, a worker that could not start — and telling them a
 text would go wrong the first time someone rewords one.
 
 `why` is a code and `host` is the machine it is about. Neither is written for a reader: the page
-words the wait, beside the chip that shows it.
+words the wait, beside the chip that shows it. `region` is the region whose kernel is missing, which
+for a cell that reads an upstream value is the region of that value.
 """
 struct RegionWaiting <: Exception
     why::String
     host::String
+    region::String
 end
-RegionWaiting(why::AbstractString) = RegionWaiting(String(why), "")
+RegionWaiting(why::AbstractString, host::AbstractString = "") = RegionWaiting(String(why), String(host), "")
 Base.showerror(io::IO, e::RegionWaiting) =
     print(io, e.why, isempty(e.host) ? "" : " (" * e.host * ")")
 
@@ -1597,6 +1599,32 @@ _alloc_wait_s() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_ALLOC_WAIT",
 const _PLACING = Set{String}()
 const _PLACING_LOCK = ReentrantLock()
 
+# These record when the placement task of each region started and when the request of each region
+# was last withdrawn, both under `_PLACING_LOCK`. A withdrawal can arrive before the task has
+# submitted the job, and the release then finds nothing to cancel. The task learns from these stamps
+# that its request is no longer wanted.
+const _PLACING_SINCE = Dict{String,Float64}()
+const _WITHDRAWN_AT = Dict{String,Float64}()
+
+_withdrawn_while_placing(name::AbstractString) = lock(_PLACING_LOCK) do
+    since = get(_PLACING_SINCE, String(name), nothing)
+    since !== nothing && get(_WITHDRAWN_AT, String(name), 0.0) >= since
+end
+
+# Stamp a withdrawal of region `name` under `_PLACING_LOCK`, and return the stamp it replaced.
+function _stamp_withdraw!(name::AbstractString, t::Float64 = time())
+    return lock(_PLACING_LOCK) do
+        prev = get(_WITHDRAWN_AT, String(name), nothing)
+        _WITHDRAWN_AT[String(name)] = t
+        prev
+    end
+end
+
+# A request for a node is still wanted when a placement task runs for it and no withdrawal has
+# arrived since that task started.
+_region_queued(name::AbstractString) =
+    lock(_PLACING_LOCK) do; String(name) in _PLACING; end && !_withdrawn_while_placing(name)
+
 # The cells that were waiting on this region: mark them stale so the next drain picks them up.
 # BLOCKED is the state a wait leaves behind; ERRORED is included too because a cell that failed for
 # its own reasons simply fails again, which is cheaper than matching on error text that is free to
@@ -1623,6 +1651,40 @@ function _restale_region_cells!(nb::LiveNotebook, name::AbstractString)
     end
     n > 0 && (try; _broadcast(nb, string(nb.version)); catch; end)
     return n
+end
+
+# Mark as errored every cell of `nb` that waits in the queue of region `name`, after its request was
+# withdrawn, so that only a run asks for a node again. A cell left BLOCKED as queued still reads as
+# waiting, and `_reconcile_blocked_regions!` would submit a new request for it within
+# `_REPLACE_EVERY`. The mark in `_READER_REARMED` keeps `_reconcile_stranded_readers!` from running
+# the cell again on its own.
+function _withdraw_region_waits!(nb::LiveNotebook, name::AbstractString)
+    stopped = String[]
+    lock(nb.lock) do
+        for c in nb.report.cells
+            (c.state == BLOCKED && c.blocked == WAIT_QUEUED && c.blocked_region == name) || continue
+            ReportEngine.mark_errored!(c, "the request for a node for region '$name' was withdrawn " *
+                                          "before the scheduler granted one; run the cell to ask again")
+            push!(stopped, c.id)
+        end
+        isempty(stopped) || (nb.version += 1)
+    end
+    isempty(stopped) && return 0
+    lock(_READER_REARMED_LOCK) do
+        foreach(id -> push!(_READER_REARMED, (nb.id, id)), stopped)
+    end
+    try; _broadcast(nb, string(nb.version)); catch; end
+    return length(stopped)
+end
+
+# Drop the kernel of `nb` for region `name` once the region's allocation is released. Its worker
+# ended with the allocation, so a kept kernel shows only a dead connection on the worker pill, and
+# the next region cell builds a new kernel in any case. The connection is dropped in its own task,
+# because `prepare!` holds the lock of a kernel for a whole worker startup.
+function _forget_released_kernel!(nb::LiveNotebook, name::AbstractString)
+    k = _forget_region_kernel!(nb, name)
+    k isa ReportEngine.GateKernel && Threads.@spawn try; ReportEngine._drop_kernel_conn!(k); catch; end
+    return nothing
 end
 
 # Key-only connects in flight, per host, with the regions waiting on each. One attempt serves every
@@ -1656,10 +1718,18 @@ function _connect_in_background!(name::AbstractString, nb::Union{LiveNotebook,No
     return nothing
 end
 
-function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Nothing} = nothing)
+# `rerun` says that a cell run asks, rather than the supervisor. A run wants the node again even
+# when the request of the task still in flight was withdrawn, so that task keeps what it gets.
+function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Nothing} = nothing;
+                               rerun::Bool = false)
     lock(_PLACING_LOCK) do
-        String(name) in _PLACING && return false
-        push!(_PLACING, String(name)); true
+        if String(name) in _PLACING
+            rerun && _withdrawn_while_placing(name) && (_PLACING_SINCE[String(name)] = time())
+            return false
+        end
+        push!(_PLACING, String(name))
+        _PLACING_SINCE[String(name)] = time()
+        true
     end || return nothing
     Threads.@spawn try
         # This task exists only to bring `name` up, so tag every _rlog it emits into that region's
@@ -1677,6 +1747,13 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
                 try; _workers_push!(nb); catch; end   # the pill says "queued" NOW, not once it lands
             end
             ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
+            # The request was withdrawn while this task submitted it or waited on it, so the job is
+            # released, granted or still queued, and the cells that waited on it stay stopped.
+            if _withdrawn_while_placing(name)
+                ReportEngine._rlog("region[$name]: the request was withdrawn while it was placed - releasing it")
+                ReportEngine.region_release!(r)
+                return
+            end
             # A NODE JUST ARRIVED, so the idle clock starts now. Without this it carries over the
             # wait that preceded the grant — time when nothing was held and nothing could be idle —
             # and a region that queued longer than its own timeout is released the moment it lands.
@@ -1697,7 +1774,10 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
         ReportEngine._rlog("region[$name]: placement failed — $(first(sprint(showerror, e), 160))")
         nb === nothing || (try; _broadcast(nb, "bringup:region '$name': could not get a node — $(first(sprint(showerror, e), 120))"); catch; end)
     finally
-        lock(_PLACING_LOCK) do; delete!(_PLACING, String(name)); end
+        lock(_PLACING_LOCK) do
+            delete!(_PLACING, String(name))
+            delete!(_PLACING_SINCE, String(name))
+        end
         nb === nothing || (try; _workers_push!(nb); catch; end)   # …and stops saying it afterwards
     end
     return nothing
@@ -1753,14 +1833,14 @@ function _region_kernel!(nb::LiveNotebook, name::String)
                 # on a sign-in; queueing and signing in need different things from you.
                 if !ReportEngine.Sweep.connected(r.host)
                     ReportEngine.Sweep.connect_failed_recently(r.host) &&
-                        throw(RegionWaiting(WAIT_NOT_SIGNED_IN, r.host))
+                        throw(RegionWaiting(WAIT_NOT_SIGNED_IN, r.host, name))
                     _connect_in_background!(name, nb, r.host)
-                    throw(RegionWaiting(WAIT_CONNECTING, r.host))
+                    throw(RegionWaiting(WAIT_CONNECTING, r.host, name))
                 end
-                _place_in_background!(name, nb)
+                _place_in_background!(name, nb; rerun = true)
                 # A queue wait is minutes on a busy cluster, so this is not a "try again" — the
                 # placement task re-runs this cell itself when the scheduler grants a node.
-                throw(RegionWaiting(WAIT_QUEUED, r.host))
+                throw(RegionWaiting(WAIT_QUEUED, r.host, name))
             end
         end
         target = ReportEngine._region_target(r; origin_env = origin_env, at = at)   # transport/datadir/region from the def; env = the notebook's
@@ -2393,7 +2473,8 @@ function _reconcile_blocked_regions!(nb::LiveNotebook)
     lock(nb.lock) do
         for c in nb.report.cells
             (c.state == BLOCKED && c.blocked == WAIT_QUEUED) || continue
-            r = _cell_region(c)
+            # The region the wait is for, which for a cell that reads an upstream value is not its own.
+            r = isempty(c.blocked_region) ? _cell_region(c) : c.blocked_region
             isempty(r) || push!(names, r)
         end
     end
@@ -2511,7 +2592,12 @@ end
 # Once the region cell is FRESH, a downstream cell still ERRORED or BLOCKED is stale by definition.
 # Re-armed ONCE per failure: a reader that fails again is failing for its own reasons, and retrying
 # it every tick would be a loop rather than a repair.
+#
+# The set has its own lock, because the task that tells the pages of a withdrawn request marks cells
+# in it. `_reconcile_stranded_readers!` takes the lock inside `nb.lock`, and `_withdraw_region_waits!`
+# takes it after releasing `nb.lock`.
 const _READER_REARMED = Set{Tuple{String,String}}()
+const _READER_REARMED_LOCK = ReentrantLock()
 
 function _reconcile_stranded_readers!(nb::LiveNotebook)
     n = 0
@@ -2524,12 +2610,15 @@ function _reconcile_stranded_readers!(nb::LiveNotebook)
             (c.id in blast && !(c.id in ready)) || continue
             key = (nb.id, c.id)
             if c.state == FRESH || c.state == STALE || c.state == RUNNING
-                delete!(_READER_REARMED, key)             # recovered — a later failure gets its own go
+                # The cell recovered, so a later failure is re-armed once more.
+                lock(_READER_REARMED_LOCK) do; delete!(_READER_REARMED, key); end
                 continue
             end
             _region_recoverable(c) || continue
-            key in _READER_REARMED && continue
-            push!(_READER_REARMED, key)
+            lock(_READER_REARMED_LOCK) do
+                key in _READER_REARMED && return false
+                push!(_READER_REARMED, key); true
+            end || continue
             ReportEngine.restale!(c) && (n += 1)
         end
         n > 0 && (nb.version += 1)
@@ -2628,6 +2717,13 @@ function _sweep_idle_regions!(h)
             end
         end
     end
+    # A notebook also uses a region when it holds a kernel for it that a retagged cell left behind,
+    # and a release drops that kernel too.
+    for (nbid, r) in lock(_REGION_LOCK) do; collect(keys(_REGION_KERNELS)); end
+        nb = lock(h.lock) do; get(h.notebooks, nbid, nothing); end
+        nb === nothing && continue
+        let v = get!(Vector{LiveNotebook}, nbs_of, r); nb in v || push!(v, nb); end
+    end
     _warn_expiring_regions!(nbs_of)
     _release_idle_regions!(nbs_of, busy)
     # Reaching the cluster to reconcile a region that holds a node with nothing on it is the one
@@ -2705,6 +2801,7 @@ function _release_idle_regions!(nbs_of, busy)
             lock(_REGION_USE_LOCK) do; delete!(_REGION_RELEASE_WARNED, r.name); end
             # Nobody was here to see it — that is why it happened — so the notice is KEPT and pushed
             # again when a page next connects, rather than broadcast once into an empty room.
+            foreach(nb -> _forget_released_kernel!(nb, r.name), nbs)
             _hold_released_notice!(nbs, r, "idle")
             _push_alloc_event!(nbs, r.name, "released"; reason = "idle")
             for nb in nbs; try; _workers_push!(nb); catch; end; end
@@ -3516,7 +3613,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         wait = e isa RegionWaiting
         ReportEngine._rlog("region: " * (wait ? "holding " : "cannot route ") * cell.id * ": " * msg)
         lock(nb.lock) do
-            wait ? ReportEngine.mark_blocked!(cell, e.why, e.host) :
+            wait ? ReportEngine.mark_blocked!(cell, e.why, e.host, e.region) :
                    ReportEngine.mark_errored!(cell, msg)
             _broadcast_progress(nb, cell)
         end
@@ -3555,7 +3652,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         wait && ReportEngine._rlog("region: holding " * cell.id * " (input transfer): " *
                                    sprint(showerror, presync_err))
         lock(nb.lock) do
-            wait ? ReportEngine.mark_blocked!(cell, presync_err.why, presync_err.host) :
+            wait ? ReportEngine.mark_blocked!(cell, presync_err.why, presync_err.host, presync_err.region) :
                    ReportEngine.mark_errored!(cell, "region boundary transfer failed: " *
                                                     sprint(showerror, presync_err))
             _broadcast_progress(nb, cell)
