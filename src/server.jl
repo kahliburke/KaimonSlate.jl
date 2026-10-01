@@ -1745,7 +1745,8 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         if r.scheduler !== :none
             # Placed-or-not is asked of the placement, never inferred from the node name: a single-node
             # cluster grants a node named like the front door, so `region_host(r) == r.host` misreads.
-            if !ReportEngine._region_holds_node(r)   # nothing placed yet
+            # It is read from `at`, the placement the target is built from, so the two cannot differ.
+            if isempty(last(at))   # nothing placed yet
                 # Asking for a node needs the cluster, and reaching the cluster may need a password
                 # that only a person can supply — which background work is not allowed to ask for.
                 # A host that takes a key needs nobody, so that is tried first, in the background
