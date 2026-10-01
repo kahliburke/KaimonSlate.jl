@@ -1215,7 +1215,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", clear="") -> String
+        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", options="", prologue="", clear="") -> String
 
     Define (or update) a named region — a global compute target: a `host` reached over `transport`
     (`tunnel`|`direct`), an optional `preload` (a LOCAL project dir replicated on the host so its
@@ -1237,7 +1237,11 @@ function create_tools(GateTool::Type)
 
     A region whose host fronts a cluster asks its `scheduler` (`slurm`, `pbs`, `auto`, or `none` to
     run on the host itself) for a node: `partition`, `walltime` (`HH:MM:SS`), `cpus`, `mem` (`16G`),
-    `gpus` (`1`, `a100:2`) and `account` say what to ask for.
+    `gpus` (`1`, `a100:2`) and `account` say what to ask for. Any other scheduler setting goes in
+    `options`, as `key=value` entries separated by `;` (`options="constraint=gpu; qos=debug"`); a
+    bare key is a switch (`exclusive`), and each is spelled for the region's scheduler when the node
+    is requested. Passing `options` replaces the region's whole set. `prologue` is shell run on the
+    granted node before the worker starts (`module load cudatoolkit`).
 
     Pass `delete=true` to REMOVE the named region from the registry (all other args ignored): its
     workers are reaped, attached ones included, and a scheduler region's allocation is released.
@@ -1250,6 +1254,7 @@ function create_tools(GateTool::Type)
                     threads::String = "", sysimage::String = "", curve::String = "", peer::String = "",
                     scheduler::String = "", partition::String = "", walltime::String = "",
                     cpus::String = "", mem::String = "", gpus::String = "", account::String = "",
+                    options::String = "", prologue::String = "",
                     clear::String = "", delete::Bool = false)::String
         nm = strip(name); isempty(nm) && return "Give a region name."
         if delete
@@ -1267,8 +1272,17 @@ function create_tools(GateTool::Type)
         given(v) = !isempty(strip(v))
         for (k, v) in ((:host, host), (:data_root, data_root), (:cache_root, cache_root),
                        (:threads, threads), (:peer, peer), (:partition, partition),
-                       (:walltime, walltime), (:mem, mem), (:gpus, gpus), (:account, account))
+                       (:walltime, walltime), (:mem, mem), (:gpus, gpus), (:account, account),
+                       (:prologue, prologue))
             given(v) && (kw[k] = String(strip(v)))
+        end
+        if given(options)
+            kw[:options] = try
+                ReportEngine.parse_region_options(options)
+            catch e
+                e isa ArgumentError || rethrow()
+                return "⛔ options: $(e.msg)"
+            end
         end
         for (k, v) in ((:base_port, base_port), (:warm, warm), (:cpus, cpus))
             given(v) || continue
@@ -1303,7 +1317,11 @@ function create_tools(GateTool::Type)
                (r.scheduler === :none ? "" :
                 string(", ", r.scheduler, isempty(r.partition) ? "" : " partition=$(r.partition)",
                        isempty(r.walltime) ? "" : " walltime=$(r.walltime)",
-                       isempty(r.gpus) ? "" : " gpus=$(r.gpus)")) *
+                       isempty(r.gpus) ? "" : " gpus=$(r.gpus)",
+                       isempty(r.account) ? "" : " account=$(r.account)",
+                       isempty(r.options) ? "" :
+                           " options=" * join((isempty(v) ? k : "$k=$v" for (k, v) in sort!(collect(r.options))), "; "))) *
+               (isempty(r.prologue) ? "" : ", prologue set") *
                (r.base_port > 0 ? ", base_port=$(r.base_port)" : "") *
                (r.warm > 0 ? ", warm=$(r.warm) (reconciling)" : "") *
                (r.sysimage ? ", sysimage=on" : "") *

@@ -3650,6 +3650,28 @@ function _region_options_of(d)
     return out
 end
 
+"""
+    parse_region_options(text) -> Dict{String,String}
+
+Scheduler options written as text: `key=value` entries separated by `;` or newlines, a bare `key`
+being a switch (`exclusive`). Separators are not commas because sbatch values carry them
+(`nodelist=nid[001-003],nid005`). Throws an `ArgumentError` naming the entry for a malformed key, and
+for one of the settings a region has its own field for, since the request drops those from options.
+"""
+function parse_region_options(text::AbstractString)
+    out = Dict{String,String}()
+    for entry in split(text, r"[;\n]")
+        e = strip(entry); isempty(e) && continue
+        k, v = occursin('=', e) ? strip.(split(e, '='; limit = 2)) : (e, "")
+        occursin(r"^[A-Za-z][A-Za-z0-9_-]*$", k) ||
+            throw(ArgumentError("'$e' is not key=value (a key is letters, digits, '_' or '-')"))
+        k in Sweep._FIELD_OWNED &&
+            throw(ArgumentError("'$k' is a region field of its own; set it with $k=, not in options"))
+        out[String(k)] = String(v)
+    end
+    return out
+end
+
 _region_from_dict(d::AbstractDict) = Region(
     String(get(d, "name", "")), String(get(d, "host", "")),
     Symbol(let t = String(get(d, "transport", "tunnel")); isempty(t) ? "tunnel" : t end),

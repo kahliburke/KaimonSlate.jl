@@ -339,6 +339,20 @@ const RE = KaimonSlate.ReportEngine
                 @test !occursin("--constraint", bare) && !occursin("--qos", bare)
             end
 
+            @testset "scheduler options written as text" begin
+                # The agent tool's spelling of the form's key/value rows.
+                @test RE.parse_region_options("constraint=gpu; qos=debug\nexclusive") ==
+                      Dict("constraint" => "gpu", "qos" => "debug", "exclusive" => "")
+                # Not split on commas or a second '=': sbatch values carry both.
+                @test RE.parse_region_options("nodelist=nid[001-003],nid005; comment=a=b") ==
+                      Dict("nodelist" => "nid[001-003],nid005", "comment" => "a=b")
+                @test RE.parse_region_options("  ;  ") == Dict{String,String}()
+                # A setting with its own field would be dropped from the request, so it is refused
+                # here rather than stored where it does nothing.
+                @test_throws ArgumentError RE.parse_region_options("qos=debug; account=m1")
+                @test_throws ArgumentError RE.parse_region_options("=gpu")
+            end
+
             @testset "a region's prologue runs where it can matter" begin
                 # In the worker's own shell, before the worker boots. Not in the allocation's job
                 # body, which only sleeps, and not on `_run_on`, which carries every poll too.
