@@ -579,8 +579,13 @@ function _boot_and_run!(nb::LiveNotebook; autorun::Bool = true)
             if autorun
                 lock(nb.lock) do; delete!(nb.report.meta, "hydratingKind"); end   # boot done → falls back to the (bannerless) "run" default
                 try; _broadcast(nb, string(nb.version)); catch; end   # worker is up → refresh the dot to "connected" BEFORE the (possibly long) run, so it's not stale
-                _drain!(nb)                          # initial full run — WAIT for it to fully complete, so
+                lock(_OPENING_RUN_LOCK) do; push!(_OPENING_RUN, nb.id); end
+                try
+                    _drain!(nb)                      # initial full run — WAIT for it to fully complete, so
                                                      # `hydrating` stays up for it (no banner though, see above)
+                finally
+                    lock(_OPENING_RUN_LOCK) do; delete!(_OPENING_RUN, nb.id); end
+                end
                 lock(nb.lock) do
                     delete!(nb.report.meta, "hydrating")
                     delete!(nb.report.meta, "hydratingKind")
@@ -1085,6 +1090,29 @@ const _REGION_LOCK = ReentrantLock()
 const WAIT_QUEUED = "queued"
 const WAIT_NOT_SIGNED_IN = "not_signed_in"
 const WAIT_CONNECTING = "connecting"
+const WAIT_NOT_REQUESTED = "not_requested"
+
+# Notebooks in the run that opening them starts. A scheduler node bills from the moment it is held,
+# so getting one is something a person asks for by running a cell, as signing in is: an open or a
+# hub restart re-running a notebook must not queue for a node nobody asked for. A node already held
+# is still used, since attaching to it costs nothing more.
+const _OPENING_RUN = Set{String}()
+const _OPENING_RUN_LOCK = ReentrantLock()
+_in_opening_run(nbid) = lock(_OPENING_RUN_LOCK) do; String(nbid) in _OPENING_RUN; end
+
+# Cells left waiting are picked up by an explicit run of the notebook. Without this a run request
+# skips them, since the runner only takes STALE cells and a waiting cell is BLOCKED.
+function _restale_blocked!(nb::LiveNotebook)
+    n = lock(nb.lock) do
+        k = 0
+        for c in nb.report.cells
+            c.state == BLOCKED && ReportEngine.restale!(c) && (k += 1)
+        end
+        k > 0 && (nb.version += 1)
+        k
+    end
+    return n
+end
 
 """
     RegionWaiting(why, note = "")
@@ -1746,6 +1774,7 @@ function _region_kernel!(nb::LiveNotebook, name::String)
             # Placed-or-not is asked of the placement, never inferred from the node name: a single-node
             # cluster grants a node named like the front door, so `region_host(r) == r.host` misreads.
             if !ReportEngine._region_holds_node(r)   # nothing placed yet
+                _in_opening_run(nb.id) && throw(RegionWaiting(WAIT_NOT_REQUESTED, r.host))
                 # Asking for a node needs the cluster, and reaching the cluster may need a password
                 # that only a person can supply — which background work is not allowed to ask for.
                 # A host that takes a key needs nobody, so that is tried first, in the background
@@ -2804,11 +2833,20 @@ end
 pending_released_notice(nbid) = lock(_RELEASED_LOCK) do; get(_RELEASED_NOTICE, String(nbid), nothing); end
 clear_released_notice!(nbid) = (lock(_RELEASED_LOCK) do; delete!(_RELEASED_NOTICE, String(nbid)); end; nothing)
 
+# How long a newly granted node is kept while nothing runs on it. The grant re-arms the cells that
+# were waiting, and until the runner reaches one and starts preparing the worker, no cell marks the
+# region busy: the waiting cell may be a local reader, and the region's own cells may still be fresh
+# from an earlier node. Once a region cell is preparing it is RUNNING, which `busy` already covers.
+const _GRANT_GRACE_S = 300.0
+
+_granted_within(r, s) = (p = ReportEngine.region_placement(r); p !== nothing && time() - p.ts < s)
+
 # A region holding a node with nothing left on it at all — no workers, idle timer or not.
 function _sweep_dead_regions!(busy)
     for r in ReportEngine.regions()
         (r.scheduler === :none || r.name in busy) && continue
         ReportEngine._region_holds_node(r) || continue
+        _granted_within(r, _GRANT_GRACE_S) && continue
         try; ReportEngine.region_reconcile!(r.name)
         catch e; ReportEngine._rlog("supervisor: region sweep on '$(r.name)': " *
                                     first(sprint(showerror, e), 120))
@@ -3498,6 +3536,25 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
 end
 
 function _eval_one!(nb::LiveNotebook, cell::Cell)
+    # A cell whose input is waiting waits too, for the same thing. Run now it could only fail on a
+    # name its upstream has not produced. Whatever re-runs the upstream re-runs this cell with it:
+    # a granted node re-arms the region's dependents, and a run of the notebook takes up every wait.
+    up = lock(nb.lock) do
+        for d in cell.deps
+            i = _index_of(nb.report.cells, d)
+            i === nothing && continue
+            u = nb.report.cells[i]
+            u.state == BLOCKED && return u
+        end
+        nothing
+    end
+    if up !== nothing
+        lock(nb.lock) do
+            ReportEngine.mark_blocked!(cell, up.blocked, up.blocked_host)
+            _broadcast_progress(nb, cell)
+        end
+        return nothing
+    end
     # Region dispatch: the `region=` tag decides the kernel; a mutation auto-follows its data (see
     # _region_route). Markdown honors its tag too — its `$(…)` interpolation runs on that region's worker.
     #

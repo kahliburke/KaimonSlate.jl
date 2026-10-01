@@ -219,6 +219,14 @@ environment on the far side, which is real work that should not look like nothin
 The allocation is found by job name, so reopening the notebook attaches to the node it was already
 using instead of queueing for a second one.
 
+Opening a notebook never asks for a node. A node bills from the moment it is held, so the run that
+opening starts leaves region cells reading **run to request a node** when nothing is held, and
+running them asks. A node that is already held is used straight away.
+
+A held node with nothing running on it still bills until its walltime. Set the region's **idle
+release** (`10m`, say) to give it back after that long without a region cell running, and **idle
+warn** to be asked first.
+
 ## Reading results back
 
 Slate does not assume it can see the cluster's filesystem — the normal deployment is a laptop driving

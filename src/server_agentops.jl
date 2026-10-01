@@ -836,6 +836,8 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
                     push!(frc, String(did))
                 end
             end
+        else
+            _restale_blocked!(nb)   # a run of the notebook takes up the cells left waiting
         end
         return nothing
     end

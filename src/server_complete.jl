@@ -2936,7 +2936,7 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/redo", req -> _withnb(h, req, nb -> begin
         lbl = redo!(nb); j = state_json(nb); j["redid"] = lbl; _json(j)
     end))
-    HTTP.register!(router, "POST", "/api/{id}/run", req -> _withnb(h, req, nb -> (_eval!(nb); _json(state_json(nb)))))
+    HTTP.register!(router, "POST", "/api/{id}/run", req -> _withnb(h, req, nb -> (_restale_blocked!(nb); _eval!(nb); _json(state_json(nb)))))
     # Clear the in-memory scratchpad (slate.eval cells) — the panel's Clear button.
     HTTP.register!(router, "POST", "/api/{id}/scratch/clear", req -> _withnb(h, req, nb -> (clear_scratch!(nb); _json(Dict("ok" => true)))))
     # Re-run the WHOLE notebook (every cell in order, keeping the namespace) — the "safe"

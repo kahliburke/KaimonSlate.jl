@@ -288,6 +288,71 @@ const RE = KaimonSlate.ReportEngine
                 end
             end
 
+            @testset "a node is asked for by a run, not by opening" begin
+                rep = RE.parse_report("#%% code id=c region=gpu\n1\n#%% code id=d\n2\n")
+                nb = NS.LiveNotebook("opening", joinpath(mktempdir(), "opening.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                lock(NS._OPENING_RUN_LOCK) do; push!(NS._OPENING_RUN, "opening"); end
+                try
+                    # Nothing held: the opening run leaves the cell waiting instead of queueing.
+                    e = try; NS._region_kernel!(nb, "gpu"); nothing; catch err; err; end
+                    @test e isa NS.RegionWaiting && e.why == NS.WAIT_NOT_REQUESTED
+                    @test isempty(lock(() -> copy(NS._PLACING), NS._PLACING_LOCK))
+                    # A node already held is used: attaching to it costs nothing more.
+                    RE.route!("c9", "login", "77")
+                    lock(RE._REGION_PLACE_LOCK) do
+                        RE._REGION_PLACE["gpu"] = (host = "c9", job = "77", ts = time(),
+                                                   checked = time(), until = time() + 600)
+                    end
+                    @test NS._region_kernel!(nb, "gpu").target.job == "77"
+                finally
+                    lock(NS._OPENING_RUN_LOCK) do; delete!(NS._OPENING_RUN, "opening"); end
+                    NS._forget_region_kernel!(nb, "gpu")
+                    lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
+                    RE.route!("c9", "")
+                end
+                # A run of the notebook takes up the waiting cell; a settled one is left alone.
+                c, d = rep.cells
+                RE.mark_blocked!(c, NS.WAIT_NOT_REQUESTED, "login")
+                d.state = RE.FRESH
+                @test NS._restale_blocked!(nb) == 1
+                @test c.state == RE.STALE && d.state == RE.FRESH
+            end
+
+            @testset "a cell whose input is waiting waits with it" begin
+                rep = RE.parse_report("#%% code id=a region=gpu\nx = 1\n#%% code id=b\ny = x + 1\n#%% code id=c\nz = y + 1\n")
+                RE.build_dependencies!(rep)
+                nb = NS.LiveNotebook("waits", joinpath(mktempdir(), "waits.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                a, b, c = rep.cells
+                RE.mark_blocked!(a, NS.WAIT_NOT_REQUESTED, "login")
+                # Run, `b` could only fail on the `x` its upstream has not produced.
+                NS._eval_one!(nb, b)
+                @test b.state == RE.BLOCKED && b.blocked == NS.WAIT_NOT_REQUESTED && b.blocked_host == "login"
+                NS._eval_one!(nb, c)                   # …and the wait carries down the chain
+                @test c.state == RE.BLOCKED && c.blocked == NS.WAIT_NOT_REQUESTED
+            end
+
+            @testset "a node just granted is not released for having no worker" begin
+                # The grant re-arms the waiting cells, and until one reaches its worker nothing marks
+                # the region busy. The sweep that gives back nodes with no workers leaves it alone.
+                at(ts) = lock(RE._REGION_PLACE_LOCK) do
+                    RE._REGION_PLACE["gpu"] = (host = "c9", job = "77", ts = ts,
+                                               checked = time(), until = time() + 600)
+                end
+                try
+                    at(time())
+                    @test NS._granted_within(RE.region_get("gpu"), NS._GRANT_GRACE_S)
+                    at(time() - NS._GRANT_GRACE_S - 1)
+                    @test !NS._granted_within(RE.region_get("gpu"), NS._GRANT_GRACE_S)
+                finally
+                    lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
+                end
+                @test !NS._granted_within(RE.region_get("gpu"), NS._GRANT_GRACE_S)   # nothing held
+            end
+
             # ── what the fixed fields cannot say ──────────────────────────────────────────────
             # A region carries the same scheduler options a sweep cell does, spelled by the same
             # catalogue, so one cluster described for a sweep and for a region says one thing.
@@ -593,6 +658,10 @@ const RE = KaimonSlate.ReportEngine
                 @test occursin("through login", msg) && occursin("padlock", msg)
                 @test !occursin("ssh/config", msg) && !occursin("key-based", msg)
 
+                # A file syncer pointed at the node, as a worker on it would have started.
+                lock(RE._SYNC_LOCK) do
+                    RE._SYNCERS["c9:proj"] = RE.SyncWatcher(Task(() -> nothing), true)
+                end
                 lock(RE._REGION_PLACE_LOCK) do
                     RE._REGION_PLACE["leased"] =
                         (host = "c9", job = "77", ts = time(), checked = time(), until = time() - 1)
@@ -600,6 +669,7 @@ const RE = KaimonSlate.ReportEngine
                 @test RE.region_host(r) == "login"             # past it: nothing placed, ask again
                 @test !RE._region_holds_node(r)
                 @test RE.via("c9") === nothing                 # the route goes with the allocation
+                @test !haskey(RE._SYNCERS, "c9:proj")          # …and so does the syncer
                 @test !haskey(RE._REGION_PLACE, "leased")
                 # An unrouted host keeps the plain advice — that one really is an ssh/config problem.
                 @test occursin("~/.ssh/config", RE._unreachable("workstation"))

@@ -4041,6 +4041,9 @@ function _placement(r::Region)
     end
     dropped === true || return nothing            # re-placed while we looked; that entry stands
     route!(p.host, "")
+    # The file syncers go too, as in `region_forget_placement!`: left running, the next local save
+    # sends the project to a node the scheduler has already handed to someone else.
+    stop_sync_host!(p.host)
     # The data forwards go with the route: their far end is gone, and the login node's session
     # carries every other command to the cluster. Spawned because this runs under `region_host`,
     # which the UI polls and which must not wait on a session queue.

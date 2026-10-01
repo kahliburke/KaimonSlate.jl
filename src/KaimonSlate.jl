@@ -1215,7 +1215,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", options="", prologue="", clear="") -> String
+        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", options="", prologue="", idle_release="", idle_warn="", clear="") -> String
 
     Define (or update) a named region — a global compute target: a `host` reached over `transport`
     (`tunnel`|`direct`), an optional `preload` (a LOCAL project dir replicated on the host so its
@@ -1241,7 +1241,9 @@ function create_tools(GateTool::Type)
     `options`, as `key=value` entries separated by `;` (`options="constraint=gpu; qos=debug"`); a
     bare key is a switch (`exclusive`), and each is spelled for the region's scheduler when the node
     is requested. Passing `options` replaces the region's whole set. `prologue` is shell run on the
-    granted node before the worker starts (`module load cudatoolkit`).
+    granted node before the worker starts (`module load cudatoolkit`). `idle_release` (`10m`, `1h`)
+    gives the node back after no region cell has run for that long; `idle_warn` asks the open page
+    that long beforehand. `0` turns either off.
 
     Pass `delete=true` to REMOVE the named region from the registry (all other args ignored): its
     workers are reaped, attached ones included, and a scheduler region's allocation is released.
@@ -1255,6 +1257,7 @@ function create_tools(GateTool::Type)
                     scheduler::String = "", partition::String = "", walltime::String = "",
                     cpus::String = "", mem::String = "", gpus::String = "", account::String = "",
                     options::String = "", prologue::String = "",
+                    idle_release::String = "", idle_warn::String = "",
                     clear::String = "", delete::Bool = false)::String
         nm = strip(name); isempty(nm) && return "Give a region name."
         if delete
@@ -1275,6 +1278,22 @@ function create_tools(GateTool::Type)
                        (:walltime, walltime), (:mem, mem), (:gpus, gpus), (:account, account),
                        (:prologue, prologue))
             given(v) && (kw[k] = String(strip(v)))
+        end
+        SW = ReportEngine.Sweep
+        for (k, v) in ((:idle_release, idle_release), (:idle_warn, idle_warn))
+            given(v) || continue
+            # `parse_duration` reads anything it cannot parse as 0, which here would mean "off".
+            s = SW.parse_duration(strip(v))
+            (s > 0 || occursin(r"^\s*0+(\.0*)?\s*[smhdw]?\s*$", v)) ||
+                return "⛔ $k must be a duration like 10m or 1h, not '$v'"
+            kw[k] = round(Int, s)
+        end
+        if haskey(kw, :idle_release) || haskey(kw, :idle_warn)
+            cur = ReportEngine.region_get(nm)
+            rel = get(kw, :idle_release, cur === nothing ? 0 : cur.idle_release)
+            wrn = get(kw, :idle_warn, cur === nothing ? 0 : cur.idle_warn)
+            (rel > 0 && wrn >= rel) &&
+                return "⛔ idle_warn ($(SW.format_duration(wrn))) must be shorter than idle_release ($(SW.format_duration(rel)))"
         end
         if given(options)
             kw[:options] = try
@@ -1322,6 +1341,8 @@ function create_tools(GateTool::Type)
                        isempty(r.options) ? "" :
                            " options=" * join((isempty(v) ? k : "$k=$v" for (k, v) in sort!(collect(r.options))), "; "))) *
                (isempty(r.prologue) ? "" : ", prologue set") *
+               (r.idle_release > 0 ? ", idle release $(SW.format_duration(r.idle_release))" *
+                                     (r.idle_warn > 0 ? " (warn $(SW.format_duration(r.idle_warn)) before)" : "") : "") *
                (r.base_port > 0 ? ", base_port=$(r.base_port)" : "") *
                (r.warm > 0 ? ", warm=$(r.warm) (reconciling)" : "") *
                (r.sysimage ? ", sysimage=on" : "") *
