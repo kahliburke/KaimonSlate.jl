@@ -1091,6 +1091,70 @@ const WAIT_QUEUED = "queued"
 const WAIT_NOT_SIGNED_IN = "not_signed_in"
 const WAIT_CONNECTING = "connecting"
 const WAIT_NOT_REQUESTED = "not_requested"
+const WAIT_NEEDS_PREPARE = "needs_prepare"
+const WAIT_PREPARING = "preparing"
+
+# Whether a notebook's first worker on region `r` should go through preparing it first: the region was
+# never prepared, its site has changed since, or this project's environment was never tried there. An
+# environment that merely changed since it was tried installs during the start, as it always has.
+# Also when the project's environment changed after it was tested: the start would otherwise resolve,
+# install and precompile it on the node inside the worker's boot, with none of the prepare's reporting.
+# `""` when the region is ready for this project, else why it is not.
+function _prepare_reason(r, origin_env::AbstractString)
+    isempty(r.readiness) && return "not prepared"
+    stale = String(get(r.readiness, "stale", ""))
+    isempty(stale) || return stale
+    isempty(origin_env) && return ""
+    e = ReportEngine.env_report(r, origin_env)
+    e === nothing && return "packages not tested here"
+    return ReportEngine.env_unchanged(e) ? "" : "packages changed since tested"
+end
+
+# Ask the page to offer preparing the region (prepare.js). Pushed on every explicit run that meets the
+# wait, so a dialog dismissed once comes back when the person runs the cell again.
+function _announce_prepare!(nb::LiveNotebook, r; reason::AbstractString = "")
+    try
+        _broadcast(nb, "regionprep:" * JSON.json(Dict("region" => r.name, "host" => r.host,
+                                                    "scheduler" => String(r.scheduler), "reason" => reason)))
+    catch
+    end
+    return nothing
+end
+
+"""
+    _prepare_for_notebook!(nb, name)
+
+Prepare region `name` for `nb`'s project, keeping the node it gets for the worker that follows, then
+re-run the cells that were waiting. Background; progress is read from `/api/regions/prepare`.
+"""
+function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString)
+    r = ReportEngine.region_get(name)
+    r === nothing && return nothing
+    # The worker prepare starts and loads the packages in is the one this notebook's cells use.
+    worker = (start = () -> begin
+                  k = _region_kernel!(nb, String(r.name); preparing = true)
+                  ReportEngine.prepare!(k, nb.report; explicit = true)
+                  k.conn === nothing && error("the worker did not connect")
+                  nothing
+              end,
+              run = code -> begin
+                  k = _region_kernel!(nb, String(r.name); preparing = true)
+                  out = lock(_eval_mutex(nb)) do
+                      ReportEngine.eval_capture(k, nb.report, String(code), "prepare")
+                  end
+                  out.exception === nothing || error(first(String(out.exception), 400))
+                  out.stdout
+              end)
+    Threads.@spawn try
+        ReportEngine.prepare_region!(r.name; project = nb.path, keep_node = true, worker,
+                                     node = r.scheduler === :none ? nothing : true)
+        _restale_region_cells!(nb, r.name)
+        _ensure_runner!(nb)
+    catch e
+        ReportEngine.prepare_failed_to_start!(r.name, e)
+    end
+    return nothing
+end
 
 # Notebooks in the run that opening them starts. A scheduler node bills from the moment it is held,
 # so getting one is something a person asks for by running a cell, as signing in is: an open or a
@@ -1103,6 +1167,8 @@ _in_opening_run(nbid) = lock(_OPENING_RUN_LOCK) do; String(nbid) in _OPENING_RUN
 # Cells left waiting are picked up by an explicit run of the notebook. Without this a run request
 # skips them, since the runner only takes STALE cells and a waiting cell is BLOCKED.
 function _restale_blocked!(nb::LiveNotebook)
+    # A run of the notebook is a request, so it ends the opening run's restraint even mid-way.
+    lock(_OPENING_RUN_LOCK) do; delete!(_OPENING_RUN, nb.id); end
     n = lock(nb.lock) do
         k = 0
         for c in nb.report.cells
@@ -1734,12 +1800,16 @@ end
 # The notebook's kernel for region `name`, created lazily from its footer spec (spawn/adopt
 # happens at its first prepare!, so a warm-pool worker makes this ~1s). Label carries the
 # region so the worker roster + attach records distinguish kernels.
-function _region_kernel!(nb::LiveNotebook, name::String)
+# `preparing`: the caller is the region's prepare, starting the worker it hands to this notebook.
+function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false)
     lock(_REGION_LOCK) do
         r = ReportEngine.region_get(name)
         r === nothing && error("region '$name' is not defined — create it in the registry: " *
                                "region(\"$name\"; host=…, warm=…) or the home-page Regions manager")
         isempty(r.host) && error("region '$name' has no host — set one in the Regions manager")
+        # While the region is being prepared its cells wait for it: a prepare for this notebook starts
+        # the worker they will use, and a second one started beside it competes for the same node.
+        (!preparing && ReportEngine.prepare_running(r.name)) && throw(RegionWaiting(WAIT_PREPARING, r.host))
         at = ReportEngine.region_where(r)
         k = get(_REGION_KERNELS, (nb.id, name), nothing)
         # A cached kernel's target names the node it runs on and, on a scheduler region, the job that
@@ -1764,6 +1834,13 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         envdir = ReportEngine.notebook_env_dir(nb.path)
         origin_env = isfile(joinpath(envdir, "Project.toml")) ? envdir :
                      (!isempty(parent) && isfile(joinpath(parent, "Project.toml")) ? parent : "")
+        # A notebook's first worker on a region goes through preparing it, step by step and in view,
+        # rather than meeting the site's first-time problems inside the run.
+        why = preparing ? "" : _prepare_reason(r, origin_env)
+        if !isempty(why)
+            (_in_opening_run(nb.id) && isempty(get(_FORCE_RUN, nb.id, ()))) || _announce_prepare!(nb, r; reason = why)
+            throw(RegionWaiting(WAIT_NEEDS_PREPARE, r.host))
+        end
         # Where the worker goes. On a scheduler region `r.host` is the front door, not the address —
         # the node is granted, not configured. Getting one can mean queueing, and on a gated cluster
         # it can mean waiting for a person to read a code off a phone. THIS RUNS UNDER `nb.lock`, so
@@ -1774,7 +1851,9 @@ function _region_kernel!(nb::LiveNotebook, name::String)
             # Placed-or-not is asked of the placement, never inferred from the node name: a single-node
             # cluster grants a node named like the front door, so `region_host(r) == r.host` misreads.
             if !ReportEngine._region_holds_node(r)   # nothing placed yet
-                _in_opening_run(nb.id) && throw(RegionWaiting(WAIT_NOT_REQUESTED, r.host))
+                # A cell someone ran by hand during the opening run is a request all the same.
+                (_in_opening_run(nb.id) && isempty(get(_FORCE_RUN, nb.id, ()))) &&
+                    throw(RegionWaiting(WAIT_NOT_REQUESTED, r.host))
                 # Asking for a node needs the cluster, and reaching the cluster may need a password
                 # that only a person can supply — which background work is not allowed to ask for.
                 # A host that takes a key needs nobody, so that is tried first, in the background
@@ -2023,6 +2102,20 @@ end
 # the wire is the only signal. `WeakKeyDict` so a closed notebook's kernels don't pin the clock in memory.
 const _KERNEL_UNRESPONSIVE_SINCE = WeakKeyDict{Any,Float64}()   # kernel → wall time it first went silent (cleared on any success)
 const _DEAD_WIRE_GRACE = something(tryparse(Float64, get(ENV, "KAIMONSLATE_DEADWIRE_GRACE", "")), 45.0)  # s of continuous silence ⇒ dead
+# The silence a remote wire may keep before it is dropped. A region worker takes its region's own
+# setting; else what preparing the region measured for this worker's project, whose packages are what
+# a busy worker is loading; else what it measured for the site; anything else gets the hub's default.
+# Never shorter than the default: a measurement only ever adds patience.
+function _dead_wire_grace(k)
+    t = try; k.target; catch; nothing; end
+    t isa ReportEngine.RemoteTarget || return _DEAD_WIRE_GRACE
+    r = isempty(t.region) ? nothing : ReportEngine.region_get(t.region)
+    r === nothing && return _DEAD_WIRE_GRACE
+    r.liveness_grace > 0 && return Float64(r.liveness_grace)
+    e = ReportEngine.env_report(r, t.origin_env)
+    m = e === nothing ? get(r.readiness, "liveness_grace_s", nothing) : get(e, "liveness_grace_s", nothing)
+    return m isa Real ? max(_DEAD_WIRE_GRACE, Float64(m)) : _DEAD_WIRE_GRACE
+end
 const _LIVENESS_PING_TIMEOUT = 8.0   # per-ping timeout; also how far to BACKDATE first-silence — when a ping first fails the worker has already been silent this long, so the countdown starts at ~8s, not 0
 const _LAST_RUNNING = Dict{String,Tuple{Set{String},Bool}}()   # nb id → (running ids, anyok) from the last sweep
 # Repeat-suppression for the unresponsive log. A wire that stays silent used to write one identical
@@ -2101,7 +2194,7 @@ end
 function _heal_dead_wire!(nb::LiveNotebook, k, unresp_s::Real = 0.0)
     side = _kernel_side_label(nb, k)
     auto = _region_autoretry()
-    ReportEngine._rlog("liveness: dead wire on $(nb.id)/$(side) — worker unresponsive for $(round(Int, unresp_s))s (grace $(round(Int, _DEAD_WIRE_GRACE))s); dropping the connection ($(auto ? "auto-retry: next run re-dials" : "manual: holds until an explicit re-run"))")
+    ReportEngine._rlog("liveness: dead wire on $(nb.id)/$(side) — worker unresponsive for $(round(Int, unresp_s))s (grace $(round(Int, _dead_wire_grace(k)))s); dropping the connection ($(auto ? "auto-retry: next run re-dials" : "manual: holds until an explicit re-run"))")
     dropped = try; ReportEngine._drop_kernel_conn!(k)
     catch e; ReportEngine._rlog("liveness: drop failed on $(nb.id)/$(side): " * first(sprint(showerror, e), 120)); false
     end
@@ -2164,7 +2257,7 @@ function _liveness_sweep!(nb::LiveNotebook)
             unresp = time() - since
             logged = _log_liveness_silence(nb, k, err, unresp)
             if (k.target isa ReportEngine.RemoteTarget || k.remote || _kernel_proc_dead(k)) &&
-               unresp >= _DEAD_WIRE_GRACE
+               unresp >= _dead_wire_grace(k)
                 delete!(_KERNEL_UNRESPONSIVE_SINCE, k); delete!(_LIVENESS_LOG_LAST, k)
                 _heal_dead_wire!(nb, k, unresp)        # → amber "disconnected" (pushes inside)
             elseif k.target isa ReportEngine.RemoteTarget || k.remote
@@ -2416,6 +2509,7 @@ const _REPLACE_AT = Dict{Tuple{String,String},Float64}()
 const _REPLACE_EVERY = 30.0
 
 function _reconcile_blocked_regions!(nb::LiveNotebook)
+    _rearm_after_prepare!(nb)
     # Only a QUEUE wait. A cell blocked because nobody has signed in to the cluster is waiting on a
     # person, and asking the scheduler about it every half minute answers a question nobody asked.
     names = Set{String}()
@@ -2447,6 +2541,28 @@ function _reconcile_blocked_regions!(nb::LiveNotebook)
         _ensure_runner!(nb)
     end
     return nothing
+end
+
+# Cells that waited while their region was prepared run once it is done. A prepare started for this
+# notebook re-runs them itself; one started from the regions panel or by a tool does not know them.
+function _rearm_after_prepare!(nb::LiveNotebook)
+    for name in _prepared_regions_waiting(nb)
+        _restale_region_cells!(nb, name) > 0 && _ensure_runner!(nb)
+    end
+    return nothing
+end
+
+# Regions with cells still waiting on a prepare that has ended.
+function _prepared_regions_waiting(nb::LiveNotebook)
+    done = Set{String}()
+    lock(nb.lock) do
+        for c in nb.report.cells
+            (c.state == BLOCKED && c.blocked == WAIT_PREPARING) || continue
+            r = _cell_region(c)
+            (isempty(r) || ReportEngine.prepare_running(r)) || push!(done, r)
+        end
+    end
+    return done
 end
 
 # Give a node back when nothing is left on it. `_region_reconcile_impl!` releases a scheduler region
@@ -2847,12 +2963,30 @@ function _sweep_dead_regions!(busy)
         (r.scheduler === :none || r.name in busy) && continue
         ReportEngine._region_holds_node(r) || continue
         _granted_within(r, _GRANT_GRACE_S) && continue
+        # Reconciling lists the workers on the node, which on a scheduler is a job step: a request to
+        # the site's controller and a row in its accounting, every minute the node is held. A node
+        # with one of our workers connected to it is in use, and its wire says so already.
+        _region_serves_kernel(r) && continue
         try; ReportEngine.region_reconcile!(r.name)
         catch e; ReportEngine._rlog("supervisor: region sweep on '$(r.name)': " *
                                     first(sprint(showerror, e), 120))
         end
     end
     return nothing
+end
+
+# Whether a region kernel of this hub is connected to a worker on the region's current node.
+function _region_serves_kernel(r)
+    at = ReportEngine.region_where(r)
+    return lock(_REGION_LOCK) do
+        for ((_, side), k) in _REGION_KERNELS
+            side == r.name || continue
+            tgt = k.target
+            (tgt isa ReportEngine.RemoteTarget && (tgt.ssh_host, tgt.job) == at && k.conn !== nothing) &&
+                return true
+        end
+        return false
+    end
 end
 
 function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, included at ~1510) — untyped so this loads

@@ -7,6 +7,7 @@ import './toc.js';       // Table of Contents — first island migrated off the 
 import './health.js';    // Watchdog health badge + panel
 import './mesh.js';      // Consent-gated region introduction popup (PEER_TUNNEL_PLAN §5.1)
 import './allocnotice.js'; // Compute node about to be released, or already gone
+import './regionprep.js'; // Prepare a region before this notebook's first worker on it
 import './extensions.js'; // Extensions gallery — browse + install from the curated registry
 import './debugger.js';  // Cell debugger — the step controls under a cell, and the focus view
 import './keymap-ui.js';  // Settings → Keyboard — rebind any shortcut, switch keymap presets

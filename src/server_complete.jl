@@ -1348,6 +1348,9 @@ function _make_router(h::Hub)
                  # Everything the fixed fields cannot say, as the sweep cell's editor stores it,
                  # plus the shell to run before a worker boots.
                  "options" => r.options, "prologue" => r.prologue,
+                 "liveness_grace" => r.liveness_grace > 0 ? ReportEngine.Sweep.format_duration(r.liveness_grace) : "",
+                 # What preparing the region found, and whether a prepare is running now.
+                 "readiness" => ReportEngine.readiness_view(r), "preparing" => ReportEngine.preparing(r.name),
                  # Where the workers actually ARE. For a scheduler region that is the granted node,
                  # and it is the thing worth showing — `host` is only where the asking happens.
                  # Read from the hub's cached placement: listing regions must never queue for a node.
@@ -1664,7 +1667,8 @@ function _make_router(h::Hub)
                                                                  for (k, v) in o if !isempty(strip(String(k)))) :
                                              Dict{String,String}()
                                      end,
-                                     prologue = strip(String(get(b, "prologue", ""))))
+                                     prologue = strip(String(get(b, "prologue", ""))),
+                                     liveness_grace = round(Int, SW.parse_duration(get(b, "liveness_grace", 0))))
         do_reconcile && Threads.@spawn try
             ReportEngine.region_reconcile!(r.name)   # no-op when warm==0 except draining excess
         catch e
@@ -1819,6 +1823,57 @@ function _make_router(h::Hub)
                  for p in s.partitions] for s in det.found)))
     end)
 
+    # Prepare a region (`prepare_region!`): started in the background, followed by polling the GET.
+    # Body {name, node?: true|false}; `node` absent runs the node stage on a first prepare only.
+    HTTP.register!(router, "POST", "/api/regions/prepare", req -> begin
+        b = _body(req)
+        r = ReportEngine.region_get(strip(String(get(b, "name", ""))))
+        r === nothing && return _json(Dict("ok" => false, "error" => "no such region"))
+        st = ReportEngine.preparing(r.name)
+        (st !== nothing && st["running"] === true) && return _json(Dict("ok" => true, "preparing" => st))
+        n = get(b, "node", nothing)
+        node = n isa Bool ? n : nothing
+        project = strip(String(get(b, "project", "")))
+        try; ReportEngine._reference_env(isempty(project) ? r.preload : project)
+        catch e; return _json(Dict("ok" => false, "error" => sprint(showerror, e))); end
+        Threads.@spawn try
+            ReportEngine.prepare_region!(r.name; node = node, project = project)
+        catch e
+            ReportEngine.prepare_failed_to_start!(r.name, e)
+        end
+        _json(Dict("ok" => true))
+    end)
+    # From a notebook: prepare the region for THIS notebook's project, keep the node for its worker,
+    # and re-run the cells that waited. Body {region}.
+    HTTP.register!(router, "POST", "/api/{id}/prepare-region", req -> _withnb(h, req, nb -> begin
+        r = ReportEngine.region_get(strip(String(get(_body(req), "region", ""))))
+        r === nothing && return _json(Dict("ok" => false, "error" => "no such region"))
+        st = ReportEngine.preparing(r.name)
+        (st !== nothing && st["running"] === true) || _prepare_for_notebook!(nb, r.name)
+        _json(Dict("ok" => true))
+    end))
+    # Every prepare a region has had, newest first, and one of them in full. Kept, never rewritten.
+    HTTP.register!(router, "GET", "/api/regions/prepare/reports", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        _json(Dict("ok" => true, "reports" => ReportEngine.prepare_reports(get(q, "name", ""))))
+    end)
+    HTTP.register!(router, "GET", "/api/regions/prepare/report", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        rep = ReportEngine.prepare_report(get(q, "name", ""), get(q, "id", ""))
+        rep === nothing ? _json(Dict("ok" => false, "error" => "no such report")) :
+                          _json(Dict("ok" => true, "report" => rep))
+    end)
+    HTTP.register!(router, "GET", "/api/regions/prepare", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        r = ReportEngine.region_get(get(q, "name", ""))
+        r === nothing && return _json(Dict("ok" => false, "error" => "no such region"))
+        st = ReportEngine.preparing(r.name)
+        # Not running: the latest report's whole log, for the Activity view of a finished prepare.
+        last = (st !== nothing && st["running"] === true) ? nothing :
+               ReportEngine.prepare_report(r.name, String(get(r.readiness, "report", "")))
+        _json(Dict("ok" => true, "preparing" => st, "readiness" => ReportEngine.readiness_view(r),
+                   "last_log" => last === nothing ? Any[] : get(last, "log", Any[])))
+    end)
     HTTP.register!(router, "POST", "/api/regions/delete", req -> begin
         b = _body(req)
         name = strip(String(get(b, "name", "")))

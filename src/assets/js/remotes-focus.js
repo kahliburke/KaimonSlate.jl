@@ -6,6 +6,7 @@ import { html } from 'htm/preact';
 import { signal, effect } from '@preact/signals';
 import { detail, focusHost, editRegion, pendingRegion, regions, parked, loadRegions, schedInfo, loadScheduler } from './stores.js';
 import { hostTransport } from './hoststore.js';
+import { StepList, Activity, History } from './prepsteps.js';
 // One answer to "is a node held" and "what is giving it back called", shared with the notebook's
 // pills and panels — these used to be worked out here, and differently in two other files. model.js
 // is a classic script loaded before every module, so it is always here by the time this runs.
@@ -31,6 +32,8 @@ const fSched = signal('none'), fPart = signal(''), fWall = signal(''), fCpus = s
 // you are still typing it. Stored as a map; kept as a list here because two blank names are two
 // rows to the eye and one key to a map.
 const fOpts = signal([]);          // [{k, v}]
+const fGrace = signal('');         // liveness grace ("" = what Prepare measured, or the hub default)
+const prep = signal({});           // region name -> last /api/regions/prepare payload
 const fPro = signal('');
 const fMore = signal(false);       // the disclosure
 const fOptMenu = signal(-1);       // which option row has its suggestion menu open (-1 = none)
@@ -54,6 +57,66 @@ function buildSysimage(name) {
     .then(r => r.json()).then(d => { if (!d || !d.ok) { sysd.value = { ...sysd.value, [name]: { ok: false, error: (d && d.error) || 'build failed to start' } }; return; } setTimeout(() => loadSysimage(name), 3000); }).catch(() => {});
 }
 // The server returns codes with the values behind them. The wording is here, beside the fields.
+// ── preparing a region ──────────────────────────────────────────────────────────────
+// Polled while one runs, so each step's outcome lands as it happens; the region list reloads once
+// it ends, because the record is part of the region.
+// name -> { after, tries } while a click waits for the hub to report the run it started.
+const prepWait = signal({});
+function prepLoad(name) {
+  fetch('/api/regions/prepare?name=' + encodeURIComponent(name)).then(r => r.json()).then(d => {
+    if (!d || !d.ok) return;
+    const w = prepWait.value[name];
+    if (w) {
+      if (!(d.preparing && (+d.preparing.started || 0) > w.after) && w.tries < 40) {
+        prepWait.value = { ...prepWait.value, [name]: { ...w, tries: w.tries + 1 } };
+        setTimeout(() => prepLoad(name), 750);
+        return;
+      }
+      const { [name]: _, ...rest } = prepWait.value; prepWait.value = rest;
+    }
+    const was = prep.value[name];
+    prep.value = { ...prep.value, [name]: d };
+    if (d.preparing && d.preparing.running) {
+      setTimeout(() => { const e = editRegion.value; if (e && e.name === name) prepLoad(name); }, 2000);
+    } else if (was && was.preparing && was.preparing.running) loadRegions();
+  }).catch(() => {});
+}
+function startPrepare(name) {
+  if (prepWait.value[name]) return;
+  const cur = prep.value[name];
+  prepWait.value = { ...prepWait.value, [name]: { after: (cur && cur.preparing && +cur.preparing.started) || 0, tries: 0 } };
+  const done = () => { const { [name]: _, ...rest } = prepWait.value; prepWait.value = rest; };
+  fetch('/api/regions/prepare', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })
+    .then(r => r.json()).then(d => { if (d && d.ok) setTimeout(() => prepLoad(name), 300); else done(); })
+    .catch(done);
+}
+function ReadinessRow(name) {
+  if (!name) return null;
+  const d = prep.value[name];
+  const running = !!(d && d.preparing && d.preparing.running);
+  const rec = (d && d.readiness) || {};
+  const has = !!rec.prepared_at;
+  const head = running ? html`<span class="pddim"><span class="hydspin"></span> preparing</span>`
+    : !has ? html`<span class="pddim">not prepared</span>`
+    : rec.stale ? html`<span class="rppsyswarn">⚠ ${rec.stale}</span>`
+    : html`<span class=${rec.ok ? 'rppsysok' : 'rppsyswarn'}>${rec.ok ? '✓ prepared' : '⚠ prepared with failures'} · ${ago(rec.prepared_at)}</span>`;
+  return html`<div class="rpprow"><label>Readiness</label><div class="rppsysbox rppprep">
+      <div class="rppprephead">${head}
+        ${running ? null : prepWait.value[name] ? html`<button class="rppsysbtn" disabled>Starting…</button>`
+          : html`<button class="rppsysbtn" title="set up the host, read the site, and on a scheduler region try a worker on a node" onClick=${() => startPrepare(name)}>${has ? 'Prepare again' : 'Prepare'}</button>`}</div>
+      ${(running || has) ? StepList(running ? d.preparing.steps : rec.steps, running ? d.preparing.now : 0, running ? d.preparing.last_output : 0) : null}
+      ${Activity(running ? d.preparing.log : (d && d.last_log), 'reg:' + name)}
+      ${History(name, 'reg:' + name)}
+      ${(!running && rec.prologue) ? html`<div class="pddim">site prologue <code>${rec.prologue}</code></div>` : null}
+      ${(!running && rec.liveness_grace_s) ? html`<div class="pddim">liveness grace ${rec.liveness_grace_s}s</div>` : null}
+      ${(!running && rec.envs) ? Object.values(rec.envs).map(e => html`<div class="pddim">${[
+          'tested ' + String(e.project || '').split('/').slice(-2).join('/'),
+          'loads in ' + e.load_s + 's',
+          e.cuda ? 'CUDA ' + (String(e.cuda.functional).startsWith('true') ? 'ok' : 'not functional') : '',
+          ago(e.prepared_at)].filter(Boolean).join(' · ')}${e.changed ? html` · <span class="rppsyswarn">packages changed since</span>` : null}</div>`) : null}
+    </div></div>`;
+}
+
 function saveError(d) {
   const c = d && d.error;
   if (c === 'warn_not_shorter')
@@ -93,7 +156,8 @@ function saveRegion() {
     idle_release: (fIdle.value || '').trim(), idle_warn: (fWarn.value || '').trim(),
     options: optMap, prologue: (fPro.value || '').trim() };
   rmsg.value = { text: warm > 0 ? 'Saving + warming…' : 'Saving…' };
-  fetch('/api/regions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, host: h, warm, preload, transport, base_port, data_root, sysimage, scheduler, ...alloc }) })
+  const liveness_grace = (fGrace.value || '').trim();
+  fetch('/api/regions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, host: h, warm, preload, transport, base_port, data_root, sysimage, scheduler, liveness_grace, ...alloc }) })
     .then(r => r.json()).then(d => {
       if (!d || !d.ok) { rmsg.value = { text: saveError(d), err: true }; return; }
       const ports = (base_port && warm > 0) ? (' · ports ' + base_port + '–' + (base_port + 3 * warm - 1)) : '', rootS = data_root ? (' · root ' + data_root) : '';
@@ -211,8 +275,12 @@ function Editor() {
       : null}
     <div class="rpprow"><label>Preload</label><input class="rpppre" autocomplete="off" placeholder="/path/to/project  (folder with Project.toml)" value=${fPre.value} onInput=${ev => fPre.value = ev.target.value}/></div>
     <div class="rpprow"><label>Data root</label><input class="rpproot" autocomplete="off" placeholder="/scratch  (a path ON THE HOST)" value=${fRoot.value} onInput=${ev => fRoot.value = ev.target.value}/></div>
+    <div class="rpprow"><label>Liveness</label><input class="rppn" type="text" autocomplete="off" placeholder="auto"
+      title="how long a worker may go without answering before its connection is dropped, e.g. 3m; blank uses what Prepare measured"
+      value=${fGrace.value} onInput=${ev => fGrace.value = ev.target.value}/></div>
     ${SchedulerRows()}
     ${AllocationRow(editing ? e.name : '')}
+    ${ReadinessRow(editing ? e.name : '')}
     <div class="rpprow"><label>Transport</label>
       <select class="rpptr" value=${fTr.value} onChange=${ev => fTr.value = ev.target.value}><option value="tunnel">tunnel</option><option value="direct">direct</option></select>
       ${fTr.value === 'direct' ? html`<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" value=${fPort.value} onInput=${ev => fPort.value = ev.target.value}/>` : null}</div>
@@ -397,7 +465,7 @@ effect(() => {   // seed the editor form from the selected region (or blank for 
     fCpus.value = e.cpus > 0 ? e.cpus : ''; fMem.value = e.mem || ''; fGpus.value = e.gpus || ''; fAcct.value = e.account || ''; fIdle.value = e.idle_release || ''; fWarn.value = e.idle_warn || '';
     // A map has no order, so the rows are sorted: the form reads the same on every open.
     fOpts.value = Object.keys(e.options || {}).sort().map(k => ({ k, v: (e.options || {})[k] }));
-    fPro.value = e.prologue || '';
+    fPro.value = e.prologue || ''; fGrace.value = e.liveness_grace || '';
     // Open the fold when the REGION has something folded away, so a saved setting is never out of
     // sight. Read from `e`, never from the form's own signals: `filledExtras()` reads `fOpts`, which
     // would subscribe this seeding effect to it — then adding a row would re-run the seed, reset the
@@ -410,10 +478,11 @@ effect(() => {   // seed the editor form from the selected region (or blank for 
     fSched.value = (si && si.suggested) ? si.suggested : 'none';
     fPart.value = ''; fWall.value = fSched.value === 'none' ? '' : '01:00:00';
     fCpus.value = ''; fMem.value = ''; fGpus.value = ''; fAcct.value = ''; fIdle.value = ''; fWarn.value = '';
-    fOpts.value = []; fPro.value = ''; fMore.value = false; }
+    fOpts.value = []; fPro.value = ''; fMore.value = false; fGrace.value = ''; }
   rmsg.value = null;
 });
 effect(() => { const e = editRegion.value; if (e && e.name && focusHost.value) loadSysimage(e.name); });   // editing → fetch build status
+effect(() => { const e = editRegion.value; if (e && e.name && focusHost.value) prepLoad(e.name); });       // editing → readiness
 // editing a scheduler region → ask the login node what it is holding for us
 effect(() => { const e = editRegion.value; if (e && e.name && e.scheduler && e.scheduler !== 'none') loadAlloc(e.name); });
 // Resolve a pending region-by-name (set by openRegionConfig) once this host's regions have loaded.

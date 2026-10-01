@@ -81,8 +81,17 @@ end
 # up and ends with it (the placement task), where there is nothing to restore to.
 set_rlog_region!(name::AbstractString) = (isempty(name) || task_local_storage(:slate_rlog_region, String(name)); nothing)
 
+const _REGION_TRACE_AT = Dict{String,Float64}()   # when each region's trace last grew
+# Complete logs, kept only while something wants all of a region's lines (a prepare, whose report
+# keeps them): the ring above holds the latest few, which is right for watching and wrong for a record.
+const _REGION_FULL_LOG = Dict{String,Vector{String}}()
+const _FULL_LOG_MAX = 200_000   # far past any prepare; a bound against a runaway, not a budget
+
 function _region_trace_append!(name::AbstractString, line::AbstractString)
     lock(_REGION_TRACE_LOCK) do
+        _REGION_TRACE_AT[String(name)] = time()
+        full = get(_REGION_FULL_LOG, String(name), nothing)
+        (full === nothing || length(full) >= _FULL_LOG_MAX) || push!(full, String(line))
         buf = get!(() -> String[], _REGION_TRACE, String(name))
         push!(buf, String(line))
         extra = length(buf) - _REGION_TRACE_MAX
@@ -192,7 +201,9 @@ const _REMOTE_KEY_PATH  = "~/.cache/kaimon/curve/server.key"
 # it into the worker env — the remote counterpart of the local `src/worker_infra` LOAD_PATH stack.
 const _REMOTE_SEB = "$_REMOTE_ROOT/devsrc/SlateExtensionsBase"
 const _LOCAL_SEB  = normpath(joinpath(@__DIR__, "..", "lib", "SlateExtensionsBase"))
-const _SEB_DEVELOP = "try; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\")); preserve=Pkg.PRESERVE_ALL); catch; try; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\"))); catch; end; end"
+# The worker cannot load without it, so a failure here fails the provision (which resets the env and
+# retries once) rather than starting a worker that dies on its first `using`.
+const _SEB_DEVELOP = "try; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\")); preserve=Pkg.PRESERVE_ALL); catch; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\"))); end"
 
 # ── Remote timing knobs ───────────────────────────────────────────────────────────────────────
 # Every value below shipped as a hardcoded literal; each is now overridable per host/deployment
@@ -459,6 +470,8 @@ end
 # and zsh globbed `Pkg.activate(ARGS[1])` → "no matches found"). A script path is a single clean token, so
 # it survives. The script self-activates via `homedir()` (a `--project=~/…` wouldn't expand under ssh).
 # Returns ok::Bool; the remote script is removed after.
+const _JULIA_SCRIPT_TIMEOUT = 4 * 3600.0   # a Pkg resolve + precompile on a slow shared filesystem
+
 function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::Bool = false, online = nothing)
     _ssh_ok(host, `mkdir -p $_REMOTE_ROOT`) || return (false, "")
     tmp = tempname()
@@ -468,7 +481,16 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::B
     rm(tmp; force = true)
     up_ok || (_rlog("FAILED: sending provisioning script → $host ($what)"); return (false, ""))
     script = _cmdstr(`$(_julia_sh("julia --startup-file=no $remote"))`)
-    ok, out = _run_on(String(host), script)
+    # Pkg work runs for minutes, so it gets its own deadline rather than the default command's. With
+    # `stream`, each line is logged as it arrives (tagged to the region whose bring-up asked, which the
+    # session's task cannot know by itself) and handed to `online` for the banner.
+    reg = _current_rlog_region()
+    tap = !stream ? nothing : function (line)
+        t = strip(line); isempty(t) && return
+        with_rlog_region(() -> _rlog("  ⟨$what⟩ $t"), reg)
+        online === nothing || online(String(t))
+    end
+    ok, out = _run_on(String(host), script; timeout = _JULIA_SCRIPT_TIMEOUT, online = tap)
     ok || _rlog("FAILED: $what\n    out: $(first(strip(out), 1200))")
     _run_on(String(host), "rm -f " * remote)
     return (ok, out)
@@ -485,9 +507,10 @@ _julia_sh(cmd::AbstractString) = "export PATH=\"\$HOME/.juliaup/bin:\$PATH\"; $c
 # `uname -s` fails/empties on Windows, where we skip and leave it to a manual install (per the agreed
 # scope). Idempotent: a present julia (system or juliaup) short-circuits. Returns true iff julia is
 # available afterward. Run at the top of provisioning and the preflight Julia step.
-function _ensure_julia!(host)
+function _ensure_julia!(host; version::AbstractString = "")
     ver = "$(VERSION.major).$(VERSION.minor).$(VERSION.patch)"   # match the HUB's Julia
-    have, out = _ssh_capture(host, `$(_julia_sh("julia --version"))`)
+    # `version` is a `julia --version` the caller already read from the host.
+    have, out = isempty(strip(version)) ? _ssh_capture(host, `$(_julia_sh("julia --version"))`) : (true, version)
     if have
         # Present already — flag a version skew (non-fatal): Serialization (the jls codec across the
         # gate) and Manifest resolution can differ across Julia versions. `juliaup add $ver` fixes it.
@@ -496,17 +519,37 @@ function _ensure_julia!(host)
             _rlog("provision: $host runs Julia $(m.captures[1]) but the hub runs $ver — version skew (Serialization/Manifest may differ); run `juliaup add $ver && juliaup default $ver` on $host to match")
         return true
     end
-    uok, uname = _ssh_capture(host, `uname -s`)
+    # A compute node shares its home directory with the login node it is reached through, so Julia is
+    # installed from there: the download and unpack do not spend the allocation, and the node finds
+    # the result in place.
+    r = via(host)
+    ih = r === nothing ? String(host) : r.host
+    uok, uname = _ssh_capture(ih, `uname -s`)
     (uok && !isempty(strip(uname))) ||
         (_rlog("provision: no `julia` on $host and it isn't a Unix host — install Julia manually (juliaup)"); return false)
+    _bringup_note("install juliaup ($ver) on $ih")
     # Pin the install to the HUB's version (`--default-channel $ver`) — not "latest" — so hub↔worker
     # Serialization + Manifest stay compatible. NB: `sh -s` reads the installer SCRIPT from stdin (the
     # curl pipe), so do NOT redirect stdin (a `< /dev/null` starves it → curl broken pipe). `--yes` is unattended.
-    _rlog("provision: `julia` missing on $host ($(strip(uname))) — installing juliaup + Julia $ver unattended (a couple of minutes)…")
-    _bringup_note("install juliaup ($ver) on $host")
-    _ssh_capture(host, `$("curl -fsSL https://install.julialang.org | sh -s -- --yes --default-channel $ver")`)
+    #
+    # An interrupted install leaves juliaup in place with no Julia and no `julia` launcher, and the
+    # unattended installer then refuses to run because it finds juliaup's configuration. That state is
+    # finished with juliaup itself rather than by the installer.
+    _, has_juliaup = _ssh_capture(ih, `sh -c $("test -x \$HOME/.juliaup/bin/juliaup && echo yes; true")`)
+    script = strip(has_juliaup) == "yes" ?
+        "cd \$HOME/.juliaup/bin && ./juliaup add $ver && ./juliaup default $ver && " *
+        "{ test -e julia || ln -s julialauncher julia; }" :
+        "curl -fsSL https://install.julialang.org | sh -s -- --yes --default-channel $ver"
+    _rlog("provision: `julia` missing on $host ($(strip(uname))) — " *
+          (strip(has_juliaup) == "yes" ? "completing the juliaup install" : "installing juliaup") *
+          " + Julia $ver on $ih (a couple of minutes)…")
+    reg = _current_rlog_region()   # the session's task cannot know which bring-up asked
+    iok, iout = _run_on(ih, script; timeout = 1800.0,       # a download and an unpack, at a site's pace
+                        online = line -> (t = strip(line); isempty(t) ||
+                                          with_rlog_region(() -> _rlog("  ⟨install Julia⟩ $t"), reg)))
     ok, _ = _ssh_capture(host, `$(_julia_sh("command -v julia"))`)
-    ok || _rlog("provision: juliaup install on $host did not yield a working `julia` (see remote.log)")
+    ok || _rlog("provision: installing Julia $ver on $ih did not yield a working `julia` on $host " *
+                "(installer exit ok=$iok)\n    out: $(first(strip(iout), 1500))")
     return ok
 end
 
@@ -533,10 +576,10 @@ end
 # Value-fetch over a host: `(ok, output)`, with stdout and stderr interleaved. A routed node runs its
 # command from the LOGIN node's session, so the hub never authenticates twice — see `_VIA` for why
 # the two schedulers get there differently.
-function _run_on(host::AbstractString, script::AbstractString)
+function _run_on(host::AbstractString, script::AbstractString; timeout::Real = 120.0, online = nothing)
     v = via(host)
     if v === nothing
-        ok, out = Sweep.run_there(host, script)
+        ok, out = Sweep.run_there(host, script; timeout, online)
         # A node that HAD a route and no longer does is a compute node whose allocation ended. It is
         # not a host anyone signs in to, so the generic offline message sends the reader to a padlock
         # that could not help. Only the message changes: a host that is still reachable on its own
@@ -546,8 +589,8 @@ function _run_on(host::AbstractString, script::AbstractString)
                            "only reachable while one is. It will be asked for again.")
         return (ok, out)
     end
-    isempty(v.job) && return Sweep.run_there(v.host, script)   # routed but not a scheduler job
-    return Sweep.run_there(v.host, _in_allocation(v, host, script))
+    isempty(v.job) && return Sweep.run_there(v.host, script; timeout, online)   # routed but not a scheduler job
+    return Sweep.run_there(v.host, _in_allocation(v, host, script); timeout, online)
 end
 
 # `BatchMode=yes` so a node that will not take us fails immediately instead of hanging on a prompt
@@ -619,6 +662,9 @@ function _prune_remote!(host, localdir::AbstractString, remotedir::AbstractStrin
         stale = String[]
         for name in readdir(String(localdir))
             name in (".git",) && continue
+            # The environment files over there belong to provisioning, which rewrote them for the
+            # host's own paths and resolved them; a send that leaves them out is not asking for them gone.
+            Sweep._is_env_file(name) && continue
             p = joinpath(String(localdir), name)
             # Held ⇔ nothing under it would be sent. A partially-sent directory is left alone: its
             # own files are judged individually and the ones still wanted are among them.
@@ -753,47 +799,133 @@ function _payload_sha()
     return sha
 end
 
-"""
-    provision_remote!(t::RemoteTarget, parent_project) -> nothing
+# The worker packages a provision adds beside the notebook's own, as the `Pkg.add` argument it splices
+# in. One definition, because the environment fingerprint has to hash exactly what is installed.
+function _infra_spec()
+    return _local_has_revise() ?
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"ripgrep_jll\"), Pkg.PackageSpec(name=\"Revise\")]" :
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"ripgrep_jll\")]"
+end
 
-Idempotent. Ensure the host can run a SlateWorker: (1) send Slate's worker payload,
-(2) materialise a KaimonGate worker env (added from the registry) + Revise, instantiate,
-(3) send the notebook's parent project (Project.toml + /src) and instantiate it. Cheap on
-reruns (the env instantiate is skipped once `.ready` exists).
-"""
-function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
-    host = t.ssh_host
-    _rlog("provision START host=$host transport=$(t.transport) project=$(t.project) parent=$parent_project")
-    # Reachability precheck FIRST — a clear message beats a cryptic transfer failure ten steps in when the
-    # host is a typo or your ssh config/key isn't set up.
-    _ssh_test(host, `true`) || error(_unreachable(host))
+# Everything that decides what step 3 of a provision installs: the environment's own files, the
+# Project of each dev'd dependency (a dependency it adds changes the resolve), the worker packages
+# added beside them, the extension SDK, and the Julia that resolves it all. A host that recorded
+# this after its last successful build already holds this environment.
+function _env_fingerprint(envdir::AbstractString, infra::AbstractString)
+    ctx = _SHA.SHA1_CTX()
+    add(s) = _SHA.update!(ctx, codeunits(String(s)))
+    add("julia $VERSION\n"); add(infra); add(_SEB_DEVELOP)
+    seb = joinpath(_LOCAL_SEB, "Project.toml")
+    isfile(seb) && add(read(seb, String))
+    if !isempty(envdir) && isdir(envdir)
+        for f in sort!(filter(Sweep._is_env_file, readdir(envdir)))
+            add(f); add(read(joinpath(envdir, f), String))
+        end
+        for (name, lpath) in _dev_deps(joinpath(envdir, "Manifest.toml"), envdir)
+            p = joinpath(lpath, "Project.toml")
+            isfile(p) && (add(name); add(read(p, String)))
+        end
+    end
+    return bytes2hex(_SHA.digest!(ctx))
+end
+
+const _ENV_STAMP = ".slate-env"   # beside the remote env's Project.toml
+# What the host last received of the worker payload and of the extension SDK, as their content SHAs.
+# Written after a send succeeds, so a matching stamp means that exact content is already there.
+const _PAYLOAD_STAMP = "$_REMOTE_WORKER/.slate-payload"
+const _SEB_STAMP     = "$_REMOTE_SEB/.slate-seb"
+const _SEB_EXCLUDES  = [".git", "*.cov"]
+
+# The SDK source as it is sent, hashed by path and content.
+function _seb_sha()
+    isdir(_LOCAL_SEB) || return ""
+    ctx = _SHA.SHA1_CTX()
+    for (root, dirs, files) in walkdir(_LOCAL_SEB)
+        filter!(!=(".git"), dirs); sort!(dirs)
+        for f in sort(files)
+            endswith(f, ".cov") && continue
+            p = joinpath(root, f)
+            _SHA.update!(ctx, codeunits(relpath(p, _LOCAL_SEB)))
+            _SHA.update!(ctx, read(p))
+        end
+    end
+    return bytes2hex(_SHA.digest!(ctx))[1:16]
+end
+
+# Everything a start needs to know about the host, read in ONE command. On a scheduler node each
+# command is a job step, and a step costs seconds to create, so asking piecemeal cost more than most
+# of what it asked about. `projrel` is the worker env ($HOME-relative); "" leaves the env lines out.
+function _host_state_script(projrel::AbstractString = "")
+    q(p) = startswith(p, "/") ? Sweep.shq(p) : "\"\$HOME/\"" * Sweep.shq(p)
+    io = IOBuffer()
+    print(io, _STAMP_SCRIPT)
+    println(io, "echo \"payload=\$(cat ", q(_PAYLOAD_STAMP), " 2>/dev/null)\"")
+    println(io, "echo \"seb=\$(cat ", q(_SEB_STAMP), " 2>/dev/null)\"")
+    println(io, "echo \"kgate=\$(test -f ", q("$_REMOTE_KGATE_ENV/.ready"), " && echo 1)\"")
+    if !isempty(projrel)
+        println(io, "echo \"env=\$(test -f ", q("$projrel/Manifest.toml"), " && cat ", q("$projrel/$_ENV_STAMP"), " 2>/dev/null)\"")
+        println(io, "echo \"rg=\$(R=\$(cat ", q(_RG_PATH_FILE), " 2>/dev/null); test -n \"\$R\" && test -x \"\$R\" && echo 1)\"")
+    end
+    return String(take!(io))
+end
+
+# `nothing` when the host did not answer.
+function _host_state(host::AbstractString, projrel::AbstractString = "")
+    ok, out = _run_on(String(host), _host_state_script(projrel))
+    ok || return nothing
+    return _parse_probe(out)
+end
+
+# Steps 0–2 of a provision: what any worker on `host` needs before a notebook's environment is
+# considered — Julia, the worker's own files, and the runtime env it boots from. Idempotent, and the
+# host stage of `prepare_region!` as well as the start of every provision. `seen` is the host's state
+# when the caller already read it. Returns what it did, one phrase per part.
+function _provision_runtime!(host; seen = nothing)
+    st = seen === nothing ? something(_host_state(host), Dict{String,String}()) : seen
+    did = String[]
     # 0. Julia — a fresh box may have none; install juliaup unattended (Linux/macOS). Everything below
     #    needs `julia`, so this gates the rest.
-    _ensure_julia!(host) ||
+    _ensure_julia!(host; version = get(st, "julia", "")) ||
         error("provision: no usable `julia` on '$host' (auto-install skipped/failed — Windows, or juliaup install error). Install Julia (juliaup) manually and retry.")
-    # 1. worker payload
-    srcdir = @__DIR__
-    tmp = mktempdir()
-    try
-        for f in readdir(srcdir)
-            (endswith(f, ".jl") && isfile(joinpath(srcdir, f))) && cp(joinpath(srcdir, f), joinpath(tmp, f))
+    # 1. worker payload, unless the host already holds this exact one
+    sha = _payload_sha()
+    if get(st, "payload", "") == sha
+        _rlog("provision [1/3] worker payload on $host is current ($sha)")
+        push!(did, "worker files current")
+    else
+        srcdir = @__DIR__
+        tmp = mktempdir()
+        try
+            for f in readdir(srcdir)
+                (endswith(f, ".jl") && isfile(joinpath(srcdir, f))) && cp(joinpath(srcdir, f), joinpath(tmp, f))
+            end
+            _rlog("provision [1/3] send worker payload → $host:$_REMOTE_WORKER")
+            _prep_stage("Syncing worker files → $host")
+            _send_dir!(host, tmp, _REMOTE_WORKER) || error("provision: could not send the worker payload → $host")
+        finally
+            rm(tmp; recursive = true, force = true)
         end
-        _rlog("provision [1/3] send worker payload → $host:$_REMOTE_WORKER")
-        _prep_stage("Syncing worker files → $host")
-        _send_dir!(host, tmp, _REMOTE_WORKER) || error("provision: could not send the worker payload → $host")
-    finally
-        rm(tmp; recursive = true, force = true)
+        _put_file(host, Vector{UInt8}(codeunits(sha)), _PAYLOAD_STAMP)
+        push!(did, "worker files sent")
     end
     # 1b. Ship the unregistered extension SDK's source (a registry add can't find it); the env build
     #     below `Pkg.develop`s it into the worker env so `worker.jl`'s `using SlateExtensionsBase` resolves.
     if isdir(_LOCAL_SEB)
-        _send_dir!(host, _LOCAL_SEB, _REMOTE_SEB; excludes = [".git", "*.cov"]) ||
+        ssha = _seb_sha()
+        if get(st, "seb", "") == ssha
+            push!(did, "SDK current")
+        elseif _send_dir!(host, _LOCAL_SEB, _REMOTE_SEB; excludes = _SEB_EXCLUDES)
+            _put_file(host, Vector{UInt8}(codeunits(ssha)), _SEB_STAMP)
+            push!(did, "SDK sent")
+        else
             _rlog("provision: could not send SlateExtensionsBase → $host (worker will miss the extension SDK)")
+        end
     else
         _rlog("provision: local SlateExtensionsBase source not found at $_LOCAL_SEB — remote worker may miss it")
     end
     # 2. KaimonGate worker env (from the registry) — instantiate once
-    if !_ssh_test(host, `test -f $_REMOTE_KGATE_ENV/.ready`)
+    if get(st, "kgate", "") != "1"
+        push!(did, "runtime env built")
         _rlog("provision [2/3] building KaimonGate env on $host (first run — adds KaimonGate+Revise; can take minutes)")
         _prep_stage("Building worker runtime on $host")
         code = """
@@ -802,12 +934,35 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
         Pkg.add(["KaimonGate", "Revise"])
         Pkg.instantiate()
         """
-        first(_ssh_julia!(host, code, "build KaimonGate env on $host")) ||
+        first(_ssh_julia!(host, code, "build KaimonGate env on $host"; stream = true, online = _bringup_note)) ||
             error("provision: could not build the remote KaimonGate env on $host (is `julia` on its PATH?)")
         _ssh_ok(host, `touch $_REMOTE_KGATE_ENV/.ready`)
     else
         _rlog("provision [2/3] KaimonGate env already built on $host (skip)")
     end
+    return join(did, " · ")
+end
+
+"""
+    provision_remote!(t::RemoteTarget, parent_project) -> nothing
+
+Idempotent. Ensure the host can run a SlateWorker: (1) send Slate's worker payload,
+(2) materialise a KaimonGate worker env (added from the registry) + Revise, instantiate,
+(3) send the notebook's parent project (Project.toml + /src) and instantiate it. Cheap on
+reruns (the env instantiate is skipped once `.ready` exists).
+"""
+function provision_remote!(t::RemoteTarget, parent_project::AbstractString; precompile::Bool = true,
+                           seen = nothing)
+    host = t.ssh_host
+    _rlog("provision START host=$host transport=$(t.transport) project=$(t.project) parent=$parent_project")
+    # Reachability precheck FIRST — a clear message beats a cryptic transfer failure ten steps in when the
+    # host is a typo or your ssh config/key isn't set up.
+    rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
+    st = seen === nothing ? _host_state(host, rel) : seen
+    st === nothing && error(_unreachable(host))
+    # A prepared region notices here when its site has changed since (Julia, default modules).
+    try; readiness_check!(t; seen = st); catch e; _rlog("readiness check on $host failed: $(sprint(showerror, e))"); end
+    _provision_runtime!(host; seen = st)
     # 3. Environment — reproduce the notebook's LOCAL env on the remote so packages match EXACTLY:
     #    ship the origin project's Project.toml + Manifest.toml (the Manifest pins registry versions and
     #    records git deps by url+tree-hash → they clone), send any dev'd deps' local sources + rewrite
@@ -818,13 +973,10 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     # plus Revise IF the user uses it locally — resolved TOGETHER with whatever else is there (one env,
     # no stacked-env skew). SlateExtensionsBase (the extension SDK) rides worker_infra locally too; on a
     # remote host it needs to reach the worker's env as well (registry add or shipped source — see below).
-    rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
-    infra = _local_has_revise() ?
-        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"ripgrep_jll\"), Pkg.PackageSpec(name=\"Revise\")]" :
-        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"ripgrep_jll\")]"
+    infra = _infra_spec()
     build_env! = function ()
         if !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml"))
-            _replicate_env!(t)                                # notebook env + worker infra
+            _replicate_env!(t; precompile)                    # notebook env + worker infra
         elseif !isempty(parent_project) && isdir(parent_project)
             _rlog("provision [3/3] send parent project → $host:$(t.project) + instantiate (no resolved origin env)")
             _send_dir!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"],
@@ -840,35 +992,62 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
             # shipped here → no reliable pre-count, so the precompile bar is indeterminate ("k done"), but it
             # still shows live progress + the current package instead of going dark.
             build = _rewrite_devpaths_script(rel, rewrites) *
-                "\nimport Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _SEB_DEVELOP * "; Pkg.instantiate()\n" *
+                "\nimport Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
+                "Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _SEB_DEVELOP * "; Pkg.instantiate()\n" *
                 _PREP_DONE_SNIPPET * "\n"
             first(_ssh_julia!(host, build, "instantiate parent project on $host";
                               stream = true, online = _bringup_note)) || error("provision: parent env build → $host failed")
         else
             _rlog("provision [3/3] bare notebook — worker env = worker infra only")
-            first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _SEB_DEVELOP * "; Pkg.instantiate()",
+            first(_ssh_julia!(host, "import Pkg; " * (precompile ? "" : _NO_AUTO_PRECOMPILE * "; ") *
+                              "Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _SEB_DEVELOP * "; Pkg.instantiate()",
                               "bare worker env on $host")) || error("provision: could not build the worker env on $host")
         end
     end
-    _prep_stage("Building package environment on $host")
-    try
-        build_env!()
-    catch e
-        # A build failure usually means the env dir carries broken resolve state — a dev-dep whose path
-        # vanished, a half-written manifest, a stale entry left by an earlier provision. Reset the env's
-        # Project + Manifest and rebuild ONCE from the authoritative local source, so one bad provision
-        # self-heals instead of wedging every future spawn on this env. (The isolation keying means this
-        # only ever touches THIS project's env.) A second failure is a real problem — let it surface.
-        _rlog("provision [3/3] env build failed on $host — resetting env + one retry: " * first(sprint(showerror, e), 140))
-        _ssh_ok(host, `rm -f $rel/Project.toml $rel/Manifest.toml`)
-        build_env!()
+    # Resolving and instantiating is minutes on a cluster filesystem, and it is the same work every
+    # time nothing changed. The host keeps the fingerprint of what it last built; when it matches, only
+    # the sources travel. The environment files stay as they are, since the ones there were rewritten
+    # for the host's own paths.
+    envdir = !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml")) ? t.origin_env :
+             (!isempty(parent_project) && isdir(parent_project) ? String(parent_project) : "")
+    fp = _env_fingerprint(envdir, infra)
+    had = get(st, "env", "")
+    built = strip(had) != fp
+    if !built
+        _rlog("provision [3/3] environment unchanged on $host (skip resolve) — sending sources only")
+        if !isempty(envdir)
+            _send_dir!(host, envdir, t.project; region = t.region, filter = true,
+                       excludes = [".git", "*.cov", ".ready", "Project.toml", "Manifest.toml",
+                                   "JuliaProject.toml", "JuliaManifest.toml"])
+            _send_dev_deps!(t, envdir)
+        end
+    else
+        rec = strip(had)
+        _rlog("provision [3/3] " * (isempty(rec) ? "no environment recorded on $host" :
+                                    "environment on $host differs (recorded $(first(rec, 12)), now $(first(fp, 12)))") *
+              " — building")
+        _prep_stage("Building package environment on $host")
+        try
+            build_env!()
+        catch e
+            # A build failure usually means the env dir carries broken resolve state — a dev-dep whose path
+            # vanished, a half-written manifest, a stale entry left by an earlier provision. Reset the env's
+            # Project + Manifest and rebuild ONCE from the authoritative local source, so one bad provision
+            # self-heals instead of wedging every future spawn on this env. (The isolation keying means this
+            # only ever touches THIS project's env.) A second failure is a real problem — let it surface.
+            _rlog("provision [3/3] env build failed on $host — resetting env + one retry: " * first(sprint(showerror, e), 140))
+            _ssh_ok(host, `rm -f $rel/Project.toml $rel/Manifest.toml $rel/$_ENV_STAMP`)
+            build_env!()
+        end
+        _put_file(host, Vector{UInt8}(codeunits(fp)), "$rel/$_ENV_STAMP") ||
+            _rlog("provision: could not record the environment fingerprint on $host (next start rebuilds)")
     end
     # WHERE rg is, written down once. `ripgrep_jll` is provisioned into the worker env, but a JLL
     # installs its binary into an artifact directory and never onto PATH — so `command -v rg` fails
     # on a host that has it, the log search falls through to `grep -E`, and POSIX ERE cannot parse
     # the patterns it is handed. That failure was silent: the counts beside a remote log all read
     # zero while the records they counted were on screen.
-    _record_rg_path!(host, rel)
+    (built || get(st, "rg", "") != "1") && _record_rg_path!(host, rel)
     _rlog("provision DONE host=$host")
     _kickoff_sysimage_build!(t, rel)   # detached + idempotent — fast workers once it lands, plain boot until then
     return nothing
@@ -1234,7 +1413,9 @@ BOTH the Manifest `path` and Project.toml's `[sources]` path (Julia ≥1.11 reso
 latter) to point there, then instantiate. The Manifest makes registry versions exact and clones git deps
 from their recorded urls; sending the dev sources makes local checkouts resolve on the host.
 """
-function _replicate_env!(t::RemoteTarget)
+const _NO_AUTO_PRECOMPILE = "ENV[\"JULIA_PKG_PRECOMPILE_AUTO\"] = \"0\""
+
+function _replicate_env!(t::RemoteTarget; precompile::Bool = true)
     host = t.ssh_host
     origin = t.origin_env
     _rlog("env: replicating origin env → $host:$(t.project)  (from $origin)")
@@ -1248,7 +1429,7 @@ function _replicate_env!(t::RemoteTarget)
     projrel = startswith(t.project, "~/") ? t.project[3:end] : t.project
     # STREAM the instantiate/precompile — the long, otherwise-silent step — into the remote log live, so a
     # multi-minute bring-up narrates its progress (resolve, install, Precompiling …) instead of going dark.
-    ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites, _local_has_revise()),
+    ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites, _local_has_revise(); precompile),
                           "instantiate on $host"; stream = true, online = _bringup_note)
     ok || error("env: instantiate failed on $host — $(first(strip(out), 500))")
     return nothing
@@ -1304,7 +1485,8 @@ end
 
 # The remote script: rewrite each dev dep's Manifest `path` to its shipped remote source, then instantiate
 # the project. Uses the TOML stdlib on the remote (always available); homedir() resolves the absolute paths.
-function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}}, add_revise::Bool)
+function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}}, add_revise::Bool;
+                                 precompile::Bool = true)
     # `ripgrep_jll` mirrors src/worker_infra: the log viewer searches whole files, which for a job's
     # output means gigabytes, and rg does that in one pass over a range rather than a transfer.
     base = "Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), " *
@@ -1315,6 +1497,9 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     rw = _rewrite_devpaths_script(projrel, rewrites)
     isempty(rw) || print(io, rw)
     println(io, "import Pkg")
+    # Fetch only: precompiling here would build for this machine's CPU, which need not be the CPU the
+    # workers run on. The packages are compiled where they will run.
+    precompile || println(io, _NO_AUTO_PRECOMPILE)
     println(io, "proj = joinpath(homedir(), raw\"$projrel\")")
     println(io, "Pkg.activate(proj)")
     # Add the worker infra INTO this same env so it resolves against the notebook's exact dependency
@@ -1514,8 +1699,12 @@ end
 function _region_prologue(region::AbstractString)
     isempty(region) && return ""
     r = try; region_get(region); catch; nothing; end
-    (r === nothing || isempty(strip(r.prologue))) && return ""
-    return "{ " * strip(r.prologue) * " ; } && "
+    r === nothing && return ""
+    # What preparing the region found the site needs (unloading a module that shadows CUDA.jl's own
+    # libraries, say) runs first, so the region's own prologue can still undo or extend it.
+    parts = filter(!isempty, [strip(String(get(r.readiness, "prologue", ""))), strip(r.prologue)])
+    isempty(parts) && return ""
+    return "{ " * join(parts, " ; ") * " ; } && "
 end
 
 function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
@@ -1796,31 +1985,34 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
 
     t0 = time()
     # After a successful (re)attach, everything that isn't the dial moves OFF the hot path: the
-    # state-sidecar write is an ssh exec and catch-up provisioning is ~10s of transfer — neither
-    # changes anything about the live session (a running worker never re-includes its payload),
-    # so they run in the background while the notebook is already usable. The attachment record
+    # state-sidecar write is an ssh exec that changes nothing about the live session, so it runs in
+    # the background while the notebook is already usable. The attachment record
     # gets the dial's resolved key/ip so the NEXT reattach needs zero ssh before its dial.
     # Cold spawn: provision (idempotent) + launch a fresh worker + dial it. Both the last resort (no
     # reusable worker) AND the redirect target when a reused worker is running a stale payload.
+    survey = nothing   # `_start_survey`, once the cheap reattach paths have not answered
+    # The survey is current enough to act on for a minute: long enough to cover a provision that
+    # changed nothing, short enough that one which built an environment reads the host again.
+    fresh(sv) = sv !== nothing && time() - sv.at < 60
     function fresh_spawn()
-        provision_remote!(t, parent_project)
+        provision_remote!(t, parent_project; seen = fresh(survey) ? survey.state : nothing)
         start_sync!(t, parent_project)
         # Remote ports (loopback for :tunnel, 0.0.0.0 for :direct). Pinned when the target names them;
         # else auto from _next_ports (9100+), floored above the roster.
-        pick_ports() =
-            (t.port != 0 && _port_is_base(t)) ?
-                # t.port is the base of a stride, not a pin: take a FREE slot in it, clear of warm workers,
-                # another notebook and anything else listening on the host.
-                (let busy = try; busy_ports(host); catch; nothing; end,
-                     sl = _base_port_slots(t.port, 1; roster = (try; list_remote_workers(host); catch; Any[]; end),
-                                           taken = busy, label = "region cold-spawn on $host")
-                     isempty(sl) ? _next_ports(floor = try; _port_floor(host); catch; 0; end, reserve = 3,
-                                           taken = busy, probe = isempty(host)) : sl[1]   # :direct pins blob at gate+2
-                 end) :
-            t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) :
-                          _next_ports(floor = try; _port_floor(host); catch; 0; end,
-                                      reserve = t.transport === :direct ? 3 : 2,
-                                      taken = try; busy_ports(host); catch; nothing; end, probe = isempty(host))   # :tunnel blob = worker-chosen free port
+        # The listening ports and the roster: the start's survey when it is recent, else one command.
+        function pick_ports(attempt)
+            (t.port != 0 && !_port_is_base(t)) && return (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1)
+            local busy, ws = (attempt == 1 && fresh(survey)) ? (survey.busy, survey.roster) : _port_survey(host)
+            floor = _port_floor(host; workers = ws)
+            t.port == 0 &&
+                return _next_ports(floor = floor, reserve = t.transport === :direct ? 3 : 2,
+                                   taken = busy, probe = isempty(host))   # :tunnel blob = worker-chosen free port
+            # t.port is the base of a stride, not a pin: take a FREE slot in it, clear of warm workers,
+            # another notebook and anything else listening on the host.
+            sl = _base_port_slots(t.port, 1; roster = ws, taken = busy, label = "region cold-spawn on $host")
+            return isempty(sl) ? _next_ports(floor = floor, reserve = 3, taken = busy, probe = isempty(host)) :
+                                 sl[1]   # :direct pins blob at gate+2
+        end
         # A port is picked from what the far side reports, and bound a remote Julia boot later. In
         # between another hub on that machine can take it, and no amount of probing closes a window
         # that long — so the answer is to notice and pick again rather than to reserve harder.
@@ -1829,7 +2021,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         movable = _port_movable(t)
         local r, port, stream_port
         for attempt in 1:_SPAWN_TRIES
-            port, stream_port = pick_ports()
+            port, stream_port = pick_ports(attempt)
             k.port = port; k.stream_port = stream_port
             _prep_stage("Starting worker process on $host")
             _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, extra_flags = k.extra_flags, region = t.region)
@@ -1865,13 +2057,12 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         _attach_record!(host, k.label; port = k.port, stream_port = k.stream_port,
                         transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
         start_sync!(t, parent_project)          # non-blocking watcher; heals /src drift from the detached period
-        Threads.@spawn begin
-            try
-                _write_worker_state!(host, k.port, "attached")
-                provision_remote!(t, parent_project)   # idempotent; on-disk freshness for the NEXT spawn
-            catch e
-                _rlog("background catch-up (post-reattach) failed: $(sprint(showerror, e))")
-            end
+        # No provisioning here. The worker is live and loads from this environment, and rebuilding it
+        # underneath competes with that load; every fresh spawn provisions for itself anyway.
+        Threads.@spawn try
+            _write_worker_state!(host, k.port, "attached")
+        catch e
+            _rlog("post-reattach state write failed: $(sprint(showerror, e))")
         end
         _rlog("connect OK: reattached via $via to worker-$(k.port) on $host in $(round(Int, (time() - t0) * 1000))ms → notebook now runs on $host")
         return (r.conn, r.tunnel)
@@ -1924,8 +2115,11 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     #    of transfer + env replication even warm, measured). A dead-but-listed worker fails the
     #    dial and falls through to a fresh spawn on new ports (the stale one stays visible in
     #    the roster for manual reap).
+    # From here on every path asks the host the same few things, so they are asked once.
+    survey = _start_survey(host, startswith(t.project, "~/") ? t.project[3:end] : t.project)
+    roster = survey === nothing ? nothing : survey.roster
     reattach = nothing
-    try; reattach = _find_live_worker(host, k.label, k.parent); catch; end
+    try; reattach = _find_live_worker(host, k.label, k.parent; workers = roster); catch; end
     if reattach !== nothing
         k.port = reattach.port; k.stream_port = reattach.stream_port
         _rlog("reconnect: probe found live worker-$(k.port) on $host (notebook=$(k.label)) — skipping spawn + provision")
@@ -1948,7 +2142,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     #     its manifest to this notebook. Any failure falls through to a fresh spawn. The claim
     #     set stops two notebooks opening concurrently from adopting the same worker.
     pool = nothing
-    try; pool = _claim_region_worker!(t.region, host; project = t.project, transport = string(t.transport)); catch e; _rlog("adopt: region scan failed ($(sprint(showerror, e)))"); end
+    try; pool = _claim_region_worker!(t.region, host; project = t.project, transport = string(t.transport), workers = roster); catch e; _rlog("adopt: region scan failed ($(sprint(showerror, e)))"); end
     if pool !== nothing
         k.port = pool.port; k.stream_port = pool.stream_port
         _rlog("adopt: warm worker-$(pool.port) on $host for region '$(t.region)' — adopting for '$(k.label)'")
@@ -3612,6 +3806,14 @@ struct Region
     # body only sleeps, so anything run there would exit without ever touching the worker. This
     # runs in the worker's own shell inside the allocation, which is the only place it can matter.
     prologue::String
+    # What preparing the region found (`prepare_region!`): each step's outcome, the site's facts, what
+    # they call for at run time, and the fingerprints a start compares to notice the site has changed.
+    # Empty until the region is first prepared, which every region written before this means.
+    readiness::Dict{String,Any}
+    # How long a worker here may go without answering the liveness ping before its wire is dropped.
+    # SECONDS; 0 takes the load time preparing the region measured, or the hub's default. A site
+    # whose packages load slowly from a shared filesystem needs more than a workstation does.
+    liveness_grace::Int
 end
 
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
@@ -3688,12 +3890,15 @@ _region_from_dict(d::AbstractDict) = Region(
     String(get(d, "alloc_name", "")), max(0, _asint(get(d, "idle_release", 0))),
     max(0, _asint(get(d, "idle_warn", 0))),
     # Absent ⇒ no extra options, which is what every region written before this meant.
-    _region_options_of(d), String(get(d, "prologue", "")))
+    _region_options_of(d), String(get(d, "prologue", "")),
+    let x = get(d, "readiness", nothing); x isa AbstractDict ? Dict{String,Any}(x) : Dict{String,Any}() end,
+    max(0, _asint(get(d, "liveness_grace", 0))))
 _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
     "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
     "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
     "curve" => r.curve, "uuid" => r.uuid, "peer" => r.peer,
     "scheduler" => String(r.scheduler), "options" => r.options, "prologue" => r.prologue,
+    "readiness" => r.readiness, "liveness_grace" => r.liveness_grace,
     "partition" => r.partition, "walltime" => r.walltime,
     "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus, "account" => r.account,
     "alloc_name" => r.alloc_name, "idle_release" => r.idle_release, "idle_warn" => r.idle_warn)
@@ -3763,7 +3968,7 @@ const REGION_DEFAULTS = (host = "", transport = :tunnel, base_port = 0, preload 
                          uuid = "", peer = "", scheduler = :none, partition = "", walltime = "",
                          cpus = 0, mem = "", gpus = "", account = "", alloc_name = "",
                          idle_release = 0, idle_warn = 0, options = Dict{String,String}(),
-                         prologue = "")
+                         prologue = "", readiness = Dict{String,Any}(), liveness_grace = 0)
 
 # An existing region's fields, in the shape `region_set!` takes.
 _region_fields(r::Region) = NamedTuple{keys(REGION_DEFAULTS)}(Tuple(getfield(r, k) for k in keys(REGION_DEFAULTS)))
@@ -3796,7 +4001,8 @@ function region_set!(name; kw...)
                    sched, String(f.partition), String(f.walltime), Int(f.cpus),
                    String(f.mem), String(f.gpus), String(f.account), String(f.alloc_name),
                    max(0, Int(f.idle_release)), max(0, Int(f.idle_warn)),
-          _region_options_of(Dict("options" => f.options)), String(f.prologue))
+          _region_options_of(Dict("options" => f.options)), String(f.prologue),
+          Dict{String,Any}(f.readiness), max(0, Int(f.liveness_grace)))
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)
         r
@@ -4247,9 +4453,10 @@ _worker_env_fits(w, project::AbstractString, transport::AbstractString) =
 # adopting notebook's, because `__slate_adopt` re-points PARENT_PROJECT but does NOT re-instantiate the
 # env — a worker booted with a DIFFERENT env holds the wrong packages. A mismatch simply isn't adopted,
 # so the caller cold-spawns and provisions the notebook's env fresh. Returns (port, stream_port) | nothing.
-function _claim_region_worker!(name::AbstractString, host; project::AbstractString = "", transport::AbstractString = "")
+function _claim_region_worker!(name::AbstractString, host; project::AbstractString = "", transport::AbstractString = "",
+                               workers = nothing)
     isempty(String(name)) && return nothing
-    for w in list_remote_workers(host)
+    for w in something(workers, list_remote_workers(host))
         _region_warm_worker(w, name) || continue
         _worker_env_fits(w, project, transport) || continue
         sp = tryparse(Int, _manifest_get(w["manifest"], "stream_port")); sp === nothing && continue
@@ -4508,9 +4715,14 @@ Enumerate the workers Slate has spawned on `host`, each: `port`, `alive` (proces
 pre-telemetry worker). Reads the on-host manifests over one ssh call. `[]` if unreachable/none.
 """
 function list_remote_workers(host)
-    sh = replace(_WORKERS_PROBE_SH, "REMOTE_WORKER_DIR" => _REMOTE_WORKER)
-    ok, out = _ssh_capture(host, `$sh`)   # one token → the remote login shell runs the script verbatim
+    ok, out = _ssh_capture(host, `$(_workers_probe_sh())`)   # one token → the remote login shell runs the script verbatim
     ok || return Any[]
+    return _parse_workers(out)
+end
+
+_workers_probe_sh() = replace(_WORKERS_PROBE_SH, "REMOTE_WORKER_DIR" => _REMOTE_WORKER)
+
+function _parse_workers(out::AbstractString)
     i = findfirst('\x02', out); j = findlast('\x03', out)
     (i === nothing || j === nothing || j <= i) && return Any[]
     payload = out[nextind(out, i):prevind(out, j)]
@@ -4547,18 +4759,58 @@ end
 # An unreadable answer is an empty set, which leaves allocation where it was rather than refusing.
 function busy_ports(host::AbstractString)
     isempty(host) && return Set{Int}()
+    ok, txt = try; _run_on(String(host), _busy_ports_sh()); catch; (false, ""); end
+    ok || return Set{Int}()
+    return _parse_busy(txt)
+end
+
+# Both things a cold spawn picks its ports from, in one command: what is listening, and the roster.
+# `(busy, roster)`, with `busy === nothing` when the host did not answer.
+function _port_survey(host::AbstractString)
+    isempty(host) && return (Set{Int}(), Any[])
+    ok, txt = try; _run_on(String(host), _busy_ports_sh() * "\n" * _workers_probe_sh()); catch; (false, ""); end
+    ok || return (nothing, Any[])
+    return _parse_survey(txt)
+end
+
+# Everything a start asks the host before it launches, in one command: the provisioning state
+# (`_host_state`), what is listening, and the worker roster. On a scheduler node each command is a
+# job step that costs seconds to create. `nothing` when the host did not answer.
+function _start_survey(host::AbstractString, projrel::AbstractString)
     ok, txt = try
-        _run_on(String(host),
-                "ss -ltnH 2>/dev/null || netstat -ltn 2>/dev/null; echo '" * _SPAWNING * "'; " *
-                "find " * Sweep.shq(_REMOTE_WORKER) * " -maxdepth 1 -name 'worker-*.jl' -mmin -2 2>/dev/null")
+        _run_on(String(host), _host_state_script(projrel) * "echo '" * _SURVEY_SPLIT * "'\n" *
+                              _busy_ports_sh() * "\n" * _workers_probe_sh())
     catch
         (false, "")
     end
-    ok || return Set{Int}()
-    i = findfirst(_SPAWNING, String(txt))
-    i === nothing && return _listen_ports(String(txt))
-    return union(_listen_ports(SubString(String(txt), 1, first(i) - 1)),
-                 _spawning_ports(SubString(String(txt), last(i) + 1)))
+    ok || return nothing
+    return _parse_start_survey(txt)
+end
+
+const _SURVEY_SPLIT = "--- ports ---"
+
+function _parse_start_survey(txt::AbstractString)
+    i = findfirst(_SURVEY_SPLIT, txt)
+    i === nothing && return nothing
+    busy, roster = _parse_survey(SubString(txt, last(i) + 1))
+    return (state = _parse_probe(SubString(txt, 1, first(i) - 1)), busy = busy, roster = roster, at = time())
+end
+
+function _parse_survey(txt::AbstractString)
+    i = something(findfirst('\x02', txt), lastindex(txt) + 1)
+    return (_parse_busy(SubString(txt, 1, prevind(txt, i))), _parse_workers(txt))
+end
+
+_busy_ports_sh() =
+    "ss -ltnH 2>/dev/null || netstat -ltn 2>/dev/null; echo '" * _SPAWNING * "'; " *
+    "find " * Sweep.shq(_REMOTE_WORKER) * " -maxdepth 1 -name 'worker-*.jl' -mmin -2 2>/dev/null"
+
+function _parse_busy(txt::AbstractString)
+    txt = String(txt)
+    i = findfirst(_SPAWNING, txt)
+    i === nothing && return _listen_ports(txt)
+    return union(_listen_ports(SubString(txt, 1, first(i) - 1)),
+                 _spawning_ports(SubString(txt, last(i) + 1)))
 end
 
 const _SPAWNING = "--- spawning ---"
@@ -4610,9 +4862,9 @@ end
 # Find a LIVE worker on `host` already serving this exact notebook (same label + parent) spawned by THIS
 # hub — the reconnect target. Returns (port, stream_port) or nothing. Conservative: only a single,
 # unambiguous, alive, same-hub match reattaches; anything else spawns fresh.
-function _find_live_worker(host, label, parent)
+function _find_live_worker(host, label, parent; workers = nothing)
     matches = Tuple{Int,Int}[]
-    for w in list_remote_workers(host)
+    for w in something(workers, list_remote_workers(host))
         w["alive"] === true || continue
         mf = w["manifest"]
         (_manifest_get(mf, "notebook") == String(label) &&

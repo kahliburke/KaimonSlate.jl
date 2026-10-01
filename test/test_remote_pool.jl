@@ -93,6 +93,27 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         # The two halves of the probe are read apart, so a path never reads as a listening port.
         @test isempty(RE._listen_ports("/h/.cache/kaimonslate/worker/worker-9148.jl"))
 
+        # A cold spawn reads both from one command; run it in a local shell against a fake home.
+        mktempdir() do home
+            wd = mkpath(joinpath(home, RE._REMOTE_WORKER))
+            write(joinpath(wd, "worker-9300.jl"), "")
+            write(joinpath(wd, "worker-9300.json"), "{\"notebook\":\"nb\"}")
+            script = RE._busy_ports_sh() * "\n" * RE._workers_probe_sh()
+            out = read(setenv(`sh -c $script`, merge(ENV, Dict("HOME" => home)); dir = home), String)
+            busy, roster = RE._parse_survey(out)
+            @test issubset(9300:9302, busy)
+            @test length(roster) == 1 && roster[1]["port"] == 9300 && roster[1]["alive"] == false
+
+            # A start asks for its provisioning state in the same command.
+            write(joinpath(wd, ".slate-payload"), "abc123")
+            # No julia on PATH: a launcher started under a fresh HOME sets itself up first, which is slow.
+            survey(script) = read(setenv(`sh -c $script`, merge(ENV, Dict("HOME" => home, "PATH" => "/usr/bin:/bin")); dir = home), String)
+            sv = RE._parse_start_survey(survey(RE._host_state_script("x") * "echo '" * RE._SURVEY_SPLIT * "'\n" * script))
+            @test sv.state["payload"] == "abc123" && haskey(sv.state, "env")
+            @test issubset(9300:9302, sv.busy) && only(sv.roster)["port"] == 9300
+            @test !haskey(sv.state, "alive")                     # the roster stays out of the state
+        end
+
         # For a worker that binds on ANOTHER machine, this one's loopback is not the question.
         # Holding a port here must not make the allocator skip it over there.
         q, _ = RE._next_ports(reserve = 2)

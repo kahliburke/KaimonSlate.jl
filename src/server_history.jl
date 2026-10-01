@@ -1248,7 +1248,15 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
     if k isa ReportEngine.GateKernel
         remote = k.target isa ReportEngine.RemoteTarget || k.remote
         since = get(_KERNEL_UNRESPONSIVE_SINCE, k, nothing)   # tracked for local kernels too
-        if k.conn === nothing
+        # A region kernel whose node the region no longer holds (released idle, by hand, or at the end
+        # of its walltime). Its worker went with the node, so nothing is starting until a cell runs.
+        released = k.conn === nothing && !isempty(side) && _region_kernel_released(side, k)
+        if released
+            d["status"] = "disconnected"
+            d["face"] = "node released"
+            d["noteCode"] = "allocation_ended"
+            d["noteHost"] = k.target.ssh_host
+        elseif k.conn === nothing
             d["status"] = k.redial_hold ? "disconnected" : "connecting"
             # "starting up…" is true and useless: a COLD region installs the notebook's whole
             # environment on the far side, which is minutes of downloading, and a word that never
@@ -1288,7 +1296,7 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
             # stops answering is a wedge the user has to break — say that instead of a countdown to
             # a recovery that will never come.
             d["note"]   = remote ?
-                "no liveness reply for $(el)s — auto-drops & reconnects at $(round(Int, _DEAD_WIRE_GRACE))s" :
+                "no liveness reply for $(el)s — auto-drops & reconnects at $(round(Int, _dead_wire_grace(k)))s" :
                 "no liveness reply for $(el)s — the worker may be wedged; interrupt it or reboot the worker"
         else
             d["status"] = "ok"
@@ -1297,6 +1305,14 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
         d["status"] = "ok"   # in-process kernel — always up
     end
     return d
+end
+
+function _region_kernel_released(side::AbstractString, k)
+    tgt = k.target
+    (tgt isa ReportEngine.RemoteTarget && !isempty(tgt.job)) || return false
+    r = ReportEngine.region_get(side)
+    r === nothing && return false
+    return ReportEngine.region_where(r) != (tgt.ssh_host, tgt.job)
 end
 
 # The notebook's ACTIVE workers: the main kernel plus every region kernel currently spawned for it.

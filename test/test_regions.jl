@@ -164,8 +164,10 @@ const RE = KaimonSlate.ReportEngine
 
             # A scheduler region with no allocation yet reads as its login node and holds nothing —
             # the honest answer for a UI, and the reason `region_host` is separate from `region_place!`.
+            # Prepared, so the tests below reach placement; preparing is tested on its own.
             gpu = RE.region_set!("gpu"; host = "login", scheduler = :slurm, walltime = "00:30:00",
-                                 partition = "gpus", gpus = "1")
+                                 partition = "gpus", gpus = "1",
+                                 readiness = Dict{String,Any}("prepared_at" => 1.0, "stale" => ""))
             @test RE.region_scheduler(gpu) === :slurm
             @test RE.region_host(gpu) == "login"
 
@@ -305,7 +307,12 @@ const RE = KaimonSlate.ReportEngine
                         RE._REGION_PLACE["gpu"] = (host = "c9", job = "77", ts = time(),
                                                    checked = time(), until = time() + 600)
                     end
-                    @test NS._region_kernel!(nb, "gpu").target.job == "77"
+                    k = NS._region_kernel!(nb, "gpu")
+                    @test k.target.job == "77" && !NS._region_kernel_released("gpu", k)
+                    # The node is given back: the kernel's worker went with it, and its pill says so.
+                    lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
+                    @test NS._region_kernel_released("gpu", k)
+                    @test NS._worker_entry(nb, "gpu", k)["face"] == "node released"
                 finally
                     lock(NS._OPENING_RUN_LOCK) do; delete!(NS._OPENING_RUN, "opening"); end
                     NS._forget_region_kernel!(nb, "gpu")
@@ -316,8 +323,65 @@ const RE = KaimonSlate.ReportEngine
                 c, d = rep.cells
                 RE.mark_blocked!(c, NS.WAIT_NOT_REQUESTED, "login")
                 d.state = RE.FRESH
+                lock(NS._OPENING_RUN_LOCK) do; push!(NS._OPENING_RUN, "opening"); end
                 @test NS._restale_blocked!(nb) == 1
                 @test c.state == RE.STALE && d.state == RE.FRESH
+                @test !NS._in_opening_run("opening")    # the run is the request, mid-opening or not
+            end
+
+            @testset "a first worker for a project waits for the region to be prepared" begin
+                d = mktempdir()
+                write(joinpath(d, "Project.toml"), "name = \"P\"\n")
+                rep = RE.parse_report("#%% code id=c region=gpu\n1\n")
+                nb = NS.LiveNotebook("needsprep", joinpath(d, "nb.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                why() = try; NS._region_kernel!(nb, "gpu"); ""; catch e; e isa NS.RegionWaiting ? e.why : "error"; end
+                saved = RE.region_get("gpu").readiness
+                try
+                    # The site is prepared but this project was never tried here.
+                    @test why() == NS.WAIT_NEEDS_PREPARE
+                    # Tried: it goes on to placement (here, the opening run's wait).
+                    env = Dict{String,Any}(RE._proj_key(d) => Dict{String,Any}("project" => d, "load_s" => 1.0,
+                        "fingerprint" => RE._env_fingerprint(d, RE._infra_spec())))
+                    RE.region_set!("gpu"; readiness = merge(saved, Dict{String,Any}("envs" => env)))
+                    lock(NS._OPENING_RUN_LOCK) do; push!(NS._OPENING_RUN, "needsprep"); end
+                    @test why() == NS.WAIT_NOT_REQUESTED
+                    # Its packages changed after they were tested: the install belongs in a prepare.
+                    write(joinpath(d, "Project.toml"), "name = \"P\"\n[deps]\nX = \"1\"\n")
+                    @test why() == NS.WAIT_NEEDS_PREPARE
+                    r = RE.region_get("gpu")
+                    @test NS._prepare_reason(r, d) == "packages changed since tested"
+                    @test only(values(RE.readiness_view(r)["envs"]))["changed"] === true
+                    write(joinpath(d, "Project.toml"), "name = \"P\"\n")
+                    @test why() == NS.WAIT_NOT_REQUESTED
+                    # A site that changed since sends it back through preparing.
+                    RE.region_set!("gpu"; readiness = merge(saved, Dict{String,Any}("envs" => env, "stale" => "changed")))
+                    @test why() == NS.WAIT_NEEDS_PREPARE
+                    # A region never prepared at all, likewise.
+                    RE.region_set!("gpu"; readiness = Dict{String,Any}())
+                    @test why() == NS.WAIT_NEEDS_PREPARE
+                    # While it is being prepared its cells wait; the prepare's own start goes ahead.
+                    c = only(nb.report.cells)
+                    lock(RE._PREPARING_LOCK) do
+                        RE._PREPARING[RE._fold_region("gpu")] = Dict{String,Any}("running" => true)
+                    end
+                    try
+                        @test why() == NS.WAIT_PREPARING
+                        own = try; NS._region_kernel!(nb, "gpu"; preparing = true); ""
+                              catch e; e isa NS.RegionWaiting ? e.why : "error"; end
+                        @test own != NS.WAIT_PREPARING && own != NS.WAIT_NEEDS_PREPARE
+                        RE.mark_blocked!(c, NS.WAIT_PREPARING, "login")
+                        @test isempty(NS._prepared_regions_waiting(nb))          # still preparing
+                    finally
+                        lock(RE._PREPARING_LOCK) do; delete!(RE._PREPARING, RE._fold_region("gpu")); end
+                        NS._forget_region_kernel!(nb, "gpu")
+                    end
+                    @test NS._prepared_regions_waiting(nb) == Set(["gpu"])     # done: they run
+                finally
+                    lock(NS._OPENING_RUN_LOCK) do; delete!(NS._OPENING_RUN, "needsprep"); end
+                    RE.region_set!("gpu"; readiness = saved)
+                end
             end
 
             @testset "a cell whose input is waiting waits with it" begin
@@ -351,6 +415,34 @@ const RE = KaimonSlate.ReportEngine
                     lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
                 end
                 @test !NS._granted_within(RE.region_get("gpu"), NS._GRANT_GRACE_S)   # nothing held
+            end
+
+            @testset "a node serving a connected worker is not asked about it" begin
+                # The minute sweep's roster is a job step on the node; a worker connected over its own
+                # wire already answers whether the node is in use.
+                rep = RE.parse_report("#%% code id=c region=gpu\n1\n")
+                nb = NS.LiveNotebook("serves", joinpath(mktempdir(), "nb.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                r() = RE.region_get("gpu")
+                try
+                    RE.route!("c9", "login", "77")
+                    lock(RE._REGION_PLACE_LOCK) do
+                        RE._REGION_PLACE["gpu"] = (host = "c9", job = "77", ts = time(),
+                                                   checked = time(), until = time() + 600)
+                    end
+                    k = NS._region_kernel!(nb, "gpu")
+                    @test !NS._region_serves_kernel(r())            # spawned, not connected
+                    k.conn = :wire
+                    @test NS._region_serves_kernel(r())
+                    lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
+                    @test !NS._region_serves_kernel(r())            # its node is not the region's any more
+                    k.conn = nothing
+                finally
+                    NS._forget_region_kernel!(nb, "gpu")
+                    lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "gpu"); end
+                    RE.route!("c9", "")
+                end
             end
 
             # ── what the fixed fields cannot say ──────────────────────────────────────────────
@@ -678,6 +770,168 @@ const RE = KaimonSlate.ReportEngine
                 lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "leased"); end
             end
         end
+    end
+
+    @testset "what preparing a region keeps, and how a start uses it" begin
+        # The probe's output, as a site prints it: one fact per line, a missing tool an empty value.
+        f = RE._parse_probe("arch=x86_64\ncpu=AMD EPYC 7763 64-Core Processor\nmodules=gcc-native/14 cudatoolkit/13.2 \n" *
+                            "cudalibs=/opt/nvidia/hpc_sdk/math_libs/13.2/lib64 \ngpus=4\nnoise line\n")
+        @test f["cpu"] == "AMD EPYC 7763 64-Core Processor" && f["gpus"] == "4" && !haskey(f, "noise")
+        # A module that puts a CUDA toolkit on the library path is unloaded, unless the region does.
+        @test RE._site_prologue(f) == "module unload cudatoolkit"
+        @test RE._site_prologue(f, "module unload cudatoolkit") == ""
+        @test RE._site_prologue(merge(f, Dict("cudalibs" => ""))) == ""      # nothing shadowed
+        # Patience from what loading took, never below the hub's default.
+        @test RE._grace_for(1) == 45 && RE._grace_for(40) == 110
+        # Module order is the site's, not a change.
+        @test RE._stamps_of(Dict("modules" => "b a", "julia" => "j")) == RE._stamps_of(Dict("modules" => "a b", "julia" => "j"))
+
+        withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir()) do
+            r = RE.region_set!("prep"; host = "login", scheduler = :slurm, prologue = "module load x")
+            @test isempty(r.readiness) && r.liveness_grace == 0
+            @test RE.readiness_text(r) == "not prepared"
+            rec = Dict{String,Any}("prepared_at" => time(), "ok" => true, "prologue" => "module unload cudatoolkit",
+                                   "liveness_grace_s" => 120, "steps" => Any[Dict("step" => "Read the site", "status" => "ok",
+                                                                                    "detail" => "", "secs" => 1.0)],
+                                   "stale" => "")
+            RE.region_set!("prep"; readiness = rec)
+            r = RE.region_get("prep")                   # through the file, as a restarted hub reads it
+            @test r.readiness["prologue"] == "module unload cudatoolkit"
+            @test occursin("✓ Read the site", RE.readiness_text(r))
+            # The site's fix runs first, then the region's own.
+            @test RE._region_prologue("prep") == "{ module unload cudatoolkit ; module load x ; } && "
+            # Editing another field keeps the record.
+            RE.region_set!("prep"; walltime = "00:10:00")
+            @test RE.region_get("prep").readiness["liveness_grace_s"] == 120
+            # The liveness grace: the region's own setting, else what was measured, else the default.
+            k = (; target = RE.RemoteTarget("c9"; region = "prep"))
+            @test NS._dead_wire_grace(k) == 120.0
+            RE.region_set!("prep"; liveness_grace = 300)
+            @test NS._dead_wire_grace(k) == 300.0
+            RE.region_set!("prep"; liveness_grace = 0, readiness = merge(rec, Dict{String,Any}("liveness_grace_s" => 10)))
+            @test NS._dead_wire_grace(k) == NS._DEAD_WIRE_GRACE
+            @test NS._dead_wire_grace((; target = nothing)) == NS._DEAD_WIRE_GRACE
+        end
+    end
+
+    @testset "a prepare for a notebook loads the packages in that notebook's worker" begin
+        steps = Tuple{String,String}[]
+        step(f, title) = (st = try; first(f()); catch; "fail"; end; push!(steps, (title, st)); st)
+        ran = String[]
+        worker = (start = () -> nothing,
+                  run = code -> (push!(ran, code); "load=12.5\ncuda=true devices=4\nsyscuda=\n"))
+        measured = Dict{String,Any}()
+        RE._prepare_in_worker!(step, measured, "proj", worker)
+        @test steps == [("Start the notebook's worker", "ok"), ("Load proj in it", "ok")]
+        @test measured["env_load_s"] == 12.5 && measured["cuda"]["functional"] == "true devices=4"
+        @test measured["runtime_load_s"] == measured["worker_start_s"]   # its start is the runtime's load
+        sent = only(ran)
+        # A worker that does not come up is not asked to load anything.
+        empty!(steps); empty!(ran)
+        RE._prepare_in_worker!(step, Dict{String,Any}(), "proj", (start = () -> error("no"), run = worker.run))
+        @test steps == [("Start the notebook's worker", "fail")] && isempty(ran)
+        # The code it sends runs in a module of its own (its imports are top-level there) and reports.
+        mktempdir() do d
+            write(joinpath(d, "Project.toml"), "")
+            out = read(`$(Base.julia_cmd()) --startup-file=no --project=$d -e $sent`, String)
+            @test occursin(r"^load=\d", out)
+        end
+    end
+
+    @testset "every prepare leaves a report, and none is rewritten" begin
+        withenv("KAIMONSLATE_DATA_HOME" => mktempdir()) do
+            mk(id, running, steps) = RE._write_report!("rep", Dict{String,Any}("id" => id, "region" => "rep",
+                "running" => running, "started" => 1.0, "project" => "/p", "steps" => steps))
+            mk("20261001T010101", false, Any[Dict("step" => "a", "status" => "ok")])
+            mk("20261001T020202", false, Any[Dict("step" => "a", "status" => "warn")])
+            # Cut off mid-way (a hub restart): still on disk, still running, and nobody is on it.
+            mk("20261001T030303", true, Any[Dict("step" => "Install", "status" => "running")])
+            reps = RE.prepare_reports("rep")
+            @test [x["id"] for x in reps] == ["20261001T030303", "20261001T020202", "20261001T010101"]
+            @test [x["outcome"] for x in reps] == ["interrupted", "warnings", "failed"]   # no record ⇒ not ok
+            @test reps[2]["warnings"] == 1
+            full = RE.prepare_report("rep", "20261001T030303")
+            @test full["outcome"] == "interrupted" && full["steps"][1]["step"] == "Install"
+            @test RE.prepare_report("rep", "../../etc/passwd") === nothing     # an id is never a path
+            @test RE.prepare_report("rep", "20991231T000000") === nothing
+        end
+    end
+
+    @testset "a prepare runs end to end and leaves its report" begin
+        # A host nothing can reach: the run stops at signing in, without prompting anyone, and still
+        # writes a record and a report. This is the path a crash in the runner itself would take.
+        withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir(), "KAIMONSLATE_DATA_HOME" => mktempdir()) do
+            RE.region_set!("unreach"; host = "slate-test-unreachable.invalid", scheduler = :slurm)
+            rec = RE.prepare_region!("unreach")
+            @test rec["ok"] == false
+            @test rec["steps"][1]["status"] == "fail" && occursin("Sign in", rec["steps"][1]["step"])
+            @test isempty(rec["stamps"])                     # nothing was read, so nothing to compare
+            r = RE.region_get("unreach")
+            @test r.readiness["report"] == rec["report"]
+            reps = RE.prepare_reports("unreach")
+            @test length(reps) == 1 && reps[1]["outcome"] == "failed"
+            @test RE.preparing("unreach")["running"] == false
+            # A start-up failure is shown as one, not lost in the log.
+            RE.prepare_failed_to_start!("nostart", ErrorException("boom"))
+            st = RE.preparing("nostart")
+            @test st["running"] == false && occursin("boom", st["steps"][1]["detail"])
+        end
+    end
+
+    @testset "an unchanged environment is not rebuilt" begin
+        # A provision skips the resolve when the host recorded this fingerprint last time, so it must
+        # hold still for an untouched environment and move for anything that changes what is installed.
+        mktempdir() do d
+            dep = mkpath(joinpath(d, "Dep"))
+            write(joinpath(dep, "Project.toml"), "name = \"Dep\"\n")
+            env = mkpath(joinpath(d, "env"))
+            write(joinpath(env, "Project.toml"), "[deps]\nDep = \"0\"\n")
+            write(joinpath(env, "Manifest.toml"), "[[deps.Dep]]\npath = \"../Dep\"\n")
+            fp = RE._env_fingerprint(env, "[infra]")
+            @test RE._env_fingerprint(env, "[infra]") == fp
+            @test RE._env_fingerprint(env, "[other]") != fp              # the worker packages added
+            write(joinpath(dep, "Project.toml"), "name = \"Dep\"\n[deps]\nX = \"1\"\n")
+            fp2 = RE._env_fingerprint(env, "[infra]")
+            @test fp2 != fp                                               # a dev'd dependency's Project
+            write(joinpath(env, "Manifest.toml"), "[[deps.Dep]]\npath = \"../Dep\"\nversion = \"2\"\n")
+            fp3 = RE._env_fingerprint(env, "[infra]")
+            @test fp3 != fp2                                              # the Manifest
+            write(joinpath(env, "notebook.jl"), "1\n")
+            @test RE._env_fingerprint(env, "[infra]") == fp3              # sources are not the environment
+        end
+    end
+
+    @testset "a start reads the host's state in one command" begin
+        # The script runs in the remote login shell; here it runs in a local one against a fake home.
+        mktempdir() do home
+            rel = ".cache/kaimonslate/remote/nb-1"
+            # No julia on PATH: a launcher started under a fresh HOME sets itself up first, which is slow.
+            sh(script) = read(setenv(`sh -c $script`, merge(ENV, Dict("HOME" => home, "PATH" => "/usr/bin:/bin")); dir = home), String)
+            fresh = RE._parse_probe(sh(RE._host_state_script(rel)))
+            @test all(k -> get(fresh, k, "?") == "", ("payload", "seb", "kgate", "env", "rg"))
+
+            put(p, s) = (mkpath(dirname(joinpath(home, p))); write(joinpath(home, p), s))
+            put(RE._PAYLOAD_STAMP, "abc123")
+            put(RE._SEB_STAMP, "def456")
+            put(RE._REMOTE_KGATE_ENV * "/.ready", "")
+            put(rel * "/" * RE._ENV_STAMP, "fp0")
+            put(RE._RG_PATH_FILE, "/bin/sh")
+            st = RE._parse_probe(sh(RE._host_state_script(rel)))
+            @test st["payload"] == "abc123" && st["seb"] == "def456" && st["kgate"] == "1"
+            @test st["rg"] == "1"
+            @test st["env"] == ""                         # a stamp without a Manifest is no environment
+            put(rel * "/Manifest.toml", "")
+            @test RE._parse_probe(sh(RE._host_state_script(rel)))["env"] == "fp0"
+            put(RE._RG_PATH_FILE, joinpath(home, "gone", "rg"))
+            @test RE._parse_probe(sh(RE._host_state_script(rel)))["rg"] == ""   # a path that went away
+
+            # Without a project the env lines are left out; the runtime ones remain.
+            bare = RE._parse_probe(sh(RE._host_state_script()))
+            @test !haskey(bare, "env") && !haskey(bare, "rg") && bare["payload"] == "abc123"
+            @test haskey(bare, "julia") && haskey(bare, "modules")
+        end
+        @test occursin("'/abs/env/Manifest.toml'", RE._host_state_script("/abs/env"))   # not under \$HOME
+        @test RE._seb_sha() == RE._seb_sha() && length(RE._seb_sha()) == 16
     end
 
     # Signing in interactively REPLACES the session (a half-open one is cleared first), and every

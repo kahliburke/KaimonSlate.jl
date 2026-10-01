@@ -208,6 +208,33 @@ targets, which regions) and whether it is signed in. **Check** asks the host whi
 methods it offers *without* authenticating, so it costs no failed login on a server that penalises
 those.
 
+## Preparing a region
+
+A region's first worker on a new machine runs into everything about that machine at once: Julia to
+install, the worker's own packages, modules the site loads by default, a filesystem slower than a
+laptop's. **Prepare** (the Readiness row of the region in 🖧 Remotes, or `region_prepare(name)` from
+an agent) does that work on its own, outside any notebook, and reports each step:
+
+* sign in, install Julia at the hub's version, build the worker runtime;
+* read the site: CPU, default modules, CUDA libraries on the library path, Julia version;
+* create the data root and check it is writable;
+* on a scheduler region, the first time: get a node, read it the same way, check that it sees the
+  login node's files, time loading the worker runtime and the region's preload environment there,
+  check CUDA, and give the node back.
+
+What it finds is kept with the region and used by every start after it. A module that puts the
+system's CUDA libraries ahead of CUDA.jl's is unloaded before the worker starts. The time loading took
+sets how long a worker may go silent before its connection is dropped (a region's own **Liveness**
+setting overrides it). And each start compares Julia and the default modules with what was recorded:
+when they differ the region is marked stale, and Prepare again brings it up to date.
+
+A region cell whose notebook's packages were never tested on the region, or have changed since they
+were, waits and offers **Prepare**. Prepared from the notebook, the region also installs and
+precompiles those packages where the workers run, then starts the notebook's own worker and loads
+them in it. The node and that worker stay for the notebook, and the waiting cells run on it when the
+prepare ends. While a region is being prepared, its cells wait for it rather than start a worker of
+their own beside it.
+
 ## Waiting for a node
 
 A region on a scheduler does not have an address until the scheduler grants one, and on a busy cluster

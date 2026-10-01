@@ -102,3 +102,23 @@
   padding:5px 9px; font-size:.74rem; line-height:1.5; box-shadow:0 8px 24px #0009; white-space:normal;
   opacity:0; transform:translateY(-2px); transition:opacity .09s, transform .09s; }
 .uitip.on { opacity:1; transform:none; }
+
+/* The steps of preparing a region (prepsteps.js): the notebook's Prepare dialog and the Remotes panel. */
+.rppprepsteps{display:flex;flex-direction:column;gap:2px;}
+.rppprepstep{font-size:.78rem;}
+.rppprepstep.planned{opacity:.6;}
+.rppprepmark{display:inline-block;width:1.3em;}
+.rppprepstep.ok .rppprepmark{color:#7fc8a0;}
+.rppprepstep.warn .rppprepmark{color:#e0c070;}
+.rppprepstep.fail .rppprepmark{color:#e07a7a;}
+.rppprepdetail{margin-left:1.3em;opacity:.75;font-size:.72rem;overflow-wrap:anywhere;}
+.rpplog{margin-top:4px;}
+.rpplog>.rpplogbtn{background:none;border:none;padding:0;color:inherit;opacity:.8;cursor:pointer;font-size:.74rem;}
+.rpplogtext{margin:4px 0 0;max-height:240px;overflow:auto;font-family:Menlo,monospace;font-size:.68rem;line-height:1.35;white-space:pre-wrap;overflow-wrap:anywhere;padding:6px 8px;border-radius:6px;background:rgba(0,0,0,.25);}
+.rpphist{margin-top:4px;display:flex;flex-direction:column;gap:1px;}
+.rpphistrow{font-size:.75rem;cursor:pointer;padding:1px 4px;border-radius:4px;}
+.rpphistrow:hover,.rpphistrow.sel{background:rgba(127,127,127,.15);}
+.rpphistrow.ok .rpphistout{color:#7fc8a0;}
+.rpphistrow.warnings .rpphistout,.rpphistrow.interrupted .rpphistout{color:#e0c070;}
+.rpphistrow.failed .rpphistout{color:#e07a7a;}
+.rpphistrep{margin:4px 0 0 8px;padding-left:8px;border-left:2px solid rgba(127,127,127,.3);}

@@ -966,6 +966,7 @@ include(joinpath(@__DIR__, "envprep.jl"))       # shared notebook-env prep polic
 include(joinpath(@__DIR__, "clocktrack.jl"))    # ClockTrack — worker↔hub clock delta, tracked not synced
 include(joinpath(@__DIR__, "gate_kernel.jl"))   # GateKernel (used when Main.Kaimon present)
 include(joinpath(@__DIR__, "remote.jl"))        # RunTarget + remote worker (provision/sync/CURVE); uses gate_kernel helpers
+include(joinpath(@__DIR__, "region_prepare.jl"))  # preparing a region: site setup + node check, kept in Region.readiness
 include(joinpath(@__DIR__, "clusters.jl"))      # named compute targets, kept with the machines (not per notebook); needs remote.jl's _slate_config_dir
 include(joinpath(@__DIR__, "peer_mesh.jl"))     # friend-group SSH mesh (introduce/teardown/peer_plan) for the :ssh blob bridge
 

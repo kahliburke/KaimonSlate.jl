@@ -342,7 +342,8 @@ function _cellRegionSet() {
 // The server sends a CODE for why a cell is waiting; the words are here. An unknown code shows as
 // itself rather than as nothing, so a new one is visible instead of silently blank.
 const BLOCKED_TEXT = { queued: 'queued', not_signed_in: 'not signed in', connecting: 'connecting',
-                       not_requested: 'run to request a node' };
+                       not_requested: 'run to request a node', needs_prepare: 'prepare the region',
+                       preparing: 'preparing' };
 function blockedText(c) {
   const code = (c && c.blocked) || '';
   return BLOCKED_TEXT[code] || code.replace(/_/g, ' ');
@@ -365,7 +366,10 @@ function cellRegionChip(c) {
     return `<span class="cregion blocked" data-bkey="${_esc(_blockedKey(c))}"` +
       ` data-at="${+(c.blockedAt) || 0}" data-reg="${_esc(loc.name || '')}"` +
       ` onmouseenter="window.blockInfo(this,'${c.id}')" onmouseleave="window.blockInfoHide()"` +
-      ` onmousedown="window.openRegionPanel('${c.id}', event)">${loc.local ? '💻' : '🖧'} ${_esc(loc.name || 'local')}` +
+      ((c.blocked === 'needs_prepare' || c.blocked === 'preparing')
+        ? ` onmousedown="window.openPrepare && window.openPrepare('${_esc(loc.name || '')}', event)">`
+        : ` onmousedown="window.openRegionPanel('${c.id}', event)">`) +
+      `${loc.local ? '💻' : '🖧'} ${_esc(loc.name || 'local')}` +
       ` <span class="cregst">${_esc(blockedText(c))}${w ? ` <span class="blockwait">${w}</span>` : ''}</span></span>`;
   }
   // `onmousedown`, not `onclick`: clicking a header selects the cell, which re-renders it and
@@ -878,6 +882,9 @@ function _regRender(c, reg, load, alloc) {
     h += _regRow('Transport', r && r.transport);
     h += _regRow('Data root', r && r.root);
     h += _regRow('Preload', r && r.preload);
+    if (r && r.defined)
+      h += '<div class="blkrow"><span>Readiness</span><div><button class="regprel" ' +
+           `onclick="window.openPrepare && window.openPrepare('${_esc(reg)}', event)">Report</button></div></div>`;
     if (!r || !r.defined) h += _regRow('Note', 'this cell names a region that is not defined');
     else if (_regIsCluster(reg)) {
       h += _regRow('Scheduler', r.scheduler);

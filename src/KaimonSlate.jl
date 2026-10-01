@@ -1215,7 +1215,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", options="", prologue="", idle_release="", idle_warn="", clear="") -> String
+        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", options="", prologue="", idle_release="", idle_warn="", liveness_grace="", clear="") -> String
 
     Define (or update) a named region — a global compute target: a `host` reached over `transport`
     (`tunnel`|`direct`), an optional `preload` (a LOCAL project dir replicated on the host so its
@@ -1243,7 +1243,9 @@ function create_tools(GateTool::Type)
     is requested. Passing `options` replaces the region's whole set. `prologue` is shell run on the
     granted node before the worker starts (`module load cudatoolkit`). `idle_release` (`10m`, `1h`)
     gives the node back after no region cell has run for that long; `idle_warn` asks the open page
-    that long beforehand. `0` turns either off.
+    that long beforehand. `0` turns either off. `liveness_grace` (`3m`) is how long a worker here may
+    go without answering before its connection is dropped; `0` takes what preparing the region
+    measured, or the hub's default.
 
     Pass `delete=true` to REMOVE the named region from the registry (all other args ignored): its
     workers are reaped, attached ones included, and a scheduler region's allocation is released.
@@ -1257,7 +1259,7 @@ function create_tools(GateTool::Type)
                     scheduler::String = "", partition::String = "", walltime::String = "",
                     cpus::String = "", mem::String = "", gpus::String = "", account::String = "",
                     options::String = "", prologue::String = "",
-                    idle_release::String = "", idle_warn::String = "",
+                    idle_release::String = "", idle_warn::String = "", liveness_grace::String = "",
                     clear::String = "", delete::Bool = false)::String
         nm = strip(name); isempty(nm) && return "Give a region name."
         if delete
@@ -1280,7 +1282,7 @@ function create_tools(GateTool::Type)
             given(v) && (kw[k] = String(strip(v)))
         end
         SW = ReportEngine.Sweep
-        for (k, v) in ((:idle_release, idle_release), (:idle_warn, idle_warn))
+        for (k, v) in ((:idle_release, idle_release), (:idle_warn, idle_warn), (:liveness_grace, liveness_grace))
             given(v) || continue
             # `parse_duration` reads anything it cannot parse as 0, which here would mean "off".
             s = SW.parse_duration(strip(v))
@@ -1343,6 +1345,7 @@ function create_tools(GateTool::Type)
                (isempty(r.prologue) ? "" : ", prologue set") *
                (r.idle_release > 0 ? ", idle release $(SW.format_duration(r.idle_release))" *
                                      (r.idle_warn > 0 ? " (warn $(SW.format_duration(r.idle_warn)) before)" : "") : "") *
+               (r.liveness_grace > 0 ? ", liveness grace $(SW.format_duration(r.liveness_grace))" : "") *
                (r.base_port > 0 ? ", base_port=$(r.base_port)" : "") *
                (r.warm > 0 ? ", warm=$(r.warm) (reconciling)" : "") *
                (r.sysimage ? ", sysimage=on" : "") *
@@ -2184,6 +2187,86 @@ function create_tools(GateTool::Type)
     end
 
     """
+        region_prepare(name; action="start", node="", project="", id="") -> String
+
+    Prepare region `name` for workers, outside any notebook: sign in, put Julia and the worker runtime
+    in place, read the site (default modules, CUDA libraries on the path, CPU), create the data root,
+    and on a scheduler region start a worker on a granted node to time its loads and check its GPUs
+    and CUDA, then give the node back. What it finds is kept in the region and used by every start:
+    a site prologue (unloading a module that shadows CUDA.jl's libraries), a liveness grace from the
+    measured load time, and fingerprints that mark the region stale when the site changes.
+
+    `action="start"` runs it in the background and returns at once; `action="status"` reports the
+    steps so far, or the stored record when none is running. Every run is kept: `action="history"`
+    lists them (newest first, with how each ended, including runs cut off mid-way), and
+    `action="report", id=…` shows one in full, with its activity log. `node` is `"true"`/`"false"` to force
+    the node stage on or off; by default it runs on a scheduler region's first prepare only. The node
+    stage queues for an allocation like any region cell.
+
+    `project` is a notebook (`.jl`) or a project folder to test with (the region's preload when
+    empty). The node stage installs its environment there, loads every package with timing and checks
+    CUDA, and the report is kept per project: a start for that project uses its load time for the
+    liveness grace, and finds its environment already installed.
+    """
+    function region_prepare(name::String; action::String = "start", node::String = "", project::String = "",
+                            id::String = "")::String
+        r = ReportEngine.region_get(strip(name))
+        r === nothing && return "No region '$name'. `regions()` lists them."
+        st = ReportEngine.preparing(r.name)
+        if strip(action) == "history"
+            reps = ReportEngine.prepare_reports(r.name)
+            isempty(reps) && return "No prepare of '$(r.name)' has run on this hub."
+            io = IOBuffer()
+            println(io, "Prepares of '$(r.name)', newest first:")
+            for x in reps
+                println(io, "  $(x["id"])  $(x["outcome"])",
+                        x["failures"] > 0 ? "  $(x["failures"]) failed" : "",
+                        x["warnings"] > 0 ? "  $(x["warnings"]) warned" : "",
+                        isempty(x["project"]) ? "" : "  · $(x["project"])")
+            end
+            print(io, "region_prepare(\"$(r.name)\", action=\"report\", id=…) shows one.")
+            return String(take!(io))
+        end
+        if strip(action) == "report"
+            rep = ReportEngine.prepare_report(r.name, strip(id))
+            rep === nothing && return "No report '$id' for '$(r.name)'. action=\"history\" lists them."
+            io = IOBuffer()
+            println(io, "Prepare of '$(r.name)' $(rep["id"]) — $(rep["outcome"])",
+                    isempty(get(rep, "project", "")) ? "" : " · tested with $(rep["project"])")
+            ReportEngine._steps_text(io, get(rep, "steps", Any[]))
+            lg = get(rep, "log", Any[])
+            isempty(lg) || (println(io, "Activity (last $(min(60, length(lg))) of $(length(lg)) lines):");
+                            foreach(l -> println(io, "  ", l), lg[max(1, end - 59):end]))
+            return String(take!(io))
+        end
+        if strip(action) == "status"
+            if st !== nothing && st["running"] === true
+                io = IOBuffer()
+                println(io, "Preparing '$(r.name)' ($(round(Int, time() - st["started"]))s so far):")
+                ReportEngine._steps_text(io, st["steps"])
+                return String(take!(io))
+            end
+            return "Region '$(r.name)': " * ReportEngine.readiness_text(r)
+        end
+        strip(action) == "start" || return "⛔ action must be start, status, history or report, not '$action'"
+        (st !== nothing && st["running"] === true) &&
+            return "'$(r.name)' is already being prepared — region_prepare(\"$(r.name)\", action=\"status\")"
+        n = isempty(strip(node)) ? nothing : _dbg_flag(node)
+        n === missing && return "⛔ node must be true or false, not '$node'"
+        try; ReportEngine._reference_env(isempty(strip(project)) ? r.preload : project)
+        catch e; return "⛔ project: " * sprint(showerror, e); end
+        Threads.@spawn try
+            ReportEngine.prepare_region!(r.name; node = n, project = project)
+        catch e
+            ReportEngine.prepare_failed_to_start!(r.name, e)
+        end
+        return "Preparing '$(r.name)' in the background" *
+               (n === true || (n === nothing && r.scheduler !== :none && isempty(r.readiness)) ?
+                    " (with a node stage — it queues for an allocation)" : "") *
+               ". Follow it with region_prepare(\"$(r.name)\", action=\"status\")."
+    end
+
+    """
         regions() -> String
 
     The compute registry at a glance, no ssh: every configured region (name, host, transport, warm
@@ -2209,6 +2292,7 @@ function create_tools(GateTool::Type)
                         isempty(r.data_root) ? "" : "  data_root=$(r.data_root)")
                 st = ReportEngine.region_status(r.name)
                 st === nothing || println(io, "      last: ", st.ok ? "ok" : "FAILED", " — ", st.msg)
+                println(io, "      ", first(split(ReportEngine.readiness_text(r), '\n')))
             end
         end
         if !isempty(parked)
@@ -3377,6 +3461,7 @@ function create_tools(GateTool::Type)
         GateTool("worker", worker),
         GateTool("region", region),
         GateTool("regions", regions),
+        GateTool("region_prepare", region_prepare),
         GateTool("peer_introduce", peer_introduce),
         GateTool("peer_teardown", peer_teardown),
         GateTool("peer_plan", peer_plan_tool),
