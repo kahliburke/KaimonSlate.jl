@@ -120,6 +120,29 @@
 // in core.js is reachable from the notebook shell alone. (core.js keeps its own `_bytes`: that is the
 // `:bytes` TABLE COLUMN format, which takes its digit count from the author's column spec and is
 // mirrored in Julia `format.jl` under a golden-fixture parity test. Different contract, not a copy.)
+// A duration in milliseconds, written as a person reads one. The value picks the unit: whole
+// milliseconds under a second, seconds with one decimal under ten seconds and whole seconds under a
+// minute, then minutes with seconds and hours with minutes. The second unit is padded to two
+// digits, so a running timer keeps its width as it counts.
+//
+//   slateDuration(850)      → '850 ms'
+//   slateDuration(4230)     → '4.2 s'
+//   slateDuration(32512)    → '33 s'
+//   slateDuration(125000)   → '2m 05s'
+//   slateDuration(3720000)  → '1h 02m'
+window.slateDuration = function slateDuration(ms) {
+  let v = +ms;
+  if (!isFinite(v) || v < 0) v = 0;
+  if (v < 999.5) return Math.round(v) + ' ms';
+  if (v < 9950) return (v / 1000).toFixed(1) + ' s';
+  const s = Math.round(v / 1000);
+  if (s < 60) return s + ' s';
+  const pad = n => String(n).padStart(2, '0');
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + pad(s % 60) + 's';
+  const m = Math.floor(s / 60);
+  return Math.floor(m / 60) + 'h ' + pad(m % 60) + 'm';
+};
+
 const _SLATE_BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
 window.slateBytes = function slateBytes(n, opts) {
   const o = opts || {};

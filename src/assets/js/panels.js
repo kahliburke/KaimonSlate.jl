@@ -580,7 +580,7 @@ function _scAgo(ms) {
 }
 function _scCellHtml(c) {
   const st = c.state || 'fresh';
-  const dur = c.duration != null ? (c.duration + ' ms') : '';
+  const dur = c.duration != null ? window.slateDuration(c.duration) : '';
   const ago = c.ranAt ? '<span class="scago" data-ranat="' + c.ranAt + '">' + _esc(_scAgo(c.ranAt)) + '</span>' : '';
   const rich = ((c.echarts && c.echarts.length) || (c.tables && c.tables.length))
     ? '<div class="scnote">interactive output — run it in a real cell to see the chart/table</div>' : '';
