@@ -28,6 +28,7 @@ const LIB = LibSSH2_jll.libssh2
 const EAGAIN = Cint(-37)          # LIBSSH2_ERROR_EAGAIN
 const DIR_INBOUND = Cint(1)       # LIBSSH2_SESSION_BLOCK_INBOUND
 const DIR_OUTBOUND = Cint(2)
+const EXTENDED_DATA_MERGE = Cint(2)  # LIBSSH2_CHANNEL_EXTENDED_DATA_MERGE (0 normal, 1 ignore, 2 merge)
 
 # ── resolved connection settings ─────────────────────────────────────────────────────────────
 # `ssh -G` prints a host's effective config with Match/Include/wildcards already applied. Running
@@ -415,15 +416,49 @@ function _drain(s::Session, ch, stream::Cint, sink::IO, deadline::Float64)
     end
 end
 
+# The command's exit status, or -1 when its output did not end by `timeout`. That is a failure even
+# though the channel then closes cleanly: libssh2 reports 0 for a command whose exit it never saw,
+# and a step that ran past its deadline is not one that succeeded. It may still be running there.
+const TIMED_OUT = Cint(-1)
+
 function _finish(s::Session, ch, out::IO, err::IO, timeout::Real)
     deadline = time() + timeout
-    _drain(s, ch, Cint(0), out, deadline)
-    _drain(s, ch, Cint(1), err, deadline)
+    done = _drain(s, ch, Cint(0), out, deadline)
+    done = _drain(s, ch, Cint(1), err, deadline) && done
     _again(s, () -> ccall((:libssh2_channel_close, LIB), Cint, (Ptr{Cvoid},), ch); timeout = 10.0)
     status = ccall((:libssh2_channel_get_exit_status, LIB), Cint, (Ptr{Cvoid},), ch)
     ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), ch)
-    return status
+    return done ? status : TIMED_OUT
 end
+
+# A sink that hands each complete line to `f` as it arrives and keeps everything, so a long command
+# can be followed while it runs and still returns its whole output. `f` runs on the session's owner
+# task, between reads, so it must be quick; a throw from it is dropped rather than ending the read.
+# A carriage return ends a line too: progress output rewrites one line with `\r`.
+mutable struct LineTap <: IO
+    buf::IOBuffer
+    partial::Vector{UInt8}
+    f::Any
+end
+LineTap(f) = LineTap(IOBuffer(), UInt8[], f)
+
+function _tap_line!(t::LineTap)
+    isempty(t.partial) && return nothing
+    line = String(copy(t.partial)); empty!(t.partial)
+    try; t.f(line); catch; end
+    return nothing
+end
+
+function Base.unsafe_write(t::LineTap, p::Ptr{UInt8}, n::UInt)
+    unsafe_write(t.buf, p, n)
+    for i in 1:n
+        b = unsafe_load(p, i)
+        (b == UInt8('\n') || b == UInt8('\r')) ? _tap_line!(t) : push!(t.partial, b)
+    end
+    return n
+end
+Base.write(t::LineTap, b::UInt8) = (unsafe_write(t, Ref(b), UInt(1)); 1)
+Base.take!(t::LineTap) = (_tap_line!(t); take!(t.buf))
 
 function _start(s::Session, ch, cmd::AbstractString)
     _again(s, () -> ccall((:libssh2_channel_process_startup, LIB), Cint,
@@ -454,21 +489,29 @@ function _channel_dead!(s::Session, why::AbstractString)
     return nothing
 end
 
-"Run `cmd` on the session's host. `(ok, output)` with stdout and stderr interleaved."
-function _exec(s::Session, cmd::AbstractString; timeout::Real = 120.0)
+"Run `cmd` on the session's host. `(ok, output)` with stdout and stderr interleaved; `online` gets each line as it arrives."
+function _exec(s::Session, cmd::AbstractString; timeout::Real = 120.0, online = nothing)
     ch = _open_channel(s)
     if ch == C_NULL
         why = "channel_open: " * _lasterr(s)
         _channel_dead!(s, why)
         return (false, why)
     end
+    # stderr arrives on the same stream as stdout, in the order it was written. Read separately, it
+    # waits until stdout ends, which holds back a command's progress (Pkg reports on stderr) until
+    # the command is over.
+    _again(s, () -> ccall((:libssh2_channel_handle_extended_data2, LIB), Cint, (Ptr{Cvoid}, Cint),
+                          ch, EXTENDED_DATA_MERGE))
     if _start(s, ch, cmd) != 0
         ccall((:libssh2_channel_free, LIB), Cint, (Ptr{Cvoid},), ch)
         return (false, "exec: " * _lasterr(s))
     end
-    out = IOBuffer()
+    out = online === nothing ? IOBuffer() : LineTap(online)
     status = _finish(s, ch, out, out, timeout)
-    return (status == 0, String(take!(out)))
+    text = String(take!(out))
+    status == TIMED_OUT &&
+        (text *= "\n[no end within $(round(Int, timeout))s; the command may still be running there]")
+    return (status == 0, text)
 end
 
 # Run `cmd`, streaming `input` to its stdin and collecting stdout. This is what replaces rsync: the
@@ -798,7 +841,8 @@ function _serve(s::Session, ask)
         end
         result = try
             !s.alive ? (kind === :io ? (false, UInt8[], s.err) : (false, s.err)) :
-            kind === :exec ? _exec(s, arg) :
+            kind === :exec ? (arg isa AbstractString ? _exec(s, arg) :
+                              _exec(s, arg.cmd; timeout = arg.timeout, online = arg.online)) :
             kind === :io ? _exec_io(s, arg[1], arg[2]) :
             kind === :forward ? _add_forward!(s, arg[1], arg[2], arg[3], pending) :
             kind === :unforward ? (_drop_forward!(s, arg); (true, "")) :
@@ -920,9 +964,17 @@ function _request(host::AbstractString, kind::Symbol, arg, fail; ask)
     return take!(reply)
 end
 
-"Run `cmd` on `host` over the shared session. `(ok, output)`."
-exec(host::AbstractString, cmd::AbstractString; ask) =
-    _request(String(host), :exec, String(cmd), (false, "session for $host is gone"); ask = ask)
+"""
+    exec(host, cmd; ask, timeout = 120, online = nothing) -> (ok, output)
+
+Run `cmd` on `host` over the shared session. A command still producing output at `timeout` seconds is
+a failure. `online(line)` is called with each line as it arrives, on the session's task: keep it quick.
+"""
+exec(host::AbstractString, cmd::AbstractString; ask, timeout::Real = 120.0, online = nothing) =
+    _request(String(host), :exec,
+             (timeout == 120.0 && online === nothing) ? String(cmd) :
+                 (; cmd = String(cmd), timeout = Float64(timeout), online = online),
+             (false, "session for $host is gone"); ask = ask)
 
 """
     exec_io(host, cmd, input) -> (ok, stdout::Vector{UInt8}, stderr::String)

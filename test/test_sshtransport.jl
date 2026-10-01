@@ -13,6 +13,24 @@ reset!() = lock(T._PROMPTS_LOCK) do
     empty!(T._PROMPTS); T._PROMPT_SAVE[] = nothing
 end
 
+@testset "a long command's output arrives line by line" begin
+    # Provisioning runs for minutes; the tap is what lets each line be seen as it lands while the
+    # whole output is still returned at the end.
+    got = String[]
+    t = T.LineTap(l -> push!(got, l))
+    write(t, "Resolving pack"); write(t, "ages\nInstalled 3\r[====] 50%\rdone\n"); write(t, "tail")
+    @test got == ["Resolving packages", "Installed 3", "[====] 50%", "done"]
+    @test String(take!(t)) == "Resolving packages\nInstalled 3\r[====] 50%\rdone\ntail"
+    @test got[end] == "tail"                    # the last line, unterminated, still arrives
+    # stderr is merged into the stream the tap reads. libssh2.h: 0 normal, 1 IGNORE, 2 MERGE; with 1,
+    # every command's stderr (all of Pkg's progress) was silently dropped.
+    @test T.EXTENDED_DATA_MERGE == 2
+    # A callback that throws loses its line and nothing else: the read goes on.
+    t2 = T.LineTap(_ -> error("boom"))
+    write(t2, "a\nb\n")
+    @test String(take!(t2)) == "a\nb\n"
+end
+
 @testset "ssh prompt store" begin
     @testset "the module imports nothing a worker might not have" begin
         # This file ships to a cluster in the worker payload and is loaded against whatever

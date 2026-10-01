@@ -194,6 +194,7 @@ function connect!(host::AbstractString; interactive::Bool = false)
         (false, first(sprint(showerror, e), 200))
     end
     lock(_CONNECT_LOCK) do
+        _CONNECT_WHY[String(host)] = ok ? "" : String(why)
         if ok
             delete!(_CONNECT_FAILED, String(host))
         else
@@ -211,6 +212,32 @@ function connect!(host::AbstractString; interactive::Bool = false)
     return ok
 end
 
+# The transport's own words for the last failed sign-in to each host, for whoever has to explain it.
+const _CONNECT_WHY = Dict{String,String}()
+
+"Why the last sign-in to `host` failed, as the transport put it, or \"\"."
+last_connect_failure(host::AbstractString) = lock(_CONNECT_LOCK) do; get(_CONNECT_WHY, String(host), ""); end
+
+"""
+    connect_waiting!(host; wait_s = 60) -> (ok, why)
+
+Sign in to `host` without a prompt, for something a person asked for rather than a poller: a login
+already under way is waited for instead of answered with "not connected", and a recent failure does
+not stop the attempt. `why` says what went wrong when it did.
+"""
+function connect_waiting!(host::AbstractString; wait_s::Real = 60)
+    h = String(host)
+    has_delegate() && return (connect!(h), "")
+    deadline = time() + wait_s
+    while SshTransport.opening(h) && time() < deadline
+        sleep(0.5)
+    end
+    connected(h) && return (true, "")
+    lock(_CONNECT_LOCK) do; delete!(_CONNECT_FAILED, h); end   # asked for: no backoff applies
+    ok = connect!(h)
+    return (ok, ok ? "" : something(last_connect_failure(h), ""))
+end
+
 "Whether a non-interactive `connect!` to `host` failed recently enough that it is still being left alone."
 connect_failed_recently(host::AbstractString) = lock(_CONNECT_LOCK) do
     fc = get(_CONNECT_FAILED, String(host), nothing)
@@ -218,12 +245,14 @@ connect_failed_recently(host::AbstractString) = lock(_CONNECT_LOCK) do
 end
 
 """
-    run_there(host, script) -> (ok, output)
+    run_there(host, script; timeout = 120, online = nothing) -> (ok, output)
 
 Run `script` on the host. An empty host runs it here — that is what makes this testable, and what
-makes a `SlurmTarget` with no host behave as documented.
+makes a `SlurmTarget` with no host behave as documented. A script still running at `timeout` seconds
+is a failure; `online(line)` is handed each line as it arrives (over a session; a worker delegating
+to the hub, or a local run, gets the output at the end).
 """
-function run_there(host::AbstractString, script::AbstractString)
+function run_there(host::AbstractString, script::AbstractString; timeout::Real = 120.0, online = nothing)
     _declare_volatile()          # running a command somewhere is never a function of the cell's source
     if isempty(host)
         buf = IOBuffer()
@@ -233,13 +262,13 @@ function run_there(host::AbstractString, script::AbstractString)
     has_delegate() && return _via(() -> (false, _offline(host)), :exec,
                                   (; host = String(host), script = String(script)))
     connect!(host) || return (false, _offline(host))
-    ok, out = SshTransport.exec(String(host), String(script); ask = _ask)
+    ok, out = SshTransport.exec(String(host), String(script); ask = _ask, timeout, online)
     # A session can die between one command and the next — the far side reboots, a NAT drops the
     # flow — and the first call to notice is the one that fails. The transport drops a session it
     # could not open a channel on, so "no longer connected" distinguishes that from a command which
     # simply exited non-zero, and the caller never sees the reconnect.
     if !ok && !SshTransport.connected(String(host)) && connect!(host)
-        ok, out = SshTransport.exec(String(host), String(script); ask = _ask)
+        ok, out = SshTransport.exec(String(host), String(script); ask = _ask, timeout, online)
     end
     return (ok, out)
 end
@@ -591,12 +620,20 @@ function _ignored(rules, rel::AbstractString, isdir::Bool, gitignored::Bool)
     return false
 end
 
+# A project environment file at the top of a directory, under any name Julia reads one by.
+_is_env_file(rel::AbstractString) =
+    occursin(r"^(Julia)?(Project|Manifest)\.toml$", rel) || occursin(r"^(Julia)?Manifest-v\d+\.\d+\.toml$", rel)
+
 """
     transfer_keep(dir; region, excludes) -> (rel -> Bool)
 
 Which relative paths under `dir` may travel. `.gitignore` (via git) and `.slateignore` decide,
 with the fixed `excludes` applied on top — those name things that must never travel regardless
 (`.git`, a Manifest the far side is meant to resolve itself).
+
+The project's own environment files at the top of `dir` travel whatever the ignore files say,
+unless `excludes` names them. They define the environment the far side runs, and a repository
+commonly ignores its Manifest.
 """
 function transfer_keep(dir::AbstractString; region::AbstractString = "",
                        excludes::Vector{String} = String[])
@@ -606,6 +643,7 @@ function transfer_keep(dir::AbstractString; region::AbstractString = "",
         r = replace(String(rel), '\\' => '/')
         # The fixed excludes are not negotiable: `.git`, a Manifest the far side must resolve.
         _excluded(r, excludes) && return false
+        _is_env_file(r) && return true
         # A directory is offered before its contents; keep it so the walk can descend, and let the
         # files inside be judged on their own.
         isdirpath = isdir(joinpath(String(dir), r))

@@ -118,6 +118,22 @@ end
         end
     end
 
+    @testset "the project's environment files travel even when ignored" begin
+        mktempdir() do d
+            # Ignoring the Manifest is the common repository setting, and the far side needs it to
+            # run the same versions. Only the project's own files at the top are exempt.
+            _mkproj(d; gitignore = "", slateignore = "Manifest.toml\nJuliaManifest-v1.12.toml\n")
+            write(joinpath(d, "Manifest.toml"), "x\n")
+            write(joinpath(d, "JuliaManifest-v1.12.toml"), "x\n")
+            write(joinpath(d, "src", "Manifest.toml"), "x\n")
+            got = _kept(d)
+            @test "Manifest.toml" in got && "JuliaManifest-v1.12.toml" in got
+            @test !("src/Manifest.toml" in got)
+            # A caller that means the far side to resolve its own still says so, and that wins.
+            @test !("Manifest.toml" in _kept(d; excludes = ["Manifest.toml"]))
+        end
+    end
+
     @testset "an anchored pattern matches only at the root" begin
         mktempdir() do d
             _mkproj(d; gitignore = "", slateignore = "/data/\n")
