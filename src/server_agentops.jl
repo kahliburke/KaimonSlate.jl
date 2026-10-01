@@ -244,7 +244,19 @@ end
 # Compact text of a cell's result for the agent: the value/stdout, or the error,
 # plus a note that rich output (image/chart) rendered (the agent can't see the
 # pixels here, but knows it worked); tables are rendered as text so their data IS visible.
-_cell_result_text(c::Cell) = (o = c.output; o === nothing ? "(not run)" : _output_result_text(o))
+#
+# A waiting cell has no result yet, whatever an earlier run left in its output, so the text says
+# what it waits for.
+function _cell_result_text(c::Cell)
+    if c.state == BLOCKED
+        why = c.blocked == WAIT_QUEUED ? "queued for a node" :
+              c.blocked == WAIT_NOT_SIGNED_IN ? "waiting for a sign-in" :
+              c.blocked == WAIT_CONNECTING ? "connecting" : c.blocked
+        return "(" * why * (isempty(c.blocked_host) ? "" : " on " * c.blocked_host) * ")"
+    end
+    o = c.output
+    return o === nothing ? "(not run)" : _output_result_text(o)
+end
 # The agent-facing text for a captured eval result — shared by cells and out-of-band (scratch) evals.
 #
 # Colour is STRIPPED here and only here. Captured output carries SGR now (the page renders it as

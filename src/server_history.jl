@@ -1315,7 +1315,7 @@ function _workers_json(nb::LiveNotebook)
     for side in sort(unique(String[_cell_region(c) for c in nb.report.cells]))
         (isempty(side) || side in have) && continue
         r = try; ReportEngine.region_get(side); catch; nothing; end
-        placing = lock(_PLACING_LOCK) do; side in _PLACING; end
+        placing = _region_queued(side)
         host = r === nothing ? "" : String(r.host)
         sched = r !== nothing && r.scheduler !== :none
         # A scheduler region can only queue while its front door is signed in. If that session has
