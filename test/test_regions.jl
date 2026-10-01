@@ -9,6 +9,7 @@ using KaimonSlate
 
 const NS = KaimonSlate.NotebookServer
 const RE = KaimonSlate.ReportEngine
+include("stubgate.jl")
 
 # A Slurm on this machine, for a region whose `host` is "": `squeue` prints the file `queue`, and
 # `scancel` appends its arguments to `cancelled` and empties the queue. A file `down` makes `squeue`
@@ -372,6 +373,8 @@ end
                         @test NS._region_queued("queue") && w.state == RE.BLOCKED
                         # The agent reads what the cell waits for, not the error of its earlier run.
                         @test NS._cell_result_text(w) == "(queued for a node)"
+                        # The cells still wait, which the agent tool reports as a queued request.
+                        @test NS._region_waits(hub, "queue") && !NS._region_waits(hub, "elsewhere")
                     end
                 finally
                     lock(NS._PLACING_LOCK) do
@@ -383,6 +386,139 @@ end
                     end
                     lock(NS._REGION_LOCK) do; delete!(NS._REGION_KERNELS, ("withdraw", "queue")); end
                 end
+            end
+
+            @testset "the region tools report and act on an allocation" begin
+                tools = KaimonSlate.create_tools(StubGate.GateTool)
+                tool(name) = only(t for t in tools if t.name == name).handler
+                regions, worker = tool("regions"), tool("worker")
+                # The lines `regions()` prints under one region, up to the next one.
+                block(name) = let m = match(Regex("• " * name * " .*\\n((?:      .*\\n)*)"), regions())
+                    m === nothing ? "" : String(m.captures[1])
+                end
+                RE.region_set!("held"; host = "login", scheduler = :slurm, partition = "gpus",
+                               walltime = "02:00:00", gpus = "1", idle_release = 1800, idle_warn = 300,
+                               options = Dict("qos" => "debug", "exclusive" => "", "walltime" => "04:00:00"))
+                RE.region_set!("steady"; host = "login", scheduler = :slurm)
+                place!(name; ts = time(), until = time() + 600) = lock(RE._REGION_PLACE_LOCK) do
+                    RE._REGION_PLACE[name] = (host = "c9", job = "77", ts = ts, checked = time(), until = until)
+                end
+                site = (:slurm, "login")
+                site_was = lock(NS._EXTENDABLE_LOCK) do; get(NS._EXTENDABLE, site, nothing); end
+                try
+                    # A walltime among the options is dropped from the request, because the field owns it.
+                    @test occursin("asks: scheduler=slurm  job_name=slate-held  partition=gpus  " *
+                                   "walltime=02:00:00  gpus=1  exclusive  qos=debug  " *
+                                   "idle_release=30m (warn 5m before)  (not sent: walltime=04:00:00)", block("held"))
+                    @test occursin("allocation: none held by this hub", block("held"))
+                    # An `auto` region drops what neither scheduler would send.
+                    RE.region_set!("either"; host = "login", scheduler = :auto,
+                                   options = Dict("qos" => "debug", "walltime" => "04:00:00"))
+                    @test occursin("qos=debug  (not sent: walltime=04:00:00)", block("either"))
+                    @test occursin("holds no allocation", worker(action = "keep", region = "held"))
+
+                    # A queued request has no idle clock yet: it starts when the node is granted.
+                    lock(NS._PLACING_LOCK) do; push!(NS._PLACING, "held"); end
+                    try
+                        @test occursin("allocation: queued for a node on login", block("held"))
+                        @test occursin("is queued for a node", worker(action = "keep", region = "held"))
+                    finally
+                        lock(NS._PLACING_LOCK) do; delete!(NS._PLACING, "held"); end
+                    end
+
+                    RE.route!("c9", "login", "77")
+                    place!("held"; ts = time() - 3600)
+                    lock(NS._REGION_USE_LOCK) do; NS._REGION_LAST_USED["held"] = time() - 600; end
+                    @test occursin(r"allocation: running as job 77 on c9, 00:(09|10):\d\d of walltime left, " *
+                                   r"idle for 00:10:0\d of the 30m idle release", block("held"))
+                    # Ten idle minutes become none.
+                    @test startswith(worker(action = "keep", region = "held"), "✅ kept 'held'")
+                    @test NS._region_idle_for("held") < 5
+                    # A job with no time limit has no walltime to count down, and its idle clock still
+                    # runs. The idle notice for it is sent without one.
+                    place!("held"; until = Inf)
+                    f = NS._region_alloc_facts("held")
+                    @test !haskey(f, "walltimeLeft") && haskey(f, "idleFor")
+                    @test occursin("allocation: running as job 77 on c9, with no walltime limit, idle for", block("held"))
+                    lock(NS._EXTENDABLE_LOCK) do
+                        NS._EXTENDABLE[site] = (; ok = false, reason = :refused, said = "", added_s = 0)
+                    end
+                    @test NS._push_alloc_notice!(NS.LiveNotebook[], RE.region_get("held"),
+                                                 Dict{String,Any}("kind" => "idle", "seconds_left" => 60)) === nothing
+                    place!("steady")
+                    @test occursin("has no idle release", worker(action = "keep", region = "steady"))
+                finally
+                    lock(RE._REGION_PLACE_LOCK) do
+                        foreach(n -> delete!(RE._REGION_PLACE, n), ("held", "steady"))
+                    end
+                    lock(NS._REGION_USE_LOCK) do
+                        foreach(n -> delete!(NS._REGION_LAST_USED, n), ("held", "steady"))
+                    end
+                    lock(NS._EXTENDABLE_LOCK) do
+                        site_was === nothing ? delete!(NS._EXTENDABLE, site) : (NS._EXTENDABLE[site] = site_was)
+                    end
+                    RE.route!("c9", "")
+                end
+
+                try
+                    @test startswith(worker(action = "log", region = "held"), "No bring-up of 'held'")
+                    RE.with_rlog_region(() -> RE._rlog("region[held]: queued for a node"), "held")
+                    @test occursin("region[held]: queued for a node", worker(action = "log", region = "held"))
+                    # A bring-up is not an allocation, so a region without a scheduler has a log too.
+                    RE.with_rlog_region(() -> RE._rlog("region[plain]: spawning"), "plain")
+                    @test occursin("region[plain]: spawning", worker(action = "log", region = "plain"))
+                finally
+                    foreach(RE.region_trace_reset!, ("held", "plain"))
+                end
+
+                # The scheduler is asked by job name, here on this machine (`host = ""`).
+                bin = fake_slurm()
+                queue, cancelled = joinpath(bin, "queue"), joinpath(bin, "cancelled")
+                RE.region_set!("here"; host = "", scheduler = :slurm)
+                release() = worker(action = "release", region = "here")
+                withenv("PATH" => bin * ":" * ENV["PATH"]) do
+                    write(queue, "123|RUNNING|c9|1:00:00\n")
+                    lock(RE._REGION_PLACE_LOCK) do
+                        RE._REGION_PLACE["here"] = (host = "", job = "123", ts = time(), checked = time(),
+                                                    until = time() + 600)
+                    end
+                    try
+                        @test startswith(release(), "✅ released job 123 of 'here'")
+                        @test readlines(cancelled) == ["-n slate-here"]
+                        @test RE.region_placement(RE.region_get("here")) === nothing
+                    finally
+                        lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "here"); end
+                    end
+                    # A job this hub does not hold, after a restart, is released by name.
+                    write(queue, "126|RUNNING|c9|1:00:00\n")
+                    @test startswith(release(), "✅ released the allocation of 'here' on this machine")
+                    @test occursin("nothing to release", release())
+                    @test length(readlines(cancelled)) == 2
+
+                    write(queue, "124|PENDING||\n")
+                    lock(NS._PLACING_LOCK) do; push!(NS._PLACING, "here"); end
+                    try
+                        @test startswith(release(), "✅ withdrew the queued request of 'here' on this machine")
+                    finally
+                        lock(NS._PLACING_LOCK) do; delete!(NS._PLACING, "here"); end
+                    end
+
+                    # Holding nothing and not being able to ask are different answers.
+                    write(queue, "125|RUNNING|c9|1:00:00\n")
+                    touch(joinpath(bin, "down"))
+                    @test occursin("may still be held, because the scheduler on this machine did not answer",
+                                   release())
+                    rm(joinpath(bin, "down"))
+                    touch(joinpath(bin, "stuck"))
+                    @test occursin("the cancel request failed, and the scheduler on this machine still lists " *
+                                   "job 125 of 'here' as running", release())
+                    rm(joinpath(bin, "stuck"))
+                end
+
+                @test occursin("has no scheduler", worker(action = "release", region = "plain"))
+                @test startswith(worker(action = "release", region = ""), "Give a region")
+                @test startswith(worker(action = "release", region = "nope"), "No region 'nope'")
+                @test occursin("release | keep | log", worker(action = "bogus"))
             end
 
             # ── what the fixed fields cannot say ──────────────────────────────────────────────
