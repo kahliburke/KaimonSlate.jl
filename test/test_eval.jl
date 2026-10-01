@@ -589,7 +589,7 @@ end
     @testset "WebPage renders self-contained HTML" begin
         w = ReportEngine.WebPage(css = "body{color:red}", html = "<h1>hi</h1>", js = "console.log(1)")
         h = sprint(show, MIME"text/html"(), w)
-        @test h == "<style>body{color:red}</style><h1>hi</h1><script>console.log(1)</script>"
+        @test h == "<style>body{color:red}</style><h1>hi</h1><script>{\nconsole.log(1)\n}</script>"
         # `</script>` / `</style>` in content are escaped so they can't close the tag early
         w2 = ReportEngine.WebPage(js = "a='</script>'", css = "x</style>")
         h2 = sprint(show, MIME"text/html"(), w2)
