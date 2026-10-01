@@ -108,6 +108,34 @@ const RE = KaimonSlate.ReportEngine
         @test occursin("ssh ", RE._in_allocation((; host = "login", job = "9", kind = :pbs), "c1", "echo hi"))
     end
 
+    @testset "a worker starts only inside the allocation it was built for" begin
+        withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir()) do
+            RE.region_set!("node9"; host = "login", scheduler = :slurm)
+            t = RE.RemoteTarget("c9"; job = "77", region = "node9")
+            launch() = RE._launch_worker!(t, 9100, 9101; label = "nb", parent = "")
+            place!(job) = lock(RE._REGION_PLACE_LOCK) do
+                RE._REGION_PLACE["node9"] = (host = "c9", job = job, ts = time(), checked = time(),
+                                             until = time() + 600)
+            end
+            # The allocation was released while its worker was starting, so the region holds no job.
+            @test RE._allocation_route(t) === nothing
+            @test_throws r"allocation 77 on c9 ended" launch()
+            # Another region on the same node holds the route of the node, in its own job.
+            place!("77")
+            RE.route!("c9", "login", "78")
+            try
+                @test RE._allocation_route(t) == (host = "login", job = "77", kind = :slurm)
+                # A later allocation of the region, on the same node.
+                place!("79")
+                @test RE._allocation_route(t) === nothing
+                @test_throws r"allocation 77 on c9 ended" launch()
+            finally
+                lock(RE._REGION_PLACE_LOCK) do; delete!(RE._REGION_PLACE, "node9"); end
+                RE.route!("c9", "")
+            end
+        end
+    end
+
     @testset "a session that cannot open a channel is dropped" begin
         # A transport dies quietly — the far side reboots, a NAT drops the flow, an idle timeout
         # fires — and nothing says so. `alive` is set once at authentication and never revalidated,

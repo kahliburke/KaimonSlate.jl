@@ -735,7 +735,7 @@ end
 # + cold-spawns any worker whose stamp is behind — so editing `worker.jl` reprovisions the remote
 # instead of silently running stale code. Cached by the newest payload mtime (one stat sweep per
 # check, not a re-hash). Reprovision-on-drift is ON; `KAIMONSLATE_SKIP_PAYLOAD_CHECK=1` turns it off —
-# see `_payload_current`.
+# see `_worker_current`.
 const _PAYLOAD_SHA_CACHE = Ref{Tuple{Float64,String}}((-1.0, ""))
 function _payload_sha()
     srcdir = @__DIR__
@@ -1480,6 +1480,7 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     _bt("worker payload loaded")
     SlateWorker.PARENT_PROJECT[] = expanduser(raw"$parent")   # `~/.cache/…` → absolute, so @asset/@sfile/datadir don't emit un-expandable tilde paths
     SlateWorker.PAYLOAD_SHA[] = raw"$(_payload_sha())"
+    SlateWorker.BOOT_JOB[] = get(ENV, "SLURM_JOB_ID", get(ENV, "PBS_JOBID", ""))
     SlateWorker.start(; host="$bind", port=$port, stream_port=$stream_port,
                       curve=$curve, allowed_clients=$allow, data_port=$(port + 2),
                       warm_deps=$warm_deps, blob_curve=$(_blob_curve(t)), blob_bind="0.0.0.0",
@@ -1518,11 +1519,36 @@ function _region_prologue(region::AbstractString)
     return "{ " * strip(r.prologue) * " ; } && "
 end
 
+"""
+    _allocation_route(t) -> route | nothing
+
+The route into the allocation that target `t` was built in: the login host and scheduler of its
+region, and its job, while the region still holds that job on that node. `nothing` once the region
+holds another job or none. The route of the node itself is not used, because it is kept per node,
+and two regions with allocations on one node share it.
+"""
+function _allocation_route(t::RemoteTarget)
+    r = region_get(t.region)
+    r === nothing && return nothing
+    p = _placement(r)
+    (p !== nothing && p.host == t.ssh_host && String(p.job) == t.job) || return nothing
+    v = via(t.ssh_host)
+    return (host = r.host, job = t.job, kind = v !== nothing ? v.kind : region_scheduler(r))
+end
+
 function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
                          label::AbstractString, parent::AbstractString,
                          threads::AbstractString = "", extra_flags::AbstractString = "",
                          warm::Bool = false, region::AbstractString = "", warm_deps::Bool = false)
     host = t.ssh_host
+    # The route to launch through, read once. A target built inside an allocation is launched inside
+    # that allocation or not at all: on a single-node cluster the node answers to the name of the
+    # login host, so a launch over plain ssh after a release would start the worker outside any job,
+    # on a shared node, with every GPU in view.
+    v = isempty(t.job) ? via(host) : _allocation_route(t)
+    (isempty(t.job) || v !== nothing) ||
+        error("slate remote: allocation $(t.job) on $host ended before its worker started; " *
+              "the next region cell asks for a new one")
     hubkey = _hub_client_pubkey()
     script = _remote_worker_script(t, port, stream_port, t.project, hubkey; warm_deps = warm_deps)
 
@@ -1563,7 +1589,6 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     # tag, the region prologue, and the sysimage resolve. Shared by both launch forms below.
     setup = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && $pro$siresolve"
     _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
-    v = via(host)
     if v === nothing || isempty(v.job)
         # A plain ssh target (or a routed node that is not a scheduler job): launch the worker DETACHED
         # on the host itself so it outlives the ssh channel. `setsid` is Linux-only (absent on macOS), so
@@ -1639,25 +1664,45 @@ catch
     dv
 end
 
-# Is the live worker `k` running the CURRENT worker payload? Compares its boot-baked stamp
-# (`__slate_env_info().payload_sha`) to `_payload_sha()`. Stale — or an old worker that reports none —
-# ⇒ false, and `attached!` reaps + cold-spawns it. A flaky env_info call ⇒ true (don't reap on a
-# transient error; liveness is validated separately). ON by default — see the body.
-function _payload_current(k)::Bool
+# Can the live worker `k` serve a kernel whose target sits in scheduler job `job` ("" for none)? One
+# `__slate_env_info` call answers two questions, and a "no" to either makes the caller reap the
+# worker. A failed env_info call counts as "yes", so a transient error does not reap a worker;
+# liveness is checked separately.
+#
+# Does it run the current worker payload? Its stamp from boot (`payload_sha`) must equal
+# `_payload_sha()`. A stale stamp, or none from an old worker, is a "no". The check is on by
+# default, as the body says.
+#
+# Does it run inside that job? A worker found by record, probe or adoption can come from an earlier
+# allocation of the region, or from a launch that the release of one left outside any job. Such a
+# worker is not where the allocation of the kernel is.
+function _worker_current(k, job::AbstractString = "")::Bool
     # Reprovision-on-drift is ON by default (skip with KAIMONSLATE_SKIP_PAYLOAD_CHECK=1). The worker SWAP
     # is now safe: `k.ns_gen` bumps on a fresh namespace (cold spawn / adopt) and the region dedups fold it
     # into their key, so the swapped worker's blank namespace is re-primed / re-resourced / re-synced; and
     # `_tool` errors cleanly (not a MethodError) if a best-effort caller hits the transient nil-conn window.
-    get(ENV, "KAIMONSLATE_SKIP_PAYLOAD_CHECK", "") == "1" && return true
-    want = _payload_sha()
-    got = try
-        String(_infofield(_tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 6.0), "payload_sha", ""))
+    # The job is checked whatever that switch says.
+    payload = get(ENV, "KAIMONSLATE_SKIP_PAYLOAD_CHECK", "") != "1"
+    (payload || !isempty(job)) || return true
+    info = try
+        _tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 6.0)
     catch
         return true
     end
-    got == want && return true
-    _rlog("payload: worker-$(k.port) for '$(k.label)' is stale " *
-          "(sha $(isempty(got) ? "none" : first(got, 12)) ≠ current $(first(want, 12))) — reprovisioning")
+    if payload
+        want = _payload_sha()
+        got = String(_infofield(info, "payload_sha", ""))
+        if got != want
+            _rlog("payload: worker-$(k.port) for '$(k.label)' is stale " *
+                  "(sha $(isempty(got) ? "none" : first(got, 12)) ≠ current $(first(want, 12))) — reprovisioning")
+            return false
+        end
+    end
+    isempty(job) && return true
+    in_job = String(_infofield(info, "job", ""))
+    in_job == job && return true
+    _rlog("worker-$(k.port) for '$(k.label)' runs in " * (isempty(in_job) ? "no scheduler job" : "job $in_job") *
+          ", not in allocation $job; replacing it")
     return false
 end
 
@@ -1843,6 +1888,17 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
                   "(attempt $attempt of $_SPAWN_TRIES)")
         end
         r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
+        # A fresh worker is checked against its job as a reused one is.
+        if !isempty(t.job)
+            k.conn = r.conn; k.tunnel = r.tunnel
+            if !_worker_current(k, t.job)
+                try; reap_remote_worker(host, port); catch; end
+                try; K.disconnect!(r.conn); catch; end
+                r.tunnel === nothing || (try; close_tunnel(r.tunnel); catch; end)
+                k.conn = nothing; k.tunnel = nothing
+                error("slate remote: the worker on $host:$port did not start inside allocation $(t.job)")
+            end
+        end
         k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
         _attach_record!(host, k.label; port = port, stream_port = stream_port,
                         transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
@@ -1854,8 +1910,9 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         k.conn = r.conn; k.tunnel = r.tunnel        # so the payload probe can gate-call this worker
         # A reused worker (park/record/probe/adopt) may be running an OLDER payload than the hub — a
         # live worker never re-includes its code, and `tools()` is fixed at boot, so a newly added
-        # gate tool can't appear on it. If its boot stamp is behind, reap it and cold-spawn fresh.
-        if !_payload_current(k)
+        # gate tool cannot appear on it. If its boot stamp is behind, or it runs outside the
+        # allocation of this kernel, reap it and cold-spawn fresh.
+        if !_worker_current(k, t.job)
             try; reap_remote_worker(host, k.port); catch; end
             try; K.disconnect!(r.conn); catch; end
             r.tunnel === nothing || (try; close_tunnel(r.tunnel); catch; end)
