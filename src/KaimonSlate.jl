@@ -1269,8 +1269,12 @@ function create_tools(GateTool::Type)
                     cpus::String = "", mem::String = "", gpus::String = "", account::String = "",
                     options::String = "", prologue::String = "",
                     idle_release::String = "", idle_warn::String = "", liveness_grace::String = "",
-                    clear::String = "", delete::Bool = false)::String
+                    machine::String = "", clear::String = "", delete::String = "")::String
         nm = strip(name); isempty(nm) && return "Give a region name."
+        # A string like every other argument here: the gate pairs keyword types by position.
+        delete = lowercase(strip(delete)) in ("true", "1", "yes")
+        (isempty(strip(machine)) || ReportEngine.cluster_get(strip(machine)) !== nothing) ||
+            return "⛔ no machine '$(strip(machine))' — `machine(action=\"list\")` shows them"
         if delete
             ReportEngine.region_get(nm) === nothing && return "No region '$nm' to delete."
             ReportEngine.region_remove!(nm)   # reaps this region's workers, then drops the record
@@ -1287,7 +1291,7 @@ function create_tools(GateTool::Type)
         for (k, v) in ((:host, host), (:data_root, data_root), (:cache_root, cache_root),
                        (:threads, threads), (:peer, peer), (:partition, partition),
                        (:walltime, walltime), (:mem, mem), (:gpus, gpus), (:account, account),
-                       (:prologue, prologue))
+                       (:prologue, prologue), (:machine, machine))
             given(v) && (kw[k] = String(strip(v)))
         end
         SW = ReportEngine.Sweep
@@ -2193,6 +2197,118 @@ function create_tools(GateTool::Type)
             println(io, "• $cid:\n", fmt(t[cid]))
         end
         return String(take!(io))
+    end
+
+    """
+        machine(; name="", action="list", project="") -> String
+
+    Machines: where regions run their workers and job cells send their sweeps. A machine is an
+    entry in the compute registry (the Remotes → Machines form; `cluster=<name>` in a job cell),
+    holding its login host, scheduler, account, the Julia to use (blank = juliaup at the hub's
+    version), the depot (blank = automatic: the site's scratch when preparing finds one) and a
+    prologue. A region names one with `region(…; machine=…)`.
+
+    `action="set"` creates or updates one from the arguments given (`host`, `kind` = slurm | pbs |
+    exec, `account`, `root_remote` (its batch store, on scratch), `depot`, `julia`, `prologue`, the
+    batch defaults `partition`, `walltime`, `cpus`, `mem`, `gpus`, `qos`, `directives` (scheduler
+    flags, one per line or `;`-separated), and `test_qos`); an empty argument leaves that field as it
+    is. `action="delete"` removes it.
+
+    `action="list"` lists them; `"show"` gives one with what preparing found on its host (Julia,
+    depot, the site's module fix, staleness) and the project environments that passed a test task
+    there. `"prepare"` runs the machine's own steps (sign in, Julia, read the site, settle the depot)
+    in the background. `"prepare_batch"` does that, then builds `project`'s task environment on the
+    machine and runs ONE test task through the scheduler (precompile, load, CUDA check) — a sweep
+    whose environment has not passed this does not submit. `"status"` reports a running prepare, or
+    the last one. Progress for either is kept like a region's: `region_prepare(name="machine_<m>"
+    or "batch_<m>", action="history")`.
+    """
+    function machine(; name::String = "", action::String = "list", project::String = "",
+                     host::String = "", kind::String = "", account::String = "", root_remote::String = "",
+                     depot::String = "", julia::String = "", prologue::String = "", partition::String = "",
+                     walltime::String = "", cpus::String = "", mem::String = "", gpus::String = "",
+                     qos::String = "", directives::String = "", test_qos::String = "")::String
+        a = strip(action); n = strip(name)
+        if a == "set"
+            isempty(n) && return "Give the machine's name."
+            cur = something(ReportEngine.cluster_get(n), Dict{String,Any}())
+            d = Dict{String,Any}(String(k) => v for (k, v) in cur)
+            d["name"] = n
+            for (k, v) in ("host" => host, "kind" => kind, "account" => account, "root_remote" => root_remote,
+                           "depot" => depot, "julia" => julia, "prologue" => prologue, "partition" => partition,
+                           "walltime" => walltime, "cpus" => cpus, "mem" => mem, "gpus" => gpus, "qos" => qos,
+                           "directives" => replace(directives, r"\s*;\s*" => "\n"), "test_qos" => test_qos)
+                isempty(strip(v)) || (d[k] = String(strip(v)))
+            end
+            haskey(d, "kind") || (d["kind"] = "slurm")
+            try
+                ReportEngine.cluster_set!(d)
+            catch e
+                return "⛔ " * sprint(showerror, e)
+            end
+            return "✓ machine '$n' saved.\n" * machine(; name = String(n), action = "show")
+        elseif a == "delete"
+            ReportEngine.cluster_get(n) === nothing && return "No machine '$n'."
+            ReportEngine.cluster_delete!(n)
+            return "🗑️ machine '$n' deleted (its store and environments on the host are untouched)."
+        end
+        if a == "list"
+            ms = ReportEngine.clusters_all()
+            isempty(ms) && return "No machines defined."
+            io = IOBuffer()
+            for d in ms
+                m = ReportEngine.machine_from(d)
+                println(io, "• $(m.name) → $(isempty(m.host) ? "this machine" : m.host) ($(m.kind))",
+                        isempty(m.host) ? "" : " · depot $(let x = ReportEngine.machine_depot(m); isempty(x) ? "~/.julia" : x end)")
+            end
+            return String(take!(io))
+        end
+        isempty(n) && return "Give the machine's name."
+        ReportEngine.cluster_get(n) === nothing && return "No machine '$n'. `machine(action=\"list\")` shows them."
+        if a == "show"
+            v = ReportEngine.machine_view(n)
+            site = v["site"]
+            io = IOBuffer()
+            println(io, "Machine '$n' on $(v["host"]) · depot $(isempty(v["depot"]) ? "~/.julia" : v["depot"])")
+            if isempty(site)
+                println(io, "  not prepared")
+            else
+                f = get(site, "facts", Dict())
+                println(io, "  prepared ", ReportEngine.Dates.format(ReportEngine.Dates.unix2datetime(Float64(get(site, "prepared_at", 0))), "yyyy-mm-dd HH:MM"), " UTC",
+                        isempty(get(site, "stale", "")) ? "" : " — STALE ($(site["stale"]))")
+                isempty(get(f, "julia", "")) || println(io, "  ", f["julia"])
+                isempty(get(site, "site_prologue", "")) || println(io, "  site prologue: ", site["site_prologue"])
+            end
+            for t in v["tests"]
+                println(io, "  tested $(get(t, "project", "")) on $(get(t, "node_type", "")) by $(get(t, "by", "")): ",
+                        "$(get(t, "status", "")), loads in $(get(t, "load_s", 0))s",
+                        get(t, "cuda", nothing) isa AbstractDict ? ", CUDA functional=$(t["cuda"]["functional"])" : "",
+                        get(t, "changed", false) === true ? " (packages changed since)" : "")
+            end
+            return String(take!(io))
+        elseif a == "prepare" || a == "prepare_batch"
+            batch = a == "prepare_batch"
+            batch && isempty(strip(project)) && return "prepare_batch needs `project` (a notebook or project folder)."
+            key = batch ? ReportEngine._batch_key(n) : ReportEngine._machine_key(n)
+            st = ReportEngine.preparing(key)
+            (st !== nothing && st["running"] === true) && return "Already preparing — `machine(name=\"$n\", action=\"status\"$(batch ? ", project=…" : ""))`."
+            Threads.@spawn try
+                batch ? ReportEngine.prepare_batch!(n; project = strip(project)) : ReportEngine.prepare_machine!(n)
+            catch e
+                ReportEngine.prepare_failed_to_start!(key, e)
+            end
+            return "Preparing '$n'$(batch ? " for $(strip(project))'s sweeps (one test task through the scheduler)" : "") in the background. " *
+                   "Follow it with machine(name=\"$n\", action=\"status\"$(batch ? ", project=\"…\"" : "")) or region_prepare(name=\"$key\", action=\"history\")."
+        elseif a == "status"
+            key = isempty(strip(project)) ? ReportEngine._machine_key(n) : ReportEngine._batch_key(n)
+            st = ReportEngine.preparing(key)
+            st === nothing && return "No prepare of '$n' has run on this hub since it started. History: region_prepare(name=\"$key\", action=\"history\")."
+            io = IOBuffer()
+            println(io, st["running"] === true ? "Preparing '$n':" : "Last prepare of '$n':")
+            ReportEngine._steps_text(io, st["steps"])
+            return String(take!(io))
+        end
+        return "Unknown action '$a': list, show, set, delete, prepare, prepare_batch or status."
     end
 
     """
@@ -3473,6 +3589,7 @@ function create_tools(GateTool::Type)
         GateTool("region", region),
         GateTool("regions", regions),
         GateTool("region_prepare", region_prepare),
+        GateTool("machine", machine),
         GateTool("peer_introduce", peer_introduce),
         GateTool("peer_teardown", peer_teardown),
         GateTool("peer_plan", peer_plan_tool),

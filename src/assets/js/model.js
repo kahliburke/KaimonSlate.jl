@@ -159,8 +159,16 @@
     return Object.assign({}, rosterEntry, hubEntry);
   }
 
+  // ── what a region is ──────────────────────────────────────────────────────────────────────────
+  // A machine is a region of its own name; a variant names the machine it narrows. Every picker
+  // shows the two apart the same way.
+  const regionKind = (r) => !r || !r.machine ? 'region' : r.machine === r.name ? 'machine' : 'variant';
+  const regionIcon = (r) => regionKind(r) === 'machine' ? '🖥' : '🖧';
+  const regionLabel = (r) => regionKind(r) === 'variant' ? r.name + ' · ' + r.machine : r.name;
+
   const model = {
     subscribe,
+    regionKind, regionIcon, regionLabel,
     getWorkers, getWorker, workerList, applyWorkers, applyTelemetry,
     isHeld, isScheduled, allocState, releaseVerb,
     isAlive, workerState, workerStatus, workerSeverity,

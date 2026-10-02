@@ -1,0 +1,301 @@
+# The machine layer (src/machines.jl): what a `clusters.json` entry says about a host, what preparing
+# found there, and the shell every Julia on it starts in. Local only: no ssh.
+using ReTest
+using KaimonSlate
+
+const RE = KaimonSlate.ReportEngine
+
+@testset "machines" begin
+    withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir()) do
+        @testset "an entry describes the machine" begin
+            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm",
+                                 "account" => "m1", "depot" => "\$HOME/d", "prologue" => "module load x"))
+            m = RE.machine_get("pm")
+            @test m.host == "perlmutter" && m.kind === :slurm && m.account == "m1"
+            @test m.depot == "~/d"                                  # one spelling for the shell to expand
+            @test RE.machine_get("nope") === nothing
+            @test RE.machine_from(Dict("name" => "w", "host" => "box", "kind" => "exec")).kind === :exec
+        end
+
+        @testset "a region takes its host and scheduler from its machine" begin
+            r = RE.region_set!("gpu"; machine = "pm", partition = "gpu", gpus = "4")
+            @test r.host == "perlmutter" && r.scheduler === :slurm && r.account == "m1"
+            @test RE.region_machine(r).name == "pm"
+            # An edit to the machine reaches the region on the next read.
+            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter2", "kind" => "pbs"))
+            r = RE.region_get("gpu")
+            @test r.host == "perlmutter2" && r.scheduler === :pbs && r.account == ""
+            # The region's own account wins over the machine's.
+            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm", "account" => "m1"))
+            @test RE.region_set!("gpu"; account = "m2").account == "m2"
+            # Editing a region, or another one, does not copy the machine's values into it.
+            RE.region_set!("cpu"; machine = "pm")
+            RE.region_set!("cpu"; walltime = "01:00:00")
+            RE.region_set!("gpu"; walltime = "00:30:00")
+            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm", "account" => "m3"))
+            @test RE.region_get("cpu").account == "m3" && RE.region_get("cpu").walltime == "01:00:00"
+            @test RE.region_get("gpu").account == "m2"
+            # A region that names a host directly runs on an implicit machine there.
+            w = RE.region_set!("ws"; host = "box")
+            m = RE.region_machine(w)
+            @test m.name == "" && m.host == "box" && m.kind === :exec && m.depot == ""
+        end
+
+        @testset "a machine is a region, and a region varies its machine" begin
+            RE.cluster_set!(Dict("name" => "mx", "host" => "mxhost", "kind" => "slurm", "account" => "acc",
+                                 "partition" => "gpu", "walltime" => "00:30:00", "gpus" => "4",
+                                 "directives" => "#SBATCH --constraint=gpu\n--licenses=scratch", "qos" => "debug",
+                                 "root_remote" => "/s"))
+            # Its shape, as one map, whatever form the entry wrote it in.
+            @test RE.machine_options(RE.cluster_get("mx")) ==
+                  Dict("constraint" => "gpu", "licenses" => "scratch", "qos" => "debug")
+            # The machine is a region of its own name, asking for what it declares.
+            r = RE.region_get("mx")
+            @test r !== nothing && r.machine == "mx" && r.host == "mxhost" && r.scheduler === :slurm
+            @test r.partition == "gpu" && r.walltime == "00:30:00" && r.gpus == "4" && r.account == "acc"
+            @test r.options["constraint"] == "gpu" && r.options["qos"] == "debug"
+            # A variant stores what differs; the rest comes from the machine, options key by key.
+            v = RE.region_set!("mx_cpu"; machine = "mx", options = Dict("constraint" => "cpu"), gpus = "", account = "acc2")
+            @test v.partition == "gpu" && v.walltime == "00:30:00" && v.account == "acc2"
+            @test v.options["constraint"] == "cpu" && v.options["qos"] == "debug"
+            # Editing the machine's own region keeps it bound to the machine.
+            e = RE.region_set!("mx"; walltime = "01:00:00")
+            @test e.machine == "mx" && e.walltime == "01:00:00" && e.partition == "gpu"
+            RE.region_delete!("mx")
+            @test RE.region_get("mx").walltime == "00:30:00"               # back to the machine's own
+            # A region is a sweep target too: the machine's entry with the region's shape.
+            d = only(filter(c -> c["name"] == "mx_cpu", RE.clusters_resolved()))
+            t = RE.Sweep.cluster(Dict(String(k) => string(x) for (k, x) in d))
+            @test (get(t.resources, :constraint, ""), t.qos, t.account) == ("cpu", "debug", "acc2")
+            @test t.root_remote == "/s" && occursin("--licenses=scratch", t.directives)
+            RE.region_delete!("mx_cpu"); RE.cluster_delete!("mx")
+            @test RE.region_get("mx") === nothing
+        end
+
+        @testset "what preparing found is kept per host" begin
+            @test isempty(RE.host_facts("perlmutter"))
+            RE.host_facts_merge!("perlmutter", Dict("scratch" => "/pscratch/sd/k/me"))
+            RE.host_facts_merge!("perlmutter", Dict("depot" => "/pscratch/sd/k/me/.julia-slate"))
+            @test RE.host_facts("perlmutter")["scratch"] == "/pscratch/sd/k/me"
+            @test RE.host_facts("perlmutter")["depot"] == "/pscratch/sd/k/me/.julia-slate"
+            RE.host_facts_set!("perlmutter", Dict{String,Any}())
+            @test isempty(RE.host_facts("perlmutter"))
+        end
+
+        @testset "the depot: the machine's setting, else what automatic resolved to" begin
+            mk(depot) = RE.Machine("pm", "perlmutter", :slurm, "", "", depot, "")
+            @test RE.machine_depot(mk("/data/jl")) == "/data/jl"
+            @test RE.machine_depot(mk("~/.julia")) == "" && RE.machine_depot(mk("\$HOME/.julia/")) == ""
+            @test RE.machine_depot(mk("")) == ""                    # automatic, before any prepare
+            RE.host_facts_merge!("perlmutter", Dict("depot" => "/scratch/me/.julia-slate"))
+            @test RE.machine_depot(mk("")) == "/scratch/me/.julia-slate"
+            @test RE._auto_depot("/scratch/me/") == "/scratch/me/.julia-slate" && RE._auto_depot("") == ""
+            RE.host_facts_set!("perlmutter", Dict{String,Any}())
+        end
+
+        @testset "every Julia on a machine starts in one shell" begin
+            m = RE.Machine("pm", "perlmutter", :slurm, "", "", "/scratch/me/jd", "module load x")
+            RE.host_facts_merge!("perlmutter", Dict("site_prologue" => "module unload cudatoolkit"))
+            s = RE.machine_setup(m)
+            @test occursin("\$HOME/.juliaup/bin", s)
+            # The trailing `:` keeps the bundled stdlib depot; juliaup is kept looking at home.
+            @test occursin("JULIA_DEPOT_PATH='/scratch/me/jd':", s) && occursin("JULIAUP_DEPOT_PATH=", s)
+            # The site's fix first, then the user's prologue, and the command only if they succeed.
+            @test endswith(s, "{ module unload cudatoolkit ; module load x ; } && ")
+            # A machine that names its own julia puts that directory first instead of juliaup's.
+            j = RE.machine_setup(RE.Machine("pm", "perlmutter", :slurm, "", "/opt/julia/bin/julia", "", ""))
+            @test occursin("'/opt/julia/bin':", j) && !occursin("juliaup", j)
+            RE.host_facts_set!("perlmutter", Dict{String,Any}())
+            @test RE.machine_setup(RE.Machine("", "box", :exec, "", "", "", "")) ==
+                  "export PATH=\"\$HOME/.juliaup/bin:\$PATH\"; "
+            # It runs: a POSIX shell takes the whole prefix.
+            mktempdir() do d
+                out = read(`sh -c $(RE.machine_setup(RE.Machine("", "box", :exec, "", "", d, "true")) * "echo \$JULIA_DEPOT_PATH")`, String)
+                @test strip(out) == d * ":"
+            end
+        end
+
+        @testset "where a host records the environment it built" begin
+            t0 = RE.RemoteTarget("h"; project = "~/.cache/kaimonslate/remote/nb-1")
+            @test RE._env_stamp_path(t0) == ".cache/kaimonslate/remote/nb-1/.slate-env"
+            t1 = RE.RemoteTarget("h"; project = "~/.cache/kaimonslate/remote/nb-1", depot = "/scratch/jd")
+            @test RE._env_stamp_path(t1) == "/scratch/jd/slate/envs/nb-1"
+            # A depot is part of the environment: a different one holds none of it.
+            mktempdir() do env
+                write(joinpath(env, "Project.toml"), "")
+                @test RE._env_fingerprint(env, "i"; depot = "/a") != RE._env_fingerprint(env, "i"; depot = "/b")
+                @test RE._env_fingerprint(env, "i") == RE._env_fingerprint(env, "i"; depot = "")
+            end
+        end
+
+        @testset "batch tasks start in their machine's shell" begin
+            S = RE.Sweep
+            RE.cluster_set!(Dict("name" => "pmb", "host" => "perlmutter", "kind" => "slurm",
+                                 "root_remote" => "/scratch/store", "depot" => "/scratch/jd"))
+            d = only(filter(c -> c["name"] == "pmb", RE.clusters_resolved()))
+            @test d["_depot"] == "/scratch/jd" && occursin("JULIA_DEPOT_PATH='/scratch/jd':", d["_setup"])
+            @test RE.cluster_get_resolved("pmb")["_setup"] == d["_setup"]
+            # The entry a cell receives is flat strings; the target it builds carries the shell.
+            t = S.cluster(Dict(String(k) => string(v) for (k, v) in d))
+            @test t.setup == d["_setup"] && t.depot == "/scratch/jd"
+            # Copies keep it.
+            t4 = S.with_chunk(t, 4)
+            @test t4.chunk == 4 && t4.setup == t.setup && t4.depot == t.depot
+            # Every task process runs it before julia, as a complete line.
+            line = S._as_line(S._prefix(t))
+            js = RE.BatchLauncher.JobSpec("n", ["c1"]; root = "/r", project = "/p", payload = "/x", prologue = line)
+            cmd = RE.BatchLauncher.task_command(js, ["c1"])
+            @test first(findfirst("JULIA_DEPOT_PATH", cmd)) < first(findfirst("julia --project=/p", cmd))
+            @test S._as_line("a; { b ; } && ") == "a; { b ; } && true" && S._as_line("a; ") == "a"
+            # A target built by hand, with no hub to resolve a machine, keeps its own prologue.
+            h = S.ClusterTarget("h"; root_remote = "/s", prologue = "module load julia")
+            @test S._prefix(h) == "{ module load julia ; } && "
+        end
+
+        @testset "a later wave builds from the project the run was written from" begin
+            S = RE.Sweep
+            proj = mktempdir()
+            t = S.ClusterTarget("perlmutter"; root_remote = "/scratch/store", parent = "/hub/own/project")
+            root = S.store_root(t); mkpath(root)
+            run = repeat("ab", 32)
+            S.BatchSweep.write_sweep!(root, run, String[]; parent = proj,
+                                      resources = Dict("gpus" => "4", "walltime" => "00:30:00"))
+            @test S._as_run(t, run).parent == proj
+            # …asking for the nodes its cell asked for.
+            @test S._as_run(t, run).resources.gpus == "4" && S._as_run(t, run).resources.walltime == "00:30:00"
+            # A run that recorded nothing, or a project that is gone, leaves the target as it was.
+            other = repeat("cd", 32)
+            S.BatchSweep.write_sweep!(root, other, String[])
+            @test S._as_run(t, other).parent == "/hub/own/project"
+        end
+
+        @testset "a sweep waits for its environment to pass a test task" begin
+            S = RE.Sweep
+            t = S.ClusterTarget("perlmutter"; root_remote = "/scratch/store", parent = mktempdir(),
+                                setup = "export PATH=x; ", depot = "/scratch/jd", machine = "pmb")
+            k = S.env_test_key(t)
+            @test k == S.proj_key(t.parent) * "|/"
+            @test S._untested(t)
+            @test !S._untested(S._with(t; tested = "other@x," * k))
+            # A target the hub did not resolve has nothing to compare against, and runs as it is.
+            @test !S._untested(S._with(t; setup = ""))
+            # What passed reaches a cell through the machine's entry; what failed does not, and nothing
+            # does while the machine's site has changed since it was prepared.
+            depot = RE.machine_depot(RE.machine_from(RE.cluster_get("pmb")))
+            write(joinpath(t.parent, "Project.toml"), "")
+            RE.record_env_test!("perlmutter", t.parent, "/"; by = "test task", status = "ok", depot)
+            bad = mktempdir(); write(joinpath(bad, "Project.toml"), "")
+            RE.record_env_test!("perlmutter", bad, "/"; by = "test task", status = "fail", depot)
+            d = RE.cluster_get_resolved("pmb")
+            @test d["_tested"] == k
+            @test S.cluster(Dict(String(a) => string(b) for (a, b) in d)).tested == k
+            @test RE.env_readiness("perlmutter", bad, "/"; depot) == "its last test failed"
+            RE.host_facts_merge!("perlmutter", Dict{String,Any}("stale" => "changed since prepared: modules"))
+            @test RE.cluster_get_resolved("pmb")["_tested"] == ""
+            @test RE.env_readiness("perlmutter", t.parent, "/"; depot) == "changed since prepared: modules"
+            RE.host_facts_set!("perlmutter", Dict{String,Any}())
+        end
+
+        @testset "a region's prepare tests the sweeps of the same project and node type" begin
+            S = RE.Sweep
+            proj = mktempdir(); write(joinpath(proj, "Project.toml"), "")
+            RE.cluster_set!(Dict("name" => "tm", "host" => "tmhost", "kind" => "slurm", "root_remote" => "/s",
+                                 "partition" => "gpu"))
+            r = RE.region_get("tm")
+            RE.record_env_test!(r.host, proj, RE.region_node_type(r); by = "tm", status = "ok", depot = RE.region_depot(r))
+            # The region's own view of it, and the verdict its cells are held by.
+            @test only(values(RE.readiness_view(r)["envs"]))["by"] == "tm"
+            @test RE.env_readiness(r.host, proj, RE.region_node_type(r); depot = RE.region_depot(r)) == ""
+            @test RE.env_readiness(r.host, proj, "cpu/") == "not tested on cpu nodes"
+            t = S._with(S.cluster(Dict(String(k) => string(v) for (k, v) in RE.cluster_get_resolved("tm"))); parent = proj)
+            @test !S._untested(t)                                       # same project, same nodes
+            @test S._untested(S.with_resources(t, (; partition = "cpu")))   # other nodes: test again
+            write(joinpath(proj, "Project.toml"), "[deps]\nX = \"1\"\n")
+            t2 = S._with(S.cluster(Dict(String(k) => string(v) for (k, v) in RE.cluster_get_resolved("tm"))); parent = proj)
+            @test S._untested(t2)                                       # its environment changed since
+            @test RE.env_readiness(r.host, proj, RE.region_node_type(r); depot = RE.region_depot(r)) ==
+                  "packages changed since tested"
+            RE.host_facts_set!("tmhost", Dict{String,Any}())
+            RE.region_delete!("tm"); RE.cluster_delete!("tm")
+        end
+
+        @testset "records from before one per machine are carried over" begin
+            proj = mktempdir(); write(joinpath(proj, "Project.toml"), "")
+            RE.cluster_set!(Dict("name" => "mg", "host" => "mghost", "kind" => "slurm", "root_remote" => "/s",
+                                 "partition" => "gpu"))
+            fp = RE._env_fingerprint(proj, RE._infra_spec(); depot = "")
+            RE.region_set!("mg"; readiness = Dict{String,Any}("prepared_at" => time(), "envs" => Dict{String,Any}(
+                RE._proj_key(proj) => Dict{String,Any}("project" => proj, "fingerprint" => fp, "status" => "ok"))))
+            RE.host_facts_merge!("mghost", Dict{String,Any}("batch" => Dict{String,Any}(
+                RE.Sweep.env_key(proj, "cpu/") => Dict{String,Any}("project" => proj, "status" => "ok"))))
+            envs = RE.tested_envs("mghost")
+            @test sort!(collect(keys(envs))) == sort!([RE.Sweep.env_key(proj, "gpu/"), RE.Sweep.env_key(proj, "cpu/")])
+            @test envs[RE.Sweep.env_key(proj, "gpu/")]["by"] == "mg"
+            @test !haskey(RE.host_facts("mghost"), "batch") && !haskey(RE.region_get("mg").readiness, "envs")
+            @test RE.env_readiness("mghost", proj, "cpu/") == ""
+            RE.host_facts_set!("mghost", Dict{String,Any}())
+            RE.region_delete!("mg"); RE.cluster_delete!("mg")
+        end
+
+        @testset "the card says where each job stands" begin
+            S = RE.Sweep
+            # One squeue line per running element and per pending array range.
+            @test RE.BatchLauncher._array_count("591_[1-8]") == 8 && RE.BatchLauncher._array_count("591_[1-3,7]") == 4
+            @test RE.BatchLauncher._array_count("591_4") == 1
+            h = S._queue_html(Dict("slate-x" => Dict{String,Any}("id" => "591", "pending" => 6, "running" => 2,
+                "reason" => "Priority", "start" => "2026-10-02 01:12:00", "nodes" => "nid001", "elapsed" => "3:01", "left" => "26:59")))
+            @test occursin("2 running on nid001", h) && occursin("6 queued — behind higher-priority jobs", h)
+            @test occursin("est. start 2026-10-02 01:12:00", h) && occursin("job 591", h)
+            @test S._queue_html(Dict{String,Dict{String,Any}}()) == ""
+            @test S._state_label(:held) != "not started"
+            @test S._prepare_key(S.ClusterTarget("h"; root_remote = "/s", machine = "pm")) == "batch_pm"
+        end
+
+        @testset "a test job runs its own command in the tasks' shell" begin
+            js = RE.BatchLauncher.JobSpec("slate-test-x", ["test"]; root = "/r", project = "/e", payload = "",
+                                          prologue = "export A=1", command = "julia --project=/e -e 1")
+            cmd = RE.BatchLauncher.task_command(js, "\$CHUNK")
+            @test endswith(cmd, "export A=1\njulia --project=/e -e 1")
+            @test !occursin("SlateTask", cmd) && !occursin("PRECOMPILE_AUTO", cmd)   # it precompiles on purpose
+        end
+
+        @testset "a batch prepare that cannot sign in still leaves its report" begin
+            withenv("KAIMONSLATE_DATA_HOME" => mktempdir()) do
+                RE.cluster_set!(Dict("name" => "gone", "host" => "slate-test-unreachable.invalid",
+                                     "kind" => "slurm", "root_remote" => "/s"))
+                proj = mktempdir(); write(joinpath(proj, "Project.toml"), "")
+                rec = RE.prepare_batch!("gone"; project = proj)
+                @test rec["ok"] == false && !haskey(rec, "tested")
+                @test occursin("Sign in", rec["steps"][1]["step"]) && rec["steps"][1]["status"] == "fail"
+                reps = RE.prepare_reports(RE._batch_key("gone"))
+                @test length(reps) == 1 && reps[1]["outcome"] == "failed"
+                @test isempty(RE.tested_envs("slate-test-unreachable.invalid"))
+            end
+        end
+
+        @testset "a shipped package's own [sources] point at the shipped copies" begin
+            mktempdir() do d
+                pkg = mkpath(joinpath(d, "devsrc", "Trade"))
+                write(joinpath(pkg, "Project.toml"),
+                      "name = \"Trade\"\n[sources]\nSEB = {path = \"../KaimonSlate.jl/lib/SEB\"}\nX = {url = \"https://x\"}\n")
+                seb = joinpath(d, "devsrc", "SEB")
+                code = RE.Sweep.devsources_script([pkg], [("Trade", pkg), ("SEB", seb)])
+                include_string(Module(), code)
+                t = RE.Sweep.TOML.parsefile(joinpath(pkg, "Project.toml"))
+                @test t["sources"]["SEB"]["path"] == seb            # absolute paths stay as given
+                @test t["sources"]["X"]["url"] == "https://x"         # a git source is left alone
+            end
+        end
+
+        @testset "a start marks the machine stale when its host changed" begin
+            RE.region_set!("gpu"; machine = "pm")
+            RE.host_facts_merge!("perlmutter", Dict("stamps" => Dict("julia" => "julia version 1.12.7", "modules" => "a b")))
+            t = RE.RemoteTarget("nid1"; region = "gpu")
+            RE.readiness_check!(t; seen = Dict("julia" => "julia version 1.12.7", "modules" => "b a"))
+            @test get(RE.host_facts("perlmutter"), "stale", "") == ""          # module order is not a change
+            RE.readiness_check!(t; seen = Dict("julia" => "julia version 1.12.8", "modules" => "a b"))
+            @test occursin("julia", RE.host_facts("perlmutter")["stale"])
+            RE.host_facts_set!("perlmutter", Dict{String,Any}())
+        end
+    end
+end

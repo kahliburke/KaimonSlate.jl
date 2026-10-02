@@ -49,7 +49,9 @@ function start() {
   const s = st.value;
   begun.value = true; err.value = '';
   awaiting.value = { after: (s && s.preparing && +s.preparing.started) || 0, tries: 0 };
-  window.api('POST', '/api/prepare-region', { region: cur.region })
+  const req = cur.batch ? window.api('POST', '/api/prepare-batch', cur.batch)
+                        : window.api('POST', '/api/prepare-region', { region: cur.region });
+  req
     .then(d => { if (d && d.ok === false) { awaiting.value = null; err.value = d.error || 'could not start'; return; }
                  setTimeout(() => poll(cur.region), 300); })
     .catch(() => { awaiting.value = null; err.value = 'request failed'; });
@@ -63,6 +65,8 @@ function open(p) {
 }
 
 function planned(d) {
+  if (d.batch) return ['Sign in to ' + d.host, 'Julia', 'Read the site', 'Depot',
+                       "Build this notebook's task environment", 'Run a test task on the nodes'];
   const sched = d.scheduler && d.scheduler !== 'none';
   return [
     'Sign in to ' + d.host, 'Julia and the worker runtime', 'Read the site',
@@ -85,7 +89,7 @@ function RegionPrep() {
   const done = !running && has;
   const log = running ? s.preparing.log : (has ? s.last_log : null);
   return html`<div class="anbg"><div class="ancard rpcard" role="dialog" aria-modal="true">
-    <div class="rphead">Prepare 🖧 ${d.region}</div>
+    <div class="rphead">${d.batch ? html`Prepare ⚙ ${d.host} for sweeps` : html`Prepare 🖧 ${d.region}`}</div>
     <div class="pddim rpsub">${d.host}${d.scheduler && d.scheduler !== 'none' ? ' · ' + d.scheduler : ''}</div>
     ${d.reason && !running && !done ? html`<div class="rppsyswarn rpsub">${d.reason}</div>` : null}
     ${steps ? StepList(steps, running ? s.preparing.now : 0, running ? s.preparing.last_output : 0)
@@ -119,6 +123,13 @@ document.addEventListener('keydown', e => {
 
 // Pushed by the hub when an explicit run meets the wait (panels.js dispatch).
 window.onRegionPrep = p => open(p);
+// A sweep card's Prepare (sweep.jl `_prepare_html`): test this notebook's environment on the machine
+// its job cell names. Progress is kept under the machine's batch key, as the server folds it.
+window.slatePrepareBatch = (machine, el) => {
+  const cell = el && el.closest ? (el.closest('[data-cid]') || {}).dataset : null;
+  open({ region: 'batch_' + String(machine).trim().replace(/[^A-Za-z0-9_]+/g, '_'), host: machine,
+         scheduler: 'batch', batch: { machine, cell: (cell && cell.cid) || '' } });
+};
 // The waiting chip (view.js). Its region's host and scheduler come from the regions list.
 window.openPrepare = (name, ev) => {
   if (ev) { ev.preventDefault(); ev.stopPropagation(); }

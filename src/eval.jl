@@ -415,7 +415,7 @@ eval_capture(k::InProcessKernel, report::Report, source::AbstractString, filenam
 # From the machine's registry: a cluster is a machine, and the same one is referenced by every
 # notebook that names it and by any region on it.
 function _cluster_attr_args(::Report)
-    reg = try; clusters_all(); catch; Dict{String,Any}[]; end
+    reg = try; clusters_resolved(); catch; Dict{String,Any}[]; end
     return String[string(get(c, "name", ""), ".", k, "=", v)
                   for c in reg
                   for (k, v) in c if k != "name" && !isempty(string(v)) && !isempty(String(get(c, "name", "")))]

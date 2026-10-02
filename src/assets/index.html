@@ -123,6 +123,24 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rtbody::-webkit-scrollbar-thumb:hover{background:#569cd6;}
 /* The focus view REPLACES the tab content rather than extending it, so it can have the room back. */
 .remotesmodal.focusmode{max-width:860px;}
+/* Machines: a list on the left, the selected machine on the right. */
+.remotesmodal.widemode{max-width:980px;}
+.mchsplit{display:grid;grid-template-columns:200px minmax(0,1fr);gap:18px;align-items:start;}
+.mchlist{display:flex;flex-direction:column;gap:4px;position:sticky;top:0;}
+.mchrow{display:flex;flex-direction:column;gap:2px;padding:7px 10px;border:1px solid #21253a;border-radius:8px;background:#0d1120;cursor:pointer;transition:border-color .12s,background .12s;}
+.mchrow:hover{border-color:#33395a;background:#101423;}
+.mchrow.sel{border-color:#569cd6;background:rgba(86,156,214,.08);}
+.mchname{color:#e6e9f5;font-weight:600;font-size:.86rem;}
+.mchmeta{color:#6a7090;font-size:.72rem;font-family:Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.mchrow.new{border-style:dashed;}
+.mchrow.new .mchname{color:#9aa3c0;font-weight:500;}
+.mchdetail{min-width:0;}
+.mchhead{display:flex;align-items:center;gap:10px;margin:2px 0 13px;}
+.mchhead .rppformhead{margin:0;flex:1 1 auto;min-width:0;}
+.mchdetail .rppcfg{border-bottom:none;}
+.mchempty{padding:30px 0;text-align:center;}
+.modal .mchhead .rppregdel{opacity:1;border-color:#2a2e40;}
+@media(max-width:760px){.mchsplit{grid-template-columns:1fr;}.mchlist{position:static;}}
 /* Standard top-right modal close (✕) — consistent across modals; Esc also closes. `.modal .modalx`
    specificity (0,2,1) beats the `.modal button` base rule so it stays a bare glyph, no button chrome. */
 .modal .modalx{position:absolute;top:8px;right:10px;background:none;border:none;box-shadow:none;color:#6a7090;font-size:1.15rem;line-height:1;cursor:pointer;padding:4px 8px;z-index:3;}
@@ -414,6 +432,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .actrss{color:#9aa3c0;font-family:Menlo,monospace;font-size:.74rem;text-align:right;}
 .actrun{color:#7cc0ff;font-size:.74rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .actrun.idle{color:#5a6070;}
+.actstopped{display:flex;align-items:center;gap:10px;padding:3px 2px;font-size:.74rem;color:#6a7090;}
+.actstopped .ports{font-family:Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
+.actstopped button{margin-left:auto;padding:1px 9px;font-size:.72rem;border-radius:5px;color:#a0a6c0;background:transparent;border:1px solid #33395a;cursor:pointer;}
+.actstopped button:hover{border-color:#569cd6;color:#d4d8e8;}
 .actempty{color:#6a7090;font-size:.76rem;padding:3px 1px;}
 .sitecards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;align-items:start;}
 .sitecard{position:relative;display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto auto;column-gap:11px;align-items:center;

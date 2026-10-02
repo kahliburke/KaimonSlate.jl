@@ -48,6 +48,9 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "remotestore.jl"))
 # batch is the third, after the local filesystem fork and a remote store over ssh.
 Base.include(@__MODULE__, joinpath(@__DIR__, "envprep.jl"))
 
+# Putting a local project's environment on another machine: shared by a region's worker and by batch.
+Base.include(@__MODULE__, joinpath(@__DIR__, "envbuild.jl"))
+
 const P = parentmodule(@__MODULE__)
 const MemoStore = P.MemoStore
 const SlateTask = P.SlateTask
@@ -177,90 +180,65 @@ function provision_payload!(host::AbstractString, root_remote::AbstractString)
 end
 
 """
-    provision_remote_env!(host, root_remote, parent; julia = "julia", prologue = "") -> envdir
+    provision_remote_env!(host, root_remote, parent; setup = "", depot = "", online = nothing) -> envdir
 
-Ship `parent` to the cluster and instantiate a task environment from it. Idempotent: keyed by the
-parent's fingerprint, so an unchanged parent costs one `test -f` over ssh.
+Put `parent`'s environment on the cluster for its tasks and return where it is, as a compute node
+sees it. The local Manifest is reproduced exactly (`envbuild.jl`), so the tasks run the versions the
+notebook ran, and every package developed from a local checkout is shipped beside it. The build runs
+in the machine's shell `setup` (its julia, depot, module fix and prologue), with hours to finish.
 
-Returns the environment path as a COMPUTE NODE sees it.
+Idempotent: keyed by the parent's fingerprint and the depot, and stamped in the depot when there is
+one, so an unchanged parent costs one read and a cleared depot is rebuilt.
 """
 function provision_remote_env!(host::AbstractString, root_remote::AbstractString,
-                               parent::AbstractString; julia::AbstractString = "julia",
-                               prologue::AbstractString = "")
+                               parent::AbstractString; setup::AbstractString = "",
+                               depot::AbstractString = "", online = nothing, precompile::Bool = true)
     connected(host) || error(_offline(host))
     isempty(parent) && return joinpath(root_remote, "env")
     # Source-inclusive, for the same reason as `task_env!`: the cluster's copy is made once, so an
     # edit the fingerprint cannot see is an edit the compute nodes never get.
     fp = env_source_fingerprint(parent)
-    key = first(fp, 12)
+    key = first(fp, 12)                              # `env_key` names it the same way, for the sweep key
     envdir = "$(root_remote)/env/$(key)"
-    stamp = "$(envdir)/.slate-parent"
+    want = isempty(depot) ? fp : fp * " " * depot
+    stamp = isempty(depot) ? "$(envdir)/.slate-parent" : "$(rstrip(depot, '/'))/slate/envs/batch-$(key)"
+    ok, had = _ssh_run(host, "cat " * shq_path(stamp) * " 2>/dev/null; true")
+    (ok && strip(had) == want) && return envdir      # already built, in this depot
 
-    ok, _ = _ssh_run(host, "test -f $(stamp) && grep -qx '$(fp)' $(stamp)")
-    ok && return envdir                              # already provisioned for this parent
+    # The project itself, Manifest included: its exact versions are what the notebook ran. Replaced
+    # rather than merged, so a source file deleted here does not linger over there and get loaded.
+    put_dir(host, rstrip(parent, '/'), envdir; delete = true, filter = true,
+            excludes = [".git", "*.cov"]) ||
+        error("could not copy $(parent) to $(host):$(envdir)")
 
-    pname = try
-        pt = Pkg.TOML.parsefile(joinpath(parent, "Project.toml"))
-        (haskey(pt, "name") && haskey(pt, "uuid")) ? String(pt["name"]) : ""
-    catch
-        ""
+    # Packages developed from a local checkout, which no registry on the cluster can supply: each is
+    # sent to `devsrc/<name>` and the environment's paths are pointed at the copy. Their sources are in
+    # the fingerprint, so an edit to one builds again.
+    devs = Dict{String,String}(env_path_deps(parent))
+    mf = parent_manifest(parent)
+    for (name, dir) in dev_deps(mf, isempty(mf) ? parent : dirname(abspath(mf)))
+        rstrip(normpath(abspath(dir)), '/') == rstrip(normpath(abspath(parent)), '/') && continue
+        haskey(devs, name) || (devs[name] = dir)
     end
-    remote_pkg = "$(root_remote)/pkg/$(basename(rstrip(parent, '/')))"
-
-    ok, out = _ssh_run(host, "mkdir -p $(remote_pkg) $(envdir)")
-    ok || error("could not create $(remote_pkg) on $(host): $(strip(out))")
-
-    # The project itself. Replaced rather than merged, so a source file deleted here does not linger
-    # over there and get loaded. Manifest.toml is excluded: the cluster resolves its own.
-    put_dir(host, rstrip(parent, '/'), remote_pkg;
-            delete = true, excludes = [".git", "Manifest.toml"]) ||
-        error("could not copy $(parent) to $(host):$(remote_pkg)")
-
-    # Packages the parent develops by path, which no registry on the cluster can supply: each is sent
-    # to `devsrc/<name>`, and every `[sources]` entry naming one (the parent's, and theirs) is pointed
-    # at that copy, since the paths recorded here mean nothing there. Their sources are already in
-    # the fingerprint, so an edit to one provisions again.
-    devs = env_path_deps(parent)
-    devdir(name) = "$(root_remote)/devsrc/$(name)"
-    for (name, dir) in devs
-        _ssh_run(host, "mkdir -p $(devdir(name))")[1] &&
-            put_dir(host, dir, devdir(name); delete = true, filter = true,
-                    excludes = [".git", "test", "docs", "Manifest.toml", "*.cov"]) ||
-            error("could not copy $(dir) to $(host):$(devdir(name))")
+    rewrites = Tuple{String,String}[]
+    for (name, dir) in sort!(collect(devs); by = first)
+        isdir(dir) || continue
+        rp = "$(root_remote)/devsrc/$(name)"
+        put_dir(host, dir, rp; delete = true, filter = true,
+                excludes = [".git", "test", "docs", "Manifest.toml", "*.cov"]) ||
+            error("could not copy $(dir) to $(host):$(rp)")
+        push!(rewrites, (name, rp))
     end
-    repoint = isempty(devs) ? "" : string(
-        "devs = Dict(", join(("raw\"$(n)\" => raw\"$(devdir(n))\"" for (n, _) in devs), ", "), "); ",
-        "for pf in [", join(("raw\"$(d)/Project.toml\"" for d in [remote_pkg; [devdir(n) for (n, _) in devs]]), ", "), "]; ",
-        "isfile(pf) || continue; d = Pkg.TOML.parsefile(pf); s = get(d, \"sources\", nothing); ",
-        "s isa AbstractDict || continue; ",
-        "for (k, e) in s; e isa AbstractDict && haskey(e, \"path\") && haskey(devs, k) && (e[\"path\"] = devs[k]); end; ",
-        "open(io -> Pkg.TOML.print(io, d), pf, \"w\"); end;")
-
-    pre = isempty(prologue) ? "" : prologue * "\n"
-    specs = String["Pkg.PackageSpec(path=raw\"$(devdir(n))\")" for (n, _) in devs]
-    isempty(pname) || push!(specs, "Pkg.PackageSpec(path=raw\"$(remote_pkg)\")")
-    dev = isempty(specs) ? "" : "Pkg.develop([" * join(specs, ", ") * "]);"
-    # The parent's deps become DIRECT deps of the task environment, not merely transitive ones.
-    #
-    # `develop` alone makes them reachable from the parent package's own code and nowhere else: a
-    # sweep body runs at top level IN this environment, and Julia resolves `using Foo` against the
-    # active project's direct deps. So a parent that lists a package precisely so the compute nodes
-    # have it — which is the whole reason a task-env package carries deps it never imports — got an
-    # environment where `using` it still failed. Loading by UUID happened to work, which is why the
-    # one package Slate loads that way (Arrow) masked this for as long as it did. The ones sent by
-    # path are direct already, through `develop`.
-    depnames = try
-        pt = Pkg.TOML.parsefile(joinpath(parent, "Project.toml"))
-        sort!(String[k for k in keys(get(pt, "deps", Dict{String,Any}())) if !any(d -> d.first == k, devs)])
-    catch
-        String[]
-    end
-    addl = isempty(depnames) ? "" :
-        "Pkg.add([" * join(("Pkg.PackageSpec(name=raw\"$(d)\")" for d in depnames), ", ") * "]);"
-    code = "using Pkg; $repoint Pkg.activate(raw\"$(envdir)\"); $dev $addl Pkg.instantiate(); Pkg.precompile()"
-    ok, out = _ssh_run(host, "$(pre)$(julia) --startup-file=no -e '$(code)' && " *
-                             "printf '%s' '$(fp)' > $(stamp)")
-    ok || error("could not instantiate the task environment on $(host):\n$(strip(out))")
+    rel(p) = startswith(p, "~/") ? p[3:end] : p      # `devpaths_script` resolves against the home dir
+    rw = [(n, rel(r)) for (n, r) in rewrites]
+    code = devpaths_script(rel(envdir), rw) * devsources_script(String[r for (_, r) in rw], rw) *
+           "\nimport Pkg\n" * (precompile ? "" : "ENV[\"JULIA_PKG_PRECOMPILE_AUTO\"] = \"0\"\n") *
+           "Pkg.activate(joinpath(homedir(), raw\"$(rel(envdir))\"))\nPkg.instantiate()\n" *
+           (precompile ? "Pkg.precompile()\n" : "")
+    ok, out = run_julia_there(host, code; setup, what = "the task environment", online)
+    ok || error("could not instantiate the task environment on $(host):\n$(first(strip(out), 2000))")
+    put_file(String(host), Vector{UInt8}(codeunits(want)), stamp) ||
+        error("could not record the task environment on $(host)")
     return envdir
 end
 
@@ -361,6 +339,15 @@ struct ClusterTarget <: SweepTarget
     # that produced them. Empty follows the site's own umask, which is routinely world-readable.
     mode::String
     probe::Int          # chunks released before any unit has finished (`@sweep(probe=)`)
+    # The machine's shell (the hub's `machine_setup`): julia on PATH, the depot, the site's module fix,
+    # the machine's prologue. Every Julia started for this target, building or running, starts in it.
+    setup::String
+    depot::String       # the machine's depot ("" = the host's default); the env stamp lives in it
+    # The environments ready on this machine's nodes (`env_key`), comma separated: the ones the hub's
+    # `env_readiness` clears, whether a region's prepare or a test task loaded them. A sweep whose
+    # environment is not among them does not submit.
+    tested::String
+    machine::String     # the machine's name, for the card's Prepare button
 end
 #
 # A target DESCRIBES a cluster; it does not reach one. `parent` and an empty `project`/`payload` mean
@@ -374,13 +361,18 @@ function ClusterTarget(host = ""; kind = :slurm, root = "", root_remote = root, 
                        parent = "", project = nothing,
                        resources = (; cpus = 1, mem = "2G", walltime = "01:00:00", partition = ""),
                        chunk = 16, account = "", qos = "", prologue = "", directives = "",
-                       julia = "julia", procs = 0, mode = "0700", probe = 1)
+                       julia = "julia", procs = 0, mode = "0700", probe = 1, setup = "", depot = "",
+                       tested = "", machine = "")
     ClusterTarget(Symbol(kind), String(host), String(root), String(root_remote),
                   project === nothing ? "" : String(project), String(payload),
                   resources, Int(chunk), String(account), String(qos), String(prologue),
                   String(directives), String(parent), String(julia), Int(procs), String(mode),
-                  Int(probe))
+                  Int(probe), String(setup), String(depot), String(tested), String(machine))
 end
+
+# `t` with the named fields replaced.
+_with(t::ClusterTarget; kw...) =
+    ClusterTarget((haskey(kw, f) ? kw[f] : getfield(t, f) for f in fieldnames(ClusterTarget))...)
 
 "A `ClusterTarget` on SLURM. The spelling notebooks and the docs use."
 SlurmTarget(host = ""; kw...) = ClusterTarget(host; kind = :slurm, kw...)
@@ -398,16 +390,25 @@ minutes on a cold cluster, and an authenticated connection either way. Reconcili
 its card and opening the notebook it lives in all have to work without any of that.
 """
 provision!(t::LocalTarget) = t
+
+# The shell a target's Julia starts in, as a prefix for one command: the machine's setup when the hub
+# resolved one, else the target's own prologue (a target built outside the hub, or by hand).
+_prefix(t::ClusterTarget) = !isempty(t.setup) ? t.setup :
+                            isempty(strip(t.prologue)) ? "" : "{ " * strip(t.prologue) * " ; } && "
+# …and as a line of its own, for a script that runs it before its commands.
+_as_line(prefix::AbstractString) = endswith(prefix, "&& ") ? prefix * "true" : rstrip(prefix, [' ', ';'])
+
 function provision!(t::ClusterTarget)
-    proj = isempty(t.project) ?
-        provision_remote_env!(t.host, t.root_remote, t.parent;
-                              julia = t.julia, prologue = t.prologue) : t.project
+    # A target the hub resolved runs in the environment a region's worker uses for the same project
+    # (`shared_env`): built and tested by whatever prepared it, never a second copy. A sweep goes
+    # out only once that has happened (`_untested`), so there is nothing to build here.
+    proj = !isempty(t.project) ? t.project :
+           !isempty(t.setup) ? "\$HOME/" * shared_env(t.parent) :
+           provision_remote_env!(t.host, t.root_remote, t.parent; setup = _prefix(t), depot = t.depot)
     # The runner is Slate's own code and its location on the cluster is Slate's business, so it is
     # shipped rather than configured. Naming one is still allowed, for a site that stages it itself.
     pay = isempty(t.payload) ? provision_payload!(t.host, t.root_remote) : t.payload
-    return ClusterTarget(t.kind, t.host, t.root, t.root_remote, proj, pay, t.resources, t.chunk,
-                         t.account, t.qos, t.prologue, t.directives, t.parent, t.julia, t.procs,
-                         t.mode, t.probe)
+    return _with(t; project = proj, payload = pay)
 end
 
 # Resources belong to the TARGET (a site's account, its partitions) but walltime, memory and cores
@@ -416,9 +417,7 @@ end
 with_resources(t::LocalTarget, res) = t          # nothing to schedule locally
 with_resources(t::ClusterTarget, res) =
     res === nothing ? t :
-    ClusterTarget(t.kind, t.host, t.root, t.root_remote, t.project, t.payload,
-                  merge(t.resources, res), t.chunk, t.account, t.qos, t.prologue, t.directives,
-                  t.parent, t.julia, t.procs, t.mode, t.probe)
+    _with(t; resources = merge(t.resources, res))
 
 # The scheduler settings a `#%% job` cell may carry on its header (engine.jl `cell_attrs`), e.g.
 #
@@ -529,7 +528,7 @@ function cluster(spec::AbstractDict)
         return LocalTarget(; a.root, a.parent, a.chunk, a.procs)
     return ClusterTarget(a.host; kind = Symbol(a.kind), a.root, a.root_remote, a.parent, a.payload,
                          a.chunk, a.account, a.qos, a.prologue, a.directives, a.resources, a.procs,
-                         a.mode)
+                         a.mode, a.setup, a.depot, a.tested, machine = a.name)
 end
 
 """
@@ -587,6 +586,9 @@ function cluster_args(spec::AbstractDict)
               root_remote = isempty(root_remote) ? root : root_remote,
               host, account = get_("account"), qos = get_("qos"),
               prologue = get_("prologue"), directives = get_("directives"),
+              # Resolved by the hub from the machine and what preparing it found (`machine_setup`),
+              # and added to the entry it hands a cell, since a worker has no registry of its own.
+              setup = get_("_setup"), depot = get_("_depot"), tested = get_("_tested"),
               resources = res === nothing ? NamedTuple() : res)
 end
 
@@ -711,15 +713,12 @@ sweep_policy(t::SweepTarget) = BatchSweep.FailurePolicy(; probe_chunks = t.probe
 with_probe(t::LocalTarget, n) = n === nothing ? t :
     LocalTarget(t.root, t.project, t.payload, t.chunk, t.procs, n)
 with_probe(t::ClusterTarget, n) = n === nothing ? t :
-    ClusterTarget(t.kind, t.host, t.root, t.root_remote, t.project, t.payload, t.resources, t.chunk,
-                  t.account, t.qos, t.prologue, t.directives, t.parent, t.julia, t.procs, t.mode, n)
+    _with(t; probe = n)
 
 with_chunk(t::LocalTarget, n) = n === nothing ? t :
     LocalTarget(t.root, t.project, t.payload, n, t.procs, t.probe)
 with_chunk(t::ClusterTarget, n) = n === nothing ? t :
-    ClusterTarget(t.kind, t.host, t.root, t.root_remote, t.project, t.payload,
-                  t.resources, n, t.account, t.qos, t.prologue, t.directives, t.parent, t.julia,
-                  t.procs, t.mode, t.probe)
+    _with(t; chunk = n)
 
 "The host a target authenticates to; empty for one that runs here."
 target_host(::LocalTarget) = ""
@@ -773,7 +772,7 @@ function specfn_for(t::ClusterTarget)
         p = ready[] === nothing ? (ready[] = provision!(t)) : ready[]
         BatchLauncher.JobSpec(name, cs; root = p.root_remote, project = p.project,
                               payload = p.payload, resources = p.resources,
-                              prologue = p.prologue, directives = p.directives,
+                              prologue = _as_line(_prefix(p)), directives = p.directives,
                               umask = store_umask(p))
     end
 end
@@ -1454,7 +1453,8 @@ one `readdir` per cluster per tick and never touches the network.
 """
 # The cluster registry and the remote log live in the hub's module. Looked up at call time because
 # this file also loads on a worker, which has neither.
-_hub_clusters() = isdefined(P, :clusters_all) ? P.clusters_all() : Dict{String,Any}[]
+_hub_clusters() = isdefined(P, :clusters_resolved) ? P.clusters_resolved() :
+                  isdefined(P, :clusters_all) ? P.clusters_all() : Dict{String,Any}[]
 _hub_log(msg::AbstractString) = (isdefined(P, :_rlog) && P._rlog(msg); nothing)
 
 function advance_started!(; every::Real = 30.0)
@@ -1485,6 +1485,13 @@ function advance_started!(; every::Real = 30.0)
                 _hub_log("supervisor: $(name)/$(run) has no descriptor — dropped its started marker")
                 continue
             end
+            # Submitted, but its environment has never run on these nodes: testing it is part of
+            # running it, so the hub starts the test, and the next pass submits once it has passed.
+            tr = _as_run(t, run)
+            if _untested(tr)
+                isdefined(P, :auto_prepare_batch!) && P.auto_prepare_batch!(name, tr.parent, tr.resources)
+                continue
+            end
             try
                 p = reconcile_and_sync!(t, run, l; submit = true, failure_policy = sweep_policy(t))
                 BatchSweep.is_settled(p) || (n += 1)
@@ -1495,6 +1502,36 @@ function advance_started!(; every::Real = 30.0)
     end
     return n
 end
+
+# A run as its cell wrote it, whichever process is submitting (the notebook's worker for the first
+# wave, the hub's supervisor for the rest): the project its task environment is built from, and the
+# resources the cell asked for. The registry knows neither.
+function _as_run(t::ClusterTarget, run::AbstractString)
+    m = try; MemoStore.read_manifest(store_root(t), run); catch; nothing; end
+    m === nothing && return t
+    p = String(get(m, "parent", ""))
+    (isempty(p) || p == t.parent || !isdir(p)) || (t = _with(t; parent = p))
+    r = get(m, "resources", nothing)
+    if r isa AbstractDict && !isempty(r)
+        t = _with(t; resources = merge(t.resources, NamedTuple(Symbol(k) => String(v) for (k, v) in r)))
+    end
+    return t
+end
+_as_run(t::SweepTarget, ::AbstractString) = t
+
+# The name a tested environment is recorded under: the project (the same key a region's prepare uses)
+# and the kind of node it ran on. A run on another partition or constraint lands on other nodes, which
+# is the difference that calls for testing again; a different count or walltime is not.
+env_key(project, nodetype) = proj_key(project) * "|" * nodetype
+env_test_key(t::ClusterTarget) = env_key(t.parent,
+    node_type(string(get(t.resources, :partition, "")), string(get(t.resources, :constraint, ""))))
+node_type(partition::AbstractString, constraint::AbstractString) =
+    lowercase(strip(partition)) * "/" * lowercase(strip(constraint))
+
+# Whether `t`'s environment still has to pass a test task before an array goes out. Only a target the
+# hub resolved knows what has been tested (`setup` is set by it); one built by hand runs as it is.
+_untested(t::ClusterTarget) = !isempty(t.setup) && !(env_test_key(t) in split(t.tested, ','; keepempty = false))
+_untested(::SweepTarget) = false
 
 # Runs whose descriptors this process has sent. The cell pushes them, but a cluster that wants a
 # sign-in is unreachable until someone signs in, and that is usually AFTER the cell has run: the
@@ -1522,6 +1559,10 @@ function reconcile_and_sync!(target::SweepTarget, run::AbstractString, launcher;
     # taken on a reader's behalf a moment ago could miss a chunk that has since landed, and the
     # decision this makes is the one that must not be taken twice.
     submit && sync_in!(target; force = true)
+    target = _as_run(target, run)
+    # An environment never tested on this machine's nodes is not sent to them as an array: the card
+    # offers Prepare, which runs one task first (`_untested`).
+    submit && _untested(target) && (submit = false)
     if submit && !_ensure_descriptors!(target, run)
         error("could not send sweep $(run)'s descriptors to " *
               "$(target_host(target)):$(job_root(target)) — nothing was submitted")
@@ -3452,8 +3493,12 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
                                       failure_policy = sweep_policy(target)) :
                   BatchSweep.plan(root, run; launcher = l, job_state = js)
     t = BatchSweep.telemetry(root, run; launcher = l, plan = p)
-    _ds = display_state(p, started)
-    _w = _when_stamp(root, run, started)
+    jobs = run_jobs(target, run)
+    # Started, nothing with the scheduler, and an environment that has not passed its test: held
+    # while the hub tests it (`advance_started!`), which is not the same as queued.
+    held = started && isempty(jobs) && _untested(_as_run(target, run))
+    _ds = held ? :held : display_state(p, started)
+    _w = _when_stamp(root, run, started; submitted = !isempty(jobs))
     # Tile COLOURS, not per-unit statuses: the browser patches tiles by index, and computing the
     # colour here is what keeps the live grid identical to the one the cell rendered. It also keeps
     # the payload flat — a few hundred short strings whatever the sweep's size.
@@ -3500,6 +3545,11 @@ function status_payload(target::SweepTarget, run::AbstractString, params, keys;
         # it to be discovered as a provisioning failure on the next Submit.
         "host" => target_host(target),
         "when" => _w.at, "when_kind" => _w.kind,
+        # Where each of its jobs stands with the scheduler, and the prepare a held run waits on.
+        "queue" => _queue_html(BatchLauncher.job_details(jobs)),
+        # Only while held: once a job is out, testing is over and the card says nothing about it.
+        "prepare" => held ? _prepare_key(target) : "",
+        "prepare_machine" => (held && target isa ClusterTarget) ? (isempty(target.machine) ? target.host : target.machine) : "",
         "signed_in" => connected(target_host(target)))
     # The data line grows as units land, so it rides the poll too. Off the indices, so a sweep
     # writing terabytes still costs manifest reads to watch.
@@ -3864,7 +3914,7 @@ _json(x) = sprint(_json, x)
 const _STATE_COLOR = Dict(
     :succeeded => "#56d364", :partial   => "#ffd700", :blocked => "#e57575",
     :exhausted => "#e57575", :cancelled => "#6a7090", :running => "#569cd6",
-    :pending   => "#6a7090", :ready     => "#4ec9b0")
+    :pending   => "#6a7090", :ready     => "#4ec9b0", :held => "#d9a441")
 
 # The three ways of stopping short read differently on purpose: one is the work's fault, one is
 # yours, and one is the resources'.
@@ -3876,9 +3926,11 @@ const _STATE_COLOR = Dict(
 # approved spending on it. Both read as past participles so the chip is a sentence about the run
 # rather than a label with a number after it. The hub renders a fallback and the browser restates it
 # in the reader's own timezone, the way the ETA clock already does.
-function _when_stamp(root::AbstractString, run::AbstractString, started::Bool)
+# "Submitted" only once a job is with the scheduler: Submit asks for the work, which a held run has
+# not yet been sent.
+function _when_stamp(root::AbstractString, run::AbstractString, started::Bool; submitted::Bool = true)
     t = started ? BatchSweep.started_at(root, run) : BatchSweep.created_at(root, run)
-    return (kind = started ? "submitted" : "written", at = t)
+    return (kind = started ? (submitted ? "submitted" : "requested") : "written", at = t)
 end
 
 # A bare "15:51" is only unambiguous on the day it happened, and a sweep card outlives the day. So
@@ -3900,7 +3952,8 @@ _state_label(s) = s === :succeeded ? "complete" :
                   s === :cancelled ? "stopped at your request" :
                   s === :exhausted ? "gave up — units never landed" :
                   s === :running   ? "running" :
-                  s === :ready     ? "ready — nothing submitted" : "not started"
+                  s === :ready     ? "ready — nothing submitted" :
+                  s === :held      ? "held — testing its environment on the nodes first" : "not started"
 
 # The unit grid, BINNED to a fixed tile budget. One tile per unit does not survive contact with a
 # real sweep: a hundred thousand units would be a hundred thousand DOM nodes, rebuilt on every
@@ -4098,6 +4151,43 @@ function _signin_html(target::SweepTarget)
                   "font-size:12px;color:var(--amber,#d9a441)'>🔒 ", _esc(h),
                   ": not signed in — use the padlock at the top of the page</div>")
 end
+
+# Where the hub keeps a machine's batch prepare (`batch_prepare.jl` `_batch_key`).
+_prepare_key(t::ClusterTarget) =
+    "batch_" * replace(strip(isempty(t.machine) ? t.host : t.machine), r"[^A-Za-z0-9_]+" => "_")
+
+# Each of a run's jobs as the scheduler sees it: how many elements wait or run, why the waiting ones
+# wait and when the scheduler expects them to start, and where the running ones are.
+function _queue_html(details::AbstractDict)
+    isempty(details) && return ""
+    io = IOBuffer()
+    print(io, "<div style='margin-top:8px;font-size:12px;display:flex;flex-direction:column;gap:3px'>")
+    for (name, d) in sort!(collect(details); by = first)
+        bits = String[]
+        np, nr = get(d, "pending", 0), get(d, "running", 0)
+        nr > 0 && push!(bits, string(nr, " running", isempty(get(d, "nodes", "")) ? "" : " on " * d["nodes"],
+                                     isempty(get(d, "elapsed", "")) ? "" : " · " * d["elapsed"] * " in",
+                                     isempty(get(d, "left", "")) ? "" : ", " * d["left"] * " left"))
+        np > 0 && push!(bits, string(np, " queued",
+                                     isempty(get(d, "reason", "")) ? "" : " — " * _queue_reason(d["reason"]),
+                                     isempty(get(d, "start", "")) ? "" : " · est. start " * d["start"]))
+        isempty(bits) && continue
+        print(io, "<div><span style='opacity:.6;font-family:monospace'>job ", _esc(get(d, "id", name)),
+                  "</span> ", _esc(join(bits, " · ")), "</div>")
+    end
+    print(io, "</div>")
+    return String(take!(io))
+end
+
+# Slurm's reason codes, as a person would say them. Anything not listed is shown as Slurm says it.
+const _QUEUE_REASONS = Dict(
+    "Priority" => "behind higher-priority jobs", "Resources" => "waiting for nodes to free up",
+    "QOSMaxJobsPerUserLimit" => "at your limit of running jobs on this QOS",
+    "QOSMaxSubmitJobPerUserLimit" => "at your limit of queued jobs on this QOS",
+    "AssocMaxJobsLimit" => "at the account's running-job limit", "Dependency" => "waiting for an earlier wave",
+    "BeginTime" => "not before its start time", "ReqNodeNotAvail" => "the nodes it asks for are unavailable",
+    "JobHeldUser" => "held", "JobHeldAdmin" => "held by an administrator", "None" => "")
+_queue_reason(r::AbstractString) = (s = get(_QUEUE_REASONS, String(r), String(r)); isempty(s) ? "" : s)
 
 function _why_html(p::BatchSweep.Plan)
     box(color, body) = string(
@@ -4347,6 +4437,10 @@ function Base.show(io::IO, ::MIME"text/html", r::ShardedResult)
     # falls back to the next MIME and the card silently becomes a line of text — so a dataset the
     # store cannot answer for would take the whole card down and give no clue why.
     print(io, "<div data-sw='data'>", _safe_data_html(r), "</div>")
+    println(io, "<div data-sw='queue'></div>")
+    # While a submitted run waits for its environment's test: the step the test is on. Filled by the
+    # script from the hub, which runs it; a click opens the prepare's own view.
+    println(io, "<div data-sw='testing' style='margin-top:8px;font-size:12px;opacity:.85;cursor:pointer'></div>")
     println(io, "<div data-sw='why'>", _why_html(p), "</div>")
     println(io, "<div data-sw='fails'>", _fails_html(getfield(r, :rows)), "</div>")
 
@@ -4540,11 +4634,32 @@ function _live_script(io, r::ShardedResult)
         // Why it stopped, and which units failed. Rendered by Julia and swapped in whole, so the
         // browser holds no second copy of this markup to drift from the cell's own render. Only on
         // CHANGE, so an open <details> is not collapsed underneath the reader on every poll.
-      ["why", "fails", "data"].forEach(function(k){
+      ["queue", "why", "fails", "data"].forEach(function(k){
           var el = root.querySelector('[data-sw="' + k + '"]');
           if (!el || s[k] === undefined) return;
           if (el.dataset.h !== s[k]) { el.dataset.h = s[k]; el.innerHTML = s[k]; }
         });
+        // The test of a held run's environment runs in the hub, which is asked directly: the step it
+        // is on, or where it failed. Nothing once the run is out.
+        var tslot = root.querySelector('[data-sw="testing"]');
+        if (tslot) {
+          if (!s.prepare) { tslot.textContent = ''; tslot.onclick = null; }
+          else {
+            tslot.onclick = function(){ window.slatePrepareBatch && window.slatePrepareBatch(s.prepare_machine, tslot); };
+            fetch('/api/regions/prepare?name=' + encodeURIComponent(s.prepare)).then(function(r){ return r.json(); }).then(function(d){
+              var p = d && d.preparing, rec = d && d.readiness, txt = 'testing its environment — starting';
+              if (p && p.running) {
+                var cur = p.steps && p.steps.length ? p.steps[p.steps.length - 1] : null;
+                if (cur) txt = 'testing — ' + cur.step + (cur.detail ? ': ' + cur.detail : '');
+              } else if (rec && rec.prepared_at) {
+                var bad = (rec.steps || []).filter(function(x){ return x.status === 'fail'; })[0];
+                if (bad) txt = 'the environment test failed at ' + bad.step + (bad.detail ? ': ' + bad.detail : '') + ' — click for the report';
+                else if (rec.tested) txt = 'tested — submitting';
+              }
+              tslot.textContent = txt;
+            }).catch(function(){});
+          }
+        }
         var bar = root.querySelector('[data-sw="bar"]');
         if (bar) bar.style.width = (100 * s.frac).toFixed(2) + "%";
         if (bar) bar.style.background = s.color;
@@ -4991,7 +5106,11 @@ function run_sweep(target::SweepTarget, params::AbstractVector, body_src::Abstra
                                summary_src = summary_src, lazy = lazy, landed = landed)
         push!(chunks, ck)
     end
-    BatchSweep.write_sweep!(root, run, chunks; cell = String(cell), notebook = _ctx_docid())
+    BatchSweep.write_sweep!(root, run, chunks; cell = String(cell), notebook = _ctx_docid(),
+                            parent = target isa ClusterTarget ? target.parent : "",
+                            resources = target isa ClusterTarget ?
+                                Dict{String,String}(String(k) => string(v) for (k, v) in pairs(target.resources)) :
+                                Dict{String,String}())
     # At most ONE unstarted run per cell. A run is keyed by body + setup + captures + grid, so every
     # edit to any of them mints a new one — and the old one, which nobody ever asked to run, is left
     # behind holding a blob per parameter point. An afternoon of adjusting a constant leaves a store
@@ -5417,6 +5536,11 @@ Re-running the cell is a reconcile: whatever has landed is kept, only what is mi
 Editing the body makes it a different sweep.
 """
 macro sweep(args...)
+    # Without parentheses, `@sweep grid do p … end` reaches the macro as ONE `do` expression around
+    # the grid's call. Taken apart, it is the same as the parenthesised form.
+    if length(args) == 1 && args[1] isa Expr && args[1].head === :do
+        args = (args[1].args[2], args[1].args[1])
+    end
     # A do-block is passed as the FIRST argument, so find the lambda rather than assuming where it
     # sits; that also keeps `@sweep(grid, target, setup = s) do p … end` working.
     bi = findfirst(a -> a isa Expr && a.head === :(->), args)

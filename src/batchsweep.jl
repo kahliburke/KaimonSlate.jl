@@ -48,7 +48,8 @@ Record which chunks make up a sweep. The chunk descriptors themselves already li
 this is the only extra bookkeeping a sweep needs.
 """
 function write_sweep!(root::AbstractString, sweep::AbstractString, chunks;
-                      cell::AbstractString = "", notebook::AbstractString = "")
+                      cell::AbstractString = "", notebook::AbstractString = "", parent::AbstractString = "",
+                      resources::AbstractDict = Dict{String,String}())
     d = Dict{String,Any}(
         "kind" => KIND_SWEEP,
         "created" => round(Int, time()),
@@ -63,6 +64,11 @@ function write_sweep!(root::AbstractString, sweep::AbstractString, chunks;
     # a cell called `fit` are indistinguishable without this — which matters most beside a button
     # that releases a run.
     isempty(notebook) || (d["notebook"] = String(notebook))
+    # …and which PROJECT its task environment is built from. Whoever submits a later wave rebuilds
+    # the target from the registry, and the registry's default project is that process's own.
+    isempty(parent) || (d["parent"] = String(parent))
+    # …and the resources the cell asked for, so a test of its environment asks for the same nodes.
+    isempty(resources) || (d["resources"] = Dict{String,Any}(String(k) => string(v) for (k, v) in resources))
     MemoStore.write_manifest(root, sweep, d)
     isempty(cell) || _index_cell_run!(root, String(cell), String(sweep))
     return sweep

@@ -1302,6 +1302,8 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
             code == "bringup" && (d["note"] = let last = ReportEngine.last_bringup_line()
                 isempty(last) ? "starting up…" : last
             end)
+            # Started by the region's prepare, which loads the packages in it before handing it over.
+            (code == "bringup" && !isempty(side) && ReportEngine.prepare_running(side)) && (d["face"] = "preparing")
         elseif since !== nothing
             el = round(Int, time() - something(since, time()))
             d["status"] = "degraded"
@@ -1353,6 +1355,12 @@ function _workers_json(nb::LiveNotebook)
         # the sign-in the way a live kernel does, so the padlock is the obvious next step instead of
         # an indicator that says the scheduler is working when nothing is reaching it.
         signedout = sched && !isempty(host) && !ReportEngine.Sweep.connected(host)
+        # A prepare of the region starts the worker it will hand over; until then it is that, not a queue.
+        preparing = ReportEngine.prepare_running(side)
+        # Cells held until the region is prepared for this notebook: nothing starts until someone does.
+        needsprep = !preparing && lock(nb.lock) do
+            any(c -> c.state == BLOCKED && c.blocked == WAIT_NEEDS_PREPARE && _cell_region(c) == side, nb.report.cells)
+        end
         # The SAME record shape as a real worker's, short a process. A placeholder that answered
         # `alive`/`state`/`held` differently — or not at all — would put the reader back to guessing
         # from missing fields, which is the whole thing this vocabulary exists to stop. A queued
@@ -1360,12 +1368,14 @@ function _workers_json(nb::LiveNotebook)
         entry = Dict{String,Any}(
             "side" => side, "host" => host, "kind" => "gate", "port" => 0, "connected" => false,
             "alive" => false, "state" => "none",
-            "status" => (placing && !signedout) ? "connecting" : "disconnected",
+            "status" => ((placing || preparing) && !signedout) ? "connecting" : "disconnected",
             # What the pill SAYS. "connecting" describes a dial; a scheduler queue is a wait of a
             # different kind and length, and the difference is the whole reason to look at the pill.
-            "face" => signedout ? "signed out" :
+            "face" => signedout ? "signed out" : preparing ? "preparing" : needsprep ? "prepare needed" :
                       placing ? (sched ? "queued" : "starting…") : "no worker",
             "note" => signedout ? "not signed in to $host - use the padlock at the top of the page" :
+                      preparing ? "the region is being prepared; its worker starts as part of it" :
+                      needsprep ? "run one of its cells, or click a waiting cell's chip, to prepare the region" :
                       placing ? (sched ? "queued for a node on $host — starts by itself when the scheduler grants one"
                                        : "starting a worker on $host") :
                       r === nothing ? "no region '$side' in the registry" :

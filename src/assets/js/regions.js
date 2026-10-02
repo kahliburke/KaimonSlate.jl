@@ -52,6 +52,14 @@ async function setCellRegion(id, name) {
   await setTags(id, name ? [...cur, 'region=' + name] : cur);
 }
 
+// What a region is and where it runs, after its name.
+function _regionSub(r) {
+  const k = window.slateModel.regionKind(r);
+  return [k === 'machine' ? 'machine' : k === 'variant' ? 'on ' + r.machine : '', r.host || '',
+          r.transport === 'direct' ? 'direct' : '', r.defined === false ? '⚠ not in registry' : '']
+    .filter(Boolean).join(' · ');
+}
+
 // ── "Run on" section for the 🏷 tag editor ───────────────────────────────────────────────────────
 // local + every region this notebook uses as a radio, plus a link to manage destinations. renderTagPop
 // injects runOnSectionHtml(id) and calls wireRunOnSection(pop, id).
@@ -61,8 +69,10 @@ function runOnSectionHtml(id) {
     `<label class="ctlrow"><input type="radio" name="runon-${id}" value="${_escc(val)}"${cur === val ? ' checked' : ''}>` +
     `<span>${_escc(label)}${sub ? `<span class="tagdesc">${_escc(sub)}</span>` : ''}</span></label>`;
   let rows = opt('', '💻 local', 'main kernel · this machine');
-  rows += _nbRegions().map(r => opt(r.name, '🖧 ' + r.name,
-    (r.host || '') + (r.transport === 'direct' ? ' · direct' : '') + (r.defined === false ? ' · ⚠ not in registry' : ''))).join('');
+  const M = window.slateModel;
+  // Machines first, then the regions that vary one or stand alone.
+  const ordered = [..._nbRegions()].sort((a, b) => (M.regionKind(a) === 'machine' ? 0 : 1) - (M.regionKind(b) === 'machine' ? 0 : 1));
+  rows += ordered.map(r => opt(r.name, M.regionIcon(r) + ' ' + r.name, _regionSub(r))).join('');
   // A cell tagged with a region NOT in the notebook's list still shows (selected) so it isn't lost.
   if (cur && !_nbRegions().some(r => r.name === cur)) rows += opt(cur, '🖧 ' + cur, 'tagged (not enabled)');
   return '<div class="ctlhead">Run on</div>' + rows +
@@ -95,9 +105,8 @@ function renderDestinations() {
       ? '<div class="ctlsub">Enabled for this notebook</div>' + cur.map(r => {
           const g = _destRegionByName(r.name);
           const badge = g && g.warm > 0 ? `<span class="destwarm" title="warm workers ready to adopt">${g.warm} warm</span>` : '';
-          const where = _escc(r.host || '(no host)') + (r.transport === 'direct' ? ' · direct' : '') +
-            (r.root ? ' · root ' + _escc(r.root) : '') + (r.defined === false ? ' · ⚠ not in registry' : '');
-          return `<div class="destitem"><div class="destinfo"><b>🖧 ${_escc(r.name)}</b> <span class="desthost">${where}</span>${badge}</div>` +
+          const where = _escc(_regionSub(r) || '(no host)') + (r.root ? ' · root ' + _escc(r.root) : '');
+          return `<div class="destitem"><div class="destinfo"><b>${window.slateModel.regionIcon(r)} ${_escc(r.name)}</b> <span class="desthost">${where}</span>${badge}</div>` +
             `<button class="destdel" data-n="${_escc(r.name)}" title="disable this region for this notebook">✕</button></div>`;
         }).join('')
       : '<div class="destempty">No regions enabled yet — pick one below, then tag cells to it (🏷 → Run on) or drag them into its DAG zone.</div>';
@@ -106,13 +115,18 @@ function renderDestinations() {
   const av = document.getElementById('destavail');
   if (av) {
     const avail = _destRegions.filter(r => !used.has(r.name));
-    av.innerHTML = '<div class="ctlsub">Regions (defined on the home page)</div>' +
-      (avail.length ? avail.map(r => {
-        const meta = [r.host, r.transport, r.warm > 0 ? `${r.warm} warm` : '', r.data_root ? `root ${r.data_root}` : '']
-          .filter(Boolean).join(' · ');
-        return `<div class="destitem"><div class="destinfo"><b>${_escc(r.name)}</b> <span class="destsrc">${_escc(meta)}</span></div>` +
-          `<button class="desten" data-n="${_escc(r.name)}" title="use this region in this notebook">Enable →</button></div>`;
-      }).join('') : '<div class="destempty">No regions defined yet — create one on the home page (🖧 Remotes → Regions ›).</div>');
+    const M = window.slateModel;
+    const item = r => {
+      const meta = [_regionSub(r), r.warm > 0 ? `${r.warm} warm` : '', r.data_root ? `root ${r.data_root}` : '']
+        .filter(Boolean).join(' · ');
+      return `<div class="destitem"><div class="destinfo"><b>${M.regionIcon(r)} ${_escc(r.name)}</b> <span class="destsrc">${_escc(meta)}</span></div>` +
+        `<button class="desten" data-n="${_escc(r.name)}" title="use it in this notebook">Enable →</button></div>`;
+    };
+    const machines = avail.filter(r => M.regionKind(r) === 'machine'), others = avail.filter(r => M.regionKind(r) !== 'machine');
+    av.innerHTML = !avail.length
+      ? '<div class="destempty">No machines or regions defined yet. Add one on the home page under 🖧 Remotes.</div>'
+      : (machines.length ? '<div class="ctlsub">Machines</div>' + machines.map(item).join('') : '') +
+        (others.length ? '<div class="ctlsub">Regions</div>' + others.map(item).join('') : '');
     av.querySelectorAll('.desten').forEach(b => b.onclick = () => enableDestination(b.dataset.n));
   }
   const hint = document.getElementById('desthint');

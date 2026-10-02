@@ -81,6 +81,13 @@ function mksweep(root; nchunk = 2, per = 3, fn_src = "p -> p * 2", sweep = "swee
 end
 
 @testset "batchsweep" begin
+    @testset "@sweep takes its grid with or without parentheses" begin
+        # Unparenthesised, the macro receives one `do` expression around the grid's call.
+        bare = :(Sweep.@sweep Sweep.paramgrid(n = 1:3) do p; p.n; end)
+        paren = :(Sweep.@sweep(Sweep.paramgrid(n = 1:3)) do p; p.n; end)
+        @test macroexpand(@__MODULE__, bare) isa Expr
+        @test macroexpand(@__MODULE__, paren) isa Expr
+    end
     @testset "submission names are content-derived and order-independent" begin
         @test BS.submission_name(["a", "b"]) == BS.submission_name(["b", "a"])
         @test BS.submission_name(["a", "b"]) != BS.submission_name(["a", "c"])

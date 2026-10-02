@@ -234,6 +234,9 @@ function connect_waiting!(host::AbstractString; wait_s::Real = 60)
     end
     connected(h) && return (true, "")
     lock(_CONNECT_LOCK) do; delete!(_CONNECT_FAILED, h); end   # asked for: no backoff applies
+    # A session left over from a failed attempt (the host was down, or restarting) answers with that
+    # attempt's failure. Asked for explicitly, it is opened fresh, as the padlock's sign-in does.
+    SshTransport.opening(h) || SshTransport.disconnect!(h)
     ok = connect!(h)
     return (ok, ok ? "" : something(last_connect_failure(h), ""))
 end

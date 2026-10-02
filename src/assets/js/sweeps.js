@@ -331,7 +331,7 @@ const humBytes = b => b == null ? '—' : window.slateBytes(b);
   // this is a different scope in the same file, which is how `sweeps` and `RUNNING` read as defined
   // here and were not.
   const swstLive = () => (window.slateSweeps ? window.slateSweeps.all() : [])
-    .some(e => { const st = (e.status || {}).state; return st === 'running' || st === 'pending'; });
+    .some(e => { const st = (e.status || {}).state; return st === 'running' || st === 'pending' || st === 'held'; });
   function stopStatus() { clearTimeout(SWST_TIMER); SWST_TIMER = 0; SWST_HTML = ''; }
   function watchStatus(pop, name) {
     clearTimeout(SWST_TIMER);
@@ -525,7 +525,7 @@ function showOptMenu(row, inp) {
         ? `<select class="swcfg-cluster"><option value=""${cur ? '' : ' selected'}>— none —</option>` +
           defs.map(c => `<option value="${esc(c.name)}"${c.name === cur ? ' selected' : ''}>${esc(c.name)}</option>`).join('') +
           '</select>'
-        : '<div class="swcfg-empty">This machine has no compute targets yet.</div>') +
+        : '<div class="swcfg-empty">No machines defined yet.</div>') +
       `<div class="swcfg-summary">${esc(clusterSummary(sel)) || (cur ? 'not defined on this machine' : 'the cell must name a target itself')}</div>` +
       '<div class="swcfg-note">Set up on the front page: <strong>🖧 Remotes → Clusters</strong>.</div>';
 
@@ -708,7 +708,8 @@ function showOptMenu(row, inp) {
   const text = () => document.getElementById('sweeppilltext');
   const panel = () => document.getElementById('sweeppanel');
 
-  const RUNNING = s => s === 'running' || s === 'pending';
+  // `held`: submitted, and waiting while its environment is tested on the nodes. Live work all the same.
+  const RUNNING = s => s === 'running' || s === 'pending' || s === 'held';
   const BAD = s => s === 'blocked' || s === 'exhausted';
 
   // Progress is counted over the sweeps that are LIVE, not over every sweep the page has ever
@@ -716,7 +717,7 @@ function showOptMenu(row, inp) {
   // starting next to a finished 2304-unit one reads "2304/2308 · 99%", which describes history
   // rather than the work in hand.
   function summary() {
-    let done = 0, total = 0, failed = 0, running = 0, bad = 0, settled = 0;
+    let done = 0, total = 0, failed = 0, running = 0, bad = 0, settled = 0, held = 0, ready = 0;
     let alldone = 0, alltotal = 0, dsbytes = 0, dsread = 0;
     for (const e of sweeps.values()) {
       const s = e.status || {};
@@ -725,10 +726,12 @@ function showOptMenu(row, inp) {
       dsbytes += s.dsbytes || 0; dsread += s.dsread || 0;
       if (RUNNING(s.state)) {
         running++; done += s.done || 0; total += s.total || 0;
+        s.state === 'held' && held++;
       } else if (BAD(s.state)) bad++;
+      else if (s.state === 'ready') ready++;     // written, never submitted: not done, not running
       else settled++;
     }
-    return { n: sweeps.size, done, total, failed, running, bad, settled, alldone, alltotal,
+    return { n: sweeps.size, done, total, failed, running, bad, settled, held, ready, alldone, alltotal,
              dsbytes, dsread };
   }
 
@@ -750,9 +753,12 @@ function showOptMenu(row, inp) {
     if (s.running > 0) {
       label = `${s.done}/${s.total} units · ${pct}%`;
       if (s.running > 1) label += ` · ${s.running} sweeps`;
+      if (s.held > 0) label += ` · ${s.held} testing`;
       if (s.bad > 0) label += ` · ${s.bad} stopped`;
     } else if (s.bad > 0) {
       label = `${s.bad} sweep${s.bad > 1 ? 's' : ''} stopped`;
+    } else if (s.ready > 0 && s.settled === 0) {
+      label = `${s.ready} sweep${s.ready > 1 ? 's' : ''} ready`;
     } else {
       label = `${s.n} sweep${s.n > 1 ? 's' : ''} done`;
     }

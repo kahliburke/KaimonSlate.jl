@@ -143,7 +143,7 @@ function Modal() {
 
   const t = tab.value;
   // A fixed header over a scrolling body: the tabs and ✕ stay put however long a tab's content runs.
-  return html`<div class=${'modal remotesmodal' + (focused ? ' focusmode' : '')}>
+  return html`<div class=${'modal remotesmodal' + (focused ? ' focusmode' : t === 'clusters' ? ' widemode' : '')}>
     <div class="rthead">
       <div class="rttabs">
         ${TABS.map(([k, label, title]) => html`<button class=${'rttab' + (t === k ? ' on' : '')} title=${title}
@@ -163,7 +163,7 @@ function Modal() {
 // none of which have anything to do with each other.
 const TABS = [
   ['hosts',    '🖧 Hosts',    'machines you can run a notebook or a region on'],
-  ['clusters', '⎈ Clusters',  'named compute targets a job cell submits to'],
+  ['clusters', '⎈ Machines',  'where regions run and job cells submit'],
   ['transfer', '⇄ Transfer',  'how data moves between this machine and a worker'],
 ];
 

@@ -1356,7 +1356,10 @@ function _make_router(h::Hub)
                  "idle_warn" => ReportEngine.Sweep.format_duration(r.idle_warn),
                  # Everything the fixed fields cannot say, as the job cell's editor stores it,
                  # plus the shell to run before a worker boots.
-                 "options" => r.options, "prologue" => r.prologue,
+                 "options" => r.options, "prologue" => r.prologue, "machine" => r.machine,
+                 # For a region on a machine: what it sets itself, and what it takes from the machine,
+                 # so the form edits the first and shows the second instead of copying it in.
+                 "own" => ReportEngine.region_own(r.name), "inherits" => ReportEngine.region_inherits(r),
                  "liveness_grace" => r.liveness_grace > 0 ? ReportEngine.Sweep.format_duration(r.liveness_grace) : "",
                  # What preparing the region found, and whether a prepare is running now.
                  "readiness" => ReportEngine.readiness_view(r), "preparing" => ReportEngine.preparing(r.name),
@@ -1368,8 +1371,13 @@ function _make_router(h::Hub)
                  "status" => st === nothing ? nothing :
                              Dict("ok" => st.ok, "msg" => st.msg, "age" => round(Int, time() - st.ts)))
         end for r in ReportEngine.regions()],
-        "parked" => [Dict("host" => p.host, "label" => p.label, "port" => p.port,
-                          "idle_s" => p.idle_s) for p in ReportEngine.parked_wires()])))
+        # A parked region wire is kept under the node it reached; `viaHost` is the login host its
+        # worker's manifest is read through, as /api/remote-notebook-workers reports it.
+        "parked" => [begin
+            v = ReportEngine.via(p.host)
+            Dict("host" => p.host, "label" => p.label, "port" => p.port, "idle_s" => p.idle_s,
+                 (v === nothing ? () : ("viaHost" => String(v.host),))...)
+        end for p in ReportEngine.parked_wires()])))
     # ── What gets sent to a remote ───────────────────────────────────────────────────────────
     # Scoped to the PROJECT, and written INTO it. `.slateignore` sits beside `Project.toml`, so it
     # is version-controlled, every notebook in that project obeys it, and a collaborator who clones
@@ -1677,6 +1685,7 @@ function _make_router(h::Hub)
                                              Dict{String,String}()
                                      end,
                                      prologue = strip(String(get(b, "prologue", ""))),
+                                     machine = strip(String(get(b, "machine", ""))),
                                      liveness_grace = round(Int, SW.parse_duration(get(b, "liveness_grace", 0))))
         do_reconcile && Threads.@spawn try
             ReportEngine.region_reconcile!(r.name)   # no-op when warm==0 except draining excess
@@ -1695,7 +1704,9 @@ function _make_router(h::Hub)
     # `local_procs` rides along so the editor's placeholder can say what a target that sets nothing
     # will actually get, rather than the word "auto".
     HTTP.register!(router, "GET", "/api/clusters", _ ->
-        _json(Dict("clusters" => ReportEngine.clusters_all(),
+        # Each with its scheduler options as one map, whatever form the entry wrote them in.
+        _json(Dict("clusters" => [merge(Dict{String,Any}(c), Dict{String,Any}("options" => ReportEngine.machine_options(c)))
+                                  for c in ReportEngine.clusters_all()],
                    "local_procs" => ReportEngine.Sweep.local_procs())))
     HTTP.register!(router, "POST", "/api/clusters", req -> begin
         b = _body(req)
@@ -1861,6 +1872,50 @@ function _make_router(h::Hub)
         (st !== nothing && st["running"] === true) || _prepare_for_notebook!(nb, r.name)
         _json(Dict("ok" => true))
     end))
+    # A machine: what preparing it found, what has passed a test task there, and preparing it.
+    HTTP.register!(router, "GET", "/api/machines/view", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        _json(ReportEngine.machine_view(String(get(q, "name", ""))))
+    end)
+    HTTP.register!(router, "POST", "/api/machines/prepare", req -> begin
+        name = strip(String(get(_body(req), "name", "")))
+        ReportEngine.cluster_get(name) === nothing && return _json(Dict("ok" => false, "error" => "no machine `$name`"))
+        key = ReportEngine._machine_key(name)
+        st = ReportEngine.preparing(key)
+        (st !== nothing && st["running"] === true) && return _json(Dict("ok" => true, "key" => key))
+        Threads.@spawn try
+            ReportEngine.prepare_machine!(name)
+        catch e
+            ReportEngine.prepare_failed_to_start!(key, e)
+        end
+        _json(Dict("ok" => true, "key" => key))
+    end)
+    # A sweep card's Prepare: test the notebook's environment on the machine its job cell names, with
+    # the cell's node type. The cell runs again when it ends, so the card picks up the result.
+    HTTP.register!(router, "POST", "/api/{id}/prepare-batch", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        machine = strip(String(get(b, "machine", "")))
+        ReportEngine.cluster_get(machine) === nothing &&
+            return _json(Dict("ok" => false, "error" => "no machine `$machine`"))
+        key = ReportEngine._batch_key(machine)
+        st = ReportEngine.preparing(key)
+        (st !== nothing && st["running"] === true) && return _json(Dict("ok" => true, "key" => key))
+        cid = String(get(b, "cell", ""))
+        cell = lock(nb.lock) do; findfirst(c -> c.id == cid, nb.report.cells); end
+        attrs = cell === nothing ? Dict{String,String}() : ReportEngine.cell_attrs(nb.report.cells[cell])
+        res = something(ReportEngine.Sweep.attr_resources(attrs), NamedTuple())
+        Threads.@spawn try
+            ReportEngine.prepare_batch!(machine; project = nb.path, resources = res)
+            again = lock(nb.lock) do
+                i = findfirst(c -> c.id == cid, nb.report.cells)
+                i !== nothing && ReportEngine.restale!(nb.report.cells[i])
+            end
+            again === true && _ensure_runner!(nb)
+        catch e
+            ReportEngine.prepare_failed_to_start!(key, e)
+        end
+        _json(Dict("ok" => true, "key" => key))
+    end))
     # Every prepare a region has had, newest first, and one of them in full. Kept, never rewritten.
     HTTP.register!(router, "GET", "/api/regions/prepare/reports", req -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
@@ -1874,7 +1929,18 @@ function _make_router(h::Hub)
     end)
     HTTP.register!(router, "GET", "/api/regions/prepare", req -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
-        r = ReportEngine.region_get(get(q, "name", ""))
+        name = String(get(q, "name", ""))
+        r = ReportEngine.region_get(name)
+        if r === nothing && startswith(name, "batch_")
+            # A machine prepared for batch work has no region record; its latest report stands in.
+            st = ReportEngine.preparing(name)
+            reps = ReportEngine.prepare_reports(name)
+            last = isempty(reps) ? nothing : ReportEngine.prepare_report(name, String(reps[1]["id"]))
+            rec = last === nothing ? Dict{String,Any}() : get(last, "record", Dict{String,Any}())
+            return _json(Dict("ok" => true, "preparing" => st, "readiness" => rec,
+                              "last_log" => (last === nothing || (st !== nothing && st["running"] === true)) ?
+                                            Any[] : get(last, "log", Any[])))
+        end
         r === nothing && return _json(Dict("ok" => false, "error" => "no such region"))
         st = ReportEngine.preparing(r.name)
         # Not running: the latest report's whole log, for the Activity view of a finished prepare.
@@ -2206,7 +2272,7 @@ function _make_router(h::Hub)
     # across and returns what comes back. Read-only, and off `nb.lock` like every kernel round trip.
     HTTP.register!(router, "GET", "/api/{id}/cluster-status", req -> _withnb(h, req, nb -> begin
         name = get(HTTP.queryparams(HTTP.URI(req.target)), "name", "")
-        spec = ReportEngine.cluster_get(name)
+        spec = ReportEngine.cluster_get_resolved(name)
         spec === nothing &&
             return _json(Dict("error" => "no compute target named `$name` on this machine"))
         # A worker that is starting or being reprovisioned is not a failure, and saying so in the
@@ -2232,7 +2298,7 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/cluster-forget", req -> _withnb(h, req, nb -> begin
         b = _body(req)
         name = String(get(b, "name", "")); sweep = String(get(b, "sweep", ""))
-        spec = ReportEngine.cluster_get(name)
+        spec = ReportEngine.cluster_get_resolved(name)
         spec === nothing &&
             return _json(Dict("error" => "no compute target named `$name` on this machine"))
         ReportEngine.kernel_connected(nb.kernel) ||

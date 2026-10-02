@@ -255,10 +255,7 @@ function _wpUnwellShort(note) { const m = note && /(\d+)s/.exec(note); return m 
 function onWorkersUpdate(ws) {
   try {
     ws = ws || [];
-    renderWorkers({ workers: ws });       // feeds the model on the way through
-    // The cell chips carry the same worker fact as the pills, so they follow the same push rather
-    // than waiting for the next full state render.
-    window.refreshRegionChips && window.refreshRegionChips();
+    renderWorkers({ workers: ws });       // feeds the model on the way through (the cell chips follow it)
     if (_wpSide !== null) {
       const w = ws.find(x => (x.side || '') === _wpSide);
       if (w) {
@@ -485,7 +482,10 @@ async function _wpRefresh() {
     const w = (_wpWorkers || []).find(x => (x.side || '') === side);
     r = Object.assign({ side: side }, w || {}, { log: "" , _noLog: true });
   }
-  const dot = _wpOverflowDot(r);   // same rank as every other dot: degraded outranks a live wire
+  // Coloured from the live worker list, as the tabs are: the log route reports identity and the log,
+  // not whether the worker is up, so a dot read from it alone stayed amber on a healthy worker.
+  const live = (_wpWorkers || []).find(x => (x.side || '') === side);
+  const dot = _wpOverflowDot(Object.assign({}, r, live || {}));   // same rank as every other dot
   document.getElementById('workerpop-title').innerHTML = dot + ' ' + (r.side ? 'region' : 'main worker') +
     ' · ' + _wpEsc(_wpLabel(r.side, r.host)) + (r.port ? ' :' + r.port : '');
   // The run-location picker (formerly the #runloc caret) lives here now — only for the MAIN worker, since a

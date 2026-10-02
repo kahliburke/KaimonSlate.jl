@@ -1027,6 +1027,8 @@ include(joinpath(@__DIR__, "gate_kernel.jl"))   # GateKernel (used when Main.Kai
 include(joinpath(@__DIR__, "remote.jl"))        # RunTarget + remote worker (provision/sync/CURVE); uses gate_kernel helpers
 include(joinpath(@__DIR__, "region_prepare.jl"))  # preparing a region: site setup + node check, kept in Region.readiness
 include(joinpath(@__DIR__, "clusters.jl"))      # named compute targets, kept with the machines (not per notebook); needs remote.jl's _slate_config_dir
+include(joinpath(@__DIR__, "machines.jl"))      # a machine (a clusters.json entry) and what preparing found on its host
+include(joinpath(@__DIR__, "batch_prepare.jl")) # preparing a machine for a project's sweeps: one test task first
 include(joinpath(@__DIR__, "peer_mesh.jl"))     # friend-group SSH mesh (introduce/teardown/peer_plan) for the :ssh blob bridge
 
 end # module ReportEngine

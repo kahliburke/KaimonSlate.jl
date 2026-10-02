@@ -123,7 +123,7 @@ function Panel() {
         <span class="sstitle">Sign in to a host</span>
         <button class="ssclose" onClick=${() => open.value = false}>✕</button>
       </div>
-      ${!rs.length ? html`<div class="ssempty">No hosts. One appears when a compute target or a
+      ${!rs.length ? html`<div class="ssempty">No hosts. One appears when a machine or a
         region names it.</div>`
        : html`<div class="sslist">${rs.map(r => html`<${Row} key=${r.host} r=${r}/>`)}</div>`}
       <div class=${'ssmsg' + (note.value && note.value.err ? ' err' : '')}>${note.value ? note.value.text : ''}</div>

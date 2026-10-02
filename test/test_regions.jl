@@ -342,9 +342,9 @@ const RE = KaimonSlate.ReportEngine
                     # The site is prepared but this project was never tried here.
                     @test why() == NS.WAIT_NEEDS_PREPARE
                     # Tried: it goes on to placement (here, the opening run's wait).
-                    env = Dict{String,Any}(RE._proj_key(d) => Dict{String,Any}("project" => d, "load_s" => 1.0,
-                        "fingerprint" => RE._env_fingerprint(d, RE._infra_spec())))
-                    RE.region_set!("gpu"; readiness = merge(saved, Dict{String,Any}("envs" => env)))
+                    rg = RE.region_get("gpu")
+                    RE.record_env_test!(rg.host, d, RE.region_node_type(rg); by = "gpu", status = "ok",
+                                        depot = RE.region_depot(rg), load_s = 1.0)
                     lock(NS._OPENING_RUN_LOCK) do; push!(NS._OPENING_RUN, "needsprep"); end
                     @test why() == NS.WAIT_NOT_REQUESTED
                     # Its packages changed after they were tested: the install belongs in a prepare.
@@ -355,9 +355,11 @@ const RE = KaimonSlate.ReportEngine
                     @test only(values(RE.readiness_view(r)["envs"]))["changed"] === true
                     write(joinpath(d, "Project.toml"), "name = \"P\"\n")
                     @test why() == NS.WAIT_NOT_REQUESTED
-                    # A site that changed since sends it back through preparing.
-                    RE.region_set!("gpu"; readiness = merge(saved, Dict{String,Any}("envs" => env, "stale" => "changed")))
+                    # A machine that changed since sends it back through preparing.
+                    gh = RE.region_get("gpu").host
+                    RE.host_facts_merge!(gh, Dict{String,Any}("stale" => "changed"))
                     @test why() == NS.WAIT_NEEDS_PREPARE
+                    RE.host_facts_set!(gh, Dict{String,Any}())
                     # A region never prepared at all, likewise.
                     RE.region_set!("gpu"; readiness = Dict{String,Any}())
                     @test why() == NS.WAIT_NEEDS_PREPARE
@@ -368,6 +370,14 @@ const RE = KaimonSlate.ReportEngine
                     end
                     try
                         @test why() == NS.WAIT_PREPARING
+                        # A cell already waiting says what for, and the pill says preparing, not queued.
+                        RE.mark_blocked!(c, NS.WAIT_NEEDS_PREPARE, "login")
+                        NS._mark_region_preparing!(nb, "gpu")
+                        @test c.blocked == NS.WAIT_PREPARING
+                        # (Signed out outranks it: nothing can start until someone signs in.)
+                        w = only(filter(w -> w["side"] == "gpu", NS._workers_json(nb)))
+                        @test w["face"] == (get(w, "noteCode", "") == "not_signed_in" ? "signed out" : "preparing")
+                        @test get(w, "noteCode", "") == "not_signed_in" || occursin("being prepared", w["note"])
                         own = try; NS._region_kernel!(nb, "gpu"; preparing = true); ""
                               catch e; e isa NS.RegionWaiting ? e.why : "error"; end
                         @test own != NS.WAIT_PREPARING && own != NS.WAIT_NEEDS_PREPARE
@@ -796,10 +806,12 @@ const RE = KaimonSlate.ReportEngine
                                    "stale" => "")
             RE.region_set!("prep"; readiness = rec)
             r = RE.region_get("prep")                   # through the file, as a restarted hub reads it
-            @test r.readiness["prologue"] == "module unload cudatoolkit"
             @test occursin("✓ Read the site", RE.readiness_text(r))
-            # The site's fix runs first, then the region's own.
-            @test RE._region_prologue("prep") == "{ module unload cudatoolkit ; module load x ; } && "
+            # The site's fix belongs to the machine and runs first; the region's own prologue after it.
+            RE.host_facts_merge!("login", Dict{String,Any}("site_prologue" => "module unload cudatoolkit"))
+            @test endswith(RE.machine_setup(RE.region_machine(r)), "{ module unload cudatoolkit ; } && ")
+            @test RE._region_prologue("prep") == "{ module load x ; } && "
+            @test occursin("site prologue: module unload cudatoolkit", RE.readiness_text(r))
             # Editing another field keeps the record.
             RE.region_set!("prep"; walltime = "00:10:00")
             @test RE.region_get("prep").readiness["liveness_grace_s"] == 120
@@ -865,7 +877,8 @@ const RE = KaimonSlate.ReportEngine
             rec = RE.prepare_region!("unreach")
             @test rec["ok"] == false
             @test rec["steps"][1]["status"] == "fail" && occursin("Sign in", rec["steps"][1]["step"])
-            @test isempty(rec["stamps"])                     # nothing was read, so nothing to compare
+            # Nothing was read, so the machine has nothing recorded to compare a start with.
+            @test isempty(RE.host_facts("slate-test-unreachable.invalid"))
             r = RE.region_get("unreach")
             @test r.readiness["report"] == rec["report"]
             reps = RE.prepare_reports("unreach")

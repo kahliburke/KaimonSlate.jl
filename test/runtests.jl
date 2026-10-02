@@ -35,6 +35,7 @@ module Blobchannel; include("test_blobchannel.jl"); end
 module RemotePool; include("test_remote_pool.jl"); end
 module SshTransportT; include("test_sshtransport.jl"); end
 module Regions;   include("test_regions.jl");   end
+module Machines;  include("test_machines.jl");  end
 module SlateDiagT; include("test_slatediag.jl"); end
 module Parallel;  include("test_parallel.jl");  end
 module Animation; include("test_animation.jl"); end
@@ -88,7 +89,7 @@ module RecordDisplay; include("test_record_display.jl"); end
 # not existing.
 const _TESTMODS = (Defname, Prepare, Demux, Termcook, SharedInc, Parsched, Memostore, Slatetask,
                    Batchsweep, Transfer, SyncDictT, Dataset, TablesInc, Jobcell, FormatT, Effectstore,
-                   Blobchannel, RemotePool, Regions, SlateDiagT, Parallel, Animation, Echarts, SlateLook,
+                   Blobchannel, RemotePool, Regions, Machines, SlateDiagT, Parallel, Animation, Echarts, SlateLook,
                    Engine, Eval, Deps, Envprep, Gateauth, SshTransportT, Tools, Registry, Toolcell, Web,
                    Bind, ReactiveState, Render, LiveOutput, Tables, Trace, Complete, History, SlateApi,
                    Agentops, Repro, Slides, Debugger, Specialist, Findings, ToolDocs, AppRender,

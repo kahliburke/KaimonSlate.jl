@@ -21,10 +21,10 @@ Slate does both, and they share one authenticated connection, one store, and one
 Both are configured on the front page, under **🖧 Remotes** — a cluster describes a *machine*, and a
 notebook that names one carries only the name.
 
-## Defining a compute target
+## Defining a machine
 
-**🖧 Remotes → Compute targets** on the front page. A target is what a `#%% job cluster=<name>`
-cell submits to:
+**🖧 Remotes → Machines** on the front page. A machine is what a `#%% job cluster=<name>` cell
+submits to, and what a region runs its workers on when it names one:
 
 | Field | What it is |
 | --- | --- |
@@ -33,11 +33,26 @@ cell submits to:
 | **Host** | where the work runs. For `slurm`/`pbs` it is the node you submit from, and Slate offers the queues it reports. For `exec` it is optional: blank runs on this machine. |
 | **Store** | a path **on the machine the work runs on** (this one, if Host is blank). On a cluster put it on scratch: `$HOME` is a few tens of GB and is not built for parallel writes. |
 | **Partition / walltime / cpus / mem** | what each job asks for. A cell may override any of them. |
-| **Project** | the folder with the `Project.toml` the units run in. |
+| **Project** | the local project the units run in. Blank is the notebook's own, which is almost always what you want: its exact Manifest is what the tasks get. |
+| **Depot** | where Julia keeps packages and compiled code on that machine. Blank is automatic: the site's scratch filesystem, found when the machine is prepared, else `~/.julia`. |
 | **Chunk** | how many sweep units ride one scheduler job. |
 | **At once** | `exec` only: how many tasks run in parallel on that machine. Blank follows the setting below. |
-| **Prologue** | shell run before every job — `module load julia`, usually. |
+| **Prologue** | shell run before every Julia on the machine, a region's worker as much as a job. |
+| **Julia** | a julia binary to use. Blank installs juliaup at the hub's Julia version, so results and environments carry across. |
+| **Test QoS** | the queue for the test task a sweep runs first (see [Preparing](#Preparing-a-machine-or-a-region)). `debug` on most sites. |
 | **Mode** | who may read the store, as an octal directory mode. `0700` (the default) is yours alone; `0750` lets your unix group read it; blank follows the site's own umask. |
+
+### The shell every Julia starts in
+
+Everything a machine says about running Julia is applied in one place, to every Julia started there:
+a region's worker, the build of an environment, Prepare's checks and each task of a sweep. Julia goes
+on the `PATH`, the depot becomes the first entry of `JULIA_DEPOT_PATH`, the module fix Prepare found
+runs (on Perlmutter, unloading the `cudatoolkit` module that puts the system's CUDA libraries ahead
+of CUDA.jl's), then your prologue.
+
+The depot matters more than it looks. On a shared home filesystem every package load checks its
+compiled cache against the source files one metadata lookup at a time, which can double the time
+`using CUDA` takes compared with scratch, warm or not.
 
 ### Who can read a sweep
 
@@ -208,12 +223,25 @@ targets, which regions) and whether it is signed in. **Check** asks the host whi
 methods it offers *without* authenticating, so it costs no failed login on a server that penalises
 those.
 
-## Preparing a region
+## Preparing a machine or a region
 
 A region's first worker on a new machine runs into everything about that machine at once: Julia to
 install, the worker's own packages, modules the site loads by default, a filesystem slower than a
-laptop's. **Prepare** (the Readiness row of the region in 🖧 Remotes, or `region_prepare(name)` from
-an agent) does that work on its own, outside any notebook, and reports each step:
+laptop's. **Prepare** does that work on its own, outside any notebook, and reports each step. It
+comes in layers:
+
+* **A machine** (its Readiness row under 🖧 Remotes → Machines, or `machine(name=…, action="prepare")`):
+  sign in, Julia, read the site, settle the depot. What it finds belongs to the host, so every region
+  and sweep there uses it.
+* **A region** (its Readiness row, or `region_prepare(name)`): the machine's steps, then the node.
+* **A sweep's environment** (the **Prepare** button on a sweep card that has not run on the machine
+  yet, or `machine(name=…, action="prepare_batch", project=…)`): the machine's steps, then the
+  notebook's task environment is built on the machine and **one test task** goes through the
+  scheduler, asking for the sweep's node type for a few minutes on the machine's **Test QoS**. It
+  precompiles there, loads every package and checks CUDA. Until that has passed, the sweep submits
+  nothing: a broken environment costs one short job rather than every task of the array.
+
+A region's prepare does this:
 
 * sign in, install Julia at the hub's version, build the worker runtime;
 * read the site: CPU, default modules, CUDA libraries on the library path, Julia version;
@@ -228,8 +256,14 @@ sets how long a worker may go silent before its connection is dropped (a region'
 setting overrides it). And each start compares Julia and the default modules with what was recorded:
 when they differ the region is marked stale, and Prepare again brings it up to date.
 
-A region cell whose notebook's packages were never tested on the region, or have changed since they
-were, waits and offers **Prepare**. Prepared from the notebook, the region also installs and
+A notebook's packages loading on a machine's nodes is recorded once, with the machine, for that kind
+of node (its partition and constraint). A region's prepare and a sweep's test task both write it, and
+the same record decides for both: a region on those nodes needs no prepare of its own for a project a
+sweep has tested there, and a sweep goes out without a test once a region has loaded its project
+there. Either one waits when the machine's site has changed since it was prepared, when the packages
+have changed since they were tested, or when nothing has loaded them on that kind of node yet.
+
+A region cell in that position waits and offers **Prepare**. Prepared from the notebook, the region also installs and
 precompiles those packages where the workers run, then starts the notebook's own worker and loads
 them in it. The node and that worker stay for the notebook, and the waiting cells run on it when the
 prepare ends. While a region is being prepared, its cells wait for it rather than start a worker of

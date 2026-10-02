@@ -369,7 +369,7 @@ function cellRegionChip(c) {
       ((c.blocked === 'needs_prepare' || c.blocked === 'preparing')
         ? ` onmousedown="window.openPrepare && window.openPrepare('${_esc(loc.name || '')}', event)">`
         : ` onmousedown="window.openRegionPanel('${c.id}', event)">`) +
-      `${loc.local ? '💻' : '🖧'} ${_esc(loc.name || 'local')}` +
+      `${loc.local ? '💻' : _regIcon(loc.name)} ${_esc(loc.name || 'local')}` +
       ` <span class="cregst">${_esc(blockedText(c))}${w ? ` <span class="blockwait">${w}</span>` : ''}</span></span>`;
   }
   // `onmousedown`, not `onclick`: clicking a header selects the cell, which re-renders it and
@@ -384,10 +384,12 @@ function cellRegionChip(c) {
   return `<span class="cregion${cls.cls}" data-reg="${_esc(loc.name)}"` +
     (cls.cls ? '' : ` style="color:${hue};border-color:${hue}"`) +
     ` onmousedown="window.openRegionPanel('${c.id}', event)"` +
-    ` title="${_esc(cls.title || ('runs on ‘' + loc.name + '’ — click for the region'))}">🖧 ${_esc(loc.name)}` +
+    ` title="${_esc(cls.title || ('runs on ‘' + loc.name + '’ — click for the region'))}">${_regIcon(loc.name)} ${_esc(loc.name)}` +
     (cls.word ? ` <span class="cregst">${_esc(cls.word)}</span>` : '') + '</span>';
 }
 
+// 🖥 for a machine used as a region, 🖧 for any other region.
+const _regIcon = reg => window.slateModel.regionIcon(_regDef(reg));
 // How a region's worker is doing, for the chip. Read from the shared model, so the chip, the topbar
 // pill and the worker popup cannot disagree about the same worker.
 //
@@ -429,6 +431,14 @@ window.refreshRegionChips = function () {
     if (st.textContent !== s.word) st.textContent = s.word;
   });
 };
+// Any change to the worker model repaints them, whichever way it arrived: the workers push, a full
+// state render (which draws the cells before it feeds the model the new list), or a telemetry frame.
+// Once per frame, however many changes land in it.
+let _chipFrame = 0;
+window.slateModel.subscribe(() => {
+  if (_chipFrame) return;
+  _chipFrame = requestAnimationFrame(() => { _chipFrame = 0; window.refreshRegionChips(); });
+});
 
 // ── Cell kinds ────────────────────────────────────────────────────────────────────────────────
 // The ONE description of what a cell can be — read by the kind switcher in every cell header, and
@@ -622,7 +632,10 @@ function cellHeaderInner(c) {
   // that's the "convert to web cell" glyph below, and both show on a @bind cell, so a shared icon would
   // read as the same action.
   const editSrc = `<button onclick="editCellSource('${c.id}','${c.kind}')" title="edit source">✎</button>`;
-  const run = isCode ? `<button class="run" data-run="${c.id}" onclick="runCell('${c.id}', true)" title="run this cell (always re-evaluates; ⇧⏎ runs only if changed)">▶</button>` : '';
+  // On mousedown, as the region chip is: an update to the header between mousedown and mouseup
+  // replaces this button, and the click is then never delivered — the cell needed a second click.
+  // The click handler is for the keyboard (Enter/Space reports `detail` 0), so a mouse runs it once.
+  const run = isCode ? `<button class="run" data-run="${c.id}" onmousedown="if (event.button === 0) { event.preventDefault(); runCell('${c.id}', true); }" onclick="if (event.detail === 0) runCell('${c.id}', true)" title="run this cell (always re-evaluates; ⇧⏎ runs only if changed)">▶</button>` : '';
   const bu = surfaceableNames(c);
   const _present = new Set([].concat(...((c.controls || []).map(col => col.map(s => s.name)))));
   const _someOn = bu.some(n => _present.has(n));
@@ -861,9 +874,13 @@ window.releaseRegionAlloc = async function (reg) {
 // region is the one tag with a reason to be edited from the header.
 function _regPicker(c, reg) {
   const regs = (typeof nbState !== 'undefined' && nbState && nbState.regions) || [];
-  const opts = ['', ...regs.map(r => r.name)];
-  const sel = opts.map(n =>
-    `<option value="${_esc(n)}"${n === reg ? ' selected' : ''}>${n ? _esc(n) : 'local (main kernel)'}</option>`).join('');
+  const M = window.slateModel;
+  const opt = (n, label) => `<option value="${_esc(n)}"${n === reg ? ' selected' : ''}>${_esc(label)}</option>`;
+  const group = (label, rs) => rs.length
+    ? `<optgroup label="${label}">${rs.map(r => opt(r.name, M.regionLabel(r))).join('')}</optgroup>` : '';
+  const machines = regs.filter(r => M.regionKind(r) === 'machine');
+  const sel = opt('', 'local (main kernel)') + group('Machines', machines) +
+              group('Regions', regs.filter(r => M.regionKind(r) !== 'machine'));
   return `<div class="blkrow"><span>Runs on</span><div>` +
          `<select class="regpick" onchange="window.setCellRegion('${c.id}', this.value)">${sel}</select></div></div>`;
 }
@@ -878,7 +895,7 @@ const _regIsCluster = reg => { const r = _regDef(reg); return !!(r && r.schedule
 // absent there; everything else is the same panel.
 function _regRender(c, reg, load, alloc) {
   const r = _regDef(reg);
-  let h = `<div class="regphead">${reg ? '🖧 ' + _esc(reg) : '💻 local'}</div>`;
+  let h = `<div class="regphead">${reg ? _regIcon(reg) + ' ' + _esc(window.slateModel.regionLabel(r || { name: reg })) : '💻 local'}</div>`;
   if (!reg) {
     h += _regRow('Kernel', 'this notebook’s own worker, on this machine');
   } else {

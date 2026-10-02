@@ -115,6 +115,25 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
             @test !haskey(sv.state, "alive")                     # the roster stays out of the state
         end
 
+        # A worker on a compute node is invisible to the login node's `pgrep`; its stats sidecar, on
+        # the shared filesystem, is what says it is alive. A record quiet for an hour is collected.
+        mktempdir() do home
+            wd = mkpath(joinpath(home, RE._REMOTE_WORKER))
+            for p in (9400, 9410, 9420)
+                write(joinpath(wd, "worker-$p.json"), "{\"notebook\":\"nb\"}")
+                write(joinpath(wd, "worker-$p.log"), "x")
+            end
+            write(joinpath(wd, "worker-9400.stats"), "{}")                    # written just now
+            write(joinpath(wd, "worker-9410.stats"), "{}")
+            touch_at(f, ago) = run(`touch -t $(Libc.strftime("%Y%m%d%H%M.%S", time() - ago)) $(joinpath(wd, f))`)
+            touch_at("worker-9410.stats", 600); touch_at("worker-9410.log", 600)   # stopped ten minutes ago
+            touch_at("worker-9420.log", 7200)                                       # stopped two hours ago
+            out = read(setenv(`sh -c $(RE._workers_probe_sh())`, merge(ENV, Dict("HOME" => home)); dir = home), String)
+            alive = Dict(w["port"] => w["alive"] for w in RE._parse_workers(out))
+            @test alive == Dict(9400 => true, 9410 => false)
+            @test !isfile(joinpath(wd, "worker-9420.json")) && isfile(joinpath(wd, "worker-9420.log"))
+        end
+
         # For a worker that binds on ANOTHER machine, this one's loopback is not the question.
         # Holding a port here must not make the allocator skip it over there.
         q, _ = RE._next_ports(reserve = 2)
@@ -369,7 +388,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         path = "."
         uuid = "5e9a7c2b-1d4f-4a6e-b3c8-0f2a9d5e8b71"
         """)
-        d = Dict(RE._dev_deps(joinpath(dir, "Manifest.toml"), dir))
+        d = Dict(RE.Sweep.dev_deps(joinpath(dir, "Manifest.toml"), dir))
         @test !haskey(d, "JSON")                                   # registry dep (no path) → not a dev dep
         @test d["NeuroDSL"] == abspath(joinpath(dir, "../NeuroDSL"))
         @test rstrip(d["NeuroSlate"], '/') == abspath(dir)         # path="." → the project itself (self-skip target)
@@ -400,7 +419,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         NeuroDSL = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
         Registered = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
         """)
-        s = RE._rewrite_devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL"),
+        s = RE.Sweep.devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL"),
                                                  ("NotDeclared", "devsrc/NotDeclared")])
         jl = Base.julia_cmd()[1]
         io = IOBuffer()
@@ -436,7 +455,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         url = "https://example.invalid/NeuroDSL.jl"
         rev = "main"
         """)
-        s = RE._rewrite_devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL")])
+        s = RE.Sweep.devpaths_script("proj", [("NeuroDSL", "devsrc/NeuroDSL")])
         jl = Base.julia_cmd()[1]
         io = IOBuffer()
         # `homedir()` reads USERPROFILE on Windows and HOME elsewhere, so pinning only HOME

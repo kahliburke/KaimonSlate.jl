@@ -63,6 +63,33 @@ async function reapWorker(host, w, bound) {
   } catch (_) { reaping.value = { port, err: 'request failed' }; }
 }
 
+// Clear stopped workers' leftover files. Nothing is running, so nothing is lost and there is no confirm.
+const clearing = signal({});   // host:port → true while its clear is in flight
+async function clearStopped(xs) {
+  const key = x => x.host + ':' + x.w.port;
+  clearing.value = Object.assign({}, clearing.value, ...xs.map(x => ({ [key(x)]: true })));
+  await Promise.all(xs.map(x => fetch('/api/reap-worker', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host: x.host, port: +x.w.port }) }).catch(() => null)));
+  const done = new Set(xs.map(key));
+  hostData.value = hostData.value.map(h => ({ ...h, workers: (h.workers || []).filter(w => !done.has(h.host + ':' + w.port)) }));
+  const c = Object.assign({}, clearing.value); done.forEach(k => delete c[k]); clearing.value = c;
+  tick();
+}
+
+// A group's stopped workers, as one line. Their manifests outlive them until cleared or collected, and
+// as full rows they read like activity.
+function Stopped({ xs }) {
+  const busy = xs.some(x => clearing.value[x.host + ':' + x.w.port]);
+  const tip = xs.map(x => {
+    const nb = String(pj(x.w.manifest).notebook || '').replace(/#[^#]*$/, '').replace(/\.jl$/, '');
+    return ':' + x.w.port + (nb ? ' ' + nb : '') + (x.w.lastActivity ? ' · last seen ' + ago(x.w.lastActivity) : '');
+  }).join('\n');
+  return html`<div class="actstopped" title=${tip}>
+    <span>⚪ ${xs.length} stopped</span>
+    <span class="ports">${xs.map(x => ':' + x.w.port).join(' ')}</span>
+    <button disabled=${busy} title="remove their leftover files" onClick=${() => clearStopped(xs)}>${busy ? 'Clearing…' : 'Clear'}</button></div>`;
+}
+
 // Restart a worker that is serving an open notebook, from the home page — wherever it runs. Same route
 // the notebook's own Restart uses (`side` targets a region kernel, empty the main one), so the open tab
 // follows along over its own feed. It re-runs the notebook, which is not what a home-page click implies
@@ -109,7 +136,7 @@ async function tick() {
     if (rw) nbRemote.value = rw.workers || [];
     const regs = d.regions || [];
     regions.value = regs;
-    const hs = {}; regs.forEach(p => p.host && (hs[p.host] = 1)); (d.parked || []).forEach(p => hs[p.host] = 1);
+    const hs = {}; regs.forEach(p => p.host && (hs[p.host] = 1)); (d.parked || []).forEach(p => hs[filedUnder(p)] = 1);
     // A notebook can be run on any ssh host, with no region defined and nothing parked — the registry
     // would never name that host, so probe the hosts the hub is actually holding kernels on as well.
     // Without this the whole host is unqueried and its workers never appear.
@@ -272,12 +299,17 @@ function Monitor() {
   const rows = (xs) => xs.map(x => {
     // Only what is actually resident counts: a dead worker's last sample is not memory in use, and
     // summing it made the footer's total describe a machine that no longer exists.
-    const st = pj(x.w.stats); if (isAlive(x.w)) totRss += st.rss || 0;
+    const st = pj(x.w.stats); totRss += st.rss || 0;
     const running = Array.isArray(st.running) ? st.running : [];
-    if (isAlive(x.w) && (running.length > 0 || (st.evals || 0) > 0 || (st.warm || '').indexOf('warming') === 0)) busy++;
+    if (running.length > 0 || (st.evals || 0) > 0 || (st.warm || '').indexOf('warming') === 0) busy++;
     return html`<${WorkerRow} w=${x.w} host=${x.host} bound=${x.bound}/>`;
   });
-  const group = (head, xs) => html`<div>${head}${xs.length ? rows(xs) : html`<div class="actempty">no workers</div>`}</div>`;
+  const live = x => isAlive(mergeWorker(x.w, x.bound));
+  const group = (head, xs) => {
+    const up = xs.filter(live), down = xs.filter(x => !live(x));
+    return html`<div>${head}${up.length ? rows(up) : down.length ? null : html`<div class="actempty">no workers</div>`}
+      ${down.length ? html`<${Stopped} xs=${down}/>` : null}</div>`;
+  };
   // This machine first — it's the tier you're always running on, whether or not any host is configured.
   if (mine.length) groups.push(group(html`<div class="actgrouphd">💻 <span class="actgroupname" style="cursor:default">this machine</span>
     <span class="actgrouphost">${mine.length} notebook worker${mine.length !== 1 ? 's' : ''} · killed when the notebook closes</span></div>`, mine));
@@ -309,7 +341,7 @@ function Monitor() {
   if (byRegion[''] && byRegion[''].length) groups.push(group(html`<div class="actgrouphd">💻 other workers</div>`, byRegion['']));
 
   if (!groups.length) return null;   // nothing → collapse (index.html hides an empty #actmon)
-  const nW = all.length + mine.length;
+  const nW = all.filter(live).length + mine.length;
   return html`<h2 class="sect">Worker activity</h2><div class="actmon-body">
     <div class="actagg">${nW} worker${nW !== 1 ? 's' : ''} · ${fmtB(totRss)} · ${busy} busy <span class="actlive">●</span></div>
     ${groups}</div>`;
