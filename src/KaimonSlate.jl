@@ -2392,6 +2392,14 @@ function create_tools(GateTool::Type)
         catch e; return "⛔ project: " * sprint(showerror, e); end
         si = lowercase(strip(sysimage))
         si in ("", "rebuild") || return "⛔ sysimage must be \"rebuild\" or empty, not '$sysimage'"
+        # A project that is an open notebook gets the notebook's own prepare: the node is kept for its
+        # worker, which starts on it, and its waiting cells run.
+        nb = n === false ? nothing : NotebookServer._open_notebook_at(_HUB[], project)
+        if nb !== nothing
+            NotebookServer._prepare_for_notebook!(nb, r.name; rebuild_sysimage = si == "rebuild")
+            return "Preparing '$(r.name)' for the open notebook $(basename(nb.path)): its node is kept for " *
+                   "the notebook's worker. region_prepare(\"$(r.name)\", action=\"status\") to follow it."
+        end
         Threads.@spawn try
             ReportEngine.prepare_region!(r.name; node = n, project = project, rebuild_sysimage = si == "rebuild")
         catch e

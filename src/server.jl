@@ -1178,13 +1178,24 @@ function _announce_prepare!(nb::LiveNotebook, r; reason::AbstractString = "")
     return nothing
 end
 
+# The notebook open in hub `h` at `path`, or `nothing`.
+function _open_notebook_at(h, path::AbstractString)
+    (h === nothing || isempty(strip(path))) && return nothing
+    p = abspath(expanduser(strip(path)))
+    nbs = lock(() -> collect(values(h.notebooks)), h.lock)
+    i = findfirst(nb -> abspath(nb.path) == p, nbs)
+    return i === nothing ? nothing : nbs[i]
+end
+
 """
-    _prepare_for_notebook!(nb, name)
+    _prepare_for_notebook!(nb, name; rebuild_sysimage = false)
 
 Prepare region `name` for `nb`'s project, keeping the node it gets for the worker that follows, then
-re-run the cells that were waiting. Background; progress is read from `/api/regions/prepare`.
+re-run the cells that were waiting. Background; progress is read from `/api/regions/prepare`. A
+prepare asked for elsewhere that names an open notebook comes here too, so the node it waited for
+goes to that notebook instead of back to the scheduler.
 """
-function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString)
+function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString; rebuild_sysimage::Bool = false)
     r = ReportEngine.region_get(name)
     r === nothing && return nothing
     # The worker prepare starts and loads the packages in is the one this notebook's cells use.
@@ -1220,7 +1231,7 @@ function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString)
     _mark_region_preparing!(nb, r.name)
     try; _workers_push!(nb); catch; end
     Threads.@spawn try
-        ReportEngine.prepare_region!(r.name; project = nb.path, keep_node = true, worker,
+        ReportEngine.prepare_region!(r.name; project = nb.path, keep_node = true, worker, rebuild_sysimage,
                                      node = r.scheduler === :none ? nothing : true)
         _restale_region_cells!(nb, r.name)
         _ensure_runner!(nb)

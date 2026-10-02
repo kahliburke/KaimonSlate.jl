@@ -1857,6 +1857,8 @@ function _make_router(h::Hub)
         project = strip(String(get(b, "project", "")))
         try; ReportEngine._reference_env(isempty(project) ? r.preload : project)
         catch e; return _json(Dict("ok" => false, "error" => sprint(showerror, e))); end
+        nb = node === false ? nothing : _open_notebook_at(h, project)
+        nb === nothing || (_prepare_for_notebook!(nb, r.name); return _json(Dict("ok" => true, "notebook" => nb.id)))
         Threads.@spawn try
             ReportEngine.prepare_region!(r.name; node = node, project = project)
         catch e
