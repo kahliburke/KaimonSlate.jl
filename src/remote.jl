@@ -337,6 +337,9 @@ const _VIA_LOCK = ReentrantLock()
 function route!(node::AbstractString, login::AbstractString, job::AbstractString = "",
                 kind::Symbol = :slurm)
     lock(_VIA_LOCK) do
+        if isempty(login) || get(_VIA, String(node), (; job = "")).job != job
+            delete!(_NODE_SSH, String(node))            # a new job, or none: ask again
+        end
         if isempty(login)
             delete!(_VIA, String(node))
         else
@@ -355,6 +358,22 @@ _was_routed(node::AbstractString) = lock(_VIA_LOCK) do; String(node) in _ROUTED_
 
 "How `host` is reached, or `nothing` when it is reachable on its own."
 via(host::AbstractString) = lock(_VIA_LOCK) do; get(_VIA, String(host), nothing); end
+
+# SLURM nodes reached by ssh from their login node rather than by `srun` steps (under `_VIA_LOCK`).
+# Some partitions start one step at a time per job, so with the worker running in its step every
+# other command would wait for it to end. An ssh into a node you hold, which most sites allow, lands
+# in the job without a step.
+const _NODE_SSH = Set{String}()
+_node_by_ssh(node::AbstractString) = lock(_VIA_LOCK) do; String(node) in _NODE_SSH; end
+
+# Whether `node` takes an ssh from its login node, remembered for the job it is routed in.
+function _probe_node_ssh!(node::AbstractString)
+    v = via(node)
+    (v === nothing || v.kind !== :slurm || isempty(v.job)) && return false
+    ok, _ = Sweep.run_there(v.host, _ssh_into(node, "true"; connect_timeout = 10); timeout = 20.0)
+    lock(_VIA_LOCK) do; ok ? push!(_NODE_SSH, String(node)) : delete!(_NODE_SSH, String(node)); end
+    return ok
+end
 
 # ── Reaching a host ──────────────────────────────────────────────────────────────────────────
 # Every command goes over the shared `SshTransport` session (see remotestore.jl), so a host that
@@ -606,14 +625,26 @@ end
 # The ssh lands OUTSIDE the job, so nothing there carries its id the way a `srun` step carries
 # `SLURM_JOB_ID`. It is exported for the command, since code run on a node (a worker, and the cells
 # on it) names checkpoints and scratch paths after the job it is in.
-_in_allocation(v, node, script) =
-    v.kind === :pbs ?
-        "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null " *
-        Sweep.shq(node) * " " *
-        Sweep.shq((isempty(v.job) ? "" : "export PBS_JOBID=" * Sweep.shq(v.job) * "; ") * script) :
-        # A step inherits the allocation's task count, so without `--ntasks=1` a job asking for N
-        # tasks runs this command N times. Everything routed here is one command on one node.
-        "srun --jobid=" * v.job * " --overlap --ntasks=1 bash -c " * Sweep.shq(script)
+function _in_allocation(v, node, script)
+    if v.kind === :pbs || _node_by_ssh(node)
+        var = v.kind === :pbs ? "PBS_JOBID" : "SLURM_JOB_ID"
+        return _ssh_into(node, (isempty(v.job) ? "" : "export $var=" * Sweep.shq(v.job) * "; ") * script)
+    end
+    # A step inherits the allocation's task count, so without `--ntasks=1` a job asking for N tasks
+    # runs this command N times. Everything routed here is one command on one node. `--immediate`
+    # bounds the wait for the step to start: a step the job cannot take now says why within that
+    # time instead of holding the login session until it can.
+    return "srun --jobid=" * v.job * " --overlap --immediate=$(_STEP_START_S) --ntasks=1 bash -c " * Sweep.shq(script)
+end
+
+# Seconds a command routed into an allocation waits for its step to start.
+const _STEP_START_S = 30
+
+# `LogLevel=ERROR` keeps the node's login banner out of the command's output and still reports why a
+# connection failed.
+_ssh_into(node, script; connect_timeout::Integer = 20) =
+    "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR " *
+    "-o ConnectTimeout=$connect_timeout " * Sweep.shq(node) * " " * Sweep.shq(script)
 
 # A worker started over ssh is outside the PBS job, so the job ending would leave it running on a node
 # that may already belong to someone else. Attaching it to the job lets the node's PBS daemon end it
@@ -1771,7 +1802,8 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
         # down with every process in it, and `setsid` escapes the process GROUP but not the cgroup. So the
         # worker runs in the FOREGROUND of the step - the step, and its cgroup, then live exactly as long as
         # the worker does - and the DETACH is moved one level out, to the LOGIN node, which is under no such
-        # cgroup. `setsid nohup` there reparents the step launcher (`srun`, or PBS's `ssh node`) to init, so
+        # cgroup. `setsid nohup` there reparents the launcher (`srun`, or `ssh node` on PBS and on a SLURM
+        # node that takes one, where the worker runs in the job's own cgroup and ends with it) to init, so
         # it survives the ssh channel closing and even a full session drop; the worker is re-attached over
         # the forward on reconnect. `_in_allocation` builds the same in-allocation launcher every poll uses.
         worker = "$setup && " * (v.kind === :pbs ? _pbs_attached(jl) : "exec $jl")
@@ -1928,7 +1960,9 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
                 for attempt in 1:12                 # the worker writes its key early in boot
                     server_key = try
                         _fetch_and_pin_curve!(t, connect_host, connect_port)
-                    catch
+                    catch e
+                        # A node that will not run the command will not run it on the next try either.
+                        occursin(r"Unable to create step|not held any more", sprint(showerror, e)) && rethrow()
                         attempt == 12 && _rlog("connect: no CURVE key from $host yet — dialing without one")
                         sleep(1.0); ""
                     end
@@ -2262,9 +2296,11 @@ function _curve_key_from(out::AbstractString)
 end
 
 function _fetch_and_pin_curve!(t::RemoteTarget, connect_host::AbstractString, port::Int)
-    ok, out = _ssh_capture(t.ssh_host, `head -n1 $_REMOTE_KEY_PATH`)
+    # Read where the files are: a routed node shares its login node's home, so no command runs on it.
+    ok, out = _ssh_capture(_host_for_files(t.ssh_host), `head -n1 $_REMOTE_KEY_PATH`)
     pub = ok ? _curve_key_from(out) : ""
-    isempty(pub) && error("slate remote: no CURVE server key on $(t.ssh_host) at $_REMOTE_KEY_PATH")
+    isempty(pub) && error("slate remote: no CURVE server key on $(t.ssh_host) at $_REMOTE_KEY_PATH" *
+                          (ok ? "" : ": " * first(strip(out), 300)))
     # Pin via KaimonGate's trust store when reachable through Kaimon; harmless if absent.
     try
         kg = getfield(_kaimon(), :KaimonGate)
@@ -4458,6 +4494,8 @@ end
 # Until `node` runs a step, or `wait_s` passes. Returns whether it did; a node that never answers is
 # handed on anyway, and its first command reports the reason.
 function _await_node_ready!(node::AbstractString, region::AbstractString; wait_s::Real = 120)
+    # A node that takes an ssh is running the job, and is then reached that way (`_in_allocation`).
+    _probe_node_ssh!(node) && (_rlog("region[$region]: $node is reached by ssh from its login node"); return true)
     t0 = time()
     said = false
     while true
