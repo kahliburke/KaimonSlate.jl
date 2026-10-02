@@ -234,7 +234,8 @@ function _doc_references(ctx)
     isempty(entries) && return ""
     _is_numeric_style(style) ? sort!(entries; by = e -> order[e.key]) :
         sort!(entries; by = e -> (lowercase(e.surname), e.year, labels[e.key]))
-    authors(a) = (names = strip.(split(_delatex(a), r"\s+and\s+")); length(names) > 3 ? join(names[1:3], ", ") * " et al." : join(names, ", "))
+    authors(a) = (names = _doc_author.(split(_delatex(a), r"\s+and\s+"));
+                  length(names) > 3 ? join(names[1:3], ", ") * " et al." : join(names, ", ", " and "))
     io = IOBuffer()
     println(io, "## References\n")
     for e in entries
@@ -248,6 +249,17 @@ function _doc_references(ctx)
         println(io)
     end
     return String(take!(io))
+end
+
+# A BibTeX name as a reference list shows it: "Lovelace, Ada Byron" → "A. B. Lovelace" (a hyphenated
+# given name keeps its hyphen, "J.-L."); a name without a comma (an institution) is kept as written.
+function _doc_author(name::AbstractString)
+    n = strip(String(name))
+    occursin(",", n) || return n
+    last, given = strip.(split(n, ","; limit = 2))
+    initials = join((join((string(first(h), ".") for h in split(g, '-') if !isempty(h)), "-")
+                     for g in split(given) if !isempty(g)), " ")
+    return isempty(initials) ? String(last) : string(initials, " ", last)
 end
 
 """

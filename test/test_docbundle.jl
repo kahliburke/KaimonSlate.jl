@@ -151,8 +151,8 @@ end
         @test cells["unlinked"]["native"] === false                     # nowhere to link: Slate renders it
         refs = cells["refs"]["markdown"]
         @test cells["refs"]["native"] === true && startswith(refs, "## References")
-        @test occursin("- Lovelace, Ada (2024). [Engines](slate-docpage:kb/ada24.md). [arXiv:2401.00001](https://arxiv.org/abs/2401.00001)", refs)
-        @test occursin("- Bard, Bea, Chen, Cy (2023). [Looms](https://example.org/looms). *Weaving*.", refs)
+        @test occursin("- A. Lovelace (2024). [Engines](slate-docpage:kb/ada24.md). [arXiv:2401.00001](https://arxiv.org/abs/2401.00001)", refs)
+        @test occursin("- B. Bard and C. Chen (2023). [Looms](https://example.org/looms). *Weaving*.", refs)
         @test occursin("Cards", refs) && !occursin("Unread", refs)        # cited only
         # The labels and the References keys follow the notebook's bibstyle.
         relabel(style) = begin
@@ -163,11 +163,12 @@ end
         end
         br = relabel("author-year-brackets")
         @test occursin("[[Lovelace 2024](slate-docpage:kb/ada24.md); [Bard 2023](https://example.org/looms)]", br["group"])
-        @test occursin("- [Bard 2023] Bard, Bea, Chen, Cy (2023).", br["refs"])
+        @test occursin("- [Bard 2023] B. Bard and C. Chen (2023).", br["refs"])
+        @test NS._doc_author("Duchateau, Jean-Luc") == "J.-L. Duchateau" && NS._doc_author("W7-X Team") == "W7-X Team"
         num = relabel("ieee")
         @test occursin("[[1](slate-docpage:kb/ada24.md); [2](https://example.org/looms)]", num["group"])
         at(s) = first(something(findfirst(s, num["refs"]), 0:0))
-        @test 0 < at("[1] Lovelace") < at("[2] Bard") < at("[3] Chen")
+        @test 0 < at("[1] A. Lovelace") < at("[2] B. Bard") < at("[3] C. Chen")
     end
 end
 
