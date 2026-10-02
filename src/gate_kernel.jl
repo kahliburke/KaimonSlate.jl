@@ -402,6 +402,11 @@ mutable struct GateKernel <: Kernel
                      # policy: `prepare!` then refuses to re-dial/cold-spawn until an EXPLICIT run clears
                      # it (a reactive cascade errors instead), so a flaky region isn't silently replaced
                      # behind the user's back. Always false under the `auto` policy (eager re-dial).
+    # Set by a `shutdown!` that found a spawn holding `lock`: the spawn ends its worker when it finishes
+    # (`_close_after_spawn!`), as `close_kill` says, and clears both. A kernel is reused after a shutdown
+    # (a restart prepares it again), so this marks one close in progress, not a dead kernel.
+    closing::Bool
+    close_kill::Bool
     online::Any      # optional `line::String -> nothing` callback: a COLD LOCAL spawn's stdout/stderr,
                      # streamed line-by-line (mirrors the remote path's `_bringup_note`/`_run_streamed`) —
                      # so a slow first-run precompile narrates itself into the UI instead of looking hung.
@@ -410,7 +415,7 @@ mutable struct GateKernel <: Kernel
                nbdir::AbstractString = "",
                pending::Vector = Any[], threads::AbstractString = "", extra_flags::AbstractString = "",
                label::AbstractString = "", target = nothing, online = nothing) =
-        new(String(project), String(parent), String(nbdir), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), String(extra_flags), false, String(label), target, nothing, 0, false, online)
+        new(String(project), String(parent), String(nbdir), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), String(extra_flags), false, String(label), target, nothing, 0, false, false, false, online)
 end
 
 """
@@ -1138,6 +1143,7 @@ function prepare!(k::GateKernel, report::Report; explicit::Bool = false)
             # connection reconnects on the next prepare (gate on `conn === nothing`).
             if k.conn === nothing
                 k.conn, k.tunnel = spawn_and_connect_remote!(k, k.target, k.parent)
+                k.closing && (_close_after_spawn!(k); error("this kernel was shut down while its worker started"))
                 lock(_GATE_SESSION_LOCK) do; _GATE_SESSION[k.conn.name] = report.id; end
                 _ensure_poller!()
                 # Carry the local memo store over NOW — the eval that triggered this prepare
@@ -1982,14 +1988,45 @@ process left running warm (namespace + packages + memo store) with its state sid
 a surviving worker would be wrong: an explicit restart (reattach would make it a no-op), the
 preflight probe, and reap. An ATTACHED worker (`k.remote`) is never ours to kill either way.
 """
-function shutdown!(k::GateKernel; kill_remote::Bool = false)
-    K = _kaimon()
-    lock(k.lock) do
-        # `send_shutdown!` tells the worker process to EXIT — only a local worker (or an explicit
-        # remote kill) gets it. An attached worker isn't ours; a detaching remote must keep running.
-        wants_exit = !(k.remote || (k.target isa RemoteTarget && !kill_remote))
-        (wants_exit && k.conn !== nothing) && (try; K.send_shutdown!(k.conn); catch; end)
-        _kill_worker!(k; kill_remote)   # proc === nothing for remote → no process kill; clears conn + routing
+function shutdown!(k::GateKernel; kill_remote::Bool = false, wait::Bool = true)
+    if wait                                # a restart: the worker is gone before it prepares again
+        lock(() -> _shutdown_locked!(k, kill_remote), k.lock)
+        return nothing
     end
+    # A close does not wait. A spawn holds the lock for as long as the worker takes to start, which can
+    # be minutes on a cluster: it sees `closing` when it finishes and ends the worker as this close
+    # asked. Anything else holding the lock is brief, and a task finishes the close after it.
+    k.close_kill = k.close_kill || kill_remote
+    k.closing = true
+    if trylock(k.lock)
+        try
+            _shutdown_locked!(k, k.close_kill); k.closing = false; k.close_kill = false
+        finally
+            unlock(k.lock)
+        end
+    else
+        Threads.@spawn lock(k.lock) do
+            k.closing || return             # the spawn ended it already
+            try; _shutdown_locked!(k, k.close_kill); catch; end
+            k.closing = false; k.close_kill = false
+        end
+    end
+    return nothing
+end
+
+function _shutdown_locked!(k::GateKernel, kill_remote::Bool)
+    # `send_shutdown!` tells the worker process to EXIT — only a local worker (or an explicit
+    # remote kill) gets it. An attached worker isn't ours; a detaching remote must keep running.
+    wants_exit = !(k.remote || (k.target isa RemoteTarget && !kill_remote))
+    (wants_exit && k.conn !== nothing) && (try; _kaimon().send_shutdown!(k.conn); catch; end)
+    _kill_worker!(k; kill_remote)   # proc === nothing for remote → no process kill; clears conn + routing
+    return nothing
+end
+
+# A worker that finished starting after its kernel was shut down: ended now, as the close asked.
+# Runs under `k.lock`, from the spawn that held it.
+function _close_after_spawn!(k::GateKernel)
+    try; _shutdown_locked!(k, k.close_kill); catch; end
+    k.closing = false; k.close_kill = false
     return nothing
 end

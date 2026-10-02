@@ -81,12 +81,15 @@ mutable struct LiveNotebook
                                          # from the same manifest. Tracked only to notice a CHANGE: a markdown cell
                                          # caches its interpolation results, so cells holding a now-claimed (or
                                          # now-unclaimed) fence must be restaled. See `_refresh_fences!`.
+    # Set the moment the notebook starts closing. Work started for it in the background (a prepare, a
+    # placement, a connect) checks it before creating anything for the notebook or running its cells.
+    closed::Bool
     # Inner constructor takes the original 13 fields and starts empty scratchpad + frontend/asset/import registries, so
     # every existing positional call site (server + tests) is unchanged; all are populated at runtime.
     LiveNotebook(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents) =
         new(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents,
             Cell[], @NamedTuple{id::String, js::String, esm::Bool, kind::String}[], Dict{String,String}(),
-            Dict{String,String}(), Set{String}())
+            Dict{String,String}(), Set{String}(), false)
 end
 
 # ── Notebook-lock protocol (`nb.lock`) ─────────────────────────────────────────────────────────────
@@ -1811,6 +1814,7 @@ const _PLACING_LOCK = ReentrantLock()
 _region_recoverable(c) = c.state == BLOCKED || c.state == ERRORED
 
 function _restale_region_cells!(nb::LiveNotebook, name::AbstractString)
+    nb.closed && return 0
     n = 0
     lock(nb.lock) do
         # Every cell that RUNS on this region, whether or not it is still waiting — then everything
@@ -1927,6 +1931,8 @@ end
 # `preparing`: the caller is the region's prepare, starting the worker it hands to this notebook.
 function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false)
     lock(_REGION_LOCK) do
+        # Checked under the lock its teardown takes, so a closing notebook gets no kernel after it.
+        nb.closed && error("$(basename(nb.path)) was closed")
         r = ReportEngine.region_get(name)
         r === nothing && error("region '$name' is not defined — create it in the registry: " *
                                "region(\"$name\"; host=…, warm=…) or the home-page Regions manager")
@@ -1947,7 +1953,11 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
             ReportEngine._rlog("region: '$name' moved off $(_at_label(tgt.ssh_host, tgt.job)) " *
                                "to $(_at_label(at...)) — rebuilding its kernel")
             _forget_region_kernel!(nb, name)
-            ReportEngine._drop_kernel_conn!(k)
+            # Its wire is dropped on a task of its own: the drop takes the kernel's lock, which a spawn
+            # in progress holds, and this runs under `_REGION_LOCK` and the notebook's lock.
+            let old = k
+                Threads.@spawn try; ReportEngine._drop_kernel_conn!(old); catch; end
+            end
         end
         proj = Base.current_project(dirname(abspath(nb.path)))
         parent = proj === nothing ? "" : dirname(proj)   # notebook's own /src synced for hot-reload provenance
@@ -2141,7 +2151,7 @@ function _everywhere_replay_source(c::Cell)
 end
 
 # Detach (default) or kill every region kernel + forget the boundary sync state.
-function _teardown_region!(nb::LiveNotebook; kill::Bool = false)
+function _teardown_region!(nb::LiveNotebook; kill::Bool = false, wait::Bool = true)
     ks = lock(_REGION_LOCK) do
         got = [pop!(_REGION_KERNELS, key) for key in collect(keys(_REGION_KERNELS)) if key[1] == nb.id]
         delete!(_REGION_SYNCED, nb.id)
@@ -2149,7 +2159,7 @@ function _teardown_region!(nb::LiveNotebook; kill::Bool = false)
         got
     end
     for k in ks
-        try; ReportEngine.shutdown!(k; kill_remote = kill); catch e
+        try; ReportEngine.shutdown!(k; kill_remote = kill, wait); catch e
             @warn "slate region: teardown failed" notebook = nb.id exception = e
         end
     end
@@ -2972,6 +2982,26 @@ function _regions_in_use(h)
     return nbs_of, busy
 end
 
+# Remote work the supervisor starts for a region runs on a task of its own, one per region and kind at
+# a time: a slow cluster then delays that region's next turn rather than the whole tick, which also
+# runs every notebook's liveness check. Returns whether the work was started.
+const _REGION_WORK = Set{Tuple{String,Symbol}}()
+const _REGION_WORK_LOCK = ReentrantLock()
+function _region_work!(f, name::AbstractString, kind::Symbol)
+    key = (String(name), kind)
+    lock(_REGION_WORK_LOCK) do
+        key in _REGION_WORK ? false : (push!(_REGION_WORK, key); true)
+    end || return false
+    Threads.@spawn try
+        f()
+    catch e
+        ReportEngine._rlog("supervisor: $kind for region '$name' failed: " * first(sprint(showerror, e), 160))
+    finally
+        lock(() -> delete!(_REGION_WORK, key), _REGION_WORK_LOCK)
+    end
+    return true
+end
+
 # How much warning a walltime gets. Unlike the idle timer this is not opt-in: the job ends whatever
 # anyone configured, and the only thing worse than losing the node is losing it unannounced.
 # Two notices per allocation: one with time to act, one with time to save. Not opt-in — the job ends
@@ -2998,8 +3028,10 @@ function _warn_expiring_regions!(nbs_of)
             # extension anyone can ask for is a real one.
             (prev > 0 && p.until <= prev + 30) && break
             _WALLTIME_WARNED[key] = p.until
-            _push_alloc_notice!(get(nbs_of, r.name, LiveNotebook[]), r,
-                                Dict{String,Any}("kind" => "walltime", "seconds_left" => round(Int, left)))
+            nbs = get(nbs_of, r.name, LiveNotebook[])
+            _region_work!(r.name, :notice) do
+                _push_alloc_notice!(nbs, r, Dict{String,Any}("kind" => "walltime", "seconds_left" => round(Int, left)))
+            end
             break
         end
     end
@@ -3026,24 +3058,26 @@ function _release_idle_regions!(nbs_of, busy)
             if warned == 0.0
                 lock(_REGION_USE_LOCK) do; _REGION_RELEASE_WARNED[r.name] = time(); end
                 left = max(0, r.idle_release - idle)
-                _ask_still_there!(nbs, r, round(Int, left))
+                _region_work!(() -> _ask_still_there!(nbs, r, round(Int, left)), r.name, :notice)
             end
         end
         idle >= r.idle_release || continue
-        ReportEngine._rlog("region[$(r.name)]: idle $(ReportEngine.Sweep.format_duration(idle)) past " *
-                           "its $(ReportEngine.Sweep.format_duration(r.idle_release)) limit — " *
-                           "releasing its node")
-        try
-            ReportEngine.region_release!(r)
-            lock(_REGION_USE_LOCK) do; delete!(_REGION_RELEASE_WARNED, r.name); end
-            # Nobody was here to see it — that is why it happened — so the notice is KEPT and pushed
-            # again when a page next connects, rather than broadcast once into an empty room.
-            _hold_released_notice!(nbs, r, "idle")
-            _push_alloc_event!(nbs, r.name, "released"; reason = "idle")
-            for nb in nbs; try; _workers_push!(nb); catch; end; end
-        catch e
-            ReportEngine._rlog("region[$(r.name)]: idle release failed — " *
-                               first(sprint(showerror, e), 120))
+        _region_work!(r.name, :release) do
+            ReportEngine._rlog("region[$(r.name)]: idle $(ReportEngine.Sweep.format_duration(idle)) past " *
+                               "its $(ReportEngine.Sweep.format_duration(r.idle_release)) limit — " *
+                               "releasing its node")
+            try
+                ReportEngine.region_release!(r)
+                lock(_REGION_USE_LOCK) do; delete!(_REGION_RELEASE_WARNED, r.name); end
+                # Nobody was here to see it — that is why it happened — so the notice is KEPT and pushed
+                # again when a page next connects, rather than broadcast once into an empty room.
+                _hold_released_notice!(nbs, r, "idle")
+                _push_alloc_event!(nbs, r.name, "released"; reason = "idle")
+                for nb in nbs; try; _workers_push!(nb); catch; end; end
+            catch e
+                ReportEngine._rlog("region[$(r.name)]: idle release failed — " *
+                                   first(sprint(showerror, e), 120))
+            end
         end
     end
     return nothing
@@ -3154,10 +3188,7 @@ function _sweep_dead_regions!(busy)
         # the site's controller and a row in its accounting, every minute the node is held. A node
         # with one of our workers connected to it is in use, and its wire says so already.
         _region_serves_kernel(r) && continue
-        try; ReportEngine.region_reconcile!(r.name)
-        catch e; ReportEngine._rlog("supervisor: region sweep on '$(r.name)': " *
-                                    first(sprint(showerror, e), 120))
-        end
+        _region_work!(() -> ReportEngine.region_reconcile!(r.name), r.name, :reconcile)
     end
     return nothing
 end
@@ -4562,6 +4593,7 @@ end
 
 # Start the runner if one isn't already draining (idempotent). Announces the batch size for the k/N pill.
 function _ensure_runner!(nb::LiveNotebook)
+    nb.closed && return nothing
     started = lock(_RUNNER_LOCK) do
         get(_RUNNERS, nb.id, false) && return false
         _RUNNERS[nb.id] = true

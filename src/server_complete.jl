@@ -4171,6 +4171,7 @@ function close_notebook!(h::Hub, id::AbstractString)
         return n
     end
     nb === nothing && return false
+    nb.closed = true                       # background work for it stops creating things from here on
     # Tell open tabs the close is DELIBERATE before draining their SSE. Without this the client's
     # disconnect recovery reads the ensuing 404 as a crashed server and re-opens the notebook by path —
     # respawning it seconds after every close. The queued message still reaches each tab: a closed
@@ -4203,8 +4204,9 @@ function close_notebook!(h::Hub, id::AbstractString)
     # session leaves its interpreter scoped to our modules for whoever adopts it next.
     try; stop_debug!(nb; serialize = false, force = true); catch; end
     forget_debug!(id); forget_specialists!(id); forget_findings!(id)   # ids are reused when the file reopens
-    try; shutdown!(nb.kernel); catch; end
-    _teardown_region!(nb)                  # detach — a remote region idles warm like the main kernel
+    # Not waiting on a worker still starting: it is ended when it is up (`shutdown!`).
+    try; shutdown!(nb.kernel; wait = false); catch; end
+    _teardown_region!(nb; wait = false)    # detach — a remote region idles warm like the main kernel
     lock(_EVAL_MUTEX_LOCK) do; delete!(_EVAL_MUTEX, id); end
     _persist_registry!(h)                  # forget an explicitly-closed nb so a restart won't re-open it
     return true
@@ -4220,11 +4222,12 @@ function stop_hub(h::Hub)
         v
     end
     for nb in nbs
+        nb.closed = true
         _close_listeners(nb); _stop_live_rerender!(nb); _stop_watchers!(nb); _unwire_callbacks!(nb)
         _interrupt_inflight!(nb)
         try; stop_debug!(nb; serialize = false, force = true); catch; end
-        try; shutdown!(nb.kernel); catch; end
-        _teardown_region!(nb)
+        try; shutdown!(nb.kernel; wait = false); catch; end
+        _teardown_region!(nb; wait = false)
     end
     _stop_run_supervisor!()          # its closure holds THIS hub — see `_ensure_run_supervisor!`
     h.server === nothing || close(h.server)

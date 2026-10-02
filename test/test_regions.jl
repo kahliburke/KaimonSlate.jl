@@ -427,6 +427,42 @@ const RE = KaimonSlate.ReportEngine
                 end
             end
 
+            @testset "closing does not wait on a worker still starting" begin
+                # A close finds the kernel's lock held (a spawn in progress) and returns at once; the
+                # ending happens once the lock is free. A restart still waits, so it starts fresh.
+                k = RE.GateKernel(mktempdir())
+                held, release = Channel{Nothing}(1), Channel{Nothing}(1)
+                spawn = Threads.@spawn lock(k.lock) do; put!(held, nothing); take!(release); end   # as a spawn holds it
+                take!(held)
+                t0 = time(); RE.shutdown!(k; wait = false)
+                @test time() - t0 < 1.0 && k.closing
+                put!(release, nothing); wait(spawn)
+                t0 = time(); while k.closing && time() - t0 < 5; sleep(0.05); end
+                @test !k.closing && !k.close_kill
+                RE.shutdown!(k)                                  # wait = true takes the lock as before
+                @test !k.closing
+                # A closed notebook gets no region kernel, and its runner is not started.
+                rep = RE.parse_report("#%% code id=c region=gpu\n1\n")
+                nb = NS.LiveNotebook("closed", joinpath(mktempdir(), "closed.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                nb.closed = true
+                @test_throws ErrorException NS._region_kernel!(nb, "gpu")
+                NS._ensure_runner!(nb)
+                @test !get(NS._RUNNERS, nb.id, false)
+                @test NS._restale_region_cells!(nb, "gpu") == 0
+            end
+
+            @testset "the supervisor's remote work for a region runs one at a time" begin
+                gate = Channel{Nothing}(1)
+                @test NS._region_work!(() -> take!(gate), "rw", :release)
+                @test !NS._region_work!(() -> nothing, "rw", :release)      # one in flight already
+                @test NS._region_work!(() -> nothing, "rw", :notice)        # another kind is its own
+                put!(gate, nothing)
+                t0 = time(); while ("rw", :release) in NS._REGION_WORK && time() - t0 < 5; sleep(0.02); end
+                @test NS._region_work!(() -> nothing, "rw", :release)       # free again once it finished
+            end
+
             @testset "a cell whose input is waiting waits with it" begin
                 rep = RE.parse_report("#%% code id=a region=gpu\nx = 1\n#%% code id=b\ny = x + 1\n#%% code id=c\nz = y + 1\n")
                 RE.build_dependencies!(rep)
