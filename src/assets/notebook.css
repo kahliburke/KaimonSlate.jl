@@ -3625,3 +3625,6 @@ body.slate-dragging .logv-body *, body.slate-dragging .swcfg-body * { pointer-ev
   color:var(--val); white-space:pre-wrap; overflow-wrap:anywhere; }
 body.record-plain .slate-record > .srec-grid { display:none; }
 body.record-plain .srec-plain { display:block; }
+
+/* The cell a ✨ turn was scoped to, above what was asked. */
+.apmsg .apscope { display:block; font-size:.7rem; color:var(--dim); margin-bottom:2px; }

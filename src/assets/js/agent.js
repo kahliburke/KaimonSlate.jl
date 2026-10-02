@@ -316,7 +316,7 @@ function _agentMsgHtml(m) {
       m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${_safeImgSrc(m.src)}" alt="agent image"></div>`
     : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
     :                     `<div class="apmsg ${m.role}${lane}${m.external ? ' ext' : ''}" ${tag}>` +
-                          `${_speakerBadge(m)}${_extBadge(m.external)}${_esca(m.text)}</div>`);
+                          `${_speakerBadge(m)}${_extBadge(m.external)}${m.scope ? `<span class="apscope">✨ ${_esca(m.scope)}</span>` : ''}${_esca(m.text)}</div>`);
 }
 // Consecutive tool calls by the same agent, as ONE block: the crew named once as a heading, then a
 // line per call. They do not have to be the same tool — a debugging specialist's run is watch,
@@ -598,7 +598,7 @@ async function agentSend() {
   // Shown straight away rather than waiting for the server to echo it back, so typing feels
   // answered. `local` marks it as the one the `user_text` event should adopt instead of appending
   // its own copy — see the handler.
-  _stopArmed = false; agentMsgs.push({ role: 'user', text, local: true });
+  _stopArmed = false; agentMsgs.push({ role: 'user', text, local: true, scope: _chatTarget || '' });
   agentStatus('thinking…'); setWorking(true);
   try {
     const r = await api('POST', '/api/chat', { text, target: _chatTarget || '', model: effectiveAgentModel(), permission: effectiveAgentPerm(), dark: _uiThemeDark() });
@@ -637,6 +637,14 @@ function _argCid(args) {
   }
   return '';
 }
+// A turn scoped to a cell (✨) reaches the agent as that cell's context, then the marker, then what
+// was typed (`/api/chat`, server_complete.jl). The transcript shows what was typed and the cell.
+const _SCOPED_MARK = '\n\nUSER REQUEST:\n';
+function _yourTurn(raw) {
+  const i = raw.indexOf(_SCOPED_MARK);
+  if (!raw.startsWith('══ SCOPED TURN') || i < 0) return { text: raw, scope: '' };
+  return { text: raw.slice(i + _SCOPED_MARK.length), scope: (raw.match(/on cell `([^`]+)`/) || [])[1] || '' };
+}
 function agentEvent(env) {
   if (!env) return;
   // The debugger's focus view keeps its OWN transcript of the specialist working, rendered for a
@@ -650,11 +658,12 @@ function agentEvent(env) {
     // Your own turn. It is in the log, so a reload has to rebuild it — without this the transcript
     // came back as the agent answering nothing. Live, `agentSend` has already shown it, so the
     // event adopts that copy rather than appending a second one.
-    const txt = (d.content && d.content.text) || '';
-    if (!txt) return;
+    const raw = (d.content && d.content.text) || '';
+    if (!raw) return;
+    const { text: txt, scope } = _yourTurn(raw);
     const mine = agentMsgs.find(m => m.role === 'user' && m.local && m.text === txt);
     if (mine) delete mine.local;
-    else agentMsgs.push({ role: 'user', text: txt });
+    else agentMsgs.push({ role: 'user', text: txt, scope });
   } else if (k === 'assistant_text' || k === 'thought') {
     // Streaming: delta:true chunks APPEND live; the final delta:false copy REPLACES
     // the streamed block (self-healing any dropped delta). Non-streaming services

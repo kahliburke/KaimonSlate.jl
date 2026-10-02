@@ -3041,6 +3041,7 @@ function _make_router(h::Hub)
         perm = String(get(_body(req), "permission", "")) # preset (notebook/lab/auto/default/bypass); binds at spawn
         ment = _mention_context(nb, text)              # @id cell references → inline those cells' context
         isempty(ment) || (text = ment * "\n\n" * text)
+        # The chat shows only what follows the marker (agent.js `_yourTurn`).
         isempty(tgt) || (text = _cell_context(nb, tgt) * "\n\nUSER REQUEST:\n" * text)
         let d = get(_body(req), "dark", nothing)       # browser's UI theme → plot-theme hint in the system prompt
             d === nothing || (nb.report.meta["ui_dark"] = d === true)
