@@ -2245,6 +2245,14 @@ const _DEAD_WIRE_GRACE = something(tryparse(Float64, get(ENV, "KAIMONSLATE_DEADW
 # setting; else what preparing the region measured for this worker's project, whose packages are what
 # a busy worker is loading; else what it measured for the site; anything else gets the hub's default.
 # Never shorter than the default: a measurement only ever adds patience.
+# While its region is being prepared, a worker is loading the notebook's packages for the prepare,
+# which can leave it silent for longer than any grace measured before; the prepare's steps carry their
+# own time limits, so its silence is shown but its wire is kept.
+function _prepare_holds(k)
+    t = try; k.target; catch; nothing; end
+    return t isa ReportEngine.RemoteTarget && !isempty(t.region) && ReportEngine.prepare_running(t.region)
+end
+
 function _dead_wire_grace(k)
     t = try; k.target; catch; nothing; end
     t isa ReportEngine.RemoteTarget || return _DEAD_WIRE_GRACE
@@ -2402,7 +2410,7 @@ function _liveness_sweep!(nb::LiveNotebook)
             unresp = time() - since
             logged = _log_liveness_silence(nb, k, err, unresp)
             if (k.target isa ReportEngine.RemoteTarget || k.remote || _kernel_proc_dead(k)) &&
-               unresp >= _dead_wire_grace(k)
+               unresp >= _dead_wire_grace(k) && !_prepare_holds(k)
                 delete!(_KERNEL_UNRESPONSIVE_SINCE, k); delete!(_LIVENESS_LOG_LAST, k)
                 _heal_dead_wire!(nb, k, unresp)        # → amber "disconnected" (pushes inside)
             elseif k.target isa ReportEngine.RemoteTarget || k.remote
