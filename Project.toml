@@ -5,6 +5,8 @@ authors = ["Kahli Burke <kahli@kahliburke.com>"]
 
 [deps]
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+BetterFileWatching = "c9fd44ac-77b5-486c-9482-9798bd063cc6"
+CancellationTokens = "2e8d271d-f2e2-407b-a864-17eb2156783e"
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
 CodecZstd = "6b39b394-51ab-5f42-8807-6242bab2b4c2"
 CommonMark = "a80b9123-70ca-4bc0-993e-6e3bcb318db6"
@@ -44,6 +46,8 @@ KaimonSlateTablesExt = "Tables"
 
 [compat]
 Base64 = "1.11.0"
+BetterFileWatching = "1"
+CancellationTokens = "2.3"
 CodecZlib = "0.7.8"
 CodecZstd = "0.8"
 CommonMark = "1.0.2"

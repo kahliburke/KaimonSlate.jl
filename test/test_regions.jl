@@ -108,6 +108,37 @@ const RE = KaimonSlate.ReportEngine
         @test occursin("ssh ", RE._in_allocation((; host = "login", job = "9", kind = :pbs), "c1", "echo hi"))
     end
 
+    @testset "the sync sends an edit anywhere in src or ext, once" begin
+        root = mktempdir()
+        foreach(d -> mkpath(joinpath(root, d)), ("src/sub", "ext", "docs"))
+        write(joinpath(root, "src", "Foo.jl"), "module Foo end\n")
+        @test RE._sync_scope(root) == ["src", "ext"]
+        @test RE._in_sync_scope("src/sub/bar.jl", ["src", "ext"]) && !RE._in_sync_scope("docs/a.md", ["src", "ext"])
+        # A project with neither folder is watched by the files directly in it.
+        @test RE._in_sync_scope("a.jl", String[]) && !RE._in_sync_scope("sub/a.jl", String[])
+        CT = RE.CancellationTokens
+        # Saved by a rename from outside the scope, so each edit is one change to the signature.
+        save(path, text) = (tmp = joinpath(root, "tmp"); write(tmp, text); mv(tmp, path; force = true))
+        # With notifications, and with the polling fallback alone, as on a filesystem that sends none.
+        for events in (true, false)
+            sends = Channel{Nothing}(Inf)
+            src = CT.CancellationTokenSource()
+            task = Threads.@spawn RE._sync_task("", root, "remote", String[], CT.get_token(src);
+                                                send = (h, l, r; excludes) -> put!(sends, nothing),
+                                                events, poll_s = 0.3)
+            sent() = (n = 0; while isready(sends); take!(sends); n += 1; end; n)
+            sleep(1.0)
+            save(joinpath(root, "src", "sub", "bar.jl"), "bar() = $events\n"); sleep(1.0)
+            @test sent() == 1
+            save(joinpath(root, "ext", "FooExt.jl"), "module FooExt end # $events\n"); sleep(1.0)
+            @test sent() == 1
+            save(joinpath(root, "docs", "a.md"), "$events\n"); sleep(1.0)
+            @test sent() == 0
+            CT.cancel(src)
+            @test timedwait(() -> istaskdone(task), 5.0) === :ok
+        end
+    end
+
     @testset "a session that cannot open a channel is dropped" begin
         # A transport dies quietly — the far side reboots, a NAT drops the flow, an idle timeout
         # fires — and nothing says so. `alive` is set once at authentication and never revalidated,
