@@ -51,6 +51,7 @@ include("cell_actions.jl")
 include("palette.jl")
 include("render.jl")
 include("binary.jl")
+include("logging.jl")
 
 # Controls
 export Widget, Choice, Selection, UploadedFile, indices, to_widget, auto_widget, kind_for
@@ -82,5 +83,6 @@ export slate_render, component, html_fragment, SlateComponentMIME, SlateHtmlMIME
 export register_fence_renderer!, fence_renderer, fence_languages, render_fence
 # Binary numeric streaming
 export SlateBinary, encode_binary_frame
+export HookLogger
 
 end # module

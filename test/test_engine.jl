@@ -266,6 +266,19 @@ mean(data)
         @test ReportEngine._progress_sink(Module(:Bare))("", 0.5, "x", false) === nothing   # no slate_progress → no-op
     end
 
+    @testset "a cell's logger answers code running in an older world" begin
+        # A package compiler baked into a sysimage asks the current logger for its level from the
+        # world the image was built in. The cell logger's handler is made after that world; its
+        # level still has to be readable from there.
+        w0 = Base.get_world_counter()
+        lg = ReportEngine._CellLogger(Logging.NullLogger(), (_...) -> nothing)
+        @test Base.invoke_in_world(w0, Base.CoreLogging._invoked_min_enabled_level, lg) == Logging.LogLevel(-1)
+        # A logger type of its own, defined after that world, is what failed.
+        T = Core.eval(Module(:Late), :(struct LateLogger <: $(Logging.AbstractLogger) end; LateLogger))
+        Core.eval(parentmodule(T), :(Base.CoreLogging.min_enabled_level(::$T) = $(Logging.Info)))
+        @test_throws MethodError Base.invoke_in_world(w0, Base.CoreLogging._invoked_min_enabled_level, Base.invokelatest(T))
+    end
+
     @testset "a re-run does not warn about replacing its own docs" begin
         # Defining a documented function and running the cell again makes `@doc` warn that it is
         # replacing the docstring. Re-running is the normal operation in a reactive notebook, so

@@ -402,13 +402,15 @@ end
 #
 # 2. RE-RUN NOISE. A warning that only fires because a cell ran twice is not telling the reader
 #    anything — re-running is the normal operation here, not a mistake. See `_rerun_noise`.
-struct _CellLogger <: Logging.AbstractLogger
-    parent::Logging.AbstractLogger
-    sink                       # (id, frac::Float64, msg::String, done::Bool) -> Any  (cell progress channel)
-end
-Logging.shouldlog(::_CellLogger, _...) = true                          # filter in handle_message
-Logging.min_enabled_level(l::_CellLogger) = min(Logging.LogLevel(-1), Logging.min_enabled_level(l.parent))
-Logging.catch_exceptions(l::_CellLogger) = Logging.catch_exceptions(l.parent)
+#
+# A `SlateExtensionsBase.HookLogger` rather than a logger type of its own: a worker booted from a
+# sysimage has package compilers in it (GPUCompiler) that ask the current logger for its level from
+# the world the image was built in, where a type defined here does not exist yet.
+# `sink` is (id, frac::Float64, msg::String, done::Bool) -> Any, the cell's progress channel.
+_CellLogger(parent::Logging.AbstractLogger, sink) =
+    SlateExtensionsBase.HookLogger(parent, (inner, args...; kwargs...) -> _cell_log(inner, sink, args...; kwargs...);
+        min_level = min(Logging.LogLevel(-1), Logging.min_enabled_level(parent)),
+        shouldlog = (_...) -> true)                                     # filter in `_cell_log`
 
 _progress_frac(p) = p === nothing                  ? 0.0 :
                     p isa AbstractString           ? (p == "done" ? 1.0 : 0.0) :
@@ -428,19 +430,19 @@ _progress_frac(p) = p === nothing                  ? 0.0 :
 _rerun_noise(_module, message) =
     _module === Base.Docs && startswith(string(message), "Replacing docs for")
 
-function Logging.handle_message(l::_CellLogger, level, message, _module, group, id, file, line; kwargs...)
+function _cell_log(parent, sink, level, message, _module, group, id, file, line; kwargs...)
     if haskey(kwargs, :progress)                                            # a progress record → cell meter
         p = kwargs[:progress]
         # The log `id` keys the bar — each `@withprogress` scope (nested loops, parallel tasks) has
         # its own, so they render as separate bars. `progress="done"` ends a scope → remove its bar
         # (else each new nested scope's fresh id would pile up).
         bid = id === nothing ? "" : string(id)
-        try; l.sink(bid, _progress_frac(p), message === nothing ? "" : string(message), p === "done"); catch; end
+        try; sink(bid, _progress_frac(p), message === nothing ? "" : string(message), p === "done"); catch; end
         return nothing                                                      # consume (don't echo to stderr)
     end
     _rerun_noise(_module, message) && return nothing
-    Logging.shouldlog(l.parent, level, _module, group, id) &&
-        Logging.handle_message(l.parent, level, message, _module, group, id, file, line; kwargs...)
+    Logging.shouldlog(parent, level, _module, group, id) &&
+        Logging.handle_message(parent, level, message, _module, group, id, file, line; kwargs...)
     return nothing
 end
 
