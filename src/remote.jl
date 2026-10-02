@@ -2035,7 +2035,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
         r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
         k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
         _attach_record!(host, k.label; port = port, stream_port = stream_port,
-                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
+                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip, job = t.job)
         _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host")
         return (r.conn, r.tunnel)
     end
@@ -2053,7 +2053,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
             return fresh_spawn()
         end
         _attach_record!(host, k.label; port = k.port, stream_port = k.stream_port,
-                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
+                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip, job = t.job)
         start_sync!(t, parent_project)          # non-blocking watcher; heals /src drift from the detached period
         # No provisioning here. The worker is live and loads from this environment, and rebuilding it
         # underneath competes with that load; every fresh spawn provisions for itself anyway.
@@ -2098,6 +2098,14 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     #    no ssh at all before the dial itself, whose success IS the validation. Short deadline:
     #    a live worker answers in well under a second; anything else is stale → demote.
     rec = _attach_lookup(host, k.label)
+    # A worker on a scheduler node ends with its job: one recorded in another job is gone, and dialling
+    # it only waits out the dial's deadline.
+    if rec !== nothing && !isempty(t.job) && rec.job != t.job
+        _attach_clear!(host, k.label)
+        _rlog("reconnect: worker-$(rec.port) was recorded in " * (isempty(rec.job) ? "an earlier allocation" : "job $(rec.job)") *
+              ", not job $(t.job); not dialling it")
+        rec = nothing
+    end
     if rec !== nothing
         k.port = rec.port; k.stream_port = rec.stream_port
         r = dial(rec.port, rec.stream_port; deadline = _dial_deadline_record(),
@@ -3686,8 +3694,10 @@ _attach_path(host, label) =
     joinpath(_ATTACH_DIR, string(hash((String(host), String(label), worker_owner_tag())); base = 16) * ".json")
 
 function _attach_record!(host, label; port::Int, stream_port::Int, transport::Symbol,
-                         server_key::AbstractString = "", remote_ip::AbstractString = "")
+                         server_key::AbstractString = "", remote_ip::AbstractString = "",
+                         job::AbstractString = "")
     fields = ["host" => String(host), "label" => String(label), "owner" => worker_owner_tag(),
+              "job" => String(job),
               "port" => string(port),
               "stream_port" => string(stream_port), "transport" => string(transport),
               "server_key" => String(server_key), "remote_ip" => String(remote_ip),
@@ -3713,7 +3723,7 @@ function _attach_lookup(host, label)
     (port === nothing || sp === nothing || port == 0) && return nothing
     tr = g("transport")
     return (port = port, stream_port = sp, transport = Symbol(isempty(tr) ? "tunnel" : tr),
-            server_key = g("server_key"), remote_ip = g("remote_ip"))
+            server_key = g("server_key"), remote_ip = g("remote_ip"), job = g("job"))
 end
 
 _attach_clear!(host, label) = (try; rm(_attach_path(host, label); force = true); catch; end; nothing)
