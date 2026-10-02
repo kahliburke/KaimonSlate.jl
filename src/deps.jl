@@ -825,8 +825,17 @@ end
 # Monotonic per PROCESS rather than per cell: a cell can be replaced wholesale (reorder, re-parse,
 # restore) and a per-cell counter would restart underneath the client. A global one is never reused,
 # so "not newer than what I hold" is always the right test.
+#
+# Across processes too: a page left open over a hub restart holds stamps from the process before, and
+# a counter that started again from zero would have every later update read as older and be dropped.
+# So it starts, on its first use in a process, from the time in microseconds, which every stamp of an
+# earlier process is below (and which stays well inside the integers JavaScript holds exactly).
 const _REV = Threads.Atomic{Int}(0)
-bump_rev!(c::Cell) = (c.rev = Threads.atomic_add!(_REV, 1) + 1; c)
+function bump_rev!(c::Cell)
+    Threads.atomic_cas!(_REV, 0, round(Int, time() * 1e6))
+    c.rev = Threads.atomic_add!(_REV, 1) + 1
+    return c
+end
 
 # Drop the wait: the reason AND the clock behind it. Called by every transition out of BLOCKED, so
 # a stale "waiting 40m" can never sit on a cell that has since run.

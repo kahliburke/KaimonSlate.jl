@@ -266,6 +266,16 @@ mean(data)
         @test ReportEngine._progress_sink(Module(:Bare))("", 0.5, "x", false) === nothing   # no slate_progress → no-op
     end
 
+    @testset "a cell's stamp is newer than any from an earlier hub process" begin
+        # A page left open over a hub restart keeps the stamps it was sent before; every stamp the new
+        # process sends has to read as newer, or the page drops the update.
+        # So stamps count up from the clock (microseconds) at the process's first one, not from zero.
+        c = only(ReportEngine.parse_report("#%% code id=a\n1\n").cells)
+        ReportEngine.bump_rev!(c); first_rev = c.rev
+        ReportEngine.bump_rev!(c)
+        @test 1_700_000_000 * 10^6 < first_rev <= round(Int, time() * 1e6) + 10^9 && c.rev == first_rev + 1
+    end
+
     @testset "a cell's logger answers code running in an older world" begin
         # A package compiler baked into a sysimage asks the current logger for its level from the
         # world the image was built in. The cell logger's handler is made after that world; its
