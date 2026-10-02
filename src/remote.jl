@@ -21,13 +21,14 @@
 # notebook's parent project (Project.toml + /src), all copied over and kept in sync so the remote
 # worker's Revise hot-reloads exactly like local. Package *adds* execute on the remote worker.
 #
-# `import Sockets`, `FileWatching` — stdlib. SSH rides the session in `SshTransport` (no subprocess,
+# `import Sockets` — stdlib; `BetterFileWatching` watches local sources for the continuous sync. SSH rides the session in `SshTransport` (no subprocess,
 # so hostnames/paths can't inject). KaimonGate CURVE bits are reached through the client the
 # hub already uses (`connect_tcp!(…; server_key=…)` does the client-side CURVE itself).
 # ═══════════════════════════════════════════════════════════════════════════════
 
 import Sockets
-import FileWatching
+import BetterFileWatching
+import CancellationTokens
 import Dates
 import Mmap
 import SHA as _SHA
@@ -1335,13 +1336,14 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     return String(take!(io))
 end
 
-# ── continuous sync ────────────────────────────────────────────────────────────
+# ── continuous sync ────────────────────────────────────────────────────────────────────────────
 # Watch the local parent project (/src + Project.toml) and send changes to the remote on
 # change, so the remote worker's Revise hot-reloads exactly like local. One task per target;
 # coalesced (a burst of saves → one transfer). Package adds happen on the remote worker itself.
 mutable struct SyncWatcher
     task::Task
     running::Bool
+    cancel::CancellationTokens.CancellationTokenSource
 end
 const _SYNCERS = Dict{String,SyncWatcher}()   # keyed by "host:remote_project"
 const _SYNC_LOCK = ReentrantLock()
@@ -1352,9 +1354,8 @@ function start_sync!(t::RemoteTarget, parent_project::AbstractString)
     lock(_SYNC_LOCK) do
         # 1. the notebook's parent project /src → t.project (project code hot-reload). NEVER the env
         #    files, or we'd clobber the replicated Project/Manifest (the exact env provisioning set up).
-        _start_syncer!(base, t.ssh_host, parent_project,
-                       isdir(joinpath(parent_project, "src")) ? joinpath(parent_project, "src") : parent_project,
-                       t.project, ["Manifest.toml", "Project.toml", ".git", "*.cov"])
+        _start_syncer!(base, t.ssh_host, parent_project, t.project,
+                       ["Manifest.toml", "Project.toml", ".git", "*.cov"])
         # 2. each dev'd path dep → devsrc/<name>, so a local package the notebook develops stays fresh on
         #    the remote and Revise hot-reloads its edits there — the "kept up to date" half of dev-dep
         #    provisioning. Read the SAME env whose Manifest provisioning replicated (origin_env, else the
@@ -1363,9 +1364,7 @@ function start_sync!(t::RemoteTarget, parent_project::AbstractString)
         for (name, lpath) in _dev_deps(joinpath(env, "Manifest.toml"), env)
             rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
             isdir(lpath) || continue
-            _start_syncer!("$base:dev:$name", t.ssh_host, lpath,
-                           isdir(joinpath(lpath, "src")) ? joinpath(lpath, "src") : lpath,
-                           "$_REMOTE_DEVSRC/$name", [".git", "*.cov"])
+            _start_syncer!("$base:dev:$name", t.ssh_host, lpath, "$_REMOTE_DEVSRC/$name", [".git", "*.cov"])
         end
     end
     return nothing
@@ -1373,34 +1372,93 @@ end
 
 # Start one keyed filesystem→remote syncer if not already running (call with _SYNC_LOCK held).
 function _start_syncer!(key::AbstractString, host::AbstractString, localdir::AbstractString,
-                        watchdir::AbstractString, remotedir::AbstractString, excludes::Vector{String})
+                        remotedir::AbstractString, excludes::Vector{String})
     k = String(key)
     (haskey(_SYNCERS, k) && _SYNCERS[k].running) && return
-    _SYNCERS[k] = SyncWatcher(Threads.@spawn(_sync_task(String(host), String(localdir), String(watchdir),
-                                                        String(remotedir), excludes, k)), true)
+    src = CancellationTokens.CancellationTokenSource()
+    task = Threads.@spawn _sync_task(String(host), String(localdir), String(remotedir), excludes,
+                                     CancellationTokens.get_token(src))
+    _SYNCERS[k] = SyncWatcher(task, true, src)
     return nothing
 end
 
-# One sync task: watch `watchdir`, and on any change send `localdir` → `remotedir`,
-# coalescing bursts. Generic over what's synced so BOTH the parent project (/src hot-reload) and each
-# dev'd path dep (devsrc/<name>, so a local package's edits Revise-reload on the remote) share it.
-function _sync_task(host::AbstractString, localdir::AbstractString, watchdir::AbstractString,
-                    remotedir::AbstractString, excludes::Vector{String}, key::String)
-    while get(_SYNCERS, key, nothing) !== nothing && _SYNCERS[key].running
+# Stop a syncer that has been taken out of `_SYNCERS` (call with _SYNC_LOCK held).
+function _stop_syncer!(w::SyncWatcher)
+    w.running = false
+    CancellationTokens.cancel(w.cancel)
+    return nothing
+end
+
+# What a syncer watches below the directory it sends: `src/` and `ext/`, where a package keeps the
+# code of the package and of its extensions, and otherwise the files directly in the directory. Read
+# afresh on every use, so a `src/` or `ext/` created later is watched from then on.
+_sync_scope(root::AbstractString) =
+    String[d for d in ("src", "ext") if isdir(joinpath(root, d))]
+
+# Whether a path relative to the root, '/'-separated, lies in the scope of a syncer.
+_in_sync_scope(rel::AbstractString, scope::Vector{String}) =
+    isempty(scope) ? !occursin('/', rel) : any(d -> rel == d || startswith(rel, d * "/"), scope)
+
+# A signature of every file in the scope of a syncer: its path, size and modification time.
+function _tree_sig(root::AbstractString, scope::Vector{String} = _sync_scope(root))
+    files = isempty(scope) ?
+        (joinpath(root, f) for f in readdir(root) if isfile(joinpath(root, f))) :
+        (joinpath(r, f) for d in scope for (r, _, fs) in walkdir(joinpath(root, d); onerror = _ -> nothing)
+                        for f in fs)
+    h = hash(0)
+    for p in files
+        st = try; stat(p); catch; continue; end
+        h = hash((relpath(p, root), st.size, st.mtime), h)
+    end
+    return h
+end
+
+# How often a syncer compares its files, for a change that raised no event. Some filesystems never
+# deliver one, such as NFS and the Windows drives that WSL mounts.
+const _SYNC_POLL_S = 2.0
+
+# One sync task: send `localdir` → `remotedir` whenever a file in its scope changes, until `token` is
+# cancelled. Generic over what's synced so BOTH the parent project (/src hot-reload) and each dev'd
+# path dep (devsrc/<name>, so a local package's edits Revise-reload on the remote) share it.
+#
+# Two things wake it: an event from BetterFileWatching, which watches the scope recursively and
+# collects a burst of saves within `latency`, and a check every `poll_s`. Either way the task sends
+# only when `_tree_sig` differs from the signature taken before the last send. A timeout or a repeated
+# event is therefore not a change, so nothing is sent while nothing changed, and a host that is gone
+# does not log a failure at every check. `send` and `events` exist for the tests.
+function _sync_task(host::AbstractString, localdir::AbstractString, remotedir::AbstractString,
+                    excludes::Vector{String}, token::CancellationTokens.CancellationToken;
+                    send = _send_dir!, events::Bool = true, poll_s::Real = _SYNC_POLL_S)
+    changed = Base.Event(true)
+    CancellationTokens.register(() -> notify(changed), token)
+    events && Threads.@spawn while !CancellationTokens.is_cancellation_requested(token)
         try
-            ev = FileWatching.watch_folder(watchdir, 2.0)      # block until a change, or time out
-            # A TIMEOUT is not a change. Sending on one tars the whole directory and pushes it over
-            # ssh every couple of seconds for as long as the notebook is open, whether or not anyone
-            # edited anything — and once the host is gone, logs a failure at the same rate.
-            (ev.second.timedout) && continue
-            sleep(0.15)                                        # coalesce a burst of saves
-            _send_dir!(host, localdir, remotedir; excludes = excludes)
+            BetterFileWatching.watch_folder(localdir, token; latency = 0.15,
+                                            ignore = rel -> !_in_sync_scope(rel, _sync_scope(localdir))) do _
+                notify(changed)
+            end
         catch e
-            @warn "slate remote: sync loop error" host = host dir = localdir exception = (e,) maxlog = 3
+            @warn "slate remote: sync watch error" host = host dir = localdir exception = (e,) maxlog = 3
             sleep(1.0)
         end
     end
-    try; FileWatching.unwatch_folder(watchdir); catch; end
+    Threads.@spawn while !CancellationTokens.is_cancellation_requested(token)
+        try; sleep(poll_s, token); catch; break; end
+        notify(changed)
+    end
+    sent = _tree_sig(localdir)
+    while true
+        wait(changed)
+        CancellationTokens.is_cancellation_requested(token) && break
+        now = _tree_sig(localdir)
+        now == sent && continue
+        try
+            send(host, localdir, remotedir; excludes = excludes)
+        catch e
+            @warn "slate remote: sync send error" host = host dir = localdir exception = (e,) maxlog = 3
+        end
+        sent = now
+    end
     return nothing
 end
 
@@ -1411,8 +1469,7 @@ function stop_sync!(t::RemoteTarget)
     lock(_SYNC_LOCK) do
         for key in collect(keys(_SYNCERS))
             (key == base || startswith(key, base * ":")) || continue
-            _SYNCERS[key].running = false
-            delete!(_SYNCERS, key)
+            _stop_syncer!(pop!(_SYNCERS, key))
         end
     end
     return nothing
@@ -1425,8 +1482,7 @@ function stop_sync_host!(host::AbstractString)
     lock(_SYNC_LOCK) do
         for key in collect(keys(_SYNCERS))
             startswith(key, pre) || continue
-            _SYNCERS[key].running = false
-            delete!(_SYNCERS, key)
+            _stop_syncer!(pop!(_SYNCERS, key))
         end
     end
     return nothing
