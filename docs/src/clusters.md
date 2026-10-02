@@ -166,7 +166,11 @@ So a cluster region stores what to ask for rather than an address:
 | **Scheduler** | `none` (run on the host itself), or the one to use. Slate detects what a host has and offers it; the choice stays yours, because a site can have both toolsets installed with only one running the jobs, and a login node you are content to run a small worker on is a legitimate answer too. |
 | **Partition** | picked from the queues the host reported, with down queues shown as down. |
 | **Walltime** | how long to hold it. The most important field on the form: an allocation bills for the time it is **held**, not the time it is used. |
-| **cpus / mem / gpus / account** | the rest of the request. |
+| **cpus / mem / gpus / account** | the rest of the request. A region on a machine fills any it leaves blank from the machine's. `mem = default` sends no memory request, so the queue's own default applies. |
+
+`mem = 0` asks SLURM for all of a node's memory, and SLURM adds CPUs to cover memory, so on a shared
+queue it turns a request for one GPU into a request for the whole node. When the scheduler holds more
+CPUs for a job than the region asked for, the prepare step and the queued line say so.
 
 **Warm workers are not offered on a scheduler region.** They exist to skip the boot by keeping a
 worker on the host between notebooks, and a scheduler region has no such host — its node is an

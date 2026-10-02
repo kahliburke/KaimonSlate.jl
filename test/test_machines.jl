@@ -342,9 +342,8 @@ const RE = KaimonSlate.ReportEngine
         end
 
         @testset "a region's request for a node reads the same everywhere" begin
-            r = RE.region_set!("plc"; host = "login", scheduler = :slurm)
-            A(st; id = "7", node = "", start = "", reason = "", said = "") =
-                RE.Sweep.Allocation("n", id, st, node, "", start, reason, said)
+            r = RE.region_set!("plc"; host = "login", scheduler = :slurm, cpus = 32, mem = "0")
+            A(st; id = "7", node = "", kw...) = RE.Sweep.Allocation("n", id, st, node, ""; kw...)
             p = RE.placement_note(r, A(:pending; start = "07:40", reason = "Priority"); waited = 240)
             @test p.state === :queued && p.text == "queued as job 7 for 4m · estimated start 07:40 · waiting on Priority"
             p = RE.placement_note(r, A(:none; id = "", said = "the queue requires 32 cores per GPU"))
@@ -353,6 +352,11 @@ const RE = KaimonSlate.ReportEngine
             @test RE.placement_note(r, A(:unreachable)).state === :unreachable
             @test RE.placement_note(r, A(:running; node = "c1")).state === :granted
             @test RE.placement_note(r, A(:running)).state === :queued              # granted, node not named yet
+            # More CPUs held than asked for: said, with the memory request that caused it.
+            p = RE.placement_note(r, A(:pending; cpus = 128))
+            @test p.grown && occursin("SLURM holds 128 CPUs, not the 32 asked for, for mem=0", p.text)
+            @test RE.placement_note(r, A(:running; node = "c1", cpus = 128)).grown
+            @test !RE.placement_note(r, A(:pending; cpus = 32)).grown
             RE.region_delete!("plc")
         end
 

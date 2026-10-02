@@ -39,8 +39,10 @@ struct Allocation
     start::String       # while queued: when the scheduler expects to start it, if it has said
     reason::String      # while queued: what it is waiting on (Priority, Resources, a limit)
     said::String        # when a request was turned down: the scheduler's reason
+    cpus::Int           # the CPUs the scheduler holds for it, which can exceed those asked for (0: not said)
 end
-Allocation(name, id, state, node, timeleft) = Allocation(name, id, state, node, timeleft, "", "", "")
+Allocation(name, id, state, node, timeleft; start = "", reason = "", said = "", cpus = 0) =
+    Allocation(name, id, state, node, timeleft, start, reason, said, cpus)
 
 Base.show(io::IO, a::Allocation) =
     a.state === :unreachable ? print(io, "Allocation(", a.name, ": host unreachable)") :
@@ -162,9 +164,10 @@ end
 # ── Asking a scheduler what it holds ─────────────────────────────────────────────────────────
 
 # SLURM answers in one line per job, which is what `-o` is for. `%S` is the expected start of a
-# pending job (once the scheduler has planned one) and `%r` what it is waiting on.
+# pending job (once the scheduler has planned one), `%r` what it is waiting on, and `%C` the CPUs
+# it holds: SLURM raises them to cover the memory asked for.
 _slurm_find_script(name) =
-    "squeue -h -n " * shq(name) * " -o '%i|%T|%N|%L|%S|%r' 2>/dev/null"
+    "squeue -h -n " * shq(name) * " -o '%i|%T|%N|%L|%S|%r|%C' 2>/dev/null"
 
 # PBS has no per-name query and no output format of its own, so one `qstat -f` is filtered by name
 # into the same fields, with the planned start and the scheduler's comment last. `%L` has no equivalent either: what is LEFT is the walltime asked for
@@ -228,8 +231,9 @@ function find_allocation(kind::Symbol, host::AbstractString, name::AbstractStrin
         kind === :pbs && (left = _pbs_timeleft(left, length(f) >= 5 ? strip(f[5]) : ""))
         at(i) = length(f) >= i ? String(strip(f[i])) : ""
         start, why = state === :pending ? (kind === :slurm ? (at(5), at(6)) : (at(6), at(7))) : ("", "")
-        return Allocation(String(name), String(strip(f[1])), state, node, left,
-                          _start_time(start), why in ("None", "(null)") ? "" : why, "")
+        cpus = kind === :slurm ? something(tryparse(Int, at(7)), 0) : 0
+        return Allocation(String(name), String(strip(f[1])), state, node, left;
+                          start = _start_time(start), reason = why in ("None", "(null)") ? "" : why, cpus)
     end
     return Allocation(String(name), "", :none, "", "")
 end
@@ -325,7 +329,7 @@ function _slurm_request_script(name; walltime, partition, cpus, mem, gpus, accou
     # once per core.
     cpus > 0 && append!(args, ["--ntasks", "1", "--cpus-per-task", string(cpus)])
     isempty(partition) || append!(args, ["-p", shq(partition)])
-    isempty(mem)       || append!(args, ["--mem", shq(mem)])
+    (isempty(mem) || BatchLauncher.queue_default(mem)) || append!(args, ["--mem", shq(mem)])
     isempty(gpus)      || append!(args, ["--gpus", shq(gpus)])
     isempty(account)   || append!(args, ["-A", shq(account)])
     append!(args, _option_args(:slurm, options))
@@ -345,7 +349,7 @@ function _pbs_request_script(name; walltime, partition, cpus, mem, gpus, account
                             options = Dict{String,String}())
     res = Dict{Symbol,Any}()
     cpus > 0 && (res[:cpus] = cpus)
-    isempty(mem)  || (res[:mem] = String(mem))
+    (isempty(mem) || BatchLauncher.queue_default(mem)) || (res[:mem] = String(mem))
     isempty(gpus) || (res[:gpus] = String(gpus))
     # `defaults = false`: an allocation states only what was asked for, so an unset memory is the
     # queue's own default rather than a number Slate invented — the same as `salloc` above.
@@ -387,8 +391,8 @@ function request_allocation!(kind::Symbol, host::AbstractString, name::AbstractS
     a.state === :none || return a
     # Nothing queued: the scheduler refused the request, and its words are the only account of why.
     said = _refusal(out)
-    return Allocation(a.name, "", :none, "", "", "", "",
-                      isempty(said) ? (ok ? "the job ended as soon as it was queued" : "") : said)
+    return Allocation(a.name, "", :none, "", "";
+                      said = isempty(said) ? (ok ? "the job ended as soon as it was queued" : "") : said)
 end
 
 # The scheduler's reason from a refused submission: its error lines, without the prefixes and the

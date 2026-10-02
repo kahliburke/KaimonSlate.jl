@@ -634,9 +634,9 @@ end
                            "echo 'allocation failure: Unspecified error'\nexit 1")
             today = Libc.strftime("%Y-%m-%d", time())
             withenv("PATH" => bin * ":" * ENV["PATH"]) do
-                tool("squeue", "echo '41|PENDING||4:00:00|$(today)T07:40:00|Priority'")
+                tool("squeue", "echo '41|PENDING||4:00:00|$(today)T07:40:00|Priority|128'")
                 a = Sweep.find_allocation(:slurm, "", "hold")
-                @test a.state === :pending && a.id == "41" && a.start == "07:40" && a.reason == "Priority"
+                @test a.state === :pending && a.id == "41" && a.start == "07:40" && a.reason == "Priority" && a.cpus == 128
                 tool("squeue", "echo '41|PENDING||4:00:00|N/A|None'")      # not planned yet
                 a = Sweep.find_allocation(:slurm, "", "hold")
                 @test a.start == "" && a.reason == ""
@@ -647,6 +647,19 @@ end
             end
         end
         @test Sweep._start_time("2020-01-02T03:04:05") == "2020-01-02 03:04"
+    end
+
+    @testset "mem = default asks the scheduler for no memory" begin
+        # Not the same as an empty mem, which a region on a machine fills from the machine's.
+        ask(mem) = Sweep._slurm_request_script("hold"; walltime = "01:00:00", partition = "", cpus = 32,
+                                               mem, gpus = "1", account = "", extra = "")
+        @test occursin("--mem '0'", ask("0")) && !occursin("--mem", ask("default")) && !occursin("--mem", ask("DEFAULT"))
+        pbs = Sweep._pbs_request_script("hold"; walltime = "01:00:00", partition = "", cpus = 4, mem = "default",
+                                        gpus = "", account = "", extra = "")
+        @test !occursin("mem=", pbs)
+        BL = Sweep.BatchLauncher
+        @test BL._pbs_chunk_mem(Dict(:mem => "default"), 4, true) === nothing
+        @test BL._pbs_chunk_mem(Dict{Symbol,Any}(), 4, true) == BL._PBS_ALWAYS.mem
     end
 
     @testset "a remote exec launcher looks for its processes where it started them" begin
@@ -2858,6 +2871,8 @@ end
                      "--gres=gpu:v100:2", "--nodelist=c[1-4]", "--exclude=c7", "--tmp=100G"]
             @test occursin("#SBATCH " * want * "\n", s)
         end
+        # `mem = "default"` leaves memory to the queue; with no mem at all the script still states one.
+        @test !occursin("--mem", script((; cpus = 8, mem = "default"))) && occursin("--mem=1G", script((; cpus = 8)))
         # `_` → `-`, so an option Slate has never heard of works the day the site invents it.
         @test occursin("#SBATCH --switches=1@00:30:00\n",
                        script((; switches = "1@00:30:00")))

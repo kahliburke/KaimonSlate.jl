@@ -479,9 +479,12 @@ function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Boo
             nodehost, a = region_place!(r; wait_s = 30)
             if !isempty(nodehost)
                 # A node the region already held comes back without its allocation; its route has the job.
-                v = via(nodehost)
-                job = a !== nothing ? a.id : v === nothing ? "" : v.job
-                return ("ok", nodehost * (isempty(job) ? "" : " (job $job)") * (a === nothing ? ", already held" : ""))
+                if a === nothing
+                    v = via(nodehost); job = v === nothing ? "" : v.job
+                    return ("ok", nodehost * (isempty(job) ? "" : " (job $job)") * ", already held")
+                end
+                p = placement_note(r, a)
+                return (p.grown ? "warn" : "ok", p.text)
             end
             p = placement_note(r, a; waited = time() - t0)
             p.state === :queued || return ("fail", p.text)

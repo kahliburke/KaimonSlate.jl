@@ -406,12 +406,12 @@ function SchedulerRows() {
       <div class="rpprow"><label>Resources</label>
       <div class="rppfields">
         ${[['cpus', fCpus, fInherit.value.cpus > 0 ? String(fInherit.value.cpus) : 'cpus', 'tasks/cores to request'],
-           ['memory', fMem, fInherit.value.mem || '16G', 'per node'],
+           ['memory', fMem, fInherit.value.mem === '0' ? '0 · whole node' : (fInherit.value.mem || '16G'), 'per node · default: send none'],
            ['gpus', fGpus, fInherit.value.gpus || '1', 'or a100:2'],
            ['account', fAcct, fInherit.value.account || '', 'project to bill']].map(([name, sig, ph, hint]) => html`
           <label class="rppfield"><span class="rppfieldname">${name}</span>
             <input class="rppport" autocomplete="off" placeholder=${ph}
-                   title=${hint + ' (blank = site default)' +
+                   title=${hint + (fInherit.value[name === 'memory' ? 'mem' : name] ? ' (blank = the machine\'s)' : ' (blank = site default)') +
                             (name === 'gpus' && !parts.some(p => p.gpus)
                               ? '. No partition on this host reports GPUs.' : '')}
                    value=${sig.value} onInput=${ev => sig.value = ev.target.value}/>

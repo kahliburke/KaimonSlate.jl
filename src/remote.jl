@@ -4343,22 +4343,38 @@ end
 What region `r`'s request for a node came to (`a`, the allocation `region_place!` returned), said
 the same way wherever it is shown. `state` is `:granted`, `:queued`, `:refused` or `:unreachable`;
 `text` is the line to show: the job and how long it has waited (`waited`, seconds), the scheduler's
-expected start and what it is waiting on, or its reason for turning the request down.
+expected start and what it is waiting on, or its reason for turning the request down. `grown` is
+true when the scheduler holds more CPUs for the job than the region asked for, which the text says.
 """
 function placement_note(r::Region, a; waited = nothing)
     sched = uppercase(string(region_scheduler(r)))
-    a === nothing && return (; state = :refused, text = "$(r.host) granted no node")
-    a.state === :unreachable && return (; state = :unreachable, text = "cannot reach $(r.host) to ask for a node")
-    Sweep.alive(a) && return (; state = :granted, text = a.node * (isempty(a.id) ? "" : " (job $(a.id))"))
+    a === nothing && return (; state = :refused, text = "$(r.host) granted no node", grown = false)
+    a.state === :unreachable &&
+        return (; state = :unreachable, text = "cannot reach $(r.host) to ask for a node", grown = false)
+    grew = _request_grown(r, a, sched)
+    tail = isempty(grew) ? "" : " · " * grew
+    Sweep.alive(a) && return (; state = :granted, grown = !isempty(grew),
+                               text = a.node * (isempty(a.id) ? "" : " (job $(a.id))") * tail)
     if a.state in (:pending, :running)          # running without a node yet: still being set up
         bits = [(a.state === :running ? "starting job " : "queued as job ") * a.id *
                 (waited === nothing ? "" : " for $(round(Int, waited / 60))m")]
         isempty(a.start) || push!(bits, "estimated start " * a.start)
         isempty(a.reason) || push!(bits, "waiting on " * a.reason)
-        return (; state = :queued, text = join(bits, " · "))
+        isempty(grew) || push!(bits, grew)
+        return (; state = :queued, text = join(bits, " · "), grown = !isempty(grew))
     end
-    return (; state = :refused, text = isempty(a.said) ? "$sched holds no job for the request" :
-                                       "$sched refused the request: $(a.said)")
+    return (; state = :refused, grown = false, text = isempty(a.said) ? "$sched holds no job for the request" :
+                                                      "$sched refused the request: $(a.said)")
+end
+
+# The scheduler holding more CPUs than the region asked for, and the memory request that is the usual
+# cause: SLURM adds CPUs to cover memory, and `mem = 0` is the whole node's.
+function _request_grown(r::Region, a, sched)
+    (a.cpus > 0 && r.cpus > 0 && a.cpus > r.cpus) || return ""
+    m = strip(r.mem)
+    why = m == "0" ? " for mem=0, which asks for the whole node's memory" :
+          (isempty(m) || Sweep.BatchLauncher.queue_default(m)) ? "" : " to cover mem=$m"
+    return "$sched holds $(a.cpus) CPUs, not the $(r.cpus) asked for,$why"
 end
 
 """

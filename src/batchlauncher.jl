@@ -831,6 +831,10 @@ end
 # whatever the site's defaults happen to be — and those are the numbers a sweep most needs to state.
 const _SBATCH_ALWAYS = (cpus = 1, mem = "1G", walltime = "00:30:00")
 
+# `mem = "default"` asks for no memory at all, so the queue's own default applies. An empty `mem` is
+# not that: a region on a machine inherits the machine's, and a sweep gets `_SBATCH_ALWAYS.mem`.
+queue_default(v) = lowercase(strip(string(v))) == "default"
+
 function _sbatch_script(l::SlurmLauncher, spec::JobSpec, indexfile::AbstractString)
     r = spec.resources
     for k in sort!(collect(keys(r)))
@@ -852,6 +856,7 @@ function _sbatch_script(l::SlurmLauncher, spec::JobSpec, indexfile::AbstractStri
              # waits for every element, so the probe's own size changes nothing. Comma is AND.
              "#SBATCH --dependency=" *
                  (isempty(spec.after) ? "singleton" : "afterok:$(spec.after),singleton")]
+    queue_default(get(r, :mem, "")) && filter!(l -> !startswith(l, "#SBATCH --mem="), lines)
     # Everything else the spec carries, sorted so two identical sweeps produce identical scripts.
     # A key absent from the spec emits no line at all: writing `--nodes=1` where the author asked
     # for nothing would override the partition's own configuration with a guess.
@@ -1279,6 +1284,7 @@ end
 function _pbs_chunk_mem(r, ncpus, defaults::Bool)
     per = strip(string(get(r, :mem_per_cpu, "")))
     flat = strip(string(get(r, :mem, "")))
+    queue_default(flat) && (flat = ""; defaults = false)
     isempty(per) && return isempty(flat) ? (defaults ? _PBS_ALWAYS.mem : nothing) : pbs_size(flat)
     isempty(flat) ||
         error("`mem` and `mem_per_cpu` are both set; PBS asks for memory per chunk, so it can " *
