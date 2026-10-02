@@ -257,8 +257,7 @@ A region's prepare does this:
 
 ### What a region's sysimage holds
 
-The image belongs to the region: its Prepare dialog lists the packages in it, and every notebook
-that prepares the region builds the same image. The list starts as the preparing notebook's
+The region decides what its image holds: its Prepare dialog lists the packages. The list starts as the preparing notebook's
 registered packages and its project's, and you can add any registered package, choose a release for
 each (the newest is marked), or add a package from a path on the machine. Slate's own worker
 packages are always in it. A package the notebook has from a path, its project included, is never
@@ -267,8 +266,13 @@ baked: it loads on top of the image, so editing it takes effect as it would with
 Julia loads a package from the image whatever version a notebook's environment asks for. So a
 worker boots from the region's image only when every package the two share is the same version in
 both; otherwise it starts without it and says which package differs. A package only the image holds
-loads in the region's cells, but not on this machine. Images live in the machine's depot, one per
-CPU the region's nodes have.
+loads in the region's cells, but not on this machine. Each package takes the version the preparing
+notebook resolves, unless the list chooses one.
+
+Images live in the machine's depot under `slate-sysimg/`, each named by a hash of Julia's version
+and every package it holds, with one image file per CPU the nodes have. Regions whose lists resolve
+to the same packages use the same image, so a second region on a machine often finds its image
+already built. An image no region uses any more stays on disk until it is deleted.
 
 What it finds is kept with the region and used by every start after it. A module that puts the
 system's CUDA libraries ahead of CUDA.jl's is unloaded before the worker starts. The time loading took

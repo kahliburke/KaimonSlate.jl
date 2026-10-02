@@ -2911,12 +2911,10 @@ function _make_router(h::Hub)
         name = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "region", "")))
         r = ReportEngine.region_get(name)
         r === nothing && return _json(Dict("ok" => false, "error" => "no region '$name'"))
-        img = get(r.readiness, "sysimage", nothing)
         _json(Dict("ok" => true, "region" => r.name, "on" => r.sysimage, "listed" => r.sysimage_pkgs,
                    "candidates" => ReportEngine.sysimage_candidates(_nb_origin_env(nb); project = _nb_project(nb)),
                    "always" => collect(ReportEngine._SYSIMAGE_INFRA),
-                   "image" => img isa AbstractDict ? Dict("packages" => get(img, "packages", Dict()),
-                                                          "built_at" => get(img, "built_at", 0)) : nothing))
+                   "image" => ReportEngine.sysimage_status(r, _nb_origin_env(nb))))
     end))
     # Keep a region's sysimage list. Body {region, packages: [{name, uuid, version, path}]}.
     HTTP.register!(router, "POST", "/api/{id}/sysimage-packages", req -> _withnb(h, req, _ -> begin

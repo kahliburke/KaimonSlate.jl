@@ -1,27 +1,28 @@
-# The program that builds a region's worker sysimage, run where the region's workers run and in
-# their shell (`build_sysimage!`). Its parameters are set above it as constants:
+# The program that builds a worker sysimage, run where the region's workers run and in their shell
+# (`build_sysimage!`). Its parameters are set above it as constants:
 #
-#   PROJ     the preparing notebook's environment on this machine: a listed package with no version
-#            chosen is pinned to the version it resolves there, and so are Slate's worker packages
-#   SYSDIR   the region's image directory, in the machine's depot
+#   PROJ     the preparing notebook's environment on this machine: the image environment starts from
+#            its Manifest, so the image holds the versions the notebook resolves
+#   STORE    the machine's image store, in its depot
+#   REGION   the region asking, named in the lock while it builds
 #   SPEC     what the region lists: (name, uuid, version, path) for each package
 #   INFRA    Slate's worker packages, which every image holds
-#   PAYLOAD  the worker's code, traced into the image
 #   EXEC     the trace program
 #   MINFREE  the memory, in GB, a build needs free before it starts
 #   STALE    seconds after which another build's lock is taken over
-#   FORCE    build even when the image is current
+#   FORCE    build even when the image exists
 #
-# The image environment is `SYSDIR/env`, made afresh from SPEC and INFRA each time. A package from a
-# path is part of the key by its contents, so editing it makes the image out of date. An image is
-# built for the CPU it was built on (a native image elsewhere can stop on an illegal instruction), so
-# its pointer is `current-<cpu>`. The run prints one `[sysimg] pkg …` line per package the image holds
-# and ends with one `[sysimg] result=…` line: current, built, deferred, busy, nocompiler or failed.
+# An image is named by what it holds: `STORE/<key>/` where the key hashes Julia and every package the
+# image environment resolves to, a package from a path by its contents. Regions that resolve to the same
+# packages share one. The directory holds that environment (`env`) and one image per CPU (`<cpu>.so`),
+# since a native image built on one CPU can stop on an illegal instruction on another. The run prints
+# one `[sysimg] pkg …` line per package the image holds and ends with one `[sysimg] result=…` line:
+# current, built, deferred, busy, nocompiler or failed.
 
 import Pkg, TOML, SHA
 
 result(kind, rest = "") = (println("[sysimg] result=", kind, isempty(rest) ? "" : " " * rest); flush(stdout))
-mkpath(SYSDIR)
+mkpath(STORE)
 
 # The CPU, spelled as the boot line's shell spells it, so both name the same pointer. An ARM CPU names
 # no model in /proc/cpuinfo; its architecture is the name then, as the shell falls back too.
@@ -41,10 +42,22 @@ for (name, es) in get(nbm, "deps", Dict{String,Any}()), e in es
 end
 abspath_of(p) = (p = expanduser(String(p)); isabspath(p) ? p : normpath(joinpath(PROJ, p)))
 
-# The image environment.
-envdir = joinpath(SYSDIR, "env")
+# The image environment, resolved in a scratch directory until its key names it. It starts from the
+# notebook's Manifest (paths made absolute), so a package both hold keeps the notebook's version and a
+# second resolve of the same list lands on the same key.
+stage = joinpath(STORE, ".resolve", string(gethostname(), "-", getpid()))
 try
-    rm(envdir; force = true, recursive = true); mkpath(envdir)
+    rm(stage; force = true, recursive = true); mkpath(stage)
+    if !isempty(nbm)
+        seed = deepcopy(nbm); delete!(seed, "project_hash")
+        for (name, es) in get(seed, "deps", Dict{String,Any}())
+            filter!(e -> !haskey(e, "path") || isdir(abspath_of(e["path"])), es)
+            for e in es; haskey(e, "path") && (e["path"] = abspath_of(e["path"])); end
+        end
+        filter!(kv -> !isempty(kv[2]), get(seed, "deps", Dict{String,Any}()))
+        open(io -> TOML.print(io, seed; sorted = true), joinpath(stage, "Manifest.toml"), "w")
+    end
+    write(joinpath(stage, "Project.toml"), "")
     adds = Pkg.PackageSpec[]; devs = String[]
     pinned(name) = (e = get(nbdeps, name, nothing); (e === nothing || haskey(e, "path")) ? "" : String(get(e, "version", "")))
     for (name, uuid, version, path) in SPEC
@@ -65,7 +78,7 @@ try
             push!(adds, isempty(v) ? Pkg.PackageSpec(name = name) : Pkg.PackageSpec(name = name, version = v))
         end
     end
-    Pkg.activate(envdir; io = devnull)
+    Pkg.activate(stage; io = devnull)
     isempty(devs) || Pkg.develop([Pkg.PackageSpec(path = p) for p in unique(devs)]; io = devnull)
     isempty(adds) || Pkg.add(adds; io = devnull)
 catch e
@@ -81,17 +94,16 @@ catch e
           "$stuck cannot be installed with the rest" * (isempty(held) ? "" : ": it clashes with " * join(held, ", ") *
           " (held to that version)") * "; the resolver's account is in the activity log"
     result("failed", "reason=the image's packages could not be resolved: " * why)
+    rm(stage; force = true, recursive = true)
     exit(0)
 end
 
-# The key: Julia, the CPU, the worker's code, and every package the image environment resolved to,
-# a path package by its contents.
+# The key: Julia and every package the image environment resolved to, a path package by its contents.
+# Not the worker's own code: it is included at each boot, not held in the image, so a Slate update
+# leaves the image as good as it was.
 ctx = SHA.SHA1_CTX()
 upd(x) = SHA.update!(ctx, codeunits(string(x, "\n")))
-upd(VERSION); upd(cpu)
-for f in sort!(filter(f -> endswith(f, ".jl") && !occursin(r"^worker-\d+\.jl$", basename(f)), readdir(PAYLOAD; join = true)))
-    upd(basename(f)); SHA.update!(ctx, read(f))
-end
+upd(VERSION)
 function tree_hash(dir)
     h = SHA.SHA1_CTX()
     for (root, dirs, files) in walkdir(dir)
@@ -103,7 +115,7 @@ function tree_hash(dir)
     end
     bytes2hex(SHA.digest!(h))[1:16]
 end
-md = (f = joinpath(envdir, "Manifest.toml"); isfile(f) ? TOML.parsefile(f) : Dict{String,Any}())
+md = (f = joinpath(stage, "Manifest.toml"); isfile(f) ? TOML.parsefile(f) : Dict{String,Any}())
 held = String[]
 for name in sort!(collect(keys(get(md, "deps", Dict{String,Any}())))), e in md["deps"][name]
     tree = haskey(e, "path") ? "path:" * tree_hash(abspath_of(e["path"])) : String(get(e, "git-tree-sha1", ""))
@@ -111,12 +123,19 @@ for name in sort!(collect(keys(get(md, "deps", Dict{String,Any}())))), e in md["
     upd(line); push!(held, line)
 end
 key = bytes2hex(SHA.digest!(ctx))[1:16]
-target = joinpath(SYSDIR, key * ".so"); curf = joinpath(SYSDIR, "current-" * cpu)
+dir = joinpath(STORE, key); envdir = joinpath(dir, "env"); target = joinpath(dir, cpu * ".so")
+mkpath(dir)
+if isfile(joinpath(envdir, "Manifest.toml"))
+    rm(stage; force = true, recursive = true)                  # the same packages, resolved before
+else
+    rm(envdir; force = true, recursive = true)
+    try; mv(stage, envdir); catch; rm(stage; force = true, recursive = true); end   # a concurrent resolve placed it
+end
 image() = "image=$target bytes=$(filesize(target)) env=$envdir"
 println("[sysimg] key=$key cpu=$cpu"); flush(stdout)
 for l in held; println("[sysimg] pkg ", l); end
 
-if !FORCE && isfile(curf) && strip(read(curf, String)) == key && isfile(target)
+if !FORCE && isfile(target)
     result("current", image()); exit(0)
 end
 if Sys.which("gcc") === nothing && Sys.which("clang") === nothing && Sys.which("cc") === nothing
@@ -139,20 +158,20 @@ catch
 end
 avail < MINFREE && (result("deferred", "reason=only $(round(avail; digits = 1))GB free, the link needs $(MINFREE)GB"); exit(0))
 
-# One build per region at a time. A lock names its builder; one whose process is gone, or that is
-# older than any build takes, is taken over rather than waited out.
-lk = joinpath(SYSDIR, ".building")
+# One build of an image per CPU at a time. A lock names its builder; one whose process is gone, or that
+# is older than any build takes, is taken over rather than waited out.
+lk = joinpath(dir, ".building-" * cpu)
 if isfile(lk)
     w = split(strip(read(lk, String))); age = time() - mtime(lk)
     gone = length(w) >= 3 && w[2] == gethostname() &&
            (p = tryparse(Int32, w[3]); p !== nothing && ccall(:kill, Cint, (Cint, Cint), p, 0) != 0)
     if !gone && age < STALE
-        result("busy", "reason=another build started $(round(Int, age / 60))m ago" * (length(w) >= 2 ? " on $(w[2])" : ""))
+        result("busy", "reason=the same image is being built for $(w[1]), started $(round(Int, age / 60))m ago" *
+                       (length(w) >= 2 ? " on $(w[2])" : ""))
         exit(0)
     end
 end
-write(lk, string(key, " ", gethostname(), " ", getpid()))
-isfile(curf) && rm(curf; force = true)   # this CPU's workers start without an image while it builds
+write(lk, string(REGION, " ", gethostname(), " ", getpid()))
 
 # Every 30s while it runs: how long, how many processes the build has and the memory they hold, and
 # what the node has left. PackageCompiler prints nothing while it compiles the image.
@@ -171,12 +190,12 @@ function tree()
 end
 
 try
-    builder = joinpath(dirname(SYSDIR), "builder"); Pkg.activate(builder; io = devnull)
+    builder = joinpath(STORE, "builder"); Pkg.activate(builder; io = devnull)
     if !isfile(joinpath(builder, "Project.toml")) || !occursin("PackageCompiler", read(joinpath(builder, "Project.toml"), String))
         Pkg.add("PackageCompiler"; io = devnull)
     end
     Pkg.instantiate(; io = devnull)
-    exec = joinpath(SYSDIR, "precompile_exec.jl"); write(exec, EXEC)
+    exec = joinpath(dir, "precompile_exec.jl"); write(exec, EXEC)
     pkgs = (f = joinpath(envdir, "Project.toml"); isfile(f) ? sort!(collect(keys(get(TOML.parsefile(f), "deps", Dict{String,Any}())))) : String[])
     println("[sysimg] baking $(length(pkgs)) package(s) and the worker's code → $target"); flush(stdout)
     # Each thread emitting the image holds its own share of it; short of memory, one is slower but fits.
@@ -186,18 +205,15 @@ try
         e = round(Int, time() - t0); n, kb = tree()
         println("[sysimg] building · $(e ÷ 60)m$(e % 60)s · $n process$(n == 1 ? "" : "es") · $(gb(kb)) GB · node $(gb(memkb("/proc/meminfo", "MemAvailable"))) GB free"); flush(stdout)
     end
+    # Linked beside its name and moved onto it, so a worker never boots a half-written image.
+    tmp = joinpath(dir, ".$cpu-$(getpid()).so")
     try
-        Base.invokelatest(PackageCompiler.create_sysimage, pkgs; sysimage_path = target, project = envdir,
+        Base.invokelatest(PackageCompiler.create_sysimage, pkgs; sysimage_path = tmp, project = envdir,
                           precompile_execution_file = exec)
     finally
         close(beat)
     end
-    tmpc = curf * ".tmp"; write(tmpc, key); mv(tmpc, curf; force = true)   # publish the pointer atomically
-    keep = Set(strip(read(f, String)) * ".so" for f in readdir(SYSDIR; join = true)
-               if startswith(basename(f), "current-") && !endswith(f, ".tmp"))
-    for f in readdir(SYSDIR; join = true)
-        (endswith(f, ".so") && !(basename(f) in keep)) && rm(f; force = true)   # images no CPU's pointer names
-    end
+    mv(tmp, target; force = true)
     # Prime the package caches against the new image here, not under the first real worker.
     try
         println("[sysimg] priming package caches against the new image…"); flush(stdout)
@@ -214,5 +230,5 @@ catch e
           replace(first(msg, 300), '\n' => ' ')
     result("failed", "reason=" * why)
 finally
-    rm(lk; force = true)
+    rm(lk; force = true); rm(joinpath(dir, ".$cpu-$(getpid()).so"); force = true)
 end

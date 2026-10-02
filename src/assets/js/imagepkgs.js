@@ -1,7 +1,7 @@
 // What a region's sysimage holds: the modal a Prepare opens before it builds one (regionprep.js).
 //
-// The list belongs to the region: every notebook that prepares it builds the same image, and the
-// next Prepare starts from it. This notebook's packages, and its project's, are offered beside it at
+// The list belongs to the region, and the next Prepare starts from it. The line above the lists says
+// whether the region's built image still answers for it. This notebook's packages, and its project's, are offered beside it at
 // the versions it resolves; a package from a path (the project itself, a checkout) is not offered,
 // since it loads normally on top of the image and its edits have to be seen. A version chosen here
 // that differs from a notebook's makes that notebook start without the image: Julia loads a package
@@ -167,6 +167,27 @@ function SourceRow({ p }) {
   </div>`;
 }
 
+// The region's built image against the list as it stands: whether Prepare reuses it or builds anew.
+// The build step decides on the machine; this reads the record of the last build.
+const listKey = xs => xs.map(p => [p.name, p.version || '', p.path || ''].join('|')).sort().join('\n');
+function size(b) { return b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + ' GB' : Math.round(b / 2 ** 20) + ' MB'; }
+function when(t) {
+  const d = new Date(t * 1000), today = new Date().toDateString() === d.toDateString();
+  return today ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+               : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+function ImageStatus({ img }) {
+  if (!img) return html`<div class="ipstat build">no image built · Prepare builds one</div>`;
+  const facts = html`<span class="ipfacts">built ${when(img.built_at)} · ${size(img.bytes)} · ${img.packages} packages</span>`;
+  const clash = img.conflicts || [];
+  if (clash.length) return html`<div class="ipstat build" title=${clash.join('\n')}>${facts}
+    <span>this notebook has other versions of ${clash.map(c => c.split(' (')[0]).join(', ')} · Prepare builds a new image</span></div>`;
+  if (!img.listed) return html`<div class="ipstat">${facts}<span>Prepare checks it against this list</span></div>`;
+  return listKey(img.listed) === listKey(incl.value)
+    ? html`<div class="ipstat ok">${facts}<span>✓ matches this list</span></div>`
+    : html`<div class="ipstat build">${facts}<span>list changed · Prepare builds a new image</span></div>`;
+}
+
 function ImageModal() {
   const m = modal.value;
   if (!m) return null;
@@ -181,6 +202,7 @@ function ImageModal() {
       ${!d ? html`<div class="pddim">reading the region's sysimage…</div>`
         : d.error ? html`<div class="rppsyswarn">${d.error}</div>`
         : html`<div class="ipbody">
+          <${ImageStatus} img=${d.image}/>
           <div class="iplists">
             <div class="iplist" onDragOver=${e => e.preventDefault()} onDrop=${e => onDrop('av', e)}>
               <div class="ipsub">Packages of this notebook</div>

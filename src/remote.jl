@@ -1080,32 +1080,12 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     return nothing
 end
 
-# ── worker sysimage (bake the include'd payload's JIT) ────────────────────────────────────────
-# KaimonGate's handshake path is already baked into ITS pkgimage, but worker.jl is `include`d — not a
-# package — so its payload files (capture, macroexpand, memo layer, ExpressionExplorer usage) and the
-# notebook/region deps JIT on the first cell. A PackageCompiler sysimage is the ONLY thing that bakes an
-# included payload: it trace-compiles an execution file (we drive one `__slate_eval` through the full
-# capture path — the same trivial eval the worker prewarms with) AND bakes the env's direct deps as
-# fully-loaded packages. The boot line adds `-J <sysimage>` when one is present (see `_launch_worker!`);
-# Revise still hot-reloads runtime /src edits on top of the baked image.
-#
-# The whole tree is namespaced PER ENV — `sysimg/<envkey>/…`, where envkey hashes the worker's
-# `--project` dir — so multiple regions sharing a host don't collide: two regions with different preload
-# envs get independent subtrees (own `current`, own images, own build lock), while two that share an env
-# legitimately share one image (dedup, no rebuild thrash). Within a subtree the image is keyed by
-# SHA(payload src + that env's Manifest), so a `.so` is intrinsically tied to its env: on any payload or
-# Manifest drift the key changes, the build clears the stale `current` pointer (live workers fall back to
-# a plain boot) and bakes a fresh image. The env-fingerprint half of the key is a CANONICAL projection of
-# the resolved deps (name/uuid/version/tree-hash + julia_version), NOT raw Manifest bytes — so TOML
-# re-serialization noise doesn't force needless rebuilds, while a real dep/Julia-version change still does.
-# The build runs DETACHED on the remote — the first cold worker boots the slow way; every boot after the
-# image lands (pool refills, reaps/respawns) is fast. A build defers if host free RAM is below
-# KAIMONSLATE_SYSIMAGE_MINFREE_GB (a link is memory-hungry).
-#
-# OPT-IN per region: only a region with `sysimage=true` (Region.sysimage → RemoteTarget.sysimage) builds +
-# boots one — it's off by default because a build is heavy (needs a C compiler + several GB free + minutes)
-# and pays off most for package-heavy envs. Notebooks' own remote workers and preflight never build one.
-# KAIMONSLATE_SYSIMAGE=0 is a global kill-switch that overrides even an opted-in region.
+# ── worker sysimage ───────────────────────────────────────────────────────────────────────────
+# A region that boots from a sysimage gets it built by its prepare (`build_sysimage!`, the program in
+# src/sysimage_build.jl), on the node type its workers run on. Images live in the machine's store,
+# `<depot>/slate-sysimg/<key>/`, named by the packages they hold, so regions that resolve to the same
+# packages share one. A worker boots from it through `_sysimage_jopt_sh` when its notebook resolves the
+# same versions (`sysimage_plan`). KAIMONSLATE_SYSIMAGE=0 turns every image off.
 _sysimage_enabled() = get(ENV, "KAIMONSLATE_SYSIMAGE", "1") != "0"
 # Minimum free RAM (GB) on the host before a sysimage build is allowed — a link peaks at several GB, so on a
 # small/busy box the build defers instead of OOM-thrashing. Tunable; default sized for a ~300MB image.
@@ -1126,11 +1106,11 @@ catch
 end
 """
 
-# Where a region's images and their environment live: in the machine's depot, so on scratch where the
-# site has one, and per region, since the region decides what its image holds.
-function sysimage_dir(r)
+# The machine's image store: in its depot, so on scratch where the site has one. Each image is a
+# directory in it named by its key.
+function sysimage_store(r)
     d = region_depot(r)
-    return (isempty(d) ? "~/.julia" : d) * "/slate-sysimg/" * r.name
+    return (isempty(d) ? "~/.julia" : d) * "/slate-sysimg"
 end
 
 # The packages every worker image holds: Slate's own, which the worker loads before anything else.
@@ -1140,14 +1120,13 @@ const _SYSIMAGE_INFRA = ("KaimonGate", "ExpressionExplorer", "Revise", "SlateExt
 # it. `proj` is the preparing notebook's environment, home-relative; `spec` is what the region lists.
 function _sysimage_build_script(r, proj::AbstractString, spec; force::Bool = false,
                                 minfree_gb::Real = _sysimage_minfree_gb(), infra = _SYSIMAGE_INFRA)
-    dir = sysimage_dir(r)
     head = """
     const PROJ = joinpath(homedir(), $(repr(String(proj))))
-    const SYSDIR = expanduser($(repr(dir)))
+    const STORE = expanduser($(repr(sysimage_store(r))))
+    const REGION = $(repr(String(r.name)))
     const SPEC = $(repr([(String(e["name"]), String(get(e, "uuid", "")), String(get(e, "version", "")),
                           String(get(e, "path", ""))) for e in spec]))
     const INFRA = $(repr(String[x for x in infra]))
-    const PAYLOAD = joinpath(homedir(), $(repr(_REMOTE_WORKER)))
     const EXEC = $(repr(_sysimage_exec_contents()))
     const MINFREE = $(Float64(minfree_gb))
     const STALE = $(_sysimage_lock_stale())
@@ -1156,7 +1135,7 @@ function _sysimage_build_script(r, proj::AbstractString, spec; force::Bool = fal
     return head * read(joinpath(@__DIR__, "sysimage_build.jl"), String)
 end
 
-# The pointer name a worker's shell boots: `current-<cpu>`, the CPU spelled as the build script spells it.
+# The image a worker's shell boots is `<cpu>.so`, the CPU spelled as the build script spells it.
 const _SYSIMAGE_CPU_SH = "CPU=\$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//; s/ *\$//; s/[^A-Za-z0-9._-]/_/g'); " *
                         "[ -n \"\$CPU\" ] || CPU=\$(uname -m)"
 
@@ -1216,8 +1195,8 @@ function _sysimage_jopt_sh(t::RemoteTarget)
     plan = sysimage_plan(t)
     isempty(plan.why) || _rlog("sysimg: $(t.region) starts without its sysimage: $(plan.why)")
     plan.use || return "JOPT=''"
-    d = _shpath(plan.dir); so = "$d/$(plan.key).so"
-    return _SYSIMAGE_CPU_SH * "; JOPT=''; if [ \"\$(cat $d/current-\$CPU 2>/dev/null)\" = \"$(plan.key)\" ] && [ -f \"$so\" ]; " *
+    d = _shpath(plan.dir); so = "$d/\$CPU.so"
+    return _SYSIMAGE_CPU_SH * "; JOPT=''; if [ -f \"$so\" ]; " *
            "then JOPT=\"--sysimage=$so\"; export JULIA_LOAD_PATH=\"@:$d/env:@stdlib\"; fi"
 end
 
@@ -1294,7 +1273,8 @@ function build_sysimage!(r, t::RemoteTarget, host::AbstractString; prologue::Abs
     t0 = time()
     ok, out = _ssh_julia!(host, body, "sysimage on $host"; stream = true, setup = t.setup * prologue)
     st, detail, m = _sysimage_outcome(out, ok, round(Int, time() - t0))
-    m["dir"] = sysimage_dir(r); m["spec"] = sysimage_spec_key(r.sysimage_pkgs); m["built_at"] = time()
+    m["dir"] = isempty(get(m, "key", "")) ? "" : sysimage_store(r) * "/" * m["key"]; m["spec"] = sysimage_spec_key(r.sysimage_pkgs)
+    m["listed"] = r.sysimage_pkgs; m["built_at"] = time()
     return (st, detail, m)
 end
 
@@ -1320,6 +1300,25 @@ function _sysimage_outcome(out::AbstractString, ok::Bool, secs::Integer)
     kind == "built" && return ("ok", "built in $(secs)s$size · $(length(pkgs)) packages", measured)
     kind == "failed" && return ("fail", reason, measured)
     return ("warn", reason * " — workers start without one", measured)
+end
+
+"""
+    sysimage_status(r, origin_env) -> Union{Dict,Nothing}
+
+Region `r`'s built image as its package dialog shows it, or `nothing` when none is built: its size,
+when it was built, how many packages it holds, the list it was built from (`listed`, `nothing` when
+that is not known), and the packages the notebook at `origin_env` resolves at other versions.
+"""
+function sysimage_status(r, origin_env::AbstractString)
+    img = get(r.readiness, "sysimage", nothing)
+    img isa AbstractDict || return nothing
+    listed = get(img, "listed", nothing)
+    if listed === nothing && get(img, "spec", nothing) == sysimage_spec_key(r.sysimage_pkgs)
+        listed = r.sysimage_pkgs           # recorded before the list was kept with the image
+    end
+    return Dict{String,Any}("key" => get(img, "key", ""), "bytes" => get(img, "bytes", 0),
+                            "built_at" => get(img, "built_at", 0), "packages" => length(get(img, "packages", Dict())),
+                            "listed" => listed, "conflicts" => sysimage_conflicts(img, origin_env))
 end
 
 """

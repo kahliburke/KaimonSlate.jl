@@ -301,32 +301,37 @@ const RE = KaimonSlate.ReportEngine
         @testset "a sysimage build reports what it did" begin
             # The build script decides before it builds anything; run it against a fake home, with no
             # packages to resolve.
-            r = RE.region_set!("simg"; host = "simghost")
+            r = RE.region_set!("simg"; host = "simghost"); r2 = RE.region_set!("simg2"; host = "simghost")
             mktempdir() do home
                 proj = mkpath(joinpath(home, "env")); write(joinpath(proj, "Project.toml"), "")
                 mkpath(joinpath(home, RE._REMOTE_WORKER)); write(joinpath(home, RE._REMOTE_WORKER, "worker.jl"), "")
-                sysdir = joinpath(home, ".julia", "slate-sysimg", "simg")
-                @test RE.sysimage_dir(r) == "~/.julia/slate-sysimg/simg"            # in the depot, per region
-                run_script(; minfree = 0.0, force = false) = begin
+                store = joinpath(home, ".julia", "slate-sysimg")
+                @test RE.sysimage_store(r) == "~/.julia/slate-sysimg"                 # in the depot, shared
+                run_script(rg = r; minfree = 0.0, force = false) = begin
                     f = joinpath(home, "build.jl")
-                    write(f, RE._sysimage_build_script(r, "env", Dict{String,String}[]; minfree_gb = minfree, force, infra = ()))
+                    write(f, RE._sysimage_build_script(rg, "env", Dict{String,String}[]; minfree_gb = minfree, force, infra = ()))
                     read(setenv(`$(Base.julia_cmd()) --startup-file=no $f`, merge(ENV, Dict("HOME" => home))), String)
                 end
-                # Too little memory: put off, with the reason.
-                st, why, _ = RE._sysimage_outcome(run_script(; minfree = 1e9), true, 3)
-                @test st == "warn" && occursin("free", why)
-                # A build already running elsewhere holds it; one whose process is gone does not.
-                mkpath(sysdir); write(joinpath(sysdir, ".building"), "k otherhost 1")
-                st, why, _ = RE._sysimage_outcome(run_script(), true, 3)
-                @test st == "warn" && occursin("another build", why) && occursin("otherhost", why)
-                # Current for these packages and this CPU: nothing to build.
+                # Too little memory: put off, with the reason. The image is named by what it holds.
                 out = run_script(; minfree = 1e9)
-                key = only(m.captures[1] for m in eachmatch(r"key=(\w+)", out))
-                cpu = only(m.captures[1] for m in eachmatch(r"cpu=(\S*)", out))
-                write(joinpath(sysdir, "current-" * cpu), key); write(joinpath(sysdir, key * ".so"), "x")
+                st, why, m = RE._sysimage_outcome(out, true, 3)
+                @test st == "warn" && occursin("free", why)
+                key, cpu = m["key"], m["cpu"]
+                dir = joinpath(store, key)
+                @test isfile(joinpath(dir, "env", "Project.toml")) && isempty(readdir(joinpath(store, ".resolve")))
+                # A build of the same image already running elsewhere holds it; the lock names its region.
+                write(joinpath(dir, ".building-" * cpu), "simg otherhost 1")
+                st, why, _ = RE._sysimage_outcome(run_script(r2), true, 3)
+                @test st == "warn" && occursin("built for simg", why) && occursin("otherhost", why)
+                rm(joinpath(dir, ".building-" * cpu))
+                # Built for this CPU: current for any region whose packages resolve the same.
+                write(joinpath(dir, cpu * ".so"), "x")
                 st, why, m = RE._sysimage_outcome(run_script(), true, 3)
                 @test st == "ok" && occursin("already built", why) && m["result"] == "current" && m["key"] == key
+                st, _, m2 = RE._sysimage_outcome(run_script(r2), true, 3)
+                @test st == "ok" && m2["key"] == key && m2["image"] == m["image"]
             end
+            RE.region_delete!("simg2")
             RE.region_delete!("simg")
             # What a finished build and a failed one read as, and the packages it holds.
             out = "[sysimg] key=abc cpu=x\n[sysimg] pkg u1 CUDA 5.1.0 t1\n[sysimg] result=built image=/h/k.so bytes=314572800 env=/h/env\n"
@@ -357,6 +362,19 @@ const RE = KaimonSlate.ReportEngine
             # An image of other packages entirely conflicts with nothing.
             @test isempty(RE.sysimage_conflicts(Dict{String,Any}("packages" => Dict("u9" => Dict("name" => "X"))), env))
             @test RE.sysimage_spec_key(Dict{String,String}[]) == ""
+            # What the package dialog reads: nothing before a build; then the list the image was built
+            # from (kept with it, or the region's own when only its hash was), and this notebook's clashes.
+            list = [Dict{String,String}("name" => "CUDA", "uuid" => "u1", "version" => "", "path" => "")]
+            r = RE.region_set!("stat"; host = "h", sysimage_pkgs = list)
+            @test RE.sysimage_status(r, env) === nothing
+            rec = merge(img("5.0.0", "t50"), Dict{String,Any}("bytes" => 2^30, "built_at" => 1.0,
+                                                              "spec" => RE.sysimage_spec_key(r.sysimage_pkgs)))
+            r = RE.region_set!("stat"; readiness = Dict{String,Any}("sysimage" => rec))
+            st = RE.sysimage_status(r, env)
+            @test st["listed"] == r.sysimage_pkgs && st["packages"] == 1 && st["conflicts"] == ["CUDA (image 5.0.0, notebook 5.1.0)"]
+            rec["spec"] = "other"; r = RE.region_set!("stat"; readiness = Dict{String,Any}("sysimage" => rec))
+            @test RE.sysimage_status(r, env)["listed"] === nothing
+            RE.region_delete!("stat")
         end
     end
 end

@@ -310,7 +310,7 @@ end
 
 # What a launch needs to know of a built image (`sysimage_plan`), kept in the region's readiness.
 _sysimage_record(m) = Dict{String,Any}(k => m[k] for k in ("key", "dir", "cpu", "image", "bytes", "packages",
-                                                           "spec", "built_at") if haskey(m, k))
+                                                           "spec", "listed", "built_at") if haskey(m, k))
 function _record_sysimage!(name, m)
     r = region_get(name); r === nothing && return nothing
     try

@@ -3374,6 +3374,11 @@ select.ipver:focus { outline:none; border-color:var(--accent); }
 .ipsug { left:0; right:auto; min-width:260px; top:100%; }
 .ipmsg { font-size:.76rem; margin-top:4px; }
 .ipalways { font-size:.72rem; margin-top:10px; }
+.ipstat { display:flex; flex-wrap:wrap; gap:4px 12px; align-items:baseline; font-size:.78rem; margin-bottom:10px;
+          padding:6px 10px; border-radius:6px; background:var(--bg3); color:var(--text); }
+.ipstat .ipfacts { color:var(--dim); }
+.ipstat.ok span:last-child { color:var(--green); }
+.ipstat.build span:last-child { color:var(--gold); }
 .rphead { font-weight:600; font-size:1rem; }
 .rpsub { font-size:.8rem; margin:2px 0 10px; }
 .rpres { margin-top:8px; font-size:.82rem; }
