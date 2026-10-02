@@ -1947,6 +1947,22 @@ end
 # project on every side — this only executes the imports, it never installs anything. Idempotent:
 # tracked per LIVE kernel against the imports' signature, so it fires once per kernel and again only
 # if the notebook's imports change (a fresh/replaced kernel has a new objectid ⇒ re-primes).
+# The cells a region worker loads before it runs anything (`_prime_namespace!`), and their signature.
+function _prime_env(nb::LiveNotebook)
+    env = [c for c in nb.report.cells if ReportEngine._cell_effect(c) == ReportEngine.EVERYWHERE]
+    return env, hash([c.src_hash for c in env])
+end
+
+# Whether a region worker still has bringing up to do for this notebook: it is not connected yet, or
+# has not loaded the notebook's imports.
+function _region_bringup_pending(nb::LiveNotebook, k)
+    k isa ReportEngine.GateKernel || return false
+    k.conn === nothing && return true
+    env, sig = _prime_env(nb)
+    isempty(env) && return false
+    return lock(_REGION_LOCK) do; get(_REGION_PRIMED, (nb.id, _worker_key(k)), UInt(0)); end != sig
+end
+
 function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
     # Cells that ESTABLISH state on every side — pure `using`/`import`, the import scaffold, a `set_theme!`
     # setter — re-run (never transferred) in document order so imports precede a scaffold/effect that
@@ -1954,9 +1970,8 @@ function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
     # (deps.jl), so the region prime and the memo replay read the SAME definition — a standalone
     # `set_theme!` can no longer silently miss the region. `RESOURCE` runs on every side too but has data
     # deps, so it replays at READ (`_ensure_resource_on!`), not here.
-    env = [c for c in nb.report.cells if ReportEngine._cell_effect(c) == ReportEngine.EVERYWHERE]
+    env, sig = _prime_env(nb)
     isempty(env) && return nothing
-    sig = hash([c.src_hash for c in env])
     key = (nb.id, _worker_key(k))
     lock(_REGION_LOCK) do; get(_REGION_PRIMED, key, UInt(0)); end == sig && return nothing
     # Re-entrancy: the presync below primes both sides before its first transfer, which lands back
@@ -2151,7 +2166,7 @@ function _dead_wire_grace(k)
     return m isa Real ? max(_DEAD_WIRE_GRACE, Float64(m)) : _DEAD_WIRE_GRACE
 end
 const _LIVENESS_PING_TIMEOUT = 8.0   # per-ping timeout; also how far to BACKDATE first-silence — when a ping first fails the worker has already been silent this long, so the countdown starts at ~8s, not 0
-const _LAST_RUNNING = Dict{String,Tuple{Set{String},Bool}}()   # nb id → (running ids, anyok) from the last sweep
+const _LAST_RUNNING = Dict{String,Tuple{Set{String},Set{String},Set{String}}}()   # nb id → (running ids, sides that answered, sides asked) from the last sweep
 # Repeat-suppression for the unresponsive log. A wire that stays silent used to write one identical
 # line per sweep — an outage lasting a working day produced hundreds of KB of the same sentence, which
 # buries the events that actually explain it. Log the FIRST failure, one line per interval while it
@@ -2238,12 +2253,13 @@ function _heal_dead_wire!(nb::LiveNotebook, k, unresp_s::Real = 0.0)
 end
 
 # Ping every connected kernel: refresh the heartbeat, track failures, heal dead remote wires, and
-# stash the union of running cell ids for the orphan reconciler. Runs every sweep (idle or busy) so a
+# stash the running cell ids, with which kernels answered, for the orphan reconciler. Runs every sweep (idle or busy) so a
 # wire that dies while nothing is running is still healed before the next cell is dispatched onto it.
 function _liveness_sweep!(nb::LiveNotebook)
-    ids = Set{String}(); anyok = false
+    ids = Set{String}(); answered = Set{String}(); asked = Set{String}()
     for k in _nb_kernels(nb)
         (k isa ReportEngine.GateKernel && k.conn !== nothing) || continue
+        push!(asked, _kernel_side_label(nb, k))
         # Don't ping down a wire we KNOW is severed. A `:tunnel` worker's connection is a forward on
         # its host's ssh session, so once nobody is signed in to that host the wire cannot answer —
         # and pinging it anyway spends 8s per sweep to rediscover, over 45s of countdown, a fact that
@@ -2263,7 +2279,7 @@ function _liveness_sweep!(nb::LiveNotebook)
                   r isa AbstractDict ? get(r, "running", get(r, :running, nothing)) : nothing
             if run !== nothing
                 for id in run; push!(ids, String(id)); end
-                anyok = true; ok = true
+                push!(answered, _kernel_side_label(nb, k)); ok = true
             end
         catch e
             err = e
@@ -2311,7 +2327,7 @@ function _liveness_sweep!(nb::LiveNotebook)
             end
         end
     end
-    _LAST_RUNNING[nb.id] = (ids, anyok)
+    _LAST_RUNNING[nb.id] = (ids, answered, asked)
     return nothing
 end
 
@@ -2334,14 +2350,16 @@ function _log_liveness_silence(nb::LiveNotebook, k, err, unresp::Real)
     return true
 end
 
-# Union of the cell ids every connected kernel said it's evaluating on the last liveness sweep, or
-# `nothing` if NO kernel could be queried (all unreachable) — in which case we must not judge anything
-# orphaned. Reads the sweep's cache (populated just before the reconciler runs) to avoid double-pinging.
+# The cell ids the connected kernels said they are evaluating on the last liveness sweep, the sides
+# (`_kernel_side_label`) whose kernel answered, and those that were asked; `nothing` if none answered.
+# A cell is judged only by its own kernel: a busy region worker that misses a ping says nothing about
+# its cells, whatever the main kernel answered, while a side with no connected kernel at all cannot
+# be running anything. Reads the sweep's cache (populated just before the reconciler runs).
 function _worker_running_ids(nb::LiveNotebook)
     cached = get(_LAST_RUNNING, nb.id, nothing)
     cached === nothing && return nothing
-    ids, anyok = cached
-    return anyok ? ids : nothing
+    ids, answered, asked = cached
+    return isempty(answered) ? nothing : (; ids, answered, asked)
 end
 
 # Explicit-reap fast-path: killing a worker on host:port leaves any LIVE kernel still bound to it holding
@@ -2447,9 +2465,12 @@ function _reconcile_nb_runs!(nb::LiveNotebook)
     actual === nothing && return nothing                         # no kernel could confirm → leave to the session layer
     for c in suspects
         key = (nb.id, c.id)
-        if c.id in actual                                        # genuinely running → clear any strike
+        if c.id in actual.ids                                    # genuinely running → clear any strike
             delete!(_RUN_ORPHAN_HITS, key); continue
         end
+        # Its own kernel was asked and did not answer this sweep: nothing is known about it either way.
+        side = _cell_side(nb, c); side = isempty(side) ? "local" : side
+        (side in actual.asked && !(side in actual.answered)) && continue
         # A region cell is marked RUNNING before it reaches a worker: the spawn, the prime and the
         # input transfer come first, and until the dispatch nothing can report it as running — which
         # is indistinguishable from an orphan from here. `_prepare_region_for_cell!` says while that
@@ -3703,13 +3724,15 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
     # precompiles it — minutes during which a spinning cell is the only sign of life. The bring-up
     # lines go out through `_bringup_broadcast`; the banner that renders them keys off `hydrating`,
     # so set it here for the duration. `remote` is the kind that says where the work is.
-    narrating = lock(nb.lock) do
+    # Every region cell is dispatched through here, so only a bring-up still to happen is narrated:
+    # announcing one for a worker that is up holds the banner over cells already running on it.
+    narrating = _region_bringup_pending(nb, kernel) && lock(nb.lock) do
         already = get(nb.report.meta, "hydrating", false) === true
         already || (nb.report.meta["hydrating"] = true;
                     nb.report.meta["hydratingKind"] = "remote")
         !already
     end
-    try; _broadcast(nb, "bringup:starting a worker for region '$side' on $host"); catch; end
+    narrating && (try; _broadcast(nb, "bringup:starting a worker for region '$side' on $host"); catch; end)
     stop_narrating = () -> narrating && lock(nb.lock) do
         delete!(nb.report.meta, "hydrating"); delete!(nb.report.meta, "hydratingKind")
         try; _broadcast(nb, string(nb.version)); catch; end

@@ -1806,6 +1806,19 @@ function _payload_current(k)::Bool
         return true
     end
     got == want && return true
+    # A worker still computing keeps its work: replacing it would kill a cell whose result nothing can
+    # recover. It is swapped on an attach after it has finished.
+    busy = try
+        r = _tool(k, "__slate_running", Dict{String,Any}(); timeout = 6.0)
+        run = _infofield(r, "running", nothing)
+        run !== nothing && !isempty(run) ? join(string.(run), ", ") : ""
+    catch
+        ""
+    end
+    if !isempty(busy)
+        _rlog("payload: worker-$(k.port) for '$(k.label)' runs older code but is still running $busy — kept until it is idle")
+        return true
+    end
     _rlog("payload: worker-$(k.port) for '$(k.label)' is stale " *
           "(sha $(isempty(got) ? "none" : first(got, 12)) ≠ current $(first(want, 12))) — reprovisioning")
     return false

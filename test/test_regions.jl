@@ -402,6 +402,31 @@ const RE = KaimonSlate.ReportEngine
                 end
             end
 
+            @testset "a running region cell is judged only by its own kernel" begin
+                rep = RE.parse_report("#%% code id=c region=gpu\nsleep(1)\n")
+                nb = NS.LiveNotebook("orphan", joinpath(mktempdir(), "orphan.jl"), rep, RE.GateKernel(mktempdir()), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                c = only(rep.cells)
+                # A worker not connected yet still has its bring-up ahead; an in-process kernel has none.
+                @test NS._region_bringup_pending(nb, nb.kernel)
+                @test !NS._region_bringup_pending(nb, RE.InProcessKernel())
+                c.state = RE.RUNNING
+                NS._RUN_SINCE[(nb.id, "c")] = time() - 60
+                sweep!(answered, asked) = (NS._LAST_RUNNING[nb.id] = (Set{String}(), Set(answered), Set(asked));
+                                           NS._reconcile_nb_runs!(nb))
+                try
+                    # The main kernel answers, the busy region worker misses its ping: nothing is known.
+                    sweep!(["local"], ["local", "gpu"]); sweep!(["local"], ["local", "gpu"])
+                    @test c.state == RE.RUNNING
+                    # No kernel for its region at all: nothing can be running it.
+                    sweep!(["local"], ["local"]); sweep!(["local"], ["local"])
+                    @test c.state == RE.STALE
+                finally
+                    delete!(NS._LAST_RUNNING, nb.id); delete!(NS._RUN_SINCE, (nb.id, "c"))
+                end
+            end
+
             @testset "a cell whose input is waiting waits with it" begin
                 rep = RE.parse_report("#%% code id=a region=gpu\nx = 1\n#%% code id=b\ny = x + 1\n#%% code id=c\nz = y + 1\n")
                 RE.build_dependencies!(rep)
