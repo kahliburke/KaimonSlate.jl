@@ -9,7 +9,7 @@ import { html } from 'htm/preact';
 import { render } from 'preact';
 import { signal, effect } from '@preact/signals';
 import { lockScroll } from './scrolllock.js';
-import { StepList, ActivityPane, HistoryPane, forgetHistory, hasWarnings } from './prepsteps.js';
+import { StepList, ActivityPane, HistoryPane, forgetHistory, hasWarnings, follow, noteScroll } from './prepsteps.js';
 import { openImagePackages } from './imagepkgs.js';
 
 const dlg   = signal(null);   // {region, host, scheduler} while the dialog is up
@@ -109,7 +109,7 @@ function RegionPrep() {
     <div class="rpsplit">
       <div class="rppane">
         <div class="rptabs"><span class="rpstriplabel">Steps</span></div>
-        <div class="rptabbody">
+        <div class="rptabbody" ref=${el => follow(el)} onScroll=${noteScroll}>
         ${steps ? StepList(steps, running ? s.preparing.now : 0, running ? s.preparing.last_output : 0)
                 : html`<div class="rppprepsteps">${planned(d).map(t => html`<div class="rppprepstep planned"><span class="rppprepmark">·</span><span class="rppprepname">${t}</span></div>`)}</div>`}
         ${done ? html`<div class=${rec.ok && !hasWarnings(rec) ? 'rppsysok rpres' : 'rppsyswarn rpres'}>${

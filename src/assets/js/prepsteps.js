@@ -28,8 +28,8 @@ const openActs = signal({});
 // A log that follows new lines only while it is scrolled to the bottom: reading back up holds it
 // there until it is scrolled down again.
 const atBottom = el => el.scrollHeight - el.scrollTop - el.clientHeight < 8;
-const follow = el => { if (el && el._follow !== false) el.scrollTop = el.scrollHeight; };
-const noteScroll = e => { e.currentTarget._follow = atBottom(e.currentTarget); };
+export const follow = el => { if (el && el._follow !== false) el.scrollTop = el.scrollHeight; };
+export const noteScroll = e => { e.currentTarget._follow = atBottom(e.currentTarget); };
 const shortTime = l => String(l).replace(/^\[\d{4}-\d\d-\d\d (\d\d:\d\d:\d\d)\.\d+\] /, '$1  ');
 export function Activity(lines, key) {
   if (!lines || !lines.length) return null;
