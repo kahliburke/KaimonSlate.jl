@@ -211,14 +211,15 @@ worker on a granted node to time its loads and check its GPUs. `project` (a note
 folder; the region's preload when empty) is installed and loaded on that node (on the host itself for
 a region without a scheduler), which is where CUDA is checked, and leaves the environment there ready
 for that project's first start. `keep_node` leaves the node held for the notebook that asked.
-`worker` is that notebook's own worker, as `(start = () -> …, run = code -> stdout)`: when given, the
+`worker` is that notebook's own worker, as `(start = fresh -> …, run = code -> stdout)` (`fresh` replaces a running one): when given, the
 packages are loaded in it rather than in a throwaway process, and it stays up for the notebook's cells.
 Returns the readiness record, which is
 also stored in the region. Runs to the end even when a step fails, recording each step's outcome, so
 one problem does not hide the next. Blocking; callers that cannot wait spawn it.
 """
 function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothing,
-                         project::AbstractString = "", keep_node::Bool = false, worker = nothing)
+                         project::AbstractString = "", keep_node::Bool = false, worker = nothing,
+                         rebuild_sysimage::Bool = false)
     r = region_get(name)
     r === nothing && error("no region '$name'")
     isempty(r.host) && error("region '$(r.name)' has no host")
@@ -252,6 +253,14 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
             catch e
                 _rlog("prepare[$(r.name)]: could not record the environment's test — $(sprint(showerror, e))")
             end
+        end
+        # The image its workers boot from, when this prepare built one or found it current; an earlier
+        # one stands otherwise.
+        m = get(measured, "sysimage", nothing)
+        if m isa AbstractDict && get(m, "result", "") in ("built", "current")
+            rec["sysimage"] = _sysimage_record(m)
+        elseif haskey(old, "sysimage")
+            rec["sysimage"] = old["sysimage"]
         end
         # A prepare that reached no node keeps what an earlier node stage found.
         if isempty(nodef) && !isempty(old)
@@ -292,11 +301,24 @@ function prepare_region!(name::AbstractString; node::Union{Nothing,Bool} = nothi
         end
         run_node = node === nothing ? (r.scheduler !== :none && isempty(r.readiness)) : node
         if r.scheduler === :none
-            _prepare_env!(r, step, measured, ref, host, _region_prologue(r.name); worker)
+            _prepare_env!(r, step, measured, ref, host, _region_prologue(r.name); worker, rebuild_sysimage)
         elseif run_node
-            _prepare_on_node!(r, step, facts, measured, ref; keep_node, note, worker)
+            _prepare_on_node!(r, step, facts, measured, ref; keep_node, note, worker, rebuild_sysimage)
         end
     end
+end
+
+# What a launch needs to know of a built image (`sysimage_plan`), kept in the region's readiness.
+_sysimage_record(m) = Dict{String,Any}(k => m[k] for k in ("key", "dir", "cpu", "image", "bytes", "packages",
+                                                           "spec", "built_at") if haskey(m, k))
+function _record_sysimage!(name, m)
+    r = region_get(name); r === nothing && return nothing
+    try
+        region_set!(r.name; readiness = merge(r.readiness, Dict{String,Any}("sysimage" => _sysimage_record(m))))
+    catch e
+        _rlog("prepare[$name]: could not record the sysimage — $(sprint(showerror, e))")
+    end
+    return nothing
 end
 
 # The machine's part of what a prepare found: what any worker or task on this host meets. Its stamps
@@ -455,7 +477,7 @@ function _start_estimate(r::Region, id::AbstractString)
 end
 
 function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Bool = false, note = _ -> nothing,
-                           worker = nothing)
+                           worker = nothing, rebuild_sysimage::Bool = false)
     # A node held before the prepare started belongs to whoever is using it, and stays theirs.
     held_before = _region_holds_node(r)
     got = step("Get a node from $(r.scheduler)") do
@@ -463,7 +485,12 @@ function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Boo
         t0 = time()
         while time() < deadline
             nodehost, a = region_place!(r; wait_s = 30)
-            isempty(nodehost) || return ("ok", "$nodehost (job $(a === nothing ? "?" : a.id))")
+            if !isempty(nodehost)
+                # A node the region already held comes back without its allocation; its route has the job.
+                v = via(nodehost)
+                job = a !== nothing ? a.id : v === nothing ? "" : v.job
+                return ("ok", nodehost * (isempty(job) ? "" : " (job $job)") * (a === nothing ? ", already held" : ""))
+            end
             a === nothing && return ("fail", "the scheduler granted nothing and reported no request")
             a.state === :unreachable && return ("fail", "cannot reach $(r.host) to ask for a node")
             est = isempty(a.id) ? "" : _start_estimate(r, a.id)
@@ -507,7 +534,7 @@ function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Boo
             measured["runtime_load_s"] = secs
             ("ok", "$(secs)s")
         end
-        _prepare_env!(r, step, measured, ref, node, pro; worker)
+        _prepare_env!(r, step, measured, ref, node, pro; worker, rebuild_sysimage)
     finally
         if keep_node
             step(() -> ("ok", region_host(r) * (haskey(measured, "worker_start_s") ? " · its worker is up" : "")),
@@ -534,6 +561,7 @@ for (_, p) in Pkg.dependencies()
 end
 println("load=", round(time() - t0; digits = 1))
 println("pid=", getpid(), " on ", gethostname())
+println("image=", unsafe_string(Base.JLOptions().image_file))
 if isdefined(Main, :CUDA)
     C = getfield(Main, :CUDA)
     println("cuda=", C.functional(), " devices=", C.functional() ? length(C.devices()) : 0)
@@ -545,7 +573,7 @@ end
 # Install the reference project's environment where its workers will run, load every package in it
 # with timing, and check CUDA when it is among them. On a scheduler region `host` is the granted node;
 # elsewhere it is the host itself. The environment stays installed, stamped, for the project's start.
-function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothing)
+function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothing, rebuild_sysimage::Bool = false)
     isempty(ref[1]) && return nothing
     name = basename(ref[1])
     t = _region_target(r; origin_env = ref[1])
@@ -558,14 +586,23 @@ function _prepare_env!(r::Region, step, measured, ref, host, pro; worker = nothi
     # Compiled here, where the workers run, and timed apart from loading: the load time below is what
     # every start pays, which is what the liveness grace is made from; this is paid once.
     step("Precompile $name") do
-        t0 = time()
         ok, out = _ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.precompile()",
                               "precompile $name on $host"; stream = true, setup = t.setup)
-        ok ? ("ok", "$(round(time() - t0; digits = 1))s") : ("fail", first(strip(out), 400))
+        ok ? ("ok", "") : ("fail", first(strip(out), 400))   # the step shows its own time
+    end
+    # A region that boots its workers from a sysimage gets it built here, on the node type its workers
+    # run on and in their shell, before the worker below starts, so that start is the one it speeds up.
+    (r.sysimage || rebuild_sysimage) && step("Build the sysimage") do
+        status, detail, m = build_sysimage!(r, t, host; prologue = pro, force = rebuild_sysimage)
+        measured["sysimage"] = m
+        # Recorded now, not when the prepare ends: the load and the worker start below boot from it.
+        get(m, "result", "") in ("built", "current") && _record_sysimage!(r.name, m)
+        (status, detail * (r.sysimage ? "" : " · the region does not boot from it until sysimage is on"))
     end
     worker === nothing || return _prepare_in_worker!(step, measured, name, worker)
     step("Load $name") do
-        ok, out = _run_on(host, t.setup * pro * _julia_sh("julia --startup-file=no --project=\$HOME/$rel -e " * Sweep.shq(_LOAD_CODE));
+        ok, out = _run_on(host, t.setup * pro * _sysimage_jopt_sh(t) * "; " *
+                                _julia_sh("julia \$JOPT --startup-file=no --project=\$HOME/$rel -e " * Sweep.shq(_LOAD_CODE));
                           timeout = 1800.0)
         ok || return ("fail", first(strip(out), 400))
         _load_result!(measured, out)
@@ -585,7 +622,11 @@ function _load_result!(measured, out::AbstractString)
     # Which process loaded them: for a notebook's prepare, the worker its cells then run on.
     pid = get(f, "pid", "")
     isempty(pid) || (measured["worker_pid"] = pid)
-    return (status, "loaded in $(measured["env_load_s"])s" * (isempty(pid) ? "" : " · process $pid") *
+    # Whether the process booted from a built sysimage rather than Julia's own.
+    img = get(f, "image", "")
+    measured["booted_sysimage"] = !isempty(img) && !(basename(img) in ("sys.so", "sys.dylib", "sys.dll"))
+    return (status, "loaded in $(measured["env_load_s"])s" * (measured["booted_sysimage"] ? " from the sysimage" : "") *
+                    (isempty(pid) ? "" : " · process $pid") *
                     (isempty(cuda) ? "" : " · CUDA functional=$cuda") *
                     (isempty(sys) ? "" : " · CUDA libraries from the system: $(first(sys, 200))"))
 end
@@ -593,9 +634,12 @@ end
 # The notebook's own worker: started the way its cells would start it, and the packages loaded in it,
 # so the first run after preparing finds both done. Its start is the runtime's load time.
 function _prepare_in_worker!(step, measured, name, worker)
+    # A worker already running booted from whatever image there was then: when this prepare built a new
+    # one, the notebook's worker is replaced so it boots from it.
+    fresh = get(get(measured, "sysimage", Dict()), "result", "") == "built"
     up = step("Start the notebook's worker") do
         t0 = time()
-        worker.start()
+        worker.start(fresh)
         measured["worker_start_s"] = measured["runtime_load_s"] = round(time() - t0; digits = 1)
         ("ok", "up in $(measured["worker_start_s"])s")
     end

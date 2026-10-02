@@ -297,5 +297,66 @@ const RE = KaimonSlate.ReportEngine
             @test occursin("julia", RE.host_facts("perlmutter")["stale"])
             RE.host_facts_set!("perlmutter", Dict{String,Any}())
         end
+
+        @testset "a sysimage build reports what it did" begin
+            # The build script decides before it builds anything; run it against a fake home, with no
+            # packages to resolve.
+            r = RE.region_set!("simg"; host = "simghost")
+            mktempdir() do home
+                proj = mkpath(joinpath(home, "env")); write(joinpath(proj, "Project.toml"), "")
+                mkpath(joinpath(home, RE._REMOTE_WORKER)); write(joinpath(home, RE._REMOTE_WORKER, "worker.jl"), "")
+                sysdir = joinpath(home, ".julia", "slate-sysimg", "simg")
+                @test RE.sysimage_dir(r) == "~/.julia/slate-sysimg/simg"            # in the depot, per region
+                run_script(; minfree = 0.0, force = false) = begin
+                    f = joinpath(home, "build.jl")
+                    write(f, RE._sysimage_build_script(r, "env", Dict{String,String}[]; minfree_gb = minfree, force, infra = ()))
+                    read(setenv(`$(Base.julia_cmd()) --startup-file=no $f`, merge(ENV, Dict("HOME" => home))), String)
+                end
+                # Too little memory: put off, with the reason.
+                st, why, _ = RE._sysimage_outcome(run_script(; minfree = 1e9), true, 3)
+                @test st == "warn" && occursin("free", why)
+                # A build already running elsewhere holds it; one whose process is gone does not.
+                mkpath(sysdir); write(joinpath(sysdir, ".building"), "k otherhost 1")
+                st, why, _ = RE._sysimage_outcome(run_script(), true, 3)
+                @test st == "warn" && occursin("another build", why) && occursin("otherhost", why)
+                # Current for these packages and this CPU: nothing to build.
+                out = run_script(; minfree = 1e9)
+                key = only(m.captures[1] for m in eachmatch(r"key=(\w+)", out))
+                cpu = only(m.captures[1] for m in eachmatch(r"cpu=(\S*)", out))
+                write(joinpath(sysdir, "current-" * cpu), key); write(joinpath(sysdir, key * ".so"), "x")
+                st, why, m = RE._sysimage_outcome(run_script(), true, 3)
+                @test st == "ok" && occursin("already built", why) && m["result"] == "current" && m["key"] == key
+            end
+            RE.region_delete!("simg")
+            # What a finished build and a failed one read as, and the packages it holds.
+            out = "[sysimg] key=abc cpu=x\n[sysimg] pkg u1 CUDA 5.1.0 t1\n[sysimg] result=built image=/h/k.so bytes=314572800 env=/h/env\n"
+            st, why, m = RE._sysimage_outcome(out, true, 600)
+            @test st == "ok" && occursin("300 MB", why) && m["image"] == "/h/k.so" && m["packages"]["u1"]["version"] == "5.1.0"
+            @test RE._sysimage_outcome("[sysimg] result=failed reason=link error\n", true, 5)[1:2] == ("fail", "link error")
+            @test RE._sysimage_outcome("ERROR: boom", false, 5)[1] == "fail"
+        end
+
+        @testset "a worker boots from the region's image only when the versions agree" begin
+            env = mktempdir()
+            write(joinpath(env, "Project.toml"), "[deps]\nCUDA = \"u1\"\nMine = \"u2\"\n")
+            write(joinpath(env, "Manifest.toml"), """
+                [[deps.CUDA]]
+                uuid = "u1"
+                version = "5.1.0"
+                git-tree-sha1 = "t51"
+                [[deps.Mine]]
+                uuid = "u2"
+                path = "../Mine"
+                version = "0.1.0"
+                """)
+            # What an image can hold: the registered packages, not the one from a path.
+            @test [e["name"] for e in RE.sysimage_candidates(env)] == ["CUDA"]
+            img(v, t) = Dict{String,Any}("packages" => Dict("u1" => Dict("name" => "CUDA", "version" => v, "tree" => t)))
+            @test isempty(RE.sysimage_conflicts(img("5.1.0", "t51"), env))
+            @test RE.sysimage_conflicts(img("5.0.0", "t50"), env) == ["CUDA (image 5.0.0, notebook 5.1.0)"]
+            # An image of other packages entirely conflicts with nothing.
+            @test isempty(RE.sysimage_conflicts(Dict{String,Any}("packages" => Dict("u9" => Dict("name" => "X"))), env))
+            @test RE.sysimage_spec_key(Dict{String,String}[]) == ""
+        end
     end
 end

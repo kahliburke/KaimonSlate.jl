@@ -327,7 +327,7 @@ function Monitor() {
     const xs = byRegion[rg.name] || [], err = rg.status && rg.status.ok === false;
     if (!xs.length && !(rg.warm > 0) && !err) return;
     const head = html`<div class=${'actgrouphd' + (err ? ' err' : '')}>
-      <span class="actgroupname" title="open this region's config" onClick=${() => openRegionConfig(rg.host, rg.name)}>🖧 ${rg.name}</span> <span class="actgrouphost">${rg.host || '(no host)'}</span>
+      <span class="actgroupname" title="open this region's config" onClick=${() => openRegionConfig(rg.host, rg.name)}>${window.slateModel.regionIcon(rg)} ${rg.name}</span> <span class="actgrouphost">${rg.host || '(no host)'}</span>
       ${rg.warm > 0 ? html` <span class="actgroupwarm">warm ${rg.warm}</span>` : null}
       ${err ? html` <span class="actgrouperr" title=${rg.status.msg}>⚠ reconcile failed</span>` : null}</div>`;
     groups.push(group(head, xs));

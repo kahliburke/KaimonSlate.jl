@@ -249,6 +249,26 @@ A region's prepare does this:
 * on a scheduler region, the first time: get a node, read it the same way, check that it sees the
   login node's files, time loading the worker runtime and the region's preload environment there,
   check CUDA, and give the node back.
+* on a region with **sysimage** on, build its workers' sysimage where they run (the node, on a
+  scheduler region) and in the machine's shell, after the packages are precompiled. The step says
+  whether the image was built, was already current, or was put off and why (too little free memory,
+  another build running, no C compiler). `region_prepare(name, sysimage="rebuild")` builds it again
+  even when it is current.
+
+### What a region's sysimage holds
+
+The image belongs to the region: its Prepare dialog lists the packages in it, and every notebook
+that prepares the region builds the same image. The list starts as the preparing notebook's
+registered packages and its project's, and you can add any registered package, choose a release for
+each (the newest is marked), or add a package from a path on the machine. Slate's own worker
+packages are always in it. A package the notebook has from a path, its project included, is never
+baked: it loads on top of the image, so editing it takes effect as it would without one.
+
+Julia loads a package from the image whatever version a notebook's environment asks for. So a
+worker boots from the region's image only when every package the two share is the same version in
+both; otherwise it starts without it and says which package differs. A package only the image holds
+loads in the region's cells, but not on this machine. Images live in the machine's depot, one per
+CPU the region's nodes have.
 
 What it finds is kept with the region and used by every start after it. A module that puts the
 system's CUDA libraries ahead of CUDA.jl's is unloaded before the worker starts. The time loading took

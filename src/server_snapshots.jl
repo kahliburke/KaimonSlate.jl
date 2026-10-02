@@ -56,6 +56,20 @@ function _pkg_names()
     end
     _PKG_NAMES[] = sort!(unique!(names))
 end
+# A registered package's releases across the reachable registries, newest first, with the ones
+# withdrawn marked. `ok = false` for a name no registry has.
+function _pkg_versions(name::AbstractString)
+    for reg in (try; Pkg.Registry.reachable_registries(); catch; []; end), (uuid, e) in reg.pkgs
+        e.name == name || continue
+        info = try; Pkg.Registry.registry_info(e); catch; continue; end
+        vs = sort!(collect(keys(info.version_info)); rev = true)
+        return Dict{String,Any}("ok" => true, "name" => name, "uuid" => string(uuid),
+            "versions" => [string(v) for v in vs],
+            "yanked" => [string(v) for v in vs if info.version_info[v].yanked])
+    end
+    return Dict{String,Any}("ok" => false, "name" => name, "versions" => String[], "yanked" => String[])
+end
+
 # Rank: exact match first, then prefix matches, then substring; case-insensitive; capped.
 function _pkg_complete(q::AbstractString, limit::Int = 50)
     q = lowercase(strip(q)); isempty(q) && return String[]

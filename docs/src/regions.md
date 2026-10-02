@@ -64,8 +64,9 @@ always match a `region=` tag.
 ![The Regions manager focused on a host: a region's config (warm count, transport, sysimage, data root), the New-region editor, and the host's live worker roster with per-worker telemetry and a parked warm worker](./assets/region-focus.png)
 
 !!! note "Advanced, still settling"
-    Two newer per-region knobs: an opt-in **sysimage** (a PackageCompiler image baked for the region's
-    workers, for faster startup) and a **`curve`** toggle — the region's data channel is
+    Two newer per-region knobs: an opt-in **sysimage** (a PackageCompiler image of the region's
+    environment that its workers boot from, built when the region is prepared; see
+    [Preparing a machine or a region](clusters.md#Preparing-a-machine-or-a-region)) and a **`curve`** toggle — the region's data channel is
     CURVE-encrypted by default. Turning it off also drops the allow-list, so leave it on unless you
     own the whole machine: a loopback port is reachable by every account on a shared host.
 

@@ -2309,7 +2309,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        region_prepare(name; action="start", node="", project="", id="") -> String
+        region_prepare(name; action="start", node="", project="", id="", sysimage="") -> String
 
     Prepare region `name` for workers, outside any notebook: sign in, put Julia and the worker runtime
     in place, read the site (default modules, CUDA libraries on the path, CPU), create the data root,
@@ -2329,9 +2329,14 @@ function create_tools(GateTool::Type)
     empty). The node stage installs its environment there, loads every package with timing and checks
     CUDA, and the report is kept per project: a start for that project uses its load time for the
     liveness grace, and finds its environment already installed.
+
+    A region with `sysimage` on builds its workers' sysimage as a step of the prepare, after the
+    precompile and before the worker starts, on the node and in the machine's shell; it is skipped
+    when the image is current. `sysimage="rebuild"` builds it even then. The report gives the outcome
+    (built, current, deferred and why, failed), the image's size, and whether the worker booted from it.
     """
     function region_prepare(name::String; action::String = "start", node::String = "", project::String = "",
-                            id::String = "")::String
+                            id::String = "", sysimage::String = "")::String
         r = ReportEngine.region_get(strip(name))
         r === nothing && return "No region '$name'. `regions()` lists them."
         st = ReportEngine.preparing(r.name)
@@ -2377,8 +2382,10 @@ function create_tools(GateTool::Type)
         n === missing && return "⛔ node must be true or false, not '$node'"
         try; ReportEngine._reference_env(isempty(strip(project)) ? r.preload : project)
         catch e; return "⛔ project: " * sprint(showerror, e); end
+        si = lowercase(strip(sysimage))
+        si in ("", "rebuild") || return "⛔ sysimage must be \"rebuild\" or empty, not '$sysimage'"
         Threads.@spawn try
-            ReportEngine.prepare_region!(r.name; node = n, project = project)
+            ReportEngine.prepare_region!(r.name; node = n, project = project, rebuild_sysimage = si == "rebuild")
         catch e
             ReportEngine.prepare_failed_to_start!(r.name, e)
         end

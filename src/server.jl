@@ -1102,16 +1102,77 @@ const WAIT_PREPARING = "preparing"
 # Why a notebook's first worker on region `r` has to go through preparing it, or `""` when it need not.
 # The machine's answer for this project on the kind of node the region gets (`env_readiness`), the same
 # one a sweep on that machine is held by.
-_prepare_reason(r, origin_env::AbstractString) =
-    ReportEngine.env_readiness(r.host, origin_env, ReportEngine.region_node_type(r);
-                               depot = ReportEngine.region_depot(r))
+function _prepare_reason(r, origin_env::AbstractString)
+    # A notebook with no environment of its own needs only the region prepared, and the site unchanged.
+    isempty(origin_env) && !isempty(r.readiness) &&
+        isempty(get(ReportEngine.host_facts(r.host), "stale", "")) && return ""
+    why = ReportEngine.env_readiness(r.host, origin_env, ReportEngine.region_node_type(r);
+                                     depot = ReportEngine.region_depot(r))
+    isempty(why) || return why
+    # A region that boots from a sysimage needs one built from what it lists now.
+    r.sysimage || return ""
+    img = get(r.readiness, "sysimage", nothing)
+    img isa AbstractDict || return "sysimage not built"
+    String(get(img, "spec", "")) == ReportEngine.sysimage_spec_key(r.sysimage_pkgs) || return "sysimage packages changed"
+    return ""
+end
+
+# The environment a notebook's region workers replicate: its own fork env when it has one, else its
+# project's; "" for a notebook with neither.
+function _nb_origin_env(nb::LiveNotebook)
+    envdir = ReportEngine.notebook_env_dir(nb.path)
+    isfile(joinpath(envdir, "Project.toml")) && return envdir
+    proj = Base.current_project(dirname(abspath(nb.path)))
+    return proj === nothing ? "" : dirname(proj)
+end
+
+# The sysimages of the regions a notebook uses, for its packages pane: per region with sysimage on and
+# an image built, the packages chosen for it and Slate's, each at the version baked, the version the
+# notebook resolves ("" when it does not have it: the package loads only in that region's cells), and
+# whether the two differ (then the notebook's workers there start without the image).
+function _nb_sysimages(nb::LiveNotebook)
+    origin = _nb_origin_env(nb)
+    mine = Dict{String,String}()
+    mf = isempty(origin) ? "" : ReportEngine.parent_manifest(origin)
+    if !isempty(mf) && isfile(mf)
+        for (name, es) in get(ReportEngine.Sweep.TOML.parsefile(mf), "deps", Dict{String,Any}()), e in es
+            mine[String(name)] = String(get(e, "version", ""))
+        end
+    end
+    out = Any[]
+    for x in _regions_json(nb)
+        r = ReportEngine.region_get(String(x["name"]))
+        (r === nothing || !r.sysimage) && continue
+        img = get(r.readiness, "sysimage", nothing)
+        img isa AbstractDict || (push!(out, Dict("region" => r.name, "built" => false, "packages" => Any[])); continue)
+        baked = Dict(String(get(v, "name", "")) => v for (_, v) in get(img, "packages", Dict()))
+        names = unique(vcat([e["name"] for e in r.sysimage_pkgs], collect(ReportEngine._SYSIMAGE_INFRA)))
+        pkgs = Any[]
+        for n in sort(names; by = lowercase)
+            b = get(baked, n, nothing); b === nothing && continue
+            v = String(get(b, "version", "")); nv = get(mine, n, "")
+            push!(pkgs, Dict("name" => n, "version" => v, "notebook" => nv,
+                             "slate" => n in ReportEngine._SYSIMAGE_INFRA,
+                             "path" => startswith(String(get(b, "tree", "")), "path:"),
+                             "clash" => !isempty(nv) && nv != v))
+        end
+        push!(out, Dict("region" => r.name, "built" => true, "packages" => pkgs,
+                        "built_at" => get(img, "built_at", 0), "bytes" => get(img, "bytes", 0),
+                        "total" => length(baked)))
+    end
+    return out
+end
+
+# The project a notebook sits in, "" for none.
+_nb_project(nb::LiveNotebook) = (p = Base.current_project(dirname(abspath(nb.path))); p === nothing ? "" : dirname(p))
 
 # Ask the page to offer preparing the region (prepare.js). Pushed on every explicit run that meets the
 # wait, so a dialog dismissed once comes back when the person runs the cell again.
 function _announce_prepare!(nb::LiveNotebook, r; reason::AbstractString = "")
     try
         _broadcast(nb, "regionprep:" * JSON.json(Dict("region" => r.name, "host" => r.host,
-                                                    "scheduler" => String(r.scheduler), "reason" => reason)))
+                                                    "scheduler" => String(r.scheduler), "sysimage" => r.sysimage,
+                                                    "reason" => reason)))
     catch
     end
     return nothing
@@ -1127,7 +1188,19 @@ function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString)
     r = ReportEngine.region_get(name)
     r === nothing && return nothing
     # The worker prepare starts and loads the packages in is the one this notebook's cells use.
-    worker = (start = () -> begin
+    worker = (start = (fresh::Bool = false) -> begin
+                  # Replacing a running worker: drop the hub's kernel for it and the process, so the
+                  # one started below boots afresh (from the image this prepare just built).
+                  if fresh
+                      k0 = lock(() -> get(_REGION_KERNELS, (nb.id, String(r.name)), nothing), _REGION_LOCK)
+                      if k0 isa ReportEngine.GateKernel && k0.conn !== nothing && k0.target isa ReportEngine.RemoteTarget
+                          host, port = k0.target.ssh_host, k0.port
+                          _forget_region_kernel!(nb, String(r.name))
+                          try; ReportEngine._drop_kernel_conn!(k0); catch; end
+                          try; ReportEngine.reap_remote_worker(host, port); catch; end
+                          ReportEngine._rlog("prepare[$(r.name)]: replaced worker-$port on $host so it boots from the new sysimage")
+                      end
+                  end
                   k = _region_kernel!(nb, String(r.name); preparing = true)
                   try; _workers_push!(nb); catch; end          # the pill shows it starting
                   ReportEngine.prepare!(k, nb.report; explicit = true)

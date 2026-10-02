@@ -509,8 +509,9 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
                 RE._REMOTE_CFG[] = Dict{String,Any}()
             end
             # the sysimage build lock window is interpolated (tunable) into the generated remote script
-            script = RE._sysimage_build_script("proj", "sysdir", 5.0)
-            @test occursin("< $(RE._sysimage_lock_stale())", script)
+            script = RE._sysimage_build_script(RE.region_set!("lockr"; host = "h"), "proj", Dict{String,String}[])
+            RE.region_delete!("lockr")
+            @test occursin("const STALE = $(RE._sysimage_lock_stale())", script)
             @test !any(a -> a isa Expr && a.head === :error, Meta.parseall(script).args)   # still valid Julia
         finally
             RE._REMOTE_CFG[] = saved

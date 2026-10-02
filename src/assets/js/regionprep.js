@@ -7,8 +7,10 @@
 //
 import { html } from 'htm/preact';
 import { render } from 'preact';
-import { signal } from '@preact/signals';
-import { StepList, Activity, History, hasWarnings } from './prepsteps.js';
+import { signal, effect } from '@preact/signals';
+import { lockScroll } from './scrolllock.js';
+import { StepList, ActivityPane, HistoryPane, forgetHistory, hasWarnings } from './prepsteps.js';
+import { openImagePackages } from './imagepkgs.js';
 
 const dlg   = signal(null);   // {region, host, scheduler} while the dialog is up
 const st    = signal(null);   // last /api/regions/prepare payload for that region
@@ -35,6 +37,7 @@ function poll(name) {
     st.value = d;
     const running = !!(d.preparing && d.preparing.running);
     if (running) { begun.value = true; setTimeout(() => poll(name), 1500); return; }
+    forgetHistory('dlg:' + name);   // the run that just ended belongs in the history
     // Done with every step passing: the cells are already running again, so there is nothing left to
     // ask. A warning keeps it open, since that is the part worth reading.
     const rec = (d.preparing && d.preparing.record) || d.readiness || {};
@@ -44,6 +47,15 @@ function poll(name) {
 }
 
 const err = signal('');
+const tab = signal('activity');   // the right column: 'activity' | 'history'
+// A region that boots from a sysimage builds it in this prepare, from a list chosen first in its
+// own modal; that modal's Prepare comes back here.
+function prepare() {
+  const cur = dlg.value; if (!cur || awaiting.value) return;
+  if (cur.sysimage && !cur.batch) return openImagePackages({ region: cur.region, host: cur.host, onConfirm: start });
+  start();
+}
+
 function start() {
   const cur = dlg.value; if (!cur || awaiting.value) return;
   const s = st.value;
@@ -60,7 +72,8 @@ function start() {
 function open(p) {
   if (!p || !p.region) return;
   if (dlg.value && dlg.value.region === p.region) return;   // already showing it
-  dlg.value = p; st.value = null; begun.value = false; awaiting.value = null; err.value = '';
+  dlg.value = p; st.value = null; begun.value = false; awaiting.value = null; err.value = ''; tab.value = 'activity';
+  forgetHistory('dlg:' + p.region);
   poll(p.region);
 }
 
@@ -68,12 +81,13 @@ function planned(d) {
   if (d.batch) return ['Sign in to ' + d.host, 'Julia', 'Read the site', 'Depot',
                        "Build this notebook's task environment", 'Run a test task on the nodes'];
   const sched = d.scheduler && d.scheduler !== 'none';
+  const image = d.sysimage ? [sched ? 'Build the sysimage there' : 'Build the sysimage'] : [];
   return [
     'Sign in to ' + d.host, 'Julia and the worker runtime', 'Read the site',
     ...(sched ? ["Download this notebook's packages", 'Get a node', 'Read the node',
-                 'Install and precompile the packages there', "Start this notebook's worker and load them",
+                 'Install and precompile the packages there', ...image, "Start this notebook's worker and load them",
                  'Keep the node for this notebook']
-              : ['Install and precompile the packages', "Start this notebook's worker and load them"]),
+              : ['Install and precompile the packages', ...image, "Start this notebook's worker and load them"]),
   ];
 }
 
@@ -92,25 +106,39 @@ function RegionPrep() {
     <div class="rphead">${d.batch ? html`Prepare ⚙ ${d.host} for sweeps` : html`Prepare 🖧 ${d.region}`}</div>
     <div class="pddim rpsub">${d.host}${d.scheduler && d.scheduler !== 'none' ? ' · ' + d.scheduler : ''}</div>
     ${d.reason && !running && !done ? html`<div class="rppsyswarn rpsub">${d.reason}</div>` : null}
-    ${steps ? StepList(steps, running ? s.preparing.now : 0, running ? s.preparing.last_output : 0)
-            : html`<div class="rppprepsteps">${planned(d).map(t => html`<div class="rppprepstep planned"><span class="rppprepmark">·</span><span class="rppprepname">${t}</span></div>`)}</div>`}
-    ${Activity(log, 'dlg:' + d.region)}
-    ${History(d.region, 'dlg:' + d.region)}
-    ${done ? html`<div class=${rec.ok && !hasWarnings(rec) ? 'rppsysok rpres' : 'rppsyswarn rpres'}>${
-        !rec.ok ? '⚠ finished with failures'
-        : hasWarnings(rec) ? '⚠ prepared, with warnings'
-        : begun.value ? '✓ prepared — the waiting cells are running' : '✓ prepared'} · ${new Date(rec.prepared_at * 1000).toLocaleString()}</div>` : null}
+    <div class="rpsplit">
+      <div class="rppane">
+        <div class="rptabs"><span class="rpstriplabel">Steps</span></div>
+        <div class="rptabbody">
+        ${steps ? StepList(steps, running ? s.preparing.now : 0, running ? s.preparing.last_output : 0)
+                : html`<div class="rppprepsteps">${planned(d).map(t => html`<div class="rppprepstep planned"><span class="rppprepmark">·</span><span class="rppprepname">${t}</span></div>`)}</div>`}
+        ${done ? html`<div class=${rec.ok && !hasWarnings(rec) ? 'rppsysok rpres' : 'rppsyswarn rpres'}>${
+            !rec.ok ? '⚠ finished with failures'
+            : hasWarnings(rec) ? '⚠ prepared, with warnings'
+            : begun.value ? '✓ prepared — the waiting cells are running' : '✓ prepared'} · ${new Date(rec.prepared_at * 1000).toLocaleString()}</div>` : null}
+        </div>
+      </div>
+      <div class="rppane">
+        <div class="rptabs">
+          <button class=${tab.value === 'activity' ? 'on' : ''} onClick=${() => tab.value = 'activity'}>Activity${log && log.length ? html` <span class="pddim">${log.length}</span>` : null}</button>
+          <button class=${tab.value === 'history' ? 'on' : ''} onClick=${() => tab.value = 'history'}>History</button>
+        </div>
+        <div class="rptabbody">${tab.value === 'activity' ? ActivityPane(log) : HistoryPane(d.region, 'dlg:' + d.region)}</div>
+      </div>
+    </div>
     <div class="rpbtns">
       ${err.value ? html`<span class="rppsyswarn" style="margin-right:auto">${err.value}</span>` : null}
       ${awaiting.value ? html`<button class="anbtn primary" disabled>Starting…</button>`
         : running ? html`<button class="anbtn" onClick=${() => dlg.value = null}>Hide</button>`
-        : done ? html`<button class=${'anbtn' + (rec.ok ? '' : ' primary')} onClick=${start}>Prepare again</button>
+        : done ? html`<button class=${'anbtn' + (rec.ok ? '' : ' primary')} onClick=${prepare}>Prepare again</button>
                    <button class="anbtn" onClick=${() => dlg.value = null}>Close</button>`
-        : html`<button class="anbtn primary" onClick=${start}>Prepare</button>
+        : html`<button class="anbtn primary" onClick=${prepare}>Prepare</button>
                <button class="anbtn" onClick=${() => dlg.value = null}>Later</button>`}
     </div>
   </div></div>`;
 }
+
+effect(() => lockScroll('regionprep', !!dlg.value));
 
 const host = document.createElement('div');
 host.id = 'regionprepbg';
@@ -135,6 +163,6 @@ window.openPrepare = (name, ev) => {
   if (ev) { ev.preventDefault(); ev.stopPropagation(); }
   fetch('/api/regions').then(r => r.json()).then(d => {
     const r = ((d && d.regions) || []).find(x => x.name === name);
-    open({ region: name, host: r ? r.host : '', scheduler: r ? r.scheduler : '' });
+    open({ region: name, host: r ? r.host : '', scheduler: r ? r.scheduler : '', sysimage: !!(r && r.sysimage) });
   }).catch(() => open({ region: name, host: '', scheduler: '' }));
 };

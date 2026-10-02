@@ -196,8 +196,6 @@ is_remote(::RemoteTarget) = true
 const _REMOTE_ROOT      = ".cache/kaimonslate"
 const _REMOTE_WORKER    = "$_REMOTE_ROOT/worker"      # Slate's worker payload (src/*.jl)
 const _REMOTE_KGATE_ENV = "$_REMOTE_ROOT/kgate-env"   # a project with KaimonGate (+ Revise) instantiated
-const _REMOTE_SYSIMG    = "$_REMOTE_ROOT/sysimg"      # baked worker sysimages, keyed by payload+env hash
-const _REMOTE_SYSIMG_BUILDER = "$_REMOTE_ROOT/sysimg-builder"  # env holding PackageCompiler (kept OFF the worker env)
 const _REMOTE_KEY_PATH  = "~/.cache/kaimon/curve/server.key"
 # The extension SDK (Widget/Choice/WebPage/slate_context) is path-dev'd from the monorepo and NOT yet
 # registered, so a registry `Pkg.add` can't find it on a remote host. Ship its source and `Pkg.develop`
@@ -1079,7 +1077,6 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     # zero while the records they counted were on screen.
     (built || get(st, "rg", "") != "1") && _record_rg_path!(host, rel; setup = t.setup)
     _rlog("provision DONE host=$host")
-    _kickoff_sysimage_build!(t, rel)   # detached + idempotent — fast workers once it lands, plain boot until then
     return nothing
 end
 
@@ -1114,10 +1111,6 @@ _sysimage_enabled() = get(ENV, "KAIMONSLATE_SYSIMAGE", "1") != "0"
 # small/busy box the build defers instead of OOM-thrashing. Tunable; default sized for a ~300MB image.
 _sysimage_minfree_gb() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_SYSIMAGE_MINFREE_GB", "")), 5.0)
 
-# Per-env sysimage subdir (host-$HOME-relative), keyed by a hash of the worker's `--project` dir. Computed
-# hub-side from the SAME `t.project` string at both the build and the boot site so they always agree.
-_sysimage_envkey(project::AbstractString) = bytes2hex(_SHA.sha1(codeunits(String(project))))[1:12]
-_sysimage_dir(project::AbstractString) = "$_REMOTE_SYSIMG/$(_sysimage_envkey(project))"
 
 # The precompile execution file (run with the worker env active): include the payload and drive the
 # eval/capture path so its hot specializations bake in. Best-effort throughout — a trace error just means
@@ -1133,192 +1126,226 @@ catch
 end
 """
 
-# The remote build program: recompute the key, skip if already current, else (invalidating a drifted
-# pointer first) bake `sysimg/<key>.so` via PackageCompiler from a dedicated builder env, then publish
-# `sysimg/current` atomically and prune older images. Self-guarded against concurrent builds by a lockfile.
-function _sysimage_build_script(projrel::AbstractString, sysreldir::AbstractString, minfree_gb::Real)
-    io = IOBuffer()
-    P(s) = println(io, s)
-    P("import Pkg, TOML, SHA")   # all stdlib — always available on the remote's default Julia
-    P("home = homedir()")
-    P("proj = joinpath(home, raw\"$projrel\")")
-    P("sysdir = joinpath(home, raw\"$sysreldir\"); mkpath(sysdir)")   # per-env subtree (no cross-region collision)
-    # key = SHA1 over the payload (basenames + contents) + a CANONICAL projection of the env's resolved deps
-    # (sorted name/uuid/version/tree-hash-or-path + julia_version) — NOT the raw Manifest bytes, which churn
-    # on TOML re-serialization and julia_version stamps and would force needless rebuilds. Still change-correct:
-    # a real dep bump or a Julia upgrade shifts the key (a sysimage IS Julia-version-specific and must rebuild).
-    P("payload = joinpath(home, raw\"$_REMOTE_WORKER\")")
-    # Hash the payload SOURCE only — exclude the transient per-port boot scripts (`worker-<port>.jl`) that
-    # `_launch_worker!` writes into this same dir, or the key would drift on every single spawn (new port →
-    # new boot script) and rebuild endlessly. The shipped src payload (worker.jl + its includes) is stable.
-    P("files = sort!(filter(f -> endswith(f, \".jl\") && !occursin(r\"^worker-\\d+\\.jl\$\", basename(f)), readdir(payload; join = true)))")
-    P("ctx = SHA.SHA1_CTX()")
-    P("for f in files; SHA.update!(ctx, codeunits(basename(f))); SHA.update!(ctx, read(f)); end")
-    P("mf = joinpath(proj, \"Manifest.toml\")")
-    P("if isfile(mf)")
-    P("  md = TOML.parsefile(mf)")
-    P("  SHA.update!(ctx, codeunits(string(get(md, \"julia_version\", \"\"))))")
-    P("  mdeps = get(md, \"deps\", Dict{String,Any}())")
-    P("  for name in sort!(collect(keys(mdeps)))")
-    P("    for e in mdeps[name]")
-    P("      e isa AbstractDict || continue")
-    P("      SHA.update!(ctx, codeunits(string(name, \";\", get(e, \"uuid\", \"\"), \";\", get(e, \"version\", \"\"), \";\", get(e, \"git-tree-sha1\", get(e, \"path\", \"\")), \"|\")))")
-    P("    end")
-    P("  end")
-    P("end")
-    P("key = bytes2hex(SHA.digest!(ctx))[1:16]")
-    P("target = joinpath(sysdir, key * \".so\"); curf = joinpath(sysdir, \"current\")")
-    P("println(\"[sysimg] key=\$key\"); flush(stdout)")
-    # already current → nothing to do (checked BEFORE the memory guard: skipping needs no headroom)
-    P("if isfile(curf) && strip(read(curf, String)) == key && isfile(target); println(\"[sysimg] already current — nothing to do\"); exit(0); end")
-    # Free-RAM guard: a sysimage link peaks at several GB; on a tight box DEFER rather than OOM-thrash. We keep
-    # any existing `current` bootable (a slightly-stale image still loads — Revise reloads /src on top), so
-    # deferring is safe; a later provision on a quieter box builds it. Tunable via KAIMONSLATE_SYSIMAGE_MINFREE_GB.
-    # Available RAM is read per-OS (the remote's Julia): Linux /proc/meminfo, macOS `vm_stat` (free+inactive
-    # pages), anything else unbounded (Inf ⇒ guard off) rather than assuming a Linux-only /proc.
-    P("avail = try")
-    P("  if Sys.islinux()")
-    P("    parse(Float64, match(r\"MemAvailable:\\s+(\\d+)\", read(\"/proc/meminfo\", String)).captures[1]) / 1048576")
-    P("  elseif Sys.isapple()")
-    P("    vs = read(`vm_stat`, String); pg = (m = match(r\"page size of (\\d+)\", vs)) === nothing ? 4096 : parse(Int, m.captures[1])")
-    P("    fp(re) = ((m = match(re, vs)) === nothing ? 0 : parse(Int, m.captures[1]))")
-    P("    (fp(r\"Pages free:\\s+(\\d+)\") + fp(r\"Pages inactive:\\s+(\\d+)\")) * pg / 2^30")
-    P("  else; Inf; end")
-    P("catch; Inf; end")
-    P("if avail < $minfree_gb; println(\"[sysimg] only \$(round(avail; digits = 1))GB free (< $(minfree_gb)GB) — deferring build (lower KAIMONSLATE_SYSIMAGE_MINFREE_GB to force)\"); exit(0); end")
-    # drift → clear the stale pointer so workers fall back to a plain boot while we rebuild
-    P("if isfile(curf); prev = strip(read(curf, String)); rm(curf; force = true); println(\"[sysimg] payload/env drift (\$prev → \$key) — invalidated; rebuilding\"); end")
-    # concurrent-build lock (stale after 30 min)
-    P("lk = joinpath(sysdir, \".building\")")
-    P("if isfile(lk) && (time() - mtime(lk)) < $(_sysimage_lock_stale()); println(\"[sysimg] another build in progress — skip\"); exit(0); end")
-    P("write(lk, key)")
-    P("try")
-    P("  builder = joinpath(home, raw\"$_REMOTE_SYSIMG_BUILDER\"); Pkg.activate(builder)")
-    P("  if !isfile(joinpath(builder, \"Project.toml\")) || !occursin(\"PackageCompiler\", read(joinpath(builder, \"Project.toml\"), String))")
-    P("    Pkg.add(\"PackageCompiler\")")
-    P("  end")
-    P("  Pkg.instantiate()")
-    P("  exec = joinpath(sysdir, \"precompile_exec.jl\")")
-    P("  open(exec, \"w\") do eio; write(eio, $(repr(_sysimage_exec_contents()))); end")
-    P("  pdata = TOML.parsefile(joinpath(proj, \"Project.toml\"))")
-    P("  pkgs = sort!(collect(keys(get(pdata, \"deps\", Dict{String,Any}()))))")   # env's direct deps → baked as packages
-    P("  println(\"[sysimg] baking \$(length(pkgs)) package(s) + payload trace → \$target\"); flush(stdout)")
-    P("  @eval import PackageCompiler")   # added at runtime above → @eval + invokelatest to dodge world-age
-    P("  Base.invokelatest(PackageCompiler.create_sysimage, pkgs; sysimage_path = target, project = proj, precompile_execution_file = exec)")
-    P("  tmpc = curf * \".tmp\"; write(tmpc, key); mv(tmpc, curf; force = true)")   # publish the pointer atomically
-    P("  for f in readdir(sysdir; join = true); (endswith(f, \".so\") && f != target) && rm(f; force = true); end")   # prune old images
-    # Prime the pkgimage cache against the NEW base image: the very first boot with a fresh custom sysimage
-    # otherwise recompiles the env's pkgimages (~a minute on a slow CPU), which would land under the first
-    # real worker. Pay it HERE, detached and idle, by running the exec (include worker.jl + evals = the real
-    # boot's load path) once under the new image, so every subsequent worker boot hits the warm cache.
-    P("  try; println(\"[sysimg] priming pkgimage cache against new image…\"); flush(stdout); run(pipeline(`\$(Base.julia_cmd()[1]) --sysimage=\$target --project=\$proj --startup-file=no \$exec`; stdout = devnull, stderr = devnull)); catch e; println(\"[sysimg] prime skipped (\$(first(sprint(showerror, e), 80)))\"); end")
-    P("  println(\"[sysimg] DONE — current=\$key\")")
-    P("finally")
-    P("  rm(lk; force = true)")
-    P("end")
-    return String(take!(io))
+# Where a region's images and their environment live: in the machine's depot, so on scratch where the
+# site has one, and per region, since the region decides what its image holds.
+function sysimage_dir(r)
+    d = region_depot(r)
+    return (isempty(d) ? "~/.julia" : d) * "/slate-sysimg/" * r.name
 end
 
-# Ship the build program to the host and launch it DETACHED (survives the ssh channel closing), stdout →
-# the build log. Fire-and-forget: workers boot without the image until it lands, then pick it up via `-J`.
-function _kickoff_sysimage_build!(t::RemoteTarget, projrel::AbstractString; force::Bool = false)
-    (t.sysimage || force) || return nothing  # OPT-IN per region (Region.sysimage); `force` = an explicit UI/API build
-    _sysimage_enabled() || return nothing     # global kill-switch (KAIMONSLATE_SYSIMAGE=0) overrides even an opted-in region
-    host = t.ssh_host
-    # PackageCompiler needs a system C compiler to link the sysimage. Probe for one FIRST and skip cleanly
-    # if the host has none — the worker just keeps booting the plain way, and we avoid a scary linker-error
-    # stacktrace in the build log on a minimal box (e.g. a fresh cloud image with no build tools).
-    if !_ssh_test(host, `sh -c $("command -v cc || command -v gcc || command -v clang")`)
-        _rlog("sysimg: no C compiler (cc/gcc/clang) on $host — skipping sysimage build (install build tools, e.g. `apt install build-essential`, to enable)")
-        return nothing
+# The packages every worker image holds: Slate's own, which the worker loads before anything else.
+const _SYSIMAGE_INFRA = ("KaimonGate", "ExpressionExplorer", "Revise", "SlateExtensionsBase")
+
+# The build program for region `r`'s image (src/sysimage_build.jl), with its parameters set in front of
+# it. `proj` is the preparing notebook's environment, home-relative; `spec` is what the region lists.
+function _sysimage_build_script(r, proj::AbstractString, spec; force::Bool = false,
+                                minfree_gb::Real = _sysimage_minfree_gb(), infra = _SYSIMAGE_INFRA)
+    dir = sysimage_dir(r)
+    head = """
+    const PROJ = joinpath(homedir(), $(repr(String(proj))))
+    const SYSDIR = expanduser($(repr(dir)))
+    const SPEC = $(repr([(String(e["name"]), String(get(e, "uuid", "")), String(get(e, "version", "")),
+                          String(get(e, "path", ""))) for e in spec]))
+    const INFRA = $(repr(String[x for x in infra]))
+    const PAYLOAD = joinpath(homedir(), $(repr(_REMOTE_WORKER)))
+    const EXEC = $(repr(_sysimage_exec_contents()))
+    const MINFREE = $(Float64(minfree_gb))
+    const STALE = $(_sysimage_lock_stale())
+    const FORCE = $force
+    """
+    return head * read(joinpath(@__DIR__, "sysimage_build.jl"), String)
+end
+
+# The pointer name a worker's shell boots: `current-<cpu>`, the CPU spelled as the build script spells it.
+const _SYSIMAGE_CPU_SH = "CPU=\$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//; s/ *\$//; s/[^A-Za-z0-9._-]/_/g'); " *
+                        "[ -n \"\$CPU\" ] || CPU=\$(uname -m)"
+
+# The same path for the remote shell: a leading `~/` as `$HOME/`, which a quoted word does not expand.
+_shpath(p::AbstractString) = startswith(p, "~/") ? "\$HOME/" * p[3:end] : String(p)
+
+"""
+    sysimage_plan(t::RemoteTarget) -> (; use, key, dir, why)
+
+Whether a worker for `t` boots from its region's sysimage: the region boots from one, one has been
+built, and every package both the image and the notebook's environment hold is the same in both.
+Julia loads a package from the image whatever version the environment asks for, so a mismatch boots
+without the image rather than with versions nobody chose. `why` says what stopped it, "" when it was
+never asked for.
+"""
+function sysimage_plan(t::RemoteTarget)
+    none(why) = (; use = false, key = "", dir = "", why = String(why))
+    (t.sysimage && !isempty(t.region)) || return none("")
+    r = region_get(t.region); r === nothing && return none("")
+    img = get(r.readiness, "sysimage", nothing)
+    img isa AbstractDict || return none("no sysimage built yet")
+    clash = sysimage_conflicts(img, t.origin_env)
+    isempty(clash) || return none("the sysimage holds other versions of " * join(clash, ", "))
+    return (; use = true, key = String(img["key"]), dir = String(img["dir"]), why = "")
+end
+
+"""
+    sysimage_conflicts(img, origin_env) -> Vector{String}
+
+The packages the image record `img` holds at another version than the environment at `origin_env`
+resolves, each as `"name (image V, notebook W)"`. A registered package is compared by its tree hash,
+one from a path by its version.
+"""
+function sysimage_conflicts(img::AbstractDict, origin_env::AbstractString)
+    held = get(img, "packages", nothing)
+    (held isa AbstractDict && !isempty(origin_env)) || return String[]
+    mf = parent_manifest(origin_env)
+    (isempty(mf) || !isfile(mf)) && return String[]
+    deps = try; get(Sweep.TOML.parsefile(mf), "deps", Dict{String,Any}()); catch; return String[]; end
+    out = String[]
+    for (name, es) in deps, e in es
+        e isa AbstractDict || continue
+        h = get(held, String(get(e, "uuid", "")), nothing)
+        h isa AbstractDict || continue
+        same = haskey(e, "path") ? String(get(e, "version", "")) == String(get(h, "version", "")) :
+               String(get(e, "git-tree-sha1", "")) == String(get(h, "tree", ""))
+        same || push!(out, "$name (image $(get(h, "version", "?")), notebook $(get(e, "version", "?")))")
     end
-    sysreldir = _sysimage_dir(t.project)            # sysimg/<envkey> — per-env, matches the boot-line resolver
-    _ssh_ok(host, `mkdir -p $sysreldir`) || return nothing
-    remote = "$sysreldir/build.jl"
-    logf = "$sysreldir/build.log"
-    body = _sysimage_build_script(projrel, sysreldir, _sysimage_minfree_gb())
-    _put_file(host, Vector{UInt8}(codeunits(body)), remote) ||
-        (_rlog("sysimg: sending build script → $host failed (skip)"); return nothing)
-    launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && if command -v setsid >/dev/null 2>&1; then setsid nohup julia --startup-file=no $remote > $logf 2>&1 & else nohup julia --startup-file=no $remote > $logf 2>&1 & fi"
-    _rlog("sysimg: launching detached build on $host  (log: $host:$logf)")
-    _ssh_ok(host, `$launch`) || _rlog("sysimg: build launch returned nonzero on $host (it may still be starting)")
-    return nothing
+    return sort!(out)
 end
 
-# Sysimage build state for a target's env — ONE ssh that reads the per-env `sysimg/<envkey>/` dir: the
-# published `current` key, the built `.so` (size + mtime), whether a build is in progress, whether the host
-# even has a C compiler, and a short tail of the build log. Feeds the Regions UI's sysimage panel.
-function sysimage_status(t::RemoteTarget)
-    host = t.ssh_host
-    d = _sysimage_dir(t.project)
-    res = Dict{String,Any}("host" => host, "envkey" => _sysimage_envkey(t.project), "opt_in" => t.sysimage,
-                           "reachable" => false, "building" => false, "current" => "", "bytes" => 0,
-                           "built" => 0, "stale" => false, "compiler" => true, "log" => "")
-    isempty(host) && return res
-    pr = startswith(t.project, "~/") ? t.project[3:end] : t.project   # env dir → Manifest for the staleness check
-    # Pass the WHOLE script as the single remote-command arg (like `_launch_worker!`'s launch line): ssh
-    # flattens argv and the remote LOGIN shell re-parses, so `sh -c <multi-word>` would be mangled — but a
-    # lone command string is parsed intact (`$(...)`, `[ … ]`, `;`, `&&` all survive).
-    # Staleness is an mtime heuristic (cheap, no content hash): a payload `.jl` (EXCLUDING the transient
-    # per-port `worker-<port>.jl` boot scripts, which the build key also ignores) or the env Manifest newer
-    # than the `.so` ⇒ the image predates a code/dep change and should be rebuilt.
-    sh = "D=\$HOME/$d; CUR=\$(cat \$D/current 2>/dev/null); echo \"current=\$CUR\"; " *
-         "if [ -n \"\$CUR\" ] && [ -f \"\$D/\$CUR.so\" ]; then SO=\$D/\$CUR.so; echo \"bytes=\$(stat -c %s \$SO 2>/dev/null || stat -f %z \$SO 2>/dev/null)\"; echo \"built=\$(stat -c %Y \$SO 2>/dev/null || stat -f %m \$SO 2>/dev/null)\"; " *
-         "N=\$(find \$HOME/$_REMOTE_WORKER -maxdepth 1 -name '*.jl' ! -name 'worker-*.jl' -newer \$SO -print -quit 2>/dev/null); " *
-         "MF=\$HOME/$pr/Manifest.toml; if [ -z \"\$N\" ] && [ -f \"\$MF\" ] && [ \"\$MF\" -nt \"\$SO\" ]; then N=\$MF; fi; " *
-         "[ -n \"\$N\" ] && echo stale=1; fi; " *
-         "if [ -f \$D/.building ]; then echo building=1; fi; " *
-         "if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then echo nocompiler=1; fi; " *
-         # Marker must NOT start with `=` — zsh (a common login shell) would try equals-expansion on `===LOG===`
-         # (`=cmd` → path of cmd), fail with a nonzero exit, and make the whole ssh command look like it failed.
-         # `|| true` so a MISSING build.log (a host that hasn't built yet) doesn't make `tail` — the last
-         # command — exit nonzero, which _ssh_capture would read as an unreachable host (false "status
-         # unavailable"). A genuine ssh/connection failure still returns nonzero via ssh itself.
-         "echo __SLATELOG__; tail -n 14 \$D/build.log 2>/dev/null || true"
-    ok, out = try; _ssh_capture(host, `$sh`); catch; (false, ""); end
-    ok || return res
-    res["reachable"] = true
-    parts = split(out, "__SLATELOG__")
-    for line in split(strip(parts[1]), '\n')
-        kv = split(line, '='; limit = 2); length(kv) == 2 || continue
-        k, v = strip(kv[1]), strip(kv[2])
-        k == "current" && (res["current"] = String(v))
-        k == "bytes" && (res["bytes"] = something(tryparse(Int, v), 0))
-        k == "built" && (res["built"] = something(tryparse(Int, v), 0))
-        k == "building" && (res["building"] = true)
-        k == "stale" && (res["stale"] = true)
-        k == "nocompiler" && (res["compiler"] = false)
+# Shell that sets `JOPT` to `--sysimage=<image>` when a worker for `t` boots from its region's image
+# (`sysimage_plan`) and this node's CPU has that image, else to nothing, for a `julia \$JOPT …` after
+# it. Booting from it also puts the image's environment on the load path, so a package only the
+# image holds loads in the region's cells. Workers boot through it, and so does a prepare's load.
+function _sysimage_jopt_sh(t::RemoteTarget)
+    plan = sysimage_plan(t)
+    isempty(plan.why) || _rlog("sysimg: $(t.region) starts without its sysimage: $(plan.why)")
+    plan.use || return "JOPT=''"
+    d = _shpath(plan.dir); so = "$d/$(plan.key).so"
+    return _SYSIMAGE_CPU_SH * "; JOPT=''; if [ \"\$(cat $d/current-\$CPU 2>/dev/null)\" = \"$(plan.key)\" ] && [ -f \"$so\" ]; " *
+           "then JOPT=\"--sysimage=$so\"; export JULIA_LOAD_PATH=\"@:$d/env:@stdlib\"; fi"
+end
+
+"""
+    sysimage_candidates(origin_env; project = "") -> Vector{Dict}
+
+The packages an image for this environment can hold, as a region lists them: its registered direct
+dependencies, and its project's when it is a notebook's own environment, each with the version it
+resolves and `from` (`notebook` or `project`). A package the environment has from a path (the project itself, a checkout) is left out: it
+loads normally on top of the image, so its edits are seen.
+"""
+function sysimage_candidates(origin_env::AbstractString; project::AbstractString = "")
+    out = Dict{String,Dict{String,String}}()
+    mf = isempty(origin_env) ? "" : parent_manifest(origin_env)
+    (isempty(mf) || !isfile(mf)) && return Dict{String,String}[]
+    m = try; Sweep.TOML.parsefile(mf); catch; return Dict{String,String}[]; end
+    byuuid = Dict{String,Any}()
+    for (name, es) in get(m, "deps", Dict{String,Any}()), e in es
+        e isa AbstractDict && (byuuid[String(get(e, "uuid", ""))] = (String(name), e))
     end
-    length(parts) > 1 && (res["log"] = String(strip(parts[2])))
-    return res
+    # The notebook's own environment first, then its project's (`project`, the enclosing one, whose
+    # packages a notebook's own environment reaches through the project rather than listing): a
+    # package in both is the notebook's. An environment that is the project itself is the project's.
+    own = joinpath(origin_env, "Project.toml")
+    projfile = isempty(project) ? "" : joinpath(project, "Project.toml")
+    for proj in unique(filter(isfile, [own, joinpath(dirname(mf), "Project.toml"), projfile]))
+        p = try; Sweep.TOML.parsefile(proj); catch; continue; end
+        from = (proj == own && rstrip(abspath(origin_env), '/') != rstrip(abspath(project), '/')) ? "notebook" : "project"
+        for (name, uuid) in get(p, "deps", Dict{String,Any}())
+            x = get(byuuid, String(uuid), nothing)
+            (x === nothing || haskey(x[2], "path") || haskey(out, String(uuid))) && continue
+            out[String(uuid)] = Dict("name" => String(name), "uuid" => String(uuid), "from" => from,
+                                     "version" => String(get(x[2], "version", "")), "path" => "")
+        end
+    end
+    return sort!(collect(values(out)); by = e -> lowercase(e["name"]))
 end
 
-# Region-level wrappers for the UI/API: read a region's sysimage state, or kick off an EXPLICIT build
-# (forced past the opt-in gate). The build first provisions (idempotent — ensures the env's Project/Manifest
-# exist) then launches detached; both in a background task so the request returns at once (UI polls status).
+"""
+    sysimage_path_package(r, path) -> Dict
+
+The package at `path` on region `r`'s machine, from its Project.toml there: `name`, `uuid`,
+`version`, or `ok = false` with why it is not a package.
+"""
+function sysimage_path_package(r, path::AbstractString)
+    ok, out = _run_on(r.host, "cat " * Sweep.shq_path(rstrip(String(path), '/') * "/Project.toml"))
+    ok || return Dict{String,Any}("ok" => false, "error" => "no Project.toml at $path on $(r.host)")
+    t = try; Sweep.TOML.parse(out); catch; return Dict{String,Any}("ok" => false, "error" => "its Project.toml does not parse"); end
+    name = String(get(t, "name", ""))
+    isempty(name) && return Dict{String,Any}("ok" => false, "error" => "$path is an environment, not a package (no name)")
+    return Dict{String,Any}("ok" => true, "name" => name, "uuid" => String(get(t, "uuid", "")),
+                            "version" => String(get(t, "version", "")), "path" => String(path))
+end
+
+# A package list's identity: what decides whether an image built from it is still the one asked for.
+sysimage_spec_key(spec) = isempty(spec) ? "" :
+    bytes2hex(_SHA.sha1(join(sort!([join((get(e, "name", ""), get(e, "uuid", ""), get(e, "version", ""), get(e, "path", "")), "|")
+                                    for e in spec]), "\n")))[1:12]
+
+"""
+    build_sysimage!(r, t::RemoteTarget, host; prologue = "", force = false) -> (status, detail, measured)
+
+Build region `r`'s worker sysimage on `host` (a granted node, or the host itself), in the shell its
+workers start in (the machine's setup, then `prologue`), for the notebook environment `t` names, and
+wait for it. The image holds what the region lists, or the notebook's registered packages when it
+lists nothing, with Slate's worker packages. The outcome as a prepare step: `ok` when the image is
+current or was built, `warn` when the build was put off or skipped (workers then start without one),
+`fail` when it failed; `measured` is the record a launch decides by (`sysimage_plan`).
+"""
+function build_sysimage!(r, t::RemoteTarget, host::AbstractString; prologue::AbstractString = "", force::Bool = false)
+    rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
+    spec = isempty(r.sysimage_pkgs) ? sysimage_candidates(t.origin_env) : r.sysimage_pkgs
+    body = _sysimage_build_script(r, rel, spec; force)
+    t0 = time()
+    ok, out = _ssh_julia!(host, body, "sysimage on $host"; stream = true, setup = t.setup * prologue)
+    st, detail, m = _sysimage_outcome(out, ok, round(Int, time() - t0))
+    m["dir"] = sysimage_dir(r); m["spec"] = sysimage_spec_key(r.sysimage_pkgs); m["built_at"] = time()
+    return (st, detail, m)
+end
+
+# A build's output as a step outcome: the last `[sysimg] result=…` line it printed, with the key, the
+# CPU and the packages the image holds (`[sysimg] pkg uuid name version tree`).
+function _sysimage_outcome(out::AbstractString, ok::Bool, secs::Integer)
+    ms = collect(eachmatch(r"\[sysimg\] result=(\w+)(.*)", out))
+    isempty(ms) && return ("fail", "the build ended without a result" * (ok ? "" : ": " * first(strip(out), 300)), Dict{String,Any}())
+    kind, rest = ms[end].captures[1], String(strip(ms[end].captures[2]))
+    field(k) = (m = match(Regex("\\b" * k * "=(\\S+)"), rest); m === nothing ? "" : String(m.captures[1]))
+    reason = (m = match(r"reason=(.*)", rest); m === nothing ? "" : String(m.captures[1]))
+    img, bytes = field("image"), something(tryparse(Int, field("bytes")), 0)
+    km = match(r"\[sysimg\] key=(\w+) cpu=(\S*)", out)
+    pkgs = Dict{String,Any}()
+    for pm in eachmatch(r"\[sysimg\] pkg (\S+) (\S+) (\S*) (\S*)", out)
+        pkgs[pm.captures[1]] = Dict("name" => pm.captures[2], "version" => pm.captures[3], "tree" => pm.captures[4])
+    end
+    size = bytes > 0 ? " · $(round(Int, bytes / 2^20)) MB" : ""
+    measured = Dict{String,Any}("image" => img, "bytes" => bytes, "secs" => secs, "result" => String(kind),
+                                "key" => km === nothing ? "" : String(km.captures[1]),
+                                "cpu" => km === nothing ? "" : String(km.captures[2]), "packages" => pkgs)
+    kind == "current" && return ("ok", "already built for these packages$size · $(length(pkgs)) packages", measured)
+    kind == "built" && return ("ok", "built in $(secs)s$size · $(length(pkgs)) packages", measured)
+    kind == "failed" && return ("fail", reason, measured)
+    return ("warn", reason * " — workers start without one", measured)
+end
+
+"""
+    sysimage_view(r) -> Dict
+
+Region `r`'s sysimage as the page shows it: the image its workers boot from (size, CPU, when it was
+built, how many packages it holds), what it lists, and whether a build is running now.
+"""
+function sysimage_view(r)
+    img = get(r.readiness, "sysimage", nothing)
+    st = preparing(r.name)
+    building = st !== nothing && st["running"] === true &&
+               any(s -> get(s, "step", "") == "Build the sysimage" && get(s, "status", "") == "running", st["steps"])
+    out = Dict{String,Any}("ok" => true, "on" => r.sysimage, "building" => building, "listed" => r.sysimage_pkgs)
+    img isa AbstractDict && merge!(out, Dict{String,Any}("current" => get(img, "key", ""), "bytes" => get(img, "bytes", 0),
+        "cpu" => replace(String(get(img, "cpu", "")), '_' => ' '), "built" => round(Int, Float64(get(img, "built_at", 0))),
+        "packages" => length(get(img, "packages", Dict()))))
+    return out
+end
+
 # Telemetry history the hub recorded for the worker on (host, port) — the ring for the kernel connected to
 # it (conn.name == "slate-<host>-<port>"). Empty when the hub has no live connection (only attached workers
 # stream telemetry in; an idle / other-hub worker surfaces just its point-in-time `.stats` sidecar). Each
 # sample is the flat telemetry NamedTuple (cpu, rss, memo, sys_cpu, load1, …, rcv = hub arrival time).
 worker_stats_history(host::AbstractString, port::Integer) =
     (st = kernel_stats("slate-$host-$port"); st === nothing ? Any[] : st.history)
-
-sysimage_status_for_region(name) = (r = region_get(name); r === nothing ? nothing : sysimage_status(_region_target(r)))
-function sysimage_build_for_region!(name)
-    r = region_get(name); r === nothing && return (; ok = false, error = "no region '$name'")
-    isempty(r.host) && return (; ok = false, error = "region '$(r.name)' has no host")
-    t = _region_target(r)
-    rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
-    Threads.@spawn try
-        provision_remote!(t, r.preload)               # idempotent — ensures the env exists before the build reads its Manifest
-        _kickoff_sysimage_build!(t, rel; force = true)
-    catch e
-        _rlog("sysimg: manual build for region '$(r.name)' failed to start — $(sprint(showerror, e))")
-    end
-    return (; ok = true, host = t.ssh_host, envkey = _sysimage_envkey(t.project))
-end
-
-
 
 const _REMOTE_DEVSRC = "$_REMOTE_ROOT/devsrc"   # shipped sources for dev'd deps (Pkg.develop targets)
 
@@ -1696,10 +1723,7 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     # zsh, which does NOT word-split an unquoted `$JOPT`, so `-J <path>` would arrive as a single glued arg
     # ("-J /path") and Julia would read the value as " /path" (leading space → treated as relative → homedir
     # prepended → load failure). The `=`-joined long form has no space to split on, so it's shell-agnostic.
-    sysreldir = _sysimage_dir(t.project)
-    siresolve = t.sysimage ?
-        "SI=\$(cat $sysreldir/current 2>/dev/null); JOPT=''; if [ -n \"\$SI\" ] && [ -f \"\$HOME/$sysreldir/\$SI.so\" ]; then JOPT=\"--sysimage=\$HOME/$sysreldir/\$SI.so\"; fi" :
-        "JOPT=''"   # region didn't opt into a sysimage → always a plain boot
+    siresolve = _sysimage_jopt_sh(t)
     xflags = effective_worker_extra_flags(extra_flags)
     jl = "julia \$JOPT --project=$proj --startup-file=no --threads=$nthreads $xflags $remote_script '$tag'"
     # A region's prologue, if it has one: `module load cuda`, a scratch dir, a venv. It runs HERE and
@@ -3799,6 +3823,10 @@ struct Region
     # The machine it runs on, by name (`machines.jl`). When set, the host, scheduler and default
     # account are the machine's; "" keeps `host` as written, as an implicit machine on that host.
     machine::String
+    # What its workers' sysimage holds, when `sysimage` is on: each entry a package by `name` (and
+    # `uuid`), with a `version` ("" = the version the notebook preparing it resolves) or a `path` on
+    # the machine for a package that is not registered. Slate's own worker packages are added to it.
+    sysimage_pkgs::Vector{Dict{String,String}}
 end
 
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
@@ -3899,7 +3927,8 @@ _region_build(d::AbstractDict) = Region(
     # Absent ⇒ no extra options, which is what every region written before this meant.
     _region_options_of(d), String(get(d, "prologue", "")),
     let x = get(d, "readiness", nothing); x isa AbstractDict ? Dict{String,Any}(x) : Dict{String,Any}() end,
-    max(0, _asint(get(d, "liveness_grace", 0))), String(get(d, "machine", "")))
+    max(0, _asint(get(d, "liveness_grace", 0))), String(get(d, "machine", "")),
+    _sysimage_pkgs_of(get(d, "sysimage_pkgs", nothing)))
 _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
     "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
     "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
@@ -3908,7 +3937,21 @@ _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport
     "readiness" => r.readiness, "liveness_grace" => r.liveness_grace, "machine" => r.machine,
     "partition" => r.partition, "walltime" => r.walltime,
     "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus, "account" => r.account,
-    "alloc_name" => r.alloc_name, "idle_release" => r.idle_release, "idle_warn" => r.idle_warn)
+    "alloc_name" => r.alloc_name, "idle_release" => r.idle_release, "idle_warn" => r.idle_warn,
+    "sysimage_pkgs" => r.sysimage_pkgs)
+
+# A sysimage package list as stored: entries with string `name`, `uuid`, `version`, `path`; anything
+# without a name is dropped.
+function _sysimage_pkgs_of(x)
+    x isa AbstractVector || return Dict{String,String}[]
+    out = Dict{String,String}[]
+    for e in x
+        e isa AbstractDict || continue
+        d = Dict{String,String}(k => String(strip(string(get(e, k, "")))) for k in ("name", "uuid", "version", "path"))
+        isempty(d["name"]) || push!(out, d)
+    end
+    return out
+end
 
 # ── Per-region UUID (mesh-artifact naming; PEER_TUNNEL_PLAN §5.5) ──────────────────────────────
 # A stable 128-bit id minted once at region setup and persisted in the region record. Every
@@ -3992,7 +4035,8 @@ const REGION_DEFAULTS = (host = "", transport = :tunnel, base_port = 0, preload 
                          uuid = "", peer = "", scheduler = :none, partition = "", walltime = "",
                          cpus = 0, mem = "", gpus = "", account = "", alloc_name = "",
                          idle_release = 0, idle_warn = 0, options = Dict{String,String}(),
-                         prologue = "", readiness = Dict{String,Any}(), liveness_grace = 0, machine = "")
+                         prologue = "", readiness = Dict{String,Any}(), liveness_grace = 0, machine = "",
+                         sysimage_pkgs = Dict{String,String}[])
 
 # An existing region's fields, in the shape `region_set!` takes.
 _region_fields(r::Region) = NamedTuple{keys(REGION_DEFAULTS)}(Tuple(getfield(r, k) for k in keys(REGION_DEFAULTS)))
@@ -4030,7 +4074,8 @@ function region_set!(name; kw...)
                    String(f.mem), String(f.gpus), String(f.account), String(f.alloc_name),
                    max(0, Int(f.idle_release)), max(0, Int(f.idle_warn)),
           _region_options_of(Dict("options" => f.options)), String(f.prologue),
-          Dict{String,Any}(f.readiness), max(0, Int(f.liveness_grace)), String(strip(String(f.machine))))
+          Dict{String,Any}(f.readiness), max(0, Int(f.liveness_grace)), String(strip(String(f.machine))),
+          _sysimage_pkgs_of(f.sysimage_pkgs))
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)
         _region_from_dict(_region_to_dict(r))

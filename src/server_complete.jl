@@ -1962,6 +1962,10 @@ function _make_router(h::Hub)
             @warn "slate: region delete failed" region = name exception = (e, catch_backtrace())
             return _json(Dict("ok" => false, "error" => "could not delete `$name`"))
         end
+        # A machine's own region outlives this: what was dropped is only what had been changed in it,
+        # and its workers and node stay.
+        ReportEngine.region_get(name) === nothing ||
+            return _json(Dict("ok" => true, "name" => name, "reset" => true))
         Threads.@spawn try; ReportEngine.region_reap!(rec, name); catch e
             @warn "slate: region teardown failed" region = name exception = (e, catch_backtrace())
         end
@@ -2017,18 +2021,9 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/sysimage", req -> begin
         name = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "region", "")))
         isempty(name) && return _json(Dict("ok" => false, "error" => "need a region"))
-        st = ReportEngine.sysimage_status_for_region(name)
-        st === nothing && return _json(Dict("ok" => false, "error" => "no region '$name'"))
-        _json(merge(Dict("ok" => true), st))
-    end)
-    # Explicitly (re)build a region's worker sysimage — forced past the per-region opt-in. Provisions (idempotent)
-    # then launches the detached build; returns at once, the UI polls GET /api/sysimage. Body {region}.
-    HTTP.register!(router, "POST", "/api/sysimage/build", req -> begin
-        b = _body(req)
-        name = strip(String(get(b, "region", "")))
-        isempty(name) && return _json(Dict("ok" => false, "error" => "need a region"))
-        r = ReportEngine.sysimage_build_for_region!(name)
-        _json(Dict("ok" => r.ok, "error" => get(r, :error, nothing), "host" => get(r, :host, nothing)))
+        r = ReportEngine.region_get(name)
+        r === nothing && return _json(Dict("ok" => false, "error" => "no region '$name'"))
+        _json(ReportEngine.sysimage_view(r))
     end)
     HTTP.register!(router, "GET", "/n/{id}", req -> begin
         id = HTTP.getparam(req, "id")
@@ -2908,6 +2903,46 @@ function _make_router(h::Hub)
         q = get(HTTP.queryparams(HTTP.URI(req.target)), "q", "")
         _json(Dict("names" => _pkg_complete(String(q))))
     end))
+    # ── A region's sysimage, as a notebook's Prepare chooses it ─────────────────────────────────────
+    # What the region lists, what this notebook could add (its registered packages and its project's,
+    # each at the version it resolves), Slate's packages every image holds, and what the image built
+    # now holds. Query {region}.
+    HTTP.register!(router, "GET", "/api/{id}/sysimage-packages", req -> _withnb(h, req, nb -> begin
+        name = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "region", "")))
+        r = ReportEngine.region_get(name)
+        r === nothing && return _json(Dict("ok" => false, "error" => "no region '$name'"))
+        img = get(r.readiness, "sysimage", nothing)
+        _json(Dict("ok" => true, "region" => r.name, "on" => r.sysimage, "listed" => r.sysimage_pkgs,
+                   "candidates" => ReportEngine.sysimage_candidates(_nb_origin_env(nb); project = _nb_project(nb)),
+                   "always" => collect(ReportEngine._SYSIMAGE_INFRA),
+                   "image" => img isa AbstractDict ? Dict("packages" => get(img, "packages", Dict()),
+                                                          "built_at" => get(img, "built_at", 0)) : nothing))
+    end))
+    # Keep a region's sysimage list. Body {region, packages: [{name, uuid, version, path}]}.
+    HTTP.register!(router, "POST", "/api/{id}/sysimage-packages", req -> _withnb(h, req, _ -> begin
+        b = _body(req)
+        name = strip(String(get(b, "region", "")))
+        ReportEngine.region_get(name) === nothing && return _json(Dict("ok" => false, "error" => "no region '$name'"))
+        pk = get(b, "packages", Any[])
+        pk isa AbstractVector || return _json(Dict("ok" => false, "error" => "packages must be a list"))
+        r = ReportEngine.region_set!(name; sysimage_pkgs = ReportEngine._sysimage_pkgs_of(pk))
+        _json(Dict("ok" => true, "listed" => r.sysimage_pkgs))
+    end))
+    # A package at a path on a region's machine, read from its Project.toml there: its name, uuid and
+    # version, or why it is not one. Query {region, path}.
+    HTTP.register!(router, "GET", "/api/{id}/sysimage-path", req -> _withnb(h, req, _ -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        r = ReportEngine.region_get(strip(String(get(q, "region", ""))))
+        r === nothing && return _json(Dict("ok" => false, "error" => "no such region"))
+        path = strip(String(get(q, "path", "")))
+        isempty(path) && return _json(Dict("ok" => false, "error" => "no path"))
+        _json(ReportEngine.sysimage_path_package(r, path))
+    end))
+    # The releases of a registered package, newest first, for choosing one. Query {name}.
+    HTTP.register!(router, "GET", "/api/{id}/pkg-versions", req -> _withnb(h, req, _ -> begin
+        name = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "name", "")))
+        _json(_pkg_versions(String(name)))
+    end))
     # What version of a package the user's GLOBAL default env has — the version a notebook that resolves
     # the package from the global env is actually using. Lets the missing-package prompt SHOW it and
     # install THAT version (not blindly latest, which could break the notebook).
@@ -2921,7 +2956,8 @@ function _make_router(h::Hub)
                    "parent" => e.parent,
                    "parentPath" => e.parentpath,
                    "detached" => e.detached,
-                   "manageable" => _pkg_manageable(nb.kernel)))
+                   "manageable" => _pkg_manageable(nb.kernel),
+                   "sysimages" => _nb_sysimages(nb)))
     end))
     HTTP.register!(router, "POST", "/api/{id}/package", req -> _withnb(h, req, nb -> begin
         b = _body(req)

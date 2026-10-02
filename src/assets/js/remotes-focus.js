@@ -51,17 +51,15 @@ const filledExtras = () =>
 const pj = (s) => { try { return JSON.parse(s || '{}'); } catch (_) { return {}; } };
 const fmtB = (b) => window.slateBytes(b, { compact: true });
 const ago = (u) => { let s = Math.max(0, Math.floor(Date.now() / 1000 - (+u || 0))); return s < 90 ? s + 's ago' : s < 5400 ? Math.round(s / 60) + 'm ago' : s < 172800 ? Math.round(s / 3600) + 'h ago' : Math.round(s / 86400) + 'd ago'; };
-const regionsOn = (h) => regions.value.filter(r => r.host === h);
+// A host's regions, the machine's own first, then the rest by name.
+const _M = window.slateModel;
+const regionsOn = (h) => regions.value.filter(r => r.host === h)
+  .sort((a, b) => (_M.regionKind(a) === 'machine' ? 0 : 1) - (_M.regionKind(b) === 'machine' ? 0 : 1) || a.name.localeCompare(b.name));
 const confirmP = (msg, ok, cls) => (window.confirmDark ? window.confirmDark(msg, ok, cls) : Promise.resolve(window.confirm(msg)));
 
 // ── data ──────────────────────────────────────────────────────────────────────────
 function fetchRoster(h) { fetch('/api/remote-workers?host=' + encodeURIComponent(h)).then(r => r.json()).then(d => { roster.value = { ...roster.value, [h]: (d && d.workers) || [] }; }).catch(() => { roster.value = { ...roster.value, [h]: [] }; }); }
 function loadSysimage(name) { fetch('/api/sysimage?region=' + encodeURIComponent(name)).then(r => r.json()).then(d => { sysd.value = { ...sysd.value, [name]: d }; if (d && d.ok && d.building) setTimeout(() => loadSysimage(name), 4000); }).catch(() => {}); }
-function buildSysimage(name) {
-  sysd.value = { ...sysd.value, [name]: { ...(sysd.value[name] || {}), ok: true, building: true } };
-  fetch('/api/sysimage/build', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ region: name }) })
-    .then(r => r.json()).then(d => { if (!d || !d.ok) { sysd.value = { ...sysd.value, [name]: { ok: false, error: (d && d.error) || 'build failed to start' } }; return; } setTimeout(() => loadSysimage(name), 3000); }).catch(() => {});
-}
 // The server returns codes with the values behind them. The wording is here, beside the fields.
 // ── preparing a region ──────────────────────────────────────────────────────────────
 // Polled while one runs, so each step's outcome lands as it happens; the region list reloads once
@@ -176,8 +174,10 @@ function saveRegion() {
       if (warm > 0) { let n = 0; (function poll() { if (focusHost.value !== h) return; fetchRoster(h); if (++n < 6) setTimeout(poll, 2500); })(); }
     }).catch(() => { rmsg.value = { text: 'request failed', err: true }; });
 }
-function deleteRegion(h, name) {
-  confirmP('Delete region `' + name + '`?\nIts workers are reaped. On a scheduler region the allocation is released too.', 'Delete', 'danger').then(ok => {
+function deleteRegion(h, name, reset = false) {
+  confirmP(reset ? 'Reset `' + name + '` to its machine\'s settings?\nWhat was changed here is dropped; its workers and node stay.'
+                 : 'Delete region `' + name + '`?\nIts workers are reaped. On a scheduler region the allocation is released too.',
+           reset ? 'Reset' : 'Delete', reset ? '' : 'danger').then(ok => {
     if (!ok) return;
     fetch('/api/regions/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).then(r => r.json())
       .then(() => { if (editRegion.value && editRegion.value.name === name) editRegion.value = null; loadRegions(); fetchRoster(h); }).catch(() => {});
@@ -206,17 +206,14 @@ function restartWorker(h, port) {
 // ── sysimage note (live checkbox + cached server status) ──────────────────────────
 function sysNote(name, checked, editing) {
   const d = sysd.value[name];
-  // Unchecking doesn't delete a built image — it's kept on the host and reused if re-enabled (unchanged).
+  // Turning it off keeps the built image on the machine; turning it back on uses it again.
   if (!checked) return (d && d.current)
-    ? html`<span class="pddim">off — a built image is kept (<code>${d.current}.so</code>) and reused if you re-enable</span>`
-    : html`<span class="pddim">off — workers boot plain</span>`;
-  if (d && d.compiler === false) return html`<span class="rppsyswarn">⚠ no C compiler on ${d.host || ''} — install build tools (e.g. <code>apt install build-essential</code>) to enable sysimages</span>`;
-  if (!editing) return html`<span class="pddim">will be built in the background after the region’s first worker starts</span>`;
-  if (!d) return html`<span class="pddim">checking build status…</span>`;
-  if (!d.ok || d.reachable === false) return html`<span class="pddim">build status unavailable</span>`;
+    ? html`<span class="pddim">off — the built image is kept and used again if you turn it back on</span>`
+    : html`<span class="pddim">off — workers start without one</span>`;
+  if (!editing || !d) return html`<span class="pddim">built when the region is prepared</span>`;
   if (d.building) return html`<div class="rppsysstat"><span class="rppsysbuilding"><span class="hydspin"></span> building…</span></div>`;
-  if (d.current) return html`<div class="rppsysstat"><span class=${d.stale ? 'rppsyswarn' : 'rppsysok'}>${d.stale ? '⚠ out of date' : '✓ built'} · <code>${d.current}.so</code> · ${fmtB(d.bytes)}${d.built ? ' · ' + ago(d.built) : ''}</span><button class="rppsysbtn" title=${d.stale ? 'code/deps changed since this image was built — rebuild' : 'rebuild the worker sysimage for this env'} onClick=${() => buildSysimage(name)}>Rebuild</button></div>`;
-  return html`<div class="rppsysstat"><span class="pddim">will be built in the background on the next worker start</span><button class="rppsysbtn" title="build it now (detached on the host)" onClick=${() => buildSysimage(name)}>Build now</button></div>`;
+  if (d.current) return html`<div class="rppsysstat"><span class="rppsysok">✓ built · ${fmtB(d.bytes)} · ${d.packages} packages${d.cpu ? ' · ' + d.cpu : ''}${d.built ? ' · ' + ago(d.built) : ''}</span></div>`;
+  return html`<span class="pddim">built when a notebook prepares this region</span>`;
 }
 
 // ── the allocation a scheduler region is holding ────────────────────────────────────
@@ -260,13 +257,19 @@ function RegionList() {
   const h = focusHost.value, regs = regionsOn(h), e = editRegion.value, newSel = !(e && e.name);
   return html`<div>
     <div class="rppreglist">
-      ${regs.map(r => html`<div class=${'rppregrow' + (e && e.name === r.name ? ' sel' : '')} onClick=${() => editRegion.value = r}>
-        <span class="rppregname">${isSched(r) ? '⎈' : '🖧'} ${r.name}</span>
+      ${regs.map(r => { const kind = _M.regionKind(r); return html`<div class=${'rppregrow' + (e && e.name === r.name ? ' sel' : '')} onClick=${() => editRegion.value = r}>
+        <span class="rppregname">${kind === 'machine' ? '🖥' : isSched(r) ? '⎈' : '🖧'} ${r.name}</span>
+        ${kind === 'machine' ? html`<span class="rppregkind">machine</span>` : kind === 'variant' ? html`<span class="rppregkind">on ${r.machine}</span>` : null}
         <span class="rppregmeta">${(r.node && r.node !== r.host) ? 'on ' + r.node + ' · ' : ''}${isSched(r)
           ? (r.walltime || '') + (r.partition ? ' · ' + r.partition : '') + (r.walltime || r.partition ? ' · ' : '')
           : 'warm ' + (+r.warm || 0) + ' · '}${r.transport || 'tunnel'}${r.sysimage ? ' · ⚙ sysimage' : ''}${r.data_root ? ' · root ' + r.data_root : ''}</span>
         ${(r.status && !r.status.ok) ? html`<span class="rppregst err">⚠ ${r.status.msg}</span>` : null}
-        <button class="rppregdel" title=${isSched(r) ? 'delete this region (releases any allocation it holds)' : 'delete this region (reaps its warm workers)'} onClick=${ev => { ev.stopPropagation(); deleteRegion(h, r.name); }}>✕</button></div>`)}
+        ${kind === 'machine'
+          // The machine's own region is the machine; removing it only drops what was changed here.
+          ? (r.own && Object.keys(r.own).length
+              ? html`<button class="rppregdel" title="drop the changes made here and take the machine's settings again" onClick=${ev => { ev.stopPropagation(); deleteRegion(h, r.name, true); }}>reset</button>`
+              : null)
+          : html`<button class="rppregdel" title=${isSched(r) ? 'delete this region (releases any allocation it holds)' : 'delete this region (reaps its warm workers)'} onClick=${ev => { ev.stopPropagation(); deleteRegion(h, r.name); }}>✕</button>`}</div>`; })}
       <div class=${'rppregrow rppregnew' + (newSel ? ' sel' : '')} title="create a new region on this host" onClick=${() => editRegion.value = null}>
         <span class="rppregname">＋ New region</span><span class="rppregmeta">a new compute def on ${h}</span></div>
     </div>
@@ -275,7 +278,9 @@ function RegionList() {
 function Editor() {
   const h = focusHost.value, e = editRegion.value, editing = !!(e && e.name);
   return html`<div class="rppcfg">
-    <div class="rppformhead">${editing ? ('Edit region “' + e.name + '”') : ('New region on ' + h)}</div>
+    <div class="rppformhead">${!editing ? ('New region on ' + h)
+      : _M.regionKind(e) === 'machine' ? ('The machine “' + e.name + '” as a region')
+      : ('Edit region “' + e.name + '”')}</div>
     <div class="rpprow"><label>Name</label>${editing
       ? html`<input class="rppname" readonly value=${e.name}/>`
       : html`<input class="rppname" autocomplete="off" placeholder="e.g. gpu, bigmem" value=${fName.value} onInput=${ev => fName.value = ev.target.value}/>`}</div>

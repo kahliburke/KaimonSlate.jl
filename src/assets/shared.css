@@ -115,6 +115,11 @@
 .rpplog{margin-top:4px;}
 .rpplog>.rpplogbtn{background:none;border:none;padding:0;color:inherit;opacity:.8;cursor:pointer;font-size:.74rem;}
 .rpplogtext{margin:4px 0 0;max-height:240px;overflow:auto;font-family:Menlo,monospace;font-size:.68rem;line-height:1.35;white-space:pre-wrap;overflow-wrap:anywhere;padding:6px 8px;border-radius:6px;background:rgba(0,0,0,.25);}
+/* The log and the history as panes of their own (prepsteps.js ActivityPane, HistoryPane). */
+.rppanelog{margin:0;max-height:none;height:100%;box-sizing:border-box;background:transparent;}
+.rppanempty{font-size:.78rem;padding:6px 2px;display:block;}
+.rppanelog .rppantag{display:block;color:var(--dim);font-weight:600;margin-top:6px;}
+.rppanelog .rppantag:first-child{margin-top:0;}
 .rpphist{margin-top:4px;display:flex;flex-direction:column;gap:1px;}
 .rpphistrow{font-size:.75rem;cursor:pointer;padding:1px 4px;border-radius:4px;}
 .rpphistrow:hover,.rpphistrow.sel{background:rgba(127,127,127,.15);}

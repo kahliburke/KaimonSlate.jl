@@ -921,7 +921,7 @@ const RE = KaimonSlate.ReportEngine
         steps = Tuple{String,String}[]
         step(f, title) = (st = try; first(f()); catch; "fail"; end; push!(steps, (title, st)); st)
         ran = String[]
-        worker = (start = () -> nothing,
+        worker = (start = (_ = false) -> nothing,
                   run = code -> (push!(ran, code); "load=12.5\ncuda=true devices=4\nsyscuda=\n"))
         measured = Dict{String,Any}()
         RE._prepare_in_worker!(step, measured, "proj", worker)
@@ -931,7 +931,7 @@ const RE = KaimonSlate.ReportEngine
         sent = only(ran)
         # A worker that does not come up is not asked to load anything.
         empty!(steps); empty!(ran)
-        RE._prepare_in_worker!(step, Dict{String,Any}(), "proj", (start = () -> error("no"), run = worker.run))
+        RE._prepare_in_worker!(step, Dict{String,Any}(), "proj", (start = (_ = false) -> error("no"), run = worker.run))
         @test steps == [("Start the notebook's worker", "fail")] && isempty(ran)
         # The code it sends runs in a module of its own (its imports are top-level there) and reports.
         mktempdir() do d
