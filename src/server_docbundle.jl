@@ -138,6 +138,156 @@ function _documenter_math(s::AbstractString)
     return String(take!(b))
 end
 
+# ── Citations on a docs page ──────────────────────────────────────────────────────────────────────
+# A citation whose `.bib` entry says where the cited work lives becomes a link labelled the way the
+# notebook's bibstyle labels it, so the cell stays plain markdown: `docpage` is a path under the docs
+# source (the cited work's own page in the same site), written as a `slate-docpage:` link that
+# DocumenterSlate makes relative to the page holding the cell, and `url` is the fallback. A citation
+# with neither still needs Slate's renderer. A bibliography cell becomes the list of what is cited.
+
+const _DOC_LINK = "slate-docpage:"
+
+# The raw text of the notebook's bibliographies: embedded BibTeX, and the `.bib` files the cells name.
+function _bib_texts(report, nbdir::AbstractString)
+    out = String[]
+    for c in report.cells
+        :bibliography in c.flags || continue
+        if occursin(r"@\w+\s*\{", c.source)
+            push!(out, c.source)
+        else
+            for ln in split(c.source, '\n')
+                p = strip(ln); isempty(p) && continue
+                src = isabspath(p) ? String(p) : joinpath(nbdir, p)
+                isfile(src) && push!(out, read(src, String))
+            end
+        end
+    end
+    return out
+end
+
+# key => (docpage, url, rest) from the bibliographies, `rest` holding the fields a reference list shows.
+function _bib_targets(report, nbdir::AbstractString)
+    out = Dict{String,NamedTuple{(:docpage, :url, :journal, :eprint),NTuple{4,String}}}()
+    field(body, name) = (m = match(Regex("(?i)\\b" * name * "\\s*=\\s*[{\"]([^{}\"]*)[}\"]"), body); m === nothing ? "" : strip(m.captures[1]))
+    for text in _bib_texts(report, nbdir)
+        for m in eachmatch(r"@\w+\s*\{\s*([^,\s]+)\s*,(.*?)(?=\n\s*@\w+\s*\{|\z)"s, text)
+            body = m.captures[2]
+            out[m.captures[1]] = (docpage = field(body, "docpage"), url = field(body, "url"),
+                                  journal = field(body, "journal"), eprint = field(body, "eprint"))
+        end
+    end
+    return out
+end
+
+_doc_cite_href(t) = !isempty(t.docpage) ? _DOC_LINK * t.docpage : t.url
+
+# Each cited key's place in first-citation order across the notebook's prose, spliced prose included.
+function _doc_cite_order(ctx)
+    cc = ctx.citectx
+    order = Dict{String,Int}()
+    rec = (key, _sup, _form) -> (haskey(order, String(key)) || (order[String(key)] = length(order) + 1); "")
+    for c in ctx.nb.report.cells
+        (c.kind == MARKDOWN && !(:bibliography in c.flags)) || continue
+        _rewrite_citations(_doc_spliced(c)[1], cc.citekeys; emit = rec)
+    end
+    return order
+end
+
+_doc_cite_labels(ctx) = _cite_labels(get(ctx.nb.report.meta, "bibstyle", "ieee"), ctx.citectx.bi, _doc_cite_order(ctx))
+
+# Citations in `s` as linked labels, where every key of a group has somewhere to link to; the rest are
+# left for `_doc_markdown` to notice. Groups keep the style's labels and brackets: `(A, 2025; B, 2024)`,
+# `[3; 5]` or `[Sun 2026; Elder 2025]`.
+function _doc_citations(ctx, s::AbstractString)
+    cc = ctx.citectx
+    cc === nothing && return s
+    targets = _bib_targets(ctx.nb.report, dirname(abspath(ctx.nb.path)))
+    (; labels, open, close) = _doc_cite_labels(ctx)
+    linked(k) = haskey(targets, k) && !isempty(_doc_cite_href(targets[k]))
+    # Each citation is first written as a marker, so a bracketed group's members can be gathered.
+    emit = (key, sup, form) -> string(form == "p" ? "\x02" : "\x01", key, "\x03", strip(sup), form == "p" ? "\x02" : "\x01")
+    t = _rewrite_citations(String(s), cc.citekeys; emit)
+    cite_link(key, sup) = string("[", get(labels, key, key), "](", _doc_cite_href(targets[key]), ")", isempty(sup) ? "" : ", " * sup)
+    t = replace(t, r"(\x01[^\x01]*\x01)+" => function (run)
+        parts = [split(m.captures[1], '\x03') for m in eachmatch(r"\x01([^\x01]*)\x01", run)]
+        all(p -> linked(p[1]), parts) || return "[" * join(("@" * p[1] * (isempty(p[2]) ? "" : ", " * p[2]) for p in parts), "; ") * "]"
+        return open * join((cite_link(p[1], p[2]) for p in parts), "; ") * close
+    end)
+    return replace(t, r"\x02([^\x02]*)\x02" => function (m)
+        key, _ = split(m[2:end-1], '\x03')
+        linked(key) ? cite_link(key, "") : "@" * key
+    end)
+end
+
+# The bibliography as a docs page shows it: the entries the notebook cites, spliced prose included,
+# each with its authors and year, its title linked to its page, and its arXiv record. A numeric style
+# numbers them in citation order; `author-year-brackets` keys each by its label.
+function _doc_references(ctx)
+    cc = ctx.citectx
+    cc === nothing && return ""
+    targets = _bib_targets(ctx.nb.report, dirname(abspath(ctx.nb.path)))
+    order = _doc_cite_order(ctx)
+    style = get(ctx.nb.report.meta, "bibstyle", "ieee")
+    labels = _cite_labels(style, cc.bi, order).labels
+    keyed = _is_numeric_style(style) || _is_bracket_style(style)
+    entries = [e for e in cc.bi if haskey(order, e.key)]
+    isempty(entries) && return ""
+    _is_numeric_style(style) ? sort!(entries; by = e -> order[e.key]) :
+        sort!(entries; by = e -> (lowercase(e.surname), e.year, labels[e.key]))
+    authors(a) = (names = strip.(split(_delatex(a), r"\s+and\s+")); length(names) > 3 ? join(names[1:3], ", ") * " et al." : join(names, ", "))
+    io = IOBuffer()
+    println(io, "## References\n")
+    for e in entries
+        t = get(targets, e.key, (docpage = "", url = "", journal = "", eprint = ""))
+        href = _doc_cite_href(t)
+        title = _delatex(e.title)
+        print(io, "- ", keyed ? string("[", labels[e.key], "] ") : "", authors(e.author), " (", e.year, "). ",
+              isempty(href) ? title : "[" * title * "](" * href * ")", ".")
+        isempty(t.journal) || print(io, " *", _delatex(t.journal), "*.")
+        isempty(t.eprint) || isempty(t.url) || isempty(t.docpage) || print(io, " [arXiv:", t.eprint, "](", t.url, ")")
+        println(io)
+    end
+    return String(take!(io))
+end
+
+"""
+    _doc_spliced(c) -> (markdown, native)
+
+A markdown cell's source with its `{{ }}` values written in as text: a scalar's text, a markdown
+value's markdown, a fence's code block when nothing claimed it. `native` is false when a value is
+something plain markdown cannot carry (a rich or failed interpolation, an extension-rendered fence).
+"""
+function _doc_spliced(c::Cell)
+    tmpl, exprs = ReportEngine._md_template(c.source)
+    native = true
+    s = tmpl
+    for (i, e) in enumerate(exprs)
+        o = i <= length(c.interp) ? c.interp[i] : nothing
+        fence = ReportEngine._fence_call(e)
+        md = o === nothing ? nothing : _doc_markdown_value(o)
+        text = if fence !== nothing
+            (o === nothing || ReportRender._is_empty_output(o)) ?
+                ReportEngine._md_fence_block(fence.lang, fence.body) : (native = false; "")
+        elseif o === nothing
+            ""
+        elseif md !== nothing
+            md
+        elseif o.exception !== nothing || !isempty(o.display) || !isempty(o.echarts) || !isempty(o.tables)
+            native = false; ""
+        else
+            ReportRender._interp_scalar(o.value_repr)
+        end
+        s = replace(s, ReportEngine._interp_token(i) => text; count = 1)
+    end
+    return (s, native)
+end
+
+# A value whose only rich form is markdown is prose, spliced in as written.
+function _doc_markdown_value(o)
+    (o.exception === nothing && length(o.display) == 1 && only(o.display).mime == "text/markdown") || return nothing
+    return String(copy(only(o.display).data))
+end
+
 """
     _doc_markdown(ctx, c) -> (markdown, native)
 
@@ -147,24 +297,8 @@ extension-rendered fence, a local image, a citation or figure reference, a `@rep
 which case a docs page embeds the rendered cell instead.
 """
 function _doc_markdown(ctx::_ExportCtx, c::Cell)
-    tmpl, exprs = ReportEngine._md_template(c.source)
-    native = true
-    s = tmpl
-    for (i, e) in enumerate(exprs)
-        o = i <= length(c.interp) ? c.interp[i] : nothing
-        fence = ReportEngine._fence_call(e)
-        text = if fence !== nothing
-            (o === nothing || ReportRender._is_empty_output(o)) ?
-                ReportEngine._md_fence_block(fence.lang, fence.body) : (native = false; "")
-        elseif o === nothing
-            ""
-        elseif o.exception !== nothing || !isempty(o.display) || !isempty(o.echarts) || !isempty(o.tables)
-            native = false; ""
-        else
-            ReportRender._interp_scalar(o.value_repr)
-        end
-        s = replace(s, ReportEngine._interp_token(i) => text; count = 1)
-    end
+    s, native = _doc_spliced(c)
+    s = _doc_citations(ctx, s)
     # Things only Slate's renderer resolves. A local image would need copying into the docs source
     # tree and a path rewrite per writer; embedding the rendered cell carries it already.
     (occursin(r"!\[[^\]]*\]\((?!https?://)", s) || occursin(r"<img\s", s) ||
@@ -277,7 +411,14 @@ function _write_doc_bundle!(out::AbstractString, nb::LiveNotebook; light, dark, 
         fm = report_frontmatter(nb.report)
         entries = _export_asset_entries(ctx; asset_sink = sink)
         for c in nb.report.cells
-            ((:bibliography in c.flags) || (:docindex in c.flags)) && continue
+            :docindex in c.flags && continue
+            if :bibliography in c.flags
+                # The reference list, as plain markdown (or nothing, when nothing is cited).
+                refs = _doc_references(ctx)
+                isempty(refs) || push!(cells, Dict{String,Any}("id" => c.id, "kind" => "markdown",
+                    "tags" => sort!([string(f) for f in c.flags]), "markdown" => refs, "native" => true, "output" => false))
+                continue
+            end
             entry = Dict{String,Any}("id" => c.id, "kind" => _cell_kind_name(c),
                                      "tags" => sort!([string(f) for f in c.flags]))
             n0, t0 = length(ctx.charts), length(ctx.tablemarks)

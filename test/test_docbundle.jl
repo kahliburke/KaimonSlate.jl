@@ -106,6 +106,71 @@ end
     end
 end
 
+# Citations whose `.bib` entries say where the cited work lives become linked labels (a `docpage` under
+# the docs source as a `slate-docpage:` link, else the `url`), so the cell stays plain markdown; a
+# bibliography cell becomes the list of what the notebook cites, spliced prose included.
+@testset "doc bundle: citations link to the cited work" begin
+    mktempdir() do dir
+        write(joinpath(dir, "refs.bib"), """
+            @misc{ada24, author = {Lovelace, Ada}, title = {Engines}, year = {2024},
+              docpage = {kb/ada24.md}, url = {https://arxiv.org/abs/2401.00001}, eprint = {2401.00001}}
+            @article{bea23, author = {Bard, Bea and Chen, Cy}, title = {Looms}, year = {2023},
+              url = {https://example.org/looms}, journal = {Weaving}}
+            @book{cy99, author = {Chen, Cy}, title = {Cards}, year = {1999}}
+            @book{unused, author = {Nobody, N.}, title = {Unread}, year = {2000}}
+            """)
+        src = """
+        #%% md id=group
+        Engines and looms [@ada24; @bea23], and as @ada24 put it.
+
+        #%% md id=spliced
+        {{ prose }}
+
+        #%% md id=unlinked
+        Cards [@cy99].
+
+        #%% md bibliography id=refs
+        refs.bib
+        """
+        path = joinpath(dir, "cites.jl")
+        write(path, src)
+        rep = RE.parse_report(src; id = "cites")
+        rep.meta["bibstyle"] = "apa"
+        byid = Dict(c.id => c for c in rep.cells)
+        byid["spliced"].interp = [_out(display = [RE.MimeChunk("text/markdown", Vector{UInt8}("See [@ada24]."))])]
+        nb = NS.LiveNotebook("cites", path, rep, RE.InProcessKernel(), 1, String[], String[], ReentrantLock(),
+                             Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+        out = joinpath(dir, "docs", "slate", "cites")
+        NS.export_doc_bundle(nb, out)
+        cells = Dict(c["id"] => c for c in JSON.parsefile(joinpath(out, "slate-bundle.json"))["cells"])
+        g = cells["group"]
+        @test g["native"] === true
+        @test occursin("([Lovelace, 2024](slate-docpage:kb/ada24.md); [Bard et al., 2023](https://example.org/looms))", g["markdown"])
+        @test occursin("as [Lovelace, 2024](slate-docpage:kb/ada24.md) put it", g["markdown"])
+        @test cells["spliced"]["native"] === true && occursin("See ([Lovelace, 2024](slate-docpage:kb/ada24.md)).", cells["spliced"]["markdown"])
+        @test cells["unlinked"]["native"] === false                     # nowhere to link: Slate renders it
+        refs = cells["refs"]["markdown"]
+        @test cells["refs"]["native"] === true && startswith(refs, "## References")
+        @test occursin("- Lovelace, Ada (2024). [Engines](slate-docpage:kb/ada24.md). [arXiv:2401.00001](https://arxiv.org/abs/2401.00001)", refs)
+        @test occursin("- Bard, Bea, Chen, Cy (2023). [Looms](https://example.org/looms). *Weaving*.", refs)
+        @test occursin("Cards", refs) && !occursin("Unread", refs)        # cited only
+        # The labels and the References keys follow the notebook's bibstyle.
+        relabel(style) = begin
+            rep.meta["bibstyle"] = style
+            o = joinpath(dir, "docs", "slate", style)
+            NS.export_doc_bundle(nb, o)
+            Dict(c["id"] => c["markdown"] for c in JSON.parsefile(joinpath(o, "slate-bundle.json"))["cells"])
+        end
+        br = relabel("author-year-brackets")
+        @test occursin("[[Lovelace 2024](slate-docpage:kb/ada24.md); [Bard 2023](https://example.org/looms)]", br["group"])
+        @test occursin("- [Bard 2023] Bard, Bea, Chen, Cy (2023).", br["refs"])
+        num = relabel("ieee")
+        @test occursin("[[1](slate-docpage:kb/ada24.md); [2](https://example.org/looms)]", num["group"])
+        at(s) = first(something(findfirst(s, num["refs"]), 0:0))
+        @test 0 < at("[1] Lovelace") < at("[2] Bard") < at("[3] Chen")
+    end
+end
+
 @testset "doc bundle: key follows the file, not its line endings" begin
     mktempdir() do dir
         a, b = joinpath(dir, "a.jl"), joinpath(dir, "b.jl")
