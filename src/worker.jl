@@ -3029,14 +3029,16 @@ Base.flush(t::_LogTee) = flush(t.inner)
 Base.isopen(t::_LogTee) = isopen(t.inner)
 Base.get(t::_LogTee, k, d) = get(t.inner, k, d)   # IOContext property probing (e.g. :color) delegates through
 
-# A logger wrapper that drops ONE benign message: `Base.Docs`' "Replacing docs for `X`" warning.
-# Reactive re-evaluation redefines a cell's documented structs/functions on every run, so Base.Docs
-# would warn each time — noise the user can't act on (the docstring is still registered, which is
-# exactly what feeds the docs index). Everything else passes through untouched.
-# A `SlateExtensionsBase.HookLogger` for the reason `_CellLogger` is one (capture.jl).
-function _docs_quiet(inner, level, message, args...; kwargs...)
-    (level == Logging.Warn && occursin("Replacing docs for", string(message))) && return nothing
-    return Logging.handle_message(inner, level, message, args...; kwargs...)
+# A process started from a sysimage inherits each package global as it was when the image was saved.
+# GPUCompiler sets up LLVM's targets once per process, behind a flag that a compile during the image's
+# build leaves set; a worker from that image would skip the setup and find no GPU target. Cleared at
+# boot, the first compile here does it. A GPUCompiler loaded later starts with it clear anyway.
+function _reset_image_once_flags!()
+    for (id, m) in Base.loaded_modules
+        id.name == "GPUCompiler" && isdefined(m, :__llvm_initialized) || continue
+        try; getfield(m, :__llvm_initialized)[] = false; catch; end
+    end
+    return nothing
 end
 
 """
@@ -3052,6 +3054,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                data_port::Int = 0, warm_deps::Bool = false, stats_path::String = "",
                blob_curve::Bool = true, blob_bind::String = "", blob_free_port::Bool = false)
     _STREAM_PORT[] = stream_port   # publish for `__slate_ports` (hub-assigned today; the hub owns only the gate)
+    _reset_image_once_flags!()
     # Install the task-demux as stdout/stderr + a task-local capture display, so cell evaluators can
     # run CONCURRENTLY in this one process while each captures its own output (see demux.jl, capture.jl
     # DemuxCapture). Non-cell output falls through to the real streams (the worker log). Once installed,
@@ -3064,11 +3067,16 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
         # Tee the log stream so every formatted record ALSO PUBs on `slate_log` (→ hub → the worker popup,
         # live) while still writing to the worker-<port>.log file. Mirrors the pipe that `worker_log_tail`
         # reads, so the pushed lines and the polled snapshot are the same text.
-        Base.global_logger(SlateExtensionsBase.HookLogger(Logging.ConsoleLogger(_LogTee(stderr), Logging.Info;
+        #
+        # Base's own logger type, not a wrapper: GPUCompiler asks the GLOBAL logger for its level from
+        # inside type inference, in a fixed world, and a logger type defined by a package loaded after
+        # that world has no method there. A cell's own logger (capture.jl) is task-local, and is where
+        # a cell's "Replacing docs" warnings are dropped.
+        Base.global_logger(Logging.ConsoleLogger(_LogTee(stderr), Logging.Info;
             meta_formatter = (lvl, m, g, id, f, l) -> begin
                 c, pre, suf = Logging.default_metafmt(lvl, m, g, id, f, l)
                 (c, string(Dates.format(Dates.now(), "HH:MM:SS "), pre), suf)
-            end), _docs_quiet))
+            end))
     catch e; @warn "slate: timestamp logger install failed" exception = e; end
     # `curve`/`allowed_clients` are set for a REMOTE worker (host="0.0.0.0", :direct transport): the
     # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
