@@ -29,7 +29,8 @@ const fName = signal(''), fWarm = signal(0), fPre = signal(''), fRoot = signal('
 // When the host fronts a scheduler, `host` is where you ASK, not where the work runs — the node is
 // granted, not chosen. These are what the request needs.
 const fSched = signal('none'), fPart = signal(''), fWall = signal(''), fCpus = signal(''),
-      fMem = signal(''), fGpus = signal(''), fAcct = signal(''), fIdle = signal(''), fWarn = signal('');
+      fMem = signal(''), fGpus = signal(''), fAcct = signal(''), fIdle = signal(''), fWarn = signal(''),
+      fSubmit = signal('');   // SLURM: '' (the machine's), 'sbatch' or 'salloc'
 // Everything the fixed fields cannot say, as ordered rows so a half-typed one does not vanish while
 // you are still typing it. Stored as a map; kept as a list here because two blank names are two
 // rows to the eye and one key to a map.
@@ -159,7 +160,7 @@ function saveRegion() {
   const alloc = scheduler === 'none' ? {} : {
     partition: (fPart.value || '').trim(), walltime: (fWall.value || '').trim(),
     cpus: Math.max(0, parseInt(fCpus.value, 10) || 0), mem: (fMem.value || '').trim(),
-    gpus: (fGpus.value || '').trim(), account: (fAcct.value || '').trim(),
+    gpus: (fGpus.value || '').trim(), account: (fAcct.value || '').trim(), submit: fSubmit.value,
     idle_release: (fIdle.value || '').trim(), idle_warn: (fWarn.value || '').trim(),
     options: optMap, prologue: (fPro.value || '').trim() };
   rmsg.value = { text: warm > 0 ? 'Saving + warming…' : 'Saving…' };
@@ -403,6 +404,13 @@ function SchedulerRows() {
       <div class="rpprow"><label>Walltime</label>
         <input class="rppn" autocomplete="off" placeholder=${fInherit.value.walltime || '01:00:00'} value=${fWall.value} onInput=${ev => fWall.value = ev.target.value}/>
         <span class="pddim" style="font-size:.76rem">how long to hold it — it bills for the time held, not used</span></div>
+      ${chosen === 'pbs' ? null : html`<div class="rpprow"><label>Request with</label>
+        <select class="rpptr" value=${fSubmit.value} onChange=${ev => fSubmit.value = ev.target.value}>
+          <option value="">${fInherit.value.submit ? '(machine: ' + fInherit.value.submit + ')' : 'sbatch'}</option>
+          ${fInherit.value.submit ? html`<option value="sbatch">sbatch</option>` : null}
+          <option value="salloc">salloc</option>
+        </select>
+        <span class="pddim" style="font-size:.76rem">salloc for an interactive QOS</span></div>`}
       <div class="rpprow"><label>Resources</label>
       <div class="rppfields">
         ${[['cpus', fCpus, fInherit.value.cpus > 0 ? String(fInherit.value.cpus) : 'cpus', 'tasks/cores to request'],
@@ -475,6 +483,7 @@ effect(() => {   // seed the editor form from the selected region (or blank for 
     fInherit.value = e.machine ? (e.inherits || {}) : {};
     fSched.value = e.scheduler || 'none'; fPart.value = own.partition || ''; fWall.value = own.walltime || '';
     fCpus.value = own.cpus > 0 ? own.cpus : ''; fMem.value = own.mem || ''; fGpus.value = own.gpus || ''; fAcct.value = own.account || ''; fIdle.value = e.idle_release || ''; fWarn.value = e.idle_warn || '';
+    fSubmit.value = own.submit || '';
     // A map has no order, so the rows are sorted: the form reads the same on every open.
     fOpts.value = Object.keys(own.options || {}).sort().map(k => ({ k, v: (own.options || {})[k] }));
     fPro.value = e.prologue || ''; fGrace.value = e.liveness_grace || ''; fMachine.value = e.machine || '';
@@ -489,7 +498,7 @@ effect(() => {   // seed the editor form from the selected region (or blank for 
     const si = schedInfo.value[h];
     fSched.value = (si && si.suggested) ? si.suggested : 'none';
     fPart.value = ''; fWall.value = fSched.value === 'none' ? '' : '01:00:00';
-    fCpus.value = ''; fMem.value = ''; fGpus.value = ''; fAcct.value = ''; fIdle.value = ''; fWarn.value = '';
+    fCpus.value = ''; fMem.value = ''; fGpus.value = ''; fAcct.value = ''; fIdle.value = ''; fWarn.value = ''; fSubmit.value = '';
     fOpts.value = []; fPro.value = ''; fMore.value = false; fGrace.value = ''; }
   rmsg.value = null;
 });

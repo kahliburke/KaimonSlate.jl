@@ -264,6 +264,7 @@ function region_inherits(r)
     m = cluster_get(r.machine); m === nothing && return Dict{String,Any}()
     out = Dict{String,Any}(k => String(string(get(m, k, ""))) for k in _SHAPE_FIELDS)
     out["cpus"] = _asint(get(m, "cpus", 0))
+    out["submit"] = _submit_of(get(m, "submit", ""))
     out["options"] = machine_options(m)
     return out
 end

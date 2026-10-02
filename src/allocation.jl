@@ -321,9 +321,10 @@ function _option_args(kind::Symbol, options)
     return args
 end
 
-function _slurm_request_script(name; walltime, partition, cpus, mem, gpus, account, extra,
-                               options = Dict{String,String}())
-    args = String["-J", shq(name), "-t", shq(walltime), "-o", "/dev/null"]
+# What the request asks for, as SLURM flags, whichever command carries it.
+function _slurm_request_args(name; walltime, partition, cpus, mem, gpus, account, extra,
+                             options = Dict{String,String}())
+    args = String["-J", shq(name), "-t", shq(walltime)]
     # `cpus` is cores for the single task, the same meaning it carries on the batch path
     # (`_SBATCH_RENAME`). `-n` is `--ntasks`, which would fan every command in the node out
     # once per core.
@@ -334,12 +335,35 @@ function _slurm_request_script(name; walltime, partition, cpus, mem, gpus, accou
     isempty(account)   || append!(args, ["-A", shq(account)])
     append!(args, _option_args(:slurm, options))
     isempty(extra)     || push!(args, extra)
+    return args
+end
+
+function _slurm_request_script(name; kw...)
+    args = _slurm_request_args(name; kw...)
     return """
-    sbatch $(join(args, " ")) 2>&1 <<'SLATE_HOLD_EOF'
+    sbatch -o /dev/null $(join(args, " ")) 2>&1 <<'SLATE_HOLD_EOF'
     #!/bin/sh
     # Slate holds this node for a notebook. SLURM ends the job at its walltime.
     sleep 2147483647
     SLATE_HOLD_EOF
+    """
+end
+
+# An interactive QOS takes no batch jobs, so the same request goes through `salloc`. `--no-shell`
+# makes it exit once the node is granted and leave the allocation held, as the sleeping batch job
+# does. It waits until then, so it runs detached on the login node and the session is not held while
+# the queue decides. What it said in its first seconds comes back: queued, or why not. Until the
+# grant the request lives in that process, so a login node going down takes it with it.
+function _slurm_salloc_script(name; kw...)
+    args = _slurm_request_args(name; kw...)
+    log = "\$HOME/.cache/kaimonslate/salloc-" * replace(String(name), r"[^A-Za-z0-9._-]" => "_") * ".log"
+    return """
+    mkdir -p "\$HOME/.cache/kaimonslate"; L="$log"; D=\$(command -v setsid || true)
+    \$D nohup salloc --no-shell $(join(args, " ")) > "\$L" 2>&1 < /dev/null &
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      sleep 1; grep -qE 'job allocation|queued and waiting|error' "\$L" 2>/dev/null && break
+    done
+    cat "\$L"
     """
 end
 
@@ -381,10 +405,10 @@ function request_allocation!(kind::Symbol, host::AbstractString, name::AbstractS
                              cpus::Integer = 1, mem::AbstractString = "",
                              gpus::AbstractString = "", account::AbstractString = "",
                              extra::AbstractString = "",
-                             options = Dict{String,String}())
+                             options = Dict{String,String}(), submit::AbstractString = "")
     cur = find_allocation(kind, host, name)
     cur.state === :none || return cur   # already held, or unreachable — either way, do not submit
-    mk = kind === :slurm ? _slurm_request_script :
+    mk = kind === :slurm ? (submit == "salloc" ? _slurm_salloc_script : _slurm_request_script) :
          kind === :pbs   ? _pbs_request_script : _unsupported_scheduler(kind)
     ok, out = run_there(host, mk(name; walltime, partition, cpus, mem, gpus, account, extra, options))
     a = find_allocation(kind, host, name)
@@ -398,9 +422,9 @@ end
 # The scheduler's reason from a refused submission: its error lines, without the prefixes and the
 # generic trailer SLURM adds.
 function _refusal(out::AbstractString)
-    ls = [strip(replace(l, r"^(sbatch|qsub): (error: )?" => "")) for l in split(String(out), '\n')
+    ls = [strip(replace(l, r"^(sbatch|salloc|qsub): (error: )?" => "")) for l in split(String(out), '\n')
           if !isempty(strip(l)) && !occursin(r"^allocation failure: Unspecified error"i, strip(l)) &&
-             !occursin(r"^Submitted batch job"i, strip(l))]
+             !occursin(r"^(Submitted batch job|salloc: (Pending|Granted) job allocation|salloc: job \d+ queued)"i, strip(l))]
     return first(join(ls, " "), 400)
 end
 

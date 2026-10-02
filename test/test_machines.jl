@@ -35,6 +35,13 @@ const RE = KaimonSlate.ReportEngine
             RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm", "account" => "m3"))
             @test RE.region_get("cpu").account == "m3" && RE.region_get("cpu").walltime == "01:00:00"
             @test RE.region_get("gpu").account == "m2"
+            # How the node is asked for comes from the machine too, and a region can say otherwise.
+            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm", "account" => "m3",
+                                 "submit" => "salloc"))
+            @test RE.region_get("cpu").submit == "salloc"
+            @test RE.region_set!("cpu"; submit = "sbatch").submit == "sbatch"
+            @test RE.region_set!("cpu"; submit = "qsub").submit == "salloc"           # not a way: the machine's
+            RE.cluster_set!(Dict("name" => "pm", "host" => "perlmutter", "kind" => "slurm", "account" => "m3"))
             # A region that names a host directly runs on an implicit machine there.
             w = RE.region_set!("ws"; host = "box")
             m = RE.region_machine(w)
@@ -357,6 +364,11 @@ const RE = KaimonSlate.ReportEngine
             @test p.grown && occursin("SLURM holds 128 CPUs, not the 32 asked for, for mem=0", p.text)
             @test RE.placement_note(r, A(:running; node = "c1", cpus = 128)).grown
             @test !RE.placement_note(r, A(:pending; cpus = 32)).grown
+            # A queue that takes no batch jobs: the refusal points at salloc, unless that is the way already.
+            batch = A(:none; id = "", said = "Cannot submit batch jobs to gpu_shared_interactive")
+            @test endswith(RE.placement_note(r, batch).text, "· set the region to request with salloc")
+            r = RE.region_set!("plc"; submit = "salloc")
+            @test r.submit == "salloc" && !occursin("set the region", RE.placement_note(r, batch).text)
             RE.region_delete!("plc")
         end
 

@@ -1350,7 +1350,7 @@ function _make_router(h::Hub)
                  # its fields from these, so they have to come back out.
                  "scheduler" => String(r.scheduler), "partition" => r.partition,
                  "walltime" => r.walltime, "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus,
-                 "account" => r.account, "alloc_name" => r.alloc_name,
+                 "account" => r.account, "alloc_name" => r.alloc_name, "submit" => r.submit,
                  # As the user wrote them, so the form shows "1h" rather than 3600.
                  "idle_release" => ReportEngine.Sweep.format_duration(r.idle_release),
                  "idle_warn" => ReportEngine.Sweep.format_duration(r.idle_warn),
@@ -1675,6 +1675,7 @@ function _make_router(h::Hub)
                                      gpus = strip(String(get(b, "gpus", ""))),
                                      account = strip(String(get(b, "account", ""))),
                                      alloc_name = strip(String(get(b, "alloc_name", ""))),
+                                     submit = strip(String(get(b, "submit", ""))),
                                      idle_release = idle_s, idle_warn = warn_s,
                                      # A name with no value is a switch (`--exclusive`), so an empty value is kept. Only a
                                      # NAMELESS entry is dropped, which is what a half-typed row in the editor is.

@@ -3836,6 +3836,10 @@ struct Region
     # `uuid`), with a `version` ("" = the version the notebook preparing it resolves) or a `path` on
     # the machine for a package that is not registered. Slate's own worker packages are added to it.
     sysimage_pkgs::Vector{Dict{String,String}}
+    # How the node is asked for on SLURM: "sbatch" submits a job that holds it, "salloc" asks for an
+    # interactive allocation, which a site's interactive QOS requires (`_slurm_salloc_script`). "" takes
+    # the machine's, and is "sbatch" when the machine says nothing.
+    submit::String
 end
 
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
@@ -3914,6 +3918,7 @@ function _region_from_dict(d::AbstractDict)
         isempty(strip(string(get(d, k, "")))) && (d[k] = String(string(get(m, k, ""))))
     end
     _asint(get(d, "cpus", 0)) == 0 && (d["cpus"] = _asint(get(m, "cpus", 0)))
+    isempty(_submit_of(get(d, "submit", ""))) && (d["submit"] = String(string(get(m, "submit", ""))))
     d["options"] = merge(machine_options(m), _region_options_of(d))
     return _region_build(d)
 end
@@ -3937,7 +3942,7 @@ _region_build(d::AbstractDict) = Region(
     _region_options_of(d), String(get(d, "prologue", "")),
     let x = get(d, "readiness", nothing); x isa AbstractDict ? Dict{String,Any}(x) : Dict{String,Any}() end,
     max(0, _asint(get(d, "liveness_grace", 0))), String(get(d, "machine", "")),
-    _sysimage_pkgs_of(get(d, "sysimage_pkgs", nothing)))
+    _sysimage_pkgs_of(get(d, "sysimage_pkgs", nothing)), _submit_of(get(d, "submit", "")))
 _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
     "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
     "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
@@ -3947,7 +3952,10 @@ _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport
     "partition" => r.partition, "walltime" => r.walltime,
     "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus, "account" => r.account,
     "alloc_name" => r.alloc_name, "idle_release" => r.idle_release, "idle_warn" => r.idle_warn,
-    "sysimage_pkgs" => r.sysimage_pkgs)
+    "sysimage_pkgs" => r.sysimage_pkgs, "submit" => r.submit)
+
+# How a region asks for its node: "sbatch", "salloc", or "" for its machine's way. Anything else is "".
+_submit_of(x) = (s = lowercase(strip(string(something(x, "")))); s in ("sbatch", "salloc") ? s : "")
 
 # A sysimage package list as stored: entries with string `name`, `uuid`, `version`, `path`; anything
 # without a name is dropped.
@@ -4045,7 +4053,7 @@ const REGION_DEFAULTS = (host = "", transport = :tunnel, base_port = 0, preload 
                          cpus = 0, mem = "", gpus = "", account = "", alloc_name = "",
                          idle_release = 0, idle_warn = 0, options = Dict{String,String}(),
                          prologue = "", readiness = Dict{String,Any}(), liveness_grace = 0, machine = "",
-                         sysimage_pkgs = Dict{String,String}[])
+                         sysimage_pkgs = Dict{String,String}[], submit = "")
 
 # An existing region's fields, in the shape `region_set!` takes.
 _region_fields(r::Region) = NamedTuple{keys(REGION_DEFAULTS)}(Tuple(getfield(r, k) for k in keys(REGION_DEFAULTS)))
@@ -4084,7 +4092,7 @@ function region_set!(name; kw...)
                    max(0, Int(f.idle_release)), max(0, Int(f.idle_warn)),
           _region_options_of(Dict("options" => f.options)), String(f.prologue),
           Dict{String,Any}(f.readiness), max(0, Int(f.liveness_grace)), String(strip(String(f.machine))),
-          _sysimage_pkgs_of(f.sysimage_pkgs))
+          _sysimage_pkgs_of(f.sysimage_pkgs), _submit_of(f.submit))
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)
         _region_from_dict(_region_to_dict(r))
@@ -4363,8 +4371,11 @@ function placement_note(r::Region, a; waited = nothing)
         isempty(grew) || push!(bits, grew)
         return (; state = :queued, text = join(bits, " · "), grown = !isempty(grew))
     end
+    # A queue that takes only interactive allocations turns a submitted job away by saying so.
+    hint = (r.submit != "salloc" && occursin(r"batch job"i, a.said)) ?
+           " · set the region to request with salloc" : ""
     return (; state = :refused, grown = false, text = isempty(a.said) ? "$sched holds no job for the request" :
-                                                      "$sched refused the request: $(a.said)")
+                                                      "$sched refused the request: $(a.said)$hint")
 end
 
 # The scheduler holding more CPUs than the region asked for, and the memory request that is the usual
@@ -4397,7 +4408,7 @@ function region_place!(r::Region; wait_s::Real = 120)
     end
     a = Sweep.allocation_node!(kind, r.host, name; wait_s = wait_s, walltime = _alloc_walltime(r),
                                partition = r.partition, cpus = r.cpus, mem = r.mem,
-                               gpus = r.gpus, account = r.account, options = r.options)
+                               gpus = r.gpus, account = r.account, options = r.options, submit = r.submit)
     if !Sweep.alive(a)
         held = lock(_REGION_PLACE_LOCK) do; pop!(_REGION_PLACE, r.name, nothing); end
         held === nothing || route!(held.host, "")   # nothing is holding it now; the route is a lie

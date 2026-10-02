@@ -649,6 +649,32 @@ end
         @test Sweep._start_time("2020-01-02T03:04:05") == "2020-01-02 03:04"
     end
 
+    @testset "an interactive allocation is asked for with salloc, detached" begin
+        kw = (; walltime = "01:00:00", partition = "", cpus = 32, mem = "56G", gpus = "1", account = "m1",
+              extra = "", options = Dict("qos" => "shared_interactive"))
+        s = Sweep._slurm_salloc_script("slate-g"; kw...)
+        @test occursin("nohup salloc --no-shell -J 'slate-g'", s) && occursin("--qos='shared_interactive'", s)
+        @test !occursin("-o /dev/null", s) && !occursin("sbatch", s)
+        @test occursin("sbatch -o /dev/null -J 'slate-g'", Sweep._slurm_request_script("slate-g"; kw...))
+        mktempdir() do home
+            bin = mkpath(joinpath(home, "bin"))
+            tool(nm, body) = (p = joinpath(bin, nm); write(p, "#!/bin/sh\n" * body * "\n"); chmod(p, 0o755))
+            withenv("PATH" => bin * ":" * ENV["PATH"], "HOME" => home) do
+                # Refused: its words come back, the way a refused sbatch's do.
+                tool("squeue", "exit 0")
+                tool("salloc", "echo 'salloc: error: the queue requires 32 cores per GPU'\nexit 1")
+                a = Sweep.request_allocation!(:slurm, "", "slate-g"; submit = "salloc", kw...)
+                @test a.state === :none && a.said == "the queue requires 32 cores per GPU"
+                # Queued: the request is left running and found by name, like a submitted job.
+                tool("salloc", "echo 'salloc: Pending job allocation 77'\nsleep 3")
+                tool("squeue", "[ -f \"\$HOME/asked\" ] && echo '77|PENDING||1:00:00|N/A|Priority|32'; touch \"\$HOME/asked\"")
+                a = Sweep.request_allocation!(:slurm, "", "slate-g"; submit = "salloc", kw...)
+                @test a.state === :pending && a.id == "77"
+                @test occursin("Pending job allocation 77", read(joinpath(home, ".cache", "kaimonslate", "salloc-slate-g.log"), String))
+            end
+        end
+    end
+
     @testset "mem = default asks the scheduler for no memory" begin
         # Not the same as an empty mem, which a region on a machine fills from the machine's.
         ask(mem) = Sweep._slurm_request_script("hold"; walltime = "01:00:00", partition = "", cpus = 32,

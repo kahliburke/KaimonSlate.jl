@@ -1224,7 +1224,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", options="", prologue="", idle_release="", idle_warn="", liveness_grace="", clear="") -> String
+        region(name::String; host="", transport="", base_port="", preload="", data_root="", cache_root="", warm="", threads="", scheduler="", partition="", walltime="", cpus="", mem="", gpus="", account="", submit="", options="", prologue="", idle_release="", idle_warn="", liveness_grace="", clear="") -> String
 
     Define (or update) a named region — a global compute target: a `host` reached over `transport`
     (`tunnel`|`direct`), an optional `preload` (a LOCAL project dir replicated on the host so its
@@ -1246,7 +1246,9 @@ function create_tools(GateTool::Type)
 
     A region whose host fronts a cluster asks its `scheduler` (`slurm`, `pbs`, `auto`, or `none` to
     run on the host itself) for a node: `partition`, `walltime` (`HH:MM:SS`), `cpus`, `mem` (`16G`),
-    `gpus` (`1`, `a100:2`) and `account` say what to ask for. Any other scheduler setting goes in
+    `gpus` (`1`, `a100:2`) and `account` say what to ask for; `mem="default"` sends no memory request,
+    so the queue's own default applies. On SLURM, `submit` is how the node is asked for: `sbatch`
+    (the default) or `salloc`, which an interactive QOS requires. Any other scheduler setting goes in
     `options`, as `key=value` entries separated by `;` (`options="constraint=gpu; qos=debug"`); a
     bare key is a switch (`exclusive`), and each is spelled for the region's scheduler when the node
     is requested. Passing `options` replaces the region's whole set. `prologue` is shell run on the
@@ -1267,7 +1269,7 @@ function create_tools(GateTool::Type)
                     threads::String = "", sysimage::String = "", curve::String = "", peer::String = "",
                     scheduler::String = "", partition::String = "", walltime::String = "",
                     cpus::String = "", mem::String = "", gpus::String = "", account::String = "",
-                    options::String = "", prologue::String = "",
+                    submit::String = "", options::String = "", prologue::String = "",
                     idle_release::String = "", idle_warn::String = "", liveness_grace::String = "",
                     machine::String = "", clear::String = "", delete::String = "")::String
         nm = strip(name); isempty(nm) && return "Give a region name."
@@ -1337,6 +1339,11 @@ function create_tools(GateTool::Type)
             sc in (:none, :auto, :slurm, :pbs) || return "⛔ scheduler must be none, auto, slurm or pbs, not '$scheduler'"
             kw[:scheduler] = sc
         end
+        if given(submit)
+            sb = lowercase(strip(submit))
+            sb in ("sbatch", "salloc") || return "⛔ submit must be sbatch or salloc, not '$submit'"
+            kw[:submit] = sb
+        end
         if given(preload)
             pl = strip(preload)
             isdir(expanduser(pl)) || return "preload project dir not found: $pl"
@@ -1350,6 +1357,7 @@ function create_tools(GateTool::Type)
                        isempty(r.walltime) ? "" : " walltime=$(r.walltime)",
                        isempty(r.gpus) ? "" : " gpus=$(r.gpus)",
                        isempty(r.account) ? "" : " account=$(r.account)",
+                       isempty(r.submit) ? "" : " submit=$(r.submit)",
                        isempty(r.options) ? "" :
                            " options=" * join((isempty(v) ? k : "$k=$v" for (k, v) in sort!(collect(r.options))), "; "))) *
                (isempty(r.prologue) ? "" : ", prologue set") *

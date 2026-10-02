@@ -168,6 +168,12 @@ So a cluster region stores what to ask for rather than an address:
 | **Walltime** | how long to hold it. The most important field on the form: an allocation bills for the time it is **held**, not the time it is used. |
 | **cpus / mem / gpus / account** | the rest of the request. A region on a machine fills any it leaves blank from the machine's. `mem = default` sends no memory request, so the queue's own default applies. |
 
+On SLURM, **Request with** decides how the node is asked for. `sbatch`, the default, submits a job
+that holds the node. `salloc` asks for an interactive allocation, which a site's interactive QOS
+requires: it refuses submitted jobs, and it usually starts far sooner than a shared or regular one. A
+request through `salloc` waits on the login node it was made from until the node is granted, so it is
+lost if that login node goes down while it waits.
+
 `mem = 0` asks SLURM for all of a node's memory, and SLURM adds CPUs to cover memory, so on a shared
 queue it turns a request for one GPU into a request for the whole node. When the scheduler holds more
 CPUs for a job than the region asked for, the prepare step and the queued line say so.
