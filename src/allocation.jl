@@ -36,7 +36,11 @@ struct Allocation
     state::Symbol       # :running | :pending | :none | :unreachable
     node::String        # the compute host, once it exists
     timeleft::String    # what the scheduler says is left, for display
+    start::String       # while queued: when the scheduler expects to start it, if it has said
+    reason::String      # while queued: what it is waiting on (Priority, Resources, a limit)
+    said::String        # when a request was turned down: the scheduler's reason
 end
+Allocation(name, id, state, node, timeleft) = Allocation(name, id, state, node, timeleft, "", "", "")
 
 Base.show(io::IO, a::Allocation) =
     a.state === :unreachable ? print(io, "Allocation(", a.name, ": host unreachable)") :
@@ -157,12 +161,13 @@ end
 
 # ── Asking a scheduler what it holds ─────────────────────────────────────────────────────────
 
-# SLURM answers in one line per job, which is what `-o` is for.
+# SLURM answers in one line per job, which is what `-o` is for. `%S` is the expected start of a
+# pending job (once the scheduler has planned one) and `%r` what it is waiting on.
 _slurm_find_script(name) =
-    "squeue -h -n " * shq(name) * " -o '%i|%T|%N|%L' 2>/dev/null"
+    "squeue -h -n " * shq(name) * " -o '%i|%T|%N|%L|%S|%r' 2>/dev/null"
 
 # PBS has no per-name query and no output format of its own, so one `qstat -f` is filtered by name
-# into the same five fields. `%L` has no equivalent either: what is LEFT is the walltime asked for
+# into the same fields, with the planned start and the scheduler's comment last. `%L` has no equivalent either: what is LEFT is the walltime asked for
 # minus the walltime used, and both are attributes on the job.
 #
 # `qselect` first for the reason `BatchLauncher._PBS_POLL` gives: `-u` silently overrides `-f`.
@@ -172,8 +177,8 @@ ids=\$(qselect -u "\$USER" 2>/dev/null)
 [ -n "\$ids" ] || exit 0
 qstat -f \$ids 2>/dev/null | awk -v want=$(shq(name)) '
   function out() {
-    if (n == want && n != "") print id "|" s "|" eh "|" wt "|" used
-    id = ""; n = ""; s = ""; eh = ""; wt = ""; used = ""
+    if (n == want && n != "") print id "|" s "|" eh "|" wt "|" used "|" est "|" cm
+    id = ""; n = ""; s = ""; eh = ""; wt = ""; used = ""; est = ""; cm = ""
   }
   function val()  { v = substr(\$0, index(\$0, "= ") + 2); sub(/[ \\t\\r]+\$/, "", v); return v }
   /^Job Id:/                            { out(); id = substr(\$0, index(\$0, ":") + 2); sub(/[ \\t\\r]+\$/, "", id) }
@@ -182,6 +187,8 @@ qstat -f \$ids 2>/dev/null | awk -v want=$(shq(name)) '
   /^[ \\t]*exec_host = /                 { eh = val() }
   /^[ \\t]*Resource_List.walltime = /    { wt = val() }
   /^[ \\t]*resources_used.walltime = /   { used = val() }
+  /^[ \\t]*estimated.start_time = /       { est = val() }
+  /^[ \\t]*comment = /                   { cm = val() }
   END                                   { out() }'
 """
 
@@ -219,9 +226,22 @@ function find_allocation(kind::Symbol, host::AbstractString, name::AbstractStrin
                kind === :slurm ? first_node(strip(f[3])) : pbs_first_node(strip(f[3]))
         left = length(f) >= 4 ? String(strip(f[4])) : ""
         kind === :pbs && (left = _pbs_timeleft(left, length(f) >= 5 ? strip(f[5]) : ""))
-        return Allocation(String(name), String(strip(f[1])), state, node, left)
+        at(i) = length(f) >= i ? String(strip(f[i])) : ""
+        start, why = state === :pending ? (kind === :slurm ? (at(5), at(6)) : (at(6), at(7))) : ("", "")
+        return Allocation(String(name), String(strip(f[1])), state, node, left,
+                          _start_time(start), why in ("None", "(null)") ? "" : why, "")
     end
     return Allocation(String(name), "", :none, "", "")
+end
+
+# A planned start as it reads beside a queued job: the time alone when it is today. SLURM prints
+# `2026-10-02T07:40:00`, or `N/A` before it has planned one; PBS's form is shown as it comes.
+function _start_time(s::AbstractString)
+    s = strip(String(s))
+    (isempty(s) || s in ("N/A", "Unknown")) && return ""
+    m = match(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})", s)
+    m === nothing && return String(s)
+    return m.captures[1] == Libc.strftime("%Y-%m-%d", time()) ? String(m.captures[2]) : m.captures[1] * " " * m.captures[2]
 end
 
 # What is left of a PBS allocation, which the scheduler does not report directly.
@@ -363,8 +383,21 @@ function request_allocation!(kind::Symbol, host::AbstractString, name::AbstractS
     mk = kind === :slurm ? _slurm_request_script :
          kind === :pbs   ? _pbs_request_script : _unsupported_scheduler(kind)
     ok, out = run_there(host, mk(name; walltime, partition, cpus, mem, gpus, account, extra, options))
-    ok || @debug "allocation request failed" kind out
-    return find_allocation(kind, host, name)
+    a = find_allocation(kind, host, name)
+    a.state === :none || return a
+    # Nothing queued: the scheduler refused the request, and its words are the only account of why.
+    said = _refusal(out)
+    return Allocation(a.name, "", :none, "", "", "", "",
+                      isempty(said) ? (ok ? "the job ended as soon as it was queued" : "") : said)
+end
+
+# The scheduler's reason from a refused submission: its error lines, without the prefixes and the
+# generic trailer SLURM adds.
+function _refusal(out::AbstractString)
+    ls = [strip(replace(l, r"^(sbatch|qsub): (error: )?" => "")) for l in split(String(out), '\n')
+          if !isempty(strip(l)) && !occursin(r"^allocation failure: Unspecified error"i, strip(l)) &&
+             !occursin(r"^Submitted batch job"i, strip(l))]
+    return first(join(ls, " "), 400)
 end
 
 """

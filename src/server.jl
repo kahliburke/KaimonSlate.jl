@@ -1873,6 +1873,12 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
                 try; _workers_push!(nb); catch; end   # the pill says "queued" NOW, not once it lands
             end
             _, alloc = ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
+            if !ReportEngine._region_holds_node(r)
+                p = ReportEngine.placement_note(r, alloc)
+                ReportEngine._rlog("region[$name]: " * p.text)
+                p.state === :queued ||
+                    (nb === nothing || (try; _broadcast(nb, "bringup:region '$name': could not get a node: $(p.text)"); catch; end))
+            end
             # A NODE JUST ARRIVED, so the idle clock starts now. Without this it carries over the
             # wait that preceded the grant — time when nothing was held and nothing could be idle —
             # and a region that queued longer than its own timeout is released the moment it lands.

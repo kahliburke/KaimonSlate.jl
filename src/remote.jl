@@ -4338,6 +4338,30 @@ function _placement(r::Region)
 end
 
 """
+    placement_note(r, a; waited = nothing) -> (; state, text)
+
+What region `r`'s request for a node came to (`a`, the allocation `region_place!` returned), said
+the same way wherever it is shown. `state` is `:granted`, `:queued`, `:refused` or `:unreachable`;
+`text` is the line to show: the job and how long it has waited (`waited`, seconds), the scheduler's
+expected start and what it is waiting on, or its reason for turning the request down.
+"""
+function placement_note(r::Region, a; waited = nothing)
+    sched = uppercase(string(region_scheduler(r)))
+    a === nothing && return (; state = :refused, text = "$(r.host) granted no node")
+    a.state === :unreachable && return (; state = :unreachable, text = "cannot reach $(r.host) to ask for a node")
+    Sweep.alive(a) && return (; state = :granted, text = a.node * (isempty(a.id) ? "" : " (job $(a.id))"))
+    if a.state in (:pending, :running)          # running without a node yet: still being set up
+        bits = [(a.state === :running ? "starting job " : "queued as job ") * a.id *
+                (waited === nothing ? "" : " for $(round(Int, waited / 60))m")]
+        isempty(a.start) || push!(bits, "estimated start " * a.start)
+        isempty(a.reason) || push!(bits, "waiting on " * a.reason)
+        return (; state = :queued, text = join(bits, " · "))
+    end
+    return (; state = :refused, text = isempty(a.said) ? "$sched holds no job for the request" :
+                                       "$sched refused the request: $(a.said)")
+end
+
+"""
     region_place!(r; wait_s = 120) -> (host, allocation)
 
 Resolve where this region's workers go, ASKING the scheduler if it must. Returns the host to use
@@ -4628,12 +4652,7 @@ function _region_reconcile_impl!(r::Region)
             return "region[$(r.name)]: nothing left to keep here — allocation released"
         end
         host, alloc = region_place!(r)
-        if isempty(host)
-            st = alloc === nothing ? :none : alloc.state
-            return st === :unreachable ? "region[$(r.name)]: cannot reach $(r.host) to ask for a node" :
-                   st === :pending ? "region[$(r.name)]: queued on $(r.host), waiting for a node" :
-                   "region[$(r.name)]: $(r.host) granted no node"
-        end
+        isempty(host) && return "region[$(r.name)]: " * placement_note(r, alloc).text
     end
     t = _region_target(r; at = (host, alloc === nothing ? "" : alloc.id))
     roster = list_remote_workers(host)

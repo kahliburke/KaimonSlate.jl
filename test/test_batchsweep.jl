@@ -627,6 +627,28 @@ end
                        try; Sweep._unsupported_scheduler(:k8s); catch e; e.msg; end)
     end
 
+    @testset "a queued request says when it expects to start, and a refused one why" begin
+        mktempdir() do bin
+            tool(nm, body) = (p = joinpath(bin, nm); write(p, "#!/bin/sh\n" * body * "\n"); chmod(p, 0o755))
+            tool("sbatch", "cat >/dev/null\necho 'sbatch: error: the queue requires 32 cores per GPU'\n" *
+                           "echo 'allocation failure: Unspecified error'\nexit 1")
+            today = Libc.strftime("%Y-%m-%d", time())
+            withenv("PATH" => bin * ":" * ENV["PATH"]) do
+                tool("squeue", "echo '41|PENDING||4:00:00|$(today)T07:40:00|Priority'")
+                a = Sweep.find_allocation(:slurm, "", "hold")
+                @test a.state === :pending && a.id == "41" && a.start == "07:40" && a.reason == "Priority"
+                tool("squeue", "echo '41|PENDING||4:00:00|N/A|None'")      # not planned yet
+                a = Sweep.find_allocation(:slurm, "", "hold")
+                @test a.start == "" && a.reason == ""
+                # Nothing held and the submission refused: the scheduler's reason comes back.
+                tool("squeue", "exit 0")
+                a = Sweep.request_allocation!(:slurm, "", "hold"; cpus = 8, gpus = "1")
+                @test a.state === :none && a.said == "the queue requires 32 cores per GPU"
+            end
+        end
+        @test Sweep._start_time("2020-01-02T03:04:05") == "2020-01-02 03:04"
+    end
+
     @testset "a remote exec launcher looks for its processes where it started them" begin
         # `reconcile!` hands every launcher `store_root`, which for a cluster is the hub's local
         # MIRROR. `submit!` writes its pid file under the cluster's own path, so asking the far side

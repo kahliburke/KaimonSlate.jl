@@ -468,21 +468,13 @@ _prepare_shell(r::Region) = machine_setup(region_machine(r)) * _region_prologue(
 # The node stage: a granted node, read the same way the host was, and a worker runtime loaded there
 # the way a worker loads it, timed. The region's preload environment, when it has one, is provisioned
 # and loaded too, which is where CUDA is checked. The node is given back at the end.
-# When the scheduler expects a pending job to start, as it prints it, or "" when it has no estimate.
-function _start_estimate(r::Region, id::AbstractString)
-    region_scheduler(r) === :slurm || return ""
-    ok, out = _run_on(r.host, "squeue -h --start -j " * Sweep.shq(id) * " -o %S 2>/dev/null")
-    t = ok ? strip(out) : ""
-    return (isempty(t) || t == "N/A") ? "" : replace(t, "T" => " ")
-end
-
 function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Bool = false, note = _ -> nothing,
                            worker = nothing, rebuild_sysimage::Bool = false)
     # A node held before the prepare started belongs to whoever is using it, and stays theirs.
     held_before = _region_holds_node(r)
     got = step("Get a node from $(r.scheduler)") do
         deadline = time() + 30 * 60
-        t0 = time()
+        t0 = time(); shown = ""
         while time() < deadline
             nodehost, a = region_place!(r; wait_s = 30)
             if !isempty(nodehost)
@@ -491,11 +483,10 @@ function _prepare_on_node!(r::Region, step, facts, measured, ref; keep_node::Boo
                 job = a !== nothing ? a.id : v === nothing ? "" : v.job
                 return ("ok", nodehost * (isempty(job) ? "" : " (job $job)") * (a === nothing ? ", already held" : ""))
             end
-            a === nothing && return ("fail", "the scheduler granted nothing and reported no request")
-            a.state === :unreachable && return ("fail", "cannot reach $(r.host) to ask for a node")
-            est = isempty(a.id) ? "" : _start_estimate(r, a.id)
-            note("queued as job $(a.id) for $(round(Int, (time() - t0) / 60))m" *
-                 (isempty(est) ? "" : " · estimated start $est"))
+            p = placement_note(r, a; waited = time() - t0)
+            p.state === :queued || return ("fail", p.text)
+            p.text == shown || note(p.text)   # a line when something changed, not one per poll
+            shown = p.text
         end
         ("fail", "no node within 30 minutes; the request was left queued")
     end

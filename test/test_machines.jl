@@ -341,6 +341,21 @@ const RE = KaimonSlate.ReportEngine
             @test RE._sysimage_outcome("ERROR: boom", false, 5)[1] == "fail"
         end
 
+        @testset "a region's request for a node reads the same everywhere" begin
+            r = RE.region_set!("plc"; host = "login", scheduler = :slurm)
+            A(st; id = "7", node = "", start = "", reason = "", said = "") =
+                RE.Sweep.Allocation("n", id, st, node, "", start, reason, said)
+            p = RE.placement_note(r, A(:pending; start = "07:40", reason = "Priority"); waited = 240)
+            @test p.state === :queued && p.text == "queued as job 7 for 4m · estimated start 07:40 · waiting on Priority"
+            p = RE.placement_note(r, A(:none; id = "", said = "the queue requires 32 cores per GPU"))
+            @test p.state === :refused && p.text == "SLURM refused the request: the queue requires 32 cores per GPU"
+            @test RE.placement_note(r, A(:none; id = "")).text == "SLURM holds no job for the request"
+            @test RE.placement_note(r, A(:unreachable)).state === :unreachable
+            @test RE.placement_note(r, A(:running; node = "c1")).state === :granted
+            @test RE.placement_note(r, A(:running)).state === :queued              # granted, node not named yet
+            RE.region_delete!("plc")
+        end
+
         @testset "a worker boots from the region's image only when the versions agree" begin
             env = mktempdir()
             write(joinpath(env, "Project.toml"), "[deps]\nCUDA = \"u1\"\nMine = \"u2\"\n")
