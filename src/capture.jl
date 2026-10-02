@@ -20,8 +20,11 @@ import Logging    # to capture a cell's `@warn`/`@info` onto the redirected stde
 # method is captured as a component descriptor / HTML fragment IN PREFERENCE to text/html or text/plain —
 # the richest representation wins, exactly like VS Code's `DISPLAYABLE_MIMES` scan. A plain value isn't
 # `showable` for them (its `slate_render` returns nothing), so it falls through to the standard MIMEs.
+# `text/markdown` comes last: a value that has nothing richer to show is prose, which renders through
+# the markdown pipeline (in a code cell's output, and spliced into a markdown cell by `{{ }}`) and so
+# reaches a PDF as typeset text rather than as a screenshot of HTML.
 const _RICH_MIMES = ("application/vnd.kaimonslate.component+json", "application/vnd.kaimonslate.html+html",
-                     "image/svg+xml", "image/png", "text/html", "text/latex")
+                     "image/svg+xml", "image/png", "text/html", "text/latex", "text/markdown")
 
 # ── Output size caps ─────────────────────────────────────────────────────────
 # A cell that accidentally produces a giant result (a printed 10⁷-element loop, the text repr of a
@@ -1038,6 +1041,12 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
             value_repr = _cap_keep!(overflow, "value", value_repr, "txt")
         catch
         end
+    end
+    # A markdown value keeps its text as the value too, whole: the paths that splice a `{{ }}` from
+    # the value text (the PDF, a docs bundle) then get all of it, where `show` under `:limit` would
+    # have shortened a long text to a "⋯ N bytes ⋯" stub.
+    if err === nothing && isempty(value_repr) && (i = findfirst(ch -> ch[1] == "text/markdown", chunks)) !== nothing
+        value_repr = _cap_keep!(overflow, "value", String(copy(chunks[i][2])), "md")
     end
     # A cell's runtime error may still arrive wrapped in a LoadError (defensive — unwrap to the
     # REAL error: UndefVarError, DomainError, …). Parse errors arrive as `ParseError` directly.

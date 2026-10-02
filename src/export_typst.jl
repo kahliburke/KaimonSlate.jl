@@ -806,6 +806,13 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
         write(joinpath(dir, base * ".out"), rstrip(plain(o.stdout)))
         print(io, "#outblock(read(\"", base, ".out\"))\n")
     end
+    md = ReportRender._markdown_output(o)
+    if md !== nothing
+        # Prose: typeset as a markdown cell's would be, rather than rasterized as HTML.
+        write(joinpath(dir, base * "_out.md"), _admonitions_to_quotes(_normalize_math_delims(md)))
+        print(io, "#cmarker.render(read(\"", base, "_out.md\"), math: mathfn, scope: (image: mdimage))\n\n")
+        return
+    end
     if texts && isempty(o.display) && !isempty(o.value_repr)
         write(joinpath(dir, base * ".val"), plain(o.value_repr))
         print(io, "#valblock(read(\"", base, ".val\"))\n")
@@ -1175,7 +1182,8 @@ function _bibliography_files!(dir::AbstractString, bibcells, nbdir::AbstractStri
     return files
 end
 
-const _BibEntry = NamedTuple{(:key, :title, :author, :year),NTuple{4,String}}
+# `surname` is the first author's, read before the braces go (`{W7-X Team}` stays whole).
+const _BibEntry = NamedTuple{(:key, :title, :author, :year, :surname),NTuple{5,String}}
 
 # LaTeX accent command → the Unicode COMBINING mark it puts on the next letter; NFC then composes
 # (`c`+◌̧ → ç, `e`+◌́ → é). Covers the accents BibTeX author/title fields actually use.
@@ -1259,24 +1267,70 @@ function _parse_bibtex_entries(text::AbstractString)
         # A braced value with ARBITRARILY nested braces (a recursive subpattern — `{\c{C}}` nests two
         # deep, so a fixed one-level match would truncate it), else a quoted value or a bare token
         # (`year = 1984`). LaTeX-decoded for display.
-        function fld(n)
+        function fld(n; dec = _delatex)
             mb = match(Regex(n * raw"\s*=\s*(\{(?:[^{}]|(?1))*\})", "i"), part)
-            mb === nothing || return _delatex(strip(chop(mb.captures[1]; head = 1, tail = 1)))   # drop outer { }
+            mb === nothing || return dec(strip(chop(mb.captures[1]; head = 1, tail = 1)))   # drop outer { }
             mq = match(Regex(n * raw"\s*=\s*\"([^\"\n]*)\"", "i"), part)
-            mq === nothing || return _delatex(strip(mq.captures[1]))
+            mq === nothing || return dec(strip(mq.captures[1]))
             mn = match(Regex(n * raw"\s*=\s*(\d[\w\-]*)", "i"), part)
-            mn === nothing ? "" : _delatex(strip(mn.captures[1]))
+            mn === nothing ? "" : dec(strip(mn.captures[1]))
         end
-        push!(out, (key = String(m.captures[1]), title = fld("title"), author = fld("author"), year = fld("year")))
+        push!(out, (key = String(m.captures[1]), title = fld("title"), author = fld("author"), year = fld("year"),
+                    surname = _delatex(_surname(fld("author"; dec = String)))))
     end
     return out
+end
+
+# Citation styles Slate ships as CSL files of its own (the rest of `_CITATION_STYLES` are Typst's), which
+# the PDF export copies into its project.
+const _SLATE_CSL = Dict("author-year-brackets" => joinpath(@__DIR__, "assets", "csl", "author-year-brackets.csl"))
+
+# `author-year-brackets` cites as [Sun 2026]: the first author's surname and the year.
+_is_bracket_style(style::AbstractString) = lowercase(String(style)) == "author-year-brackets"
+
+# The first author's surname; a braced name (`{W7-X Team}`) is a literal name and is kept whole.
+function _surname(author::AbstractString)
+    a = strip(String(author))
+    isempty(a) && return ""
+    first = strip(split(a, r"\s+and\s+")[1])
+    m = match(r"^\{([^{}]*)\}$", first)
+    m === nothing || return String(strip(m.captures[1]))
+    s = occursin(",", first) ? strip(split(first, ",")[1]) : String(strip(split(first)[end]))
+    return replace(String(s), r"[{}]" => "")
+end
+
+"""
+    _cite_labels(style, entries, numbers) -> (; labels, open, close)
+
+How a style labels each entry in running text, and the brackets a group goes in: a number for a
+numeric style (`[1; 3]`), the surname and year for `author-year-brackets` (`[Sun 2026; Elder 2025]`,
+with `a`, `b`, … where two entries would share a label, in order of first citation as Typst assigns
+them), and otherwise author and year (`(Sun et al., 2026)`). `numbers` is the first-citation order
+(`citation_numbers`).
+"""
+function _cite_labels(style::AbstractString, entries, numbers)
+    if _is_numeric_style(style)
+        return (labels = Dict{String,String}(e.key => string(get(numbers, e.key, "?")) for e in entries), open = "[", close = "]")
+    elseif _is_bracket_style(style)
+        base = Dict(e.key => strip(string(e.surname, " ", e.year)) for e in entries)
+        labels = Dict{String,String}()
+        for lab in unique(values(base))
+            es = sort([e for e in entries if base[e.key] == lab];
+                      by = e -> (get(numbers, e.key, typemax(Int)), lowercase(_delatex(e.title))))
+            for (i, e) in enumerate(es)
+                labels[e.key] = length(es) == 1 ? lab : string(lab, Char('a' + i - 1))
+            end
+        end
+        return (labels = labels, open = "[", close = "]")
+    end
+    return (labels = Dict{String,String}(e.key => _author_year_label(e.author, e.year) for e in entries), open = "(", close = ")")
 end
 
 # Numeric CSL styles cite as [1]; the rest are author-date. Drives the LIVE citation format (the PDF
 # uses the real CSL engine either way).
 _is_numeric_style(style::AbstractString) =
-    lowercase(String(style)) in ("ieee", "vancouver", "nature", "chicago-notes",
-                                 "iso-690-numeric", "american-physics-society")
+    lowercase(String(style)) in ("ieee", "vancouver", "nature", "chicago-notes", "iso-690-numeric",
+                                 "american-physics-society", "american-institute-of-physics")
 
 # A compact author-date label for the live view, e.g. "Knuth, 1984" / "Cormen et al., 2009".
 function _author_year_label(author::AbstractString, year::AbstractString)
@@ -1321,7 +1375,7 @@ function cited_citation_keys(report)
         c.kind == MARKDOWN || continue
         :bibliography in c.flags && continue
         infence = false
-        for ln in split(c.source, '\n')
+        for ln in split(first(ReportRender._md_spliced(c.source, c.interp)), '\n')   # spliced prose too
             if occursin(r"^\s*(```|~~~)", ln); infence = !infence; continue; end
             infence && continue
             for m in eachmatch(r"(?<![\w@])@([A-Za-z][\w:.\-]*)", ln)
@@ -1340,7 +1394,7 @@ function citation_numbers(report, citekeys)
     rec = (key, _sup, _form) -> (k = String(key); (k in seen || (push!(order, k); push!(seen, k))); "")
     for c in report.cells
         (c.kind == MARKDOWN && !(:bibliography in c.flags)) || continue
-        _rewrite_citations(c.source, citekeys; emit = rec)
+        _rewrite_citations(first(ReportRender._md_spliced(c.source, c.interp)), citekeys; emit = rec)
     end
     return Dict{String,Int}(k => i for (i, k) in enumerate(order))
 end
@@ -1363,9 +1417,14 @@ function bib_cell_info(cell, nbdir::AbstractString)
 end
 
 # Typst `#bibliography(...)` call for the resolved files, or "" when there are none.
-function _bibliography_typst(files, style::AbstractString)::String
+function _bibliography_typst(files, style::AbstractString; dir = nothing)::String
     isempty(files) && return ""
     farg = length(files) == 1 ? "\"$(files[1])\"" : "(" * join(("\"$f\"" for f in files), ", ") * ")"
+    csl = get(_SLATE_CSL, lowercase(String(style)), nothing)
+    if csl !== nothing && dir !== nothing                 # a style Slate ships: staged beside doc.typ
+        cp(csl, joinpath(dir, basename(csl)); force = true)
+        style = basename(csl)
+    end
     return "#bibliography($farg, style: \"$(style)\", title: [References])\n"
 end
 
@@ -1474,7 +1533,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
         end
         # References — `:bibliography` cells (embedded + external .bib), rendered via Typst's CSL.
         biblio = _bibliography_files!(dir, fm.bibcells, dirname(abspath(nb.path)))
-        print(io, _bibliography_typst(biblio, get(nb.report.meta, "bibstyle", "ieee")))
+        print(io, _bibliography_typst(biblio, get(nb.report.meta, "bibstyle", "ieee"); dir))
         cols == 2 && print(io, "]\n")
         write(joinpath(dir, "media.json"), JSON.json(mediasz))   # always present: the preamble reads it
         write(joinpath(dir, "doc.typ"), String(take!(io)))
@@ -1578,7 +1637,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
         # References slide — `:bibliography` cells rendered via Typst's CSL engine.
         biblio = _bibliography_files!(dir, fm.bibcells, dirname(abspath(nb.path)))
         isempty(biblio) || print(io, "#slide[\n",
-            _bibliography_typst(biblio, get(nb.report.meta, "bibstyle", "ieee")), "]\n\n")
+            _bibliography_typst(biblio, get(nb.report.meta, "bibstyle", "ieee"); dir), "]\n\n")
         if notes
             for (si, seg) in enumerate(segs)
                 isempty(seg.notes) && continue

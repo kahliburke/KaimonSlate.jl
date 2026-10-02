@@ -1499,6 +1499,33 @@ end
     @test occursin(raw"<code>\(no\)</code>", h) # inline code keeps its text (KaTeX skips <code>)
 end
 
+# A value whose only rich form is `text/markdown` is prose. It is captured as markdown with its whole
+# text as the value (no `show`-under-`:limit` stub), spliced into a markdown cell BEFORE parsing so its
+# headings and links are the cell's own, rendered as markdown in a code cell's output, and handed to the
+# PDF's markdown typesetter rather than rasterized.
+struct _MdProse; text::String; end
+Base.show(io::IO, ::MIME"text/markdown", p::_MdProse) = print(io, p.text)
+
+@testset "markdown values are prose" begin
+    long = "### Heading\n\n" * repeat("A [link](x.md) and **bold** text. ", 400)
+    m = Module(:MdProseNS)
+    Core.eval(m, :(prose = $(_MdProse(long))))
+    o = _RE._eval_capture(m, "prose")
+    @test only(o.display).mime == "text/markdown" && o.value_repr == long     # whole text, not a stub
+    @test KaimonSlate.ReportRender._markdown_output(o) == long
+    h = KaimonSlate.ReportRender._md_html("## Section\n\n{{ prose }}\n\nAfter.", [o])
+    @test occursin("<h3>Heading</h3>", h) && occursin("<a href=\"x.md\">link</a>", h) && occursin("<strong>bold</strong>", h)
+    @test !occursin("ival", h)                                                  # not an escaped scalar span
+    @test occursin("<div class=\"disp md\"><h3>Heading</h3>", KaimonSlate.ReportRender._render_chunks(o.display))
+    # Spliced prose gets what the caller did to the written prose (the live view's citation links).
+    cite = _RE._eval_capture(m, "prose2 = $(_MdProse)(\"As shown [@knuth84].\")")
+    h2 = KaimonSlate.ReportRender.markdown_html("Text {{ prose2 }}", [cite]; prose = s -> replace(s, "[@knuth84]" => "(Knuth, 1984)"))
+    @test occursin("(Knuth, 1984)", h2) && !occursin("[@knuth84]", h2)
+    # Strings and numbers splice as before.
+    n = _RE._eval_capture(m, "42")
+    @test KaimonSlate.ReportRender._markdown_output(n) === nothing && occursin("ival", KaimonSlate.ReportRender._md_html("{{ x }}", [n]))
+end
+
 # ── PDF export: admonitions ───────────────────────────────────────────────────────────────────────
 # `cmarker` (the Typst markdown renderer) is plain CommonMark and has no `!!!` rule, so the marker
 # would print literally and the four-space body would typeset as a CODE BLOCK. `_admonitions_to_quotes`

@@ -5306,21 +5306,24 @@ end
 function _md_cite_ctx(nb::LiveNotebook)
     bi = bibliography_index(nb.report, dirname(abspath(nb.path)))
     isempty(bi) && return nothing
-    numeric = _is_numeric_style(get(nb.report.meta, "bibstyle", "ieee"))
+    style = get(nb.report.meta, "bibstyle", "ieee")
+    numeric = _is_numeric_style(style)
     citekeys = Set(e.key for e in bi)
     numbers = citation_numbers(nb.report, citekeys)         # first-citation order (numeric labels + ordering)
-    label = Dict{String,String}(e.key => (numeric ? string(get(numbers, e.key, 0)) : _author_year_label(e.author, e.year)) for e in bi)
+    (; open, close) = labels = _cite_labels(style, bi, numbers)
+    label = labels.labels
     intext = (key, sup) -> begin
         lab = get(label, String(key), String(key))
         inner = isempty(strip(sup)) ? lab : string(lab, ", ", strip(sup))
-        numeric ? string("[", inner, "]") : string("(", inner, ")")
+        string(open, inner, close)
     end
     emit = (key, sup, _form) -> intext(key, sup)                       # plain text (markdown / meta desc)
     # HTML in-text citation that LINKS to its References entry (`#ref-<key>`) — used by the HTML export
     # so a rendered `[N]` / `(Author, Year)` jumps to the bibliography, matching the live view.
     emit_html = (key, sup, _form) ->
         string("<a class=\"cite\" href=\"#ref-", _cite_anchor(String(key)), "\">", _esc(intext(key, sup)), "</a>")
-    return (; citekeys, emit, emit_html, bi, numeric, numbers, cited = cited_citation_keys(nb.report))
+    bracketed = _is_bracket_style(style)
+    return (; citekeys, emit, emit_html, bi, numeric, bracketed, numbers, label, open, close, cited = cited_citation_keys(nb.report))
 end
 # Fold a BibTeX key to an HTML-id-safe anchor (shared by the inline `#ref-…` link and the
 # References entry it targets), so a key with punctuation still yields a matching pair.
@@ -5329,6 +5332,9 @@ _cite_anchor(key::AbstractString) = replace(String(key), r"[^A-Za-z0-9_-]+" => "
 # Bibliography ordering + entry formatting shared by the HTML and Markdown References sections.
 _cited_in_order(ctx) = sort([e for e in ctx.bi if haskey(ctx.numbers, e.key)]; by = e -> ctx.numbers[e.key])  # numeric: citation order
 _bib_alpha(ctx) = sort(ctx.bi; by = e -> lowercase(_author_year_label(e.author, e.year)))                    # author-date: alphabetical
+# `author-year-brackets`: the cited entries by surname and year, each keyed by its in-text label.
+_bib_bracketed(ctx) = sort([e for e in ctx.bi if haskey(ctx.numbers, e.key)];
+                           by = e -> (lowercase(e.surname), e.year, ctx.label[e.key]))
 _ref_numeric_body(e) = join(filter(!isempty, [strip(e.author), strip(e.title), strip(e.year)]), ". ")        # "Author. Title. Year"
 function _ref_author_date_head(e)                                                                            # "Author (Year). Title"
     yr = isempty(strip(e.year)) ? "" : string(" (", strip(e.year), ")")
@@ -5349,6 +5355,15 @@ function _html_references(ctx)
             print(io, "<li id=\"ref-", _cite_anchor(e.key), "\">", _esc(_ref_numeric_body(e)), ".</li>")
         end
         print(io, "</ol>")
+    elseif ctx.bracketed
+        cited = _bib_bracketed(ctx)
+        isempty(cited) && return ""
+        print(io, "<ul class=\"exp-reflist\">")
+        for e in cited
+            print(io, "<li id=\"ref-", _cite_anchor(e.key), "\">[", _esc(ctx.label[e.key]), "] ",
+                  _esc(_ref_numeric_body(e)), ".</li>")
+        end
+        print(io, "</ul>")
     else
         print(io, "<ul class=\"exp-reflist\">")
         for e in _bib_alpha(ctx)
@@ -5367,6 +5382,10 @@ function _md_references(ctx)
     if ctx.numeric
         for e in _cited_in_order(ctx)
             println(io, ctx.numbers[e.key], ". ", _ref_numeric_body(e), ".")
+        end
+    elseif ctx.bracketed
+        for e in _bib_bracketed(ctx)
+            println(io, "- \\[", ctx.label[e.key], "\\] ", _ref_numeric_body(e), ".")
         end
     else
         for e in _bib_alpha(ctx)

@@ -246,6 +246,12 @@ function notebook_pkg_op!(nb::LiveNotebook, op::AbstractString, name::AbstractSt
     return r
 end
 
+# The citation styles a notebook can pick (`bibstyle`): Typst's own by name, and those Slate ships as
+# CSL files (`_SLATE_CSL`, export_typst.jl).
+const _CITATION_STYLES = ("ieee", "american-physics-society", "american-institute-of-physics", "nature",
+                          "vancouver", "apa", "chicago-author-date", "harvard-cite-them-right", "mla",
+                          "author-year-brackets")
+
 # ── Durable per-notebook config registry (the "Notebook config" panel SSOT) ────────────────────────
 # One entry per Slate.config footer key the panel exposes: its UI group/label/type, its built-in
 # default, an optional server-global default (the slate.json tier — `nothing` means the only tiers
@@ -277,8 +283,8 @@ const _CONFIG_UI = (
      choices = ["none", "fade", "slide"], global_default = nothing, restart = false),
     (key = "slideratio", group = "Slides", label = "PDF slide ratio", type = :enum, default = "16:9",
      choices = ["16:9", "4:3"], global_default = nothing, restart = false),
-    (key = "bibstyle", group = "Slides", label = "Bibliography style", type = :string, default = "ieee",
-     choices = String[], global_default = nothing, restart = false),
+    (key = "bibstyle", group = "Export", label = "Citation style", type = :enum, default = "ieee",
+     choices = collect(_CITATION_STYLES), global_default = nothing, restart = false),
     (key = "series", group = "Publishing", label = "Series", type = :string, default = "",
      choices = String[], global_default = nothing, restart = false),
     # `@replay` export resolution as `<mark id>:<stride>` pairs — normally set from the export dialog's
@@ -796,12 +802,12 @@ end
 # doesn't flood the cell). External files get a "view" link (the /bibfile route).
 const _BIB_CARD_LIMIT = 10
 function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::AbstractString, cited,
-                        numbers::Dict{String,Int} = Dict{String,Int}())
+                        labels::Dict{String,String} = Dict{String,String}(); by = e -> 0)
     esc = _esc   # shared HTML-escape (server_hub) — same &<>" mapping
     ncited = Base.count(e -> e.key in cited, entries)
     meta(e) = strip(join(filter(!isempty, [String(e.author), String(e.title)]), " · "))
-    # Cited entries get their [N] (matching the in-text numbers); uncited get a hollow marker.
-    mark(e) = haskey(numbers, e.key) ? "<span class=\"bibcard-num\">[$(numbers[e.key])]</span>" :
+    # Cited entries get their in-text label (`[3]`, `[Sun 2026]`, `(Sun, 2026)`); uncited a hollow marker.
+    mark(e) = haskey(labels, e.key) ? "<span class=\"bibcard-num\">$(esc(labels[e.key]))</span>" :
               (e.key in cited ? "<span class=\"bibcard-tick\">●</span>" : "<span class=\"bibcard-tick\">○</span>")
     item(e) = string("<li class=\"", e.key in cited ? "cited" : "uncited", "\">", mark(e),
         "<code>", esc(e.key), "</code>",
@@ -828,7 +834,7 @@ function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::Abs
         # Large library: show only the cited entries.
         print(io, "<div class=\"bibcard-note\">Showing the $(ncited) cited of $(count) entries.</div>",
               "<ul class=\"bibcard-keys\">")
-        for e in entries; e.key in cited && print(io, item(e)); end
+        for e in sort([e for e in entries if e.key in cited]; by); print(io, item(e)); end   # in reference-list order
         print(io, "</ul>")
     end
     print(io, "<div class=\"bibcard-hint\">Cite with <code>[@key]</code> in markdown.</div></div>")
@@ -849,7 +855,7 @@ function _cite_link_emit(ctx)
     return (key, sup, _form) -> begin
         core = get(ctx.labels, String(key), String(key))
         inner = isempty(strip(sup)) ? core : string(core, ", ", strip(sup))
-        text = ctx.numeric ? string("[", inner, "]") : string("(", inner, ")")
+        text = string(ctx.open, inner, ctx.close)
         href = isempty(ctx.anchor) ? "" : " href=\"#cell-$(esc(ctx.anchor))\""
         string("<a class=\"cite\"", href, " title=\"", esc(get(ctx.tips, String(key), String(key))),
                "\">", esc(text), "</a>")
@@ -864,11 +870,11 @@ function _bib_link_ctx(nb)
     idx = findfirst(c -> :bibliography in c.flags, nb.report.cells)
     anchor = idx === nothing ? "" : nb.report.cells[idx].id
     tips = Dict{String,String}(e.key => strip(join(filter(!isempty, [e.author, e.title]), " · ")) for e in bi)
-    numeric = _is_numeric_style(get(nb.report.meta, "bibstyle", "ieee"))
-    numbers = numeric ? citation_numbers(nb.report, Set(e.key for e in bi)) : Dict{String,Int}()
-    labels = numeric ? Dict{String,String}(k => string(v) for (k, v) in numbers) :
-                       Dict{String,String}(e.key => _author_year_label(e.author, e.year) for e in bi)
-    return (anchor = anchor, tips = tips, labels = labels, numeric = numeric, numbers = numbers)
+    style = get(nb.report.meta, "bibstyle", "ieee")
+    numeric = _is_numeric_style(style)
+    numbers = citation_numbers(nb.report, Set(e.key for e in bi))
+    (; labels, open, close) = _cite_labels(style, bi, numbers)
+    return (anchor = anchor, tips = tips, labels = labels, numeric = numeric, numbers = numbers, open = open, close = close)
 end
 _bib_keys_meta(ctx) = ctx === nothing ? nothing : [Dict("key" => k, "label" => v) for (k, v) in ctx.tips]
 
@@ -908,10 +914,12 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     figrefs = figidx === nothing ? Dict{String,Tuple{Int,String}}() : figidx.labels
     # Markdown citations → links to the bibliography cell (per bibstyle), and `[@fig:label]` → a live
     # "Figure N" link that jumps to the figure. Skips bibliography/caption cells' own bodies.
-    _mdsrc = (c.kind == MARKDOWN && !(:bibliography in c.flags) && (bibctx !== nothing || !isempty(figrefs))) ?
-        _rewrite_citations(c.source, bibctx === nothing ? Set{String}() : Set(keys(bibctx.tips));
-                           emit = bibctx === nothing ? _cite_literal : _cite_link_emit(bibctx),
-                           figrefs = figrefs, figemit = _fig_link_emit) : c.source
+    # The same applies to prose a `{{ }}` splices in, which the source does not yet contain.
+    cites = c.kind == MARKDOWN && !(:bibliography in c.flags) && (bibctx !== nothing || !isempty(figrefs))
+    _cite_rw(s) = _rewrite_citations(s, bibctx === nothing ? Set{String}() : Set(keys(bibctx.tips));
+                                     emit = bibctx === nothing ? _cite_literal : _cite_link_emit(bibctx),
+                                     figrefs = figrefs, figemit = _fig_link_emit)
+    _mdsrc = cites ? _cite_rw(c.source) : c.source
     d = Dict{String,Any}(
         "id"      => c.id,
         # How recent this payload is. The same cell reaches the browser over two transports, and
@@ -932,7 +940,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "blocked" => c.blocked,
         "blockedHost" => c.blocked_host,
         "blockedAt" => c.blocked_at,
-        "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(_mdsrc, c.interp) :
+        "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(_mdsrc, c.interp; prose = cites ? _cite_rw : identity) :
                         (live_placeholder && _is_live(c) ? _live_output_placeholder() : output_html(c))),
         # How the browser should treat this output's session-boundness (see `_live_output_placeholder`):
         # "render" = the real, live-for-THIS-session thing; "placeholder" = a stand-in awaiting the connect
@@ -1013,8 +1021,13 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         d["bibFile"] = file
         d["bibCount"] = n
         d["bibKeys"] = [Dict("key" => e.key, "title" => e.title, "author" => e.author) for e in es]
-        nums = bibctx === nothing ? Dict{String,Int}() : bibctx.numbers
-        d["output"] = _bib_card_html(file, n, es, nbid, cited, nums)  # card instead of raw BibTeX
+        labs, by = Dict{String,String}(), e -> 0
+        if bibctx !== nothing
+            labs = Dict{String,String}(k => string(bibctx.open, v, bibctx.close) for (k, v) in bibctx.labels
+                                       if haskey(bibctx.numbers, k))
+            by = bibctx.numeric ? (e -> get(bibctx.numbers, e.key, typemax(Int))) : (e -> lowercase(get(bibctx.labels, e.key, e.key)))
+        end
+        d["output"] = _bib_card_html(file, n, es, nbid, cited, labs; by)  # card instead of raw BibTeX
     end
     # All user-facing tags (known behaviour tags + free-form) for the cell-header tag editor;
     # `:opaque` is inferred each eval, not a user tag, so it's excluded from tags — but shipped

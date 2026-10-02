@@ -1181,8 +1181,9 @@ See also `save_asset`, `FileUpload`."""),
             file paths (one per line), resolved relative to the notebook and copied into the export.
             Inline + external can be mixed; in the live UI it renders an adaptive references card.
         With no `title` cell, the document title falls back to the first markdown H1 (then the
-        filename). Per-notebook citation style is `bibstyle` (Settings → Citation style):
-        ieee/apa/chicago-author-date/mla/nature/vancouver/harvard."""),
+        filename). Per-notebook citation style is `bibstyle` (Settings → Export → Citation style):
+        ieee/american-physics-society/american-institute-of-physics/nature/vancouver/apa/
+        chicago-author-date/harvard-cite-them-right/mla/author-year-brackets ([Knuth 1984])."""),
     SlateApiEntry("citation", "Document",
         "Cite a bibliography key in markdown prose: `[@key]`, `[@key, p. 7]`, bare `@key`.",
         ["bibtex", "reference", "cite", "bibliography", "footnote"],
