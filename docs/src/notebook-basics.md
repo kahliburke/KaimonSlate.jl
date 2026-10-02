@@ -11,7 +11,7 @@ There are five kinds:
   is free-form, so a notebook can coin its own.
 - **Web cells** hold HTML, CSS and JS in their own panes, for building an interface that talks to
   Julia. See [Front-end Extensions](frontend-extensions.md).
-- **Tool cells** hold an `@tool name(...)` call, defining a tool the [agent](agent.md) can call. They
+- **Tool cells** hold an `@tool name(...)` call to one of the tools an [agent](agent.md) can call. They
   are never swept up by an automatic run, so reopening a notebook does not re-fire one.
 - **Job cells** hold work whose result lands over time: a parameter sweep (`@sweep`) on a compute
   target, or a design campaign (`@campaign`) running in the background. Running the cell picks up
