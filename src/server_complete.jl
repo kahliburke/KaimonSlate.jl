@@ -2915,7 +2915,9 @@ function _make_router(h::Hub)
         _json(Dict("ok" => true, "region" => r.name, "on" => r.sysimage, "listed" => r.sysimage_pkgs,
                    "candidates" => ReportEngine.sysimage_candidates(_nb_origin_env(nb); project = _nb_project(nb)),
                    "always" => collect(ReportEngine._SYSIMAGE_INFRA),
-                   "image" => ReportEngine.sysimage_status(r, _nb_origin_env(nb))))
+                   "image" => ReportEngine.sysimage_status(r, let k = get(_REGION_KERNELS, (nb.id, r.name), nothing)
+                       (k isa GateKernel && k.target isa ReportEngine.RemoteTarget) ? k.target.project : ""
+                   end)))
     end))
     # Keep a region's sysimage list. Body {region, packages: [{name, uuid, version, path}]}.
     HTTP.register!(router, "POST", "/api/{id}/sysimage-packages", req -> _withnb(h, req, _ -> begin

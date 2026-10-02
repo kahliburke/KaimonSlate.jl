@@ -1157,7 +1157,8 @@ function sysimage_plan(t::RemoteTarget)
     r = region_get(t.region); r === nothing && return none("")
     img = get(r.readiness, "sysimage", nothing)
     img isa AbstractDict || return none("no sysimage built yet")
-    clash = sysimage_conflicts(img, t.origin_env)
+    deps = _worker_env_deps(r.host, t.project)
+    clash = deps === nothing ? sysimage_conflicts(img, t.origin_env) : sysimage_conflicts(img, deps)
     isempty(clash) || return none("the sysimage holds other versions of " * join(clash, ", "))
     return (; use = true, key = String(img["key"]), dir = String(img["dir"]), why = "")
 end
@@ -1170,11 +1171,17 @@ resolves, each as `"name (image V, notebook W)"`. A registered package is compar
 one from a path by its version.
 """
 function sysimage_conflicts(img::AbstractDict, origin_env::AbstractString)
-    held = get(img, "packages", nothing)
-    (held isa AbstractDict && !isempty(origin_env)) || return String[]
+    isempty(origin_env) && return String[]
     mf = parent_manifest(origin_env)
     (isempty(mf) || !isfile(mf)) && return String[]
     deps = try; get(Sweep.TOML.parsefile(mf), "deps", Dict{String,Any}()); catch; return String[]; end
+    return sysimage_conflicts(img, deps)
+end
+
+# The same, against a Manifest's `deps` table.
+function sysimage_conflicts(img::AbstractDict, deps::AbstractDict)
+    held = get(img, "packages", nothing)
+    held isa AbstractDict || return String[]
     out = String[]
     for (name, es) in deps, e in es
         e isa AbstractDict || continue
@@ -1185,6 +1192,17 @@ function sysimage_conflicts(img::AbstractDict, origin_env::AbstractString)
         same || push!(out, "$name (image $(get(h, "version", "?")), notebook $(get(e, "version", "?")))")
     end
     return sort!(out)
+end
+
+# The `deps` of the environment a worker loads, read on `host`, or `nothing` when it cannot be read.
+# The hub's copy is not that environment: provisioning adds Slate's worker packages to it there, and
+# resolving them can move other packages to other versions.
+function _worker_env_deps(host::AbstractString, project::AbstractString)
+    (isempty(host) || isempty(project)) && return nothing
+    ok, out = _run_on(host, "cat " * Sweep.shq_path(rstrip(String(project), '/') * "/Manifest.toml") * " 2>/dev/null")
+    (ok && !isempty(strip(out))) || return nothing
+    d = try; get(Sweep.TOML.parse(out), "deps", nothing); catch; nothing; end
+    return d isa AbstractDict ? d : nothing
 end
 
 # Shell that sets `JOPT` to `--sysimage=<image>` when a worker for `t` boots from its region's image
@@ -1303,13 +1321,14 @@ function _sysimage_outcome(out::AbstractString, ok::Bool, secs::Integer)
 end
 
 """
-    sysimage_status(r, origin_env) -> Union{Dict,Nothing}
+    sysimage_status(r, worker_project) -> Union{Dict,Nothing}
 
 Region `r`'s built image as its package dialog shows it, or `nothing` when none is built: its size,
 when it was built, how many packages it holds, the list it was built from (`listed`, `nothing` when
-that is not known), and the packages the notebook at `origin_env` resolves at other versions.
+that is not known), and the packages the notebook's environment on the machine (`worker_project`,
+"" when it has none there yet) holds at other versions.
 """
-function sysimage_status(r, origin_env::AbstractString)
+function sysimage_status(r, worker_project::AbstractString)
     img = get(r.readiness, "sysimage", nothing)
     img isa AbstractDict || return nothing
     listed = get(img, "listed", nothing)
@@ -1318,7 +1337,8 @@ function sysimage_status(r, origin_env::AbstractString)
     end
     return Dict{String,Any}("key" => get(img, "key", ""), "bytes" => get(img, "bytes", 0),
                             "built_at" => get(img, "built_at", 0), "packages" => length(get(img, "packages", Dict())),
-                            "listed" => listed, "conflicts" => sysimage_conflicts(img, origin_env))
+                            "listed" => listed,
+                            "conflicts" => (d = _worker_env_deps(r.host, worker_project); d === nothing ? String[] : sysimage_conflicts(img, d)))
 end
 
 """

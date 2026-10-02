@@ -397,14 +397,17 @@ const RE = KaimonSlate.ReportEngine
             # from (kept with it, or the region's own when only its hash was), and this notebook's clashes.
             list = [Dict{String,String}("name" => "CUDA", "uuid" => "u1", "version" => "", "path" => "")]
             r = RE.region_set!("stat"; host = "h", sysimage_pkgs = list)
-            @test RE.sysimage_status(r, env) === nothing
+            @test RE.sysimage_status(r, "") === nothing
             rec = merge(img("5.0.0", "t50"), Dict{String,Any}("bytes" => 2^30, "built_at" => 1.0,
                                                               "spec" => RE.sysimage_spec_key(r.sysimage_pkgs)))
             r = RE.region_set!("stat"; readiness = Dict{String,Any}("sysimage" => rec))
-            st = RE.sysimage_status(r, env)
-            @test st["listed"] == r.sysimage_pkgs && st["packages"] == 1 && st["conflicts"] == ["CUDA (image 5.0.0, notebook 5.1.0)"]
+            st = RE.sysimage_status(r, "")            # no environment on the machine yet: no versions to compare
+            @test st["listed"] == r.sysimage_pkgs && st["packages"] == 1 && isempty(st["conflicts"])
             rec["spec"] = "other"; r = RE.region_set!("stat"; readiness = Dict{String,Any}("sysimage" => rec))
-            @test RE.sysimage_status(r, env)["listed"] === nothing
+            @test RE.sysimage_status(r, "")["listed"] === nothing
+            # The versions compared are the machine's environment's, given as its Manifest's deps.
+            there = Dict{String,Any}("CUDA" => [Dict{String,Any}("uuid" => "u1", "version" => "5.0.0", "git-tree-sha1" => "t50")])
+            @test isempty(RE.sysimage_conflicts(rec, there)) && !isempty(RE.sysimage_conflicts(rec, env))
             RE.region_delete!("stat")
         end
     end
