@@ -275,8 +275,41 @@
   const regionIcon = (r) => regionKind(r) === 'machine' ? '🖥' : '🖧';
   const regionLabel = (r) => regionKind(r) === 'variant' ? r.name + ' · ' + r.machine : r.name;
 
+  // ── what a telemetry sample says ──────────────────────────────────────────────────────────────
+  // CPU against what the worker may use, memory against the limit that would stop it, and the GPUs,
+  // as every display of a sample shows them. Memory follows the hub's own reading (`_memory_state` in
+  // server.jl): the job's cgroup where there is one, else the host's total less what is available.
+  // `null` where the sample cannot say.
+  const coresText = (cpu) => cpu == null || cpu < 0 ? '—' : cpu >= 100 ? (cpu / 100).toFixed(1) + ' cores' : Math.round(cpu) + '% of a core';
+  const sampleCores = (s) => (s && s.host && ((s.host.cores && s.host.cores.length) || s.host.ncpu)) || 0;
+  function reading(s) {
+    if (!s) return null;
+    const job = s.job || {}, host = s.host || {};
+    const hostCores = sampleCores(s);
+    const allow = job.cpus > 0 ? job.cpus : hostCores;
+    const cpu = s.cpu >= 0 ? s.cpu : null;
+    const mem = job.mem_max > 0 && job.mem_cur >= 0 ? { used: job.mem_cur, limit: job.mem_max, of: 'job' }
+      : host.mem_avail >= 0 && s.sys_mem_total > 0 ? { used: s.sys_mem_total - host.mem_avail, limit: s.sys_mem_total, of: 'host' }
+      : null;
+    const gpus = (s.gpus || []).map(g => ({ i: g.i, name: g.name,
+      util: g.util >= 0 ? g.util : null, peak: g.util_max >= 0 ? g.util_max : null,
+      memUsed: g.mem_used >= 0 ? g.mem_used : null, memTotal: g.mem_total > 0 ? g.mem_total : null,
+      temp: g.temp >= 0 ? g.temp : null, power: g.power_w >= 0 ? g.power_w : null,
+      powerLimit: g.power_limit_w > 0 ? g.power_limit_w : null }));
+    const busy = gpus.filter(g => g.util != null);
+    return {
+      cpu, cpuText: coresText(cpu), hostCores, allow,
+      cpuFrac: cpu == null ? null : allow ? cpu / 100 / allow : cpu / 100,
+      hostCpu: s.sys_cpu >= 0 ? s.sys_cpu : null,
+      rss: s.rss > 0 ? s.rss : null,
+      mem, memFrac: mem ? mem.used / mem.limit : null,
+      gpus, gpuAvg: busy.length ? busy.reduce((a, g) => a + g.util, 0) / busy.length : null,
+    };
+  }
+
   const model = {
     subscribe,
+    reading, coresText, sampleCores,
     regionKind, regionIcon, regionLabel,
     getWorkers, getWorker, workerList, applyTelemetry,
     getFacts, workersOf, sessions, session, hubNow, connectFacts, pageNotebook,

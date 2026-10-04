@@ -435,10 +435,23 @@ const RE = KaimonSlate.ReportEngine
                     @test (r2, quiet) == (r1, true)
                     @test r3 == r1 + 1 && "worker/factsnb/" in gone["del"]
                     @test NS.facts_snapshot()["rev"] == r3
+                    # A worker no notebook holds sends its samples under the host and port its roster
+                    # lists it by.
+                    NS._telemetry_push!(hub, "slate-login-node-9106", (cpu = 3.0,))
+                    smp = KaimonSlate.JSON.parse(take!(ch))
+                    @test (smp["t"], smp["key"]) == ("sample", "roster/login-node:9106")
                 finally
                     NS._FACTS_HUB[] = prev
                     lock(() -> filter!(c -> c !== ch, NS._FACT_LISTENERS), NS._FACT_LISTENERS_LOCK)
                 end
+            end
+
+            @testset "telemetry is watched only on workers this hub started and nothing holds" begin
+                ws = Any[Dict{String,Any}("port" => 9300, "alive" => true, "state" => "idle",
+                                          "manifest" => "{\"hub\":\"elsewhere\",\"stream_port\":\"9301\"}")]
+                RE._watch_roster!("not-signed-in.invalid", ws)     # no session: nothing to watch over
+                RE._watch_roster!("x", ws)                          # not ours either way
+                @test isempty(RE.watched_workers()) && isempty(RE._WATCH_DIALING)
             end
 
             @testset "a ▶ on a cell already running its code does not queue a second run" begin

@@ -3049,6 +3049,7 @@ function _sweep_stale_conn_state!(h)
     for (_, k) in lock(_REGION_LOCK) do; collect(_REGION_KERNELS); end
         (k isa ReportEngine.GateKernel && k.conn !== nothing) && push!(live, String(k.conn.name))
     end
+    union!(live, ReportEngine.held_conns())
     for name in ReportEngine.kernel_stats_conns()
         name in live || ReportEngine.forget_kernel_stats(name)
     end

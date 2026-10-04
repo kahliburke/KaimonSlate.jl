@@ -31,6 +31,7 @@ const regions  = signal([]);     // the region registry, from the facts → [{na
 const hostData = signal([]);     // per-host live rosters    → [{host, workers:[…]}]
 const localW   = signal([]);     // the hub's kernels on this machine, from its facts (roster-shaped)
 const nbRemote = signal([]);     // the hub's OFF-MACHINE kernels for open notebooks, from its facts
+const samplesTick = signal(0);   // bumped on every model change (a sample among them)
 
 // `detail` (open worker popup target) is imported from ./stores.js — shared across home-page islands.
 
@@ -79,6 +80,7 @@ function fromFacts() {
   }
   localW.value = loc; nbRemote.value = rem;
   regions.value = M.regions();
+  samplesTick.value++;
 }
 window.slateModel.subscribe(fromFacts);
 fromFacts();   // the facts may have landed before this module subscribed
@@ -117,11 +119,6 @@ function start() { if (timer) return; tick(); timer = setInterval(tick, POLL_MS)
 // Entries carry `bound` = the hub kernel, i.e. "this is serving an open notebook from here".
 // Pure over its two arguments (asserted by test/js/worker_merge.mjs — keep it that way).
 // The name a worker is FILED under, which is not always the machine it runs on. A scheduler region's
-// worker lives on the granted node, but its manifest sits on the shared filesystem and is probed
-// through the login node — so the roster files it under the login host and the hub knows it by the
-// node. Keying on the running host alone listed such a worker twice: the hub's live kernel, and the
-// roster's stale manifest for the same process, with contradictory verdicts.
-// The name a worker is FILED under, which is not always the machine it runs on. A scheduler region's
 // worker lives on the granted node, but its manifest sits on the shared filesystem and is read
 // through the login node, so that is the name every roster read uses. `viaHost` is present only when
 // the two differ.
@@ -150,7 +147,20 @@ function mergeRosters(hostRosters, hubKernels) {
   });
   return out;
 }
-const allEntries = () => mergeRosters(hostData.value, nbRemote.value);
+// The machine a roster entry runs on: its manifest's `node` when it has one (a routed node's worker is
+// listed under the login host), else the host it is listed under.
+const runsOn = e => pj(e.w.manifest).node || e.host;
+// A worker the hub does not hold for a notebook still sends its samples (the hub watches it), under
+// the machine it runs on: those are fresher than the roster's last probe.
+const allEntries = () => {
+  samplesTick.value;   // re-render on each sample
+  const M = window.slateModel;
+  return mergeRosters(hostData.value, nbRemote.value).map(e => {
+    if (e.bound) return e;
+    const smp = M.sampleOf('roster/' + runsOn(e) + ':' + e.w.port);
+    return smp ? { ...e, w: { ...e.w, stats: smp.stats, lastActivity: Math.round(smp.at) } } : e;
+  });
+};
 // The hub's fields win: it names the notebook on the worker NOW, and carries the `nbid` a host manifest
 // has no reason to know — which is what makes Restart / Open notebook reachable for a remote worker.
 
@@ -196,14 +206,16 @@ function WorkerRow({ w, host, bound }) {
     : (state !== 'attached' && !bound && nb && !running.length && !warm)
     ? 'detached from ' + nb + (w.stateSince ? ' · idle since ' + ago(w.stateSince) : '') + ' — reopening it reattaches here'
     : runTxt;
-  const cpuPct = cpu == null ? 0 : (cpu <= 0 ? 0 : Math.max(5, Math.min(100, cpu)));
-  const barCol = cpu >= 85 ? '#e5636e' : cpu >= 50 ? '#e8a13f' : '#3fb96e';
+  // The bar is the worker's CPU against what it may use, as in its panel and telemetry view.
+  const frac = cpu == null ? null : window.slateModel.reading(st).cpuFrac;
+  const cpuPct = !(frac > 0) ? 0 : Math.max(5, Math.min(100, frac * 100));
+  const barCol = frac >= 0.85 ? '#e5636e' : frac >= 0.5 ? '#e8a13f' : '#3fb96e';
   return html`<div class="actrow" title="worker details + history" style="cursor:pointer"
       onClick=${() => { detail.value = { host, port: +w.port }; }}>
     <span class="actlabel"><span class="actwho">${alive ? '🟢' : '⚪'} :${w.port}</span>
       <span class="actbadge ${state}">${state}</span></span>
     <span class="actbar">${(cpu == null || cpuPct <= 0) ? null : html`<span class="actbarf" style=${`width:${cpuPct}%;background-color:${barCol}`}></span>`}</span>
-    <span class="actcpun">${cpu == null ? '—' : cpu + '%'}</span>
+    <span class="actcpun">${cpu == null ? '—' : Math.round(cpu) + '%'}</span>
     <span class="actrss">${rss ? fmtB(rss) : '—'}</span>
     <span class="actrun ${(runTxt === 'idle' || runTxt.charAt(0) === '↩') ? 'idle' : ''}" title=${runTip}>${runTxt}</span></div>`;
 }
@@ -290,8 +302,10 @@ function WorkerDetail() {
     if (!d) return;
     pending.value = null;   // a different worker clears any stale in-flight/error state
     const e = findEntry(d.host, d.port), mf = e ? mergeManifest(e.w, e.bound) : {};
+    // The hub keeps a worker's history under the machine it runs on.
+    const on = d.host === 'local' ? '' : (e ? (e.bound ? e.host : runsOn(e)) : d.host);
     openTelemetry({
-      side: mf.side && mf.side !== 'local' ? mf.side : '', host: d.host === 'local' ? '' : d.host, port: d.port,
+      side: mf.side && mf.side !== 'local' ? mf.side : '', host: on, port: d.port,
       label: workerLabel(mf, d.port),
       actions: () => html`<${WorkerBar} host=${d.host} port=${d.port} entry=${findEntry(d.host, d.port)}
         onRegion=${(name) => { detail.value = null; openRegionConfig(d.host, name); }} onDone=${done}/>`,

@@ -3687,7 +3687,19 @@ function _telemetry_tidy!(dir::AbstractString, today::AbstractString)
 end
 
 function _telemetry_push!(h, conn_name::AbstractString, sample)
-    owner = _worker_conn_owner(h, conn_name); owner === nothing && return nothing
+    owner = _worker_conn_owner(h, conn_name)
+    if owner === nothing
+        # A worker no notebook holds (watched, or parked): relayed under the host and port the
+        # host rosters list it by, for the rows and views that show it.
+        m = match(r"^slate-(.+)-(\d+)$", String(conn_name))
+        m === nothing && return nothing
+        frame = try
+            string("{\"t\":\"sample\",\"key\":", JSON.json("roster/" * m.captures[1] * ":" * m.captures[2]),
+                   ",\"at\":", time(), ",\"stats\":", JSON.json(JSON.json(sample)), "}")
+        catch; return nothing; end
+        _facts_send(frame)
+        return nothing
+    end
     nb, side = owner
     try; _telemetry_log!(nb, side, sample); catch e; @debug "slate: telemetry log write failed" exception = e; end
     # A measurement, not a fact: relayed on the facts stream to every page (a notebook's and the home

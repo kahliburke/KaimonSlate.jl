@@ -134,9 +134,11 @@ happening and where.
 **The Worker activity panel** — on the hub's front page, a live "top" for every worker the hub knows
 about: this machine's workers under **💻 this machine**, notebooks placed on a host grouped by host,
 and region workers grouped by region. Each row shows a CPU meter, RSS, and *what it's doing*
-(▶ running-cell ids · ⏳ warming · ✓ ready · idle), with a click-through detail popup (cpu/rss
-sparklines and full telemetry) that can also restart, open or reap the worker. It refreshes every few
-seconds, and appears whenever any notebook has a worker, local or not.
+(▶ running-cell ids · ⏳ warming · ✓ ready · idle). Clicking a row opens its telemetry view, with
+the worker's facts and its restart, open and reap actions above the charts. Rows update live, and
+appear whenever any notebook has a worker, local or not. A remote worker this hub started keeps
+streaming telemetry after its notebook detaches, and while it waits warm in a region pool: the hub
+holds a connection to it for that alone while it has a session to the host.
 
 ![The Remote activity strip: workers grouped by region (db · db-box, gpu · gpu-box), each row with a CPU meter, RSS, and status — one attached and running ▶ train, one warm and ✓ ready · CUDA](./assets/remote-activity.png)
 

@@ -642,6 +642,12 @@ function _ensure_poller!()
                     # human DISPLAY label (`display_name`) — once a session carries a notebook-filename
                     # label, display_name diverges from name and a `session_name` lookup silently misses,
                     # dropping every slate_refresh/progress/hot-reload event (dead reactivity).
+                    # A sample is the worker's, not a notebook's: kept whichever wire brought it (a
+                    # notebook's, a parked one, or one held only for telemetry).
+                    if m.channel == "slate_telemetry"
+                        _record_telemetry!(m.conn_name, String(m.data))
+                        continue
+                    end
                     rid = lock(_GATE_SESSION_LOCK) do; get(_GATE_SESSION, m.conn_name, nothing); end
                     rid === nothing && continue
                     if m.channel == "slate_refresh"
@@ -686,8 +692,6 @@ function _ensure_poller!()
                         end
                     elseif m.channel == "slate_emit_bin"      # a raw binary numeric frame (bytes carry channel+meta+dtype+shape+payload)
                         m.data isa Vector{UInt8} && push!(binemits, (rid, m.data))
-                    elseif m.channel == "slate_telemetry"     # worker's 2s sample — per-kernel ring + WS push
-                        _record_telemetry!(m.conn_name, String(m.data))
                     elseif m.channel == "slate_log"           # worker log record → live tail push (no store)
                         _relay_log!(m.conn_name, String(m.data))
                     elseif m.channel == "slate_prepare"       # env precompile progress → "Preparing packages" banner

@@ -1835,6 +1835,9 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     # this). `project` (the worker's --project env dir) is what pool adoption matches on.
     fields = ["notebook" => String(label), "parent" => String(parent), "hub" => gethostname(),
               "owner" => worker_owner_tag(),     # which hub on that host — see `_manifest_ours`
+              # The machine it runs on: a routed node's manifest is read through the login host, so
+              # the roster's host does not say.
+              "node" => String(host),
               "transport" => string(t.transport), "project" => t.project,
               "port" => string(port), "stream_port" => string(stream_port),
               "client_pubkey" => hubkey, "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS")]
@@ -1914,6 +1917,123 @@ function _payload_current(k)::Bool
     return false
 end
 
+# Resolve connect coordinates + CURVE key, open the tunnel if needed, and dial. `deadline`
+# bounds the wait: a fresh spawn legitimately needs ~90s (remote Julia boot + KaimonGate
+# load), but an ALREADY-RUNNING worker answers in about a second — so the reattach dial
+# fails fast instead of hanging on a wedged process. The retry quantum is 0.25s (was 1s —
+# it sat directly on the reattach path, where try #1 usually races the tunnel coming up).
+# On failure the just-opened tunnel is CLOSED — its supervisor would otherwise respawn the
+# forward forever (a leak the old single-path flow had on its error exit).
+function _dial_worker(t::RemoteTarget, port, stream_port; deadline::Float64, server_key::String = "",
+                      remote_ip::String = "", label::AbstractString = "", quiet::Bool = false)
+    K = _kaimon()
+    host = t.ssh_host
+    quiet || _unwatch!(host, Int(port))        # a notebook taking the worker replaces a telemetry watch
+    if t.transport === :direct
+        # CURVE key + routable IP: use the caller's cached values (the attachment record) when
+        # given — each is otherwise an ssh exec, and both were learned at the original spawn.
+        # The key is PINNED either way (pinning is a local trust-store write, not a fetch).
+        ip = isempty(remote_ip) ? _remote_ip(host) : remote_ip
+        if isempty(server_key)
+            server_key = _fetch_and_pin_curve!(t, ip, port)
+        else
+            try; getfield(_kaimon(), :KaimonGate).pin_server!(ip, port, server_key); catch; end
+        end
+        connect_host, connect_port, connect_stream = ip, port, stream_port
+        tunnel = nothing
+    else
+        ip = ""
+        lport, lstream = _free_local_port(), _free_local_port()
+        v = via(host)
+        # For a routed worker the login node reaches the compute node over the cluster's own network,
+        # so the forward targets the node BY NAME. On a SINGLE-NODE cluster the node IS the login host:
+        # the SSH server then commonly refuses `direct_tcpip` to its own external name (PermitOpen is
+        # loopback-only), while the worker - bound 0.0.0.0 - is still reachable on loopback. Target
+        # 127.0.0.1 there, which is also the address the CURVE key is then pinned against.
+        tunnel = v === nothing ? open_tunnel(host, [(lport, port), (lstream, stream_port)]) :
+                 open_tunnel(v.host, [(lport, port), (lstream, stream_port)];
+                             remote = host == v.host ? "127.0.0.1" : host)
+        connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
+        # The key is pinned against the LOCAL end of the forward, which is the address this hub
+        # actually dials. Every forward carries CURVE, routed or not — see `_remote_worker_script`.
+        if isempty(server_key)
+            for attempt in 1:12                 # the worker writes its key early in boot
+                server_key = try
+                    _fetch_and_pin_curve!(t, connect_host, connect_port)
+                catch e
+                    # A node that will not run the command will not run it on the next try either.
+                    occursin(r"Unable to create step|not held any more", sprint(showerror, e)) && rethrow()
+                    attempt == 12 && _rlog("connect: no CURVE key from $host yet — dialing without one")
+                    sleep(1.0); ""
+                end
+                isempty(server_key) || break
+            end
+        end
+    end
+    quiet || _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
+    quiet || _prep_stage("Connecting to worker on $host — remote Julia boot + handshake…")
+    # A FORWARDED transport (:tunnel) sets up its `ssh -L` ASYNC (open_tunnel spawns it), so the local
+    # port isn't listening the instant we dial — a bare connect_tcp! then burns its full ~1.5s
+    # _tcp_port_open timeout on the not-yet-ready forward before the first retry. Tight-poll the local
+    # port first (loopback "refused" is instant), so the first real connect lands the moment the forward
+    # comes up — the dominant warm-worker ADOPT latency once the ssh master is warm. Bounded; on timeout
+    # we fall through and let the connect loop's own deadline handle a genuinely-stuck forward.
+    if tunnel !== nothing
+        fw0 = time()
+        while time() - fw0 < min(deadline, _fwd_ready_wait()) &&
+              _probe_tcp(connect_host, connect_port; timeout = 0.5) !== :open
+            sleep(0.05)
+        end
+    end
+    t0 = time(); last = ""; conn = nothing; tries = 0
+    firewall_since = 0.0   # :direct — first time the port looked firewalled (SYN dropped) with no refuse/open since
+    while time() - t0 < deadline
+        tries += 1
+        # :direct dials the worker's RAW ip:port. A closed/firewalled port DROPS the SYN, so a bare
+        # connect_tcp! blocks ~75 s (the OS TCP timeout) — long enough to look like a hang and blow past
+        # `deadline`. Probe first (bounded): dial only when the port is actually open; a booting worker
+        # (refused) just retries; a port that stays unreachable is a firewall → fail fast with a clear
+        # message instead of waiting out the whole deadline.
+        if t.transport === :direct
+            _pt = time()
+            pr = _probe_tcp(connect_host, connect_port; timeout = _probe_timeout())
+            _rlog("  dial try $tries: probe=$pr in $(round(time() - _pt; digits = 2))s (elapsed $(round(time() - t0; digits = 1))s)")
+            if pr === :unreachable
+                firewall_since == 0.0 && (firewall_since = time())
+                last = "port $connect_port on $host is not reachable — open $(connect_port)-$(connect_port + 2) in the host's firewall, or use transport=:tunnel"
+                (time() - firewall_since > _firewall_giveup()) && break   # sustained DROP ⇒ firewall, not a slow boot — stop early
+                sleep(0.5); continue
+            end
+            firewall_since = 0.0                                  # refused/open ⇒ host reachable; normal boot/ready path
+            if pr === :refused
+                last = "worker not listening on $connect_port yet (booting)"
+                sleep(0.5); continue
+            end
+        end
+        try
+            conn = K.connect_tcp!(_manager(), connect_host, connect_port;
+                                  name = "slate-$(host)-$(port)", stream_port = connect_stream,
+                                  server_key = server_key, label = label)
+            quiet || _rlog("connect: TCP+CURVE up after $tries tries, $(round(time() - t0; digits = 1))s of dialing (post-connect setup follows before 'connect OK')")
+            break
+        catch e
+            last = sprint(showerror, e)
+            # A stale live-status ConnectionManager entry for this endpoint makes connect_tcp!
+            # refuse with "Already connected" on EVERY retry (it won't replace a live corpse) —
+            # so evict it and let the next iteration build fresh, instead of burning the whole
+            # deadline re-dialing into the same corpse. Same eviction the reap path does.
+            occursin("Already connected", last) && _evict_worker_conn!(host, port)
+            sleep(0.25)
+        end
+    end
+    if conn === nothing
+        quiet || _rlog("connect FAILED: could not reach worker on $host:$port after $tries tries ($last)")
+        tunnel === nothing || (try; close_tunnel(tunnel); catch; end)
+    end
+    # resolved key/ip ride back so a successful caller can stamp them into the attachment record
+    return (conn = conn, tunnel = tunnel, err = last, server_key = server_key, remote_ip = ip)
+end
+
 """
     spawn_and_connect_remote!(k, t::RemoteTarget, parent_project) -> (conn, tunnel|nothing)
 
@@ -1936,118 +2056,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
     host = t.ssh_host
     _rlog("═══ REMOTE SPAWN requested: notebook worker → $host (transport=$(t.transport)) ═══")
 
-    # Resolve connect coordinates + CURVE key, open the tunnel if needed, and dial. `deadline`
-    # bounds the wait: a fresh spawn legitimately needs ~90s (remote Julia boot + KaimonGate
-    # load), but an ALREADY-RUNNING worker answers in about a second — so the reattach dial
-    # fails fast instead of hanging on a wedged process. The retry quantum is 0.25s (was 1s —
-    # it sat directly on the reattach path, where try #1 usually races the tunnel coming up).
-    # On failure the just-opened tunnel is CLOSED — its supervisor would otherwise respawn the
-    # forward forever (a leak the old single-path flow had on its error exit).
-    function dial(port, stream_port; deadline::Float64, server_key::String = "", remote_ip::String = "")
-        if t.transport === :direct
-            # CURVE key + routable IP: use the caller's cached values (the attachment record) when
-            # given — each is otherwise an ssh exec, and both were learned at the original spawn.
-            # The key is PINNED either way (pinning is a local trust-store write, not a fetch).
-            ip = isempty(remote_ip) ? _remote_ip(host) : remote_ip
-            if isempty(server_key)
-                server_key = _fetch_and_pin_curve!(t, ip, port)
-            else
-                try; getfield(_kaimon(), :KaimonGate).pin_server!(ip, port, server_key); catch; end
-            end
-            connect_host, connect_port, connect_stream = ip, port, stream_port
-            tunnel = nothing
-        else
-            ip = ""
-            lport, lstream = _free_local_port(), _free_local_port()
-            v = via(host)
-            # For a routed worker the login node reaches the compute node over the cluster's own network,
-            # so the forward targets the node BY NAME. On a SINGLE-NODE cluster the node IS the login host:
-            # the SSH server then commonly refuses `direct_tcpip` to its own external name (PermitOpen is
-            # loopback-only), while the worker - bound 0.0.0.0 - is still reachable on loopback. Target
-            # 127.0.0.1 there, which is also the address the CURVE key is then pinned against.
-            tunnel = v === nothing ? open_tunnel(host, [(lport, port), (lstream, stream_port)]) :
-                     open_tunnel(v.host, [(lport, port), (lstream, stream_port)];
-                                 remote = host == v.host ? "127.0.0.1" : host)
-            connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
-            # The key is pinned against the LOCAL end of the forward, which is the address this hub
-            # actually dials. Every forward carries CURVE, routed or not — see `_remote_worker_script`.
-            if isempty(server_key)
-                for attempt in 1:12                 # the worker writes its key early in boot
-                    server_key = try
-                        _fetch_and_pin_curve!(t, connect_host, connect_port)
-                    catch e
-                        # A node that will not run the command will not run it on the next try either.
-                        occursin(r"Unable to create step|not held any more", sprint(showerror, e)) && rethrow()
-                        attempt == 12 && _rlog("connect: no CURVE key from $host yet — dialing without one")
-                        sleep(1.0); ""
-                    end
-                    isempty(server_key) || break
-                end
-            end
-        end
-        _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
-        _prep_stage("Connecting to worker on $host — remote Julia boot + handshake…")
-        # A FORWARDED transport (:tunnel) sets up its `ssh -L` ASYNC (open_tunnel spawns it), so the local
-        # port isn't listening the instant we dial — a bare connect_tcp! then burns its full ~1.5s
-        # _tcp_port_open timeout on the not-yet-ready forward before the first retry. Tight-poll the local
-        # port first (loopback "refused" is instant), so the first real connect lands the moment the forward
-        # comes up — the dominant warm-worker ADOPT latency once the ssh master is warm. Bounded; on timeout
-        # we fall through and let the connect loop's own deadline handle a genuinely-stuck forward.
-        if tunnel !== nothing
-            fw0 = time()
-            while time() - fw0 < min(deadline, _fwd_ready_wait()) &&
-                  _probe_tcp(connect_host, connect_port; timeout = 0.5) !== :open
-                sleep(0.05)
-            end
-        end
-        t0 = time(); last = ""; conn = nothing; tries = 0
-        firewall_since = 0.0   # :direct — first time the port looked firewalled (SYN dropped) with no refuse/open since
-        while time() - t0 < deadline
-            tries += 1
-            # :direct dials the worker's RAW ip:port. A closed/firewalled port DROPS the SYN, so a bare
-            # connect_tcp! blocks ~75 s (the OS TCP timeout) — long enough to look like a hang and blow past
-            # `deadline`. Probe first (bounded): dial only when the port is actually open; a booting worker
-            # (refused) just retries; a port that stays unreachable is a firewall → fail fast with a clear
-            # message instead of waiting out the whole deadline.
-            if t.transport === :direct
-                _pt = time()
-                pr = _probe_tcp(connect_host, connect_port; timeout = _probe_timeout())
-                _rlog("  dial try $tries: probe=$pr in $(round(time() - _pt; digits = 2))s (elapsed $(round(time() - t0; digits = 1))s)")
-                if pr === :unreachable
-                    firewall_since == 0.0 && (firewall_since = time())
-                    last = "port $connect_port on $host is not reachable — open $(connect_port)-$(connect_port + 2) in the host's firewall, or use transport=:tunnel"
-                    (time() - firewall_since > _firewall_giveup()) && break   # sustained DROP ⇒ firewall, not a slow boot — stop early
-                    sleep(0.5); continue
-                end
-                firewall_since = 0.0                                  # refused/open ⇒ host reachable; normal boot/ready path
-                if pr === :refused
-                    last = "worker not listening on $connect_port yet (booting)"
-                    sleep(0.5); continue
-                end
-            end
-            try
-                conn = K.connect_tcp!(_manager(), connect_host, connect_port;
-                                      name = "slate-$(host)-$(port)", stream_port = connect_stream,
-                                      server_key = server_key, label = k.label)
-                _rlog("connect: TCP+CURVE up after $tries tries, $(round(time() - t0; digits = 1))s of dialing (post-connect setup follows before 'connect OK')")
-                break
-            catch e
-                last = sprint(showerror, e)
-                # A stale live-status ConnectionManager entry for this endpoint makes connect_tcp!
-                # refuse with "Already connected" on EVERY retry (it won't replace a live corpse) —
-                # so evict it and let the next iteration build fresh, instead of burning the whole
-                # deadline re-dialing into the same corpse. Same eviction the reap path does.
-                occursin("Already connected", last) && _evict_worker_conn!(host, port)
-                sleep(0.25)
-            end
-        end
-        if conn === nothing
-            _rlog("connect FAILED: could not reach worker on $host:$port after $tries tries ($last)")
-            tunnel === nothing || (try; close_tunnel(tunnel); catch; end)
-        end
-        # resolved key/ip ride back so a successful caller can stamp them into the attachment record
-        return (conn = conn, tunnel = tunnel, err = last, server_key = server_key, remote_ip = ip)
-    end
+    dial(port, stream_port; kw...) = _dial_worker(t, port, stream_port; label = k.label, kw...)
 
     t0 = time()
     # After a successful (re)attach, everything that isn't the dial moves OFF the hot path: the
@@ -2246,7 +2255,7 @@ function _spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::Abstract
                 try
                     _write_worker_manifest!(host, port, [
                         "notebook" => k.label, "parent" => k.parent, "hub" => gethostname(),
-                        "owner" => worker_owner_tag(),
+                        "owner" => worker_owner_tag(), "node" => String(host),
                         "transport" => string(t.transport), "project" => t.project,
                         "port" => string(port), "stream_port" => string(sp),
                         "client_pubkey" => _hub_client_pubkey(), "region" => t.region,
@@ -3190,6 +3199,7 @@ function _session_dropped!(host::AbstractString, died::Bool = false)
     end
     for x in hosts
         try; _evict_data_tunnels!(x); catch; end
+        try; _unwatch_host!(x); catch; end
     end
     _rlog("session $(died ? "lost" : "closed") on $h — discarded the data forwards it carried" *
           (length(hosts) > 1 ? " (and those of $(join(hosts[2:end], ", ")))" : ""))
@@ -4878,6 +4888,110 @@ function _ensure_park_sweeper!()
     return nothing
 end
 
+# ── Telemetry from workers no notebook holds ────────────────────────────────────────────────────
+# A worker publishes a sample every two seconds whether or not anything is listening; a hub only
+# receives them over a connection to it. So for each remote worker this hub started that no notebook
+# holds (detached, a warm-pool member), it keeps a connection used for nothing else, and the worker's
+# samples reach the history and every page as an attached worker's do. Found by the roster reads
+# (`list_remote_workers`); dropped when the worker is gone or attached, and with its ssh session.
+# Never signs in: with no session to the host there is nothing to watch over.
+mutable struct Watched
+    conn::Any
+    tunnel::Any
+end
+const _WATCHED = Dict{Tuple{String,Int},Watched}()
+const _WATCH_DIALING = Set{Tuple{String,Int}}()
+const _WATCH_LOCK = ReentrantLock()
+
+"The workers this hub is watching for telemetry only, as `(host, port)`."
+watched_workers() = lock(() -> collect(keys(_WATCHED)), _WATCH_LOCK)
+
+"""
+The connection names of the wires this hub holds to workers no notebook has: parked ones and telemetry
+watches. Their workers are still running, so their telemetry history is kept.
+"""
+function held_conns()
+    name(c) = try; String(c.name); catch; ""; end
+    out = lock(() -> String[name(w.conn) for w in values(_WATCHED)], _WATCH_LOCK)
+    lock(_PARK_LOCK) do
+        for p in values(_PARKED); push!(out, name(p.conn)); end
+    end
+    return filter!(!isempty, out)
+end
+
+# Does the hub already have a live wire to this worker (a notebook's, a parked one, or a watch)?
+function _hub_has_wire(host::AbstractString, port::Int)
+    nm = "slate-$(host)-$(port)"
+    mgr = try; _manager(); catch; return false; end
+    return try
+        lock(mgr.lock) do
+            any(c -> getfield(c, :name) == nm && getfield(c, :status) in (:connected, :stalled), mgr.connections)
+        end
+    catch
+        false
+    end
+end
+
+function _unwatch!(host::AbstractString, port::Int)
+    w = lock(() -> pop!(_WATCHED, (String(host), port), nothing), _WATCH_LOCK)
+    w === nothing && return nothing
+    try; _kaimon().disconnect!(w.conn); catch; end
+    w.tunnel === nothing || (try; close_tunnel(w.tunnel); catch; end)
+    return nothing
+end
+
+# The host whose ssh session reaches `host`: itself, or the login host of a node routed through one.
+_session_of(host::AbstractString) = (v = via(host); v === nothing ? String(host) : String(v.host))
+
+# Drop the watches that go over `host`'s session (the workers on it and on nodes routed through it).
+_unwatch_host!(host::AbstractString) =
+    for (h, p) in watched_workers(); _session_of(h) == String(host) && _unwatch!(h, p); end
+
+# `host` is the roster's: the host whose filesystem holds the manifests. A worker on a node routed
+# through it is dialed at its `node`, over the same session.
+function _watch_roster!(host::AbstractString, ws)
+    h = String(host)
+    sess = _session_of(h)
+    if !Sweep.connected(sess)
+        _unwatch_host!(sess)
+        return nothing
+    end
+    want = Set{Tuple{String,Int}}()
+    for w in ws
+        port = Int(get(w, "port", 0)); port > 0 || continue
+        (get(w, "alive", false) === true && get(w, "state", "") != "attached") || continue
+        mf = String(get(w, "manifest", ""))
+        _manifest_ours(mf) || continue
+        sp = tryparse(Int, _manifest_get(mf, "stream_port")); sp === nothing && continue
+        node = _manifest_get(mf, "node")
+        node = isempty(node) ? h : node
+        _session_of(node) == sess || continue            # no route to that node from here
+        key = (node, port)
+        push!(want, key)
+        lock(() -> haskey(_WATCHED, key) || key in _WATCH_DIALING, _WATCH_LOCK) && continue
+        _hub_has_wire(node, port) && continue
+        tr = _manifest_get(mf, "transport") == "direct" ? :direct : :tunnel
+        lock(() -> push!(_WATCH_DIALING, key), _WATCH_LOCK)
+        Threads.@spawn try
+            r = _dial_worker(RemoteTarget(node; transport = tr), port, sp; deadline = 15.0,
+                             label = "telemetry", quiet = true)
+            if r.conn !== nothing
+                lock(() -> (_WATCHED[key] = Watched(r.conn, r.tunnel)), _WATCH_LOCK)
+                _ensure_poller!()
+                _rlog("telemetry: watching worker-$port on $node (no notebook holds it)")
+            end
+        catch e
+            _rlog("telemetry: could not watch worker-$port on $node — " * first(sprint(showerror, e), 120))
+        finally
+            lock(() -> delete!(_WATCH_DIALING, key), _WATCH_LOCK)
+        end
+    end
+    for (wh, p) in watched_workers()
+        (_session_of(wh) == sess && !((wh, p) in want)) && _unwatch!(wh, p)
+    end
+    return nothing
+end
+
 # The probe (one POSIX-sh command string, sent as a SINGLE ssh argv token like the launch line)
 # that enumerates workers: for each `worker-<port>.json` it emits port, liveness (pgrep), the
 # log's mtime (last activity) and size, the state sidecar, and the raw manifest — delimited with
@@ -4941,7 +5055,9 @@ pre-telemetry worker). Reads the on-host manifests over one ssh call. `[]` if un
 function list_remote_workers(host)
     ok, out = _ssh_capture(host, `$(_workers_probe_sh())`)   # one token → the remote login shell runs the script verbatim
     ok || return Any[]
-    return _parse_workers(out)
+    ws = _parse_workers(out)
+    try; _watch_roster!(host, ws); catch; end
+    return ws
 end
 
 _workers_probe_sh() = replace(_WORKERS_PROBE_SH, "REMOTE_WORKER_DIR" => _REMOTE_WORKER)
@@ -5120,6 +5236,7 @@ end
 # ("slate-<host>-<port>") — exact per worker, never a same-port worker on another host. Called BOTH on
 # reap (mark it dead everywhere) and self-healingly in the dial loop when "Already connected" is hit.
 function _evict_worker_conn!(host, port::Int)
+    _unwatch!(String(host), port)          # a telemetry-only wire gives way to whatever needs this worker
     nm = "slate-$(host)-$(port)"
     mgr = try; _manager(); catch; return 0; end
     K = _kaimon()

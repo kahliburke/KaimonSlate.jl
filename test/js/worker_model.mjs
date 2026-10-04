@@ -178,6 +178,21 @@ const eq = (label, got, want) => {
   eq('parked wires', M.parked().map(p => p.port), [9100]);
 }
 
+// ── what a telemetry sample says ──
+{
+  const GB = 2 ** 30;
+  const job = M.reading({ cpu: 250, rss: GB, sys_cpu: 40, sys_mem_total: 64 * GB,
+    job: { cpus: 4, mem_max: 8 * GB, mem_cur: 6 * GB }, host: { ncpu: 32, mem_avail: 10 * GB },
+    gpus: [{ i: 0, util: 40, util_max: 90, mem_used: GB, mem_total: 80 * GB }, { i: 1, util: 20, util_max: 20 }] });
+  eq('cpu against the job allowance', [job.cpuText, job.allow, job.cpuFrac], ['2.5 cores', 4, 0.625]);
+  eq('memory against the job limit', [job.mem.of, job.memFrac], ['job', 0.75]);
+  eq('gpu average and peak', [job.gpuAvg, job.gpus[0].peak], [30, 90]);
+
+  const host = M.reading({ cpu: 40, sys_mem_total: 64 * GB, host: { cores: [1, 2, 3, 4], mem_avail: 48 * GB } });
+  eq('below a core, against the host', [host.cpuText, host.cpuFrac, host.mem.of, host.memFrac], ['40% of a core', 0.1, 'host', 0.25]);
+  eq('no available-memory reading: memory unknown', M.reading({ cpu: 0, sys_mem_total: GB, sys_mem_free: 1 }).mem, null);
+}
+
 if (fails.length) {
   console.error('worker_model: ' + fails.length + ' failure(s)');
   for (const f of fails) console.error('  - ' + f);

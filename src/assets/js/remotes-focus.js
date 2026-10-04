@@ -445,7 +445,7 @@ function Roster() {
       : !rs.length ? html`<div class="rppempty">No workers on ${h} yet.</div>`
       : rs.map(w => {
         const mf = pj(w.manifest), st = pj(w.stats), tel = [];
-        if (st.cpu !== undefined && st.cpu >= 0) tel.push('cpu ' + st.cpu + '%');
+        if (st.cpu !== undefined && st.cpu >= 0) tel.push('cpu ' + window.slateModel.coresText(st.cpu));
         if (st.rss) tel.push('rss ' + fmtB(st.rss));
         if (st.memo_bytes > 0) tel.push('memo ' + fmtB(st.memo_bytes));
         const warm = st.warm || '', wc = warm.indexOf('ready') === 0 ? '#56d364' : warm.indexOf('warming') === 0 ? '#e8a13f' : '#8a90a8';

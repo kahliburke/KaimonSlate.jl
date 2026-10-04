@@ -23,31 +23,34 @@ const _wpBytes = v => (v == null || v < 0) ? '' : window.slateBytes(v, { compact
 // what the worker can actually use (the job's limits where it has them, else the host's), then a line
 // of the rest. Clicking it opens the telemetry view (telemetry.js) for the full picture over time.
 // `note` (why the worker is unwell) leads, and shows even when there is no sample yet.
-const _wpMeter = (label, frac, text, warn) => '<div class="wm-row"><span class="wm-k">' + label + '</span>' +
-  '<span class="wm-bar' + (warn ? ' warn' : '') + '"><span style="width:' + (frac == null ? 0 : Math.round(Math.min(1, Math.max(0, frac)) * 100)) + '%"></span></span>' +
-  '<span class="wm-v">' + text + '</span></div>';
+// `peak`, when given, is the busiest moment in the sample's interval: a translucent band behind the bar.
+const _wpPct = f => Math.round(Math.min(1, Math.max(0, f)) * 100);
+const _wpMeter = (label, frac, text, warn, peak) => '<div class="wm-row"><span class="wm-k">' + label + '</span>' +
+  '<span class="wm-bar' + (warn ? ' warn' : '') + '">' +
+  (peak != null && frac != null && peak > frac ? '<span class="wm-peak" style="width:' + _wpPct(peak) + '%"></span>' : '') +
+  '<span class="wm-fill" style="width:' + (frac == null ? 0 : _wpPct(frac)) + '%"></span></span>' +
+  '<span class="wm-v" title="' + text + '">' + text + '</span></div>';
 function _wpStatsChips(statsJson, note) {
   const warn = note ? '<span class="wchip wchip-warn">⚠ ' + _wpEsc(note) + '</span>' : '';
   let s; if (statsJson) { try { s = JSON.parse(statsJson); } catch (_) { s = null; } }
   if (!s) return warn;
-  const job = s.job || {}, host = s.host || {}, proc = s.proc || {};
+  const r = window.slateModel.reading(s), proc = s.proc || {}, B = _wpBytes;
   const rows = [];
-  // CPU: this worker in cores, against what it may use (the job's allowance, else the host's cores).
-  const cores = (host.cores && host.cores.length) || host.ncpu || 0, allow = job.cpus > 0 ? job.cpus : cores;
-  if (s.cpu >= 0) rows.push(_wpMeter('CPU', allow ? (s.cpu / 100) / allow : s.cpu / 100,
-    _wpEsc((s.cpu >= 100 ? (s.cpu / 100).toFixed(1) + ' cores' : Math.round(s.cpu) + '% of a core') + (s.sys_cpu >= 0 ? ' · host ' + Math.round(s.sys_cpu) + '%' + (cores ? ' of ' + cores : '') : ''))));
+  // CPU: this worker, against what it may use (the job's allowance, else the host's cores).
+  if (r.cpu != null) rows.push(_wpMeter('CPU', r.cpuFrac,
+    _wpEsc(r.cpuText + (r.hostCpu != null ? ' · host ' + Math.round(r.hostCpu) + '%' + (r.hostCores ? ' of ' + r.hostCores : '') : ''))));
   // Memory: against the limit that would stop it.
-  const lim = job.mem_max > 0 ? job.mem_max : s.sys_mem_total;
-  const used = job.mem_max > 0 ? job.mem_cur : (host.mem_avail >= 0 ? s.sys_mem_total - host.mem_avail : s.sys_mem_total - s.sys_mem_free);
-  if (lim > 0 && used >= 0) rows.push(_wpMeter('Memory', used / lim,
-    _wpEsc(_wpBytes(used) + ' / ' + _wpBytes(lim) + (job.mem_max > 0 ? ' job limit' : ' host') + (s.rss > 0 ? ' · this worker ' + _wpBytes(s.rss) : '')),
-    used / lim > 0.85));
-  else if (s.rss > 0) rows.push(_wpMeter('Memory', null, _wpEsc('this worker ' + _wpBytes(s.rss))));
-  for (const g of (s.gpus || [])) rows.push(_wpMeter('GPU ' + g.i, g.util >= 0 ? g.util / 100 : null,
-    _wpEsc([g.util >= 0 ? g.util + '%' : null, g.mem_used >= 0 ? _wpBytes(g.mem_used) + ' / ' + _wpBytes(g.mem_total) : null,
-            g.temp >= 0 ? g.temp + '°C' : null,
-            g.power_w >= 0 ? Math.round(g.power_w) + (g.power_limit_w > 0 ? ' / ' + Math.round(g.power_limit_w) : '') + ' W' : null]
-      .filter(Boolean).join(' · ')), g.mem_total > 0 && g.mem_used / g.mem_total > 0.9));
+  if (r.mem) rows.push(_wpMeter('Memory', r.memFrac,
+    _wpEsc(B(r.mem.used) + ' / ' + B(r.mem.limit) + (r.mem.of === 'job' ? ' job limit' : ' host') + (r.rss ? ' · this worker ' + B(r.rss) : '')),
+    r.memFrac > 0.85));
+  else if (r.rss) rows.push(_wpMeter('Memory', null, _wpEsc('this worker ' + B(r.rss))));
+  for (const g of r.gpus) rows.push(_wpMeter('GPU ' + g.i, g.util == null ? null : g.util / 100,
+    _wpEsc([g.util != null ? g.util + '%' + (g.peak != null ? ' · peak ' + g.peak + '%' : '') : null,
+            g.memUsed != null && g.memTotal ? B(g.memUsed) + ' / ' + B(g.memTotal) : null,
+            g.temp != null ? g.temp + '°C' : null,
+            g.power != null ? Math.round(g.power) + (g.powerLimit ? ' / ' + Math.round(g.powerLimit) : '') + ' W' : null]
+      .filter(Boolean).join(' · ')), g.memTotal && g.memUsed / g.memTotal > 0.9,
+    g.peak == null ? null : g.peak / 100));
   const memo = s.memo_bytes ?? s.memo;
   const rest = [proc.alloc_rate >= 0 ? 'allocating ' + _wpBytes(proc.alloc_rate) + '/s' : null,
                 memo >= 0 ? 'memo ' + _wpBytes(memo) : null, s.evals > 0 ? s.evals + ' running' : null,
@@ -176,8 +179,8 @@ function _wpPillStat(statsJson) {
   if (s.cpu >= 1) p.push(Math.round(s.cpu) + '%');   // hide 0% on a resting worker — it's just noise (popup still shows it)
   if (s.rss > 0) p.push(_wpBytes(s.rss));
   // On a GPU job the GPUs' load is usually the number that matters: their mean, when busy.
-  const gu = (s.gpus || []).filter(g => g.util >= 0).map(g => g.util);
-  if (gu.length && Math.max(...gu) >= 1) p.push('gpu ' + Math.round(gu.reduce((a, b) => a + b, 0) / gu.length) + '%');
+  const r = window.slateModel.reading(s);
+  if (r.gpus.some(g => g.util >= 1)) p.push('gpu ' + Math.round(r.gpuAvg) + '%');
   return p.join(' · ');
 }
 

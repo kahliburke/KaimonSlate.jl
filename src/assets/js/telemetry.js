@@ -121,9 +121,7 @@ const shown = () => {
 };
 const ms = (x) => x.t * 1000;
 const series = (s, f) => s.map(x => { const v = f(x); return [ms(x), (v == null || v < 0 || Number.isNaN(v)) ? null : v]; });
-const ncores = (x) => (x.host && ((x.host.cores && x.host.cores.length) || x.host.ncpu)) || 0;
-// A worker's CPU in cores, or in percent of one core below a core, where `0.0 cores` says nothing.
-const coresText = (cpu) => cpu < 0 ? '—' : cpu >= 100 ? (cpu / 100).toFixed(1) + ' cores' : Math.round(cpu) + '% of a core';
+const { reading, sampleCores: ncores } = window.slateModel;
 const coreTick = (v) => Number.isInteger(+v) ? String(v) : (+v).toFixed(1);
 
 // Cells run over the window: each completed run as the hub timed it, and each cell still running from
@@ -152,7 +150,7 @@ const gcPct = (s) => s.map((x, i) => {
 });
 
 // ── charts ──────────────────────────────────────────────────────────────────────────────────────
-const AXIS = { type: 'time', axisLabel: { hideOverlap: true }, splitLine: { show: false } };
+const AXIS = { type: 'time', splitNumber: 3, axisLabel: { hideOverlap: true }, splitLine: { show: false } };
 const GRID = { left: 56, right: 16, top: 30, bottom: 22 };
 function base(yname, yfmt, extra = {}) {
   return Object.assign({
@@ -241,25 +239,23 @@ function Telemetry() {
       <div class="tm-card">${head}${acts}<div class="tm-body"><div class="tm-empty">${failed.value || 'waiting for telemetry…'}</div></div></div></div>`;
 
   const job = last.job || {}, host = last.host || {}, proc = last.proc || {}, gpus = last.gpus || [];
-  const memLimit = job.mem_max > 0 ? job.mem_max : (last.sys_mem_total || 0);
-  const memUsed = job.mem_max > 0 ? job.mem_cur : (host.mem_avail >= 0 ? last.sys_mem_total - host.mem_avail : -1);
+  const r = reading(last), memLimit = r.mem ? r.mem.limit : (last.sys_mem_total || 0);
   xWindow = [ms(s[0]), ms(last)];
-  const nc = ncores(last), spans = cellSpans(s, runs.value);
+  const nc = r.hostCores, spans = cellSpans(s, runs.value);
   const ids = [...new Set(spans.map(x => x.id))];
-  const gpuAvg = gpus.length ? gpus.reduce((a, g) => a + Math.max(0, g.util), 0) / gpus.length : -1;
   const gcNow = gcPct(s.slice(-2)).pop()[1];
 
   const tiles = html`<div class="tm-tiles">
-    <${Tile} label="CPU · this worker" value=${coresText(last.cpu)}
-             sub=${last.sys_cpu >= 0 ? 'host ' + pct(last.sys_cpu) + (nc ? ' of ' + nc + ' cores' : '') : null}/>
-    <${Tile} label=${job.mem_max > 0 ? 'Memory · job limit' : memUsed >= 0 ? 'Memory · host' : 'Memory · this worker'}
-             value=${memUsed >= 0 ? B(memUsed) + ' / ' + B(memLimit) : B(last.rss)}
-             frac=${memUsed >= 0 && memLimit > 0 ? memUsed / memLimit : null}
-             tone=${memUsed >= 0 && memLimit > 0 && memUsed / memLimit > 0.85 ? 'warn' : ''}
-             sub=${memUsed >= 0 ? 'this worker ' + B(last.rss) : null}/>
-    ${gpus.length ? html`<${Tile} label=${gpus.length > 1 ? 'GPUs · ' + gpus.length : 'GPU'} value=${pct(gpuAvg)}
-             frac=${gpuAvg >= 0 ? gpuAvg / 100 : null}
-             sub=${gpus.map(g => B(g.mem_used) + ' / ' + B(g.mem_total)).join(' · ')}/>` : null}
+    <${Tile} label="CPU · this worker" value=${r.cpuText}
+             sub=${r.hostCpu != null ? 'host ' + pct(r.hostCpu) + (nc ? ' of ' + nc + ' cores' : '') : null}/>
+    <${Tile} label=${!r.mem ? 'Memory · this worker' : r.mem.of === 'job' ? 'Memory · job limit' : 'Memory · host'}
+             value=${r.mem ? B(r.mem.used) + ' / ' + B(r.mem.limit) : B(last.rss)}
+             frac=${r.memFrac}
+             tone=${r.memFrac > 0.85 ? 'warn' : ''}
+             sub=${r.mem ? 'this worker ' + B(last.rss) : null}/>
+    ${r.gpus.length ? html`<${Tile} label=${r.gpus.length > 1 ? 'GPUs · ' + r.gpus.length : 'GPU'} value=${r.gpuAvg == null ? '—' : pct(r.gpuAvg)}
+             frac=${r.gpuAvg == null ? null : r.gpuAvg / 100}
+             sub=${r.gpus.map(g => B(g.memUsed) + ' / ' + B(g.memTotal)).join(' · ')}/>` : null}
     <${Tile} label="Garbage collection" value=${gcNow == null ? '—' : gcNow.toFixed(1) + '%'}
              sub=${proc.alloc_rate >= 0 ? 'allocating ' + B(proc.alloc_rate) + '/s' : null}
              tone=${gcNow > 30 ? 'warn' : ''}/>
@@ -316,7 +312,7 @@ function Telemetry() {
     cols.forEach((x, ci) => { const c = (x.host || {}).cores || []; own.forEach((k, row) => data.push([ci, row, c[k] ?? 0])); });
     heat = { animation: false, grid: { left: 56, right: 16, top: 8, bottom: 24 },
       xAxis: { type: 'category', data: cols.map(x => new Date(ms(x)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })),
-               axisLabel: { hideOverlap: true }, splitArea: { show: false } },
+               axisLabel: { hideOverlap: true, interval: Math.max(0, Math.ceil(cols.length / 4) - 1) }, splitArea: { show: false } },
       yAxis: { type: 'category', data: own.map(String), name: own.length < nc ? 'job cores' : 'core',
                axisLabel: { interval: Math.max(0, Math.ceil(own.length / 8) - 1) } },
       visualMap: { min: 0, max: 100, show: false, inRange: { color: ['#151a2b', '#1f4f8a', '#3f8fe0', '#9fd2ff'] } },
