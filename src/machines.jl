@@ -187,10 +187,32 @@ function env_readiness(host::AbstractString, project::AbstractString, nodetype::
     isempty(stale) || return stale
     isempty(project) && return isempty(hf) ? "not prepared" : ""
     e = get(tested_envs(host), Sweep.env_key(project, nodetype), nothing)
-    e isa AbstractDict || return isempty(hf) ? "not prepared" : "not tested on " * _node_words(nodetype)
-    get(e, "status", "") in ("ok", "warn") || return "its last test failed"
-    env_unchanged(e; depot) || return "packages changed since tested"
-    return ""
+    if e isa AbstractDict
+        get(e, "status", "") in ("ok", "warn") || return "its last test failed"
+        env_unchanged(e; depot) && return ""
+    end
+    # Another environment with the same contents that passed there answers for this one: a copied
+    # notebook's own environment, or two notebooks that use the same packages.
+    tested_twin(host, project, nodetype; depot) === nothing || return ""
+    e isa AbstractDict && return "packages changed since tested"
+    return isempty(hf) ? "not prepared" : "not tested on " * _node_words(nodetype)
+end
+
+"""
+    tested_twin(host, project, nodetype; depot) -> Union{Dict, Nothing}
+
+The record of an environment that passed its test on `host`'s `nodetype` nodes with the same contents
+as `project`'s now, by the fingerprint, which covers what decides the resolve and not where it lives.
+"""
+function tested_twin(host::AbstractString, project::AbstractString, nodetype::AbstractString;
+                     depot::AbstractString = "")
+    isdir(project) || return nothing
+    fp = _env_fingerprint(String(project), _infra_spec(); depot = String(depot))
+    for (_, e) in tested_envs(host)
+        (e isa AbstractDict && get(e, "node_type", "") == nodetype &&
+         get(e, "status", "") in ("ok", "warn") && String(get(e, "fingerprint", "")) == fp) && return e
+    end
+    return nothing
 end
 
 _node_words(nodetype) = (p = split(nodetype, '/'; limit = 2);

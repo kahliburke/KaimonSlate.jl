@@ -226,6 +226,35 @@ const RE = KaimonSlate.ReportEngine
             RE.region_delete!("tm"); RE.cluster_delete!("tm")
         end
 
+        @testset "an environment with the same contents as a tested one is ready" begin
+            tested, copy, other = mktempdir(), mktempdir(), mktempdir()
+            for d in (tested, copy); write(joinpath(d, "Project.toml"), "[deps]\nX = \"1\"\n"); end
+            write(joinpath(other, "Project.toml"), "[deps]\nY = \"1\"\n")
+            RE.record_env_test!("twinhost", tested, "gpu/"; by = "prep", status = "ok", depot = "/d")
+            @test RE.env_readiness("twinhost", copy, "gpu/"; depot = "/d") == ""
+            @test RE.env_readiness("twinhost", other, "gpu/"; depot = "/d") == "not tested on gpu nodes"
+            @test RE.env_readiness("twinhost", copy, "cpu/"; depot = "/d") == "not tested on cpu nodes"
+            @test RE.env_readiness("twinhost", copy, "gpu/"; depot = "/other") == "not tested on gpu nodes"
+            RE.host_facts_set!("twinhost", Dict{String,Any}())
+        end
+
+        @testset "an environment the host already built from the same contents is copied" begin
+            home = mktempdir()
+            run_script(t, fp) = read(addenv(`bash -c $(RE._twin_env_script(t, fp))`, "HOME" => home), String)
+            a = joinpath(home, "envs", "a"); mkpath(a)
+            write(joinpath(a, "Project.toml"), "P"); write(joinpath(a, "Manifest.toml"), "M")
+            write(joinpath(a, RE._ENV_STAMP), "fp1")
+            @test occursin("twin=", run_script(RE.RemoteTarget("h"; project = "~/envs/b"), "fp1"))
+            @test read(joinpath(home, "envs", "b", "Manifest.toml"), String) == "M"
+            @test !occursin("twin=", run_script(RE.RemoteTarget("h"; project = "~/envs/c"), "fp9"))
+            @test !isdir(joinpath(home, "envs", "c"))
+            # With a depot the stamp sits in it, named for the environment.
+            dep = joinpath(home, "depot"); mkpath(joinpath(dep, "slate", "envs"))
+            write(joinpath(dep, "slate", "envs", "a"), "fp2")
+            @test occursin("twin=", run_script(RE.RemoteTarget("h"; project = "~/envs/d", depot = dep), "fp2"))
+            @test isfile(joinpath(home, "envs", "d", "Project.toml"))
+        end
+
         @testset "records from before one per machine are carried over" begin
             proj = mktempdir(); write(joinpath(proj, "Project.toml"), "")
             RE.cluster_set!(Dict("name" => "mg", "host" => "mghost", "kind" => "slurm", "root_remote" => "/s",

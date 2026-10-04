@@ -895,6 +895,41 @@ _env_stamp(fp::AbstractString, julia::AbstractString, precompiled::Bool) =
 _env_stamp_serves(had::AbstractString, want::AbstractString) =
     had == want || (!endswith(want, "+pc") && had == want * "+pc")
 
+# The shell for `_adopt_twin_env!`: find another environment on the host whose stamp serves `stamp`
+# (`_env_stamp_serves`) and copy its resolved files into `t`'s. Prints `twin=<dir>` when it did.
+function _twin_env_script(t, stamp::AbstractString)
+    rel = _projrel(t.project)
+    q(p) = (startswith(p, "/") || startswith(p, "~/")) ? Sweep.shq_path(p) : "\"\$HOME/\"" * Sweep.shq(p)
+    envs = q(dirname(rel))
+    # Each stamp names the environment it belongs to: by its own directory when it sits beside it, by
+    # its file name when the depot holds it.
+    stamps, src = isempty(t.depot) ? (envs * "/*/" * _ENV_STAMP, "\$(dirname \"\$s\")") :
+                                     (q(rstrip(t.depot, '/') * "/slate/envs") * "/*", envs * "/\$(basename \"\$s\")")
+    return """
+    dst=$(q(rel)); want=$(Sweep.shq(String(stamp))); alt=$(Sweep.shq(endswith(stamp, "+pc") ? String(stamp) : stamp * "+pc"))
+    for s in $stamps; do
+      [ -f "\$s" ] || continue
+      c=\$(cat "\$s"); [ "\$c" = "\$want" ] || [ "\$c" = "\$alt" ] || continue
+      src=$src
+      [ "\$src" = "\$dst" ] && continue
+      [ -f "\$src/Project.toml" ] && [ -f "\$src/Manifest.toml" ] || continue
+      mkdir -p "\$dst" && cp "\$src/Project.toml" "\$src/Manifest.toml" "\$dst/" || continue
+      [ -f "\$src/LocalPreferences.toml" ] && cp "\$src/LocalPreferences.toml" "\$dst/"
+      echo "twin=\$src"; break
+    done; true
+    """
+end
+
+# An environment the host already built from the same contents (the stamp covers everything that
+# decides the resolve and the host's Julia, and not where it lives) is copied rather than resolved
+# again: its files were rewritten for the host's paths, and the packages it names are in the same depot.
+function _adopt_twin_env!(t, stamp::AbstractString)
+    ok, out = _run_on(t.ssh_host, _twin_env_script(t, stamp))
+    m = ok ? match(r"twin=(\S+)", out) : nothing
+    m === nothing && return false
+    _rlog("provision [3/3] same environment already built on $(t.ssh_host) in $(basename(m.captures[1])) — copied it")
+    return true
+end
 # What the host last received of the worker payload and of the extension SDK, as their content SHAs.
 # Written after a send succeeds, so a matching stamp means that exact content is already there.
 const _PAYLOAD_STAMP = "$_REMOTE_WORKER/.slate-payload"
@@ -1079,14 +1114,17 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
     stamp = _env_stamp(_env_fingerprint(envdir, infra; depot = t.depot), get(st, "julia", ""), precompile)
     had = strip(get(st, "env", ""))
     built = rebuild || !_env_stamp_serves(had, stamp)
+    # The environment's sources without its resolved files, which hold the host's own paths.
+    send_sources! = function ()
+        isempty(envdir) && return
+        _send_dir!(host, envdir, t.project; region = t.region, filter = true,
+                   excludes = [".git", "*.cov", ".ready", "Project.toml", "Manifest.toml",
+                               "JuliaProject.toml", "JuliaManifest.toml"])
+        _send_dev_deps!(t, envdir)
+    end
     if !built
         _rlog("provision [3/3] environment unchanged on $host (skip resolve) — sending sources only")
-        if !isempty(envdir)
-            _send_dir!(host, envdir, t.project; region = t.region, filter = true,
-                       excludes = [".git", "*.cov", ".ready", "Project.toml", "Manifest.toml",
-                                   "JuliaProject.toml", "JuliaManifest.toml"])
-            _send_dev_deps!(t, envdir)
-        end
+        send_sources!()
     else
         _rlog("provision [3/3] " * (rebuild ? "rebuilding the environment on $host" :
                                     isempty(had) ? "no environment recorded on $host" :
@@ -1094,7 +1132,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString; prec
               " — building")
         _prep_stage("Building package environment on $host")
         try
-            build_env!()
+            _adopt_twin_env!(t, stamp) ? send_sources!() : build_env!()
         catch e
             # A build failure usually means the env dir carries broken resolve state — a dev-dep whose path
             # vanished, a half-written manifest, a stale entry left by an earlier provision. Reset the env's
