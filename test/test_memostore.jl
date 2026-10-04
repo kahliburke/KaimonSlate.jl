@@ -102,6 +102,15 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
         @test unfaithful(mkmanifest(["full" => hA], hA), ["full"]) == false
     end
 
+    @testset "an entry lacking a name the cell now defines is recognisable" begin
+        hA = "0" ^ 64
+        mf = mkmanifest(["x" => hA], hA)
+        mf["elided"] = [Dict{String,Any}("name" => "fig")]
+        mf["absent"] = ["maybe"]
+        @test MemoStore.unbound_writes(mf, ["x", "fig", "maybe"]) == String[]
+        @test MemoStore.unbound_writes(mf, ["x", "ad_cpu"]) == ["ad_cpu"]
+    end
+
     @testset "worker-shaped round-trip through Serialization" begin
         mktempdir() do root
             val = Dict("df" => rand(10), "n" => 42)

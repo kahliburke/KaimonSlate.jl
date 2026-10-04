@@ -13,29 +13,24 @@ import { signal } from '@preact/signals';
 import { useEffect } from 'preact/hooks';
 
 const open = signal(false);
-export const sessions = signal([]);   // [{host, used_by, connected, auth, asks}] — the one copy
+// Every host this page has something to sign in to, from the hub's facts (model.js) — the one copy. A
+// signal mirroring the model, so the Preact parts here re-render when it changes.
+export const sessions = signal([]);   // [{host, usedBy, connected, opening, auth, error, asks}]
 const busy = signal('');          // the host an action is in flight for
 const note = signal(null);        // {text, err}
 const probing = signal('');
 const loaded = signal(false);   // an empty list otherwise reads the same as "not asked yet"
 
 // On a NOTEBOOK page, only the hosts that notebook names — a notebook that sweeps on one cluster
-// has no business showing a control for another. The home page passes no doc and gets all of them.
-//
-// From the URL rather than the page's state object: this is an ES module and `nbState` is a
-// classic-script binding, which a module cannot see. `/n/<id>` is the notebook route.
-const docId = () => {
-  const m = /^\/n\/([^/]+)/.exec(location.pathname);
-  return m ? decodeURIComponent(m[1]) : '';
-};
+// has no business showing a control for another. The home page shows all of them.
+const docId = () => window.slateModel.pageNotebook();
 
-export function loadSessions() {
-  const d = docId();
-  return fetch('/api/sessions' + (d ? '?doc=' + encodeURIComponent(d) : '')).then(r => r.json())
-    .then(j => { sessions.value = (j && j.sessions) || []; })
-    .catch(() => {})
-    .then(() => { loaded.value = true; });
+function fromModel() {
+  sessions.value = window.slateModel.sessions(docId());
+  loaded.value = Object.keys(window.slateModel.getFacts()).length > 0 || loaded.value;
 }
+window.slateModel.subscribe(fromModel);
+fromModel();
 
 // What the row says about getting in. `unknown` is honest: nothing has asked this host yet, and
 // finding out costs a connection, so it stays unknown until someone presses Check.
@@ -72,9 +67,9 @@ function signIn(host, out) {
       const ok = !!(d && d.connected);
       note.value = ok ? { text: `signed in to ${host}` }
         : { text: out ? `signed out of ${host}` : ((d && d.error) || 'could not sign in'), err: !out };
-      // This page gets no push, so hand the outcome to the dialog that is showing "signing in…".
+      // Hand the outcome to the dialog that is showing "signing in…". The session itself reaches
+      // this page through the facts.
       if (!out && window.onSshAuthResult) window.onSshAuthResult({ host, ok, error: (d && d.error) || '' });
-      return loadSessions();
     })
     .catch(() => { note.value = { text: 'request failed', err: true }; })
     .then(() => { stop.done = true; busy.value = ''; });
@@ -86,8 +81,7 @@ function check(host) {
   fetch('/api/sessions/probe', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                  body: JSON.stringify({ host }) })
     .then(r => r.json()).then(d => {
-      sessions.value = sessions.value.map(r => r.host === host
-        ? { ...r, auth: (d && d.auth) || 'unknown', error: (d && d.error) || '' } : r);
+      // The hub keeps the answer in the session's facts, so every page shows it.
       if (d && d.error) note.value = { text: `${host}: ${d.error}`, err: true };
     })
     .catch(() => { note.value = { text: 'could not reach this Slate', err: true }; })
@@ -101,7 +95,7 @@ function Row({ r }) {
   return html`<div class="ssrow">
     <span class="sshost">${r.host}</span>
     <span class=${'sstag ' + lab.cls}>${lab.text}</span>
-    <span class="ssuse">${(r.used_by || []).join(' · ')}</span>
+    <span class="ssuse">${(r.usedBy || []).join(' · ')}</span>
     ${working ? html`<span class="sswait"><span class="hydspin"></span> waiting…</span>`
      : r.connected
        ? html`<button class="ssbtn" onClick=${() => signIn(r.host, true)}>Sign out</button>`
@@ -114,7 +108,7 @@ function Row({ r }) {
 }
 
 function Panel() {
-  useEffect(() => { if (open.value) { note.value = null; loadSessions(); } }, [open.value]);
+  useEffect(() => { if (open.value) note.value = null; }, [open.value]);
   if (!open.value) return null;
   const rs = sessions.value;
   return html`<div class="ssback" onClick=${e => { if (e.target.classList.contains('ssback')) open.value = false; }}>
@@ -185,9 +179,5 @@ if (btnHost) render(html`<${SignInButton}/>`, btnHost);
 export function openSessions() { open.value = true; }
 window.openSessions = openSessions;
 
-// The button needs the list before anyone opens the panel — that is how it knows whether to appear
-// at all. One cheap call; re-read after any sign-in, and on a timer slow enough to be free.
-loadSessions();
-setInterval(loadSessions, 30000);
 
 if (location.hash === '#signin') openSessions();

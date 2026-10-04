@@ -646,6 +646,14 @@ _ssh_into(node, script; connect_timeout::Integer = 20) =
     "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR " *
     "-o ConnectTimeout=$connect_timeout " * Sweep.shq(node) * " " * Sweep.shq(script)
 
+# `cmd` started in a session of its own with its output to `logf`, returning at once. `setsid -f` forks
+# before it detaches, so nothing of the calling shell stays behind holding the ssh channel open (a
+# backgrounded `setsid nohup … &` leaves one, and the ssh that started it never returns). An older
+# util-linux without `-f` falls back to a double fork.
+_detach_on_node(cmd::AbstractString, logf::AbstractString) =
+    "if setsid -f true 2>/dev/null; then setsid -f $cmd > $logf 2>&1 < /dev/null; " *
+    "else ( nohup $cmd > $logf 2>&1 < /dev/null & ); fi"
+
 # A worker started over ssh is outside the PBS job, so the job ending would leave it running on a node
 # that may already belong to someone else. Attaching it to the job lets the node's PBS daemon end it
 # with the job, as a `srun` step does on SLURM. PBS Pro and OpenPBS spell that `pbs_attach`; Torque
@@ -1797,23 +1805,30 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
         _ssh_ok(host, `$launch`) ||
             _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
     else
-        # A routed scheduler node. A worker launched DETACHED inside the `srun --overlap` step (`… & fi`)
-        # dies the instant the step exits: the node runs `proctrack/cgroup`, so the step's cgroup is torn
-        # down with every process in it, and `setsid` escapes the process GROUP but not the cgroup. So the
-        # worker runs in the FOREGROUND of the step - the step, and its cgroup, then live exactly as long as
-        # the worker does - and the DETACH is moved one level out, to the LOGIN node, which is under no such
-        # cgroup. `setsid nohup` there reparents the launcher (`srun`, or `ssh node` on PBS and on a SLURM
-        # node that takes one, where the worker runs in the job's own cgroup and ends with it) to init, so
-        # it survives the ssh channel closing and even a full session drop; the worker is re-attached over
-        # the forward on reconnect. `_in_allocation` builds the same in-allocation launcher every poll uses.
-        worker = "$setup && " * (v.kind === :pbs ? _pbs_attached(jl) : "exec $jl")
-        inner = _in_allocation(v, host, worker)
-        launch = "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $inner > $logf 2>&1 & else nohup $inner > $logf 2>&1 & fi"
-        # Run the detach on the RAW login session (`run_there`), NOT `_ssh_ok`/`_run_on`: on a single-node
+        # A routed scheduler node, two ways in.
+        #
+        # Reached by ssh (PBS, and a SLURM node that takes one): the command lands in the job's own
+        # cgroup, which lasts as long as the job, so the worker is detached ON THE NODE. It then depends
+        # on nothing at the login node: losing that login node, or the hub's session through it, leaves
+        # the worker running, to be re-attached over a new forward. It still ends with the job.
+        #
+        # Reached by a `srun --overlap` step: a worker detached inside the step dies the instant the step
+        # exits, since the node runs `proctrack/cgroup` and the step's cgroup is torn down with every
+        # process in it (`setsid` escapes the process GROUP, not the cgroup). So the worker runs in the
+        # FOREGROUND of the step, and the detach moves one level out, to the LOGIN node: `setsid nohup`
+        # there reparents `srun` to init, so it survives the ssh channel closing and a session drop.
+        #
+        # Both run on the RAW login session (`run_there`), NOT `_ssh_ok`/`_run_on`: on a single-node
         # cluster the login host IS the routed node (`via(v.host)` is set), so `_run_on(v.host, …)` would
-        # wrap this in ANOTHER `srun --overlap` step and the detached launcher would die with THAT step's
-        # cgroup - the very failure this fix exists to avoid. `run_there` reaches the login node directly.
-        first(Sweep.run_there(v.host, launch)) ||
+        # wrap this in ANOTHER `srun --overlap` step and the launcher would die with THAT step's cgroup.
+        worker = "$setup && " * (v.kind === :pbs ? _pbs_attached(jl) : "exec $jl")
+        launch = if v.kind === :pbs || _node_by_ssh(host)
+            _in_allocation(v, host, "cd \$HOME && " * _detach_on_node("bash -c " * Sweep.shq(worker), logf))
+        else
+            inner = _in_allocation(v, host, worker)
+            "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $inner > $logf 2>&1 & else nohup $inner > $logf 2>&1 & fi"
+        end
+        first(Sweep.run_there(v.host, launch; timeout = 60)) ||
             _rlog("spawn: worker launch returned nonzero via $(v.host) (it may still be starting)")
     end
     # Record who/what this worker serves so it's self-describing (list/reconnect/reap/adopt all read
@@ -3165,7 +3180,7 @@ end
 # 45s counting down to a conclusion available the instant the session went.
 const _SESSION_DROP_SINK = Ref{Any}(nothing)
 
-function _session_dropped!(host::AbstractString)
+function _session_dropped!(host::AbstractString, died::Bool = false)
     h = String(host)
     hosts = String[h]
     lock(_VIA_LOCK) do
@@ -3176,10 +3191,10 @@ function _session_dropped!(host::AbstractString)
     for x in hosts
         try; _evict_data_tunnels!(x); catch; end
     end
-    _rlog("session dropped on $h — discarded the data forwards it carried" *
+    _rlog("session $(died ? "lost" : "closed") on $h — discarded the data forwards it carried" *
           (length(hosts) > 1 ? " (and those of $(join(hosts[2:end], ", ")))" : ""))
     f = _SESSION_DROP_SINK[]
-    f === nothing || (try; f(h, hosts); catch e
+    f === nothing || (try; f(h, hosts, died); catch e
         _rlog("session drop sink failed for $h: " * first(sprint(showerror, e), 160))
     end)
     return nothing

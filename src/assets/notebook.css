@@ -720,7 +720,7 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
 /* The detail behind the chip. A panel and not a `title`, because what belongs here is a small
    report — when it was asked for, how long it has waited, what the cluster has free — and a
    tooltip can hold none of that, cannot be styled, and vanishes while you read it. */
-.blkpanel { position:fixed; z-index:60; min-width:250px; max-width:330px; padding:8px 10px;
+.blkpanel { position:fixed; z-index:60; min-width:250px; max-width:min(540px, calc(100vw - 20px)); padding:8px 10px;
   background:var(--panel, #171a21); border:1px solid var(--line, #2a2f3a); border-radius:8px;
   box-shadow:0 8px 24px rgba(0,0,0,.45); font-size:.76rem; line-height:1.5; color:var(--fg, #d7dae1);
   opacity:0; visibility:hidden; transition:opacity .12s ease; pointer-events:none; }
@@ -734,15 +734,21 @@ body.app .appfail .appfailjump:hover { color:var(--text); border-color:var(--acc
 .blkdim { opacity:.6; }
 /* The queue's name on its own line, its figures under it — they wrap, and a site with long queue
    names does not shove them out of the panel. */
-.blkq + .blkq { margin-top:3px; }
-.blkqn { display:block; opacity:.8; }
+.blkqhead { opacity:.8; margin-bottom:4px; }
+.blkqt { border-collapse:collapse; font-size:.92em; font-variant-numeric:tabular-nums; width:100%; }
+.blkqt th { text-align:left; font-weight:400; opacity:.55; padding:0 10px 2px 0; }
+.blkqt td { padding:1px 10px 1px 0; white-space:nowrap; }
+.blkqt td:first-child { max-width:240px; overflow:hidden; text-overflow:ellipsis; }
+.blkqt td:not(:first-child), .blkqt th:not(:first-child) { text-align:right; }
+.blkqmore { margin-top:4px; }
+.blkqmore summary { cursor:pointer; opacity:.6; font-size:.92em; }
 
 /* The region panel, opened by clicking the chip. Same rows as the hover panel, but interactive, so
    unlike that one it takes pointer events and stays until dismissed. */
 /* Taller than the window is a real case — a cluster with several queues, each with its own line —
    so the panel scrolls rather than running off the bottom. `overscroll-behavior` keeps that scroll
    from becoming the page's once it reaches the end. */
-.regpanel { position:fixed; z-index:61; min-width:280px; max-width:360px; padding:10px 12px;
+.regpanel { position:fixed; z-index:61; min-width:280px; max-width:min(540px, calc(100vw - 20px)); padding:10px 12px;
   max-height:calc(100vh - 16px); overflow-y:auto; overscroll-behavior:contain;
   background:var(--panel, #171a21); border:1px solid var(--line, #2a2f3a); border-radius:8px;
   box-shadow:0 10px 28px rgba(0,0,0,.5); font-size:.78rem; line-height:1.55; color:var(--fg, #d7dae1);
@@ -2467,7 +2473,7 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 /* As a NON-covering side panel: docked top-right, below the topbar, so it coexists with the (top-left)
    dropdown — you can keep hovering rows to switch which worker it shows. No backdrop, no dimming. */
 .workerpop-panel { position:fixed; top:calc(var(--topbar-h,49px) + 8px); right:14px; z-index:62;   /* above the DAG pane (60) so the Log popup opened from a region card isn't hidden behind a right-docked pane */
-  width:380px; max-width:calc(100vw - 28px); max-height:72vh;
+  width:560px; max-width:calc(100vw - 28px); max-height:84vh;
   border:1px solid var(--border); border-radius:10px; background:var(--bg2);
   box-shadow:0 12px 40px rgba(0,0,0,.5); display:none; }
 .workerpop-panel.show { display:flex; }
@@ -2516,7 +2522,15 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 .wchip-note { color:var(--dim); background:transparent; border:none; padding:1px 0; }
 .workerpop-x { cursor:pointer; color:var(--dim); font-size:1.25rem; line-height:1; flex:0 0 auto; padding:0 4px; }
 .workerpop-x:hover { color:var(--text); }
-.workerpop-log { margin:0; padding:6px 0; overflow:auto; flex:1 1 auto; min-height:200px;
+.workerpop-logbar { display:flex; align-items:center; justify-content:space-between; padding:5px 14px;
+  font-size:.74rem; color:var(--dim); background:var(--bg2); border-bottom:1px solid var(--border); }
+/* A worker being started, narrated where the worker is shown (workers.js `_wpPaintBringup`). */
+.workerpop-bringup { display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border-radius:8px;
+  background:color-mix(in srgb, var(--accent) 8%, var(--bg)); border:1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); }
+.workerpop-bringup .hydspin { margin-top:3px; }
+.workerpop-bringup .wpbody { display:flex; flex-direction:column; gap:4px; min-width:0; flex:1 1 auto; color:var(--accent); }
+.workerpop-bringup .hydmsg { color:var(--text); }
+.workerpop-log { margin:0; padding:6px 0; overflow:auto; flex:1 1 auto; min-height:220px;
   font-family:var(--mono,ui-monospace,monospace); font-size:.76rem; line-height:1.5; color:var(--text); background:var(--bg); }
 /* One parsed log RECORD (a whole @info/@warn block); newest on top, lines within a record in natural order. */
 .wlog-rec { padding:2px 14px; border-bottom:1px solid rgba(255,255,255,.045); white-space:pre-wrap; word-break:break-word; }
@@ -3335,8 +3349,6 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .rptabs button.on { color:var(--text); background:var(--bg); border-color:var(--border); padding-bottom:6px; }
 .rptabbody { flex:1 1 auto; min-height:0; overflow:auto; padding:6px 8px; }
 @media (max-width: 720px) { .rpsplit { grid-template-columns:1fr; height:auto; } }
-/* A modal holding the page still (scrolllock.js); the scrollbar's room is kept so nothing shifts. */
-html.scroll-locked { overflow:hidden; scrollbar-gutter:stable; }
 .rptabbody, .iplist { overscroll-behavior:contain; }
 /* What a region's sysimage holds (imagepkgs.js): its own modal, above the Prepare dialog. */
 .ipbg { z-index:97; }
@@ -3502,6 +3514,8 @@ select.ipver:focus { outline:none; border-color:var(--accent); }
 .logv-x:hover { color:var(--text); }
 
 .logv-body { display:flex; flex:1 1 auto; min-height:0; }
+/* One file (a worker's log): no list to choose from. */
+.logv-one .logv-side, .logv-one .logv-split { display:none; }
 .logv-side { width:400px; flex:0 0 auto; display:flex; flex-direction:column; min-height:0; }
 /* The drag handle IS the border between the panes, widened to something a mouse can find. */
 .logv-split { flex:0 0 auto; width:5px; cursor:col-resize; background:var(--border);
@@ -3705,3 +3719,17 @@ body.record-plain .srec-plain { display:block; }
 
 /* The cell a ✨ turn was scoped to, above what was asked. */
 .apmsg .apscope { display:block; font-size:.7rem; color:var(--dim); margin-bottom:2px; }
+
+/* The worker popup's figures (workers.js `_wpStatsChips`): a meter row each, against what the worker
+   can use; the whole block opens the telemetry view. */
+.wm { display:flex; flex-direction:column; gap:5px; width:100%; padding:6px 8px; border-radius:8px; cursor:pointer;
+      border:1px solid transparent; }
+.wm:hover { border-color:var(--border); background:var(--bg2); }
+.wm-row { display:grid; grid-template-columns:62px 110px minmax(0, 1fr); align-items:center; gap:10px; font-size:.74rem; }
+.wm-k { color:var(--dim); }
+.wm-bar { height:6px; border-radius:3px; background:var(--bg3); overflow:hidden; }
+.wm-bar > span { display:block; height:100%; border-radius:3px; background:var(--accent); }
+.wm-bar.warn > span { background:var(--gold); }
+.wm-v { color:var(--text); font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.wm-rest { font-size:.72rem; color:var(--dim); font-variant-numeric:tabular-nums; }
+.wm-open { font-size:.72rem; color:var(--accent); align-self:flex-end; }

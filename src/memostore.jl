@@ -228,6 +228,21 @@ every downstream reader undefined.
 restores_no_bindings(manifest::AbstractDict) = isempty(get(manifest, "bindings", Any[]))
 
 """
+    unbound_writes(manifest, writes) -> Vector{String}
+
+The names in `writes` (what the cell defines now) that the entry neither binds, elides, nor records
+as left undefined by its run. An entry written for an older version of a cell can lack a name the
+cell defines today; restoring it returns the output and leaves that name undefined.
+"""
+function unbound_writes(manifest::AbstractDict, writes)
+    have = Set{String}()
+    for b in get(manifest, "bindings", Any[]); b isa AbstractDict && push!(have, String(get(b, "name", ""))); end
+    for e in get(manifest, "elided", Any[]); e isa AbstractDict && push!(have, String(get(e, "name", ""))); end
+    for nm in get(manifest, "absent", Any[]); push!(have, String(nm)); end
+    return String[String(w) for w in writes if !(String(w) in have)]
+end
+
+"""
     drop_manifest(root, key) -> Bool
 
 Evict the entry for `key`, returning whether one was there. Dropping the manifest IS the eviction:

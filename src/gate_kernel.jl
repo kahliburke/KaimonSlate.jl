@@ -507,12 +507,35 @@ function _parse_telemetry(raw::AbstractString)
          # When the WORKER last had work, on ITS monotonic clock. Meaningless here until mapped
          # through `ClockTrack`; `-1` from a worker too old to report it.
          last_eval_mono = Float64(get(d, "last_eval_mono", -1.0)),
+         # One reading per GPU the worker's job can use (gpustats.jl); empty where there are none.
+         gpus    = _parse_gpus(get(d, "gpus", nothing)),
+         # Host, process and job (cgroup) figures (sysstats.jl), as the worker sent them: what a
+         # machine cannot say is absent, so these stay dictionaries rather than fixed fields.
+         host    = _dict_of(get(d, "host", nothing)),
+         proc    = _dict_of(get(d, "proc", nothing)),
+         job     = _dict_of(get(d, "job", nothing)),
          ts      = Float64(get(d, "ts", 0.0)),
          rcv     = time())
     catch
         nothing
     end
 end
+
+_parse_gpus(x) = x isa AbstractVector ?
+    [(i = Int(get(g, "i", 0)), name = String(get(g, "name", "")), util = Int(get(g, "util", -1)),
+      util_max = Int(get(g, "util_max", get(g, "util", -1))),
+      mem_util = Int(get(g, "mem_util", -1)), mem_used = Int64(get(g, "mem_used", -1)),
+      mem_total = Int64(get(g, "mem_total", -1)), temp = Int(get(g, "temp", -1)),
+      power_w = Float64(get(g, "power_w", -1.0)), power_limit_w = Float64(get(g, "power_limit_w", -1.0)),
+      sm_mhz = Int(get(g, "sm_mhz", -1)), sm_max_mhz = Int(get(g, "sm_max_mhz", -1)),
+      throttle = String[String(t) for t in get(g, "throttle", Any[])], proc_mem = Int64(get(g, "proc_mem", -1)))
+     for g in x if g isa AbstractDict] : NamedTuple[]
+
+# Number lists (the per-core figures, a few hundred a sample) are kept as plain vectors: the ring holds
+# an hour of samples per worker, and a list of boxed numbers costs several times as much.
+_dict_of(x) = x isa AbstractDict ?
+    Dict{String,Any}(String(k) => (v isa AbstractVector ? Float64[Float64(e) for e in v if e isa Real] : v)
+                     for (k, v) in x) : Dict{String,Any}()
 
 function _record_telemetry!(conn_name::AbstractString, raw::AbstractString)
     s = _parse_telemetry(raw); s === nothing && return nothing
@@ -1466,6 +1489,8 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
             # so older 3-field memo tuples (agent scratch evals) still work.
             "memo_force" => (hasproperty(memo, :force) && memo.force === true),
             "memo_always" => (hasproperty(memo, :always) && memo.always === true),
+            # a locked cell not run by its own ▶: restore, or report that there was nothing to restore
+            "memo_restore_only" => (hasproperty(memo, :restore_only) && memo.restore_only === true),
             # names nothing downstream reads — display objects among them store as wire-image only
             "memo_unread" => (hasproperty(memo, :unread) ? collect(String, memo.unread) : String[]),
             # names nothing downstream MUTATES — restore may zero-copy (mmap/arrow view)

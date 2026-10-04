@@ -159,6 +159,9 @@ function restart_kernel!(nb::LiveNotebook)
         ReportEngine.reset!(nb.kernel, report)
         build_dependencies!(report)
         report.meta["hydrating"] = true
+        # A restart is not a ▶ on any cell. A ▶ still waiting to be served would make the re-run below
+        # compute a locked cell nobody just asked for.
+        delete!(_FORCE_RUN, nb.id)
         nb.version += 1
     end
     _broadcast(nb, "restart")
@@ -805,6 +808,59 @@ end
 # (a notebook's main and region kernels each get their own series), so the port — which is what the
 # monitor UI carries — has to be resolved back to a live kernel first. `[]` if it's gone or never
 # streamed a sample. Mirrors `ReportEngine.worker_stats_history` for the remote case.
+# The telemetry of a notebook's worker for `side` ("" the main kernel), whichever process that is now. A
+# restart puts a new worker on another port, so a view that names the side keeps following it; the
+# answer says where it runs now, and whether it is connected yet.
+function _side_telemetry(h::Hub, nbid::AbstractString, side::AbstractString, since::Real)
+    nb = lock(h.lock) do; get(h.notebooks, String(nbid), nothing); end
+    nb === nothing && return Dict("ok" => false, "error" => "the notebook is not open")
+    k = isempty(side) ? nb.kernel : lock(_REGION_LOCK) do; get(_REGION_KERNELS, (nb.id, String(side)), nothing); end
+    k isa ReportEngine.GateKernel || return Dict("ok" => false, "error" => "no worker for this side")
+    conn = k.conn
+    cn = conn === nothing ? "" : (try; String(conn.name); catch; ""; end)
+    st = isempty(cn) ? nothing : ReportEngine.kernel_stats(cn)
+    hist = st === nothing ? Any[] : st.history
+    runs = _runs_since(nb.id, isempty(side) ? "local" : side, since)
+    return Dict("ok" => true, "connected" => conn !== nothing, "port" => k.port,
+                "host" => k.target isa ReportEngine.RemoteTarget ? k.target.ssh_host : "local",
+                "samples" => [_sample_full(s) for s in hist if s.rcv > since],
+                "runs" => [Dict("id" => r.id, "t0" => r.t0, "t1" => r.t1, "memo" => r.memo, "err" => r.err) for r in runs])
+end
+
+# The cell runs that ended after `since` on the worker at `host`:`port`, from the open notebook whose
+# kernel it is. `host` is "local" for this machine, else the host the worker runs on or is reached
+# through.
+function _worker_runs(h::Hub, host::AbstractString, port::Int, since::Real)
+    nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+    for nb in nbs, k in _nb_kernels(nb)
+        (k isa ReportEngine.GateKernel && k.port == port) || continue
+        t = k.target
+        if host == "local"
+            t isa ReportEngine.RemoteTarget && continue
+        else
+            t isa ReportEngine.RemoteTarget || continue
+            (t.ssh_host == host || (v = ReportEngine.via(t.ssh_host); v !== nothing && v.host == host)) || continue
+        end
+        return _runs_since(nb.id, _kernel_side_label(nb, k), since)
+    end
+    return Any[]
+end
+
+# Stop the worker process an open notebook's kernel spawned on this machine. The kernel stays: its
+# next run finds the process gone and starts a new one with every cell stale, the same recovery as a
+# worker that crashed. Kills only a process this hub spawned, found by its gate port.
+function _reap_local_worker!(h::Hub, port::Int)
+    nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+    for nb in nbs, k in _nb_kernels(nb)
+        (k isa ReportEngine.GateKernel && k.port == port && !(k.target isa ReportEngine.RemoteTarget)) || continue
+        p = k.proc
+        (p === nothing || !process_running(p)) && return false
+        kill(p)
+        return true
+    end
+    return false
+end
+
 function _local_kernel_history(h::Hub, port::Int)
     nbs = lock(h.lock) do; collect(values(h.notebooks)); end
     for nb in nbs, k in _nb_kernels(nb)
@@ -817,13 +873,15 @@ function _local_kernel_history(h::Hub, port::Int)
     return Any[]
 end
 
-# A region's worker state changed → tell the pages that care. "Care" is having a cell on that region;
-# a notebook that never mentions it has nothing to redraw.
+# A region's worker state changed: the facts are refreshed, and `f`, when given, runs for each notebook
+# with a cell on that region (an event its page shows, beside the facts).
 #
 # Off the request, because it takes each notebook's lock and the caller must not wait on that. At
 # module scope rather than inside `_make_router`, where every handler closes over one shared scope
 # and a loop variable would be an assignment they all see.
-function _announce_region_change!(h, name::AbstractString, f = _workers_push!)
+function _announce_region_change!(h, name::AbstractString, f = nothing)
+    facts_changed!()
+    f === nothing && return nothing
     Threads.@spawn try
         for anb in lock(h.lock) do; collect(values(h.notebooks)); end
             uses = lock(anb.lock) do; any(c -> _cell_region(c) == name, anb.report.cells); end
@@ -1267,12 +1325,7 @@ function _make_router(h::Hub)
                     "project" => k.project, "port" => string(k.port), "stream_port" => string(k.stream_port),
                     "pid" => (try; k.proc === nothing ? "" : string(Base.getpid(k.proc)); catch; ""; end),
                     "hub" => gethostname(), "path" => abspath(nb.path))),
-                "stats" => st === nothing ? "" : JSON.json(_json_finite(Dict(
-                    "cpu" => st.latest.cpu, "rss" => st.latest.rss, "gc_ms" => st.latest.gc_ms,
-                    "evals" => st.latest.evals, "running" => st.latest.running, "warm" => st.latest.warm,
-                    "memo_bytes" => st.latest.memo, "sys_cpu" => st.latest.sys_cpu, "load1" => st.latest.load1,
-                    "sys_mem_total" => st.latest.sys_mem_total, "sys_mem_free" => st.latest.sys_mem_free,
-                    "ts" => st.latest.ts))),
+                "stats" => st === nothing ? "" : _stats_json(st.latest),
             ))
         end
         sort!(out; by = d -> d["port"])
@@ -1327,12 +1380,7 @@ function _make_router(h::Hub)
                     "project" => tgt === nothing ? k.project : tgt.project,
                     "port" => string(k.port), "stream_port" => string(k.stream_port),
                     "hub" => gethostname(), "path" => abspath(nb.path))),
-                "stats" => st === nothing ? "" : JSON.json(_json_finite(Dict(
-                    "cpu" => st.latest.cpu, "rss" => st.latest.rss, "gc_ms" => st.latest.gc_ms,
-                    "evals" => st.latest.evals, "running" => st.latest.running, "warm" => st.latest.warm,
-                    "memo_bytes" => st.latest.memo, "sys_cpu" => st.latest.sys_cpu, "load1" => st.latest.load1,
-                    "sys_mem_total" => st.latest.sys_mem_total, "sys_mem_free" => st.latest.sys_mem_free,
-                    "ts" => st.latest.ts))),
+                "stats" => st === nothing ? "" : _stats_json(st.latest),
             ))
         end
         sort!(out; by = d -> (d["host"], d["port"]))
@@ -1572,6 +1620,7 @@ function _make_router(h::Hub)
                                      r.mem, isempty(r.gpus) ? "" : "$(r.gpus) gpu",
                                      r.walltime, r.partition]), " · ")
         _json(Dict("ok" => true, "scheduler" => String(kind), "host" => r.host, "ask" => ask,
+                   "gpus" => r.gpus, "partition" => r.partition,
                    "queues" => [Dict("name" => q.name, "nodes_free" => q.nodes_free,
                                      "nodes_total" => q.nodes_total, "cpus_free" => q.cpus_free,
                                      "cpus_total" => q.cpus_total, "queued" => q.queued,
@@ -1734,41 +1783,11 @@ function _make_router(h::Hub)
     end)
 
     # ── Signing in to the hosts this machine actually uses ───────────────────────────────────
-    # One list, keyed by HOST rather than by cluster or region. Whether a host wants a password and
-    # a second factor is a property of its sshd, not of what you use it for: a cluster can take keys
-    # and a plain remote can demand 2FA. So the panel lists hosts and shows what each one is FOR.
-    #
+    # One list, keyed by HOST rather than by cluster or region (`_session_hosts`, server_facts.jl).
     # Sessions live in this process (see remotestore.jl), so this is machine-wide — one sign-in
-    # covers every notebook, its sweeps and its regions.
-    # `nb === nothing` is the machine-wide view (the home page). Given a notebook, only the hosts IT
-    # names — a notebook that sweeps on one cluster has no business showing a control for another.
-    function _session_hosts(nb::Union{LiveNotebook,Nothing} = nothing)
-        wanted = nb === nothing ? nothing : begin
-            cl, rg = Set{String}(), Set{String}()
-            lock(nb.lock) do
-                for c in nb.report.cells
-                    n = get(ReportEngine.cell_attrs(c), "cluster", ""); isempty(n) || push!(cl, n)
-                    r = _cell_region(c); isempty(r) || push!(rg, r)
-                end
-            end
-            (cl, rg)
-        end
-        seen = Dict{String,Vector{String}}()
-        add!(h, use) = isempty(strip(String(h))) ||
-            push!(get!(seen, strip(String(h)), String[]), use)
-        for c in ReportEngine.clusters_all()
-            String(get(c, "kind", "")) == "local" && continue   # nothing to sign in to
-            name = String(get(c, "name", "?"))
-            (wanted === nothing || name in wanted[1]) || continue
-            add!(get(c, "host", ""), "cluster " * name)
-        end
-        for r in ReportEngine.regions()
-            (wanted === nothing || r.name in wanted[2]) || continue
-            add!(r.host, "region " * r.name)
-        end
-        return seen
-    end
-
+    # covers every notebook, its sweeps and its regions. Pages read it from the facts; this route
+    # answers the same thing for a caller that asks.
+    HTTP.register!(router, "GET", "/api/facts", req -> _json(_json_finite(facts_snapshot())))
     HTTP.register!(router, "GET", "/api/sessions", req -> begin
         doc = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "doc", "")))
         nb = isempty(doc) ? nothing : lock(h.lock) do; get(h.notebooks, doc, nothing); end
@@ -1793,11 +1812,10 @@ function _make_router(h::Hub)
         p = try; ReportEngine.Sweep.SshTransport.probe(host)
         catch e; return _json(Dict("ok" => false, "error" => first(sprint(showerror, e), 200))); end
         ms = String[String(m) for m in p.methods]
-        _json(Dict("ok" => p.reachable, "host" => host, "methods" => ms, "error" => p.error,
-                   "auth" => !p.reachable ? "unreachable" :
-                             ("already-authenticated" in ms) ? "connected" :
-                             ("publickey" in ms) ? "key" :
-                             ("keyboard-interactive" in ms) ? "interactive" : "unknown"))
+        auth = !p.reachable ? "unreachable" : ("already-authenticated" in ms) ? "connected" :
+               ("publickey" in ms) ? "key" : ("keyboard-interactive" in ms) ? "interactive" : "unknown"
+        auth == "connected" || session_probed!(host, auth, something(p.error, ""))
+        _json(Dict("ok" => p.reachable, "host" => host, "methods" => ms, "error" => p.error, "auth" => auth))
     end)
 
     # ── Logging in to a host ─────────────────────────────────────────────────────────────────
@@ -1991,6 +2009,7 @@ function _make_router(h::Hub)
         host = strip(String(get(b, "host", "")))
         port = tryparse(Int, string(get(b, "port", "")))
         (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
+        host == "local" && return _json(Dict("ok" => _reap_local_worker!(h, port)))
         try; _drop_kernels_for_worker!(h, host, port); catch; end   # wake any eval bound to this worker before it dies
         _json(Dict("ok" => ReportEngine.reap_remote_worker(host, port)))
     end)
@@ -2010,14 +2029,28 @@ function _make_router(h::Hub)
     # hub isn't connected to that worker (only its point-in-time `.stats` is then available via the roster).
     HTTP.register!(router, "GET", "/api/worker-stats", req -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
+        # A notebook's worker named by its side follows that side through restarts.
+        haskey(q, "nb") && return _json(_json_finite(_side_telemetry(h, String(q["nb"]), String(get(q, "side", "")),
+            something(tryparse(Float64, String(get(q, "since", ""))), -Inf))))
         host = strip(String(get(q, "host", ""))); port = tryparse(Int, String(get(q, "port", "")))
         (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
         # host="local" is the hub's own machine (see /api/local-workers): its telemetry ring is keyed by
         # connection name, not host:port, so resolve the port back to its kernel's conn first.
         hist = host == "local" ? _local_kernel_history(h, port) : ReportEngine.worker_stats_history(host, port)
+        # `full=1`: every field of every sample, for the telemetry view; with `since=<t>`, only the
+        # samples after hub time `t`, so the open view adds what is new instead of refetching an hour.
+        if get(q, "full", "") == "1"
+            since = something(tryparse(Float64, String(get(q, "since", ""))), -Inf)
+            runs = [Dict("id" => r.id, "t0" => r.t0, "t1" => r.t1, "memo" => r.memo, "err" => r.err)
+                    for r in _worker_runs(h, host, port, since)]
+            return _json(_json_finite(Dict("ok" => true, "host" => host, "port" => port,
+                                           "samples" => [_sample_full(s) for s in hist if s.rcv > since],
+                                           "runs" => runs)))
+        end
         _json(Dict("ok" => true, "host" => host, "port" => port,
                    "samples" => [Dict("t" => round(s.rcv), "cpu" => s.cpu, "rss" => s.rss, "memo" => s.memo,
-                                      "sys_cpu" => s.sys_cpu, "load1" => s.load1) for s in hist]))
+                                      "sys_cpu" => s.sys_cpu, "load1" => s.load1,
+                                      "gpu" => _gpu_util(s), "gpu_mem" => _gpu_mem(s)) for s in hist]))
     end)
     # Sysimage build state for a region's env — one ssh to the host: is it built (key/size/age), building
     # now, is there a compiler. Feeds the Regions UI sysimage panel. Query {region}.
@@ -2082,6 +2115,11 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
     # A worker's log tail + status for the topbar worker/region status popup. `?side=` selects the
     # worker (""=main, else a region); local reads the log file, remote ssh-tails it. Polled while open.
+    HTTP.register!(router, "POST", "/api/{id}/worker-log-io", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        opts = (; (Symbol(k) => v for (k, v) in b)...)
+        _json(_worker_log_io(nb, String(get(b, "side", "")), String(get(b, "action", "")), opts))
+    end))
     HTTP.register!(router, "GET", "/api/{id}/worker-log", req -> _withnb(h, req, nb -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
         side = get(q, "side", "")
@@ -2363,7 +2401,7 @@ function _make_router(h::Hub)
             ReportEngine.shutdown!(k)
             true
         end
-        try; _workers_push!(nb); catch; end
+        try; facts_changed!(); catch; end
         _json(Dict("ok" => ok, "did" => "shut down"))
     end))
     # A release this notebook has not been shown yet. Asked on load, because the release happened
@@ -3681,16 +3719,110 @@ end
 # Telemetry sample → `{t:"telemetry",side,stats}`. `stats` is the SAME JSON STRING the roster pill parses
 # (`_worker_entry` sets `d["stats"] = JSON.json(sample)`), so the browser reuses its `_wpStats`/`_wpPillStat`
 # verbatim — hence the double-encode (JSON string embedded as a JSON string value).
+# A worker's latest telemetry sample as the page reads it, from the `/state` and roster endpoints.
+_stats_json(l) = JSON.json(_json_finite(Dict(
+    "cpu" => l.cpu, "rss" => l.rss, "gc_ms" => l.gc_ms, "evals" => l.evals, "running" => l.running,
+    "warm" => l.warm, "memo_bytes" => l.memo, "sys_cpu" => l.sys_cpu, "load1" => l.load1,
+    "sys_mem_total" => l.sys_mem_total, "sys_mem_free" => l.sys_mem_free,
+    "gpus" => [Dict(pairs(g)) for g in _sample_gpus(l)],
+    "host" => _sample_part(l, :host), "proc" => _sample_part(l, :proc), "job" => _sample_part(l, :job),
+    "ts" => l.ts)))
+
+# A sample's host / proc / job figures; empty for a sample recorded before they were.
+_sample_part(s, k::Symbol) = hasproperty(s, k) ? getproperty(s, k) : Dict{String,Any}()
+
+# Every field of a sample, for the telemetry view (the history endpoint keeps to what its charts plot).
+_sample_full(s) = Dict{String,Any}(
+    "t" => round(s.rcv; digits = 1), "cpu" => s.cpu, "rss" => s.rss, "gc_ms" => s.gc_ms, "evals" => s.evals,
+    "running" => s.running, "memo" => s.memo, "sys_cpu" => s.sys_cpu, "load1" => s.load1,
+    "sys_mem_total" => s.sys_mem_total, "sys_mem_free" => s.sys_mem_free,
+    "gpus" => [Dict(pairs(g)) for g in _sample_gpus(s)],
+    "host" => _sample_part(s, :host), "proc" => _sample_part(s, :proc), "job" => _sample_part(s, :job))
+
+# A sample's GPU readings; none for a sample recorded before they were.
+_sample_gpus(s) = hasproperty(s, :gpus) ? s.gpus : NamedTuple[]
+# For the history charts: mean utilization over the GPUs, and memory used across them (-1 without GPUs).
+_gpu_util(s) = (g = filter(x -> x.util >= 0, _sample_gpus(s)); isempty(g) ? -1 : round(sum(x.util for x in g) / length(g); digits = 1))
+_gpu_mem(s) = (g = filter(x -> x.mem_used >= 0, _sample_gpus(s)); isempty(g) ? -1 : sum(x.mem_used for x in g))
+
+# ── Telemetry log ──────────────────────────────────────────────────────────────────────────────
+# Every sample a worker sends, kept per notebook and per day as JSON lines under
+# `<cache>/telemetry/<notebook>/<yyyy-mm-dd>.jsonl`. Each sample names the cells running when it was
+# taken, so what ran when, and what it used, can be read back (DuckDB reads these files as they are).
+# A finished day is compressed with zstd; days older than `TELEMETRY_KEEP_DAYS` are removed. The cores
+# are summarized (mean, max, how many are busy): every core of a large node is several hundred figures a
+# sample, which the live view keeps and the log does not need.
+const TELEMETRY_LOG = Ref(true)
+const TELEMETRY_KEEP_DAYS = Ref(14)
+const _TEL_LOG_LOCK = ReentrantLock()
+const _TEL_LOG_DAY = Dict{String,String}()          # notebook's log dir → the day it last wrote
+
+telemetry_dir(nb::LiveNotebook) = joinpath(SlateHome.cache_home(), "telemetry",
+    replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_-]" => "_") * "-" *
+    string(hash(abspath(nb.path)) % 0xffffffff; base = 16, pad = 8))
+
+function _telemetry_line(side::AbstractString, sample)
+    d = _sample_full(sample)
+    host = Dict{String,Any}(d["host"])
+    cores = pop!(host, "cores", nothing)
+    if cores isa AbstractVector && !isempty(cores)
+        host["cores_n"] = length(cores)
+        host["cores_mean"] = round(sum(cores) / length(cores); digits = 1)
+        host["cores_max"] = maximum(cores)
+        host["cores_busy"] = count(>=(50), cores)
+    end
+    d["host"] = host; d["side"] = String(side)
+    return JSON.json(_json_finite(d))
+end
+
+function _telemetry_log!(nb::LiveNotebook, side::AbstractString, sample)
+    TELEMETRY_LOG[] || return nothing
+    dir = telemetry_dir(nb)
+    day = Dates.format(Dates.now(), "yyyy-mm-dd")
+    line = _telemetry_line(side, sample)
+    newday = lock(_TEL_LOG_LOCK) do
+        mkpath(dir)
+        open(io -> println(io, line), joinpath(dir, day * ".jsonl"), "a")
+        prev = get(_TEL_LOG_DAY, dir, "")
+        _TEL_LOG_DAY[dir] = day
+        prev != day
+    end
+    newday && Threads.@spawn _telemetry_tidy!(dir, day)
+    return nothing
+end
+
+# Compress the days before `today` and remove those past the retention.
+function _telemetry_tidy!(dir::AbstractString, today::AbstractString)
+    cutoff = Dates.Date(today) - Dates.Day(TELEMETRY_KEEP_DAYS[])
+    for f in readdir(dir; join = true)
+        m = match(r"^(\d{4}-\d{2}-\d{2})\.jsonl(\.zst)?$", basename(f))
+        m === nothing && continue
+        d = Dates.Date(m.captures[1])
+        if d < cutoff
+            rm(f; force = true)
+        elseif m.captures[2] === nothing && m.captures[1] != today
+            try
+                open(f) do src
+                    open(f * ".zst", "w") do dst
+                        z = ZstdCompressorStream(dst); write(z, src); close(z)
+                    end
+                end
+                rm(f)
+            catch e
+                @warn "slate: could not compress a telemetry log" file = f exception = e
+            end
+        end
+    end
+    return nothing
+end
+
 function _telemetry_push!(h, conn_name::AbstractString, sample)
     owner = _worker_conn_owner(h, conn_name); owner === nothing && return nothing
     nb, side = owner
-    # The sample says what the WORKER knows. What ends a worker on a scheduler — the allocation's
-    # lease and the region's idle policy — is the hub's to know, so it rides along here rather than
-    # waiting on a separate push that some mutation site has to remember to make.
-    alloc = _region_alloc_facts(String(side))
+    try; _telemetry_log!(nb, side, sample); catch e; @debug "slate: telemetry log write failed" exception = e; end
+    # A measurement only. What the hub knows about the worker (its allocation among it) is in the facts.
     frame = try
         string("{\"t\":\"telemetry\",\"side\":", JSON.json(String(side)),
-               ",\"alloc\":", JSON.json(alloc),
                ",\"stats\":", JSON.json(JSON.json(sample)), "}")
     catch; return nothing; end
     _ws_broadcast!(nb, frame)
@@ -3739,18 +3871,6 @@ function _log_push!(h, conn_name::AbstractString, line::AbstractString)
     nb, side = owner
     frame = try
         string("{\"t\":\"log\",\"side\":", JSON.json(String(side)), ",\"line\":", JSON.json(String(line)), "}")
-    catch; return nothing; end
-    _ws_broadcast!(nb, frame)
-    return nothing
-end
-
-# Current worker/pill list → `{t:"workers",data:[...]}`. Pushed at a region spawn-START (so the pill
-# appears immediately in a "starting" state, before the worker's gate is even up and any telemetry flows)
-# and again on connect — the browser's renderWorkers() then draws/updates the pills without waiting for
-# the next notebook state version-bump (which is why they used to pop in only after the first run).
-function _workers_push!(nb::LiveNotebook)
-    frame = try
-        string("{\"t\":\"workers\",\"data\":", JSON.json(_workers_json(nb)), "}")
     catch; return nothing; end
     _ws_broadcast!(nb, frame)
     return nothing
@@ -3825,7 +3945,7 @@ function _install_sshauth_watch!(h)
             String(r.host) == String(host) || continue
             try; _restale_region_cells!(nb, r.name) > 0 && _ensure_runner!(nb); catch; end
         end
-        for nb in nbs; try; _workers_push!(nb); catch; end; end   # pills leave "disconnected" at once
+        for nb in nbs; try; facts_changed!(); catch; end; end   # pills leave "disconnected" at once
         return nothing
     end
     errormonitor(@async while true
@@ -4042,11 +4162,17 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     end
     _install_sshauth_watch!(h) # a cluster asking for a password / second factor → a dialog in the notebook
     _install_session_drop!(h)  # a session going away drops the worker wires it was carrying, at once
+    _install_facts!(h)         # the one description of the hub's state every page renders from
     routed = _make_router(h)
     # Instrumentation sits on the request path permanently and costs a `Ref` read when off. Wrapping
     # the ROUTER rather than the dispatcher below on purpose: the raw-stream handlers (SSE, the
     # WebSocket) are long-lived, and timing a connection that stays open for an hour would say
     # nothing useful about a route.
+    # Anything that changes the hub is a request that is not a GET, so after each one the facts are
+    # refreshed: whatever it changed reaches every page, without each route having to say what that
+    # was. A refresh that finds nothing changed sends nothing.
+    routed_ = routed
+    routed = req -> (r = routed_(req); req.method == "GET" || facts_changed!(); r)
     handle = HTTP.streamhandler(function (req)
         SlateDiag.diag_enabled() || return routed(req)
         t0 = time_ns(); b0 = Base.gc_bytes(); ok = true
@@ -4080,6 +4206,7 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
             for (k, v) in r.headers; HTTP.setheader(stream, k => v); end
             HTTP.startwrite(stream); write(stream, r.body); return
         end
+        target == "/api/facts/events" && return _sse_facts(stream)
         m = match(_EVENTS_RE, target)
         if m !== nothing
             nb = lock(h.lock) do; get(h.notebooks, m.captures[1], nothing); end
@@ -4214,6 +4341,7 @@ end
 
 "Stop the hub: drain every notebook's SSE connections, then close the server."
 function stop_hub(h::Hub)
+    _FACTS_HUB[] === h && (_FACTS_HUB[] = nothing)   # its facts tick ends with it
     # Snapshot + clear the notebooks under `h.lock`, then tear each down OFF the lock (blocking worker
     # round-trips must not run while `h.lock` is held — this is the outer half of the teardown deadlock).
     nbs = lock(h.lock) do

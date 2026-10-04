@@ -435,9 +435,15 @@ end
 # Memo-aware entry (5-arg `memo` = (; key, names, threshold)). Default: ignore caching and just
 # evaluate — only the gate kernel (real notebooks) implements durable memoization. Keeps in-process
 # and test kernels working unchanged. `region`/`regions` flow through to the execution context.
-eval_capture(k::Kernel, report::Report, source::AbstractString, filename::AbstractString, memo;
-             region::AbstractString = "", regions::AbstractVector = String[]) =
-    eval_capture(k, report, source, filename; region = region, regions = regions)
+# A restore-only run (a locked cell not run by its own ▶) has nothing to restore from here, so it does
+# not run either.
+function eval_capture(k::Kernel, report::Report, source::AbstractString, filename::AbstractString, memo;
+                      region::AbstractString = "", regions::AbstractVector = String[])
+    (memo !== nothing && hasproperty(memo, :restore_only) && memo.restore_only === true) &&
+        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", nothing, nothing, 0.0, Any[], "",
+                          Any[], Any[], "absent", "this kernel keeps no durable results")
+    return eval_capture(k, report, source, filename; region = region, regions = regions)
+end
 
 """
     PendingKernel <: Kernel

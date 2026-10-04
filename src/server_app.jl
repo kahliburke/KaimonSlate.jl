@@ -554,6 +554,7 @@ function _status_worker(nb::LiveNotebook, k)
         d["sysCpu"] = round(l.sys_cpu; digits = 1)
         d["sysMemUsedMB"] = _mb(max(0, l.sys_mem_total - l.sys_mem_free))
         d["sysMemTotalMB"] = _mb(l.sys_mem_total)
+        d["gpus"] = [Dict(pairs(g)) for g in _sample_gpus(l)]
         d["lastSampleAgo"] = round(time() - l.rcv; digits = 1)
         # A short RSS/CPU trail so a slow leak or a pinned core is visible as a shape, not one number.
         hist = st.history

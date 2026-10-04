@@ -1,8 +1,8 @@
-// Watchdog health — the browser-visible surface of the hub's 5s stall/runaway watchdog
-// (server: _watchdog_scan!). Polls GET /api/health, shows a topbar BADGE when something is wrong
-// (amber = warning, red = critical), and a click-out PANEL listing each alert with a contextual
-// RECOVERY action: "Stop run" (/api/cancel — graceful interrupt) for a stuck cell, "Restart worker"
-// (/api/restart — nukes the namespace) for a runaway/unreachable kernel.
+// Watchdog health — the browser-visible surface of the hub's 5s watchdog (server: _watchdog_scan!),
+// which judges memory against the limit that applies and CPU by whether anything is running. Shows a
+// topbar BADGE when something is wrong (red = critical, amber = warning, blue = for information) and
+// a click-out PANEL listing each alert with a RECOVERY action where one helps: "Stop run"
+// (/api/cancel, a graceful interrupt) for a cell, "Restart" (/api/restart, a fresh worker) for a kernel.
 //
 // MIGRATED to Preact/ESM (imported by app.js). The health payload is a signal; the panel is a
 // component derived from it, so a poll just assigns the signal and the UI follows — no manual
@@ -26,15 +26,18 @@ function _hAgo(sec) {
 const panelOpen = signal(false);
 let timer = null, inflight = false;
 
-// Per-alert presentation: severity drives colour, icon + label read at a glance. Keys match the
-// server's alert `kind`s; an unknown kind degrades to a neutral warning dot.
+// Per-alert presentation: icon + label read at a glance. Keys match the server's alert `kind`s; the
+// severity comes with each alert (the same kind can be a warning or critical), an unknown kind
+// degrading to a neutral dot.
 const KIND = {
-  'slow':        { sev: 'warn', icon: '◔', label: 'slow' },
-  'stalled':     { sev: 'crit', icon: '⏳', label: 'stalled' },
-  'runaway-cpu': { sev: 'warn', icon: '🔥', label: 'cpu runaway' },
-  'runaway-mem': { sev: 'crit', icon: '🧠', label: 'memory runaway' },
-  'gc-thrash':   { sev: 'warn', icon: '♻', label: 'gc thrash' },
-  'unreachable': { sev: 'crit', icon: '📡', label: 'unreachable' },
+  'memory-low':      { icon: '🧠', label: 'memory low' },
+  'memory-pressure': { icon: '🧠', label: 'memory pressure' },
+  'busy-idle':       { icon: '🔥', label: 'busy, nothing running' },
+  'no-activity':     { icon: '⏳', label: 'no activity' },
+  'gc-thrash':       { icon: '♻', label: 'gc thrash' },
+  'gpu-memory':      { icon: '▦', label: 'gpu memory' },
+  'gpu-throttle':    { icon: '▦', label: 'gpu held back' },
+  'unreachable':     { icon: '📡', label: 'unreachable' },
 };
 const fmtAge = (s) => (s = +s || 0, s < 60 ? Math.round(s) + 's' : Math.round(s / 60) + 'm');
 const jumpTo = (id) => { try { window.selectCell && window.selectCell(id, true); } catch (_) {} };
@@ -60,7 +63,7 @@ style.textContent = `
   .hprow{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:9px;
     padding:7px 6px;border-top:1px solid rgba(42,46,64,.6);}
   .hprow:first-of-type{border-top:none;}
-  .hprow.crit .hpico{color:#e5636e;} .hprow.warn .hpico{color:#e8a13f;}
+  .hprow.crit .hpico{color:#e5636e;} .hprow.warn .hpico{color:#e8a13f;} .hprow.info .hpico{color:#7cc0ff;}
   .hpico{font-size:.95rem;}
   .hpmain{min-width:0;color:#d4d8e8;font-size:.76rem;line-height:1.3;}
   .hpmain b{font-weight:600;}
@@ -103,9 +106,9 @@ effect(() => {
     return;
   }
   if (alerting) {                                        // a watchdog alert wins the badge; ↻ if also stale
-    const crit = h.status === 'critical';
-    b.className = 'healthbadge ' + (crit ? 'crit' : 'warn');
-    b.textContent = (crit ? '⛔' : '⚠') + ' ' + a.length + (h.src_stale ? ' ↻' : '');
+    const sev = h.status === 'critical' ? 'crit' : h.status === 'warning' ? 'warn' : 'info';
+    b.className = 'healthbadge ' + sev;
+    b.textContent = (sev === 'crit' ? '⛔' : sev === 'warn' ? '⚠' : 'ⓘ') + ' ' + a.length + (h.src_stale ? ' ↻' : '');
   } else {                                               // only "server source changed" — a passive info nudge
     b.className = 'healthbadge info';
     // The arrow always shows; the topbar drops the qualifier (hb-detail) then the verb (hb-key) as it
@@ -117,11 +120,13 @@ effect(() => {
 
 // ── panel (reactive component) ────────────────────────────────────────────────────────────────
 function AlertRow({ al }) {
-  const k = KIND[al.kind] || { sev: 'warn', icon: '•', label: al.kind };
+  const k = { sev: al.sev || 'warn', ...(KIND[al.kind] || { icon: '•', label: al.kind }) };
   const isCell = al.scope === 'cell';
   const target = isCell ? ('cell ' + al.target) : (al.target + ' kernel');
+  // A GPU held back by heat or a power brake is the hardware's doing: a restart would not change it.
   const act = isCell
     ? html`<button class="hpact" onClick=${(e) => { e.stopPropagation(); cancelRun(); }}>Stop run</button>`
+    : al.kind === 'gpu-throttle' ? null
     : html`<button class="hpact danger" onClick=${(e) => { e.stopPropagation(); restartWorker(al.target); }}>Restart ${al.target === 'local' ? 'worker' : al.target}</button>`;
   return html`<div class="hprow ${k.sev}" data-cid=${isCell ? al.target : null}
                    onClick=${isCell ? () => jumpTo(al.target) : null}>

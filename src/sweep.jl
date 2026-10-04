@@ -3311,6 +3311,63 @@ const LOG_SLICE_MAX = 1 << 22        # 4 MB per window
 const LOG_HITS_MAX = 5000
 _opt_span(opts, key::Symbol, default::Int, cap::Int) =
     clamp(_opt_int(opts, key, default), -cap, cap)
+"""
+    log_reads(launcher, path, action, opts) -> Dict or nothing
+
+The log viewer's reads of one file through `launcher`, each as the viewer takes it: `log_stat`
+(size and mtime, what a live view polls), `log_slice` (a byte window of whole lines) and
+`log_search` (every matching line of the whole file). `nothing` for any other action. Shared by a
+sweep's job output and a worker's log, so the viewer reads both the same way.
+"""
+function log_reads(l, path::AbstractString, action::AbstractString, opts)
+    if action == "log_stat"
+        st = BatchLauncher.log_stat(l, path)
+        return Dict{String,Any}("bytes" => st.bytes, "modified" => st.modified)
+    elseif action == "log_slice"
+        s = BatchLauncher.log_slice(l, path; offset = _opt_span(opts, :offset, -(1 << 16), typemax(Int) >> 1),
+                                             nbytes = _opt_span(opts, :nbytes, 1 << 16, LOG_SLICE_MAX))
+        return Dict{String,Any}("text" => s.text, "from" => s.from, "to" => s.to, "size" => s.size)
+    elseif action == "log_search"
+        r = BatchLauncher.log_search(l, path, String(get(opts, :pattern, ""));
+                                     ignorecase = get(opts, :ignorecase, false) == true,
+                                     regex = get(opts, :regex, false) == true,
+                                     limit = clamp(_opt_int(opts, :limit, 1000), 0, LOG_HITS_MAX))
+        return Dict{String,Any}("total" => r.total, "capped" => r.capped,
+                                "hits" => [Dict{String,Any}("offset" => h.offset, "line" => h.line,
+                                                            "text" => h.text) for h in r.hits])
+    end
+    return nothing
+end
+
+"""
+    log_vocabulary() -> Dict
+
+What counts as an error or a warning in a log, and the shape of a log record, as the patterns the
+viewer applies. Sent rather than restated in JS, so the viewer and a sweep card colouring the same
+line cannot disagree about it.
+"""
+log_vocabulary() = Dict{String,Any}("declared" => _LOG_LEVEL_SRC,
+                                    "error" => [_LOG_BAD_SRC, _LOG_BAD_COUNT_SRC],
+                                    "warn" => [_LOG_WARN_SRC],
+                                    # Counting a whole file goes by DECLARED level when the file
+                                    # has any; the word lists are for output that has none.
+                                    "dwarn" => _LOG_DECL_WARN_SRC,
+                                    "derror" => _LOG_DECL_BAD_SRC,
+                                    # …and the shape of a record, so it can be shown as one.
+                                    "head" => _LOG_HEAD_SRC, "field" => _LOG_FIELD_SRC,
+                                    "fcont" => _LOG_FCONT_SRC, "mcont" => _LOG_MCONT_SRC,
+                                    "tail" => _LOG_TAIL_SRC)
+
+"""
+    file_launcher(host) -> launcher
+
+A launcher that only reads files on `host` ("" for this machine) over its signed-in session, for
+`log_reads` on a file no sweep owns.
+"""
+file_launcher(host::AbstractString) =
+    isempty(host) ? BatchLauncher.ExecLauncher() :
+                    BatchLauncher.ExecLauncher(String(host); runner = (h, sc) -> run_there(h, sc))
+
 function handle_action(target::SweepTarget, run::AbstractString, params, keys,
                        action::AbstractString; plot = nothing, notify = nothing,
                        landed = nothing, arg::AbstractString = "", opts = (;))
@@ -3365,17 +3422,7 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
         # What counts as an error or a warning, sent rather than restated in JS — the viewer marks
         # the lines it is showing and the card colours the ones it renders, and the two disagreeing
         # about the same line is the bug this prevents.
-        out["logsev"] = Dict{String,Any}("declared" => _LOG_LEVEL_SRC,
-                                         "error" => [_LOG_BAD_SRC, _LOG_BAD_COUNT_SRC],
-                                         "warn" => [_LOG_WARN_SRC],
-                                         # Counting a whole file goes by DECLARED level when the
-                                         # file has any; the word lists are for output that has none.
-                                         "dwarn" => _LOG_DECL_WARN_SRC,
-                                         "derror" => _LOG_DECL_BAD_SRC,
-                                         # …and the shape of a record, so it can be shown as one.
-                                         "head" => _LOG_HEAD_SRC, "field" => _LOG_FIELD_SRC,
-                                         "fcont" => _LOG_FCONT_SRC, "mcont" => _LOG_MCONT_SRC,
-                                         "tail" => _LOG_TAIL_SRC)
+        out["logsev"] = log_vocabulary()
         return out
     end
     # What is behind one tile of the grid, asked for when a reader points at it. Per-unit detail is
@@ -3405,24 +3452,8 @@ function handle_action(target::SweepTarget, run::AbstractString, params, keys,
     end
     # The three reads, each a bare reply rather than a status payload: a viewer polling a growing
     # file must not drag a manifest scan along behind every tick.
-    if action == "log_stat"
-        st = log_stat(target, run, arg)
-        return Dict{String,Any}("bytes" => st.bytes, "modified" => st.modified)
-    end
-    if action == "log_slice"
-        s = log_slice(target, run, arg; offset = _opt_span(opts, :offset, -(1 << 16), typemax(Int) >> 1),
-                                        nbytes = _opt_span(opts, :nbytes, 1 << 16, LOG_SLICE_MAX))
-        return Dict{String,Any}("text" => s.text, "from" => s.from, "to" => s.to, "size" => s.size)
-    end
-    if action == "log_search"
-        r = log_search(target, run, arg, String(get(opts, :pattern, ""));
-                       ignorecase = get(opts, :ignorecase, false) == true,
-                       regex = get(opts, :regex, false) == true,
-                       limit = clamp(_opt_int(opts, :limit, 1000), 0, LOG_HITS_MAX))
-        return Dict{String,Any}("total" => r.total, "capped" => r.capped,
-                                "hits" => [Dict{String,Any}("offset" => h.offset, "line" => h.line,
-                                                            "text" => h.text) for h in r.hits])
-    end
+    action in ("log_stat", "log_slice", "log_search") &&
+        return log_reads(launcher_for(target), _known_log(target, run, arg), action, opts)
     _with_store_lock(target) do
     if action == "submit"
         BatchSweep.start!(root, run)

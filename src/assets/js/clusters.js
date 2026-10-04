@@ -10,7 +10,7 @@
 import { html } from 'htm/preact';
 import { signal, effect } from '@preact/signals';
 import { schedInfo, loadScheduler } from './stores.js';
-import { sessions, loadSessions, openSessions } from './sessions.js';
+import { sessions, openSessions } from './sessions.js';
 import { StepList, Activity, History } from './prepsteps.js';
 import { OptionsTable, optionsMap, optionRows } from './optstable.js';
 
@@ -78,8 +78,7 @@ function seed(c) {
   kDepot.value = g('depot'); kJulia.value = g('julia'); kTestQos.value = g('test_qos');
   kOpts.value = optionRows(c && c.options); kOptMenu.value = -1;
   if (c && c.host) loadMachine(c.name);
-  if (kHost.value && !isExecKind(kKind.value)) { loadScheduler(kHost.value); loadSessions(); }
-  if (kHost.value && isExecKind(kKind.value)) loadSessions();
+  if (kHost.value && !isExecKind(kKind.value)) loadScheduler(kHost.value);
 }
 
 // How many of the folded-away fields this target actually uses. Shown on the disclosure so a
@@ -260,8 +259,7 @@ export function Clusters() {
         <div class="rpprow"><label>Host</label>
           <input class="rpppre" autocomplete="off" spellcheck="false"
             placeholder="ssh host to run on — blank runs on this machine"
-            value=${kHost.value} onInput=${ev => kHost.value = ev.target.value}
-            onBlur=${() => loadSessions()}/></div>
+            value=${kHost.value} onInput=${ev => kHost.value = ev.target.value}/></div>
         ${kHost.value.trim() ? Session() : null}
         <div class="rpprow"><label>Store</label>
           ${kHost.value.trim()
@@ -278,7 +276,7 @@ export function Clusters() {
       : html`
         <div class="rpprow"><label>Login host</label>
           <input class="rpppre" autocomplete="off" spellcheck="false" placeholder="ssh host you submit from"
-            value=${kHost.value} onInput=${ev => kHost.value = ev.target.value} onBlur=${ev => { loadScheduler(ev.target.value.trim()); loadSessions(); }}/></div>
+            value=${kHost.value} onInput=${ev => kHost.value = ev.target.value} onBlur=${ev => loadScheduler(ev.target.value.trim())}/></div>
         ${HostSays()}
         ${Session()}
         <div class="rpprow"><label>Store</label>

@@ -343,7 +343,7 @@ function _cellRegionSet() {
 // itself rather than as nothing, so a new one is visible instead of silently blank.
 const BLOCKED_TEXT = { queued: 'queued', not_signed_in: 'not signed in', connecting: 'connecting',
                        not_requested: 'run to request a node', needs_prepare: 'prepare the region',
-                       preparing: 'preparing' };
+                       preparing: 'preparing', locked: 'locked' };
 function blockedText(c) {
   const code = (c && c.blocked) || '';
   return BLOCKED_TEXT[code] || code.replace(/_/g, ' ');
@@ -352,6 +352,15 @@ function blockedText(c) {
 function cellRegionChip(c) {
   const set = _cellRegionSet();
   const blocked = !!(c && c.state === 'blocked' && c.blocked);
+  // A locked cell with nothing to restore, or a cell reading one: not a wait on a machine, so no
+  // place and no clock, just which cell's ▶ ends it.
+  if (blocked && c.blocked === 'locked') {
+    const own = !c.blockedHost || c.blockedHost === c.id;
+    const tip = own ? 'Locked, with no stored result to restore. Its own ▶ computes it.'
+                    : 'Reads ' + c.blockedHost + ', a locked cell not computed yet. Its ▶ computes it.';
+    return `<span class="cregion blocked" data-bkey="${_esc(_blockedKey(c))}" title="${_esc(tip)}">🔒` +
+      ` <span class="cregst">${own ? '▶ to compute' : 'waits on ' + _esc(c.blockedHost)}</span></span>`;
+  }
   if (!blocked && set.size < 2 && set.has('local')) return '';
   const loc = _cellRunLoc(c);
   if (!loc) return '';
@@ -406,7 +415,7 @@ function _regChipStatus(name) {
   return {
     cls: st === 'degraded' ? ' degraded' : ' unwell',
     word: word,
-    title: 'runs on ‘' + name + '’ — ' + (w.note || word) + ' (click for the region)',
+    title: 'runs on ‘' + name + '’ — ' + (M.workerNote(w) || word) + ' (click for the region)',
   };
 }
 
@@ -732,7 +741,7 @@ function _blockedWaited(c) {
 function _blockedKey(c) {
   if (!c || c.state !== 'blocked' || !c.blocked) return '';
   const l = _cellRunLoc(c);
-  return [c.blocked, +(c.blockedAt) || 0, (l && l.key) || ''].join('\x1f');
+  return [c.blocked, c.blockedHost || '', +(c.blockedAt) || 0, (l && l.key) || ''].join('\x1f');
 }
 // One timer for the page, not one per cell: it only rewrites the elapsed text, and stops costing
 // anything when nothing is waiting.
@@ -751,12 +760,35 @@ setInterval(() => {
 // none of that fits a tooltip.
 let _blkPanel = null, _blkTimer = 0, _blkFor = '';
 const _blkLoad = new Map();     // region → {at, data} — a hover is a round trip to a login node
-function _blkFmtQ(q) {
-  const bits = [`${q.cpus_free}/${q.cpus_total} cpus free`];
-  if (q.nodes_total > 0) bits.push(`${q.nodes_free}/${q.nodes_total} nodes`);
-  if (q.down > 0) bits.push(`${q.down} down`);
-  if (q.queued > 0) bits.push(`${q.queued} job${q.queued === 1 ? '' : 's'} queued`);
-  return `<div class="blkq"><span class="blkqn">${_esc(q.name)}</span>${_esc(bits.join(' · '))}</div>`;
+// The cluster's load, compactly: the scheduler-wide figures once, then one row per distinct set of
+// nodes (a scheduler lists the same nodes under several partition names, which read as duplicates),
+// the ones this region can use first and the rest folded away. `load.partition` names the region's
+// own partition; without one, its GPU ask picks the GPU partitions.
+const _num = (n) => (+n || 0).toLocaleString();
+function _blkCluster(load) {
+  const qs = (load && load.rows) || [];
+  const q0 = qs[0] || {};
+  const head = [q0.queued > 0 ? _num(q0.queued) + ' job' + (q0.queued === 1 ? '' : 's') + ' queued' : '',
+                q0.down > 0 ? _num(q0.down) + ' node' + (q0.down === 1 ? '' : 's') + ' down' : ''].filter(Boolean).join(' · ');
+  const groups = new Map();
+  for (const q of qs) {
+    const k = [q.cpus_free, q.cpus_total, q.nodes_free, q.nodes_total].join('/');
+    groups.has(k) ? groups.get(k).names.push(q.name) : groups.set(k, { q, names: [q.name] });
+  }
+  const want = load.partition ? (g) => g.names.includes(load.partition)
+             : (g) => (!!load.gpus && load.gpus !== '0') === g.names.some(n => /gpu/i.test(n));
+  const all = [...groups.values()].sort((a, b) => b.q.cpus_free - a.q.cpus_free);
+  const mine = all.filter(want), rest = all.filter(g => !want(g));
+  const row = (g) => `<tr><td title="${_esc(g.names.join(', '))}">${_esc(g.names.join(', '))}</td>` +
+    `<td>${_num(g.q.cpus_free)} / ${_num(g.q.cpus_total)}</td>` +
+    `<td>${g.q.nodes_total > 0 ? _num(g.q.nodes_free) + ' / ' + _num(g.q.nodes_total) : ''}</td></tr>`;
+  const table = (gs) => '<table class="blkqt"><tr><th>partition</th><th>cpus free</th><th>nodes free</th></tr>' +
+    gs.map(row).join('') + '</table>';
+  return '<div class="blkrow blkq1"><span>Cluster</span><div>' +
+    (head ? `<div class="blkqhead">${_esc(head)}</div>` : '') +
+    ((mine.length ? mine : all).length ? table(mine.length ? mine : all) : '') +
+    ((mine.length && rest.length) ? `<details class="blkqmore"><summary>${rest.length} other partition${rest.length === 1 ? '' : 's'}</summary>${table(rest)}</details>` : '') +
+    '</div></div>';
 }
 // The region's host, which the chip does not show — the chip names the REGION, and on a cluster the
 // two differ (`pbsnode` is asked for on `slate-pbs`).
@@ -781,7 +813,7 @@ function _blkRender(c, reg, load) {
   if (load === undefined) rows.push('<div class="blkrow blkdim"><span>Cluster</span><div>asking…</div></div>');
   else if (load === null) rows.push('<div class="blkrow blkdim"><span>Cluster</span><div>no answer</div></div>');
   else if (!qs || !qs.length) rows.push('<div class="blkrow blkdim"><span>Cluster</span><div>nothing reported</div></div>');
-  else rows.push('<div class="blkrow blkq1"><span>Cluster</span><div>' + qs.map(_blkFmtQ).join('') + '</div></div>');
+  else rows.push(_blkCluster(load));
   return rows.join('');
 }
 window.blockInfo = function (el, id) {
@@ -795,16 +827,21 @@ window.blockInfo = function (el, id) {
   const fresh = cached && (Date.now() - cached.at < 15000);
   _blkPanel.innerHTML = _blkRender(c, reg, fresh ? cached.data : undefined);
   const r = el.getBoundingClientRect();
-  _blkPanel.style.left = Math.round(Math.min(r.left, window.innerWidth - 340)) + 'px';
+  _blkPanel.style.left = Math.round(Math.max(10, Math.min(r.left, window.innerWidth - _blkPanel.offsetWidth - 10))) + 'px';
   _blkPanel.style.top = Math.round(r.bottom + 6) + 'px';
   _blkPanel.classList.add('on');
   if (!reg || fresh) return;
   fetch('/api/region-load?region=' + encodeURIComponent(reg))
     .then(r => r.json())
     .then(j => {
-      const data = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [] };
+      const data = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [], gpus: j && j.gpus, partition: (j && j.partition) || '' };
       _blkLoad.set(reg, { at: Date.now(), data });
-      if (_blkFor === id && _blkPanel && _blkPanel.classList.contains('on')) _blkPanel.innerHTML = _blkRender(c, reg, data);
+      if (_blkFor === id && _blkPanel && _blkPanel.classList.contains('on')) {
+        _blkPanel.innerHTML = _blkRender(c, reg, data);
+        // The table can widen it: keep it on screen.
+        const l = parseFloat(_blkPanel.style.left) || 0, over = l + _blkPanel.offsetWidth + 10 - window.innerWidth;
+        if (over > 0) _blkPanel.style.left = Math.max(10, l - over) + 'px';
+      }
     })
     .catch(() => { if (_blkFor === id && _blkPanel) _blkPanel.innerHTML = _blkRender(c, reg, null); });
 };
@@ -914,7 +951,7 @@ function _regRender(c, reg, load, alloc) {
       const qs = load && load.rows;
       if (load === undefined) h += '<div class="blkrow blkdim"><span>Cluster</span><div>asking…</div></div>';
       else if (!qs || !qs.length) h += '<div class="blkrow blkdim"><span>Cluster</span><div>nothing reported</div></div>';
-      else h += '<div class="blkrow blkq1"><span>Cluster</span><div>' + qs.map(_blkFmtQ).join('') + '</div></div>';
+      else h += _blkCluster(load);
     } else {
       h += _regRow('Warm workers', String((r.warm | 0) || 0));
     }
@@ -959,7 +996,7 @@ window.openRegionPanel = function (id, ev) {
   };
   let L = fresh ? cached.data : undefined, A;
   if (!fresh) fetch('/api/region-load?region=' + encodeURIComponent(reg)).then(r => r.json())
-    .then(j => { L = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [] };
+    .then(j => { L = { ask: (j && j.ask) || '', rows: (j && j.ok && j.queues) || [], gpus: j && j.gpus, partition: (j && j.partition) || '' };
                  _blkLoad.set(reg, { at: Date.now(), data: L }); paint(L, A); })
     .catch(() => paint(null, A));
   // Through the shared cache, so releasing from the Remotes roster invalidates what this panel would
@@ -1763,21 +1800,27 @@ function updateChrome(state) {
               : 'in-process kernel';
   }
   window.renderRunLoc && window.renderRunLoc(state);   // toolbar run-location pill (session/notebook/global)
-  window.renderWorkers && window.renderWorkers(state); // per-region worker pills next to it (click → log/status popup)
   window.renderRunPill && window.renderRunPill();      // error pill reads live state → clears when a cell is fixed/removed
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
   const hb = document.getElementById('hydbanner');
   // "run" (the plain initial autorun) gets NO banner — cells are fully interactive and each shows
-  // its own running/stale state, exactly like any later manual run; a special top banner just for
-  // the FIRST run would be an arbitrary inconsistency now that it's not gating anything. "boot"
-  // (cold local worker spawn), "remote" (worker provisioning), and "env" (bundle reconstruction)
-  // have no per-cell equivalent — there's no worker yet to show per-cell progress against — so
-  // those keep a status banner, narrated live by the same `bringup:` stream in all three cases.
-  // An app hides the code cells, so the per-cell running state the "run" case relies on below is
-  // invisible to its reader — a cold start reads as a page of headings that does nothing for
-  // minutes. There, and only there, the plain autorun gets a banner too.
+  // its own running/stale state, exactly like any later manual run. "boot" (cold local worker spawn)
+  // and "remote" (worker provisioning) are narrated in the WORKER PANEL instead (workers.js), where the
+  // worker's pill already says it is starting: the progress line and build log belong to that worker,
+  // and a bar across the notebook for them pushed every cell down. "env" (bundle reconstruction)
+  // keeps the banner: it replaces the cells with a frozen preview, which needs saying up top.
+  // An app hides the code cells and its reader has no worker panel, so there every kind (the plain
+  // autorun included) gets the banner — otherwise a cold start reads as a page that does nothing.
   const _isApp = _APPMODE;
-  if (state.hydrating && (_isApp || state.hydratingKind !== 'run')) {
+  const bringup = !!state.hydrating && !_isApp && (state.hydratingKind === 'boot' || state.hydratingKind === 'remote');
+  const was = window.__slateBringup;
+  window.__slateBringup = bringup ? { kind: state.hydratingKind, host: state.hydratingHost || '', side: state.hydratingSide || '' } : null;
+  if ((!!was) !== bringup || (was && bringup && was.side !== window.__slateBringup.side))
+    window.wpBringupChanged && window.wpBringupChanged();
+  if (bringup) {
+    hb.style.display = 'none'; document.body.classList.remove('hyd-preview');
+    window.renderPrepare && window.renderPrepare();   // into the worker panel, when it shows that worker
+  } else if (state.hydrating && (_isApp || state.hydratingKind !== 'run')) {
     hb.className = 'hydbanner'; hb.style.display = 'flex';
     // Short headline per kind — shown only until structured status arrives, then prepare.js hides it so the
     // banner stays compact (the #hydprep line becomes the headline). Specifics (precompile k/N, current

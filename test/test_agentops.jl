@@ -437,76 +437,54 @@ end
     end
 end
 
-@testset "locked cell self-heals on a fresh autorun=false open (a cold reopen has nothing in memory)" begin
+# A locked cell computes only on its own ▶. This kernel keeps no durable results, so nothing can be
+# restored: every other run holds the cell instead of computing it, and its readers wait on it.
+@testset "a locked cell with nothing to restore is held until its own ▶" begin
     hub = NS.start_hub(; port = freeport())
+    RE_ = KaimonSlate.ReportEngine
     try
-        # `b` is deliberately SELF-CONTAINED (doesn't read `a`'s `base`): InProcessKernel (this test
-        # has no gate worker) has no durable memo store, so its `eval_capture` ignores `memo` and just
-        # re-evaluates — self-heal exercises the SAME trigger path a real GateKernel restore would, but
-        # without a real memo store the "restore" is actually a recompute, which would UndefVarError if
-        # `b` depended on `a` (never run in this fresh process, per autorun=false).
         nbp = tempname() * ".jl"
-        write(nbp, "#%% code id=a\nbase = 10\n#%% code id=b\nderived = 5 * 2\n")
+        write(nbp, "#%% code id=a\nbase = 10\n#%% code id=b\nderived = base * 2\n#%% code id=c\nuse = derived + 1\n")
         id = NS.open_notebook!(hub, nbp)
         nb = hub.notebooks[id]
         NS._eval!(nb; wait_all = true)
-        @test findfirst(c -> c.id == "b", nb.report.cells) !== nothing
         NS.set_cell_tags!(nb, "b", ["locked"])
-        NS._eval!(nb; wait_all = true)   # locking a FRESH cell only QUEUES its capture force-run
-        bcell() = nb.report.cells[findfirst(c -> c.id == "b", nb.report.cells)]
-        @test :locked in bcell().flags
-        @test any(f -> startswith(String(f), "lockedkey="), bcell().flags)
+        NS._eval!(nb; wait_all = true)   # locking a FRESH cell freezes it on a forced run
+        cell(n, id) = n.report.cells[findfirst(c -> c.id == id, n.report.cells)]
+        @test !isempty(RE_._locked_key(cell(nb, "b")))
 
+        # Reopened: nothing in memory and nothing to restore from.
         NS.close_notebook!(hub, id)
-        nb2 = hub.notebooks[NS.open_notebook!(hub, nbp; autorun = false)]
-        # Self-heal runs in a background @async task — POLL for it to finish instead of a fixed sleep,
-        # which can expire before the restore completes on a loaded / coverage-instrumented CI run
-        # (leaving `output === nothing` → a spurious failure).
-        bfind() = nb2.report.cells[findfirst(c -> c.id == "b", nb2.report.cells)]
+        nb2 = hub.notebooks[NS.open_notebook!(hub, nbp)]
         timedwait(10.0; pollint = 0.05) do
-            bc = bfind(); bc.state == KaimonSlate.ReportEngine.FRESH && bc.output !== nothing
+            cell(nb2, "c").state == RE_.BLOCKED
         end
-        acell2 = nb2.report.cells[findfirst(c -> c.id == "a", nb2.report.cells)]
-        bcell2 = bfind()
-        @test acell2.state == KaimonSlate.ReportEngine.STALE     # unlocked: untouched, per autorun=false
-        @test bcell2.state == KaimonSlate.ReportEngine.FRESH     # locked: self-healed despite autorun=false
-        @test bcell2.output !== nothing && bcell2.output.value_repr == "10"
-    finally
-        NS.stop_hub(hub)
-    end
-end
+        b, c = cell(nb2, "b"), cell(nb2, "c")
+        @test (b.state, b.blocked, b.output) == (RE_.BLOCKED, NS.WAIT_LOCKED, nothing)
+        @test (c.state, c.blocked, c.blocked_host) == (RE_.BLOCKED, NS.WAIT_LOCKED, "b")
+        @test cell(nb2, "a").state == RE_.FRESH
 
-@testset "restart_kernel!: a locked cell restores ahead of a slow preceding cell, not queued behind it" begin
-    hub = NS.start_hub(; port = freeport())
-    try
-        nbp = tempname() * ".jl"
-        # `slow` sleeps generously so the "fast restored WHILE slow is still running" window stays
-        # open long enough to observe reliably on a loaded CI runner — a fixed sleep here was flaky.
-        # The Windows box this is exercised on runs x86-64 Julia under emulation, where the restore
-        # is far from instant, so the whole fixture is scaled rather than just the bound: the margin
-        # between "fast is back" and "slow is still going" stays the same proportion everywhere.
-        slack = Sys.iswindows() ? 3 : 1
-        write(nbp, "#%% code id=slow\nsleep($(3.0 * slack)); slowval = 1\n#%% code id=fast\nfastval = 5 * 2\n")
-        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
-        NS._eval!(nb; wait_all = true)
-        NS.set_cell_tags!(nb, "fast", ["locked"])
-        NS._eval!(nb; wait_all = true)   # runs the surgical force-run queued by locking a FRESH cell
-        fastcell() = nb.report.cells[findfirst(c -> c.id == "fast", nb.report.cells)]
-        slowcell() = nb.report.cells[findfirst(c -> c.id == "slow", nb.report.cells)]
-        @test any(f -> startswith(String(f), "lockedkey="), fastcell().flags)
+        # A run of the notebook is not its ▶, and neither is the ▶ of a cell upstream: still held.
+        NS._restale_blocked!(nb2); NS._eval!(nb2; wait_all = true)
+        held_after_run = cell(nb2, "b").state
+        NS.edit_cell!(nb2, "a", cell(nb2, "a").source; force = true)
+        NS._eval!(nb2; wait_all = true)
+        @test (held_after_run, cell(nb2, "b").state, cell(nb2, "a").state) == (RE_.BLOCKED, RE_.BLOCKED, RE_.FRESH)
 
-        NS.restart_kernel!(nb)
-        # POLL for the locked cell to restore instead of a fixed sleep, which expires before the restore
-        # completes on a loaded CI run. It self-heals out of document order (a memo-key restore), so it
-        # lands FRESH well within the slow cell's sleep — proving it did NOT queue behind `slow`. The
-        # poll stays at half that sleep, so `slow` is guaranteed still running when it returns.
-        @test timedwait(1.5 * slack; pollint = 0.02) do
-            fastcell().state == KaimonSlate.ReportEngine.FRESH
-        end === :ok
-        @test fastcell().state == KaimonSlate.ReportEngine.FRESH   # restored already — did NOT wait on `slow`
-        @test slowcell().state in (KaimonSlate.ReportEngine.STALE, KaimonSlate.ReportEngine.RUNNING)   # still queued/running
-        # Wait for the slow cell to finish before teardown so `stop_hub` isn't racing a live eval task.
-        timedwait(6.0 * slack; pollint = 0.05) do; slowcell().state == KaimonSlate.ReportEngine.FRESH; end
+        # Its own ▶ computes it, and the reader follows.
+        NS.edit_cell!(nb2, "b", cell(nb2, "b").source; force = true)
+        NS._eval!(nb2; wait_all = true)
+        NS._restale_blocked!(nb2); NS._eval!(nb2; wait_all = true)
+        @test (cell(nb2, "b").state, cell(nb2, "b").output.value_repr) == (RE_.FRESH, "20")
+        @test (cell(nb2, "c").state, cell(nb2, "c").output.value_repr) == (RE_.FRESH, "21")
+
+        # An agent's run of a reader with `run_locked` computes the held locked cell it needs.
+        NS.close_notebook!(hub, nb2.id)
+        nb3 = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        timedwait(() -> cell(nb3, "c").state == RE_.BLOCKED, 10.0; pollint = 0.05)
+        plain = (NS.agent_run!(nb3, "c"); NS._eval!(nb3; wait_all = true); cell(nb3, "b").state)
+        NS.agent_run!(nb3, "c"; run_locked = true); NS._eval!(nb3; wait_all = true)
+        @test (plain, cell(nb3, "b").state, cell(nb3, "c").output.value_repr) == (RE_.BLOCKED, RE_.FRESH, "21")
     finally
         NS.stop_hub(hub)
     end
@@ -534,6 +512,35 @@ end
         @test acell().state == KaimonSlate.ReportEngine.FRESH        # the played cell itself re-ran
         @test bcell().state == KaimonSlate.ReportEngine.FRESH        # `b` stayed frozen — never went STALE
         @test KaimonSlate.ReportEngine._locked_key(bcell()) == lockedkey_before
+    finally
+        NS.stop_hub(hub)
+    end
+end
+
+@testset "running an edited locked cell computes its new code" begin
+    hub = NS.start_hub(; port = freeport())
+    try
+        nbp = tempname() * ".jl"
+        write(nbp, "#%% code id=a\nbase = 10\n#%% code id=b\nderived = base * 2\n")
+        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+        NS._eval!(nb; wait_all = true)
+        NS.set_cell_tags!(nb, "b", ["locked"])
+        NS._eval!(nb; wait_all = true)
+        RE_ = KaimonSlate.ReportEngine
+        bcell() = nb.report.cells[findfirst(c -> c.id == "b", nb.report.cells)]
+        key0, stamp0 = RE_._locked_key(bcell()), RE_._frozen_stamp(bcell())
+        @test !isempty(key0)
+        # Shift-Enter after an edit: no force. The frozen result belongs to the old code, so the run
+        # computes the new code and the freeze moves to its result.
+        NS.edit_cell!(nb, "b", "derived = base * 3"; force = false)
+        NS._eval!(nb; wait_all = true)
+        @test bcell().state == RE_.FRESH
+        @test RE_._locked_key(bcell()) != key0 && RE_._frozen_stamp(bcell()) != stamp0
+        # The same source again is not an edit: nothing is forced, and the freeze stays.
+        key1 = RE_._locked_key(bcell())
+        NS.edit_cell!(nb, "b", "derived = base * 3"; force = false)
+        @test !("b" in get(NS._FORCE_RUN, nb.id, Set{String}()))
+        @test RE_._locked_key(bcell()) == key1
     finally
         NS.stop_hub(hub)
     end

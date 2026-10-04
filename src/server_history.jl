@@ -1305,14 +1305,14 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
             # Started by the region's prepare, which loads the packages in it before handing it over.
             (code == "bringup" && !isempty(side) && ReportEngine.prepare_running(side)) && (d["face"] = "preparing")
         elseif since !== nothing
-            el = round(Int, time() - something(since, time()))
             d["status"] = "degraded"
-            # Only a remote wire auto-drops, so only a remote pill promises it. A local worker that
-            # stops answering is a wedge the user has to break — say that instead of a countdown to
-            # a recovery that will never come.
-            d["note"]   = remote ?
-                "no liveness reply for $(el)s — auto-drops & reconnects at $(round(Int, _dead_wire_grace(k)))s" :
-                "no liveness reply for $(el)s — the worker may be wedged; interrupt it or reboot the worker"
+            # When it stopped answering, not for how long: the page counts. Only a remote wire
+            # auto-drops (after `graceS`), so only a remote pill promises it; a local worker that
+            # stops answering is a wedge the user has to break.
+            d["noteCode"] = "no_reply"
+            d["unresponsiveSince"] = round(Float64(since); digits = 1)
+            d["remote"] = remote
+            remote && (d["graceS"] = round(Int, _dead_wire_grace(k)))
         else
             d["status"] = "ok"
         end
@@ -1437,6 +1437,32 @@ function _worker_log(nb::LiveNotebook, side::AbstractString, lines::Int)
     return merge(_worker_entry(nb, side, k), _worker_provenance(k), Dict{String,Any}("log" => log))
 end
 
+# The log viewer's reads of a worker's log file (logview.js, opened from the worker panel): `logs`
+# lists the one file with the vocabulary to read it, and `log_stat`/`log_slice`/`log_search` page and
+# search it however large it is. Only that worker's own log is ever read, whatever `arg` names.
+function _worker_log_io(nb::LiveNotebook, side::AbstractString, action::AbstractString, opts)
+    k = isempty(side) ? nb.kernel : _region_kernel_if_active(nb, side)
+    k isa ReportEngine.GateKernel || return Dict{String,Any}("loglist" => Any[], "logerr" => "no worker for this side")
+    remote = k.target isa ReportEngine.RemoteTarget
+    # A cluster's nodes share their login node's home, so a node's log is read there. The region names
+    # that host even after its allocation has ended and the node is no longer routed.
+    r = isempty(side) ? nothing : ReportEngine.region_get(String(side))
+    fhost = !remote ? "" : (r !== nothing && !isempty(r.host)) ? String(r.host) :
+                           ReportEngine._host_for_files(k.target.ssh_host)
+    l = ReportEngine.Sweep.file_launcher(fhost)
+    path = remote ? "$(ReportEngine._REMOTE_WORKER)/worker-$(k.port).log" : k.logpath
+    isempty(path) && return Dict{String,Any}("loglist" => Any[], "logerr" => "this worker has no log file")
+    if action == "logs"
+        st = try; ReportEngine.Sweep.BatchLauncher.log_stat(l, path); catch; (bytes = -1, modified = 0); end
+        return Dict{String,Any}("loglist" => [Dict{String,Any}("path" => path, "name" => basename(path), "job" => "",
+                                                               "bytes" => st.bytes, "modified" => st.modified,
+                                                               "running" => k.conn !== nothing)],
+                                "logsev" => ReportEngine.Sweep.log_vocabulary())
+    end
+    r = ReportEngine.Sweep.log_reads(l, path, action, opts)
+    return r === nothing ? Dict{String,Any}("error" => "unknown action $action") : r
+end
+
 # Provenance + age from a remote worker's own manifest: ADOPTED from the warm pool behaves
 # differently from spawned-for-this-notebook, and "spawned three days ago" is the tell for a stale
 # one. Deliberately NOT part of `_worker_entry` — reading the roster is an ssh round-trip, and that
@@ -1512,7 +1538,6 @@ function state_json(nb::LiveNotebook)
     meta["regions"] = _regions_json(nb)                                     # declared per-cell destinations (regionon footer) → tag editor + DAG zones
     meta["clusters"] = _clusters_json()                                     # this machine's compute targets → a job cell's cluster= picker
     meta["health"] = _health_json(nb)                                       # watchdog status + alerts (stall/runaway) → health panel
-    meta["workers"] = _workers_json(nb)                                     # ACTIVE workers (main + each region) → topbar pills + log/status popup
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
     # Other live copies of this same document (see `shared_with`). Normally empty — notably for a
@@ -1539,7 +1564,6 @@ function state_json(nb::LiveNotebook)
         # pill and treat cells as a static preview until launched.
         meta["cells"] = _static_cells(nb)
         meta["inactive"] = true
-        meta["workers"] = Any[]   # nothing is running — suppress the worker-strip pill; the inactive pill stands alone
         # The packages this notebook's env carries (from the reproducibility footer, parsed at load — no
         # kernel needed) → the launch popover lists them, so the reader sees what a launch will bring up.
         # We can't cheaply know WHICH will precompile ahead of instantiation (a fresh download has no env
@@ -1559,9 +1583,11 @@ function state_json(nb::LiveNotebook)
         # "env" = reconstructing a self-contained bundle's environment (shows a frozen preview);
         # "run" = a normal open whose initial full run is happening in the background;
         # "remote" = bringing up a remote worker (provision + connect) before any cell can run.
-        meta["hydratingKind"] = get(nb.report.meta, "hydratingKind",
-                                    haskey(nb.report.meta, "preview") ? "env" : "run")
+        # Unset means "run": the paths that need another say so (a bundle sets "env", a boot "boot").
+        # A saved preview does not make it "env", since a live notebook keeps one from its last session.
+        meta["hydratingKind"] = get(nb.report.meta, "hydratingKind", "run")
         haskey(nb.report.meta, "hydratingHost") && (meta["hydratingHost"] = nb.report.meta["hydratingHost"])
+        haskey(nb.report.meta, "hydratingSide") && (meta["hydratingSide"] = nb.report.meta["hydratingSide"])
         return meta
     end
     bindref, hostednames = _bind_index(nb.report)
@@ -1682,7 +1708,8 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
         # made, on every load, permanently. Round-tripping through the same split/assemble the browser
         # uses makes the invariant `_web_sections` documents actually hold, at the one place it can.
         source = cells[idx].kind == WEB ? _canonical_web_source(source) : String(source)
-        if cells[idx].source != String(source)
+        changed = cells[idx].source != String(source)
+        if changed
             _snapshot!(nb)
             _preempt_superseded!(nb, (cells[idx],))   # a RUNNING old-source eval is now worthless
         end
@@ -1694,12 +1721,19 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
         new_full = serialize_report(nb.report)
         cells[idx].source = saved
         update_source!(nb.report, new_full)
+        # A locked cell restores its frozen result instead of running when the notebook opens. Once its
+        # code is edited that result belongs to other code, so the run this edit asks for computes and
+        # replaces it. An edit that does not run leaves it for its own ▶: a marker set now would be
+        # served by whatever ran next, a restart's re-run included.
+        (changed && run && :locked in cells[idx].flags) && push!(get!(Set{String}, _FORCE_RUN, nb.id), String(id))
         # force=true → re-run even when the source is unchanged (the explicit play/run button). A forced
         # re-run may change this cell's outputs (or clear an error), so its DEPENDENTS must re-run too —
         # otherwise downstream cells keep stale/errored results from the previous run (e.g. re-running a
         # producer that previously errored leaves its consumers stuck ERRORED). update_source! only
         # restales dependents when the SOURCE changed, so on an unchanged force-run we do it explicitly.
-        if force
+        # A ▶ on a cell already running its current code asks for the run in flight, not a second one
+        # queued behind it.
+        if force && !(cells[idx].state == RUNNING && !changed)
             i = findfirst(c -> c.id == id, nb.report.cells)
             if i !== nothing
                 frc = get!(Set{String}, _FORCE_RUN, nb.id)
@@ -1714,8 +1748,9 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
                     # ▶ means "actually re-evaluate" — for the WHOLE cascade, not just this cell.
                     # The memo key digests upstream SOURCES, so if the played cell is impure (a data
                     # fetch — the main reason to press ▶), its dependents' keys don't change and a
-                    # restore would serve results computed from the PREVIOUS data. Force them all.
-                    push!(frc, String(did))
+                    # restore would serve results computed from the PREVIOUS data. Force them all,
+                    # except a locked one with nothing frozen yet: re-run unforced, it only restores.
+                    (did == id || !(:locked in c.flags)) && push!(frc, String(did))
                 end
             end
         end

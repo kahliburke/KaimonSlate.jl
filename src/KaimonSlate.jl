@@ -733,6 +733,11 @@ function _load_slate_config!()
         return nothing
     end
     NotebookServer.CHECKER_ON[] = get(_slate_config(), "checker_on", false) === true
+    # Workers' telemetry kept on disk per notebook (slate.json "telemetry_log", "telemetry_keep_days").
+    NotebookServer.TELEMETRY_LOG[] = get(_slate_config(), "telemetry_log", true) !== false
+    let k = get(_slate_config(), "telemetry_keep_days", 14)
+        k isa Integer && k > 0 && (NotebookServer.TELEMETRY_KEEP_DAYS[] = k)
+    end
     NotebookServer._CHECKER_PERSIST[] = function (on)
         cfg = _slate_config(); cfg["checker_on"] = on
         _persist_slate_config!(cfg)
@@ -1135,6 +1140,18 @@ function create_tools(GateTool::Type)
                 (smt !== nothing && smf !== nothing && smt != "0") &&
                     push!(parts, "host-mem $(hb(string(parse(Float64, smt) - parse(Float64, smf))))/$(hb(smt))")
                 isempty(parts) || println(io, "      stats: ", join(parts, " · "))
+                # The GPUs the worker's job can use (an array, so read as JSON rather than by pattern).
+                gpus = try; get(JSON.parse(stj), "gpus", Any[]); catch; Any[]; end
+                for gp in gpus
+                    gp isa AbstractDict || continue
+                    gb(x) = string(round(Float64(x) / 2^30; digits = 1))
+                    line = "gpu$(get(gp, "i", 0)) $(get(gp, "name", ""))  $(get(gp, "util", -1))%"
+                    get(gp, "mem_used", -1) >= 0 && (line *= " · $(gb(gp["mem_used"]))/$(gb(gp["mem_total"]))GB")
+                    get(gp, "temp", -1) >= 0 && (line *= " · $(gp["temp"])°C")
+                    get(gp, "power_w", -1) >= 0 && (line *= " · $(round(Int, gp["power_w"]))W")
+                    get(gp, "proc_mem", -1) > 0 && (line *= " · this worker $(gb(gp["proc_mem"]))GB")
+                    println(io, "      ", line)
+                end
             end
         end
         println(io, "\nReap one with worker(action=\"reap\", host=…, port=…); restart a notebook's own worker with worker(action=\"restart\", notebook=…).")
@@ -2549,7 +2566,7 @@ function create_tools(GateTool::Type)
     api(; topic::String = "")::String = NotebookServer.slate_api_reference(topic)   # SSOT (also feeds the prompt)
 
     """
-        add_cell(notebook, source; after="", kind="code", id="", tags="", run=true, background=false) -> String
+        add_cell(notebook, source; after="", kind="code", id="", tags="", run=true, background=false, run_locked=false) -> String
 
     Append a cell containing `source`, RUN it, and return its result (value/output,
     or the error to fix). A cell that outruns a ~30s grace window is PROMOTED to a background job
@@ -2571,6 +2588,8 @@ function create_tools(GateTool::Type)
     and free-form metadata. Add ONE cell at a time and read its result before the next — do not
     compose the whole notebook up front.
 
+    `run_locked=true` computes held locked cells upstream of the new cell, as for `run`.
+
     `run=false` lands the cell STALE without evaluating it. Default to leaving it alone: an added
     cell you haven't run is a cell you don't know works, and it returns no result to check. Reach
     for it only when adding several cells whose FIRST one can't run yet (a later cell defines what
@@ -2581,10 +2600,10 @@ function create_tools(GateTool::Type)
     `slate.api` for the reference before plotting or adding interactivity; their names are not in
     package docs.
     """
-    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "", tags::String = "", run::Bool = true, background::Bool = false)::String
+    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "", tags::String = "", run::Bool = true, background::Bool = false, run_locked::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
         res = agent_add_cell!(nb, source; after = after, kind = kind, id = id, tags = tags, run = run,
-                              background = background, caller = _caller())
+                              background = background, run_locked = run_locked, caller = _caller())
         return _surfaced(nb, "add_cell",
             Dict{String,Any}("source" => source, "after" => after, "kind" => kind, "id" => id, "tags" => tags, "run" => run), res)
     end
@@ -2603,7 +2622,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        edit_cell(notebook, cell, source; tags=nothing, run=true, background=false) -> String
+        edit_cell(notebook, cell, source; tags=nothing, run=true, background=false, run_locked=false) -> String
 
     Replace cell `cell`'s source, run it, and return its result. Use to fix a cell
     that errored, or to revise one in place. `tags` (optional, comma/space-separated) REPLACES the
@@ -2619,6 +2638,9 @@ function create_tools(GateTool::Type)
     that might be slow (auto-promotion covers that), and following it with a sleep defeats its purpose:
     if you have nothing to do meanwhile, you wanted the default. See `run` for the full rule.
 
+    `run_locked=true` computes the cell even if it is locked and unchanged, and the held locked cells
+    upstream of it, as for `run`.
+
     `run=false` writes the source and leaves the cell (and its dependents) STALE without running it.
     It is not a faster edit — it is an UNVERIFIED one: you get no result back, so you don't know the
     new source works, and the stale cells are yours to clear. Two cases want it: a BULK refactor
@@ -2633,20 +2655,26 @@ function create_tools(GateTool::Type)
                        # and the gate's arg coercion would have to turn an incoming "" into a
                        # `Union{Nothing,String}`. Taking it as Any and normalizing in the body keeps
                        # that off the dispatch boundary.
-                       tags = nothing, run::Bool = true, background::Bool = false)::String
+                       tags = nothing, run::Bool = true, background::Bool = false, run_locked::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
         t = tags === nothing ? nothing : String(tags)
         res = agent_edit_cell!(nb, cell, source; tags = t, run = run,
-                               background = background, caller = _caller())
+                               background = background, run_locked = run_locked, caller = _caller())
         return _surfaced(nb, "edit_cell",
             Dict{String,Any}("cell" => cell, "source" => source,
                              "tags" => something(t, ""), "run" => run), res)
     end
 
     """
-        run(notebook, cell; background=false) -> String
+        run(notebook, cell; background=false, run_locked=false) -> String
 
     Run cell `cell` and return its result; `cell` = "" recomputes all stale cells.
+
+    LOCKED CELLS compute only when run deliberately. `run` on a locked cell computes it, but a locked
+    cell UPSTREAM of it that has no stored result is held ("🔒 · ▶ to compute") and the cell waits on
+    it, as does a run of the whole notebook. `run_locked=true` says the run is deliberate: the held
+    locked cells it reaches (upstream of `cell`, or all of them for `cell=""`) compute too. Use it for
+    a planned sequence of expensive runs, not to clear a wait you did not expect.
 
     SLOW RUNS HANDLE THEMSELVES. A run that outruns a ~30s grace window is promoted to a background
     job automatically: you get a job id, collect the result with `check_eval(notebook, job)`, and it
@@ -2672,9 +2700,9 @@ function create_tools(GateTool::Type)
     `run=false` edits go through immediately. Collect with `check_eval` once you've genuinely run out
     of other work.
     """
-    function run_cell(notebook::String, cell::String; background::Bool = false)::String
+    function run_cell(notebook::String, cell::String; background::Bool = false, run_locked::Bool = false)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_run!(nb, cell; background = background, caller = _caller())
+        res = agent_run!(nb, cell; background = background, run_locked = run_locked, caller = _caller())
         return _surfaced(nb, "run", Dict{String,Any}("cell" => cell), res)
     end
 

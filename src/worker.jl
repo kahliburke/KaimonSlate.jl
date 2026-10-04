@@ -93,6 +93,8 @@ include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_sched
 include(joinpath(@__DIR__, "macroexpand.jl")) # _expand_cell_source — macro-aware deps (engine + worker)
 include(joinpath(@__DIR__, "termcook.jl"))  # cook_terminal — replay \r/cursor redraws (used by capture.jl)
 include(joinpath(@__DIR__, "record_display.jl")) # record_html — a NamedTuple value as a grid of fields (used by capture.jl)
+include(joinpath(@__DIR__, "gpustats.jl"))  # gpu_sample — the GPUs' load from NVML, for the telemetry sample
+include(joinpath(@__DIR__, "sysstats.jl"))  # sys_sample! — host, process and job figures from /proc and the cgroup
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
 include(joinpath(@__DIR__, "prepare.jl"))   # PrepareTracker — classify precompile output into structured status (shared w/ engine)
@@ -586,6 +588,12 @@ function _memo_restore(cellkey::String; unread::Vector{String} = String[],
     if MemoStore.restores_no_bindings(mf) && !isempty(writes)
         return miss("entry binds nothing but the cell defines $(join(writes, ", ")) — refusing an unfaithful restore")
     end
+    # An entry must bind every name the cell defines NOW. One that lacks a name (written for an older
+    # version of the cell, or synced from elsewhere) restores the output while leaving that name
+    # undefined, and a reader fails on it. A name the run itself left undefined is recorded as such.
+    let lacking = MemoStore.unbound_writes(mf, writes)
+        isempty(lacking) || return miss("entry does not bind $(join(lacking, ", ")), which the cell defines")
+    end
     # An entry that ELIDED a display object (stored the wire image, not the object — see
     # `_memo_store`) is only faithful while that name stays UNREAD. A reader added since means the
     # real object is needed → treat as a miss; the re-run re-stores WITH the object (its name is no
@@ -730,6 +738,7 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
     evict[] = (root, key)
     entries = Dict{String,Any}[]
     elided = Dict{String,Any}[]
+    absent = String[]        # declared writes this run left undefined (a branch not taken)
     # Read each declared write at the LATEST world age. A global the cell defines for the FIRST
     # time this run lives in a binding partition NEWER than this method's captured (older) world
     # age, so a naive `isdefined`/`getglobal` here would not observe it — and we'd wrongly skip
@@ -741,6 +750,7 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
         s = Symbol(nm)
         if !Base.invokelatest(isdefined, m, s)
             @info "slate memo: a declared write is undefined post-run — cached without it" key = cellkey name = nm
+            push!(absent, nm)
             continue
         end
         v = Base.invokelatest(getglobal, m, s)
@@ -805,6 +815,7 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
             "bindings" => entries,
             "wire" => Dict{String,Any}("codec" => "jls", "blob" => wh, "bytes" => wn))
         isempty(elided) || (mf["elided"] = elided)  # restore checks these against CURRENT readers
+        isempty(absent) || (mf["absent"] = absent)  # left undefined on purpose: not a gap in the entry
         MemoStore.write_manifest(root, key, mf)
         _memo_gc()
         if trace !== nothing
@@ -831,7 +842,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
                    memo_names::Vector{String}, memo_threshold::Float64,
                    memo_force::Bool = false, memo_always::Bool = false,
                    memo_unread::Vector{String} = String[], memo_safe::Vector{String} = String[];
-                   slate_ctx = nothing)
+                   memo_restore_only::Bool = false, slate_ctx = nothing)
     cid = replace(filename, r"^cell:" => "")
     # The decision record for this eval (see _MEMO_TRACE): filled in as the memo layer acts,
     # committed at every exit — `slate.memo_trace` reads it back.
@@ -859,6 +870,15 @@ function _eval_one(source::String, filename::String, memo_key::String,
         end
     elseif !isempty(memo_key) && memo_force
         tr["miss"] = "explicit ▶ run (memo_force) — restore skipped, fresh result re-stores"
+    end
+    # A locked cell asked to restore and nothing else: with no entry it is not run at all, and the hub
+    # holds it until its own ▶.
+    if memo_restore_only
+        tr["action"] = "held"
+        tr["note"] = "locked — restore only, " * String(get(tr, "miss", "no stored result"))
+        _trace_commit!(cid, tr)
+        return merge(_interrupted_wire(), (exception = nothing, memo = "absent",
+                                           memo_why = String(get(tr, "miss", "no stored result"))))
     end
     local r
     try
@@ -936,7 +956,7 @@ function __slate_eval(source::String; filename::String = "string",
                      memo_key::String = "", memo_names::Vector{String} = String[],
                      memo_threshold::Float64 = 0.0, memo_force::Bool = false,
                      memo_always::Bool = false, memo_unread::Vector{String} = String[],
-                     memo_safe::Vector{String} = String[],
+                     memo_safe::Vector{String} = String[], memo_restore_only::Bool = false,
                      ctx_region::String = "", ctx_notebook::String = "", ctx_docid::String = "",
                      ctx_regions::Vector{String} = String[],
                      ctx_attrs::Vector{String} = String[],
@@ -951,7 +971,7 @@ function __slate_eval(source::String; filename::String = "string",
                            ctx_docid)
     try
         return _eval_one(source, filename, memo_key, memo_names, memo_threshold, memo_force,
-                         memo_always, memo_unread, memo_safe; slate_ctx = ctx)
+                         memo_always, memo_unread, memo_safe; memo_restore_only, slate_ctx = ctx)
     finally
         lock(_CANCEL_LOCK) do; delete!(_RUNNING_TASKS, cid); end
         # A cell that loaded a package registers ITS gate tools during this eval (a model package's
@@ -1068,7 +1088,8 @@ function __slate_eval_batch(cells; run_id::String = "", npool::Int = 0)
                   Float64(_cell_get(c, "memo_threshold", 0.0)),
                   _cell_get(c, "memo_force", false) === true,
                   _cell_get(c, "memo_always", false) === true,
-                  Vector{String}(String[String(x) for x in _cell_get(c, "memo_unread", String[])]))
+                  Vector{String}(String[String(x) for x in _cell_get(c, "memo_unread", String[])]);
+                  memo_restore_only = _cell_get(c, "memo_restore_only", false) === true)
     end
     # Track each task so __slate_cancel can interrupt it; drop it once it finishes.
     onspawn = (id, t) -> lock(_CANCEL_LOCK) do; _RUNNING_TASKS[id] = t; end
@@ -2946,6 +2967,7 @@ function _telemetry_loop!(stats_path::String)
         (-1, -1)
     end
     lastc = cputime(); lastw = time(); memo = -1; tick = 0; spin = 0
+    sys = try; SysSampler(); catch; nothing; end
     lastsb, lastst = sysstat()
     while true
         sleep(2.0)
@@ -2985,10 +3007,17 @@ function _telemetry_loop!(stats_path::String)
         load1 = try; round(Sys.loadavg()[1]; digits = 2); catch; -1.0; end
         smt = try; Int(Sys.total_memory()); catch; 0; end
         smf = try; Int(Sys.free_memory()); catch; 0; end
+        gpus = try; gpu_sample_json(gpu_sample()); catch; "[]"; end
+        hpj = try
+            x = sys_sample!(sys)
+            ",\"host\":$(sys_json(x.host)),\"proc\":$(sys_json(x.proc)),\"job\":$(sys_json(x.job))"
+        catch
+            ""
+        end
         line = "{\"cpu\":$cpu,\"rss\":$(rssbytes()),\"gc_ms\":$gcms,\"evals\":$evals," *
                "\"running\":$running,\"warm\":\"$warm\",\"memo_bytes\":$memo," *
                "\"sys_cpu\":$syscpu,\"load1\":$load1,\"sys_mem_total\":$smt,\"sys_mem_free\":$smf," *
-               "\"last_eval_mono\":$(_LAST_EVAL_AT[])," *
+               "\"last_eval_mono\":$(_LAST_EVAL_AT[]),\"gpus\":$gpus$hpj," *
                "\"ts\":$(round(Int, time()))}"
         try; KaimonGate._publish_stream("slate_telemetry", line); catch; end
         isempty(stats_path) || try                          # roster sidecar — remote workers only

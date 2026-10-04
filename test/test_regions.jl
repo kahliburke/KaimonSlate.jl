@@ -402,6 +402,133 @@ const RE = KaimonSlate.ReportEngine
                 end
             end
 
+            @testset "facts: one description of the hub, published as a diff" begin
+                # A worker entry as a fact holds still between real changes: no telemetry, and the
+                # instant a duration counts from rather than the duration.
+                f = NS._worker_fact(Dict{String,Any}("side" => "gpu", "stats" => "{}", "clockSamples" => 9,
+                                                     "clockRttMs" => 1.234, "walltimeLeft" => 600, "idleFor" => 12))
+                @test !haskey(f, "stats") && !haskey(f, "clockSamples") && f["clockRttMs"] == 1.2
+                @test abs(f["until"] - (time() + 600)) < 2 && abs(f["lastUsed"] - (time() - 12)) < 2
+                @test !haskey(f, "walltimeLeft") && !haskey(f, "idleFor")
+
+                rep = RE.parse_report("#%% code id=c\n1\n")
+                nb = NS.LiveNotebook("factsnb", joinpath(mktempdir(), "factsnb.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                hub = (lock = ReentrantLock(), notebooks = Dict{String,Any}("factsnb" => nb))
+                prev = NS._FACTS_HUB[]
+                ch = Channel{String}(16)
+                lock(() -> push!(NS._FACT_LISTENERS, ch), NS._FACT_LISTENERS_LOCK)
+                try
+                    NS._FACTS_HUB[] = hub
+                    lock(() -> empty!(NS._FACTS), NS._FACTS_LOCK)
+                    r1 = NS.facts_refresh!()
+                    first_frame = KaimonSlate.JSON.parse(take!(ch))
+                    r2 = NS.facts_refresh!()                      # nothing changed: nothing sent
+                    quiet = !isready(ch)
+                    delete!(hub.notebooks, "factsnb")
+                    r3 = NS.facts_refresh!()
+                    gone = KaimonSlate.JSON.parse(take!(ch))
+                    @test haskey(first_frame["set"], "worker/factsnb/") && first_frame["rev"] == r1
+                    @test (r2, quiet) == (r1, true)
+                    @test r3 == r1 + 1 && "worker/factsnb/" in gone["del"]
+                    @test NS.facts_snapshot()["rev"] == r3
+                finally
+                    NS._FACTS_HUB[] = prev
+                    lock(() -> filter!(c -> c !== ch, NS._FACT_LISTENERS), NS._FACT_LISTENERS_LOCK)
+                end
+            end
+
+            @testset "a ▶ on a cell already running its code does not queue a second run" begin
+                rep = RE.parse_report("#%% code id=r\n1\n")
+                nb = NS.LiveNotebook("rerun", joinpath(mktempdir(), "rerun.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                nb.closed = true
+                c = only(rep.cells)
+                RE.mark_running!(c)
+                try
+                    NS.edit_cell!(nb, "r", c.source; force = true, run = false)
+                    @test c.state == RE.RUNNING && !("r" in get(NS._FORCE_RUN, "rerun", Set{String}()))
+                finally
+                    delete!(NS._FORCE_RUN, "rerun")
+                end
+            end
+
+            @testset "editing a locked cell without running it leaves no pending run" begin
+                rep = RE.parse_report("#%% code id=k locked\n1\n")
+                nb = NS.LiveNotebook("lockedit", joinpath(mktempdir(), "lockedit.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                nb.closed = true
+                pending() = "k" in get(NS._FORCE_RUN, "lockedit", Set{String}())
+                try
+                    NS.edit_cell!(nb, "k", "2"; run = false)
+                    quiet = pending()
+                    NS.edit_cell!(nb, "k", "3"; run = true)
+                    @test (quiet, pending()) == (false, true)
+                finally
+                    delete!(NS._FORCE_RUN, "lockedit")
+                end
+            end
+
+            @testset "held locked cells are re-armed once per worker connection" begin
+                rep = RE.parse_report("#%% code id=L locked region=gpu\n1\n")
+                nb = NS.LiveNotebook("rearm", joinpath(mktempdir(), "rearm.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                nb.closed = true                                  # no runner: the restale is what is under test
+                c = only(rep.cells)
+                hold!() = RE.mark_blocked!(c, NS.WAIT_LOCKED, "L")
+                k1, k2 = (conn = (name = "w1",),), (conn = (name = "w2",),)
+                hold!(); first_up = NS._rearm_locked!(nb, "gpu", k1)
+                hold!(); again = NS._rearm_locked!(nb, "gpu", k1)        # same worker: never again
+                state_again = c.state
+                new_worker = NS._rearm_locked!(nb, "gpu", k2)
+                @test (first_up, again, state_again, new_worker, c.state) == (1, 0, RE.BLOCKED, 1, RE.STALE)
+            end
+
+            @testset "each completed run is kept with when it started and ended" begin
+                rep = RE.parse_report("#%% code id=q\n1\n")
+                nb = NS.LiveNotebook("runlog", joinpath(mktempdir(), "runlog.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                c = only(rep.cells)
+                c.output = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "1", nothing, nothing, 250.0)
+                NS._run_log!(nb, "gpu", c)
+                r = only(NS._runs_since("runlog", "gpu", 0))
+                @test (r.id, round(r.t1 - r.t0; digits = 3), r.err) == ("q", 0.25, false)
+                @test isempty(NS._runs_since("runlog", "gpu", r.t1)) && isempty(NS._runs_since("runlog", "local", 0))
+            end
+
+            @testset "a kernel whose session was lost waits on that session" begin
+                k = RE.GateKernel(mktempdir())
+                @test NS._lost_session_of(k) == ""                    # never lost: nothing to wait on
+                NS._session_lost!(k, "lost-host.invalid")
+                waiting = NS._lost_session_of(k)
+                NS._session_regained!("lost-host.invalid")
+                @test (waiting, NS._lost_session_of(k)) == ("lost-host.invalid", "")
+            end
+
+            @testset "a region bring-up banner moves the version when it starts and ends" begin
+                rep = RE.parse_report("#%% code id=c region=gpu\n1\n")
+                nb = NS.LiveNotebook("narrate", joinpath(mktempdir(), "narrate.jl"), rep, RE.GateKernel(mktempdir()), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                v0 = nb.version
+                stop = NS._narrate_region_bringup!(nb, nb.kernel, "gpu", "gpu (node)")
+                started = (nb.version, get(rep.meta, "hydrating", false), get(rep.meta, "hydratingKind", ""),
+                           get(rep.meta, "hydratingSide", ""))
+                # A second cell arriving during the same bring-up leaves the banner to the first.
+                NS._narrate_region_bringup!(nb, nb.kernel, "gpu", "gpu (node)")()
+                stop()
+                @test (started, nb.version, haskey(rep.meta, "hydrating"), haskey(rep.meta, "hydratingSide")) ==
+                      ((v0 + 1, true, "remote", "gpu"), v0 + 2, false, false)
+                # No bring-up ahead: no banner and no version change.
+                NS._narrate_region_bringup!(nb, RE.InProcessKernel(), "gpu", "gpu (node)")()
+                @test nb.version == v0 + 2
+            end
+
             @testset "a running region cell is judged only by its own kernel" begin
                 rep = RE.parse_report("#%% code id=c region=gpu\nsleep(1)\n")
                 nb = NS.LiveNotebook("orphan", joinpath(mktempdir(), "orphan.jl"), rep, RE.GateKernel(mktempdir()), 1,
@@ -451,6 +578,123 @@ const RE = KaimonSlate.ReportEngine
                 NS._ensure_runner!(nb)
                 @test !get(NS._RUNNERS, nb.id, false)
                 @test NS._restale_region_cells!(nb, "gpu") == 0
+            end
+
+            @testset "a notebook's opening run is not shown as a bundle being rebuilt" begin
+                rep = RE.parse_report("#%% code id=c\n1\n")
+                nb = NS.LiveNotebook("hyd", joinpath(mktempdir(), "hyd.jl"), rep, RE.InProcessKernel(), 1,
+                                     String[], String[], ReentrantLock(), Channel{String}[],
+                                     ReentrantLock(), "", false, Dict{String,String}())
+                # Hydrating with a saved preview and no kind: a live notebook's run, not a bundle's "env".
+                rep.meta["hydrating"] = true; rep.meta["preview"] = Dict{String,Any}()
+                kind() = (s = NS.state_json(nb); (s isa AbstractString ? KaimonSlate.JSON.parse(s) : s)["hydratingKind"])
+                @test kind() == "run"
+                rep.meta["hydratingKind"] = "env"; @test kind() == "env"        # a bundle says so itself
+                rep.meta["hydratingKind"] = "boot"; @test kind() == "boot"
+            end
+
+            @testset "GPU readings ride the telemetry sample" begin
+                # The sampler, loaded as the worker loads it. Without NVML (no NVIDIA driver here) it
+                # reports no GPUs rather than failing; its JSON round-trips through the hub's parser.
+                G = Module(:GpuStatsT)
+                Base.invokelatest(Base.include, G, joinpath(pkgdir(KaimonSlate), "src", "gpustats.jl"))
+                gs = Base.invokelatest(G.gpu_sample)
+                @test gs isa Vector
+                g1 = (i = 0, name = "A \"100\"", util = 80, util_max = 97, mem_util = 30, mem_used = Int64(4) << 30,
+                      mem_total = Int64(40) << 30, temp = 70, power_w = 250.5, power_limit_w = 250.0,
+                      sm_mhz = 1215, sm_max_mhz = 1410, throttle = ["power cap"], proc_mem = Int64(1) << 30)
+                g2 = merge(g1, (i = 1, util = 40, mem_used = Int64(2) << 30, proc_mem = Int64(-1)))
+                line = "{\"cpu\":1.0,\"gpus\":" * Base.invokelatest(G.gpu_sample_json, [g1, g2]) * ",\"ts\":1}"
+                s = RE._parse_telemetry(line)
+                @test length(s.gpus) == 2 && s.gpus[1].name == "A \"100\"" && s.gpus[2].util == 40
+                @test NS._gpu_util(s) == 60.0 && NS._gpu_mem(s) == Int64(6) << 30
+                @test Base.invokelatest(G.gpu_sample_json, NamedTuple[]) == "[]"
+                # A sample without GPUs, or from a worker that predates them, charts as -1.
+                s0 = RE._parse_telemetry("{\"cpu\":1.0,\"ts\":1}")
+                @test isempty(s0.gpus) && NS._gpu_util(s0) == -1 && NS._gpu_mem(s0) == -1
+                @test occursin("\"gpus\":[", NS._stats_json(s))
+                @test s.gpus[1].throttle == ["power cap"] && s.gpus[1].sm_max_mhz == 1410 && s.gpus[1].util_max == 97
+                # A worker that sends no peak reads its utilization as the peak.
+                @test RE._parse_telemetry("{\"cpu\":1.0,\"gpus\":[{\"i\":0,\"util\":12}],\"ts\":1}").gpus[1].util_max == 12
+            end
+
+            @testset "host, process and job figures ride the sample and are logged per notebook" begin
+                S = Module(:SysStatsT)
+                Base.invokelatest(Base.include, S, joinpath(pkgdir(KaimonSlate), "src", "sysstats.jl"))
+                smp = Base.invokelatest(S.SysSampler)
+                Base.invokelatest(S.sys_sample!, smp); sleep(0.2)
+                x = Base.invokelatest(S.sys_sample!, smp)
+                @test x.proc["threads"] >= 1 && haskey(x.proc, "alloc_rate") && x.host["ncpu"] >= 1   # on any OS
+                Sys.islinux() || @test !haskey(x.host, "cores")                  # Linux-only figures are absent
+                line = "{\"cpu\":1.0,\"running\":[\"c1\"],\"host\":{\"cores\":[10.0,90.0,60.0],\"mem_avail\":5}," *
+                       "\"proc\":" * Base.invokelatest(S.sys_json, x.proc) * ",\"job\":{\"mem_max\":100,\"mem_cur\":40},\"ts\":1}"
+                s = RE._parse_telemetry(line)
+                @test s.host["cores"] isa Vector{Float64} && s.job["mem_max"] == 100
+                # The log keeps a summary of the cores, and which cells were running.
+                d = KaimonSlate.JSON.parse(NS._telemetry_line("gpu", s))
+                @test d["side"] == "gpu" && d["running"] == ["c1"] && !haskey(d["host"], "cores")
+                @test d["host"]["cores_n"] == 3 && d["host"]["cores_max"] == 90.0 && d["host"]["cores_busy"] == 2
+                # Written per notebook and day; an earlier day is compressed, one past retention removed.
+                withenv("KAIMONSLATE_CACHE_HOME" => mktempdir()) do
+                    rep = RE.parse_report("#%% code id=c1\n1\n")
+                    nb = NS.LiveNotebook("tel", joinpath(mktempdir(), "tel nb.jl"), rep, RE.InProcessKernel(), 1,
+                                         String[], String[], ReentrantLock(), Channel{String}[],
+                                         ReentrantLock(), "", false, Dict{String,String}())
+                    NS._telemetry_log!(nb, "gpu", s)
+                    dir = NS.telemetry_dir(nb)
+                    today = KaimonSlate.NotebookServer.Dates.format(KaimonSlate.NotebookServer.Dates.now(), "yyyy-mm-dd")
+                    @test length(readlines(joinpath(dir, today * ".jsonl"))) == 1
+                    old = joinpath(dir, "2000-01-01.jsonl"); write(old, "{}\n")
+                    prev = string(KaimonSlate.NotebookServer.Dates.Date(today) - KaimonSlate.NotebookServer.Dates.Day(1))
+                    write(joinpath(dir, prev * ".jsonl"), "{}\n")
+                    NS._telemetry_tidy!(dir, today)
+                    @test !isfile(old) && isfile(joinpath(dir, prev * ".jsonl.zst")) && !isfile(joinpath(dir, prev * ".jsonl"))
+                end
+            end
+
+            @testset "the watchdog judges by capacity and behaviour" begin
+                GiB = Int64(2)^30
+                function smp(t; cpu = 50.0, running = String[], memmax = -1, memcur = -1, avail = -1,
+                             total = 0, gpus = "[]", psi = 0.0, gc = 0)
+                    job = memmax > 0 ? ",\"job\":{\"mem_max\":$memmax,\"mem_cur\":$memcur}" : ""
+                    host = ",\"host\":{\"mem_avail\":$avail,\"psi_mem\":$psi}"
+                    run = "[" * join(("\"$r\"" for r in running), ",") * "]"
+                    x = RE._parse_telemetry("{\"cpu\":$cpu,\"gc_ms\":$gc,\"running\":$run,\"sys_mem_total\":$total," *
+                                            "\"gpus\":$gpus$job$host,\"ts\":1}")
+                    merge(x, (rcv = t,))
+                end
+                kinds(al) = sort!([(a.kind, a.sev) for a in al])
+                T = 10_000.0
+                hist(f; n = 30, dt = 2.0) = [f(T - (n - k) * dt) for k in 1:n]
+                # Big work on a big box: 10 GiB of 250 GiB, a core pinned by a running cell. Nothing to say.
+                h = hist(t -> smp(t; cpu = 100.0, running = ["c1"], avail = 240GiB, total = 250GiB))
+                @test isempty(NS._kernel_alerts("pm", h; now = T))
+                # The job's limit is what counts, not the node's.
+                h = hist(t -> smp(t; memmax = 56GiB, memcur = 54GiB, avail = 150GiB, total = 250GiB))
+                @test kinds(NS._kernel_alerts("pm", h; now = T)) == [("memory-low", "crit")]
+                h = hist(t -> smp(t; memmax = 56GiB, memcur = 50GiB))
+                @test kinds(NS._kernel_alerts("pm", h; now = T)) == [("memory-low", "warn")]
+                # Growing toward the limit fast enough to run out within a minute.
+                h = [smp(T - (30 - k) * 2.0; memmax = 56GiB, memcur = 20GiB + k * GiB) for k in 1:30]
+                al = NS._kernel_alerts("pm", h; now = T)
+                @test kinds(al) == [("memory-low", "crit")] && occursin("out in about", only(al).detail)
+                # Busy with nothing running; and a cell running with nothing happening.
+                h = hist(t -> smp(t; cpu = 97.0); n = 16)
+                @test kinds(NS._kernel_alerts("pm", h; now = T)) == [("busy-idle", "warn")]
+                h = hist(t -> smp(t; cpu = 0.5, running = ["c1"]); n = 200)
+                al = NS._kernel_alerts("pm", h; now = T, quiet_cells = ["c1"])
+                @test kinds(al) == [("no-activity", "info")] && only(al).scope == "cell" && only(al).target == "c1"
+                @test isempty(NS._kernel_alerts("pm", h; now = T))          # not a code cell: a job waits by design
+                # GPUs: nearly full memory warns; heat holding the clocks down is for information; the power
+                # cap of a GPU working flat out is neither.
+                g(used, thr) = "[{\"i\":0,\"util\":99,\"mem_used\":$used,\"mem_total\":$(40GiB),\"throttle\":[$thr]}]"
+                @test kinds(NS._kernel_alerts("pm", hist(t -> smp(t; gpus = g(39GiB, "")); n = 3); now = T)) == [("gpu-memory", "warn")]
+                @test kinds(NS._kernel_alerts("pm", hist(t -> smp(t; gpus = g(GiB, "\"thermal (hardware)\"")); n = 3); now = T)) ==
+                      [("gpu-throttle", "info")]
+                @test isempty(NS._kernel_alerts("pm", hist(t -> smp(t; gpus = g(GiB, "\"power cap\"")); n = 3); now = T))
+                # Silent while a cell runs.
+                h = hist(t -> smp(t; running = ["c1"]); n = 3)
+                @test kinds(NS._kernel_alerts("pm", h; now = T + 60)) == [("unreachable", "crit")]
             end
 
             @testset "the supervisor's remote work for a region runs one at a time" begin
@@ -1116,11 +1360,11 @@ const RE = KaimonSlate.ReportEngine
         saw = String[]
         prev = ST._ON_DROP[]
         try
-            ST.on_drop!(h -> push!(saw, h))
-            ST._announce_drop("login")
-            @test saw == ["login"]
+            ST.on_drop!((h, died) -> push!(saw, "$h:$died"))
+            ST._announce_drop("login"); ST._announce_drop("login", true)
+            @test saw == ["login:false", "login:true"]
             # A listener that throws must not break disconnecting — that would strand the session.
-            ST.on_drop!(_ -> error("boom"))
+            ST.on_drop!((_, _) -> error("boom"))
             @test ST._announce_drop("login") === nothing
         finally
             ST._ON_DROP[] = prev

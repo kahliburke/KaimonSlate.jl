@@ -17,7 +17,8 @@ import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(here, '..', '..', 'src', 'assets', 'js', 'model.js'), 'utf8');
 
-const NAMES = ['getWorkers', 'getWorker', 'workerList', 'applyWorkers', 'applyTelemetry', 'isHeld',
+const NAMES = ['getWorkers', 'getWorker', 'workerList', 'applyTelemetry', 'workersOf', 'sessions',
+               'session', 'hubNow', 'walltimeLeft', 'idleFor', 'isHeld',
                'isScheduled', 'allocState', 'releaseVerb', 'isAlive', 'workerState', 'workerStatus',
                'workerSeverity', 'getAllocation', 'loadAllocation', 'refreshAllocation',
                'rosterKey', 'mergeWorker', 'subscribe'];
@@ -125,41 +126,42 @@ const eq = (label, got, want) => {
   eq('roster key', M.rosterKey('gpu-box', 9300), 'gpu-box:9300');
 }
 
-// ── applying pushes ─────────────────────────────────────────────────────────────────────────────
+// ── the hub's facts ─────────────────────────────────────────────────────────────────────────────
 {
-  M.applyWorkers([{ side: '', status: 'ok' }, { side: 'gpu', status: 'ok', scheduler: 'slurm',
-                                                held: true, allocState: 'running', walltimeLeft: 600 }]);
-  eq('both workers land', Object.keys(M.getWorkers()).sort(), ['', 'gpu']);
+  M._setPageNotebook('nb1');
+  const T = Date.now() / 1000;
+  M._applyFrame({ t: 'facts', rev: 1, now: T, full: true, set: {
+    'worker/nb1/': { nb: 'nb1', side: '', status: 'ok' },
+    'worker/nb1/gpu': { nb: 'nb1', side: 'gpu', status: 'ok', scheduler: 'slurm', held: true,
+                        allocState: 'running', until: T + 600, idleRelease: 180, lastUsed: T - 12 },
+    'worker/nb2/': { nb: 'nb2', side: '', status: 'ok' },
+    'session/pm': { host: 'pm', connected: true, nbs: ['nb1'] },
+    'session/other': { host: 'other', connected: false, nbs: ['nb2'] } } });
+  eq('this notebook\'s workers land', Object.keys(M.getWorkers()).sort(), ['', 'gpu']);
+  eq('walltime is measured from the instant', Math.round(M.walltimeLeft(M.getWorker('gpu'))), 600);
+  eq('idle is measured from the last use', Math.round(M.idleFor(M.getWorker('gpu'))), 12);
+  eq('a notebook sees the hosts it uses', M.sessions('nb1').map(x => x.host), ['pm']);
+  eq('the home page sees every host', M.sessions('').map(x => x.host), ['other', 'pm']);
 
-  // A worker that has gone must GO. The list is complete, so a leftover key would keep a pill for a
-  // region that is no longer in the notebook.
-  M.applyWorkers([{ side: '', status: 'ok' }]);
+  // A worker that has gone must GO, or a pill lingers for a region the notebook no longer has.
+  M._applyFrame({ t: 'facts', rev: 2, now: T, set: {}, del: ['worker/nb1/gpu'] });
   eq('a dropped worker disappears', Object.keys(M.getWorkers()), ['']);
 
-  M.applyWorkers([{ side: '', status: 'ok' },
-                  { side: 'gpu', status: 'ok', scheduler: 'slurm', held: true,
-                    allocState: 'running', walltimeLeft: 600, idleRelease: 180, idleFor: 12 }]);
+  // A delta after a gap is not applied over a set it does not follow: the page reloads the whole set.
+  M._applyFrame({ t: 'facts', rev: 9, now: T, set: { 'session/pm': { host: 'pm', connected: false, nbs: ['nb1'] } }, del: [] });
+  eq('a delta after a gap is not applied', M.session('pm').connected, true);
 
-  // Telemetry merges: stats change, everything else about the worker stays.
-  M.applyTelemetry('gpu', '{"cpu":42}', undefined);
-  eq('stats update', M.getWorkers().gpu.stats, '{"cpu":42}');
-  eq('other fields survive a stats-only frame', M.getWorkers().gpu.walltimeLeft, 600);
+  // A sign-out changes the session fact, and everything reading it reads the new one.
+  M._applyFrame({ t: 'facts', rev: 3, now: T, set: { 'session/pm': { host: 'pm', connected: false, nbs: ['nb1'] } }, del: [] });
+  eq('a session change lands', M.session('pm').connected, false);
 
-  // THE subtle one. When the node goes back, the new `alloc` has no walltime and no idle counter.
-  // Merging field-by-field would leave the old ones in place and the panel would count down a
-  // walltime for a node that is gone — which is the bug this model was built to end.
-  M.applyTelemetry('gpu', '{"cpu":1}', { scheduler: 'slurm', held: false, allocState: 'none' });
-  const g = M.getWorkers().gpu;
-  eq('held goes false', g.held, false);
-  eq('walltime is cleared, not stale', g.walltimeLeft, undefined);
-  eq('idle counter is cleared', g.idleFor, undefined);
-  eq('idleRelease is cleared', g.idleRelease, undefined);
-  eq('the worker itself survives', g.status, 'ok');
-  eq('and it is no longer held', M.isHeld(g), false);
-
-  // A frame for a worker we have never heard of is ignored rather than inventing a half-record with
-  // no host, port or status for the pills to render.
-  M.applyTelemetry('ghost', '{"cpu":1}', undefined);
+  // Telemetry merges into a worker's record and never into the facts.
+  M.applyTelemetry('', '{"cpu":42}');
+  eq('stats update', M.getWorker('').stats, '{"cpu":42}');
+  eq('the fact is untouched', M.getFacts()['worker/nb1/'].stats, undefined);
+  M._applyFrame({ t: 'facts', rev: 4, now: T, set: { 'worker/nb1/': { nb: 'nb1', side: '', status: 'degraded' } }, del: [] });
+  eq('stats survive a fact change', M.getWorker('').stats, '{"cpu":42}');
+  M.applyTelemetry('ghost', '{"cpu":1}');
   eq('unknown side is ignored', M.getWorkers().ghost, undefined);
 }
 

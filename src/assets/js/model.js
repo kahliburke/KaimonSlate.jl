@@ -27,8 +27,10 @@
 (function () {
   'use strict';
 
-  // side -> worker record.
+  // side -> worker record, for THIS page's notebook: derived from the facts below, plus the latest
+  // telemetry sample for each (which is a measurement, not a fact, and arrives on its own stream).
   let _workers = {};
+  const _stats = {};
   // region -> payload | null (asking) | undefined (never asked)
   let _allocations = {};
   const _subs = [];
@@ -40,40 +42,105 @@
   const getWorker = (side) => _workers[side || ''];
   const workerList = () => Object.values(_workers);
 
-  // Replace the whole set. This is what `{t:'workers'}` and `/api/state` carry: a complete list, so a
-  // worker that has gone must disappear rather than linger from the previous set.
-  function applyWorkers(list) {
-    if (!Array.isArray(list)) return;
+  // ── the hub's facts ───────────────────────────────────────────────────────────────────────────
+  // The one description of the hub's state (server_facts.jl): `worker/<notebook>/<side>` and
+  // `session/<host>`, kept current over one stream for the whole page. Everything below that shows a
+  // worker or a session reads it, and nothing else holds a copy. Instants, not durations: `hubNow()` is
+  // the hub's clock as this page reckons it, so a walltime or an idle stretch is measured here.
+  let _facts = {};
+  let _rev = -1;
+  let _offset = 0;                       // hub seconds minus this machine's
+  let _es = null;
+  const hubNow = () => Date.now() / 1000 + _offset;
+  const getFacts = () => _facts;
+
+  // The notebook this page shows ('' on the home page): `/n/<id>` is the notebook route.
+  let _pageNb = null;                   // set only by the node tests, which have no location
+  const pageNotebook = () => {
+    if (_pageNb !== null) return _pageNb;
+    const m = typeof location !== 'undefined' && /^\/n\/([^/]+)/.exec(location.pathname);
+    return m ? decodeURIComponent(m[1]) : '';
+  };
+  const _setPageNotebook = (nb) => { _pageNb = nb; _rebuildWorkers(); };
+
+  // A worker fact as components read it: the fact, its latest sample, and its clocks.
+  function _workerRecord(f) {
+    const w = Object.assign({}, f);
+    const st = _stats[w.side || ''];
+    if (st !== undefined) w.stats = st;
+    return w;
+  }
+
+  /** The workers of notebook `nb`, each as `_workerRecord`. */
+  const workersOf = (nb) => Object.keys(_facts)
+    .filter(k => k.startsWith('worker/' + nb + '/')).map(k => _workerRecord(_facts[k]));
+
+  /** Every host there is something to sign in to; given `nb`, only the hosts that notebook uses. */
+  const sessions = (nb) => Object.keys(_facts).filter(k => k.startsWith('session/')).map(k => _facts[k])
+    .filter(s => !nb || (s.nbs || []).includes(nb)).sort((a, b) => a.host.localeCompare(b.host));
+  const session = (host) => _facts['session/' + host];
+
+  function _rebuildWorkers() {
+    const nb = pageNotebook();
     const next = {};
-    for (const w of list) if (w && typeof w.side === 'string') next[w.side] = w;
+    if (nb) for (const w of workersOf(nb)) next[w.side || ''] = w;
     _workers = next;
-    _notify();
   }
 
-  // Everything `_region_alloc_facts` may contribute. Listed so a stale one can be cleared: these are
-  // the fields whose ABSENCE is meaningful, and a leftover from an earlier frame reads as current.
-  const ALLOC_KEYS = ['scheduler', 'held', 'allocState', 'walltimeLeft',
-                      'idleRelease', 'idleWarn', 'idleFor'];
-
-  // A telemetry frame: fresh stats, and the allocation clocks the hub recomputes on every sample.
-  // MERGED rather than replacing, because a frame is about one worker and carries only what changed.
-  //
-  // `alloc` is the whole allocation answer or absent; when present it REPLACES the previous one
-  // rather than merging into it, so a field that stops applying (the walltime of a node that just
-  // went back) actually goes away instead of persisting from the last frame that had it.
-  function applyTelemetry(side, stats, alloc) {
-    side = side || '';
-    const prev = _workers[side];
-    if (!prev) return;                     // a worker we don't know yet; the next list push carries it
-    const next = Object.assign({}, prev);
-    if (stats !== undefined) next.stats = stats;
-    if (alloc && typeof alloc === 'object') {
-      for (const k of ALLOC_KEYS) delete next[k];
-      Object.assign(next, alloc);
+  function _applyFrame(m) {
+    if (!m || m.t !== 'facts') return;
+    if (typeof m.now === 'number') _offset = m.now - Date.now() / 1000;
+    if (m.full) _facts = Object.assign({}, m.set || {});
+    else if (m.rev !== _rev + 1) return _resync();     // a delta was missed: load the whole set
+    else {
+      const next = Object.assign({}, _facts);
+      for (const k of Object.keys(m.set || {})) next[k] = m.set[k];
+      for (const k of (m.del || [])) delete next[k];
+      _facts = next;
     }
-    _workers = Object.assign({}, _workers, { [side]: next });
+    _rev = m.rev;
+    _rebuildWorkers();
     _notify();
   }
+
+  function _resync() {
+    return fetch('/api/facts').then(r => r.json()).then(_applyFrame).catch(() => {});
+  }
+
+  // One stream for the page. The hub sends the whole set when it opens (and again after a
+  // reconnect), then each change. EventSource reconnects by itself.
+  function connectFacts() {
+    if (_es || typeof EventSource === 'undefined') return;
+    _es = new EventSource('/api/facts/events');
+    _es.onmessage = (e) => { try { _applyFrame(JSON.parse(e.data)); } catch (_) {} };
+  }
+
+  // A telemetry sample for one of this page's workers. Merged into its record, never into the facts.
+  function applyTelemetry(side, stats) {
+    side = side || '';
+    _stats[side] = stats;
+    if (!_workers[side]) return;
+    _workers = Object.assign({}, _workers, { [side]: Object.assign({}, _workers[side], { stats }) });
+    _notify();
+  }
+
+  // A worker fact in the shape a host roster lists a worker (`/api/remote-workers`): its manifest built
+  // from the hub's record, so a view merging hub kernels with host rosters reads both the same way.
+  function asRosterEntry(f) {
+    const mf = { nbid: f.nb, notebook: f.notebookName || '', side: f.side || 'local', region: f.side || '',
+                 transport: f.transport || '', project: f.env || '', port: String(f.port || ''),
+                 stream_port: f.streamPort ? String(f.streamPort) : '', pid: f.pid ? String(f.pid) : '',
+                 path: f.path || '' };
+    const e = Object.assign({}, f, { host: f.host || 'local', region: f.side || '', manifest: JSON.stringify(mf) });
+    if (f.viaHost) e.viaHost = f.viaHost;
+    return e;
+  }
+
+  // ── clocks, from the instants the facts carry ─────────────────────────────────────────────────
+  // Seconds of walltime left on a worker's allocation, or -1 when it has none.
+  const walltimeLeft = (w) => (w && +w.until > 0) ? Math.max(0, +w.until - hubNow()) : -1;
+  // Seconds since the region was last used, or -1 when it does not release on idle.
+  const idleFor = (w) => (w && +w.lastUsed > 0) ? Math.max(0, hubNow() - +w.lastUsed) : -1;
 
   // ── the questions components used to answer for themselves ────────────────────────────────────
   // Each of these has exactly one definition now, and each is a plain read of what the hub said. They
@@ -113,6 +180,29 @@
   // expression existed, one of which checked `connected` first and so ranked a degraded worker as
   // healthy whenever its wire happened to be up.
   const workerStatus = (w) => (!w ? 'none' : (w.status || (w.connected ? 'ok' : 'connecting')));
+
+  // Why a worker is not well, in words. The hub sends a code; the words are here, once, for every
+  // place that shows a worker. `note` is free text for the one case that is commentary rather than
+  // state: what a worker being started is doing.
+  function workerNote(w) {
+    if (!w) return '';
+    switch (w.noteCode) {
+      case 'allocation_ended':
+        return 'the allocation on ' + (w.noteHost || 'the compute node') + ' ended — the next run requests a new node';
+      case 'not_signed_in':
+        return 'not signed in to ' + (w.noteHost || 'the host') + ' — use the padlock at the top of the page';
+      case 'unresponsive':
+        return 'worker stopped responding — press ▶ or re-run to reconnect';
+      case 'no_reply': {
+        // Counted here, from when it stopped answering: the hub says when, not for how long.
+        const el = Math.max(0, Math.round(hubNow() - (+w.unresponsiveSince || 0)));
+        return w.remote ? 'no liveness reply for ' + el + 's — auto-drops & reconnects at ' + (w.graceS || 0) + 's'
+                        : 'no liveness reply for ' + el + 's — the worker may be wedged; interrupt it or reboot the worker';
+      }
+      default:
+        return w.note || '';
+    }
+  }
 
   const SEVERITY = { disconnected: 4, degraded: 3, connecting: 2, none: 1, ok: 0 };
   const workerSeverity = (w) => (SEVERITY[workerStatus(w)] || 0);
@@ -169,14 +259,19 @@
   const model = {
     subscribe,
     regionKind, regionIcon, regionLabel,
-    getWorkers, getWorker, workerList, applyWorkers, applyTelemetry,
+    getWorkers, getWorker, workerList, applyTelemetry,
+    getFacts, workersOf, sessions, session, hubNow, connectFacts, pageNotebook,
+    walltimeLeft, idleFor, asRosterEntry, _applyFrame, _setPageNotebook,
     isHeld, isScheduled, allocState, releaseVerb,
-    isAlive, workerState, workerStatus, workerSeverity,
+    isAlive, workerState, workerStatus, workerSeverity, workerNote,
     getAllocation, loadAllocation, refreshAllocation,
     rosterKey, mergeWorker,
-    ALLOC_KEYS,
   };
 
-  if (typeof window !== 'undefined') window.slateModel = model;
+  if (typeof window !== 'undefined') {
+    window.slateModel = model;
+    // An app's reader is not shown workers or sessions, and the hub does not serve it the facts.
+    if (!(window.__SLATE_APP__ && window.__SLATE_APP__.on)) connectFacts();
+  }
   if (typeof globalThis !== 'undefined') globalThis.slateModel = model;   // for the node tests
 })();

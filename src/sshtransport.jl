@@ -565,7 +565,7 @@ function _channel_dead!(s::Session, why::AbstractString)
     # Off this task: `_channel_dead!` runs ON the session's owner, and the drop listener reaches
     # back into the transport to discard what was riding the session. Announcing inline would have
     # the owner waiting on work only the owner can do.
-    dropped && @async _announce_drop(key)
+    dropped && @async _announce_drop(key, true)
     return nothing
 end
 
@@ -864,6 +864,7 @@ function _open!(s::Session, ask)
     end
     _authed(s) || error("$(s.ep.alias): authentication did not complete")
     s.alive = true
+    errormonitor(Threads.@spawn _announce_connect(s.ep.alias))
     # Keep the session warm. Between runs a region holds nothing but an idle control session, and an
     # idle session dies to the server's own timeout or a NAT dropping the flow - after which the only
     # way back is an interactive second factor. Configuring an interval here and sending on a timer
@@ -1078,7 +1079,7 @@ function session(host::AbstractString; ask)
         try; close(o.req); catch; end
     end
     # On a task of its own: the listener takes the hub's locks, and a caller may hold one of them.
-    replaced[] && errormonitor(Threads.@spawn _announce_drop(key))
+    replaced[] && errormonitor(Threads.@spawn _announce_drop(key, true))
     return s
 end
 
@@ -1157,13 +1158,34 @@ end
 # half-open session first.
 const _ON_DROP = Ref{Any}(nothing)
 
-"Call `f(host)` whenever a session for `host` is dropped or replaced, so callers can discard what rode it."
+"""
+    on_drop!(f)
+
+Call `f(host, died)` whenever a session for `host` is dropped or replaced, so callers can discard what
+rode it. `died` is true when the transport failed under it, false when it was closed on purpose (a
+sign-out, or an interactive sign-in clearing the old session first).
+"""
 on_drop!(f) = (_ON_DROP[] = f; nothing)
 
-function _announce_drop(host::AbstractString)
+function _announce_drop(host::AbstractString, died::Bool = false)
     f = _ON_DROP[]
     f === nothing && return nothing
-    try; f(String(host)); catch; end     # a listener's failure must never break disconnecting
+    try; f(String(host), died); catch; end     # a listener's failure must never break disconnecting
+    return nothing
+end
+
+# Told whenever a session for a host is signed in, by whatever signed it in: a person at the padlock,
+# a key sign-in in the background, or a command that reconnected on its own. What shows a host's
+# sign-in state updates from it instead of waiting for something else to.
+const _ON_CONNECT = Ref{Any}(nothing)
+
+"Call `f(host)` whenever a session for `host` has signed in."
+on_connect!(f) = (_ON_CONNECT[] = f; nothing)
+
+function _announce_connect(host::AbstractString)
+    f = _ON_CONNECT[]
+    f === nothing && return nothing
+    try; f(String(host)); catch; end
     return nothing
 end
 

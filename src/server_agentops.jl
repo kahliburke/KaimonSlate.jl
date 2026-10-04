@@ -699,11 +699,31 @@ return id + result. One file write (build the cell with its source up front) so 
 async file-watcher can't race the intermediate empty-cell state.
 `run=false` lands the cell STALE without evaluating (see `agent_edit_cell!` for when that is
 actually wanted — it is the exception, not the cheap default)."
+# `run_locked`: the caller says this run is deliberate, so the locked cells it reaches COMPUTE instead of
+# only restoring, as each would on its own ▶. For `id` that is the cell and the locked cells upstream
+# of it that hold no result; for "" it is every such locked cell. A locked cell that is FRESH keeps its
+# result, except `id` itself when `self` (an edit asking to compute it). Called under `nb.lock`; the
+# runner picks them up in order.
+function _force_locked!(nb::LiveNotebook, id::AbstractString; self::Bool = false)
+    frc = get!(Set{String}, _FORCE_RUN, nb.id)
+    reach = isempty(id) ? Set{String}(c.id for c in nb.report.cells) :
+                          push!(_upstream_closure(nb.report, String(id)), String(id))
+    n = 0
+    for c in nb.report.cells
+        (c.id in reach && :locked in c.flags && c.state != RUNNING) || continue
+        (c.state != FRESH || (self && c.id == id)) || continue
+        ReportEngine.restale!(c)
+        push!(frc, c.id)
+        n += 1
+    end
+    return n
+end
+
 function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
                          after::AbstractString = "", kind::AbstractString = "code",
                          id::AbstractString = "", tags::AbstractString = "",
                          caller::AbstractString = "", expected_version::Int = -1,
-                         run::Bool = true, background::Bool = false)
+                         run::Bool = true, background::Bool = false, run_locked::Bool = false)
     rej = nothing; errmsg = nothing
     cid = lock(nb.lock) do
         rej = _guard_commit(nb; caller = caller, expected_version = expected_version)
@@ -726,6 +746,7 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
         # announce=true → push the new cell to the browser BEFORE eval, so a long-running
         # added cell is visible (stale) immediately instead of only when its eval finishes.
         _commit_structure!(nb, i + 1; announce = true, run = run)
+        (run && run_locked) && _force_locked!(nb, cell.id)
         return cell.id
     end
     errmsg === nothing || return "⛔ $errmsg"
@@ -758,7 +779,7 @@ at a time is the DEFAULT, and wanting the result back sooner is not a reason to 
 function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString;
                           tags::Union{Nothing,AbstractString} = nothing, caller::AbstractString = "",
                           expected_version::Int = -1,
-                          run::Bool = true, background::Bool = false)
+                          run::Bool = true, background::Bool = false, run_locked::Bool = false)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     rej = lock(nb.lock) do
         r = _guard_commit(nb; caller = caller, expected_version = expected_version)
@@ -773,6 +794,7 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
         # could add `nocache` but never take it back off).
         tags === nothing || set_cell_tags!(nb, id, tags)
         edit_cell!(nb, id, source; announce = true, run = run)   # show the edited source before its eval finishes
+        (run && run_locked) && _force_locked!(nb, id; self = true)
         return nothing
     end
     rej === nothing || return rej
@@ -809,7 +831,7 @@ end
 "Run one cell (or recompute all stale if `id` empty); return the result(s)."
 function agent_run!(nb::LiveNotebook, id::AbstractString = "";
                     caller::AbstractString = "", expected_version::Int = -1,
-                    background::Bool = false)
+                    background::Bool = false, run_locked::Bool = false)
     rej = lock(nb.lock) do
         r = _guard_commit(nb; caller = caller, expected_version = expected_version)
         r === nothing || return r
@@ -823,7 +845,9 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
         # against unchanged upstream sources would resurrect pre-re-run results.
         if !isempty(id)
             i = findfirst(c -> c.id == id, nb.report.cells)
-            if i !== nothing
+            # Already running: the run in flight is the answer, so this waits for it rather than
+            # queuing an identical run behind it.
+            if i !== nothing && nb.report.cells[i].state != RUNNING
                 frc = get!(Set{String}, _FORCE_RUN, nb.id)
                 for did in dependents_of(nb.report, Set([id]))   # closure includes `id` itself
                     j = findfirst(c -> c.id == did, nb.report.cells)
@@ -831,14 +855,16 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
                     c = nb.report.cells[j]
                     # A locked dependent stays frozen against this cascade too — only its OWN
                     # ▶ (did == id) may re-run it, so the played cell itself bypasses the guard.
+                    # One with nothing frozen yet is re-run unforced, so it only restores.
                     ok = did == id ? (c.state = STALE; true) : ReportEngine.restale!(c)
                     ok || continue
-                    push!(frc, String(did))
+                    (did == id || !(:locked in c.flags)) && push!(frc, String(did))
                 end
             end
         else
             _restale_blocked!(nb)   # a run of the notebook takes up the cells left waiting
         end
+        run_locked && _force_locked!(nb, id)
         return nothing
     end
     rej === nothing || return rej
@@ -1214,8 +1240,8 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
         _cell_region(c) == had_region || ReportEngine.restale!(c)
         now_locked = :locked in c.flags
         if now_locked && !had_locked
-            # `locked` just turned ON. A STALE cell just self-captures on its next ordinary run
-            # (`_eval_one!` persists + pins the key it freezes on). A FRESH cell needs an explicit
+            # `locked` just turned ON. A STALE cell has nothing to freeze yet and computes on its own
+            # ▶ (`_eval_one!` persists + pins the key it freezes on). A FRESH cell needs an explicit
             # (surgical, non-cascading — no dependents involved) force-run so its CURRENT result
             # actually lands in the durable store under a pinned key, not just the in-memory value
             # `c.output` (which a restart would lose): `always` in `_eval_one!` guarantees the

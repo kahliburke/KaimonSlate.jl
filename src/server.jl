@@ -1027,6 +1027,31 @@ function _stats_record!(nb::LiveNotebook, cell)
     return nothing
 end
 
+# Every completed cell run, per notebook and kernel side (`_kernel_side_label`), for the telemetry
+# view's timeline: when each run actually started and ended. The worker's samples, two seconds apart,
+# miss a short run entirely. A ring per kernel, kept for the session like the stats above.
+const _RUN_LOG = Dict{Tuple{String,String},Vector{Any}}()
+const _RUN_LOG_LOCK = ReentrantLock()
+const _RUN_LOG_MAX = 2000
+
+function _run_log!(nb::LiveNotebook, side::AbstractString, cell)
+    out = cell.output; out === nothing && return nothing
+    t1 = time()
+    r = (id = String(cell.id), t0 = t1 - out.duration_ms / 1000, t1 = t1, memo = String(out.memo),
+         err = out.exception !== nothing)
+    lock(_RUN_LOG_LOCK) do
+        v = get!(Vector{Any}, _RUN_LOG, (nb.id, String(side)))
+        push!(v, r)
+        length(v) > _RUN_LOG_MAX && popfirst!(v)
+    end
+    return nothing
+end
+
+# The runs on one kernel side that ended after `since`.
+_runs_since(nbid::AbstractString, side::AbstractString, since::Real) = lock(_RUN_LOG_LOCK) do
+    Any[r for r in get(_RUN_LOG, (String(nbid), String(side)), Any[]) if r.t1 > since]
+end
+
 # The JSON view for cell_json["stats"] (nothing when the cell has never completed). Percentiles are
 # over the recent ring (last ≤64 computes) — labeled "recent", not lifetime.
 function _cell_stats_json(nbid::AbstractString, cid::AbstractString)
@@ -1101,6 +1126,9 @@ const WAIT_CONNECTING = "connecting"
 const WAIT_NOT_REQUESTED = "not_requested"
 const WAIT_NEEDS_PREPARE = "needs_prepare"
 const WAIT_PREPARING = "preparing"
+# A locked cell with no frozen result to restore here. Only its own ▶ computes it; `blocked_host`
+# carries its id, so a cell downstream says which locked cell it waits on.
+const WAIT_LOCKED = "locked"
 
 # Why a notebook's first worker on region `r` has to go through preparing it, or `""` when it need not.
 # The machine's answer for this project on the kind of node the region gets (`env_readiness`), the same
@@ -1216,10 +1244,10 @@ function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString; rebuild_
                       end
                   end
                   k = _region_kernel!(nb, String(r.name); preparing = true)
-                  try; _workers_push!(nb); catch; end          # the pill shows it starting
+                  try; facts_changed!(); catch; end          # the pill shows it starting
                   ReportEngine.prepare!(k, nb.report; explicit = true)
                   k.conn === nothing && error("the worker did not connect")
-                  try; _workers_push!(nb); catch; end          # …and up, before the load
+                  try; facts_changed!(); catch; end          # …and up, before the load
                   nothing
               end,
               run = code -> begin
@@ -1232,7 +1260,7 @@ function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString; rebuild_
               end)
     # The cells say what they are waiting for from the moment it starts, not what they last ran into.
     _mark_region_preparing!(nb, r.name)
-    try; _workers_push!(nb); catch; end
+    try; facts_changed!(); catch; end
     Threads.@spawn try
         ReportEngine.prepare_region!(r.name; project = nb.path, keep_node = true, worker, rebuild_sysimage,
                                      node = r.scheduler === :none ? nothing : true)
@@ -1241,7 +1269,7 @@ function _prepare_for_notebook!(nb::LiveNotebook, name::AbstractString; rebuild_
     catch e
         ReportEngine.prepare_failed_to_start!(r.name, e)
     finally
-        try; _workers_push!(nb); catch; end
+        try; facts_changed!(); catch; end
     end
     return nothing
 end
@@ -1836,6 +1864,27 @@ function _restale_region_cells!(nb::LiveNotebook, name::AbstractString)
     return n
 end
 
+# Kernels whose wire went down with a LOST ssh session (not a sign-out), with that session's host.
+# Their next run waits on a key sign-in to the host instead of failing on the missing session.
+const _LOST_SESSION = WeakKeyDict{Any,String}()
+const _LOST_SESSION_LOCK = ReentrantLock()
+
+_session_lost!(k, host::AbstractString) = lock(_LOST_SESSION_LOCK) do; _LOST_SESSION[k] = String(host); end
+_session_regained!(host::AbstractString) = lock(_LOST_SESSION_LOCK) do
+    for k in [k for (k, h) in _LOST_SESSION if h == host]; delete!(_LOST_SESSION, k); end
+end
+
+# The host whose session `k` is waiting on, or "" when it is not waiting on one: never lost, wire
+# back up, or the session already open again.
+function _lost_session_of(k)
+    (k isa ReportEngine.GateKernel && k.conn === nothing) || return ""
+    h = lock(_LOST_SESSION_LOCK) do; get(_LOST_SESSION, k, ""); end
+    isempty(h) && return ""
+    ReportEngine.Sweep.connected(h) || return h
+    _session_regained!(h)
+    return ""
+end
+
 # Key-only connects in flight, per host, with the regions waiting on each. One attempt serves every
 # region on the host, and all of them are re-run when it ends.
 const _CONNECTING = Dict{String,Vector{Tuple{Any,String}}}()
@@ -1853,6 +1902,7 @@ function _connect_in_background!(name::AbstractString, nb::Union{LiveNotebook,No
     Threads.@spawn begin
         ok = try; ReportEngine.Sweep.connect!(h); catch; false; end
         ReportEngine._rlog("region: key-only connect to $h " * (ok ? "succeeded" : "failed — waiting for a sign-in"))
+        ok && _session_regained!(h)
         waiters = lock(_CONNECTING_LOCK) do; pop!(_CONNECTING, h, Tuple{Any,String}[]); end
         # Re-run whoever was waiting: connected, they queue for a node; refused, the failure just
         # recorded turns their wait into a sign-in. A failure that recorded nothing (a login someone
@@ -1885,7 +1935,7 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
             ReportEngine._rlog("region[$name]: queued for a node on $(r.host) - waiting for the scheduler to grant one")
             if nb !== nothing
                 try; _broadcast(nb, "bringup:region '$name': queued for a node on $(r.host)…"); catch; end
-                try; _workers_push!(nb); catch; end   # the pill says "queued" NOW, not once it lands
+                try; facts_changed!(); catch; end   # the pill says "queued" NOW, not once it lands
             end
             _, alloc = ReportEngine.region_place!(r; wait_s = _alloc_wait_s())
             if !ReportEngine._region_holds_node(r)
@@ -1920,7 +1970,7 @@ function _place_in_background!(name::AbstractString, nb::Union{LiveNotebook,Noth
         nb === nothing || (try; _broadcast(nb, "bringup:region '$name': could not get a node — $(first(sprint(showerror, e), 120))"); catch; end)
     finally
         lock(_PLACING_LOCK) do; delete!(_PLACING, String(name)); end
-        nb === nothing || (try; _workers_push!(nb); catch; end)   # …and stops saying it afterwards
+        nb === nothing || (try; facts_changed!(); catch; end)   # …and stops saying it afterwards
     end
     return nothing
 end
@@ -1942,6 +1992,14 @@ function _region_kernel!(nb::LiveNotebook, name::String; preparing::Bool = false
         (!preparing && ReportEngine.prepare_running(r.name)) && throw(RegionWaiting(WAIT_PREPARING, r.host, r.name))
         at = ReportEngine.region_where(r)
         k = get(_REGION_KERNELS, (nb.id, name), nothing)
+        # A kernel whose wire went down with a lost ssh session is reached again through a new one. A
+        # key sign-in is tried once, in the background (this runs under `nb.lock`), for every cell
+        # waiting on the host, and they are re-run when it ends.
+        if (sh = _lost_session_of(k)) != ""
+            ReportEngine.Sweep.connect_failed_recently(sh) && throw(RegionWaiting(WAIT_NOT_SIGNED_IN, sh))
+            _connect_in_background!(name, nb, sh)
+            throw(RegionWaiting(WAIT_CONNECTING, sh))
+        end
         # A cached kernel's target names the node it runs on and, on a scheduler region, the job that
         # node was granted in. Either can go stale: the next allocation may land on another node, or on
         # the same one (a single-node cluster grants its only node every time, so the name alone cannot
@@ -2182,6 +2240,10 @@ function restart_region!(nb::LiveNotebook, side::AbstractString)
             (cell.kind == CODE && _cell_side(nb, cell) == side) || continue
             cell.state = STALE; push!(ids, cell.id)
         end
+        # The re-run below serves no ▶: one still pending on these cells would compute a locked cell
+        # nobody just asked for (see `restart_kernel!`).
+        frc = get(_FORCE_RUN, nb.id, nothing)
+        frc === nothing || setdiff!(frc, ids)
     end
     ReportEngine._rlog("region: restart '$side' for $(nb.id) — killed worker, restaled $(length(ids)) cell(s)")
     @async begin
@@ -2310,11 +2372,12 @@ function _kernel_proc_dead(k)
     return try; !process_running(p); catch; false; end
 end
 
-# A wire severed by a sign-out is not an unresponsive worker, and must not be reported as one: the
-# worker on the far side is very likely fine, nothing is wrong with it, and the fix is a sign-in
-# rather than a restart. So it is dropped WITHOUT the unresponsive clock — no countdown, no "stopped
-# responding" — and held, so it reconnects on an explicit run once there is a session again.
-function _drop_signed_out_wire!(nb::LiveNotebook, k, host::AbstractString)
+# A wire severed with its ssh session is not an unresponsive worker, and must not be reported as one:
+# the worker on the far side is very likely fine. So it is dropped WITHOUT the unresponsive clock — no
+# countdown, no "stopped responding". `hold` is for a deliberate sign-out: the kernel then reconnects
+# only on an explicit run after a sign-in. A session that died under it is not held, so the next run
+# signs in again with a key where it can and re-attaches to the same worker.
+function _drop_signed_out_wire!(nb::LiveNotebook, k, host::AbstractString; hold::Bool = true)
     delete!(_KERNEL_UNRESPONSIVE_SINCE, k)     # never a health story; don't leave a phantom countdown
     delete!(_LIVENESS_LOG_LAST, k)
     dropped = try; ReportEngine._drop_kernel_conn!(k)
@@ -2323,27 +2386,34 @@ function _drop_signed_out_wire!(nb::LiveNotebook, k, host::AbstractString)
                            first(sprint(showerror, e), 120)); false
     end
     dropped || return false
-    try; k.redial_hold = true; catch; end
+    hold ? (try; k.redial_hold = true; catch; end) : _session_lost!(k, host)
     ReportEngine._rlog("liveness: $(nb.id)/$(_kernel_side_label(nb, k)) rides the session for $host, " *
-                       "which is signed out — dropped its wire (reconnects on an explicit run after a sign-in)")
-    try; _workers_push!(nb); catch; end
+                       (hold ? "which is signed out — dropped its wire (reconnects on an explicit run after a sign-in)" :
+                               "which was lost — dropped its wire (the next run re-attaches)"))
+    try; facts_changed!(); catch; end
     return true
 end
 
-# Every wire an ssh session was carrying, dropped the moment that session goes. Signing out is a
-# DECISION, not a symptom — the answer is known immediately, so nothing should have to time out to
-# reach it. Installed on the transport's drop announcement (see `ReportEngine._session_dropped!`).
+# Every wire an ssh session was carrying, dropped the moment that session goes. The answer is known
+# immediately, so nothing should have to time out to reach it. Installed on the transport's drop
+# announcement (see `ReportEngine._session_dropped!`).
 function _install_session_drop!(h)
-    ReportEngine._SESSION_DROP_SINK[] = function (host, hosts)
+    ReportEngine._SESSION_DROP_SINK[] = function (host, hosts, died = false)
         nbs = lock(h.lock) do; collect(values(h.notebooks)); end
         n = 0
         for nb in nbs, k in _nb_kernels(nb)
             (k isa ReportEngine.GateKernel && k.conn !== nothing) || continue
             ReportEngine.rides_session(k, hosts) || continue
-            _drop_signed_out_wire!(nb, k, String(host)) && (n += 1)
+            _drop_signed_out_wire!(nb, k, String(host); hold = !died) && (n += 1)
         end
         n == 0 || ReportEngine._rlog("session drop on $host: dropped $n worker wire(s) it was carrying")
+        facts_changed!()
         return nothing
+    end
+    # …and back, whatever signed the host in again.
+    ReportEngine.Sweep.SshTransport.on_connect!() do host
+        _session_regained!(host)
+        facts_changed!()
     end
     return nothing
 end
@@ -2356,7 +2426,7 @@ function _heal_dead_wire!(nb::LiveNotebook, k, unresp_s::Real = 0.0)
     catch e; ReportEngine._rlog("liveness: drop failed on $(nb.id)/$(side): " * first(sprint(showerror, e), 120)); false
     end
     dropped && !auto && (try; k.redial_hold = true; catch; end)
-    dropped && (try; _workers_push!(nb); catch; end)   # pill flips to amber "reconnecting" NOW, not at the next state
+    dropped && (try; facts_changed!(); catch; end)   # pill flips to amber "reconnecting" NOW, not at the next state
     return dropped
 end
 
@@ -2374,7 +2444,7 @@ function _liveness_sweep!(nb::LiveNotebook)
         # signing out established instantly. Say so and drop it; the `_SESSION_DROP_SINK` normally
         # gets there first, and this covers a session that died without being dropped through us.
         if (h = ReportEngine.session_host(k)) != "" && !ReportEngine.Sweep.connected(h)
-            _drop_signed_out_wire!(nb, k, h)
+            _drop_signed_out_wire!(nb, k, h; hold = false)
             continue
         end
         ok = false; err = nothing
@@ -2399,7 +2469,7 @@ function _liveness_sweep!(nb::LiveNotebook)
                 if pop!(_LIVENESS_LOG_LAST, k, nothing) !== nothing   # we said it went silent — say it came back
                     ReportEngine._rlog("liveness: $(nb.id)/$(_kernel_side_label(nb, k)) is answering again after $(el)s")
                 end
-                try; _workers_push!(nb); catch; end    # pill back to green immediately
+                try; facts_changed!(); catch; end    # pill back to green immediately
             end
         elseif k.conn !== conn0
             # The connection was replaced while the ping was out (a worker running older code is being
@@ -2427,11 +2497,11 @@ function _liveness_sweep!(nb::LiveNotebook)
                 # Still CONNECTED but missing pings: surface it as a muted-yellow "degraded" pill NOW (an
                 # early warning, well before the drop), and re-push each sweep so its unresponsive-countdown
                 # ticks live in the pill/popup.
-                try; _workers_push!(nb); catch; end
+                try; facts_changed!(); catch; end
             elseif logged
                 # Local: nothing counts down, so push only when the state actually changed rather than
                 # re-sending the same pill every 8s for as long as the worker stays silent.
-                try; _workers_push!(nb); catch; end
+                try; facts_changed!(); catch; end
             end
         end
     end
@@ -2487,7 +2557,7 @@ function _drop_kernels_for_worker!(h, host::AbstractString, port::Integer)
             if ReportEngine._drop_kernel_conn!(k)
                 n += 1
                 ReportEngine._rlog("reap: dropped live wire on $(nb.id)/$(_kernel_side_label(nb, k)) (worker-$port on $host reaped)")
-                try; _workers_push!(nb); catch; end   # pill flips to amber "reconnecting" immediately
+                try; facts_changed!(); catch; end   # pill flips to amber "reconnecting" immediately
             end
         catch; end
     end
@@ -3073,7 +3143,7 @@ function _release_idle_regions!(nbs_of, busy)
                 # again when a page next connects, rather than broadcast once into an empty room.
                 _hold_released_notice!(nbs, r, "idle")
                 _push_alloc_event!(nbs, r.name, "released"; reason = "idle")
-                for nb in nbs; try; _workers_push!(nb); catch; end; end
+                for nb in nbs; try; facts_changed!(); catch; end; end
             catch e
                 ReportEngine._rlog("region[$(r.name)]: idle release failed — " *
                                    first(sprint(showerror, e), 120))
@@ -3098,7 +3168,7 @@ function _push_alloc_event!(nbs, region::AbstractString, event::AbstractString; 
                     Dict{String,Any}(String(k) => v for (k, v) in extra))
     for nb in nbs
         try; _broadcast(nb, "allocevent:" * JSON.json(payload)); catch; end
-        try; _workers_push!(nb); catch; end
+        try; facts_changed!(); catch; end
     end
     return nothing
 end
@@ -3255,18 +3325,23 @@ end
 
 # ── Watchdog: stall + runaway detection ─────────────────────────────────────────────────────
 # Rides the same 5s sweep as the run-reconciler, but where the reconciler HEALS orphans (RUNNING
-# cells no worker is evaluating), the watchdog CLASSIFIES trouble on cells that ARE still alive:
-# slow/stalled by duration, and — where telemetry flows — runaway cpu/mem and gc-thrash. It only
-# reports (into `_NB_HEALTH`, surfaced to the health panel); acting on an alert (interrupt/reboot)
-# is a deliberate user gesture (the recovery buttons), never automatic. Thresholds are generous on
-# purpose: a late "slow" is cheap, a false "stalled" cries wolf.
-const _WD_SLOW        = 90.0          # a cell RUNNING this long (still confirmed alive) is "slow"
-const _WD_STALL       = 300.0         # ... this long is "stalled"
-const _WD_CPU_HOT     = 90.0          # cpu% at/above this counts as pegged
-const _WD_CPU_SAMPLES = 5             # ...sustained across this many samples (~10s) → runaway-cpu
-const _WD_RSS_CEIL    = 4 * 2^30      # rss above this AND climbing → runaway-mem
-const _WD_STALE_TEL   = 20.0          # telemetry silent this long while a cell runs → unreachable
-const _WD_TEL_FRESH   = 10.0          # a telemetry sample older than this isn't trusted as "current"
+# cells no worker is evaluating), the watchdog CLASSIFIES trouble on kernels that are still alive. It
+# judges by capacity and behaviour, not by absolute size: memory against the limit that would actually
+# stop the worker (its job's cgroup, else what the host has available), and CPU by whether anything is
+# running. A cell that keeps a node busy for an hour is doing its job; a node busy with nothing
+# running, or a cell running with nothing happening, is not. It only reports (into `_NB_HEALTH`, for
+# the health panel); acting on an alert is the user's choice.
+const _WD_MEM_WARN     = 0.15         # memory headroom below this share of the limit → warning
+const _WD_MEM_CRIT     = 0.05         # ... below this → critical
+const _WD_MEM_ETA_WARN = 300.0        # growth that runs out of memory within this many seconds → warning
+const _WD_MEM_ETA_CRIT = 60.0         # ... within this → critical
+const _WD_PSI_MEM      = 10.0         # % of the last 10 s spent waiting on memory → memory pressure
+const _WD_IDLE_HOT     = 90.0         # cpu% that counts as busy...
+const _WD_IDLE_SAMPLES = 15           # ...for this many samples (~30 s) with no cell running → busy-idle
+const _WD_QUIET_S      = 300.0        # a code cell running this long with no cpu, gpu or I/O → no-activity
+const _WD_GPU_MEM      = 0.95         # GPU memory this full → the next allocation is likely to fail
+const _WD_STALE_TEL    = 20.0         # telemetry silent this long while a cell runs → unreachable
+const _WD_TEL_FRESH    = 10.0         # a telemetry sample older than this isn't trusted as "current"
 const _NB_HEALTH = Dict{String,Any}() # nb id → (; status, alerts, ts)
 const _WD_LOCK   = ReentrantLock()
 
@@ -3299,69 +3374,111 @@ function _nb_kernel_stats(nb::LiveNotebook)
     return out
 end
 
-# Union of cell ids the kernels' latest FRESH telemetry says are running, or `nothing` if no kernel
-# has a current sample (then we can't confirm liveness → cells stay "unconfirmed", never "stalled").
-function _running_from_telemetry(nb::LiveNotebook)
-    ids = Set{String}(); any = false; now = time()
-    for (_, latest, _) in _nb_kernel_stats(nb)
-        now - latest.rcv <= _WD_TEL_FRESH || continue
-        union!(ids, latest.running); any = true
-    end
-    return any ? ids : nothing
+_gib(b::Real) = string(round(b / 2^30; digits = 1), " GiB")
+
+# Memory in use and the limit it counts against, with which limit that is: the job's cgroup where the
+# worker has one (on a cluster the allocation, not the node, is what ends it), else the host's total
+# less what is available. `nothing` where the sample cannot say.
+function _memory_state(s)
+    job = _sample_part(s, :job); host = _sample_part(s, :host)
+    mx, cur = get(job, "mem_max", -1), get(job, "mem_cur", -1)
+    (mx isa Real && mx > 0 && cur isa Real && cur >= 0) && return (used = Float64(cur), limit = Float64(mx), of = "job")
+    av = get(host, "mem_avail", -1)
+    (av isa Real && av >= 0 && s.sys_mem_total > 0) &&
+        return (used = Float64(s.sys_mem_total - av), limit = Float64(s.sys_mem_total), of = "host")
+    return nothing
 end
 
-_gib(b::Integer) = string(round(b / 2^30; digits = 1), "GiB")
+# Whether anything was happening in a sample: CPU, a GPU, or storage I/O.
+function _active(s)
+    s.cpu >= 3 && return true
+    any(g -> g.util >= 3, _sample_gpus(s)) && return true
+    p = _sample_part(s, :proc)
+    return max(get(p, "io_read", 0), get(p, "io_write", 0)) >= 2^20
+end
+
+"""
+    _kernel_alerts(side, hist; now = time(), quiet_cells = String[]) -> Vector
+
+The watchdog's alerts for one kernel from its telemetry history (oldest first). `quiet_cells` are the
+code cells that sample says are running, checked for no activity. Each alert is
+`(; kind, sev, scope, target, since, detail)`, `sev` one of "crit", "warn", "info".
+"""
+function _kernel_alerts(side::AbstractString, hist; now::Real = time(), quiet_cells = String[])
+    out = Any[]
+    isempty(hist) && return out
+    l = hist[end]
+    al(kind, sev, since, detail; scope = "kernel", target = side) =
+        push!(out, (kind = kind, sev = sev, scope = scope, target = String(target), since = since, detail = detail))
+    stale = now - l.rcv
+    if stale > _WD_STALE_TEL && !isempty(l.running)
+        al("unreachable", "crit", l.rcv, "no telemetry for $(round(Int, stale))s while a cell runs")
+        return out                       # a silent kernel's figures are stale too
+    end
+    win = hist[max(1, length(hist) - 29):end]     # the last minute or so
+    # Memory: headroom against the limit that applies, and where its growth is heading.
+    m = _memory_state(l)
+    if m !== nothing && m.limit > 0
+        free = (m.limit - m.used) / m.limit
+        m0 = _memory_state(win[1])
+        dt = l.rcv - win[1].rcv
+        slope = (m0 !== nothing && dt > 10) ? (m.used - m0.used) / dt : 0.0
+        eta = slope > 0 ? (m.limit - m.used) / slope : Inf
+        what = "$(m.of == "job" ? "job" : "host") memory $(_gib(m.used)) of $(_gib(m.limit)) ($(round(Int, 100 * free))% free)"
+        if free < _WD_MEM_CRIT || eta < _WD_MEM_ETA_CRIT
+            al("memory-low", "crit", win[1].rcv, eta < _WD_MEM_ETA_WARN ? "$what, out in about $(round(Int, eta))s at this rate" : what)
+        elseif free < _WD_MEM_WARN || (eta < _WD_MEM_ETA_WARN && free < 0.5)
+            al("memory-low", "warn", win[1].rcv,
+               eta < _WD_MEM_ETA_WARN ? "$what, out in about $(max(1, round(Int, eta / 60))) min at this rate" : what)
+        end
+    end
+    host = _sample_part(l, :host)
+    psi = get(host, "psi_mem", -1.0)
+    psi isa Real && psi >= _WD_PSI_MEM &&
+        al("memory-pressure", "warn", l.rcv, "waiting on memory $(round(psi; digits = 1))% of the last 10 s")
+    sw0 = get(_sample_part(win[1], :host), "swap_used", -1); sw = get(host, "swap_used", -1)
+    (sw isa Real && sw0 isa Real && sw0 >= 0 && sw - sw0 > 64 * 2^20) &&
+        al("memory-pressure", "warn", win[1].rcv, "swapping: $(_gib(sw - sw0)) more swap in the last minute")
+    # CPU busy with nothing running: work nobody asked for (a background task that will not stop).
+    busy = hist[max(1, length(hist) - _WD_IDLE_SAMPLES + 1):end]
+    (length(busy) >= _WD_IDLE_SAMPLES && all(s -> s.cpu >= _WD_IDLE_HOT && isempty(s.running), busy)) &&
+        al("busy-idle", "warn", busy[1].rcv, "cpu ≥$(round(Int, _WD_IDLE_HOT))% for $(round(Int, l.rcv - busy[1].rcv))s with no cell running")
+    # A code cell running with nothing happening: waiting on something that may never come.
+    if !isempty(quiet_cells) && l.rcv - hist[1].rcv >= _WD_QUIET_S
+        recent = [s for s in hist if l.rcv - s.rcv <= _WD_QUIET_S]
+        if !any(_active, recent)
+            for c in quiet_cells
+                all(s -> c in s.running, recent) &&
+                    al("no-activity", "info", recent[1].rcv, "running with no CPU, GPU or I/O for $(round(Int, (l.rcv - recent[1].rcv) / 60)) min";
+                       scope = "cell", target = c)
+            end
+        end
+    end
+    if length(win) >= 10
+        dgc = (win[end].gc_ms - win[1].gc_ms) / 1000; dwall = win[end].rcv - win[1].rcv
+        (dwall > 0 && dgc / dwall > 0.5) &&
+            al("gc-thrash", "warn", win[1].rcv, "garbage collection $(round(Int, 100 * dgc / dwall))% of the last $(round(Int, dwall))s")
+    end
+    for g in _sample_gpus(l)
+        (g.mem_total > 0 && g.mem_used / g.mem_total >= _WD_GPU_MEM) &&
+            al("gpu-memory", "warn", l.rcv, "gpu$(g.i) memory $(round(Int, 100 * g.mem_used / g.mem_total))% full ($(_gib(g.mem_used)) of $(_gib(g.mem_total)))")
+        held = filter(!=("power cap"), hasproperty(g, :throttle) ? g.throttle : String[])
+        isempty(held) || al("gpu-throttle", "info", l.rcv, "gpu$(g.i) clocks held down: $(join(held, ", "))")
+    end
+    return out
+end
 
 function _watchdog_scan!(nb::LiveNotebook)
     nb.kernel isa ReportEngine.GateKernel || return nothing   # in-process kernels have no worker to watch
     now = time()
     alerts = Any[]
-    confirmed = _running_from_telemetry(nb)   # telemetry-derived liveness (no extra RPC)
-    # Per running cell: slow / stalled. A cell absent from FRESH telemetry is an orphan the reconciler
-    # owns — skip it here so the two supervisors don't both shout about the same cell.
-    for c in nb.report.cells
-        c.state == RUNNING || continue
-        since = get(_RUN_SINCE, (nb.id, c.id), now)
-        dur = now - since
-        dur >= _WD_SLOW || continue
-        (confirmed !== nothing && !(c.id in confirmed)) && continue
-        kind = dur >= _WD_STALL ? "stalled" : "slow"
-        note = confirmed === nothing ? " (unconfirmed — no telemetry)" : ""
-        push!(alerts, (kind = kind, scope = "cell", target = c.id, since = since,
-                       detail = "running $(round(Int, dur))s$note"))
-    end
-    # Per kernel: runaway cpu / mem, gc-thrash, unreachable.
+    code = Set(c.id for c in nb.report.cells if c.state == RUNNING && c.kind == CODE)
     for (side, latest, hist) in _nb_kernel_stats(nb)
-        stale = now - latest.rcv
-        if stale > _WD_STALE_TEL && !isempty(latest.running)
-            push!(alerts, (kind = "unreachable", scope = "kernel", target = side, since = latest.rcv,
-                           detail = "no telemetry for $(round(Int, stale))s while a cell runs"))
-            continue   # a silent kernel's cpu/rss are stale too — don't pile on runaway alerts
-        end
-        recent = length(hist) >= _WD_CPU_SAMPLES ? hist[end - _WD_CPU_SAMPLES + 1:end] : hist
-        if length(recent) >= _WD_CPU_SAMPLES && all(s -> s.cpu >= _WD_CPU_HOT, recent) && !isempty(latest.running)
-            push!(alerts, (kind = "runaway-cpu", scope = "kernel", target = side, since = recent[1].rcv,
-                           detail = "cpu ≥$(round(Int, _WD_CPU_HOT))% for $(length(recent)) samples"))
-        end
-        # "climbing" over a BOUNDED recent window (~last 30 samples ≈ 60s), not hist[1] — the ring is now up
-        # to ~1h long, and comparing against the oldest sample would flag any worker whose rss grew over the
-        # hour as "runaway". mw0 is the window's start index.
-        mw0 = max(1, length(hist) - 29)
-        if latest.rss >= _WD_RSS_CEIL && length(hist) >= 3 && hist[end].rss > hist[mw0].rss
-            push!(alerts, (kind = "runaway-mem", scope = "kernel", target = side, since = hist[mw0].rcv,
-                           detail = "rss $(_gib(latest.rss)) and climbing"))
-        end
-        if length(hist) >= 3
-            dgc = (hist[end].gc_ms - hist[1].gc_ms) / 1000
-            dwall = hist[end].rcv - hist[1].rcv
-            (dwall > 0 && dgc / dwall > 0.5) &&
-                push!(alerts, (kind = "gc-thrash", scope = "kernel", target = side, since = hist[1].rcv,
-                               detail = "gc $(round(Int, 100 * dgc / dwall))% of walltime"))
-        end
+        append!(alerts, _kernel_alerts(side, hist; now, quiet_cells = [id for id in latest.running if id in code]))
     end
-    status = isempty(alerts) ? "ok" :
-             any(a -> a.kind in ("stalled", "runaway-mem", "unreachable"), alerts) ? "critical" :
-             "warning"
+    status = any(a -> a.sev == "crit", alerts) ? "critical" :
+             any(a -> a.sev == "warn", alerts) ? "warning" :
+             isempty(alerts) ? "ok" : "info"
     rec = (status = status, alerts = alerts, ts = now)
     _health_transition!(nb, rec)
     lock(_WD_LOCK) do; _NB_HEALTH[nb.id] = rec; end
@@ -3501,7 +3618,7 @@ function _health_json(nb::LiveNotebook)
                                                "src_stale" => stale, "revise" => rev)
     now = time()
     Dict{String,Any}("status" => rec.status, "ts" => rec.ts, "src_stale" => stale, "revise" => rev,
-        "alerts" => Any[Dict{String,Any}("kind" => a.kind, "scope" => a.scope, "target" => a.target,
+        "alerts" => Any[Dict{String,Any}("kind" => a.kind, "sev" => a.sev, "scope" => a.scope, "target" => a.target,
                                           "since" => a.since, "age" => round(Int, now - a.since),
                                           "detail" => a.detail) for a in rec.alerts])
 end
@@ -3806,6 +3923,39 @@ end
 # policy and the (possibly slow, cold) bring-up + namespace prime, surfacing any failure AS the cell's
 # error. Returns true to proceed, false when the cell was already resolved (held/errored) and the caller
 # should return. A no-op (returns true) for a main-kernel cell (`side == ""`). Shared by code + markdown.
+# Narrate a region bring-up. A cold region installs the notebook's whole environment on the far side
+# and precompiles it — minutes during which a spinning cell is the only sign of life. The bring-up
+# lines go out through `_bringup_broadcast`; the banner that renders them keys off `hydrating`, so set
+# it for the duration. `remote` is the kind that says where the work is. Every region cell is
+# dispatched through here, so only a bring-up still to happen is narrated: announcing one for a worker
+# that is up holds the banner over cells already running on it. Returns the function that ends it.
+#
+# A browser refetches state only when the version it is sent moves, so setting and clearing the flag
+# each bump it.
+function _narrate_region_bringup!(nb::LiveNotebook, kernel, side::AbstractString, host::AbstractString)
+    narrating = _region_bringup_pending(nb, kernel) && lock(nb.lock) do
+        get(nb.report.meta, "hydrating", false) === true && return false
+        nb.report.meta["hydrating"] = true
+        nb.report.meta["hydratingKind"] = "remote"
+        nb.report.meta["hydratingSide"] = String(side)   # whose worker panel narrates it
+        nb.version += 1
+        true
+    end
+    narrating || return () -> nothing
+    try
+        _broadcast(nb, string(nb.version))
+        _broadcast(nb, "bringup:starting a worker for region '$side' on $host")
+    catch
+    end
+    return () -> lock(nb.lock) do
+        delete!(nb.report.meta, "hydrating"); delete!(nb.report.meta, "hydratingKind")
+        delete!(nb.report.meta, "hydratingSide")
+        nb.version += 1
+        try; _broadcast(nb, string(nb.version)); catch; end
+        nothing
+    end
+end
+
 function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::AbstractString)
     isempty(side) && return true
     # Reconnect-hold policy (manual mode). A cell EXPLICITLY run (▶ force marker) reconnects a region that
@@ -3848,30 +3998,19 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
         ReportEngine.mark_running!(cell)
         _broadcast_progress(nb, cell)
     end
-    try; _workers_push!(nb); catch; end   # pill appears NOW as "starting", not after the run completes
-    # Narrate it. A cold region installs the notebook's whole environment on the far side and
-    # precompiles it — minutes during which a spinning cell is the only sign of life. The bring-up
-    # lines go out through `_bringup_broadcast`; the banner that renders them keys off `hydrating`,
-    # so set it here for the duration. `remote` is the kind that says where the work is.
-    # Every region cell is dispatched through here, so only a bring-up still to happen is narrated:
-    # announcing one for a worker that is up holds the banner over cells already running on it.
-    narrating = _region_bringup_pending(nb, kernel) && lock(nb.lock) do
-        already = get(nb.report.meta, "hydrating", false) === true
-        already || (nb.report.meta["hydrating"] = true;
-                    nb.report.meta["hydratingKind"] = "remote")
-        !already
-    end
-    narrating && (try; _broadcast(nb, "bringup:starting a worker for region '$side' on $host"); catch; end)
-    stop_narrating = () -> narrating && lock(nb.lock) do
-        delete!(nb.report.meta, "hydrating"); delete!(nb.report.meta, "hydratingKind")
-        try; _broadcast(nb, string(nb.version)); catch; end
-    end
+    try; facts_changed!(); catch; end   # pill appears NOW as "starting", not after the run completes
+    stop_narrating = _narrate_region_bringup!(nb, kernel, side, host)
+    # Every region cell passes through here, so what belongs to a worker COMING UP (seeding its clock,
+    # giving held locked cells their restore) happens only when this call brought it up. A held cell
+    # re-armed on every pass would run, be held, and be re-armed again without end.
+    came_up = kernel isa ReportEngine.GateKernel && kernel.conn === nothing
     try
         ReportEngine.prepare!(kernel, nb.report; explicit = forced)
-        _seed_clock!(kernel)          # converge the clock mapping now, not over the next minute
+        came_up && _seed_clock!(kernel)   # converge the clock mapping now, not over the next minute
         _prime_namespace!(nb, kernel, side)
         stop_narrating()
-        try; _workers_push!(nb); catch; end   # connected → pill flips out of "starting"; telemetry takes over
+        try; facts_changed!(); catch; end   # connected → pill flips out of "starting"; telemetry takes over
+        came_up && _rearm_locked!(nb, side, kernel)
         return true
     catch e
         stop_narrating()
@@ -3884,9 +4023,64 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
                 first(sprint(showerror, e), 160))
             _broadcast_progress(nb, cell)
         end
-        try; _workers_push!(nb); catch; end   # push the failure → pill goes amber/disconnected, not stuck "starting"
+        try; facts_changed!(); catch; end   # push the failure → pill goes amber/disconnected, not stuck "starting"
         return false
     end
+end
+
+# A locked cell computes only on its own ▶, the one-shot force marker. Every other run of it (opening
+# the notebook, an upstream change, a run of the notebook, a restart) may only restore its frozen result.
+_restore_only(nb::LiveNotebook, cell::Cell) = :locked in cell.flags && !lock(nb.lock) do
+    ids = get(_FORCE_RUN, nb.id, nothing); ids !== nothing && cell.id in ids
+end
+
+# Whether the worker for `side` is up: the main kernel always counts, a region only once its kernel
+# has a wire.
+function _side_up(nb::LiveNotebook, side::AbstractString)
+    isempty(side) && return true
+    k = lock(_REGION_LOCK) do; get(_REGION_KERNELS, (nb.id, String(side)), nothing); end
+    return k isa ReportEngine.GateKernel && k.conn !== nothing
+end
+
+# Hold a locked cell that had nothing to restore. It keeps whatever it showed, cells reading it wait
+# on it, and its own ▶ computes it.
+function _hold_locked!(nb::LiveNotebook, cell::Cell)
+    lock(nb.lock) do
+        i = _index_of(nb.report.cells, cell.id)
+        i === nothing && return
+        c = nb.report.cells[i]
+        pop!(get!(Set{String}, _DIRTY_WHILE_RUNNING, nb.id), c.id, nothing)
+        ReportEngine.mark_blocked!(c, WAIT_LOCKED, c.id)
+        _broadcast_progress(nb, c)
+    end
+    return nothing
+end
+
+# A region worker just came up: locked cells held because it was not, and the cells waiting on them,
+# try their restore again. Once per worker connection, whoever calls it.
+const _REARMED = Dict{Tuple{String,String},String}()   # (nb id, side) → the connection last re-armed for
+const _REARMED_LOCK = ReentrantLock()
+
+function _rearm_locked!(nb::LiveNotebook, side::AbstractString, kernel)
+    cn = try; kernel.conn === nothing ? "" : String(kernel.conn.name); catch; ""; end
+    isempty(cn) && return 0
+    lock(_REARMED_LOCK) do
+        get(_REARMED, (nb.id, String(side)), "") == cn ? true : (_REARMED[(nb.id, String(side))] = cn; false)
+    end && return 0
+    n = lock(nb.lock) do
+        held = Set{String}(c.id for c in nb.report.cells
+                           if c.state == BLOCKED && c.blocked == WAIT_LOCKED && _cell_region(c) == side)
+        isempty(held) && return 0
+        m = 0
+        for c in nb.report.cells
+            (c.state == BLOCKED && c.blocked == WAIT_LOCKED && c.blocked_host in held) || continue
+            ReportEngine.restale!(c) && (m += 1)
+        end
+        m > 0 && (nb.version += 1)
+        m
+    end
+    n > 0 && (try; _broadcast(nb, string(nb.version)); _ensure_runner!(nb); catch; end)
+    return n
 end
 
 function _eval_one!(nb::LiveNotebook, cell::Cell)
@@ -3914,6 +4108,10 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     end
     passed_on && _ensure_runner!(nb)
     waits && return nothing
+    # A locked cell computes only on its own ▶. Any other run restores the result it froze on, and only
+    # where its worker is already up: it does not start one, since a region worker can mean a queue wait.
+    cell.kind == CODE && _restore_only(nb, cell) && !_side_up(nb, _cell_region(cell)) &&
+        return _hold_locked!(nb, cell)
     # Region dispatch: the `region=` tag decides the kernel; a mutation auto-follows its data (see
     # _region_route). Markdown honors its tag too — its `$(…)` interpolation runs on that region's worker.
     #
@@ -3937,7 +4135,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
             _broadcast_progress(nb, cell)
         end
         # The region's pill says what it is waiting for too (queued, prepare needed, preparing).
-        wait && (try; _workers_push!(nb); catch; end)
+        wait && (try; facts_changed!(); catch; end)
         return nothing
     end
     if cell.kind == MARKDOWN
@@ -3986,7 +4184,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     let rg = _cell_region(cell)
         if !isempty(rg)
             _region_used!(rg)              # the idle clock runs from region CELLS, not worker traffic
-            try; _workers_push!(nb); catch; end   # …and the panel is showing that clock
+            try; facts_changed!(); catch; end   # …and the panel is showing that clock
         end
     end
     src, srchash, memo, locked = lock(nb.lock) do
@@ -4031,9 +4229,12 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
              threshold = ReportEngine._MEMO_THRESHOLD_MS,
              force = frc,
              always = (:cache in cell.flags) || locked,   # `cache`/`locked` → persist regardless of runtime
+             restore_only = locked && !frc,               # a locked cell computes only on its own ▶
              unread = unread, safe = safe)
         (s, cell.src_hash, m, locked)
     end
+    # Nothing to restore from: a locked cell with no key is held without asking the worker.
+    (memo.restore_only && isempty(memo.key)) && return _hold_locked!(nb, cell)
     out = try
         # `region`/`regions` seed the cell's task-local Slate execution context (`slate_context()`): the
         # effective side it runs on ("" = main) + the notebook's declared regions. Generic — a region-aware
@@ -4048,6 +4249,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     # in play — region cells need the same modules loaded. Mirrors run on main + each region any
     # cell references, except the side that just ran. Results discarded (the main run's output
     # stands); a failure logs rather than erroring the cell (that side surfaces it on first use).
+    out.memo == "absent" && return _hold_locked!(nb, cell)   # restore-only, and nothing was stored
     if _region_active(nb) && ReportEngine._is_pure_using(cell.source) && out.exception === nothing
         sides = Set{String}([""])
         for c in nb.report.cells
@@ -4085,6 +4287,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         c.binds = out.binds
         _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :everywhere classification)
         _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
+        _run_log!(nb, isempty(side) ? "local" : side, c)   # the side as `_kernel_side_label` names it
         _broadcast_progress(nb, c)
         # A successful `locked` run freezes ON this key: persist it (surviving a restart — the `.jl`
         # footer round-trips `c.flags`) and swap the durable-store pin, outside the lock (a gate RPC —
@@ -4424,6 +4627,7 @@ function server_celldone(nb::LiveNotebook, run_id::AbstractString, cid::Abstract
         run_id == "reconnect" || (c.binds = out.binds)
         _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :everywhere classification)
         _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
+        run_id == "reconnect" || _run_log!(nb, "local", c)   # a parallel batch runs on the main kernel
         _broadcast_progress(nb, c)
     end
     return nothing
@@ -4813,6 +5017,7 @@ end
 
 
 include("server_history.jl")
+include("server_facts.jl")     # the one description of the hub's state that pages render from
 include("server_agentops.jl")
 include("server_sse_import.jl")
 include("server_agentsessions.jl")
