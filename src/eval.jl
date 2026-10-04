@@ -869,7 +869,7 @@ function pkg_op(k::InProcessKernel, ::Report, op::AbstractString, name::Abstract
         ensure_notebook_env!(k.envdir)   # first add materialises it — base mode until then
     end
     r = _in_env(dir) do
-        op == "add"    ? Pkg.add(String(name)) :
+        op == "add"    ? add_installed_first!([Pkg.PackageSpec(name = String(name))]) :
         op == "update" ? Pkg.update(String(name)) :
                          Pkg.rm(String(name))
         return Dict{String,Any}("ok" => true, "message" => "")

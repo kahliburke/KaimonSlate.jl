@@ -325,4 +325,21 @@ end
         @test ReportEngine.env_stale(env, "") == false     # a detached notebook has nothing to follow
     end
 
+    @testset "a package add chooses among the versions already installed" begin
+        installed = Set{VersionNumber}()
+        for root in DEPOT_PATH, d in (isdir(joinpath(root, "packages", "JSON")) ? readdir(joinpath(root, "packages", "JSON"); join = true) : String[])
+            f = joinpath(d, "Project.toml")
+            isfile(f) && push!(installed, VersionNumber(Pkg.TOML.parsefile(f)["version"]))
+        end
+        old = Base.active_project()
+        try
+            Pkg.activate(mktempdir(); io = devnull)
+            ReportEngine.add_installed_first!([Pkg.PackageSpec(name = "JSON")])
+            got = only(p.version for p in values(Pkg.dependencies()) if p.name == "JSON")
+            @test got in installed && !Pkg.OFFLINE_MODE[]
+        finally
+            Pkg.activate(old; io = devnull)
+        end
+    end
+
 end

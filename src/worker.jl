@@ -2071,7 +2071,7 @@ function __slate_pkg(op, name)
             return Dict{String,Any}("ok" => true, "message" => "updated $(join(tokens, ", "))")
         elseif o == "add"
             s = _pkg_add_specs(tokens)
-            isempty(s.adds) || Pkg.add(s.adds)
+            add_installed_first!(s.adds)
             isempty(s.devs) || Pkg.develop(s.devs)
             return Dict{String,Any}("ok" => true, "message" => "added $(join(s.labels, ", "))")
         else
@@ -2129,7 +2129,7 @@ function __slate_pkg_parent(op, name, parent)
         o = String(op)
         if o == "add"
             s = _pkg_add_specs(tokens)
-            isempty(s.adds) || Pkg.add(s.adds)
+            add_installed_first!(s.adds)
             isempty(s.devs) || Pkg.develop(s.devs)
             msg = "added $(join(s.labels, ", ")) to the project"
         elseif o == "rm"
