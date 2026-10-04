@@ -144,11 +144,6 @@ function _facts_compute(h)
             f["nb"] = nb.id
             f["notebookName"] = basename(nb.path)
             f["path"] = abspath(nb.path)
-            # The name a roster files a routed node's worker under: its login host, which shares its
-            # home and where its manifest is read.
-            h_ = String(get(f, "host", ""))
-            v = isempty(h_) ? nothing : (try; ReportEngine.via(h_); catch; nothing; end)
-            (v === nothing || isempty(v.host)) || (f["viaHost"] = String(v.host))
             out["worker/" * nb.id * "/" * String(get(w, "side", ""))] = f
         end
     end

@@ -1188,6 +1188,17 @@ end
 _kernel_status(k::GateKernel) = Dict{String,Any}("kind" => "gate", "port" => k.port, "connected" => (k.conn !== nothing))
 _kernel_status(::Kernel) = Dict{String,Any}("kind" => "inproc", "port" => 0, "connected" => true)
 
+# The login host a routed node's worker is filed under by the host rosters, which read its manifest
+# there: the live route's, or once the allocation has ended and the route with it, its region's host.
+# "" for a worker on the host it is listed under.
+function _filed_under(t)
+    v = try; ReportEngine.via(t.ssh_host); catch; nothing; end
+    (v === nothing || isempty(v.host)) || return String(v.host)
+    isempty(t.region) && return ""
+    r = try; ReportEngine.region_get(t.region); catch; nothing; end
+    return (r === nothing || isempty(r.host) || r.host == t.ssh_host) ? "" : String(r.host)
+end
+
 # One worker entry (side/host/status + latest telemetry) for the topbar pills. `side==""` is the main
 # kernel; a region side is its own worker. `host` is the remote host or "" (local/in-process).
 function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
@@ -1212,6 +1223,8 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
             t = k.target
             if t isa ReportEngine.RemoteTarget
                 d["transport"] = String(t.transport)
+                vh = _filed_under(t)
+                isempty(vh) || (d["viaHost"] = vh)
                 # A :tunnel worker picks its own free port, so gate+2 is only the :direct answer.
                 # 0 until the hub has asked it; the panel leaves the slot out rather than guessing.
                 d["dataPort"] = ReportEngine._blob_data_port_display(t, k)
@@ -1269,6 +1282,7 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
             d["face"] = "node released"
             d["noteCode"] = "allocation_ended"
             d["noteHost"] = k.target.ssh_host
+            d["alive"] = false                      # its process ended with the allocation
         elseif k.conn === nothing
             d["status"] = k.redial_hold ? "disconnected" : "connecting"
             # "starting up…" is true and useless: a COLD region installs the notebook's whole
@@ -1297,6 +1311,7 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
             end
             d["noteCode"] = code
             isempty(host) || (d["noteHost"] = host)
+            code == "allocation_ended" && (d["alive"] = false)
             # `note` stays for the one case that is not a state but a running commentary: what the
             # provisioner last said while bringing a worker up.
             code == "bringup" && (d["note"] = let last = ReportEngine.last_bringup_line()

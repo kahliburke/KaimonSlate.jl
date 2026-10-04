@@ -446,6 +446,14 @@ const RE = KaimonSlate.ReportEngine
                 end
             end
 
+            @testset "a node's worker is filed under its login host after its route is gone" begin
+                RE.region_set!("filedtest"; host = "loginx", scheduler = :slurm)
+                @test NS._filed_under(RE.RemoteTarget("nodey"; region = "filedtest")) == "loginx"
+                @test NS._filed_under(RE.RemoteTarget("loginx"; region = "filedtest")) == ""
+                @test NS._filed_under(RE.RemoteTarget("nodey")) == ""
+                RE.region_delete!("filedtest")
+            end
+
             @testset "telemetry is watched only on workers this hub started and nothing holds" begin
                 ws = Any[Dict{String,Any}("port" => 9300, "alive" => true, "state" => "idle",
                                           "manifest" => "{\"hub\":\"elsewhere\",\"stream_port\":\"9301\"}")]
