@@ -430,6 +430,8 @@ const RE = KaimonSlate.ReportEngine
                     r3 = NS.facts_refresh!()
                     gone = KaimonSlate.JSON.parse(take!(ch))
                     @test haskey(first_frame["set"], "worker/factsnb/") && first_frame["rev"] == r1
+                    # The region registry is published beside the workers.
+                    @test all(haskey(first_frame["set"], "region/" * r.name) for r in RE.regions())
                     @test (r2, quiet) == (r1, true)
                     @test r3 == r1 + 1 && "worker/factsnb/" in gone["del"]
                     @test NS.facts_snapshot()["rev"] == r3
@@ -612,7 +614,6 @@ const RE = KaimonSlate.ReportEngine
                 # A sample without GPUs, or from a worker that predates them, charts as -1.
                 s0 = RE._parse_telemetry("{\"cpu\":1.0,\"ts\":1}")
                 @test isempty(s0.gpus) && NS._gpu_util(s0) == -1 && NS._gpu_mem(s0) == -1
-                @test occursin("\"gpus\":[", NS._stats_json(s))
                 @test s.gpus[1].throttle == ["power cap"] && s.gpus[1].sm_max_mhz == 1410 && s.gpus[1].util_max == 97
                 # A worker that sends no peak reads its utilization as the peak.
                 @test RE._parse_telemetry("{\"cpu\":1.0,\"gpus\":[{\"i\":0,\"util\":12}],\"ts\":1}").gpus[1].util_max == 12

@@ -161,8 +161,6 @@ window.slatePrepareBatch = (machine, el) => {
 // The waiting chip (view.js). Its region's host and scheduler come from the regions list.
 window.openPrepare = (name, ev) => {
   if (ev) { ev.preventDefault(); ev.stopPropagation(); }
-  fetch('/api/regions').then(r => r.json()).then(d => {
-    const r = ((d && d.regions) || []).find(x => x.name === name);
-    open({ region: name, host: r ? r.host : '', scheduler: r ? r.scheduler : '', sysimage: !!(r && r.sysimage) });
-  }).catch(() => open({ region: name, host: '', scheduler: '' }));
+  const r = window.slateModel.getFacts()['region/' + name];
+  open({ region: name, host: r ? r.host : '', scheduler: r ? r.scheduler : '', sysimage: !!(r && r.sysimage) });
 };

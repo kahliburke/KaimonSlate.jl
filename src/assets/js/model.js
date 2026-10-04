@@ -30,7 +30,6 @@
   // side -> worker record, for THIS page's notebook: derived from the facts below, plus the latest
   // telemetry sample for each (which is a measurement, not a fact, and arrives on its own stream).
   let _workers = {};
-  const _stats = {};
   // region -> payload | null (asking) | undefined (never asked)
   let _allocations = {};
   const _subs = [];
@@ -66,14 +65,20 @@
   // A worker fact as components read it: the fact, its latest sample, and its clocks.
   function _workerRecord(f) {
     const w = Object.assign({}, f);
-    const st = _stats[w.side || ''];
-    if (st !== undefined) w.stats = st;
+    const smp = _samples['worker/' + f.nb + '/' + (f.side || '')];
+    if (smp) w.stats = smp.stats;
     return w;
   }
 
   /** The workers of notebook `nb`, each as `_workerRecord`. */
   const workersOf = (nb) => Object.keys(_facts)
     .filter(k => k.startsWith('worker/' + nb + '/')).map(k => _workerRecord(_facts[k]));
+
+  /** The region registry, by name. */
+  const regions = () => Object.keys(_facts).filter(k => k.startsWith('region/')).map(k => _facts[k])
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  /** Parked region wires: a live connection kept for a notebook that was closed. */
+  const parked = () => Object.keys(_facts).filter(k => k.startsWith('parked/')).map(k => _facts[k]);
 
   /** Every host there is something to sign in to; given `nb`, only the hosts that notebook uses. */
   const sessions = (nb) => Object.keys(_facts).filter(k => k.startsWith('session/')).map(k => _facts[k])
@@ -87,7 +92,21 @@
     _workers = next;
   }
 
+  // The latest sample for each worker, by fact key, as `{stats, at}` (`at` in the hub's clock). A
+  // measurement riding the facts stream, never merged into the facts.
+  const _samples = {};
+  const sampleOf = (key) => _samples[key];
+
+  function _applySample(m) {
+    _samples[m.key] = { stats: m.stats, at: m.at };
+    const pre = 'worker/' + pageNotebook() + '/', side = m.key.startsWith(pre) ? m.key.slice(pre.length) : null;
+    if (side !== null && _workers[side])
+      _workers = Object.assign({}, _workers, { [side]: Object.assign({}, _workers[side], { stats: m.stats }) });
+    _notify();
+  }
+
   function _applyFrame(m) {
+    if (m && m.t === 'sample') return _applySample(m);
     if (!m || m.t !== 'facts') return;
     if (typeof m.now === 'number') _offset = m.now - Date.now() / 1000;
     if (m.full) _facts = Object.assign({}, m.set || {});
@@ -115,10 +134,10 @@
     _es.onmessage = (e) => { try { _applyFrame(JSON.parse(e.data)); } catch (_) {} };
   }
 
-  // A telemetry sample for one of this page's workers. Merged into its record, never into the facts.
+  // A telemetry sample for one of this page's workers. Kept beside the facts, never in them.
   function applyTelemetry(side, stats) {
     side = side || '';
-    _stats[side] = stats;
+    _samples['worker/' + pageNotebook() + '/' + side] = { stats, at: hubNow() };
     if (!_workers[side]) return;
     _workers = Object.assign({}, _workers, { [side]: Object.assign({}, _workers[side], { stats }) });
     _notify();
@@ -261,7 +280,7 @@
     regionKind, regionIcon, regionLabel,
     getWorkers, getWorker, workerList, applyTelemetry,
     getFacts, workersOf, sessions, session, hubNow, connectFacts, pageNotebook,
-    walltimeLeft, idleFor, asRosterEntry, _applyFrame, _setPageNotebook,
+    walltimeLeft, idleFor, asRosterEntry, sampleOf, regions, parked, refresh: _resync, _applyFrame, _setPageNotebook,
     isHeld, isScheduled, allocState, releaseVerb,
     isAlive, workerState, workerStatus, workerSeverity, workerNote,
     getAllocation, loadAllocation, refreshAllocation,

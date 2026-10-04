@@ -1958,31 +1958,6 @@ function __slate_fork(envdir, parent)
     end
 end
 
-"Re-resolve a forked notebook env against the CURRENT parent (called when the parent's
-Manifest changed): re-seed from the parent, then re-add the notebook's own packages so the
-two stay one consistent environment. Returns `{ok, adds}`."
-function __slate_sync_parent(envdir, parent)
-    try
-        e = String(envdir); p = String(parent)
-        fdeps = Set{String}()
-        fpf = joinpath(e, "Project.toml")
-        isfile(fpf) && (fdeps = Set(keys(get(Pkg.TOML.parsefile(fpf), "deps", Dict{String,Any}()))))
-        pdeps = Set{String}(); pname = ""
-        ppf = joinpath(p, "Project.toml")
-        if isfile(ppf)
-            pt = Pkg.TOML.parsefile(ppf)
-            pdeps = Set(keys(get(pt, "deps", Dict{String,Any}())))
-            pname = string(get(pt, "name", ""))
-        end
-        adds = sort(collect(setdiff(fdeps, pdeps, Set([pname, ""]))))   # the notebook's own packages
-        _seed_notebook_env!(e, p)
-        isempty(adds) || Pkg.add(adds; preserve = Pkg.PRESERVE_ALL)
-        return Dict{String,Any}("ok" => true, "adds" => adds)
-    catch e
-        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
-    end
-end
-
 "Reconstruct a notebook env from its `.jl` footer: seed from the parent, then add the
 notebook's own packages at the recorded versions. Called on open when the env dir is
 absent (e.g. a fresh git clone) but the footer records a delta. `pkgs` is a list of
@@ -2748,7 +2723,6 @@ function tools()
         KaimonGate.GateTool("__slate_project_deps", __slate_project_deps),
         KaimonGate.GateTool("__slate_env_info", __slate_env_info),
         KaimonGate.GateTool("__slate_fork", __slate_fork),
-        KaimonGate.GateTool("__slate_sync_parent", __slate_sync_parent),
         KaimonGate.GateTool("__slate_reconstruct", __slate_reconstruct),
         KaimonGate.GateTool("__slate_bundle_info", __slate_bundle_info),
         KaimonGate.GateTool("__slate_extension_manifest", __slate_extension_manifest),

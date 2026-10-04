@@ -316,27 +316,6 @@ function _wpOverflowDot(w) { const st = window.slateModel.workerStatus(w);
 // Short reason for a degraded pill face — pull the "Ns" out of the note ("no liveness reply for 18s …").
 function _wpUnwellShort(note) { const m = note && /(\d+)s/.exec(note); return m ? m[1] + 's no reply' : 'unresponsive'; }
 
-// A worker telemetry sample pushed over the WS → into the model, and its pill face and the open
-// panel's figures at once (a sample is not worth a full repaint). `side===""` is the main worker.
-function onWorkerTelemetry(side, statsJson) {
-  side = side || '';
-  window.slateModel.applyTelemetry(side, statsJson);
-  const box = document.getElementById('workerpills');
-  const pill = box && box.querySelector('.wpill[data-side="' + (window.CSS && CSS.escape ? CSS.escape(side) : side) + '"]');
-  // Only patch the face when the pill is showing its normal stat — leave a degraded/reconnecting pill's status
-  // text alone (the debounced re-render owns that; a stray stale sample shouldn't overwrite "⚠ Ns no reply").
-  if (pill && !pill.classList.contains('degraded') && !pill.classList.contains('reconnecting')) {
-    const txt = _wpPillStat(statsJson);
-    let el = pill.querySelector('.wstat');
-    if (txt && !el) { el = document.createElement('span'); el.className = 'wstat'; pill.appendChild(document.createTextNode(' ')); pill.appendChild(el); }
-    if (el) el.textContent = txt;
-  }
-  if (_wpSide === side) {                                        // popup for this side is open — refresh its figures
-    const el = document.getElementById('workerpop-stats');
-    if (el) el.innerHTML = _wpStatsChips(statsJson, _wpNoteText(_wpCurrent()));
-  }
-}
-
 // A worker log line pushed over the WS → prepend it to the open popup for that side (newest-first, matching
 // the snapshot render). Ignored unless that side's popup is showing; the log file keeps the full history.
 function onWorkerLog(side, line) {
@@ -480,8 +459,7 @@ function _wpSwitchTab(side) {
   _wpOpenPort = _wpPortOf(side);
   _wpPaintBringup();
   const log = document.getElementById('workerpop-log'); if (log) log.textContent = 'loading…';
-  const st = document.getElementById('workerpop-stats'); if (st) st.textContent = '';
-  const id = document.getElementById('workerpop-ident'); if (id) id.innerHTML = '';
+  _wpDrawFacts();   // what the facts say is there at once; the log follows
   _wpPaintTabs();
   _wpRefresh();
 }
@@ -494,13 +472,12 @@ function openWorkerPop(side, ev, pin) {
   const bg = document.getElementById('workerpopbg'); if (!bg) return;
   _wpRaw = [];
   document.getElementById('workerpop-log').textContent = 'loading…';
-  document.getElementById('workerpop-stats').textContent = '';
-  const idb = document.getElementById('workerpop-ident'); if (idb) idb.innerHTML = '';
+  _wpDrawFacts();   // what the facts say is there at once; the log follows
   bg.classList.add('show');
   _wpUpdatePin();
   _wpPaintTabs();   // opens on the worker you clicked, with its siblings alongside
   _wpPaintBringup();
-  _wpRefresh();   // ONE snapshot for history + title/status; live stats & new log lines then arrive via the WS push
+  _wpRefresh();   // the log; new lines then arrive over the page's WebSocket, everything else through the model
 }
 function closeWorkerPop() {
   _wpSide = null; _wpPinned = false;
@@ -537,30 +514,29 @@ async function _wpRefresh() {
 
 // The open panel's title, picker, identity, actions and figures, from the model. Called when the panel
 // opens, whenever the model changes, and every second while an allocation clock is showing.
+// Only touches what changed: this runs on every change to the model (each telemetry sample among
+// them), and replacing a button under the pointer would swallow a click on it.
+function _wpSetHtml(el, html) { if (el && el._wpHtml !== html) { el.innerHTML = html; el._wpHtml = html; } }
 function _wpDrawFacts() {
   const r = _wpCurrent(); if (!r) return;
   const dot = _wpOverflowDot(r);   // same rank as every other dot
-  document.getElementById('workerpop-title').innerHTML = dot + ' ' + (r.side ? 'region' : 'main worker') +
-    ' · ' + _wpEsc(_wpLabel(r.side, r.host)) + (r.port ? ' :' + r.port : '');
+  _wpSetHtml(document.getElementById('workerpop-title'), dot + ' ' + (r.side ? 'region' : 'main worker') +
+    ' · ' + _wpEsc(_wpLabel(r.side, r.host)) + (r.port ? ' :' + r.port : ''));
   // The run-location picker (formerly the #runloc caret) lives here now — only for the MAIN worker, since a
   // region's host is fixed by its registry def. "change ▾" opens the existing picker modal.
   const rl = document.getElementById('workerpop-runloc');
   if (rl) {
-    if (!r.side) { rl.style.display = ''; rl.innerHTML = 'run location: <b>' + _wpEsc(r.host || 'local') +
-      '</b> <button class="wrl-change" onclick="closeWorkerPop(); toggleRunLoc(event)">change ▾</button>'; }
-    else { rl.style.display = 'none'; rl.innerHTML = ''; }
+    rl.style.display = r.side ? 'none' : '';
+    _wpSetHtml(rl, r.side ? '' : 'run location: <b>' + _wpEsc(r.host || 'local') +
+      '</b> <button class="wrl-change" onclick="closeWorkerPop(); toggleRunLoc(event)">change ▾</button>');
   }
-  const idb = document.getElementById('workerpop-ident');
-  if (idb) idb.innerHTML = _wpIdentChips(r);
-  const ab = document.getElementById('workerpop-acts');
-  if (ab) ab.innerHTML = _wpActions(r);
-  const st = document.getElementById('workerpop-stats');
-  if (st) st.innerHTML = _wpStatsChips(r.stats, _wpNoteText(r));
+  _wpSetHtml(document.getElementById('workerpop-ident'), _wpIdentChips(r));
+  _wpSetHtml(document.getElementById('workerpop-acts'), _wpActions(r));
+  _wpSetHtml(document.getElementById('workerpop-stats'), _wpStatsChips(r.stats, _wpNoteText(r)));
 }
 
 window.openWorkerPop = openWorkerPop;
 window.closeWorkerPop = closeWorkerPop;
-window.onWorkerTelemetry = onWorkerTelemetry;
 window.onWorkerLog = onWorkerLog;
 
 // The bar's single pill. HOVERING it (after the tooltip delay from Settings) opens the ranked list of ALL
@@ -676,7 +652,7 @@ setInterval(() => {
   if (!r) return;
   if (!window.slateModel.isHeld(r) && r.noteCode !== 'no_reply') return;   // nothing counting
   const st = document.getElementById('workerpop-stats');
-  if (st && r.noteCode === 'no_reply') st.innerHTML = _wpStatsChips(r.stats, _wpNoteText(r));
+  if (r.noteCode === 'no_reply') _wpSetHtml(st, _wpStatsChips(r.stats, _wpNoteText(r)));
   const idb = document.getElementById('workerpop-ident');
-  if (idb) idb.innerHTML = _wpIdentChips(r);
+  _wpSetHtml(idb, _wpIdentChips(r));
 }, 1000);

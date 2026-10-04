@@ -17,7 +17,8 @@
 # than patching what an event says it touched is what keeps the copy right: an event cannot forget a
 # consequence, because no event says what its consequences are.
 #
-# Keys are `worker/<notebook>/<side>` (side "" is the notebook's main worker) and `session/<host>`.
+# Keys are `worker/<notebook>/<side>` (side "" is the notebook's main worker), `session/<host>`,
+# `region/<name>` and `parked/<host>/<label>/<port>`.
 
 const _FACTS = Dict{String,Any}()
 const _FACTS_REV = Ref(0)
@@ -151,10 +152,69 @@ function _facts_compute(h)
             out["worker/" * nb.id * "/" * String(get(w, "side", ""))] = f
         end
     end
+    for r in (try; ReportEngine.regions(); catch; (); end)
+        out["region/" * r.name] = (try; _region_entry(r); catch; Dict{String,Any}("name" => r.name); end)
+    end
+    for p in (try; ReportEngine.parked_wires(); catch; (); end)
+        out["parked/" * p.host * "/" * p.label * "/" * string(p.port)] = _parked_entry(p)
+    end
     for (host, uses) in (try; _session_hosts(nothing); catch; Dict{String,Vector{String}}(); end)
         out["session/" * host] = _session_fact(host, uses, nbs)
     end
     return out
+end
+
+# A region as pages read it: its definition, what preparing it found, where its workers are now and
+# how its last reconcile went (as the instant it finished).
+function _region_entry(r)
+    st = ReportEngine.region_status(r.name)
+    # What a region is and how it stands, not every record behind it: the image's full package list
+    # is read by the dialog that shows it (`/api/sysimage-packages`), and the readiness record is not
+    # a setting the region's own fields need to carry.
+    ready = ReportEngine.readiness_view(r)
+    let im = get(ready, "sysimage", nothing)
+        if im isa AbstractDict && haskey(im, "packages")
+            im = Dict{String,Any}(im); pk = pop!(im, "packages")
+            im["packageCount"] = pk isa AbstractVector || pk isa AbstractDict ? length(pk) : 0
+            ready = merge(ready, Dict{String,Any}("sysimage" => im))
+        end
+    end
+    own = Dict{String,Any}(String(k) => v for (k, v) in ReportEngine.region_own(r.name) if String(k) != "readiness")
+    return Dict{String,Any}("name" => r.name, "host" => r.host, "transport" => String(r.transport),
+        "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
+        "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
+        # What to ask a scheduler for, when `host` is one's front door. The editor seeds its fields
+        # from these, so they have to come back out.
+        "scheduler" => String(r.scheduler), "partition" => r.partition,
+        "walltime" => r.walltime, "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus,
+        "account" => r.account, "alloc_name" => r.alloc_name, "submit" => r.submit,
+        # As the user wrote them, so the form shows "1h" rather than 3600.
+        "idle_release" => ReportEngine.Sweep.format_duration(r.idle_release),
+        "idle_warn" => ReportEngine.Sweep.format_duration(r.idle_warn),
+        # Everything the fixed fields cannot say, as the job cell's editor stores it, plus the shell
+        # to run before a worker boots.
+        "options" => r.options, "prologue" => r.prologue, "machine" => r.machine,
+        # For a region on a machine: what it sets itself, and what it takes from the machine, so the
+        # form edits the first and shows the second instead of copying it in.
+        "own" => own, "inherits" => ReportEngine.region_inherits(r),
+        "liveness_grace" => r.liveness_grace > 0 ? ReportEngine.Sweep.format_duration(r.liveness_grace) : "",
+        # What preparing the region found, and whether a prepare is running now.
+        "readiness" => ready, "preparing" => ReportEngine.preparing(r.name),
+        # Where the workers actually ARE. For a scheduler region that is the granted node, and it is
+        # the thing worth showing: `host` is only where the asking happens. From the hub's cached
+        # placement: listing regions must never queue for a node.
+        "node" => ReportEngine.region_host(r),
+        # The last reconcile's outcome, so a silent background spawn failure is visible.
+        "status" => st === nothing ? nothing : Dict{String,Any}("ok" => st.ok, "msg" => st.msg, "ts" => st.ts))
+end
+
+# A parked region wire, kept under the node it reached. `viaHost` is the login host its worker's
+# manifest is read through.
+function _parked_entry(p)
+    v = ReportEngine.via(p.host)
+    d = Dict{String,Any}("host" => p.host, "label" => p.label, "port" => p.port, "since" => p.since)
+    v === nothing || (d["viaHost"] = String(v.host))
+    return d
 end
 
 # A worker entry as a fact: the measurements that ride the telemetry stream are left out, and what was

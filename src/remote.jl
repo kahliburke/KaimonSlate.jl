@@ -4235,8 +4235,7 @@ end
 # Snapshot of the parked wires (host, label, port, idle seconds) — for the query surface.
 function parked_wires()
     lock(_PARK_LOCK) do
-        [(host = k[1], label = k[2], port = p.port, idle_s = round(Int, time() - p.since))
-         for (k, p) in _PARKED]
+        [(host = k[1], label = k[2], port = p.port, since = p.since) for (k, p) in _PARKED]
     end
 end
 

@@ -1293,138 +1293,19 @@ function _make_router(h::Hub)
         isempty(host) && return _json(Dict("host" => "", "workers" => []))
         _json(Dict("host" => host, "workers" => ReportEngine.list_remote_workers(host)))
     end)
-    # The hub's OWN workers — one process per open notebook, plus any region kernel that runs on this
-    # machine. Deliberately the SAME entry shape as /api/remote-workers (port/alive/state/manifest/stats)
-    # so the activity monitor renders local and remote rows through one component; a local worker has no
-    # on-host manifest, so the equivalent fields are synthesized from the kernel. Pure in-memory state —
-    # no ssh, no worker round-trip — so it's safe on the monitor's poll interval.
-    HTTP.register!(router, "GET", "/api/local-workers", _ -> begin
-        nbs = lock(h.lock) do; collect(values(h.notebooks)); end
-        out = Any[]
-        for nb in nbs, k in _nb_kernels(nb)
-            k isa ReportEngine.GateKernel || continue
-            (k.remote || k.target isa ReportEngine.RemoteTarget) && continue   # off-machine: the host roster owns it
-            k.port == 0 && continue                                            # never spawned (dormant notebook)
-            cn = try; k.conn === nothing ? "" : String(k.conn.name); catch; ""; end
-            st = isempty(cn) ? nothing : ReportEngine.kernel_stats(cn)
-            side = _kernel_side_label(nb, k)
-            running = (try; Base.process_running(k.proc); catch; false; end)
-            push!(out, Dict{String,Any}(
-                "port" => k.port,
-                "alive" => running || k.conn !== nothing,
-                "lastActivity" => st === nothing ? 0 : round(Int, st.latest.rcv),
-                "logBytes" => (try; isfile(k.logpath) ? filesize(k.logpath) : 0; catch; 0; end),
-                # A local worker only exists while its notebook is open, so "attached" is the steady state;
-                # a live process with no wire is mid-(re)connect, which reads as idle.
-                "state" => k.conn === nothing ? "idle" : "attached",
-                "stateSince" => 0,
-                "manifest" => JSON.json(Dict("notebook" => basename(nb.path), "nbid" => nb.id,
-                    # No "region" key: a local kernel isn't a region worker, and tagging it would both
-                    # mis-group it in the monitor and offer a region-config link that goes nowhere.
-                    "side" => side, "transport" => "local",
-                    "project" => k.project, "port" => string(k.port), "stream_port" => string(k.stream_port),
-                    "pid" => (try; k.proc === nothing ? "" : string(Base.getpid(k.proc)); catch; ""; end),
-                    "hub" => gethostname(), "path" => abspath(nb.path))),
-                "stats" => st === nothing ? "" : _stats_json(st.latest),
-            ))
-        end
-        sort!(out; by = d -> d["port"])
-        _json(Dict("host" => "local", "workers" => out))
-    end)
-    # The hub's OFF-MACHINE kernels — the mirror image of /api/local-workers: every kernel of an open
-    # notebook that runs on another machine, whether it serves the notebook itself (run-on host, no region)
-    # or a region. This is what the host rosters alone cannot tell you: /api/remote-workers is a per-host
-    # ssh probe, and the monitor only knows to probe hosts that appear in the region registry — so a
-    # notebook launched on a plain ssh host was invisible. It is also hub truth, so a worker still shows
-    # (with its notebook) when the host is unreachable or its manifest was never written. Same entry shape
-    # as the other two rosters, plus `host`/`region`, and pure in-memory — safe on the poll interval.
-    HTTP.register!(router, "GET", "/api/remote-notebook-workers", _ -> begin
-        nbs = lock(h.lock) do; collect(values(h.notebooks)); end
-        out = Any[]
-        for nb in nbs, k in _nb_kernels(nb)
-            k isa ReportEngine.GateKernel || continue
-            tgt = k.target isa ReportEngine.RemoteTarget ? k.target : nothing
-            (tgt !== nothing || k.remote) || continue   # on this machine: /api/local-workers owns it
-            k.port == 0 && continue
-            # A `remoteworker` attach has no target: the hub only holds a forwarded wire, so there is no
-            # host to probe or reap on. Empty host marks it as such for the UI.
-            host = tgt === nothing ? "" : tgt.ssh_host
-            region = tgt === nothing ? "" : tgt.region
-            cn = try; k.conn === nothing ? "" : String(k.conn.name); catch; ""; end
-            st = isempty(cn) ? nothing : ReportEngine.kernel_stats(cn)
-            side = _kernel_side_label(nb, k)
-            # Where a HOST ROSTER would file this worker. A scheduler region's worker runs on the
-            # granted node, but its manifest lives on the shared filesystem and is probed through the
-            # login node — so the roster calls it `login:port` and this record calls it `node:port`.
-            # Two names for one worker, and the monitor merges on that name: without this it lists a
-            # region worker twice, once live from here and once as the stale manifest the roster
-            # found. Absent for an ordinary host, where both views already agree.
-            v = try; ReportEngine.via(host); catch; nothing; end
-            push!(out, Dict{String,Any}(
-                "host" => host, "region" => region,
-                "port" => k.port,
-                # NOT a replacement for `host`: reaching this worker still means addressing the node,
-                # which the transport routes through the login session on its own.
-                (v === nothing ? () : ("viaHost" => String(v.host),))...,
-                # No local process to inspect — the wire IS the liveness signal here, and the liveness
-                # sweep drops a dead one, so a kernel mid-redial reads as idle rather than dead.
-                "alive" => true,
-                "lastActivity" => st === nothing ? 0 : round(Int, st.latest.rcv),
-                "logBytes" => 0,
-                "state" => k.conn === nothing ? "idle" : "attached",
-                "stateSince" => 0,
-                # `region` is "" for a notebook's own remote kernel — the marker the monitor groups on.
-                "manifest" => JSON.json(Dict("notebook" => basename(nb.path), "nbid" => nb.id,
-                    "region" => region, "side" => side,
-                    "transport" => tgt === nothing ? "forwarded" : String(tgt.transport),
-                    "project" => tgt === nothing ? k.project : tgt.project,
-                    "port" => string(k.port), "stream_port" => string(k.stream_port),
-                    "hub" => gethostname(), "path" => abspath(nb.path))),
-                "stats" => st === nothing ? "" : _stats_json(st.latest),
-            ))
-        end
-        sort!(out; by = d -> (d["host"], d["port"]))
-        _json(Dict("workers" => out))
-    end)
-    # Global region registry (named compute defs) + parked wires — the hub's own view, NO ssh. Per-host
-    # live rosters come from /api/remote-workers. Feeds the home-page Regions manager + Destinations picker.
+    # The region registry as pages read it: the same records the facts carry (`_region_entry`), with the
+    # reconcile outcome's age worked out for a caller that is not keeping time.
     HTTP.register!(router, "GET", "/api/regions", _ -> _json(Dict(
         "regions" => [begin
-            st = ReportEngine.region_status(r.name)
-            Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
-                 "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
-                 "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
-                 # What to ask a scheduler for, when `host` is one's front door. The editor seeds
-                 # its fields from these, so they have to come back out.
-                 "scheduler" => String(r.scheduler), "partition" => r.partition,
-                 "walltime" => r.walltime, "cpus" => r.cpus, "mem" => r.mem, "gpus" => r.gpus,
-                 "account" => r.account, "alloc_name" => r.alloc_name, "submit" => r.submit,
-                 # As the user wrote them, so the form shows "1h" rather than 3600.
-                 "idle_release" => ReportEngine.Sweep.format_duration(r.idle_release),
-                 "idle_warn" => ReportEngine.Sweep.format_duration(r.idle_warn),
-                 # Everything the fixed fields cannot say, as the job cell's editor stores it,
-                 # plus the shell to run before a worker boots.
-                 "options" => r.options, "prologue" => r.prologue, "machine" => r.machine,
-                 # For a region on a machine: what it sets itself, and what it takes from the machine,
-                 # so the form edits the first and shows the second instead of copying it in.
-                 "own" => ReportEngine.region_own(r.name), "inherits" => ReportEngine.region_inherits(r),
-                 "liveness_grace" => r.liveness_grace > 0 ? ReportEngine.Sweep.format_duration(r.liveness_grace) : "",
-                 # What preparing the region found, and whether a prepare is running now.
-                 "readiness" => ReportEngine.readiness_view(r), "preparing" => ReportEngine.preparing(r.name),
-                 # Where the workers actually ARE. For a scheduler region that is the granted node,
-                 # and it is the thing worth showing — `host` is only where the asking happens.
-                 # Read from the hub's cached placement: listing regions must never queue for a node.
-                 "node" => ReportEngine.region_host(r),
-                 # Last reconcile outcome — so a silent background spawn failure is visible.
-                 "status" => st === nothing ? nothing :
-                             Dict("ok" => st.ok, "msg" => st.msg, "age" => round(Int, time() - st.ts)))
+            d = _region_entry(r)
+            st = d["status"]
+            st === nothing || (d["status"] = merge(st, Dict("age" => round(Int, time() - st["ts"]))))
+            d
         end for r in ReportEngine.regions()],
-        # A parked region wire is kept under the node it reached; `viaHost` is the login host its
-        # worker's manifest is read through, as /api/remote-notebook-workers reports it.
         "parked" => [begin
-            v = ReportEngine.via(p.host)
-            Dict("host" => p.host, "label" => p.label, "port" => p.port, "idle_s" => p.idle_s,
-                 (v === nothing ? () : ("viaHost" => String(v.host),))...)
+            d = _parked_entry(p)
+            d["idle_s"] = round(Int, time() - d["since"])
+            d
         end for p in ReportEngine.parked_wires()])))
     # ── What gets sent to a remote ───────────────────────────────────────────────────────────
     # Scoped to the PROJECT, and written INTO it. `.slateignore` sits beside `Project.toml`, so it
@@ -1787,7 +1668,8 @@ function _make_router(h::Hub)
     # Sessions live in this process (see remotestore.jl), so this is machine-wide — one sign-in
     # covers every notebook, its sweeps and its regions. Pages read it from the facts; this route
     # answers the same thing for a caller that asks.
-    HTTP.register!(router, "GET", "/api/facts", req -> _json(_json_finite(facts_snapshot())))
+    # Brought up to date first: a page asks after changing something, and wants the result of it.
+    HTTP.register!(router, "GET", "/api/facts", req -> (facts_refresh!(); _json(_json_finite(facts_snapshot()))))
     HTTP.register!(router, "GET", "/api/sessions", req -> begin
         doc = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "doc", "")))
         nb = isempty(doc) ? nothing : lock(h.lock) do; get(h.notebooks, doc, nothing); end
@@ -3716,18 +3598,6 @@ function _worker_conn_owner(h, conn_name::AbstractString)
     return nothing
 end
 
-# Telemetry sample → `{t:"telemetry",side,stats}`. `stats` is the SAME JSON STRING the roster pill parses
-# (`_worker_entry` sets `d["stats"] = JSON.json(sample)`), so the browser reuses its `_wpStats`/`_wpPillStat`
-# verbatim — hence the double-encode (JSON string embedded as a JSON string value).
-# A worker's latest telemetry sample as the page reads it, from the `/state` and roster endpoints.
-_stats_json(l) = JSON.json(_json_finite(Dict(
-    "cpu" => l.cpu, "rss" => l.rss, "gc_ms" => l.gc_ms, "evals" => l.evals, "running" => l.running,
-    "warm" => l.warm, "memo_bytes" => l.memo, "sys_cpu" => l.sys_cpu, "load1" => l.load1,
-    "sys_mem_total" => l.sys_mem_total, "sys_mem_free" => l.sys_mem_free,
-    "gpus" => [Dict(pairs(g)) for g in _sample_gpus(l)],
-    "host" => _sample_part(l, :host), "proc" => _sample_part(l, :proc), "job" => _sample_part(l, :job),
-    "ts" => l.ts)))
-
 # A sample's host / proc / job figures; empty for a sample recorded before they were.
 _sample_part(s, k::Symbol) = hasproperty(s, k) ? getproperty(s, k) : Dict{String,Any}()
 
@@ -3820,12 +3690,13 @@ function _telemetry_push!(h, conn_name::AbstractString, sample)
     owner = _worker_conn_owner(h, conn_name); owner === nothing && return nothing
     nb, side = owner
     try; _telemetry_log!(nb, side, sample); catch e; @debug "slate: telemetry log write failed" exception = e; end
-    # A measurement only. What the hub knows about the worker (its allocation among it) is in the facts.
+    # A measurement, not a fact: relayed on the facts stream to every page (a notebook's and the home
+    # page's alike) under its worker's key, and never kept as part of the facts.
     frame = try
-        string("{\"t\":\"telemetry\",\"side\":", JSON.json(String(side)),
-               ",\"stats\":", JSON.json(JSON.json(sample)), "}")
+        string("{\"t\":\"sample\",\"key\":", JSON.json("worker/" * nb.id * "/" * String(side)),
+               ",\"at\":", time(), ",\"stats\":", JSON.json(JSON.json(sample)), "}")
     catch; return nothing; end
-    _ws_broadcast!(nb, frame)
+    _facts_send(frame)
     return nothing
 end
 
@@ -4163,6 +4034,9 @@ function start_hub(; host = "127.0.0.1", port = 8765, app::Bool = false,
     _install_sshauth_watch!(h) # a cluster asking for a password / second factor → a dialog in the notebook
     _install_session_drop!(h)  # a session going away drops the worker wires it was carrying, at once
     _install_facts!(h)         # the one description of the hub's state every page renders from
+    # A forked env behind its project is re-resolved before a worker starts in it (see `_refresh_fork_env!`).
+    ReportEngine.FORK_REFRESH[] = (k, report) ->
+        _refresh_fork_env!(k.envdir, k.parent, get(report.meta, "env", Dict{String,Any}[]))
     routed = _make_router(h)
     # Instrumentation sits on the request path permanently and costs a `Ref` read when off. Wrapping
     # the ROUTER rather than the dispatcher below on purpose: the raw-stream handlers (SSE, the

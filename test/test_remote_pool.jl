@@ -486,7 +486,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
                 @test RE._tunnel_alive_interval() == 5 && RE._tunnel_alive_count() == 3
                 @test RE._firewall_giveup() == 10.0
                 @test RE._connect_deadline_local() == 90.0
-                @test RE._pkg_op_timeout() == 900.0 && RE._sync_parent_timeout() == 600.0
+                @test RE._pkg_op_timeout() == 900.0
                 @test RE._blob_xfer_timeout() == 600.0
                 @test RE._blob_chunk_timeout_ms() == 20_000       # 20s → ms
                 @test RE._peer_bw_default() == 30.0e6             # 30 MB/s → bytes/s

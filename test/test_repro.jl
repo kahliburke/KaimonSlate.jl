@@ -147,16 +147,6 @@ end
         @test !ReportEngine._base_mode(detach)
     end
 
-    @testset "parent manifest hash" begin
-        d = mktempdir()
-        @test ReportEngine._parent_manifest_hash("") == ""
-        @test ReportEngine._parent_manifest_hash(d) == ""        # no Manifest yet
-        write(joinpath(d, "Manifest.toml"), "julia_version=\"1.12.0\"\n")
-        h1 = ReportEngine._parent_manifest_hash(d)
-        @test !isempty(h1)
-        write(joinpath(d, "Manifest.toml"), "julia_version=\"1.12.0\"\n[[deps.X]]\n")
-        @test ReportEngine._parent_manifest_hash(d) != h1        # changes with content
-    end
 end
 
 # Live help lookup (docs palette ?Module drill-down + cross-reference links).

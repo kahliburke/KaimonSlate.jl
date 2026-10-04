@@ -461,7 +461,7 @@ function Roster() {
             <button class="rppreap" title="kill this worker + remove its files" onClick=${ev => { ev.stopPropagation(); reapWorker(h, +w.port); }}>✕ Reap</button></div></div>`;
       })
     }</div>
-    <div class="rtfpark">${parkedFor.map(p => html`<div class="rpppark">⇄ parked: ${p.label} → :${p.port} <span style="opacity:.7">(idle ${p.idle_s}s)</span></div>`)}</div></div>`;
+    <div class="rtfpark">${parkedFor.map(p => html`<div class="rpppark">⇄ parked: ${p.label} → :${p.port} <span style="opacity:.7">(idle ${Math.max(0, Math.round(window.slateModel.hubNow() - p.since))}s)</span></div>`)}</div></div>`;
 }
 // The breadcrumb "Remotes ›" returns to the host list — just clear the focus signal (the modal island
 // renders the list whenever focusHost is '').

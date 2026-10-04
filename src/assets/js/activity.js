@@ -1,12 +1,11 @@
 // Worker activity monitor — the FIRST home-page (index.html) Preact island. Opening a worker shows it
 // in the telemetry view (telemetry.js), with its actions and manifest.
-// Covers every tier a worker can live in: this machine (/api/local-workers — one per open notebook), the
-// per-host rosters (/api/remote-workers — region + leftover workers, an ssh probe), and the hub's own
-// off-machine kernels (/api/remote-notebook-workers — a notebook whose run-on target is another machine).
-// All three return the same entry shape, so one row component renders any of them; only the available
-// ACTIONS differ (see Acts). The last two describe the same processes from different sides and are merged
-// on host:port by allEntries() — which is also what makes a plain ssh host visible at all, since the
-// per-host probe only ever runs against hosts something told us about.
+// Covers every tier a worker can live in: this hub's own kernels (from its facts, model.js) and the
+// per-host rosters (/api/remote-workers — region + leftover workers, an ssh probe). Both come in the
+// same entry shape, so one row component renders either; only the available ACTIONS differ (see Acts).
+// An off-machine kernel is described from both sides and merged on host:port by allEntries(), which is
+// also what makes a plain ssh host visible at all, since the per-host probe only ever runs against
+// hosts something told us about.
 // Replaces the former inline innerHTML render (`_act*` / `rtWd*` in index.html): a poll assigns signals
 // and the components follow — no manual re-render or event re-wiring, no innerHTML clobbering. Reuses the
 // existing `.act*` / `.wd*` / `.modal*` CSS already in index.html (same class names), so no styles here.
@@ -28,13 +27,11 @@ import { WorkerBar, workerLabel, pending, pj, mergeManifest, ago } from './worke
 const { isAlive, workerState, mergeWorker } = window.slateModel;
 
 const POLL_MS = 3000;
-const regions  = signal([]);     // /api/regions            → [{name,host,warm,status,…}]
+const regions  = signal([]);     // the region registry, from the facts → [{name,host,warm,status,…}]
 const hostData = signal([]);     // per-host live rosters    → [{host, workers:[…]}]
 const localW   = signal([]);     // the hub's kernels on this machine, from its facts (roster-shaped)
 const nbRemote = signal([]);     // the hub's OFF-MACHINE kernels for open notebooks, from its facts
-// What the hub's kernels MEASURE (latest sample, last activity, log size), by host:port, from a poll.
-// Measurements, not facts: who a worker is and what state it is in come from the facts alone.
-let measured = {};
+
 // `detail` (open worker popup target) is imported from ./stores.js — shared across home-page islands.
 
 let timer = null, inflight = false;
@@ -69,17 +66,19 @@ function Stopped({ xs }) {
     <button disabled=${busy} title="remove their leftover files" onClick=${() => clearStopped(xs)}>${busy ? 'Clearing…' : 'Clear'}</button></div>`;
 }
 
-// The hub's kernels for open notebooks, from the facts (model.js), each with its latest measurements.
+// The hub's kernels for open notebooks and the region registry, from the facts (model.js), each
+// kernel with its latest sample (which rides the same stream).
 function fromFacts() {
   const M = window.slateModel, facts = M.getFacts(), loc = [], rem = [];
   for (const k of Object.keys(facts)) {
     const f = facts[k];
     if (!k.startsWith('worker/') || !f || !(+f.port > 0)) continue;   // a region with no worker yet
-    const e = M.asRosterEntry(f), mm = measured[(f.host ? f.host : 'local') + ':' + f.port] || {};
-    for (const x of ['stats', 'lastActivity', 'logBytes']) if (mm[x] !== undefined) e[x] = mm[x];
+    const e = M.asRosterEntry(f), smp = M.sampleOf(k);
+    if (smp) { e.stats = smp.stats; e.lastActivity = Math.round(smp.at); }
     (f.host ? rem : loc).push(e);
   }
   localW.value = loc; nbRemote.value = rem;
+  regions.value = M.regions();
 }
 window.slateModel.subscribe(fromFacts);
 fromFacts();   // the facts may have landed before this module subscribed
@@ -89,18 +88,8 @@ async function tick() {
   if (inflight || document.hidden) return;
   inflight = true;
   try {
-    const [d, lw, rw] = await Promise.all([
-      fetch('/api/regions').then(r => r.json()),
-      fetch('/api/local-workers').then(r => r.json()).catch(() => null),
-      fetch('/api/remote-notebook-workers').then(r => r.json()).catch(() => null)]);
-    const m = {};
-    for (const w of (lw && lw.workers) || []) m['local:' + w.port] = w;
-    for (const w of (rw && rw.workers) || []) m[(w.host || '') + ':' + w.port] = w;
-    measured = m;
-    fromFacts();
-    const regs = d.regions || [];
-    regions.value = regs;
-    const hs = {}; regs.forEach(p => p.host && (hs[p.host] = 1)); (d.parked || []).forEach(p => hs[filedUnder(p)] = 1);
+    const M = window.slateModel, regs = M.regions();
+    const hs = {}; regs.forEach(p => p.host && (hs[p.host] = 1)); M.parked().forEach(p => hs[filedUnder(p)] = 1);
     // A notebook can be run on any ssh host, with no region defined and nothing parked — the registry
     // would never name that host, so probe the hosts the hub is actually holding kernels on as well.
     // Without this the whole host is unqueried and its workers never appear.
@@ -122,7 +111,7 @@ function start() { if (timer) return; tick(); timer = setInterval(tick, POLL_MS)
 // A worker on another machine is described twice, and neither description is complete on its own:
 //   • the HOST roster (/api/remote-workers) — the on-disk manifest + telemetry sidecar, and the only
 //     view that sees workers this hub isn't connected to (detached, warm-pool, another hub's).
-//   • the HUB's own kernels (/api/remote-notebook-workers) — which open notebook is on it right now,
+//   • the HUB's own kernels (its facts) — which open notebook is on it right now,
 //     available with no ssh, and still answering when the host is unreachable or wrote no manifest.
 // Merge on host:port, preferring the host's richer record but taking the live binding from the hub.
 // Entries carry `bound` = the hub kernel, i.e. "this is serving an open notebook from here".
@@ -316,7 +305,7 @@ function WorkerDetail() {
 // ── mount ────────────────────────────────────────────────────────────────────────────
 // Not on an app. This monitor is about WHERE work runs — regions, hosts, warm pools — which is an
 // operator's question, and its UI is authoring chrome the reading view hides anyway. Left mounted it
-// would poll `/api/regions`, `/api/local-workers` and `/api/remote-notebook-workers` on a timer
+// would probe every region host over ssh on a timer
 // forever, and every one of those is refused: a console full of 403s, restarting every POLL_MS, on a
 // page where nothing can act on the answer. An app's operator view is `/status`.
 if (!(window.__SLATE_APP__ && window.__SLATE_APP__.on)) {

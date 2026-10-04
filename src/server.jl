@@ -334,6 +334,61 @@ function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; 
     return envdir
 end
 
+# ── A forked env follows its parent project ─────────────────────────────────────────────────────
+# A notebook that added packages of its own runs in a fork of its project's env. When the project
+# changes (a dependency added to the package under development, a re-resolve), the fork is behind it,
+# and a worker started in it fails to load the package: "does not have X in its dependencies". So the
+# fork is re-resolved whenever it is found behind (`env_stale`): when the notebook opens, before any
+# worker starts in it (a region's included, which is provisioned from it), and while the notebook is
+# open, as soon as the project's files change. With the hub's own Julia, which is the workers'.
+const _FORK_LOCK = ReentrantLock()
+
+function _refresh_fork_env!(envdir::AbstractString, parent::AbstractString, delta; online = nothing)
+    (isempty(parent) || isempty(envdir) || !isfile(joinpath(envdir, "Project.toml"))) && return false
+    lock(_FORK_LOCK) do
+        ReportEngine.env_stale(envdir, parent) || return false
+        ReportEngine._rlog("fork: $(basename(envdir)) is behind its project $(basename(parent)) — re-resolving it")
+        # `delta`: the re-seed comes from the PARENT, which knows nothing about what this notebook
+        # added, so its own packages have to be put back.
+        _rebuild_notebook_env!(envdir, parent; online = online, delta = delta)
+        return true
+    end
+end
+
+_refresh_nb_fork!(nb::LiveNotebook) = (k = nb.kernel; k isa ReportEngine.GateKernel &&
+    _refresh_fork_env!(k.envdir, k.parent, get(nb.report.meta, "env", Dict{String,Any}[])))
+
+# The parent project's files as last seen, per notebook, so the watch below re-reads them only when
+# one has been written.
+const _FORK_SEEN = Dict{String,Tuple{Float64,Float64}}()
+
+# While a notebook is open: if its project's files changed and that left its fork behind, re-resolve
+# the fork and bring each of its connected region workers' environments up to it. A local worker runs
+# in the fork itself, so it can load the new packages at once; a region worker has a copy, which is
+# what the provision updates.
+function _watch_fork!(nb::LiveNotebook)
+    k = nb.kernel
+    (k isa ReportEngine.GateKernel && !isempty(k.parent)) || return nothing
+    ppf = ReportEngine.project_file_in(k.parent)
+    isempty(ppf) && return nothing
+    pmf = ReportEngine._manifest_for(ppf)
+    sig = (mtime(ppf), isempty(pmf) ? 0.0 : mtime(pmf))
+    prev = get(_FORK_SEEN, nb.id, nothing)
+    _FORK_SEEN[nb.id] = sig
+    (prev === nothing || prev == sig) && return nothing
+    _refresh_nb_fork!(nb) || return nothing
+    for rk in _nb_kernels(nb)
+        (rk isa ReportEngine.GateKernel && rk.conn !== nothing && rk.target isa ReportEngine.RemoteTarget) || continue
+        Threads.@spawn try
+            ReportEngine.provision_remote!(rk.target, rk.parent)
+        catch e
+            ReportEngine._rlog("fork: updating $(rk.target.ssh_host)'s copy of $(basename(k.envdir)) failed — " *
+                               first(sprint(showerror, e), 160))
+        end
+    end
+    return nothing
+end
+
 # Self-contained `.jl`s are intercepted earlier in `load_notebook` (background hydrate against
 # the depot cache), so this only handles ordinary notebooks: base / forked / detached.
 function _select_kernel(path::AbstractString, report; threads::AbstractString = "", online = nothing)
@@ -437,12 +492,7 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             # the PARENT changed since this fork was seeded (a dep added, a re-resolve — e.g. an
             # extension package that gained a dependency), REBUILD it: a stale fork would crash the
             # worker at boot on `using` a dep the fork never received. Self-healing, before spawn.
-            if ReportEngine.env_stale(envdir, parent)
-                ReportEngine._rlog("_select_kernel: notebook env stale vs parent → rebuilding $(basename(envdir))")
-                # `delta` matters here: the re-seed comes from the PARENT, which knows nothing about
-                # what this notebook added, so its own packages have to be put back.
-                _rebuild_notebook_env!(envdir, parent; online = online, delta = delta)
-            end
+            _refresh_fork_env!(envdir, parent, delta; online = online)
             return GateKernel(envdir; parent = parent, envdir = envdir, nbdir = nbdir, threads = th, extra_flags = ef, label = lbl, online = online)
         else
             # Base mode: no notebook-specific packages yet → run directly in the parent.
@@ -4005,6 +4055,7 @@ function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::A
     # re-armed on every pass would run, be held, and be re-armed again without end.
     came_up = kernel isa ReportEngine.GateKernel && kernel.conn === nothing
     try
+        came_up && _refresh_nb_fork!(nb)       # the region's copy of the env is made from the fork
         ReportEngine.prepare!(kernel, nb.report; explicit = forced)
         came_up && _seed_clock!(kernel)   # converge the clock mapping now, not over the next minute
         _prime_namespace!(nb, kernel, side)

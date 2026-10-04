@@ -310,4 +310,19 @@ end
         @test ReportEngine.env_parent_fingerprint(par) == d
     end
 
+
+    # A fork is behind its parent once the parent's project changes, as when a dependency is added to
+    # the package under development; that is what re-resolves it before a worker starts in it.
+    @testset "a fork falls behind when its parent project changes" begin
+        par = mktempdir(); env = mktempdir()
+        pf = joinpath(par, "Project.toml")
+        write(pf, "name = \"Parent\"\nuuid = \"11111111-1111-1111-1111-111111111111\"\n\n[deps]\n")
+        unstamped = ReportEngine.env_stale(env, par)
+        ReportEngine.stamp_env!(env, par)
+        fresh = ReportEngine.env_stale(env, par)
+        write(pf, read(pf, String) * "Preferences = \"21216c6a-2e73-6563-6e65-726566657250\"\n")
+        @test (unstamped, fresh, ReportEngine.env_stale(env, par)) == (true, false, true)
+        @test ReportEngine.env_stale(env, "") == false     # a detached notebook has nothing to follow
+    end
+
 end

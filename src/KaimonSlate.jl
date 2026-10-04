@@ -2460,7 +2460,7 @@ function create_tools(GateTool::Type)
         if !isempty(parked)
             println(io, "Parked wires (live conns kept across close — reattach is ~0 network):")
             for p in parked
-                println(io, "  • $(p.label) → $(p.host):$(p.port)  (idle $(p.idle_s)s)")
+                println(io, "  • $(p.label) → $(p.host):$(p.port)  (idle $(round(Int, time() - p.since))s)")
             end
         end
         return String(take!(io))

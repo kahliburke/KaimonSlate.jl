@@ -1190,12 +1190,12 @@ function prepare!(k::GateKernel, report::Report; explicit::Bool = false)
             # locked-cell restores the open path just did).
             replaced = k.proc !== nothing
             _kill_worker!(k)                      # tear down a dead/old proc before replacing (no leak/orphan)
+            fork_refresh(k, report)               # a forked env behind its parent project is re-resolved first
             _spawn_worker!(k)
             _connect!(k)
             lock(_GATE_SESSION_LOCK) do; _GATE_SESSION[k.conn.name] = report.id; end   # route this worker's stream events back to the notebook
             _ensure_poller!()
             _reconstruct_env!(k)                  # env dir absent but footer has a delta → rebuild it
-            _maybe_sync_parent!(k)                # forked + parent drifted → re-resolve once, up front
             # A worker that DIED (OOM, segfault, an `exit()` in a cell) took every binding with it,
             # but the cells still record the state they were in when it was alive. Left alone, the
             # notebook claims to be fresh while nothing is defined, and the next run of a downstream
@@ -1239,8 +1239,6 @@ end
 _connect_deadline_local() = _rcfg("connect_deadline_local", "KAIMONSLATE_CONNECT_DEADLINE_LOCAL", 90.0)
 # Gate timeout for a package op (add/rm/reconstruct) — a heavy stack's resolve + precompile is minutes.
 _pkg_op_timeout()         = _rcfg("pkg_op_timeout",         "KAIMONSLATE_PKG_OP_TIMEOUT",         900.0)
-# Gate timeout for a parent-project /src sync.
-_sync_parent_timeout()    = _rcfg("sync_parent_timeout",    "KAIMONSLATE_SYNC_PARENT_TIMEOUT",    600.0)
 
 kernel_connected(k::GateKernel) = k.conn !== nothing
 
@@ -1854,7 +1852,7 @@ function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::Abstrac
         (r isa AbstractDict && get(r, :ok, get(r, "ok", false)) == false) &&
             return Dict{String,Any}("ok" => false, "message" => "fork failed: " * string(get(r, :message, get(r, "message", "?"))))
         k.project = k.envdir                        # the worker is now on the forked env
-        _write_parent_marker!(k)                    # record the parent baseline we seeded from
+        stamp_env!(k.envdir, k.parent)              # record the parent this fork was seeded from
     end
     try
         # Generous timeout — Pkg.add of a heavy package (a full Makie stack, etc.) resolves + precompiles
@@ -1880,19 +1878,21 @@ function registry_add(k::GateKernel, report::Report, url::AbstractString)
     end
 end
 
-# Hash of the parent's Manifest (its content) — the baseline a forked env was seeded from.
-# Stored in the env as a marker so we can detect parent drift and auto re-resolve on open.
-# `parent_manifest` resolves it the way the loader does, so a workspace member reads the shared
-# manifest at the workspace root rather than a `Manifest.toml` it does not have.
-function _parent_manifest_hash(parent::AbstractString)
-    isempty(parent) && return ""
-    mf = parent_manifest(parent)
-    isempty(mf) && return ""
-    return string(hash(read(mf, String)); base = 16)
-end
-_parent_marker_path(k::GateKernel) = joinpath(k.envdir, ".slate_parent_manifest")
-function _write_parent_marker!(k::GateKernel)
-    try; isempty(k.envdir) || write(_parent_marker_path(k), _parent_manifest_hash(k.parent)); catch; end
+# A notebook's forked env follows its parent project: when the parent has changed since the fork was
+# seeded (a dependency added, a re-resolve), the fork is re-resolved before a worker starts in it, or
+# the worker fails to load a package the parent now needs. The hub installs the rebuild
+# (`_rebuild_notebook_env!`), since it knows the notebook's own packages, which the re-seed from the
+# parent does not.
+const FORK_REFRESH = Ref{Any}(nothing)
+function fork_refresh(k::GateKernel, report)
+    f = FORK_REFRESH[]
+    f === nothing && return false
+    try
+        return f(k, report) === true
+    catch e
+        _rlog("fork: re-resolving $(basename(k.envdir)) failed — " * first(sprint(showerror, e), 160))
+        return false
+    end
 end
 
 # Rebuild a notebook env from its `.jl` footer when the env dir is absent (e.g. a fresh
@@ -1904,27 +1904,11 @@ function _reconstruct_env!(k::GateKernel)
         _tool(k, "__slate_reconstruct",
               Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent, "pkgs" => k.pending);
               timeout = _pkg_op_timeout())
-        _write_parent_marker!(k)
+        stamp_env!(k.envdir, k.parent)
         empty!(k.pending)   # clear ONLY on success — a failed rebuild keeps `pending` so the next use retries
     catch e
         e isa InterruptException && rethrow()
         @warn "KaimonSlate: notebook env reconstruction failed — keeping pending packages to retry" exception = (e, catch_backtrace())
-    end
-    return
-end
-
-# Auto re-resolve a forked notebook env when its parent's Manifest has changed since we
-# seeded it (keeps the one-env invariant: parent updates flow in, notebook adds preserved).
-function _maybe_sync_parent!(k::GateKernel)
-    (isempty(k.parent) || _base_mode(k)) && return
-    cur = _parent_manifest_hash(k.parent)
-    isempty(cur) && return
-    prev = try; isfile(_parent_marker_path(k)) ? read(_parent_marker_path(k), String) : ""; catch; ""; end
-    cur == prev && return
-    try
-        _tool(k, "__slate_sync_parent", Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent); timeout = _sync_parent_timeout())
-        _write_parent_marker!(k)
-    catch
     end
     return
 end

@@ -16,15 +16,15 @@ export const focusHost  = signal('');     // the host whose regions/workers the 
 export const editRegion = signal(null);   // region object being edited (null = the "new region" form)
 export const pendingRegion = signal('');  // a region name to auto-select once focusHost's regions load ('' = none)
 
-// The global region registry (all hosts) + parked wires, shared so BOTH the modal's known-hosts list
-// (per-host region counts) and the focus view's region list read one source — a save/delete anywhere
-// calls loadRegions() and every island re-renders. This is what retires the old slateSyncHosts bridge.
+// The global region registry (all hosts) + parked wires: the hub's facts (model.js), mirrored into
+// signals so every island re-renders when they change. `loadRegions()` brings the facts up to date at
+// once, for a caller that just changed a region and reads the result next.
 export const regions = signal([]);
 export const parked  = signal([]);
-export function loadRegions() {
-  return fetch('/api/regions').then(r => r.json())
-    .then(d => { regions.value = (d && d.regions) || []; parked.value = (d && d.parked) || []; }).catch(() => {});
-}
+const fromModel = () => { regions.value = window.slateModel.regions(); parked.value = window.slateModel.parked(); };
+window.slateModel.subscribe(fromModel);
+fromModel();
+export const loadRegions = () => window.slateModel.refresh();
 
 // What scheduler(s) a host has, keyed by host: `undefined` = never asked, `null` = asking,
 // `{kinds, suggested, partitions}` = answered. Shared because a region on a cluster and a batch

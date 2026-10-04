@@ -100,6 +100,8 @@ parent-package*) and `POST /api/<id>/package`
 (`{op: "add"|"rm"|"update", name, target: "notebook"|"project"}`). Operations run
 through worker tools (`__slate_pkg`, `__slate_pkg_parent` for a write to the enclosing project,
 `__slate_registry_add` for installing a registry into the worker's depot, and `__slate_fork` /
-`__slate_sync_parent` / `__slate_reconstruct` for the env lifecycle); on success the notebook
-restales and re-runs and
-the footer refreshes.
+`__slate_reconstruct` for the env lifecycle); on success the notebook restales and re-runs and
+the footer refreshes. A forked env follows its parent project: when the project's `Project.toml` or
+`Manifest.toml` changes (a dependency added to the package under development, say), the hub
+re-resolves the fork, both before a worker starts in it and while the notebook is open, and brings
+the environment of any region worker it has up to date too.

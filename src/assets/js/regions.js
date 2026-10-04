@@ -137,8 +137,7 @@ function renderDestinations() {
 
 // Load the global region registry, then render (warm counts + availability need it).
 async function _destLoad() {
-  try { const d = await (await fetch('/api/regions')).json(); _destRegions = (d && d.regions) || []; }
-  catch (_) { _destRegions = []; }
+  _destRegions = window.slateModel.regions();
   renderDestinations();
 }
 

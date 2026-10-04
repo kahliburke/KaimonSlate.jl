@@ -18,7 +18,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(here, '..', '..', 'src', 'assets', 'js', 'model.js'), 'utf8');
 
 const NAMES = ['getWorkers', 'getWorker', 'workerList', 'applyTelemetry', 'workersOf', 'sessions',
-               'session', 'hubNow', 'walltimeLeft', 'idleFor', 'isHeld',
+               'session', 'hubNow', 'walltimeLeft', 'idleFor', 'regions', 'parked', 'sampleOf', 'isHeld',
                'isScheduled', 'allocState', 'releaseVerb', 'isAlive', 'workerState', 'workerStatus',
                'workerSeverity', 'getAllocation', 'loadAllocation', 'refreshAllocation',
                'rosterKey', 'mergeWorker', 'subscribe'];
@@ -163,6 +163,19 @@ const eq = (label, got, want) => {
   eq('stats survive a fact change', M.getWorker('').stats, '{"cpu":42}');
   M.applyTelemetry('ghost', '{"cpu":1}');
   eq('unknown side is ignored', M.getWorkers().ghost, undefined);
+
+  // Samples ride the same stream, for any notebook's workers, and are never stored as facts.
+  M._applyFrame({ t: 'sample', key: 'worker/nb1/', at: T, stats: '{"cpu":7}' });
+  eq('a sample reaches this page\'s worker', M.getWorker('').stats, '{"cpu":7}');
+  M._applyFrame({ t: 'sample', key: 'worker/nb2/', at: T, stats: '{"cpu":9}' });
+  eq('another notebook\'s sample is kept for it', M.workersOf('nb2')[0].stats, '{"cpu":9}');
+  eq('and is not a fact', M.getFacts()['worker/nb2/'].stats, undefined);
+
+  M._applyFrame({ t: 'facts', rev: 5, now: T, set: {
+    'region/b': { name: 'b', host: 'h' }, 'region/a': { name: 'a', host: 'h' },
+    'parked/n1/lbl/9100': { host: 'n1', label: 'lbl', port: 9100, since: T - 5 } }, del: [] });
+  eq('regions, by name', M.regions().map(r => r.name), ['a', 'b']);
+  eq('parked wires', M.parked().map(p => p.port), [9100]);
 }
 
 if (fails.length) {
