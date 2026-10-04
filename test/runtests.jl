@@ -12,6 +12,7 @@
 # regions beside it — which point at real machines. That is a suite opening ssh connections to a
 # cluster because it ran, and a test that hangs for as long as one takes to answer.
 ENV["KAIMONSLATE_HOME"] = mktempdir(; cleanup = true)
+ENV["KAIMONSLATE_NOTEBOOK_ENVS"] = mktempdir(; cleanup = true)   # notebooks' own envs, kept out of the depot
 
 using ReTest
 

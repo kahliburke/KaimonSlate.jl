@@ -128,7 +128,38 @@ end
         d2 = ReportEngine.notebook_env_dir("/tmp/b/para.jl")   # same basename, different path
         @test d1 != d2                                          # keyed by full path, not name
         @test ReportEngine.notebook_env_dir("/tmp/a/para.jl") == d1   # stable
-        @test occursin("kaimonslate", d1)
+        @test dirname(d1) == ReportEngine.notebook_envs_root()
+        withenv("KAIMONSLATE_NOTEBOOK_ENVS" => nothing) do
+            @test ReportEngine.notebook_envs_root() == joinpath(first(DEPOT_PATH), "environments", "kaimonslate")
+        end
+    end
+
+    @testset "notebook envs no notebook needs are pruned" begin
+        root, nbs = mktempdir(), mktempdir()
+        withenv("KAIMONSLATE_NOTEBOOK_ENVS" => root) do
+            deps = "[deps]\nX = \"00000000-0000-0000-0000-000000000001\"\n"
+            function mk(p; files = Dict("Project.toml" => deps))
+                d = ReportEngine.notebook_env_dir(p); mkpath(d)
+                for (f, c) in files; write(joinpath(d, f), c); end
+                return d
+            end
+            live = joinpath(nbs, "live.jl"); write(live, "")
+            found = joinpath(nbs, "sub", "found.jl"); mkpath(dirname(found)); write(found, "")
+            gone = joinpath(nbs, "gone.jl")
+            dlive = mk(live); ReportEngine.mark_notebook_env!(dlive, live)
+            dgone = mk(gone); ReportEngine.mark_notebook_env!(dgone, gone)
+            dempty = mk(joinpath(nbs, "empty.jl"); files = Dict("Project.toml" => ""))
+            dfound = mk(found)                                      # no record, but its notebook is there
+            dlost = mk(joinpath(nbs, "lost.jl"))                    # no record, and no notebook
+            dassets = mk(joinpath(nbs, "assets.jl"); files = Dict("Project.toml" => "", "plot.png" => "x"))
+            v = Dict(r.dir => r.verdict for r in ReportEngine.prune_notebook_envs(; roots = [nbs]))
+            @test (v[dlive], v[dgone], v[dempty], v[dfound], v[dlost], v[dassets]) ==
+                  (:keep, :remove, :remove, :keep, :unmatched, :keep)
+            @test isfile(joinpath(dfound, ".slate-notebook")) && isdir(dgone)   # marked; a dry run removes nothing
+            ReportEngine.prune_notebook_envs(; apply = true, roots = [nbs])
+            @test (isdir(dgone), isdir(dempty), isdir(dlost), isdir(dlive), isdir(dassets)) ==
+                  (false, false, true, true, true)
+        end
     end
 
     @testset "ensure_notebook_env! materialises a Project.toml" begin

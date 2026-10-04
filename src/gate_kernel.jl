@@ -447,16 +447,97 @@ function notebook_env_dir(path::AbstractString)
     ap = abspath(String(path))
     key = replace(splitext(basename(ap))[1], r"[^A-Za-z0-9_-]" => "_") *
           "-" * string(hash(ap) % 0xffffffff; base = 16, pad = 8)
-    return joinpath(first(DEPOT_PATH), "environments", "kaimonslate", key)
+    return joinpath(notebook_envs_root(), key)
+end
+
+# Where every notebook's own environment lives. KAIMONSLATE_NOTEBOOK_ENVS moves it, which the test
+# suite does so it leaves nothing in the depot.
+notebook_envs_root() = get(ENV, "KAIMONSLATE_NOTEBOOK_ENVS", "") |>
+    r -> isempty(r) ? joinpath(first(DEPOT_PATH), "environments", "kaimonslate") : r
+
+# The notebook an environment belongs to, written into it, so one whose notebook is gone can be found.
+const _NOTEBOOK_MARK = ".slate-notebook"
+function mark_notebook_env!(dir::AbstractString, notebook::AbstractString)
+    (isempty(notebook) || !isdir(dir)) && return nothing
+    f, ap = joinpath(dir, _NOTEBOOK_MARK), abspath(String(notebook))
+    (isfile(f) && read(f, String) == ap) && return nothing
+    try; write(f, ap); catch; end
+    return nothing
+end
+
+# What a notebook env may hold and still be nothing but an environment: anything else (a detached
+# notebook's assets and data live in its env dir) means it is never removed.
+const _ENV_ONLY = r"^(Julia)?(Project|Manifest)(-v\d+\.\d+)?\.toml$|^LocalPreferences\.toml$|^\.slate[-_]"
+
+function _has_deps(dir)
+    f = joinpath(dir, "Project.toml")
+    t = isfile(f) ? Pkg.TOML.tryparsefile(f) : nothing
+    return t isa AbstractDict && !isempty(get(t, "deps", Dict()))
+end
+
+# Notebook files under `roots` named one of `names` (`<name>.jl`), skipping hidden and vendored trees.
+function _notebooks_named(roots, names::Set{String})
+    found = Dict{String,Vector{String}}()
+    for root in roots, (dir, dirs, files) in walkdir(root; onerror = _ -> nothing)
+        filter!(d -> !startswith(d, '.') && !(d in ("node_modules", "Library", "compiled", "artifacts")), dirs)
+        for f in files
+            endswith(f, ".jl") || continue
+            n = replace(f[1:end-3], r"[^A-Za-z0-9_-]" => "_")
+            n in names && push!(get!(found, n, String[]), joinpath(dir, f))
+        end
+    end
+    return found
+end
+
+"""
+    prune_notebook_envs(; apply = false, roots = [homedir()], unmatched = false) -> Vector{NamedTuple}
+
+Each notebook env under `notebook_envs_root()` with what happens to it: `:keep` or `:remove`, why, and
+its size. Removed: an env whose notebook (named by its `.slate-notebook`) is gone, and an env that
+holds only a `Project.toml` with no packages, which opening its notebook recreates. An env with no
+record is looked for among the notebooks under `roots` by the path hash in its name, and marked when
+found; one that matches no notebook is `:unmatched`, removed only with `unmatched = true`. An env that
+holds anything but environment files is always kept. Nothing is deleted unless `apply`.
+"""
+function prune_notebook_envs(; apply::Bool = false, roots = [homedir()], unmatched::Bool = false)
+    root = notebook_envs_root()
+    isdir(root) || return NamedTuple[]
+    dirs = [joinpath(root, d) for d in readdir(root) if isdir(joinpath(root, d))]
+    name(d) = replace(basename(d), r"-[0-9a-f]{8}$" => "")
+    bytes(d) = sum((filesize(joinpath(r, f)) for (r, _, fs) in walkdir(d) for f in fs); init = 0)
+    unknown = [d for d in dirs if !isfile(joinpath(d, _NOTEBOOK_MARK)) && _has_deps(d)]
+    cands = isempty(unknown) ? Dict{String,Vector{String}}() : _notebooks_named(roots, Set(name.(unknown)))
+    out = NamedTuple[]
+    for d in dirs
+        verdict, why = if any(f -> !occursin(_ENV_ONLY, f), readdir(d))
+            :keep, "holds files besides its environment"
+        elseif isfile(joinpath(d, _NOTEBOOK_MARK))
+            nb = strip(read(joinpath(d, _NOTEBOOK_MARK), String))
+            isfile(nb) ? (:keep, nb) : (:remove, "notebook gone: " * nb)
+        elseif !_has_deps(d)
+            :remove, "no packages"
+        else
+            nb = findfirst(p -> notebook_env_dir(p) == d, get(cands, name(d), String[]))
+            if nb === nothing
+                (unmatched ? :remove : :unmatched), "no notebook found for it"
+            else
+                p = cands[name(d)][nb]; mark_notebook_env!(d, p); (:keep, p)
+            end
+        end
+        push!(out, (; dir = d, verdict, why, bytes = bytes(d)))
+        (apply && verdict === :remove) && (try; rm(d; recursive = true); catch; end)
+    end
+    return out
 end
 
 # Ensure a notebook env exists on disk (an empty `Project.toml` is enough for the worker
 # to activate it and for `Pkg.add` to populate it). Seeds `[deps]` from `seed_toml` when
 # given (the reproducibility footer's embedded notebook Project.toml).
-function ensure_notebook_env!(dir::AbstractString; seed_toml::AbstractString = "")
+function ensure_notebook_env!(dir::AbstractString; seed_toml::AbstractString = "", notebook::AbstractString = "")
     mkpath(dir)
     proj = joinpath(dir, "Project.toml")
     isfile(proj) || write(proj, isempty(seed_toml) ? "" : seed_toml)
+    mark_notebook_env!(dir, notebook)
     return dir
 end
 
@@ -1857,6 +1938,7 @@ function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::Abstrac
             return Dict{String,Any}("ok" => false, "message" => "fork failed: " * string(get(r, :message, get(r, "message", "?"))))
         k.project = k.envdir                        # the worker is now on the forked env
         stamp_env!(k.envdir, k.parent)              # record the parent this fork was seeded from
+        isempty(k.nbdir) || mark_notebook_env!(k.envdir, joinpath(k.nbdir, k.label))
     end
     try
         # Generous timeout — Pkg.add of a heavy package (a full Makie stack, etc.) resolves + precompiles

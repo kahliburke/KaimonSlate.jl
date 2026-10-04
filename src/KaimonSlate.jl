@@ -1443,6 +1443,42 @@ function create_tools(GateTool::Type)
     end
 
     """
+        prune_envs(; apply = "0", unmatched = "0", roots = "") -> String
+
+    Notebooks' own package environments (under ~/.julia/environments/kaimonslate) that no notebook
+    needs any more: those whose notebook is gone, and those holding only an empty Project.toml, which
+    opening the notebook recreates. An environment with no record of its notebook is matched against
+    the notebooks under `roots` (comma-separated directories, default your home) and kept when found;
+    one that matches none is reported, and removed only with `unmatched="1"`. An environment holding
+    anything besides environment files (a project-less notebook's assets) is always kept. Reports what
+    it would do; `apply="1"` removes. Run `Pkg.gc()` afterwards to free the package versions only
+    those environments used.
+    """
+    function prune_envs(; apply::String = "0", unmatched::String = "0", roots::String = "")::String
+        yes(x) = lowercase(strip(x)) in ("1", "true", "yes", "on")
+        rs = String[expanduser(strip(r)) for r in split(roots, ',') if !isempty(strip(r))]
+        rows = ReportEngine.prune_notebook_envs(; apply = yes(apply), unmatched = yes(unmatched),
+                                                  roots = isempty(rs) ? [homedir()] : rs)
+        isempty(rows) && return "No notebook environments under $(ReportEngine.notebook_envs_root())."
+        hum(b) = b < 2^20 ? "$(round(b / 1024; digits = 1)) KB" : "$(round(b / 2^20; digits = 1)) MB"
+        io = IOBuffer()
+        println(io, (yes(apply) ? "Pruned " : "Would prune ") * ReportEngine.notebook_envs_root())
+        for v in (:remove, :unmatched, :keep)
+            g = [r for r in rows if r.verdict === v]
+            isempty(g) && continue
+            println(io, "  ", v === :remove ? (yes(apply) ? "removed" : "remove") : String(v), ": ",
+                    length(g), " (", hum(sum(r.bytes for r in g)), ")")
+            v === :keep && continue
+            reasons = Dict{String,Int}()
+            for r in g; k = String(first(split(r.why, ':'))); reasons[k] = get(reasons, k, 0) + 1; end
+            for (k, n) in sort!(collect(reasons); by = last, rev = true); println(io, "    $n × $k"); end
+            v === :unmatched && println(io, "    ", join(first(basename.(getfield.(g, :dir)), 12), ", "),
+                                        length(g) > 12 ? ", …" : "")
+        end
+        return String(take!(io))
+    end
+
+    """
         transfers() -> String
 
     Live view of region→region blob transfers the hub is orchestrating (or recently ran) over the
@@ -3642,6 +3678,7 @@ function create_tools(GateTool::Type)
         GateTool("peer_teardown", peer_teardown),
         GateTool("peer_plan", peer_plan_tool),
         GateTool("transfers", transfers),
+        GateTool("prune_envs", prune_envs),
         GateTool("memo_trace", memo_trace),
         # Cell debugger. `dbg_start` and `spec_ask` can both block on a PERSON — one asking to take
         # a session, the other asking a question — so they get a person's budget, not a machine's.

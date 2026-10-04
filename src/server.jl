@@ -442,6 +442,7 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             # own fork env (its added packages) when it has one, else the parent project. Empty ⇒ nothing to
             # replicate (bare notebook) — the worker just gets Slate's payload + KaimonGate.
             envdir = ReportEngine.notebook_env_dir(path)
+            ReportEngine.mark_notebook_env!(envdir, path)
             origin_env = isfile(joinpath(envdir, "Project.toml")) ? envdir :
                          (!isempty(parent) && isfile(joinpath(parent, "Project.toml")) ? parent : "")
             # Remote env dir keyed by the CONTENT it replicates (origin_env) or the parent project — a path
@@ -459,6 +460,7 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
         proj = Base.current_project(dirname(abspath(path)))
         parent = proj === nothing ? "" : dirname(proj)
         envdir = ReportEngine.notebook_env_dir(path)
+        ReportEngine.mark_notebook_env!(envdir, path)
         # Base dir for `@asset "rel/path"` resolution + memo hashing AND the notebook's data root
         # (`datadir()`/`@sfile` → `<assetbase>/data`, matching the worker's PARENT_PROJECT). A DETACHED
         # notebook (no enclosing project) has no parent dir; anchor it to the per-notebook fork-env dir
@@ -485,7 +487,7 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             return GateKernel(envdir; parent = parent, envdir = envdir, nbdir = nbdir, pending = delta, threads = th, extra_flags = ef, label = lbl, online = online)
         elseif parent == ""
             # Detached: the notebook env IS the whole world (everything is a "notebook add").
-            ReportEngine.ensure_notebook_env!(envdir)
+            ReportEngine.ensure_notebook_env!(envdir; notebook = path)
             return GateKernel(envdir; parent = "", envdir = envdir, nbdir = nbdir, threads = th, extra_flags = ef, label = lbl, online = online)
         elseif env_exists
             # Already has its own packages → run in the forked env (extends the parent). But first, if
@@ -521,7 +523,7 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
     # active project is set to while a cell runs, so creating it up front is what makes `Pkg.status()`
     # in a cell describe the notebook instead of the hub, from the very first cell rather than from
     # whenever a package happens to be added.
-    k = InProcessKernel(enclosing, ReportEngine.ensure_notebook_env!(ReportEngine.notebook_env_dir(path)))
+    k = InProcessKernel(enclosing, ReportEngine.ensure_notebook_env!(ReportEngine.notebook_env_dir(path); notebook = path))
     return k
 end
 
